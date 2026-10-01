@@ -26,7 +26,7 @@ use crcbl::net::{
 use crcbl::server::{Host, HostConfig, PeerEvent};
 
 use super::event::{self, Event};
-use super::serve::{STATUS_INTERVAL, Server};
+use super::serve::{Console, Next, STATUS_INTERVAL, Server, serve_until_quit};
 use super::{JOIN_TIMEOUT, JoinFailure, Joining, MAX_PLAYERS, PROTOCOL_ID, Progress, SESSION};
 use crate::game::{Controls, Game, Refusal, Stats};
 use crate::map::{Map, MapError, MapWireError};
@@ -1266,6 +1266,75 @@ fn four_players_win_the_whole_table_on_a_dedicated_server() {
         }),
         "no status line said the table was won"
     );
+}
+
+/// **`quit` at a dedicated server's console tells every player the server
+/// shut down.** The serve loop reads a console that says `status`, a word
+/// it does not know, a blank and `quit` — and a `status` after it, which it
+/// never reads. It answers the first two, ends every session and returns
+/// the last status line; each of the two players' clients then reads the
+/// sealed session end, and its game says how the session ended.
+#[test]
+fn quit_at_the_console_tells_every_player_the_server_shut_down() {
+    let mut rig = Rig::serving().with_playing(2);
+    let (typed, lines) = std::sync::mpsc::channel();
+    for line in ["status", "frobnicate", "", "quit", "status"] {
+        typed.send(line.to_string()).expect("the console is open");
+    }
+    let mut printed = Vec::new();
+    let now = rig.host.now + FRAME;
+    let last = serve_until_quit(
+        &mut rig.host.server,
+        &mut Console::new(lines),
+        FRAME,
+        || now,
+        &mut |line| printed.push(line.to_string()),
+    );
+    let [.., status, unknown] = &printed[..] else {
+        panic!("the console answered too little: {printed:?}");
+    };
+    assert!(status.starts_with("towers: 2/4 players"), "{status}");
+    assert_eq!(
+        unknown,
+        "towers: no command \"frobnicate\"; the commands are status, quit"
+    );
+    assert!(last.starts_with("towers: 0/4 players"), "{last}");
+    assert_eq!(rig.connected(), 0, "a session outlived the quit");
+
+    rig.until("every player told the server shut down", |rig| {
+        rig.joiners
+            .iter()
+            .all(|joiner| joiner.game().session_end().as_deref() == Some("the server shut down"))
+    });
+    for joiner in &rig.joiners {
+        let client = joiner.lan().and_then(LanClient::client).expect("joined");
+        assert_eq!(
+            client.ended(),
+            Some(crcbl::client::Ended::ByServer(
+                crcbl::net::SessionEndReason::SHUTTING_DOWN
+            ))
+        );
+    }
+}
+
+/// **A console whose input ended is not a quit**: the server serves on,
+/// with nothing printed, and says so in the log only once.
+#[test]
+fn a_console_whose_input_ended_is_not_a_quit() {
+    let mut rig = Rig::serving().with_playing(1);
+    let (typed, lines) = std::sync::mpsc::channel::<String>();
+    drop(typed);
+    let mut console = Console::new(lines);
+    let mut printed = Vec::new();
+    for _ in 0..3 {
+        assert_eq!(
+            console.obey(&rig.host.server, &mut |line| printed.push(line.to_string())),
+            Next::Serve
+        );
+    }
+    assert_eq!(printed, Vec::<String>::new());
+    rig.step();
+    assert_eq!(rig.connected(), 1, "the player's session ended");
 }
 
 /// **A player leaving mid-run does not stop a dedicated server.** A wave is

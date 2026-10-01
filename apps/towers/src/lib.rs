@@ -122,6 +122,8 @@ pub mod wave;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use app::serve;
 pub use app::{Loop, PendingLoop, Summary, Towers, TowersError, run, start, with_shell};
 pub use args::{Invocation, Options, USAGE, parse};
 pub use creep::{CREEPS, Creep, CreepSpec, CreepView};

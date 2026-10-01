@@ -531,10 +531,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and log the failure there. **A refused command is told to the player who sent
   it**: the stage records each refusal against its sender, and the host sends
   that peer a refusal event naming the rule (`game::Refusal`: the run is over,
-  no such plot, the plot is taken, not enough gold, no tower to upgrade,
-  already upgraded, no wave to send), which `Game::take_refusals` hands the
-  front end — solo, the host's own player and a joiner alike — and the page
-  shows as a `REFUSED: …` line above the control hint for a few seconds
+  no such plot, the plot is taken, not enough gold, no tower to upgrade, already
+  upgraded, no wave to send), which `Game::take_refusals` hands the front end —
+  solo, the host's own player and a joiner alike — and the page shows as a
+  `REFUSED: …` line above the control hint for a few seconds
   (`page::draw_notice`). The map and the refusals share one versioned envelope
   (`lan::event`: a version byte and a tag ahead of the payload, `Map::from_wire`
   still reading the map's); an event a player cannot read is counted
@@ -566,15 +566,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 - **Towers has a dedicated server**: `towers --serve [PORT]` runs the same
   authoritative stage on `crcbl::lan`'s host with no window, no renderer and no
-  player of its own, announced to `--browse` and ticking on the wall clock until
-  the process is killed, so all four places are joiners'. It prints a status
-  line — players, wave, lives, gold, run and outcome — when any of those change
-  and every 10 seconds otherwise. With nobody in the session the run holds
-  still: no build phase runs out and no wave is sent at an empty field until the
-  first player joins, and a run whose last player left for good is reset, so the
-  next group starts on a fresh field. `--serve` takes `--tick-hz` and `--scene`
-  and refuses every window, GPU or frame flag, and `--host`, `--join` and
-  `--browse`, with exit code 2. Native builds only.
+  player of its own, announced to `--browse` and ticking on the wall clock, so
+  all four places are joiners'. It reads a console on stdin: `quit` ends every
+  session with `SessionEndReason::SHUTTING_DOWN`, so each player is told before
+  the sockets close, and the process exits 0 printing the last status line in
+  place of a summary; `status` prints the status line now; stdin closing is not
+  a quit. `crcbl_towers::serve(&Options)` runs it (native builds), and `run`
+  refuses `--serve` options by name. It prints a status line — players, wave,
+  lives, gold, run and outcome — when any of those change and every 10 seconds
+  otherwise. With nobody in the session the run holds still: no build phase runs
+  out and no wave is sent at an empty field until the first player joins, and a
+  run whose last player left for good is reset, so the next group starts on a
+  fresh field. `--serve` takes `--tick-hz` and `--scene` and refuses every
+  window, GPU or frame flag, and `--host`, `--join` and `--browse`, with exit
+  code 2. Native builds only.
 
 - **Server events reach the game**: `crcbl_server::Host::send_event(peer, data)`
   seals `data` as a `ServerToClient::Event` under that peer's session key and

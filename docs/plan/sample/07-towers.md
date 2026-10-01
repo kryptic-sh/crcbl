@@ -244,18 +244,19 @@ not built anywhere yet.
   Every player's commands are validated in admission order against one purse and
   one pool of lives, up to four players. **`towers --serve [PORT]` is the
   dedicated server**: the same host with no window, no renderer and no player of
-  its own, announced on the LAN and ticking on the wall clock until killed, so
-  all four places are joiners'; it prints a status line (players, wave, lives,
-  gold, outcome) on every change and on an interval. **With nobody in the
-  session the run holds still** — `run_team_tick` sees a tick with no command
-  frame and steps nothing, so no build phase runs out and no wave is sent at an
-  empty field until the first player joins; a player whose link dropped keeps
-  the run going through their grace period. A run whose last player left for
-  good (every grace period over) is reset once, so the next group starts on a
-  fresh field (decided 2026-10-01). `lan::tests` has four joiners of a dedicated
-  server on loopback splitting the plots between them and winning all ten waves,
-  a browser finding an empty server that has sent no wave, and a player leaving
-  mid-run while the other plays on. **A native `towers` opens on a lobby**
+  its own, announced on the LAN and ticking on the wall clock until `quit` is
+  typed at its stdin console (`status` prints the status line), so all four
+  places are joiners'; it prints a status line (players, wave, lives, gold,
+  outcome) on every change and on an interval. **With nobody in the session the
+  run holds still** — `run_team_tick` sees a tick with no command frame and
+  steps nothing, so no build phase runs out and no wave is sent at an empty
+  field until the first player joins; a player whose link dropped keeps the run
+  going through their grace period. A run whose last player left for good (every
+  grace period over) is reset once, so the next group starts on a fresh field
+  (decided 2026-10-01). `lan::tests` has four joiners of a dedicated server on
+  loopback splitting the plots between them and winning all ten waves, a browser
+  finding an empty server that has sent no wave, and a player leaving mid-run
+  while the other plays on. **A native `towers` opens on a lobby**
   (`crcbl_towers::lobby`) when its command line chose nothing — no session flag,
   no `--scene`, no `--headless`, `--frames` or `--screenshot`: solo, host, a row
   per LAN host this build can join (name and players), the others dimmed under
@@ -290,8 +291,7 @@ not built anywhere yet.
   link: the player is back in the lobby, over the idle solo run that was under
   it and its own field, with a `SESSION ENDED` warning naming how, and the
   lobby's browser listening again; `--join` and `--browse` show the end on their
-  panel instead. **Not built:** a clean shutdown for `--serve` (it runs until
-  killed), and the wasm client, which the LAN rule rules out.
+  panel instead. **Not built:** the wasm client, which the LAN rule rules out.
   `docs/backlog.md`'s _What towers' LAN co-op shipped without_ has each with
   what it would take.
 

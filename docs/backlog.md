@@ -14211,22 +14211,18 @@ frame, and the page shows it for `NOTICE_FOR` (in `crate::app`); tested by
 - **The lobby's host binds every interface**, as `--host` does
   (`LanBind::on_the_lan(0)`), on any free port printed to stdout; there is no
   field for the port. `--host PORT` is still the way to pick one.
-- **`--serve` has no clean shutdown.** It runs until the process is killed: the
-  workspace has no signal handling (no Ctrl+C hook, and no crate for one), so
-  the players are never sent `SessionEndReason::SHUTTING_DOWN` and see their
-  links time out instead. **Decided 2026-10-01: a console on stdin.** A reader
-  thread takes lines from the server's stdin — `quit` ends the session with
-  `Host::shutdown` between frames, `status` prints the status line now — which
-  is the dedicated-server norm, is `std` only, and behaves the same on every OS,
-  where a signal hook is a new dependency or a handler per platform. Ctrl+C
-  still kills it without the goodbye; stdin closing is not a quit, so a server
-  started with no console keeps running.
-- **`--serve`'s wall-clock loop and `app::run`'s dispatch to it are not run by
-  any test.** `serve` binds every interface (`LanBind::on_the_lan`), which can
-  raise a Windows firewall prompt, so the tests drive `serve::Server` a frame at
-  a time on loopback instead; only `until_next_tick`'s arithmetic is tested of
-  the loop. A manual check: `towers --serve`, then four `towers --browse` on the
-  LAN, and play the table.
+- **`--serve`'s entry point, its stdin reader and `main`'s dispatch to it are
+  not run by any test.** `serve::serve` binds every interface
+  (`LanBind::on_the_lan`), which can raise a Windows firewall prompt, and
+  `Console::on_stdin` reads the real stdin, so the tests drive `serve::Server` a
+  frame at a time on loopback and run `serve::serve_until_quit` — the loop
+  itself — with a `Console` over a channel they type into
+  (`quit_at_the_console_tells_every_player_the_server_shut_down`,
+  `a_console_whose_input_ended_is_not_a_quit`). Ctrl+C still kills the server
+  without telling the players (no signal hook, decided 2026-10-01). A manual
+  check: `towers --serve`, then four `towers --browse` on the LAN, play the
+  table, type `status`, then `quit` and watch every player return to the lobby
+  saying the server shut down.
 - **The ten-wave soak is one process.**
   `four_players_win_the_whole_table_on_a_dedicated_server` wins every wave with
   four UDP clients on loopback, in about half a minute of wall time; the exit

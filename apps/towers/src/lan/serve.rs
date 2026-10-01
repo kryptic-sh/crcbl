@@ -4,6 +4,7 @@
 //!  wall clock ─▶ Server::frame ─▶ LanHost ─▶ Host ─▶ TowersModule ─▶ Stage
 //!                    │                        ├─ UDP ─ a player
 //!                    └─▶ the status line      └─ UDP ─ another
+//!  stdin ─▶ reader thread ─▶ channel ─▶ Console::obey, between frames
 //! ```
 //!
 //! The same authoritative stage a `--host` runs, on the same
@@ -17,8 +18,8 @@
 //! Towers' [`Loop`](crate::Loop) opens a shell and a GPU before the game, and
 //! `--headless` is the engine's name for a run on an offscreen ring with a
 //! stepped clock and a frame budget — reproducible frames for CI, which is the
-//! opposite of a server that keeps wall time until it is killed. So this is
-//! its own entry point with its own flag: [`serve`] ticks the host on
+//! opposite of a server that keeps wall time until it is told to stop. So
+//! this is its own entry point with its own flag: [`serve`] ticks the host on
 //! [`Instant`] and sleeps to the next tick boundary, and the flags that only
 //! mean something to a window or a renderer are refused beside it by
 //! `crate::args`.
@@ -32,19 +33,31 @@
 //! holds a place through its grace period, so the run goes on while they
 //! reconnect.
 //!
-//! # Stopping
+//! # Stopping: a console on stdin
 //!
-//! It runs until the process is killed. The workspace has no signal handling
-//! to hang a clean shutdown on — no Ctrl+C hook tells the players
-//! `SHUTTING_DOWN` before the sockets close — so a joiner sees its link time
-//! out instead; `docs/backlog.md` records it.
+//! The server reads its stdin as a console — the dedicated-server norm, and
+//! `std` alone, so it behaves the same on every OS. A read blocks, so a
+//! thread of its own reads the lines and hands them over a channel, which
+//! the loop drains between frames ([`Console::obey`]). `quit` ends every
+//! session with `SessionEndReason::SHUTTING_DOWN` (`Host::shutdown`), so
+//! each player is told before the sockets close, and [`serve`] answers the
+//! last status line; `status` prints the status line now; anything else
+//! prints the commands there are.
+//!
+//! **Stdin closing is not a quit.** A server started with no console — its
+//! input at its end from the start, under a service manager say — keeps
+//! serving, and only the reader thread ends. Ctrl+C still kills it without
+//! the goodbye, and the players see their links time out: the workspace has
+//! no signal hook, and the console is what was chosen instead of one.
 
-use std::convert::Infallible;
+use std::io::{self, BufRead};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crcbl::core::FrameClock;
 use crcbl::lan::{LanBind, LanHost};
+use crcbl::net::SessionEndReason;
 
 use super::{APP, MAX_PLAYERS, SESSION, event, tell, welcome};
 use crate::game::{Field, GameError, Stats};
@@ -134,6 +147,14 @@ impl Server {
         &mut self.lan
     }
 
+    /// Ends every session, each player told the server is shutting down
+    /// before its link closes. The host itself carries on, empty.
+    pub fn shutdown(&mut self) {
+        self.lan
+            .host_mut()
+            .shutdown(SessionEndReason::SHUTTING_DOWN);
+    }
+
     /// How many players hold a place in the session, one whose link dropped
     /// among them until its grace period runs out — the count the run goes
     /// on for, and the one the announcement carries.
@@ -181,22 +202,170 @@ fn status_line(players: usize, stats: &Stats) -> String {
     )
 }
 
+/// What the console's help line names.
+const COMMANDS: &str = "status, quit";
+
+/// A line typed at the console, read.
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    /// End every session and stop.
+    Quit,
+    /// Print the status line now.
+    Status,
+    /// Nothing but blanks: nothing to answer.
+    Blank,
+    /// Anything else, trimmed.
+    Unknown(String),
+}
+
+impl Command {
+    /// The command `line` is, ignoring the blanks around it and the case.
+    fn parse(line: &str) -> Self {
+        let word = line.trim();
+        if word.is_empty() {
+            Self::Blank
+        } else if word.eq_ignore_ascii_case("quit") {
+            Self::Quit
+        } else if word.eq_ignore_ascii_case("status") {
+            Self::Status
+        } else {
+            Self::Unknown(word.to_string())
+        }
+    }
+}
+
+/// Whether the serve loop goes on after reading the console.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Next {
+    /// Serve another frame.
+    Serve,
+    /// `quit` was typed.
+    Quit,
+}
+
+/// The console's lines as the serve loop reads them: whatever sends them —
+/// stdin's reader thread, or a test.
+pub(crate) struct Console {
+    lines: Receiver<String>,
+    /// Whether the sender is gone — stdin at its end — which is logged once.
+    closed: bool,
+}
+
+impl Console {
+    /// A console reading `lines`.
+    pub(crate) const fn new(lines: Receiver<String>) -> Self {
+        Self {
+            lines,
+            closed: false,
+        }
+    }
+
+    /// A console on this process's stdin: a thread reads it a line at a
+    /// time into the channel, and ends when stdin does or a read fails —
+    /// either logged, neither a quit.
+    fn on_stdin() -> Self {
+        let (sender, lines) = mpsc::channel();
+        let reader = thread::Builder::new()
+            .name("towers-console".into())
+            .spawn(move || {
+                for line in io::stdin().lock().lines() {
+                    match line {
+                        Ok(line) => {
+                            if sender.send(line).is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            crcbl::log::warn!("serve: the console's input failed: {error}");
+                            return;
+                        }
+                    }
+                }
+            });
+        if let Err(error) = reader {
+            crcbl::log::warn!("serve: no console, the reader thread did not start: {error}");
+        }
+        Self::new(lines)
+    }
+
+    /// Answers every line waiting, printing through `print`, and says
+    /// whether to serve on: [`Next::Quit`] at the first `quit`, leaving any
+    /// line after it unread.
+    pub(crate) fn obey(&mut self, server: &Server, print: &mut dyn FnMut(&str)) -> Next {
+        loop {
+            match self.lines.try_recv() {
+                Ok(line) => match Command::parse(&line) {
+                    Command::Quit => return Next::Quit,
+                    Command::Status => print(&server.status()),
+                    Command::Blank => {}
+                    Command::Unknown(word) => print(&format!(
+                        "{APP}: no command {word:?}; the commands are {COMMANDS}"
+                    )),
+                },
+                Err(TryRecvError::Empty) => return Next::Serve,
+                Err(TryRecvError::Disconnected) => {
+                    if !self.closed {
+                        self.closed = true;
+                        crcbl::log::info!(
+                            "serve: the console's input ended; serving on, with no console"
+                        );
+                    }
+                    return Next::Serve;
+                }
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for Console {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Console")
+            .field("closed", &self.closed)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Serves `map` on UDP `port` (0 for any free one), announced on the LAN, at
-/// `tick_hz` on the wall clock — until the process is killed, so it answers
-/// only if the server could not start.
+/// `tick_hz` on the wall clock, with a console on stdin — until `quit` is
+/// typed at it. Answers the last status line.
 ///
 /// # Errors
 ///
 /// [`GameError::Lan`] if the listener would not bind.
-pub(crate) fn serve(port: u16, map: &Map, tick_hz: u32) -> Result<Infallible, GameError> {
+pub(crate) fn serve(port: u16, map: &Map, tick_hz: u32) -> Result<String, GameError> {
     let mut server = Server::open(LanBind::on_the_lan(port), map, tick_hz)?;
+    println!("{APP}: console: {COMMANDS}");
     let tick = FrameClock::new(tick_hz).tick_dt();
     let started = Instant::now();
+    Ok(serve_until_quit(
+        &mut server,
+        &mut Console::on_stdin(),
+        tick,
+        || started.elapsed(),
+        &mut |line| println!("{line}"),
+    ))
+}
+
+/// Serves `server` a frame a `tick` on the clock `now` reads, reading
+/// `console` between frames and printing through `print`, until it says
+/// `quit`: then every session ends (`Server::shutdown`) and the last status
+/// line is answered.
+pub(crate) fn serve_until_quit(
+    server: &mut Server,
+    console: &mut Console,
+    tick: Duration,
+    mut now: impl FnMut() -> Duration,
+    print: &mut dyn FnMut(&str),
+) -> String {
     loop {
-        if let Some(status) = server.frame(started.elapsed()) {
-            println!("{status}");
+        if let Some(status) = server.frame(now()) {
+            print(&status);
         }
-        thread::sleep(until_next_tick(started.elapsed(), tick));
+        if console.obey(server, print) == Next::Quit {
+            server.shutdown();
+            return server.status();
+        }
+        thread::sleep(until_next_tick(now(), tick));
     }
 }
 
@@ -232,6 +401,20 @@ mod tests {
             Duration::from_millis(1)
         );
         assert_eq!(until_next_tick(Duration::from_millis(32), tick), tick);
+    }
+
+    /// **The console reads a line whatever its case and its blanks**, and
+    /// anything else is not a command.
+    #[test]
+    fn the_console_reads_its_two_commands_and_nothing_else() {
+        assert_eq!(Command::parse("quit"), Command::Quit);
+        assert_eq!(Command::parse("  QUIT\r"), Command::Quit);
+        assert_eq!(Command::parse("Status"), Command::Status);
+        assert_eq!(Command::parse(" \t"), Command::Blank);
+        assert_eq!(
+            Command::parse("quit now"),
+            Command::Unknown("quit now".into())
+        );
     }
 
     /// **The status line says who is in and how the run stands**, and an

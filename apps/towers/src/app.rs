@@ -522,9 +522,10 @@ impl Towers {
 /// `Loop<HeadlessShell>` so they can inject the events a compositor would send.
 pub type Loop<S = dyn Shell> = crcbl::engine::Loop<S, Towers>;
 
-/// Runs the full loop — or, natively with `--serve`, a dedicated server
-/// with no loop at all, which answers only if it could not start (see
-/// `crate::lan::serve`).
+/// Runs the full loop.
+///
+/// A native `--serve` is no loop and has no window to summarise, so it is
+/// `serve`'s, and asked of this it is refused by name.
 ///
 /// # Errors
 ///
@@ -532,13 +533,30 @@ pub type Loop<S = dyn Shell> = crcbl::engine::Loop<S, Towers>;
 /// Teardown runs on every path.
 pub fn run(options: &Options) -> Result<Summary, TowersError> {
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(port) = options.serve {
-        return match crate::lan::serve::serve(port, &options.map, options.common.tick_hz) {
-            Ok(never) => match never {},
-            Err(error) => Err(TowersError::Game(error)),
-        };
+    if options.serve.is_some() {
+        return Err(TowersError::Game(crate::game::GameError::Server(
+            "--serve is run by crcbl_towers::serve, not run".into(),
+        )));
     }
     crcbl::engine::drive(start(options)?)
+}
+
+/// Runs `--serve`'s dedicated server — no window, no loop, a console on
+/// stdin (see `crate::lan::serve`) — until `quit` is typed at it, and
+/// answers its last status line, which is what it has instead of a summary.
+///
+/// # Errors
+///
+/// [`TowersError`] if the listener would not bind, or `options` asked for
+/// no server.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn serve(options: &Options) -> Result<String, TowersError> {
+    let Some(port) = options.serve else {
+        return Err(TowersError::Game(crate::game::GameError::Server(
+            "no --serve was asked for".into(),
+        )));
+    };
+    crate::lan::serve::serve(port, &options.map, options.common.tick_hz).map_err(TowersError::Game)
 }
 
 /// Opens a shell, a window, a GPU and the simulation.

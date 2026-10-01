@@ -99,10 +99,13 @@ OPTIONS:
                          start.
     --serve [PORT]       Run a dedicated server on UDP PORT: the --host session
                          with no window, no renderer and no player of its own,
-                         announced to --browse, on the wall clock until killed.
-                         With nobody in it the run holds still. Prints a status
-                         line as players come and go and every 10 seconds.
-                         Takes --tick-hz and --scene and no other option.
+                         announced to --browse, on the wall clock. With nobody
+                         in it the run holds still. Prints a status line as
+                         players come and go and every 10 seconds. Reads a
+                         console on stdin: status prints the line now, quit
+                         tells every player and stops; stdin closing does not
+                         stop it. Takes --tick-hz and --scene and no other
+                         option.
     --join <IP:PORT>     Join the co-op session at IP:PORT directly. A joiner
                          plays on the host's map, whatever --scene says.
     --browse             Look for co-op sessions on the local network, print
