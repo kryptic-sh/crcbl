@@ -835,6 +835,35 @@ impl Scene {
         &self.systems
     }
 
+    /// Adds `name` at the end of the manifest, so the next
+    /// [`save`](Self::save) writes its chunk file; `false`, changing nothing,
+    /// for a system the manifest already lists — a manifest naming one twice
+    /// is one [`load`](Self::load) refuses.
+    ///
+    /// What a tool putting a component in a system the scene did not have
+    /// calls first. Not checked against a codec: a save refuses a system with
+    /// none, as a load does.
+    pub fn list_system(&mut self, name: impl Into<String>) -> bool {
+        let name = name.into();
+        if self.systems.contains(&name) {
+            return false;
+        }
+        self.systems.push(name);
+        true
+    }
+
+    /// Takes `name` out of the manifest, and says whether it was listed.
+    ///
+    /// The world is not consulted: rows still in that system are left out of
+    /// the next save, so a caller takes them out first — the inverse of
+    /// [`list_system`](Self::list_system) for a system that never gained a
+    /// row is the case it is for.
+    pub fn unlist_system(&mut self, name: &str) -> bool {
+        let before = self.systems.len();
+        self.systems.retain(|listed| listed != name);
+        self.systems.len() != before
+    }
+
     /// The camera and ambience `env.ron` carries.
     #[must_use]
     pub fn env(&self) -> &Env {

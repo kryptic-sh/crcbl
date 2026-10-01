@@ -279,7 +279,7 @@ struct Renaming {
 }
 
 /// What one frame of the panels did.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PanelFrame {
     /// The viewport pane's rectangle in framebuffer pixels, as this frame laid
     /// it out: `(top-left, bottom-right)`. A pointer outside it is a panel's.
@@ -289,6 +289,9 @@ pub struct PanelFrame {
     /// What a click on the toolbar asked for this frame — the action the
     /// button's key asks for — for the caller to carry out.
     pub toolbar: Option<Action>,
+    /// The mesh asset accept was pressed on in the asset browser this frame,
+    /// for the caller to place at the view's centre.
+    pub spawn: Option<String>,
 }
 
 /// The editor's panels, and everything they keep between frames.
@@ -665,6 +668,16 @@ impl Panels {
             .map_or_else(Vec::new, |&content| self.ui.child_keys(content))
     }
 
+    /// The mesh asset whose browser row is under `at`, in window pixels, as
+    /// the last frame laid it out — what a press there starts dragging into
+    /// the viewport.
+    #[must_use]
+    pub fn asset_at(&self, at: Vec2) -> Option<String> {
+        self.browser
+            .asset_at(&self.ui, self.list.to_logical(at))
+            .map(str::to_owned)
+    }
+
     /// Lists `document`'s asset source again — what a caller does after
     /// handing the document another one ([`Document::set_assets`]), and what
     /// the browser's refresh button does.
@@ -863,6 +876,12 @@ impl Panels {
                 self.set_status(error.to_string(), Tone::Warning);
             }
         }
+        // Read off the focus before a relist could take the row away.
+        let spawn = if input.nav.accept {
+            self.browser.focused_asset(&self.ui).map(str::to_owned)
+        } else {
+            None
+        };
         if relist {
             self.relist_assets(document);
         }
@@ -877,6 +896,7 @@ impl Panels {
             viewport: self.viewport,
             commands,
             toolbar,
+            spawn,
         }
     }
 

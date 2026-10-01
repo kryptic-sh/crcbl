@@ -56,6 +56,18 @@
 //! the matrix the picture was drawn with. A click outside the pane's rectangle
 //! picks nothing.
 //!
+//! # Dragging an asset into the scene
+//!
+//! A press on a mesh asset's row in the asset browser
+//! ([`Panels::asset_at`]) starts a drag, and a release over the viewport drops
+//! it: the ray through the release pixel — the pick's ray — lands on the first
+//! surface it strikes, or else on the ground plane, and
+//! [`Document::spawn_mesh`] stands the mesh there as one undoable entry and
+//! the editor selects it. A release anywhere else drops nothing. Enter on a
+//! focused row ([`crate::panel::PanelFrame::spawn`]) places the asset where the
+//! ray through the view's centre meets the ground, which is the same command
+//! from the keyboard. Both are refused in play mode, on the status line.
+//!
 //! # The keyboard is not read here
 //!
 //! [`crate::keys`] holds it, as an [`ActionMap`] whose reserved `ui` and `text`
@@ -214,6 +226,9 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     camera: OrbitCamera,
     /// Which drag, if any, the pointer is in the middle of.
     drag: Option<Drag>,
+    /// The mesh asset a press on the asset browser took hold of, dropped
+    /// where the button comes up — see the module docs.
+    dragged: Option<String>,
     /// Which handles the selection shows: W and R choose.
     gizmo_mode: gizmo::Mode,
     /// The absolute grid a drag lands on while Ctrl is held, from the player's
@@ -394,6 +409,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             ticks: 0,
             camera: OrbitCamera::new(bounds.center(), 1.0, Projection::default()),
             drag: None,
+            dragged: None,
             gizmo_mode: gizmo::Mode::default(),
             snap,
             clock_source,
@@ -518,6 +534,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                 self.pick(&pending);
             }
         }
+        self.drag_asset(&pending, in_viewport);
         if let Some(Drag::Gizmo(drag)) = self.drag {
             if pending.motion.is_some()
                 && let Some(at) = pending.pointer
@@ -545,6 +562,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         };
         let panels = self.panels.frame(&mut self.document, input);
         asked.extend(panels.toolbar);
+        let accepted = panels.spawn;
         self.draw_gizmo(pointer.pos);
 
         let requests = self.panels.take_clipboard_requests();
@@ -558,6 +576,9 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.ticks += u64::from(self.document.advance(dt));
         for action in asked {
             self.act(&action);
+        }
+        if let Some(asset) = accepted {
+            self.place_at_centre(&asset);
         }
         if let Some((target, content)) = self.paste.take() {
             self.paste_content(&target, &content);
@@ -831,6 +852,65 @@ impl<S: Shell + ?Sized> Editor<S> {
             ),
             Tone::Warning,
         )
+    }
+
+    /// Takes hold of the asset a press on the browser landed on, and drops
+    /// the one held where the button comes up over the viewport — see the
+    /// module docs.
+    fn drag_asset(&mut self, pending: &Pending, in_viewport: bool) {
+        if pending.pointer_pressed && !in_viewport {
+            self.dragged = pending.pointer.and_then(|at| self.panels.asset_at(at));
+        }
+        if !pending.pointer_released {
+            return;
+        }
+        let Some(asset) = self.dragged.take() else {
+            return;
+        };
+        if let (true, Some(at)) = (in_viewport, pending.pointer) {
+            let ray = self.ray_at(at);
+            let point = self.document.drop_point(&ray);
+            self.place(&asset, point);
+        }
+    }
+
+    /// Places `asset` where the ray through the middle of the viewport meets
+    /// the ground: Enter on the asset browser.
+    fn place_at_centre(&mut self, asset: &str) {
+        let (min, max) = self.panels.viewport_pixels();
+        let ray = self.ray_at((min + max) * 0.5);
+        self.place(asset, Document::ground_point(&ray));
+    }
+
+    /// Spawns a mesh of `asset` standing on `point` and selects it, saying on
+    /// the status line what was placed — and that it is a placeholder, and
+    /// why, when its asset will not load — or why nothing was.
+    fn place(&mut self, asset: &str, point: Result<DVec3, EditError>) {
+        let placed = point.and_then(|point| self.document.spawn_mesh(asset, point));
+        let id = match placed {
+            Ok(id) => id,
+            Err(error) => {
+                crcbl::log::warn!("editor: {error}");
+                self.panels.set_status(error.to_string(), Tone::Warning);
+                return;
+            }
+        };
+        self.document.select(Some(id));
+        let prefix = format!("entity #{id}: ");
+        let problem = self
+            .document
+            .mesh_problems()
+            .into_iter()
+            .find(|problem| problem.starts_with(&prefix));
+        match problem {
+            Some(problem) => self.panels.set_status(
+                format!("Placed #{id} as a placeholder: {problem}"),
+                Tone::Warning,
+            ),
+            None => self
+                .panels
+                .set_status(format!("Placed `{asset}` as #{id}"), Tone::Info),
+        }
     }
 
     /// Selects whatever the left button landed on.

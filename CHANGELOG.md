@@ -637,6 +637,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   plane. `Mesh::standing_on` puts a mesh's foot on a point, and `is_mesh_asset`
   says which listed keys a mesh can be made of.
 
+- **The editor places meshes from the asset browser.** Dragging a mesh asset's
+  row into the viewport spawns a `Mesh` of it standing on the point the release
+  pixel's ray first strikes, or on the ground plane `y = 0` where it strikes
+  nothing (`Document::drop_point`); Enter on a focused row places it where the
+  view's centre meets the ground (`Document::ground_point`). Either is one
+  undoable entry (`Document::spawn_mesh`), selects the new entity, says on the
+  status line what was placed — or that it is a placeholder and why — and is
+  refused in play mode. A key no mesh may name is refused (`EditError::Asset`).
+  Dropping into a scene that lists no `meshes` lists the system in the same
+  entry: `EditCommand::ListSystem` and its inverse `UnlistSystem`, refused for a
+  system already listed (`EditError::Listed`) or still holding entities
+  (`EditError::Populated`), so one undo puts the files back as they were.
+
+- **`crcbl::scene::scn::Scene::list_system` and `unlist_system`** add a system
+  to the end of a scene's manifest, so the next save writes its chunk, and take
+  one out; listing one already listed, or unlisting one that is not, changes
+  nothing and says so.
+
 - **The editor has an asset browser**, a fourth pane under the outliner, listing
   the `.glb` and `.gltf` assets under the asset root as a tree of the folders
   holding them — only keys a `Mesh` may name, so nothing listed is refused when

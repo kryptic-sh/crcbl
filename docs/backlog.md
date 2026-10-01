@@ -11420,10 +11420,10 @@ deliberately does not have because nothing can reach it today.
 show a poll is enough for one path; a directory of thousands of files is the
 case `notify` would be for, and adding it is the user's decision), the reimport
 path, and the deletion-queue retire calls `AssetRegistry`'s refcount stops short
-of. **What it blocks:** the editor's revert path and its asset browser, and
-stage 6's exit criteria: editing a texture, shader or scene chunk on disk shows
-in the running sandbox without a restart, and editing one chunk file reloads
-only that system.
+of. **What it blocks:** the editor's revert path and an asset browser that
+follows the disk by itself (it has a Refresh button), and stage 6's exit
+criteria: editing a texture, shader or scene chunk on disk shows in the running
+sandbox without a restart, and editing one chunk file reloads only that system.
 
 ### No golden over a real glTF document (2026-08-27, re-verified 2026-09-24)
 
@@ -11602,9 +11602,10 @@ says what that cleared and what it did not. The allow-list entry in
 **What it still waits on (re-verified 2026-09-24).** Neither of the two things
 this paragraph used to name is missing any more: `crcbl_scene::scn` is the
 format feature 5 opens and saves, and `Ui::inspector` is the inspector slice 3
-draws. What is left, for feature 6's asset browser, is a watcher and
-`crcbl bake` — see _Asset hot reload: two polled watches, and no engine reload
-path_ above.
+draws. Feature 6's asset browser landed 2026-10-01 without a watcher or
+`crcbl bake` — a Refresh button, and glTF imported directly — and what those two
+would still give it is in the asset browser bullet below and _Asset hot reload:
+two polled watches, and no engine reload path_ above.
 
 **Its four owner decisions were answered 2026-09-16** and are recorded in
 `08-editor.md`: the edit command enum and undo log exist from day one and are
@@ -11681,12 +11682,61 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   and drags are tested headless through `Camera::pixel_of` and the null backend;
   no windowed run has shown the plane squares' translucent fill or the scale
   tips' outlines, and the snap steps have no panel — only `settings.toml`.
-- **The asset browser and drag-spawn.** `AssetSource::list` landed 2026-09-30
-  (`DirSource`, `MemorySource`; `Unsupported` by default). What is still
-  missing: a mesh component the editor's vocabulary can spawn and draw — it
-  draws every entity as a greybox cube today — and a pane for the browser, which
-  under the splitters-only docking decision is a fourth pane and a layout the
-  saved `settings.toml` of an older build refuses (`crate::layout::load`).
+- **The asset browser and drag-spawn landed 2026-10-01** (`08-editor.md`'s slice
+  13): `crcbl::scene_mesh::Mesh`, measured by `MeshLibrary`, drawn from the
+  editor's `app::meshes::Shelf`, listed by the `panel::assets` pane, and placed
+  by a drag or Enter through `Document::spawn_mesh`. What it leaves, each with
+  what it takes:
+  - **Textures and the file's own pages are not drawn.** A renderer holds one
+    page per kind, sized at `with_scene`, so an asset's materials are appended
+    by their factors with every page column `NO_PAGE`
+    (`app::meshes::by_factors`). Drawing textures needs a renderer that takes
+    pages after it is built, or the bindless form of the `ArrayPages` entry, or
+    the shelf resampling every asset's images onto shared per-kind pages when it
+    rebuilds — the last costs a page of the largest extent per kind and a full
+    resample at every rebuild.
+  - **A renderer rebuild per new asset, and nothing is ever unloaded.** The
+    shelf only grows, so a long session's renderer holds every asset any mesh
+    ever named; a rebuild drains the device and re-uploads everything. An
+    unload, or a renderer that adds and frees meshes in place (its `MeshPool`
+    already has `upload` and `free`), would end both. Not measured: the cost of
+    a rebuild with many or large assets.
+  - **No import from an OS drop or paste.** Feature 8's "OS drag-drop into the
+    asset browser = import" needs a `crcbl import` step the editor can run, a
+    place in the asset root to write the result, and the Win32 drop seam the
+    2026-08-09 corrections name. `ShellEvent::DroppedFile` reaches the editor
+    and is ignored.
+  - **No watcher: the pane lists on open and on Refresh.** The `notify` decision
+    is the owner's (above); a polled re-list of a small tree would work
+    meanwhile. A changed asset on disk is not re-measured either, since a
+    `MeshLibrary` remembers every result — a new library (as
+    `Document::set_assets` makes) is the only way to read it again.
+  - **No thumbnails and no drag preview.** The rows are names; a drag shows
+    nothing until it is dropped. A thumbnail is a small offscreen render per
+    asset, cached; a preview is the asset's box drawn at the drop point while
+    the button is held.
+  - **No rotation or scale on a mesh**, for the scene-format reasons the rotate
+    gizmo bullet gives; `Mesh` is a position and an asset.
+  - **The asset key is free text in the inspector.** A typed key is checked when
+    the scene is saved (the meshes check) and re-measured at once, but there is
+    no picker; one would be the browser opened as a chooser.
+  - **The asset root defaults to the directory holding the scene**, so a scene
+    moved to another directory keeps its keys and loses its assets unless
+    `--assets` names the old root. A root recorded per project, or keys relative
+    to the scene, would be the alternatives; neither is decided.
+  - **Attaching a mesh does not list `meshes`.** `Document::attachable` offers
+    only the manifest's systems; the drop lists the system itself (one entry
+    with the spawn), and attaching could do the same.
+  - **The undo property test does not play drops or `ListSystem`.** The drop's
+    undo is held by its own tests against the saved files.
+  - **Not tested:** a body on a mesh in play (the bodies module reads the
+    placement, so it should fall as its measured box), a glTF with several nodes
+    and primitives (the fixture triangle has one part), and a source answering
+    `Pending` (no editor source does).
+  - **Coverage gaps:** nothing of this has been looked at on a device. The
+    meshes' picture, the pane and a drag are held by null-backend and headless
+    tests; no Vulkan, Metal, D3D12 or browser image of a drawn mesh in the
+    editor exists.
 - **Play mode landed 2026-10-01, and towers' field plays in it.**
   `Registry::module(system, factory)` registers a game's `GameModule` beside its
   components, and `Document::play`/`pause`/`stop`/`advance` (F5, F6 and a
@@ -13697,10 +13747,12 @@ inventory kit rather than scheduled on its own, which also settles the consumer
 question: the first consumer the plan names, the editor's asset browser, does
 not exist and neither does the editor.
 
-**What it blocks:** outliner reparenting and VFX curve handles in the editor,
-and the editor's asset browser — `apps/editor` exists, and has neither an asset
-browser nor drag-drop. The grid kit's interaction model was the other consumer,
-and `grid_drag` below now serves it.
+**What it blocks:** outliner reparenting and VFX curve handles in the editor.
+The editor's asset browser landed 2026-10-01 without it: its drag into the
+viewport is a press on a row and a release over the pane, read by
+`apps/editor/src/app.rs` rather than as a drop target of the tree. The grid
+kit's interaction model was the other consumer, and `grid_drag` below now serves
+it.
 
 **The mechanism shipped 2026-09-23 as `crcbl_ui::grid_drag`** (`CellGrid`,
 `GridDrag<P>`, a typed payload, `can_accept`, drop feedback as widget state,

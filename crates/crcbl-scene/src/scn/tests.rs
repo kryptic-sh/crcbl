@@ -807,3 +807,38 @@ fn a_detached_row_leaves_the_entity_and_attaches_back() {
         before,
     );
 }
+
+/// **Listing a system adds its chunk to the next save, and unlisting it puts
+/// the files back as they were**; listing one twice or unlisting one never
+/// listed changes nothing.
+#[test]
+fn a_listed_system_is_saved_and_unlisting_it_restores_the_files() {
+    let (mut scene, ids, mut world) = load(HEADER, ENV, MARKS).expect("the canonical scene loads");
+    world.register_system(Box::new(System::<Mark>::new("pins")));
+    let codecs = vec![chunk_of::<Mark>("marks"), chunk_of::<Mark>("pins")];
+    let before = scene.save(&mut world, &ids, &codecs).expect("saves");
+
+    assert!(scene.list_system("pins"));
+    assert!(!scene.list_system("pins"), "a system was listed twice");
+    assert_eq!(scene.systems(), ["marks", "pins"]);
+    let listed = scene.save(&mut world, &ids, &codecs).expect("saves");
+    assert_eq!(
+        listed["sys/pins.ron"],
+        "Chunk(\n    system: \"pins\",\n    entities: [],\n)"
+    );
+    assert!(
+        listed["scene.ron"].contains("\"pins\""),
+        "{}",
+        listed["scene.ron"]
+    );
+
+    assert!(scene.unlist_system("pins"));
+    assert!(
+        !scene.unlist_system("pins"),
+        "an unlisted system was unlisted"
+    );
+    assert_eq!(
+        scene.save(&mut world, &ids, &codecs).expect("saves"),
+        before
+    );
+}

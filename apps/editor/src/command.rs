@@ -80,6 +80,17 @@
 //! entity is not what the person asked for. [`Delete`](EditCommand::Delete) is
 //! how an entity goes.
 //!
+//! # Listing a system in the manifest
+//!
+//! [`ListSystem`](EditCommand::ListSystem) adds a system the vocabulary knows
+//! to the scene's manifest, so its chunk is saved;
+//! [`UnlistSystem`](EditCommand::UnlistSystem) takes one holding no entity
+//! back out. Each is the other's inverse. A drop from the asset browser into a scene with no
+//! meshes yet is the case: a [`Batch`](EditCommand::Batch) of the listing and
+//! the spawn, so one undo takes the mesh and the manifest entry back and the
+//! files are what they were. Unlisting a system still holding rows is refused,
+//! since the save that followed would drop them.
+//!
 //! # Names
 //!
 //! [`Rename`](EditCommand::Rename) names an entity, or takes its name away,
@@ -168,6 +179,19 @@ pub enum EditCommand {
         /// Whose.
         entity: SceneEntityId,
         /// The scene system it leaves.
+        system: String,
+    },
+
+    /// Add `system`, which the vocabulary registers and the manifest does not
+    /// list, to the end of the manifest.
+    ListSystem {
+        /// The scene system listed.
+        system: String,
+    },
+
+    /// Take `system`, which holds no entity, out of the manifest.
+    UnlistSystem {
+        /// The scene system unlisted.
         system: String,
     },
 

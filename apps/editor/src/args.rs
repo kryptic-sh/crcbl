@@ -143,6 +143,11 @@ EDITING:
                          the entities a clipboard holds as new ones
     Ctrl+Z / Ctrl+Y     Undo and redo. Ctrl+Shift+Z redoes too
     Ctrl+S               Save the scene back over the directory it came from
+    Drag an asset        From the asset browser into the viewport: place it
+                         standing on the surface under the cursor, or on the
+                         ground where there is none — one undo a drop
+    Enter on an asset    Place it where the middle of the view meets the
+                         ground
 
     A click in the viewport takes the keyboard back from the panels, and none
     of the keys above fire while a field is being typed into.

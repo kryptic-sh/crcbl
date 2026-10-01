@@ -233,3 +233,111 @@ fn play_and_stop_keep_the_meshes_measured() {
     document.stop().expect("the snapshot reloads");
     assert_eq!(document.bounds(TRIANGLE_MESH), measured);
 }
+
+/// **A mesh dropped into a scene with no meshes lists the system with the
+/// spawn**, as one entry: one undo takes the mesh and the manifest entry back
+/// and the files are what they were; the redo brings both.
+#[test]
+fn a_mesh_spawned_into_a_scene_without_meshes_lists_them_as_one_undo() {
+    let mut document = Document::built_in().expect("the compiled-in scene");
+    document.set_assets(Box::new(assets()));
+    let before = document.files().expect("saves");
+    assert!(!before["scene.ron"].contains(MESHES));
+
+    let id = document
+        .spawn_mesh(TRIANGLE, DVec3::new(1.0, 0.0, 2.0))
+        .expect("the vocabulary has meshes");
+    assert_eq!(document.log().position(), 1, "the drop was not one entry");
+    let files = document.files().expect("saves");
+    assert!(
+        files["scene.ron"].contains(MESHES),
+        "{}",
+        files["scene.ron"]
+    );
+    assert!(files["sys/meshes.ron"].contains(TRIANGLE));
+    let (min, max) = document.bounds(id).expect("placed");
+    assert_eq!(min.y, 0.0, "the mesh does not stand on the point");
+    assert_eq!(((min.x + max.x) * 0.5, (min.z + max.z) * 0.5), (1.0, 2.0));
+
+    document.undo().expect("the drop undoes");
+    assert_eq!(document.files().expect("saves"), before);
+    document.redo().expect("and redoes");
+    assert_eq!(document.files().expect("saves"), files);
+}
+
+/// **A key no mesh may name is refused before anything is spawned**, and an
+/// asset the source does not hold is spawned as the placeholder with its
+/// problem — never refused, never a panic.
+#[test]
+fn a_drop_of_a_bad_key_is_refused_and_of_a_missing_asset_is_a_placeholder() {
+    let mut document = props();
+    let before = document.files().expect("saves");
+    for asset in ["", "../escape.glb", "props/notes.txt"] {
+        assert!(
+            matches!(
+                document.spawn_mesh(asset, DVec3::ZERO),
+                Err(EditError::Asset(_))
+            ),
+            "`{asset}` was not refused as a key",
+        );
+    }
+    assert_eq!(document.files().expect("saves"), before);
+    assert_eq!(document.log().position(), 0);
+
+    let id = document
+        .spawn_mesh("props/elsewhere.glb", DVec3::new(2.0, 0.0, 0.0))
+        .expect("a missing asset is a placeholder, not a refusal");
+    let half = PLACEHOLDER_HALF_EXTENT;
+    assert_eq!(
+        document.bounds(id),
+        Some(render_box(
+            DVec3::new(2.0 - half, 0.0, -half),
+            DVec3::new(2.0 + half, 2.0 * half, half)
+        )),
+    );
+    assert!(
+        document
+            .mesh_problems()
+            .iter()
+            .any(|problem| problem.starts_with(&format!("entity #{id}: "))),
+        "{:?}",
+        document.mesh_problems(),
+    );
+}
+
+/// **A drop is refused in play mode**, before anything is spawned.
+#[test]
+fn a_drop_in_play_mode_is_refused() {
+    let mut document = props();
+    document.play().expect("nothing here refuses play");
+    assert!(matches!(
+        document.spawn_mesh(TRIANGLE, DVec3::ZERO),
+        Err(EditError::Playing)
+    ));
+}
+
+/// **A system holding rows is not unlisted, and one listed is not listed
+/// again**: the refusals that keep a save from dropping rows.
+#[test]
+fn listing_and_unlisting_refuse_what_would_lose_rows() {
+    let mut document = props();
+    assert!(matches!(
+        document.apply(EditCommand::UnlistSystem {
+            system: MESHES.to_owned()
+        }),
+        Err(EditError::Populated(system)) if system == MESHES
+    ));
+    assert!(matches!(
+        document.apply(EditCommand::ListSystem {
+            system: MESHES.to_owned()
+        }),
+        Err(EditError::Listed(system)) if system == MESHES
+    ));
+    assert!(matches!(
+        document.apply(EditCommand::ListSystem {
+            system: "nonsense".to_owned()
+        }),
+        Err(EditError::NoSystem(_))
+    ));
+    assert_eq!(document.log().position(), 0);
+}

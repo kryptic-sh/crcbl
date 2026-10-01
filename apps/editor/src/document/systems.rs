@@ -12,9 +12,9 @@
 //! [`attachable`](Document::attachable) offers the systems the scene's
 //! manifest lists that do not hold the entity, not every system the
 //! vocabulary registers: a save writes the manifest's chunks and no others, so
-//! a component in an unlisted system would be dropped by the next one, and
-//! adding a system to the manifest is a change to the scene's header that no
-//! command makes yet.
+//! a component in an unlisted system would be dropped by the next one.
+//! Listing a system is [`EditCommand::ListSystem`], which a drop from the asset
+//! browser makes ([`Document::spawn_mesh`]) and attaching does not yet.
 //!
 //! # A new component's value
 //!
@@ -183,6 +183,39 @@ impl Document {
             .then(|| self.registry.codec(system))
             .flatten()
             .ok_or_else(|| EditError::NoSystem(system.to_owned()))
+    }
+
+    /// Adds `system` to the manifest, and hands back the unlisting that undoes
+    /// it. The outline gains its group, so the membership moves.
+    pub(super) fn list_system(&mut self, system: &str) -> Result<EditCommand, EditError> {
+        if !self.registry.contains(system) {
+            return Err(EditError::NoSystem(system.to_owned()));
+        }
+        if !self.scene.list_system(system) {
+            return Err(EditError::Listed(system.to_owned()));
+        }
+        self.membership += 1;
+        Ok(EditCommand::UnlistSystem {
+            system: system.to_owned(),
+        })
+    }
+
+    /// Takes `system`, which must hold no entity, out of the manifest, and
+    /// hands back the listing that undoes it.
+    pub(super) fn unlist_system(&mut self, system: &str) -> Result<EditCommand, EditError> {
+        self.listed_codec(system)?;
+        if !self
+            .registry
+            .entities(&mut self.world, &self.ids, system)
+            .is_empty()
+        {
+            return Err(EditError::Populated(system.to_owned()));
+        }
+        self.scene.unlist_system(system);
+        self.membership += 1;
+        Ok(EditCommand::ListSystem {
+            system: system.to_owned(),
+        })
     }
 
     /// What follows `entity` entering or leaving a system: its collider rebuilt

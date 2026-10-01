@@ -7,6 +7,7 @@ use crcbl::engine::FrameLimit;
 use crcbl::shell::{HeadlessShell, PhysicalPoint, PhysicalSize};
 use crcbl::ui::tree::NodeKey;
 
+mod assets;
 mod clipboard;
 mod play;
 

@@ -9,6 +9,18 @@
 //! attach, a delete's undo, or a panel retyping the key. The colliders of the
 //! meshes whose box moved are rebuilt, so a mesh picks where it is drawn.
 //!
+//! # Dropping an asset into the scene
+//!
+//! [`Document::spawn_mesh`] is what a drop from the asset browser does: a new
+//! entity with one mesh row of the asset, standing on the point the drop lands
+//! on ([`Document::drop_point`]: the surface under the pointer, else the ground
+//! plane `y = 0`) — the bottom centre of the asset's box, or of the
+//! placeholder's for one that will not load, put on that point. One
+//! [`EditCommand::Spawn`], so one undo takes it back — wrapped in a
+//! [`EditCommand::Batch`] with the [`EditCommand::ListSystem`] that adds
+//! `meshes` to the manifest when the scene had none, so that undo also puts
+//! the files back as they were. Refused in play mode, like every edit.
+//!
 //! # Which source
 //!
 //! [`Document::set_assets`] names it. A document opened from a directory reads
@@ -20,10 +32,14 @@
 use std::collections::BTreeSet;
 
 use crcbl::assets::AssetSource;
-use crcbl::scene::scn::SceneEntityId;
-use crcbl::scene_mesh::{MESHES, Mesh, MeshLibrary, mesh_of};
+use crcbl::math::DVec3;
+use crcbl::phys::{PhysicsSystem, Ray};
+use crcbl::render::ViewRay;
+use crcbl::scene::scn::{SceneEntityId, row_text};
+use crcbl::scene_mesh::{MESHES, Mesh, MeshLibrary, MeshPathError, check_asset, mesh_of};
 
-use super::{Document, sync_colliders};
+use super::{Document, EditError, sync_colliders, widen};
+use crate::command::{EditCommand, SystemRow};
 
 impl Document {
     /// Reads every mesh's asset through `assets` from now on, measuring each
@@ -101,9 +117,85 @@ impl Document {
         self.measures
     }
 
+    /// Spawns a mesh of `asset` standing on `point`, as one undoable entry,
+    /// and returns its id — the drop the module docs of `document::meshes`
+    /// describe.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::Playing`] in play mode; [`EditError::Asset`] for a key no
+    /// mesh may name, the empty key included; [`EditError::NoSystem`] for a
+    /// vocabulary with no meshes. An asset that is a key and will not load is
+    /// **not** refused: it is spawned as the placeholder, and
+    /// [`mesh_problems`](Self::mesh_problems) names it.
+    pub fn spawn_mesh(&mut self, asset: &str, point: DVec3) -> Result<SceneEntityId, EditError> {
+        self.refuse_in_play()?;
+        if asset.is_empty() {
+            return Err(EditError::Asset(MeshPathError::Extension(String::new())));
+        }
+        check_asset(asset).map_err(EditError::Asset)?;
+        if !self.registry.contains(MESHES) {
+            return Err(EditError::NoSystem(MESHES.to_owned()));
+        }
+        let local = self.measure(asset).ok();
+        let row = row_text(MESHES, &Mesh::standing_on(asset, point, local))?;
+        let id = self.ids.next_id();
+        let spawn = EditCommand::Spawn {
+            entity: id,
+            rows: vec![SystemRow {
+                system: MESHES.to_owned(),
+                row,
+            }],
+            name: None,
+        };
+        let listed = self.scene.systems().iter().any(|system| system == MESHES);
+        let command = if listed {
+            spawn
+        } else {
+            EditCommand::Batch(vec![
+                EditCommand::ListSystem {
+                    system: MESHES.to_owned(),
+                },
+                spawn,
+            ])
+        };
+        self.apply(command)?;
+        Ok(id)
+    }
+
+    /// Where a drop along `ray` lands: the first surface it strikes, else
+    /// where it meets the ground plane `y = 0` in front of the camera.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NoGround`] for a ray that strikes nothing and runs level
+    /// with the ground or away from it.
+    pub fn drop_point(&mut self, ray: &ViewRay) -> Result<DVec3, EditError> {
+        let ray = Ray::new(widen(ray.origin), widen(ray.direction));
+        if let Some((_, hit)) = self
+            .world
+            .system_mut::<PhysicsSystem>()
+            .and_then(|physics| physics.cast_ray(&ray))
+        {
+            return Ok(hit.point);
+        }
+        ground(&ray).ok_or(EditError::NoGround)
+    }
+
+    /// Where `ray` meets the ground plane `y = 0` in front of the camera,
+    /// whatever stands between — the point a keyboard drop at the view's
+    /// centre lands on, which a person can see coming whatever is selected.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NoGround`] for a ray level with the ground or leaving it.
+    pub fn ground_point(ray: &ViewRay) -> Result<DVec3, EditError> {
+        ground(&Ray::new(widen(ray.origin), widen(ray.direction))).ok_or(EditError::NoGround)
+    }
+
     /// Writes every mesh row its asset's box, or leaves it on the placeholder
     /// with a problem, and rebuilds the colliders of those whose box moved —
-    /// see the [module docs](self).
+    /// see the module docs of `document::meshes`.
     pub(super) fn resolve_meshes(&mut self) {
         let resolution = self.meshes.resolve(&mut self.world, self.assets.as_ref());
         if !resolution.moved.is_empty() {
@@ -112,4 +204,11 @@ impl Document {
         }
         self.mesh_problems = resolution.problems;
     }
+}
+
+/// Where `ray` meets the ground plane `y = 0` ahead of its origin, or [`None`]
+/// for a ray level with it or leaving it.
+fn ground(ray: &Ray) -> Option<DVec3> {
+    let distance = -ray.origin.y / ray.dir.y;
+    (distance.is_finite() && distance >= 0.0).then(|| ray.origin + ray.dir * distance)
 }

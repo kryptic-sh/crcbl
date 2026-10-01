@@ -138,6 +138,20 @@ pub enum EditError {
     /// others, so the row would be dropped by the next one.
     NoSystem(String),
 
+    /// A listing named a system the manifest already lists.
+    Listed(String),
+
+    /// An unlisting named a system still holding entities, whose rows the
+    /// next save would drop.
+    Populated(String),
+
+    /// A mesh was asked for of a key no mesh may name.
+    Asset(crcbl::scene_mesh::MeshPathError),
+
+    /// A drop's ray met neither the scene nor the ground plane in front of
+    /// the camera, so there is nowhere to put what was dropped.
+    NoGround,
+
     /// A command named a component of `entity` in a system that does not hold
     /// it — an edit, a read or a detach.
     NotAttached {
@@ -220,6 +234,16 @@ impl fmt::Display for EditError {
             Self::NoSystem(system) => {
                 write!(f, "the scene has no system `{system}` to put an entity in")
             }
+            Self::Listed(system) => write!(f, "the scene already lists `{system}`"),
+            Self::Populated(system) => write!(
+                f,
+                "`{system}` still holds entities, which a save without it would drop"
+            ),
+            Self::Asset(error) => write!(f, "{error}"),
+            Self::NoGround => f.write_str(
+                "the drop meets nothing in the scene and the ground is not in front of the \
+                 camera, so there is nowhere to put it",
+            ),
             Self::NotAttached { entity, system } => {
                 write!(f, "entity {entity} has no component in `{system}`")
             }
@@ -959,6 +983,8 @@ impl Document {
             } => self.attach_row(*id, system, row),
             EditCommand::Detach { entity: id, system } => self.detach_row(*id, system),
             EditCommand::Rename { entity: id, name } => self.set_name(*id, name.clone()),
+            EditCommand::ListSystem { system } => self.list_system(system),
+            EditCommand::UnlistSystem { system } => self.unlist_system(system),
             EditCommand::Batch(commands) => {
                 let mut undo = Vec::with_capacity(commands.len());
                 for command in commands {

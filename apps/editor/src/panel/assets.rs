@@ -19,6 +19,12 @@
 //! [`StorageError::Unsupported`](crcbl::store::StorageError::Unsupported) —
 //! says so in the pane rather than showing an empty one.
 //!
+//! **A row is where a drop starts.** A press on a mesh asset's row is the
+//! start of a drag into the viewport ([`super::Panels::asset_at`]), and accept
+//! — Enter — on the focused one asks for that asset at the view's centre
+//! ([`super::PanelFrame::spawn`]); `crate::app` carries both out. A folder's
+//! row is neither.
+//!
 //! The walk stops at [`MAX_DEPTH`] folders down and [`MAX_LISTED`] entries
 //! read, and says so, because an asset root pointed at a home directory is a
 //! mistake a person makes once and should not cost them the editor.
@@ -26,6 +32,7 @@
 use std::path::Path;
 
 use crcbl::assets::AssetSource;
+use crcbl::math::Vec2;
 use crcbl::scene_mesh::is_mesh_asset;
 use crcbl::ui::tree::{NodeKey, OutlinerId, OutlinerOptions, OutlinerState, Ui};
 
@@ -140,6 +147,44 @@ impl Browser {
     #[cfg(test)]
     pub(super) const fn refresh_button(&self) -> Option<NodeKey> {
         self.refresh
+    }
+
+    /// The mesh asset whose row the last frame laid out under `at`, in the
+    /// tree's own pixels, or [`None`] over a folder's row or none.
+    pub(super) fn asset_at(&self, ui: &Ui, at: Vec2) -> Option<&str> {
+        let inside = |key: NodeKey| {
+            ui.rect(key).is_some_and(|(min, max)| {
+                at.x >= min.x && at.x < max.x && at.y >= min.y && at.y < max.y
+            })
+        };
+        // A row scrolled half out of the pane is laid out past its edge, so
+        // the pane's own rectangle is asked too.
+        if !self.key.is_some_and(inside) {
+            return None;
+        }
+        self.rows
+            .iter()
+            .find(|&&(key, _)| inside(key))
+            .and_then(|&(_, id)| self.asset_of(id))
+    }
+
+    /// The mesh asset whose row holds the tree's focus, if one does: what
+    /// accept on the pane asks for.
+    pub(super) fn focused_asset(&self, ui: &Ui) -> Option<&str> {
+        let focused = ui.focused()?;
+        self.rows
+            .iter()
+            .find(|&&(key, _)| key == focused)
+            .and_then(|&(_, id)| self.asset_of(id))
+    }
+
+    /// The mesh asset `id`'s row stands for, or [`None`] for a folder's.
+    fn asset_of(&self, id: OutlinerId) -> Option<&str> {
+        usize::try_from(id.0)
+            .ok()
+            .and_then(|index| self.listing.entries.get(index))
+            .filter(|entry| !entry.folder)
+            .map(|entry| entry.key.as_str())
     }
 
     /// The rows the last frame built, each with the key of the entry it

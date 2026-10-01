@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 12 2026-10-01, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 13 2026-10-01, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -515,6 +515,69 @@ of the same day (below).
   move. The mutations each turned a test red are listed in the commit that
   landed this.
 
+**Slice 13, the asset browser, scene meshes and drag-spawn (task 6), landed
+2026-10-01**, on the decisions of the same day (below). With it every step of
+the exit criterion has a path in the editor except creating a scene from empty.
+
+- **A mesh is a scene component.** `crcbl::scene_mesh` (behind `scn`/`scene`,
+  registered by `scene_mesh::register`, which the editor's vocabulary calls)
+  puts `Mesh { asset, position }` under `meshes`: a glTF key in the asset source
+  and where the asset's own origin stands. `check_asset` admits a key —
+  relative, no `..`, a `.glb` or `.gltf` extension, a canonical asset key, or
+  empty for a mesh with no asset chosen (what attaching one starts as) — and a
+  row is read through it, so a key that would walk out of the asset root is
+  `ScnError::Parse` naming the file, line and field, and the check reports one a
+  panel typed.
+- **Its box is measured from the asset and never saved.** A `Placement` answers
+  from the row alone, so `MeshLibrary` (feature `scene`) imports each asset once
+  through the asset source, boxes every vertex through its node transforms, and
+  writes the box into the row beside the key it was measured for; a row retyped
+  to another key answers the placeholder until it is measured again. The
+  document resolves after its load, play's restore and every command, undo and
+  redo, and rebuilds the picking boxes that moved. A missing, broken or unchosen
+  asset is a `PLACEHOLDER_HALF_EXTENT` cube about the origin and a
+  `MeshProblem`, which `Document::problems` names by entity — never a panic. A
+  flat model gets `MIN_HALF_EXTENT` across its plane.
+- **The viewport draws the asset.** `apps/editor/src/app/meshes.rs`'s `Shelf` is
+  the greybox pack plus every measured asset's meshes, converted by
+  `crcbl::scene::build_render_scene` and appended, materials by their factors
+  alone (a renderer has one page per kind). A renderer's geometry is fixed at
+  `with_scene`, so a mesh naming an asset the shelf lacks rebuilds the renderer
+  (device drained first) with every asset it held; a mesh not on the shelf, or
+  missing, is drawn as the greybox cube of its box.
+- **The browser is a fourth pane.** `apps/editor/src/panel/assets.rs` walks
+  `AssetSource::list` when the panels open and on its Refresh button, listing
+  the keys `is_mesh_asset` admits under the folders holding them, capped at
+  `MAX_DEPTH` folders and `MAX_LISTED` entries, and saying so when the source
+  cannot list or holds no mesh. `--assets DIR` names the root; a scene opened
+  from a directory reads from the directory holding it, the compiled-in scene
+  from nothing. An older build's saved three-pane layout is migrated by
+  `crate::layout::migrate`: the browser docked below the outliner, sharing its
+  slot, every other pane and divider kept; the old default becomes the new.
+- **Drag-spawn.** A press on a mesh row and a release over the viewport stand a
+  mesh of it on the point the release pixel's ray first strikes, or on the
+  ground plane `y = 0` (`Document::drop_point`) — the bottom centre of its box,
+  or the placeholder's, on that point (`Mesh::standing_on`). Enter on a focused
+  row places it where the view's centre meets the ground. Either is
+  `Document::spawn_mesh`: one undoable entry, the new entity selected, refused
+  in play mode, and in a scene listing no `meshes` a `Batch` of
+  `EditCommand::ListSystem` (new, with its inverse `UnlistSystem`, over
+  `Scene::list_system`) and the spawn, so one undo puts the files back.
+- **Evidence**: the umbrella's tests hold the round trip with the box left out
+  of the file, every key refusal on load and by the check, the placement from a
+  measured box and the placeholder, a missing or broken asset as a placeholder
+  and a named problem, and a retyped key measured again; the editor's hold
+  meshes measured on open, spawn, undo, redo, a retype, play and stop, a mesh
+  picked by its measured box, the viewport drawing the asset's part at its row
+  through its nodes and a missing one as a cube, a newly measured asset
+  rebuilding the renderer, the browser listing only mesh assets and their
+  folders, the notes for a source that cannot list or holds none, refresh, the
+  layout migration from a committed older `settings.toml` and a current one
+  round-tripping, a drop on a surface and on the ground, outside the viewport,
+  in play, and Enter at the view's centre, one undo each, and a drop into a
+  scene without meshes undoing to its files byte for byte. The mutations each
+  turned a test red are listed in the commits that landed this.
+
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
 opens the vocabularies it was compiled with. The shipped build registers its own
@@ -540,8 +603,10 @@ Two things sit behind it, in both directions:
   the workspace", which was already false when it was written:
   `crcbl_render::stack::CameraStack::from_ron` and
   `crcbl_inventory::catalog::Catalog::from_ron` both predate it.) Feature 6, the
-  asset browser, still waits on the rest of stage 6 — there is no watcher and no
-  `crcbl bake` (both owed in `docs/backlog.md`; stage 6's rules are in
+  asset browser, landed in slice 13 without the rest of stage 6 — a refresh
+  button where a watcher would be, and glTF imported directly rather than baked
+  — and what it would gain from them is in the backlog; there is no watcher and
+  no `crcbl bake` (both owed in `docs/backlog.md`; stage 6's rules are in
   [../notes/tooling.md](../notes/tooling.md)). Feature 3 landed in slice 3 on
   stage 7's inspector (`Ui::inspector_with`; the UI's rules are in
   [../notes/tooling.md](../notes/tooling.md)).
@@ -774,6 +839,29 @@ and recorded, as above):
 - **Static and kinematic bodies collide and do not move**; a kinematic velocity
   is not added until something needs one.
 
+**Decided 2026-10-01, for the asset browser and drag-spawn** (taken for the long
+term and recorded, as above):
+
+- **A scene-carried mesh component**, `Mesh { asset, position }` in
+  `crcbl::scene_mesh` behind the scene features, `#[derive(Reflect)]`, serde,
+  `Default`, registered with one call the editor's vocabulary makes. Its
+  placement comes from the asset's bounds, measured at load through the asset
+  source and cached; an unloaded or missing asset is a named placeholder box and
+  a problem, never a panic. The asset path is validated at the boundary
+  (relative, no `..`, a known extension) by name.
+- **The editor draws the real mesh** through the engine's existing renderer and
+  glTF bridge, not a renderer of its own; every other entity stays greybox.
+- **The browser is a fourth pane**, and an older three-pane `settings.toml`
+  layout is **migrated** — the browser added at a default size, below the
+  outliner — rather than refused. The pane lists the `AssetSource::list` entries
+  a mesh can be made of, with their folders.
+- **Drag-spawn** spawns a mesh where the pointer's ray meets the surface under
+  it, or the ground plane `y = 0`, as one undoable spawn, refused in play mode,
+  the new entity selected; Enter on a browser entry spawns at the viewport
+  centre's ground point. One spawn into a scene that lists no `meshes` also
+  lists the system, in the same undo entry, since a save writes only the
+  manifest's chunks.
+
 **Still the owner's:** a file watcher dependency for hot reload (`notify`),
 because adding a crates.io dependency is the owner's call by the workspace's
 rules. It stays open in the backlog.
@@ -855,7 +943,8 @@ rules. It stays open in the backlog.
    MVP: spawn, delete, duplicate, rename, transform, property-set, attach/detach
    system data, scene-load/save markers).
 5. Gizmos.
-6. Asset browser + drag-spawn.
+6. Asset browser + drag-spawn. Landed in slice 13 (meshes from glTF assets, the
+   browser as a fourth pane, drag and Enter to place).
 7. Play/stop with snapshot restore. The mechanism landed in slice 8, restoring
    from the scene's text; towers registers the first module (slice 9).
 8. Dogfood pass: build a small playable scene start-to-finish in the editor; fix
