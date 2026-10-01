@@ -17,7 +17,7 @@
 //! between two of them; [`Mode::Scale`] draws a box-tipped line along each of
 //! the box's **own** axes — a half extent is along them, so its handle is too —
 //! and a square at the centre that resizes evenly; [`Mode::Rotate`] draws a
-//! ring about each world axis ([`ring`]).
+//! ring about each world axis ([`ring()`]).
 //!
 //! # Which field a handle writes
 //!
