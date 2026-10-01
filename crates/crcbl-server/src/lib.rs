@@ -7,12 +7,13 @@
 //! (see [`crcbl_net::auth`]) — an unauthenticated packet reaches nothing but
 //! the error counter.
 
+pub mod cadence;
 pub mod host;
 mod peer;
 pub mod sim_hash;
 
 pub use host::{EventNotSent, Host, HostConfig, HostModule, PeerEvent, PeerId, PeerInputs};
-pub use peer::SnapshotTooLarge;
+pub use peer::{PeerStats, SnapshotTooLarge, UpdateTooLarge};
 
 pub use crcbl_net::rate_limit;
 // Moved to `crcbl-net`, where the client can reach it too; kept here so
@@ -32,15 +33,20 @@ use crcbl_net::{
 
 use peer::{Counters, PeerSession};
 
-/// Ticks the server will keep delta-encoding against the same acked baseline
-/// before it gives up and sends a keyframe.
+/// Snapshots the server will keep delta-encoding against the same acked
+/// baseline before it gives up and sends a keyframe.
 ///
 /// A client whose acks stop making progress — because the delta it needs was
 /// lost, or because its baseline was evicted from the ring — cannot recover on
 /// its own: it will reject every delta that targets a baseline it does not
 /// have, forever. This bounds that stall, and is the server half of the same
 /// guarantee the client makes by re-announcing its baseline.
-const KEYFRAME_RECOVERY_TICKS: u32 = 32;
+///
+/// Counted in snapshots rather than ticks because a session the rate drop
+/// ([`cadence`]) has slowed is sent, and acknowledges, fewer of them: in
+/// ticks, it would be given only a fraction as many snapshots to make
+/// progress before its client was reset with a keyframe.
+const KEYFRAME_RECOVERY_SNAPSHOTS: u32 = 32;
 
 /// The most client input frames one tick will hold.
 ///
@@ -178,7 +184,10 @@ impl<T: Transport> Server<T> {
         // queue is almost always empty here and `sweep` returns immediately
         // when it is.
         self.world.sweep();
-        if was_connected && self.peer.session.state() == SessionState::Connected {
+        if was_connected
+            && self.peer.session.state() == SessionState::Connected
+            && self.peer.snapshot_due()
+        {
             self.emit_snapshot();
         }
     }
@@ -386,8 +395,13 @@ impl<T: Transport> Server<T> {
         else {
             return;
         };
-        self.peer
-            .send_snapshot(&mut self.transport, sector, current, &mut self.counters);
+        self.peer.send_snapshot(
+            &mut self.transport,
+            sector,
+            current,
+            &self.world,
+            &mut self.counters,
+        );
     }
 
     /// Replace the transport after a disconnect. The next valid resume handshake
@@ -464,6 +478,13 @@ impl<T: Transport> Server<T> {
     #[must_use]
     pub fn session_state(&self) -> SessionState {
         self.peer.session.state()
+    }
+
+    /// What the client's session reports about the snapshots it is sent: its
+    /// current snapshot interval and the updates withheld as too long.
+    #[must_use]
+    pub fn peer_stats(&self) -> PeerStats {
+        self.peer.stats()
     }
 
     /// Number of unrecoverable transport, encoding, decoding, or lifecycle errors.
@@ -1654,7 +1675,7 @@ mod tests {
         // baseline the client is provably not applying.
         let mut now = 3 * TICK;
         let mut sent_keyframe = false;
-        for _ in 0..(KEYFRAME_RECOVERY_TICKS + 4) {
+        for _ in 0..(KEYFRAME_RECOVERY_SNAPSHOTS + 4) {
             now += TICK;
             server.update(now);
             for msg in drain_payloads(&mut peer) {

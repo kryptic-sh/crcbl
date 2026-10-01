@@ -34,9 +34,13 @@
 //! datagram — [`MAX_UNRELIABLE_PAYLOAD`] bytes. A world whose snapshot grew
 //! past it has each snapshot fitted to the datagram, the least urgent updates
 //! held back for later ones (`crcbl::net::budget`), which the F3 panel
-//! counts. Only an update that cannot fit a datagram on its own is refused,
-//! which the host records by name ([`crate::server::SnapshotTooLarge`]) and
-//! this module logs.
+//! counts; a peer whose snapshots go on not fitting is sent them less often
+//! (`crcbl::server::cadence`), and the panel shows each peer's interval. An
+//! update that cannot fit a datagram on its own is withheld while the rest of
+//! the snapshot ships, which the host records by name
+//! ([`crate::server::UpdateTooLarge`]) and this module logs; only a snapshot
+//! whose framing alone overflows is refused
+//! ([`crate::server::SnapshotTooLarge`]), logged the same way.
 //!
 //! # Native only
 //!
@@ -60,9 +64,40 @@ use crate::net::udp::{ConnectError, UdpListener, UdpTransport};
 use crate::server::{Host, HostConfig, PeerEvent};
 use crate::ui::{DebugModule, DebugSection};
 
-/// The least time between two logged snapshot refusals: one a second says
-/// the world is too big without a line every tick.
+/// The least time between two logged snapshot refusals, or two withheld
+/// updates: one a second says the world is too big without a line every
+/// tick.
 const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+/// What a climbing count has had logged: a line when it has moved, at most
+/// one every [`REFUSAL_LOG_INTERVAL`].
+#[derive(Debug, Default)]
+struct ThrottledLog {
+    /// The count the last line reported.
+    logged: u64,
+    /// When the last line went out.
+    last: Option<Duration>,
+}
+
+impl ThrottledLog {
+    /// Whether `count` is due a line at `now`: it moved since the last line,
+    /// and that line is [`REFUSAL_LOG_INTERVAL`] old. A line found due is
+    /// taken as written.
+    fn due(&mut self, count: u64, now: Duration) -> bool {
+        if count == self.logged {
+            return false;
+        }
+        if self
+            .last
+            .is_some_and(|last| now.saturating_sub(last) < REFUSAL_LOG_INTERVAL)
+        {
+            return false;
+        }
+        self.logged = count;
+        self.last = Some(now);
+        true
+    }
+}
 
 /// What a sample's LAN session is known by: on the wire, in the announce, and
 /// in what it prints.
@@ -206,9 +241,10 @@ pub struct LanHost {
     /// this machine holds it. The session is still joinable by address.
     announcer: Option<Announcer>,
     host: Host,
-    /// Refusals already logged, and when the last line went out.
-    refusals_logged: u64,
-    last_refusal_log: Option<Duration>,
+    /// Snapshot refusals logged.
+    refusals: ThrottledLog,
+    /// Withheld updates logged.
+    withheld: ThrottledLog,
 }
 
 impl LanHost {
@@ -279,8 +315,8 @@ impl LanHost {
             listener,
             announcer,
             host,
-            refusals_logged: 0,
-            last_refusal_log: None,
+            refusals: ThrottledLog::default(),
+            withheld: ThrottledLog::default(),
         })
     }
 
@@ -340,27 +376,28 @@ impl LanHost {
         events
     }
 
-    /// Logs a snapshot the transport refused as too long, naming the limit —
-    /// at most once per [`REFUSAL_LOG_INTERVAL`].
+    /// Logs a snapshot the transport refused as too long, and an update
+    /// withheld as too long for any snapshot, each naming the limit — each at
+    /// most once per [`REFUSAL_LOG_INTERVAL`].
     fn report_refusals(&mut self, now: Duration) {
         let refused = self.host.oversized_snapshot_count();
-        if refused == self.refusals_logged {
-            return;
-        }
-        if self
-            .last_refusal_log
-            .is_some_and(|last| now.saturating_sub(last) < REFUSAL_LOG_INTERVAL)
+        if self.refusals.due(refused, now)
+            && let Some(snapshot) = self.host.last_oversized_snapshot()
         {
-            return;
-        }
-        if let Some(snapshot) = self.host.last_oversized_snapshot() {
             crate::log::warn!(
-                "lan: {snapshot} ({refused} refused so far); one entity's update must fit a UDP \
-                 datagram on its own"
+                "lan: {snapshot} ({refused} refused so far); a snapshot's framing must fit a UDP \
+                 datagram"
             );
         }
-        self.refusals_logged = refused;
-        self.last_refusal_log = Some(now);
+        let withheld = self.host.oversized_update_count();
+        if self.withheld.due(withheld, now)
+            && let Some(update) = self.host.last_oversized_update()
+        {
+            crate::log::warn!(
+                "lan: {update} ({withheld} withheld so far); one entity's update must fit a UDP \
+                 datagram on its own, and a remote player sees it stale until it does"
+            );
+        }
     }
 }
 
@@ -409,6 +446,20 @@ impl DebugModule for LanHost {
         out.row(
             "refused",
             format_args!("{}", self.host.oversized_snapshot_count()),
+        );
+        out.row(
+            "withheld",
+            format_args!("{}", self.host.oversized_update_count()),
+        );
+        let intervals: Vec<String> = self
+            .host
+            .peers()
+            .filter_map(|peer| self.host.peer_stats(peer))
+            .map(|stats| stats.snapshot_interval_ticks.to_string())
+            .collect();
+        out.row(
+            "snapshot every",
+            format_args!("{} tick(s)", intervals.join(" ")),
         );
     }
 }

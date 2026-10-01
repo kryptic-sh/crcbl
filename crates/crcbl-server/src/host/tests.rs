@@ -10,14 +10,14 @@ use crcbl_net::{InMemoryTransport, Message};
 
 use super::*;
 
-const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
+pub(super) const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
     protocol_version: ProtocolCompatibility::DEFAULT.protocol_version,
     engine_build_id: 0x0000_484f_5354,
     schema_hash: 0x0000_5045_4552,
 };
 
-const TICK_HZ: u32 = 60;
-const TICK: Duration = Duration::from_nanos(16_666_667);
+pub(super) const TICK_HZ: u32 = 60;
+pub(super) const TICK: Duration = Duration::from_nanos(16_666_667);
 
 /// A world with one system holding one entity, so every snapshot carries
 /// something.
@@ -123,7 +123,11 @@ fn raw(host: &mut Host) -> InMemoryTransport {
     near
 }
 
-fn say_hello(transport: &mut InMemoryTransport, generation: u64, token: Option<ResumeToken>) {
+pub(super) fn say_hello(
+    transport: &mut InMemoryTransport,
+    generation: u64,
+    token: Option<ResumeToken>,
+) {
     transport
         .send_reliable(Message::reliable(crcbl_net::encode_hello(&Hello {
             protocol_version: COMPATIBILITY.protocol_version,
@@ -136,7 +140,7 @@ fn say_hello(transport: &mut InMemoryTransport, generation: u64, token: Option<R
 }
 
 /// The handshake reply waiting on `transport`, skipping anything else.
-fn reply(transport: &mut InMemoryTransport) -> HandshakeResult {
+pub(super) fn reply(transport: &mut InMemoryTransport) -> HandshakeResult {
     while let Some(msg) = transport.recv().unwrap() {
         if let Ok(result) = crcbl_net::decode_handshake_result(&msg.payload) {
             return result;

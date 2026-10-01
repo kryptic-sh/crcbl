@@ -1,5 +1,6 @@
 //! The flag parser every LAN sample reads `--host`, `--join` and `--browse`
-//! through. The sessions themselves are driven end to end by the samples'
+//! through, and the throttle on the host's refusal and withheld-update
+//! lines. The sessions themselves are driven end to end by the samples'
 //! own loopback suites — `apps/sandbox/src/lan/tests.rs` and
 //! `apps/towers/src/lan/tests.rs` — which is where a host and its clients
 //! have a world to replicate.
@@ -76,4 +77,30 @@ fn a_second_mode_or_a_bad_address_is_refused() {
             Err(format!("--join needs an IP:PORT address, not `{address}`"))
         );
     }
+}
+
+/// **A count that climbs every frame is logged once an interval.** A host
+/// withholding an update from every snapshot at 60 Hz for three seconds logs
+/// it three times — when it first moves, then once per
+/// [`REFUSAL_LOG_INTERVAL`] — and a count that stops moving logs nothing.
+#[test]
+fn a_climbing_count_is_logged_once_an_interval() {
+    const FRAME: Duration = Duration::from_nanos(16_666_667);
+    const FRAMES: u32 = 180;
+    let mut log = ThrottledLog::default();
+    let lines = (1..=FRAMES)
+        .filter(|&frame| log.due(u64::from(frame), FRAME * frame))
+        .count();
+    // Frames 1, 61 and 121: the next line is due a frame past the run.
+    assert_eq!(lines, 3);
+
+    let later = FRAME * FRAMES + REFUSAL_LOG_INTERVAL;
+    assert!(
+        log.due(u64::from(FRAMES), later),
+        "what moved since the last line is logged once the interval passes"
+    );
+    assert!(
+        !log.due(u64::from(FRAMES), later + 10 * REFUSAL_LOG_INTERVAL),
+        "a count that has not moved since is not"
+    );
 }

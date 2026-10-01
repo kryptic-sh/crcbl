@@ -13325,12 +13325,13 @@ layout and MAC by hand and flip every byte and bound input. The discovery
   Snapshots are fitted to `UdpTransport::max_unreliable_message_bytes`
   (`crcbl_net::budget`, see _Quantization, the priority/budget encoder, and the
   one-datagram rule_), so a long snapshot rotates its updates instead of being
-  refused. What is still refused by name (`Host::oversized_snapshot_count`,
-  `crcbl_server::SnapshotTooLarge`, logged by `crcbl::lan` at most once a
-  second) is one entity's update too long for a datagram on its own. Any sample
-  over UDP must keep every single entity's replicated blob under
-  `MAX_UNRELIABLE_PAYLOAD` less the framing; towers' largest is its numbers
-  entity (`replica`'s `HUD_SCHEMA`), a few dozen bytes.
+  refused. One entity's update too long for a datagram on its own is withheld
+  while the rest ships (`Host::oversized_update_count`,
+  `crcbl_server::UpdateTooLarge` by system name, logged by `crcbl::lan` at most
+  once a second), so that entity is stale on every remote client for as long as
+  it stays too long. Any sample over UDP must keep every single entity's
+  replicated blob under `MAX_UNRELIABLE_PAYLOAD` less the framing; towers'
+  largest is its numbers entity (`replica`'s `HUD_SCHEMA`), a few dozen bytes.
 - LAN discovery, D1, is built; what it left is under _Netgraph HUD, LAN
   discovery_. Connection tokens, D2, are built; what they left is under _Left
   from D2_ above.
@@ -13469,8 +13470,8 @@ reliable-ordered, where one loss head-of-line blocks them into a stale burst.
 
 ### Quantization, the priority/budget encoder, and the one-datagram rule (2026-08-27)
 
-**The budget, the priority accumulator and quantization are built (2026-10-01);
-the rate drop, relevance and the predicted-component exemption are not.**
+**The budget, the priority accumulator, quantization and the rate drop are built
+(2026-10-01); relevance and the predicted-component exemption are not.**
 
 **Built:** `crcbl_net::budget`. `crcbl_server`'s `PeerSession::send_snapshot`
 diffs against the acked baseline, then `PriorityAccumulator::fit` (one per
@@ -13478,14 +13479,32 @@ diffs against the acked baseline, then `PriorityAccumulator::fit` (one per
 `baseline_stores`) trims the delta to `snapshot_budget` of the transport's
 `Transport::max_unreliable_message_bytes`, and the server retains
 `Fitted::baseline_after` — what the client will hold — rather than the full
-state. Removals pack first; a keyframe is fitted like a delta; framing plus the
-single largest entry past the budget is `BudgetTooSmall`, which the host records
-as `SnapshotTooLarge`. The module docs state how each ack-baseline invariant
-survives. Tests: `crcbl_net::budget::tests` (rotation bound, convergence under
-loss, no removal or revert, removals first and deferred, budget never exceeded,
-byte-identical output, ties, relevance, fitted join keyframe, the refusal) and
+state. Removals pack first; a keyframe is fitted like a delta; a system with
+nothing packed is left out; an entry no snapshot could carry is withheld as
+`Fitted::oversized` while the rest ships; only framing past the budget is
+`BudgetTooSmall`, which the host records as `SnapshotTooLarge`. The module docs
+state how each ack-baseline invariant survives. Tests:
+`crcbl_net::budget::tests` (rotation bound, convergence under loss, no removal
+or revert, removals first and deferred, budget never exceeded, byte-identical
+output, ties, relevance, fitted join keyframe, the withheld oversized update,
+the framing refusal, systems left out) and
 `host::udp_tests::a_session_changing_more_than_a_datagram_holds_updates_back_and_converges`,
 each shown red by a mutation.
+
+**Built: the rate drop** (2026-10-01), `crcbl_server::cadence`. Each
+`PeerSession` holds a `SnapshotCadence`: a snapshot every tick, stepping to
+every second then every third tick (`SNAPSHOT_INTERVAL_STEPS`) after
+`STEP_DOWN_AFTER` consecutive snapshots that held something back, and back up
+after `STEP_UP_AFTER` consecutive snapshots within `HEADROOM` of their budget.
+`Host::emit_snapshots` and `Server::tick` ask each session whether it is due;
+`Host::peer_stats` / `Server::peer_stats` report the interval, and
+`crcbl::lan`'s F3 section lists it per peer. Keyframe recovery counts snapshots
+(`KEYFRAME_RECOVERY_SNAPSHOTS`). Tests, each shown red by a mutation:
+`cadence::tests` (each step and not past the last, due spacing, no flapping on
+an alternating pattern, step up on headroom and not on a tight fit) and
+`host::rate_tests` (a congested peer slowed alone and restored, recovery after
+its snapshots at the slow rate, the client interpolating at the slowest
+interval, an oversized entity not stopping the others).
 
 **Built: quantization,** `crcbl_ecs::quantize` — in the ECS beside
 `SystemTrait::replicate` and `ComponentHash`, because physics declares a schema
@@ -13534,16 +13553,24 @@ read, and `client_server_session`'s convergence to the quantized value.
   half a quantum. Nothing predicts yet.
 - **The fuzz target decodes the new surface** (`Transform::decode_wire` and a
   schema of every codec), but the corpus has no named seed for either.
-- **The rate drop (30, then 20 Hz under sustained over-budget)** is not built
-  because nothing has a per-session cadence to hook: `Host::emit_snapshots` and
-  `Server::emit_snapshot` send every peer a snapshot every tick. It needs a
-  per-`PeerSession` send interval (every Nth tick), an over-budget signal
-  (`Fitted::shed > 0` for some number of consecutive snapshots, with hysteresis
-  to come back up), `KEYFRAME_RECOVERY_TICKS` counted in snapshots rather than
-  ticks (at a lower rate it would fire early), and the client's interpolation
-  delay checked against the longer interval. The server ticks at whatever
-  `tick_hz` the game gives it, so "30 then 20 Hz" wants restating as fractions
-  of the tick rate.
+- **The rate drop's thresholds are unmeasured on a real link.**
+  `crcbl_server::cadence`'s `STEP_DOWN_AFTER`, `STEP_UP_AFTER` and `HEADROOM`
+  were chosen, not tuned: every test drives them over in-memory links with a
+  narrow reported limit. Its signal is only what the budget held back, so a link
+  that fits every snapshot and still loses packets, or a session whose datagrams
+  fit but whose bandwidth does not, is never slowed; RTT, loss and send
+  bandwidth are not inputs, and the netgraph that would show them is not built.
+  Decided 2026-10-01 for the long term: steps are tick-rate fractions
+  (`SNAPSHOT_INTERVAL_STEPS`), per session, with distinct down and up
+  thresholds; a withheld oversized update does not count against the rate.
+- **The client has no jitter buffer.** Its playback is held between the two
+  snapshots it has (`Client::advance_playback`), so at any interval it reaches
+  the newest snapshot as the next is due and a late one stands it still until it
+  lands; nothing extrapolates. That is why the rate drop needed no client change
+  (`host::rate_tests::a_client_interpolates_smoothly_at_the_slowest_interval`
+  holds it at the slowest interval with on-time snapshots), and it is the same
+  at every interval: a fixed or adaptive playback delay longer than the spacing
+  is what would absorb jitter, at the cost of latency. Not designed.
 - **Relevance** is `DEFAULT_RELEVANCE` for every update: `fit` takes a
   `Fn(system_id, entity_bits) -> NonZeroU32`, and `send_snapshot` passes the
   constant. A game's interest model (distance, view, ownership) is what would
@@ -13561,14 +13588,25 @@ read, and `client_server_session`'s convergence to the quantized value.
   Closing it needs either a keyframe that keeps unlisted entities, which the
   server cannot then track exactly, or state on the reliable channel, which the
   notes refuse. Not tested beyond the join case.
-- **An entity whose one update exceeds a datagram stalls the whole session**:
-  `fit` refuses the snapshot rather than leave that entity stale in silence, so
-  nothing else ships either. Splitting a component across snapshots, or giving
-  such an entity its own reliable path, is the alternative; neither is designed.
-- **Systems stay in a fitted delta with nothing in them**, 16 bytes each. With a
-  few systems this is noise; with hundreds it is most of a datagram, and
-  dropping empty systems from a delta would buy it back (the fixed framing would
-  then depend on what was packed).
+- **An entity whose one update exceeds a datagram is stale on every client** for
+  as long as it stays too long: `fit` withholds it (`Fitted::oversized`) and the
+  session carries on, and the host counts and names it
+  (`PeerStats::oversized_updates`, `UpdateTooLarge`). Until 2026-10-01 `fit`
+  refused the whole snapshot instead, stalling every other entity of the
+  session. Getting the entity itself across is deferred: splitting a component
+  across snapshots (a per-field mask, or fragments the client reassembles before
+  applying) or giving such an entity its own reliable path, which the notes
+  refuse for state. Either needs a design for how the ack baseline tracks a
+  partly delivered component.
+- **A system with no entities still costs its 16-byte header in every delta.**
+  `fit` drops a system with nothing packed only when the diff shows it held
+  something (`SystemDelta::unchanged_count` above zero) or every entry was held
+  back: a system empty on both sides cannot be told from one newly created
+  empty, which must be named for the client to create it. Telling them apart
+  needs the previous baseline in `fit`; not worth it while such systems are
+  rare. `fit` also relies on `unchanged_count`, which only a server-side diff
+  fills in — a decoded delta always reads zero there — so it must never be fed a
+  delta off the wire.
 - **Steam reports the default limit.** `SteamTransport` does not override
   `max_unreliable_message_bytes`, so it is budgeted at
   `MAX_IN_MEMORY_MESSAGE_BYTES`, under its own `MAX_MESSAGE_BYTES`, and Steam
@@ -14536,12 +14574,17 @@ frame, and the page shows it for `NOTICE_FOR` (in `crate::app`); tested by
   the team's — so the MVP rule is dropped rather than enforced.
 - **No presence.** A player's cursor and picked kind are presentation and never
   cross the wire, so nobody sees where a teammate is about to build.
-- **An entity the wire cannot carry is dropped from the snapshot, logged once.**
+- **An entity whose values its schema cannot carry is left out of the snapshot,
+  logged once.** This is towers' own range check, not the datagram limit:
+  `replica::encode` refuses a value outside its `quantize` schema
+  (`Encoded::refused`) and the `"towers"` system's `replicate` warns once.
   `replica`'s extents hold the committed field and every tower's reach with room
   (`the_extents_hold_the_field_and_every_reach`), so nothing on it trips this,
   but a position outside them is left out with a warning rather than shipped
   exactly. `crcbl_phys::Transform::encode_wire`'s exact fallback is the model if
-  it ever matters.
+  it ever matters. An entity whose encoded update is too long for a datagram is
+  the engine's case, withheld by `crcbl_net::budget` and named by the host — see
+  _Quantization, the priority/budget encoder, and the one-datagram rule_.
 
 ### towers' map is scene data, and what `Map::new` does not check (2026-09-30)
 

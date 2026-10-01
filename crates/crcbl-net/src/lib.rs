@@ -48,7 +48,10 @@ pub mod types;
 pub mod udp;
 
 pub use auth::{AuthError, ReplayWindow, SessionCrypto, SessionKey};
-pub use budget::{BudgetTooSmall, DEFAULT_RELEVANCE, Fitted, PriorityAccumulator, snapshot_budget};
+pub use budget::{
+    BudgetTooSmall, DEFAULT_RELEVANCE, Fitted, OversizedUpdate, PriorityAccumulator,
+    snapshot_budget,
+};
 pub use codec::{
     Ack, DecodeError, decode_ack, decode_client_to_server, decode_handshake_result, decode_hello,
     decode_server_to_client, decode_session_ended, encode_ack, encode_client_to_server,

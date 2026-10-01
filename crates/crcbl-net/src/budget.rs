@@ -60,11 +60,34 @@
 //!   withdraws what it holds back until those deltas add it again: a
 //!   partial keyframe cannot say "keep the rest", and state never rides the
 //!   reliable channel.
-//! * **What cannot be held back** is the delta's framing — its header and one
-//!   header per system — and any single update too long to fit beside it.
-//!   Such a snapshot could never be sent whole or in part, so `fit` refuses it
-//!   with [`BudgetTooSmall`] rather than leave one entity stale for good in
-//!   silence.
+//! * **An update too long for any snapshot is withheld, not the snapshot.**
+//!   One entity's entry that would not fit even a snapshot carrying nothing
+//!   else is taken out and reported in [`Fitted::oversized`]; the rest of the
+//!   snapshot ships. Like a held-back update it stays out of the retained
+//!   baseline, so the client keeps its old value — stale until the update
+//!   shrinks — and the next diff includes it again, to be withheld again.
+//!   It accumulates no priority, since waiting cannot make it fit. What the
+//!   server does with the report is the server's: `crcbl-server` counts it
+//!   per session and names it. Refusing the whole snapshot instead, as `fit`
+//!   once did, stalled every other entity of the session behind one that
+//!   could never ship.
+//! * **What cannot be held back** is the delta's header, the header of any
+//!   system the client must be told exists although it has no entities, and
+//!   one removal when there is any; `fit` refuses a budget smaller than that
+//!   with [`BudgetTooSmall`], since nothing at all could be sent.
+//!
+//! # Systems with nothing to say are left out
+//!
+//! A diff names every system in the state, and each costs a
+//! `SYSTEM_HEADER_BYTES` header whether or not it carries anything. `fit`
+//! leaves out a system with nothing packed in it — one whose entities all
+//! went unchanged, or one whose entries were all held back — because
+//! [`DeltaCodec::apply`] leaves a system the delta does not name exactly as
+//! the baseline holds it. That is a choice about which systems to list, not a
+//! change to the wire: a decoder of any version reads the shorter delta. The
+//! one system kept although it carries nothing is a system with no entities,
+//! since naming it is how the client learns it exists, and the diff cannot
+//! say whether such a system is new; its header is part of the framing.
 //!
 //! # Determinism
 //!
@@ -87,10 +110,10 @@ use crcbl_core::TickId;
 use crate::auth::AUTH_OVERHEAD;
 use crate::delta::{
     Baseline, BaselineDecodeError, DELTA_HEADER_BYTES, Delta, DeltaCodec,
-    ENTITY_ENTRY_HEADER_BYTES, MAX_DELTA_BYTES, REMOVED_ENTRY_BYTES, SYSTEM_HEADER_BYTES, Trust,
-    encoded_delta_len,
+    ENTITY_ENTRY_HEADER_BYTES, MAX_DELTA_BYTES, REMOVED_ENTRY_BYTES, SYSTEM_HEADER_BYTES,
+    SystemDelta, Trust, encoded_delta_len,
 };
-use crate::types::EntityBits;
+use crate::types::{EntityBits, EntityData};
 
 /// The relevance of an update nothing has said more about: the unit every
 /// tick of staleness adds.
@@ -113,8 +136,8 @@ pub const fn snapshot_budget(max_unreliable_message_bytes: usize) -> usize {
     }
 }
 
-/// A snapshot whose unsheddable part — the delta's framing, plus the one
-/// update too long to fit beside it — does not fit the budget.
+/// A snapshot whose unsheddable part — the delta's header, the systems it
+/// must declare, and one removal when there is any — does not fit the budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
     "the smallest snapshot carrying what cannot be held back encodes to {size} bytes, \
@@ -127,24 +150,43 @@ pub struct BudgetTooSmall {
     pub budget: usize,
 }
 
+/// One entity's update too long to fit any snapshot of the budget on its
+/// own, withheld from the snapshot it was fitted to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OversizedUpdate {
+    /// The system the update belongs to.
+    pub system_id: u32,
+    /// The entity it updates.
+    pub entity_bits: EntityBits,
+    /// Encoded length of the smallest snapshot that would carry it: the
+    /// fitted delta's unsheddable framing, a system header, and the entry.
+    pub snapshot_bytes: usize,
+}
+
 /// A delta fitted to a budget, and what was held back to fit it.
 #[derive(Debug, Clone)]
 pub struct Fitted {
-    /// What to send: the diff with the held-back entries taken out and every
-    /// list in entity order.
+    /// What to send: the diff with the held-back entries taken out, every
+    /// list in entity order, and no system that has nothing to say (see the
+    /// [module docs](self)).
     pub delta: Delta,
     /// Added or modified entries held back for a later snapshot.
     pub shed: usize,
     /// Removals deferred to a later snapshot because the tick's removals alone
     /// overflowed the budget.
     pub deferred_removals: usize,
+    /// Entries withheld because no snapshot of this budget could carry them,
+    /// largest first. Unlike [`shed`](Self::shed) these accumulate no
+    /// priority — no amount of waiting makes them fit — and they are diffed
+    /// and withheld again every fit until the entity's update shrinks.
+    pub oversized: Vec<OversizedUpdate>,
 }
 
 impl Fitted {
     /// Whether nothing was held back, so the snapshot is the whole diff.
     #[must_use]
     pub fn is_whole(&self) -> bool {
-        self.shed == 0 && self.deferred_removals == 0
+        self.shed == 0 && self.deferred_removals == 0 && self.oversized.is_empty()
     }
 
     /// The baseline the client holds once it applies [`Fitted::delta`] to
@@ -197,6 +239,11 @@ struct Candidate {
     bytes: usize,
 }
 
+/// Whether a system's delta carries no entry at all.
+fn says_nothing(system: &SystemDelta) -> bool {
+    system.added.is_empty() && system.modified.is_empty() && system.removed.is_empty()
+}
+
 impl PriorityAccumulator {
     /// An accumulator holding nothing back.
     #[must_use]
@@ -214,19 +261,29 @@ impl PriorityAccumulator {
             .unwrap_or(0)
     }
 
-    /// Fit `delta` to `budget` encoded bytes.
+    /// Fit `delta` — a diff from [`DeltaCodec::encode_from_baseline`] — to
+    /// `budget` encoded bytes.
     ///
     /// Every added or modified entry's priority grows by `relevance` of it;
     /// removals are packed first, then entries in descending priority, each
-    /// one that fits what is left; packed entries return to priority zero and
-    /// the rest keep what they have accumulated. A delta that already fits is
-    /// returned whole, in entity order. Priorities saturate rather than wrap.
+    /// one that fits what is left, a system's header charged with the first
+    /// entry packed in it; packed entries return to priority zero and the
+    /// rest keep what they have accumulated. An entry that could not fit even
+    /// an otherwise empty snapshot is withheld as
+    /// [`oversized`](Fitted::oversized) rather than held back. A delta that
+    /// already fits is returned whole, in entity order. Priorities saturate
+    /// rather than wrap.
+    ///
+    /// A system with nothing packed in it is left out: on a delta, one whose
+    /// entities are all unchanged, and on either kind, one whose entries were
+    /// all held back. A system with no entities, unchanged or otherwise, is
+    /// kept, because applying it is what creates it on the client.
     ///
     /// # Errors
     ///
-    /// [`BudgetTooSmall`] when the delta's framing, or its framing plus any
-    /// single entry, exceeds `budget`: that entry could never be sent. The
-    /// accumulator is left as it was.
+    /// [`BudgetTooSmall`] when the delta's header and the systems it must
+    /// declare, plus one removal if there is any, exceed `budget`: nothing
+    /// could be sent. The accumulator is left as it was.
     pub fn fit(
         &mut self,
         mut delta: Delta,
@@ -242,25 +299,34 @@ impl PriorityAccumulator {
                 .sort_unstable_by_key(|entity| entity.entity_bits);
             system.removed.sort_unstable();
         }
+        if !delta.is_keyframe {
+            // The client's baseline already holds every entity of such a
+            // system, and a delta that does not name a system leaves it as it
+            // is, so its header would say nothing at all. `unchanged_count` is
+            // what tells it from a system with no entities on either side,
+            // which costs the same header and is kept: the diff cannot say
+            // whether that one is new.
+            delta
+                .systems
+                .retain(|system| !(says_nothing(system) && system.unchanged_count > 0));
+        }
 
+        // A system that carries nothing yet is still in the delta is one the
+        // client must be told exists; its header cannot be held back.
+        let declared: Vec<bool> = delta.systems.iter().map(says_nothing).collect();
         let framing = SYSTEM_HEADER_BYTES
-            .saturating_mul(delta.systems.len())
+            .saturating_mul(declared.iter().filter(|&&declared| declared).count())
             .saturating_add(DELTA_HEADER_BYTES);
-        let largest_entry = delta
+        let removal = if delta
             .systems
             .iter()
-            .flat_map(|system| {
-                let removal = (!system.removed.is_empty()).then_some(REMOVED_ENTRY_BYTES);
-                system
-                    .added
-                    .iter()
-                    .chain(&system.modified)
-                    .map(|entity| ENTITY_ENTRY_HEADER_BYTES + entity.data.len())
-                    .chain(removal)
-            })
-            .max()
-            .unwrap_or(0);
-        let unsheddable = framing.saturating_add(largest_entry);
+            .any(|system| !system.removed.is_empty())
+        {
+            SYSTEM_HEADER_BYTES + REMOVED_ENTRY_BYTES
+        } else {
+            0
+        };
+        let unsheddable = framing.saturating_add(removal);
         if unsheddable > budget {
             return Err(BudgetTooSmall {
                 size: unsheddable,
@@ -268,17 +334,36 @@ impl PriorityAccumulator {
             });
         }
 
+        let oversized = withhold_oversized(&mut delta, framing, budget);
+
         if encoded_delta_len(&delta).is_some_and(|len| len <= budget) {
             // Everything pending is packed, so nothing carries a priority on.
             self.held.clear();
+            drop_emptied(&mut delta, &declared);
             return Ok(Fitted {
                 delta,
                 shed: 0,
                 deferred_removals: 0,
+                oversized,
             });
         }
 
         let mut room = budget - framing;
+        // A system's header is paid once, by the first entry packed in it.
+        let mut opened = declared.clone();
+        let mut pack = |system_index: usize, bytes: usize| {
+            let header = if opened[system_index] {
+                0
+            } else {
+                SYSTEM_HEADER_BYTES
+            };
+            if bytes + header > room {
+                return false;
+            }
+            room -= bytes + header;
+            opened[system_index] = true;
+            true
+        };
         let mut kept: HashSet<(usize, EntityBits)> = HashSet::new();
 
         let mut removals: Vec<(EntityBits, u32, usize)> = delta
@@ -295,8 +380,7 @@ impl PriorityAccumulator {
         removals.sort_unstable();
         let mut deferred_removals = 0;
         for (entity_bits, _, system_index) in removals {
-            if REMOVED_ENTRY_BYTES <= room {
-                room -= REMOVED_ENTRY_BYTES;
+            if pack(system_index, REMOVED_ENTRY_BYTES) {
                 kept.insert((system_index, entity_bits));
             } else {
                 deferred_removals += 1;
@@ -334,8 +418,7 @@ impl PriorityAccumulator {
 
         let mut held = HashMap::new();
         for candidate in candidates {
-            if candidate.bytes <= room {
-                room -= candidate.bytes;
+            if pack(candidate.system_index, candidate.bytes) {
                 kept.insert((candidate.system_index, candidate.entity_bits));
             } else {
                 held.insert(
@@ -353,14 +436,66 @@ impl PriorityAccumulator {
             system.modified.retain(|entity| keep(entity.entity_bits));
             system.removed.retain(|&entity_bits| keep(entity_bits));
         }
+        drop_emptied(&mut delta, &declared);
         debug_assert!(encoded_delta_len(&delta).is_some_and(|len| len <= budget));
 
         Ok(Fitted {
             delta,
             shed,
             deferred_removals,
+            oversized,
         })
     }
+}
+
+/// Take out of `delta` every added or modified entry that would not fit a
+/// snapshot of `budget` holding only `framing` and that entry's own system
+/// header, and return them, largest first.
+///
+/// No fit could ever pack one, so holding it back with the rest would only
+/// grow its priority for ever; and refusing the whole snapshot for it, as
+/// this once did, stalled every other entity of the session behind one that
+/// can never ship.
+fn withhold_oversized(delta: &mut Delta, framing: usize, budget: usize) -> Vec<OversizedUpdate> {
+    let mut oversized = Vec::new();
+    for system in &mut delta.systems {
+        let system_id = system.system_id;
+        let mut fits = |entity: &EntityData| {
+            let snapshot_bytes = framing
+                .saturating_add(SYSTEM_HEADER_BYTES + ENTITY_ENTRY_HEADER_BYTES)
+                .saturating_add(entity.data.len());
+            if snapshot_bytes <= budget {
+                return true;
+            }
+            oversized.push(OversizedUpdate {
+                system_id,
+                entity_bits: entity.entity_bits,
+                snapshot_bytes,
+            });
+            false
+        };
+        system.added.retain(&mut fits);
+        system.modified.retain(&mut fits);
+    }
+    oversized.sort_unstable_by_key(|update| {
+        (
+            Reverse(update.snapshot_bytes),
+            update.entity_bits,
+            update.system_id,
+        )
+    });
+    oversized
+}
+
+/// Leave out every system that had entries and has none left; `declared`
+/// marks, by index, the systems that had none to begin with and stay.
+fn drop_emptied(delta: &mut Delta, declared: &[bool]) {
+    let mut index = 0;
+    delta.systems.retain(|system| {
+        let keep = declared[index] || !says_nothing(system);
+        index += 1;
+        keep
+    });
 }
 
 #[cfg(test)]

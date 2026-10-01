@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_net::Fitted` gained `oversized`**, and `PriorityAccumulator::fit` no
+  longer returns `BudgetTooSmall` for one entry too long for the budget: it
+  withholds that entry and fits the rest (see Added). A struct literal naming
+  every field must add it. `crcbl_server::Host` and `Server` no longer send a
+  peer a snapshot every tick unconditionally: a peer whose snapshots go on
+  overflowing their budget is sent one every second or third tick (the rate
+  drop, see Added).
+
 - **`crcbl_net::udp`'s handshake is `TRANSPORT_VERSION` 2, and a listener
   answers a tokenless hello with a challenge** (see Added), so a v1 client and a
   v2 listener, either way round, do not answer each other: the connect times out
@@ -873,10 +881,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `oversized_snapshot_count()` and `last_oversized_snapshot()`, a
   `SnapshotTooLarge { tick, size, limit }` whose message names the transport's
   unreliable limit — over UDP one datagram's payload. Since snapshots are fitted
-  to that limit (next entry), only what cannot be held back is refused: one
-  entity's update too long for any snapshot, or a transport that accepts less
-  than it reports. `largest_snapshot_bytes()` is the longest one sent. Each
-  refusal still counts as a processing error.
+  to that limit (next entry), only what cannot be held back is refused: a delta
+  whose framing alone overflows it, or a transport that accepts less than it
+  reports. One entity's update too long for any snapshot is withheld instead,
+  and the rest of the snapshot ships: `oversized_update_count()` and
+  `last_oversized_update()`, an
+  `UpdateTooLarge { tick, system, entity_bits, size, limit }` naming the
+  replicating system, counted per peer in `PeerStats::oversized_updates`; that
+  entity stays stale on the client until its update fits. `crcbl::lan` logs both
+  at most once a second. `largest_snapshot_bytes()` is the longest one sent.
+  Each refusal still counts as a processing error; a withheld update does not.
 
 - **Snapshots are fitted to one message of the transport's unreliable channel
   instead of being refused** (`crcbl_net::budget`). Each (client, sector) has a
@@ -894,7 +908,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the server fits to, and the conformance suite's
   `the_unreliable_limit_it_reports_is_one_it_accepts` holds a transport to it.
   `Host::held_back_update_count()` counts the updates held back, and the
-  sandbox's F3 "lan" section shows it.
+  sandbox's F3 "lan" section shows it. An entry no snapshot of the budget could
+  carry is withheld (`Fitted::oversized`, each an `OversizedUpdate` with the
+  snapshot it would need) rather than refusing the whole snapshot, and gathers
+  no priority. A system with nothing packed in it — every entity unchanged, or
+  every entry held back — is left out of the fitted delta, saving its 16-byte
+  header: in
+  `budget::tests::systems_with_nothing_to_say_are_left_out_and_the_client_converges`
+  40 unchanged systems beside one changing cost 640 bytes less. No wire change —
+  a delta that does not name a system leaves it as the client holds it — so
+  `ProtocolCompatibility::DEFAULT` is unchanged; a system with no entities is
+  still named, since that is how the client learns it exists.
+
+- **The snapshot rate drop** (`crcbl_server::cadence`). A session whose
+  snapshots go on holding updates back — `STEP_DOWN_AFTER` over-budget snapshots
+  in a row — is stepped down from a snapshot every tick to every second, then
+  every third tick (`SNAPSHOT_INTERVAL_STEPS`, the plan's 30 and 20 Hz at a 60
+  Hz server, restated as fractions of the tick rate), and back up after
+  `STEP_UP_AFTER` snapshots in a row that fit within `HEADROOM` of their budget,
+  so a link at its limit does not flap. A withheld update does not count against
+  the rate, since no rate makes it fit. Each peer has its own cadence: one
+  congested peer does not slow the rest. `Host::peer_stats(peer)` and
+  `Server::peer_stats()` return a `PeerStats` with `snapshot_interval_ticks`,
+  which `crcbl::lan`'s F3 "lan" section lists per peer as "snapshot every".
+  Keyframe recovery counts snapshots (`KEYFRAME_RECOVERY_SNAPSHOTS`), not ticks,
+  so a slowed session is given as many snapshots to acknowledge before it is
+  reset. The client needed no change: its playback is held between the two
+  snapshots it has, so its interpolation lags by whatever their spacing is, and
+  `host::rate_tests::a_client_interpolates_smoothly_at_the_slowest_interval`
+  shows it advancing every frame at the slowest interval.
 
 - **`crcbl_client::Client::transport()`**, to ask a link why it ended
   (`UdpTransport::end_reason`) or read its counters.

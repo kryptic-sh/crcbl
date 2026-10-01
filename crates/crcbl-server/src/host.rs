@@ -23,7 +23,7 @@ use crcbl_net::{
     SectorId, SessionConfig, SessionEndReason, SessionId, SessionState, Transport, TransportError,
 };
 
-use crate::peer::{self, Counters, PeerSession, SnapshotTooLarge};
+use crate::peer::{self, Counters, PeerSession, PeerStats, SnapshotTooLarge, UpdateTooLarge};
 
 /// How long a pending transport may go without a hello before it is dropped.
 ///
@@ -174,6 +174,9 @@ struct Peer {
     /// Whether the session was connected when the current tick began; only
     /// such a session is sent the tick's snapshot, as in `Server`.
     was_connected: bool,
+    /// Whether the session is sent the current tick's snapshot: connected
+    /// all tick, and due one by its own cadence.
+    snapshot_due: bool,
     /// When the peer's current session key was adopted, which starts the
     /// [`AUTHENTICATION_DEADLINE`].
     keyed_at: Duration,
@@ -500,6 +503,7 @@ impl Host {
             transport: Some(pending.transport),
             link,
             was_connected: false,
+            snapshot_due: false,
             keyed_at: self.now,
         });
         self.events.push(PeerEvent::Joined(id));
@@ -641,13 +645,16 @@ impl Host {
     }
 
     /// Serialise the world once, then delta-encode and seal it for each
-    /// peer that was connected all tick.
+    /// peer that was connected all tick and is due a snapshot by its own
+    /// cadence ([`crate::cadence`]).
     fn emit_snapshots(&mut self) {
-        if !self
-            .peers
-            .iter()
-            .any(|peer| peer.was_connected && peer.is_connected())
-        {
+        let mut any_due = false;
+        for peer in &mut self.peers {
+            peer.snapshot_due =
+                peer.was_connected && peer.is_connected() && peer.link.snapshot_due();
+            any_due |= peer.snapshot_due;
+        }
+        if !any_due {
             return;
         }
         let tick = self.clock.tick();
@@ -657,7 +664,7 @@ impl Host {
             return;
         };
         for peer in &mut self.peers {
-            if !(peer.was_connected && peer.is_connected()) {
+            if !peer.snapshot_due {
                 continue;
             }
             let Some(transport) = peer.transport.as_mut() else {
@@ -667,6 +674,7 @@ impl Host {
                 transport.as_mut(),
                 sector,
                 current.clone(),
+                &self.world,
                 &mut self.counters,
             );
         }
@@ -780,6 +788,17 @@ impl Host {
             .map(|p| p.link.session.state())
     }
 
+    /// What `peer`'s session reports about the snapshots it is sent — its
+    /// current snapshot interval and the updates withheld as too long — or
+    /// `None` once its session has ended.
+    #[must_use]
+    pub fn peer_stats(&self, peer: PeerId) -> Option<PeerStats> {
+        self.peers
+            .iter()
+            .find(|p| p.id == peer)
+            .map(|p| p.link.stats())
+    }
+
     /// Reconnect grace configuration. Applies to links that drop from now on.
     pub fn set_session_config(&mut self, session_config: SessionConfig) {
         self.session_config = session_config;
@@ -849,6 +868,24 @@ impl Host {
     #[must_use]
     pub fn last_oversized_snapshot(&self) -> Option<SnapshotTooLarge> {
         self.counters.last_oversized_snapshot
+    }
+
+    /// Entity updates withheld from peers' snapshots because no snapshot
+    /// their transport carries could hold one, summed over every snapshot
+    /// sent; [`peer_stats`](Self::peer_stats) has each peer's share. The rest
+    /// of each snapshot was sent. A figure that climbs every snapshot is one
+    /// entity whose replicated component outgrew the wire.
+    #[must_use]
+    pub fn oversized_update_count(&self) -> u64 {
+        self.counters.oversized_updates
+    }
+
+    /// The latest update withheld as too long for any snapshot, naming its
+    /// system and entity: what a game logs when
+    /// [`oversized_update_count`](Self::oversized_update_count) moves.
+    #[must_use]
+    pub fn last_oversized_update(&self) -> Option<&UpdateTooLarge> {
+        self.counters.last_oversized_update.as_ref()
     }
 
     /// The longest sealed snapshot any peer's transport has accepted, in
@@ -926,6 +963,9 @@ impl fmt::Debug for Host {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod rate_tests;
 
 // The UDP transport is native only, by the no-web-networking rule.
 #[cfg(all(test, not(target_arch = "wasm32")))]

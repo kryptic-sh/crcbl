@@ -13,12 +13,14 @@ use crcbl_ecs::{Inspector, World};
 use crcbl_net::auth::{AUTH_OVERHEAD, SessionCrypto};
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
-    Baseline, DEFAULT_RELEVANCE, DeltaCodec, HandshakeResult, Message, RejectReason, ResumeToken,
-    SectorId, SessionConfig, SessionEndReason, SessionId, SessionManager, SessionState,
-    SnapshotWriter, Transport, TransportError, Trust, snapshot_budget,
+    Baseline, DEFAULT_RELEVANCE, DeltaCodec, HandshakeResult, Message, OversizedUpdate,
+    RejectReason, ResumeToken, SectorId, SessionConfig, SessionEndReason, SessionId,
+    SessionManager, SessionState, SnapshotWriter, Transport, TransportError, Trust,
+    snapshot_budget,
 };
 
-use crate::{KEYFRAME_RECOVERY_TICKS, MAX_CLIENT_INPUTS_PER_TICK, replicated_system_id};
+use crate::cadence::SnapshotCadence;
+use crate::{KEYFRAME_RECOVERY_SNAPSHOTS, MAX_CLIENT_INPUTS_PER_TICK, replicated_system_id};
 
 /// The failure counters a server reports, shared by every session it runs.
 #[derive(Debug, Default)]
@@ -29,12 +31,17 @@ pub(crate) struct Counters {
     pub(crate) rate_limited_bytes: u64,
     /// Frames the per-tick input cap has refused since the server was built.
     pub(crate) dropped_inputs: u64,
-    /// Snapshots refused for their size — by the budget, for what it cannot
-    /// hold back, or by a transport that took less than it reported; each is
-    /// a processing error too.
+    /// Snapshots refused for their size — by the budget, for framing it
+    /// cannot hold, or by a transport that took less than it reported; each
+    /// is a processing error too.
     pub(crate) oversized_snapshots: u64,
     /// The latest of those, with its size and the transport's limit.
     pub(crate) last_oversized_snapshot: Option<SnapshotTooLarge>,
+    /// Entity updates withheld from snapshots because no snapshot could carry
+    /// one, summed over every snapshot sent and every session.
+    pub(crate) oversized_updates: u64,
+    /// The latest of those, by name.
+    pub(crate) last_oversized_update: Option<UpdateTooLarge>,
     /// The longest sealed snapshot any transport accepted.
     pub(crate) largest_snapshot_bytes: usize,
     /// Entity updates held back to fit a snapshot's budget, removals
@@ -47,9 +54,10 @@ pub(crate) struct Counters {
 /// A transport's limit on its unreliable channel is its own:
 /// [`crcbl_net::MAX_IN_MEMORY_MESSAGE_BYTES`] in memory, a single datagram's
 /// payload over UDP, which is far smaller. Every snapshot is fitted to it
-/// ([`crcbl_net::budget`]), holding the least urgent updates back, so what is
-/// refused is only what cannot be held back: the delta's framing, and a
-/// single entity's update too long to fit beside it in any snapshot. That is
+/// ([`crcbl_net::budget`]), holding the least urgent updates back and
+/// withholding any one entity's update too long for a snapshot on its own
+/// ([`UpdateTooLarge`]), so what is refused is only what cannot be held back:
+/// the delta's framing, which no real transport's limit is near. That is
 /// refused before it is sent. A transport that accepts less than
 /// [`Transport::max_unreliable_message_bytes`] reports can refuse one too.
 /// Either way nothing is sent — the client stops applying state — so the host
@@ -79,6 +87,62 @@ impl std::fmt::Display for SnapshotTooLarge {
     }
 }
 
+/// One entity's update withheld from a snapshot because no snapshot the
+/// transport carries could hold it, even alone.
+///
+/// The rest of the snapshot is sent; this entity stays at whatever the
+/// client last held — stale, not removed — and is withheld again from every
+/// snapshot until its update shrinks to fit. That is the one-datagram rule
+/// at its sharpest: on UDP a single entity's replicated component must fit a
+/// datagram beside the snapshot's framing. Counted per session
+/// ([`PeerStats::oversized_updates`]) and recorded by the system's name, so a
+/// game can say which of its components outgrew the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateTooLarge {
+    /// The tick of the snapshot it was withheld from.
+    pub tick: TickId,
+    /// The replicating system's name, or its replicated id in hex when no
+    /// system of the world has that id.
+    pub system: String,
+    /// The entity whose update it is.
+    pub entity_bits: u64,
+    /// The sealed length of the smallest snapshot that would carry it.
+    pub size: usize,
+    /// The most the transport's unreliable channel takes, in bytes.
+    pub limit: usize,
+}
+
+impl std::fmt::Display for UpdateTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the {} update for entity {:#x} at tick {} needs a {}-byte snapshot, past \
+             the transport's {}-byte unreliable limit, and was withheld",
+            self.system,
+            self.entity_bits,
+            self.tick.get(),
+            self.size,
+            self.limit
+        )
+    }
+}
+
+/// What one peer's session reports about the snapshots it is sent, read
+/// with [`Host::peer_stats`](crate::Host::peer_stats) or
+/// [`Server::peer_stats`](crate::Server::peer_stats).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PeerStats {
+    /// Ticks between this peer's snapshots: one of
+    /// [`SNAPSHOT_INTERVAL_STEPS`](crate::cadence::SNAPSHOT_INTERVAL_STEPS),
+    /// longer while the rate drop ([`crate::cadence`]) has stepped it down.
+    pub snapshot_interval_ticks: u32,
+    /// Entity updates withheld from this peer's snapshots because no
+    /// snapshot could carry one ([`UpdateTooLarge`]), summed over every
+    /// snapshot sent; one entity too long for the wire adds one a snapshot.
+    pub oversized_updates: u64,
+}
+
 /// One peer's session state.
 #[derive(Debug)]
 pub(crate) struct PeerSession {
@@ -96,8 +160,9 @@ pub(crate) struct PeerSession {
     /// all, which is the whole point of having two channels.
     reliable_rate_limiter: InboundRateLimiter,
     unreliable_rate_limiter: InboundRateLimiter,
-    /// Ticks since `last_acked_tick` last advanced; drives keyframe recovery.
-    ticks_since_ack_progress: u32,
+    /// Snapshots since `last_acked_tick` last advanced; drives keyframe
+    /// recovery.
+    snapshots_since_ack_progress: u32,
     last_ack_progress: Option<TickId>,
     /// The client input frames that arrived since the current tick began, in
     /// arrival order, handed to the module as
@@ -106,6 +171,10 @@ pub(crate) struct PeerSession {
     pub(crate) client_inputs: Vec<(TickId, Vec<u8>)>,
     /// Frames the cap refused during the current tick.
     pub(crate) dropped_inputs: u32,
+    /// How often this session is sent a snapshot.
+    cadence: SnapshotCadence,
+    /// Updates withheld from this session's snapshots as too long for any.
+    oversized_updates: u64,
 }
 
 impl PeerSession {
@@ -124,15 +193,17 @@ impl PeerSession {
             authenticated: false,
             reliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, now),
             unreliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, now),
-            ticks_since_ack_progress: 0,
+            snapshots_since_ack_progress: 0,
             last_ack_progress: None,
             client_inputs: Vec::new(),
             dropped_inputs: 0,
+            cadence: SnapshotCadence::default(),
+            oversized_updates: 0,
         }
     }
 
-    /// Replace the session and its credential, forgetting its key and ack
-    /// progress; the inbound budgets carry over.
+    /// Replace the session and its credential, forgetting its key, its ack
+    /// progress and its snapshot cadence; the inbound budgets carry over.
     pub(crate) fn replace_session(
         &mut self,
         session_id: SessionId,
@@ -142,8 +213,24 @@ impl PeerSession {
         self.session = SessionManager::new(session_id, config);
         self.resume_token = resume_token;
         self.session_crypto = None;
-        self.ticks_since_ack_progress = 0;
+        self.snapshots_since_ack_progress = 0;
         self.last_ack_progress = None;
+        self.cadence = SnapshotCadence::default();
+    }
+
+    /// Count one tick against this session's snapshot cadence, returning
+    /// whether it is due a snapshot on it. Called once a tick for a session
+    /// that would be sent one.
+    pub(crate) fn snapshot_due(&mut self) -> bool {
+        self.cadence.due()
+    }
+
+    /// What this session reports about the snapshots it is sent.
+    pub(crate) fn stats(&self) -> PeerStats {
+        PeerStats {
+            snapshot_interval_ticks: self.cadence.interval(),
+            oversized_updates: self.oversized_updates,
+        }
     }
 
     /// Last tick's inputs go before this tick's are read: a frame is offered
@@ -254,12 +341,14 @@ impl PeerSession {
     }
 
     /// Delta-encode `current` against this client's baseline, fit it to the
-    /// transport's unreliable limit, seal it, and send it on `transport`.
+    /// transport's unreliable limit, seal it, and send it on `transport`;
+    /// `world` is what names an update too long for any snapshot.
     pub(crate) fn send_snapshot<T: Transport + ?Sized>(
         &mut self,
         transport: &mut T,
         sector: SectorId,
         current: Baseline,
+        world: &World,
         counters: &mut Counters,
     ) {
         let tick = current.tick;
@@ -285,23 +374,25 @@ impl PeerSession {
 
         // Every update is relevant alike until a game supplies relevance.
         let limit = transport.max_unreliable_message_bytes();
-        let fitted = match self.session.priority_accumulator_mut(sector).fit(
-            delta,
-            snapshot_budget(limit),
-            |_, _| DEFAULT_RELEVANCE,
-        ) {
-            Ok(fitted) => fitted,
-            Err(too_small) => {
-                counters.processing_errors += 1;
-                counters.oversized_snapshots += 1;
-                counters.last_oversized_snapshot = Some(SnapshotTooLarge {
-                    tick,
-                    size: too_small.size + AUTH_OVERHEAD,
-                    limit,
-                });
-                return;
-            }
-        };
+        let budget = snapshot_budget(limit);
+        let fitted =
+            match self
+                .session
+                .priority_accumulator_mut(sector)
+                .fit(delta, budget, |_, _| DEFAULT_RELEVANCE)
+            {
+                Ok(fitted) => fitted,
+                Err(too_small) => {
+                    counters.processing_errors += 1;
+                    counters.oversized_snapshots += 1;
+                    counters.last_oversized_snapshot = Some(SnapshotTooLarge {
+                        tick,
+                        size: too_small.size + AUTH_OVERHEAD,
+                        limit,
+                    });
+                    return;
+                }
+            };
         // What the client holds once it applies this snapshot is what the next
         // delta is encoded against. With updates held back that is not
         // `current`: retaining `current` would record them as delivered, and
@@ -325,6 +416,7 @@ impl PeerSession {
                 return;
             }
         };
+        let encoded = payload.len();
         let Some(crypto) = self.session_crypto.as_mut() else {
             counters.processing_errors += 1;
             return;
@@ -341,9 +433,13 @@ impl PeerSession {
         match transport.send_unreliable(Message::unreliable(payload)) {
             Ok(()) => {
                 counters.largest_snapshot_bytes = counters.largest_snapshot_bytes.max(size);
-                counters.held_back_updates = counters
-                    .held_back_updates
-                    .saturating_add((fitted.shed + fitted.deferred_removals) as u64);
+                let held_back = fitted.shed + fitted.deferred_removals;
+                counters.held_back_updates =
+                    counters.held_back_updates.saturating_add(held_back as u64);
+                self.record_oversized(&fitted.oversized, tick, limit, world, counters);
+                // A withheld update is too long for any snapshot, which no
+                // rate fixes, so only what was held back counts against it.
+                self.cadence.observe(held_back > 0, encoded, budget);
             }
             Err(TransportError::MessageTooLarge { size, limit }) => {
                 counters.processing_errors += 1;
@@ -363,6 +459,37 @@ impl PeerSession {
         // future deltas encode against: that is what evicts the client's real
         // baseline and makes the desync permanent.
         self.session.baseline_store_mut(sector).insert(retained);
+    }
+
+    /// Count the updates a fit withheld as too long for any snapshot, and
+    /// record the largest by its system's name.
+    fn record_oversized(
+        &mut self,
+        oversized: &[OversizedUpdate],
+        tick: TickId,
+        limit: usize,
+        world: &World,
+        counters: &mut Counters,
+    ) {
+        let Some(largest) = oversized.first() else {
+            return;
+        };
+        let count = oversized.len() as u64;
+        self.oversized_updates = self.oversized_updates.saturating_add(count);
+        counters.oversized_updates = counters.oversized_updates.saturating_add(count);
+        let system = world
+            .schedule()
+            .iter()
+            .map(|system| system.name())
+            .find(|&name| replicated_system_id(name) == largest.system_id)
+            .map_or_else(|| format!("{:#010x}", largest.system_id), str::to_owned);
+        counters.last_oversized_update = Some(UpdateTooLarge {
+            tick,
+            system,
+            entity_bits: largest.entity_bits,
+            size: largest.snapshot_bytes + AUTH_OVERHEAD,
+            limit,
+        });
     }
 
     /// Tell the client, sealed and on the reliable channel, why its session is
@@ -391,18 +518,20 @@ impl PeerSession {
     /// The tick this delta should be encoded against, or `None` for a keyframe.
     ///
     /// Returns `None` — forcing a keyframe — once the client's acks have
-    /// stopped advancing for [`KEYFRAME_RECOVERY_TICKS`], because at that
+    /// stopped advancing for [`KEYFRAME_RECOVERY_SNAPSHOTS`], because at that
     /// point the client is provably not applying what it is being sent.
+    /// Called once per snapshot, so what it counts is snapshots: a session
+    /// the rate drop has slowed is given as many as one at full rate.
     fn delta_baseline_tick(&mut self, sector: SectorId) -> Option<TickId> {
         let last_acked = self.session.last_acked_tick(sector);
         if last_acked == self.last_ack_progress {
-            self.ticks_since_ack_progress = self.ticks_since_ack_progress.saturating_add(1);
+            self.snapshots_since_ack_progress = self.snapshots_since_ack_progress.saturating_add(1);
         } else {
             self.last_ack_progress = last_acked;
-            self.ticks_since_ack_progress = 0;
+            self.snapshots_since_ack_progress = 0;
         }
-        if self.ticks_since_ack_progress >= KEYFRAME_RECOVERY_TICKS {
-            self.ticks_since_ack_progress = 0;
+        if self.snapshots_since_ack_progress >= KEYFRAME_RECOVERY_SNAPSHOTS {
+            self.snapshots_since_ack_progress = 0;
             return None;
         }
 

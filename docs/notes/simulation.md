@@ -884,13 +884,13 @@ sessions and reconnect (`SessionManager`, `ResumeToken`); the
 decoder fuzz tree `crates/crcbl-net/fuzz`, which CI's `decoder-fuzz` job runs;
 ack-baseline deltas with removals, keyframe recovery and sector keys
 (`delta.rs`, `SectorId`, `SnapshotWriter::new_with_sector`, and `crcbl-server`'s
-`KEYFRAME_RECOVERY_TICKS`); per-session HMAC with a `ReplayWindow` (`auth.rs`),
-which authenticates and does not encrypt; and the transport conformance suite
-(`conformance.rs`). Since then `crcbl-steam`'s `SteamTransport` implements
-`Transport` and runs that suite, and `crcbl_server::Host` serves several
-sessions over `Box<dyn Transport>` peers (`docs/notes/backends.md`, _What the
-deleted 42-steam plan left behind_) — so a network transport exists, but it is
-Valve's relay, not this plan's UDP layer.
+`KEYFRAME_RECOVERY_SNAPSHOTS`); per-session HMAC with a `ReplayWindow`
+(`auth.rs`), which authenticates and does not encrypt; and the transport
+conformance suite (`conformance.rs`). Since then `crcbl-steam`'s
+`SteamTransport` implements `Transport` and runs that suite, and
+`crcbl_server::Host` serves several sessions over `Box<dyn Transport>` peers
+(`docs/notes/backends.md`, _What the deleted 42-steam plan left behind_) — so a
+network transport exists, but it is Valve's relay, not this plan's UDP layer.
 
 What it left unbuilt is in `docs/backlog.md` under _Netcode (from the deleted
 23-netcode plan, 2026-09-24)_: the UDP layer and its crypto, the missing

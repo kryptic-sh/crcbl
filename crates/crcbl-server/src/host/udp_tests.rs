@@ -145,14 +145,6 @@ impl<C: Clock + Clone + 'static> Rig<C> {
         }
     }
 
-    /// `ticks` steps, pausing between them for loopback.
-    fn run_ticks(&mut self, ticks: usize) {
-        for _ in 0..ticks {
-            self.step();
-            thread::sleep(POLL_PAUSE);
-        }
-    }
-
     /// Steps until `done` holds, pausing between steps for loopback.
     fn until(&mut self, what: &str, mut done: impl FnMut(&mut Self) -> bool) {
         let start = Instant::now();
@@ -250,16 +242,17 @@ fn a_udp_peer_that_falls_silent_times_out_and_is_lost() {
     assert_eq!(rig.host.peer_count(), 1, "a lost peer keeps its place");
 }
 
-/// **A snapshot that cannot fit one datagram is refused by name, not dropped
-/// in silence.** `UdpTransport::send_unreliable` takes at most
-/// [`MAX_UNRELIABLE_PAYLOAD`], and here one entity's update alone is that
-/// long, so no fitting of the snapshot can hold it back into a datagram (a
-/// snapshot that is merely long is fitted — see the test below). The host
-/// records the refusal with the limit the transport reports, and the client
-/// applies nothing. The same world with the entity under the limit plays, so
-/// it is the size that is refused.
+/// **An update that cannot fit one datagram is withheld by name, and the
+/// rest of the snapshot plays.** `UdpTransport::send_unreliable` takes at
+/// most [`MAX_UNRELIABLE_PAYLOAD`], and here one entity's update alone is
+/// that long, so no snapshot can carry it (a snapshot that is merely long is
+/// fitted — see the test below). The host withholds it, records it by its
+/// system's name with the limit the transport reports, and counts it against
+/// the peer; every snapshot still reaches the client, with the other systems
+/// in it, and none is refused. The same world with the entity under the
+/// limit ships it, so it is the size that is withheld.
 #[test]
-fn a_snapshot_past_one_datagram_is_refused_by_name_and_one_under_it_plays() {
+fn an_update_past_one_datagram_is_withheld_by_name_and_the_rest_plays() {
     for (bytes, fits) in [
         (MAX_UNRELIABLE_PAYLOAD / 4, true),
         (MAX_UNRELIABLE_PAYLOAD, false),
@@ -268,13 +261,20 @@ fn a_snapshot_past_one_datagram_is_refused_by_name_and_one_under_it_plays() {
         world.register_system(Box::new(Blob { bytes }));
         let mut rig = Rig::new(world, SystemClock::new());
         rig.connect();
-        rig.until_joined();
+        let peer = rig.until_joined();
+        rig.until("the first snapshot", |rig| {
+            rig.clients[0].last_applied_tick() > TickId::ZERO
+        });
+        assert_eq!(
+            rig.host.oversized_snapshot_count(),
+            0,
+            "nothing was refused"
+        );
+        let blob = rig.clients[0].replicated("blob").count();
         if fits {
-            rig.until("the first snapshot", |rig| {
-                rig.clients[0].last_applied_tick() > TickId::ZERO
-            });
-            assert_eq!(rig.host.oversized_snapshot_count(), 0);
-            assert_eq!(rig.host.last_oversized_snapshot(), None);
+            assert_eq!(blob, 1, "the blob shipped");
+            assert_eq!(rig.host.oversized_update_count(), 0);
+            assert_eq!(rig.host.last_oversized_update(), None);
             let largest = rig.host.largest_snapshot_bytes();
             assert!(
                 largest > bytes && largest <= MAX_UNRELIABLE_PAYLOAD,
@@ -282,30 +282,37 @@ fn a_snapshot_past_one_datagram_is_refused_by_name_and_one_under_it_plays() {
             );
             continue;
         }
-        rig.until("a refusal", |rig| rig.host.oversized_snapshot_count() > 0);
-        let refused = rig
+        assert_eq!(blob, 0, "the blob was withheld");
+        assert!(
+            rig.clients[0].baseline_system_count() > 0,
+            "the rest of the snapshot arrived"
+        );
+        let withheld = rig
             .host
-            .last_oversized_snapshot()
-            .expect("the refusal is recorded by name");
-        assert_eq!(refused.limit, MAX_UNRELIABLE_PAYLOAD);
-        assert!(refused.size > refused.limit, "{refused:?}");
+            .last_oversized_update()
+            .expect("the withheld update is recorded by name")
+            .clone();
+        assert_eq!(withheld.system, "blob");
+        assert_eq!(withheld.entity_bits, 1);
+        assert_eq!(withheld.limit, MAX_UNRELIABLE_PAYLOAD);
+        assert!(withheld.size > withheld.limit, "{withheld:?}");
+        let message = withheld.to_string();
         assert!(
-            refused
-                .to_string()
-                .contains(&MAX_UNRELIABLE_PAYLOAD.to_string()),
-            "the message names the limit: {refused}"
+            message.contains("blob") && message.contains(&MAX_UNRELIABLE_PAYLOAD.to_string()),
+            "the message names the system and the limit: {message}"
         );
-        assert_eq!(rig.host.largest_snapshot_bytes(), 0, "nothing was sent");
-        assert!(
-            rig.host.processing_error_count() >= rig.host.oversized_snapshot_count(),
-            "each refusal is a processing error too"
-        );
-        rig.run_ticks(10);
+        let stats = rig.host.peer_stats(peer).expect("the peer is in");
+        assert!(stats.oversized_updates > 0);
         assert_eq!(
-            rig.clients[0].last_applied_tick(),
-            TickId::ZERO,
-            "no snapshot reached the client"
+            stats.snapshot_interval_ticks, 1,
+            "a withheld update does not slow the session"
         );
+
+        let applied = rig.clients[0].last_applied_tick();
+        rig.until("snapshots to go on arriving", |rig| {
+            rig.clients[0].last_applied_tick() > applied
+        });
+        assert_eq!(rig.host.processing_error_count(), 0);
     }
 }
 
