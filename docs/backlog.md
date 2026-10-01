@@ -14167,7 +14167,14 @@ joiner the host accepts again on its link (its first `Accept` came after its
 handshake timeout) is sent the map again on `PeerEvent::Reaccepted`
 (`a_joiner_accepted_again_is_sent_the_map_again`, over in-memory pairs with the
 first `Accept` lost); a `Resumed` peer is not, since `crcbl::lan::LanClient`
-never reconnects on a new link — its link ends, and so does its game.
+never reconnects on a new link — its link ends, and so does its game. A refused
+command is told to whoever sent it: `run_team_tick` records each refusal against
+its sender, `lan::tell` sends that peer a `lan::event::refusal` after every
+frame, and the page shows it for `NOTICE_FOR` (in `crate::app`); tested by
+`a_refusal_is_told_to_the_player_who_sent_it_and_no_other`,
+`a_dedicated_server_tells_a_player_what_it_refused`,
+`an_event_this_build_cannot_read_is_counted_and_passed_over` and
+`a_refused_command_is_shown_to_the_player_for_a_while`.
 
 **Left, and what each would take:**
 
@@ -14240,11 +14247,6 @@ never reconnects on a new link — its link ends, and so does its game.
   plays from there, and refusing it now would be work to undo when late join
   lands. Drop-in costs a co-op tower defense nothing — the purse and lives are
   the team's — so the MVP rule is dropped rather than enforced.
-- **A refused command is counted, not told to whoever sent it.**
-  `Stats::refused` is the team's. Telling the player who asked needs the refusal
-  attributed to its `PeerId` in `run_team_tick` and a way back to that peer — a
-  replicated per-player entity, or an event once the unreliable-event channel
-  exists.
 - **No presence.** A player's cursor and picked kind are presentation and never
   cross the wire, so nobody sees where a teammate is about to build.
 - **An entity the wire cannot carry is dropped from the snapshot, logged once.**

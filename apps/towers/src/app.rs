@@ -137,6 +137,11 @@ fn action_map() -> ActionMap {
     map
 }
 
+/// How long a refused command's line stays on the page, on the frame's
+/// clock: long enough to read, short enough that it is about the command
+/// just pressed.
+const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(3);
+
 // ---- summary -----------------------------------------------------------------
 
 /// What a finished run reports.
@@ -212,6 +217,9 @@ pub struct Towers {
     stats: Stats,
     /// What the last frame's overlay drew, from the same frame.
     page: PageStats,
+    /// The line the latest refusal of this player's commands left on the
+    /// page, and how much longer it stays — see [`NOTICE_FOR`].
+    notice: Option<(String, std::time::Duration)>,
     /// Which selectors this device drew through, read off the GPU bundle.
     ///
     /// Kept here rather than reached through `gpu` because
@@ -317,6 +325,22 @@ impl Towers {
             self.paths.binding,
             self.paths.lighting,
         );
+    }
+
+    /// Ages the refusal line by `render_dt`, and puts the newest refusal of
+    /// this player's commands in its place, if the server made one — the
+    /// same line solo, hosting or joined, since [`Game::take_refusals`]
+    /// hides which server said no.
+    fn update_notice(&mut self, render_dt: std::time::Duration) {
+        self.notice = self.notice.take().and_then(|(line, left)| {
+            left.checked_sub(render_dt)
+                .filter(|left| !left.is_zero())
+                .map(|left| (line, left))
+        });
+        if let Some(refusal) = self.game.take_refusals().pop() {
+            crcbl::log::info!("towers: refused: {}", refusal.label());
+            self.notice = Some((format!("REFUSED: {}", refusal.label()), NOTICE_FOR));
+        }
     }
 
     /// The simulation, for scripted tests and for an embedder that drives it.
@@ -486,6 +510,7 @@ impl Towers {
         self.pending_keys.clear();
         self.pending_restart = false;
         self.stats = Stats::default();
+        self.notice = None;
         std::mem::replace(&mut self.game, game)
     }
 }
@@ -596,6 +621,7 @@ fn assemble<S: Shell + ?Sized>(
             render_state: RenderState::default(),
             stats: Stats::default(),
             page: PageStats::default(),
+            notice: None,
             paths,
             #[cfg(not(target_arch = "wasm32"))]
             lobby: options.lobby.then(|| {
@@ -861,8 +887,12 @@ impl HostedGame for Towers {
         self.game.frame(frame.render_dt);
         #[cfg(not(target_arch = "wasm32"))]
         self.drive_session_end(gpu);
+        self.update_notice(frame.render_dt);
         self.render_state = self.game.render_state();
         gpu.set_field(&self.render_state);
+        if let Some((line, _)) = &self.notice {
+            crate::page::draw_notice(draw_list, gpu.atlas(), gpu.extent(), line);
+        }
         self.page = crate::page::draw(
             draw_list,
             gpu.atlas(),
@@ -1248,6 +1278,35 @@ mod tests {
             "the purse does not match one bolt tower's upgrade",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A refused command is shown to the player who pressed it, for a
+    /// while.** `U` on an empty plot is refused by the server, and the page
+    /// names why; [`NOTICE_FOR`] later the line is gone.
+    #[test]
+    fn a_refused_command_is_shown_to_the_player_for_a_while() {
+        let mut engine = scripted(&headless(1000));
+        frames(&mut engine, 4);
+        let line = format!("REFUSED: {}", crate::game::Refusal::NoTower.label());
+        assert!(!ui_text(engine.gpu().draw_list()).contains(&line));
+
+        tap(&mut engine, KeyCode::KeyU);
+        assert_eq!(engine.game().game().stats().refused, 1);
+        assert!(
+            ui_text(engine.gpu().draw_list()).contains(&line),
+            "the refusal is not on the page: {:?}",
+            ui_text(engine.gpu().draw_list())
+        );
+
+        let past = NOTICE_FOR.as_nanos() / crcbl::engine::HEADLESS_FRAME_STEP.as_nanos() + 2;
+        frames(
+            &mut engine,
+            usize::try_from(past).expect("a few hundred frames"),
+        );
+        assert!(
+            !ui_text(engine.gpu().draw_list()).contains(&line),
+            "the refusal outstayed its time"
+        );
     }
 
     /// **A scripted run builds towers, sends the wave and holds it**, which is

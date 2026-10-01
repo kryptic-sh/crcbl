@@ -19,7 +19,9 @@
 //! already been stepped up, is a wave already running — happens on the server's
 //! side of the wire in `Stage::place_tower`, `Stage::upgrade_tower` and
 //! [`crate::wave::Waves::start_now`]. A refused command is **counted**, so "the
-//! server said no" is a number a run reports rather than something it swallows.
+//! server said no" is a number a run reports rather than something it swallows,
+//! and it is **told** to the player who sent it, naming the rule — a
+//! [`Refusal`], which [`Game::take_refusals`] hands the front end.
 //!
 //! **Co-op is the same stage on another server.** A LAN host ticks the same
 //! `TowersModule` from a `crcbl::server::Host`, with every player's commands
@@ -69,7 +71,7 @@ use crcbl::ecs::{ClientInputs, DebugCtx, Entity, GameModule, SystemTrait, World}
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{ColliderId, PhysicsWorld};
-use crcbl::server::{HostModule, PeerInputs};
+use crcbl::server::{HostModule, PeerId, PeerInputs};
 use crcbl::session::Loopback;
 
 use crate::creep::{self, Creep, CreepView};
@@ -222,7 +224,7 @@ impl Intent {
     /// is deliberate — a plot number is a thing the *rules* refuse rather than a
     /// thing the format cannot express, so it travels intact and
     /// [`Stage::place_tower`] turns it down. That is where the refusal is
-    /// counted, and where a co-op build would report it to the player who asked.
+    /// counted, and recorded against the player who asked, to be told.
     ///
     /// The kind byte is the other way round for the same reason read the other
     /// way: there is no `Kind` to carry, so the frame cannot be decoded at all.
@@ -274,6 +276,87 @@ impl Intent {
         merged
     }
 }
+
+/// Why the server turned a command down: each a rule of the game, never a
+/// frame it could not read.
+///
+/// What `Stage::place_tower`, `Stage::upgrade_tower` and the `StartWave`
+/// check answer, and what the player who sent the command is told — solo
+/// and a LAN host's own player on this process, a joiner through
+/// `crate::lan`'s refusal event, which carries [`Refusal::code`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The run is over: nothing is built, stepped up or sent until the next
+    /// one starts.
+    RunOver,
+    /// A build names a plot the map does not have.
+    NoSuchPlot,
+    /// A build names a plot that already has a tower on it.
+    PlotTaken,
+    /// The team's purse cannot pay for it.
+    NotEnoughGold,
+    /// An upgrade names a plot with no tower on it — which covers a plot
+    /// that is not a plot at all.
+    NoTower,
+    /// An upgrade names a tower already at the top tier.
+    TopTier,
+    /// There is no wave to bring forward: one is releasing, or the table is
+    /// spent.
+    NoWaveToSend,
+}
+
+impl Refusal {
+    /// Every refusal, in [`Refusal::code`] order.
+    pub const ALL: [Self; 7] = [
+        Self::RunOver,
+        Self::NoSuchPlot,
+        Self::PlotTaken,
+        Self::NotEnoughGold,
+        Self::NoTower,
+        Self::TopTier,
+        Self::NoWaveToSend,
+    ];
+
+    /// Its byte on the wire. Written out rather than derived from the
+    /// declaration order, so reordering the variants cannot change what an
+    /// older build reads.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::RunOver => 1,
+            Self::NoSuchPlot => 2,
+            Self::PlotTaken => 3,
+            Self::NotEnoughGold => 4,
+            Self::NoTower => 5,
+            Self::TopTier => 6,
+            Self::NoWaveToSend => 7,
+        }
+    }
+
+    /// The refusal `code` names, or `None` for a byte no refusal has.
+    #[must_use]
+    pub fn from_code(code: u8) -> Option<Self> {
+        Self::ALL.into_iter().find(|refusal| refusal.code() == code)
+    }
+
+    /// What the player is shown.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RunOver => "THE RUN IS OVER",
+            Self::NoSuchPlot => "NO SUCH PLOT",
+            Self::PlotTaken => "THAT PLOT IS TAKEN",
+            Self::NotEnoughGold => "NOT ENOUGH GOLD",
+            Self::NoTower => "NO TOWER TO UPGRADE",
+            Self::TopTier => "ALREADY UPGRADED",
+            Self::NoWaveToSend => "NO WAVE TO SEND NOW",
+        }
+    }
+}
+
+/// Who sent a command, as the stage records a refusal against them: a LAN
+/// host's peer, or `None` for solo's one player, who has no [`PeerId`].
+type Sender = Option<PeerId>;
 
 // ---------------------------------------------------------------------------
 // The stage
@@ -334,6 +417,11 @@ struct Stage {
     /// validation happens at all**: a build that trusted its client leaves this
     /// at zero while towers appear on occupied plots.
     refused: u64,
+    /// The refusals not yet told to whoever sent the command, oldest first:
+    /// taken every tick or frame by whatever serves the stage — [`Game`], or
+    /// a dedicated server's `Field` — and kept across a reset, which can
+    /// follow a refusal in the same tick.
+    refusals: Vec<(Sender, Refusal)>,
     outcome: Outcome,
     /// When the run ended, in [`Stage::elapsed`] seconds. Only read once it
     /// has.
@@ -377,6 +465,7 @@ impl Stage {
             built_by_kind: [0; tower::KINDS],
             upgrades: 0,
             refused: 0,
+            refusals: Vec::new(),
             outcome: Outcome::Playing,
             ended_at: 0.0,
             runs: 1,
@@ -395,8 +484,16 @@ impl Stage {
     /// say so, and the map the run is played on.
     fn reset(&mut self) {
         let runs = self.runs + 1;
+        let refusals = std::mem::take(&mut self.refusals);
         *self = Self::new(Arc::clone(&self.map));
         self.runs = runs;
+        self.refusals = refusals;
+    }
+
+    /// Counts a refused command and records it against `sender`, to be told.
+    fn refuse(&mut self, sender: Sender, refusal: Refusal) {
+        self.refused += 1;
+        self.refusals.push((sender, refusal));
     }
 
     /// Whether `plot` already has a tower on it.
@@ -417,20 +514,26 @@ impl Stage {
     /// the purse is short. A client that predicted the build would have to
     /// predict all four — and the price it would have to predict is the kind's,
     /// which is the fifth thing slice 3 put on the server's side of the wire.
-    fn place_tower(&mut self, plot: u8, kind: tower::Kind) -> bool {
+    fn place_tower(&mut self, plot: u8, kind: tower::Kind) -> Result<(), Refusal> {
         let plot = plot as usize;
         let cost = kind.spec(Tier::Base).cost;
         let Some(feet) = self.map.plots().get(plot).map(crate::scene::Plot::at) else {
-            return false;
+            return Err(Refusal::NoSuchPlot);
         };
-        if self.outcome.is_over() || self.is_taken(plot) || self.gold < cost {
-            return false;
+        if self.outcome.is_over() {
+            return Err(Refusal::RunOver);
+        }
+        if self.is_taken(plot) {
+            return Err(Refusal::PlotTaken);
+        }
+        if self.gold < cost {
+            return Err(Refusal::NotEnoughGold);
         }
         self.gold -= cost;
         self.towers.push(Tower::new(plot, feet, kind));
         self.built += 1;
         self.built_by_kind[kind.index()] += 1;
-        true
+        Ok(())
     }
 
     /// The server's half of the `UpgradeTower` command: steps the tower on
@@ -442,25 +545,25 @@ impl Stage {
     /// tier, or the purse is short. The price is the kind's and the tier's, off
     /// [`tower::TOWERS`], so a client could not hard-code it even if it wanted
     /// to predict the command.
-    fn upgrade_tower(&mut self, plot: u8) -> bool {
+    fn upgrade_tower(&mut self, plot: u8) -> Result<(), Refusal> {
         if self.outcome.is_over() {
-            return false;
+            return Err(Refusal::RunOver);
         }
         let Some(index) = self.tower_on(plot as usize) else {
-            return false;
+            return Err(Refusal::NoTower);
         };
         let Some(cost) = self.towers[index].upgrade_cost() else {
-            return false;
+            return Err(Refusal::TopTier);
         };
         if self.gold < cost {
-            return false;
+            return Err(Refusal::NotEnoughGold);
         }
         if !self.towers[index].upgrade() {
-            return false;
+            return Err(Refusal::TopTier);
         }
         self.gold -= cost;
         self.upgrades += 1;
-        true
+        Ok(())
     }
 
     /// Takes `damage` off the creep whose body is `body`, and pays its bounty if
@@ -569,17 +672,18 @@ impl Stage {
 /// One tick of the simulation: a command in, and the seven systems in the order
 /// the module docs give.
 fn run_tick(stage: &mut Stage, intent: Intent, dt: f64) {
-    run_team_tick(stage, core::slice::from_ref(&intent), dt);
+    run_team_tick(stage, &[(None, intent)], dt);
 }
 
 /// One tick with every player's command in — one per player, in the order the
-/// host admitted them — and then the seven systems.
+/// host admitted them, each with who sent it — and then the seven systems.
 ///
 /// **One team, one run.** A restart from anyone throws the run away for
 /// everyone, before any other command is read. The rest are validated one
 /// player at a time against the one purse, so two players building on the same
 /// plot in the same tick get one tower and one refusal, and the first admitted
-/// is the one who built it.
+/// is the one who built it. Each refusal is recorded against the player who
+/// sent the command (`Stage::refusals`), for them to be told.
 ///
 /// **No players, no run.** A tick with no command frame at all is a session
 /// nobody holds a place in — only a dedicated server's, since solo and a
@@ -594,30 +698,34 @@ fn run_tick(stage: &mut Stage, intent: Intent, dt: f64) {
 /// it — is reset rather than kept half-played: the next group to join finds a
 /// fresh field, not the lives and gold the last one left behind. A reset stage
 /// has ticked nothing, so the empty ticks after it hold still like any other.
-fn run_team_tick(stage: &mut Stage, intents: &[Intent], dt: f64) {
+fn run_team_tick(stage: &mut Stage, intents: &[(Sender, Intent)], dt: f64) {
     if intents.is_empty() {
         if stage.ticks > 0 {
             stage.reset();
         }
         return;
     }
-    if intents.iter().any(|intent| intent.restart) {
+    if intents.iter().any(|(_, intent)| intent.restart) {
         stage.reset();
         return;
     }
-    for intent in intents {
+    for &(sender, intent) in intents {
         if let Some(plot) = intent.place
-            && !stage.place_tower(plot, intent.kind)
+            && let Err(refusal) = stage.place_tower(plot, intent.kind)
         {
-            stage.refused += 1;
+            stage.refuse(sender, refusal);
         }
         if let Some(plot) = intent.upgrade
-            && !stage.upgrade_tower(plot)
+            && let Err(refusal) = stage.upgrade_tower(plot)
         {
-            stage.refused += 1;
+            stage.refuse(sender, refusal);
         }
-        if intent.start_wave && (stage.outcome.is_over() || !stage.waves.start_now(stage.elapsed)) {
-            stage.refused += 1;
+        if intent.start_wave {
+            if stage.outcome.is_over() {
+                stage.refuse(sender, Refusal::RunOver);
+            } else if !stage.waves.start_now(stage.elapsed) {
+                stage.refuse(sender, Refusal::NoWaveToSend);
+            }
         }
     }
 
@@ -787,9 +895,9 @@ impl GameModule for TowersModule {
 impl HostModule for TowersModule {
     fn tick(&mut self, world: &mut World, inputs: PeerInputs<'_>) {
         let dt = world.tick_dt();
-        let intents: Vec<Intent> = inputs
+        let intents: Vec<(Sender, Intent)> = inputs
             .iter()
-            .map(|(_, frames)| Intent::from_inputs(frames))
+            .map(|(peer, frames)| (Some(peer), Intent::from_inputs(frames)))
             .collect();
         let mut stage = lock(&self.shared);
         run_team_tick(&mut stage, &intents, dt);
@@ -870,6 +978,13 @@ fn server_world(map: &Arc<Map>) -> (Arc<Mutex<Stage>>, World, TowersModule) {
 pub(crate) struct Field(Arc<Mutex<Stage>>);
 
 #[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for Field {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Field").finish_non_exhaustive()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl Field {
     /// A new stage on `map`, the world a host serves it from and the module
     /// that ticks it, with the start-up line logged as every other mode logs
@@ -887,6 +1002,13 @@ impl Field {
     /// The stage's numbers, read as [`Game::stats`] reads them.
     pub(crate) fn stats(&self) -> Stats {
         stats_of(&lock(&self.0))
+    }
+
+    /// Takes the refusals not yet told, oldest first, each with the peer
+    /// who sent the command — `None` only on a solo stage, which no host
+    /// serves.
+    pub(crate) fn take_refusals(&self) -> Vec<(Option<PeerId>, Refusal)> {
+        std::mem::take(&mut lock(&self.0).refusals)
     }
 }
 
@@ -1102,6 +1224,9 @@ pub struct Game {
     ticks_run: u64,
     /// What the player asked for, sent on the next tick.
     pending: Intent,
+    /// Solo's refusals, taken off the stage every tick and not yet taken by
+    /// [`Game::take_refusals`]. A LAN link holds its own.
+    refusals: Vec<Refusal>,
 }
 
 impl std::fmt::Debug for Game {
@@ -1158,6 +1283,7 @@ impl Game {
             sim_time: tick_period,
             ticks_run: 0,
             pending: Intent::default(),
+            refusals: Vec::new(),
         })
     }
 
@@ -1183,8 +1309,9 @@ impl Game {
         assert!(tick_hz > 0, "tick rate must be positive");
         let map = Arc::new(map.clone());
         let (shared, world, module) = server_world(&map);
+        let served = (Field(Arc::clone(&shared)), world, module);
         let (link, tick_period) =
-            crate::lan::HostLink::open(crate::lan::SESSION, bind, world, module, tick_hz, &map)?;
+            crate::lan::HostLink::open(crate::lan::SESSION, bind, served, tick_hz, &map)?;
         log_the_rules(tick_hz, tick_period, &map);
         Ok(Self {
             link: Link::Host(Box::new(link)),
@@ -1196,6 +1323,7 @@ impl Game {
             sim_time: tick_period,
             ticks_run: 0,
             pending: Intent::default(),
+            refusals: Vec::new(),
         })
     }
 
@@ -1203,7 +1331,8 @@ impl Game {
     /// sent at join. Built by `crate::lan::Joining` once that map has
     /// arrived, and by nothing else, so a joiner's game is never on any other
     /// map. `now` is the client's clock so far, which this game's carries on
-    /// from.
+    /// from, and `ignored_events` how many of the host's events the join
+    /// could not read, which its count carries on from.
     ///
     /// # Panics
     ///
@@ -1214,10 +1343,14 @@ impl Game {
         map: Map,
         client: crcbl::lan::LanClient,
         now: Duration,
+        ignored_events: u64,
     ) -> Self {
         assert!(tick_hz > 0, "tick rate must be positive");
         Self {
-            link: Link::Remote(Box::new(crate::lan::RemoteLink::new(client))),
+            link: Link::Remote(Box::new(crate::lan::RemoteLink::new(
+                client,
+                ignored_events,
+            ))),
             shared: None,
             map: Arc::new(map),
             // The client clock's own step, so one period is exactly one tick
@@ -1226,6 +1359,7 @@ impl Game {
             sim_time: now,
             ticks_run: 0,
             pending: Intent::default(),
+            refusals: Vec::new(),
         }
     }
 
@@ -1270,6 +1404,13 @@ impl Game {
                 // Consumes no tick — the clock has not moved between the two —
                 // and is there to take the snapshot this tick produced.
                 client.update(self.sim_time);
+                // Solo's one player sent every command, so every refusal is
+                // theirs to be told.
+                if let Some(shared) = &self.shared {
+                    let refusals = std::mem::take(&mut lock(shared).refusals);
+                    self.refusals
+                        .extend(refusals.into_iter().map(|(_, refusal)| refusal));
+                }
             }
             #[cfg(not(target_arch = "wasm32"))]
             Link::Host(host) => host.tick(input, self.sim_time),
@@ -1294,6 +1435,30 @@ impl Game {
             Link::Host(host) => host.frame(render_dt, self.sim_time),
             #[cfg(not(target_arch = "wasm32"))]
             Link::Remote(remote) => remote.frame(self.sim_time),
+        }
+    }
+
+    /// Takes the refusals of this player's commands since the last call,
+    /// oldest first: the server's own, solo or hosting, or what the host
+    /// told a joiner.
+    pub fn take_refusals(&mut self) -> Vec<Refusal> {
+        match &mut self.link {
+            Link::Solo(_) => std::mem::take(&mut self.refusals),
+            #[cfg(not(target_arch = "wasm32"))]
+            Link::Host(host) => host.take_refusals(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Link::Remote(remote) => remote.take_refusals(),
+        }
+    }
+
+    /// Events from the host this joiner could not read, counted and
+    /// ignored — see `crate::lan::event`. Zero solo and hosting.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn ignored_events(&self) -> u64 {
+        match &self.link {
+            Link::Remote(remote) => remote.ignored_events(),
+            Link::Solo(_) | Link::Host(_) => 0,
         }
     }
 
@@ -2384,7 +2549,7 @@ mod tests {
         );
 
         for _ in 0..ticks {
-            run_team_tick(&mut stage, &[Intent::default()], DT);
+            run_team_tick(&mut stage, &[(None, Intent::default())], DT);
         }
         assert!(
             stage.waves.started() > 0,
@@ -2422,6 +2587,61 @@ mod tests {
             runs + 1,
             "an empty session reset more than once"
         );
+    }
+
+    /// **Every refusal names the rule that refused it**, recorded against
+    /// the player who sent the command — solo's here, who has no peer — in
+    /// the order the commands were read, and kept across a reset until
+    /// whatever serves the stage takes it to tell.
+    #[test]
+    fn every_refusal_names_the_rule_that_refused_it() {
+        let mut stage = new_stage();
+        command(&mut stage, build(200, BoltKind));
+        command(&mut stage, build(0, BoltKind));
+        command(&mut stage, build(0, Splash));
+        command(&mut stage, step_up(1));
+        command(&mut stage, step_up(0));
+        stage.gold = 10 * BoltKind.spec(Tier::Upgraded).cost;
+        command(&mut stage, step_up(0));
+        stage.gold = 0;
+        command(&mut stage, build(1, BoltKind));
+        command(&mut stage, send_wave());
+        command(&mut stage, send_wave());
+        assert_eq!(
+            stage.refusals,
+            [
+                (None, Refusal::NoSuchPlot),
+                (None, Refusal::PlotTaken),
+                (None, Refusal::NoTower),
+                (None, Refusal::TopTier),
+                (None, Refusal::NotEnoughGold),
+                (None, Refusal::NoWaveToSend),
+            ]
+        );
+        assert_eq!(stage.refused, 6, "a refusal recorded but not counted");
+
+        stage.outcome = Outcome::Lost;
+        command(&mut stage, build(2, BoltKind));
+        assert_eq!(stage.refusals.last(), Some(&(None, Refusal::RunOver)));
+        stage.reset();
+        assert_eq!(
+            stage.refusals.len(),
+            7,
+            "the reset lost what was not yet told"
+        );
+    }
+
+    /// **Every refusal has its own byte, and reads back from it** — and no
+    /// other byte reads as one.
+    #[test]
+    fn every_refusal_has_its_own_code() {
+        for refusal in Refusal::ALL {
+            assert_eq!(Refusal::from_code(refusal.code()), Some(refusal));
+        }
+        let known = (0..=u8::MAX)
+            .filter(|&code| Refusal::from_code(code).is_some())
+            .count();
+        assert_eq!(known, Refusal::ALL.len());
     }
 
     /// **A kill pays its kind's bounty**, which is the whole of the economy.

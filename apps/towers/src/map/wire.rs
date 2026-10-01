@@ -466,6 +466,14 @@ mod tests {
         let bytes = largest.to_wire();
         assert_eq!(bytes.len(), MAX_WIRE_BYTES);
         const { assert!(MAX_WIRE_BYTES < crcbl::net::codec::MAX_FIELD_BYTES) };
+        // …inside the envelope a LAN host sends it in, too.
+        #[cfg(not(target_arch = "wasm32"))]
+        const {
+            assert!(
+                crate::lan::event::HEADER_BYTES + MAX_WIRE_BYTES
+                    < crcbl::net::codec::MAX_FIELD_BYTES
+            );
+        };
         assert_eq!(Map::from_wire(&bytes).expect("decodes"), largest);
     }
 }

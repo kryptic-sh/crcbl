@@ -25,9 +25,10 @@ use crcbl::net::{
 };
 use crcbl::server::{Host, HostConfig, PeerEvent};
 
+use super::event::{self, Event};
 use super::serve::{STATUS_INTERVAL, Server};
 use super::{JOIN_TIMEOUT, JoinFailure, Joining, MAX_PLAYERS, PROTOCOL_ID, Progress, SESSION};
-use crate::game::{Controls, Game, Stats};
+use crate::game::{Controls, Game, Refusal, Stats};
 use crate::map::{Map, MapError, MapWireError};
 use crate::tower::{self, Tier};
 
@@ -707,7 +708,7 @@ fn a_malformed_map_ends_the_join_by_name() {
             "the join ending on the map",
             |lan, peer| {
                 lan.host_mut()
-                    .send_event(peer, bytes.clone())
+                    .send_event(peer, event::map(&bytes))
                     .expect("the joiner is connected");
             },
             |joiner| !matches!(joiner, Joiner::Joining(_)),
@@ -757,7 +758,7 @@ fn a_joiner_builds_nothing_until_the_map_comes() {
     }
     bare.lan
         .host_mut()
-        .send_event(admitted.expect("admitted"), map.to_wire())
+        .send_event(admitted.expect("admitted"), event::map(&map.to_wire()))
         .expect("the joiner is connected");
     let joiner = step_bare(
         &mut bare,
@@ -847,7 +848,7 @@ fn a_joiner_accepted_again_is_sent_the_map_again() {
         host_side,
         lose_replies: 1,
     };
-    let wire = map.to_wire();
+    let wire = event::map(&map.to_wire());
     let mut raised = Vec::new();
     let mut now = Duration::ZERO;
     let mut received = Vec::new();
@@ -875,7 +876,135 @@ fn a_joiner_accepted_again_is_sent_the_map_again() {
     let [bytes] = &received[..] else {
         panic!("not one map: {} events", received.len());
     };
-    assert_eq!(Map::from_wire(bytes).expect("a map"), map);
+    assert_eq!(event::decode(bytes).ok(), Some(Event::Map(map)));
+}
+
+/// **An event from the host this build cannot read is counted and passed
+/// over**, joining or playing: one of another envelope version ahead of the
+/// map, and one with a tag nobody knows after it, beside a refusal that is
+/// read. The join still plays, and the game goes on.
+#[test]
+fn an_event_this_build_cannot_read_is_counted_and_passed_over() {
+    let map = another_map();
+    let mut bare = Bare::open(SESSION);
+    let client = LanClient::join(SESSION, bare.address(), TICK_HZ).expect("connect");
+    let mut admitted = None;
+    let mut joiner = step_bare(
+        &mut bare,
+        Joiner::through(client),
+        "the game",
+        |lan, peer| {
+            admitted = Some(peer);
+            let host = lan.host_mut();
+            host.send_event(peer, vec![event::VERSION + 1, event::MAP_TAG])
+                .expect("the joiner is connected");
+            host.send_event(peer, event::map(&map.to_wire()))
+                .expect("the joiner is connected");
+        },
+        |joiner| matches!(joiner, Joiner::Playing(_)),
+    );
+    assert_eq!(joiner.game().map(), &map);
+    assert_eq!(joiner.game().ignored_events(), 1, "the join's count");
+
+    let peer = admitted.expect("admitted");
+    let host = bare.lan.host_mut();
+    host.send_event(peer, vec![event::VERSION, 0xee])
+        .expect("the joiner is connected");
+    host.send_event(peer, event::refusal(Refusal::TopTier))
+        .expect("the joiner is connected");
+    let mut told = Vec::new();
+    for _ in 0..MAX_FRAMES {
+        if !told.is_empty() {
+            break;
+        }
+        bare.frame();
+        joiner = joiner.frame(FRAME);
+        told.extend(joiner.game_mut().take_refusals());
+        thread::sleep(PAUSE);
+    }
+    assert_eq!(told, [Refusal::TopTier]);
+    assert_eq!(joiner.game().ignored_events(), 2);
+    assert!(matches!(joiner, Joiner::Playing(_)), "{joiner:?}");
+}
+
+/// What each player of a host's rig has been told it was refused: the
+/// host's own player first, then each joiner.
+fn told(rig: &mut Rig<Game>, so_far: &mut [Vec<Refusal>]) {
+    so_far[0].extend(rig.host.take_refusals());
+    for (joiner, told) in rig.joiners.iter_mut().zip(&mut so_far[1..]) {
+        told.extend(joiner.game_mut().take_refusals());
+    }
+}
+
+/// **A refusal is told to the player who sent the command, and to no
+/// other.** Joiner A builds on the first plot; joiner B asks for the same
+/// plot and is told it is taken — A and the host's own player are told
+/// nothing. Then the host's own player asks for a plot the map does not
+/// have, and only it is told so.
+#[test]
+fn a_refusal_is_told_to_the_player_who_sent_it_and_no_other() {
+    let mut rig = Rig::playing(2);
+    let mut so_far = vec![Vec::new(); 3];
+    rig.joiners[0]
+        .game_mut()
+        .set_controls(build(0, tower::Kind::Bolt));
+    rig.until("the host building A's tower", |rig| {
+        rig.host.stats().built == 1
+    });
+    rig.joiners[1]
+        .game_mut()
+        .set_controls(build(0, tower::Kind::Bolt));
+    for _ in 0..MAX_FRAMES {
+        if !so_far[2].is_empty() {
+            break;
+        }
+        rig.step();
+        told(&mut rig, &mut so_far);
+    }
+    // A few more frames, for a refusal sent to the wrong player to arrive.
+    for _ in 0..SEEN_WITHIN {
+        rig.step();
+        told(&mut rig, &mut so_far);
+    }
+    assert_eq!(rig.host.stats().refused, 1);
+    assert_eq!(so_far, [vec![], vec![], vec![Refusal::PlotTaken]]);
+
+    rig.host.set_controls(build(200, tower::Kind::Bolt));
+    for _ in 0..MAX_FRAMES {
+        if !so_far[0].is_empty() {
+            break;
+        }
+        rig.step();
+        told(&mut rig, &mut so_far);
+    }
+    for _ in 0..SEEN_WITHIN {
+        rig.step();
+        told(&mut rig, &mut so_far);
+    }
+    assert_eq!(
+        so_far,
+        [vec![Refusal::NoSuchPlot], vec![], vec![Refusal::PlotTaken]]
+    );
+}
+
+/// **A dedicated server tells a player what it refused them**, as a host
+/// does: a wave sent while one is releasing is refused as there being no
+/// wave to send.
+#[test]
+fn a_dedicated_server_tells_a_player_what_it_refused() {
+    let mut rig = Rig::serving().with_playing(1);
+    rig.joiners[0].game_mut().set_controls(send_wave());
+    rig.until("the wave", |rig| rig.host.stats().wave == 1);
+    rig.joiners[0].game_mut().set_controls(send_wave());
+    let mut told = Vec::new();
+    for _ in 0..MAX_FRAMES {
+        if !told.is_empty() {
+            break;
+        }
+        rig.step();
+        told.extend(rig.joiners[0].game_mut().take_refusals());
+    }
+    assert_eq!(told, [Refusal::NoWaveToSend]);
 }
 
 /// **A host nobody answers ends the join as no answer**, once the join's

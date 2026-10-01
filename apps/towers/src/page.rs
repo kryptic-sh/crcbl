@@ -22,6 +22,7 @@
 //!  │ GATE         40g │
 //!  └──────────────────┘
 //!
+//!             REFUSED: THAT PLOT IS TAKEN        ← for a few seconds
 //!   LEFT/RIGHT pick a plot  1/2/3 a kind  B builds  U upgrades  N sends  R restarts
 //! ```
 //!
@@ -248,6 +249,22 @@ fn build_list(
             ReadoutRow::new(label, reading, colour)
         })
         .collect()
+}
+
+/// Draws `text` centred one row above the control hint, in the warning
+/// colour: a line the player reads and then forgets — a command of theirs the
+/// server refused, and why. How long it stays is the caller's.
+pub fn draw_notice(list: &mut DrawList, atlas: &FontAtlas, extent: (u32, u32), text: &str) {
+    let width = atlas.text_width(text, NATURAL_SCALE);
+    list.text(
+        Vec2::new(
+            (extent.0 as f32 - width) * 0.5,
+            extent.1 as f32 - READOUT.inset - 2.0 * READOUT.row_height,
+        ),
+        text.to_string(),
+        WARN,
+        NATURAL_FONT_SIZE,
+    );
 }
 
 /// Draws the overlay into `list`, laid out against a surface of `extent`, with
@@ -639,14 +656,54 @@ mod tests {
             measured <= room,
             "the hint is {measured:.0} px wide in a {room:.0} px window: {HINT}",
         );
-        // …and the banner, which is centred the same way and is the only other
-        // string on this page nothing bounds.
+        // …and the banner, which is centred the same way, and every refusal's
+        // notice: the other strings on this page nothing bounds.
         for banner in ["EVERY WAVE HELD", "OVERRUN"] {
             assert!(
                 atlas.text_width(banner, NATURAL_SCALE) <= room,
                 "the {banner} banner does not fit the window",
             );
         }
+        for refusal in crate::game::Refusal::ALL {
+            let notice = format!("REFUSED: {}", refusal.label());
+            assert!(
+                atlas.text_width(&notice, NATURAL_SCALE) <= room,
+                "the {notice} notice does not fit the window",
+            );
+        }
+    }
+
+    /// **A notice is drawn centred above the hint, in the warning colour**,
+    /// clear of the hint's row and inside the surface.
+    #[test]
+    fn a_notice_is_drawn_centred_above_the_hint_in_the_warning_colour() {
+        let atlas = FontAtlas::built_in();
+        let notice = "REFUSED: THAT PLOT IS TAKEN";
+        let mut list = DrawList::new();
+        draw_notice(&mut list, &atlas, EXTENT, notice);
+        let [
+            DrawCommand::Text {
+                pos: position,
+                text,
+                color,
+                ..
+            },
+        ] = list.commands()
+        else {
+            panic!("not one line: {:?}", list.commands());
+        };
+        assert_eq!(text, notice);
+        assert_eq!(*color, WARN);
+        let width = atlas.text_width(notice, NATURAL_SCALE);
+        assert!(
+            (position.x + width * 0.5 - EXTENT.0 as f32 * 0.5).abs() < 1.0,
+            "not centred: {position:?}"
+        );
+        let hint_top = EXTENT.1 as f32 - READOUT.inset - READOUT.row_height;
+        assert!(
+            position.y >= 0.0 && position.y + READOUT.row_height <= hint_top,
+            "not above the hint: {position:?}"
+        );
     }
 
     /// **A finished run wears its banner, and a running one does not.** The

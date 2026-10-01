@@ -58,6 +58,16 @@
 //! lobby goes back to it with that line (`crate::lobby`), and one from the
 //! command line shows it on its panel.
 //!
+//! # A refused command is told to whoever sent it
+//!
+//! The stage records each refusal against the peer whose command it was, and
+//! after every frame the host sends that peer an [`event::refusal`] naming the
+//! rule — its own player too, whose client reads it the way a joiner's does —
+//! so [`Game::take_refusals`] is the same question solo, hosting or joined.
+//! The map and the refusals share [`event`]'s envelope, a version and a tag
+//! ahead of the payload; an event a player cannot read is counted
+//! ([`Game::ignored_events`]) and passed over, never a panic.
+//!
 //! # Wall time, every frame
 //!
 //! As `apps/sandbox`'s session does, a host serves its peers on the frame's
@@ -82,9 +92,10 @@ use crcbl::net::udp::{CONNECT_TIMEOUT, UdpTransport};
 use crcbl::net::{InMemoryTransport, SessionEndReason};
 use crcbl::server::{Host, PeerEvent, PeerId};
 
-use crate::game::{COMPATIBILITY, Game, GameError, TowersModule};
+use crate::game::{COMPATIBILITY, Field, Game, GameError, Refusal, TowersModule};
 use crate::map::{Map, MapWireError};
 use crate::replica::{self, Decoded};
+use event::{Event, EventError};
 
 /// The most players a towers session holds, the host's own among them: the
 /// "1–4 players co-op" of `docs/plan/sample/07-towers.md`.
@@ -120,7 +131,7 @@ pub const SESSION: LanGame = LanGame {
 /// that accepted the join and whose map never came.
 pub const JOIN_TIMEOUT: Duration = CONNECT_TIMEOUT.saturating_mul(2);
 
-/// Sends `map` — a [`Map::to_wire`] — to every peer `events` says joined or
+/// Sends `map` — an [`event::map`] — to every peer `events` says joined or
 /// was accepted again, but `local`: the host's own player, whose game is on
 /// the map already.
 ///
@@ -148,6 +159,24 @@ fn welcome(host: &mut Host, events: &[PeerEvent], map: &[u8], local: Option<Peer
     }
 }
 
+/// Tells each peer in `refusals` which of its commands the stage turned
+/// down, as an [`event::refusal`] — this host's own player among them, whose
+/// client reads it as a joiner's does.
+///
+/// A send that fails is logged, and the refusal is still in the stage's
+/// count: a peer whose link is down, or who left, has nobody to read it.
+fn tell(host: &mut Host, refusals: &[(Option<PeerId>, Refusal)]) {
+    for &(sender, refusal) in refusals {
+        let Some(peer) = sender else {
+            crcbl::log::warn!("lan: a refusal with no peer on a host's stage: {refusal:?}");
+            continue;
+        };
+        if let Err(error) = host.send_event(peer, event::refusal(refusal)) {
+            crcbl::log::warn!("lan: {peer:?} was not told of a refusal ({refusal:?}): {error}");
+        }
+    }
+}
+
 /// A host's side: the engine's LAN host, and this player's own client of it.
 #[derive(Debug)]
 pub(crate) struct HostLink {
@@ -155,18 +184,25 @@ pub(crate) struct HostLink {
     local: Client<InMemoryTransport>,
     /// This player's own session, which is sent no map.
     local_peer: Option<PeerId>,
-    /// The map every joiner is sent, encoded once.
+    /// The map every joiner is sent, as its event, encoded once.
     map: Vec<u8>,
+    /// The stage the host serves, read for the refusals to tell.
+    field: Field,
+    /// This player's refusals, read back off its own client's events and
+    /// not yet taken.
+    refusals: Vec<Refusal>,
     /// Wall time since the session started, summed from each frame's
     /// `render_dt`: the host's clock.
     wall: Duration,
 }
 
 impl HostLink {
-    /// Hosts `world` — the stage's replica on `map` — ticked by `module` as
-    /// `game`, bound where `bind` says, and joins it as this player. Every
-    /// other player is sent `map` as they join. Answers the link and the tick
-    /// period, with the first tick spent on this player's handshake.
+    /// Hosts `world` — the replica of `field`'s stage on `map` — ticked by
+    /// `module` as `game`, bound where `bind` says, and joins it as this
+    /// player. Every other player is sent `map` as they join, and every
+    /// player the stage's refusals of their commands. Answers the link and
+    /// the tick period, with the first tick spent on this player's
+    /// handshake.
     ///
     /// # Errors
     ///
@@ -176,8 +212,7 @@ impl HostLink {
     pub fn open(
         game: LanGame,
         bind: LanBind,
-        world: World,
-        module: TowersModule,
+        (field, world, module): (Field, World, TowersModule),
         tick_hz: u32,
         map: &Map,
     ) -> Result<(Self, Duration), GameError> {
@@ -206,7 +241,7 @@ impl HostLink {
             PeerEvent::Joined(peer) => Some(peer),
             _ => None,
         });
-        let map = map.to_wire();
+        let map = event::map(&map.to_wire());
         welcome(lan.host_mut(), &events, &map, local_peer);
         Ok((
             Self {
@@ -214,6 +249,8 @@ impl HostLink {
                 local,
                 local_peer,
                 map,
+                field,
+                refusals: Vec::new(),
                 wall: tick_period,
             },
             tick_period,
@@ -225,16 +262,38 @@ impl HostLink {
     pub fn tick(&mut self, input: Vec<u8>, sim_time: Duration) {
         self.local.set_input(input);
         self.local.update(sim_time);
+        self.read_events();
     }
 
-    /// Runs the host to the wall time `render_dt` later, then reads what it
-    /// sent this player — without moving the client's clock from
-    /// `sim_time`, so no command goes out twice.
+    /// Runs the host to the wall time `render_dt` later, tells every player
+    /// what it refused them, then reads what it sent this player — without
+    /// moving the client's clock from `sim_time`, so no command goes out
+    /// twice.
     pub fn frame(&mut self, render_dt: Duration, sim_time: Duration) {
         self.wall += render_dt;
         let events = self.lan.frame(self.wall);
         welcome(self.lan.host_mut(), &events, &self.map, self.local_peer);
+        tell(self.lan.host_mut(), &self.field.take_refusals());
         self.local.update(sim_time);
+        self.read_events();
+    }
+
+    /// Takes this player's refusals since the last call, oldest first.
+    pub fn take_refusals(&mut self) -> Vec<Refusal> {
+        std::mem::take(&mut self.refusals)
+    }
+
+    /// Reads the host's events to this player: only ever refusals, since
+    /// this player is sent no map.
+    fn read_events(&mut self) {
+        for bytes in self.local.events() {
+            match event::decode(&bytes) {
+                Ok(Event::Refused(refusal)) => self.refusals.push(refusal),
+                other => crcbl::log::warn!(
+                    "lan: an event to the host's own player that is no refusal: {other:?}"
+                ),
+            }
+        }
     }
 
     /// The engine's LAN host: the F3 section and the session's numbers.
@@ -252,12 +311,22 @@ impl HostLink {
 #[derive(Debug)]
 pub(crate) struct RemoteLink {
     lan: LanClient,
+    /// What the host refused this player, not yet taken.
+    refusals: Vec<Refusal>,
+    /// Events from the host this build could not read, the join's among
+    /// them.
+    ignored_events: u64,
 }
 
 impl RemoteLink {
-    /// Plays through `lan`.
-    pub const fn new(lan: LanClient) -> Self {
-        Self { lan }
+    /// Plays through `lan`, having ignored `ignored_events` of the host's
+    /// events while it joined.
+    pub const fn new(lan: LanClient, ignored_events: u64) -> Self {
+        Self {
+            lan,
+            refusals: Vec::new(),
+            ignored_events,
+        }
     }
 
     /// Sends this player's command, once there is a session to send it on,
@@ -272,19 +341,38 @@ impl RemoteLink {
     /// Reads what the host sent, without moving the client's clock from
     /// `sim_time`.
     ///
-    /// The host sends one event, the map, and [`Joining`] took it before
-    /// this game was built; anything after it means nothing to towers and is
-    /// taken off the queue and logged rather than left to fill it.
+    /// Its events after the map are the refusals of this player's commands,
+    /// kept for [`RemoteLink::take_refusals`]. A second copy of the map —
+    /// sent when the host accepted this joiner again — is passed over, since
+    /// the game is on the first, and an event this build cannot read is
+    /// counted and logged, never left on the queue to fill it.
     pub fn frame(&mut self, sim_time: Duration) {
         self.lan.frame(sim_time);
         if let Some(client) = self.lan.client_mut() {
-            for event in client.events() {
-                crcbl::log::warn!(
-                    "lan: an event of {} bytes from the host after its map, ignored",
-                    event.len()
-                );
+            for bytes in client.events() {
+                match event::decode(&bytes) {
+                    Ok(Event::Refused(refusal)) => self.refusals.push(refusal),
+                    Ok(Event::Map(_)) => {
+                        crcbl::log::debug!("lan: the host's map again, passed over");
+                    }
+                    Err(error) => {
+                        self.ignored_events += 1;
+                        crcbl::log::warn!("lan: an event from the host, ignored: {error}");
+                    }
+                }
             }
         }
+    }
+
+    /// Takes what the host refused this player since the last call, oldest
+    /// first.
+    pub fn take_refusals(&mut self) -> Vec<Refusal> {
+        std::mem::take(&mut self.refusals)
+    }
+
+    /// Events from the host this build could not read, counted and ignored.
+    pub const fn ignored_events(&self) -> u64 {
+        self.ignored_events
     }
 
     /// The engine's LAN client: the F3 section and the session.
@@ -402,6 +490,9 @@ pub struct Joining {
     /// How long a chosen host has to send its map: [`JOIN_TIMEOUT`], unless a
     /// test asked for less.
     timeout: Duration,
+    /// Events from the host this build could not read, counted and ignored
+    /// — carried into the game's count.
+    ignored_events: u64,
 }
 
 /// Where a [`Joining`] stands after a frame.
@@ -426,6 +517,7 @@ impl Joining {
             now: Duration::ZERO,
             chosen_at: None,
             timeout,
+            ignored_events: 0,
         }
     }
 
@@ -436,8 +528,9 @@ impl Joining {
     }
 
     /// Runs the join for a frame covering `render_dt`, paused or not, and
-    /// says where it stands. The first event the host sends is its map: a
-    /// map that decodes is the game, and one that does not ends the join.
+    /// says where it stands. The first map event the host sends is the
+    /// game, or ends the join if this build refuses the map; an event this
+    /// build cannot read at all is counted and passed over.
     pub fn step(mut self, render_dt: Duration) -> Progress {
         self.now += render_dt;
         self.lan.frame(self.now);
@@ -452,18 +545,45 @@ impl Joining {
                 reason: refusal.msg.clone(),
             });
         }
-        // The host sends one event, its map; anything behind it in the same
-        // read goes with the drain, as `RemoteLink::frame` drops what comes
-        // after.
-        let map = client.events().next();
-        if let Some(bytes) = map {
-            return match Map::from_wire(&bytes) {
-                Ok(map) => Progress::Joined(Game::joined(self.tick_hz, map, *self.lan, self.now)),
-                Err(error) => {
-                    crcbl::log::warn!("lan: {host} sent a map this build refuses: {error}");
-                    Progress::Failed(JoinFailure::BadMap { host, error })
+        // The first map ends the wait; anything behind it in the same read
+        // goes with the drain, since nothing but a map means anything before
+        // the game.
+        let mut map = None;
+        for bytes in client.events() {
+            match event::decode(&bytes) {
+                Ok(Event::Map(decoded)) => {
+                    map = Some(Ok(decoded));
+                    break;
                 }
-            };
+                Err(EventError::Map(error)) => {
+                    map = Some(Err(error));
+                    break;
+                }
+                Ok(Event::Refused(refusal)) => {
+                    crcbl::log::warn!("lan: {host} refused a command before its map: {refusal:?}");
+                }
+                Err(error) => {
+                    self.ignored_events += 1;
+                    crcbl::log::warn!("lan: an event from {host}, ignored: {error}");
+                }
+            }
+        }
+        match map {
+            Some(Ok(map)) => {
+                let ignored = self.ignored_events;
+                return Progress::Joined(Game::joined(
+                    self.tick_hz,
+                    map,
+                    *self.lan,
+                    self.now,
+                    ignored,
+                ));
+            }
+            Some(Err(error)) => {
+                crcbl::log::warn!("lan: {host} sent a map this build refuses: {error}");
+                return Progress::Failed(JoinFailure::BadMap { host, error });
+            }
+            None => {}
         }
         if let Some(ended) = client.ended() {
             let how = how_it_ended(ended, client);
@@ -483,6 +603,7 @@ impl Joining {
     }
 }
 
+pub mod event;
 pub(crate) mod serve;
 
 #[cfg(test)]

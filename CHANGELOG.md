@@ -528,7 +528,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   join that ends without a map — refused, the link ended, a map this build
   refuses, or nothing within `lan::JOIN_TIMEOUT` — ends as a `lan::JoinFailure`
   naming which; `--join` and `--browse` wait under a `JOINING` panel and show
-  and log the failure there.
+  and log the failure there. **A refused command is told to the player who sent
+  it**: the stage records each refusal against its sender, and the host sends
+  that peer a refusal event naming the rule (`game::Refusal`: the run is over,
+  no such plot, the plot is taken, not enough gold, no tower to upgrade,
+  already upgraded, no wave to send), which `Game::take_refusals` hands the
+  front end — solo, the host's own player and a joiner alike — and the page
+  shows as a `REFUSED: …` line above the control hint for a few seconds
+  (`page::draw_notice`). The map and the refusals share one versioned envelope
+  (`lan::event`: a version byte and a tag ahead of the payload, `Map::from_wire`
+  still reading the map's); an event a player cannot read is counted
+  (`Game::ignored_events`) and passed over.
 
 - **Towers opens on a lobby** (native builds): solo, host (as `--host`, on any
   free port), a row per LAN host a `Browser` hears that this build can join —
