@@ -766,10 +766,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `crcbl_store::web::canonical_dir`, the directory-key rule `list` uses, is
   public.
 
-- **The editor has a translate gizmo.** An arrow per axis over the selection,
-  drawn in the viewport's screen space at a constant size; dragging one moves
-  the selection along that axis (in quarter-metre steps with Ctrl held), and a
-  whole drag is one undo. `crcbl_render::Camera::pixel_of` is new: the pixel a
+- **The editor has translate and scale gizmos.** Drawn over the selection in the
+  viewport's screen space at a constant size, and a whole drag is one undo. W
+  shows translate: an arrow per axis moves the selection along it, and a square
+  per plane between two arrows moves it across that plane. R shows scale on an
+  entity whose component has a `half_extents` field: a line per axis resizes
+  along it and the centre square resizes evenly, never below a minimum; an
+  entity without the field shows none, and the status line says why. With Ctrl
+  held a drag snaps to the absolute grid — the centre to multiples of
+  `editor.snap.grid`, a half extent to `editor.snap.scale`, both settings in the
+  editor's `settings.toml`. There is no rotate: the scene format carries no
+  rotation, and E says so. `crcbl_render::Camera::pixel_of` is new: the pixel a
   point lands on, `ray_through` run the other way, for anything drawn over the
   scene.
 

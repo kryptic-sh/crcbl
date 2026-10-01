@@ -198,6 +198,11 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     camera: OrbitCamera,
     /// Which drag, if any, the pointer is in the middle of.
     drag: Option<Drag>,
+    /// Which handles the selection shows: W and R choose.
+    gizmo_mode: gizmo::Mode,
+    /// The absolute grid a drag lands on while Ctrl is held, from the player's
+    /// settings.
+    snap: gizmo::Snap,
     clock_source: Clock,
     budget: FrameBudget,
     events: u64,
@@ -219,7 +224,7 @@ enum Drag {
     Orbit,
     /// Middle button: slide the pivot across the view plane.
     Pan,
-    /// Left button on a gizmo handle: move the selection along its axis.
+    /// Left button on a gizmo handle: move or resize the selection through it.
     Gizmo(gizmo::Drag),
 }
 
@@ -359,6 +364,7 @@ impl<S: Shell + ?Sized> Editor<S> {
 
         let panels = Panels::new(&mut document, dock.clone(), gpu.extent());
         let title = document.title();
+        let snap = gizmo::Snap::load(&settings);
         Ok(Self {
             windowed: !options.common.headless,
             shell,
@@ -381,6 +387,8 @@ impl<S: Shell + ?Sized> Editor<S> {
             elapsed: Duration::ZERO,
             camera: OrbitCamera::new(bounds.center(), 1.0, Projection::default()),
             drag: None,
+            gizmo_mode: gizmo::Mode::default(),
+            snap,
             clock_source,
             budget: FrameBudget::new(options.common.frame_budget()),
             events,
@@ -617,13 +625,15 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
     }
 
-    /// The selection's gizmo handles, in the pane's pixels — none for nothing
-    /// selected, and none for an entity with no `position` to move.
+    /// The selection's gizmo handles in the current mode, in the pane's
+    /// pixels — none for nothing selected, and none for an entity without the
+    /// field the mode writes: no `position` to move, or no `half_extents` to
+    /// resize.
     fn handles(&mut self) -> Vec<gizmo::Handle> {
         let Some(id) = self.document.selected() else {
             return Vec::new();
         };
-        if !matches!(self.document.read(id, "position.0"), Ok(Value::Float(_))) {
+        if self.field_values(id, self.gizmo_mode.field()).is_none() {
             return Vec::new();
         }
         let Some((min, max)) = self.document.bounds(id) else {
@@ -634,7 +644,25 @@ impl<S: Shell + ?Sized> Editor<S> {
             self.panels.viewport_extent(),
             (min + max) * 0.5,
             self.panels.scale(),
+            self.gizmo_mode,
         )
+    }
+
+    /// The three numbers `field.0` to `field.2` of `id`'s component hold, or
+    /// [`None`] where it has no such field.
+    ///
+    /// **By name, through the component's reflected paths** — the way an arrow
+    /// key finds `position` — so any registered component with the field has
+    /// handles for it and no component type is named here.
+    fn field_values(&mut self, id: SceneEntityId, field: &str) -> Option<[f64; 3]> {
+        let mut values = [0.0; 3];
+        for (index, value) in values.iter_mut().enumerate() {
+            let Ok(Value::Float(read)) = self.document.read(id, &format!("{field}.{index}")) else {
+                return None;
+            };
+            *value = read;
+        }
+        Some(values)
     }
 
     /// Starts a gizmo drag if the press landed on a handle, and says whether it
@@ -645,13 +673,13 @@ impl<S: Shell + ?Sized> Editor<S> {
         };
         let handles = self.handles();
         let (corner, _) = self.panels.viewport_pixels();
-        let Some(axis) = gizmo::hit(&handles, at - corner, self.panels.scale()) else {
+        let Some(grip) = gizmo::hit(&handles, at - corner, self.panels.scale()) else {
             return false;
         };
-        let path = format!("position.{}", axis.index());
-        let (Ok(Value::Float(start)), Some((min, max))) =
-            (self.document.read(id, &path), self.document.bounds(id))
-        else {
+        let (Some(start), Some((min, max))) = (
+            self.field_values(id, grip.mode().field()),
+            self.document.bounds(id),
+        ) else {
             return false;
         };
         let origin = (min + max) * 0.5;
@@ -661,26 +689,48 @@ impl<S: Shell + ?Sized> Editor<S> {
             f64::from(origin.z),
         );
         let gesture = self.document.begin_gesture();
-        let ray = self.ray_at(at);
-        let Some(drag) = gizmo::Drag::begin(id, axis, gesture, start, origin, &ray) else {
+        let pointer = self.pointer_at(at);
+        let Some(drag) = gizmo::Drag::begin(
+            id,
+            grip,
+            gesture,
+            start,
+            origin,
+            &pointer,
+            self.panels.scale(),
+        ) else {
             return false;
         };
         self.drag = Some(Drag::Gizmo(drag));
         true
     }
 
-    /// Moves the dragged entity to where the pointer at `at` puts it on the
-    /// handle's axis, snapping while Ctrl is held — one write of the drag's
+    /// Moves or resizes the dragged entity to where the pointer at `at` puts
+    /// it, on the absolute grid while Ctrl is held — one write of the drag's
     /// gesture, so the whole drag undoes at once.
+    ///
+    /// A handle that sets several leaves at once — a plane, the centre — sets
+    /// them as one [`EditCommand::Batch`], which the log folds like a single
+    /// leaf (`crate::command::UndoLog::record_in`).
     fn move_handle(&mut self, drag: &gizmo::Drag, at: Vec2) {
-        let snap = self.modifiers.contains(Modifiers::CTRL);
-        let Some(value) = drag.value(&self.ray_at(at), snap) else {
+        let snap = self
+            .modifiers
+            .contains(Modifiers::CTRL)
+            .then_some(self.snap);
+        let Some(writes) = drag.writes(&self.pointer_at(at), snap) else {
             return;
         };
-        let command = EditCommand::SetProperty {
-            entity: drag.entity,
-            path: format!("position.{}", drag.axis.index()),
-            value: Value::Float(value),
+        let commands: Vec<EditCommand> = writes
+            .into_iter()
+            .map(|write| EditCommand::SetProperty {
+                entity: drag.entity,
+                path: write.path,
+                value: Value::Float(write.value),
+            })
+            .collect();
+        let command = match <[EditCommand; 1]>::try_from(commands) {
+            Ok([one]) => one,
+            Err(several) => EditCommand::Batch(several),
         };
         if let Err(error) = self.document.apply_in(command, drag.gesture) {
             crcbl::log::warn!("editor: {error}");
@@ -696,11 +746,64 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
         let (corner, _) = self.panels.viewport_pixels();
         let hot = match self.drag {
-            Some(Drag::Gizmo(drag)) => Some(drag.axis),
+            Some(Drag::Gizmo(drag)) => Some(drag.grip()),
             _ => gizmo::hit(&handles, pointer - corner, self.panels.scale()),
         };
         self.panels
             .overlay_viewport(|list| gizmo::draw(list, &handles, corner, hot));
+    }
+
+    /// Shows `mode`'s handles from now on, and says on the status line what
+    /// they do — or, for scale, why the selection has none.
+    fn choose_mode(&mut self, mode: gizmo::Mode) {
+        self.gizmo_mode = mode;
+        let (text, tone) = match mode {
+            gizmo::Mode::Translate => (
+                format!(
+                    "Translate: drag an arrow along its axis or a square across its plane; \
+                     hold Ctrl to snap to the {} m grid",
+                    self.snap.grid_step()
+                ),
+                Tone::Info,
+            ),
+            gizmo::Mode::Scale => self.scale_status(),
+        };
+        self.panels.set_status(text, tone);
+    }
+
+    /// What the status line says when scale is chosen: how to use the handles,
+    /// or why the selection shows none.
+    fn scale_status(&mut self) -> (String, Tone) {
+        let Some(id) = self.document.selected() else {
+            return (
+                "Scale: select an entity with half extents to resize it".to_owned(),
+                Tone::Info,
+            );
+        };
+        if self.field_values(id, gizmo::HALF_EXTENTS).is_some() {
+            return (
+                format!(
+                    "Scale: drag a box to resize along its axis or the centre to resize \
+                     evenly; hold Ctrl to snap half extents to {} m",
+                    self.snap.scale_step()
+                ),
+                Tone::Info,
+            );
+        }
+        let kind = self.document.component(id).map_or("entity", |component| {
+            component
+                .type_name()
+                .rsplit("::")
+                .next()
+                .unwrap_or("entity")
+        });
+        (
+            format!(
+                "Scale: this {kind} has no `{}` field, so it has nothing to resize",
+                gizmo::HALF_EXTENTS
+            ),
+            Tone::Warning,
+        )
     }
 
     /// Selects whatever the left button landed on.
@@ -731,6 +834,16 @@ impl<S: Shell + ?Sized> Editor<S> {
             .ray_through(at - min + Vec2::splat(0.5), self.panels.viewport_extent())
     }
 
+    /// The pointer at `at`, a point in window pixels, as a gizmo drag reads it:
+    /// [`ray_at`](Self::ray_at)'s ray, and the point from the pane's corner.
+    fn pointer_at(&self, at: Vec2) -> gizmo::Pointer {
+        let (min, _) = self.panels.viewport_pixels();
+        gizmo::Pointer {
+            ray: self.ray_at(at),
+            at: at - min,
+        }
+    }
+
     /// Carries out one keyboard action.
     ///
     /// A refusal is logged rather than propagated: nudging with nothing
@@ -757,6 +870,21 @@ impl<S: Shell + ?Sized> Editor<S> {
                 if let Err(error) = self.paste.ask(self.shell.as_mut(), self.window) {
                     crcbl::log::warn!("editor: the clipboard refused the paste — {error}");
                 }
+                Ok(())
+            }
+            Action::Translate => {
+                self.choose_mode(gizmo::Mode::Translate);
+                Ok(())
+            }
+            Action::Scale => {
+                self.choose_mode(gizmo::Mode::Scale);
+                Ok(())
+            }
+            // Refused here and not merely unbound: E is where every other
+            // editor keeps rotate, and a key that did nothing would look broken
+            // rather than absent. The mode stays whatever it was.
+            Action::Rotate => {
+                self.panels.set_status(ROTATE_REFUSED, Tone::Warning);
                 Ok(())
             }
         };
@@ -1041,6 +1169,10 @@ impl<S: Shell + ?Sized> Editor<S> {
         Ok(summary)
     }
 }
+
+/// What the status line says when rotate is asked for. See [`gizmo::Mode`].
+const ROTATE_REFUSED: &str = "Rotate is not built: the scene format carries no rotation to turn \
+                              (W translates, R scales)";
 
 /// The app id the window system matches this tool to its `.desktop` file by.
 const APP_ID: &str = "sh.kryptic.crcbl.editor";

@@ -200,41 +200,33 @@ fn physical(at: Vec2) -> PhysicalPoint {
     }
 }
 
-/// **Dragging a gizmo handle moves the selection along that axis alone, as
-/// one undo**, and a press on the handle does not re-pick whatever is
-/// behind it.
-#[test]
-fn dragging_a_handle_moves_the_selection_along_its_axis_as_one_undo() {
-    let mut editor = headless(16);
-    let id = SceneEntityId(2);
-    editor.document_mut().select(Some(id));
-    editor.frame().expect("a frame");
-    let before = editor.document_mut().files().expect("ids");
-    let read = |editor: &mut Editor<HeadlessShell>, axis: usize| {
-        let Value::Float(value) = editor
-            .document_mut()
-            .read(id, &format!("position.{axis}"))
-            .expect("a block")
-        else {
-            panic!("a position is a number");
-        };
-        value
-    };
-    let was = [
-        read(&mut editor, 0),
-        read(&mut editor, 1),
-        read(&mut editor, 2),
-    ];
+/// The three leaves `field.0` to `field.2` of `id` hold.
+fn leaves(editor: &mut Editor<HeadlessShell>, id: SceneEntityId, field: &str) -> [f64; 3] {
+    editor
+        .field_values(id, field)
+        .unwrap_or_else(|| panic!("{id} has no {field}"))
+}
 
-    let handles = editor.handles();
-    let x = handles
-        .iter()
-        .find(|handle| handle.axis == gizmo::Axis::X)
-        .expect("the default view shows the X handle");
+/// The selection's handle that takes hold of `grip`, in window pixels from
+/// the pane's own: `(from, to)` for a line, and `(centre, centre)` for a
+/// square.
+fn handle_at(editor: &mut Editor<HeadlessShell>, grip: gizmo::Grip) -> (Vec2, Vec2) {
     let (corner, _) = editor.panels.viewport_pixels();
-    let grab = corner + (x.from + x.to) * 0.5;
-    let release = corner + x.to + (x.to - x.from) * 0.5;
+    let handle = editor
+        .handles()
+        .into_iter()
+        .find(|handle| handle.grip == grip)
+        .unwrap_or_else(|| panic!("the default view shows no {grip:?}"));
+    match handle.shape {
+        gizmo::Shape::Line { from, to } => (corner + from, corner + to),
+        gizmo::Shape::Square { centre, .. } => (corner + centre, corner + centre),
+    }
+}
 
+/// Presses the left button at `grab`, moves to `release` over four frames
+/// and lets go there — a drag, through the shell, as a window system would
+/// deliver one.
+fn drag(editor: &mut Editor<HeadlessShell>, grab: Vec2, release: Vec2) {
     let window = editor.window;
     let shell = editor.shell_mut();
     shell
@@ -272,17 +264,29 @@ fn dragging_a_handle_moves_the_selection_along_its_axis_as_one_undo() {
         )
         .expect("live");
     editor.frame().expect("a frame");
+}
+
+/// **Dragging a gizmo handle moves the selection along that axis alone, as
+/// one undo**, and a press on the handle does not re-pick whatever is
+/// behind it.
+#[test]
+fn dragging_a_handle_moves_the_selection_along_its_axis_as_one_undo() {
+    let mut editor = headless(16);
+    let id = SceneEntityId(2);
+    editor.document_mut().select(Some(id));
+    editor.frame().expect("a frame");
+    let before = editor.document_mut().files().expect("ids");
+    let was = leaves(&mut editor, id, gizmo::POSITION);
+
+    let (from, to) = handle_at(&mut editor, gizmo::Grip::Move(gizmo::Axis::X));
+    drag(&mut editor, (from + to) * 0.5, to + (to - from) * 0.5);
 
     assert_eq!(
         editor.document().selected(),
         Some(id),
         "the press re-picked"
     );
-    let now = [
-        read(&mut editor, 0),
-        read(&mut editor, 1),
-        read(&mut editor, 2),
-    ];
+    let now = leaves(&mut editor, id, gizmo::POSITION);
     assert!(
         now[0] > was[0] + 0.1,
         "the X handle did not move it along +X: {now:?}"
@@ -292,6 +296,234 @@ fn dragging_a_handle_moves_the_selection_along_its_axis_as_one_undo() {
 
     editor.act(&Action::Undo);
     assert_eq!(editor.document_mut().files().expect("ids"), before);
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **Dragging a plane handle moves the selection across that plane alone,
+/// as one undo** — two leaves a frame, folded into one entry, and the
+/// third leaf untouched.
+#[test]
+fn dragging_a_plane_handle_moves_in_that_plane_as_one_undo() {
+    let mut editor = headless(16);
+    let id = SceneEntityId(2);
+    editor.document_mut().select(Some(id));
+    editor.frame().expect("a frame");
+    let before = editor.document_mut().files().expect("ids");
+    let was = leaves(&mut editor, id, gizmo::POSITION);
+
+    let plane = editor
+        .handles()
+        .into_iter()
+        .find_map(|handle| match handle.grip {
+            gizmo::Grip::MovePlane(plane) => Some(plane),
+            _ => None,
+        })
+        .expect("the default view shows a plane handle");
+    let (square, _) = handle_at(&mut editor, gizmo::Grip::MovePlane(plane));
+    let (centre, _) = handle_at(&mut editor, gizmo::Grip::Move(plane.axes()[0]));
+    // Outwards from the centre through the square, which is along both of
+    // the plane's axes at once.
+    drag(&mut editor, square, square + (square - centre));
+
+    let now = leaves(&mut editor, id, gizmo::POSITION);
+    let [a, b] = plane.axes().map(gizmo::Axis::index);
+    let normal = plane.normal().index();
+    assert!(
+        (now[a] - was[a]).abs() > 0.05 && (now[b] - was[b]).abs() > 0.05,
+        "{plane:?} did not move it along both its axes: {was:?} to {now:?}",
+    );
+    assert_eq!(now[normal], was[normal], "{plane:?} moved it off the plane");
+    assert_eq!(editor.document().log().len(), 1, "a drag is one entry");
+
+    editor.act(&Action::Undo);
+    assert_eq!(editor.document_mut().files().expect("ids"), before);
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **R shows the scale handles, and dragging one resizes that axis alone
+/// and dragging the centre resizes all three in proportion** — each drag
+/// one undo, and the centre never moving.
+#[test]
+fn scale_handles_resize_one_axis_or_all_three_as_one_undo_each() {
+    let mut editor = headless(40);
+    let id = SceneEntityId(2);
+    editor.document_mut().select(Some(id));
+    editor.frame().expect("a frame");
+    tap(&mut editor, KeyCode::KeyR);
+    let before = editor.document_mut().files().expect("ids");
+    let position = leaves(&mut editor, id, gizmo::POSITION);
+    let was = leaves(&mut editor, id, gizmo::HALF_EXTENTS);
+
+    let (from, to) = handle_at(&mut editor, gizmo::Grip::Scale(gizmo::Axis::X));
+    drag(
+        &mut editor,
+        from + (to - from) * 0.85,
+        to + (to - from) * 0.5,
+    );
+    let now = leaves(&mut editor, id, gizmo::HALF_EXTENTS);
+    assert!(now[0] > was[0] + 0.1, "X did not grow: {was:?} to {now:?}");
+    assert_eq!(
+        [now[1], now[2]],
+        [was[1], was[2]],
+        "it resized off its axis"
+    );
+    assert_eq!(leaves(&mut editor, id, gizmo::POSITION), position);
+    assert_eq!(editor.document().log().len(), 1, "a drag is one entry");
+    editor.act(&Action::Undo);
+    assert_eq!(editor.document_mut().files().expect("ids"), before);
+
+    let (centre, _) = handle_at(&mut editor, gizmo::Grip::ScaleAll);
+    drag(&mut editor, centre, centre + Vec2::new(40.0, 0.0));
+    let now = leaves(&mut editor, id, gizmo::HALF_EXTENTS);
+    let ratios = [0, 1, 2].map(|axis| now[axis] / was[axis]);
+    assert!(ratios[0] > 1.1, "the centre did not grow it: {ratios:?}");
+    assert!(
+        ratios.iter().all(|ratio| (ratio - ratios[0]).abs() < 1e-9),
+        "the centre resized out of proportion: {ratios:?}",
+    );
+    assert_eq!(leaves(&mut editor, id, gizmo::POSITION), position);
+    assert_eq!(
+        editor.document().log().position(),
+        1,
+        "the centre's drag is one entry"
+    );
+    editor.act(&Action::Undo);
+    assert_eq!(editor.document_mut().files().expect("ids"), before);
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A drag with Ctrl held lands on the absolute grid**, from a start the
+/// arrow keys left off it — so a snap measured in steps from the press
+/// would stay off it.
+#[test]
+fn a_drag_with_ctrl_held_lands_on_the_absolute_grid() {
+    let mut editor = headless(24);
+    let id = SceneEntityId(2);
+    editor.document_mut().select(Some(id));
+    editor.act(&Action::Nudge { axis: 0, sign: 1.0 });
+    editor.frame().expect("a frame");
+    let step = editor.snap.grid_step();
+    let off = leaves(&mut editor, id, gizmo::POSITION)[0];
+    assert!(
+        (off / step).fract().abs() > 1e-6,
+        "the start is on the grid already, so this proves nothing: {off}",
+    );
+
+    let window = editor.window;
+    editor.shell_mut().set_modifiers(Modifiers::CTRL);
+    editor
+        .shell_mut()
+        .key_press(window, KeyCode::ControlLeft)
+        .expect("live");
+    editor.frame().expect("a frame");
+    let (from, to) = handle_at(&mut editor, gizmo::Grip::Move(gizmo::Axis::X));
+    drag(&mut editor, (from + to) * 0.5, to + (to - from) * 0.5);
+
+    let now = leaves(&mut editor, id, gizmo::POSITION)[0];
+    assert!(now > off + step, "the drag did not move it: {off} to {now}");
+    assert_eq!(
+        (now / step).fract(),
+        0.0,
+        "{now} is not on the {step} m grid"
+    );
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// `apps/puppet`'s blockout, saved into a temporary directory and opened
+/// in an editor — a scene with components that have a position and no
+/// half extents.
+fn puppet_editor(frames: u64) -> (tempfile::TempDir, Editor<HeadlessShell>) {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let mut source = Document::open(
+        &crcbl_puppet::map::built_in_source(),
+        Path::new(crcbl_puppet::map::BLOCKOUT),
+        crate::scene::vocabulary(),
+    )
+    .expect("the committed blockout is a scene");
+    source.save_to(dir.path()).expect("a writable directory");
+
+    let mut options = options(frames);
+    options.scene = Some(dir.path().to_path_buf());
+    let editor = Editor::with_shell(Box::new(HeadlessShell::new()), &options)
+        .expect("what we just wrote is a scene");
+    (dir, editor)
+}
+
+/// **An entity with no `half_extents` shows no scale handles**, and the
+/// status line says why when scale is chosen — while it still shows
+/// translate handles, so it is the field that is missing and not the
+/// entity.
+#[test]
+fn an_entity_without_half_extents_shows_no_scale_handles_and_says_why() {
+    let (_dir, mut editor) = puppet_editor(40);
+    editor.frame().expect("a frame");
+    let ids: Vec<SceneEntityId> = editor
+        .document_mut()
+        .outline()
+        .into_iter()
+        .flat_map(|(_, ids)| ids)
+        .collect();
+    let selected = ids
+        .into_iter()
+        .find(|id| {
+            editor.field_values(*id, gizmo::POSITION).is_some()
+                && editor.field_values(*id, gizmo::HALF_EXTENTS).is_none()
+                && editor.document_mut().bounds(*id).is_some()
+        })
+        .expect("puppet's blockout holds a placed entity with no half extents");
+    editor.document_mut().select(Some(selected));
+    editor.frame().expect("a frame");
+    assert!(
+        !editor.handles().is_empty(),
+        "it has no translate handles either, so the field is not what is missing",
+    );
+
+    tap(&mut editor, KeyCode::KeyR);
+    assert_eq!(editor.gizmo_mode, gizmo::Mode::Scale);
+    assert!(editor.handles().is_empty(), "it shows scale handles");
+    let (text, tone) = editor.panels.status();
+    assert_eq!(tone, Tone::Warning, "{text}");
+    assert!(text.contains(gizmo::HALF_EXTENTS), "{text}");
+
+    tap(&mut editor, KeyCode::KeyW);
+    assert!(
+        !editor.handles().is_empty(),
+        "W did not bring translate back"
+    );
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **E cannot enter a rotate mode**: there is none, the key says so on the
+/// status line, and whichever mode was showing stays.
+#[test]
+fn rotate_cannot_be_entered() {
+    let mut editor = headless(40);
+    editor.document_mut().select(Some(SceneEntityId(2)));
+    editor.frame().expect("a frame");
+    let modes = |editor: &mut Editor<HeadlessShell>| -> Vec<gizmo::Mode> {
+        editor
+            .handles()
+            .iter()
+            .map(|handle| handle.grip.mode())
+            .collect()
+    };
+    for (key, mode) in [
+        (KeyCode::KeyW, gizmo::Mode::Translate),
+        (KeyCode::KeyR, gizmo::Mode::Scale),
+    ] {
+        tap(&mut editor, key);
+        let showing = modes(&mut editor);
+        assert!(
+            !showing.is_empty() && showing.iter().all(|shown| *shown == mode),
+            "{key:?} showed {showing:?}",
+        );
+        tap(&mut editor, KeyCode::KeyE);
+        assert_eq!(editor.gizmo_mode, mode, "E changed the mode");
+        assert_eq!(modes(&mut editor), showing, "E changed the handles");
+        let (text, tone) = editor.panels.status();
+        assert_eq!(tone, Tone::Warning, "{text}");
+        assert!(text.contains("Rotate is not built"), "{text}");
+    }
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 
@@ -538,19 +770,7 @@ fn a_click_on_an_outliner_row_selects_the_entity_it_names() {
 /// a text context is about.
 #[test]
 fn typing_in_a_field_does_not_nudge_the_selection() {
-    let dir = tempfile::tempdir().expect("a temporary directory");
-    let mut source = Document::open(
-        &crcbl_puppet::map::built_in_source(),
-        Path::new(crcbl_puppet::map::BLOCKOUT),
-        crate::scene::vocabulary(),
-    )
-    .expect("the committed blockout is a scene");
-    source.save_to(dir.path()).expect("a writable directory");
-
-    let mut options = options(400);
-    options.scene = Some(dir.path().to_path_buf());
-    let mut editor = Editor::with_shell(Box::new(HeadlessShell::new()), &options)
-        .expect("what we just wrote is a scene");
+    let (_dir, mut editor) = puppet_editor(400);
     editor.frame().expect("a frame");
 
     // The one component in either sample's vocabulary with a `String` in

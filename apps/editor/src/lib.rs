@@ -23,8 +23,9 @@
 //!   a command.
 //! * [`clipboard`] — entities as clipboard text, and the paste that waits for
 //!   the clipboard's answer.
-//! * [`gizmo`] — the translate handles drawn over the selection, and the drag
-//!   that moves it along one.
+//! * [`gizmo`] — the translate and scale handles drawn over the selection, and
+//!   the drag that moves or resizes it through one, on the absolute grid while
+//!   snapping.
 //! * [`document`] — the scene, the [`World`](crcbl::ecs::World) it loaded into,
 //!   the selection, the history and the save. Runs with no device and no
 //!   window, which is how the gates hold it.
@@ -46,9 +47,8 @@
 //!
 //! # What this slice is not
 //!
-//! No server protocol or transport routing, no rotate or scale gizmo, no play
-//! mode, no asset
-//! listing, no file watcher, no multi-session editing, and no port of a
+//! No server protocol or transport routing, no rotate gizmo, no play mode, no
+//! asset listing, no file watcher, no multi-session editing, and no port of a
 //! sample's state into ECS. Each is named in the plan with what it waits on.
 
 pub mod app;

@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 and 5 2026-09-30, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slice 7 2026-10-01, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -148,7 +148,8 @@ full-window draw under a hole in the panels is gone.
   pointing along the view has none. A press on a handle drags instead of
   picking; the entity moves along the axis line through where the drag began, to
   the point closest to the cursor's ray, by as far as that point has moved since
-  the press — in `gizmo::SNAP_M` steps while Ctrl is held.
+  the press. (Ctrl snapped the move in quarter-metre steps from the press; slice
+  7 made it the absolute grid.)
 - **A drag is one undo.** Each write is a `position.N` property set through
   `Document::apply_in` with the drag's `Gesture`, and `UndoLog::record_in` folds
   a gesture's writes to one leaf into one entry that keeps the first write's
@@ -163,8 +164,55 @@ full-window draw under a hole in the panels is gone.
   drag through plain `apply`, flipping the sign of the formula's `b` term (which
   first survived, until an oblique ray was added) and dropping the seal each
   turned a test red.
-- **Owed from task 5**: rotate and scale handles, plane handles, and snapping to
-  an absolute grid rather than in steps from where the drag began.
+- **Owed from task 5** after slice 6: rotate and scale handles, plane handles,
+  and snapping to an absolute grid. Slice 7, below, built all but rotate.
+
+**Slice 7, the rest of task 5's gizmos, landed 2026-10-01.**
+
+- **Two modes, W and R.** Translate adds a square per plane in the corner
+  between its two arrows, which moves the selection across that plane; scale
+  draws a box-tipped line per axis and a square at the centre. A square takes a
+  press before a line does — it is drawn on top and is the smaller target — so a
+  press where a plane square lies over an arrow is the plane's, and one at the
+  centre is the uniform scale's although every line starts there. A plane seen
+  nearly edge-on has no square, since a slip of the pointer would be a long
+  move.
+- **Scale finds its field by name**, as translate finds `position`: a handle
+  writes `half_extents.N` through the component's reflected paths, so any
+  registered component with that field scales and the editor names no type. An
+  entity without one shows no scale handles, and choosing scale on it says so on
+  the status line. An axis adds the cursor's travel along it to that half
+  extent; the centre multiplies all three by one plus the pointer's travel to
+  the right in handle lengths. Nothing writes a half extent below
+  `gizmo::MIN_HALF_EXTENT`.
+- **Snapping is to the absolute grid**: with Ctrl held a centre lands on the
+  nearest multiple of `editor.snap.grid` and a half extent on one of
+  `editor.snap.scale`, both settings in the editor's `settings.toml`
+  (`gizmo::Snap::load`; a value that is not a positive number falls back to the
+  default and is logged).
+- **A drag is still one undo.** A plane or centre drag writes its leaves as one
+  `EditCommand::Batch` a frame, and `UndoLog::record_in` folds a gesture's batch
+  into the entry on top when it names the same leaves in the same order.
+- **Rotate cannot be entered.** `gizmo::Mode` has no rotate variant, and E puts
+  a refusal on the status line and leaves the mode as it was: the scene format
+  carries no rotation for a handle to write. The backlog says what it would
+  take.
+- **Multi-select is not a question yet**: the document holds one selection
+  (`Document::selected`), and the outliner's Ctrl and Shift clicks select rows
+  of which the document takes the first. Every handle acts on that one entity.
+- **Evidence**: the gizmo's tests hold plane-square placement, the edge-on drop,
+  square-over-line priority on a hand-built overlap, plane drags writing exactly
+  their two leaves through oblique rays, per-axis and uniform scale, the
+  minimum, absolute snapping from an off-grid start and the settings fallback;
+  the editor's loop tests drag a plane, a scale axis and the centre through the
+  headless shell (one entry each, undone to the saved text), snap a nudged block
+  onto the grid with Ctrl held, find no scale handles on a puppet entity without
+  half extents, and press E in both modes. Each of these mutations — lines
+  before squares, a plane writing all three leaves or crossing the wrong plane,
+  snapping from the press, no minimum, an additive uniform scale, its sign
+  flipped, batches never folding, scale handles without the field, E entering
+  scale, Ctrl ignored, no settings validation, edge-on planes kept, a plane
+  square off its corner, and R unbound — turned a test red.
 
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor

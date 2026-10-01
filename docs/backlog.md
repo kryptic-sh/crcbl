@@ -11636,12 +11636,34 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   correction); and a server hosting more than one session.
 - **An edit-mode schedule** for the selection, gizmo and editor-camera systems;
   a `World` has one `Schedule` and no per-system gating.
-- **The rest of the transform gizmos**: rotate and scale handles, plane handles,
-  and snapping to an absolute grid. The translate axis handles landed 2026-09-30
-  in `apps/editor/src/gizmo.rs`, drawn in the pane's screen space (decided then;
-  `08-editor.md` _Status_ says why not debug draw). A rotate handle needs the
-  scene format to carry a rotation, which `Block` and `Brick` do not; scale maps
-  onto `half_extents` where a component has them.
+- **The rotate gizmo**, the one transform handle not built. Translate (axis and
+  plane handles) and scale (axis and uniform) landed 2026-10-01 in
+  `apps/editor/src/gizmo.rs`, with Ctrl snapping to the absolute grid
+  (`editor.snap.grid` and `editor.snap.scale` in the editor's `settings.toml`).
+  `gizmo::Mode` has no rotate variant, and E only puts a refusal on the status
+  line, because nothing in a scene can turn. What it takes:
+  - **A rotation in the scene format**: a reflected `rotation` field on each
+    component that should turn — the editor's `Block`, breakout's `Brick` —
+    which changes their chunk rows and so the committed scenes that hold them.
+  - **`crcbl::registry::Placement` answering an orientation**: it returns a
+    centre and half extents, so every consumer assumes an axis-aligned box —
+    `apps/editor/src/document.rs`'s `sync_colliders` (`Transform::from_position`
+    for the pick collider), the instance transform
+    `apps/editor/src/app/instances` draws the greybox cube with, and the
+    selection's debug-draw `aabb`.
+  - **The handles**: a screen-space ring per axis, a drag measured as the angle
+    swept about the projected centre, Ctrl snapping to an angle step beside the
+    two snap settings, and E entering the mode. Scale would then have to choose
+    between world and local axes, which it does not today.
+- **Multi-select transforms**: not MVP by the plan, and not reachable yet — the
+  document holds one selection (`Document::selected`), the outliner's Ctrl and
+  Shift clicks select rows of which the document takes the first, and every
+  gizmo handle acts on that one entity. Shared-pivot translate needs the
+  document to hold a set first.
+- **The gizmo has not been looked at on a device.** Its placement, hit testing
+  and drags are tested headless through `Camera::pixel_of` and the null backend;
+  no windowed run has shown the plane squares' translucent fill or the scale
+  tips' outlines, and the snap steps have no panel — only `settings.toml`.
 - **The asset browser and drag-spawn.** `AssetSource::list` landed 2026-09-30
   (`DirSource`, `MemorySource`; `Unsupported` by default). What is still
   missing: a mesh component the editor's vocabulary can spawn and draw — it

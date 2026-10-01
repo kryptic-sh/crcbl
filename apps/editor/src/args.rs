@@ -95,8 +95,19 @@ EDITING:
     Ctrl / Shift click   Add a row to the selection, or take a run of them
     Drag a field         Edit it, one step a pixel — an undoable command like
                          every other edit
-    Drag an arrow        Move the selection along that axis, one undo a drag;
-                         hold Ctrl to move in quarter-metre steps
+    W                    Show the translate handles (the default): drag an
+                         arrow to move the selection along that axis, or a
+                         square between two arrows to move it across that
+                         plane — one undo a drag
+    R                    Show the scale handles, on an entity with half
+                         extents: drag a box-tipped line to resize along that
+                         axis, or the centre square to resize evenly
+    E                    Rotate is not built — the scene format carries no
+                         rotation — and the status line says so
+    Ctrl while dragging  Snap to the absolute grid: a centre to multiples of
+                         editor.snap.grid and a half extent to multiples of
+                         editor.snap.scale, both metres in settings.toml. W
+                         and R name the steps on the status line
     Arrow keys           Nudge the selection along X (left/right) and Y
                          (up/down), or walk the rows once a panel has the
                          keyboard

@@ -85,6 +85,17 @@ pub const COPY: &str = "editor_copy";
 /// Spawn whatever entities the system clipboard holds.
 pub const PASTE: &str = "editor_paste";
 
+/// Show the translate handles: W, the key every editor with a move tool uses.
+pub const TRANSLATE: &str = "editor_translate";
+
+/// Show the scale handles: R, beside it.
+pub const SCALE: &str = "editor_scale";
+
+/// Ask for rotate handles, which this editor does not have — E, where every
+/// other editor keeps them, so the key says why rather than doing nothing. See
+/// [`crate::gizmo::Mode`].
+pub const ROTATE: &str = "editor_rotate";
+
 /// One thing the keyboard asked for this frame.
 ///
 /// Collected out of the map and applied afterwards, because reading the map
@@ -114,6 +125,12 @@ pub enum Action {
     Copy,
     /// Spawn whatever entities the system clipboard holds.
     Paste,
+    /// Show the translate handles.
+    Translate,
+    /// Show the scale handles.
+    Scale,
+    /// Ask for rotate handles, which the scene format gives nothing to turn.
+    Rotate,
 }
 
 /// The editor's map: its own actions in the default context, with the reserved
@@ -197,6 +214,12 @@ pub fn map() -> ActionMap {
             key: KeyCode::KeyV,
         }],
     ));
+    // W, E and R are free in both reserved contexts: `text` takes letters only
+    // while a field is engaged, which asks for nothing at all, and `ui`'s WASD
+    // is rebound to the arrows below.
+    map.declare(button(TRANSLATE, vec![Binding::Key(KeyCode::KeyW)]));
+    map.declare(button(SCALE, vec![Binding::Key(KeyCode::KeyR)]));
+    map.declare(button(ROTATE, vec![Binding::Key(KeyCode::KeyE)]));
 
     // Holding a nudge key repeats it, which is how a coarse move is made — the
     // schedule the reserved navigation actions carry, so a held arrow moves an
@@ -271,7 +294,8 @@ pub fn pop_ui(map: &mut ActionMap) {
 pub fn release_keys(map: &mut ActionMap) {
     let mut keys = Vec::new();
     for name in [
-        MOVE, LIFT, UNDO, REDO, SAVE, FRAME, DELETE, DUPLICATE, COPY, PASTE,
+        MOVE, LIFT, UNDO, REDO, SAVE, FRAME, DELETE, DUPLICATE, COPY, PASTE, TRANSLATE, SCALE,
+        ROTATE,
     ] {
         for binding in map.bindings(name).unwrap_or_default() {
             binding.visit_keys(|key| keys.push(key));
@@ -350,6 +374,15 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
     }
     if map.just_pressed(DELETE) {
         actions.push(Action::Delete);
+    }
+    if map.just_pressed(TRANSLATE) {
+        actions.push(Action::Translate);
+    }
+    if map.just_pressed(SCALE) {
+        actions.push(Action::Scale);
+    }
+    if map.just_pressed(ROTATE) {
+        actions.push(Action::Rotate);
     }
     actions
 }
@@ -529,6 +562,16 @@ mod tests {
         assert_eq!(keys.tap(KeyCode::KeyC, Modifiers::CTRL), [Action::Copy]);
         assert_eq!(keys.tap(KeyCode::KeyV, Modifiers::CTRL), [Action::Paste]);
         assert_eq!(keys.tap(KeyCode::KeyV, Modifiers::empty()), []);
+        assert_eq!(
+            keys.tap(KeyCode::KeyW, Modifiers::empty()),
+            [Action::Translate]
+        );
+        assert_eq!(keys.tap(KeyCode::KeyR, Modifiers::empty()), [Action::Scale]);
+        assert_eq!(
+            keys.tap(KeyCode::KeyE, Modifiers::empty()),
+            [Action::Rotate]
+        );
+        assert_eq!(keys.tap(KeyCode::KeyR, Modifiers::CTRL), []);
     }
 
     /// A key this editor has no meaning for asks for nothing.
