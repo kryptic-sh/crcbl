@@ -13315,13 +13315,31 @@ crosses anything slower. Path-MTU discovery. Bandwidth rates for the netgraph
 - The risks the plan named: ack wraparound, RTO tuning and fragment loss, gated
   by the condition-simulator soak below.
 
-**What _is_ built is narrower and easy to overread:** `crcbl_net::auth` is
-per-session HMAC-SHA256 keyed with the handshake's 32-byte `ResumeToken`,
-truncated to 128 bits, plus a `ReplayWindow`. It authenticates and orders; it
-does not encrypt. The resume token travels in the clear inside the handshake's
-`Accept`, so an observer who watched the handshake holds the session key. The
-MAC defends against a spoofer who can send packets but did not see the
-handshake, and against nobody else.
+**Session crypto, as it stands (verified 2026-10-01 against the code; an earlier
+version of this paragraph said the session key travels in clear, which stopped
+being true when slice C landed).** Two layers, keyed independently. On UDP the
+outer one is `crcbl_net::seal`: each `UdpTransport::connect` and each hello
+`UdpListener` answers draws a fresh X25519 secret from `getrandom`, the hello
+and reply carry the two public keys, and `seal::agree_channel` runs
+`seal::keys::SessionKeys::derive` (SHA-256 transcript over `PROTOCOL_NAME`, the
+protocol id and both public keys, then Noise §4.3 HKDF) to one
+XChaCha20-Poly1305 key per direction; every datagram after the hello is sealed,
+nonce from direction plus the 64-bit seal counter, the clear prefix as
+associated data. The session handshake (`crcbl_net::handshake`'s `Hello` /
+`Accept`, resume token included) rides inside that seal. The inner layer is
+`crcbl_net::auth::SessionCrypto`, HMAC-SHA256 keyed by `SessionKey::derive` over
+the `ResumeToken`, which `crcbl_server`'s `PeerSession::adopt_session_key` and
+`crcbl_client` re-adopt on every `Accept`: a `Reaccepted` re-hello restarts that
+key (same token, fresh counters) on the same transport, whose seal keys and
+replay window carry on, so the datagrams sent before it still do not replay; a
+reconnect is a new `UdpTransport` and new X25519 keys. So an on-path observer of
+a UDP handshake learns neither key —
+`udp::tests::an_observer_of_the_whole_handshake_cannot_open_the_session` tries
+every 32-byte run of the clear handshake as a shared secret and as an X25519
+secret against either public key, and opens nothing. The resume token is in
+clear only on `InMemoryTransport`, which has no wire; Steam's transport encrypts
+on its own (below). What the outer layer still does not stop is an active man in
+the middle of the hello: no public key is authenticated.
 
 **DECIDED 2026-09-06 —** RustCrypto is taken when netcode starts —
 `x25519-dalek`, `chacha20poly1305`, `hmac` and `sha2` — and the Noise handshake

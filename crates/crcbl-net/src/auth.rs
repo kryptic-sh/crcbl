@@ -21,12 +21,17 @@
 //!
 //! # What this is and is not
 //!
-//! This authenticates *and* orders; it does not encrypt. Payloads stay
-//! readable on the wire — snapshot confidentiality is a separate decision that
-//! needs a key exchange the handshake does not have (the resume token travels
-//! in the clear inside `Accept`, so an on-path observer of the handshake
-//! learns the key). Against the threat this protocol actually names — a
-//! spoofer who can send packets but did not see the handshake — a shared-secret
+//! This authenticates *and* orders; it does not encrypt, and its key is only
+//! as secret as the transport keeps `Accept`, which carries the resume token
+//! the key derives from. **Confidentiality is the transport's job**, not this
+//! layer's: the native `udp` transport puts the whole session handshake,
+//! `Accept` included, under [`crate::seal`]'s AEAD keyed by its own X25519
+//! exchange, so an observer of a UDP link sees neither the token nor a
+//! payload; Steam's transport encrypts on its own; [`crate::InMemoryTransport`]
+//! has no wire. On a transport that sealed nothing, an observer of the
+//! handshake would hold this key. Against what is left once the transport has
+//! done its part — a peer that holds the transport's keys but not this
+//! session's, or a transport that admits anyone who can send — a shared-secret
 //! MAC is the right primitive.
 //!
 //! The MAC is HMAC-SHA256 truncated to 128 bits, on RustCrypto's `hmac` and

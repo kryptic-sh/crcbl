@@ -427,6 +427,115 @@ fn the_handshake_keys_both_sides_and_everything_after_it_is_sealed() {
     }
 }
 
+/// Every 32-byte run of `datagrams`, without repeats: what an observer can
+/// try as key material when all it has is what crossed the wire in clear.
+fn every_run_of_32(datagrams: &[&[u8]]) -> Vec<[u8; 32]> {
+    let mut runs: Vec<[u8; 32]> = datagrams
+        .iter()
+        .flat_map(|datagram| datagram.windows(32))
+        .map(|run| run.try_into().expect("a 32-byte window"))
+        .collect();
+    runs.sort_unstable();
+    runs.dedup();
+    runs
+}
+
+/// An observer that recorded the whole handshake and the session after it
+/// tries every key it can make from what it saw — each run of clear bytes as
+/// the shared secret under the real transcript, and as an X25519 secret
+/// against either public key — and opens none of the sealed datagrams, either
+/// way. The honest ends read each other, so the keys exist; the observer just
+/// cannot reach them.
+#[test]
+fn an_observer_of_the_whole_handshake_cannot_open_the_session() {
+    use crate::seal::keys::SessionKeys;
+    use crate::seal::{Role, agree_channel};
+
+    let clock = ManualClock::new();
+    let mut listener = listener(ListenerConfig::new(PROTOCOL), clock.clone());
+    let mut proxy = Proxy::new(listener.local_addr().expect("address"));
+    let (mut client, mut peer, mut wire) = connect_via(&mut listener, &mut proxy, clock);
+    client
+        .send_reliable(Message::reliable(b"upstream".to_vec()))
+        .expect("send");
+    peer.send_reliable(Message::reliable(b"downstream".to_vec()))
+        .expect("send");
+    let (mut at_peer, mut at_client) = (Vec::new(), Vec::new());
+    wait_until("a message both ways", || {
+        wire.extend(proxy.forward());
+        while let Some(message) = peer.recv().expect("up") {
+            at_peer.push(message.payload);
+        }
+        while let Some(message) = client.recv().expect("up") {
+            at_client.push(message.payload);
+        }
+        !at_peer.is_empty() && !at_client.is_empty()
+    });
+
+    let clear: Vec<&[u8]> = wire
+        .iter()
+        .map(|(_, datagram)| datagram.as_slice())
+        .filter(|datagram| datagram[0] != SEALED_TAG)
+        .collect();
+    let sealed = |way: Way| -> Vec<&[u8]> {
+        wire.iter()
+            .filter(|(seen, datagram)| *seen == way && datagram[0] == SEALED_TAG)
+            .map(|(_, datagram)| datagram.as_slice())
+            .collect()
+    };
+    let (upstream, downstream) = (sealed(Way::Up), sealed(Way::Down));
+    assert!(!upstream.is_empty() && !downstream.is_empty(), "{wire:?}");
+    let client_public = clear
+        .iter()
+        .find_map(|datagram| Hello::decode(datagram, HELLO_TAG, PROTOCOL))
+        .expect("the hello was seen")
+        .public_key;
+    let server_public = clear
+        .iter()
+        .find_map(|datagram| Hello::decode(datagram, HELLO_REPLY_TAG, PROTOCOL))
+        .expect("the reply was seen")
+        .public_key;
+
+    // Each attempt is one opener per direction, fresh, so no replay window
+    // carried over from another attempt can be what refuses a datagram.
+    let opens_any = |role: Role, opener: &mut crate::seal::Opener| {
+        let datagrams = match role {
+            Role::Server => &upstream,
+            Role::Client => &downstream,
+        };
+        datagrams
+            .iter()
+            .any(|datagram| opener.open(datagram).is_ok())
+    };
+    let candidates = every_run_of_32(&clear);
+    assert!(candidates.contains(&client_public) && candidates.contains(&server_public));
+    for candidate in &candidates {
+        for role in [Role::Server, Role::Client] {
+            let (_, mut opener) =
+                SessionKeys::derive(candidate, &client_public, &server_public, PROTOCOL)
+                    .into_channel(role);
+            assert!(
+                !opens_any(role, &mut opener),
+                "{candidate:?} as the shared secret opened {role:?}-bound traffic"
+            );
+            let guess = KeyPair::from_secret_bytes(*candidate);
+            for public in [client_public, server_public] {
+                if let Ok((_, mut opener)) = agree_channel(role, &guess, &public, PROTOCOL) {
+                    assert!(
+                        !opens_any(role, &mut opener),
+                        "{candidate:?} as a secret against {public:?} opened {role:?}-bound \
+                         traffic"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        (at_peer, at_client),
+        (vec![b"upstream".to_vec()], vec![b"downstream".to_vec()])
+    );
+}
+
 /// A reply forged by someone who did not see the hello — its nonce is not
 /// the hello's — is ignored, and the real reply still keys the link.
 #[test]

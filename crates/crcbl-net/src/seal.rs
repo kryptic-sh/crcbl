@@ -63,7 +63,7 @@
 mod agreement;
 mod channel;
 pub(crate) mod kdf;
-mod keys;
+pub(crate) mod keys;
 mod nonce;
 
 #[cfg(test)]
