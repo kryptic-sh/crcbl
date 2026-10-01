@@ -21,6 +21,18 @@ on shard on 2026-09-27.
 
 ## EW integration follow-ups
 
+**Decided 2026-10-01: both API requests are accepted, in the engine, in this
+order** — the slide contacts first (EW's forecasting repeats whole
+`move_and_slide` previews today, so it is the costlier workaround), then the
+candidate sweep. Both change `crcbl-phys`'s query and character code, so they
+land after the oriented-box and rotation work in flight there, one slice each,
+one green hash per API as with the earlier port requests; EW then migrates and
+deletes its preview logic. The candidate sweep is to return every hit along the
+straight sweep in fraction order (shape-level hit, normal and fraction), with
+the same solid/trigger, layer-mask and self-exclusion rules as the closest-hit
+query, rather than a callback filter — the ordered list is what both of EW's
+braking cases read, and a filter can be built on it but not the reverse.
+
 - **Expose ordered character-slide contacts for game motion forecasting.** EW's
   `src/controller_contact_forecast.rs` repeats shortened
   `CharacterController::move_and_slide` previews to recover normals that
