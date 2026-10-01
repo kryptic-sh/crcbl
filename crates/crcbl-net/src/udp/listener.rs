@@ -64,7 +64,7 @@ pub struct ListenerStats {
     pub pending: usize,
     /// Hellos answered with a reply and a pending handshake.
     pub hellos_answered: u64,
-    /// Hellos answered with a [`Challenge`](super::Challenge) instead: no
+    /// Hellos answered with a [`Challenge`] instead: no
     /// token, or one counted below as refused. Each held nothing and cost no
     /// key agreement.
     pub challenges: u64,
@@ -73,12 +73,12 @@ pub struct ListenerStats {
     /// before a restart — or not a token at all.
     pub tokens_forged: u64,
     /// Hellos whose token was authentic and past
-    /// [`TOKEN_LIFETIME`](super::TOKEN_LIFETIME).
+    /// [`TOKEN_LIFETIME`].
     pub tokens_expired: u64,
     /// Hellos whose token had already bought a handshake.
     pub tokens_spent: u64,
     /// Hellos with a valid token turned away because
-    /// [`MAX_SPENT_TOKENS`](super::MAX_SPENT_TOKENS) spent tokens were
+    /// [`MAX_SPENT_TOKENS`] spent tokens were
     /// already remembered.
     pub spent_full: u64,
     /// Hellos turned away because [`ListenerConfig::max_pending`] handshakes
