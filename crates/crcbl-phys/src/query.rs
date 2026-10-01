@@ -2,10 +2,23 @@
 //!
 //! These operate on the collider shapes directly (sphere, box, capsule) rather
 //! than on the BVH. They compute exact hit points, normals, and times of impact.
+//!
+//! The functions named for an AABB take a box whose axes are the world's; the
+//! ones named for a box ([`ray_vs_box`] and its siblings) take a
+//! [`BoxCollider`](crate::BoxCollider), which may be turned, and are what the
+//! query world answers its boxes with.
+
+mod boxes;
 
 use crate::broadphase::Ray;
 use crate::collider::{Aabb, Capsule, Sphere};
 use glam::DVec3;
+
+pub(crate) use self::boxes::contact_box;
+pub use self::boxes::{
+    capsule_penetration_vs_box, ray_vs_box, sphere_overlaps_box, swept_capsule_vs_box,
+    swept_sphere_vs_box,
+};
 
 // ---------------------------------------------------------------------------
 // Overlap queries

@@ -708,7 +708,7 @@ fn closest_between_segments(p1: DVec3, q1: DVec3, p2: DVec3, q2: DVec3) -> (DVec
 /// The squared distance from a segment to a convex set is convex along it, so
 /// a golden-section search finds its minimum; the two ends are compared as
 /// well, because the search's last bracket never quite reaches them.
-fn closest_on_segment_to_box(p0: DVec3, along: DVec3, half: DVec3) -> f64 {
+pub(crate) fn closest_on_segment_to_box(p0: DVec3, along: DVec3, half: DVec3) -> f64 {
     let distance = |t: f64| {
         let p = p0 + along * t;
         (p - p.clamp(-half, half)).length_squared()

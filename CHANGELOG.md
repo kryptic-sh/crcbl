@@ -16,6 +16,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_phys::BoxCollider` gained a public `rotation`**, a unit quaternion
+  turning the box about its centre (see Added), so a struct literal naming every
+  field must add it; `BoxCollider::new` makes an unturned box as before.
+
 - **`crcbl::registry::Placement::placement` returns `Option<OrientedBox>`**, not
   `Option<(DVec3, DVec3)>`, and `Registry::placement` answers the same: a
   centre, half extents along the box's own axes, and a rotation (see Added). An
@@ -515,6 +519,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **Turned boxes in `crcbl_phys`'s query world.** `BoxCollider::with_rotation`
+  turns a box, and `PhysicsWorld`'s rays, sphere and capsule sweeps, sphere
+  overlaps, capsule push-outs and lying-capsule queries answer for the turned
+  box itself rather than the box unturned; its broadphase holds the world-axis
+  box around it (`BoxCollider::aabb`). The shape-level forms are public:
+  `ray_vs_box`, `swept_sphere_vs_box`, `sphere_overlaps_box`,
+  `swept_capsule_vs_box` and `capsule_penetration_vs_box`. A ray, a sphere sweep
+  and a sphere overlap are answered exactly in the box's frame; an upright
+  capsule, which is not upright there, is swept by the contact pipeline's
+  conservative advancement and stops a little short of the contact. An unturned
+  box gives the answers it gave before, to the bit.
 
 - **The editor's rotate gizmo.** E shows a ring about each world axis (it put a
   refusal on the status line before), hit-tested against the drawn ring; a drag
@@ -4283,6 +4299,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **A `PhysicsSystem` body's box collider turns with the body in the query
+  world**, as it already did in the contact solver: `ColliderComponent::Box`'s
+  offset and faces are turned by the body's rotation, so a ray, sweep or overlap
+  through `PhysicsSystem::world` meets a turned body's box where it is drawn,
+  where it met the unturned box at the unturned offset before. Bodies that never
+  turn are unaffected. Capsules and spheres there are unchanged: a capsule stays
+  upright along the world's `Y`, and both keep their offset unturned.
 
 - **The same `SceneEntityId` in two chunk files is one entity in two systems**,
   where it used to be refused as `ScnError::DuplicateId`. The same id twice in

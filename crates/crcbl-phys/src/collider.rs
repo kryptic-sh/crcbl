@@ -10,7 +10,7 @@
 //! boundary (camera-relative transforms).
 
 use crcbl_core::bounds::{max_lanes_d, min_lanes_d};
-use glam::DVec3;
+use glam::{DMat3, DQuat, DVec3};
 
 // ---------------------------------------------------------------------------
 // Aabb
@@ -295,18 +295,27 @@ impl Sphere {
 // BoxCollider
 // ---------------------------------------------------------------------------
 
-/// An axis-aligned box collider (not oriented — orientation is a rotation of
-/// the ECS transform system, not of the collider shape itself).
+/// A box collider: a centre, half extents along the box's own axes, and how
+/// those axes are turned from the world's.
+///
+/// [`BoxCollider::new`] makes an unturned box, whose axes are the world's, and
+/// [`BoxCollider::with_rotation`] turns one. The query world answers rays,
+/// sweeps and overlaps against the turned box itself, not the world-axis box
+/// around it — see [`crate::query::ray_vs_box`] and its siblings — and its
+/// broadphase holds that world-axis box, [`aabb`](Self::aabb).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoxCollider {
     /// Centre in local simulation space.
     pub centre: DVec3,
-    /// Half-width on each axis, in metres.
+    /// Half-width along each of the box's own axes, in metres.
     pub half_extents: DVec3,
+    /// How the box's axes are turned from the world's: a unit quaternion,
+    /// [`DQuat::IDENTITY`] for a box whose axes are the world's.
+    pub rotation: DQuat,
 }
 
 impl BoxCollider {
-    /// Create a box collider.
+    /// Create an unturned box collider: its axes are the world's.
     ///
     /// # Panics
     ///
@@ -321,17 +330,80 @@ impl BoxCollider {
         Self {
             centre,
             half_extents,
+            rotation: DQuat::IDENTITY,
         }
     }
 
-    /// AABB of this box (same as the box itself for an axis-aligned collider).
+    /// This box turned by `rotation` about its centre, which must be a unit
+    /// quaternion.
+    #[inline]
+    #[must_use]
+    pub const fn with_rotation(self, rotation: DQuat) -> Self {
+        Self { rotation, ..self }
+    }
+
+    /// The smallest world-axis box holding this one: the box itself for an
+    /// unturned collider, and for a turned one its half extents projected onto
+    /// each world axis (the absolute rotation matrix times the extents,
+    /// Ericson, _Real-Time Collision Detection_ §4.2.6).
+    ///
+    /// Exactly `centre ± half_extents` when unturned, an infinite extent
+    /// included, which the projection would turn into `0 · ∞ = NaN`.
     #[inline]
     #[must_use]
     pub fn aabb(&self) -> Aabb {
-        Aabb {
-            min: self.centre - self.half_extents,
-            max: self.centre + self.half_extents,
+        if !self.is_turned() {
+            return Aabb {
+                min: self.centre - self.half_extents,
+                max: self.centre + self.half_extents,
+            };
         }
+        let turned = DMat3::from_quat(self.rotation);
+        let reach = DVec3::new(
+            turned.row(0).abs().dot(self.half_extents),
+            turned.row(1).abs().dot(self.half_extents),
+            turned.row(2).abs().dot(self.half_extents),
+        );
+        Aabb {
+            min: self.centre - reach,
+            max: self.centre + reach,
+        }
+    }
+
+    /// Whether the box's axes are not the world's. An unturned box is answered
+    /// by the world-axis queries directly, so its answers are the ones it had
+    /// before boxes could turn, to the bit.
+    #[inline]
+    #[must_use]
+    pub fn is_turned(&self) -> bool {
+        self.rotation != DQuat::IDENTITY
+    }
+
+    /// The box at the origin with its own axes, as a world-axis box: what a
+    /// query moved into the box's frame ([`local_point`](Self::local_point)) is
+    /// tested against.
+    #[inline]
+    #[must_use]
+    pub(crate) fn local_aabb(&self) -> Aabb {
+        Aabb {
+            min: -self.half_extents,
+            max: self.half_extents,
+        }
+    }
+
+    /// `point` in the box's own frame: relative to its centre, turned back by
+    /// its rotation.
+    #[inline]
+    #[must_use]
+    pub(crate) fn local_point(&self, point: DVec3) -> DVec3 {
+        self.rotation.inverse() * (point - self.centre)
+    }
+
+    /// `local`, a point in the box's own frame, back in the world.
+    #[inline]
+    #[must_use]
+    pub(crate) fn world_point(&self, local: DVec3) -> DVec3 {
+        self.centre + self.rotation * local
     }
 }
 
