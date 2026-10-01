@@ -449,3 +449,78 @@ fn an_edit_reports_its_path_and_old_value_and_set_path_undoes_it() {
         "the path the edit reported does not read back what it replaced"
     );
 }
+
+/// **The inspection names the leaf under the pointer and the leaf holding
+/// focus**, by the path an edit at it would carry — a plain row, a nested one,
+/// and one axis of an override's vector row — and names nothing over a label.
+#[test]
+fn the_inspection_names_the_hovered_and_focused_leaf_by_its_path() {
+    let overrides = Overrides::vectors();
+    let mut ui = Ui::new();
+    let mut value = surface();
+    let still = page(
+        &mut ui,
+        idle(),
+        NavInput::default(),
+        &mut value,
+        Some(&overrides),
+    );
+    assert_eq!((still.hovered, still.focused), (None, None));
+    open(&mut ui, "Motion", &mut value, Some(&overrides));
+
+    for (label, path) in [("Height", "height"), ("Speed", "motion.speed")] {
+        let on = centre(&ui, field_key(&ui, label));
+        let over = page(
+            &mut ui,
+            PointerInput::hovering(on),
+            NavInput::default(),
+            &mut value,
+            Some(&overrides),
+        );
+        assert_eq!(over.hovered.as_deref(), Some(path), "over {label}");
+    }
+
+    // The vector row's second axis: its widget is the second `.inspector-axis`
+    // block's last child.
+    let axes: Vec<NodeKey> = (0..ui.nodes.len())
+        .filter(|&index| selector_of(&ui, index).contains("inspector-axis-label"))
+        .map(|index| ui.nodes[index + 1].key)
+        .collect();
+    let on = centre(&ui, axes[1]);
+    let over = page(
+        &mut ui,
+        PointerInput::hovering(on),
+        NavInput::default(),
+        &mut value,
+        Some(&overrides),
+    );
+    assert_eq!(over.hovered.as_deref(), Some("position.1"));
+
+    // A label is not a value.
+    let label = (0..ui.nodes.len())
+        .find(|&index| selector_of(&ui, index).contains("inspector-label"))
+        .map(|index| ui.nodes[index].key)
+        .expect("a row was built");
+    let on = centre(&ui, label);
+    let over = page(
+        &mut ui,
+        PointerInput::hovering(on),
+        NavInput::default(),
+        &mut value,
+        Some(&overrides),
+    );
+    assert_eq!(over.hovered, None, "a label named a field");
+
+    // Focus stays with the field clicked once the pointer has gone.
+    let on = centre(&ui, field_key(&ui, "Visible"));
+    click(&mut ui, on, &mut value, Some(&overrides));
+    let away = page(
+        &mut ui,
+        idle(),
+        NavInput::default(),
+        &mut value,
+        Some(&overrides),
+    );
+    assert_eq!(away.hovered, None);
+    assert_eq!(away.focused.as_deref(), Some("visible"));
+}

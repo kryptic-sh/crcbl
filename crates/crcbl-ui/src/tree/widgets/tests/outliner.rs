@@ -646,3 +646,92 @@ fn setting_the_offset_brings_a_row_outside_the_window_into_it() {
         clamped.built,
     );
 }
+
+/// **Two clicks on one row close enough in time are a double-click, for the
+/// frame the second lands** — and two clicks too far apart, or on two rows,
+/// are not.
+#[test]
+fn a_second_click_on_a_row_soon_enough_is_a_double_click() {
+    use crate::tree::{DOUBLE_CLICK_TIME, TextInput};
+
+    let mut ui = Ui::new();
+    sheet(&mut ui);
+    let mut state = OutlinerState::new();
+    state.set_expanded(id(0), true);
+    // A frame `dt` long, so the clock the double-click is timed by moves.
+    let step = |ui: &mut Ui, state: &mut OutlinerState, pointer, dt| {
+        let text = TextInput {
+            dt,
+            ..TextInput::default()
+        };
+        frame_with_text(ui, pointer, NavInput::default(), text, |ui| {
+            let mut built = Vec::new();
+            let outliner = ui.outliner_with(
+                "#tree",
+                state,
+                &options(SelectMode::Replace),
+                fixture,
+                |ui, row| {
+                    built.push(*row);
+                    ui.span(".label", "x", &[]);
+                },
+            );
+            OutlinerPage {
+                outliner,
+                built,
+                nodes: 0,
+            }
+        })
+    };
+    let short = DOUBLE_CLICK_TIME / 4;
+    let first = step(&mut ui, &mut state, idle(), short);
+    let at = |ui: &Ui, page: &OutlinerPage, item| {
+        let (min, max) = rect(ui, row_key(ui, page, id(item)));
+        Vec2::new(max.x - 2.0, (min.y + max.y) * 0.5)
+    };
+    let (one, five) = (at(&ui, &first, 1), at(&ui, &first, 5));
+    let click = |ui: &mut Ui, state: &mut OutlinerState, on, dt| {
+        step(ui, state, press(on), dt);
+        step(ui, state, release(on), dt);
+        state.double_clicked()
+    };
+
+    assert_eq!(click(&mut ui, &mut state, one, short), None, "one click");
+    assert_eq!(
+        click(&mut ui, &mut state, one, short),
+        Some(id(1)),
+        "a second click soon after was not a double-click"
+    );
+    step(&mut ui, &mut state, idle(), short);
+    assert_eq!(state.double_clicked(), None, "it lasted past its frame");
+
+    assert_eq!(
+        click(&mut ui, &mut state, one, short),
+        None,
+        "a third click"
+    );
+    assert_eq!(
+        click(&mut ui, &mut state, five, short),
+        None,
+        "clicks on two rows made a double-click"
+    );
+    assert_eq!(click(&mut ui, &mut state, five, DOUBLE_CLICK_TIME), None);
+    assert_eq!(
+        click(&mut ui, &mut state, five, DOUBLE_CLICK_TIME),
+        None,
+        "clicks too far apart made a double-click"
+    );
+
+    // Two clicks on one spot that are on two rows, because opening `b` put
+    // its child `c` where `e` was.
+    assert_eq!(click(&mut ui, &mut state, five, DOUBLE_CLICK_TIME), None);
+    state.set_expanded(id(2), true);
+    // Laid out once open, so the press lands on the row now under it.
+    step(&mut ui, &mut state, idle(), short);
+    assert_eq!(
+        click(&mut ui, &mut state, five, short),
+        None,
+        "clicks on one spot over two rows made a double-click"
+    );
+    assert!(state.is_selected(id(3)), "the second click was not on `c`");
+}

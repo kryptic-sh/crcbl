@@ -72,6 +72,15 @@
 //! leaves the field alone and reports nothing, and so does a write that landed
 //! on the value already there.
 //!
+//! # Which field a person means
+//!
+//! [`Inspection::hovered`] and [`Inspection::focused`] name the leaf whose
+//! widget the pointer is over and the one that holds the tree's focus, by the
+//! same path an edit carries — so a caller can act on "this field" without
+//! knowing how the rows are laid out: copy its value, paste one over it. Each
+//! is the leaf's widget alone; a label, a header and the gaps between rows name
+//! nothing, because nothing there is a value.
+//!
 //! # Per-type overrides
 //!
 //! [`Overrides`] is the caller's, built once and handed to
@@ -134,6 +143,33 @@ pub struct Inspection {
     /// The edits this frame's rows made, in the order they made them; empty
     /// when nothing moved.
     pub edits: Vec<FieldEdit>,
+    /// The path of the leaf whose widget the pointer is over this frame, if
+    /// it is over one; see the module docs.
+    pub hovered: Option<String>,
+    /// The path of the leaf whose widget holds the tree's focus this frame, if
+    /// one does.
+    pub focused: Option<String>,
+}
+
+/// What a frame's rows report as they are built: the edits they made, and
+/// which leaf's widget is under the pointer and which holds focus.
+#[derive(Debug, Default)]
+struct Report {
+    edits: Vec<FieldEdit>,
+    hovered: Option<String>,
+    focused: Option<String>,
+}
+
+impl Report {
+    /// Records that the widget editing the leaf at `path` answered `response`.
+    fn locate(&mut self, path: &str, response: &Response) {
+        if response.hovered {
+            self.hovered = Some(path.to_owned());
+        }
+        if response.focused {
+            self.focused = Some(path.to_owned());
+        }
+    }
 }
 
 /// A row builder registered for one type; see [`Overrides`].
@@ -292,8 +328,9 @@ pub struct FieldRow<'a> {
     pub step: Option<f64>,
     /// The dotted path from the inspected value to [`value`](Self::value).
     path: &'a str,
-    /// Where an edit this row makes is recorded.
-    edits: &'a mut Vec<FieldEdit>,
+    /// Where an edit this row makes is recorded, and which of its widgets is
+    /// hovered or focused.
+    report: &'a mut Report,
 }
 
 impl fmt::Debug for FieldRow<'_> {
@@ -340,12 +377,19 @@ impl FieldRow<'_> {
         if after == before {
             return false;
         }
-        self.edits.push(FieldEdit {
+        self.report.edits.push(FieldEdit {
             path: joined(self.path, at),
             before,
             after,
         });
         true
+    }
+
+    /// Says that `response` is the widget editing the leaf `at` names inside
+    /// this field, so [`Inspection::hovered`] and [`Inspection::focused`] can
+    /// name it. An override that never calls this leaves its widgets nameless.
+    pub fn locate(&mut self, at: &str, response: &Response) {
+        self.report.locate(&joined(self.path, at), response);
     }
 }
 
@@ -431,9 +475,10 @@ fn vector_row(ui: &mut Ui, field: &mut FieldRow<'_>, named: bool) {
             // whose state must follow the component rather than its position.
             ui.block_keyed(*axis, ".inspector-axis", &[], |ui| {
                 ui.span(".inspector-axis-label", *axis, &[]);
-                moved = ui
-                    .drag_value(".inspector-field", &mut number, min..=max, step, step)
-                    .changed;
+                let response =
+                    ui.drag_value(".inspector-field", &mut number, min..=max, step, step);
+                moved = response.changed;
+                field.locate(&segment, &response);
             });
             if moved {
                 field.set(&segment, written(before.kind(), number));
@@ -464,7 +509,7 @@ impl Ui {
         options: &InspectorOptions<'_>,
     ) -> Inspection {
         let selector = typed("inspector", selector);
-        let mut edits = Vec::new();
+        let mut report = Report::default();
         let mut path = String::new();
         let response = self.block(&selector, &[], |ui| {
             // A composite is its rows. A leaf handed in on its own, and any
@@ -479,12 +524,17 @@ impl Ui {
                 .overrides
                 .is_some_and(|overrides| overrides.of(value).is_some());
             if overridden || matches!(value.kind(), Kind::Leaf(_)) {
-                ui.inspect_row(value, root, &mut path, options, &mut edits);
+                ui.inspect_row(value, root, &mut path, options, &mut report);
             } else {
-                ui.inspect_children(value, root, &mut path, options, &mut edits);
+                ui.inspect_children(value, root, &mut path, options, &mut report);
             }
         });
-        Inspection { response, edits }
+        Inspection {
+            response,
+            edits: report.edits,
+            hovered: report.hovered,
+            focused: report.focused,
+        }
     }
 
     /// One row per child of `value`: its fields, or its elements by index,
@@ -495,7 +545,7 @@ impl Ui {
         parent: Row<'_>,
         path: &mut String,
         options: &InspectorOptions<'_>,
-        edits: &mut Vec<FieldEdit>,
+        report: &mut Report,
     ) {
         match value.kind() {
             Kind::Struct | Kind::Enum => {
@@ -512,7 +562,7 @@ impl Ui {
                         range: field.range,
                         step: field.step,
                     };
-                    self.inspect_row(child, row, path, options, edits);
+                    self.inspect_row(child, row, path, options, report);
                 }
             }
             Kind::List { len } => {
@@ -530,7 +580,7 @@ impl Ui {
                         range: parent.range,
                         step: parent.step,
                     };
-                    self.inspect_row(child, row, path, options, edits);
+                    self.inspect_row(child, row, path, options, report);
                 }
             }
             Kind::Leaf(_) => {}
@@ -546,7 +596,7 @@ impl Ui {
         row: Row<'_>,
         path: &mut String,
         options: &InspectorOptions<'_>,
-        edits: &mut Vec<FieldEdit>,
+        report: &mut Report,
     ) {
         let base = path.len();
         if !row.name.is_empty() {
@@ -563,12 +613,12 @@ impl Ui {
                 range: row.range,
                 step: row.step,
                 path,
-                edits,
+                report,
             };
             builder(self, &mut field);
         } else {
             match child.kind() {
-                Kind::Leaf(kind) => self.leaf_row(child, row, kind, path, options, edits),
+                Kind::Leaf(kind) => self.leaf_row(child, row, kind, path, options, report),
                 Kind::Struct | Kind::Enum | Kind::List { .. } => {
                     // An enum describes its active variant's fields and no
                     // others, so the header names the variant the rows are of.
@@ -577,7 +627,7 @@ impl Ui {
                         None => row.label.to_owned(),
                     };
                     self.collapsing(".inspector-group", &title, |ui| {
-                        ui.inspect_children(child, row, path, options, edits);
+                        ui.inspect_children(child, row, path, options, report);
                     });
                 }
             }
@@ -596,7 +646,7 @@ impl Ui {
         kind: ValueKind,
         path: &str,
         options: &InspectorOptions<'_>,
-        edits: &mut Vec<FieldEdit>,
+        report: &mut Report,
     ) {
         let Some(before) = child.get() else {
             return;
@@ -604,21 +654,21 @@ impl Ui {
         let float_step = options.float_step();
         self.block(".inspector-row", &[], |ui| {
             ui.span(".inspector-label", row.label, &[]);
-            let new = match kind {
+            let (response, new) = match kind {
                 ValueKind::Bool => {
                     let mut on = matches!(before, Value::Bool(true));
-                    ui.checkbox(".inspector-field", "", &mut on)
-                        .changed
-                        .then_some(Value::Bool(on))
+                    let response = ui.checkbox(".inspector-field", "", &mut on);
+                    let new = response.changed.then_some(Value::Bool(on));
+                    (response, new)
                 }
                 ValueKind::Text => {
                     let mut text = match &before {
                         Value::Text(text) => text.clone(),
                         _ => String::new(),
                     };
-                    ui.text_input(".inspector-field", &mut text)
-                        .changed
-                        .then_some(Value::Text(text))
+                    let response = ui.text_input(".inspector-field", &mut text);
+                    let new = response.changed.then_some(Value::Text(text));
+                    (response, new)
                 }
                 ValueKind::Int | ValueKind::UInt | ValueKind::Float => {
                     let step = row.step.unwrap_or(match kind {
@@ -627,13 +677,15 @@ impl Ui {
                     }) as f32;
                     let (min, max) = bounds(row.range);
                     let mut number = shown(&before);
-                    ui.drag_value(".inspector-field", &mut number, min..=max, step, step)
-                        .changed
-                        .then(|| written(kind, number))
+                    let response =
+                        ui.drag_value(".inspector-field", &mut number, min..=max, step, step);
+                    let new = response.changed.then(|| written(kind, number));
+                    (response, new)
                 }
             };
+            report.locate(path, &response);
             if let Some(new) = new {
-                write_leaf(child, path, &new, edits);
+                write_leaf(child, path, &new, &mut report.edits);
             }
         });
     }

@@ -20,6 +20,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Name` and `NoNames`, for the names file (see Added); an exhaustive `match` on
   it must handle them.
 
+- **`crcbl_ui::tree::Inspection` has two more fields**, `hovered` and `focused`
+  (see Added), so a struct literal of it must name them.
+
 - **Physics transforms replicate quantized, and the protocol version is 6**
   (`ProtocolCompatibility::DEFAULT`). `PhysicsSystem::replicate` writes each
   transform as `Transform::encode_wire`: 16 bytes — each position axis as 24-bit
@@ -489,6 +492,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   name and a declared file that names nothing; a save refuses a name whose
   entity is gone. `Scene::entity_name`, `entity_names` and `set_entity_name` are
   the runtime half.
+
+- **`crcbl_ui`'s inspector says which field is meant, and its outliner sees a
+  double-click.** `Inspection::hovered` and `Inspection::focused` name the leaf
+  whose widget is under the pointer and the one holding focus, by the path an
+  edit carries (an override reports its widgets through `FieldRow::locate`).
+  `OutlinerState::double_clicked` is the row a second click within
+  `DOUBLE_CLICK_TIME` and `DRAG_THRESHOLD` of the first landed on, timed by the
+  frames' own `TextInput::dt`.
 
 - **The editor has a status line** under its panes. It reads "Ready" until
   something happens, then shows the last refusal (a save with nowhere to go, a

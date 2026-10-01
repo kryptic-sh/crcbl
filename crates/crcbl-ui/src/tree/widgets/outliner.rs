@@ -41,15 +41,26 @@
 //!   modifier, mapped by the caller from its own input exactly as
 //!   [`NavInput`](crate::tree::NavInput) is: `Toggle` adds or removes one row,
 //!   `Range` takes every row between the anchor and the one acted on.
+//! * **A double-click** on a row — a second click on it within
+//!   [`DOUBLE_CLICK_TIME`] and [`DRAG_THRESHOLD`] of the first, as a text
+//!   input's word selection is timed — is [`OutlinerState::double_clicked`]
+//!   for the frame it lands, which is the gesture a file manager renames or
+//!   opens an item with. The tree reads no wall clock, so the time is the
+//!   frames' own [`TextInput::dt`](crate::tree::TextInput), summed.
 
 use std::collections::HashSet;
 use std::panic::Location;
+use std::time::Duration;
+
+use glam::Vec2;
 
 use super::list::{row_inline, row_span};
+use super::text_input::DOUBLE_CLICK_TIME;
 use super::{Ui, WidgetState, typed};
 use crate::style::{Declaration, PseudoClasses, Sides};
 use crate::tree::{
-    Behavior, KeySource, Length, LengthAuto, NodeKey, Overflow, Response, Role, hash_of,
+    Behavior, DRAG_THRESHOLD, KeySource, Length, LengthAuto, NodeKey, Overflow, Response, Role,
+    hash_of,
 };
 
 /// How far one level of depth indents a row, in pixels:
@@ -131,6 +142,11 @@ pub struct OutlinerState {
     anchor: Option<OutlinerId>,
     /// Whether the rows must be flattened again before they are read.
     stale: bool,
+    /// The last click on a row that did not complete a double-click: which
+    /// row, when on the tree's text clock, and where.
+    last_click: Option<(OutlinerId, Duration, Vec2)>,
+    /// The row this frame's click made a double-click of.
+    double_clicked: Option<OutlinerId>,
 }
 
 impl Default for OutlinerState {
@@ -149,7 +165,16 @@ impl OutlinerState {
             rows: Vec::new(),
             anchor: None,
             stale: true,
+            last_click: None,
+            double_clicked: None,
         }
+    }
+
+    /// The row a click completed a double-click on during the last
+    /// [`Ui::outliner`] call, if one did; see the module docs.
+    #[must_use]
+    pub const fn double_clicked(&self) -> Option<OutlinerId> {
+        self.double_clicked
     }
 
     /// The flattened visible rows, in the order they are shown.
@@ -454,6 +479,7 @@ impl Ui {
         ];
         let disabled = self.building_disabled();
         let (mut focused, mut changed) = (None, false);
+        state.double_clicked = None;
         self.block(".outliner-content", &content, |ui| {
             // The focused row outside the window, built in its place in tree
             // order so that next and previous still walk the rows in order.
@@ -475,6 +501,7 @@ impl Ui {
                 let (row_key, clicked) = ui.outliner_row(index, item, state, options, height, row);
                 if clicked && !disabled {
                     changed |= state.select(item.id, options.select);
+                    ui.note_click(state, item.id);
                 }
                 if ui.focused() == Some(row_key) {
                     focused = Some(index);
@@ -482,6 +509,23 @@ impl Ui {
             }
         });
         (focused, changed)
+    }
+
+    /// Records a click on the row `id`, and makes it
+    /// [`OutlinerState::double_clicked`] when it is the second of a pair.
+    fn note_click(&self, state: &mut OutlinerState, id: OutlinerId) {
+        let (now, at) = (self.text_clock, self.pointer.pos);
+        let second = state.last_click.is_some_and(|(row, when, from)| {
+            row == id
+                && now.saturating_sub(when) <= DOUBLE_CLICK_TIME
+                && (at - from).length_squared() <= DRAG_THRESHOLD * DRAG_THRESHOLD
+        });
+        if second {
+            state.double_clicked = Some(id);
+            state.last_click = None;
+        } else {
+            state.last_click = Some((id, now, at));
+        }
     }
 
     /// One row of an outliner, inside its content block: the row block, its
