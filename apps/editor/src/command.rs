@@ -59,17 +59,24 @@
 //! [`Batch`](EditCommand::Batch) of spawns, one per entity the clipboard holds
 //! ([`crate::Document::paste`]), so one undo takes the whole paste back.
 //!
+//! # Names
+//!
+//! [`Rename`](EditCommand::Rename) names an entity, or takes its name away,
+//! and its inverse is the rename back to the name it had — the scene's
+//! `names.ron` ([`crcbl::scene::scn::names`]) is what it writes. A spawn
+//! carries a name too, so a deleted entity comes back under its name as well as
+//! its id; a **duplicate** carries none, because a name says which entity this
+//! is and the copy is another one ([`crate::Document::duplicate`]).
+//!
 //! # What task 4 does not have yet
 //!
-//! The plan's task 4 lists about ten commands for the MVP. Three of them wait on
+//! The plan's task 4 lists about ten commands for the MVP. Two of them wait on
 //! something outside this crate, and an arm nothing could apply would be an
 //! inverse nothing could show was right:
 //!
-//! * **rename** — an entity has no name: the scene format files it under a bare
-//!   [`SceneEntityId`] and a component has no name field in common.
 //! * **attach and detach system data** — the format cannot hold one entity in
-//!   two systems, which is decided when the towers port first needs it
-//!   (`docs/plan/08-editor.md`, 2026-09-30).
+//!   two systems yet. Decided 2026-10-01 that it will, keyed by the shared
+//!   [`SceneEntityId`], as the next format slice (`docs/plan/08-editor.md`).
 //! * **scene load and save markers** — the log's position against the position
 //!   of the last save already is the dirty marker, and a load replaces the
 //!   document and its log wholesale, so there is nothing in between for a
@@ -85,7 +92,7 @@
 //! [`Value`]: crcbl::reflect::Value
 
 use crcbl::reflect::{PathError, Reflect, Value, get_path, set_path};
-use crcbl::scene::scn::SceneEntityId;
+use crcbl::scene::scn::{EntityName, SceneEntityId};
 
 /// One undoable edit, as a value that could be sent rather than performed.
 ///
@@ -116,12 +123,25 @@ pub enum EditCommand {
         system: String,
         /// Its component, as one chunk row's RON text.
         row: String,
+        /// What it is called, or [`None`] for an unnamed entity.
+        name: Option<EntityName>,
     },
 
-    /// Remove `entity` from the scene, component and all.
+    /// Remove `entity` from the scene, component, name and all.
     Delete {
         /// Whose.
         entity: SceneEntityId,
+    },
+
+    /// Name `entity` `name`, or take its name away with [`None`].
+    ///
+    /// Its inverse is the rename to the name the entity had, read as it is
+    /// applied — which is how "old and new name" are both in the log.
+    Rename {
+        /// Whose.
+        entity: SceneEntityId,
+        /// The name it is given.
+        name: Option<EntityName>,
     },
 
     /// Several commands applied in order as one entry of the log, so one undo

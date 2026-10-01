@@ -88,7 +88,7 @@ use crcbl::text_input::TextPump;
 use crcbl::ui::tree::{DockLayout, SelectMode};
 
 use crate::args::Options;
-use crate::clipboard::Paste;
+use crate::clipboard::{Paste, PasteTarget};
 use crate::command::EditCommand;
 use crate::document::{Document, EditError, PlayState};
 use crate::gizmo;
@@ -174,7 +174,7 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     actions: ActionMap,
     /// The typing and the clipboard, for the inspector's text fields.
     text_pump: TextPump,
-    /// An entity paste waiting on the clipboard's answer.
+    /// A paste waiting on the clipboard's answer, and what it is for.
     paste: Paste,
     /// Where the pointer is and whether its button is held.
     ///
@@ -556,8 +556,8 @@ impl<S: Shell + ?Sized> Editor<S> {
         for action in asked {
             self.act(&action);
         }
-        if let Some(content) = self.paste.take() {
-            self.paste_content(&content);
+        if let Some((target, content)) = self.paste.take() {
+            self.paste_content(&target, &content);
         }
         self.update_title();
 
@@ -877,11 +877,27 @@ impl<S: Shell + ?Sized> Editor<S> {
             }),
             Action::Copy => self.copy(),
             Action::Paste => {
-                if let Err(error) = self.paste.ask(self.shell.as_mut(), self.window) {
+                // Decided now, from where the keyboard is as the key goes
+                // down: the answer arrives frames later.
+                let target = self
+                    .panels
+                    .field_target()
+                    .map_or(PasteTarget::Entities, |field| PasteTarget::Field {
+                        entity: field.entity,
+                        path: field.path.clone(),
+                    });
+                if let Err(error) = self.paste.ask(self.shell.as_mut(), self.window, target) {
                     crcbl::log::warn!("editor: the clipboard refused the paste — {error}");
                 }
                 Ok(())
             }
+            Action::Rename => match self.document.selected() {
+                Some(id) => self.panels.begin_rename(&self.document, id),
+                None => {
+                    self.panels.set_status(RENAME_NOTHING, Tone::Info);
+                    Ok(())
+                }
+            },
             Action::Translate => {
                 self.choose_mode(gizmo::Mode::Translate);
                 Ok(())
@@ -987,39 +1003,55 @@ impl<S: Shell + ?Sized> Editor<S> {
         Ok(())
     }
 
-    /// Offers the selection to the clipboard, as the engine's RON and as text.
+    /// Offers the inspector field the keyboard means to the clipboard, as
+    /// plain text — or, with no such field, the selection, as the engine's
+    /// RON and as text. See [`Panels::field_target`].
     ///
     /// A clipboard that refuses is logged: a backend with none, or a window
     /// system that wants a recent input event first.
     fn copy(&mut self) -> Result<(), EditError> {
+        if let Some(field) = self.panels.field_target().cloned() {
+            let text = self.document.copy_field(field.entity, &field.path)?;
+            self.offer(&[ClipboardOffer::text(&text)]);
+            self.panels
+                .set_status(format!("Copied `{}`: {text}", field.path), Tone::Info);
+            return Ok(());
+        }
         let Some(id) = self.document.selected() else {
             crcbl::log::info!("editor: nothing is selected");
             return Ok(());
         };
         let text = self.document.copy(id)?;
-        let offers = [ClipboardOffer::ron(&text), ClipboardOffer::text(&text)];
-        if let Err(error) = self.shell.clipboard_offer(self.window, &offers) {
-            crcbl::log::warn!("editor: the clipboard refused the copy — {error}");
-        }
+        self.offer(&[ClipboardOffer::ron(&text), ClipboardOffer::text(&text)]);
         Ok(())
     }
 
-    /// Spawns the entities a paste's answer names, and selects the first.
-    fn paste_content(&mut self, content: &ClipboardContent) {
+    /// Hands `offers` to the shell's clipboard, logging a refusal.
+    fn offer(&mut self, offers: &[ClipboardOffer<'_>]) {
+        if let Err(error) = self.shell.clipboard_offer(self.window, offers) {
+            crcbl::log::warn!("editor: the clipboard refused the copy — {error}");
+        }
+    }
+
+    /// Carries out a paste whose answer arrived: spawns the entities it names
+    /// and selects the first, or writes its value into the field it was asked
+    /// for. A refusal is on the status line, and changes nothing.
+    fn paste_content(&mut self, target: &PasteTarget, content: &ClipboardContent) {
         let Some(text) = content.text() else {
             crcbl::log::info!("editor: the clipboard holds no text to paste");
             return;
         };
-        match self.document.paste(text) {
-            Ok(pasted) => {
+        let outcome = match target {
+            PasteTarget::Entities => self.document.paste(text).map(|pasted| {
                 if let Some(&first) = pasted.first() {
                     self.document.select(Some(first));
                 }
-            }
-            Err(error) => {
-                crcbl::log::warn!("editor: {error}");
-                self.panels.set_status(error.to_string(), Tone::Warning);
-            }
+            }),
+            PasteTarget::Field { entity, path } => self.document.paste_field(*entity, path, text),
+        };
+        if let Err(error) = outcome {
+            crcbl::log::warn!("editor: {error}");
+            self.panels.set_status(error.to_string(), Tone::Warning);
         }
     }
 
@@ -1239,6 +1271,9 @@ impl<S: Shell + ?Sized> Editor<S> {
 
 /// What the status line says once play mode has stopped.
 const STOPPED: &str = "Stopped: the scene is back as it was when play began";
+
+/// What the status line says when a rename is asked for with nothing selected.
+const RENAME_NOTHING: &str = "Rename: select an entity to name it";
 
 /// What the status line says once play mode is paused.
 const PAUSED: &str = "Paused: F6 resumes, F5 stops and puts the scene back";

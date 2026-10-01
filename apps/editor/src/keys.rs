@@ -103,6 +103,10 @@ pub const PLAY: &str = "editor_play";
 /// Pause play mode, or resume it: F6, beside it.
 pub const PAUSE: &str = "editor_pause";
 
+/// Rename the selection in its outliner row: F2, the key every file manager
+/// renames with. See [`crate::panel::Panels::begin_rename`].
+pub const RENAME: &str = "editor_rename";
+
 /// One thing the keyboard asked for this frame.
 ///
 /// Collected out of the map and applied afterwards, because reading the map
@@ -142,6 +146,8 @@ pub enum Action {
     PlayStop,
     /// Pause a playing scene, or resume a paused one.
     Pause,
+    /// Rename the selection in its outliner row.
+    Rename,
 }
 
 /// The editor's map: its own actions in the default context, with the reserved
@@ -236,6 +242,9 @@ pub fn map() -> ActionMap {
     // every IDE, and only the editing rule in `actions` stops them.
     map.declare(button(PLAY, vec![Binding::Key(KeyCode::F5)]));
     map.declare(button(PAUSE, vec![Binding::Key(KeyCode::F6)]));
+    // F2 too, so a rename starts while the outliner row it renames holds the
+    // keyboard — which is where a person who just clicked the row is.
+    map.declare(button(RENAME, vec![Binding::Key(KeyCode::F2)]));
 
     // Holding a nudge key repeats it, which is how a coarse move is made — the
     // schedule the reserved navigation actions carry, so a held arrow moves an
@@ -311,7 +320,7 @@ pub fn release_keys(map: &mut ActionMap) {
     let mut keys = Vec::new();
     for name in [
         MOVE, LIFT, UNDO, REDO, SAVE, FRAME, DELETE, DUPLICATE, COPY, PASTE, TRANSLATE, SCALE,
-        ROTATE, PLAY, PAUSE,
+        ROTATE, PLAY, PAUSE, RENAME,
     ] {
         for binding in map.bindings(name).unwrap_or_default() {
             binding.visit_keys(|key| keys.push(key));
@@ -405,6 +414,9 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
     }
     if map.just_pressed(PAUSE) {
         actions.push(Action::Pause);
+    }
+    if map.just_pressed(RENAME) {
+        actions.push(Action::Rename);
     }
     actions
 }
@@ -600,6 +612,8 @@ mod tests {
         );
         assert_eq!(keys.tap(KeyCode::F6, Modifiers::empty()), [Action::Pause]);
         assert_eq!(keys.tap(KeyCode::F5, Modifiers::CTRL), []);
+        assert_eq!(keys.tap(KeyCode::F2, Modifiers::empty()), [Action::Rename]);
+        assert_eq!(keys.tap(KeyCode::F2, Modifiers::CTRL), []);
     }
 
     /// A key this editor has no meaning for asks for nothing.

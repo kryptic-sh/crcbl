@@ -7,6 +7,7 @@ use crcbl::engine::FrameLimit;
 use crcbl::shell::{HeadlessShell, PhysicalPoint, PhysicalSize};
 use crcbl::ui::tree::NodeKey;
 
+mod clipboard;
 mod play;
 
 fn options(frames: u64) -> Options {

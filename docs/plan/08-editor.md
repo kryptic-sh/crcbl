@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 and 8 2026-10-01, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 10 2026-10-01, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -125,12 +125,12 @@ full-window draw under a hole in the panels is gone.
   entity, under both the engine's RON mime and plain text; Ctrl+V reads the
   clipboard's text and spawns every entity it names under fresh ids as one
   `EditCommand::Batch`, so one undo takes a paste back and a paste with one
-  entity the scene cannot hold spawns none. The field half of feature 8 is still
-  owed.
-- **Still owed from task 4's list**: rename (no entity names), attach and detach
-  (one entity in two systems), and load/save markers (nothing for them to mean
-  while a load replaces the log). The backlog's editor entry says what each
-  waits on.
+  entity the scene cannot hold spawns none. The field half of feature 8 landed
+  in slice 10, below.
+- **Still owed from task 4's list**: attach and detach (one entity in two
+  systems, decided 2026-10-01 as the next format slice) and load/save markers
+  (nothing for them to mean while a load replaces the log). Rename landed in
+  slice 10. The backlog's editor entry says what each waits on.
 
 **Slice 6, the translate gizmo (task 5's first half), landed 2026-09-30.**
 
@@ -329,6 +329,65 @@ towers' game on it, and creeps visibly walk the lane.
   `spawned_bounds` answering for scene entities, creeps given colliders, and
   stop not restoring.
 
+**Slice 10, entity names, rename and field copy/paste, landed 2026-10-01**, on
+the decisions of the same day (below).
+
+- **The scene names its entities.** `crcbl_scene::scn::names` reads and writes
+  the optional `names.ron` the header declares; `Scene::entity_name`,
+  `entity_names` and `set_entity_name` hold the names at run time, and a save
+  writes them in id order. Every committed `.scn/` is unchanged.
+- **`EditCommand::Rename`** names an entity or takes its name away, its inverse
+  the rename back; `Document::rename` turns a typed name into one (empty text
+  clears, the same name records nothing) and is refused in play mode. A spawn
+  carries a name, so an undone delete brings the name back with the id; a delete
+  takes it, since a save refuses a name whose entity is gone.
+- **The outliner shows a name, and renames in place.** A named row reads
+  `Gate #2`, an unnamed one `#2`. F2 (bound in the default context, reaching the
+  editor while an outliner row holds the keyboard) or a double-click on a row
+  (`crcbl_ui`'s `OutlinerState::double_clicked`) puts a text input in the row
+  and engages it once it is laid out (`Panels::begin_rename`); accept or a click
+  elsewhere commits through `Document::rename`, back cancels, and a refusal is a
+  status-line warning.
+- **Feature 8's field half: one leaf at a time.** `crcbl_ui`'s `Inspection`
+  names the leaf under the pointer and the one holding focus, and
+  `Panels::field_target` is the focused one, else the hovered one. Ctrl+C with a
+  target copies its value as the chunk file's ron text (`Document::copy_field`);
+  Ctrl+V reads the clipboard as the leaf's kind through `ron::from_str`, the
+  deserializer the loader calls for that leaf, and applies it as one
+  `SetProperty` (`Document::paste_field`), so the leaf's own refusal (a
+  non-finite position) is a refusal too. With no target the keys copy and paste
+  entities, and a paste remembers its target from the key press. A whole vector
+  is not a field: its ron shape is its type's serde derive, which the reflected
+  value does not carry.
+- **Evidence**: the scene's tests hold the named round trip and its vanishing
+  when the last name goes, id order, and each refusal (unknown id on load and on
+  save, empty, too long, control character, an id named twice, a declared file
+  that names nothing or is missing, an unknown field) with an undeclared file
+  ignored. The editor's hold rename, undo and redo against the saved text, the
+  no-op, the refusals and play mode; a delete's name and its undo; the duplicate
+  and paste rule; a named scene saved and reopened; the outliner's labels
+  through a rename, an undo and a delete; the F2 flow typed and committed and
+  backed out of; a double-click; the field target by focus then pointer; field
+  copy against the file's own text, paste and undo, bad pastes and play mode;
+  and, through the loop, routing by the pointer, a paste landing where it was
+  asked after the pointer left, a bad paste on the status line, and F2. The undo
+  property test now renames too, compares `names.ron`, and asserts some history
+  named an entity. Each of these mutations turned a test red: the header always
+  declaring names, the loader ignoring the declaration, each refusal removed,
+  the save check removed, no `serde` default on the header field; the inspector
+  never reporting hover or focus, the vector row not reporting, the
+  double-click's time, row or reset checks removed; a delete keeping the name, a
+  spawn dropping it, the rename's inverse forgetting, a duplicate copying the
+  name, a paste ignoring names already taken, the label ignoring names, the
+  panels not re-reading names on a rename or on opening, the rename's input
+  never built, never engaged or never committed, a rename begun in play, the
+  double-click ignored, hover before focus, paste or copy ignoring the field,
+  the play checks removed, F2 unbound, a pasted float off by one, a copied float
+  narrowed to `f32`, a no-op rename recorded, a cancel committed, and an unnamed
+  clipping writing `name: None`. A clipping's `name` with no `serde` default
+  survived, being equivalent — serde reads a missing `Option` field as `None` —
+  so the attribute was removed.
+
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
 opens the vocabularies it was compiled with. The shipped build registers its own
@@ -340,10 +399,10 @@ Run-time discovery needs a link-time distributed slice (`linkme` or
 Everything else below stands unchanged: the server still drops commands, there
 is one schedule per `World`, there is no snapshot of a `World` (play restores
 from the scene's text, slice 8), the samples' state is outside the ECS, the
-format cannot hold one entity in two systems, and there are no
-`serve`/`scene`/`edit` subcommands. (Debug draw is still not a gizmo layer; the
-gizmo does not need it to be — slice 6, above. `AssetSource` lists since
-2026-09-30.)
+format cannot hold one entity in two systems (decided 2026-10-01 that it will,
+as the next format slice), and there are no `serve`/`scene`/`edit` subcommands.
+(Debug draw is still not a gizmo layer; the gizmo does not need it to be — slice
+6, above. `AssetSource` lists since 2026-09-30.)
 
 Two things sit behind it, in both directions:
 
@@ -521,7 +580,9 @@ long term and recorded):
 - **The scene format change for entities spanning systems** is decided when the
   towers port first needs one entity in two systems. The format is v0, so the
   break is allowed then. The map's port (2026-09-30) did not: a corner of the
-  path and a build plot are one component each, in one system each.
+  path and a build plot are one component each, in one system each. _Superseded
+  2026-10-01, below_: decided now, for physics on scene components and
+  attach/detach.
 
 **Decided 2026-10-01** (taken for the long term and recorded, as above):
 
@@ -542,6 +603,34 @@ long term and recorded):
 - **The first slice builds the mechanism only.** No sample registers a module in
   it, and no demo component joins the shipped vocabulary; towers' play module is
   the next slice.
+
+**Decided 2026-10-01, for entity names and spanning systems** (taken for the
+long term and recorded, as above):
+
+- **Names live in an optional names chunk**, `names.ron` in the `.scn/`
+  directory: a list of `(SceneEntityId, "name")` pairs in id order, written by
+  the deterministic writer and left out entirely while no entity is named, so
+  every scene from before stays byte-identical. **The header declares it**
+  (`names: true`, skipped when false) rather than the loader looking for the
+  fixed name: a browser build seeds a `MemorySource` file by file, and an
+  undeclared file left out of the seeding would load as a scene whose names had
+  silently gone, where a declared one is a missing key that names itself; it
+  also spares an unnamed scene's every load a failing read, which over a network
+  source is a round trip. A list rather than a RON map, so an id named twice is
+  refused rather than the later entry winning. A name is optional, trimmed,
+  non-empty, at most `scn::MAX_NAME_CHARS` characters and free of control
+  characters; a name for an id the scene does not hold is refused on load by key
+  and id, and on save. An unnamed entity is shown as before.
+- **A duplicate is unnamed**, and a pasted entity keeps its clipping's name only
+  while nothing in the scene bears it. A name says which entity this is, and
+  `Gate (2)` would invent a name nobody chose that a person then renames anyway;
+  the one rule covers both, since a duplicate's original always bears its name.
+- **One entity in several systems is allowed, keyed by the shared
+  `SceneEntityId` across chunks.** Needed for physics on scene components and
+  for attach/detach. Not built in the slice that decided it: it is the next
+  format slice, and the backlog's _Task 4's commands_ says precisely what
+  refuses it today and what the loader, `IdMap`, the registry and the editor
+  each have to change.
 
 **Still the owner's:** a file watcher dependency for hot reload (`notify`),
 because adding a crates.io dependency is the owner's call by the workspace's

@@ -11353,9 +11353,9 @@ _`crcbl save list|dump|diff|restore`_, _Golden audio buffers per sample, and
 **What it waits on**: the editor's server command handling —
 `ClientToServer::Command` is matched and dropped by `crcbl-server`, `Client` has
 no send path and a server hosts one session (`docs/plan/08-editor.md`, missing
-piece 1) — and `EditCommand` has only property, spawn and delete variants (the
-editor entry, _Task 4's commands_, lists what is owed). When the CLI reads
-commands it will have to parse input, which is the moment
+piece 1) — and `EditCommand` has only property, spawn, delete and rename
+variants (the editor entry, _Task 4's commands_, lists what is owed). When the
+CLI reads commands it will have to parse input, which is the moment
 `crates/crcbl-cli/src/json.rs` says to reconsider hand-written JSON.
 
 **The exit criteria that hang on it**: a scripted `crcbl new` → `crcbl import` →
@@ -11495,16 +11495,46 @@ says what that cleared and what it did not. The allow-list entry in
   closure stored in the registry, which is a second thing to forget. The general
   answer is still `crcbl::phys::Transform` on the entity, which is the
   scene-format change and the user's open decision.
-- **Task 4's commands (2026-09-30).** `EditCommand` has `SetProperty`, `Spawn`
-  and `Delete`; a duplicate is a `Spawn` of the original's row under
-  `IdMap::next_id`, and Delete and Ctrl+D drive them. The undo property test is
-  `document::entity_tests::random_histories_walk_back_through_every_state`.
-  Still owed, each waiting on something outside the editor:
-  - **Rename**: an entity has no name. It needs a name in the scene format (a
-    per-entity field or a names chunk), which is a format change; decide it with
-    the towers port's format change rather than separately.
-  - **Attach and detach system data**: the format cannot hold one entity in two
-    systems, decided 2026-09-30 to wait for towers.
+- **Task 4's commands (2026-09-30, rename 2026-10-01).** `EditCommand` has
+  `SetProperty`, `Spawn`, `Delete` and `Rename`; a duplicate is a `Spawn` of the
+  original's row under `IdMap::next_id`, and Delete, Ctrl+D and F2 drive them.
+  The undo property test is
+  `document::entity_tests::random_histories_walk_back_through_every_state`, and
+  renames since 2026-10-01. Names are `crcbl_scene::scn::names`' `names.ron`;
+  `08-editor.md`'s decisions of 2026-10-01 say why a chunk the header declares.
+  Still owed:
+  - **Attach and detach system data, and one entity in several systems — the
+    next format slice.** Decided 2026-10-01: allowed, keyed by the shared
+    `SceneEntityId` across chunks; physics on scene components needs it too.
+    What refuses it today, each read in the tree on 2026-10-01:
+    - _The loader_: `ChunkOf::read` (`crcbl_scene::scn`) spawns a fresh `Entity`
+      for every row and `IdMap::bind` refuses an id already bound with
+      `ScnError::DuplicateId`, so the same id in a second chunk file is a
+      refusal. The change: a row whose id an earlier chunk bound attaches to
+      that entity; a repeat **within** one chunk stays refused, which needs the
+      check moved from `bind` (the map) to the chunk read. Load stays in
+      manifest order, so `Entity` bits stay a function of the files. The writer
+      needs nothing: each chunk already writes its own rows by id.
+      `Scene::FORMAT` can stay 0 — a scene of today is one of the new form.
+    - _The registry_: `Registry::system_of`, `component` and `placement`
+      (`crates/crcbl/src/registry.rs`) answer the first system in name order
+      that holds the entity — `component`'s docs say this becomes a choice the
+      day the format changes. Each needs a per-system form (the systems an
+      entity is in; one system's component) and `placement` a rule for which
+      component places an entity.
+    - _The editor_: `EditCommand::Spawn` carries one system and one row, and
+      `Document::row`, `remove` and `copy` read one, so a delete's undo would
+      lose every system but the first — a spawn needs every row. `Attach` (an
+      entity, a system and a row) and `Detach` (an entity and a system) would be
+      each other's inverse, with detaching an entity's last system refused
+      (Delete is that). `Document::outline` lists an entity under every system
+      that holds it and `panel.rs`'s `entity_row` keys a row by the id alone, so
+      two system headers would build two rows with one `OutlinerId` — rows keyed
+      by system and id, or an entity listed once. The inspector draws the one
+      component `Registry::component` returns; it needs a section per system.
+      `clipboard::Clipped` holds one system and row; a list of them, keeping the
+      single-system fields readable, keeps older clippings pasting.
+      `sync_colliders` places by `Registry::placement`'s first match.
   - **Scene load and save markers**: the log's position against `saved_at` is
     already the dirty marker, and a load replaces the document and its log, so a
     marker entry has nothing to mean until the log outlives a load (the server
@@ -11567,10 +11597,9 @@ says what that cleared and what it did not. The allow-list entry in
   context**, so the stack cannot take them from an application while a field is
   engaged; the editor asks for nothing while `editing`, which its own test
   holds.
-- **No drag-to-dock, no entity names and no multi-row inspector.** The layout
-  moves only by dragging dividers (`DockLayout::move_pane` has no gesture), an
-  entity has no name to show or rename, and the inspector draws the first of a
-  multi-row selection.
+- **No drag-to-dock and no multi-row inspector.** The layout moves only by
+  dragging dividers (`DockLayout::move_pane` has no gesture), and the inspector
+  draws the first of a multi-row selection.
 - **Cost**: the panels add 18.5 µs to a headless frame (40.4 → 58.9 µs, release,
   null backend, 4 entities). `Panels::frame` is flat past a full window — 27 µs
   at 4 entities, 59 µs at 500, 55 µs at 3 000 — but `Document::outline` is 83 µs
@@ -11599,9 +11628,10 @@ the ECS today, so each port is its own slice and is owed here; play/stop
 restores by reloading the scene (amended 2026-10-01: from the scene's text held
 in memory since play began, so unsaved edits survive); and a component's
 editable fields come from `#[derive(Reflect)]`, the workspace's first proc-macro
-dependency. Still open: docking and tabs, file dialogs, the scene-format change
-for entities spanning systems, and the `notify` watcher. The viewport's shape
-was decided and built 2026-09-30 (a rendered view sampled by a UI rectangle).
+dependency. Still open: docking and tabs, file dialogs, and the `notify`
+watcher; the scene-format change for entities spanning systems was decided
+2026-10-01 and is the next format slice. The viewport's shape was decided and
+built 2026-09-30 (a rendered view sampled by a UI rectangle).
 
 **It blocks two sample plans:** `docs/plan/sample/07-towers.md`, whose milestone
 2 _is_ the editor dogfood pass and whose exit criterion is "map authored 100% in
@@ -11699,7 +11729,9 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   - **Physics on scene components.** The world's `PhysicsSystem` holds one
     kinematic box per entity for picking, rebuilt from `Placement` after each
     tick that ran; nothing gives a scene component a simulated body, so a module
-    that wants collision or gravity has to bring its own.
+    that wants collision or gravity has to bring its own. A body beside a scene
+    component is one entity in two systems: the next format slice (_Task 4's
+    commands_ above).
   - **A module despawning a scene entity** is swept and leaves the outline and
     the picture (both re-read when the world's entity count moves), but its id
     stays in the document's id map until stop, so selecting it shows "no
@@ -11727,14 +11759,34 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     until a viewport click. Towers' play has never been looked at on a device
     either: the creeps are drawn in the greybox grey, one material for every
     kind, and the camera frames the scene's own entities, not the creeps.
-- **The remaining command variants**: rename, attach/detach system data and
-  scene-load and save markers (_Task 4's commands_ above says what each waits
-  on). Spawn, delete, duplicate, batch and the undo property test landed
-  2026-09-30, and so did entity copy and paste (`apps/editor/src/clipboard.rs`:
-  dual-mime RON, ids re-minted on paste, one undo per paste). Feature 8's field
-  half — any inspector value copied as plain text and pasted through the scene's
-  serde path — is still owed, and needs the inspector to expose a field's value
-  as text.
+- **The remaining command variants**: attach/detach system data and scene-load
+  and save markers (_Task 4's commands_ above says what each waits on). Spawn,
+  delete, duplicate, batch and the undo property test landed 2026-09-30, and so
+  did entity copy and paste (`apps/editor/src/clipboard.rs`: dual-mime RON, ids
+  re-minted on paste, one undo per paste). Rename and feature 8's field half
+  landed 2026-10-01 (`08-editor.md`'s slice 10). What the field half leaves:
+  - **A field is one leaf.** A whole `position` does not copy: its ron shape is
+    the component type's serde derive (a `[f64; 3]` is a tuple, a `Vec` a list),
+    which the reflected value does not carry, and a text built from the
+    reflected shape would be a second serializer that could disagree with the
+    first. It would take the codec handing out one field's text — a typed path
+    into the row — or the inspector drawing composites through it.
+  - **An `f32` leaf copies at `f64` precision.** `crcbl_reflect::Value::Float`
+    is an `f64`, so `0.1` stored in an `f32` copies as `0.10000000149011612`,
+    where its chunk file says `0.1`; it pastes back to the same `f32`. Printing
+    the shorter form would change the value pasted into an `f64` field, so it
+    waits on `Value` knowing a leaf's width. Not checked: whether any component
+    in the shipped vocabulary has such a leaf.
+  - **An override reports its widgets only if it calls `FieldRow::locate`.** The
+    vectors override does; one a caller registers without it has fields no
+    clipboard key can name.
+  - **A rename's text is not selected when it begins**, so typing into a named
+    row appends; Ctrl+A first replaces it. The input is engaged by `Ui::engage`,
+    which takes no edits; selecting would need the first engaged frame's text
+    input to carry `Edit::SelectAll`.
+  - **Coverage gap**: rename and field copy/paste have never been looked at on a
+    device — the tests type and click through the headless shell and the null
+    backend.
 - **The dogfood pass**, which is towers' milestone 2. Towers' map is a `.scn/`
   directory the editor opens since 2026-09-30
   (`crcbl_towers::register_components` in

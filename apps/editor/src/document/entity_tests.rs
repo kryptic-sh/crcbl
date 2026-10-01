@@ -141,6 +141,7 @@ fn a_spawn_the_scene_cannot_hold_is_refused_and_leaves_nothing() {
             entity: SceneEntityId(2),
             system: crate::scene::BLOCKS.to_owned(),
             row: row.clone(),
+            name: None,
         })
         .expect_err("2 is the second step's");
     assert!(
@@ -153,6 +154,7 @@ fn a_spawn_the_scene_cannot_hold_is_refused_and_leaves_nothing() {
             entity: SceneEntityId(9),
             system: "bricks".to_owned(),
             row,
+            name: None,
         })
         .expect_err("the greybox scene has no bricks");
     assert!(
@@ -165,6 +167,7 @@ fn a_spawn_the_scene_cannot_hold_is_refused_and_leaves_nothing() {
             entity: SceneEntityId(9),
             system: crate::scene::BLOCKS.to_owned(),
             row: "(position:(0.0,0.0,0.0))".to_owned(),
+            name: None,
         })
         .expect_err("a block has half extents");
     assert!(matches!(error, EditError::Scene(_)), "{error}");
@@ -229,9 +232,14 @@ fn a_paste_with_one_bad_entity_spawns_none() {
     let before = document.files().expect("ids");
     let good = document.copy(SceneEntityId(2)).expect("held");
     let mut entities = crate::clipboard::decode(&good).expect("its own copy");
+    let clipped = |system: &str, row: &str| crate::clipboard::Clipped {
+        system: system.to_owned(),
+        row: row.to_owned(),
+        name: None,
+    };
     for bad in [
-        ("bricks".to_owned(), entities[0].1.clone()),
-        ("blocks".to_owned(), "(position:(0.0,0.0,0.0))".to_owned()),
+        clipped("bricks", &entities[0].row),
+        clipped("blocks", "(position:(0.0,0.0,0.0))"),
     ] {
         entities.truncate(1);
         entities.push(bad);
@@ -257,6 +265,10 @@ fn a_paste_with_one_bad_entity_spawns_none() {
 const HISTORIES: u64 = 48;
 const HISTORY_LEN: u64 = 24;
 
+/// What a rename in [`random_histories_walk_back_through_every_state`] names
+/// an entity — one of these, or nothing.
+const NAMES: [Option<&str>; 4] = [Some("Gate"), Some("Spawner"), Some("Tower"), None];
+
 /// **`docs/plan/08-editor.md`'s undo property test: a random sequence of
 /// commands, undone in full, lands on the state it started from** — and on every
 /// state in between on the way down, and back up again on redo.
@@ -268,13 +280,19 @@ const HISTORY_LEN: u64 = 24;
 /// keyed by the id and prints every float through its shortest round trip, so
 /// two states that differ in any field or any row differ here.
 ///
-/// Each step is one of a nudge by an arbitrary float, a duplicate, a delete, or
-/// a paste of two entities as one batch, of entities chosen from those the
-/// document holds at that moment. The
+/// Each step is one of a nudge by an arbitrary float, a duplicate, a delete, a
+/// paste of two entities as one batch, or a rename — to one of a few names, or
+/// to none — of entities chosen from those the document holds at that moment.
+/// The text compared includes `names.ron` and the header's `names` entry, so a
+/// name an undo failed to put back, or a delete failed to take away, differs
+/// here. The
 /// choices come from [`hash_u64`] over `(seed, index)`, so a failure names the
 /// history that produced it and replays exactly.
 #[test]
 fn random_histories_walk_back_through_every_state() {
+    // How many states held a name, so a run whose renames never landed in a
+    // file cannot pass as one that walked them back.
+    let mut named = 0;
     for seed in 0..HISTORIES {
         let mut document = document();
         let mut states = vec![document.files().expect("ids")];
@@ -283,10 +301,20 @@ fn random_histories_walk_back_through_every_state() {
             let held = ids(&mut document);
             let len = u64::try_from(held.len()).expect("a handful of entities");
             let target = held[usize::try_from(draw(0) % len).expect("an index into held")];
-            match draw(1) % 5 {
+            match draw(1) % 6 {
                 0 if held.len() > 1 => document.delete(target).expect("a held entity"),
                 1 => {
                     document.duplicate(target).expect("a held entity");
+                }
+                3 => {
+                    let name = NAMES[usize::try_from(draw(2) % 4).expect("an index into NAMES")]
+                        .map(|name| EntityName::new(name).expect("a name"));
+                    document
+                        .apply(EditCommand::Rename {
+                            entity: target,
+                            name,
+                        })
+                        .expect("a held entity");
                 }
                 2 => {
                     let other = held[usize::try_from(draw(2) % len).expect("an index into held")];
@@ -332,5 +360,10 @@ fn random_histories_walk_back_through_every_state() {
                 "seed {seed}: redoing to position {position} did not restore that state",
             );
         }
+        named += states
+            .iter()
+            .filter(|state| state.contains_key("names.ron"))
+            .count();
     }
+    assert!(named > 0, "no history named an entity");
 }

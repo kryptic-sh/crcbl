@@ -493,6 +493,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   entity is gone. `Scene::entity_name`, `entity_names` and `set_entity_name` are
   the runtime half.
 
+- **The editor renames entities, and copies and pastes single fields.** The
+  outliner shows a named entity as its name and id. F2, or a double-click on a
+  row, puts a text input in the row; Enter or a click elsewhere commits the name
+  as one undoable `EditCommand::Rename` (clearing it takes the name away),
+  Escape cancels, and play mode refuses it. A deleted entity's name comes back
+  with its undo; a duplicate is unnamed, and a pasted entity keeps its
+  clipping's name only while nothing in the scene bears it (the clipping carries
+  the name as `name: Some(..)`, written only for a named entity, so older
+  clippings paste). With an inspector field focused or under the pointer, Ctrl+C
+  copies its value as plain text in the chunk file's RON form and Ctrl+V parses
+  the clipboard as that field's kind, the way the scene loader does, and applies
+  it as one undoable property set; text that is no such value is a status-line
+  warning and changes nothing. Elsewhere the keys copy and paste entities as
+  before. Fields are leaves: a whole vector copies an axis at a time.
+
 - **`crcbl_ui`'s inspector says which field is meant, and its outliner sees a
   double-click.** `Inspection::hovered` and `Inspection::focused` name the leaf
   whose widget is under the pointer and the one holding focus, by the path an

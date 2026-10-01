@@ -25,13 +25,29 @@
 //! it through an untyped value on the way would round floats the scene file
 //! writes exactly.
 //!
+//! **A named entity carries its name**, as `name: Some("Gate")` after the row,
+//! and an unnamed one writes no `name` at all — so an unnamed entity's clipping
+//! is the text it was before names existed, and a clipping from then decodes
+//! now as an unnamed entity. Where the name lands is
+//! [`crate::Document::paste`]'s rule.
+//!
 //! # Why a paste reads plain text
 //!
 //! [`Paste::ask`] requests [`MimeType::TextUtf8`], not the RON mime: the copy
 //! offers the same bytes under both, and a clipping that went through a chat
 //! comes back as text alone.
+//!
+//! # What a paste is for
+//!
+//! The same keys paste entities into the scene or a value into one inspector
+//! field, by where the keyboard is ([`crate::panel::Panels::field_target`]),
+//! and the read is answered frames after the key was pressed. So the paste
+//! remembers its [`PasteTarget`] from the press: a pointer that moved off the
+//! field while the clipboard answered does not turn a field paste into an
+//! entity paste.
 
 use crcbl::ron;
+use crcbl::scene::scn::SceneEntityId;
 use crcbl::serde::{Deserialize, Serialize};
 use crcbl::shell::{
     ClipboardContent, ClipboardRequestId, MimeType, Shell, ShellError, ShellEvent, WindowId,
@@ -44,43 +60,53 @@ struct Clipping {
     entities: Vec<Clipped>,
 }
 
-/// One copied entity: the system it goes back into and its row.
-#[derive(Debug, Serialize, Deserialize)]
+/// One copied entity: the system it goes back into, its row, and its name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "crcbl::serde", rename = "Entity", deny_unknown_fields)]
-struct Clipped {
-    system: String,
-    row: String,
+pub struct Clipped {
+    /// The scene system whose chunk the row belongs to.
+    pub system: String,
+    /// The component, as one chunk row's RON text.
+    pub row: String,
+    /// What the entity was called, if it was named — unchecked text, because a
+    /// clipping is whatever the clipboard holds; a paste checks it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
-/// The clipboard text for `entities`, each a `(system, row)` pair.
+/// The clipboard text for `entities`.
 #[must_use]
-pub fn encode(entities: Vec<(String, String)>) -> String {
-    let clipping = Clipping {
-        entities: entities
-            .into_iter()
-            .map(|(system, row)| Clipped { system, row })
-            .collect(),
-    };
+pub fn encode(entities: Vec<Clipped>) -> String {
     ron::ser::to_string_pretty(
-        &clipping,
+        &Clipping { entities },
         ron::ser::PrettyConfig::default().struct_names(true),
     )
-    .expect("a list of string pairs always serializes")
+    .expect("a list of strings always serializes")
 }
 
-/// The `(system, row)` pairs `text` names.
+/// The entities `text` names.
 ///
 /// # Errors
 ///
 /// ron's own error, with its position, if the text is not a clipping — which is
 /// what a paste of anything else copied from anywhere else is.
-pub fn decode(text: &str) -> Result<Vec<(String, String)>, ron::error::SpannedError> {
+pub fn decode(text: &str) -> Result<Vec<Clipped>, ron::error::SpannedError> {
     let clipping: Clipping = ron::from_str(text)?;
-    Ok(clipping
-        .entities
-        .into_iter()
-        .map(|Clipped { system, row }| (system, row))
-        .collect())
+    Ok(clipping.entities)
+}
+
+/// What a paste was asked for: see the module docs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PasteTarget {
+    /// Spawn the entities a clipping names.
+    Entities,
+    /// Write a value into one leaf of one entity's component.
+    Field {
+        /// Whose component.
+        entity: SceneEntityId,
+        /// The leaf's path.
+        path: String,
+    },
 }
 
 /// A paste waiting on the clipboard's answer.
@@ -90,15 +116,16 @@ pub fn decode(text: &str) -> Result<Vec<(String, String)>, ron::error::SpannedEr
 /// spawns in whichever frame the answer arrives.
 #[derive(Debug, Default)]
 pub struct Paste {
-    /// The read this editor issued and no answer has arrived for. A newer
-    /// paste replaces it: the newer press is the one the person is waiting on.
-    awaiting: Option<ClipboardRequestId>,
-    /// The answer, until [`take`](Self::take) collects it.
-    arrived: Option<ClipboardContent>,
+    /// The read this editor issued and no answer has arrived for, and what it
+    /// is for. A newer paste replaces it: the newer press is the one the
+    /// person is waiting on.
+    awaiting: Option<(ClipboardRequestId, PasteTarget)>,
+    /// The answer and what it is for, until [`take`](Self::take) collects it.
+    arrived: Option<(PasteTarget, ClipboardContent)>,
 }
 
 impl Paste {
-    /// Asks `shell` for the clipboard's text.
+    /// Asks `shell` for the clipboard's text, to paste as `target` says.
     ///
     /// # Errors
     ///
@@ -108,8 +135,10 @@ impl Paste {
         &mut self,
         shell: &mut S,
         window: WindowId,
+        target: PasteTarget,
     ) -> Result<(), ShellError> {
-        self.awaiting = Some(shell.clipboard_request(window, MimeType::TextUtf8)?);
+        let request = shell.clipboard_request(window, MimeType::TextUtf8)?;
+        self.awaiting = Some((request, target));
         Ok(())
     }
 
@@ -122,19 +151,16 @@ impl Paste {
         else {
             return false;
         };
-        if self
-            .awaiting
-            .take_if(|awaited| awaited == request)
-            .is_none()
-        {
+        let Some((_, target)) = self.awaiting.take_if(|(awaited, _)| awaited == request) else {
             return false;
-        }
-        self.arrived = Some(content.clone());
+        };
+        self.arrived = Some((target, content.clone()));
         true
     }
 
-    /// The answer, once: [`None`] until it arrives and after it was taken.
-    pub fn take(&mut self) -> Option<ClipboardContent> {
+    /// The answer and what it is for, once: [`None`] until it arrives and
+    /// after it was taken.
+    pub fn take(&mut self) -> Option<(PasteTarget, ClipboardContent)> {
         self.arrived.take()
     }
 }
@@ -143,20 +169,40 @@ impl Paste {
 mod tests {
     use super::*;
 
-    /// **A clipping reads back as the pairs it was written from**, including a
-    /// row holding a quoted string.
+    fn clipped(system: &str, row: &str, name: Option<&str>) -> Clipped {
+        Clipped {
+            system: system.to_owned(),
+            row: row.to_owned(),
+            name: name.map(str::to_owned),
+        }
+    }
+
+    /// **A clipping reads back as the entities it was written from**, including
+    /// a row holding a quoted string and a name.
     #[test]
     fn a_clipping_decodes_to_the_entities_it_encodes() {
         let entities = vec![
-            ("blocks".to_owned(), "(position:(1.0,2.0,3.0))".to_owned()),
-            (
-                "marks".to_owned(),
-                r#"(label:"a \"quoted\" name")"#.to_owned(),
-            ),
+            clipped("blocks", "(position:(1.0,2.0,3.0))", Some("Gate")),
+            clipped("marks", r#"(label:"a \"quoted\" name")"#, None),
         ];
         let text = encode(entities.clone());
         assert!(text.starts_with("Entities("), "{text}");
         assert_eq!(decode(&text).expect("its own text"), entities);
+    }
+
+    /// **An unnamed entity's clipping is the text it was before names
+    /// existed**, and such a clipping decodes as an unnamed entity — so a
+    /// clipping from an older editor still pastes.
+    #[test]
+    fn an_unnamed_clipping_is_the_text_from_before_names() {
+        let before = "Entities(\n    entities: [\n        Entity(\n            system: \
+                      \"blocks\",\n            row: \"(position:(1.0,2.0,3.0))\",\n        ),\n    \
+                      ],\n)";
+        let entities = vec![clipped("blocks", "(position:(1.0,2.0,3.0))", None)];
+        // ron's default newline is the host's, so the clipping is compared
+        // with Windows' line ends taken out.
+        assert_eq!(encode(entities.clone()).replace("\r\n", "\n"), before);
+        assert_eq!(decode(before).expect("an older clipping"), entities);
     }
 
     /// Text that is not a clipping — the ordinary thing to find on a clipboard

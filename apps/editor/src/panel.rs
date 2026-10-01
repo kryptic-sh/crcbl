@@ -53,6 +53,24 @@
 //! [`Panels::release_keyboard`] to give them back. That is click-to-focus, and
 //! it is what makes the arrows one thing at a time rather than two.
 //!
+//! # Names, and renaming a row in place
+//!
+//! A named entity's row reads its name and then its id; an unnamed one reads
+//! its id, as before names existed. F2 on the selection, or a double-click on
+//! a row, puts a text input in that row ([`Panels::begin_rename`]), engaged so
+//! the next key typed is the name's. Accept or a click elsewhere commits it
+//! through [`Document::rename`] — one undoable command, refused in play mode —
+//! and back cancels it. Clearing the text takes the name away.
+//!
+//! # Which field a clipboard key means
+//!
+//! [`Panels::field_target`] is the inspector leaf the keyboard means: the one
+//! whose widget holds focus, or else the one under the pointer. Copy and paste
+//! act on that field when there is one, and on the selected entity when there
+//! is not — so a click into the viewport or onto an outliner row, which takes
+//! focus away from the inspector, puts the keys back on the entity. A text
+//! field being typed into answers both itself, before either is asked.
+//!
 //! # An inspector edit is a command
 //!
 //! [`Ui::inspector_with`] edits the component and reports each write as a
@@ -70,18 +88,20 @@
 //! when [`Document::membership`] moves, which is an entity entering or leaving,
 //! and the flatten runs only when the widget says its model is stale.
 
+use std::collections::BTreeMap;
+
 use crcbl::math::Vec2;
 use crcbl::scene::scn::SceneEntityId;
 use crcbl::ui::style::Declaration;
 use crcbl::ui::tree::{
-    AvailableSpace, ClipboardRequest, DockLayout, FieldEdit, InspectorOptions, LengthAuto,
-    NavInput, NodeKey, OUTLINER_ROW_HEIGHT, OutlinerId, OutlinerOptions, OutlinerState, Overrides,
-    SelectMode, TextInput, Ui,
+    AvailableSpace, ClipboardRequest, DockLayout, Engagement, FieldEdit, InspectorOptions,
+    LengthAuto, NavInput, NodeKey, OUTLINER_ROW_HEIGHT, OutlinerId, OutlinerOptions, OutlinerState,
+    Overrides, SelectMode, TextInput, TextInputOptions, Ui,
 };
 use crcbl::ui::{DrawList, FontAtlas, PointerInput, TextureId};
 
 use crate::command::Gesture;
-use crate::document::{Document, PlayState};
+use crate::document::{Document, EditError, PlayState};
 use crate::keys::Action;
 use crate::layout::{self, PANE_MIN};
 
@@ -162,6 +182,8 @@ const EDITOR_CSS: &str = "
 
 #outline { flex-grow: 1; min-width: 0; min-height: 0; border-width: 0; }
 
+.outliner-rename { flex-grow: 1; min-width: 0; }
+
 #props { flex-grow: 1; min-width: 0; min-height: 0; overflow: scroll; }
 ";
 
@@ -205,6 +227,27 @@ pub struct PanelInput {
     pub scroll: f32,
 }
 
+/// The inspector leaf a clipboard key means: see the module docs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldTarget {
+    /// Whose component the inspector was drawn for.
+    pub entity: SceneEntityId,
+    /// The leaf's path inside it.
+    pub path: String,
+}
+
+/// An outliner row being renamed in place: see the module docs.
+#[derive(Debug)]
+struct Renaming {
+    /// Whose row.
+    id: SceneEntityId,
+    /// What the row's text input holds.
+    text: String,
+    /// Whether the input has been engaged — asked for once it was first laid
+    /// out, because the tree engages only a node it has laid out.
+    engaged: bool,
+}
+
 /// What one frame of the panels did.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PanelFrame {
@@ -232,6 +275,15 @@ pub struct Panels {
     outline: Vec<(String, Vec<SceneEntityId>)>,
     /// The [`Document::membership`] the outline was read at.
     counted: u64,
+    /// Every named entity's name, read again when the membership or
+    /// [`Document::naming`] moves.
+    names: BTreeMap<SceneEntityId, String>,
+    /// The [`Document::naming`] the names were read at.
+    named: u64,
+    /// The row being renamed, if one is.
+    renaming: Option<Renaming>,
+    /// The inspector leaf a clipboard key means, as the last frame found it.
+    field: Option<FieldTarget>,
     /// The selection the outliner was last told about: the witness that says
     /// which side changed it. See the module docs.
     shown: Option<SceneEntityId>,
@@ -289,6 +341,10 @@ impl Panels {
             overrides: Overrides::vectors(),
             counted: document.membership(),
             outline,
+            names: names_of(document),
+            named: document.naming(),
+            renaming: None,
+            field: None,
             // Deliberately not the document's selection: leaving the witness
             // empty makes the idle frame below *push* whatever is selected into
             // the outliner, so a document handed over with a selection keeps it
@@ -385,6 +441,52 @@ impl Panels {
     /// edited — what a click in the viewport means.
     pub fn release_keyboard(&mut self) {
         self.ui.clear_focus();
+    }
+
+    /// The inspector leaf a clipboard key means, as the last frame found it:
+    /// the one whose widget holds focus, else the one under the pointer, else
+    /// none. See the module docs.
+    #[must_use]
+    pub const fn field_target(&self) -> Option<&FieldTarget> {
+        self.field.as_ref()
+    }
+
+    /// Puts a text input in `id`'s outliner row, holding its name, and engages
+    /// it once it is laid out — the next frame — so what is typed after that
+    /// renames it. See the module docs.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::Playing`] in play mode, as every edit is, and
+    /// [`EditError::NoEntity`] for an id `document` does not hold. Nothing
+    /// is put in the row in either case.
+    pub fn begin_rename(
+        &mut self,
+        document: &Document,
+        id: SceneEntityId,
+    ) -> Result<(), EditError> {
+        if document.play_state() != PlayState::Editing {
+            return Err(EditError::Playing);
+        }
+        let Some(index) = self.outline.iter().position(|(_, ids)| ids.contains(&id)) else {
+            return Err(EditError::NoEntity(id));
+        };
+        // The row has to be built for its input to be: open its system and
+        // scroll it into view, as a pick does.
+        self.outliner.set_expanded(system_row(index), true);
+        self.reveal = Some(id);
+        self.renaming = Some(Renaming {
+            id,
+            text: self.names.get(&id).cloned().unwrap_or_default(),
+            engaged: false,
+        });
+        Ok(())
+    }
+
+    /// The entity whose row is being renamed, if one is.
+    #[must_use]
+    pub fn renaming(&self) -> Option<SceneEntityId> {
+        self.renaming.as_ref().map(|renaming| renaming.id)
     }
 
     /// Puts `text` on the status line under the panes, read as `tone`, until
@@ -516,6 +618,9 @@ impl Panels {
         let mut status_key = None;
         let mut outliner_key = None;
         let mut props = None;
+        let mut field = None;
+        let mut rename_input = None;
+        let mut double_clicked = None;
 
         // Last frame's scrolling blocks, read before the fields are borrowed
         // below — and last frame's is the right answer anyway, because that is
@@ -532,6 +637,8 @@ impl Panels {
             outliner,
             overrides,
             outline,
+            names,
+            renaming,
             status,
             ..
         } = self;
@@ -556,11 +663,19 @@ impl Panels {
                     // rectangle once it is laid out. See the module docs.
                     layout::VIEWPORT => viewport = ui.current_key(),
                     layout::OUTLINER => {
-                        outliner_key = Some(build_outliner(ui, outliner, &options, outline));
+                        let rows = Rows {
+                            outline,
+                            names,
+                            renaming: renaming.as_mut(),
+                        };
+                        let built = build_outliner(ui, outliner, &options, rows);
+                        outliner_key = Some(built.key);
+                        rename_input = built.rename;
+                        double_clicked = outliner.double_clicked().and_then(entity_of);
                     }
                     layout::INSPECTOR => {
                         props = Some(build_inspector(
-                            ui, document, selected, overrides, &mut edits,
+                            ui, document, selected, overrides, &mut edits, &mut field,
                         ));
                     }
                     other => {
@@ -603,12 +718,21 @@ impl Panels {
         self.status_key = status_key;
         self.toolbar_key = toolbar_key;
         self.props_key = props.flatten();
+        self.field = selected
+            .zip(field)
+            .map(|(entity, path)| FieldTarget { entity, path });
         if let (Some(key), Some(id)) = (outliner_key, self.reveal.take()) {
             self.reveal_row(key, id);
         }
 
         let commands = self.apply_edits(document, selected, &edits, input.pointer);
         self.follow_outliner(document);
+        self.follow_rename(document, rename_input);
+        if let Some(id) = double_clicked
+            && let Err(error) = self.begin_rename(document, id)
+        {
+            self.set_status(error.to_string(), Tone::Warning);
+        }
         PanelFrame {
             viewport: self.viewport,
             commands,
@@ -617,17 +741,57 @@ impl Panels {
     }
 
     /// Reads [`Document::outline`] again when the document has gained or lost
-    /// an entity.
+    /// an entity, and the names when one was renamed as well.
     ///
     /// On [`Document::membership`], not the entity count: a delete and a
     /// duplicate leave the count where it was and the rows different.
     fn refresh(&mut self, document: &mut Document) {
-        if document.membership() == self.counted {
+        let joined = document.membership() != self.counted;
+        if joined || document.naming() != self.named {
+            self.named = document.naming();
+            self.names = names_of(document);
+        }
+        if !joined {
             return;
         }
         self.counted = document.membership();
         self.outline = document.outline();
         self.outliner.invalidate();
+    }
+
+    /// Carries a rename forward a frame: engages its input the first frame it
+    /// is laid out, commits it when the input commits, and drops it when the
+    /// input cancels, is not built, or did not take the engagement.
+    ///
+    /// `input` is the rename's text input as this frame built it, and where
+    /// its engagement stood.
+    fn follow_rename(&mut self, document: &mut Document, input: Option<(NodeKey, Engagement)>) {
+        let Some(renaming) = &mut self.renaming else {
+            return;
+        };
+        let Some((key, engagement)) = input else {
+            // Its row is gone — deleted, or scrolled out of the window.
+            self.renaming = None;
+            return;
+        };
+        if !renaming.engaged {
+            self.ui.engage(key);
+            renaming.engaged = true;
+            return;
+        }
+        match engagement {
+            Engagement::Began | Engagement::Engaged => {}
+            Engagement::Committed => {
+                let Some(Renaming { id, text, .. }) = self.renaming.take() else {
+                    return;
+                };
+                if let Err(error) = document.rename(id, &text) {
+                    crcbl::log::warn!("editor: {error}");
+                    self.set_status(error.to_string(), Tone::Warning);
+                }
+            }
+            Engagement::Cancelled | Engagement::Idle => self.renaming = None,
+        }
     }
 
     /// Pushes a selection the document gained from somewhere else — a ray pick
@@ -788,15 +952,41 @@ fn build_toolbar(ui: &mut Ui, play: PlayState) -> (Option<NodeKey>, Option<Actio
     (Some(toolbar.key), asked)
 }
 
-/// The outliner pane: a title and the scene's rows. Returns the outliner
-/// block's key.
+/// What the outliner's rows are built from.
+struct Rows<'a> {
+    outline: &'a [(String, Vec<SceneEntityId>)],
+    names: &'a BTreeMap<SceneEntityId, String>,
+    renaming: Option<&'a mut Renaming>,
+}
+
+/// What [`build_outliner`] built.
+struct BuiltOutliner {
+    /// The outliner block's key.
+    key: NodeKey,
+    /// The rename's text input and where its engagement stood, if a row is
+    /// being renamed and was built this frame.
+    rename: Option<(NodeKey, Engagement)>,
+}
+
+/// The placeholder a rename's input shows while it is empty: what committing
+/// it empty does.
+const UNNAMED: &str = "unnamed";
+
+/// The outliner pane: a title and the scene's rows, one of them a text input
+/// while it is renamed.
 fn build_outliner(
     ui: &mut Ui,
     state: &mut OutlinerState,
     options: &OutlinerOptions,
-    outline: &[(String, Vec<SceneEntityId>)],
-) -> NodeKey {
+    rows: Rows<'_>,
+) -> BuiltOutliner {
+    let Rows {
+        outline,
+        names,
+        mut renaming,
+    } = rows;
     let mut key = None;
+    let mut rename = None;
     ui.block(".editor-panel", &[], |ui| {
         ui.span(".editor-title", "Scene", &[]);
         key = Some(
@@ -813,25 +1003,40 @@ fn build_outliner(
                         });
                     }
                 },
-                |ui, row| {
-                    let label = label_of(outline, row.id);
-                    ui.span(".outliner-label", label.as_str(), &[]);
+                |ui, row| match renaming.as_deref_mut() {
+                    Some(edit) if entity_of(row.id) == Some(edit.id) => {
+                        let options = TextInputOptions {
+                            placeholder: UNNAMED,
+                            masked: false,
+                        };
+                        let input = ui.text_input_with(".outliner-rename", &mut edit.text, options);
+                        rename = Some((input.key, input.engagement));
+                    }
+                    _ => {
+                        let label = label_of(outline, names, row.id);
+                        ui.span(".outliner-label", label.as_str(), &[]);
+                    }
                 },
             )
             .key,
         );
     });
-    key.expect("the outliner is built inside its panel")
+    BuiltOutliner {
+        key: key.expect("the outliner is built inside its panel"),
+        rename,
+    }
 }
 
 /// The inspector pane: a title naming what is selected, and its component's
-/// rows — or a note, when nothing is.
+/// rows — or a note, when nothing is. `field` is set to the path of the leaf
+/// a clipboard key means, if there is one; see the module docs.
 fn build_inspector(
     ui: &mut Ui,
     document: &mut Document,
     selected: Option<SceneEntityId>,
     overrides: &Overrides,
     edits: &mut Vec<FieldEdit>,
+    field: &mut Option<String>,
 ) -> Option<NodeKey> {
     let mut key = None;
     ui.block(".editor-panel", &[], |ui| {
@@ -855,8 +1060,20 @@ fn build_inspector(
         let inspection = ui.inspector_with("#props", component, &options);
         key = Some(inspection.response.key);
         edits.extend(inspection.edits);
+        // Focus first: the keyboard's own target is the one a key means, and
+        // the pointer only stands in when nothing in the inspector has it.
+        *field = inspection.focused.or(inspection.hovered);
     });
     key
+}
+
+/// Every named entity's name, as the outliner shows it.
+fn names_of(document: &Document) -> BTreeMap<SceneEntityId, String> {
+    document
+        .entity_names()
+        .iter()
+        .map(|(id, name)| (*id, name.as_str().to_owned()))
+        .collect()
 }
 
 /// The row a system at `index` in [`Document::outline`] is drawn as.
@@ -880,10 +1097,17 @@ const fn entity_of(row: OutlinerId) -> Option<SceneEntityId> {
 }
 
 /// What a row reads: a system's name and how many entities it holds, or an
-/// entity's own id.
-fn label_of(outline: &[(String, Vec<SceneEntityId>)], row: OutlinerId) -> String {
+/// entity's name and id — its id alone when it has no name.
+fn label_of(
+    outline: &[(String, Vec<SceneEntityId>)],
+    names: &BTreeMap<SceneEntityId, String>,
+    row: OutlinerId,
+) -> String {
     match entity_of(row) {
-        Some(id) => format!("#{id}"),
+        Some(id) => match names.get(&id) {
+            Some(name) => format!("{name} #{id}"),
+            None => format!("#{id}"),
+        },
         None => {
             let index = (row.0 - SYSTEM_ROW) as usize;
             match outline.get(index) {
@@ -910,6 +1134,8 @@ mod tests {
     use crcbl::ui::tree::{INSPECTOR_STEP, NodeKey};
 
     use crate::layout::default_layout;
+
+    mod naming;
 
     /// The framebuffer every page here is laid out over: the size the editor's
     /// own window opens at.

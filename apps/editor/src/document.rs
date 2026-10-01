@@ -41,11 +41,13 @@ use crcbl::phys::{ColliderComponent, PhysicsSystem, Ray, RigidBody, Transform};
 use crcbl::reflect::{PathError, Reflect, Value, get_path, set_path};
 use crcbl::registry::Registry;
 use crcbl::render::ViewRay;
-use crcbl::scene::scn::{IdMap, Scene, SceneEntityId, ScnError};
+use crcbl::scene::scn::{EntityName, IdMap, NameError, Scene, SceneEntityId, ScnError};
 use crcbl::store::{NativeStorage, StorageError, StorageSource};
 
 use crate::command::{EditCommand, Gesture, UndoLog, set_property};
 
+mod field;
+mod naming;
 mod play;
 
 pub use play::PlayState;
@@ -74,6 +76,9 @@ pub struct Document {
     /// How many times an entity has entered or left this document — see
     /// [`Document::membership`].
     membership: u64,
+    /// How many times an entity's name has changed — see
+    /// [`Document::naming`].
+    naming: u64,
     /// The last [`Gesture`] [`Document::begin_gesture`] handed out.
     gestures: u64,
     /// Where [`Document::save_to`] writes when it is not told otherwise: the
@@ -124,6 +129,19 @@ pub enum EditError {
     /// pasting something copied from anywhere else.
     Paste(crcbl::ron::error::SpannedError),
 
+    /// A rename, or a clipping's name, is not a name: empty where one was
+    /// wanted, too long, or holding a control character.
+    Name(NameError),
+
+    /// A field paste's text is not a value of the field's kind, read the way
+    /// the scene's loader reads that kind.
+    FieldPaste {
+        /// The field pasted into.
+        path: String,
+        /// What ron said about the text.
+        message: String,
+    },
+
     /// A file would not be written.
     Write {
         /// The scene-relative key that failed.
@@ -165,6 +183,10 @@ impl fmt::Display for EditError {
                 write!(f, "the scene has no system `{system}` to put an entity in")
             }
             Self::Paste(error) => write!(f, "the clipboard holds no entities: {error}"),
+            Self::Name(error) => write!(f, "{error}"),
+            Self::FieldPaste { path, message } => {
+                write!(f, "the clipboard holds no value for `{path}`: {message}")
+            }
             Self::Write { key, source } => write!(f, "writing `{key}`: {source}"),
             Self::NoOrigin => f.write_str(
                 "this document was not opened from a directory, so there is nowhere to save \
@@ -236,6 +258,7 @@ impl Document {
             log: UndoLog::new(),
             saved_at: 0,
             membership: 0,
+            naming: 0,
             gestures: 0,
             origin: None,
             play: None,
@@ -582,6 +605,12 @@ impl Document {
     /// variant whose inverse could be wrong on its own. The copy stands where
     /// the original does, which is what a caller moving it next expects.
     ///
+    /// **The copy is unnamed.** A name says which entity this is, and two
+    /// entities answering to "Gate" is the confusion a name exists to end;
+    /// numbering it `Gate (2)` would invent a name nobody chose, which a
+    /// person then renames anyway. [`paste`](Self::paste) follows the same
+    /// rule: a clipping's name comes along only while nothing else bears it.
+    ///
     /// # Errors
     ///
     /// [`EditError::NoEntity`] for an id this document does not hold, or
@@ -594,30 +623,45 @@ impl Document {
             entity: copy,
             system,
             row,
+            name: None,
         })?;
         Ok(copy)
     }
 
-    /// The clipboard text for `id`: its system and row, in
+    /// The clipboard text for `id`: its system, its row and its name, in
     /// [`crate::clipboard`]'s format.
     ///
     /// # Errors
     ///
     /// As [`duplicate`](Self::duplicate).
     pub fn copy(&mut self, id: SceneEntityId) -> Result<String, EditError> {
-        Ok(crate::clipboard::encode(vec![self.row(id)?]))
+        let (system, row) = self.row(id)?;
+        let name = self
+            .scene
+            .entity_name(id)
+            .map(|name| name.as_str().to_owned());
+        Ok(crate::clipboard::encode(vec![crate::clipboard::Clipped {
+            system,
+            row,
+            name,
+        }]))
     }
 
     /// Spawns every entity the clipboard text `text` names, under ids this
     /// document hands out fresh, and returns them in the text's order.
     ///
     /// One [`EditCommand::Batch`], so one undo takes the whole paste back — and
-    /// a paste with one entity the scene cannot hold spawns none of them.
+    /// a paste with one entity the scene cannot hold spawns none of them. A
+    /// clipping's name comes along **only while no entity in the scene bears
+    /// it**, nor an earlier one in the same paste — the rule a
+    /// [`duplicate`](Self::duplicate) follows, so a copy pasted back into the
+    /// scene it came from is unnamed and one pasted into another keeps its name.
     ///
     /// # Errors
     ///
-    /// [`EditError::Paste`] if the text is not a clipping, and otherwise as a
-    /// spawn: [`EditError::NoSystem`] for a system this scene does not list, or
+    /// [`EditError::Paste`] if the text is not a clipping, [`EditError::Name`]
+    /// if a clipping's name is not a name, and otherwise as a spawn:
+    /// [`EditError::NoSystem`] for a system this scene does not list, or
     /// [`EditError::Scene`] for a row that is not that system's component.
     /// [`EditError::Playing`] in play mode, before the text is read.
     pub fn paste(&mut self, text: &str) -> Result<Vec<SceneEntityId>, EditError> {
@@ -625,21 +669,27 @@ impl Document {
         // was refused rather than what was wrong with the clipboard.
         self.refuse_in_play()?;
         let entities = crate::clipboard::decode(text).map_err(EditError::Paste)?;
+        let mut taken: Vec<EntityName> = self.scene.entity_names().values().cloned().collect();
         let first = self.ids.next_id().0;
-        let (ids, spawns): (Vec<_>, Vec<_>) = (first..)
-            .map(SceneEntityId)
-            .zip(entities)
-            .map(|(id, (system, row))| {
-                (
-                    id,
-                    EditCommand::Spawn {
-                        entity: id,
-                        system,
-                        row,
-                    },
-                )
-            })
-            .unzip();
+        let mut ids = Vec::with_capacity(entities.len());
+        let mut spawns = Vec::with_capacity(entities.len());
+        for (id, clipped) in (first..).map(SceneEntityId).zip(entities) {
+            let name = clipped
+                .name
+                .as_deref()
+                .map(EntityName::new)
+                .transpose()
+                .map_err(EditError::Name)?
+                .filter(|name| !taken.contains(name));
+            taken.extend(name.clone());
+            ids.push(id);
+            spawns.push(EditCommand::Spawn {
+                entity: id,
+                system: clipped.system,
+                row: clipped.row,
+                name,
+            });
+        }
         if !spawns.is_empty() {
             self.apply(EditCommand::Batch(spawns))?;
         }
@@ -820,8 +870,10 @@ impl Document {
                 entity: id,
                 system,
                 row,
-            } => self.spawn(*id, system, row),
+                name,
+            } => self.spawn(*id, system, row, name.as_ref()),
             EditCommand::Delete { entity: id } => self.remove(*id),
+            EditCommand::Rename { entity: id, name } => self.set_name(*id, name.clone()),
             EditCommand::Batch(commands) => {
                 let mut undo = Vec::with_capacity(commands.len());
                 for command in commands {
@@ -842,13 +894,14 @@ impl Document {
         }
     }
 
-    /// Creates `id` in `system` from `row`, and hands back the delete that
-    /// undoes it.
+    /// Creates `id` in `system` from `row`, called `name`, and hands back the
+    /// delete that undoes it.
     fn spawn(
         &mut self,
         id: SceneEntityId,
         system: &str,
         row: &str,
+        name: Option<&EntityName>,
     ) -> Result<EditCommand, EditError> {
         if self.ids.entity(id).is_some() {
             return Err(EditError::IdInUse(id));
@@ -873,14 +926,20 @@ impl Document {
             self.ids.restore(id, entity),
             "a fresh entity under a free id is always filed",
         );
+        // A free id holds no name — a delete took it with the entity — so
+        // this names the entity or leaves it unnamed, and replaces nothing.
+        self.scene.set_entity_name(id, name.cloned());
         sync_colliders(&self.registry, &mut self.world, [entity]);
         self.membership += 1;
         Ok(EditCommand::Delete { entity: id })
     }
 
     /// Removes `id` from the scene, and hands back the spawn that undoes it: the
-    /// same id, the same system, and the component's row read immediately
-    /// before it went.
+    /// same id, the same system, the component's row read immediately before it
+    /// went, and its name.
+    ///
+    /// The name goes with the entity: a scene holding a name for an id it does
+    /// not hold is one [`Scene::save`] refuses to write.
     fn remove(&mut self, id: SceneEntityId) -> Result<EditCommand, EditError> {
         let (system, row) = self.row(id)?;
         let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
@@ -890,6 +949,7 @@ impl Document {
         // until a sweep, drawn, picked and saved.
         self.world.sweep();
         self.ids.remove(id);
+        let name = self.scene.set_entity_name(id, None);
         self.membership += 1;
         if self.selected == Some(id) {
             self.selected = None;
@@ -898,6 +958,7 @@ impl Document {
             entity: id,
             system,
             row,
+            name,
         })
     }
 
@@ -1037,6 +1098,12 @@ fn narrow(value: DVec3) -> Vec3 {
 
 #[cfg(test)]
 mod entity_tests;
+
+#[cfg(test)]
+mod field_tests;
+
+#[cfg(test)]
+mod naming_tests;
 
 #[cfg(test)]
 pub(crate) mod play_tests;
