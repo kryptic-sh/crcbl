@@ -3858,6 +3858,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A character falling into a corner no longer hangs in mid-air.**
+  `CharacterController::move_and_slide` (and `move_lying`, which shares the
+  slide) dropped the planes it had collected after any advance at all, so a
+  sweep meeting a second wall within rounding of the skin width — an advance of
+  about 1e-17 — emptied the set, the clip ran against that wall alone, turned
+  the move against itself and stopped it dead, every tick, with gravity applied.
+  The set is now kept across an advance no longer than the slide's minimum move,
+  so the crease between the two walls survives; reproduced with an axis wall and
+  a 30°-turned box. Moves that cover real ground are unchanged.
+
 - Sphere and capsule sweeps against boxes retain contact times for tiny nonzero
   motion instead of treating it as stationary. Stationary sphere/box overlap
   checks avoid squared-distance underflow and overflow at extreme scales.

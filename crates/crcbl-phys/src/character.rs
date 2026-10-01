@@ -131,6 +131,9 @@ const UP: DVec3 = DVec3::Y;
 /// A displacement shorter than this is not worth a sweep: the capsule is
 /// already where it was going, and sweeping it would only cost a broadphase
 /// traversal to be told so.
+///
+/// For the same reason an advance no longer than this has not covered ground,
+/// and the slide keeps the planes it has already collected across it.
 const MIN_MOVE: f64 = 1e-9;
 
 /// How many blocking planes one move may collect before the character is
@@ -775,9 +778,17 @@ impl CharacterController {
                 let step = direction * travel;
                 self.position += step;
                 remaining -= step;
-                clip_from = remaining;
-                plane_count = 0;
                 contact.applied = step;
+                // Only real ground covered makes the planes already found
+                // stale. A sweep that touches within rounding of the skin
+                // width advances by noise, and dropping the set on that
+                // would lose the crease: a capsule falling into a corner
+                // would keep only the second wall, clip against it alone,
+                // and stop dead every tick.
+                if travel > MIN_MOVE {
+                    clip_from = remaining;
+                    plane_count = 0;
+                }
             } else if hit.started_inside {
                 // The sweep began *on* the surface rather than short of it, so
                 // clipping alone would leave the next sweep starting on it too
@@ -1942,3 +1953,7 @@ mod lying_turn_tests;
 #[cfg(test)]
 #[path = "character/slide_contact_tests.rs"]
 mod slide_contact_tests;
+
+#[cfg(test)]
+#[path = "character/crease_tests.rs"]
+mod crease_tests;

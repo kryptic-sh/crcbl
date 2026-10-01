@@ -54,19 +54,27 @@ What it left:
 - **`move_lying` records nothing.** The slide records through the same loop for
   a lying body (`slide` takes the sink for both), but only the upright move
   exposes it. A `move_lying_into` is a few lines once a caller asks for it.
-- **A numerically zero advance drops the crease, and a character can hang in
-  mid-air** — found while building the contact tests, not fixed (it would change
-  movement, and this slice promised none). In `slide`, any `travel > 0.0` resets
-  the plane set; a sweep that touches within floating-point noise of the skin
-  width advances about 1e-17 and still resets it. A falling character pressed
-  into the corner of an axis wall and a turned box then keeps only the second
-  plane, the clip against it opposes the move, and it stops dead every tick with
-  gravity applied — its contacts show the wall at fraction ~0.02 with zero
-  applied, then the box with ~1e-17 applied and zero remaining. Reproduced with
-  a 30°-turned box beside an axis box, both vertical, and moves of (0.08, -0.01,
-  -0.03); the fix is a travel threshold (e.g. `MIN_MOVE`) for resetting the
-  plane set, which needs the corner and crease tests rerun and every character
-  test's figures rechecked.
+- **A capsule hovering within the turned-box sweep's tolerance can hang on a
+  face it slides along** — found while fixing the corner hang (the slide now
+  keeps its plane set across an advance no longer than `MIN_MOVE`), not fixed.
+  The turned-box capsule sweep (`query::boxes::swept_capsule_vs_box`,
+  conservative advancement) reports a hit once the gap is within its tolerance
+  (a quarter of `LINEAR_SLOP`), and the slide only backs a capsule off to the
+  skin width when the sweep reports `started_inside`. A capsule that has crept
+  to within that tolerance of a 30°-turned box's face meets it at a fraction of
+  about 1e-15 every tick, with zero applied; the tangential remainder's sweep,
+  starting that close, meets the same face again at a fraction of 2/9, again
+  with zero applied, until `max_slides` runs out, and the character hangs in
+  mid-air. Seen in 20 of 4800 starts of a corner scan (axis wall filling
+  `x >= 5`, slab at (4.6, 0, -2) with half extents (0.25, 5, 1) turned 30°,
+  falling moves of (0.05, -0.01, -0.05) from a grid of starts at y = 2); before
+  the plane-set fix the same move hung 208 times. The likely cause of the second
+  hit is rounding in the advancement's closing speed for motion tangent to the
+  face; that is inferred from the contacts, not traced. The fix is either a
+  sweep that reports no closing hit for motion tangent within rounding, or a
+  slide that backs off any hit nearer than the skin width rather than only a
+  started-inside one; both change movement or query results, so it is its own
+  slice with the corner, crease and turned-box tests rerun.
 
 - **Provide access to sweep candidates for airborne braking forecasts.** EW's
   `src/controller_ballistic.rs` enlarges its probe by the arc/chord deviation to
