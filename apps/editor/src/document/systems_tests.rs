@@ -4,7 +4,13 @@
 
 use super::*;
 
+use crcbl::scene_mesh::MESHES;
+
 use crate::scene::{BLOCKS, GREYBOX};
+
+/// The meshes chunk's key, which [`two_systems`] does not hold until a mesh
+/// system is listed.
+const MESHES_CHUNK: &str = "sys/meshes.ron";
 
 /// The second system [`two_systems`] holds: puppet's sun, which is no thing
 /// in space — so an entity in both is placed by its block, and one in the sun
@@ -76,8 +82,8 @@ fn an_entity_in_two_systems_is_one_entity_listed_once() {
     );
     assert_eq!(document.placing_system(BOTH).as_deref(), Some(BLOCKS));
     assert_eq!(document.placing_system(LONE_SUN), None);
-    assert_eq!(document.attachable(BLOCK), [SUN]);
-    assert!(document.attachable(BOTH).is_empty());
+    assert_eq!(document.attachable(BLOCK), unlisted_after(&[SUN]));
+    assert_eq!(document.attachable(BOTH), unlisted_after(&[]));
     assert_eq!(
         document.read(BOTH, SUN, "intensity").expect("its sun"),
         Value::Float(2.0)
@@ -141,10 +147,84 @@ fn attach_and_detach_undo_and_redo_against_the_saved_text() {
     assert_eq!(document.files().expect("ids"), detached);
 }
 
+/// `first`, then every system the vocabulary registers that [`two_systems`]'
+/// manifest does not list, in name order: what an entity holding every listed
+/// system but `first` could be attached to.
+fn unlisted_after(first: &[&str]) -> Vec<String> {
+    let vocabulary = crate::scene::vocabulary();
+    let unlisted = vocabulary
+        .systems()
+        .filter(|system| ![BLOCKS, SUN].contains(system));
+    first
+        .iter()
+        .copied()
+        .chain(unlisted)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// **Attach offers every registered system, and attaching to one the manifest
+/// does not list lists it at the end in the same entry** — so the row is
+/// saved, and one undo puts every file back byte for byte, the manifest and
+/// the chunk the listing added included.
+#[test]
+fn attaching_to_an_unlisted_system_lists_it_and_one_undo_puts_the_files_back() {
+    let mut document = two_systems();
+    let before = document.files().expect("ids");
+    assert!(!before.contains_key(MESHES_CHUNK));
+    let offered = document.attachable(BLOCK);
+    assert_eq!(offered[0], SUN, "the manifest's systems come first");
+    assert!(offered.contains(&MESHES.to_owned()), "{offered:?}");
+
+    document.attach(BLOCK, MESHES).expect("2 has no mesh");
+    assert_eq!(document.systems_of(BLOCK), [BLOCKS, MESHES]);
+    assert_eq!(
+        document.log().len(),
+        1,
+        "the listing and the attach are one"
+    );
+    let attached = document.files().expect("ids");
+    assert_eq!(
+        attached["scene.ron"],
+        HEADER.replace("\"sun\",\n", "\"sun\",\n        \"meshes\",\n"),
+    );
+    assert!(
+        attached[MESHES_CHUNK].contains("(2, Mesh("),
+        "{}",
+        attached[MESHES_CHUNK]
+    );
+    assert!(!document.attachable(BLOCK).contains(&MESHES.to_owned()));
+
+    assert!(document.undo().expect("the batch's inverse applies"));
+    assert_eq!(document.files().expect("ids"), before);
+    assert!(!document.is_dirty());
+    assert!(document.redo().expect("the batch applies again"));
+    assert_eq!(document.files().expect("ids"), attached);
+}
+
+/// **Detaching the last entity of a system leaves the system listed**: its
+/// chunk is saved empty, and unlisting it is an edit of its own.
+#[test]
+fn detaching_a_systems_last_entity_leaves_it_listed() {
+    let mut document = two_systems();
+    document.attach(BLOCK, MESHES).expect("2 has no mesh");
+    let attached = document.files().expect("ids");
+    document.detach(BLOCK, MESHES).expect("2 keeps its block");
+    let detached = document.files().expect("ids");
+    assert_eq!(detached["scene.ron"], attached["scene.ron"]);
+    assert!(
+        !detached[MESHES_CHUNK].contains("Mesh("),
+        "{}",
+        detached[MESHES_CHUNK]
+    );
+    assert_eq!(document.log().len(), 2);
+}
+
 /// **An attach or a detach the scene cannot take is refused by its reason,
 /// and nothing is recorded**: a detach of the last system, of a system that
-/// does not hold the entity, an attach to one that does or to one the manifest
-/// does not list, an absent entity, and a row that is not the component.
+/// does not hold the entity, an attach to one that does or to one the
+/// vocabulary does not register, an absent entity, and a row that is not the
+/// component.
 #[test]
 fn an_attach_or_detach_the_scene_cannot_take_is_refused() {
     let mut document = two_systems();
@@ -166,10 +246,10 @@ fn an_attach_or_detach_the_scene_cannot_take_is_refused() {
         "{error}"
     );
     let error = document
-        .attach(BLOCK, "bricks")
-        .expect_err("not in the manifest");
+        .attach(BLOCK, "nonsense")
+        .expect_err("not in the vocabulary");
     assert!(
-        matches!(&error, EditError::NoSystem(system) if system == "bricks"),
+        matches!(&error, EditError::NoSystem(system) if system == "nonsense"),
         "{error}"
     );
     let error = document

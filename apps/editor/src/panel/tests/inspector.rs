@@ -49,7 +49,14 @@ fn the_inspector_draws_a_section_per_system() {
     assert_eq!(page.panels.section_systems(), [BLOCKS, SUN]);
     assert!(page.panels.remove_button(BLOCKS).is_some());
     assert!(page.panels.remove_button(SUN).is_some());
-    assert!(page.panels.add_buttons().is_empty(), "1 is in every system");
+    let listed = [BLOCKS.to_owned(), SUN.to_owned()];
+    assert!(
+        page.panels
+            .add_buttons()
+            .iter()
+            .all(|(system, _)| !listed.contains(system)),
+        "1 is in every system the manifest lists",
+    );
     // Each section's rows are its own component's: the sun has its four
     // fields, and the block its two vector rows and its rotation.
     let ui = page.panels.ui();
@@ -72,7 +79,8 @@ fn the_inspector_draws_a_section_per_system() {
         .into_iter()
         .map(|(system, _)| system)
         .collect();
-    assert_eq!(adds, [SUN]);
+    assert_eq!(adds, page.document.attachable(BLOCK));
+    assert_eq!(adds[0], SUN, "the manifest's systems come first");
 }
 
 /// **The add button attaches and a remove button detaches**, each one undoable

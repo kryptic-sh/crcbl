@@ -11757,12 +11757,25 @@ says what that cleared and what it did not. The allow-list entry in
   `Body` places nothing and takes its box from the block, so that reason is gone
   and refusing is open again. A check (`Registry::check`-style) reporting
   placements that disagree is the other way, if it bites.
-- **Attach offers only the systems the scene's manifest lists** (slice 11). A
-  registered system the manifest does not list cannot be attached: a save writes
-  the manifest's chunks and no others, so the row would be lost. Offering it
-  needs a command that adds a system to the manifest (and its inverse removing
-  it, refused while any entity is in it), which changes `scene.ron` — a header
-  edit no command makes today.
+- **Attach offers every registered system, and attaching to an unlisted one
+  lists it** (2026-10-02): one `EditCommand::Batch` of `ListSystem` and
+  `Attach`, built by `Document::listing_first` as a mesh drop's is. Decided for
+  the long term: **detaching a system's last entity leaves it listed** — an
+  empty manifest entry saves an empty chunk and loads as nothing, unlisting is
+  an explicit `UnlistSystem`, and a detach whose inverse was sometimes a batch
+  would be two shapes. What follows, not bugs:
+  - **Every game's systems are offered.** The shipped vocabulary registers
+    breakout's, puppet's and towers' components beside the greybox ones, so the
+    add buttons list them all, and attaching one lists that system. A system a
+    game keys its `Registry::check` and module by brings both along: towers'
+    `waypoints` puts its check into `Document::problems` and its module into
+    play, and towers' loader refuses a scene without `plots`, so play then
+    reports `Unplayable`. An undo takes the listing back out. Grouping or hiding
+    other games' systems in the inspector is open if the list gets in the way.
+  - **A save does not delete a chunk file the manifest stopped listing.** A
+    listing saved and then undone and saved again leaves `sys/<system>.ron` on
+    disk beside a `scene.ron` that no longer names it; `Scene::load` reads only
+    the manifest's systems, so it is inert. A drop's undo has the same shape.
 - **Task 4's commands (2026-09-30, rename and attach/detach 2026-10-01).**
   `EditCommand` has `SetProperty`, `Spawn`, `Delete`, `Rename`, `Attach` and
   `Detach`; a duplicate is a `Spawn` of every one of the original's rows under
@@ -12001,9 +12014,6 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     recorded in a per-project file, which is a new file format for what the
     manifest already marks. Not covered: a workspace whose game crate sits under
     another `Cargo.toml` takes the nearest one, which is the game's own.
-  - **Attaching a mesh does not list `meshes`.** `Document::attachable` offers
-    only the manifest's systems; the drop lists the system itself (one entry
-    with the spawn), and attaching could do the same.
   - **The undo property test does not play drops or `ListSystem`.** The drop's
     undo is held by its own tests against the saved files.
   - **Not tested:** a body on a mesh in play (the bodies module reads the

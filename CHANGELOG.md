@@ -682,10 +682,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   other's inverse through the undo log and refused in play mode; detaching an
   entity's last system is refused, since Delete is how an entity goes. The
   inspector draws a section per system holding the selection, each with a Remove
-  button while there is more than one, and an add button per system of the
-  scene's manifest the entity is not in, which attaches that component at its
-  type's `Default`. The outliner lists an entity once, under the first system
-  holding it. `EditCommand::Spawn` carries every system's row
+  button while there is more than one, and an add button per system the
+  vocabulary registers that the entity is not in — the manifest's first — which
+  attaches that component at its type's `Default`. Attaching to a system the
+  manifest does not list lists it at the manifest's end in the same undo entry,
+  so the row is saved and one undo puts every file back; detaching a system's
+  last entity leaves the system listed. The outliner lists an entity once, under
+  the first system holding it. `EditCommand::Spawn` carries every system's row
   (`rows: Vec<SystemRow>`), so a delete's undo, a duplicate and a paste bring
   all of them; `SetProperty` names the system its component is in. A clipping
   writes an entity's other systems' rows in `others`, written only for an entity

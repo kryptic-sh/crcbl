@@ -148,17 +148,7 @@ impl Document {
             }],
             name: None,
         };
-        let listed = self.scene.systems().iter().any(|system| system == MESHES);
-        let command = if listed {
-            spawn
-        } else {
-            EditCommand::Batch(vec![
-                EditCommand::ListSystem {
-                    system: MESHES.to_owned(),
-                },
-                spawn,
-            ])
-        };
+        let command = self.listing_first(MESHES, spawn);
         self.apply(command)?;
         Ok(id)
     }

@@ -132,11 +132,13 @@ pub enum EditError {
     /// scene's id map, and it would come back as a save that lost a row.
     IdInUse(SceneEntityId),
 
-    /// A spawn or an attach named a system this scene's manifest does not
-    /// list, or one the document's vocabulary cannot read a row of.
+    /// A spawn or a row-level attach named a system this scene's manifest does
+    /// not list, or an edit named one the document's vocabulary cannot read a
+    /// row of.
     ///
     /// Refused rather than attached: a save writes the manifest's chunks and no
     /// others, so the row would be dropped by the next one.
+    /// [`Document::attach`] lists the system first instead.
     NoSystem(String),
 
     /// A listing named a system the manifest already lists.

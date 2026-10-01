@@ -430,9 +430,9 @@ the decisions of the same day (below).
   so older clippings paste. The outliner lists an entity once, under the first
   manifest system holding it; the inspector draws a section per system (manifest
   order) with a Remove button while there is more than one, and an add button
-  per **manifest** system the entity is not in — a component in an unlisted
-  system would be dropped by the next save, and adding a manifest entry is a
-  header change no command makes yet. Arrow keys and the gizmo move the placing
+  per system the entity is not in — the manifest's then, since 2026-10-02, every
+  other registered one, attaching to which lists it in the same undo entry
+  (_Editor follow-ups_, below). Arrow keys and the gizmo move the placing
   component. A detach that takes the placement away removes the entity's pick
   collider and its instance.
 - **There is no `crcbl scene` subcommand** in `crates/crcbl-cli` to update: the
@@ -983,6 +983,17 @@ term and recorded, as above):
   centre's ground point. One spawn into a scene that lists no `meshes` also
   lists the system, in the same undo entry, since a save writes only the
   manifest's chunks.
+
+**Editor follow-ups, 2026-10-02.**
+
+- **Attach offers every registered system**, the manifest's first in its order
+  and then the rest in name order. Attaching to one the manifest does not list
+  is one `EditCommand::Batch` of `ListSystem` (at the manifest's end) and
+  `Attach`, the shape a mesh drop already had (`Document::listing_first` builds
+  both), so one undo puts every file back byte for byte. **Decided: detaching a
+  system's last entity leaves it listed** — an empty entry saves an empty chunk
+  and loads as nothing, and unlisting is an explicit `UnlistSystem`, so a
+  detach's inverse keeps one shape.
 
 **Decided 2026-10-01, for rotation** (taken for the long term and recorded, as
 above):
