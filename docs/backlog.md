@@ -19,6 +19,57 @@ production change. Browser culling measurements, CPU draw-recording cost, and
 overlapping grass workloads remain open below; the authored interior was priced
 on shard on 2026-09-27.
 
+## EW integration follow-ups
+
+- **Expose ordered character-slide contacts for game motion forecasting.** EW's
+  `src/controller_contact_forecast.rs` repeats shortened
+  `CharacterController::move_and_slide` previews to recover normals that
+  `MoveOutcome` does not retain. A floor, ceiling or non-approaching wall can
+  hide a later wall, and a finite wall can be absent from endpoint overlaps.
+  Provide contact normals and clearly defined sweep fractions/displacements for
+  each slide through an API that preserves existing movement behavior. Fractions
+  along a straight sweep are not elapsed time along an accelerated trajectory;
+  define that distinction so callers do not infer time from total removed
+  displacement. Preserve query masks, self-collider exclusion and collider
+  synchronization. EW's `controller_contact_forecast_tests.rs`,
+  `controller_wall_ceiling_timing_tests.rs` and
+  `controller_wall_contact_timing_tests.rs` provide reproductions. Keep
+  game-specific air-control limits and input rules in EW. The engine owner
+  should implement this request; EW will migrate and remove its superseded
+  preview logic after validation.
+- **Provide access to sweep candidates for airborne braking forecasts.** EW's
+  `src/controller_ballistic.rs` enlarges its probe by the arc/chord deviation to
+  find wall-normal turning points. A closest-only query hides other candidates
+  behind floors, ceilings or tangent walls. Checking all initial overlaps fixes
+  the demonstrated ceiling/braking miss, but candidates hidden later along the
+  sweep remain inaccessible. Evaluate a multi-hit sweep or a filtered candidate
+  query with shape-level hits/normals; preserve solid/trigger and layer rules.
+  Use EW's `controller_wall_ceiling_braking_tests.rs` and
+  `controller_wall_braking_tests.rs` as acceptance cases, including stopping
+  short without a false wall hit. Curved-path entry/exit and moving-wall
+  dynamics still need separate validation; straight sweeps alone do not provide
+  curved continuous collision detection.
+- **Complete platform validation of the EW integration fixes.** Windows
+  workspace formatting and Clippy pass. The full workspace test run has only the
+  cursor-focus failure below. Physics regressions cover small upward moves,
+  short box sweeps and extreme-scale stationary overlap checks. Screenshot CLI
+  tests pass, with inspected Vulkan/DX12 cube, sprite and UI captures. Clipboard
+  tests pass with the desktop fixture mutex; replacing its shared mutex with an
+  unrelated mutex fails the gate assertion. Non-Windows native execution and
+  platform CI remain unverified. EW still needs native playback of the combined
+  ceiling/braking fixture. Reproduce with
+  `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all` and
+  `cargo test --workspace --no-fail-fast`; local logs are
+  `short-box-engine-tests.log`, `short-box-sweep-*.log`, `ceiling-braking-*.log`
+  and `stack-fixed-*` under `%TEMP%/ew-crcbl-update-review/`.
+- **Repeat the Windows cursor test in a foreground-capable session.**
+  `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for` in
+  `crates/crcbl-shell/src/win32/shell/tests.rs` fails in `focus_and_confirm`
+  because `SetForegroundWindow` is refused, before the cursor assertions run.
+  The isolated retry also failed (`cursor-focus-retry.log`). Possible user
+  desktop activity was reported but is not a confirmed cause. Preserve the focus
+  precondition; cursor balancing remains unverified in this session.
+
 ## First priority: every dependency on its latest stable release, CI green (2026-09-25)
 
 **Ahead of everything below.** The owner asked for the dependencies Dependabot

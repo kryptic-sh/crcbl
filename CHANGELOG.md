@@ -3843,6 +3843,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- Sphere and capsule sweeps against boxes retain contact times for tiny nonzero
+  motion instead of treating it as stationary. Stationary sphere/box overlap
+  checks avoid squared-distance underflow and overflow at extreme scales.
+
+- Debug builds of `crcbl screenshot` no longer overflow the Windows main-thread
+  stack while constructing a scene. Shared constructors box renderers before
+  returning them to the scene dispatcher, avoiding large per-scene temporaries
+  in its stack frame.
+
+- `CharacterController::move_and_slide` preserves upward motion smaller than the
+  ground probe's reach instead of snapping a small jump step back to its floor.
+  Ground settling distinguishes requested ascent from the rise produced by
+  walking uphill, which retains support.
+
 - **`crcbl_client::Client` no longer counts a hello sent while its link is still
   coming up as a processing error.** A `UdpTransport` before its hello reply,
   like a `SteamTransport` before Steam connects, answers a send with
