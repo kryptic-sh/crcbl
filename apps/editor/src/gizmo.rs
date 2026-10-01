@@ -16,9 +16,9 @@
 //! [`Mode::Translate`] draws an arrow per axis and a square per plane between
 //! two of them; [`Mode::Scale`] draws a box-tipped line per axis and a square
 //! at the centre that resizes evenly. **There is no rotate mode**, and the enum
-//! has no variant for one: the scene format carries no rotation — a greybox
-//! `Block` and breakout's `Brick` are a position and half extents — so a rotate
-//! handle would have nothing to write. `docs/backlog.md` says what it takes.
+//! has no variant for one yet: the scene format carries a rotation on the
+//! components that turn (`crcbl::registry::Rotation`), and the ring handles
+//! that would write it are not built. `docs/backlog.md` says what they take.
 //!
 //! # Which field a handle writes
 //!

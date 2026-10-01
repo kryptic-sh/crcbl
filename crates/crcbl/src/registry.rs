@@ -15,8 +15,8 @@
 //!                     ├── codecs()          the chunk file, read and written
 //!                     ├── register_systems  the System<Brick> a load spawns into
 //!                     ├── component()       &mut dyn Reflect, for an edit
-//!                     ├── placement()       a centre and half extents, for a
-//!                     │                     collider and a bounds box
+//!                     ├── placement()       a turned box, for a collider, an
+//!                     │                     instance and a bounds box
 //!                     └── default_row()     a new Brick's row, for a tool
 //!                                           attaching one to an entity
 //!
@@ -133,7 +133,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -141,6 +141,10 @@ use crcbl_assets::AssetSource;
 use crcbl_ecs::{ComponentHash, Entity, GameModule, System, World};
 use crcbl_reflect::Reflect;
 use crcbl_scene::scn::{IdMap, ScnError, SystemChunk, chunk_of, row_text};
+
+mod rotation;
+
+pub use rotation::{ROTATION_TOLERANCE, Rotation, RotationError};
 
 // ---------------------------------------------------------------------------
 // Placement
@@ -181,11 +185,97 @@ pub const POSITION: &str = "position";
 /// [`None`], and that is a real answer rather than a missing one: `apps/puppet`'s
 /// `Sun` is a direction and an intensity, and a scene made of it has a row an
 /// outliner lists and a ray cannot hit.
+///
+/// # A turned box, with the turn always spelled
+///
+/// The answer carries an orientation as well as a centre and half extents
+/// ([`OrientedBox`]), and every impl states it — a component with no rotation
+/// field answers [`OrientedBox::axis_aligned`]. Not a provided method that
+/// defaults to "unturned": a component that grew a [`Rotation`] and forgot to
+/// override it would be drawn and picked unturned while its file said
+/// otherwise, and nothing would say so.
 pub trait Placement {
-    /// This component's centre and its **half** extents, in simulation space —
-    /// which is what both a box collider and a debug-draw box want — or [`None`]
-    /// for a row that is not a thing in space.
-    fn placement(&self) -> Option<(DVec3, DVec3)>;
+    /// This component's box in simulation space — its centre, its **half**
+    /// extents along its own axes, and how those axes are turned — or
+    /// [`None`] for a row that is not a thing in space.
+    fn placement(&self) -> Option<OrientedBox>;
+}
+
+/// A box in simulation space that may be turned: what [`Placement`] answers,
+/// and what a collider, an instance transform and a selection outline are
+/// built from.
+///
+/// `half_extents` are along the box's **own** axes, which are the world's
+/// axes turned by `rotation` — the frame a component's `half_extents` field is
+/// written in, and the one a box collider on a turned
+/// `crcbl::phys::Transform` takes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrientedBox {
+    /// The box's centre.
+    pub centre: DVec3,
+    /// Half its extent along each of its own axes.
+    pub half_extents: DVec3,
+    /// How its axes are turned from the world's: a unit quaternion.
+    pub rotation: DQuat,
+}
+
+impl OrientedBox {
+    /// An unturned box: its axes are the world's.
+    #[must_use]
+    pub const fn axis_aligned(centre: DVec3, half_extents: DVec3) -> Self {
+        Self {
+            centre,
+            half_extents,
+            rotation: DQuat::IDENTITY,
+        }
+    }
+
+    /// A box at `centre` reaching `half_extents` along its own axes, turned by
+    /// `rotation` from the world's.
+    #[must_use]
+    pub const fn new(centre: DVec3, half_extents: DVec3, rotation: DQuat) -> Self {
+        Self {
+            centre,
+            half_extents,
+            rotation,
+        }
+    }
+
+    /// Its eight corners, corner `i` taking the far side of the box's own `x`
+    /// where bit 0 of `i` is set, `y` for bit 1 and `z` for bit 2 — the order
+    /// [`DebugDraw::box_edges`](crate::render::debug_draw::DebugDraw::box_edges)
+    /// joins.
+    #[must_use]
+    pub fn corners(&self) -> [DVec3; 8] {
+        std::array::from_fn(|corner| {
+            let sign = |bit: usize| if corner & bit == 0 { -1.0 } else { 1.0 };
+            let local = self.half_extents * DVec3::new(sign(1), sign(2), sign(4));
+            self.centre + self.rotation * local
+        })
+    }
+
+    /// The smallest box with the world's axes that holds this one, as its
+    /// `(min, max)` corners: what a camera frames and a bounds query answers.
+    #[must_use]
+    pub fn bounds(&self) -> (DVec3, DVec3) {
+        let reach = self.reach();
+        (self.centre - reach, self.centre + reach)
+    }
+
+    /// How far this box reaches from its centre along each world axis: the
+    /// half extents of [`bounds`](Self::bounds), and exactly `half_extents`
+    /// for an unturned box.
+    #[must_use]
+    pub fn reach(&self) -> DVec3 {
+        // Each world axis reaches as far as the box's turned half extents
+        // project onto it: the absolute rotation matrix times the extents.
+        let turned = glam::DMat3::from_quat(self.rotation);
+        DVec3::new(
+            turned.row(0).abs().dot(self.half_extents),
+            turned.row(1).abs().dot(self.half_extents),
+            turned.row(2).abs().dot(self.half_extents),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +299,7 @@ pub trait Placement {
 /// use crcbl::ecs::{ComponentHash, World};
 /// use crcbl::math::DVec3;
 /// use crcbl::reflect::Reflect;
-/// use crcbl::registry::{Placement, Registry};
+/// use crcbl::registry::{OrientedBox, Placement, Registry};
 /// use crcbl::serde::{Deserialize, Serialize};
 /// use std::hash::Hasher;
 ///
@@ -229,8 +319,11 @@ pub trait Placement {
 /// }
 ///
 /// impl Placement for Prop {
-///     fn placement(&self) -> Option<(DVec3, DVec3)> {
-///         Some((DVec3::from_array(self.position), DVec3::splat(0.5)))
+///     fn placement(&self) -> Option<OrientedBox> {
+///         Some(OrientedBox::axis_aligned(
+///             DVec3::from_array(self.position),
+///             DVec3::splat(0.5),
+///         ))
 ///     }
 /// }
 ///
@@ -326,7 +419,7 @@ struct Entry {
     codec: fn(&str) -> Box<dyn SystemChunk>,
     register: fn(&mut World, &str),
     component_mut: for<'w> fn(&'w mut World, &str, Entity) -> Option<&'w mut dyn Reflect>,
-    placement: fn(&mut World, &str, Entity) -> Option<(DVec3, DVec3)>,
+    placement: fn(&mut World, &str, Entity) -> Option<OrientedBox>,
     entities: fn(&mut World, &str) -> Vec<Entity>,
     default_row: fn(&str) -> Result<String, ScnError>,
 }
@@ -337,7 +430,7 @@ struct Entry {
 struct RuntimeEntry {
     /// The component's Rust path, for a message.
     component: &'static str,
-    placement: fn(&mut World, &str, Entity) -> Option<(DVec3, DVec3)>,
+    placement: fn(&mut World, &str, Entity) -> Option<OrientedBox>,
     entities: fn(&mut World, &str) -> Vec<Entity>,
 }
 
@@ -689,7 +782,7 @@ impl Registry {
     /// [`None`] both for an entity no registered system holds and for one none
     /// of whose components is a thing in space — see [`Placement`].
     #[must_use]
-    pub fn placement(&self, world: &mut World, entity: Entity) -> Option<(DVec3, DVec3)> {
+    pub fn placement(&self, world: &mut World, entity: Entity) -> Option<OrientedBox> {
         if let Some(system) = self.placing_system(world, entity) {
             let entry = &self.entries[&system];
             return (entry.placement)(world, &system, entity);
@@ -848,7 +941,7 @@ where
 }
 
 /// [`Entry::placement`] for `T`.
-fn placement_of<T>(world: &mut World, name: &str, entity: Entity) -> Option<(DVec3, DVec3)>
+fn placement_of<T>(world: &mut World, name: &str, entity: Entity) -> Option<OrientedBox>
 where
     T: ComponentHash + Placement + 'static,
 {

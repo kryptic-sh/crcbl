@@ -50,7 +50,7 @@ use crcbl::assets::{AssetSource, DirSource, MemorySource};
 use crcbl::ecs::{ComponentHash, System, World};
 use crcbl::math::DVec3;
 use crcbl::reflect::Reflect;
-use crcbl::registry::{Placement, Registry};
+use crcbl::registry::{OrientedBox, Placement, Registry};
 use crcbl::scene::scn::{Scene, ScnError};
 use crcbl::serde::{Deserialize, Serialize};
 
@@ -132,8 +132,11 @@ impl ComponentHash for Brick {
 /// *where* a row is without knowing that a brick's position is called
 /// `position`. See [`crcbl::registry::Placement`].
 impl Placement for Brick {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
-        Some((self.position(), self.half_extents()))
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::axis_aligned(
+            self.position(),
+            self.half_extents(),
+        ))
     }
 }
 

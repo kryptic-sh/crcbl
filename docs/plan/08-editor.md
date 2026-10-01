@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 13 2026-10-01, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 14 2026-10-01, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -194,8 +194,8 @@ full-window draw under a hole in the panels is gone.
   into the entry on top when it names the same leaves in the same order.
 - **Rotate cannot be entered.** `gizmo::Mode` has no rotate variant, and E puts
   a refusal on the status line and leaves the mode as it was: the scene format
-  carries no rotation for a handle to write. The backlog says what it would
-  take.
+  carried no rotation for a handle to write. (Slice 14 put one in the format;
+  the handle is still owed, and the backlog says what it takes.)
 - **Multi-select is not a question yet**: the document holds one selection
   (`Document::selected`), and the outliner's Ctrl and Shift clicks select rows
   of which the document takes the first. Every handle acts on that one entity.
@@ -488,7 +488,8 @@ of the same day (below).
   through the paths it already has; stop throws the world away.
 - **Rotation is locked**: a dynamic body gets no inertia tensor, so it never
   turns, and the box that collides is the axis-aligned box that is drawn. What
-  rotation needs is in the backlog.
+  rotation needs is in the backlog. (Slice 14 creates a body at its placement's
+  rotation, still locked.)
 - **The picking boxes are not the simulated bodies.** `sync_colliders` keeps one
   kinematic box per placed entity in the document's own `PhysicsSystem`; the
   bodies live in the `Simulation`, a different type, so the sync after a tick
@@ -577,6 +578,55 @@ the exit criterion has a path in the editor except creating a scene from empty.
   in play, and Enter at the view's centre, one undo each, and a drop into a
   scene without meshes undoing to its files byte for byte. The mutations each
   turned a test red are listed in the commits that landed this.
+
+**Slice 14, rotation in the scene format, landed 2026-10-01**, on the decisions
+of the same day (below).
+
+- **Decided 2026-10-01: a rotation is an optional field on a placing
+  component**, a unit quaternion stored as `crcbl::registry::Rotation` and
+  written `rotation: (x, y, z, w)`, serde-defaulted to the identity and left out
+  of the file while it is exactly the identity — so every committed `.scn/` is
+  byte-identical. Four numbers rather than Euler angles, which have several
+  spellings of one orientation and lose an axis at a right-angle pitch, so a
+  file of them would not read back to what was saved; rather than glam's own
+  serde form, which needs a glam feature the workspace does not turn on.
+- **Decided 2026-10-01: refused, not normalised, on load.** A number that is not
+  finite and a length further than `ROTATION_TOLERANCE` from one are each
+  `ScnError::Parse` naming the file, line and why (`RotationError`); a value
+  within the tolerance is kept exactly as written, so a hand-typed `0.7071`
+  saves back as itself, and `Rotation::quat` reads it normalised. A length of
+  `0.5` or `3` is a typo, and normalising it would save numbers nobody wrote.
+- **Who carries one**: the editor's `Block` and `scene_mesh::Mesh` (turned about
+  the asset's origin, so its box's centre swings round `position`). Breakout's
+  `Brick`, puppet's `Surface` and `Spawn` and towers' `Waypoint` and `Plot` do
+  not: each game builds its colliders and its picture from a position and an
+  extent, and a field the game ignores would show a turn the game never plays.
+- **Decided 2026-10-01: `Placement` returns an orientation.** It answers a
+  `crcbl::registry::OrientedBox` — centre, half extents along the box's own
+  axes, rotation — and every impl spells the turn, `OrientedBox::axis_aligned`
+  for none, rather than a provided method defaulting to unturned that a
+  component growing a rotation could forget. `Document::placement` hands it out;
+  `Document::bounds` is the world-axis box around it (`OrientedBox::bounds`),
+  exactly the old numbers for an unturned box.
+- **Picking, drawing and outlining turn.** A turned box picks by a
+  twelve-triangle box mesh on a turned transform, because `crcbl_phys`'s query
+  world keeps a box collider axis-aligned whatever its transform; an unturned
+  one keeps the box collider. The greybox cube's instance transform and a mesh's
+  parts carry the rotation, and the selection is outlined as its turned box
+  (`DebugDraw::box_edges` over `OrientedBox::corners`).
+- **Decided 2026-10-01: physics keeps rotation locked.** A scene `Body` is
+  created at its placement's rotation — a turned collider and transform, so a
+  tipped cube lands on its edge — and keeps it: no inertia, and only the centre
+  is written back. What unlocking needs is in the backlog.
+- **Evidence**: the umbrella's tests hold the tolerance kept as written, both
+  refusals by name and on load naming the file, only the exact identity left
+  out, an off-unit reflected write read as its direction, turned corners and
+  bounds, an unturned reach exact to the bit, a turned mesh round-tripping and
+  its box swinging about its origin, and a tipped body resting on its edge and
+  keeping its rotation; the editor's hold a turned block saved, reopened and
+  undone to the saved text, a ray the turn swings under picking it and one it
+  swings away from passing it, its bounds, and its cube drawn turned. The
+  mutations each turned a test red are listed in the commit that landed this.
 
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
@@ -861,6 +911,23 @@ term and recorded, as above):
   centre's ground point. One spawn into a scene that lists no `meshes` also
   lists the system, in the same undo entry, since a save writes only the
   manifest's chunks.
+
+**Decided 2026-10-01, for rotation** (taken for the long term and recorded, as
+above):
+
+- **Rotation is an optional field on placing components**: a unit quaternion,
+  serde-defaulted to the identity and omitted from the file when it is the
+  identity, so committed scenes stay byte-identical; validated on load by name.
+  Added where the component's game honours it — the editor's `Block` and `Mesh`
+  — and not to components whose games ignore it. Built in slice 14.
+- **`Placement` returns an orientation**, and picking, instance transforms and
+  the selection outline use it. Built in slice 14.
+- **The rotate gizmo is E**: three screen-space ring handles hit-tested against
+  the projected ring, a drag turning about the ring's world axis through the
+  entity's centre, Ctrl snapping to an angle step that is a setting beside the
+  grid and scale steps, one undo per drag, refused in play.
+- **Physics keeps rotation locked** for now: a body is created at its rotation
+  and does not spin. Built in slice 14; unlocking is in the backlog.
 
 **Still the owner's:** a file watcher dependency for hot reload (`notify`),
 because adding a crates.io dependency is the owner's call by the workspace's

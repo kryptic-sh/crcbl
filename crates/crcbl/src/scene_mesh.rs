@@ -60,6 +60,14 @@
 //! A flat model — one quad — measures zero on one axis; its box is given
 //! [`MIN_HALF_EXTENT`] there, so a ray can strike it and a body can collide as
 //! it, rather than a box no collider can be.
+//!
+//! # Turned about its own origin
+//!
+//! [`Mesh::rotation`] turns the asset about `position`, the point its own
+//! origin stands on — the way its picture is drawn, origin first and then the
+//! asset's own transforms — so the box is the measured one turned the same
+//! way, its centre swung round `position` with it. Left out of the file while
+//! it is the identity, so a scene of unturned meshes is the file it was.
 
 use std::fmt;
 use std::path::Path;
@@ -72,7 +80,7 @@ use crcbl_ecs::{ComponentHash, Entity, System, World};
 use crcbl_reflect::Reflect;
 use crcbl_store::web::canonical_key;
 
-use crate::registry::{Placement, Registry, check_chunk};
+use crate::registry::{OrientedBox, Placement, Registry, Rotation, check_chunk};
 
 /// The scene system every [`Mesh`] is a row of: the manifest entry and the
 /// chunk file's stem.
@@ -108,6 +116,11 @@ pub struct Mesh {
     /// Where the asset's own origin stands.
     #[reflect(name = "Position", step = 0.01)]
     pub position: [f64; 3],
+    /// How the asset is turned about its origin; the identity is left out of
+    /// the file.
+    #[reflect(name = "Rotation")]
+    #[serde(default, skip_serializing_if = "Rotation::is_identity")]
+    pub rotation: Rotation,
     /// The asset's box in its own frame, with the key it was measured for;
     /// never written to a file nor shown in a panel.
     #[reflect(skip)]
@@ -124,12 +137,14 @@ struct Measured {
 }
 
 impl Mesh {
-    /// A mesh of `asset` with its origin at `position`, not yet measured.
+    /// A mesh of `asset` with its origin at `position`, unturned and not yet
+    /// measured.
     #[must_use]
     pub fn new(asset: impl Into<String>, position: [f64; 3]) -> Self {
         Self {
             asset: asset.into(),
             position,
+            rotation: Rotation::IDENTITY,
             measured: None,
         }
     }
@@ -184,25 +199,28 @@ fn placeholder() -> (DVec3, DVec3) {
     )
 }
 
-/// The measured box offset by `position`, or the placeholder's — never
-/// [`None`]: a mesh is a thing in space whether or not its asset loaded.
+/// The measured box, or the placeholder's, turned by `rotation` about the
+/// asset's origin and stood on `position` — never [`None`]: a mesh is a thing
+/// in space whether or not its asset loaded.
 impl Placement for Mesh {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
+    fn placement(&self) -> Option<OrientedBox> {
         let (min, max) = self.local_bounds().unwrap_or_else(placeholder);
-        let centre = DVec3::from_array(self.position) + (min + max) * 0.5;
+        let rotation = self.rotation.quat();
+        let centre = DVec3::from_array(self.position) + rotation * ((min + max) * 0.5);
         let half = ((max - min) * 0.5).max(DVec3::splat(MIN_HALF_EXTENT));
-        Some((centre, half))
+        Some(OrientedBox::new(centre, half, rotation))
     }
 }
 
 impl ComponentHash for Mesh {
-    /// The key and the position: the measured box is a fact about the asset,
-    /// recomputed from the key, so it adds nothing a hash could disagree on.
+    /// The key, the position and the rotation: the measured box is a fact
+    /// about the asset, recomputed from the key, so it adds nothing a hash
+    /// could disagree on.
     fn hash_component(&self, hasher: &mut dyn std::hash::Hasher) {
         hasher.write(self.asset.as_bytes());
         // A terminator, so a key and a position cannot run into one another.
         hasher.write_u8(0);
-        for value in self.position {
+        for value in self.position.into_iter().chain(self.rotation.to_array()) {
             hasher.write(&value.to_bits().to_le_bytes());
         }
     }
@@ -210,12 +228,16 @@ impl ComponentHash for Mesh {
 
 /// [`Mesh`] as a file spells it, before [`check_asset`]: what serde reads a
 /// row into, so a key that would walk out of the asset root is refused by the
-/// loader with the file's line and column.
+/// loader with the file's line and column. The rotation is checked by its own
+/// type as it is read ([`Rotation`]'s `try_from`), with the same line and
+/// column.
 #[derive(Deserialize)]
 #[serde(rename = "Mesh")]
 struct MeshRow {
     asset: String,
     position: [f64; 3],
+    #[serde(default)]
+    rotation: Rotation,
 }
 
 impl TryFrom<MeshRow> for Mesh {
@@ -223,7 +245,10 @@ impl TryFrom<MeshRow> for Mesh {
 
     fn try_from(row: MeshRow) -> Result<Self, MeshPathError> {
         check_asset(&row.asset)?;
-        Ok(Self::new(row.asset, row.position))
+        Ok(Self {
+            rotation: row.rotation,
+            ..Self::new(row.asset, row.position)
+        })
     }
 }
 

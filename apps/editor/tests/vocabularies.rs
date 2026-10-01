@@ -21,7 +21,7 @@ use std::path::Path;
 
 use crcbl::assets::AssetSource;
 use crcbl::reflect::Value;
-use crcbl::registry::{Placement, Registry};
+use crcbl::registry::{OrientedBox, Placement, Registry};
 use crcbl::scene::scn::{SceneEntityId, ScnError};
 use crcbl_editor::{Document, EditCommand, EditError};
 
@@ -141,7 +141,10 @@ fn a_bricks_placement_is_the_one_slice_one_read_by_hand() {
     let first = board.bricks()[0];
     assert_eq!(
         first.placement(),
-        Some((first.position(), first.half_extents())),
+        Some(OrientedBox::axis_aligned(
+            first.position(),
+            first.half_extents()
+        )),
     );
 }
 

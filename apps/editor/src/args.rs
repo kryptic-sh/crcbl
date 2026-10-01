@@ -130,8 +130,8 @@ EDITING:
     R                    Show the scale handles, on an entity with half
                          extents: drag a box-tipped line to resize along that
                          axis, or the centre square to resize evenly
-    E                    Rotate is not built — the scene format carries no
-                         rotation — and the status line says so
+    E                    Rotate is not built — there are no ring handles yet
+                         — and the status line says so
     Ctrl while dragging  Snap to the absolute grid: a centre to multiples of
                          editor.snap.grid and a half extent to multiples of
                          editor.snap.scale, both metres in settings.toml. W

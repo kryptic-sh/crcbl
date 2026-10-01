@@ -1,6 +1,7 @@
 use super::*;
 
 use crcbl::engine::{ExitReason, Flow};
+use crcbl::math::Quat;
 use crcbl::reflect::Value;
 use crcbl::render::shadow::Cadence;
 use crcbl::shell::HeadlessShell;
@@ -637,5 +638,41 @@ fn a_newly_measured_asset_rebuilds_the_renderer_and_is_drawn() {
         live, 3,
         "the slab, the triangle and the missing mesh's cube, and nothing left over"
     );
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A turned block is drawn turned**: its cube's transform carries the
+/// block's rotation, at its centre and scaled to its own box, and the renderer
+/// holds that transform — then the undo draws it unturned again.
+#[test]
+fn a_turned_block_is_drawn_turned() {
+    let mut editor = headless(16);
+    let id = SceneEntityId(2);
+    step_any(&mut editor);
+    let unturned = placed_of(&editor, id).descs[0].transform;
+
+    let turn = crcbl::math::DQuat::from_rotation_z(0.4);
+    crate::document::rotation_tests::turn_block(&mut editor.document, id, turn);
+    step_any(&mut editor);
+    let placed = placed_of(&editor, id);
+    let (scale, rotation, translation) = placed.descs[0].transform.to_scale_rotation_translation();
+    assert!(
+        rotation.abs_diff_eq(turn.as_quat(), 1e-6),
+        "the cube is turned {rotation:?}, not {turn:?}",
+    );
+    assert!(scale.abs_diff_eq(Vec3::new(2.4, 1.5, 3.0), 1e-5), "{scale}");
+    assert!(
+        translation.abs_diff_eq(Vec3::new(0.0, 0.75, 0.0), 1e-6),
+        "{translation}"
+    );
+    assert!(records_hold(
+        &editor,
+        placed.handles[0],
+        placed.descs[0].transform
+    ));
+
+    editor.act(&Action::Undo);
+    step_any(&mut editor);
+    assert_eq!(placed_of(&editor, id).descs[0].transform, unturned);
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }

@@ -56,7 +56,7 @@ use crcbl::assets::{AssetSource, DirSource, MemorySource};
 use crcbl::ecs::{ComponentHash, System, World};
 use crcbl::math::DVec3;
 use crcbl::reflect::Reflect;
-use crcbl::registry::{Placement, Registry};
+use crcbl::registry::{OrientedBox, Placement, Registry};
 use crcbl::scene::scn::{IdMap, Scene};
 use crcbl::serde::{Deserialize, Serialize};
 
@@ -130,9 +130,9 @@ impl ComponentHash for Waypoint {
 /// as proud of the ground as it is drawn — the square the two legs meeting there
 /// both cover, so a tool picks the corner where the picture shows one.
 impl Placement for Waypoint {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
+    fn placement(&self) -> Option<OrientedBox> {
         let feet = DVec3::from_array(self.position);
-        Some((
+        Some(OrientedBox::axis_aligned(
             feet + DVec3::new(0.0, 0.5 * LANE_HEIGHT, 0.0),
             DVec3::new(0.5 * LANE_WIDTH, 0.5 * LANE_HEIGHT, 0.5 * LANE_WIDTH),
         ))
@@ -180,8 +180,8 @@ impl ComponentHash for Plot {
 /// The build pad a plot is drawn as, which is the box a tool draws and picks it
 /// by.
 impl Placement for Plot {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
-        Some((
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::axis_aligned(
             self.at() + DVec3::new(0.0, 0.5 * PAD_HEIGHT, 0.0),
             DVec3::new(0.5 * PAD_EDGE, 0.5 * PAD_HEIGHT, 0.5 * PAD_EDGE),
         ))
@@ -752,7 +752,7 @@ mod tests {
         };
         assert_eq!(
             waypoint.placement(),
-            Some((
+            Some(OrientedBox::axis_aligned(
                 DVec3::new(8.0, 0.5 * LANE_HEIGHT, -6.0),
                 DVec3::new(0.5 * LANE_WIDTH, 0.5 * LANE_HEIGHT, 0.5 * LANE_WIDTH),
             )),
@@ -763,7 +763,7 @@ mod tests {
         };
         assert_eq!(
             plot.placement(),
-            Some((
+            Some(OrientedBox::axis_aligned(
                 DVec3::new(-7.0, 0.5 * PAD_HEIGHT, -1.0),
                 DVec3::new(0.5 * PAD_EDGE, 0.5 * PAD_HEIGHT, 0.5 * PAD_EDGE),
             )),

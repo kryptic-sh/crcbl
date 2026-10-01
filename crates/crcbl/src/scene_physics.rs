@@ -44,18 +44,21 @@
 //! component whose `position` **is** its centre, the written value is the
 //! simulated centre exactly.
 //!
-//! # Rotation is locked
+//! # A body starts at its rotation, and keeps it
 //!
-//! The scene format carries no rotation — a block is a position and half
-//! extents — and every tool draws a placement as an axis-aligned box. So a
-//! dynamic body is built with no rotational inertia, which `crcbl_phys` reads
-//! as "torque does nothing and the spin never changes": it starts still and
-//! stays unrotated, and the box that collides is the box that is drawn.
-//! Simulating rotation and not drawing it was declined: a box resting on its
-//! corner while the picture shows it flat is a simulation the picture lies
-//! about. Drawing rotation needs a rotation in the scene format and in
-//! [`Placement`], and a place to write it back to; `docs/backlog.md` has the
-//! entry.
+//! A placement may be turned ([`OrientedBox::rotation`], from a placing
+//! component's `rotation` field), and the body's box is created turned the
+//! same way, so a slab tilted in the editor is a ramp that things slide down.
+//! **The rotation is then locked**: a dynamic body is built with no rotational
+//! inertia, which `crcbl_phys` reads as "torque does nothing and the spin
+//! never changes", so it keeps the orientation it was placed at — and the box
+//! that collides is still the box that is drawn, because only the centre
+//! moves and only the centre is written back. Unlocking it needs the module to
+//! write the orientation into the placing component's `rotation` leaves beside
+//! [`POSITION`], and an inertia from `crcbl_phys::MassProperties` for the box;
+//! `docs/backlog.md` has the entry. Simulating rotation without writing it
+//! back was declined: a box resting on its corner while the picture shows it
+//! flat is a simulation the picture lies about.
 //!
 //! # The simulated bodies are not the picking ones
 //!
@@ -92,7 +95,7 @@ use crcbl_phys::{
 use crcbl_reflect::{Reflect, Value, get_path, set_path};
 use crcbl_scene::scn::{Scene, SceneEntityId};
 
-use crate::registry::{POSITION, Placement, Registry, check_chunk};
+use crate::registry::{OrientedBox, POSITION, Placement, Registry, check_chunk};
 
 /// The scene system every [`Body`] is a row of: the manifest entry, the chunk
 /// file's stem, and the system the module is registered under.
@@ -274,7 +277,7 @@ impl ComponentHash for Body {
 /// component that places its entity, so the placement question passes it by
 /// and goes on to that one — see [`Registry::placing_system`].
 impl Placement for Body {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
+    fn placement(&self) -> Option<OrientedBox> {
         None
     }
 }
@@ -345,11 +348,7 @@ enum ShapeError {
     /// No scene component of the entity's answers a placement.
     Unplaced,
     /// The placement is not a box a collider can be.
-    Degenerate {
-        system: String,
-        centre: DVec3,
-        half_extents: DVec3,
-    },
+    Degenerate { system: String, shape: OrientedBox },
     /// The placing component has no float leaves at `position.N`.
     NoPosition { system: String, why: String },
 }
@@ -361,15 +360,11 @@ impl fmt::Display for ShapeError {
                 "has a body and nothing that places it: a body collides as the box its entity \
                  is placed by",
             ),
-            Self::Degenerate {
-                system,
-                centre,
-                half_extents,
-            } => write!(
+            Self::Degenerate { system, shape } => write!(
                 f,
-                "is placed by `{system}` as a box of half extents {half_extents} at {centre}, \
-                 which a collider cannot be: every value must be finite and every half extent \
-                 above zero"
+                "is placed by `{system}` as a box of half extents {} at {}, which a collider \
+                 cannot be: every value must be finite and every half extent above zero",
+                shape.half_extents, shape.centre,
             ),
             Self::NoPosition { system, why } => write!(
                 f,
@@ -380,26 +375,23 @@ impl fmt::Display for ShapeError {
     }
 }
 
-/// The box `entity` collides as: its placement's centre and half extents,
-/// checked to be a box a collider can be and placed by a component whose
-/// [`POSITION`] the module can write.
+/// The box `entity` collides as: its placement, checked to be a box a
+/// collider can be and placed by a component whose [`POSITION`] the module
+/// can write.
 fn shape_of(
     registry: &Registry,
     world: &mut World,
     entity: Entity,
-) -> Result<(DVec3, DVec3), ShapeError> {
+) -> Result<OrientedBox, ShapeError> {
     let system = registry
         .placing_system(world, entity)
         .ok_or(ShapeError::Unplaced)?;
-    let (centre, half_extents) = registry
+    let shape = registry
         .placement(world, entity)
         .ok_or(ShapeError::Unplaced)?;
-    if !(centre.is_finite() && half_extents.is_finite() && half_extents.min_element() > 0.0) {
-        return Err(ShapeError::Degenerate {
-            system,
-            centre,
-            half_extents,
-        });
+    let finite = shape.centre.is_finite() && shape.half_extents.is_finite();
+    if !(finite && shape.half_extents.min_element() > 0.0) {
+        return Err(ShapeError::Degenerate { system, shape });
     }
     let Some(component) = registry.component(world, &system, entity) else {
         return Err(ShapeError::Unplaced);
@@ -422,7 +414,7 @@ fn shape_of(
             }
         }
     }
-    Ok((centre, half_extents))
+    Ok(shape)
 }
 
 /// Every [`Body`] in `world`'s [`BODIES`] system, in storage order — the order
@@ -551,27 +543,27 @@ impl GameModule for BodyPlay {
                 log::warn!("{entity:?} is left out of the simulation: {error}");
                 continue;
             }
-            let (centre, half_extents) = match shape_of(&self.registry, world, entity) {
+            let shape = match shape_of(&self.registry, world, entity) {
                 Ok(shape) => shape,
                 Err(error) => {
                     log::warn!("{entity:?} is left out of the simulation: it {error}");
                     continue;
                 }
             };
-            let transform = Transform::from_position(centre);
+            let transform = Transform::new(shape.centre, shape.rotation);
             physics.set_transform(entity, transform);
             physics.set_collider(
                 entity,
                 &ColliderComponent::Box {
                     offset: DVec3::ZERO,
-                    half_extents,
+                    half_extents: shape.half_extents,
                     is_trigger: false,
                 },
                 &transform,
             );
             match body.kind {
-                // No inertia tensor: the rotation stays locked — see the
-                // module docs.
+                // No inertia tensor: the body keeps the rotation it was
+                // placed at — see the module docs.
                 BodyKind::Dynamic => {
                     physics.set_body(entity, RigidBody::new_dynamic(body.mass));
                     moving.push(entity);
@@ -612,9 +604,10 @@ fn follow(
     let system = registry
         .placing_system(world, entity)
         .ok_or("nothing places it any more")?;
-    let (placed, _) = registry
+    let placed = registry
         .placement(world, entity)
-        .ok_or("nothing places it any more")?;
+        .ok_or("nothing places it any more")?
+        .centre;
     let component = registry
         .component(world, &system, entity)
         .ok_or("its placing component is gone")?;

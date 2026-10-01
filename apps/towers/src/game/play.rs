@@ -39,7 +39,7 @@ use crcbl::assets::AssetSource;
 use crcbl::ecs::{ClientInputs, ComponentHash, Entity, GameModule, System, World};
 use crcbl::math::DVec3;
 use crcbl::phys::ColliderId;
-use crcbl::registry::{Placement, Registry};
+use crcbl::registry::{OrientedBox, Placement, Registry};
 
 use super::{DEFAULT_TICK_HZ, Stage, TowersModule, lock};
 use crate::map::{CREEP_RADIUS, Map};
@@ -63,8 +63,11 @@ impl ComponentHash for Walker {
 
 /// The box around the creep's sphere, which is what a greybox draws it as.
 impl Placement for Walker {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
-        Some((self.centre, DVec3::splat(CREEP_RADIUS)))
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::axis_aligned(
+            self.centre,
+            DVec3::splat(CREEP_RADIUS),
+        ))
     }
 }
 
@@ -331,7 +334,10 @@ mod tests {
         };
         assert_eq!(
             walker.placement(),
-            Some((walker.centre, DVec3::splat(CREEP_RADIUS))),
+            Some(OrientedBox::axis_aligned(
+                walker.centre,
+                DVec3::splat(CREEP_RADIUS)
+            )),
         );
     }
 }

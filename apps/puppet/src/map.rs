@@ -112,7 +112,7 @@ use crcbl::greybox::{GREYBOX_TILE_M, cube, grid_material, grid_page, platform, s
 use crcbl::math::{DVec3, Mat4, Vec3};
 use crcbl::phys::{BoxCollider, PhysicsWorld, Sphere};
 use crcbl::reflect::Reflect;
-use crcbl::registry::{Placement, Registry};
+use crcbl::registry::{OrientedBox, Placement, Registry};
 use crcbl::render::scene::{Capacities, Geometry, InstanceDesc, MeshDesc, ProbeGrid, SceneDesc};
 use crcbl::render::{
     DirectionalLight, ForwardRenderer, InstanceHandle, InstancePoolError, MeshPoolError, SkinRange,
@@ -409,7 +409,7 @@ impl ComponentHash for Surface {
 /// shared: a collider there is the analytic [`Sphere`], and this is the box a
 /// tool draws and picks it by.
 impl Placement for Surface {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
+    fn placement(&self) -> Option<OrientedBox> {
         let origin = DVec3::from_array(self.position);
         Some(match self.shape {
             // A `platform` stands *on* its origin, so the centre is half a
@@ -418,11 +418,11 @@ impl Placement for Surface {
                 width,
                 depth,
                 height,
-            } => (
+            } => OrientedBox::axis_aligned(
                 origin + DVec3::new(0.0, 0.5 * height, 0.0),
                 DVec3::new(0.5 * width, 0.5 * height, 0.5 * depth),
             ),
-            Shape::Dome { radius } => (origin, DVec3::splat(radius)),
+            Shape::Dome { radius } => OrientedBox::axis_aligned(origin, DVec3::splat(radius)),
         })
     }
 }
@@ -486,9 +486,9 @@ impl ComponentHash for Spawn {
 /// point a tool draws as the thing that will stand in it is one a person can see
 /// is clipping into a wall.
 impl Placement for Spawn {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
+    fn placement(&self) -> Option<OrientedBox> {
         let half_height = 0.5 * CHARACTER_HEIGHT;
-        Some((
+        Some(OrientedBox::axis_aligned(
             DVec3::from_array(self.position) + DVec3::new(0.0, half_height, 0.0),
             DVec3::new(CHARACTER_RADIUS, half_height, CHARACTER_RADIUS),
         ))
@@ -556,7 +556,7 @@ impl ComponentHash for Sun {
 /// the middle of every map and make "the sun is selected" a thing a person
 /// reached by accident.
 impl Placement for Sun {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
+    fn placement(&self) -> Option<OrientedBox> {
         None
     }
 }
@@ -1254,9 +1254,8 @@ impl Map {
                 // rather than repeated, so the collider and the box a tool draws
                 // cannot disagree.
                 Shape::Platform { .. } => {
-                    let (centre, half_extents) =
-                        surface.placement().expect("a surface is a thing in space");
-                    world.add_box(BoxCollider::new(centre, half_extents));
+                    let placed = surface.placement().expect("a surface is a thing in space");
+                    world.add_box(BoxCollider::new(placed.centre, placed.half_extents));
                 }
                 Shape::Dome { radius } => {
                     world.add_sphere(Sphere::new(origin, radius));

@@ -11659,20 +11659,37 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   `apps/editor/src/gizmo.rs`, with Ctrl snapping to the absolute grid
   (`editor.snap.grid` and `editor.snap.scale` in the editor's `settings.toml`).
   `gizmo::Mode` has no rotate variant, and E only puts a refusal on the status
-  line, because nothing in a scene can turn. What it takes:
-  - **A rotation in the scene format**: a reflected `rotation` field on each
-    component that should turn — the editor's `Block`, breakout's `Brick` —
-    which changes their chunk rows and so the committed scenes that hold them.
-  - **`crcbl::registry::Placement` answering an orientation**: it returns a
-    centre and half extents, so every consumer assumes an axis-aligned box —
-    `apps/editor/src/document.rs`'s `sync_colliders` (`Transform::from_position`
-    for the pick collider), the instance transform
-    `apps/editor/src/app/instances` draws the greybox cube with, and the
-    selection's debug-draw `aabb`.
+  line. The scene format and the placement it needed landed 2026-10-01
+  (`crcbl::registry::Rotation` on the editor's `Block` and on
+  `scene_mesh::Mesh`, and `Placement` answering an `OrientedBox` that picking,
+  the instances and the selection outline all turn by). What it still takes:
   - **The handles**: a screen-space ring per axis, a drag measured as the angle
     swept about the projected centre, Ctrl snapping to an angle step beside the
     two snap settings, and E entering the mode. Scale would then have to choose
     between world and local axes, which it does not today.
+- **Rotation on scene components (landed 2026-10-01): what it leaves.**
+  `crcbl::registry::Rotation` is on the editor's `Block` and `scene_mesh::Mesh`
+  only. Deferred, each with what it takes:
+  - **The games' components have no rotation, on purpose.** Breakout's `Brick`
+    (its colliders are `Transform::from_position` and its picture a list of
+    centres in `RenderState::bricks`), puppet's `Surface` and `Spawn`
+    (`Map::world` builds unturned boxes and spheres) and towers' `Waypoint` and
+    `Plot` (a grid-aligned lane and pads) would carry a field their games never
+    read, and the editor would show a turn the game does not play. Adding one to
+    a game is the field, its `Placement` turning, and the game's own loader
+    honouring it — in that order, or not at all.
+  - **A rotation set off unit by a path write is caught at load, not at save,
+    for blocks.** No editor edit writes one leaf alone (the handle and the
+    inspector row write all four in one command), but `SetProperty` on one leaf
+    can; `Rotation::quat` reads it normalised meanwhile. Meshes are covered at
+    save by the meshes check, which reads through `Rotation`'s `try_from`; the
+    editor's `Block` registers no check. Same root as `Body`'s mass: a
+    validation hook on `Registry::register` that `SetProperty` runs.
+  - **The physics query world's boxes do not turn**, so a turned block picks by
+    a twelve-triangle box mesh in its frame (`pick_collider` in
+    `apps/editor/src/document.rs`), each half extent at least
+    `PICK_MIN_HALF_EXTENT`. "Rotating query colliders" in the physics section is
+    the fix that would let it be a box again.
 - **Multi-select transforms**: not MVP by the plan, and not reachable yet — the
   document holds one selection (`Document::selected`), the outliner's Ctrl and
   Shift clicks select rows of which the document takes the first, and every
@@ -11715,8 +11732,12 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     nothing until it is dropped. A thumbnail is a small offscreen render per
     asset, cached; a preview is the asset's box drawn at the drop point while
     the button is held.
-  - **No rotation or scale on a mesh**, for the scene-format reasons the rotate
-    gizmo bullet gives; `Mesh` is a position and an asset.
+  - **No scale on a mesh.** `Mesh` is an asset, a position and (since
+    2026-10-01) a rotation about the asset's origin; a scale field would be a
+    fourth, multiplying the measured box and the drawn parts alike. Not tested:
+    a turned mesh's drawn parts — the instances test turns a block; the mesh's
+    part transform is `Mat4::from_rotation_translation` over the same rotation,
+    held only by reading.
   - **The asset key is free text in the inspector.** A typed key is checked when
     the scene is saved (the meshes check) and re-measured at once, but there is
     no picker; one would be the browser opened as a chooser.
@@ -11770,15 +11791,19 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   - **Physics on scene components (slice 12, 2026-10-01): what it leaves.**
     `crcbl::scene_physics` registers `Body` under `bodies`, a check and a play
     module; the editor's vocabulary takes it. Deferred, each with what it takes:
-    - **Rotation.** A dynamic body has no rotational inertia, so it never turns
-      and the axis-aligned box that collides is the one drawn. Simulating
-      rotation needs a rotation in the scene format (a `rotation` field on the
-      placing component, or a scene-level transform system), a rotated box in
-      `Placement` and in what every tool draws and picks by, a rotate gizmo
-      mode, and the module writing the orientation back beside `position` — then
-      `RigidBody::with_inertia` from `crcbl_phys::MassProperties` for the box.
-      Declined meanwhile: simulating rotation without drawing it, which shows a
-      box flat while it rests on its corner.
+    - **Rotation is locked (decided 2026-10-01).** A body is created at its
+      placing component's rotation (`OrientedBox::rotation`, turned collider and
+      transform) and keeps it: a dynamic body has no rotational inertia, so it
+      never turns, and only its centre is written back. Unlocking it takes the
+      module writing the simulated orientation into the placing component's
+      `rotation` leaves (`Rotation::LEAVES`) beside `position` after each tick —
+      `follow` in `crates/crcbl/src/scene_physics.rs`, rotating the component's
+      offset from its centre too, since a mesh's centre swings about its origin
+      — and `RigidBody::with_inertia` from `crcbl_phys::MassProperties` for the
+      box. Placing components with no rotation field (breakout's, puppet's,
+      towers') could then not take a turned body, and the factory would have to
+      refuse one by name. Declined meanwhile: simulating rotation without
+      writing it back, which shows a box flat while it rests on its corner.
     - **A kinematic velocity field.** A kinematic body stands where it was
       placed, since nothing gives it a velocity; a moving platform needs a
       `velocity` (and an angular one, after rotation) on `Body`, set on the

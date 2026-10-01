@@ -28,8 +28,8 @@ impl ComponentHash for Block {
 }
 
 impl Placement for Block {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
-        Some((
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::axis_aligned(
             DVec3::from_array(self.position),
             DVec3::from_array(self.half_extents),
         ))
@@ -52,7 +52,7 @@ impl ComponentHash for Beacon {
 }
 
 impl Placement for Beacon {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
+    fn placement(&self) -> Option<OrientedBox> {
         None
     }
 }
@@ -337,8 +337,11 @@ impl ComponentHash for Ball {
 }
 
 impl Placement for Ball {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
-        Some((DVec3::from_array(self.centre), DVec3::splat(0.25)))
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::axis_aligned(
+            DVec3::from_array(self.centre),
+            DVec3::splat(0.25),
+        ))
     }
 }
 
@@ -385,7 +388,10 @@ fn a_runtime_component_is_placed_and_never_part_of_the_scene() {
     assert_eq!(registry.runtime_entities(&mut world), [ball]);
     assert_eq!(
         registry.placement(&mut world, ball),
-        Some((DVec3::new(1.0, 2.0, 3.0), DVec3::splat(0.25))),
+        Some(OrientedBox::axis_aligned(
+            DVec3::new(1.0, 2.0, 3.0),
+            DVec3::splat(0.25)
+        )),
     );
     assert!(
         registry.component(&mut world, "balls", ball).is_none(),
@@ -518,7 +524,7 @@ fn the_component_accessor_reads_and_writes_the_entity_it_names() {
         registry
             .placement(&mut world, first)
             .expect("a block is a thing in space")
-            .0,
+            .centre,
         DVec3::new(1.0, 9.0, 3.0),
         "the write did not reach the component the placement reads",
     );
@@ -526,7 +532,7 @@ fn the_component_accessor_reads_and_writes_the_entity_it_names() {
         registry
             .placement(&mut world, second)
             .expect("so is its neighbour")
-            .0,
+            .centre,
         DVec3::new(4.0, 0.0, 0.0),
         "editing one row moved another",
     );
@@ -633,8 +639,11 @@ impl ComponentHash for Crate {
 }
 
 impl Placement for Crate {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
-        Some((DVec3::from_array(self.centre), DVec3::splat(2.0)))
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::axis_aligned(
+            DVec3::from_array(self.centre),
+            DVec3::splat(2.0),
+        ))
     }
 }
 
@@ -736,7 +745,10 @@ fn the_first_placing_system_in_name_order_places_an_entity() {
     );
     assert_eq!(
         registry.placement(&mut world, both),
-        Some((DVec3::new(1.0, 2.0, 3.0), DVec3::splat(0.5))),
+        Some(OrientedBox::axis_aligned(
+            DVec3::new(1.0, 2.0, 3.0),
+            DVec3::splat(0.5)
+        )),
     );
     assert_eq!(
         registry.placing_system(&mut world, lit).as_deref(),
@@ -744,7 +756,10 @@ fn the_first_placing_system_in_name_order_places_an_entity() {
     );
     assert_eq!(
         registry.placement(&mut world, lit),
-        Some((DVec3::new(7.0, 0.0, 0.0), DVec3::splat(2.0))),
+        Some(OrientedBox::axis_aligned(
+            DVec3::new(7.0, 0.0, 0.0),
+            DVec3::splat(2.0)
+        )),
     );
     let stranger = world.spawn();
     assert_eq!(registry.placing_system(&mut world, stranger), None);
@@ -776,4 +791,64 @@ fn a_default_row_is_the_types_default_and_attaches() {
         .attach_row(&mut world, entity, &row)
         .expect("a default row reads back");
     assert_eq!(registry.systems_of(&mut world, entity), ["blocks"]);
+}
+
+/// **A turned box's corners are its own corners turned about its centre**,
+/// in the order the debug draw's edges join: a quarter turn about `+Z` takes
+/// the box's own `+X` reach to the world's `+Y`.
+#[test]
+fn a_turned_boxs_corners_turn_about_its_centre() {
+    let centre = DVec3::new(1.0, 2.0, 3.0);
+    let half = DVec3::new(2.0, 0.5, 0.25);
+    let turned = OrientedBox::new(
+        centre,
+        half,
+        DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
+    );
+    let corners = turned.corners();
+    // Corner 1 is the far side of the box's own x alone.
+    let expected = centre + DVec3::new(0.5, 2.0, -0.25);
+    assert!(
+        corners[1].abs_diff_eq(expected, 1e-12),
+        "corner 1 is {}, not {expected}",
+        corners[1],
+    );
+    let unturned = OrientedBox::axis_aligned(centre, half).corners();
+    assert_eq!(unturned[0], centre - half);
+    assert_eq!(unturned[7], centre + half);
+}
+
+/// **The world box around a turned one reaches as far as its corners do**:
+/// a cube turned an eighth about `-Y` — a turn whose matrix has negative
+/// entries in every row it turns — reaches its half-diagonal along X and
+/// Z, and its own height along Y.
+#[test]
+fn the_bounds_of_a_turned_box_hold_its_corners() {
+    let turned = OrientedBox::new(
+        DVec3::ZERO,
+        DVec3::ONE,
+        DQuat::from_rotation_y(-std::f64::consts::FRAC_PI_4),
+    );
+    let (min, max) = turned.bounds();
+    let diagonal = std::f64::consts::SQRT_2;
+    assert!(
+        max.abs_diff_eq(DVec3::new(diagonal, 1.0, diagonal), 1e-12),
+        "{max}"
+    );
+    assert_eq!(min, -max);
+    for corner in turned.corners() {
+        assert!(
+            corner.cmpge(min - 1e-12).all() && corner.cmple(max + 1e-12).all(),
+            "{corner} is outside {min}..{max}",
+        );
+    }
+}
+
+/// **An unturned box reaches exactly its half extents**, to the bit: what
+/// keeps a tool's bounds the same numbers they were before boxes could turn.
+#[test]
+fn an_unturned_box_reaches_exactly_its_half_extents() {
+    let half = DVec3::new(0.1, 0.2, 0.30000000000000004);
+    let unturned = OrientedBox::axis_aligned(DVec3::new(0.7, -1.3, 2.9), half);
+    assert_eq!(unturned.reach(), half);
 }

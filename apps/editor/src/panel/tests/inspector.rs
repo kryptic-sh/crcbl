@@ -51,11 +51,11 @@ fn the_inspector_draws_a_section_per_system() {
     assert!(page.panels.remove_button(SUN).is_some());
     assert!(page.panels.add_buttons().is_empty(), "1 is in every system");
     // Each section's rows are its own component's: the sun has its four
-    // fields, and the block its two vector rows.
+    // fields, and the block its two vector rows and its rotation.
     let ui = page.panels.ui();
     let block_rows = ui.child_keys(page.panels.section_fields(0).expect("a block section"));
     let sun_rows = ui.child_keys(page.panels.section_fields(1).expect("a sun section"));
-    assert_eq!(block_rows.len(), 2);
+    assert_eq!(block_rows.len(), 3);
     assert_eq!(sun_rows.len(), 4);
 
     page.document.select(Some(BLOCK));

@@ -32,7 +32,7 @@ use crcbl::assets::MemorySource;
 use crcbl::ecs::ComponentHash;
 use crcbl::math::DVec3;
 use crcbl::reflect::Reflect;
-use crcbl::registry::{Placement, Registry};
+use crcbl::registry::{OrientedBox, Placement, Registry, Rotation};
 use crcbl::serde::{Deserialize, Serialize};
 
 /// The one system this vocabulary is made of: the manifest entry, the chunk
@@ -94,13 +94,21 @@ const GREYBOX_BLOCKS_RON: &str = r#"Chunk(
     ],
 )"#;
 
-/// A greybox box: where it stands and how far it reaches.
+/// A greybox box: where it stands, how far it reaches, and how it is turned.
 ///
 /// Both in world units and both `f64`, for `apps/breakout`'s `Brick`'s reason:
 /// this is the number the physics world a pick goes through is spelled in —
 /// `crcbl::phys::Transform` and `ColliderComponent::Box` take [`DVec3`] — and a
 /// scene written as `f32` would round on the way through the file and move the
 /// picture.
+///
+/// **One of the two placing components in the shipped vocabulary that turn**,
+/// with `crcbl::scene_mesh::Mesh`. The games' components (breakout's `Brick`,
+/// puppet's `Surface` and `Spawn`, towers' `Waypoint` and `Plot`) have no
+/// rotation, because their games would not honour one: each builds its
+/// colliders and its picture from a position and an extent alone, and a field
+/// the game ignored would show a turn in the editor that the game never
+/// plays.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl::reflect")]
 #[serde(crate = "crcbl::serde")]
@@ -115,11 +123,17 @@ pub struct Block {
     /// bounds the widget, not the write.
     #[reflect(name = "Half extents", min = 0.0, max = 64.0, step = 0.01)]
     pub half_extents: [f64; 3],
+    /// How it is turned about its centre; the identity is left out of the
+    /// file, so a scene of unturned blocks is the file it always was.
+    #[reflect(name = "Rotation")]
+    #[serde(default, skip_serializing_if = "Rotation::is_identity")]
+    pub rotation: Rotation,
 }
 
 impl ComponentHash for Block {
     fn hash_component(&self, hasher: &mut dyn std::hash::Hasher) {
-        for value in self.position.iter().chain(&self.half_extents) {
+        let numbers = self.position.into_iter().chain(self.half_extents);
+        for value in numbers.chain(self.rotation.to_array()) {
             hasher.write(&value.to_bits().to_le_bytes());
         }
     }
@@ -136,17 +150,19 @@ impl Default for Block {
         Self {
             position: [0.0, NEW_BLOCK_HALF_EXTENT, 0.0],
             half_extents: [NEW_BLOCK_HALF_EXTENT; 3],
+            rotation: Rotation::IDENTITY,
         }
     }
 }
 
-/// A block's own box, which is what its collider already is: the two fields
-/// spell a centre and half extents directly.
+/// A block's own box, which is what its collider already is: the three fields
+/// spell a centre, half extents and a turn directly.
 impl Placement for Block {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
-        Some((
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::new(
             DVec3::from_array(self.position),
             DVec3::from_array(self.half_extents),
+            self.rotation.quat(),
         ))
     }
 }
@@ -383,34 +399,43 @@ mod tests {
         );
     }
 
-    /// A block's rows are the two a panel draws, labelled as the attributes say —
-    /// the claim `#[derive(Reflect)]` is carried here for.
+    /// A block's rows are the three a panel draws, labelled as the attributes
+    /// say — the claim `#[derive(Reflect)]` is carried here for.
     #[test]
-    fn a_block_describes_the_two_rows_a_panel_draws() {
+    fn a_block_describes_the_three_rows_a_panel_draws() {
         let block = Block {
             position: [1.0, 2.0, 3.0],
             half_extents: [0.5, 0.5, 0.5],
+            rotation: Rotation::IDENTITY,
         };
         assert_eq!(block.kind(), Kind::Struct);
         let fields = block.fields();
-        assert_eq!(fields.len(), 2);
+        assert_eq!(fields.len(), 3);
         assert_eq!(fields[0].label, "Position");
         assert_eq!(fields[1].label, "Half extents");
         assert_eq!(fields[1].step, Some(0.01));
+        assert_eq!(fields[2].label, "Rotation");
         assert_eq!(get_path(&block, "position.2"), Ok(Value::Float(3.0)));
+        assert_eq!(get_path(&block, "rotation.w"), Ok(Value::Float(1.0)));
     }
 
-    /// A block's placement is its own box, which is what a collider and a bounds
-    /// box are both built from.
+    /// A block's placement is its own box, turned as its rotation says, which
+    /// is what a collider and a bounds box are both built from.
     #[test]
-    fn a_blocks_placement_is_its_centre_and_its_half_extents() {
+    fn a_blocks_placement_is_its_centre_its_half_extents_and_its_turn() {
+        let turn = crcbl::math::DQuat::from_rotation_x(0.75);
         let block = Block {
             position: [1.0, -2.0, 3.0],
             half_extents: [4.0, 0.5, 6.0],
+            rotation: Rotation::new(turn).expect("a turn is unit"),
         };
         assert_eq!(
             block.placement(),
-            Some((DVec3::new(1.0, -2.0, 3.0), DVec3::new(4.0, 0.5, 6.0))),
+            Some(OrientedBox::new(
+                DVec3::new(1.0, -2.0, 3.0),
+                DVec3::new(4.0, 0.5, 6.0),
+                turn,
+            )),
         );
     }
 }

@@ -36,10 +36,10 @@ use std::path::{Path, PathBuf};
 
 use crcbl::assets::{AssetSource, MemorySource};
 use crcbl::ecs::{Entity, World};
-use crcbl::math::{DVec3, Vec3};
-use crcbl::phys::{ColliderComponent, PhysicsSystem, Ray, RigidBody, Transform};
+use crcbl::math::{DQuat, DVec3, Vec3};
+use crcbl::phys::{ColliderComponent, PhysicsSystem, Ray, RigidBody, Transform, TriangleMesh};
 use crcbl::reflect::{PathError, Reflect, Value, get_path, set_path};
-use crcbl::registry::Registry;
+use crcbl::registry::{OrientedBox, Registry};
 use crcbl::render::ViewRay;
 use crcbl::scene::scn::{EntityName, IdMap, NameError, Scene, SceneEntityId, ScnError};
 use crcbl::scene_mesh::{MeshLibrary, MeshProblem};
@@ -530,12 +530,41 @@ impl Document {
         self.placed(entity)
     }
 
-    /// `entity`'s placement as a render-space box: what [`bounds`](Self::bounds)
-    /// and [`spawned_bounds`](Self::spawned_bounds) both answer with.
+    /// `id`'s placement, turned as its placing component says: the box a
+    /// greybox instance is drawn as and the selection outlined by, in
+    /// simulation space. [`bounds`](Self::bounds) is the world-axis box
+    /// around it.
+    ///
+    /// [`None`] for an id this document does not hold, and for an entity
+    /// nothing places.
+    #[must_use]
+    pub fn placement(&mut self, id: SceneEntityId) -> Option<OrientedBox> {
+        let entity = self.ids.entity(id)?;
+        self.registry.placement(&mut self.world, entity)
+    }
+
+    /// [`placement`](Self::placement), for a [`spawned`](Self::spawned)
+    /// entity: [`None`] for one no longer in the world, and for one of the
+    /// scene's.
+    #[must_use]
+    pub fn spawned_placement(&mut self, entity: Entity) -> Option<OrientedBox> {
+        if self.ids.id(entity).is_some() {
+            return None;
+        }
+        self.registry.placement(&mut self.world, entity)
+    }
+
+    /// `entity`'s placement as the render-space box with the world's axes
+    /// around it: what [`bounds`](Self::bounds) and
+    /// [`spawned_bounds`](Self::spawned_bounds) both answer with.
+    ///
+    /// The centre and the reach are narrowed apart, as they were before a
+    /// placement could turn, so an unturned box's corners are the same `f32`s
+    /// they always were.
     fn placed(&mut self, entity: Entity) -> Option<(Vec3, Vec3)> {
-        let (centre, half) = self.registry.placement(&mut self.world, entity)?;
-        let (centre, half) = (narrow(centre), narrow(half));
-        Some((centre - half, centre + half))
+        let placement = self.registry.placement(&mut self.world, entity)?;
+        let (centre, reach) = (narrow(placement.centre), narrow(placement.reach()));
+        Some((centre - reach, centre + reach))
     }
 
     /// What the leaf `path` names inside `id`'s component in `system` currently
@@ -1191,7 +1220,7 @@ fn sync_colliders(
     world: &mut World,
     entities: impl IntoIterator<Item = Entity>,
 ) {
-    let placements: Vec<(Entity, Option<(DVec3, DVec3)>)> = entities
+    let placements: Vec<(Entity, Option<OrientedBox>)> = entities
         .into_iter()
         .map(|entity| (entity, registry.placement(world, entity)))
         .collect();
@@ -1199,22 +1228,79 @@ fn sync_colliders(
         return;
     };
     for (entity, placement) in placements {
-        let Some((centre, half_extents)) = placement else {
+        let Some(placement) = placement else {
             phys.remove_entity(entity);
             continue;
         };
-        let transform = Transform::from_position(centre);
+        let transform = Transform::new(placement.centre, placement.rotation);
         phys.set_body(entity, RigidBody::new_kinematic());
         phys.set_transform(entity, transform);
-        phys.set_collider(
-            entity,
-            &ColliderComponent::Box {
-                offset: DVec3::ZERO,
-                half_extents,
-                is_trigger: false,
-            },
-            &transform,
-        );
+        phys.set_collider(entity, &pick_collider(&placement), &transform);
+    }
+}
+
+/// The least half extent a turned box's picking mesh is given on any axis, in
+/// metres: a millimetre, so a turned block scaled flat still has faces a ray
+/// can strike rather than triangles [`TriangleMesh::new`] refuses as
+/// degenerate.
+const PICK_MIN_HALF_EXTENT: f64 = 0.001;
+
+/// The eight corners' triangles, two per face, each wound so its normal faces
+/// out of the box — corner `i` taking the box's far `x` for bit 0, `y` for
+/// bit 1 and `z` for bit 2, as [`OrientedBox::corners`] numbers them.
+const BOX_TRIANGLES: [[u32; 3]; 12] = [
+    [0, 4, 6],
+    [0, 6, 2],
+    [1, 3, 7],
+    [1, 7, 5],
+    [0, 1, 5],
+    [0, 5, 4],
+    [2, 6, 7],
+    [2, 7, 3],
+    [0, 2, 3],
+    [0, 3, 1],
+    [4, 5, 7],
+    [4, 7, 6],
+];
+
+/// What a ray picks `placement` by: its box, and for a turned one the same
+/// box as a triangle mesh in the turned frame.
+///
+/// **A mesh for a turned box because the query world's boxes do not turn**:
+/// `crcbl_phys` keeps a `ColliderComponent::Box` in its query world as an
+/// axis-aligned box whatever the transform's rotation, where a mesh is placed
+/// by its whole transform (`docs/backlog.md`'s "rotating query colliders").
+/// An unturned box keeps the box collider, which is exact for a zero extent
+/// and costs no mesh to build.
+///
+/// A turned box whose mesh cannot be built — extents so large its faces'
+/// areas overflow — picks by the world-axis box around it
+/// ([`OrientedBox::reach`]) and says so in the log, rather than not picking.
+fn pick_collider(placement: &OrientedBox) -> ColliderComponent {
+    let unturned = |half_extents| ColliderComponent::Box {
+        offset: DVec3::ZERO,
+        half_extents,
+        is_trigger: false,
+    };
+    if placement.rotation == DQuat::IDENTITY {
+        return unturned(placement.half_extents);
+    }
+    let reach = placement
+        .half_extents
+        .max(DVec3::splat(PICK_MIN_HALF_EXTENT));
+    let corners = OrientedBox::axis_aligned(DVec3::ZERO, reach).corners();
+    match TriangleMesh::new(&corners, &BOX_TRIANGLES) {
+        Ok(mesh) => ColliderComponent::Mesh {
+            mesh,
+            is_trigger: false,
+        },
+        Err(error) => {
+            crcbl::log::warn!(
+                "editor: a turned box of half extents {} picks by its bounds: {error}",
+                placement.half_extents,
+            );
+            unturned(placement.reach())
+        }
     }
 }
 
@@ -1275,6 +1361,9 @@ pub(crate) mod physics_tests;
 
 #[cfg(test)]
 pub(crate) mod play_tests;
+
+#[cfg(test)]
+pub(crate) mod rotation_tests;
 
 #[cfg(test)]
 pub(crate) mod systems_tests;

@@ -17,7 +17,8 @@ use std::collections::HashSet;
 
 use crcbl::ecs::Entity;
 use crcbl::greybox::{GREYBOX_CUBE, GREYBOX_GREY};
-use crcbl::math::{Mat4, Quat, Vec3};
+use crcbl::math::{Mat4, Vec3};
+use crcbl::registry::OrientedBox;
 use crcbl::render::instance_pool::InstancePoolError;
 use crcbl::render::scene::InstanceDesc;
 use crcbl::render::{ForwardRenderer, InstanceHandle};
@@ -205,7 +206,10 @@ fn instances_of(document: &mut Document, shelf: &Shelf, drawn: Drawn) -> Vec<Ins
         && mesh.local_bounds().is_some()
         && let Some(parts) = shelf.parts(&mesh.asset)
     {
-        let origin = Mat4::from_translation(narrow(mesh.position));
+        // Turned about the asset's origin, then stood on `position`: the
+        // frame the mesh's placement boxes it in.
+        let origin =
+            Mat4::from_rotation_translation(mesh.rotation.quat().as_quat(), narrow(mesh.position));
         return parts
             .iter()
             .map(|part| InstanceDesc {
@@ -215,22 +219,35 @@ fn instances_of(document: &mut Document, shelf: &Shelf, drawn: Drawn) -> Vec<Ins
             })
             .collect();
     }
-    let bounds = match drawn {
-        Drawn::Scene(id) => document.bounds(id),
-        Drawn::Spawned(entity) => document.spawned_bounds(entity),
+    let placement = match drawn {
+        Drawn::Scene(id) => document.placement(id),
+        Drawn::Spawned(entity) => document.spawned_placement(entity),
     };
-    let Some((min, max)) = bounds else {
+    let Some(placement) = placement else {
         return Vec::new();
     };
     vec![InstanceDesc {
         mesh: GREYBOX_CUBE,
         material: GREYBOX_GREY,
-        transform: Mat4::from_scale_rotation_translation(
-            max - min,
-            Quat::IDENTITY,
-            (min + max) * 0.5,
-        ),
+        transform: cube_transform(&placement),
     }]
+}
+
+/// The unit greybox cube scaled to `placement`'s box, turned as it is, and
+/// stood at its centre.
+///
+/// Spanned in render space's `f32` from the narrowed centre and half extents,
+/// as `Document::bounds` spans them, so an unturned box is drawn from the
+/// same numbers its bounds are and as it was drawn before boxes could turn.
+fn cube_transform(placement: &OrientedBox) -> Mat4 {
+    let centre = narrow(placement.centre.to_array());
+    let half = narrow(placement.half_extents.to_array());
+    let (min, max) = (centre - half, centre + half);
+    Mat4::from_scale_rotation_translation(
+        max - min,
+        placement.rotation.as_quat(),
+        (min + max) * 0.5,
+    )
 }
 
 /// Render space's `f32`, from a row's `f64` position: the lossy direction,

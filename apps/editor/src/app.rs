@@ -1235,9 +1235,14 @@ impl<S: Shell + ?Sized> Editor<S> {
             .update(&mut self.renderer, &mut self.document, &self.shelf)
             .map_err(|error| GpuError::pools("the editor's entities", &error))?;
         if let Some(id) = self.document.selected()
-            && let Some((min, max)) = self.document.bounds(id)
+            && let Some(placement) = self.document.placement(id)
         {
-            self.renderer.debug_draw().aabb(min, max, SELECTION_COLOR);
+            // The box itself, turned as it is drawn — not the world-axis box
+            // around it, which would outline a turned block loosely.
+            let corners = placement.corners().map(|corner| corner.as_vec3());
+            self.renderer
+                .debug_draw()
+                .box_edges(&corners, SELECTION_COLOR);
         }
 
         // The scene is drawn at the pane's extent — as the panels last laid it
@@ -1433,7 +1438,7 @@ const PAUSED: &str = "Paused: F6 resumes, F5 stops and puts the scene back";
 const NOT_PLAYING: &str = "Not playing: F5 starts play mode";
 
 /// What the status line says when rotate is asked for. See [`gizmo::Mode`].
-const ROTATE_REFUSED: &str = "Rotate is not built: the scene format carries no rotation to turn \
+const ROTATE_REFUSED: &str = "Rotate is not built: there are no ring handles to turn with yet \
                               (W translates, R scales)";
 
 /// The app id the window system matches this tool to its `.desktop` file by.

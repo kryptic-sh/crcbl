@@ -154,13 +154,13 @@ fn a_new_mesh_has_no_asset_and_reloads() {
     load(&scene(&format!("(0, {row})"))).expect("a new mesh's row loads");
 }
 
-/// The asset key and the box are what the inspector cannot see apart: the
-/// key is a row, the box is not.
+/// The asset key, the position and the rotation are rows and the box is not:
+/// the box is a fact about the asset, never edited.
 #[test]
-fn the_inspector_sees_the_asset_and_the_position_and_not_the_box() {
+fn the_inspector_sees_the_asset_position_and_rotation_and_not_the_box() {
     let mesh = Mesh::new("props/crate.glb", [1.0, 2.0, 3.0]);
     let labels: Vec<&str> = mesh.fields().iter().map(|field| field.label).collect();
-    assert_eq!(labels, ["Asset", "Position"]);
+    assert_eq!(labels, ["Asset", "Position", "Rotation"]);
     assert_eq!(
         get_path(&mesh, "asset"),
         Ok(Value::Text("props/crate.glb".to_owned()))
@@ -175,7 +175,7 @@ fn a_meshs_placement_is_its_measured_box_or_the_placeholder() {
     let mut mesh = Mesh::new("props/sign.glb", [1.0, 2.0, 3.0]);
     assert_eq!(
         mesh.placement(),
-        Some((
+        Some(OrientedBox::axis_aligned(
             DVec3::new(1.0, 2.0, 3.0),
             DVec3::splat(PLACEHOLDER_HALF_EXTENT)
         )),
@@ -183,7 +183,7 @@ fn a_meshs_placement_is_its_measured_box_or_the_placeholder() {
     mesh.set_local_bounds(DVec3::new(-1.0, 0.0, 0.0), DVec3::new(1.0, 4.0, 0.0));
     assert_eq!(
         mesh.placement(),
-        Some((
+        Some(OrientedBox::axis_aligned(
             DVec3::new(1.0, 4.0, 3.0),
             DVec3::new(1.0, 2.0, MIN_HALF_EXTENT)
         )),
@@ -199,7 +199,7 @@ fn a_meshs_placement_is_its_measured_box_or_the_placeholder() {
     assert_eq!(mesh.local_bounds(), None);
     assert_eq!(
         mesh.placement(),
-        Some((
+        Some(OrientedBox::axis_aligned(
             DVec3::new(1.0, 2.0, 3.0),
             DVec3::splat(PLACEHOLDER_HALF_EXTENT)
         )),
@@ -214,12 +214,18 @@ fn a_mesh_standing_on_a_point_has_its_foot_there() {
     let local = (DVec3::new(10.0, 5.0, 0.0), DVec3::new(11.0, 6.0, 2.0));
     let mut mesh = Mesh::standing_on("a.glb", point, Some(local));
     mesh.set_local_bounds(local.0, local.1);
-    let (centre, half) = mesh.placement().expect("placed");
-    assert_eq!(centre - DVec3::new(0.0, half.y, 0.0), point);
+    let placed = mesh.placement().expect("placed");
+    assert_eq!(
+        placed.centre - DVec3::new(0.0, placed.half_extents.y, 0.0),
+        point
+    );
 
     let placeholder = Mesh::standing_on("missing.glb", point, None);
-    let (centre, half) = placeholder.placement().expect("placed");
-    assert_eq!(centre - DVec3::new(0.0, half.y, 0.0), point);
+    let placed = placeholder.placement().expect("placed");
+    assert_eq!(
+        placed.centre - DVec3::new(0.0, placed.half_extents.y, 0.0),
+        point
+    );
 }
 
 #[cfg(feature = "scene")]
@@ -267,7 +273,7 @@ mod measured {
         assert_eq!(resolution.problems, []);
         assert_eq!(
             registry().placement(&mut world, entity),
-            Some((
+            Some(OrientedBox::axis_aligned(
                 DVec3::new(11.5, 5.5, 2.0),
                 DVec3::new(0.5, 0.5, MIN_HALF_EXTENT)
             )),
@@ -320,7 +326,10 @@ mod measured {
             let entity = ids.entity(SceneEntityId(id)).expect("in the scene");
             assert_eq!(
                 registry().placement(&mut world, entity),
-                Some((centre, DVec3::splat(PLACEHOLDER_HALF_EXTENT))),
+                Some(OrientedBox::axis_aligned(
+                    centre,
+                    DVec3::splat(PLACEHOLDER_HALF_EXTENT)
+                )),
                 "#{id} is not the placeholder",
             );
         }
@@ -344,7 +353,10 @@ mod measured {
         // nothing more, and says why the box is gone.
         assert_eq!(
             row.placement(),
-            Some((DVec3::ZERO, DVec3::splat(PLACEHOLDER_HALF_EXTENT)))
+            Some(OrientedBox::axis_aligned(
+                DVec3::ZERO,
+                DVec3::splat(PLACEHOLDER_HALF_EXTENT)
+            ))
         );
         let resolution = library.resolve(&mut world, &assets());
         assert_eq!(resolution.moved, []);
@@ -362,4 +374,81 @@ mod measured {
             Some((TRIANGLE_MIN, TRIANGLE_MAX))
         );
     }
+}
+
+/// **A turned mesh round-trips with its rotation as four numbers**, and its
+/// file reads back to the same row — where an unturned one writes none
+/// (`a_mesh_round_trips_and_its_measured_box_is_not_written`).
+#[test]
+fn a_turned_mesh_round_trips_with_its_rotation() {
+    let rows = "(0, (asset: \"a.glb\", position: (1.0, 0.0, 0.0), \
+                rotation: (0.0, 0.6, 0.0, 0.8)))";
+    let (mut world, scene, ids) = load(&scene(rows)).expect("the scene loads");
+    let loaded = mesh(&mut world, &ids, 0);
+    assert_eq!(loaded.rotation.to_array(), [0.0, 0.6, 0.0, 0.8]);
+    let written = scene
+        .save(&mut world, &ids, &registry().codecs())
+        .expect("the scene saves");
+    assert!(
+        written["sys/meshes.ron"].contains("rotation: (0.0, 0.6, 0.0, 0.8),"),
+        "{}",
+        written["sys/meshes.ron"],
+    );
+    let mut again = MemorySource::new();
+    for (key, text) in &written {
+        again
+            .insert(Path::new(key), text.clone().into_bytes())
+            .expect("a scene key");
+    }
+    let (mut reloaded, _, ids) = load(&again).expect("what the writer wrote loads");
+    assert_eq!(mesh(&mut reloaded, &ids, 0), loaded);
+}
+
+/// **A rotation that is not a unit quaternion is refused on load, naming the
+/// file, and by the check** — a length off one and a number that is not
+/// finite, each on its own.
+#[test]
+fn a_rotation_that_is_not_a_rotation_is_refused_on_load_and_by_the_check() {
+    let registry = registry();
+    for (rotation, says) in [
+        ("(0.0, 0.0, 0.0, 2.0)", "unit quaternion"),
+        ("(0.0, 0.0, 0.0, 0.0)", "unit quaternion"),
+        ("(NaN, 0.0, 0.0, 1.0)", "finite"),
+    ] {
+        let source = scene(&format!(
+            "(0, (asset: \"a.glb\", position: (0.0, 0.0, 0.0), rotation: {rotation}))"
+        ));
+        let error = load(&source)
+            .err()
+            .unwrap_or_else(|| panic!("{rotation} loaded"));
+        assert!(
+            matches!(&error, ScnError::Parse { key, message, .. }
+                if key == "sys/meshes.ron" && message.contains(says)),
+            "{rotation} was refused without saying {says} in its file: {error}",
+        );
+        let problems = registry.problems(&[MESHES.to_owned()], &source, Path::new(""));
+        assert!(
+            problems.len() == 1 && problems[0].contains(says),
+            "the check did not report {rotation}: {problems:?}",
+        );
+    }
+}
+
+/// **A turned mesh's box swings about its origin**: a quarter turn about
+/// `+Y` takes a box reaching out along the asset's own `+X` round to the
+/// world's `-Z`, and turns the box with it.
+#[test]
+fn a_turned_meshs_box_swings_about_its_origin() {
+    let mut mesh = Mesh::new("a.glb", [1.0, 0.0, 0.0]);
+    mesh.rotation = Rotation::new(glam::DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2))
+        .expect("a quarter turn is unit");
+    mesh.set_local_bounds(DVec3::new(2.0, -1.0, -1.0), DVec3::new(4.0, 1.0, 1.0));
+    let placed = mesh.placement().expect("placed");
+    assert!(
+        placed.centre.abs_diff_eq(DVec3::new(1.0, 0.0, -3.0), 1e-12),
+        "the box stands at {}",
+        placed.centre,
+    );
+    assert_eq!(placed.half_extents, DVec3::ONE);
+    assert_eq!(placed.rotation, mesh.rotation.quat());
 }

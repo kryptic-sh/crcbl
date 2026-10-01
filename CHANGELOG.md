@@ -16,6 +16,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl::registry::Placement::placement` returns `Option<OrientedBox>`**, not
+  `Option<(DVec3, DVec3)>`, and `Registry::placement` answers the same: a
+  centre, half extents along the box's own axes, and a rotation (see Added). An
+  implementor with no rotation returns
+  `OrientedBox::axis_aligned(centre, half_extents)` where it returned the pair;
+  one with a rotation field returns
+  `OrientedBox::new(centre, half_extents, rotation)`. A caller reading the pair
+  reads `.centre` and `.half_extents`, and one that wants a world-axis box takes
+  `.bounds()`. The turn is a required part of the answer rather than a defaulted
+  method, so a component that grows a rotation cannot forget to report it. Every
+  impl in the workspace is updated (breakout's `Brick`, puppet's `Surface`,
+  `Spawn` and `Sun`, towers' `Waypoint`, `Plot` and `Walker`, the editor's
+  `Block`, `scene_mesh::Mesh` and `scene_physics::Body`). The editor's greybox
+  `Block` and `scene_mesh::Mesh` gained a public `rotation` field, so a struct
+  literal naming every field must add it (`Rotation::IDENTITY` for no turn).
+
 - **`crcbl_net::Fitted` gained `oversized`**, and `PriorityAccumulator::fit` no
   longer returns `BudgetTooSmall` for one entry too long for the budget: it
   withholds that entry and fits the rest (see Added). A struct literal naming
@@ -499,6 +515,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **Rotation on placing scene components.** `crcbl::registry::Rotation` is a
+  unit quaternion a component carries as a reflected `rotation` field, written
+  `rotation: (x, y, z, w)` in a chunk row and left out of the file while it is
+  exactly the identity
+  (`#[serde(default, skip_serializing_if = "Rotation::is_identity")]`), so every
+  committed scene is byte-identical. A file's value is refused on load, naming
+  the file and line, when a number is not finite (`RotationError::NotFinite`) or
+  its length is further than `ROTATION_TOLERANCE` from one
+  (`RotationError::NotUnit`); a value within the tolerance is kept exactly as
+  written, and `Rotation::quat` reads it normalised. The editor's greybox
+  `Block` and `scene_mesh::Mesh` (turned about the asset's origin) carry one;
+  breakout's `Brick`, puppet's components and towers' rows do not, because their
+  games build colliders and pictures from a position and an extent alone.
+  `crcbl::registry::OrientedBox` is the turned box a placement answers, with
+  `corners`, `bounds` and `reach`. The editor draws a turned block's cube and a
+  turned mesh's parts turned, outlines the selection as its turned box, and
+  picks a turned box exactly (a box mesh in its frame, since the physics query
+  world's boxes do not turn). `scene_physics` creates a turned body's box
+  turned; the rotation stays locked while the scene plays.
 
 - **Connection tokens on `crcbl_net::udp`**, netcode.io's connect-token pattern
   minted by the listener itself. A hello without a valid token is answered with

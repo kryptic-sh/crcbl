@@ -25,8 +25,8 @@ impl ComponentHash for Block {
 }
 
 impl Placement for Block {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
-        Some((
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::axis_aligned(
             DVec3::from_array(self.position),
             DVec3::from_array(self.half_extents),
         ))
@@ -54,8 +54,8 @@ impl ComponentHash for Pad {
 }
 
 impl Placement for Pad {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
-        Some((
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::axis_aligned(
             DVec3::from_array(self.position) + DVec3::new(0.0, PAD_HALF, 0.0),
             DVec3::splat(PAD_HALF),
         ))
@@ -78,8 +78,11 @@ impl ComponentHash for Marker {
 }
 
 impl Placement for Marker {
-    fn placement(&self) -> Option<(DVec3, DVec3)> {
-        Some((DVec3::from_array(self.centre), DVec3::splat(0.5)))
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::axis_aligned(
+            DVec3::from_array(self.centre),
+            DVec3::splat(0.5),
+        ))
     }
 }
 
@@ -664,4 +667,99 @@ fn a_body_does_not_rotate_even_landing_off_centre() {
         .expect("the dropped block is simulated")
         .rotation;
     assert_eq!(rotation, glam::DQuat::IDENTITY, "the block turned");
+}
+
+/// A placing component that may be turned — the editor's greybox block with
+/// its rotation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(crate = "crcbl_reflect")]
+struct Tilt {
+    position: [f64; 3],
+    half_extents: [f64; 3],
+    #[serde(
+        default,
+        skip_serializing_if = "crate::registry::Rotation::is_identity"
+    )]
+    rotation: crate::registry::Rotation,
+}
+
+impl ComponentHash for Tilt {
+    fn hash_component(&self, hasher: &mut dyn Hasher) {
+        let numbers = self.position.into_iter().chain(self.half_extents);
+        for value in numbers.chain(self.rotation.to_array()) {
+            hasher.write(&value.to_bits().to_le_bytes());
+        }
+    }
+}
+
+impl Placement for Tilt {
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::new(
+            DVec3::from_array(self.position),
+            DVec3::from_array(self.half_extents),
+            self.rotation.quat(),
+        ))
+    }
+}
+
+/// **A turned body starts at its rotation and keeps it**: a cube tipped a
+/// twelfth of a turn about `+Z` falls onto the slab, lands on its edge and
+/// rests there, still tipped — its collider was made turned, so it rests
+/// with its lowest edge on the slab rather than its face, and its rotation is
+/// locked, so it never falls over onto that face.
+#[test]
+fn a_turned_body_starts_at_its_rotation_and_keeps_it() {
+    let mut registry = registry();
+    registry.register::<Tilt>("tilts");
+    let tip = std::f64::consts::FRAC_PI_6;
+    let rotation = glam::DQuat::from_rotation_z(tip);
+    let [x, y, z, w] = rotation.to_array();
+    let tilts = format!(
+        "(1, (position: (0.0, {DROP_Y:?}, 0.0), half_extents: ({HALF:?}, {HALF:?}, {HALF:?}), \
+         rotation: ({x:?}, {y:?}, {z:?}, {w:?})))"
+    );
+    let source = scene(
+        &["blocks", "tilts", "bodies"],
+        &[
+            ("blocks", SLAB),
+            ("tilts", &tilts),
+            (
+                "bodies",
+                "(0, (kind: Static, mass: 1.0, friction: 0.6, restitution: 0.0)), \
+                 (1, (kind: Dynamic, mass: 1.0, friction: 0.6, restitution: 0.0))",
+            ),
+        ],
+    );
+    let mut modules = registry
+        .modules(&[BODIES.to_owned()], &source, Path::new(""))
+        .expect("every body here can be simulated");
+    let mut module = modules.remove(0);
+    let (mut world, ids) = load(&registry, &source);
+    module.register(&mut world);
+    let entity = ids.entity(SceneEntityId(1)).expect("in the scene");
+    let simulated = |world: &mut World| {
+        world
+            .system_mut::<Simulation>()
+            .and_then(|simulation| simulation.physics().transform(entity).copied())
+            .expect("the tipped cube is simulated")
+    };
+    assert_eq!(
+        simulated(&mut world).rotation,
+        rotation,
+        "it started unturned"
+    );
+
+    run(&mut world, module.as_mut(), ticks_in(3.0));
+    let rested = simulated(&mut world);
+    assert_eq!(rested.rotation, rotation, "a locked rotation turned");
+    let tipped: Tilt = component(&mut world, &ids, "tilts", 1);
+    assert_eq!(tipped.rotation.quat(), rotation, "the row's rotation moved");
+    // Resting on its lowest edge: the centre stands as high as the turned
+    // cube reaches down, which is more than its half extent.
+    let reach = HALF * (tip.cos() + tip.sin());
+    assert!(
+        (tipped.position[1] - reach).abs() < REST_TOLERANCE,
+        "the tipped cube came to rest at {:?}, not on its edge at y = {reach}",
+        tipped.position,
+    );
 }
