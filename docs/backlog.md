@@ -11974,20 +11974,13 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   (`Registry::problems` reading the chunks back); `08-editor.md`'s _Editor
   follow-ups, 2026-10-02_ has the design. Each item below was checked against
   the tree the day it landed:
-  - **Towers' `OffTheField` is a rule about one row and stays the scene
-    check's.** It needs no other row (the field's half extents and the lane's or
-    pad's width are constants), so it could join `footing` in `Waypoint`'s and
-    `Plot`'s `Validate`; it was left out because a per-edit refusal would refuse
-    every frame of a gizmo drag that passes the field's edge on its way
-    somewhere legal, which is a UX call rather than a correctness one. Moving it
-    is a line in `towers::map::footing`'s callers and one more case in
-    `the_row_rules_and_map_new_give_the_same_verdict`.
-  - **No generic guard in the editor's `sync_colliders`.** Every shipped placing
-    component now refuses a negative extent by its own rule, but a component
-    registered later with no rule and a `Placement` that can go negative would
-    still panic `BoxCollider::new`'s debug assertion in the picking collider
-    after an edit. Refusing a degenerate box there (no collider, so not
-    pickable) would close it for every component; not built.
+  - **Decided 2026-10-02: towers' `OffTheField` stays the scene check's.** It is
+    a rule about one row (the field's half extents and the lane's or pad's width
+    are constants) and could join `footing` in `Waypoint`'s and `Plot`'s
+    `Validate`, but a per-edit refusal would refuse every frame of a gizmo drag
+    that passes the field's edge on its way somewhere legal. Being off the field
+    is a layout still being authored, like the whole-scene rules, so it is
+    reported at save, not refused mid-drag.
   - **A non-finite value never reaches a rule from an edit**:
     `crcbl::reflect::set_path` refuses `NaN` and infinities itself (observed:
     `EditError::Path(Set(NotFinite))` for a brick's `position.0`, a spawn's

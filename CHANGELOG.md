@@ -3950,6 +3950,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The editor no longer panics on a placement no collider can be.** A placing
+  component whose box has a negative half extent or a non-finite number — one
+  registered without a `Validate` rule, or a value written past the commands —
+  used to reach `BoxCollider::new`'s assertion in the picking sync. Such an
+  entity is now left unpickable, with a warning naming it, until its component
+  is fixed.
+
 - **The samples' scene components refuse the values their games cannot build**,
   through `crcbl::registry::Validate`: on load by file, line and field, and at
   the editor's edit, put back with the field named. Breakout's `Brick` and

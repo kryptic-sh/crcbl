@@ -1325,7 +1325,16 @@ fn sync_colliders(
         return;
     };
     for (entity, placement) in placements {
-        let Some(placement) = placement else {
+        let Some(placement) = placement.filter(|placement| {
+            let buildable = can_pick_by(placement);
+            if !buildable {
+                crcbl::log::warn!(
+                    "editor: {entity:?} is placed as a box no collider can be — \
+                     {placement:?}; it cannot be picked until its component is fixed"
+                );
+            }
+            buildable
+        }) else {
             phys.remove_entity(entity);
             continue;
         };
@@ -1344,6 +1353,21 @@ fn sync_colliders(
             &transform,
         );
     }
+}
+
+/// Whether `placement` is a box the physics can build a collider for: every
+/// number finite and no half extent below zero.
+///
+/// A registered component's rule ([`crcbl::registry::Validate`]) should keep
+/// any other placement out of a document, but a component without one — or a
+/// value written past the commands — would otherwise reach `BoxCollider::new`'s
+/// assertion and take the editor down. Such an entity is left unpickable
+/// instead, and the warning names it.
+fn can_pick_by(placement: &OrientedBox) -> bool {
+    placement.centre.is_finite()
+        && placement.half_extents.is_finite()
+        && placement.half_extents.min_element() >= 0.0
+        && placement.rotation.is_finite()
 }
 
 /// Simulation space's `f64`, from render space's `f32`.
@@ -1419,22 +1443,6 @@ mod validation_tests;
 #[cfg(test)]
 mod tests {
 
-    /// **A scene reads its assets from its game's root**, the nearest
-    /// directory above it with a manifest, and from the directory holding it
-    /// outside any project.
-    #[test]
-    fn a_scenes_asset_root_is_its_games_root() {
-        let dir = tempfile::tempdir().expect("a temporary directory");
-        let game = dir.path().join("game");
-        let scenes = game.join("levels").join("one");
-        std::fs::create_dir_all(&scenes).expect("the scene folders");
-        let scene = scenes.join("field.scn");
-
-        assert_eq!(asset_root(&scene), scenes, "outside a project");
-
-        std::fs::write(game.join(PROJECT_MARKER), "").expect("a manifest");
-        assert_eq!(asset_root(&scene), game, "inside a project");
-    }
     use super::*;
 
     /// The document every test here opens: this build's compiled-in greybox
@@ -1473,6 +1481,58 @@ mod tests {
     /// axis is 1.5, so a ray from `z = 20` meets every one of them.
     fn ray_at(x: f64, y: f64) -> Ray {
         Ray::new(DVec3::new(x, y, 20.0), DVec3::NEG_Z)
+    }
+
+    /// **A scene reads its assets from its game's root**, the nearest
+    /// directory above it with a manifest, and from the directory holding it
+    /// outside any project.
+    #[test]
+    fn a_scenes_asset_root_is_its_games_root() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let game = dir.path().join("game");
+        let scenes = game.join("levels").join("one");
+        std::fs::create_dir_all(&scenes).expect("the scene folders");
+        let scene = scenes.join("field.scn");
+
+        assert_eq!(asset_root(&scene), scenes, "outside a project");
+
+        std::fs::write(game.join(PROJECT_MARKER), "").expect("a manifest");
+        assert_eq!(asset_root(&scene), game, "inside a project");
+    }
+
+    /// **A box no collider can be is left unpickable, not a crash.** A value
+    /// written past the commands — here a block's half extent below zero —
+    /// reaches the picking sync without any rule seeing it; the sync must take
+    /// the entity's collider away rather than hand the physics a box it
+    /// refuses.
+    #[test]
+    fn a_box_no_collider_can_be_is_left_unpickable() {
+        let mut document = document();
+        let (_, x, y) = STEPS[0];
+        let id = document.pick(&ray_at(x, y)).expect("the first step");
+        let block = document
+            .component(id, crate::scene::BLOCKS)
+            .expect("a block");
+        set_path(block, "half_extents.0", &Value::Float(-1.0)).expect("a block's leaf");
+
+        let entity = document.ids.entity(id).expect("a filed id");
+        sync_colliders(&document.registry, &mut document.world, [entity]);
+        assert_eq!(
+            document.pick(&ray_at(x, y)),
+            None,
+            "the bad box still picks"
+        );
+
+        let block = document
+            .component(id, crate::scene::BLOCKS)
+            .expect("a block");
+        set_path(block, "half_extents.0", &Value::Float(1.0)).expect("a block's leaf");
+        sync_colliders(&document.registry, &mut document.world, [entity]);
+        assert_eq!(
+            document.pick(&ray_at(x, y)),
+            Some(id),
+            "a fixed box picks again"
+        );
     }
 
     /// **The compiled-in scene loads, grouped by the system its chunk came out
