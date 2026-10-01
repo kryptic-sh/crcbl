@@ -44,6 +44,7 @@ use crcbl::render::ViewRay;
 use crcbl::scene::scn::{EntityName, IdMap, NameError, Scene, SceneEntityId, ScnError};
 use crcbl::scene_mesh::{MeshLibrary, MeshProblem};
 use crcbl::store::{NativeStorage, StorageError, StorageSource};
+use crcbl::ui::tree::FieldEdit;
 
 use crate::command::{EditCommand, Gesture, SystemRow, UndoLog, set_property};
 
@@ -615,8 +616,12 @@ impl Document {
             })
     }
 
-    /// Turns an edit a panel **has already made** into an [`EditCommand`], so
-    /// that it lands in the log like every other edit.
+    /// Turns the edits a panel **has already made** to `id`'s component in
+    /// `system` in one frame into one [`EditCommand`], so that they land in
+    /// the log like every other edit: a [`EditCommand::SetProperty`] for one
+    /// leaf, and an [`EditCommand::Batch`] of them for several — what a row
+    /// writing several leaves at once makes, as the rotation row writes all
+    /// four of a quaternion, so one undo puts them all back together.
     ///
     /// # Why this rewinds first
     ///
@@ -629,8 +634,9 @@ impl Document {
     /// one failure that would pass every test asserting the command was
     /// recorded.
     ///
-    /// So `before` is written back first, putting the component where the panel
-    /// found it, and the command is then applied over the top. **This is the
+    /// So each `before` is written back first, last edit first, putting the
+    /// component where the panel found it, and the command is then applied
+    /// over the top. **This is the
     /// only field write in the crate**, and it exists to make sure the command
     /// is the thing that does the editing: the value it restores came out of
     /// the same leaf a moment earlier, so nothing is invented and the inverse
@@ -652,24 +658,35 @@ impl Document {
     /// [`apply_in`](Self::apply_in), so a field dragged over many frames — one
     /// report a frame — is one entry whose undo goes back to where the drag
     /// began.
-    pub fn record_edit(
+    pub fn record_edits(
         &mut self,
         id: SceneEntityId,
         system: &str,
-        path: &str,
-        before: &Value,
-        after: &Value,
+        edits: &[FieldEdit],
         gesture: Option<Gesture>,
     ) -> Result<(), EditError> {
-        set_path(self.component_of(id, system)?, path, before)?;
+        if edits.is_empty() {
+            return Ok(());
+        }
+        let component = self.component_of(id, system)?;
+        for edit in edits.iter().rev() {
+            set_path(component, &edit.path, &edit.before)?;
+        }
         // After the rewind, so a panel's write into a playing scene is taken
         // back rather than left standing beside the refusal.
         self.refuse_in_play()?;
-        let command = EditCommand::SetProperty {
-            entity: id,
-            system: system.to_owned(),
-            path: path.to_owned(),
-            value: after.clone(),
+        let mut commands: Vec<EditCommand> = edits
+            .iter()
+            .map(|edit| EditCommand::SetProperty {
+                entity: id,
+                system: system.to_owned(),
+                path: edit.path.clone(),
+                value: edit.after.clone(),
+            })
+            .collect();
+        let command = match commands.len() {
+            1 => commands.remove(0),
+            _ => EditCommand::Batch(commands),
         };
         match gesture {
             Some(gesture) => self.apply_in(command, gesture),

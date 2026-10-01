@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 14 2026-10-01, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -164,7 +164,8 @@ full-window draw under a hole in the panels is gone.
   first survived, until an oblique ray was added) and dropping the seal each
   turned a test red.
 - **Owed from task 5** after slice 6: rotate and scale handles, plane handles,
-  and snapping to an absolute grid. Slice 7, below, built all but rotate.
+  and snapping to an absolute grid. Slice 7, below, built all but rotate, and
+  slice 15 built rotate.
 
 **Slice 7, the rest of task 5's gizmos, landed 2026-10-01.**
 
@@ -194,8 +195,8 @@ full-window draw under a hole in the panels is gone.
   into the entry on top when it names the same leaves in the same order.
 - **Rotate cannot be entered.** `gizmo::Mode` has no rotate variant, and E puts
   a refusal on the status line and leaves the mode as it was: the scene format
-  carried no rotation for a handle to write. (Slice 14 put one in the format;
-  the handle is still owed, and the backlog says what it takes.)
+  carried no rotation for a handle to write. (Slice 14 put one in the format,
+  and slice 15 built the rings.)
 - **Multi-select is not a question yet**: the document holds one selection
   (`Document::selected`), and the outliner's Ctrl and Shift clicks select rows
   of which the document takes the first. Every handle acts on that one entity.
@@ -628,6 +629,47 @@ of the same day (below).
   swings away from passing it, its bounds, and its cube drawn turned. The
   mutations each turned a test red are listed in the commit that landed this.
 
+**Slice 15, the rotate gizmo (the last of task 5), landed 2026-10-01.**
+
+- **E shows a ring about each world axis** (`gizmo::Mode::Rotate`): the circle
+  square to the axis through the selection's centre, sampled at
+  `gizmo::RING_SEGMENTS` points and scaled on screen so a ring facing the eye is
+  `gizmo::RING_PX` across — the arrows' constant-size rule. The polyline is both
+  what is drawn and what a press is measured against, within `HIT_PX`. An entity
+  whose placing component has no `rotation` field of the `Rotation` type shows
+  no rings, and E says so on the status line.
+- **A drag turns by the angle swept round the centre on screen**
+  (`gizmo::swept`), counter-clockwise as seen from the axis's tip, the other way
+  when the axis points away from the eye; about the ring's world axis through
+  the placement's centre, composed onto the rotation the press found. It writes
+  the four `rotation` leaves and, where the component has a `position`, that
+  position swung round the centre — unmoved for a block, whose position is its
+  centre, and carried round for a mesh, whose origin is not. Each frame's writes
+  are one `EditCommand::Batch` of the same leaves, so the drag is one undo; play
+  refuses every write.
+- **Ctrl snaps a turn to `editor.snap.angle`** (degrees, 15 by default, beside
+  the grid and scale steps in `settings.toml`), measured from the press: an
+  orientation has no absolute grid about one axis.
+- **Scale's lines follow the box's own axes**, since a half extent is along
+  them, so a turned block's scale handles point along its faces; translate's
+  arrows and the rings are the world's.
+- **The inspector draws a rotation as three angles in degrees**
+  (`EulerRot::XYZ`) over the quaternion, writing all four leaves when one angle
+  is dragged; `Panels::apply_edits` makes a frame's edits to one section one
+  command (`Document::record_edits`), so an undo never takes back one leaf of a
+  quaternion. Euler angles are a view only — the file keeps the quaternion.
+- **Evidence**: the gizmo's tests hold a ring per axis on its own plane and the
+  facing ring's size near and far at two scales, a press within and just past
+  the hit radius, the swept angle's direction and wrap, a quarter turn about
+  each axis from each side composed onto a start, snapping to the step, a
+  position swung round the centre, scale lines along a turned box's axes and the
+  angle setting's fallback; the editor's loop tests show E's rings and their
+  status, drag the Y ring to a turn about Y alone that is one undo, snap a ring
+  drag with Ctrl, find no rings on a puppet entity, and refuse a ring drag in
+  play; the panel's drag a rotation angle over four frames to one command and
+  one undo, and the angles compose back to the quaternion. The mutations each
+  turned a test red are listed in the commit that landed this.
+
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
 opens the vocabularies it was compiled with. The shipped build registers its own
@@ -925,7 +967,7 @@ above):
 - **The rotate gizmo is E**: three screen-space ring handles hit-tested against
   the projected ring, a drag turning about the ring's world axis through the
   entity's centre, Ctrl snapping to an angle step that is a setting beside the
-  grid and scale steps, one undo per drag, refused in play.
+  grid and scale steps, one undo per drag, refused in play. Built in slice 15.
 - **Physics keeps rotation locked** for now: a body is created at its rotation
   and does not spin. Built in slice 14; unlocking is in the backlog.
 

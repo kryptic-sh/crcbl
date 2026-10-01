@@ -80,7 +80,7 @@
 //! (`inspector`'s module docs), each through [`Ui::inspector_with`], which
 //! edits that component and reports each write as a `FieldEdit`. Each becomes
 //! an [`EditCommand`](crate::command::EditCommand) on that section's system
-//! through [`Document::record_edit`], which rewinds the panel's own write first
+//! through [`Document::record_edits`], which rewinds the panel's own write first
 //! so the inverse the log records is exact — that method's docs say why. Undo,
 //! redo, the dirty marker and the collider all follow, because they follow
 //! every command. A section's remove button and the add buttons under the
@@ -330,8 +330,9 @@ pub struct Panels {
     props_key: Option<NodeKey>,
     /// The inspector's sections and add buttons, as the last frame built them.
     inspector: (Vec<inspector::Section>, Vec<(String, NodeKey)>),
-    /// The field a held pointer is dragging — its system and path — and the
-    /// gesture its edits share; see [`Panels::apply_edits`].
+    /// The field a held pointer is dragging — its system and the paths it
+    /// writes, comma-joined — and the gesture its edits share; see
+    /// [`Panels::apply_edits`].
     field_gesture: Option<(SceneEntityId, String, String, Gesture)>,
     /// The line under the panes: what the editor last had to say, and whether
     /// it is a warning — see [`Panels::set_status`].
@@ -375,7 +376,7 @@ impl Panels {
             list: DrawList::new(),
             layout,
             outliner,
-            overrides: Overrides::vectors(),
+            overrides: inspector::overrides(),
             counted: document.membership(),
             outline,
             names: names_of(document),
@@ -1004,6 +1005,15 @@ impl Panels {
     /// entry of its own. The tree has no pointer capture to ask instead, and a
     /// held button over one leaf is what a drag is. A typed edit, made with the
     /// button up, is an entry each.
+    ///
+    /// # One row, one command
+    ///
+    /// A frame's consecutive edits to one section are one command
+    /// ([`Document::record_edits`]): a widget edits one leaf, so several in one
+    /// section in one frame are a row that writes several leaves together —
+    /// the rotation row writing a quaternion's four — and splitting them would
+    /// let an undo take back one leaf of a value whose leaves only mean
+    /// something together. Their gesture is keyed by every path they name.
     fn apply_edits(
         &mut self,
         document: &mut Document,
@@ -1014,27 +1024,27 @@ impl Panels {
         let held = pointer.down || pointer.released;
         let mut applied = 0;
         if let Some(id) = selected {
-            for (system, edit) in edits {
+            for group in edits.chunk_by(|(a, _), (b, _)| a == b) {
+                let system = &group[0].0;
+                let row: Vec<FieldEdit> = group.iter().map(|(_, edit)| edit.clone()).collect();
+                let paths = row
+                    .iter()
+                    .map(|edit| edit.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let gesture = held.then(|| match &self.field_gesture {
-                    Some((entity, held_system, path, gesture))
-                        if *entity == id && held_system == system && *path == edit.path =>
+                    Some((entity, held_system, held_paths, gesture))
+                        if *entity == id && held_system == system && *held_paths == paths =>
                     {
                         *gesture
                     }
                     _ => {
                         let gesture = document.begin_gesture();
-                        self.field_gesture = Some((id, system.clone(), edit.path.clone(), gesture));
+                        self.field_gesture = Some((id, system.clone(), paths.clone(), gesture));
                         gesture
                     }
                 });
-                match document.record_edit(
-                    id,
-                    system,
-                    &edit.path,
-                    &edit.before,
-                    &edit.after,
-                    gesture,
-                ) {
+                match document.record_edits(id, system, &row, gesture) {
                     Ok(()) => applied += 1,
                     Err(error) => {
                         crcbl::log::warn!("editor: {error}");
@@ -1267,6 +1277,7 @@ mod tests {
     mod assets;
     mod inspector;
     mod naming;
+    mod rotation;
 
     /// The framebuffer every page here is laid out over: the size the editor's
     /// own window opens at.

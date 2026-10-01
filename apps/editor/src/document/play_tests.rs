@@ -250,7 +250,7 @@ fn every_edit_is_refused_in_play_mode() {
                     gesture,
                 )
             }),
-            ("record_edit", {
+            ("record_edits", {
                 // What a panel does: write the field, then report it.
                 let before = document
                     .read(STEP, crate::scene::BLOCKS, "position.0")
@@ -259,12 +259,14 @@ fn every_edit_is_refused_in_play_mode() {
                     .component(STEP, crate::scene::BLOCKS)
                     .expect("a block");
                 set_path(component, "position.0", &Value::Float(9.0)).expect("an x");
-                document.record_edit(
+                document.record_edits(
                     STEP,
                     crate::scene::BLOCKS,
-                    "position.0",
-                    &before,
-                    &Value::Float(9.0),
+                    &[FieldEdit {
+                        path: "position.0".to_owned(),
+                        before,
+                        after: Value::Float(9.0),
+                    }],
                     None,
                 )
             }),

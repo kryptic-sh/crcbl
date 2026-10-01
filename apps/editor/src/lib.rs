@@ -18,7 +18,7 @@
 //! * [`command`] — every edit as a value, and the log. Applied in process here
 //!   and routed over the transport later: what a transport gains is a carrier,
 //!   not a vocabulary. **The only field write in this crate is the one
-//!   [`Document::record_edit`] rewinds a panel's own edit with**, so that the
+//!   [`Document::record_edits`] rewinds a panel's own edit with**, so that the
 //!   command it then applies records an exact inverse; every other mutation is
 //!   a command.
 //! * [`clipboard`] — entities as clipboard text, and the paste that waits for
@@ -47,7 +47,7 @@
 //!
 //! # What this slice is not
 //!
-//! No server protocol or transport routing, no rotate gizmo, no game that
+//! No server protocol or transport routing, no game that
 //! plays yet (play mode runs whatever modules a vocabulary registers, and none
 //! does), no file watcher, no multi-session editing, and no
 //! port of a sample's state into ECS. Each is named in the plan with what it waits on.

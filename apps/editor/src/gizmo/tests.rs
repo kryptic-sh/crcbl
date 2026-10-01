@@ -24,7 +24,7 @@ fn lines(handles: &[Handle]) -> Vec<(Grip, Vec2, Vec2)> {
         .iter()
         .filter_map(|handle| match handle.shape {
             Shape::Line { from, to } => Some((handle.grip, from, to)),
-            Shape::Square { .. } => None,
+            Shape::Square { .. } | Shape::Ring { .. } => None,
         })
         .collect()
 }
@@ -35,7 +35,7 @@ fn squares(handles: &[Handle]) -> Vec<(Grip, Vec2, f32)> {
         .iter()
         .filter_map(|handle| match handle.shape {
             Shape::Square { centre, half } => Some((handle.grip, centre, half)),
-            Shape::Line { .. } => None,
+            Shape::Line { .. } | Shape::Ring { .. } => None,
         })
         .collect()
 }
@@ -82,7 +82,14 @@ fn only(writes: &[Write]) -> (&str, f64) {
 fn each_handle_points_along_its_axis_on_screen() {
     let camera = camera();
     for mode in [Mode::Translate, Mode::Scale] {
-        let lines = lines(&handles(&camera, EXTENT, Vec3::ZERO, 1.0, mode));
+        let lines = lines(&handles(
+            &camera,
+            EXTENT,
+            Vec3::ZERO,
+            DQuat::IDENTITY,
+            1.0,
+            mode,
+        ));
         assert_eq!(lines.len(), 3, "{mode:?}");
         for (grip, from, to) in lines {
             assert_eq!(grip.mode(), mode);
@@ -109,7 +116,7 @@ fn a_handle_is_the_same_size_near_and_far() {
     for origin in [Vec3::ZERO, Vec3::new(-20.0, -10.0, -40.0)] {
         for scale in [1.0, 2.0] {
             for mode in [Mode::Translate, Mode::Scale] {
-                let handles = handles(&camera, EXTENT, origin, scale, mode);
+                let handles = handles(&camera, EXTENT, origin, DQuat::IDENTITY, scale, mode);
                 for (_, from, to) in lines(&handles) {
                     let length = from.distance(to);
                     assert!((length - HANDLE_PX * scale).abs() < 1e-3, "{length}");
@@ -135,7 +142,14 @@ fn an_axis_along_the_view_and_a_centre_behind_the_eye_have_no_handle() {
         target: Vec3::ZERO,
         ..Camera::default()
     };
-    let handles = handles(&looking_down_z, EXTENT, Vec3::ZERO, 1.0, Mode::Translate);
+    let handles = handles(
+        &looking_down_z,
+        EXTENT,
+        Vec3::ZERO,
+        DQuat::IDENTITY,
+        1.0,
+        Mode::Translate,
+    );
     let grips: Vec<Grip> = handles.iter().map(|handle| handle.grip).collect();
     assert_eq!(
         grips,
@@ -155,7 +169,14 @@ fn an_axis_along_the_view_and_a_centre_behind_the_eye_have_no_handle() {
 
 /// The handles for a centre behind `camera`'s eye.
 fn handles_behind(camera: &Camera, mode: Mode) -> Vec<Handle> {
-    handles(camera, EXTENT, Vec3::new(0.0, 0.0, 20.0), 1.0, mode)
+    handles(
+        camera,
+        EXTENT,
+        Vec3::new(0.0, 0.0, 20.0),
+        DQuat::IDENTITY,
+        1.0,
+        mode,
+    )
 }
 
 /// **A plane handle sits in the corner between its own two arrows**: its
@@ -163,7 +184,14 @@ fn handles_behind(camera: &Camera, mode: Mode) -> Vec<Handle> {
 /// and of nothing else.
 #[test]
 fn a_plane_handle_sits_between_its_two_axes() {
-    let handles = handles(&camera(), EXTENT, Vec3::ZERO, 1.0, Mode::Translate);
+    let handles = handles(
+        &camera(),
+        EXTENT,
+        Vec3::ZERO,
+        DQuat::IDENTITY,
+        1.0,
+        Mode::Translate,
+    );
     let lines = lines(&handles);
     let squares = squares(&handles);
     assert_eq!(squares.len(), 3, "every plane is in view: {squares:?}");
@@ -204,7 +232,14 @@ fn a_plane_seen_edge_on_has_no_handle() {
         target: Vec3::ZERO,
         ..Camera::default()
     };
-    let handles = handles(&level, EXTENT, Vec3::ZERO, 1.0, Mode::Translate);
+    let handles = handles(
+        &level,
+        EXTENT,
+        Vec3::ZERO,
+        DQuat::IDENTITY,
+        1.0,
+        Mode::Translate,
+    );
     let axes: Vec<Axis> = lines(&handles)
         .into_iter()
         .map(|(grip, ..)| axis_of(grip))
@@ -225,7 +260,14 @@ fn a_plane_seen_edge_on_has_no_handle() {
 /// every line starts there.
 #[test]
 fn scale_shows_an_axis_each_and_a_centre_that_wins_where_the_lines_meet() {
-    let handles = handles(&camera(), EXTENT, Vec3::ZERO, 1.0, Mode::Scale);
+    let handles = handles(
+        &camera(),
+        EXTENT,
+        Vec3::ZERO,
+        DQuat::IDENTITY,
+        1.0,
+        Mode::Scale,
+    );
     let grips: Vec<Grip> = handles.iter().map(|handle| handle.grip).collect();
     assert_eq!(
         grips,
@@ -239,8 +281,8 @@ fn scale_shows_an_axis_each_and_a_centre_that_wins_where_the_lines_meet() {
     let (_, centre, _) = squares(&handles)[0];
     let lines_only: Vec<Handle> = handles
         .iter()
-        .copied()
         .filter(|handle| matches!(handle.shape, Shape::Line { .. }))
+        .cloned()
         .collect();
     assert!(
         hit(&lines_only, centre, 1.0).is_some(),
@@ -254,7 +296,14 @@ fn scale_shows_an_axis_each_and_a_centre_that_wins_where_the_lines_meet() {
 /// nothing.
 #[test]
 fn a_press_takes_the_handle_under_it() {
-    let handles = handles(&camera(), EXTENT, Vec3::ZERO, 1.0, Mode::Translate);
+    let handles = handles(
+        &camera(),
+        EXTENT,
+        Vec3::ZERO,
+        DQuat::IDENTITY,
+        1.0,
+        Mode::Translate,
+    );
     for (grip, from, to) in lines(&handles) {
         // Towards the tip, clear of the plane squares in the corners.
         let near_tip = from + (to - from) * 0.85;
@@ -318,17 +367,17 @@ fn along_finds_the_closest_point_on_the_axis() {
         origin: Vec3::new(3.0, 10.0, 0.0),
         direction: Vec3::NEG_Y,
     };
-    let t = along(&down, DVec3::ZERO, Axis::X).expect("not parallel");
+    let t = along(&down, DVec3::ZERO, Axis::X.unit()).expect("not parallel");
     assert!((t - 3.0).abs() < 1e-9, "{t}");
     // From an anchor at x = 1 the same point is 2 along.
-    let t = along(&down, DVec3::new(1.0, 0.0, 0.0), Axis::X).expect("not parallel");
+    let t = along(&down, DVec3::new(1.0, 0.0, 0.0), Axis::X.unit()).expect("not parallel");
     assert!((t - 2.0).abs() < 1e-9, "{t}");
     // A skew ray passing above the Z axis at z = -4.
     let skew = ViewRay {
         origin: Vec3::new(-5.0, 2.0, -4.0),
         direction: Vec3::X,
     };
-    let t = along(&skew, DVec3::ZERO, Axis::Z).expect("not parallel");
+    let t = along(&skew, DVec3::ZERO, Axis::Z.unit()).expect("not parallel");
     assert!((t + 4.0).abs() < 1e-9, "{t}");
     // An oblique ray through x = 5 on the axis, so the `b` term is not
     // zero: every ray above is square to its axis and would pass with
@@ -337,14 +386,14 @@ fn along_finds_the_closest_point_on_the_axis() {
         origin: Vec3::new(1.0, 2.0, 2.0),
         direction: Vec3::new(4.0, -2.0, -2.0).normalize(),
     };
-    let t = along(&oblique, DVec3::ZERO, Axis::X).expect("not parallel");
+    let t = along(&oblique, DVec3::ZERO, Axis::X.unit()).expect("not parallel");
     assert!((t - 5.0).abs() < 1e-5, "{t}");
     // And a ray along the axis has no closest point.
     let parallel = ViewRay {
         origin: Vec3::new(0.0, 1.0, 0.0),
         direction: Vec3::X,
     };
-    assert_eq!(along(&parallel, DVec3::ZERO, Axis::X), None);
+    assert_eq!(along(&parallel, DVec3::ZERO, Axis::X.unit()), None);
 }
 
 /// **A ray crosses a plane where it is aimed**, and a ray along the plane
@@ -389,6 +438,7 @@ fn a_drag_moves_by_the_distance_along_the_axis() {
         Gesture(1),
         [-3.0, 0.25, 0.0],
         DVec3::new(-3.0, 0.25, 0.0),
+        DQuat::IDENTITY,
         &down_onto(-2.5),
         1.0,
     )
@@ -418,6 +468,7 @@ fn a_plane_drag_moves_in_exactly_that_plane() {
         Gesture(1),
         start,
         origin,
+        DQuat::IDENTITY,
         &at(1.0, 1.0),
         1.0,
     )
@@ -443,6 +494,7 @@ fn a_plane_drag_moves_in_exactly_that_plane() {
         Gesture(1),
         start,
         origin,
+        DQuat::IDENTITY,
         &at(0.5, -2.0),
         1.0,
     )
@@ -468,6 +520,7 @@ fn a_scale_drag_changes_one_half_extent_by_the_distance() {
         Gesture(1),
         [1.2, 0.25, 1.5],
         DVec3::ZERO,
+        DQuat::IDENTITY,
         &down_onto(1.0),
         1.0,
     )
@@ -493,6 +546,7 @@ fn the_centre_scales_every_half_extent_in_proportion() {
             Gesture(1),
             [1.2, 0.25, 1.5],
             DVec3::ZERO,
+            DQuat::IDENTITY,
             &pixel(100.0),
             scale,
         )
@@ -525,6 +579,7 @@ fn a_half_extent_stops_at_the_minimum() {
         Gesture(1),
         [1.2, 0.25, 1.5],
         DVec3::ZERO,
+        DQuat::IDENTITY,
         &down_onto(1.0),
         1.0,
     )
@@ -538,6 +593,7 @@ fn a_half_extent_stops_at_the_minimum() {
         Gesture(1),
         [0.05, 0.25, 1.5],
         DVec3::ZERO,
+        DQuat::IDENTITY,
         &down_onto(1.0),
         1.0,
     )
@@ -557,6 +613,7 @@ fn a_half_extent_stops_at_the_minimum() {
         Gesture(1),
         [1.2, 0.25, 1.5],
         DVec3::ZERO,
+        DQuat::IDENTITY,
         &pixel(0.0),
         1.0,
     )
@@ -580,6 +637,7 @@ fn snapping_lands_on_absolute_grid_multiples_from_an_off_grid_start() {
         Gesture(1),
         [-2.9, 0.0, 0.0],
         DVec3::new(-2.9, 0.0, 0.0),
+        DQuat::IDENTITY,
         &down_onto(-2.9),
         1.0,
     )
@@ -601,6 +659,7 @@ fn snapping_lands_on_absolute_grid_multiples_from_an_off_grid_start() {
         Gesture(1),
         [0.1, 0.3, 0.0],
         DVec3::new(0.1, 0.3, 0.0),
+        DQuat::IDENTITY,
         &at(0.1, 0.3),
         1.0,
     )
@@ -615,6 +674,7 @@ fn snapping_lands_on_absolute_grid_multiples_from_an_off_grid_start() {
         Gesture(1),
         [1.2, 0.25, 1.5],
         DVec3::ZERO,
+        DQuat::IDENTITY,
         &down_onto(1.0),
         1.0,
     )
@@ -647,4 +707,322 @@ fn the_snap_steps_come_from_the_settings_or_their_defaults() {
             "a grid of {grid} or a scale of {scale:?} was taken",
         );
     }
+}
+
+/// The ring handles, as `(axis, points)`.
+fn rings(handles: &[Handle]) -> Vec<(Axis, [Vec2; RING_SEGMENTS])> {
+    handles
+        .iter()
+        .filter_map(|handle| match (handle.grip, &handle.shape) {
+            (Grip::Rotate(axis), Shape::Ring { points }) => Some((axis, **points)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **Rotate draws a ring about each world axis, and only rings**: each ring's
+/// points lie on its axis's plane through the centre, and the ring facing the
+/// eye most squarely is [`RING_PX`] across at its widest, near or far, at
+/// either scale.
+#[test]
+fn rotate_draws_a_ring_per_axis_the_same_size_near_and_far() {
+    let camera = camera();
+    for origin in [Vec3::ZERO, Vec3::new(-20.0, -10.0, -40.0)] {
+        for scale in [1.0, 2.0] {
+            let handles = handles(
+                &camera,
+                EXTENT,
+                origin,
+                DQuat::IDENTITY,
+                scale,
+                Mode::Rotate,
+            );
+            assert_eq!(handles.len(), 3, "{handles:?}");
+            let rings = rings(&handles);
+            assert_eq!(
+                rings.iter().map(|(axis, _)| *axis).collect::<Vec<_>>(),
+                Axis::ALL,
+            );
+            let centre = camera.pixel_of(origin, EXTENT).expect("in front");
+            let view = (origin - camera.eye).normalize();
+            let along = |axis: Axis| view.dot(narrow(axis.unit())).abs();
+            let (facing, points) = rings
+                .iter()
+                .max_by(|a, b| along(a.0).total_cmp(&along(b.0)))
+                .expect("three rings");
+            let widest = points
+                .iter()
+                .map(|point| point.distance(centre))
+                .fold(0.0, f32::max);
+            assert!(
+                (widest / (RING_PX * scale) - 1.0).abs() < 0.05,
+                "the {facing:?} ring reaches {widest} px, not {} px",
+                RING_PX * scale,
+            );
+            // Every point is where a world direction square to the axis
+            // projects to: on the axis's own plane through the centre.
+            for (axis, points) in &rings {
+                let ray = camera.ray_through(points[RING_SEGMENTS / 3], EXTENT);
+                let crossing = on_plane(&ray, widen(origin), *axis).expect("crosses its plane");
+                let off = (crossing - widen(origin)).dot(axis.unit());
+                assert!(off.abs() < 1e-3, "{axis:?}'s ring left its plane by {off}");
+            }
+        }
+    }
+}
+
+/// **A press on a ring takes that ring**, within [`HIT_PX`] of its drawn
+/// line, and a press just past that, or at the centre, takes none.
+#[test]
+fn a_press_on_a_ring_takes_it() {
+    let camera = camera();
+    let handles = handles(
+        &camera,
+        EXTENT,
+        Vec3::ZERO,
+        DQuat::IDENTITY,
+        1.0,
+        Mode::Rotate,
+    );
+    let centre = camera.pixel_of(Vec3::ZERO, EXTENT).expect("in front");
+    let rings = rings(&handles);
+    for (axis, points) in &rings {
+        // A point of this ring at least three hit radii from either other.
+        let alone = points
+            .iter()
+            .copied()
+            .find(|point| {
+                rings
+                    .iter()
+                    .filter(|(other, _)| other != axis)
+                    .all(|(_, others)| distance_to_ring(*point, others) > 3.0 * HIT_PX)
+            })
+            .unwrap_or_else(|| panic!("the {axis:?} ring crosses the others everywhere"));
+        let outward = (alone - centre).normalize();
+        assert_eq!(
+            hit(&handles, alone + outward * (HIT_PX - 1.0), 1.0),
+            Some(Grip::Rotate(*axis))
+        );
+        assert_eq!(
+            hit(&handles, alone + outward * (HIT_PX + 1.0), 1.0),
+            None,
+            "a press past the hit radius took the {axis:?} ring",
+        );
+    }
+    assert_eq!(
+        hit(&handles, centre, 1.0),
+        None,
+        "no ring passes the centre here"
+    );
+}
+
+/// **The swept angle is counter-clockwise as a person sees it**, on a pane
+/// whose `y` runs down, and wraps rather than running past a half turn.
+#[test]
+fn the_swept_angle_is_counter_clockwise_and_wraps() {
+    let centre = Vec2::new(100.0, 100.0);
+    let right = centre + Vec2::new(50.0, 0.0);
+    let up = centre + Vec2::new(0.0, -50.0);
+    let down = centre + Vec2::new(0.0, 50.0);
+    let left = centre + Vec2::new(-50.0, 0.0);
+    let quarter = std::f64::consts::FRAC_PI_2;
+    let swept_by = |from, to| swept(centre, from, to).expect("off the centre");
+    assert!((swept_by(right, up) - quarter).abs() < 1e-6);
+    assert!((swept_by(up, right) + quarter).abs() < 1e-6);
+    assert!((swept_by(right, down) + quarter).abs() < 1e-6);
+    // Across the left-hand side, where `atan2` jumps from -π to π: a small
+    // step down the left is a small counter-clockwise turn, not most of one
+    // the other way.
+    let above_left = centre + Vec2::new(-50.0, -1.0);
+    let below_left = centre + Vec2::new(-50.0, 1.0);
+    let small = swept_by(above_left, below_left);
+    assert!(small > 0.0 && small < 0.05, "{small}");
+    assert!((swept_by(right, left).abs() - 2.0 * quarter).abs() < 1e-6);
+    assert_eq!(swept(centre, right, centre + Vec2::splat(0.5)), None);
+}
+
+/// A ring drag of `axis` from `from`, pressed to the right of its centre.
+fn ring_drag(axis: Axis, from: Turn) -> Drag {
+    let at = from.centre + Vec2::new(60.0, 0.0);
+    Drag::turn(SceneEntityId(1), axis, Gesture(1), DVec3::ZERO, at, from)
+}
+
+/// The pointer at `at` on the pane; a turn does not read the ray.
+fn pointer_at(at: Vec2) -> Pointer {
+    Pointer {
+        ray: ViewRay {
+            origin: Vec3::ZERO,
+            direction: Vec3::NEG_Z,
+        },
+        at,
+    }
+}
+
+/// The rotation a turn's writes set, read off its four `rotation` leaves.
+fn rotation_written(writes: &[Write]) -> DQuat {
+    let leaf = |name: &str| {
+        writes
+            .iter()
+            .find(|write| write.path == format!("{ROTATION}.{name}"))
+            .unwrap_or_else(|| panic!("no rotation.{name} in {writes:?}"))
+            .value
+    };
+    DQuat::from_xyzw(leaf("x"), leaf("y"), leaf("z"), leaf("w"))
+}
+
+/// **A ring drag turns about its own axis by the angle swept**: a quarter
+/// turn counter-clockwise on screen is a quarter turn about each axis seen
+/// from its tip, the other way seen from behind it, composed onto the
+/// rotation the press found.
+#[test]
+fn a_ring_drag_turns_about_its_axis_by_the_angle_swept() {
+    let centre = Vec2::new(300.0, 200.0);
+    let quarter = centre + Vec2::new(0.0, -60.0);
+    let start = DQuat::from_rotation_x(0.3);
+    for axis in Axis::ALL {
+        for facing in [1.0, -1.0] {
+            let from = Turn {
+                rotation: start,
+                position: None,
+                centre,
+                facing,
+            };
+            let writes = ring_drag(axis, from)
+                .writes(&pointer_at(quarter), None)
+                .expect("off the centre");
+            assert_eq!(
+                writes.len(),
+                4,
+                "a turn with no position writes four leaves"
+            );
+            let expected =
+                DQuat::from_axis_angle(axis.unit(), facing * std::f64::consts::FRAC_PI_2) * start;
+            assert!(
+                rotation_written(&writes).abs_diff_eq(expected, 1e-12),
+                "{axis:?} facing {facing}: {:?}, not {expected:?}",
+                rotation_written(&writes),
+            );
+        }
+    }
+}
+
+/// **With Ctrl, a turn lands on a multiple of the angle step from the
+/// press**: 20° swept is 15°, 40° is 45° and -50° is -45°.
+#[test]
+fn a_snapped_turn_lands_on_the_angle_step() {
+    let snap = Snap::default();
+    assert_eq!(snap.angle_step(), ANGLE_DEG);
+    let centre = Vec2::new(300.0, 200.0);
+    let from = Turn {
+        rotation: DQuat::IDENTITY,
+        position: None,
+        centre,
+        facing: 1.0,
+    };
+    for (swept_deg, landed_deg) in [(20.0_f64, 15.0_f64), (40.0, 45.0), (-50.0, -45.0)] {
+        let (sin, cos) = swept_deg.to_radians().sin_cos();
+        #[allow(clippy::cast_possible_truncation)]
+        let at = centre + Vec2::new(cos as f32, -sin as f32) * 60.0;
+        let writes = ring_drag(Axis::Y, from)
+            .writes(&pointer_at(at), Some(snap))
+            .expect("off the centre");
+        let (axis, angle) = rotation_written(&writes).to_axis_angle();
+        let signed = angle.to_degrees() * axis.y.signum();
+        assert!(
+            (signed - landed_deg).abs() < 1e-6,
+            "{swept_deg}° swept landed on {signed}°, not {landed_deg}°",
+        );
+    }
+}
+
+/// **A turn swings a position that is not the centre round it**, as a mesh's
+/// origin is: a quarter turn about `+Y` takes an origin a metre along `+X`
+/// from the centre to a metre along `-Z`; one at the centre stays put.
+#[test]
+fn a_turn_swings_a_position_off_the_centre_round_it() {
+    let centre = Vec2::new(300.0, 200.0);
+    let quarter = centre + Vec2::new(0.0, -60.0);
+    for (position, swung) in [(DVec3::X, DVec3::NEG_Z), (DVec3::ZERO, DVec3::ZERO)] {
+        let from = Turn {
+            rotation: DQuat::IDENTITY,
+            position: Some(position),
+            centre,
+            facing: 1.0,
+        };
+        let writes = ring_drag(Axis::Y, from)
+            .writes(&pointer_at(quarter), None)
+            .expect("off the centre");
+        let at = Axis::ALL.map(|axis| {
+            writes
+                .iter()
+                .find(|write| write.path == format!("{POSITION}.{}", axis.index()))
+                .expect("a position leaf")
+                .value
+        });
+        assert!(
+            DVec3::from_array(at).abs_diff_eq(swung, 1e-12),
+            "{position} swung to {at:?}, not {swung}",
+        );
+    }
+}
+
+/// **Scale's lines run along the box's own axes**: a box turned a quarter
+/// about `+Z` has its X scale handle pointing where the world's Y does.
+#[test]
+fn scale_lines_follow_the_boxs_turn() {
+    let camera = camera();
+    let turned = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+    let handles = handles(&camera, EXTENT, Vec3::ZERO, turned, 1.0, Mode::Scale);
+    let (_, from, to) = lines(&handles)
+        .into_iter()
+        .find(|(grip, ..)| *grip == Grip::Scale(Axis::X))
+        .expect("an X scale handle");
+    let world_y = camera.pixel_of(Vec3::Y * 2.0, EXTENT).expect("in front");
+    let along = (to - from).normalize().dot((world_y - from).normalize());
+    assert!(along > 0.999, "the X scale handle points {:?}", to - from);
+}
+
+/// **The angle step comes from the settings or its default**, as the other
+/// two do.
+#[test]
+fn the_angle_step_comes_from_the_settings_or_its_default() {
+    let mut stack = SettingsStack::from_storage(&MemoryStorage::new());
+    stack.set(ANGLE_KEY, &5.0).expect("a writable stack");
+    assert_eq!(Snap::load(&stack).angle_step(), 5.0);
+    stack.set(ANGLE_KEY, &0.0).expect("a writable stack");
+    assert_eq!(
+        Snap::load(&stack).angle_step(),
+        ANGLE_DEG,
+        "a step of zero was taken"
+    );
+}
+
+/// **A scale drag on a turned box measures along the box's own axis**: the X
+/// handle of a box turned a quarter about `+Z` grows its X half extent by
+/// the cursor's travel along the world's Y.
+#[test]
+fn a_scale_drag_on_a_turned_box_follows_its_own_axis() {
+    let turned = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+    let across_y = |y: f32| Pointer {
+        ray: ViewRay {
+            origin: Vec3::new(0.0, y, 10.0),
+            direction: Vec3::NEG_Z,
+        },
+        at: Vec2::ZERO,
+    };
+    let drag = Drag::begin(
+        SceneEntityId(1),
+        Grip::Scale(Axis::X),
+        Gesture(1),
+        [1.0, 0.5, 0.5],
+        DVec3::ZERO,
+        turned,
+        &across_y(1.0),
+        1.0,
+    )
+    .expect("not parallel");
+    let writes = drag.writes(&across_y(1.5), None).expect("not parallel");
+    let (path, value) = only(&writes);
+    assert_eq!(path, "half_extents.0");
+    assert!((value - 1.5).abs() < 1e-6, "{value}");
 }

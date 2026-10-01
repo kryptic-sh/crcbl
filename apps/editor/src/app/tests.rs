@@ -213,8 +213,8 @@ fn leaves(editor: &mut Editor<HeadlessShell>, id: SceneEntityId, field: &str) ->
 }
 
 /// The selection's handle that takes hold of `grip`, in window pixels from
-/// the pane's own: `(from, to)` for a line, and `(centre, centre)` for a
-/// square.
+/// the pane's own: `(from, to)` for a line, `(centre, centre)` for a
+/// square, and a ring's first two points.
 fn handle_at(editor: &mut Editor<HeadlessShell>, grip: gizmo::Grip) -> (Vec2, Vec2) {
     let (corner, _) = editor.panels.viewport_pixels();
     let handle = editor
@@ -225,6 +225,7 @@ fn handle_at(editor: &mut Editor<HeadlessShell>, grip: gizmo::Grip) -> (Vec2, Ve
     match handle.shape {
         gizmo::Shape::Line { from, to } => (corner + from, corner + to),
         gizmo::Shape::Square { centre, .. } => (corner + centre, corner + centre),
+        gizmo::Shape::Ring { points } => (corner + points[0], corner + points[1]),
     }
 }
 
@@ -498,37 +499,162 @@ fn an_entity_without_half_extents_shows_no_scale_handles_and_says_why() {
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 
-/// **E cannot enter a rotate mode**: there is none, the key says so on the
-/// status line, and whichever mode was showing stays.
+/// The selection's ring about `axis`, as a press on it and a release a
+/// quarter turn counter-clockwise round the selection's centre on screen, in
+/// window pixels.
+pub(super) fn ring_quarter(editor: &mut Editor<HeadlessShell>, axis: gizmo::Axis) -> (Vec2, Vec2) {
+    let (corner, _) = editor.panels.viewport_pixels();
+    let points = editor
+        .handles()
+        .into_iter()
+        .find_map(|handle| match (handle.grip, handle.shape) {
+            (gizmo::Grip::Rotate(shown), gizmo::Shape::Ring { points }) if shown == axis => {
+                Some(points)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the default view shows no {axis:?} ring"));
+    let centre = points.iter().copied().sum::<Vec2>() / points.len() as f32;
+    let grab = points[0];
+    let out = grab - centre;
+    // A quarter turn counter-clockwise as a person sees it, on a pane whose
+    // y runs down.
+    let release = centre + Vec2::new(out.y, -out.x);
+    (corner + grab, corner + release)
+}
+
+/// **E shows a ring about each axis, and says how to use them**; W and R
+/// bring their own handles back.
 #[test]
-fn rotate_cannot_be_entered() {
+fn e_shows_the_rotate_rings_and_says_how() {
     let mut editor = headless(40);
     editor.document_mut().select(Some(SceneEntityId(2)));
     editor.frame().expect("a frame");
-    let modes = |editor: &mut Editor<HeadlessShell>| -> Vec<gizmo::Mode> {
-        editor
-            .handles()
-            .iter()
-            .map(|handle| handle.grip.mode())
-            .collect()
-    };
+    tap(&mut editor, KeyCode::KeyE);
+    assert_eq!(editor.gizmo_mode, gizmo::Mode::Rotate);
+    let grips: Vec<gizmo::Grip> = editor.handles().iter().map(|handle| handle.grip).collect();
+    assert_eq!(
+        grips,
+        gizmo::Axis::ALL.map(gizmo::Grip::Rotate),
+        "E did not show the three rings"
+    );
+    let (text, tone) = editor.panels.status();
+    assert_eq!(tone, Tone::Info, "{text}");
+    assert!(text.starts_with("Rotate:"), "{text}");
+    assert!(
+        text.contains(&editor.snap.angle_step().to_string()),
+        "{text}"
+    );
     for (key, mode) in [
         (KeyCode::KeyW, gizmo::Mode::Translate),
         (KeyCode::KeyR, gizmo::Mode::Scale),
     ] {
         tap(&mut editor, key);
-        let showing = modes(&mut editor);
         assert!(
-            !showing.is_empty() && showing.iter().all(|shown| *shown == mode),
-            "{key:?} showed {showing:?}",
+            editor
+                .handles()
+                .iter()
+                .all(|handle| handle.grip.mode() == mode),
+            "{key:?} did not bring its handles back"
         );
-        tap(&mut editor, KeyCode::KeyE);
-        assert_eq!(editor.gizmo_mode, mode, "E changed the mode");
-        assert_eq!(modes(&mut editor), showing, "E changed the handles");
-        let (text, tone) = editor.panels.status();
-        assert_eq!(tone, Tone::Warning, "{text}");
-        assert!(text.contains("Rotate is not built"), "{text}");
     }
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **Dragging a ring turns the selection about that axis alone, as one
+/// undo**: the block's rotation is a positive turn about Y, still unit, its centre
+/// where it was, one entry in the log, and the undo puts the files back.
+#[test]
+fn dragging_a_ring_turns_the_selection_about_its_axis_as_one_undo() {
+    let mut editor = headless(24);
+    let id = SceneEntityId(2);
+    editor.document_mut().select(Some(id));
+    editor.frame().expect("a frame");
+    tap(&mut editor, KeyCode::KeyE);
+    let before = editor.document_mut().files().expect("ids");
+    let position = leaves(&mut editor, id, gizmo::POSITION);
+
+    let (grab, release) = ring_quarter(&mut editor, gizmo::Axis::Y);
+    drag(&mut editor, grab, release);
+
+    let turned = editor.rotation_of(id).expect("a block has a rotation");
+    let (axis, angle) = turned.to_axis_angle();
+    assert!(angle > 0.5, "a quarter of the ring turned it {angle} rad");
+    // Counter-clockwise on screen, seen from above — from the tip of +Y — is
+    // a positive turn about +Y.
+    assert!(
+        axis.abs_diff_eq(DVec3::Y, 1e-9),
+        "the Y ring turned it about {axis}, by {angle}"
+    );
+    assert!((turned.length() - 1.0).abs() < 1e-12, "{turned:?}");
+    assert_eq!(leaves(&mut editor, id, gizmo::POSITION), position);
+    assert_eq!(editor.document().log().len(), 1, "a drag is one entry");
+
+    editor.act(&Action::Undo);
+    assert_eq!(editor.document_mut().files().expect("ids"), before);
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A ring drag with Ctrl held turns by a multiple of the angle step.**
+#[test]
+fn a_ring_drag_with_ctrl_held_turns_by_the_angle_step() {
+    let mut editor = headless(24);
+    let id = SceneEntityId(2);
+    editor.document_mut().select(Some(id));
+    editor.frame().expect("a frame");
+    tap(&mut editor, KeyCode::KeyE);
+    let window = editor.window;
+    editor.shell_mut().set_modifiers(Modifiers::CTRL);
+    editor
+        .shell_mut()
+        .key_press(window, KeyCode::ControlLeft)
+        .expect("live");
+    editor.frame().expect("a frame");
+
+    let (grab, release) = ring_quarter(&mut editor, gizmo::Axis::Y);
+    // Short of a quarter, so the snap has somewhere to round to.
+    drag(&mut editor, grab, grab + (release - grab) * 0.8);
+
+    let (_, angle) = editor
+        .rotation_of(id)
+        .expect("a block has a rotation")
+        .to_axis_angle();
+    let steps = angle.to_degrees() / editor.snap.angle_step();
+    assert!(steps > 0.5, "the drag did not turn it: {angle} rad");
+    assert!(
+        (steps - steps.round()).abs() < 1e-6,
+        "{}° is not a multiple of the {}° step",
+        angle.to_degrees(),
+        editor.snap.angle_step(),
+    );
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **An entity with no `rotation` shows no rings**, and the status line says
+/// why — puppet's components are a position and no turn.
+#[test]
+fn an_entity_without_a_rotation_shows_no_rings_and_says_why() {
+    let (_dir, mut editor) = puppet_editor(40);
+    editor.frame().expect("a frame");
+    let ids: Vec<SceneEntityId> = editor
+        .document_mut()
+        .outline()
+        .into_iter()
+        .flat_map(|(_, ids)| ids)
+        .collect();
+    let selected = ids
+        .into_iter()
+        .find(|id| editor.document_mut().bounds(*id).is_some())
+        .expect("puppet's blockout holds a placed entity");
+    editor.document_mut().select(Some(selected));
+    editor.frame().expect("a frame");
+
+    tap(&mut editor, KeyCode::KeyE);
+    assert_eq!(editor.gizmo_mode, gizmo::Mode::Rotate);
+    assert!(editor.handles().is_empty(), "it shows rings");
+    let (text, tone) = editor.panels.status();
+    assert_eq!(tone, Tone::Warning, "{text}");
+    assert!(text.contains(gizmo::ROTATION), "{text}");
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 

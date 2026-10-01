@@ -91,8 +91,7 @@ pub const TRANSLATE: &str = "editor_translate";
 /// Show the scale handles: R, beside it.
 pub const SCALE: &str = "editor_scale";
 
-/// Ask for rotate handles, which this editor does not have — E, where every
-/// other editor keeps them, so the key says why rather than doing nothing. See
+/// Show the rotate handles: E, where every other editor keeps them. See
 /// [`crate::gizmo::Mode`].
 pub const ROTATE: &str = "editor_rotate";
 
@@ -140,7 +139,7 @@ pub enum Action {
     Translate,
     /// Show the scale handles.
     Scale,
-    /// Ask for rotate handles, which the scene format gives nothing to turn.
+    /// Show the rotate handles.
     Rotate,
     /// Start play mode from editing, or stop it from playing or paused.
     PlayStop,

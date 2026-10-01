@@ -516,6 +516,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The editor's rotate gizmo.** E shows a ring about each world axis (it put a
+  refusal on the status line before), hit-tested against the drawn ring; a drag
+  turns the selection about that axis through its centre by the angle swept
+  round the centre on screen, swinging a position that is not the centre round
+  with it, as one undo, refused in play. Ctrl snaps the turn to
+  `editor.snap.angle` degrees (15 by default) in the editor's `settings.toml`.
+  Scale's handles now run along a turned box's own axes. The inspector draws a
+  `Rotation` as three angles in degrees and writes the quaternion's four leaves
+  as one command — a frame's edits to one inspector section are now one command.
+
 - **Rotation on placing scene components.** `crcbl::registry::Rotation` is a
   unit quaternion a component carries as a reflected `rotation` field, written
   `rotation: (x, y, z, w)` in a chunk row and left out of the file while it is

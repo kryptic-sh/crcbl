@@ -85,8 +85,9 @@ use crcbl::engine::{
 };
 use crcbl::hal::{CommandEncoderDesc, ImageUsage};
 use crcbl::input::ActionMap;
-use crcbl::math::{DVec3, Vec2, Vec3};
+use crcbl::math::{DQuat, DVec3, Vec2, Vec3};
 use crcbl::reflect::Value;
+use crcbl::registry::Rotation;
 use crcbl::render::grid::GridStyle;
 use crcbl::render::{
     Aabb, DirectionalLight, ForwardRenderer, OrbitCamera, Projection, RenderGraph,
@@ -660,25 +661,39 @@ impl<S: Shell + ?Sized> Editor<S> {
 
     /// The selection's gizmo handles in the current mode, in the pane's
     /// pixels — none for nothing selected, and none for an entity without the
-    /// field the mode writes: no `position` to move, or no `half_extents` to
-    /// resize.
+    /// field the mode writes: no `position` to move, no `half_extents` to
+    /// resize, or no `rotation` to turn.
     fn handles(&mut self) -> Vec<gizmo::Handle> {
         let Some(id) = self.document.selected() else {
             return Vec::new();
         };
-        if self.field_values(id, self.gizmo_mode.field()).is_none() {
+        if !self.has_field(id, self.gizmo_mode) {
             return Vec::new();
         }
-        let Some((min, max)) = self.document.bounds(id) else {
+        let (Some((min, max)), Some(placement)) =
+            (self.document.bounds(id), self.document.placement(id))
+        else {
             return Vec::new();
         };
         gizmo::handles(
             &self.camera.camera(),
             self.panels.viewport_extent(),
             (min + max) * 0.5,
+            placement.rotation,
             self.panels.scale(),
             self.gizmo_mode,
         )
+    }
+
+    /// Whether the component placing `id` has the field `mode`'s handles
+    /// write.
+    fn has_field(&mut self, id: SceneEntityId, mode: gizmo::Mode) -> bool {
+        match mode {
+            gizmo::Mode::Rotate => self.rotation_of(id).is_some(),
+            gizmo::Mode::Translate | gizmo::Mode::Scale => {
+                self.field_values(id, mode.field()).is_some()
+            }
+        }
     }
 
     /// The three numbers `field.0` to `field.2` of the component placing `id`
@@ -703,6 +718,27 @@ impl<S: Shell + ?Sized> Editor<S> {
         Some(values)
     }
 
+    /// The orientation of the component placing `id`, from its
+    /// [`gizmo::ROTATION`] field — or [`None`] where nothing places it or it
+    /// has no such field.
+    ///
+    /// By name, as [`field_values`](Self::field_values) is, and of the
+    /// `crcbl::registry::Rotation` type the scene format reads: a field
+    /// called `rotation` of any other type is not one the handles can write.
+    fn rotation_of(&mut self, id: SceneEntityId) -> Option<DQuat> {
+        let system = self.document.placing_system(id)?;
+        let component = self.document.component(id, &system)?;
+        let index = component
+            .fields()
+            .iter()
+            .position(|field| field.name == gizmo::ROTATION)?;
+        component
+            .field(index)?
+            .as_any()
+            .downcast_ref::<Rotation>()
+            .map(Rotation::quat)
+    }
+
     /// Starts a gizmo drag if the press landed on a handle, and says whether it
     /// did — a press that missed every handle is a pick.
     fn grab_handle(&mut self, pending: &Pending) -> bool {
@@ -714,41 +750,86 @@ impl<S: Shell + ?Sized> Editor<S> {
         let Some(grip) = gizmo::hit(&handles, at - corner, self.panels.scale()) else {
             return false;
         };
-        let (Some(start), Some((min, max))) = (
-            self.field_values(id, grip.mode().field()),
-            self.document.bounds(id),
-        ) else {
+        let (Some((min, max)), Some(placement)) =
+            (self.document.bounds(id), self.document.placement(id))
+        else {
             return false;
         };
-        let origin = (min + max) * 0.5;
-        let origin = DVec3::new(
-            f64::from(origin.x),
-            f64::from(origin.y),
-            f64::from(origin.z),
-        );
         let gesture = self.document.begin_gesture();
-        let pointer = self.pointer_at(at);
-        let Some(drag) = gizmo::Drag::begin(
-            id,
-            grip,
-            gesture,
-            start,
-            origin,
-            &pointer,
-            self.panels.scale(),
-        ) else {
+        let drag = if let gizmo::Grip::Rotate(axis) = grip {
+            self.begin_turn(id, axis, gesture, (min + max) * 0.5, at - corner)
+        } else {
+            let Some(start) = self.field_values(id, grip.mode().field()) else {
+                return false;
+            };
+            let origin = (min + max) * 0.5;
+            let origin = DVec3::new(
+                f64::from(origin.x),
+                f64::from(origin.y),
+                f64::from(origin.z),
+            );
+            gizmo::Drag::begin(
+                id,
+                grip,
+                gesture,
+                start,
+                origin,
+                placement.rotation,
+                &self.pointer_at(at),
+                self.panels.scale(),
+            )
+        };
+        let Some(drag) = drag else {
             return false;
         };
         self.drag = Some(Drag::Gizmo(drag));
         true
     }
 
-    /// Moves or resizes the dragged entity to where the pointer at `at` puts
-    /// it, on the absolute grid while Ctrl is held — one write of the drag's
+    /// A drag of `id`'s ring about `axis`, pressed at `at` in the pane's
+    /// pixels, its handles drawn about `shown` — or [`None`] for an entity with
+    /// no rotation, or a centre behind the eye.
+    ///
+    /// The pivot is the placement's own centre in `f64`, not the drawn one, so
+    /// a block whose position is its centre keeps that position to the bit.
+    fn begin_turn(
+        &mut self,
+        id: SceneEntityId,
+        axis: gizmo::Axis,
+        gesture: crate::command::Gesture,
+        shown: Vec3,
+        at: Vec2,
+    ) -> Option<gizmo::Drag> {
+        let rotation = self.rotation_of(id)?;
+        let pivot = self.document.placement(id)?.centre;
+        let position = self
+            .field_values(id, gizmo::POSITION)
+            .map(DVec3::from_array);
+        let camera = self.camera.camera();
+        let centre = camera.pixel_of(shown, self.panels.viewport_extent())?;
+        let toward_eye = axis.unit().dot(camera.eye.as_dvec3() - pivot);
+        let facing = if toward_eye < 0.0 { -1.0 } else { 1.0 };
+        Some(gizmo::Drag::turn(
+            id,
+            axis,
+            gesture,
+            pivot,
+            at,
+            gizmo::Turn {
+                rotation,
+                position,
+                centre,
+                facing,
+            },
+        ))
+    }
+
+    /// Moves, resizes or turns the dragged entity to where the pointer at `at`
+    /// puts it, snapped while Ctrl is held — one write of the drag's
     /// gesture, so the whole drag undoes at once.
     ///
-    /// A handle that sets several leaves at once — a plane, the centre — sets
-    /// them as one [`EditCommand::Batch`], which the log folds like a single
+    /// A handle that sets several leaves at once — a plane, the centre, a ring
+    /// — sets them as one [`EditCommand::Batch`], which the log folds like a
     /// leaf (`crate::command::UndoLog::record_in`).
     fn move_handle(&mut self, drag: &gizmo::Drag, at: Vec2) {
         let snap = self
@@ -799,7 +880,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     }
 
     /// Shows `mode`'s handles from now on, and says on the status line what
-    /// they do — or, for scale, why the selection has none.
+    /// they do — or, for scale and rotate, why the selection has none.
     fn choose_mode(&mut self, mode: gizmo::Mode) {
         self.gizmo_mode = mode;
         let (text, tone) = match mode {
@@ -811,29 +892,45 @@ impl<S: Shell + ?Sized> Editor<S> {
                 ),
                 Tone::Info,
             ),
-            gizmo::Mode::Scale => self.scale_status(),
-        };
-        self.panels.set_status(text, tone);
-    }
-
-    /// What the status line says when scale is chosen: how to use the handles,
-    /// or why the selection shows none.
-    fn scale_status(&mut self) -> (String, Tone) {
-        let Some(id) = self.document.selected() else {
-            return (
-                "Scale: select an entity with half extents to resize it".to_owned(),
-                Tone::Info,
-            );
-        };
-        if self.field_values(id, gizmo::HALF_EXTENTS).is_some() {
-            return (
+            gizmo::Mode::Scale => self.field_status(
+                mode,
+                "Scale: select an entity with half extents to resize it",
                 format!(
                     "Scale: drag a box to resize along its axis or the centre to resize \
                      evenly; hold Ctrl to snap half extents to {} m",
                     self.snap.scale_step()
                 ),
-                Tone::Info,
-            );
+                "resize",
+            ),
+            gizmo::Mode::Rotate => self.field_status(
+                mode,
+                "Rotate: select an entity with a rotation to turn it",
+                format!(
+                    "Rotate: drag a ring to turn about its axis; hold Ctrl to snap to {}°",
+                    self.snap.angle_step()
+                ),
+                "turn",
+            ),
+        };
+        self.panels.set_status(text, tone);
+    }
+
+    /// What the status line says when a mode whose handles need a field is
+    /// chosen: `none` with nothing selected, `usage` when the selection has
+    /// the field, and why it shows no handles when it does not — it has
+    /// nothing to `verb`.
+    fn field_status(
+        &mut self,
+        mode: gizmo::Mode,
+        none: &str,
+        usage: String,
+        verb: &str,
+    ) -> (String, Tone) {
+        let Some(id) = self.document.selected() else {
+            return (none.to_owned(), Tone::Info);
+        };
+        if self.has_field(id, mode) {
+            return (usage, Tone::Info);
         }
         let placing = self.document.placing_system(id);
         let kind = placing
@@ -845,10 +942,15 @@ impl<S: Shell + ?Sized> Editor<S> {
                     .next()
                     .unwrap_or("entity")
             });
+        let label = match mode {
+            gizmo::Mode::Translate => "Translate",
+            gizmo::Mode::Scale => "Scale",
+            gizmo::Mode::Rotate => "Rotate",
+        };
         (
             format!(
-                "Scale: this {kind} has no `{}` field, so it has nothing to resize",
-                gizmo::HALF_EXTENTS
+                "{label}: this {kind} has no `{}` field, so it has nothing to {verb}",
+                mode.field()
             ),
             Tone::Warning,
         )
@@ -1004,11 +1106,8 @@ impl<S: Shell + ?Sized> Editor<S> {
                 self.choose_mode(gizmo::Mode::Scale);
                 Ok(())
             }
-            // Refused here and not merely unbound: E is where every other
-            // editor keeps rotate, and a key that did nothing would look broken
-            // rather than absent. The mode stays whatever it was.
             Action::Rotate => {
-                self.panels.set_status(ROTATE_REFUSED, Tone::Warning);
+                self.choose_mode(gizmo::Mode::Rotate);
                 Ok(())
             }
             Action::PlayStop => self.play_or_stop(),
@@ -1436,10 +1535,6 @@ const PAUSED: &str = "Paused: F6 resumes, F5 stops and puts the scene back";
 
 /// What the status line says when pause is asked for while editing.
 const NOT_PLAYING: &str = "Not playing: F5 starts play mode";
-
-/// What the status line says when rotate is asked for. See [`gizmo::Mode`].
-const ROTATE_REFUSED: &str = "Rotate is not built: there are no ring handles to turn with yet \
-                              (W translates, R scales)";
 
 /// The app id the window system matches this tool to its `.desktop` file by.
 const APP_ID: &str = "sh.kryptic.crcbl.editor";

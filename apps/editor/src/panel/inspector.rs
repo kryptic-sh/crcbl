@@ -17,9 +17,16 @@
 //! the pane reports the [`Change`] and [`super::Panels::frame`] applies it
 //! through the document, so a refusal reaches the status line like every
 //! other.
+//!
+//! **A rotation is drawn as three angles** ([`overrides`]): the quaternion a
+//! `crcbl::registry::Rotation` holds is no row a person can drag, so its row
+//! shows degrees and writes all four leaves when one angle moves.
 
+use crcbl::math::{DQuat, EulerRot};
+use crcbl::reflect::Value;
+use crcbl::registry::Rotation;
 use crcbl::scene::scn::SceneEntityId;
-use crcbl::ui::tree::{FieldEdit, InspectorOptions, NodeKey, Overrides, Ui};
+use crcbl::ui::tree::{AXES, FieldEdit, FieldRow, InspectorOptions, NodeKey, Overrides, Ui};
 
 use crate::document::Document;
 
@@ -155,4 +162,85 @@ pub(super) fn build(
         built.field = focused.or(hovered);
     });
     built
+}
+
+/// The order a rotation's three angles are composed in on its row: about X,
+/// then Y, then Z.
+const EULER: EulerRot = EulerRot::XYZ;
+
+/// How far one pixel of a drag turns an angle on the rotation row, in degrees.
+const DEGREE_STEP: f32 = 0.5;
+
+/// How far an angle on the rotation row is held either way of zero, in
+/// degrees: a whole turn, which every orientation is inside.
+const DEGREE_RANGE: f32 = 360.0;
+
+/// The inspector's per-type rows: [`Overrides::vectors`], and a
+/// [`Rotation`] drawn as three angles.
+pub(super) fn overrides() -> Overrides {
+    let mut overrides = Overrides::vectors();
+    overrides.register::<Rotation>(rotation_row);
+    overrides
+}
+
+/// A [`Rotation`] as three angles in degrees on one row — the view every
+/// editor of this shape gives a turn, over the quaternion the file holds.
+///
+/// A dragged angle is composed back with the other two (in [`EULER`] order)
+/// and the quaternion's four leaves written at once, which
+/// [`super::Panels::apply_edits`] makes one command — never one leaf of the
+/// four alone. The angles are read back from the quaternion each frame, so
+/// near a right-angle pitch two of them trade places as Euler angles do; the
+/// orientation does not jump. The widgets name no leaf for the clipboard keys:
+/// an angle is not a leaf the file holds.
+fn rotation_row(ui: &mut Ui, field: &mut FieldRow<'_>) {
+    let Some(rotation) = field.value.as_any().downcast_ref::<Rotation>() else {
+        return;
+    };
+    let degrees = degrees_of(rotation.quat());
+    let label = field.label;
+    let mut turned = None;
+    ui.block(".inspector-row", &[], |ui| {
+        ui.span(".inspector-label", label, &[]);
+        for (index, axis) in AXES.iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let mut number = degrees[index] as f32;
+            let mut moved = false;
+            // Keyed by the axis, as a vector row's are.
+            ui.block_keyed(*axis, ".inspector-axis", &[], |ui| {
+                ui.span(".inspector-axis-label", *axis, &[]);
+                let response = ui.drag_value(
+                    ".inspector-field",
+                    &mut number,
+                    -DEGREE_RANGE..=DEGREE_RANGE,
+                    DEGREE_STEP,
+                    DEGREE_STEP,
+                );
+                moved = response.changed;
+            });
+            if moved {
+                let mut angles = degrees;
+                angles[index] = f64::from(number);
+                turned = Some(angles);
+            }
+        }
+    });
+    if let Some(angles) = turned {
+        let quat = quat_of(angles);
+        for (leaf, value) in Rotation::LEAVES.into_iter().zip(quat.to_array()) {
+            field.set(leaf, Value::Float(value));
+        }
+    }
+}
+
+/// `quat` as the three angles its row shows, in degrees.
+pub(super) fn degrees_of(quat: DQuat) -> [f64; 3] {
+    let (x, y, z) = quat.to_euler(EULER);
+    [x, y, z].map(f64::to_degrees)
+}
+
+/// The quaternion three angles in degrees compose to.
+pub(super) fn quat_of(degrees: [f64; 3]) -> DQuat {
+    let [x, y, z] = degrees.map(f64::to_radians);
+    DQuat::from_euler(EULER, x, y, z)
 }

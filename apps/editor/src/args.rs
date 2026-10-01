@@ -130,12 +130,15 @@ EDITING:
     R                    Show the scale handles, on an entity with half
                          extents: drag a box-tipped line to resize along that
                          axis, or the centre square to resize evenly
-    E                    Rotate is not built — there are no ring handles yet
-                         — and the status line says so
+    E                    Show the rotate handles, on an entity with a
+                         rotation: drag a ring to turn about its axis — one
+                         undo a drag
     Ctrl while dragging  Snap to the absolute grid: a centre to multiples of
                          editor.snap.grid and a half extent to multiples of
-                         editor.snap.scale, both metres in settings.toml. W
-                         and R name the steps on the status line
+                         editor.snap.scale, both metres in settings.toml;
+                         and a turn to multiples of editor.snap.angle
+                         degrees from the press. W, R and E name the steps on
+                         the status line
     Arrow keys           Nudge the selection along X (left/right) and Y
                          (up/down), or walk the rows once a panel has the
                          keyboard

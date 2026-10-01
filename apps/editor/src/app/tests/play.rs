@@ -278,6 +278,27 @@ fn a_gizmo_drag_in_play_mode_is_refused() {
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 
+/// **A ring drag in play mode is refused** like any other handle's: every
+/// write is refused on the status line, and the rotation stays where play
+/// left it.
+#[test]
+fn a_ring_drag_in_play_mode_is_refused() {
+    let id = SceneEntityId(2);
+    let mut editor = paused_editor(16);
+    editor.document_mut().select(Some(id));
+    editor.frame().expect("a frame");
+    editor.act(&Action::Rotate);
+    let was = editor.rotation_of(id).expect("a block has a rotation");
+
+    let (grab, release) = super::ring_quarter(&mut editor, gizmo::Axis::Y);
+    drag(&mut editor, grab, release);
+
+    assert_refused_for_play(&editor, "ring drag");
+    assert_eq!(editor.rotation_of(id), Some(was), "the drag turned it");
+    assert!(editor.document().log().is_empty());
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
 /// **Towers' creeps are drawn while its field plays, and gone once it
 /// stops** — counted off the renderer's own live records as well as the
 /// editor's instances, through the field opened from its committed directory

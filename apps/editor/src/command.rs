@@ -10,7 +10,7 @@
 //!
 //! An inspector is the one thing that arrives the other way round — the widget
 //! writes the field and *reports* what it wrote — and
-//! [`crate::Document::record_edit`] is where that is turned back into a
+//! [`crate::Document::record_edits`] is where that is turned back into a
 //! command. It is the crate's only field write, and it is a rewind: what the
 //! panel did is undone so the command can do it, and so record an exact
 //! inverse. That method's docs say why.

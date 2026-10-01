@@ -11654,22 +11654,25 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   correction); and a server hosting more than one session.
 - **An edit-mode schedule** for the selection, gizmo and editor-camera systems;
   a `World` has one `Schedule` and no per-system gating.
-- **The rotate gizmo**, the one transform handle not built. Translate (axis and
-  plane handles) and scale (axis and uniform) landed 2026-10-01 in
-  `apps/editor/src/gizmo.rs`, with Ctrl snapping to the absolute grid
-  (`editor.snap.grid` and `editor.snap.scale` in the editor's `settings.toml`).
-  `gizmo::Mode` has no rotate variant, and E only puts a refusal on the status
-  line. The scene format and the placement it needed landed 2026-10-01
-  (`crcbl::registry::Rotation` on the editor's `Block` and on
-  `scene_mesh::Mesh`, and `Placement` answering an `OrientedBox` that picking,
-  the instances and the selection outline all turn by). What it still takes:
-  - **The handles**: a screen-space ring per axis, a drag measured as the angle
-    swept about the projected centre, Ctrl snapping to an angle step beside the
-    two snap settings, and E entering the mode. Scale would then have to choose
-    between world and local axes, which it does not today.
-- **Rotation on scene components (landed 2026-10-01): what it leaves.**
-  `crcbl::registry::Rotation` is on the editor's `Block` and `scene_mesh::Mesh`
-  only. Deferred, each with what it takes:
+- **Rotation on scene components and the rotate gizmo (landed 2026-10-01): what
+  they leave.** `crcbl::registry::Rotation` is on the editor's `Block` and
+  `scene_mesh::Mesh` only, and E's rings (`apps/editor/src/gizmo/ring.rs`) turn
+  about world axes. Deferred, each with what it takes:
+  - **Rings about the box's own axes.** The rings are the world's, as the arrows
+    are; scale's lines follow the box's own axes (a half extent is along them).
+    A local/world toggle for translate and rotate is a mode flag the handles and
+    `Drag::begin`/`Drag::turn` would take, and a key for it.
+  - **The rotation row's angles trade places near a right-angle pitch.** The
+    inspector shows a `Rotation` as three angles (`EulerRot::XYZ`), read back
+    from the quaternion each frame, so dragging the Y angle through ±90° flips
+    the other two; the orientation does not jump, the numbers do. Holding the
+    angles a drag started from for the whole gesture would hide it.
+  - **A turn snaps relative to the press**, not to an absolute angle — an
+    orientation has no absolute grid about one axis unless turned about it
+    alone. A block that starts unturned lands on the step's multiples anyway.
+  - **No ring is hidden.** A ring seen edge-on is a line through the centre and
+    still turns by the angle swept about the centre on screen, which works but
+    reads oddly; the back half of each ring is drawn too.
   - **The games' components have no rotation, on purpose.** Breakout's `Brick`
     (its colliders are `Transform::from_position` and its picture a list of
     centres in `RenderState::bricks`), puppet's `Surface` and `Spawn`
@@ -11697,8 +11700,9 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   document to hold a set first.
 - **The gizmo has not been looked at on a device.** Its placement, hit testing
   and drags are tested headless through `Camera::pixel_of` and the null backend;
-  no windowed run has shown the plane squares' translucent fill or the scale
-  tips' outlines, and the snap steps have no panel — only `settings.toml`.
+  no windowed run has shown the plane squares' translucent fill, the scale tips'
+  outlines or the rotate rings, and the snap steps have no panel — only
+  `settings.toml`.
 - **The asset browser and drag-spawn landed 2026-10-01** (`08-editor.md`'s slice
   13): `crcbl::scene_mesh::Mesh`, measured by `MeshLibrary`, drawn from the
   editor's `app::meshes::Shelf`, listed by the `panel::assets` pane, and placed
