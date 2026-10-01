@@ -558,9 +558,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `crcbl::registry::OrientedBox` is the turned box a placement answers, with
   `corners`, `bounds` and `reach`. The editor draws a turned block's cube and a
   turned mesh's parts turned, outlines the selection as its turned box, and
-  picks a turned box exactly (a box mesh in its frame, since the physics query
-  world's boxes do not turn). `scene_physics` creates a turned body's box
-  turned, and writes its simulated orientation back while the scene plays.
+  picks a turned box exactly, by its box collider turned in the physics query
+  world. `scene_physics` creates a turned body's box turned, and writes its
+  simulated orientation back while the scene plays.
 
 - **Connection tokens on `crcbl_net::udp`**, netcode.io's connect-token pattern
   minted by the listener itself. A hello without a valid token is answered with

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use super::*;
 
+use crcbl::math::DQuat;
 use crcbl::registry::Rotation;
 use crcbl::scene_physics::{BODIES, Simulation};
 
