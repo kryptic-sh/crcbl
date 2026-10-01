@@ -208,3 +208,31 @@ fn an_unturned_box_answers_exactly_as_its_aabb() {
         swept_capsule_vs_aabb(&path, 0.07, 0.3, &target.aabb()),
     );
 }
+
+/// **A short sweep keeps its contact time against a turned box**, as
+/// [`swept_sphere_vs_aabb`] does against an unturned one, at every scale: the
+/// turned box is that sweep in the box's frame. That sweep inflates the box by
+/// the radius rather than rounding it, so a sphere of radius `s` heading along
+/// `+X` straight at the diamond's vertical edge meets the inflated box's edge,
+/// `2√2 s` out, when its centre is at `-2√2 s`: `0.59` of the way from `-4 s`
+/// to `-2 s`.
+#[test]
+fn a_short_sweep_keeps_its_contact_time_against_a_turned_box() {
+    for scale in [1e100, 1.0, 1e-6, 1e-10, 1e-100] {
+        let target = BoxCollider::new(DVec3::ZERO, DVec3::splat(scale))
+            .with_rotation(crate::rotation_from_scaled_axis(DVec3::Y * FRAC_PI_4));
+        let path = Segment::new(
+            DVec3::new(-4.0 * scale, 0.0, 0.0),
+            DVec3::new(-2.0 * scale, 0.0, 0.0),
+        );
+        let hit = swept_sphere_vs_box(&path, scale, &target)
+            .unwrap_or_else(|| panic!("a short sweep missed at scale {scale}"));
+        let expected = (4.0 - 2.0 * SQRT_2) / 2.0;
+        assert!(
+            (hit.t - expected).abs() < 1e-12,
+            "met at {} of the way, not {expected}, at scale {scale}",
+            hit.t,
+        );
+        assert!(!hit.started_inside);
+    }
+}
