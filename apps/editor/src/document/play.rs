@@ -306,6 +306,7 @@ impl Document {
         self.world = world;
         self.scene = scene;
         self.ids = ids;
+        self.resolve_meshes();
         self.membership += 1;
         self.select(self.selected);
         Ok(())

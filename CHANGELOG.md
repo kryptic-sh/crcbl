@@ -637,6 +637,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   plane. `Mesh::standing_on` puts a mesh's foot on a point, and `is_mesh_asset`
   says which listed keys a mesh can be made of.
 
+- **The editor draws a scene's meshes.** Its vocabulary registers `scene_mesh`,
+  so a scene listing `meshes` opens with each mesh boxed by its asset — measured
+  after the load, play's restore and every command, undo and redo — and drawn as
+  the asset's geometry, shading by its materials' factors (textures are not
+  drawn yet). A mesh whose asset is missing or broken is drawn, picked and moved
+  as the placeholder cube, and `Document::problems` names it.
+  `Document::set_assets` names the source mesh keys are read through; a scene
+  opened from a directory reads from the directory holding it. A renderer holds
+  the geometry it was built with, so a mesh naming an asset it lacks rebuilds it
+  with every asset it already held. The editor now builds `crcbl` with the
+  `scene` feature, for the glTF importer.
+
 - **The editor plays physics.** Its vocabulary registers `scene_physics`, so a
   greybox block with a body beside it falls, collides and comes to rest when the
   scene plays, the picture and the pick following it; stop puts the scene back

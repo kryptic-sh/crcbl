@@ -410,8 +410,10 @@ impl fmt::Display for MeshProblem {
 /// What [`MeshLibrary::resolve`] did to a world.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Resolution {
-    /// The entities whose placement moved — whose collider, bounds and
-    /// picture a tool brings up to date.
+    /// The entities whose placement moved, or whose box was measured or
+    /// forgotten — whose collider, bounds and picture a tool brings up to
+    /// date. The second half counts a row retyped to another asset of the
+    /// same size, which is placed as before and drawn as another thing.
     pub moved: Vec<Entity>,
     /// Every mesh left on the placeholder, and why, in storage order.
     pub problems: Vec<MeshProblem>,
@@ -481,7 +483,7 @@ impl MeshLibrary {
             let Some(mesh) = system.get_mut(entity) else {
                 continue;
             };
-            let before = mesh.placement();
+            let before = (mesh.placement(), mesh.local_bounds());
             match self.measure(source, &mesh.asset) {
                 Ok((min, max)) => mesh.set_local_bounds(min, max),
                 Err(error) => {
@@ -493,7 +495,7 @@ impl MeshLibrary {
                     });
                 }
             }
-            if mesh.placement() != before {
+            if (mesh.placement(), mesh.local_bounds()) != before {
                 resolution.moved.push(entity);
             }
         }

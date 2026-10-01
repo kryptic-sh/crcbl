@@ -22,8 +22,11 @@
 //!
 //! # The picture
 //!
-//! One [`crcbl::greybox::GREYBOX_CUBE`] per entity, scaled to its own extents,
-//! over [`ForwardRenderer::set_ground_grid`]'s screen-space floor. The
+//! A scene's meshes as their glTF assets, and one
+//! [`crcbl::greybox::GREYBOX_CUBE`] per other entity, scaled to its own
+//! extents, over [`ForwardRenderer::set_ground_grid`]'s screen-space floor. A
+//! renderer holds the geometry it was built with, so a mesh naming an asset it
+//! lacks rebuilds it — `meshes`' module docs say why and how. The
 //! selection is a [`DebugDraw`](crcbl::render::debug_draw::DebugDraw) box, and
 //! the layer is forced on at start-up: `r_debug_draw` is off by default, so an
 //! editor that did not switch it on would draw no selection and report nothing
@@ -68,7 +71,6 @@ use crcbl::engine::{
     Handled, LoopError, ModeRequest, Pending, PointerCapture, RunSummary, SettingsSource,
     accept_close, open_window, wait_for_configure,
 };
-use crcbl::greybox::scene3d;
 use crcbl::hal::{CommandEncoderDesc, ImageUsage};
 use crcbl::input::ActionMap;
 use crcbl::math::{DVec3, Vec2, Vec3};
@@ -97,8 +99,10 @@ use crate::layout;
 use crate::panel::{PanelInput, Panels, Tone, VIEWPORT_TEXTURE};
 
 mod instances;
+mod meshes;
 
 use instances::Placed;
+use meshes::Shelf;
 
 /// How far one arrow key moves the selection, in metres.
 ///
@@ -164,6 +168,15 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// One instance per entity, retaining its last published description so
     /// unchanged draws let the renderer settle motion history and reuse shadows.
     instances: Placed,
+    /// The assets the renderer was built with — see `meshes`.
+    shelf: Shelf,
+    /// The document's [`Document::membership`] and [`Document::measures`] the
+    /// shelf was last checked against: a mesh can only want a new asset when
+    /// one of them moves.
+    shelved: (u64, u64),
+    /// How far the ground grid reaches, which a rebuilt renderer is given
+    /// again.
+    grid_extent: f32,
     document: Document,
     /// The docked outliner and inspector, and the join between what they show
     /// and what the document holds.
@@ -335,28 +348,15 @@ impl<S: Shell + ?Sized> Editor<S> {
         settings: SettingsStack,
         settings_source: SettingsSource<'static>,
     ) -> Result<Self, EditorError> {
-        let mut renderer =
-            ForwardRenderer::with_scene(gpu.device(), gpu.queue(), gpu.format(), &scene3d())
-                .map_err(GpuError::Hal)?;
-
-        // Rolled back by hand from here on: this type has no `Drop`, so a `?`
-        // past this point would leak the renderer's pipelines rather than
-        // release them — `apps/towers` carries the same note.
         let bounds = scene_bounds(&mut document);
-        let extent = bounds.half_extent().length().max(1.0) * GRID_MARGIN;
-        if let Err(error) =
-            renderer.set_ground_grid(gpu.device(), Some(GridStyle::for_extent(extent)))
-        {
-            renderer.destroy(gpu.device());
-            return Err(GpuError::Hal(error).into());
-        }
-        let instances = match Placed::place(&mut renderer, &mut document) {
-            Ok(instances) => instances,
-            Err(error) => {
-                renderer.destroy(gpu.device());
-                return Err(GpuError::pools("the editor's entities", &error).into());
-            }
-        };
+        let grid_extent = bounds.half_extent().length().max(1.0) * GRID_MARGIN;
+        let wanted = document.mesh_assets();
+        let (shelf, scene) = Shelf::build(document.assets(), &wanted);
+        let (renderer, instances) = renderer_for(&gpu, &scene, grid_extent, &mut document, &shelf)?;
+        let shelved = (document.membership(), document.measures());
+        // Rolled back by hand: this type has no `Drop`, so a `?` would leak
+        // the renderer's pipelines rather than release them — `apps/towers`
+        // carries the same note.
         let ui = match UiRenderer::new(gpu.device(), gpu.queue(), gpu.format()) {
             Ok(ui) => ui,
             Err(error) => {
@@ -376,6 +376,9 @@ impl<S: Shell + ?Sized> Editor<S> {
             renderer,
             pool: TransientPool::new(),
             instances,
+            shelf,
+            shelved,
+            grid_extent,
             document,
             panels,
             ui,
@@ -1147,8 +1150,9 @@ impl<S: Shell + ?Sized> Editor<S> {
         };
         let extent = acquired.extent;
 
+        self.shelve()?;
         self.instances
-            .update(&mut self.renderer, &mut self.document)
+            .update(&mut self.renderer, &mut self.document, &self.shelf)
             .map_err(|error| GpuError::pools("the editor's entities", &error))?;
         if let Some(id) = self.document.selected()
             && let Some((min, max)) = self.document.bounds(id)
@@ -1232,6 +1236,43 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.pool.retire_unused(self.gpu.device());
         self.drawn_viewport = Some(viewport);
         Ok(outcome)
+    }
+
+    /// Rebuilds the renderer around the shelf it has and every asset the
+    /// document's meshes now name, when they name one it lacks — see `meshes`.
+    ///
+    /// The device is drained first, because a renderer is destroyed idle; the
+    /// old renderer stays in place if the new one is refused.
+    ///
+    /// # Errors
+    ///
+    /// [`EditorError`] if the device would not drain, or refused the new
+    /// renderer, its grid or an instance.
+    fn shelve(&mut self) -> Result<(), EditorError> {
+        let seen = (self.document.membership(), self.document.measures());
+        if seen == self.shelved {
+            return Ok(());
+        }
+        self.shelved = seen;
+        let wanted = self.document.mesh_assets();
+        if self.shelf.holds(&wanted) {
+            return Ok(());
+        }
+        let assets = self.shelf.assets().union(&wanted).cloned().collect();
+        let (shelf, scene) = Shelf::build(self.document.assets(), &assets);
+        let (renderer, instances) = renderer_for(
+            &self.gpu,
+            &scene,
+            self.grid_extent,
+            &mut self.document,
+            &shelf,
+        )?;
+        self.gpu.drain()?;
+        let previous = std::mem::replace(&mut self.renderer, renderer);
+        previous.destroy(self.gpu.device());
+        self.instances = instances;
+        self.shelf = shelf;
+        Ok(())
     }
 
     /// Writes the dock layout back, if this run moved it.
@@ -1328,6 +1369,37 @@ const SELECTION_COLOR: [f32; 4] = [1.0, 0.72, 0.2, 1.0];
 
 /// The mode this tool asks for. It never asks for anything else.
 pub const DISPLAY_MODE: DisplayMode = DisplayMode::Windowed;
+
+/// A renderer of `scene` with the ground grid reaching `grid_extent` and every
+/// entity of `document` placed in it, drawn from `shelf`.
+///
+/// # Errors
+///
+/// [`EditorError`] if the device refused the renderer, the grid or an
+/// instance — the renderer released first, since it has no `Drop` to do it.
+fn renderer_for(
+    gpu: &GpuContext,
+    scene: &crcbl::render::scene::SceneDesc<'_>,
+    grid_extent: f32,
+    document: &mut Document,
+    shelf: &Shelf,
+) -> Result<(ForwardRenderer, Placed), EditorError> {
+    let mut renderer = ForwardRenderer::with_scene(gpu.device(), gpu.queue(), gpu.format(), scene)
+        .map_err(GpuError::Hal)?;
+    if let Err(error) =
+        renderer.set_ground_grid(gpu.device(), Some(GridStyle::for_extent(grid_extent)))
+    {
+        renderer.destroy(gpu.device());
+        return Err(GpuError::Hal(error).into());
+    }
+    match Placed::place(&mut renderer, document, shelf) {
+        Ok(instances) => Ok((renderer, instances)),
+        Err(error) => {
+            renderer.destroy(gpu.device());
+            Err(GpuError::pools("the editor's entities", &error).into())
+        }
+    }
+}
 
 /// The light the scene is shaded by. The engine's own default: an editor is not
 /// a place to art-direct, and a scene lit from somewhere surprising reads as a

@@ -9,6 +9,14 @@ use crate::app::{Editor, tests::headless};
 use crate::command::EditCommand;
 use crate::keys::Action;
 
+/// How a greybox entity is drawn: its one cube, or nothing for an entity with
+/// no box.
+fn instance_of(document: &mut Document, drawn: Drawn) -> Option<InstanceDesc> {
+    let descs = instances_of(document, &Shelf::default(), drawn);
+    assert!(descs.len() <= 1, "a greybox entity is drawn as one cube");
+    descs.into_iter().next()
+}
+
 fn step(editor: &mut Editor<HeadlessShell>, cached: bool) {
     assert_eq!(editor.frame().expect("a presented frame"), Flow::Continue);
     assert_eq!(
@@ -31,11 +39,11 @@ fn pose(
         .find(|placed| placed.drawn == Drawn::Scene(id))
         .expect("placed");
     assert_eq!(
-        placed.desc, *current,
+        placed.descs[0], *current,
         "the mirror holds the last publication"
     );
     let (records, _) = editor.renderer.cull_records();
-    let index = usize::try_from(placed.handle.index()).expect("a host index");
+    let index = usize::try_from(placed.handles[0].index()).expect("a host index");
     let actual = &records[index];
     assert_eq!(actual.transform, current.transform.to_cols_array());
     assert_eq!(
@@ -244,13 +252,13 @@ fn a_falling_body_moves_its_drawn_instance() {
             .find(|placed| placed.drawn == Drawn::Scene(FALLING))
             .expect("the falling block is drawn");
         let (records, _) = editor.renderer.cull_records();
-        let index = usize::try_from(placed.handle.index()).expect("a host index");
+        let index = usize::try_from(placed.handles[0].index()).expect("a host index");
         assert_eq!(
             records[index].transform,
-            placed.desc.transform.to_cols_array(),
+            placed.descs[0].transform.to_cols_array(),
             "the renderer holds another pose than the one published",
         );
-        placed.desc.transform.w_axis.y
+        placed.descs[0].transform.w_axis.y
     };
     let before = height(&editor);
     let half = ticks_in(&editor.document, 0.5);
@@ -274,11 +282,11 @@ fn missing_bounds_leave_the_published_instance_unchanged() {
     step(&mut editor, true);
     let (before, _) = editor.renderer.cull_records();
     let drawn = editor.instances.instances[0].drawn;
-    let desc = editor.instances.instances[0].desc;
+    let desc = editor.instances.instances[0].descs[0];
     editor.instances.instances[0].drawn = Drawn::Scene(SceneEntityId(u32::MAX));
     assert!(instance_of(&mut editor.document, editor.instances.instances[0].drawn).is_none());
     step(&mut editor, true);
-    assert_eq!(editor.instances.instances[0].desc, desc);
+    assert_eq!(editor.instances.instances[0].descs[0], desc);
     assert_eq!(editor.renderer.cull_records().0, before);
     editor.instances.instances[0].drawn = drawn;
     step(&mut editor, true);
@@ -346,7 +354,7 @@ fn filtered_editor_images_match_eager_writes_through_history() {
             if eager {
                 for placed in &editor.instances.instances {
                     if let Some(desc) = instance_of(&mut editor.document, placed.drawn) {
-                        editor.renderer.set_instance(placed.handle, &desc);
+                        editor.renderer.set_instance(placed.handles[0], &desc);
                     }
                 }
             }
@@ -419,7 +427,8 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
         crate::scene::vocabulary(),
     )
     .expect("greybox document");
-    let mut placed = Placed::place(&mut renderer, &mut document).expect("placed entities");
+    let mut placed =
+        Placed::place(&mut renderer, &mut document, &Shelf::default()).expect("placed entities");
     let buffers: HashSet<_> = recorder
         .events()
         .windows(2)
@@ -440,7 +449,7 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
     let tick = |renderer: &mut ForwardRenderer, placed: &mut Placed, document: &mut Document| {
         let seen = recorder.events().len();
         placed
-            .update(renderer, document)
+            .update(renderer, document, &Shelf::default())
             .expect("no entity arrives");
         renderer
             .begin_frame(device.as_ref(), &camera, &light, (64, 64))
@@ -462,7 +471,7 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
     let Drawn::Scene(id) = placed.instances[0].drawn else {
         panic!("the greybox scene spawns nothing");
     };
-    let original = placed.instances[0].desc;
+    let original = placed.instances[0].descs[0];
     let Value::Float(x) = document
         .read(id, crate::scene::BLOCKS, "position.0")
         .expect("position")
@@ -482,7 +491,7 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
         tick(&mut renderer, &mut placed, &mut document),
         INSTANCE_STRIDE
     );
-    let index = usize::try_from(placed.instances[0].handle.index()).expect("host index");
+    let index = usize::try_from(placed.instances[0].handles[0].index()).expect("host index");
     let moving = &renderer.cull_records().0[index];
     assert_eq!(moving.transform, moved.transform.to_cols_array());
     assert_eq!(
@@ -508,4 +517,125 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
     renderer.destroy(device.as_ref());
     recorder.assert_valid();
     assert_eq!(recorder.total_live_objects(), 0);
+}
+
+/// The placed entity `id` names, as the last frame left it.
+fn placed_of(editor: &Editor<HeadlessShell>, id: SceneEntityId) -> &PlacedInstance {
+    editor
+        .instances
+        .instances
+        .iter()
+        .find(|placed| placed.drawn == Drawn::Scene(id))
+        .unwrap_or_else(|| panic!("#{id} is not drawn"))
+}
+
+/// Whether the renderer's record behind `handle` is live and holds
+/// `transform`: what says a description reached the renderer.
+fn records_hold(editor: &Editor<HeadlessShell>, handle: InstanceHandle, transform: Mat4) -> bool {
+    let (records, _) = editor.renderer.cull_records();
+    let record = &records[usize::try_from(handle.index()).expect("a host index")];
+    record.flags & crcbl::shaders::mesh::GpuInstance::LIVE != 0
+        && record.transform == transform.to_cols_array()
+}
+
+/// **A mesh is drawn as its asset and a missing one as its box**: the
+/// triangle's part names the first mesh appended after the greybox pack, at
+/// the row's position through its glTF nodes, shading through its own
+/// material; the missing asset is the greybox cube of the placeholder.
+#[test]
+fn a_mesh_is_drawn_as_its_asset_and_a_missing_one_as_its_box() {
+    use crate::document::mesh_tests::{MISSING_MESH, TRIANGLE, TRIANGLE_MESH, props};
+
+    let mut editor = headless(16);
+    step_any(&mut editor);
+    editor.document = props();
+    step_any(&mut editor);
+
+    let greybox = crcbl::greybox::scene3d();
+    assert_eq!(
+        editor.shelf.assets().into_iter().collect::<Vec<_>>(),
+        [TRIANGLE],
+        "the renderer was not rebuilt with the triangle",
+    );
+    let triangle = placed_of(&editor, TRIANGLE_MESH);
+    // The triangle's one part sits under nodes at (10, 0, 0) and (0, 5, 0),
+    // its row at the origin; the file's material 0 is the shelf's row 1 past
+    // the greybox pack's.
+    let part = Mat4::from_translation(Vec3::new(10.0, 5.0, 0.0));
+    assert_eq!(
+        triangle.descs,
+        [InstanceDesc {
+            mesh: greybox.meshes.len(),
+            material: greybox.materials.len() + 1,
+            transform: part,
+        }],
+    );
+    assert!(records_hold(&editor, triangle.handles[0], part));
+
+    let (min, max) = editor
+        .document
+        .bounds(MISSING_MESH)
+        .expect("the placeholder is a box");
+    let missing = placed_of(&editor, MISSING_MESH);
+    let cube = Mat4::from_scale_rotation_translation(max - min, Quat::IDENTITY, (min + max) * 0.5);
+    assert_eq!(missing.descs.len(), 1);
+    assert_eq!(missing.descs[0].mesh, GREYBOX_CUBE);
+    assert!(records_hold(&editor, missing.handles[0], cube));
+
+    // Moving the mesh moves its part, through the ordinary publish.
+    editor
+        .document
+        .apply(EditCommand::SetProperty {
+            entity: TRIANGLE_MESH,
+            system: crcbl::scene_mesh::MESHES.to_owned(),
+            path: "position.0".into(),
+            value: Value::Float(3.0),
+        })
+        .expect("a mesh has a position");
+    step_any(&mut editor);
+    let moved = Mat4::from_translation(Vec3::new(3.0, 0.0, 0.0)) * part;
+    let triangle = placed_of(&editor, TRIANGLE_MESH);
+    assert_eq!(triangle.descs[0].transform, moved);
+    assert!(records_hold(&editor, triangle.handles[0], moved));
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **An asset the renderer lacks rebuilds it**: a document whose meshes were
+/// all placeholders draws the triangle as its asset once its source is named,
+/// the cube it was drawn as gone from the renderer's live records.
+#[test]
+fn a_newly_measured_asset_rebuilds_the_renderer_and_is_drawn() {
+    use crate::document::mesh_tests::{TRIANGLE, TRIANGLE_MESH, assets, props};
+
+    let mut editor = headless(16);
+    let mut document = props();
+    document.set_assets(Box::new(crcbl::assets::MemorySource::new()));
+    editor.document = document;
+    step_any(&mut editor);
+    assert!(editor.shelf.assets().is_empty());
+    assert_eq!(
+        placed_of(&editor, TRIANGLE_MESH).descs[0].mesh,
+        GREYBOX_CUBE
+    );
+
+    editor.document.set_assets(Box::new(assets()));
+    step_any(&mut editor);
+    assert_eq!(
+        editor.shelf.assets().into_iter().collect::<Vec<_>>(),
+        [TRIANGLE]
+    );
+    let triangle = placed_of(&editor, TRIANGLE_MESH);
+    assert_ne!(triangle.descs[0].mesh, GREYBOX_CUBE);
+    let live = editor
+        .renderer
+        .cull_records()
+        .0
+        .iter()
+        .filter(|record| record.flags & crcbl::shaders::mesh::GpuInstance::LIVE != 0)
+        .count();
+    assert_eq!(
+        live, 3,
+        "the slab, the triangle and the missing mesh's cube, and nothing left over"
+    );
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
 }

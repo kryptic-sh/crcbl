@@ -32,16 +32,22 @@ name = "editor"
 path = "src/main.rs"
 
 [dependencies]
-# The engine, with the two features this tool needs beyond the default set.
+# The engine, with the three features this tool needs beyond the default set.
 #
 # `scn` is the scene *format* half of `crcbl::scene` — the `.scn/` directory
-# this editor opens — without the glTF importer, which it reads none of. It is
-# the same feature `apps/breakout` asks for, and for the same reason.
+# this editor opens. It is the same feature `apps/breakout` asks for, and for
+# the same reason.
 #
-# `greybox` is the one-call prototyping scene: the editor draws every entity as
-# `crcbl::greybox::GREYBOX_CUBE` scaled to its own extents, so the picture comes
-# out of a pack the engine already ships rather than out of a mesh builder here.
-crcbl = { workspace = true, features = ["greybox", "scn"] }
+# `scene` is the glTF importer and its bridge to the renderer: a scene's
+# `crcbl::scene_mesh::Mesh` rows name glTF assets, which the document measures
+# (`MeshLibrary`) and the viewport draws (`app::meshes`). A native tool, so the
+# parser it links costs no browser build anything.
+#
+# `greybox` is the one-call prototyping scene: the editor draws every entity
+# that is not a mesh as `crcbl::greybox::GREYBOX_CUBE` scaled to its own
+# extents, so that picture comes out of a pack the engine already ships rather
+# than out of a mesh builder here.
+crcbl = { workspace = true, features = ["greybox", "scn", "scene"] }
 
 # **The vocabularies this build ships with.** A `.scn/` chunk cannot be read
 # without the type its rows are of, so every tool that opens a scene carries a
@@ -61,6 +67,10 @@ towers = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# The meshes' tests draw a real `.glb`, built by `crcbl-scene`'s fixture
+# builder rather than vendored, on that module's argument: a checked-in binary
+# is a fixture nobody reviewing a change can read.
+crcbl-scene = { workspace = true, features = ["gltf-fixture"] }
 
 # **`breakout`, `puppet` and `towers` are named through their `[lib]` names**
 # (`crcbl_breakout`, `crcbl_puppet`, `crcbl_towers`) and `cargo machete` matches

@@ -16,8 +16,8 @@
 //! [`app`](crate::app) name no game — but a tool still has to have something to
 //! open. A greybox block is the smallest thing that is honestly the editor's
 //! own: it is what `docs/plan/08-editor.md`'s exit criterion "create scene from
-//! empty → place meshes" starts from, and it is what [`crate::app`] already
-//! draws every entity as.
+//! empty → place meshes" starts from, and it is what [`crate::app`] draws
+//! every entity that is not a mesh as.
 //!
 //! A build of this editor that should open some other game's scene registers
 //! that game's components in [`vocabulary`] beside these — one line each, and
@@ -162,6 +162,9 @@ pub fn vocabulary() -> Registry {
     // Physics on scene components: a body beside a block makes that block
     // fall, collide and come to rest while the scene plays.
     crcbl::scene_physics::register(&mut registry);
+    // Meshes on scene components: a glTF asset placed where a person drops
+    // it from the asset browser.
+    crcbl::scene_mesh::register(&mut registry);
     // The games the workspace wants edited, through the call each one's own
     // loader makes: `docs/plan/sample/07-towers.md`'s milestone 2 is an editor
     // dogfood pass, and an editor that could not open a sample's committed
@@ -250,6 +253,7 @@ mod tests {
                 BLOCKS,
                 crcbl::scene_physics::BODIES,
                 "bricks",
+                crcbl::scene_mesh::MESHES,
                 "plots",
                 "spawn",
                 "sun",

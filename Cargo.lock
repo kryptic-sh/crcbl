@@ -905,6 +905,7 @@ version = "0.1.0"
 dependencies = [
  "breakout",
  "crcbl",
+ "crcbl-scene",
  "puppet",
  "tempfile",
  "towers",

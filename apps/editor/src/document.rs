@@ -42,11 +42,13 @@ use crcbl::reflect::{PathError, Reflect, Value, get_path, set_path};
 use crcbl::registry::Registry;
 use crcbl::render::ViewRay;
 use crcbl::scene::scn::{EntityName, IdMap, NameError, Scene, SceneEntityId, ScnError};
+use crcbl::scene_mesh::{MeshLibrary, MeshProblem};
 use crcbl::store::{NativeStorage, StorageError, StorageSource};
 
 use crate::command::{EditCommand, Gesture, SystemRow, UndoLog, set_property};
 
 mod field;
+mod meshes;
 mod naming;
 mod play;
 mod systems;
@@ -89,6 +91,16 @@ pub struct Document {
     /// The scene as it stood when play began, and what is running it — or
     /// [`None`] while editing. See [`Document::play`].
     play: Option<play::Session>,
+    /// Where a mesh's asset key is read from — see [`Document::set_assets`].
+    assets: Box<dyn AssetSource>,
+    /// Every asset a mesh has been measured from, each imported once.
+    meshes: MeshLibrary,
+    /// What the last resolve could not measure — see
+    /// [`Document::mesh_problems`].
+    mesh_problems: Vec<MeshProblem>,
+    /// How many resolves have moved a mesh's box — see
+    /// [`Document::measures`].
+    measures: u64,
 }
 
 /// Why a document would not open, edit or save.
@@ -285,7 +297,7 @@ impl Document {
         registry: Registry,
     ) -> Result<Self, EditError> {
         let (world, scene, ids) = load(source, dir, &registry)?;
-        Ok(Self {
+        let mut document = Self {
             world,
             scene,
             ids,
@@ -298,13 +310,20 @@ impl Document {
             gestures: 0,
             origin: None,
             play: None,
-        })
+            assets: Box::new(MemorySource::new()),
+            meshes: MeshLibrary::new(),
+            mesh_problems: Vec::new(),
+            measures: 0,
+        };
+        document.resolve_meshes();
+        Ok(document)
     }
 
     /// Opens the scene directory at `path` on this machine's filesystem.
     ///
     /// The document remembers where it came from, so [`Document::save`] writes
-    /// back over it.
+    /// back over it, and reads its meshes' assets from the directory holding
+    /// it until [`Document::set_assets`] says otherwise.
     ///
     /// # Errors
     ///
@@ -317,6 +336,8 @@ impl Document {
         // root is how a caller says where the scene is.
         let source = crcbl::assets::DirSource::at(path.clone());
         let mut document = Self::open(&source, Path::new(""), registry)?;
+        let holding = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        document.set_assets(Box::new(crcbl::assets::DirSource::at(holding)));
         document.origin = Some(path);
         Ok(document)
     }
@@ -619,6 +640,7 @@ impl Document {
     pub fn apply(&mut self, command: EditCommand) -> Result<(), EditError> {
         self.refuse_in_play()?;
         let undo = self.perform(&command)?;
+        self.resolve_meshes();
         self.log.record(command, undo);
         Ok(())
     }
@@ -640,6 +662,7 @@ impl Document {
     pub fn apply_in(&mut self, command: EditCommand, gesture: Gesture) -> Result<(), EditError> {
         self.refuse_in_play()?;
         let undo = self.perform(&command)?;
+        self.resolve_meshes();
         self.log.record_in(command, undo, gesture);
         Ok(())
     }
@@ -870,7 +893,9 @@ impl Document {
 
     /// What the games whose systems this scene holds would refuse in it as it
     /// stands — each registered [`crcbl::registry::SceneCheck`] run over the
-    /// scene's own saved text — or nothing for a scene they would all play.
+    /// scene's own saved text — or nothing for a scene they would all play;
+    /// and after them, every mesh whose asset could not be measured
+    /// ([`mesh_problems`](Self::mesh_problems)).
     ///
     /// Not a gate on [`save`](Self::save): authoring passes through layouts
     /// no game would load, a corner added before the leg it breaks is
@@ -882,9 +907,11 @@ impl Document {
     /// As [`files`](Self::files).
     pub fn problems(&mut self) -> Result<Vec<String>, EditError> {
         let source = memory_source(self.files()?)?;
-        Ok(self
+        let mut problems = self
             .registry
-            .problems(self.scene.systems(), &source, Path::new("")))
+            .problems(self.scene.systems(), &source, Path::new(""));
+        problems.extend(self.mesh_problems());
+        Ok(problems)
     }
 
     /// [`save_to`](Self::save_to) the directory this document was opened from.
@@ -1061,6 +1088,7 @@ impl Document {
     /// it came from is already holding the other half.
     fn replay(&mut self, command: &EditCommand) -> Result<(), EditError> {
         self.perform(command)?;
+        self.resolve_meshes();
         Ok(())
     }
 }
@@ -1189,6 +1217,9 @@ mod entity_tests;
 
 #[cfg(test)]
 mod field_tests;
+
+#[cfg(test)]
+pub(crate) mod mesh_tests;
 
 #[cfg(test)]
 mod naming_tests;
