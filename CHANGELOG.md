@@ -16,6 +16,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl::scene::scn::ScnError` has three more variants**, `NameOfNoEntity`,
+  `Name` and `NoNames`, for the names file (see Added); an exhaustive `match` on
+  it must handle them.
+
 - **Physics transforms replicate quantized, and the protocol version is 6**
   (`ProtocolCompatibility::DEFAULT`). `PhysicsSystem::replicate` writes each
   transform as `Transform::encode_wire`: 16 bytes — each position axis as 24-bit
@@ -474,6 +478,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   them (`WIRE_SCHEMA`, `WIRE_POSITION`, `WIRE_ROTATION`, `QUANTIZED_LEN`), plus
   `PhysicsSystem::NAME`. **`crcbl_net::replicated_system_id`**, moved from
   `crcbl-server` (which re-exports it) so a client can find a system's entries.
+
+- **A scene can name its entities.** `crcbl_scene::scn`'s `.scn/` directory
+  gains an optional `names.ron` — a list of `(SceneEntityId, "name")` pairs in
+  id order — declared by `names: true` in `scene.ron`'s header. Both are written
+  only when an entity is named, so every existing scene loads and saves
+  byte-identically. A name is an `EntityName`: trimmed, non-empty, at most
+  `MAX_NAME_CHARS` characters, no control characters. The loader refuses, by key
+  and id, a name for an id no chunk holds, an id named twice, text that is not a
+  name and a declared file that names nothing; a save refuses a name whose
+  entity is gone. `Scene::entity_name`, `entity_names` and `set_entity_name` are
+  the runtime half.
 
 - **The editor has a status line** under its panes. It reads "Ready" until
   something happens, then shows the last refusal (a save with nowhere to go, a

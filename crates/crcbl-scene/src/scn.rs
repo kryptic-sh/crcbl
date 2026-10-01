@@ -11,9 +11,13 @@
 //! scenes/board.scn/
 //!   scene.ron        # format version, name, the system manifest
 //!   env.ron          # camera defaults and ambience
+//!   names.ron        # optional: what a person calls each entity
 //!   sys/
 //!     bricks.ron     # that system's entity array
 //! ```
+//!
+//! `names.ron` is written only for a scene that names an entity, and read only
+//! when the header says it is there — the [`names`] module says why.
 //!
 //! [`Scene::load`] reads those keys through a [`crcbl_assets::AssetSource`], so
 //! the same loader serves a directory ([`crcbl_assets::DirSource`]) and a
@@ -73,6 +77,10 @@ use serde::{Deserialize, Serialize};
 
 use crcbl_assets::{AssetSource, StorageError};
 use crcbl_ecs::{ComponentHash, Entity, System, World};
+
+pub mod names;
+
+pub use names::{EntityName, MAX_NAME_CHARS, NameError};
 
 // ---------------------------------------------------------------------------
 // Ids
@@ -258,7 +266,22 @@ struct SceneFile {
     format: u32,
     name: String,
     systems: Vec<String>,
+    /// Whether `names.ron` is part of the scene. Defaulted and skipped when
+    /// false, so a header written before names existed reads, and is written,
+    /// exactly as it was.
+    #[serde(default, skip_serializing_if = "is_false")]
+    names: bool,
 }
+
+/// `serde`'s `skip_serializing_if` takes a path, and a `bool` has no method
+/// that is this.
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// The key `names.ron` is read from and written under, relative to the scene
+/// directory.
+const NAMES_KEY: &str = "names.ron";
 
 /// `env.ron`: the camera the scene opens on and the light it sits in.
 ///
@@ -546,6 +569,9 @@ pub struct Scene {
     name: String,
     systems: Vec<String>,
     env: Env,
+    /// What a person calls each named entity: `names.ron`, keyed by the id
+    /// the chunks file the entity under.
+    entity_names: BTreeMap<SceneEntityId, EntityName>,
 }
 
 impl Scene {
@@ -566,6 +592,7 @@ impl Scene {
             name: name.into(),
             systems,
             env,
+            entity_names: BTreeMap::new(),
         }
     }
 
@@ -574,7 +601,8 @@ impl Scene {
     /// Reads exactly `dir/scene.ron`, `dir/env.ron`, and `dir/sys/<name>.ron`
     /// for each name the header's manifest lists, **in manifest order** — so
     /// the entity ids a `World` hands out are a function of the file rather
-    /// than of the order `chunks` happens to be in.
+    /// than of the order `chunks` happens to be in — and then `dir/names.ron`
+    /// if the header declares it, and not otherwise.
     ///
     /// `dir` may be `.` (or empty), which is what a [`crcbl_assets::DirSource`]
     /// rooted at the scene directory itself wants.
@@ -585,8 +613,10 @@ impl Scene {
     /// a key that will not read, text that is not RON or is RON that is not
     /// this format (an unknown field included — every file type sets
     /// `deny_unknown_fields`), a `format` this build does not know, a manifest
-    /// entry with no codec in `chunks`, or a chunk whose declared system is not
-    /// the one its file is named for.
+    /// entry with no codec in `chunks`, a chunk whose declared system is not
+    /// the one its file is named for, or a names file naming an id no chunk
+    /// holds, an id twice, nothing at all, or text that is not an
+    /// [`EntityName`].
     pub fn load(
         source: &dyn AssetSource,
         dir: &Path,
@@ -622,18 +652,29 @@ impl Scene {
             codec.read(world, &mut ids, &key, &text)?;
         }
 
+        // After the chunks, so a name is checked against the ids they hold.
+        let entity_names = if header.names {
+            let key = join_key(prefix, NAMES_KEY);
+            let text = read_text(source, &key)?;
+            names::read(&key, &text, &ids)?
+        } else {
+            BTreeMap::new()
+        };
+
         Ok((
             Self {
                 name: header.name,
                 systems: header.systems,
                 env,
+                entity_names,
             },
             ids,
         ))
     }
 
     /// The files this scene is, keyed **relative to the scene directory** —
-    /// `scene.ron`, `env.ron`, `sys/<name>.ron`.
+    /// `scene.ron`, `env.ron`, `sys/<name>.ron`, and `names.ron` when an entity
+    /// is named.
     ///
     /// Returns the text rather than writing it: no engine crate performs
     /// synchronous IO, and a caller that wants a directory joins each key onto
@@ -658,21 +699,28 @@ impl Scene {
     /// [`ScnError`] if the manifest names a system with no codec in `chunks` or
     /// none in `world`, or if an entity attached to one of them was never given
     /// a [`SceneEntityId`] — a save that silently dropped such a row is the
-    /// failure this refusal exists to prevent.
+    /// failure this refusal exists to prevent — or [`ScnError::NameOfNoEntity`]
+    /// if a name is held for an id `ids` does not, which would be a file the
+    /// loader refuses.
     pub fn save(
         &self,
         world: &mut World,
         ids: &IdMap,
         chunks: &[Box<dyn SystemChunk>],
     ) -> Result<BTreeMap<String, String>, ScnError> {
+        let names = names::write(NAMES_KEY, &self.entity_names, ids)?;
         let header = SceneFile {
             format: Self::FORMAT,
             name: self.name.clone(),
             systems: self.systems.clone(),
+            names: names.is_some(),
         };
         let mut files = BTreeMap::new();
         files.insert("scene.ron".to_string(), to_ron(&header));
         files.insert("env.ron".to_string(), to_ron(&self.env));
+        if let Some(text) = names {
+            files.insert(NAMES_KEY.to_string(), text);
+        }
         for name in &self.systems {
             let codec = codec_named(chunks, name)?;
             files.insert(format!("sys/{name}.ron"), codec.write(world, ids)?);
@@ -702,6 +750,34 @@ impl Scene {
     /// The [`Env`], to change before a [`save`](Self::save).
     pub fn env_mut(&mut self) -> &mut Env {
         &mut self.env
+    }
+
+    /// What `id` is called, if it is named.
+    #[must_use]
+    pub fn entity_name(&self, id: SceneEntityId) -> Option<&EntityName> {
+        self.entity_names.get(&id)
+    }
+
+    /// Every named entity's name, in id order.
+    #[must_use]
+    pub const fn entity_names(&self) -> &BTreeMap<SceneEntityId, EntityName> {
+        &self.entity_names
+    }
+
+    /// Names `id` `name`, or takes its name away with [`None`], and hands back
+    /// the name it had.
+    ///
+    /// Not checked against a world: the scene does not hold the entities, so
+    /// [`save`](Self::save) is where a name for an id nothing holds is refused.
+    pub fn set_entity_name(
+        &mut self,
+        id: SceneEntityId,
+        name: Option<EntityName>,
+    ) -> Option<EntityName> {
+        match name {
+            Some(name) => self.entity_names.insert(id, name),
+            None => self.entity_names.remove(&id),
+        }
     }
 }
 
@@ -755,13 +831,14 @@ fn read_text(source: &dyn AssetSource, key: &str) -> Result<String, ScnError> {
 /// Writes one of this module's own types.
 ///
 /// `expect` for the reason `crcbl_render::stack::CameraStack::to_ron` gives:
-/// [`SceneFile`] and [`Env`] are strings, integers, floats and sequences, and
+/// [`SceneFile`], [`Env`] and the names file are strings, integers, floats,
+/// booleans and sequences, and
 /// ron's serializer has no failing path over those. A *component* is a caller's
 /// type and can fail, which is why [`SystemChunk::write`] returns a `Result`
 /// and this does not.
 fn to_ron<T: Serialize>(value: &T) -> String {
     ron::ser::to_string_pretty(value, pretty())
-        .expect("a scene header and its env have no serializer path that can fail")
+        .expect("a scene header, its env and its names have no serializer path that can fail")
 }
 
 /// The one writer configuration, so nothing that later writes a chunk can
@@ -887,6 +964,35 @@ pub enum ScnError {
         system: String,
         /// What ron said.
         message: String,
+    },
+
+    /// A name is held for an id no chunk holds: in a names file being read,
+    /// or in a scene being written after its entity went.
+    #[error("`{key}` names the scene entity id {id}, which the scene does not hold")]
+    NameOfNoEntity {
+        /// The names file's key.
+        key: String,
+        /// The id named.
+        id: SceneEntityId,
+    },
+
+    /// A names file holds text that is not an [`EntityName`].
+    #[error("`{key}` names the scene entity id {id} with text that is not a name: {error}")]
+    Name {
+        /// The names file's key.
+        key: String,
+        /// The id the text was for.
+        id: SceneEntityId,
+        /// Which rule the text breaks.
+        error: NameError,
+    },
+
+    /// The header declares a names file and the file names nothing — which
+    /// the writer never writes, so the header and the file disagree.
+    #[error("`{key}` names no entity, though the scene's header declares it")]
+    NoNames {
+        /// The names file's key.
+        key: String,
     },
 }
 
@@ -1331,6 +1437,180 @@ mod tests {
             None,
             "an entity the system does not hold has no row",
         );
+    }
+
+    /// The canonical scene's header, declaring a names file.
+    fn named_header() -> String {
+        HEADER.replace("    ],\n)", "    ],\n    names: true,\n)")
+    }
+
+    /// The canonical names file: the one row, named.
+    const NAMES: &str = "Names(\n    names: [\n        (0, \"Gate\"),\n    ],\n)";
+
+    /// [`load`], with `names` at `one.scn/names.ron` beside the trio.
+    fn load_named(header: &str, names: &str) -> Result<(Scene, IdMap, World), ScnError> {
+        let mut source = source(header, ENV, MARKS);
+        source
+            .insert(Path::new("one.scn/names.ron"), names.as_bytes().to_vec())
+            .expect("a nested scene key is a legal asset key");
+        let mut world = world_with_marks();
+        let (scene, ids) = Scene::load(&source, Path::new("one.scn"), &codecs(), &mut world)?;
+        Ok((scene, ids, world))
+    }
+
+    /// **A named scene round-trips byte for byte**, its header declaring the
+    /// names file — and a scene whose last name is taken away writes neither
+    /// the file nor the declaration, so it is the unnamed scene again.
+    #[test]
+    fn names_round_trip_and_vanish_when_the_last_goes() {
+        let (mut scene, ids, mut world) =
+            load_named(&named_header(), NAMES).expect("the named scene loads");
+        assert_eq!(
+            scene.entity_name(SceneEntityId(0)).map(EntityName::as_str),
+            Some("Gate"),
+        );
+        let files = scene
+            .save(&mut world, &ids, &codecs())
+            .expect("a scene that loaded can be written");
+        assert_eq!(files["scene.ron"], named_header());
+        assert_eq!(files["names.ron"], NAMES);
+        assert_eq!(files["sys/marks.ron"], MARKS);
+
+        let was = scene.set_entity_name(SceneEntityId(0), None);
+        assert_eq!(was.as_ref().map(EntityName::as_str), Some("Gate"));
+        let files = scene
+            .save(&mut world, &ids, &codecs())
+            .expect("still writable");
+        assert_eq!(
+            files["scene.ron"], HEADER,
+            "the header still declares names"
+        );
+        assert_eq!(
+            files.keys().collect::<Vec<_>>(),
+            ["env.ron", "scene.ron", "sys/marks.ron"],
+            "a scene with no names still writes the names file",
+        );
+    }
+
+    /// **Names are written in id order whatever order they were given in**,
+    /// so two scenes holding the same names write the same file.
+    #[test]
+    fn names_are_written_in_id_order() {
+        let (mut scene, mut ids, mut world) = load(HEADER, ENV, MARKS).expect("the scene loads");
+        let second = world.spawn();
+        assert_eq!(ids.assign(second), SceneEntityId(1));
+        system_named::<Mark>(&mut world, "marks")
+            .expect("registered")
+            .attach(
+                second,
+                Mark {
+                    position: [0.0; 3],
+                    label: "second".to_owned(),
+                },
+            );
+        let name = |text| Some(EntityName::new(text).expect("a name"));
+        scene.set_entity_name(SceneEntityId(1), name("Spawner"));
+        scene.set_entity_name(SceneEntityId(0), name("Gate"));
+        let files = scene.save(&mut world, &ids, &codecs()).expect("writable");
+        assert_eq!(
+            files["names.ron"],
+            "Names(\n    names: [\n        (0, \"Gate\"),\n        (1, \"Spawner\"),\n    ],\n)",
+        );
+    }
+
+    /// **A name for an id the scene does not hold is refused by that id**, on
+    /// load and on save — a save would otherwise write a file its own loader
+    /// refuses.
+    #[test]
+    fn a_name_for_an_id_the_scene_does_not_hold_is_refused() {
+        let error = load_named(&named_header(), &NAMES.replace("(0,", "(7,"))
+            .expect_err("id 7 is not in the scene");
+        assert!(
+            matches!(&error, ScnError::NameOfNoEntity { key, id }
+                if key == "one.scn/names.ron" && *id == SceneEntityId(7)),
+            "{error}"
+        );
+
+        let (mut scene, ids, mut world) = load(HEADER, ENV, MARKS).expect("the scene loads");
+        scene.set_entity_name(
+            SceneEntityId(7),
+            Some(EntityName::new("Ghost").expect("a name")),
+        );
+        let error = scene
+            .save(&mut world, &ids, &codecs())
+            .expect_err("id 7 is not in the scene");
+        assert!(
+            matches!(&error, ScnError::NameOfNoEntity { id, .. } if *id == SceneEntityId(7)),
+            "{error}"
+        );
+    }
+
+    /// **Text that is not a name is refused by the rule it breaks and the id
+    /// it was for**: empty, too long, and a control character.
+    #[test]
+    fn a_names_file_holding_text_that_is_not_a_name_is_refused() {
+        let long = "n".repeat(MAX_NAME_CHARS + 1);
+        for (text, expected) in [
+            ("   ", NameError::Empty),
+            (
+                long.as_str(),
+                NameError::TooLong {
+                    chars: MAX_NAME_CHARS + 1,
+                },
+            ),
+            ("Ga\\tte", NameError::Control('\t')),
+        ] {
+            let names = NAMES.replace("\"Gate\"", &format!("\"{text}\""));
+            let error = load_named(&named_header(), &names).expect_err("not a name");
+            assert!(
+                matches!(&error, ScnError::Name { key, id, error }
+                    if key == "one.scn/names.ron" && *id == SceneEntityId(0)
+                        && *error == expected),
+                "{text:?}: {error}"
+            );
+        }
+    }
+
+    /// One id named twice, a declared file that names nothing, a declared file
+    /// that is not there, and a field the file does not have are each refused.
+    #[test]
+    fn a_names_file_that_disagrees_with_itself_or_the_header_is_refused() {
+        let twice = NAMES.replace("    ],\n)", "        (0, \"Again\"),\n    ],\n)");
+        let error = load_named(&named_header(), &twice).expect_err("0 is named twice");
+        assert!(
+            matches!(&error, ScnError::DuplicateId { key, id }
+                if key == "one.scn/names.ron" && *id == SceneEntityId(0)),
+            "{error}"
+        );
+
+        let error = load_named(&named_header(), "Names(names: [])").expect_err("names nothing");
+        assert!(matches!(&error, ScnError::NoNames { .. }), "{error}");
+
+        let error = load(&named_header(), ENV, MARKS).expect_err("the names file is missing");
+        assert!(
+            matches!(&error, ScnError::Read { key, source: StorageError::NotFound(_) }
+                if key == "one.scn/names.ron"),
+            "{error}"
+        );
+
+        let error = load_named(&named_header(), &NAMES.replace("names:", "nams:"))
+            .expect_err("an unknown field");
+        assert!(
+            matches!(&error, ScnError::Parse { key, .. } if key == "one.scn/names.ron"),
+            "{error}"
+        );
+    }
+
+    /// **A names file the header does not declare is not read**: the header is
+    /// what says which files the scene is, and an undeclared one is not part of
+    /// it — so a save writes the scene without it.
+    #[test]
+    fn a_names_file_the_header_does_not_declare_is_not_read() {
+        let (scene, ids, mut world) =
+            load_named(HEADER, "not even RON").expect("an undeclared file is not read");
+        assert!(scene.entity_names().is_empty());
+        let files = scene.save(&mut world, &ids, &codecs()).expect("writable");
+        assert!(!files.contains_key("names.ron"));
     }
 
     /// Text that is not the component is refused by the system's name, and
