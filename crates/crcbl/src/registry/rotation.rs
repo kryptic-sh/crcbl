@@ -6,7 +6,9 @@ use std::fmt;
 use glam::{DQuat, DVec4};
 use serde::{Deserialize, Serialize};
 
-use crcbl_reflect::Reflect;
+use crcbl_reflect::{Kind, Reflect};
+
+use super::FieldError;
 
 /// How far a file's quaternion may be from unit length and still load: one
 /// part in ten thousand.
@@ -49,11 +51,13 @@ pub const ROTATION_TOLERANCE: f64 = 1.0e-4;
 ///
 /// The four numbers are reflected leaves, so a path write can set one of them
 /// alone — no edit the editor makes does (its handle and its inspector row
-/// write all four as one command), and nothing checks a write when it lands:
-/// `#[reflect(min, max)]` is advisory, as `docs/backlog.md` records for
-/// `Body`'s mass. So [`Rotation::quat`] reads any length as its direction, and
-/// the one value with no direction — all four zero — as the identity, while a
-/// save writes the value as it stands and the next load refuses it by name.
+/// write all four as one command), and `#[reflect(min, max)]` is advisory. A
+/// tool that runs [`Registry::validate`](super::Registry::validate) after a
+/// write refuses it, since every registered component's rotations are checked
+/// there ([`Validate`](super::Validate)); a write that skips it stands. So
+/// [`Rotation::quat`] reads any length as its direction, and the one value
+/// with no direction — all four zero — as the identity, while a save writes
+/// the value as it stands and the next load refuses it by name.
 ///
 /// # How a component carries one
 ///
@@ -162,6 +166,43 @@ impl TryFrom<[f64; 4]> for Rotation {
 impl From<Rotation> for [f64; 4] {
     fn from(rotation: Rotation) -> Self {
         rotation.to_array()
+    }
+}
+
+/// The first [`Rotation`] under `value`, `value` itself included, that a file
+/// could not hold — found by type through every reflected field, nested ones
+/// and list items included — as the field it is at and why.
+pub(super) fn fault_in(value: &dyn Reflect) -> Option<FieldError> {
+    fault_at(value, "")
+}
+
+/// [`fault_in`], for `value` at the dotted `path`.
+fn fault_at(value: &dyn Reflect, path: &str) -> Option<FieldError> {
+    if let Some(rotation) = value.as_any().downcast_ref::<Rotation>() {
+        return rotation.check().err().map(|error| {
+            FieldError::new(
+                path,
+                format_args!("{error}; its four numbers are written together"),
+            )
+        });
+    }
+    let child = |segment: &str| {
+        if path.is_empty() {
+            segment.to_owned()
+        } else {
+            format!("{path}.{segment}")
+        }
+    };
+    match value.kind() {
+        Kind::Leaf(_) => None,
+        Kind::Struct | Kind::Enum => value
+            .fields()
+            .iter()
+            .enumerate()
+            .find_map(|(index, field)| fault_at(value.field(index)?, &child(field.name))),
+        Kind::List { len } => {
+            (0..len).find_map(|index| fault_at(value.field(index)?, &child(&index.to_string())))
+        }
     }
 }
 

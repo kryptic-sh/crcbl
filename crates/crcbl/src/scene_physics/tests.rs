@@ -33,6 +33,8 @@ impl Placement for Block {
     }
 }
 
+impl Validate for Block {}
+
 /// A placing component that **stands on** its `position`: its centre is
 /// [`PAD_HALF`] above it, so a pad at rest on the ground has `position.1` at
 /// the ground, where a block's centre would be half its height up.
@@ -62,6 +64,8 @@ impl Placement for Pad {
     }
 }
 
+impl Validate for Pad {}
+
 /// A placing component with no `position`: its centre is spelled otherwise.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl_reflect")]
@@ -85,6 +89,8 @@ impl Placement for Marker {
         ))
     }
 }
+
+impl Validate for Marker {}
 
 /// The three placing components and the bodies.
 fn registry() -> Registry {
@@ -711,6 +717,8 @@ impl Placement for Tilt {
     }
 }
 
+impl Validate for Tilt {}
+
 /// How far from lying on a face an orientation is: one less the largest `|y|`
 /// of its own axes, zero exactly when one of them stands upright.
 fn off_face(rotation: glam::DQuat) -> f64 {
@@ -845,6 +853,8 @@ impl Placement for Swing {
         ))
     }
 }
+
+impl Validate for Swing {}
 
 /// **A turned component's offset turns with its body**: a swing tipped a
 /// twelfth of a turn tips onto a face, and at every tick its placement — its

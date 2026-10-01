@@ -69,6 +69,18 @@
 //! [`Scene::load`], and a manifest entry with no codec is an error rather than a
 //! skip.
 //!
+//! # A rule over one row
+//!
+//! A component may refuse values its type can hold — a mass of zero, an asset
+//! key that climbs out of its root. [`chunk_ruled`] builds a codec that runs a
+//! [`RowRule`] on every row as it is read, from a chunk file and from one
+//! row's text alike, so the refusal is ron's own [`ScnError::Parse`] with the
+//! file, the line and the column, exactly as a `#[serde(try_from)]` on the
+//! component would give it. The rule is a type rather than a function value
+//! because a row is read inside `serde`, which carries no state to hand one
+//! in through; this crate knows nothing of what the rule checks, and
+//! [`chunk_of`] is the codec with none.
+//!
 //! Reaching a system by *name* rather than by type is deliberate.
 //! [`crcbl_ecs::World::system_mut`] finds the first system of a type, so two
 //! `System<Prop>`s under different names collide; the manifest names files, so
@@ -95,7 +107,7 @@ use std::marker::PhantomData;
 use std::path::Path;
 
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crcbl_assets::{AssetSource, StorageError};
 use crcbl_ecs::{ComponentHash, Entity, System, World};
@@ -487,18 +499,84 @@ pub fn chunk_of<T>(name: impl Into<String>) -> Box<dyn SystemChunk>
 where
     T: Serialize + DeserializeOwned + ComponentHash + 'static,
 {
-    Box::new(ChunkOf::<T> {
+    chunk_ruled::<T, AnyRow>(name)
+}
+
+/// A rule over one row of a chunk, run as the row is read: `Ok` for a value a
+/// file may hold, or the reason it may not, which a load reports as
+/// [`ScnError::Parse`] at the row's place in the file — see the
+/// [module docs](self).
+///
+/// Implemented on a marker type rather than on the component, so one rule can
+/// serve every component a caller registers, and so this crate need not know
+/// what the rule checks.
+pub trait RowRule<T> {
+    /// `Ok` for a row a file may hold, or why not, in words that name the
+    /// field.
+    ///
+    /// # Errors
+    ///
+    /// The reason, which becomes the [`ScnError::Parse`] message.
+    fn check(row: &T) -> Result<(), String>;
+}
+
+/// The rule [`chunk_of`] reads with: every row a component's `serde` reads is
+/// one a file may hold.
+struct AnyRow;
+
+impl<T> RowRule<T> for AnyRow {
+    fn check(_: &T) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The codec for a `System<T>` registered under `name`, refusing every row
+/// `R` refuses as it is read — by [`SystemChunk::read`] from a chunk file and
+/// by [`SystemChunk::attach_row`] from one row's text.
+///
+/// [`chunk_of`] with a rule; writing is the same, since a rule is about what
+/// may be read back.
+#[must_use]
+pub fn chunk_ruled<T, R>(name: impl Into<String>) -> Box<dyn SystemChunk>
+where
+    T: Serialize + DeserializeOwned + ComponentHash + 'static,
+    R: RowRule<T> + 'static,
+{
+    Box::new(ChunkOf::<T, R> {
         name: name.into(),
         component: PhantomData,
     })
 }
 
-struct ChunkOf<T> {
-    name: String,
-    component: PhantomData<fn() -> T>,
+/// One row read through the rule `R`: what a chunk file's rows and one row's
+/// text are deserialised as, so a refused row fails inside `serde`, where ron
+/// knows its line and column.
+struct Ruled<T, R> {
+    row: T,
+    rule: PhantomData<fn() -> R>,
 }
 
-impl<T> fmt::Debug for ChunkOf<T> {
+impl<'de, T, R> Deserialize<'de> for Ruled<T, R>
+where
+    T: Deserialize<'de>,
+    R: RowRule<T>,
+{
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let row = T::deserialize(deserializer)?;
+        R::check(&row).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            row,
+            rule: PhantomData,
+        })
+    }
+}
+
+struct ChunkOf<T, R> {
+    name: String,
+    component: PhantomData<fn() -> (T, R)>,
+}
+
+impl<T, R> fmt::Debug for ChunkOf<T, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SystemChunk")
             .field("name", &self.name)
@@ -507,9 +585,10 @@ impl<T> fmt::Debug for ChunkOf<T> {
     }
 }
 
-impl<T> SystemChunk for ChunkOf<T>
+impl<T, R> SystemChunk for ChunkOf<T, R>
 where
     T: Serialize + DeserializeOwned + ComponentHash + 'static,
+    R: RowRule<T> + 'static,
 {
     fn name(&self) -> &str {
         &self.name
@@ -522,7 +601,7 @@ where
         key: &str,
         text: &str,
     ) -> Result<(), ScnError> {
-        let file: ChunkFile<T> =
+        let file: ChunkFile<Ruled<T, R>> =
             ron::from_str(text).map_err(|error| ScnError::parse(key, &error))?;
         if file.system != self.name {
             return Err(ScnError::Chunk {
@@ -537,7 +616,7 @@ where
         // both `&mut world`, so they cannot be held at once.
         let mut seen = BTreeSet::new();
         let mut rows = Vec::with_capacity(file.entities.len());
-        for (id, data) in file.entities {
+        for (id, Ruled { row: data, .. }) in file.entities {
             // Checked here and not by the map: an id an earlier chunk bound is
             // this chunk's to attach to, and only a repeat within one chunk
             // would replace a row.
@@ -599,8 +678,9 @@ where
     }
 
     fn attach_row(&self, world: &mut World, entity: Entity, text: &str) -> Result<(), ScnError> {
-        let data: T = ron::from_str(text).map_err(|error| ScnError::parse(&self.name, &error))?;
-        system_named::<T>(world, &self.name)?.attach(entity, data);
+        let data: Ruled<T, R> =
+            ron::from_str(text).map_err(|error| ScnError::parse(&self.name, &error))?;
+        system_named::<T>(world, &self.name)?.attach(entity, data.row);
         Ok(())
     }
 

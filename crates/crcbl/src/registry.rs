@@ -12,13 +12,20 @@
 //! ```text
 //!     a game ──▶ Registry::register::<Brick>("bricks")
 //!                     │
-//!                     ├── codecs()          the chunk file, read and written
+//!                     ├── codecs()          the chunk file, read and written,
+//!                     │                     every row held to Brick's Validate
+//!                     ├── validate()        the same rule, for an edit
 //!                     ├── register_systems  the System<Brick> a load spawns into
 //!                     ├── component()       &mut dyn Reflect, for an edit
 //!                     ├── placement()       a turned box, for a collider, an
 //!                     │                     instance and a bounds box
 //!                     └── default_row()     a new Brick's row, for a tool
 //!                                           attaching one to an entity
+//!
+//!     a game ──▶ Registry::group("breakout", |registry| …)
+//!                     │
+//!                     └── group_of()        which game registered a system, for
+//!                                           a tool listing them
 //!
 //!     a game ──▶ Registry::module("bricks", start)
 //!                     │
@@ -41,6 +48,11 @@
 //! all of them does not compile. That is the failure this module exists to remove —
 //! "not registered" arriving as "nothing to edit" — closed at compile time
 //! rather than detected at run time.
+//!
+//! The same holds for a component's rule over its values ([`Validate`]): the
+//! codec that reads a row, the check an edit runs and the report a save makes
+//! are monomorphised from one `T` through one function, so a load cannot
+//! refuse what an edit lets through.
 //!
 //! What is left for run time is the other direction: a scene whose manifest
 //! names a system **nobody registered**. [`Scene::load`](crcbl_scene::scn::Scene::load)
@@ -72,7 +84,7 @@
 //!
 //! So it is a module of the facade, behind the same feature that re-exports the
 //! scene format — `scn` or `scene`, either of which brings [`crcbl_scene`] in,
-//! and without which there is no [`chunk_of`] to build an entry from. A game
+//! and without which there is no [`chunk_ruled`] to build an entry from. A game
 //! registers its components with the crate it already depends on, and so does
 //! the tool.
 //!
@@ -140,11 +152,15 @@ use serde::de::DeserializeOwned;
 use crcbl_assets::AssetSource;
 use crcbl_ecs::{ComponentHash, Entity, GameModule, System, World};
 use crcbl_reflect::Reflect;
-use crcbl_scene::scn::{IdMap, ScnError, SystemChunk, chunk_of, row_text};
+use crcbl_scene::scn::{IdMap, ScnError, SystemChunk, chunk_ruled, row_text};
 
 mod rotation;
+mod validate;
 
 pub use rotation::{ROTATION_TOLERANCE, Rotation, RotationError};
+pub use validate::{FieldError, Validate};
+
+use validate::{Validated, check_row};
 
 // ---------------------------------------------------------------------------
 // Placement
@@ -168,6 +184,11 @@ pub const POSITION: &str = "position";
 /// A placing component without it cannot be turned, and its body's rotation
 /// stays locked.
 pub const ROTATION: &str = "rotation";
+
+/// The [`Registry::group`] the engine's own scene components are registered
+/// in — [`crate::scene_physics`]'s body and [`crate::scene_mesh`]'s mesh —
+/// beside every game's.
+pub const ENGINE_GROUP: &str = "engine";
 
 /// Where a component's entity stands in the world, and how far it reaches.
 ///
@@ -292,7 +313,8 @@ impl OrientedBox {
 // ---------------------------------------------------------------------------
 
 /// What a tool needs, per scene system name: the codec, the system, the
-/// `&mut dyn Reflect`, the [`Placement`] and a new component's row.
+/// `&mut dyn Reflect`, the [`Placement`], a new component's row, the
+/// [`Validate`] rule and the game that registered it.
 ///
 /// Built once at start-up, from one `register` call per component. A tool holds
 /// one and asks it; a game hands one out, and uses the same one to load its own
@@ -308,7 +330,7 @@ impl OrientedBox {
 /// use crcbl::ecs::{ComponentHash, World};
 /// use crcbl::math::DVec3;
 /// use crcbl::reflect::Reflect;
-/// use crcbl::registry::{OrientedBox, Placement, Registry};
+/// use crcbl::registry::{OrientedBox, Placement, Registry, Validate};
 /// use crcbl::serde::{Deserialize, Serialize};
 /// use std::hash::Hasher;
 ///
@@ -342,6 +364,9 @@ impl OrientedBox {
 ///     }
 /// }
 ///
+/// // Any value a prop's type can hold is one a scene may: no rule of its own.
+/// impl Validate for Prop {}
+///
 /// let mut registry = Registry::new();
 /// registry.register::<Prop>("props");
 ///
@@ -371,6 +396,9 @@ pub struct Registry {
     /// The games' rules over whole scenes, each with the system whose presence
     /// in a manifest says the rule applies — see [`Registry::check`].
     checks: Vec<(String, SceneCheck)>,
+    /// The label [`Registry::group`] is registering under, or [`None`]
+    /// outside one.
+    group: Option<&'static str>,
     /// The games' behaviour, each with the system whose presence in a manifest
     /// says the scene is that game's — see [`Registry::module`].
     modules: Vec<(String, ModuleFactory)>,
@@ -431,6 +459,9 @@ struct Entry {
     placement: fn(&mut World, &str, Entity) -> Option<OrientedBox>,
     entities: fn(&mut World, &str) -> Vec<Entity>,
     default_row: fn(&str) -> Result<String, ScnError>,
+    validate: fn(&mut World, &str, Entity) -> Result<(), FieldError>,
+    /// The game that registered it — see [`Registry::group`].
+    group: Option<&'static str>,
 }
 
 /// One runtime component, reduced to the two calls a tool drawing it makes —
@@ -453,9 +484,10 @@ impl Registry {
     /// Registers `T` as the component of the scene system called `system`.
     ///
     /// The one call that produces the codec, the system registration, the
-    /// `&mut dyn Reflect` accessor, the [`Placement`] and the row a new
-    /// component starts as — see the [module docs](self) for why they are one
-    /// call and not several.
+    /// `&mut dyn Reflect` accessor, the [`Placement`], the row a new
+    /// component starts as and the [`Validate`] rule every door holds a row
+    /// to — see the [module docs](self) for why they are one call and not
+    /// several. Inside [`group`](Self::group), the system is that group's.
     ///
     /// **`Default` is a bound for [`Placement`]'s reason**: a tool attaching
     /// this component to an entity needs a value to start it at, and a
@@ -474,7 +506,14 @@ impl Registry {
     /// of the two lost would be a component silently never reached.
     pub fn register<T>(&mut self, system: impl Into<String>)
     where
-        T: Serialize + DeserializeOwned + ComponentHash + Reflect + Placement + Default + 'static,
+        T: Serialize
+            + DeserializeOwned
+            + ComponentHash
+            + Reflect
+            + Placement
+            + Validate
+            + Default
+            + 'static,
     {
         let system = system.into();
         let entry = Entry {
@@ -485,6 +524,8 @@ impl Registry {
             placement: placement_of::<T>,
             entities: entities_of::<T>,
             default_row: default_row_of::<T>,
+            validate: validate_of::<T>,
+            group: self.group,
         };
         self.refuse_taken(&system, entry.component);
         self.entries.insert(system, entry);
@@ -540,6 +581,58 @@ impl Registry {
         }
     }
 
+    /// Registers, through `register`, the systems of the game called `label`:
+    /// each one [`register`](Self::register) adds in it answers `label` to
+    /// [`group_of`](Self::group_of).
+    ///
+    /// What a tool listing systems groups them by, so one game's components
+    /// are not offered unremarked on another game's scene — a registry holds
+    /// several games' vocabularies at once. A label rather than an owner
+    /// registered elsewhere, so a game says it in the call that registers its
+    /// components, and an inner group names its own systems and hands the
+    /// outer one back.
+    ///
+    /// ```
+    /// # use crcbl::ecs::ComponentHash;
+    /// # use crcbl::reflect::Reflect;
+    /// # use crcbl::registry::{OrientedBox, Placement, Registry, Validate};
+    /// # use crcbl::serde::{Deserialize, Serialize};
+    /// # #[derive(Default, Reflect, Serialize, Deserialize)]
+    /// # #[reflect(crate = "crcbl::reflect")]
+    /// # #[serde(crate = "crcbl::serde")]
+    /// # struct Brick {
+    /// #     position: [f64; 3],
+    /// # }
+    /// # impl ComponentHash for Brick {
+    /// #     fn hash_component(&self, _: &mut dyn std::hash::Hasher) {}
+    /// # }
+    /// # impl Placement for Brick {
+    /// #     fn placement(&self) -> Option<OrientedBox> {
+    /// #         None
+    /// #     }
+    /// # }
+    /// # impl Validate for Brick {}
+    /// let mut registry = Registry::new();
+    /// registry.group("breakout", |registry| registry.register::<Brick>("bricks"));
+    /// registry.register::<Brick>("loose");
+    ///
+    /// assert_eq!(registry.group_of("bricks"), Some("breakout"));
+    /// assert_eq!(registry.group_of("loose"), None);
+    /// ```
+    pub fn group(&mut self, label: &'static str, register: impl FnOnce(&mut Self)) {
+        let outer = self.group.replace(label);
+        register(self);
+        self.group = outer;
+    }
+
+    /// The label of the [`group`](Self::group) `system` was registered in, or
+    /// [`None`] for one registered outside any — or a name this registry does
+    /// not know.
+    #[must_use]
+    pub fn group_of(&self, system: &str) -> Option<&'static str> {
+        self.entries.get(system).and_then(|entry| entry.group)
+    }
+
     /// Adds `check`, run on every scene whose manifest lists `system` — the
     /// game that owns that system holding the scene to its own rules.
     ///
@@ -550,9 +643,16 @@ impl Registry {
         self.checks.push((system.into(), check));
     }
 
-    /// What every check whose system `systems` lists refuses in the scene
-    /// `source` holds under `dir`, in the order the checks were added — empty
-    /// for a scene every applicable game would play.
+    /// What the scene `source` holds under `dir`, listing `systems`, would be
+    /// refused for: first each listed registered system's chunk that would not
+    /// load — a row its [`Validate`] refuses, by file, line and column — in
+    /// `systems`' order, then what every check whose system `systems` lists
+    /// refuses, in the order the checks were added. Empty for a scene that
+    /// loads and that every applicable game would play.
+    ///
+    /// The chunks are read back through the codecs a load reads them with, so
+    /// a row reported here is exactly a row the next load refuses — what a
+    /// tool saving a value written past [`validate`](Self::validate) is told.
     #[must_use]
     pub fn problems(
         &self,
@@ -560,11 +660,48 @@ impl Registry {
         source: &dyn AssetSource,
         dir: &Path,
     ) -> Vec<String> {
-        self.checks
+        let rows = systems
+            .iter()
+            .filter_map(|system| self.chunk_problem(system, source, dir));
+        let checks = self
+            .checks
             .iter()
             .filter(|(system, _)| systems.contains(system))
-            .filter_map(|(_, check)| check(source, dir).err())
-            .collect()
+            .filter_map(|(_, check)| check(source, dir).err());
+        rows.chain(checks).collect()
+    }
+
+    /// Why the chunk file of `system` under `dir` would not load: the file
+    /// alone, read through its own codec into a world of its own — [`None`]
+    /// for one that loads, and for a name this registry does not know, whose
+    /// scene a load refuses before any chunk.
+    fn chunk_problem(&self, system: &str, source: &dyn AssetSource, dir: &Path) -> Option<String> {
+        let entry = self.entries.get(system)?;
+        let read = || -> Result<(), String> {
+            let prefix = dir.to_str().ok_or_else(|| {
+                format!(
+                    "the scene directory `{}` is not a valid asset key",
+                    dir.display()
+                )
+            })?;
+            let prefix = prefix.trim_end_matches('/');
+            let name = format!("sys/{system}.ron");
+            let key = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let bytes = source
+                .read(Path::new(&key))
+                .map_err(|error| format!("reading `{key}`: {error}"))?;
+            let text = String::from_utf8(bytes).map_err(|error| format!("`{key}`: {error}"))?;
+            let mut world = World::new();
+            (entry.register)(&mut world, system);
+            (entry.codec)(system)
+                .read(&mut world, &mut IdMap::new(), &key, &text)
+                .map_err(|error| error.to_string())
+        };
+        read().err()
     }
 
     /// Adds `factory`, whose module plays any scene whose manifest lists
@@ -737,6 +874,30 @@ impl Registry {
             .collect()
     }
 
+    /// Whether `entity`'s component in the system called `system` is one a
+    /// scene may hold: its [`Validate`] rule, with every rotation it carries —
+    /// the same rule a load holds a row to.
+    ///
+    /// What a tool runs after it writes a property, to refuse and put back a
+    /// value the next load would refuse, rather than saving it. `Ok` for a
+    /// name this registry does not know and an entity that system does not
+    /// hold: there is no row to refuse.
+    ///
+    /// # Errors
+    ///
+    /// [`FieldError`] naming the first field the component may not hold.
+    pub fn validate(
+        &self,
+        world: &mut World,
+        system: &str,
+        entity: Entity,
+    ) -> Result<(), FieldError> {
+        match self.entries.get(system) {
+            Some(entry) => (entry.validate)(world, system, entity),
+            None => Ok(()),
+        }
+    }
+
     /// Registers one [`System<T>`](crcbl_ecs::System) per registered component,
     /// under the name its chunk file is spelled with.
     ///
@@ -859,46 +1020,6 @@ impl fmt::Debug for Registry {
     }
 }
 
-/// Whether the chunk file of `system` under `dir` would load as rows of `T`:
-/// the file alone, read through its own codec into a world of its own — the
-/// [`SceneCheck`] a component whose values are refused on load runs, so a
-/// value a panel set is reported where it was made rather than as a scene that
-/// will not open next time.
-///
-/// A check is handed no vocabulary, and the rest of the scene is other games'
-/// business, so nothing but this one chunk is read.
-pub(crate) fn check_chunk<T>(
-    source: &dyn AssetSource,
-    dir: &Path,
-    system: &str,
-) -> Result<(), String>
-where
-    T: Serialize + DeserializeOwned + ComponentHash + 'static,
-{
-    let prefix = dir.to_str().ok_or_else(|| {
-        format!(
-            "the scene directory `{}` is not a valid asset key",
-            dir.display()
-        )
-    })?;
-    let prefix = prefix.trim_end_matches('/');
-    let name = format!("sys/{system}.ron");
-    let key = if prefix.is_empty() {
-        name
-    } else {
-        format!("{prefix}/{name}")
-    };
-    let bytes = source
-        .read(Path::new(&key))
-        .map_err(|error| format!("reading `{key}`: {error}"))?;
-    let text = String::from_utf8(bytes).map_err(|error| format!("`{key}`: {error}"))?;
-    let mut world = World::new();
-    world.register_system(Box::new(System::<T>::new(system)));
-    chunk_of::<T>(system)
-        .read(&mut world, &mut IdMap::new(), &key, &text)
-        .map_err(|error| error.to_string())
-}
-
 // ---------------------------------------------------------------------------
 // The monomorphised halves
 // ---------------------------------------------------------------------------
@@ -920,12 +1041,24 @@ where
         .and_then(|system| system.as_any_mut().downcast_mut::<System<T>>())
 }
 
-/// [`Entry::codec`] for `T`.
+/// [`Entry::codec`] for `T`: every row it reads held to [`check_row`].
 fn codec_of<T>(name: &str) -> Box<dyn SystemChunk>
 where
-    T: Serialize + DeserializeOwned + ComponentHash + 'static,
+    T: Serialize + DeserializeOwned + ComponentHash + Reflect + Validate + 'static,
 {
-    chunk_of::<T>(name)
+    chunk_ruled::<T, Validated>(name)
+}
+
+/// [`Entry::validate`] for `T`: [`check_row`], the rule [`codec_of`] reads
+/// with.
+fn validate_of<T>(world: &mut World, name: &str, entity: Entity) -> Result<(), FieldError>
+where
+    T: ComponentHash + Reflect + Validate + 'static,
+{
+    match system_named::<T>(world, name).and_then(|system| system.get(entity)) {
+        Some(row) => check_row(row),
+        None => Ok(()),
+    }
 }
 
 /// [`Entry::register`] for `T`.

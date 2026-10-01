@@ -145,14 +145,14 @@ fn a_single_leaf_write_off_unit_is_refused_and_put_back() {
         })
         .expect_err("half a turn's length is no rotation");
     assert!(
-        matches!(&error, EditError::Rotation { entity, system, field, .. }
-            if *entity == STEP && system == BLOCKS && field == "rotation"),
+        matches!(&error, EditError::Invalid { entity, system, error }
+            if *entity == STEP && system == BLOCKS && error.field == "rotation"),
         "{error}"
     );
     let error = document
         .paste_field(STEP, BLOCKS, "rotation.x", "0.7071")
         .expect_err("one leaf of four");
-    assert!(matches!(error, EditError::Rotation { .. }), "{error}");
+    assert!(matches!(error, EditError::Invalid { .. }), "{error}");
     assert_eq!(document.files().expect("the scene saves"), before);
     assert!(document.log().is_empty(), "a refused write was recorded");
 
@@ -166,31 +166,35 @@ fn a_single_leaf_write_off_unit_is_refused_and_put_back() {
 }
 
 /// **A rotation off unit that reached the world without a command is a
-/// problem naming its entity, system and field**, for a block and for a
-/// mesh alike, and none is reported while every rotation is unit.
+/// problem naming its file and line**, as the next load would refuse it, for
+/// a block and for a mesh alike, and none is reported while every rotation
+/// is unit.
 #[test]
-fn a_rotation_off_unit_is_a_problem_by_entity_and_field() {
+fn a_rotation_off_unit_is_a_problem_by_file_and_line() {
     let mut document = Document::built_in().expect("the compiled-in scene");
-    assert!(document.rotation_problems().is_empty());
+    assert!(document.problems().expect("the scene saves").is_empty());
     write_behind(&mut document, STEP, "rotation.w", 0.5);
     let problems = document.problems().expect("the scene saves");
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(
-        problems[0].starts_with("entity #2: `blocks`'s `rotation`: ")
-            && problems[0].contains("length 0.5"),
+        problems[0].starts_with("`sys/blocks.ron` line ") && problems[0].contains("length 0.5"),
         "{problems:?}"
     );
 
     let mut props = super::mesh_tests::props();
-    assert!(props.rotation_problems().is_empty());
+    let unturned = props.problems().expect("it saves");
     let mesh = props
         .component(super::mesh_tests::TRIANGLE_MESH, crcbl::scene_mesh::MESHES)
         .expect("a mesh");
     set_path(mesh, "rotation.y", &Value::Float(3.0)).expect("a rotation leaf");
-    let problems = props.rotation_problems();
-    assert_eq!(problems.len(), 1, "{problems:?}");
+    let problems = props.problems().expect("it saves");
+    let turned: Vec<_> = problems
+        .iter()
+        .filter(|problem| !unturned.contains(problem))
+        .collect();
+    assert_eq!(turned.len(), 1, "{problems:?}");
     assert!(
-        problems[0].starts_with("entity #1: `meshes`'s `rotation`: "),
+        turned[0].starts_with("`sys/meshes.ron` line ") && turned[0].contains("`rotation`"),
         "{problems:?}"
     );
 }

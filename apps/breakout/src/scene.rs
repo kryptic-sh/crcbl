@@ -50,7 +50,7 @@ use crcbl::assets::{AssetSource, DirSource, MemorySource};
 use crcbl::ecs::{ComponentHash, System, World};
 use crcbl::math::DVec3;
 use crcbl::reflect::Reflect;
-use crcbl::registry::{OrientedBox, Placement, Registry};
+use crcbl::registry::{OrientedBox, Placement, Registry, Validate};
 use crcbl::scene::scn::{Scene, ScnError};
 use crcbl::serde::{Deserialize, Serialize};
 
@@ -140,6 +140,9 @@ impl Placement for Brick {
     }
 }
 
+/// No rule of its own: [`Board::load`] refuses no brick its type can hold.
+impl Validate for Brick {}
+
 /// How far a brick reaches either side of its centre along `Z`: the depth every
 /// row of the committed board is written with.
 const BRICK_HALF_DEPTH: f64 = 0.5;
@@ -166,10 +169,15 @@ impl Default for Brick {
 /// **The one place `bricks` is joined to [`Brick`].** [`Board::load`] uses it and
 /// so does any tool that opens this game's board, so the vocabulary the game
 /// ships and the vocabulary an editor sees are the same list rather than two that
-/// agree today — `docs/plan/08-editor.md`'s component registry.
+/// agree today — `docs/plan/08-editor.md`'s component registry. Registered
+/// in this game's [`Registry::group`], so a tool listing systems says whose
+/// it is.
 pub fn register_components(registry: &mut Registry) {
-    registry.register::<Brick>(BRICKS);
+    registry.group(GROUP, |registry| registry.register::<Brick>(BRICKS));
 }
+
+/// The [`Registry::group`] this game's components are registered in.
+const GROUP: &str = "breakout";
 
 /// A board's brick layout, in the order its chunk file spells it.
 ///

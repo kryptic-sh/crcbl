@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl::registry::Registry::register` is bounded on `Validate`** (see
+  Added), so every registered component needs an impl: `impl Validate for T {}`
+  for one with no rule of its own. Every component in the workspace states one
+  (breakout's `Brick`, puppet's `Surface`, `Spawn` and `Sun`, towers' `Waypoint`
+  and `Plot`, the editor's `Block`, `scene_mesh::Mesh` and
+  `scene_physics::Body`); a game outside it — EW's — adds one per component it
+  registers. `scene_physics::Body` and `scene_mesh::Mesh` no longer go through a
+  private `try_from` row type, and neither registers a `Registry::check` any
+  more: their rules are their `Validate` impls. The editor's
+  `EditError::Rotation` and `Document::rotation_problems` are gone, replaced by
+  `EditError::Invalid` and `Document::problems` (see Added).
+
 - **`crcbl_phys::BoxCollider` gained a public `rotation`**, a unit quaternion
   turning the box about its centre (see Added), so a struct literal naming every
   field must add it; `BoxCollider::new` makes an unturned box as before.
@@ -683,19 +695,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   entity's last system is refused, since Delete is how an entity goes. The
   inspector draws a section per system holding the selection, each with a Remove
   button while there is more than one, and an add button per system the
-  vocabulary registers that the entity is not in — the manifest's first — which
-  attaches that component at its type's `Default`. Attaching to a system the
-  manifest does not list lists it at the manifest's end in the same undo entry,
-  so the row is saved and one undo puts every file back; detaching a system's
-  last entity leaves the system listed. The outliner lists an entity once, under
-  the first system holding it. `EditCommand::Spawn` carries every system's row
-  (`rows: Vec<SystemRow>`), so a delete's undo, a duplicate and a paste bring
-  all of them; `SetProperty` names the system its component is in. A clipping
-  writes an entity's other systems' rows in `others`, written only for an entity
-  in several, so a single-system clipping is the text it was and older clippings
-  paste. The arrow keys and the gizmo move the component that places the entity,
-  and an entity whose placing component is detached stops being drawn and
-  picked.
+  vocabulary registers that the entity is not in — the manifest's first, then
+  grouped by game (see the add list entry) — which attaches that component at
+  its type's `Default`. Attaching to a system the manifest does not list lists
+  it at the manifest's end in the same undo entry, so the row is saved and one
+  undo puts every file back; detaching a system's last entity leaves the system
+  listed. The outliner lists an entity once, under the first system holding it.
+  `EditCommand::Spawn` carries every system's row (`rows: Vec<SystemRow>`), so a
+  delete's undo, a duplicate and a paste bring all of them; `SetProperty` names
+  the system its component is in. A clipping writes an entity's other systems'
+  rows in `others`, written only for an entity in several, so a single-system
+  clipping is the text it was and older clippings paste. The arrow keys and the
+  gizmo move the component that places the entity, and an entity whose placing
+  component is detached stops being drawn and picked.
 
 - **The editor renames entities, and copies and pastes single fields.** The
   outliner shows a named entity as its name and id. F2, or a double-click on a
@@ -752,16 +764,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **Physics on scene components: `crcbl::scene_physics`** (features `scn` or
   `scene`). A `Body` — `kind` (`BodyKind::Dynamic`, `Static` or `Kinematic`),
   `mass`, `friction`, `restitution` — is a scene component under the `bodies`
-  system, registered with the check and the play module by one call,
+  system, registered with the play module by one call,
   `scene_physics::register(&mut registry)`; it derives `Reflect`, and its
   `Default` is a dynamic body of one kilogram on `crcbl_phys`'s default surface.
   A row no simulation takes (a mass not finite and above zero, a friction not
-  finite and non-negative, a restitution outside `0..=1`) is refused on load
-  with the file, line and field, and the check reports one a panel set. A body
-  has no shape of its own: it collides as its entity's placement box. While a
-  scene plays, the module simulates every body in a `Simulation` system of its
-  own (a `PhysicsSystem` with contacts and Earth gravity) and writes each
-  dynamic body's pose back into its entity's placing component: its centre at
+  finite and non-negative, a restitution outside `0..=1`) is refused by its
+  `Validate` rule: on load with the file, line and field, at the editor's edit,
+  and by `Registry::problems` for one set past that. A body has no shape of its
+  own: it collides as its entity's placement box. While a scene plays, the
+  module simulates every body in a `Simulation` system of its own (a
+  `PhysicsSystem` with contacts and Earth gravity) and writes each dynamic
+  body's pose back into its entity's placing component: its centre at
   `position.N`, keeping that component's own offset (turned as the body turns),
   and its orientation at `rotation.x` to `rotation.w`, so a tool draws the
   motion the way it draws an edit. A dynamic body whose placing component has a
@@ -778,19 +791,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **Meshes on scene components: `crcbl::scene_mesh`** (features `scn` or
   `scene`). A `Mesh` — `asset`, a glTF key in the asset source, and `position`,
   where the asset's own origin stands — is a scene component under the `meshes`
-  system, registered with its check by `scene_mesh::register(&mut registry)`; it
-  derives `Reflect`, and its `Default` has no asset chosen. A key is admitted by
-  `check_asset`: relative, no `..`, a `.glb` or `.gltf` extension, a legal asset
-  key in its canonical spelling, or empty for a mesh with no asset yet; any
-  other is refused on load with the file, line and field, and the check reports
-  one a panel typed. Its placement is the asset's box offset by `position`,
-  measured by `MeshLibrary` (feature `scene`), which imports each asset once
-  through any `AssetSource` and writes the box into the rows with `resolve`. The
-  box is never written to the file. A missing, malformed or unchosen asset is a
-  `PLACEHOLDER_HALF_EXTENT` cube about the origin and a `MeshProblem` naming the
-  asset, never a panic; a flat model is given `MIN_HALF_EXTENT` across its
-  plane. `Mesh::standing_on` puts a mesh's foot on a point, and `is_mesh_asset`
-  says which listed keys a mesh can be made of.
+  system, registered by `scene_mesh::register(&mut registry)`; it derives
+  `Reflect`, and its `Default` has no asset chosen. A key is admitted by
+  `check_asset`, its `Validate` rule: relative, no `..`, a `.glb` or `.gltf`
+  extension, a legal asset key in its canonical spelling, or empty for a mesh
+  with no asset yet; any other is refused on load with the file, line and field,
+  at the editor's edit, and by `Registry::problems` for one typed past that. Its
+  placement is the asset's box offset by `position`, measured by `MeshLibrary`
+  (feature `scene`), which imports each asset once through any `AssetSource` and
+  writes the box into the rows with `resolve`. The box is never written to the
+  file. A missing, malformed or unchosen asset is a `PLACEHOLDER_HALF_EXTENT`
+  cube about the origin and a `MeshProblem` naming the asset, never a panic; a
+  flat model is given `MIN_HALF_EXTENT` across its plane. `Mesh::standing_on`
+  puts a mesh's foot on a point, and `is_mesh_asset` says which listed keys a
+  mesh can be made of.
 
 - **The editor places meshes from the asset browser.** Dragging a mesh asset's
   row into the viewport spawns a `Mesh` of it standing on the point the release
@@ -809,14 +823,40 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   where it stood rather than at the end, and the `scene.ron` saved is the one
   before it.
 
-- **The editor keeps every rotation a rotation.** A property write that leaves a
-  `Rotation` further than `ROTATION_TOLERANCE` from unit — one of a quaternion's
-  four numbers pasted alone — is put back and refused with
-  `EditError::Rotation`, naming the entity, system and field on the status line,
-  rather than saved for the next load to refuse. `Document::problems` (the
-  save's report) also names, by entity and field, any rotation off unit in a
-  component the scene would save (`Document::rotation_problems`), in every
-  component that carries one, not only meshes.
+- **One validation rule per component, held on load, at each edit and at the
+  save.** `crcbl::registry::Validate` (a bound on `Registry::register`, its one
+  method `validate` provided as `Ok`) is a component's rule over its own values,
+  returning a `FieldError` (`field`, its dotted path, and `message`). The
+  registry runs it, after checking every `Rotation` the component holds (found
+  by type through its reflected fields), at three doors through one function:
+  every row a registered codec reads, from a chunk file or one row's text, so a
+  refusal is `ScnError::Parse` with the file, line and column;
+  `Registry::validate(world, system, entity)`, which a tool runs after a
+  property write; and `Registry::problems`, which now reads every listed
+  registered chunk back through its codec before the games' scene checks, so
+  what it reports is exactly what the next load refuses. `Body`'s rule is
+  `Body::check` (`BodyError::field` names the field), `Mesh`'s is `check_asset`,
+  and the editor's `Block` refuses a half extent that is not a finite number of
+  zero or more, which a box collider would panic on. Whole-scene rules stay
+  `Registry::check`, reported at the save and never per edit. The editor runs
+  the rule after every `SetProperty` or `Batch` it applies: a write that leaves
+  a component failing — a mass of zero, one of a quaternion's four numbers
+  pasted alone — puts the whole command back and is refused with
+  `EditError::Invalid`, naming the entity, system and field on the status line,
+  and the picking collider is rebuilt only once the command passes.
+  `crcbl_scene::scn::chunk_ruled::<T, R>` is the codec with a `RowRule` run on
+  each row as it is read; `chunk_of` is the one with none.
+
+- **The inspector's add list is grouped by game.** `Registry::group(label, f)`
+  names the systems registered inside `f` with `label`, which
+  `Registry::group_of` answers; breakout, puppet and towers register theirs in
+  their own group, the editor's block in `greybox`, and `scene_physics` and
+  `scene_mesh` in `ENGINE_GROUP`. `Document::attachable_groups` heads the
+  systems an entity could join with "In this scene" (`IN_SCENE`) for the
+  manifest's, then each group by label, then "Other" (`UNGROUPED`), and the
+  inspector draws one line per group, so another game's systems are never
+  offered unremarked on a scene. `Document::attachable` is the same list
+  flattened, in that order.
 
 - **`crcbl::scene::scn::Scene::list_system` and `unlist_system`** add a system
   to the end of a scene's manifest, so the next save writes its chunk, and take

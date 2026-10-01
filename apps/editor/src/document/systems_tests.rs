@@ -6,6 +6,8 @@ use super::*;
 
 use crcbl::scene_mesh::MESHES;
 
+use super::systems::IN_SCENE;
+
 use crate::scene::{BLOCKS, GREYBOX};
 
 /// The meshes chunk's key, which [`two_systems`] does not hold until a mesh
@@ -148,19 +150,71 @@ fn attach_and_detach_undo_and_redo_against_the_saved_text() {
 }
 
 /// `first`, then every system the vocabulary registers that [`two_systems`]'
-/// manifest does not list, in name order: what an entity holding every listed
-/// system but `first` could be attached to.
+/// manifest does not list, by group label and then by name, the ungrouped
+/// last: what an entity holding every listed system but `first` could be
+/// attached to.
 fn unlisted_after(first: &[&str]) -> Vec<String> {
     let vocabulary = crate::scene::vocabulary();
-    let unlisted = vocabulary
+    let mut unlisted: Vec<&str> = vocabulary
         .systems()
-        .filter(|system| ![BLOCKS, SUN].contains(system));
+        .filter(|system| ![BLOCKS, SUN].contains(system))
+        .collect();
+    unlisted.sort_by_key(|system| {
+        let group = vocabulary.group_of(system);
+        (group.is_none(), group, *system)
+    });
     first
         .iter()
         .copied()
         .chain(unlisted)
         .map(str::to_owned)
         .collect()
+}
+
+/// **The systems an entity could join are grouped by the game that
+/// registered them, the scene's own first**: a block in the two-system scene
+/// is offered the sun under "In this scene", then each game's systems under
+/// its label in label order, and no heading whose systems it holds already.
+#[test]
+fn attachable_systems_are_grouped_by_game_with_the_scenes_first() {
+    let mut document = two_systems();
+    let groups: Vec<(String, Vec<String>)> = document
+        .attachable_groups(BLOCK)
+        .into_iter()
+        .map(|group| (group.label, group.systems))
+        .collect();
+    let expected: Vec<(String, Vec<String>)> = [
+        (IN_SCENE, &[SUN][..]),
+        ("breakout", &["bricks"]),
+        ("engine", &["bodies", MESHES]),
+        ("puppet", &["spawn", "surfaces"]),
+        ("towers", &["plots", "waypoints"]),
+    ]
+    .into_iter()
+    .map(|(label, systems)| {
+        (
+            label.to_owned(),
+            systems.iter().map(|system| (*system).to_owned()).collect(),
+        )
+    })
+    .collect();
+    assert_eq!(groups, expected, "the greybox block's own group is held");
+
+    let flat: Vec<String> = expected
+        .into_iter()
+        .flat_map(|(_, systems)| systems)
+        .collect();
+    assert_eq!(document.attachable(BLOCK), flat);
+    let both: Vec<String> = document
+        .attachable_groups(BOTH)
+        .into_iter()
+        .map(|group| group.label)
+        .collect();
+    assert_eq!(
+        both,
+        ["breakout", "engine", "puppet", "towers"],
+        "a heading with nothing left to offer is drawn",
+    );
 }
 
 /// **Attach offers every registered system, and attaching to one the manifest

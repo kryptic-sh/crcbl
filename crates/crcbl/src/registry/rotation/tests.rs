@@ -104,3 +104,55 @@ fn the_leaves_are_x_y_z_w() {
     let names: Vec<&str> = rotation.fields().iter().map(|field| field.name).collect();
     assert_eq!(names, Rotation::LEAVES);
 }
+
+/// A component carrying rotations at the top, nested, and in a list.
+#[derive(Default, Reflect)]
+#[reflect(crate = "crcbl_reflect")]
+struct Rig {
+    rotation: Rotation,
+    arm: Arm,
+    joints: [Rotation; 2],
+}
+
+#[derive(Default, Reflect)]
+#[reflect(crate = "crcbl_reflect")]
+struct Arm {
+    length: f64,
+    rotation: Rotation,
+}
+
+/// **The walk finds a rotation off unit wherever a component holds it**, by
+/// its path, the first in field order first — and nothing in a component
+/// whose rotations are all unit.
+#[test]
+fn the_walk_finds_every_rotation_off_unit_by_its_path() {
+    use crcbl_reflect::{Value, set_path};
+
+    let mut rig = Rig::default();
+    assert_eq!(fault_in(&rig), None);
+    for path in ["rotation.w", "arm.rotation.x", "joints.1.y"] {
+        set_path(&mut rig, path, &Value::Float(2.0)).expect("a leaf");
+    }
+    for (fixed, field) in [
+        ("rotation.w", "rotation"),
+        ("arm.rotation.x", "arm.rotation"),
+        ("joints.1.y", "joints.1"),
+    ] {
+        let fault = fault_in(&rig).expect("a rotation off unit");
+        assert_eq!(fault.field, field);
+        set_path(
+            &mut rig,
+            fixed,
+            &Value::Float(f64::from(u8::from(fixed.ends_with('w')))),
+        )
+        .expect("a leaf");
+    }
+    assert_eq!(fault_in(&rig), None, "every rotation is unit again");
+    set_path(&mut rig, "arm.rotation.x", &Value::Float(2.0)).expect("a leaf");
+    assert!(
+        fault_in(&rig.arm)
+            .expect("off unit")
+            .message
+            .contains(&format!("length {}", 5.0_f64.sqrt())),
+    );
+}

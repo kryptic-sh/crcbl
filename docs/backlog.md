@@ -11764,14 +11764,22 @@ says what that cleared and what it did not. The allow-list entry in
   empty manifest entry saves an empty chunk and loads as nothing, unlisting is
   an explicit `UnlistSystem`, and a detach whose inverse was sometimes a batch
   would be two shapes. What follows, not bugs:
-  - **Every game's systems are offered.** The shipped vocabulary registers
-    breakout's, puppet's and towers' components beside the greybox ones, so the
-    add buttons list them all, and attaching one lists that system. A system a
-    game keys its `Registry::check` and module by brings both along: towers'
-    `waypoints` puts its check into `Document::problems` and its module into
-    play, and towers' loader refuses a scene without `plots`, so play then
-    reports `Unplayable`. An undo takes the listing back out. Grouping or hiding
-    other games' systems in the inspector is open if the list gets in the way.
+  - **Every game's systems are offered, grouped by game** (grouping decided and
+    built 2026-10-02). The shipped vocabulary registers breakout's, puppet's and
+    towers' components beside the greybox and engine ones; the add list heads
+    the manifest's systems "In this scene" and the rest by their
+    `Registry::group` label, one line per group. Attaching one still lists that
+    system, and a system a game keys its `Registry::check` and module by brings
+    both along: towers' `waypoints` puts its check into `Document::problems` and
+    its module into play, and towers' loader refuses a scene without `plots`, so
+    play then reports `Unplayable`. An undo takes the listing back out. **Not
+    built: hiding or collapsing another game's group.** Grouping answers
+    "offered unremarked"; a collapsing header per group, closed for games the
+    scene does not list, is the next step if the list grows long — the
+    `Ui::collapsing` widget the inspector already uses would do, and the panel
+    tests that read `Panels::add_buttons` would need to open it first. Not
+    looked at on a device: the grouped list is held by headless layout tests
+    only.
   - **A save does not delete a chunk file the manifest stopped listing.** A
     listing saved and then undone and saved again leaves `sys/<system>.ron` on
     disk beside a `scene.ron` that no longer names it; `Scene::load` reads only
@@ -11948,21 +11956,53 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     a game is the field, its `Placement` turning, and the game's own loader
     honouring it — in that order, or not at all.
   - **Decided 2026-10-02: a property write that leaves a rotation off unit is
-    refused, not renormalised** (`document::rotations`): `Document::apply` puts
-    the write back and returns `EditError::Rotation` naming the entity, system
-    and field, which the status line shows. The one path that writes a single
-    quaternion leaf is a field paste (`Document::paste_field`, reachable only
-    through the API — the inspector's rotation row names no leaf for the
-    clipboard keys); renormalising it would save numbers nobody wrote, which is
-    `Rotation`'s own reason for refusing a file's value. Declined: renormalising
-    in `paste_field`. `Document::problems` also reports, by entity and field,
-    any rotation off unit in a component the scene would save — found by type
-    through every component's reflected fields, so a game's component carrying
-    one is covered — for a value written through `Document::component` without a
-    command. A mesh's such rotation is reported twice: there and by the meshes
-    chunk check (file line and column). The general answer — a validation hook
-    on `Registry::register` that `SetProperty` runs — is still open for `Body`'s
-    mass, below; the rotation check is the editor's, not the registry's.
+    refused, not renormalised.** Since the validation hook landed the same day
+    (_One validation rule per component_, below) this is the registry's check of
+    every `Rotation` a registered component carries, found by type through its
+    reflected fields: `Document::apply` puts the write back and returns
+    `EditError::Invalid` naming the entity, system and field `rotation`. The one
+    path that writes a single quaternion leaf is a field paste
+    (`Document::paste_field`, reachable only through the API — the inspector's
+    rotation row names no leaf for the clipboard keys); renormalising it would
+    save numbers nobody wrote, which is `Rotation`'s own reason for refusing a
+    file's value. Declined: renormalising in `paste_field`. A rotation written
+    through `Document::component` without a command is reported once by
+    `Document::problems`, by file, line and column.
+- **One validation rule per component (decided and built 2026-10-02): what it
+  leaves.** `crcbl::registry::Validate` is run on load (the codec), at each
+  editor edit (`Registry::validate` from `Document::apply`) and at the save
+  (`Registry::problems` reading the chunks back); `08-editor.md`'s _Editor
+  follow-ups, 2026-10-02_ has the design. Each item below was checked against
+  the tree the day it landed:
+  - **Towers' and puppet's per-row rules are still their loaders'.** Towers'
+    `Map::load` refuses a waypoint or plot off the ground (`OffTheGround`) and a
+    plot label too long (`LabelTooLong`) — rules about one row — but runs them
+    as the scene check, at the save, with the whole-scene ones; their `Validate`
+    impls are empty. Moving them onto `Waypoint`'s and `Plot`'s `Validate` would
+    refuse them at the edit and on load with the line; it changes towers'
+    `MapError` reporting, so it is the game's slice. Puppet's `Map::load`
+    refuses nothing per row (read, not run).
+  - **A negative half extent on breakout's `Brick` or puppet's `Surface` would
+    trip `BoxCollider::new`'s debug assertion in the editor's picking
+    collider**, as it did for the editor's `Block` until `Block`'s rule refused
+    it. Observed for `Block` (a test panicked in
+    `crates/crcbl-phys/src/collider.rs`); for `Brick` and `Surface` it is read
+    from their placements, not run. The widgets clamp at their `min`, so a field
+    paste is the path. Either a rule on each, or `sync_colliders` refusing a
+    degenerate box generically, would close it.
+  - **A component already failing its rule refuses every write that leaves it
+    failing**, a write to another field included, until a write puts the failing
+    field right — the check is the component's, not the write's. Only a value
+    written past the edit check (through `Document::component`) can be there;
+    two such fields at once can only be fixed together, by a batch or in the
+    file. Not a bug; the alternative, judging only the written field, needs a
+    rule that reports every failing field.
+  - **Undo and redo are not checked**: they replay states the log held, each of
+    which passed when it was made.
+  - **Not measured:** `Registry::problems` now reads every listed chunk back
+    through its codec on each call, beside the scene save it already made; the
+    cost on a large scene is unknown.
+
 - **Multi-select transforms**: not MVP by the plan, and not reachable yet — the
   document holds one selection (`Document::selected`), the outliner's Ctrl and
   Shift clicks select rows of which the document takes the first, and every
@@ -12012,9 +12052,10 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     a turned mesh's drawn parts — the instances test turns a block; the mesh's
     part transform is `Mat4::from_rotation_translation` over the same rotation,
     held only by reading.
-  - **The asset key is free text in the inspector.** A typed key is checked when
-    the scene is saved (the meshes check) and re-measured at once, but there is
-    no picker; one would be the browser opened as a chooser.
+  - **The asset key is free text in the inspector.** A typed key is refused at
+    the edit when `check_asset` refuses it (`Mesh`'s `Validate` rule) and
+    re-measured at once, but there is no picker; one would be the browser opened
+    as a chooser.
   - **Decided and built 2026-10-01: the asset root defaults to the game's root**
     — `document::asset_root`, the nearest directory above the scene holding a
     `Cargo.toml` (what `crcbl new` writes and every sample has), or the scene's
@@ -12080,13 +12121,6 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     - **Gravity and the solver settings are fixed** (Earth gravity down `-Y`,
       `ContactSettings::DEFAULT`). Per-scene settings belong in `env.ron` or a
       settings component, when a scene wants other ones.
-    - **An invalid value set in the inspector is caught at save, not at the
-      edit.** `#[reflect(min, max)]` is advisory, so a panel can set a mass of
-      zero; the bodies check reports it on the status line when the scene is
-      saved (`Document::problems`) and play refuses it, but the save still
-      writes it, and a scene saved so does not reopen until the file is fixed.
-      Refusing at the edit needs a validation hook on `Registry::register` that
-      `SetProperty` runs.
     - **Not tested:** a module despawning an entity that has a body (the
       `Simulation`'s sweep takes the body out; no module despawns one), and a
       body on a placing component whose centre is offset from `position` in the

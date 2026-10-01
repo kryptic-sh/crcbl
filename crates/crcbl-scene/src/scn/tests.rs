@@ -617,6 +617,60 @@ fn a_row_that_is_not_the_component_is_refused_and_attaches_nothing() {
     assert!(system.get(entity).is_none());
 }
 
+/// A rule refusing a mark with an empty label.
+struct Labelled;
+
+impl RowRule<Mark> for Labelled {
+    fn check(row: &Mark) -> Result<(), String> {
+        if row.label.is_empty() {
+            return Err("a mark's `label` may not be empty".to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// **A ruled codec refuses a row its rule refuses, at the row's place in the
+/// file and from one row's text alike**, attaching nothing; a row the rule
+/// takes reads as it would through [`chunk_of`].
+#[test]
+fn a_ruled_codec_refuses_a_row_where_it_is_written() {
+    let codecs = vec![chunk_ruled::<Mark, Labelled>("marks")];
+    let read = |marks: &str| {
+        let mut world = world_with_marks();
+        Scene::load(
+            &source(HEADER, ENV, marks),
+            Path::new("one.scn"),
+            &codecs,
+            &mut world,
+        )
+        .map(drop)
+    };
+    read(MARKS).expect("a labelled mark is taken");
+    let error = read(&MARKS.replace("\"first\"", "\"\"")).expect_err("an empty label");
+    let ScnError::Parse {
+        key, line, message, ..
+    } = &error
+    else {
+        panic!("{error}");
+    };
+    assert_eq!(key, "one.scn/sys/marks.ron");
+    assert!(*line > 1, "the position is the row's, not the file's start");
+    assert!(message.contains("`label`"), "{message}");
+
+    let mut world = world_with_marks();
+    let entity = world.spawn();
+    let error = codecs[0]
+        .attach_row(&mut world, entity, "(position:(0.0,0.0,0.0),label:\"\")")
+        .expect_err("an empty label in one row's text");
+    assert!(
+        matches!(&error, ScnError::Parse { key, message, .. }
+            if key == "marks" && message.contains("`label`")),
+        "{error}",
+    );
+    let system = world.system_mut::<System<Mark>>().expect("registered");
+    assert!(system.get(entity).is_none());
+}
+
 /// A second system's component, so a scene can hold one entity in two
 /// systems of two different types.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

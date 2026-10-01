@@ -153,3 +153,50 @@ fn a_field_in_a_section_belongs_to_that_sections_system() {
     };
     assert_eq!(system, SUN);
 }
+
+/// **The add list heads each group of systems with its label, the scene's
+/// own first**: one heading per group the document offers, in its order, each
+/// with its own buttons on its line or the lines after, and every one below
+/// the group before it.
+#[test]
+fn the_add_list_heads_each_group_with_the_scenes_systems_first() {
+    let mut page = Page::over(two_systems());
+    page.document.select(Some(BLOCK));
+    page.idle();
+    let groups = page.document.attachable_groups(BLOCK);
+    let headings = page.panels.add_headings();
+    let labels: Vec<&str> = headings.iter().map(|(label, _)| label.as_str()).collect();
+    let offered: Vec<&str> = groups.iter().map(|group| group.label.as_str()).collect();
+    assert_eq!(labels, offered);
+    assert_eq!(labels[0], crate::document::IN_SCENE);
+    assert!(labels.contains(&"towers"), "{labels:?}");
+
+    let adds = page.panels.add_buttons();
+    let rect = |key| page.panels.ui().rect(key).expect("laid out last frame");
+    let mut drawn = adds.iter();
+    let mut above = f32::MIN;
+    for ((label, heading), group) in headings.iter().zip(&groups) {
+        let (top, bottom) = rect(*heading);
+        assert!(
+            top.y >= above,
+            "`{label}` is drawn over the group before it"
+        );
+        let mut lowest = bottom.y;
+        for system in &group.systems {
+            let (named, button) = drawn.next().expect("a button per offered system");
+            assert_eq!(named, system);
+            let (at, below) = rect(*button);
+            assert!(
+                at.y >= above,
+                "`{system}` is drawn in the group before `{label}`"
+            );
+            assert!(
+                at.x >= bottom.x || at.y >= bottom.y,
+                "`{system}` is drawn before `{label}` rather than after it",
+            );
+            lowest = lowest.max(below.y);
+        }
+        above = lowest;
+    }
+    assert!(drawn.next().is_none(), "a button under no heading");
+}

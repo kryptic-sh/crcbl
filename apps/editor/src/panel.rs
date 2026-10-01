@@ -213,6 +213,10 @@ const EDITOR_CSS: &str = "
 .section-title { flex-grow: 1; min-width: 0; }
 
 .inspector-add .section-title { padding: 2px 4px; color: #9aa3b2; }
+
+.add-group { flex-direction: row; flex-wrap: wrap; align-items: center; min-width: 0; }
+
+.add-group-label { padding: 2px 4px; color: #7a8190; }
 ";
 
 /// Where a system's row sits in an [`OutlinerId`], above every entity's.
@@ -294,6 +298,17 @@ pub struct PanelFrame {
     pub spawn: Option<String>,
 }
 
+/// The inspector's sections, add buttons and add-list headings, as a frame
+/// built them.
+#[derive(Debug, Default)]
+struct Inspected {
+    sections: Vec<inspector::Section>,
+    /// Each add button and the system it attaches, in the order drawn.
+    adds: Vec<(String, NodeKey)>,
+    /// Each add-list heading and the label it reads, in the order drawn.
+    headings: Vec<(String, NodeKey)>,
+}
+
 /// The editor's panels, and everything they keep between frames.
 #[derive(Debug)]
 pub struct Panels {
@@ -328,8 +343,8 @@ pub struct Panels {
     outliner_key: Option<NodeKey>,
     /// The inspector block, as the last frame laid it out.
     props_key: Option<NodeKey>,
-    /// The inspector's sections and add buttons, as the last frame built them.
-    inspector: (Vec<inspector::Section>, Vec<(String, NodeKey)>),
+    /// The inspector, as the last frame built it.
+    inspector: Inspected,
     /// The field a held pointer is dragging — its system and the paths it
     /// writes, comma-joined — and the gesture its edits share; see
     /// [`Panels::apply_edits`].
@@ -392,7 +407,7 @@ impl Panels {
             viewport: (Vec2::ZERO, Vec2::ZERO),
             outliner_key: None,
             props_key: None,
-            inspector: (Vec::new(), Vec::new()),
+            inspector: Inspected::default(),
             field_gesture: None,
             status: (READY.to_owned(), Tone::Info),
             status_key: None,
@@ -619,7 +634,7 @@ impl Panels {
     #[must_use]
     pub fn section_systems(&self) -> Vec<String> {
         self.inspector
-            .0
+            .sections
             .iter()
             .map(|section| section.system.clone())
             .collect()
@@ -629,7 +644,10 @@ impl Panels {
     /// as the last frame laid it out, or [`None`] past the last section.
     #[must_use]
     pub fn section_fields(&self, index: usize) -> Option<NodeKey> {
-        self.inspector.0.get(index).map(|section| section.fields)
+        self.inspector
+            .sections
+            .get(index)
+            .map(|section| section.fields)
     }
 
     /// The remove button of the section the last frame drew for `system`, if
@@ -637,7 +655,7 @@ impl Panels {
     #[must_use]
     pub fn remove_button(&self, system: &str) -> Option<NodeKey> {
         self.inspector
-            .0
+            .sections
             .iter()
             .find(|section| section.system == system)
             .and_then(|section| section.remove)
@@ -647,7 +665,16 @@ impl Panels {
     /// as the last frame laid them out.
     #[must_use]
     pub fn add_buttons(&self) -> Vec<(String, NodeKey)> {
-        self.inspector.1.clone()
+        self.inspector.adds.clone()
+    }
+
+    /// The add list's headings, each with the label it reads, as the last
+    /// frame laid them out — one per
+    /// [`Document::attachable_groups`](crate::document::Document::attachable_groups)
+    /// group, each above its buttons.
+    #[must_use]
+    pub fn add_headings(&self) -> Vec<(String, NodeKey)> {
+        self.inspector.headings.clone()
     }
 
     /// Which rows the outliner shows as selected.
@@ -849,12 +876,17 @@ impl Panels {
             props,
             sections,
             adds,
+            headings,
             edits,
             field,
             change,
         } = built;
         self.props_key = props;
-        self.inspector = (sections, adds);
+        self.inspector = Inspected {
+            sections,
+            adds,
+            headings,
+        };
         self.field = selected
             .zip(field)
             .map(|(entity, (system, path))| FieldTarget {

@@ -99,5 +99,8 @@ pub use lod_resolve::{HandLodLink, LodOrigin, LodResolveError, MeshLod, resolve_
 pub use meshlet::{ClusterBounds, Meshlet, MeshletBuild, MeshletError, build_meshlets};
 #[cfg(feature = "render")]
 pub use quad_mesh::{Corner, Facing, QuadMesh};
-pub use scn::{Env, EnvCamera, IdMap, Scene, SceneEntityId, ScnError, SystemChunk, chunk_of};
+pub use scn::{
+    Env, EnvCamera, IdMap, RowRule, Scene, SceneEntityId, ScnError, SystemChunk, chunk_of,
+    chunk_ruled,
+};
 pub use simplify::{Simplified, SimplifyError, simplify, simplify_with_locked_edges};

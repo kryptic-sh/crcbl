@@ -12,8 +12,11 @@
 //! while the entity has more than one: detaching the last is refused
 //! ([`EditError::NoComponent`](crate::document::EditError::NoComponent)), and
 //! Delete is how an entity goes. Under the sections, one **add** button per
-//! system the entity could join ([`Document::attachable`]) attaches that
-//! system's component at its type's `Default`. Neither is carried out here:
+//! system the entity could join attaches that system's component at its
+//! type's `Default` — under a heading per group
+//! ([`Document::attachable_groups`]): the scene's own systems first, then each
+//! game's, so another game's system is never offered unremarked. Neither is
+//! carried out here:
 //! the pane reports the [`Change`] and [`super::Panels::frame`] applies it
 //! through the document, so a refusal reaches the status line like every
 //! other.
@@ -58,8 +61,10 @@ pub(super) struct Built {
     pub(super) props: Option<NodeKey>,
     /// Each section, in the order drawn.
     pub(super) sections: Vec<Section>,
-    /// Each add button and the system it attaches.
+    /// Each add button and the system it attaches, in the order drawn.
     pub(super) adds: Vec<(String, NodeKey)>,
+    /// Each add-list heading, with the label it reads, in the order drawn.
+    pub(super) headings: Vec<(String, NodeKey)>,
     /// The frame's field edits, each with the system of its section.
     pub(super) edits: Vec<(String, FieldEdit)>,
     /// The leaf a clipboard key means — its system and path — if there is one;
@@ -97,7 +102,7 @@ pub(super) fn build(
             ..InspectorOptions::default()
         };
         let removable = systems.len() > 1;
-        let attachable = document.attachable(id);
+        let attachable = document.attachable_groups(id);
         // A focused leaf anywhere outranks a hovered one anywhere: the
         // keyboard's own target is the one a key means.
         let mut focused = None;
@@ -147,13 +152,21 @@ pub(super) fn build(
             if !attachable.is_empty() {
                 ui.block(".inspector-add", &[], |ui| {
                     ui.span(".section-title", "Add a component", &[]);
-                    for system in &attachable {
-                        let text = format!("+ {system}");
-                        let button = ui.button(".section-add", text.as_str());
-                        if button.clicked {
-                            built.change = Some(Change::Attach(system.clone()));
-                        }
-                        built.adds.push((system.clone(), button.key));
+                    // One line per group, its label and then its buttons,
+                    // wrapping when they do not fit across the pane.
+                    for group in &attachable {
+                        ui.block_keyed(&group.label, ".add-group", &[], |ui| {
+                            let heading = ui.span(".add-group-label", group.label.as_str(), &[]);
+                            built.headings.push((group.label.clone(), heading.key));
+                            for system in &group.systems {
+                                let text = format!("+ {system}");
+                                let button = ui.button(".section-add", text.as_str());
+                                if button.clicked {
+                                    built.change = Some(Change::Attach(system.clone()));
+                                }
+                                built.adds.push((system.clone(), button.key));
+                            }
+                        });
                     }
                 });
             }

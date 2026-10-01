@@ -36,6 +36,8 @@ impl Placement for Block {
     }
 }
 
+impl Validate for Block {}
+
 /// A second vocabulary, and one that is **not** a thing in space — the
 /// `apps/puppet` `Sun` shape, so the tests below are about two component
 /// types rather than one registered twice.
@@ -56,6 +58,8 @@ impl Placement for Beacon {
         None
     }
 }
+
+impl Validate for Beacon {}
 
 /// Both components, under the names the scene below spells.
 fn registry() -> Registry {
@@ -647,6 +651,8 @@ impl Placement for Crate {
     }
 }
 
+impl Validate for Crate {}
+
 /// Every component here, `crates` included.
 fn three_registry() -> Registry {
     let mut registry = registry();
@@ -851,4 +857,159 @@ fn an_unturned_box_reaches_exactly_its_half_extents() {
     let half = DVec3::new(0.1, 0.2, 0.30000000000000004);
     let unturned = OrientedBox::axis_aligned(DVec3::new(0.7, -1.3, 2.9), half);
     assert_eq!(unturned.reach(), half);
+}
+
+/// A component with a rule of its own, beside a rotation the registry checks
+/// for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(crate = "crcbl_reflect")]
+struct Dial {
+    reading: f64,
+    #[serde(default)]
+    rotation: Rotation,
+}
+
+impl ComponentHash for Dial {
+    fn hash_component(&self, hasher: &mut dyn Hasher) {
+        hasher.write(&self.reading.to_bits().to_le_bytes());
+    }
+}
+
+impl Placement for Dial {
+    fn placement(&self) -> Option<OrientedBox> {
+        None
+    }
+}
+
+impl Validate for Dial {
+    fn validate(&self) -> Result<(), FieldError> {
+        if self.reading < 0.0 {
+            return Err(FieldError::new(
+                "reading",
+                "a dial's `reading` may not be below zero",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A one-system scene of dials, as text: `rows` inside its chunk.
+fn dial_source(rows: &str) -> MemorySource {
+    let mut source = MemorySource::new();
+    for (key, text) in [
+        (
+            "scene.ron".to_owned(),
+            "(format: 0, name: \"dials\", systems: [\"dials\"])".to_owned(),
+        ),
+        (
+            "env.ron".to_owned(),
+            "(camera: (position: (0.0, 0.0, 8.0), look_at: (0.0, 0.0, 0.0)), \
+             ambient: (0.1, 0.1, 0.1))"
+                .to_owned(),
+        ),
+        (
+            "sys/dials.ron".to_owned(),
+            format!("(system: \"dials\", entities: [{rows}])"),
+        ),
+    ] {
+        source
+            .insert(std::path::Path::new(&key), text.into_bytes())
+            .expect("a scene key is a legal asset key");
+    }
+    source
+}
+
+/// **A component's rule is held at every door, and is one rule**: a file's
+/// row and one row's text are refused by it with the field, an edit left
+/// standing in the world is refused by [`Registry::validate`], the same value
+/// saved is a problem by file and line — and a rotation off unit is refused
+/// by the edit check too, for a component that states nothing about it.
+#[test]
+fn one_rule_is_held_on_load_at_the_edit_and_at_the_save() {
+    let mut registry = Registry::new();
+    registry.register::<Dial>("dials");
+    let systems = ["dials".to_owned()];
+    let open = |source: &MemorySource| {
+        let mut world = World::new();
+        registry.register_systems(&mut world);
+        Scene::load(source, Path::new(""), &registry.codecs(), &mut world)
+            .map(|(scene, ids)| (world, scene, ids))
+    };
+
+    let Err(refused) = open(&dial_source("(0, (reading: -1.0))")) else {
+        panic!("a reading below zero loaded");
+    };
+    assert!(
+        matches!(&refused, ScnError::Parse { key, message, .. }
+            if key == "sys/dials.ron" && message.contains("`reading`")),
+        "{refused}"
+    );
+
+    let (mut world, scene, ids) = open(&dial_source("(0, (reading: 2.0))")).expect("a dial");
+    let dial = ids.entity(SceneEntityId(0)).expect("the file's dial");
+    assert_eq!(registry.validate(&mut world, "dials", dial), Ok(()));
+    let codec = registry.codec("dials").expect("registered");
+    let error = codec
+        .attach_row(&mut world, dial, "(reading: -3.0)")
+        .expect_err("a row's text is held to the rule too");
+    assert!(error.to_string().contains("`reading`"), "{error}");
+
+    let component = registry
+        .component(&mut world, "dials", dial)
+        .expect("a dial");
+    crcbl_reflect::set_path(component, "reading", &Value::Float(-1.0)).expect("a leaf");
+    let error = registry
+        .validate(&mut world, "dials", dial)
+        .expect_err("the edit left a reading below zero");
+    assert_eq!(error.field, "reading");
+
+    let files = scene
+        .save(&mut world, &ids, &registry.codecs())
+        .expect("a save writes what stands");
+    let mut saved = MemorySource::new();
+    for (key, text) in files {
+        saved
+            .insert(std::path::Path::new(&key), text.into_bytes())
+            .expect("a scene key");
+    }
+    let problems = registry.problems(&systems, &saved, Path::new(""));
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].starts_with("`sys/dials.ron` line ") && problems[0].contains("`reading`"),
+        "{problems:?}"
+    );
+
+    let component = registry
+        .component(&mut world, "dials", dial)
+        .expect("a dial");
+    crcbl_reflect::set_path(component, "reading", &Value::Float(1.0)).expect("a leaf");
+    crcbl_reflect::set_path(component, "rotation.w", &Value::Float(0.5)).expect("a leaf");
+    let error = registry
+        .validate(&mut world, "dials", dial)
+        .expect_err("a rotation off unit");
+    assert_eq!(error.field, "rotation");
+    assert_eq!(
+        registry.validate(&mut world, "gauges", dial),
+        Ok(()),
+        "a system nobody registered holds no row to refuse",
+    );
+}
+
+/// **A group names the systems registered in it, an inner one its own**, and
+/// hands the outer one back when it ends; a system registered outside every
+/// group has none.
+#[test]
+fn a_group_names_the_systems_registered_inside_it() {
+    let mut registry = Registry::new();
+    registry.group("outer", |registry| {
+        registry.register::<Block>("blocks");
+        registry.group("inner", |registry| registry.register::<Beacon>("beacons"));
+        registry.register::<Dial>("dials");
+    });
+    registry.register::<Crate>("crates");
+    assert_eq!(registry.group_of("blocks"), Some("outer"));
+    assert_eq!(registry.group_of("beacons"), Some("inner"));
+    assert_eq!(registry.group_of("dials"), Some("outer"));
+    assert_eq!(registry.group_of("crates"), None);
+    assert_eq!(registry.group_of("bricks"), None);
 }

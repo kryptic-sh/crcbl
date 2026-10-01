@@ -10,8 +10,12 @@
 //! # Every registered system, listing it when it must
 //!
 //! [`attachable`](Document::attachable) offers every system the vocabulary
-//! registers that does not hold the entity: the manifest's first, in its
-//! order, then the rest in name order. A save writes the manifest's chunks and
+//! registers that does not hold the entity, in the groups
+//! [`attachable_groups`](Document::attachable_groups) heads them with: the
+//! manifest's first, in its order, then the rest by the game that registered
+//! them ([`Registry::group`](crcbl::registry::Registry::group)) — so towers'
+//! `waypoints` is offered on a breakout scene under "towers", not unremarked
+//! beside the scene's own. A save writes the manifest's chunks and
 //! no others, so a component attached in a system the manifest does not list
 //! would be dropped by the next one — attaching there is one
 //! [`EditCommand::Batch`] of the [`EditCommand::ListSystem`] that adds it at
@@ -33,10 +37,31 @@
 //! component — see that method for why the game chooses it rather than this
 //! tool.
 
+use std::collections::BTreeMap;
+
 use crcbl::scene::scn::{SceneEntityId, SystemChunk};
 
 use super::{Document, EditError, sync_colliders};
 use crate::command::EditCommand;
+
+/// The heading of the systems the scene's manifest lists, first in the add
+/// list.
+pub const IN_SCENE: &str = "In this scene";
+
+/// The heading of systems registered outside any
+/// [`Registry::group`](crcbl::registry::Registry::group), last in the add
+/// list.
+pub const UNGROUPED: &str = "Other";
+
+/// One heading of the add list, and the systems under it in the order they
+/// are offered — see [`Document::attachable_groups`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SystemGroup {
+    /// [`IN_SCENE`], a game's group label, or [`UNGROUPED`].
+    pub label: String,
+    /// The systems under it, never empty.
+    pub systems: Vec<String>,
+}
 
 impl Document {
     /// The systems holding `id`, in the order the scene's manifest lists them —
@@ -69,27 +94,59 @@ impl Document {
     }
 
     /// The systems `id` could be given a component in: every registered one
-    /// less those already holding it — the manifest's in its order, then the
-    /// rest in name order. See the module docs for what attaching to one the
-    /// manifest does not list does.
+    /// less those already holding it, in the order
+    /// [`attachable_groups`](Self::attachable_groups) offers them. See the
+    /// module docs for what attaching to one the manifest does not list does.
     #[must_use]
     pub fn attachable(&mut self, id: SceneEntityId) -> Vec<String> {
+        self.attachable_groups(id)
+            .into_iter()
+            .flat_map(|group| group.systems)
+            .collect()
+    }
+
+    /// [`attachable`](Self::attachable), under the headings the inspector's
+    /// add list draws: [`IN_SCENE`] for the manifest's systems, in its order;
+    /// then each game's group by its label, its systems in name order; then
+    /// [`UNGROUPED`]. A heading with nothing left to offer is left out.
+    #[must_use]
+    pub fn attachable_groups(&mut self, id: SceneEntityId) -> Vec<SystemGroup> {
         if self.ids.entity(id).is_none() {
             return Vec::new();
         }
         let held = self.systems_of(id);
+        let offered = |system: &str| !held.iter().any(|each| each == system);
         let listed = self.scene.systems();
-        let unlisted = self
-            .registry
-            .systems()
-            .filter(|system| !listed.iter().any(|each| each == system));
-        listed
-            .iter()
-            .map(String::as_str)
-            .chain(unlisted)
-            .filter(|system| !held.iter().any(|each| each == system))
-            .map(str::to_owned)
-            .collect()
+        let mut groups = vec![SystemGroup {
+            label: IN_SCENE.to_owned(),
+            systems: listed
+                .iter()
+                .filter(|system| offered(system))
+                .cloned()
+                .collect(),
+        }];
+        // `None` sorts first in a map, so the ungrouped are taken out and put
+        // last by hand.
+        let mut games: BTreeMap<Option<&str>, Vec<String>> = BTreeMap::new();
+        for system in self.registry.systems() {
+            if offered(system) && !listed.iter().any(|each| each == system) {
+                games
+                    .entry(self.registry.group_of(system))
+                    .or_default()
+                    .push(system.to_owned());
+            }
+        }
+        let ungrouped = games.remove(&None);
+        groups.extend(games.into_iter().map(|(label, systems)| SystemGroup {
+            label: label.unwrap_or(UNGROUPED).to_owned(),
+            systems,
+        }));
+        groups.extend(ungrouped.map(|systems| SystemGroup {
+            label: UNGROUPED.to_owned(),
+            systems,
+        }));
+        groups.retain(|group| !group.systems.is_empty());
+        groups
     }
 
     /// Gives `id` a component in `system`, at the component type's `Default`,

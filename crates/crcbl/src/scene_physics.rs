@@ -4,9 +4,10 @@
 //! ```text
 //!     a vocabulary ──▶ scene_physics::register(&mut registry)
 //!                         │
-//!                         ├── Body under `bodies`   a row of sys/bodies.ron
-//!                         ├── a check               a body the files cannot
-//!                         │                         reload, reported on save
+//!                         ├── Body under `bodies`   a row of sys/bodies.ron,
+//!                         │                         its values held to
+//!                         │                         Body::check at load, at
+//!                         │                         each edit and at save
 //!                         └── the module            built per play
 //!
 //!     play ──▶ the factory loads the scene's files ──▶ every body placed? or
@@ -103,7 +104,8 @@ use crcbl_reflect::{Reflect, Value, get_path, set_path};
 use crcbl_scene::scn::{Scene, SceneEntityId};
 
 use crate::registry::{
-    OrientedBox, POSITION, Placement, ROTATION, Registry, Rotation, check_chunk,
+    ENGINE_GROUP, FieldError, OrientedBox, POSITION, Placement, ROTATION, Registry, Rotation,
+    Validate,
 };
 
 /// The scene system every [`Body`] is a row of: the manifest entry, the chunk
@@ -138,12 +140,13 @@ pub enum BodyKind {
 /// meets another's. Its shape is its entity's placement — see the
 /// [module docs](self).
 ///
-/// The values are refused on load when no simulation could take them
-/// ([`Body::check`]), naming the field: a scene with a body of negative mass
-/// does not open, rather than opening and failing when it plays.
+/// The values are refused when no simulation could take them
+/// ([`Body::check`], its [`Validate`] rule), naming the field: on load, so a
+/// scene with a body of negative mass does not open rather than opening and
+/// failing when it plays; and at the edit, by a tool that runs
+/// [`Registry::validate`], so a panel cannot set one.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl_reflect")]
-#[serde(try_from = "BodyRow")]
 pub struct Body {
     /// How it moves. A panel shows it and cannot switch it:
     /// `crcbl_reflect` describes an enum's active variant and has no way to
@@ -210,6 +213,15 @@ impl Body {
     }
 }
 
+/// **The one rule a body's values are held to**, wherever they come in: a
+/// file's row, a pasted one, and a property write — see [`Validate`].
+impl Validate for Body {
+    fn validate(&self) -> Result<(), FieldError> {
+        self.check()
+            .map_err(|error| FieldError::new(error.field(), error))
+    }
+}
+
 /// A [`Body`] value no simulation takes, naming the field.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BodyError {
@@ -219,6 +231,18 @@ pub enum BodyError {
     Friction(f64),
     /// The restitution is outside `0..=1`.
     Restitution(f64),
+}
+
+impl BodyError {
+    /// The field it is about, as a property write's path names it.
+    #[must_use]
+    pub const fn field(&self) -> &'static str {
+        match self {
+            Self::Mass(_) => "mass",
+            Self::Friction(_) => "friction",
+            Self::Restitution(_) => "restitution",
+        }
+    }
 }
 
 impl fmt::Display for BodyError {
@@ -242,33 +266,6 @@ impl fmt::Display for BodyError {
 
 impl std::error::Error for BodyError {}
 
-/// [`Body`] as a file spells it, before [`Body::check`]: what serde reads a
-/// row into, so a value no simulation takes is refused by the loader with the
-/// file's line and column.
-#[derive(Deserialize)]
-#[serde(rename = "Body")]
-struct BodyRow {
-    kind: BodyKind,
-    mass: f64,
-    friction: f64,
-    restitution: f64,
-}
-
-impl TryFrom<BodyRow> for Body {
-    type Error = BodyError;
-
-    fn try_from(row: BodyRow) -> Result<Self, BodyError> {
-        let body = Self {
-            kind: row.kind,
-            mass: row.mass,
-            friction: row.friction,
-            restitution: row.restitution,
-        };
-        body.check()?;
-        Ok(body)
-    }
-}
-
 impl ComponentHash for Body {
     fn hash_component(&self, hasher: &mut dyn std::hash::Hasher) {
         hasher.write_u8(match self.kind {
@@ -291,25 +288,17 @@ impl Placement for Body {
     }
 }
 
-/// Registers [`Body`] under [`BODIES`], the check a tool saving a scene runs
-/// over its bodies, and the module that simulates them while the scene plays.
+/// Registers [`Body`] under [`BODIES`], in [`ENGINE_GROUP`], and the module that
+/// simulates the bodies while the scene plays. A body's values are held to
+/// [`Body::check`] by the registration itself ([`Validate`]), so a tool saving
+/// a scene is told of one a panel set past its edit check by
+/// [`Registry::problems`].
 ///
 /// One call, so a game's vocabulary — or a tool's — takes physics on scene
 /// components whole.
 pub fn register(registry: &mut Registry) {
-    registry.register::<Body>(BODIES);
-    registry.check(BODIES, check_bodies);
+    registry.group(ENGINE_GROUP, |registry| registry.register::<Body>(BODIES));
     registry.module(BODIES, start);
-}
-
-/// Whether the bodies chunk under `dir` would load: a value a panel set that
-/// no simulation takes is reported where it was made, rather than as a scene
-/// that will not open next time.
-///
-/// The chunk alone, read through its own codec: a check is handed no
-/// vocabulary, and the rest of the scene is other games' business.
-fn check_bodies(source: &dyn AssetSource, dir: &Path) -> Result<(), String> {
-    check_chunk::<Body>(source, dir, BODIES)
 }
 
 /// The module that simulates the bodies of the scene whose files `source`

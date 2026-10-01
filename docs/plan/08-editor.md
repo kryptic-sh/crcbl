@@ -987,13 +987,13 @@ term and recorded, as above):
 **Editor follow-ups, 2026-10-02.**
 
 - **Attach offers every registered system**, the manifest's first in its order
-  and then the rest in name order. Attaching to one the manifest does not list
-  is one `EditCommand::Batch` of `ListSystem` (at the manifest's end) and
-  `Attach`, the shape a mesh drop already had (`Document::listing_first` builds
-  both), so one undo puts every file back byte for byte. **Decided: detaching a
-  system's last entity leaves it listed** — an empty entry saves an empty chunk
-  and loads as nothing, and unlisting is an explicit `UnlistSystem`, so a
-  detach's inverse keeps one shape.
+  and then the rest grouped by the game that registered them (below). Attaching
+  to one the manifest does not list is one `EditCommand::Batch` of `ListSystem`
+  (at the manifest's end) and `Attach`, the shape a mesh drop already had
+  (`Document::listing_first` builds both), so one undo puts every file back byte
+  for byte. **Decided: detaching a system's last entity leaves it listed** — an
+  empty entry saves an empty chunk and loads as nothing, and unlisting is an
+  explicit `UnlistSystem`, so a detach's inverse keeps one shape.
 - **The undo property test plays drops and the manifest's edits**: a mesh drop
   (listing `meshes` when the manifest lacks it), a `ListSystem` at a random
   place, an `UnlistSystem` of an empty listed system and an attach to an
@@ -1003,16 +1003,35 @@ term and recorded, as above):
   manifest's end, saving a reordered `scene.ron`: `ListSystem` now carries its
   place (`at`) and `Scene::list_system_at` inserts there. Putting the undo back
   at the end, and an unlisting whose inverse did nothing, each turned it red.
-- **Rotations stay rotations.** `Document::apply` refuses, and puts back, a
-  property write that leaves any component's `Rotation` off unit
-  (`EditError::Rotation`, by entity, system and field) — decided over
-  renormalising, which would save numbers nobody wrote; the only single-leaf
-  path is a field paste. `Document::problems` reports a rotation off unit that
-  reached the world without a command, in every component carrying one, found by
-  type through the reflected fields (`document::rotations`). Skipping the check
-  at the edit, matching only an exact path, leaving the report out of
-  `problems`, and a walk that stopped at the top struct or the first list
-  element each turned a test red.
+- **One validation rule per component, at load, at the edit and at the save**
+  (decided and built 2026-10-02). `crcbl::registry::Validate`, a bound on
+  `Registry::register` with a provided `Ok` (`impl Validate for T {}` states no
+  rule), is a component's rule over its own values, after the registry's own
+  check of every `Rotation` it carries. One function runs it at every door:
+  every row a registered codec reads (a file's, a pasted one, an undone
+  delete's), refused as `ScnError::Parse` with file, line and column through
+  `crcbl_scene::scn::chunk_ruled`; `Registry::validate`, which `Document::apply`
+  runs on every component a `SetProperty` or `Batch` wrote, putting the whole
+  command back and refusing it as `EditError::Invalid` by entity, system and
+  field; and `Registry::problems`, which reads every listed chunk back through
+  its codec, so the save reports exactly what the next load would refuse.
+  `Body`'s rule is `Body::check`, `Mesh`'s `check_asset`, and the editor's
+  `Block` refuses a half extent a box collider would panic on; the picking
+  collider is rebuilt only after a command passes. The rotation check that was
+  the editor's own (`document::rotations`, `EditError::Rotation`) is this rule
+  now, and the bodies' and meshes' `Registry::check`s are gone. **Whole-scene
+  rules stay `Registry::check`** — towers' path needs every waypoint — **and are
+  not run per edit**: authoring passes through layouts the game would refuse (a
+  corner placed before the leg it bends), so they are reported at the save.
+  Removing the codec's rule, the edit check, the rewind, the rows from
+  `problems`, the registry's rotation walk, or checking only a batch's first
+  write each turned a test red.
+- **The add list is grouped by game** (decided and built 2026-10-02).
+  `Registry::group(label, f)` names the systems `f` registers; each sample
+  registers in its own group, the engine's body and mesh in `ENGINE_GROUP`.
+  `Document::attachable_groups` heads the manifest's systems "In this scene",
+  then each game's group by label, and the inspector draws one line per group,
+  so towers' `waypoints` is offered on a breakout scene under "towers".
 
 **Decided 2026-10-01, for rotation** (taken for the long term and recorded, as
 above):

@@ -112,7 +112,7 @@ use crcbl::greybox::{GREYBOX_TILE_M, cube, grid_material, grid_page, platform, s
 use crcbl::math::{DVec3, Mat4, Vec3};
 use crcbl::phys::{BoxCollider, PhysicsWorld, Sphere};
 use crcbl::reflect::Reflect;
-use crcbl::registry::{OrientedBox, Placement, Registry};
+use crcbl::registry::{OrientedBox, Placement, Registry, Validate};
 use crcbl::render::scene::{Capacities, Geometry, InstanceDesc, MeshDesc, ProbeGrid, SceneDesc};
 use crcbl::render::{
     DirectionalLight, ForwardRenderer, InstanceHandle, InstancePoolError, MeshPoolError, SkinRange,
@@ -427,6 +427,9 @@ impl Placement for Surface {
     }
 }
 
+/// No rule of its own: [`Map::load`] refuses no surface its type can hold.
+impl Validate for Surface {}
+
 /// The side of the platform a new surface is: a step a person can see and
 /// then resize.
 const NEW_PLATFORM_SIDE: f64 = 1.0;
@@ -495,6 +498,9 @@ impl Placement for Spawn {
     }
 }
 
+/// No rule of its own: [`Map::load`] refuses no spawn its type can hold.
+impl Validate for Spawn {}
+
 /// The committed map's own spawn, facing the zero yaw — what a tool attaching a
 /// spawn to an entity starts it as, which is why `Registry::register` asks for
 /// one.
@@ -561,6 +567,9 @@ impl Placement for Sun {
     }
 }
 
+/// No rule of its own: [`Map::load`] refuses no sun its type can hold.
+impl Validate for Sun {}
+
 /// The sun the committed map is lit by, from the constants its row was written
 /// from — what a tool attaching a sun to an entity starts it as, which is why
 /// `Registry::register` asks for one.
@@ -581,12 +590,19 @@ impl Default for Sun {
 /// **The one place those three names are joined to their types.** [`Map::load`]
 /// uses it and so does any tool that opens this map, so the vocabulary the sample
 /// ships and the vocabulary an editor sees are the same list rather than two that
-/// agree today — `docs/plan/08-editor.md`'s component registry.
+/// agree today — `docs/plan/08-editor.md`'s component registry. Registered
+/// in this sample's [`Registry::group`], so a tool listing systems says whose
+/// they are.
 pub fn register_components(registry: &mut Registry) {
-    registry.register::<Surface>(SURFACES);
-    registry.register::<Spawn>(SPAWN_POINT);
-    registry.register::<Sun>(SUN);
+    registry.group(GROUP, |registry| {
+        registry.register::<Surface>(SURFACES);
+        registry.register::<Spawn>(SPAWN_POINT);
+        registry.register::<Sun>(SUN);
+    });
 }
+
+/// The [`Registry::group`] this sample's components are registered in.
+const GROUP: &str = "puppet";
 
 /// Why a directory is not one of puppet's maps.
 ///

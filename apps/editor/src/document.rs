@@ -39,7 +39,7 @@ use crcbl::ecs::{Entity, World};
 use crcbl::math::{DVec3, Vec3};
 use crcbl::phys::{ColliderComponent, PhysicsSystem, Ray, RigidBody, Transform};
 use crcbl::reflect::{PathError, Reflect, Value, get_path, set_path};
-use crcbl::registry::{OrientedBox, Registry};
+use crcbl::registry::{FieldError, OrientedBox, Registry};
 use crcbl::render::ViewRay;
 use crcbl::scene::scn::{EntityName, IdMap, NameError, Scene, SceneEntityId, ScnError};
 use crcbl::scene_mesh::{MeshLibrary, MeshProblem};
@@ -52,10 +52,11 @@ mod field;
 mod meshes;
 mod naming;
 mod play;
-mod rotations;
 mod systems;
+mod validation;
 
 pub use play::PlayState;
+pub use systems::{IN_SCENE, SystemGroup, UNGROUPED};
 
 /// A loaded scene and everything the editor knows about it.
 #[derive(Debug)]
@@ -162,20 +163,19 @@ pub enum EditError {
     /// A mesh was asked for of a key no mesh may name.
     Asset(crcbl::scene_mesh::MeshPathError),
 
-    /// A property write would leave a rotation of `entity`'s component in
-    /// `system` off unit — one of a quaternion's four leaves written alone.
+    /// A property write would leave `entity`'s component in `system` holding
+    /// a value its rule refuses — a body's mass of zero, one of a rotation's
+    /// four leaves written alone — which the next load would refuse.
     ///
-    /// Refused, and the write put back, rather than renormalised: see the
-    /// module docs of `document::rotations`.
-    Rotation {
+    /// Refused, and the command put back, rather than repaired: see the
+    /// module docs of `document::validation`.
+    Invalid {
         /// Whose.
         entity: SceneEntityId,
         /// The system holding the component.
         system: String,
-        /// The rotation's dotted path in the component.
-        field: String,
-        /// What a load would refuse it for.
-        error: crcbl::registry::RotationError,
+        /// The field, and why — [`FieldError::field`] is its dotted path.
+        error: FieldError,
     },
 
     /// A drop's ray met neither the scene nor the ground plane in front of
@@ -274,15 +274,14 @@ impl fmt::Display for EditError {
                 "`{system}` still holds entities, which a save without it would drop"
             ),
             Self::Asset(error) => write!(f, "{error}"),
-            Self::Rotation {
+            Self::Invalid {
                 entity,
                 system,
-                field,
                 error,
             } => write!(
                 f,
-                "entity {entity}'s `{field}` in `{system}` would be left off unit ({error}); \
-                 a rotation's four numbers are written together"
+                "entity {entity}'s `{}` in `{system}` is refused: {error}",
+                error.field
             ),
             Self::NoGround => f.write_str(
                 "the drop meets nothing in the scene and the ground is not in front of the \
@@ -693,7 +692,9 @@ impl Document {
     /// leaf refuses either value. A refusal on the way back in leaves the
     /// rewind standing, which is the panel's own `before` and so still a value
     /// the document held. [`EditError::Playing`] in play mode, after the rewind
-    /// — so the panel's write does not stand either.
+    /// — so the panel's write does not stand either. [`EditError::Invalid`]
+    /// for a value the component's rule refuses, which leaves the rewind
+    /// standing too.
     ///
     /// # A drag
     ///
@@ -749,11 +750,11 @@ impl Document {
     /// [`EditError::Path`] carrying the component's own refusal — in which case
     /// nothing was written and nothing was recorded — or [`EditError::Playing`]
     /// in play mode, which writes and records nothing either.
-    /// [`EditError::Rotation`] for a property write that would leave a
-    /// rotation off unit, which is put back and not recorded.
+    /// [`EditError::Invalid`] for a property write that would leave a value
+    /// its component's rule refuses, which is put back and not recorded.
     pub fn apply(&mut self, command: EditCommand) -> Result<(), EditError> {
         self.refuse_in_play()?;
-        let undo = self.perform_true(&command)?;
+        let undo = self.perform_valid(&command)?;
         self.resolve_meshes();
         self.log.record(command, undo);
         Ok(())
@@ -775,7 +776,7 @@ impl Document {
     /// As [`apply`](Self::apply).
     pub fn apply_in(&mut self, command: EditCommand, gesture: Gesture) -> Result<(), EditError> {
         self.refuse_in_play()?;
-        let undo = self.perform_true(&command)?;
+        let undo = self.perform_valid(&command)?;
         self.resolve_meshes();
         self.log.record_in(command, undo, gesture);
         Ok(())
@@ -1005,12 +1006,14 @@ impl Document {
         Ok(())
     }
 
-    /// What the games whose systems this scene holds would refuse in it as it
-    /// stands — each registered [`crcbl::registry::SceneCheck`] run over the
-    /// scene's own saved text — or nothing for a scene they would all play;
-    /// and after them, every mesh whose asset could not be measured
-    /// ([`mesh_problems`](Self::mesh_problems)), and every rotation a
-    /// component holds off unit ([`rotation_problems`](Self::rotation_problems)).
+    /// What the scene as it stands would be refused for, read from its own
+    /// saved text by [`Registry::problems`]: every row a component's rule
+    /// refuses — a value written past [`apply`](Self::apply)'s check, by file,
+    /// line and column — and what each registered
+    /// [`crcbl::registry::SceneCheck`] of a game whose systems the scene holds
+    /// refuses; or nothing for a scene that reloads and that they would all
+    /// play. After them, every mesh whose asset could not be measured
+    /// ([`mesh_problems`](Self::mesh_problems)).
     ///
     /// Not a gate on [`save`](Self::save): authoring passes through layouts
     /// no game would load, a corner added before the leg it breaks is
@@ -1026,7 +1029,6 @@ impl Document {
             .registry
             .problems(self.scene.systems(), &source, Path::new(""));
         problems.extend(self.mesh_problems());
-        problems.extend(self.rotation_problems());
         Ok(problems)
     }
 
@@ -1047,16 +1049,17 @@ impl Document {
     }
 
     /// [`perform`](Self::perform), then puts it back and refuses it if a
-    /// property write left a rotation off unit — the body
+    /// property write left a value its component's rule refuses — the body
     /// [`apply`](Self::apply) and [`apply_in`](Self::apply_in) share. See the
-    /// module docs of `document::rotations`.
-    fn perform_true(&mut self, command: &EditCommand) -> Result<EditCommand, EditError> {
+    /// module docs of `document::validation`.
+    fn perform_valid(&mut self, command: &EditCommand) -> Result<EditCommand, EditError> {
         let undo = self.perform(command)?;
-        if let Err(error) = self.turned_true(command) {
+        if let Err(error) = self.validated(command) {
             self.perform(&undo)
                 .expect("an inverse produced a moment ago applies");
             return Err(error);
         }
+        self.sync_written(command);
         Ok(undo)
     }
 
@@ -1080,10 +1083,16 @@ impl Document {
                 path,
                 value,
             } => {
-                let undo = set_property(self.component_of(*id, system)?, *id, system, path, value)?;
-                let entity = self.ids.entity(*id).ok_or(EditError::NoEntity(*id))?;
-                sync_colliders(&self.registry, &mut self.world, [entity]);
-                Ok(undo)
+                // The collider is rebuilt by the caller once the whole
+                // command stands (`sync_written`): a write the rule refuses,
+                // or one leaf of a batch's several, is no box to build.
+                Ok(set_property(
+                    self.component_of(*id, system)?,
+                    *id,
+                    system,
+                    path,
+                    value,
+                )?)
             }
             EditCommand::Spawn {
                 entity: id,
@@ -1229,6 +1238,7 @@ impl Document {
     /// it came from is already holding the other half.
     fn replay(&mut self, command: &EditCommand) -> Result<(), EditError> {
         self.perform(command)?;
+        self.sync_written(command);
         self.resolve_meshes();
         Ok(())
     }
@@ -1402,6 +1412,9 @@ pub(crate) mod systems_tests;
 
 #[cfg(test)]
 mod towers_play_tests;
+
+#[cfg(test)]
+mod validation_tests;
 
 #[cfg(test)]
 mod tests {

@@ -4,10 +4,11 @@
 //! ```text
 //!     a vocabulary ──▶ scene_mesh::register(&mut registry)
 //!                         │
-//!                         ├── Mesh under `meshes`   a row of sys/meshes.ron:
-//!                         │                         an asset key and a position
-//!                         └── a check               an asset key the files
-//!                                                   cannot reload, on save
+//!                         └── Mesh under `meshes`   a row of sys/meshes.ron:
+//!                                                   an asset key and a position,
+//!                                                   the key held to check_asset
+//!                                                   at load, at each edit and
+//!                                                   at save
 //!
 //!     a tool ──▶ MeshLibrary::resolve(world, assets)
 //!                  └── each Mesh's asset imported once, its box measured,
@@ -22,10 +23,12 @@
 //! glTF importer reads ([`MESH_EXTENSIONS`]). [`check_asset`] is the rule, by
 //! name: an absolute path, a `..`, another extension, a byte no asset key may
 //! hold and a key spelled other than its canonical form are each refused with
-//! the reason. A scene row is read through it ([`ScnError::Parse`] naming the
-//! file, line and field, as `Body`'s values are), and the [`register`] check
-//! reports a key a panel typed, so a scene is never saved holding a path that
-//! would walk out of the asset root. The empty key is the one exception: it is
+//! the reason. It is [`Mesh`]'s [`Validate`] rule, so a scene row is read
+//! through it ([`ScnError::Parse`] naming the file, line and field, as
+//! `Body`'s values are), a tool running [`Registry::validate`] refuses a key a
+//! panel typed, and [`Registry::problems`] reports one written past that — so
+//! a scene is never saved unreported holding a path that would walk out of the
+//! asset root. The empty key is the one exception: it is
 //! a mesh with no asset chosen yet — what attaching one starts as — and is
 //! drawn as the placeholder.
 //!
@@ -80,7 +83,9 @@ use crcbl_ecs::{ComponentHash, Entity, System, World};
 use crcbl_reflect::Reflect;
 use crcbl_store::web::canonical_key;
 
-use crate::registry::{OrientedBox, Placement, Registry, Rotation, check_chunk};
+use crate::registry::{
+    ENGINE_GROUP, FieldError, OrientedBox, Placement, Registry, Rotation, Validate,
+};
 
 /// The scene system every [`Mesh`] is a row of: the manifest entry and the
 /// chunk file's stem.
@@ -107,7 +112,6 @@ pub const MIN_HALF_EXTENT: f64 = 0.005;
 /// the asset's, measured — see the [module docs](self).
 #[derive(Clone, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl_reflect")]
-#[serde(try_from = "MeshRow")]
 pub struct Mesh {
     /// The asset's key, as [`check_asset`] admits it — or empty for a mesh
     /// with no asset chosen yet, which is drawn as the placeholder.
@@ -226,29 +230,13 @@ impl ComponentHash for Mesh {
     }
 }
 
-/// [`Mesh`] as a file spells it, before [`check_asset`]: what serde reads a
-/// row into, so a key that would walk out of the asset root is refused by the
-/// loader with the file's line and column. The rotation is checked by its own
-/// type as it is read ([`Rotation`]'s `try_from`), with the same line and
-/// column.
-#[derive(Deserialize)]
-#[serde(rename = "Mesh")]
-struct MeshRow {
-    asset: String,
-    position: [f64; 3],
-    #[serde(default)]
-    rotation: Rotation,
-}
-
-impl TryFrom<MeshRow> for Mesh {
-    type Error = MeshPathError;
-
-    fn try_from(row: MeshRow) -> Result<Self, MeshPathError> {
-        check_asset(&row.asset)?;
-        Ok(Self {
-            rotation: row.rotation,
-            ..Self::new(row.asset, row.position)
-        })
+/// **The asset key is the rule**, wherever a row comes in: a file's, a pasted
+/// one, and a property write — see [`Validate`]. The rotation is checked for
+/// every registered component by the registry, and by its own type as it is
+/// read.
+impl Validate for Mesh {
+    fn validate(&self) -> Result<(), FieldError> {
+        check_asset(&self.asset).map_err(|error| FieldError::new("asset", error))
     }
 }
 
@@ -347,19 +335,14 @@ pub fn is_mesh_asset(key: &str) -> bool {
     !key.is_empty() && check_asset(key).is_ok()
 }
 
-/// Registers [`Mesh`] under [`MESHES`], and the check a tool saving a scene
-/// runs over its meshes' keys.
+/// Registers [`Mesh`] under [`MESHES`], in [`ENGINE_GROUP`]; its asset key is
+/// held to [`check_asset`] by the registration itself ([`Validate`]).
 ///
 /// One call, so a game's vocabulary — or a tool's — takes meshes whole.
 pub fn register(registry: &mut Registry) {
-    registry.register::<Mesh>(MESHES);
-    registry.check(MESHES, check_meshes);
-}
-
-/// Whether the meshes chunk under `dir` would load: a key a panel typed that
-/// the loader refuses is reported where it was typed.
-fn check_meshes(source: &dyn AssetSource, dir: &Path) -> Result<(), String> {
-    check_chunk::<Mesh>(source, dir, MESHES)
+    registry.group(ENGINE_GROUP, |registry| {
+        registry.register::<Mesh>(MESHES);
+    });
 }
 
 /// The `System<Mesh>` in `world` called [`MESHES`], found by name for

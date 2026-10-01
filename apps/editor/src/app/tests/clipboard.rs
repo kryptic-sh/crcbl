@@ -188,3 +188,62 @@ fn f2_starts_a_rename_of_the_selection_and_says_why_when_it_cannot() {
     assert_eq!(editor.panels.renaming(), Some(SceneEntityId(1)));
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
+
+/// The middle of the widget of the `row`th row of the inspector's `section`th
+/// section, a leaf row: a label and then its widget.
+fn leaf_field(editor: &Editor<HeadlessShell>, section: usize, row: usize) -> PhysicalPoint {
+    let ui = editor.panels.ui();
+    let fields = editor
+        .panels
+        .section_fields(section)
+        .expect("the inspector drew the section");
+    let row = ui.child_keys(fields)[row];
+    centre(editor, ui.child_keys(row)[1])
+}
+
+/// **A mass of zero pasted into a body's field is refused on the status
+/// line, naming the field, and the body keeps its mass** — the inspector's
+/// field half held to the body's rule like every other write.
+#[test]
+fn a_massless_paste_into_a_body_is_refused_on_the_status_line() {
+    use crcbl::scene_physics::BODIES;
+
+    /// A body's rows: its kind, then its mass.
+    const MASS_ROW: usize = 1;
+
+    let mut editor = headless(200);
+    let step = SceneEntityId(3);
+    editor
+        .document_mut()
+        .attach(step, BODIES)
+        .expect("the step has no body");
+    editor.document_mut().select(Some(step));
+    editor.frame().expect("a frame");
+    let before = editor.document_mut().files().expect("ids");
+    let window = editor.window;
+
+    editor
+        .shell_mut()
+        .clipboard_offer(window, &[ClipboardOffer::text("0.0")])
+        .expect("the headless clipboard takes an offer");
+    let mass = leaf_field(&editor, 1, MASS_ROW);
+    hover(&mut editor, mass);
+    editor.act(&Action::Paste);
+    settle(&mut editor);
+    let (text, tone) = editor.panels.status();
+    assert_eq!(tone, Tone::Warning, "{text}");
+    assert!(
+        text.contains("`mass` in `bodies` is refused"),
+        "the status line does not name the field: {text}"
+    );
+    assert_eq!(
+        editor
+            .document_mut()
+            .read(step, BODIES, "mass")
+            .expect("a mass"),
+        Value::Float(1.0),
+    );
+    assert_eq!(editor.document_mut().files().expect("ids"), before);
+    assert_eq!(editor.document().log().len(), 1, "the paste was recorded");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}

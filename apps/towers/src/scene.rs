@@ -56,7 +56,7 @@ use crcbl::assets::{AssetSource, DirSource, MemorySource};
 use crcbl::ecs::{ComponentHash, System, World};
 use crcbl::math::DVec3;
 use crcbl::reflect::Reflect;
-use crcbl::registry::{OrientedBox, Placement, Registry};
+use crcbl::registry::{OrientedBox, Placement, Registry, Validate};
 use crcbl::scene::scn::{IdMap, Scene};
 use crcbl::serde::{Deserialize, Serialize};
 
@@ -139,6 +139,10 @@ impl Placement for Waypoint {
     }
 }
 
+/// No rule of its own yet: every rule of the field, the per-row ones
+/// included, is [`Map::load`]'s, run as this game's scene check.
+impl Validate for Waypoint {}
+
 /// One place a tower can be built.
 ///
 /// `Default` is an unlabelled plot at the origin: what a tool attaching a plot
@@ -188,6 +192,10 @@ impl Placement for Plot {
     }
 }
 
+/// No rule of its own yet: every rule of the field, the per-row ones
+/// included, is [`Map::load`]'s, run as this game's scene check.
+impl Validate for Plot {}
+
 /// This game's scene vocabulary: two components, under the names their chunk
 /// files are spelled with, the rule a scene holding them is held to, and the
 /// module a tool plays that scene with — with the creeps it walks as a runtime
@@ -202,13 +210,21 @@ impl Placement for Plot {
 /// The module is registered under `waypoints` alone, so it is built once per
 /// play and only for a scene that holds a path; `crate::game`'s `play` module
 /// has what it does.
+///
+/// Registered in this game's [`Registry::group`], so a tool listing systems
+/// says whose they are.
 pub fn register_components(registry: &mut Registry) {
-    registry.register::<Waypoint>(WAYPOINTS);
-    registry.register::<Plot>(PLOTS);
+    registry.group(GROUP, |registry| {
+        registry.register::<Waypoint>(WAYPOINTS);
+        registry.register::<Plot>(PLOTS);
+    });
     registry.check(WAYPOINTS, check_field);
     registry.module(WAYPOINTS, crate::game::play::start);
     registry.register_runtime::<crate::game::play::Walker>(crate::game::play::WALKERS);
 }
+
+/// The [`Registry::group`] this game's components are registered in.
+const GROUP: &str = "towers";
 
 /// This game's rule over a scene that holds its waypoints: that
 /// [`Map::load`] would take it — the check an editor saving this game's field

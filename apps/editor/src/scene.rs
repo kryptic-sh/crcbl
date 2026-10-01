@@ -32,7 +32,7 @@ use crcbl::assets::MemorySource;
 use crcbl::ecs::ComponentHash;
 use crcbl::math::DVec3;
 use crcbl::reflect::Reflect;
-use crcbl::registry::{OrientedBox, Placement, Registry, Rotation};
+use crcbl::registry::{FieldError, OrientedBox, Placement, Registry, Rotation, Validate};
 use crcbl::serde::{Deserialize, Serialize};
 
 /// The one system this vocabulary is made of: the manifest entry, the chunk
@@ -167,6 +167,29 @@ impl Placement for Block {
     }
 }
 
+/// **A half extent must be a finite number of zero or more**: a box collider
+/// refuses anything else, and the picking collider is built from these three
+/// numbers after every edit. Its rotation is held to unit by the registry, as
+/// every registered component's is.
+impl Validate for Block {
+    fn validate(&self) -> Result<(), FieldError> {
+        for (axis, half) in self.half_extents.into_iter().enumerate() {
+            if !(half.is_finite() && half >= 0.0) {
+                return Err(FieldError::new(
+                    format!("half_extents.{axis}"),
+                    format_args!(
+                        "a block's `half_extents` must be finite numbers of zero or more, not {half}"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The [`Registry::group`] the greybox block is registered in.
+const GROUP: &str = "greybox";
+
 /// This build's vocabulary: the components a scene it opens may be made of.
 ///
 /// **The one place `blocks` is joined to [`Block`]**, and the only registration
@@ -174,7 +197,7 @@ impl Placement for Block {
 #[must_use]
 pub fn vocabulary() -> Registry {
     let mut registry = Registry::new();
-    registry.register::<Block>(BLOCKS);
+    registry.group(GROUP, |registry| registry.register::<Block>(BLOCKS));
     // Physics on scene components: a body beside a block makes that block
     // fall, collide and come to rest while the scene plays.
     crcbl::scene_physics::register(&mut registry);
