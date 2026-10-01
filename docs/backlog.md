@@ -76,18 +76,46 @@ What it left:
   started-inside one; both change movement or query results, so it is its own
   slice with the corner, crease and turned-box tests rerun.
 
-- **Provide access to sweep candidates for airborne braking forecasts.** EW's
-  `src/controller_ballistic.rs` enlarges its probe by the arc/chord deviation to
-  find wall-normal turning points. A closest-only query hides other candidates
-  behind floors, ceilings or tangent walls. Checking all initial overlaps fixes
-  the demonstrated ceiling/braking miss, but candidates hidden later along the
-  sweep remain inaccessible. Evaluate a multi-hit sweep or a filtered candidate
-  query with shape-level hits/normals; preserve solid/trigger and layer rules.
-  Use EW's `controller_wall_ceiling_braking_tests.rs` and
-  `controller_wall_braking_tests.rs` as acceptance cases, including stopping
-  short without a false wall hit. Curved-path entry/exit and moving-wall
-  dynamics still need separate validation; straight sweeps alone do not provide
-  curved continuous collision detection.
+**The candidate sweep shipped (2026-10-01)** as
+`PhysicsWorld::sweep_sphere_all(segment, radius, filter, &mut hits)` and
+`PhysicsWorld::sweep_capsule_all(segment, radius, half_height, filter, &mut hits)`,
+with the same pair on `OverlapQueries`: every solid collider along the straight
+sweep as `(ColliderId, ShapeHit)`, nearest first, ties by `ColliderId::index`,
+starting overlaps kept at `t = 0` and flagged, the closest sweep's
+solid/trigger, layer-mask and exclusion rules. The first entry equals the
+closest sweep's answer bit for bit, held by a property test over random scenes
+(`crates/crcbl-phys/src/world/candidate_sweep_tests.rs`), and to make that hold
+the closest sphere, capsule and lying-capsule sweeps now break exact ties by
+collider slot rather than by broadphase order. EW's acceptance cases were not
+run (no EW checkout here); they were derived from the request as tests: a
+ceiling met before a wall, a grazed wall then one ahead, a wall just past the
+sweep's end not reported, triggers and masked and excluded colliders left out, a
+turned box's turned normal. EW migrates `src/controller_ballistic.rs` onto it.
+What it left:
+
+- **One hit per collider, so a mesh hides its own later triangles.** A triangle
+  mesh is one collider and reports only the first triangle the sweep meets
+  (`PlacedMesh::sweep` keeps the nearest), so a floor and a wall that are one
+  level mesh still hide each other. Per-triangle candidates would mean a mesh
+  sweep that collects every triangle hit (`TriangleMesh::sweep_with` already
+  visits each candidate triangle; it keeps the best) and a hit type carrying the
+  triangle index, as `MeshHit` does; the agreement property then compares the
+  first triangle. Not started; wait for EW to hit it with mesh levels.
+- **No exits, and no second touch of one collider.** Each entry is where the
+  sweep first meets a collider; where it leaves, or meets a concave collider
+  again, is not reported. A braking forecast that needs a wall's far side would
+  need exit times from each shape function, which none computes today.
+- **Straight segments only — curved continuous collision is still separate.**
+  The fractions are distance shares along one chord. Curved-path entry and exit
+  needs a sweep whose motion is a polynomial in t (conservative advancement over
+  the gap along the curve), as the slide contacts' curved-path entry above
+  describes; moving-wall dynamics need the swept collider's own motion in the
+  query, which nothing in the query world reads. Both still need validation
+  against EW's braking fixtures, natively.
+- **No candidate form of rays or lying-capsule sweeps.** Rays still break exact
+  ties by broadphase order (`closest_hit_core`); only the sweeps were changed.
+  Both are small once a caller asks.
+
 - **Complete platform validation of the EW integration fixes.** Windows
   workspace formatting and Clippy pass. The full workspace test run has only the
   cursor-focus failure below. Physics regressions cover small upward moves,

@@ -520,6 +520,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Every hit along a straight sweep from `crcbl_phys::PhysicsWorld`.**
+  `sweep_sphere_all(segment, radius, filter, &mut hits)` and
+  `sweep_capsule_all(segment, radius, half_height, filter, &mut hits)` (and the
+  same pair on `OverlapQueries`, taking a `QueryScratch`) write every solid
+  collider the sweep meets into the caller's `Vec<(ColliderId, ShapeHit)>`,
+  nearest first — a wall beyond the ceiling a sweep meets first, or beyond a
+  wall it starts out grazing, which the closest-hit sweeps hide. Each collider
+  is one entry at its first touch, with the fraction of the segment covered, the
+  point, the surface normal (a turned box's turned face) and `started_inside`
+  for one the sweep begins touching; a collider past the end of the segment is
+  not met. Triggers, the filter's layer mask and its excluded collider are left
+  out exactly as the closest sweeps leave them out, and the first entry is the
+  closest sweep's answer to the bit. A triangle mesh is one collider and reports
+  its first triangle only. The fraction is a share of the straight segment, not
+  a time along a curved path.
+
 - **Ordered slide contacts from `crcbl_phys::CharacterController`.**
   `move_and_slide_into(world, motion, &mut contacts)` makes exactly the move
   `move_and_slide` makes, to the bit, and writes every sweep that met something
@@ -4344,6 +4360,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **`crcbl_phys::PhysicsWorld`'s closest-hit sphere and capsule sweeps break
+  ties by collider slot.** Two colliders met at exactly the same fraction — two
+  boxes sharing the face a sweep meets, or two a sweep starts inside — now give
+  the one with the lower `ColliderId::index`, where the winner used to be
+  whichever the broadphase offered first, which followed the tree's history of
+  adds, refits and rebuilds. The lying-capsule sweep the character controller
+  uses for a prone body ranks the same way. Answers without a tie are unchanged.
 
 - **A `PhysicsSystem` body's box collider turns with the body in the query
   world**, as it already did in the contact solver: `ColliderComponent::Box`'s

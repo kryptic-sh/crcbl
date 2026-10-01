@@ -16,6 +16,8 @@ use crate::contact::sweep::time_of_contact;
 use crate::mesh::{MeshScratch, PlacedMesh, TriangleMesh};
 use crate::query::{self, Penetration, ShapeHit};
 
+mod candidate_sweeps;
+
 /// Opaque identifier for a registered collider.
 ///
 /// Created by [`PhysicsWorld::add_sphere`], [`PhysicsWorld::add_box`],
@@ -581,15 +583,11 @@ impl OverlapQueries<'_> {
         filter: QueryFilter,
         scratch: &mut QueryScratch,
     ) -> Option<(ColliderId, ShapeHit)> {
-        sweep_sphere_core(
-            self.bvh,
-            self.colliders,
-            self.generations,
-            segment,
-            radius,
-            filter,
-            scratch,
-        )
+        let mut closest = None;
+        sweep_sphere_hits(*self, segment, radius, filter, scratch, |id, hit| {
+            keep_closest(&mut closest, id, hit);
+        });
+        closest
     }
 
     /// [`PhysicsWorld::sweep_capsule`] under a shared borrow, working in
@@ -640,15 +638,12 @@ impl OverlapQueries<'_> {
         filter: QueryFilter,
         scratch: &mut QueryScratch,
     ) -> Option<(ColliderId, ShapeHit)> {
-        sweep_capsule_core(
-            self.bvh,
-            self.colliders,
-            self.generations,
-            &Capsule::new(segment.start, radius, half_height),
-            segment.end,
-            filter,
-            scratch,
-        )
+        let capsule = Capsule::new(segment.start, radius, half_height);
+        let mut closest = None;
+        sweep_capsule_hits(*self, &capsule, segment.end, filter, scratch, |id, hit| {
+            keep_closest(&mut closest, id, hit);
+        });
+        closest
     }
 
     /// [`PhysicsWorld::capsule_penetrations_into`] under a shared borrow,
@@ -828,30 +823,32 @@ fn cast_ray_core(
     best
 }
 
-/// The one implementation of "what does this swept sphere hit first".
+/// The one implementation of "what does this swept sphere hit": every
+/// admitted collider it meets, handed to `visit` with its exact hit.
 ///
 /// Both [`PhysicsWorld::sweep_sphere_filtered`] and
-/// [`OverlapQueries::sweep_sphere_filtered`] come through here — and so do
-/// the `sweep_sphere` and `sweep_sphere_excluding` forms, which are this with
-/// a narrower filter.
+/// [`OverlapQueries::sweep_sphere_filtered`] come through here, keeping the
+/// closest — and so do the `sweep_sphere` and `sweep_sphere_excluding` forms,
+/// which are this with a narrower filter, and
+/// [`PhysicsWorld::sweep_sphere_all`], which keeps them all.
 ///
 /// The broadphase query is the swept *volume* and not the centre line; see
 /// [`PhysicsWorld::sweep_sphere`] for what that costs and what it fixes.
-fn sweep_sphere_core(
-    bvh: &Bvh,
-    colliders: &[Option<ColliderSlot>],
-    generations: &[u32],
+fn sweep_sphere_hits(
+    view: OverlapQueries<'_>,
     segment: &Segment,
     radius: f64,
     filter: QueryFilter,
     scratch: &mut QueryScratch,
-) -> Option<(ColliderId, ShapeHit)> {
-    let filter = ResolvedFilter::solid(colliders, generations, filter);
+    visit: impl FnMut(ColliderId, ShapeHit),
+) {
+    let filter = ResolvedFilter::solid(view.colliders, view.generations, filter);
     let bounds = swept_bounds(segment, DVec3::splat(radius));
-    bvh.traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
-    closest_swept_core(
-        colliders,
-        generations,
+    view.bvh
+        .traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
+    swept_hits_core(
+        view.colliders,
+        view.generations,
         &scratch.candidates,
         filter,
         |entry| match entry {
@@ -860,17 +857,20 @@ fn sweep_sphere_core(
             ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
             ColliderEntry::Mesh(m) => m.sweep(segment, radius, DVec3::ZERO, &mut scratch.mesh),
         },
-    )
+        visit,
+    );
 }
 
-/// The one implementation of "what does this swept Y-aligned capsule hit
-/// first": `capsule` sits at the start of the sweep and its centre travels to
-/// `end`.
+/// The one implementation of "what does this swept Y-aligned capsule hit":
+/// `capsule` sits at the start of the sweep and its centre travels to `end`,
+/// and every admitted collider it meets is handed to `visit` with its exact
+/// hit.
 ///
 /// Both [`PhysicsWorld::sweep_capsule_filtered`] and
-/// [`OverlapQueries::sweep_capsule_filtered`] come through here — and so do
-/// the `sweep_capsule` and `sweep_capsule_excluding` forms, which are this
-/// with a narrower filter. They take a
+/// [`OverlapQueries::sweep_capsule_filtered`] come through here, keeping the
+/// closest — and so do the `sweep_capsule` and `sweep_capsule_excluding`
+/// forms, which are this with a narrower filter, and
+/// [`PhysicsWorld::sweep_capsule_all`], which keeps them all. They take a
 /// [`Segment`] and a radius the way the sphere sweeps do; the shape is one
 /// argument here so that the swept capsule's two dimensions travel together.
 ///
@@ -878,27 +878,27 @@ fn sweep_sphere_core(
 /// [`PhysicsWorld::sweep_sphere`] gives: the capsule is `radius` wide and
 /// `half_height + radius` tall, so the candidates are everything within that of
 /// the path its centre takes.
-fn sweep_capsule_core(
-    bvh: &Bvh,
-    colliders: &[Option<ColliderSlot>],
-    generations: &[u32],
+fn sweep_capsule_hits(
+    view: OverlapQueries<'_>,
     capsule: &Capsule,
     end: DVec3,
     filter: QueryFilter,
     scratch: &mut QueryScratch,
-) -> Option<(ColliderId, ShapeHit)> {
+    visit: impl FnMut(ColliderId, ShapeHit),
+) {
     let Capsule {
         radius,
         half_height,
         ..
     } = *capsule;
     let segment = &Segment::new(capsule.centre, end);
-    let filter = ResolvedFilter::solid(colliders, generations, filter);
+    let filter = ResolvedFilter::solid(view.colliders, view.generations, filter);
     let bounds = swept_bounds(segment, DVec3::new(radius, radius + half_height, radius));
-    bvh.traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
-    closest_swept_core(
-        colliders,
-        generations,
+    view.bvh
+        .traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
+    swept_hits_core(
+        view.colliders,
+        view.generations,
         &scratch.candidates,
         filter,
         |entry| match entry {
@@ -913,7 +913,8 @@ fn sweep_capsule_core(
                 m.sweep(segment, radius, DVec3::Y * half_height, &mut scratch.mesh)
             }
         },
-    )
+        visit,
+    );
 }
 
 /// The one implementation of "what is this capsule inside, and how far out does
@@ -1172,22 +1173,27 @@ fn closest_hit_core(
     best.map(|(_, id, hit)| (id, hit))
 }
 
-/// Given broadphase candidates, find the closest exact swept hit, with `narrow`
-/// supplying the shape-level TOI for whichever shape is being swept, over the
-/// colliders `filter` admits — which skips triggers.
+/// Given broadphase candidates, hand `visit` every exact swept hit, with
+/// `narrow` supplying the shape-level TOI for whichever shape is being swept,
+/// over the colliders `filter` admits — which skips triggers.
 ///
 /// The sphere, capsule and lying capsule sweeps share this rather than each
 /// carrying a copy: what a trigger, a dead slot, an excluded collider and a
 /// layer mask mean is one rule, and a second copy of it is where they would
-/// drift.
-fn closest_swept_core<H: SweptHit>(
+/// drift. The closest sweeps keep one of the hits it hands over
+/// ([`keep_closest`]) and the candidate sweeps keep them all, so the two
+/// agree on which hits there are.
+///
+/// A hit whose `t` is not below infinity — a `NaN` from degenerate input —
+/// ranks against nothing, and is no hit.
+fn swept_hits_core<H: SweptHit>(
     colliders: &[Option<ColliderSlot>],
     generations: &[u32],
     candidates: &[u32],
     filter: ResolvedFilter,
     mut narrow: impl FnMut(&ColliderEntry) -> Option<H>,
-) -> Option<(ColliderId, H)> {
-    let mut best: Option<(f64, ColliderId, H)> = None;
+    mut visit: impl FnMut(ColliderId, H),
+) {
     for &element in candidates {
         let idx = element as usize;
         let Some(Some(slot)) = colliders.get(idx) else {
@@ -1197,12 +1203,63 @@ fn closest_swept_core<H: SweptHit>(
             continue;
         }
         if let Some(hit) = narrow(&slot.entry)
-            && hit.t() < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
+            && hit.t() < f64::INFINITY
         {
-            best = Some((hit.t(), id_for_slot_in(generations, element), hit));
+            visit(id_for_slot_in(generations, element), hit);
         }
     }
-    best.map(|(_, id, hit)| (id, hit))
+}
+
+/// [`swept_hits_core`] keeping only the hit that comes first by
+/// [`sweep_order`]: the lying capsule sweep's closest hit.
+fn closest_swept_core<H: SweptHit>(
+    colliders: &[Option<ColliderSlot>],
+    generations: &[u32],
+    candidates: &[u32],
+    filter: ResolvedFilter,
+    narrow: impl FnMut(&ColliderEntry) -> Option<H>,
+) -> Option<(ColliderId, H)> {
+    let mut closest = None;
+    swept_hits_core(
+        colliders,
+        generations,
+        candidates,
+        filter,
+        narrow,
+        |id, hit| {
+            keep_closest(&mut closest, id, hit);
+        },
+    );
+    closest
+}
+
+/// Replace `closest` with `(id, hit)` if that comes first by [`sweep_order`].
+fn keep_closest<H: SweptHit>(closest: &mut Option<(ColliderId, H)>, id: ColliderId, hit: H) {
+    if closest
+        .as_ref()
+        .is_none_or(|&(best, best_hit)| sweep_order((id, hit.t()), (best, best_hit.t())).is_lt())
+    {
+        *closest = Some((id, hit));
+    }
+}
+
+/// The order a sweep's hits come in: nearer `t` first, and of two at the
+/// same `t` the one in the lower storage slot.
+///
+/// The tie needs a rule because the alternative is the order the broadphase
+/// happened to offer the candidates in, which follows the tree's shape and so
+/// the world's history of adds, refits and rebuilds. A slot index is stable
+/// for the collider's whole life. The closest sweeps and the candidate sweeps
+/// both rank by this, which is what makes the candidate list's first entry
+/// the closest sweep's answer.
+fn sweep_order(a: (ColliderId, f64), b: (ColliderId, f64)) -> std::cmp::Ordering {
+    if a.1 < b.1 {
+        std::cmp::Ordering::Less
+    } else if b.1 < a.1 {
+        std::cmp::Ordering::Greater
+    } else {
+        a.0.index.cmp(&b.0.index)
+    }
 }
 
 /// What [`closest_swept_core`] ranks a sweep's hits by: how far along the
@@ -1598,7 +1655,10 @@ impl PhysicsWorld {
     /// Sweep a sphere along a segment, returning the closest hit (if any).
     ///
     /// Uses the shape-level swept-sphere TOI functions for exact results.
-    /// Triggers are non-solid and are skipped.
+    /// Triggers are non-solid and are skipped. Of two colliders met at exactly
+    /// the same `t`, the one with the lower [`ColliderId::index`] is the
+    /// answer. [`sweep_sphere_all`](Self::sweep_sphere_all) reports every hit,
+    /// in the same order.
     ///
     /// # The broadphase query is the swept *volume*, not the centre line
     ///
@@ -1692,8 +1752,10 @@ impl PhysicsWorld {
     /// `half_height` describe the same capsule [`Capsule`] does.
     ///
     /// This is [`sweep_sphere`](Self::sweep_sphere)'s sibling and shares its
-    /// semantics: exact shape-level TOI, triggers skipped, and a broadphase
-    /// query over the swept volume rather than the centre line.
+    /// semantics: exact shape-level TOI, triggers skipped, ties to the lower
+    /// collider index, and a broadphase query over the swept volume rather
+    /// than the centre line. [`sweep_capsule_all`](Self::sweep_capsule_all)
+    /// reports every hit, in the same order.
     ///
     /// # Why a character wants this and not the sphere sweep
     ///
@@ -3442,3 +3504,7 @@ mod lying_capsule_tests;
 #[cfg(test)]
 #[path = "world/turned_box_tests.rs"]
 mod turned_box_tests;
+
+#[cfg(test)]
+#[path = "world/candidate_sweep_tests.rs"]
+mod candidate_sweep_tests;
