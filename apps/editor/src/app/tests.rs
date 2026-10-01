@@ -18,6 +18,7 @@ fn options(frames: u64) -> Options {
     Options {
         common,
         scene: None,
+        assets: None,
     }
 }
 

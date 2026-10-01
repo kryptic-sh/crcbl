@@ -1,0 +1,2 @@
+[editor]
+layout = 'Split(axis:Row,position:Some(300.0),first:Pane("outliner"),second:Split(axis:Row,position:None,first:Pane("viewport"),second:Pane("inspector")))'

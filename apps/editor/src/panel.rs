@@ -1,5 +1,6 @@
-//! The editor's panels: a docked outliner and inspector beside the viewport,
-//! and the two-way join between what they show and what the [`Document`] holds.
+//! The editor's panels: a docked outliner, asset browser and inspector beside
+//! the viewport, and the two-way join between what they show and what the
+//! [`Document`] holds.
 //!
 //! **Nothing here touches a device or a window**, which is
 //! [`crate::document`]'s rule extended to the panels: a frame of this is a
@@ -9,11 +10,12 @@
 //! The tests below drive the real widgets — real clicks, at real rectangles —
 //! with no GPU at all.
 //!
-//! # The three panes
+//! # The four panes
 //!
 //! [`crate::layout`] names them and holds the [`DockLayout`] they are arranged
-//! by. Two are built here; the third, the viewport, is a block with nothing in
-//! it that the frame fills with **the scene's own picture**: a
+//! by. Three are built here — the outliner, the inspector and the asset browser
+//! (`assets`' module docs) — and the fourth, the viewport, is a block with
+//! nothing in it that the frame fills with **the scene's own picture**: a
 //! [`DrawList::texture`] rectangle over the pane's laid-out rectangle, naming
 //! [`VIEWPORT_TEXTURE`], which [`crate::app`] pairs with the target it drew the
 //! scene into — sized to [`Panels::viewport_pixels`] — when the frame's passes
@@ -33,7 +35,8 @@
 //! A strip over the panes, outside the dock, with play mode's two buttons and
 //! where play stands — so it costs the saved layout nothing: the dock's panes
 //! are the ones [`crate::layout::load`] checks a settings file against, and a
-//! fourth pane would have every saved layout discarded. A click is not acted
+//! pane a layout does not hold has to be migrated into it, as the asset
+//! browser is (`crate::layout`'s module docs). A click is not acted
 //! on here: [`PanelFrame::toolbar`] hands the [`Action`] its key would have
 //! asked for back to [`crate::app`], which carries both out the same way.
 //!
@@ -108,6 +111,7 @@ use crate::document::{Document, EditError, PlayState};
 use crate::keys::Action;
 use crate::layout::{self, PANE_MIN};
 
+mod assets;
 mod inspector;
 
 /// The name the viewport pane's picture goes by in the panels' draw list —
@@ -333,6 +337,8 @@ pub struct Panels {
     status_key: Option<NodeKey>,
     /// The toolbar, as the last frame laid it out.
     toolbar_key: Option<NodeKey>,
+    /// The asset browser's listing and rows — see `assets`.
+    browser: assets::Browser,
 }
 
 /// How the status line reads a message.
@@ -387,6 +393,7 @@ impl Panels {
             status: (READY.to_owned(), Tone::Info),
             status_key: None,
             toolbar_key: None,
+            browser: assets::Browser::new(document.assets()),
         };
         // One idle frame, so the first real one has rectangles to hit-test
         // against: the tree resolves a click against the *previous* layout, and
@@ -658,6 +665,45 @@ impl Panels {
             .map_or_else(Vec::new, |&content| self.ui.child_keys(content))
     }
 
+    /// Lists `document`'s asset source again — what a caller does after
+    /// handing the document another one ([`Document::set_assets`]), and what
+    /// the browser's refresh button does.
+    pub fn relist_assets(&mut self, document: &Document) {
+        self.browser.relist(document.assets());
+    }
+
+    /// The mesh assets the browser lists, in tree order.
+    #[must_use]
+    pub fn listed_assets(&self) -> Vec<&str> {
+        self.browser.assets()
+    }
+
+    /// The folders the browser lists, in tree order.
+    #[must_use]
+    pub fn listed_folders(&self) -> Vec<&str> {
+        self.browser.folders()
+    }
+
+    /// What the browser says beside its tree, if anything: why nothing could
+    /// be listed, that nothing was, or that the walk stopped short.
+    #[must_use]
+    pub fn assets_note(&self) -> Option<&str> {
+        self.browser.note()
+    }
+
+    /// The browser's rows, as the last frame built them, each with the key of
+    /// what it stands for.
+    #[cfg(test)]
+    pub(crate) fn asset_rows(&self) -> Vec<(NodeKey, &str)> {
+        self.browser.rows()
+    }
+
+    /// The browser's refresh button, as the last frame laid it out.
+    #[cfg(test)]
+    pub(crate) fn refresh_button(&self) -> Option<NodeKey> {
+        self.browser.refresh_button()
+    }
+
     /// The clipboard requests this frame's text fields made, for the caller to
     /// carry to the shell.
     pub fn take_clipboard_requests(&mut self) -> Vec<ClipboardRequest> {
@@ -687,11 +733,12 @@ impl Panels {
         let mut built = inspector::Built::default();
         let mut rename_input = None;
         let mut double_clicked = None;
+        let mut relist = false;
 
         // Last frame's scrolling blocks, read before the fields are borrowed
         // below — and last frame's is the right answer anyway, because that is
         // the layout the pointer is over.
-        let scrollers: Vec<NodeKey> = [self.outliner_key, self.props_key]
+        let scrollers: Vec<NodeKey> = [self.outliner_key, self.props_key, self.browser.key()]
             .into_iter()
             .flatten()
             .collect();
@@ -706,6 +753,7 @@ impl Panels {
             names,
             renaming,
             status,
+            browser,
             ..
         } = self;
         let options = OutlinerOptions {
@@ -743,6 +791,7 @@ impl Panels {
                         built =
                             inspector::build(ui, document, selected, &selected_label, overrides);
                     }
+                    layout::ASSETS => relist = browser.build(ui, &options),
                     other => {
                         // Unreachable while `crate::layout::load` refuses a
                         // layout whose panes are not this build's, and said out
@@ -813,6 +862,9 @@ impl Panels {
                 crcbl::log::warn!("editor: {error}");
                 self.set_status(error.to_string(), Tone::Warning);
             }
+        }
+        if relist {
+            self.relist_assets(document);
         }
         self.follow_outliner(document);
         self.follow_rename(document, rename_input);
@@ -1192,6 +1244,7 @@ mod tests {
 
     use crate::layout::default_layout;
 
+    mod assets;
     mod inspector;
     mod naming;
 

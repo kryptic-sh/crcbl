@@ -1,5 +1,5 @@
 //! The command line: the shared flags every binary in this workspace takes,
-//! plus one positional argument.
+//! the asset root, and one positional argument.
 //!
 //! Modelled on `apps/bare`'s parser, which is the smallest one here, with
 //! `apps/viewer`'s positional shape: a path is a path, not a flag, because
@@ -22,6 +22,10 @@ pub struct Options {
     pub common: Common,
     /// The `.scn/` directory to open, or [`None`] for the compiled-in scene.
     pub scene: Option<std::path::PathBuf>,
+    /// The directory a mesh's asset key is read from and the asset browser
+    /// lists, or [`None`] for the directory holding the scene — and for the
+    /// compiled-in scene, none at all.
+    pub assets: Option<std::path::PathBuf>,
 }
 
 /// What [`parse`] hands back.
@@ -43,6 +47,7 @@ pub type Invocation = crcbl::args::Invocation<Options>;
 pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
     let mut common = Common::new(DEFAULT_TICK_HZ);
     let mut scene = None;
+    let mut assets = None;
     let mut args = args.peekable();
 
     while let Some(arg) = args.next() {
@@ -50,6 +55,12 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
             Consumed::Yes => continue,
             Consumed::Help => return Invocation::Help,
             Consumed::Bad(message) => return Invocation::BadUsage(message),
+            Consumed::No if arg == ASSETS_FLAG => match args.next() {
+                Some(dir) => assets = Some(std::path::PathBuf::from(dir)),
+                None => {
+                    return Invocation::BadUsage(format!("{ASSETS_FLAG} needs a directory"));
+                }
+            },
             Consumed::No => {
                 if arg.starts_with('-') {
                     return Invocation::BadUsage(format!("unknown argument: {arg}"));
@@ -65,8 +76,15 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
         }
     }
 
-    Invocation::Run(Options { common, scene })
+    Invocation::Run(Options {
+        common,
+        scene,
+        assets,
+    })
 }
+
+/// The flag naming the asset root: see [`Options::assets`].
+const ASSETS_FLAG: &str = "--assets";
 
 /// The `--help` text.
 pub const USAGE: &str = "\
@@ -83,12 +101,18 @@ ARGS:
                          into it, which has nowhere to save — Ctrl+S on it says
                          so rather than guessing where to write.
 
+ASSETS:
+    --assets <DIR>       The directory a mesh's asset key is read from, and the
+                         one the asset browser lists. Default: the directory
+                         holding SCENE_DIR; the compiled-in scene has none
+
 PANELS:
     The scene's entities are listed on the left, grouped by the system whose
-    chunk file they came out of, with the selected one's fields under them.
-    Selecting a row and picking in the viewport are the same selection. Drag a
-    divider to move a panel's edge; where they were left is remembered between
-    runs. The rest of the window is the viewport.
+    chunk file they came out of, with the .glb and .gltf assets under the asset
+    root below them and the selected entity's fields under those. Selecting a
+    row and picking in the viewport are the same selection. Drag a divider to
+    move a panel's edge; where they were left is remembered between runs. The
+    rest of the window is the viewport.
 
 EDITING:
     Left click           In the viewport, pick the entity under the cursor; on
@@ -194,6 +218,26 @@ mod tests {
         );
         assert!(options.common.headless);
         assert_eq!(options.common.frames, Some(4));
+    }
+
+    /// `--assets` names the asset root, and wants a directory after it.
+    #[test]
+    fn the_assets_flag_names_the_asset_root() {
+        let Invocation::Run(options) = run(&["board.scn", "--assets", "art"]) else {
+            panic!("that is a run");
+        };
+        assert_eq!(options.assets.as_deref(), Some(std::path::Path::new("art")));
+        assert_eq!(
+            options.scene.as_deref(),
+            Some(std::path::Path::new("board.scn"))
+        );
+        let Invocation::Run(options) = run(&[]) else {
+            panic!("an empty command line is a run");
+        };
+        assert_eq!(options.assets, None);
+        assert!(
+            matches!(run(&["--assets"]), Invocation::BadUsage(message) if message.contains("--assets")),
+        );
     }
 
     /// Two directories is a refusal rather than a silent choice of one.

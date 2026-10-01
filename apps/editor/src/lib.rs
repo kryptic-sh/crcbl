@@ -33,8 +33,8 @@
 //!   on. **The only module that names a component type**, and it names no
 //!   game: the rest of the crate asks a [`Registry`](crcbl::registry::Registry)
 //!   and opens any scene whose systems are in it.
-//! * [`panel`] — the docked outliner and inspector, and the two-way join
-//!   between what they show and what the document holds. Runs with no device
+//! * [`panel`] — the docked outliner, asset browser and inspector, and the
+//!   two-way join between what they show and what the document holds. Runs with no device
 //!   either: a frame of it is a `crcbl_ui` tree laid out and emitted, and its
 //!   own tests drive real clicks at real rectangles with no GPU.
 //! * [`layout`] — where the panels are, and the settings key that outlives the
@@ -49,7 +49,7 @@
 //!
 //! No server protocol or transport routing, no rotate gizmo, no game that
 //! plays yet (play mode runs whatever modules a vocabulary registers, and none
-//! does), no asset listing, no file watcher, no multi-session editing, and no
+//! does), no file watcher, no multi-session editing, and no
 //! port of a sample's state into ECS. Each is named in the plan with what it waits on.
 
 pub mod app;

@@ -33,16 +33,27 @@
 //!
 //! # A layout read back is checked before it is used
 //!
-//! [`load`] refuses anything that is not exactly this editor's three panes.
-//! A saved layout that lost the viewport — an older build's, a hand-edited
-//! file, a future build's with a fourth pane — would otherwise leave the editor
-//! with no viewport and no way to get one back, and the pane names are the only
-//! thing the dock cannot rebuild for itself.
+//! [`load`] takes a layout of exactly this editor's four panes. A saved
+//! layout that lost the viewport — a hand-edited file, a future build's with a
+//! fifth pane — would otherwise leave the editor with no viewport and no way to
+//! get one back, and the pane names are the only thing the dock cannot rebuild
+//! for itself; so any other set of panes is discarded for the default.
+//!
+//! # An older build's three panes are migrated, not discarded
+//!
+//! Builds before the asset browser saved the viewport, the outliner and the
+//! inspector ([`PANES_BEFORE_ASSETS`]). **That layout is kept and the browser
+//! is added to it** ([`migrate`]): docked below the outliner, sharing the
+//! outliner's slot equally — `DockLayout::dock`'s own split — so the
+//! inspector, the viewport and every divider a person dragged stay where they
+//! were. The migrated layout is written back only if the run moves a divider,
+//! as any layout is. The old default migrates to the new default, so a person
+//! who never moved a divider sees the layout a first run does.
 
 use crcbl::serde::{Deserialize, Serialize};
 use crcbl::store::StorageError;
 use crcbl::store::settings::SettingsStack;
-use crcbl::ui::tree::{DockLayout, SplitAxis};
+use crcbl::ui::tree::{DockLayout, DockSide, SplitAxis};
 
 /// The name this tool keeps its settings under: `settings.toml` in this
 /// platform's config directory for it.
@@ -66,9 +77,16 @@ pub const OUTLINER: &str = "outliner";
 /// The pane holding the selected entity's fields.
 pub const INSPECTOR: &str = "inspector";
 
+/// The pane listing the mesh assets a scene can place.
+pub const ASSETS: &str = "assets";
+
 /// Every pane this build knows, which is what a layout read back must hold —
 /// see the module docs.
-pub const PANES: [&str; 3] = [VIEWPORT, OUTLINER, INSPECTOR];
+pub const PANES: [&str; 4] = [VIEWPORT, OUTLINER, INSPECTOR, ASSETS];
+
+/// The panes a build before the asset browser saved, which [`load`] migrates
+/// rather than discards — see the module docs.
+pub const PANES_BEFORE_ASSETS: [&str; 3] = [VIEWPORT, OUTLINER, INSPECTOR];
 
 /// How little a pane may be dragged to, along and across its split, in pixels.
 ///
@@ -86,8 +104,11 @@ pub const PANE_MIN: [f32; 2] = [160.0, 64.0];
 /// person wants it.
 pub const SIDE_WIDTH: f32 = 240.0;
 
-/// The layout a build with nothing saved opens on: the outliner over the
-/// inspector in a column down the left, the viewport taking the rest.
+/// The layout a build with nothing saved opens on: a column down the left of
+/// the outliner over the asset browser, sharing its upper half, over the
+/// inspector, and the viewport taking the rest.
+///
+/// What [`migrate`] makes of an older build's default, which a test holds.
 #[must_use]
 pub fn default_layout() -> DockLayout {
     DockLayout::Split {
@@ -95,11 +116,29 @@ pub fn default_layout() -> DockLayout {
         position: Some(SIDE_WIDTH),
         first: Box::new(DockLayout::split(
             SplitAxis::Column,
-            DockLayout::pane(OUTLINER),
+            DockLayout::split(
+                SplitAxis::Column,
+                DockLayout::pane(OUTLINER),
+                DockLayout::pane(ASSETS),
+            ),
             DockLayout::pane(INSPECTOR),
         )),
         second: Box::new(DockLayout::pane(VIEWPORT)),
     }
+}
+
+/// An older build's three-pane layout with the asset browser docked below
+/// its outliner — see the module docs — or [`None`] for a layout that is not
+/// exactly those three panes.
+#[must_use]
+pub fn migrate(layout: &DockLayout) -> Option<DockLayout> {
+    if !holds_exactly(layout, &PANES_BEFORE_ASSETS) {
+        return None;
+    }
+    let mut migrated = layout.clone();
+    migrated
+        .dock(ASSETS, OUTLINER, DockSide::Bottom)
+        .then_some(migrated)
 }
 
 /// A [`DockLayout`] as it is written down; see the module docs.
@@ -214,20 +253,26 @@ pub fn from_ron(text: &str) -> Result<DockLayout, crcbl::ron::error::SpannedErro
 /// Whether `layout` holds exactly this build's panes, each once.
 #[must_use]
 pub fn is_this_editors(layout: &DockLayout) -> bool {
+    holds_exactly(layout, &PANES)
+}
+
+/// Whether `layout` holds exactly the panes `wanted` names, each once.
+fn holds_exactly(layout: &DockLayout, wanted: &[&str]) -> bool {
     let mut panes = layout.panes();
     panes.sort_unstable();
-    let mut wanted = PANES;
+    let mut wanted = wanted.to_vec();
     wanted.sort_unstable();
     panes == wanted
 }
 
 /// The layout `stack` holds, or [`None`] where it holds none this build can
-/// use.
+/// use — an older build's three panes [migrated](migrate) to this build's
+/// four.
 ///
-/// Text that is not a layout, and a layout that is not this editor's panes, are
-/// both **logged and discarded** rather than refused: a settings file is a
-/// thing people edit, and a tool that would not start because of one is worse
-/// than a tool that starts with its default panels. See the module docs.
+/// Text that is not a layout, and a layout of any other panes, are both
+/// **logged and discarded** rather than refused: a settings file is a thing
+/// people edit, and a tool that would not start because of one is worse than
+/// a tool that starts with its default panels. See the module docs.
 #[must_use]
 pub fn load(stack: &SettingsStack) -> Option<DockLayout> {
     let text: String = stack.get(LAYOUT_KEY)?;
@@ -238,15 +283,22 @@ pub fn load(stack: &SettingsStack) -> Option<DockLayout> {
             return None;
         }
     };
-    if !is_this_editors(&layout) {
-        crcbl::log::warn!(
-            "editor: {LAYOUT_KEY} holds the panes {:?}, and this build has {PANES:?}; \
-             using the default",
-            layout.panes(),
-        );
-        return None;
+    if is_this_editors(&layout) {
+        return Some(layout);
     }
-    Some(layout)
+    if let Some(migrated) = migrate(&layout) {
+        crcbl::log::info!(
+            "editor: {LAYOUT_KEY} is an older build's layout; the asset browser is added below \
+             the outliner"
+        );
+        return Some(migrated);
+    }
+    crcbl::log::warn!(
+        "editor: {LAYOUT_KEY} holds the panes {:?}, and this build has {PANES:?}; using the \
+         default",
+        layout.panes(),
+    );
+    None
 }
 
 /// Writes `layout` into `stack` under [`LAYOUT_KEY`].
@@ -281,13 +333,13 @@ mod tests {
         SettingsStack::from_storage(&MemoryStorage::new())
     }
 
-    /// **The default layout is this build's three panes**, and the side column
+    /// **The default layout is this build's four panes**, and the side column
     /// is the first child of the outer split so that a resize moves the
     /// viewport rather than the panels.
     #[test]
     fn the_default_layout_is_this_builds_panes_with_the_side_column_fixed() {
         let layout = default_layout();
-        assert_eq!(layout.panes(), [OUTLINER, INSPECTOR, VIEWPORT]);
+        assert_eq!(layout.panes(), [OUTLINER, ASSETS, INSPECTOR, VIEWPORT]);
         assert!(is_this_editors(&layout));
         let DockLayout::Split {
             axis,
@@ -304,7 +356,7 @@ mod tests {
             Some(SIDE_WIDTH),
             "the side column has no width of its own, so a resize would share it",
         );
-        assert_eq!(first.panes(), [OUTLINER, INSPECTOR], "{first:?}");
+        assert_eq!(first.panes(), [OUTLINER, ASSETS, INSPECTOR], "{first:?}");
     }
 
     /// **A layout survives a save and a restore**, dividers included — the
@@ -345,10 +397,10 @@ mod tests {
         assert_eq!(load(&stack()), None);
     }
 
-    /// **A layout that is not this build's panes is discarded**, which is what
-    /// keeps a hand-edited or an older file from leaving the editor with no
-    /// viewport to click in. Each half is refused on its own: text that is not
-    /// a layout, and a layout whose panes are not these.
+    /// **A layout that is not this build's panes, nor an older build's, is
+    /// discarded**, which is what keeps a hand-edited file from leaving the
+    /// editor with no viewport to click in. Each half is refused on its own:
+    /// text that is not a layout, and a layout whose panes are not these.
     #[test]
     fn a_layout_this_build_cannot_use_is_discarded() {
         let mut stack = stack();
@@ -393,5 +445,134 @@ mod tests {
             from_ron(&text).expect("what we just wrote"),
             default_layout()
         );
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    use crcbl::store::MemoryStorage;
+    use crcbl::ui::tree::DockSide;
+
+    /// A `settings.toml` holding an older build's layout — three panes, before
+    /// the asset browser — as the settings writer writes it (`SavedLayout` and
+    /// the writer are unchanged since): its default with the side column
+    /// dragged to 300 pixels and the inspector moved to the viewport's right.
+    const THREE_PANES_TOML: &str = include_str!("layout/three-panes.toml");
+
+    /// The layout [`THREE_PANES_TOML`] holds, built as the older build built
+    /// it.
+    fn three_panes() -> DockLayout {
+        let mut layout = DockLayout::Split {
+            axis: SplitAxis::Row,
+            position: Some(300.0),
+            first: Box::new(DockLayout::split(
+                SplitAxis::Column,
+                DockLayout::pane(OUTLINER),
+                DockLayout::pane(INSPECTOR),
+            )),
+            second: Box::new(DockLayout::pane(VIEWPORT)),
+        };
+        assert!(layout.move_pane(INSPECTOR, VIEWPORT, DockSide::Right));
+        layout
+    }
+
+    /// A stack over memory holding `toml` as its `settings.toml`.
+    fn stack_holding(toml: &str) -> SettingsStack {
+        let storage = MemoryStorage::new();
+        crcbl::store::StorageSource::write(
+            &storage,
+            std::path::Path::new("settings.toml"),
+            toml.as_bytes(),
+        )
+        .expect("memory takes a write");
+        SettingsStack::from_storage(&storage)
+    }
+
+    /// **An older build's saved layout is migrated, not discarded**: every
+    /// divider and pane it had stays where it was, and the asset browser is
+    /// docked below the outliner, sharing its slot.
+    #[test]
+    fn an_older_three_pane_layout_gains_the_browser_below_the_outliner() {
+        let older = three_panes();
+        assert_eq!(
+            from_ron(
+                &stack_holding(THREE_PANES_TOML)
+                    .get::<String>(LAYOUT_KEY)
+                    .expect("the fixture holds a layout")
+            )
+            .expect("the fixture is a layout"),
+            older,
+            "the fixture is not the older layout",
+        );
+
+        let loaded = load(&stack_holding(THREE_PANES_TOML)).expect("an older layout is migrated");
+        assert!(is_this_editors(&loaded), "{loaded:?}");
+        let mut expected = older;
+        assert!(expected.dock(ASSETS, OUTLINER, DockSide::Bottom));
+        assert_eq!(loaded, expected);
+        let DockLayout::Split {
+            position, first, ..
+        } = &loaded
+        else {
+            panic!("the outer split survives");
+        };
+        assert_eq!(*position, Some(300.0), "the dragged divider moved");
+        assert_eq!(
+            **first,
+            DockLayout::split(
+                SplitAxis::Column,
+                DockLayout::pane(OUTLINER),
+                DockLayout::pane(ASSETS),
+            ),
+            "the browser does not share the outliner's slot",
+        );
+    }
+
+    /// **The older default migrates to this default**, so a person who never
+    /// moved a divider sees what a first run sees.
+    #[test]
+    fn the_older_default_migrates_to_this_default() {
+        let older_default = DockLayout::Split {
+            axis: SplitAxis::Row,
+            position: Some(SIDE_WIDTH),
+            first: Box::new(DockLayout::split(
+                SplitAxis::Column,
+                DockLayout::pane(OUTLINER),
+                DockLayout::pane(INSPECTOR),
+            )),
+            second: Box::new(DockLayout::pane(VIEWPORT)),
+        };
+        assert_eq!(migrate(&older_default), Some(default_layout()));
+        assert_eq!(
+            migrate(&default_layout()),
+            None,
+            "a current layout migrated"
+        );
+        assert_eq!(
+            migrate(&DockLayout::split(
+                SplitAxis::Row,
+                DockLayout::pane(OUTLINER),
+                DockLayout::pane(VIEWPORT),
+            )),
+            None,
+            "a layout of two panes is not an older build's",
+        );
+    }
+
+    /// **A current four-pane layout round-trips** through a settings file
+    /// untouched by the migration.
+    #[test]
+    fn a_current_layout_round_trips_unmigrated() {
+        let mut moved = default_layout();
+        assert!(moved.move_pane(ASSETS, VIEWPORT, DockSide::Bottom));
+        let storage = MemoryStorage::new();
+        let mut saved = SettingsStack::from_storage(&storage);
+        store(&mut saved, &moved).expect("writable");
+        saved
+            .save(&storage, std::path::Path::new("settings.toml"))
+            .expect("memory takes a write");
+        assert_eq!(load(&SettingsStack::from_storage(&storage)), Some(moved));
     }
 }

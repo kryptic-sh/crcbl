@@ -1408,7 +1408,8 @@ fn sun() -> DirectionalLight {
     DirectionalLight::default()
 }
 
-/// Opens what the command line named, or the compiled-in scene.
+/// Opens what the command line named, or the compiled-in scene, reading its
+/// meshes from the asset root the command line named, if it named one.
 ///
 /// Both through [`crate::scene::vocabulary`], which is the components **this**
 /// build knows: a directory whose manifest names a system it does not is refused
@@ -1418,7 +1419,11 @@ fn open_document(options: &Options) -> Result<Document, EditorError> {
         Some(path) => Document::open_dir(path.clone(), crate::scene::vocabulary()),
         None => Document::built_in(),
     };
-    document.map_err(LoopError::Game)
+    let mut document = document.map_err(LoopError::Game)?;
+    if let Some(root) = &options.assets {
+        document.set_assets(Box::new(crcbl::assets::DirSource::at(root.clone())));
+    }
+    Ok(document)
 }
 
 /// Says in the log what was opened: the scene's name and how many entities it
