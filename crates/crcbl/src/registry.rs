@@ -18,10 +18,16 @@
 //!                     └── placement()       a centre and half extents, for a
 //!                                           collider and a bounds box
 //!
-//!     a game ──▶ Registry::module("bricks", || Box::new(Rules))
+//!     a game ──▶ Registry::module("bricks", start)
 //!                     │
-//!                     └── modules()         a fresh GameModule per play, for a
-//!                                           tool that runs the scene
+//!                     └── modules()         a fresh GameModule per play, built
+//!                                           from the scene's files, for a tool
+//!                                           that runs the scene
+//!
+//!     a game ──▶ Registry::register_runtime::<Ball>("balls")
+//!                     │
+//!                     ├── placement()       where a thing its module spawned
+//!                     └── runtime_entities()  stands, for a tool to draw it
 //! ```
 //!
 //! # One call registers all four, which is why they cannot drift
@@ -85,6 +91,19 @@
 //!   [`GameModule`] and [`Registry::modules`] builds them; registering their
 //!   systems and ticking them is the caller's — the editor's play mode is one,
 //!   and it decides the rate and the inputs.
+//!
+//! # A runtime component is placed and never saved
+//!
+//! What a module spawns while a scene plays — a creep walking the lane — is
+//! not part of the scene, and a tool still wants to draw it.
+//! [`Registry::register_runtime`] records **only** the placement: no codec, so
+//! a manifest naming the system is refused by
+//! [`Scene::load`](crcbl_scene::scn::Scene::load) and
+//! [`Scene::save`](crcbl_scene::scn::Scene::save) has nothing to write it
+//! with; no `&mut dyn Reflect`, so nothing edits it; and no system
+//! registration, because the module that spawns into it registers its own.
+//! The guarantee is the missing codec rather than a flag a save has to
+//! remember to read, so a runtime system cannot leak into a scene's files.
 
 use std::any::type_name;
 use std::collections::BTreeMap;
@@ -201,6 +220,10 @@ pub struct Registry {
     /// The games' behaviour, each with the system whose presence in a manifest
     /// says the scene is that game's — see [`Registry::module`].
     modules: Vec<(String, ModuleFactory)>,
+    /// The components a game's module spawns while a scene plays, keyed and
+    /// sorted by system name as `entries` is — see
+    /// [`Registry::register_runtime`].
+    runtime: BTreeMap<String, RuntimeEntry>,
 }
 
 /// A game's rule over a whole scene: the scene's files, read through `source`
@@ -213,14 +236,23 @@ pub struct Registry {
 /// was made rather than where it is next loaded.
 pub type SceneCheck = fn(&dyn AssetSource, &Path) -> Result<(), String>;
 
-/// Builds a fresh instance of a game's [`GameModule`]: what a tool that plays a
-/// scene calls each time it starts playing.
+/// Builds a fresh instance of a game's [`GameModule`] for the scene whose files
+/// `source` holds under `dir` — or the reason the game refuses to play that
+/// scene. What a tool that plays a scene calls each time it starts playing.
 ///
 /// A constructor rather than an instance, because a module carries state from
 /// tick to tick — a score, a wave counter — and a second play has to start from
 /// none of it. A function pointer for [`SceneCheck`]'s reason: a capture-free
 /// closure coerces to one, and the registry stays a table of plain pointers.
-pub type ModuleFactory = fn() -> Box<dyn GameModule>;
+///
+/// **Handed the scene's files, and allowed to refuse them**, because a game
+/// reads its rules off the scene before the first tick — a path whose legs must
+/// be axis-aligned is a path a module cannot walk otherwise — and a refusal
+/// there is a reason a person can act on, where a module built regardless would
+/// have to panic or sit inert. The files rather than the world, for
+/// [`SceneCheck`]'s reason: they are what the game's own loader reads, so the
+/// module plays the scene the way the game would load it.
+pub type ModuleFactory = fn(&dyn AssetSource, &Path) -> Result<Box<dyn GameModule>, String>;
 
 /// One registered component, reduced to the calls a tool makes.
 ///
@@ -235,6 +267,16 @@ struct Entry {
     codec: fn(&str) -> Box<dyn SystemChunk>,
     register: fn(&mut World, &str),
     component_mut: for<'w> fn(&'w mut World, &str, Entity) -> Option<&'w mut dyn Reflect>,
+    placement: fn(&mut World, &str, Entity) -> Option<(DVec3, DVec3)>,
+    entities: fn(&mut World, &str) -> Vec<Entity>,
+}
+
+/// One runtime component, reduced to the two calls a tool drawing it makes —
+/// see [`Registry::register_runtime`].
+#[derive(Clone, Copy)]
+struct RuntimeEntry {
+    /// The component's Rust path, for a message.
+    component: &'static str,
     placement: fn(&mut World, &str, Entity) -> Option<(DVec3, DVec3)>,
     entities: fn(&mut World, &str) -> Vec<Entity>,
 }
@@ -271,14 +313,58 @@ impl Registry {
             placement: placement_of::<T>,
             entities: entities_of::<T>,
         };
-        if let Some(held) = self.entries.get(&system) {
+        self.refuse_taken(&system, entry.component);
+        self.entries.insert(system, entry);
+    }
+
+    /// Registers `T` as a **runtime** component: one a game's module spawns
+    /// into the system called `system` while a scene plays, which a tool draws
+    /// from its [`Placement`] and never lists, edits or saves.
+    ///
+    /// Only the placement and the entity list are recorded — see the
+    /// [module docs](self) for why the missing codec is the guarantee. So the
+    /// name is not one of [`systems`](Self::systems),
+    /// [`contains`](Self::contains) says a scene naming it cannot be opened,
+    /// and [`register_systems`](Self::register_systems) leaves it out: the
+    /// module registers the system in its own
+    /// [`register`](crcbl_ecs::GameModule::register), so it exists only in a
+    /// world that is playing.
+    ///
+    /// # Panics
+    ///
+    /// If `system` is already registered, as a scene system or a runtime one,
+    /// for [`register`](Self::register)'s reason: [`placement`](Self::placement)
+    /// finds a system by name, and two under one name would answer for each
+    /// other.
+    pub fn register_runtime<T>(&mut self, system: impl Into<String>)
+    where
+        T: ComponentHash + Placement + 'static,
+    {
+        let system = system.into();
+        let entry = RuntimeEntry {
+            component: type_name::<T>(),
+            placement: placement_of::<T>,
+            entities: entities_of::<T>,
+        };
+        self.refuse_taken(&system, entry.component);
+        self.runtime.insert(system, entry);
+    }
+
+    /// Panics, naming both types, if `system` is already registered — the one
+    /// refusal [`register`](Self::register) and
+    /// [`register_runtime`](Self::register_runtime) share.
+    fn refuse_taken(&self, system: &str, component: &str) {
+        let held = self
+            .entries
+            .get(system)
+            .map(|entry| entry.component)
+            .or_else(|| self.runtime.get(system).map(|entry| entry.component));
+        if let Some(held) = held {
             panic!(
-                "the scene system `{system}` is already registered, holding `{}`; \
-                 registering `{}` under it would hide one of them",
-                held.component, entry.component,
+                "the scene system `{system}` is already registered, holding `{held}`; \
+                 registering `{component}` under it would hide one of them",
             );
         }
-        self.entries.insert(system, entry);
     }
 
     /// Adds `check`, run on every scene whose manifest lists `system` — the
@@ -310,7 +396,8 @@ impl Registry {
 
     /// Adds `factory`, whose module plays any scene whose manifest lists
     /// `system` — the game that owns that system bringing its behaviour beside
-    /// its components.
+    /// its components. The factory is handed the scene's files, and may refuse
+    /// them — see [`ModuleFactory`].
     ///
     /// Keyed by a system for [`check`](Self::check)'s reason: a registry holds
     /// several games' vocabularies at once, and one game's rules ticking on
@@ -320,6 +407,9 @@ impl Registry {
     /// be built and ticked twice.
     ///
     /// ```
+    /// use std::path::Path;
+    ///
+    /// use crcbl::assets::{AssetSource, MemorySource};
     /// use crcbl::ecs::{ClientInputs, GameModule, World};
     /// use crcbl::registry::Registry;
     ///
@@ -333,31 +423,51 @@ impl Registry {
     ///     fn tick(&mut self, _world: &mut World, _inputs: ClientInputs<'_>) {}
     /// }
     ///
-    /// let mut registry = Registry::new();
-    /// registry.module("bricks", || Box::new(Rules));
+    /// fn start(_: &dyn AssetSource, _: &Path) -> Result<Box<dyn GameModule>, String> {
+    ///     Ok(Box::new(Rules))
+    /// }
     ///
-    /// let built = registry.modules(&["bricks".to_owned()]);
+    /// let mut registry = Registry::new();
+    /// registry.module("bricks", start);
+    ///
+    /// let scene = MemorySource::new();
+    /// let built = registry
+    ///     .modules(&["bricks".to_owned()], &scene, Path::new(""))
+    ///     .expect("the rules play any scene");
     /// assert_eq!(built.len(), 1);
     /// assert_eq!(built[0].name(), "rules");
-    /// assert!(registry.modules(&["props".to_owned()]).is_empty());
+    /// let none = registry
+    ///     .modules(&["props".to_owned()], &scene, Path::new(""))
+    ///     .expect("no game to refuse it");
+    /// assert!(none.is_empty());
     /// ```
     pub fn module(&mut self, system: impl Into<String>, factory: ModuleFactory) {
         self.modules.push((system.into(), factory));
     }
 
-    /// A fresh instance of every module whose system `systems` lists, in the
-    /// order the modules were added — empty for a scene no registered game
-    /// plays.
+    /// A fresh instance of every module whose system `systems` lists, built
+    /// for the scene `source` holds under `dir`, in the order the modules were
+    /// added — empty for a scene no registered game plays.
     ///
     /// Registration order rather than name order, because it is the order the
     /// modules tick in, and a game that registers two wants them to run in the
     /// order it wrote.
-    #[must_use]
-    pub fn modules(&self, systems: &[String]) -> Vec<Box<dyn GameModule>> {
+    ///
+    /// # Errors
+    ///
+    /// The first refusal a factory gave, in that order: a game that will not
+    /// play the scene, saying why. No module is handed back then, so a caller
+    /// has registered nothing it would have to take out of its world again.
+    pub fn modules(
+        &self,
+        systems: &[String],
+        source: &dyn AssetSource,
+        dir: &Path,
+    ) -> Result<Vec<Box<dyn GameModule>>, String> {
         self.modules
             .iter()
             .filter(|(system, _)| systems.contains(system))
-            .map(|(_, factory)| factory())
+            .map(|(_, factory)| factory(source, dir))
             .collect()
     }
 
@@ -472,18 +582,40 @@ impl Registry {
     }
 
     /// Where `entity` stands and how far it reaches, from the [`Placement`] of
-    /// whichever registered component it has.
+    /// whichever registered component it has — a scene component's, or a
+    /// [runtime](Self::register_runtime) one's.
     ///
     /// [`None`] both for an entity no registered system holds and for one whose
     /// component is not a thing in space — see [`Placement`].
     #[must_use]
     pub fn placement(&self, world: &mut World, entity: Entity) -> Option<(DVec3, DVec3)> {
-        for (system, entry) in &self.entries {
-            if let Some(placement) = (entry.placement)(world, system, entity) {
-                return Some(placement);
-            }
-        }
-        None
+        let scene = self
+            .entries
+            .iter()
+            .map(|(system, entry)| (system, entry.placement));
+        let runtime = self
+            .runtime
+            .iter()
+            .map(|(system, entry)| (system, entry.placement));
+        scene
+            .chain(runtime)
+            .find_map(|(system, placement)| placement(world, system, entity))
+    }
+
+    /// Every entity a [runtime](Self::register_runtime) system holds in
+    /// `world` — what a module spawned while the scene plays — by system name
+    /// and then in storage order.
+    ///
+    /// Empty in a world no module has registered a runtime system in, which is
+    /// every world that is not playing. Storage order rather than an id's,
+    /// because these entities have none: nothing saves them, and the order is
+    /// only the order a tool draws them in.
+    #[must_use]
+    pub fn runtime_entities(&self, world: &mut World) -> Vec<Entity> {
+        self.runtime
+            .iter()
+            .flat_map(|(system, entry)| (entry.entities)(world, system))
+            .collect()
     }
 
     /// The entities the system called `system` holds, in the order the chunk file
@@ -857,35 +989,190 @@ mod tests {
         }
 
         let mut registry = registry();
-        registry.module("beacons", || {
+        registry.module("beacons", |_, _| {
             BUILT.fetch_add(1, Ordering::Relaxed);
-            Box::new(Named("first"))
+            Ok(Box::new(Named("first")))
         });
-        registry.module("bricks", || {
+        registry.module("bricks", |_, _| {
             BUILT.fetch_add(1, Ordering::Relaxed);
-            Box::new(Named("elsewhere"))
+            Ok(Box::new(Named("elsewhere")))
         });
-        registry.module("blocks", || {
+        registry.module("blocks", |_, _| {
             BUILT.fetch_add(1, Ordering::Relaxed);
-            Box::new(Named("second"))
+            Ok(Box::new(Named("second")))
         });
 
+        let source = scene_source();
+        let build = |systems: &[String]| {
+            registry
+                .modules(systems, &source, Path::new(""))
+                .expect("no factory here refuses")
+        };
         let systems = ["blocks".to_owned(), "beacons".to_owned()];
-        let first = registry.modules(&systems);
+        let first = build(&systems);
         assert_eq!(names(&first), ["first", "second"]);
         assert_eq!(
             BUILT.load(Ordering::Relaxed),
             2,
             "a module nothing listed was built"
         );
-        let again = registry.modules(&systems);
+        let again = build(&systems);
         assert_eq!(names(&again), ["first", "second"]);
         assert_eq!(
             BUILT.load(Ordering::Relaxed),
             4,
             "a second call handed back the modules it built before",
         );
-        assert!(registry.modules(&[]).is_empty());
+        assert!(build(&[]).is_empty());
+    }
+
+    /// **A factory reads the scene it is handed and may refuse it**, and the
+    /// refusal is what `modules` answers — no module is handed back beside it.
+    #[test]
+    fn a_factory_that_refuses_the_scene_refuses_the_play() {
+        struct Rules;
+
+        impl GameModule for Rules {
+            fn name(&self) -> &str {
+                "rules"
+            }
+            fn register(&self, _world: &mut World) {}
+        }
+
+        /// Plays a scene with a header, and refuses one without.
+        fn start(source: &dyn AssetSource, dir: &Path) -> Result<Box<dyn GameModule>, String> {
+            source
+                .read(&dir.join("scene.ron"))
+                .map_err(|error| format!("no header: {error}"))?;
+            Ok(Box::new(Rules))
+        }
+
+        let mut registry = registry();
+        registry.module("blocks", start);
+        let systems = ["blocks".to_owned()];
+
+        let played = registry
+            .modules(&systems, &scene_source(), Path::new(""))
+            .expect("the scene has a header");
+        assert_eq!(played.len(), 1);
+        let refused = registry
+            .modules(&systems, &MemorySource::new(), Path::new(""))
+            .err()
+            .expect("an empty source has no header");
+        assert!(refused.starts_with("no header"), "{refused}");
+    }
+
+    /// A runtime component: where a thing a module spawned stands.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Ball {
+        centre: [f64; 3],
+    }
+
+    impl ComponentHash for Ball {
+        fn hash_component(&self, hasher: &mut dyn Hasher) {
+            for value in self.centre {
+                hasher.write(&value.to_bits().to_le_bytes());
+            }
+        }
+    }
+
+    impl Placement for Ball {
+        fn placement(&self) -> Option<(DVec3, DVec3)> {
+            Some((DVec3::from_array(self.centre), DVec3::splat(0.25)))
+        }
+    }
+
+    /// **A runtime component is placed and listed for drawing, and it is no
+    /// part of the scene vocabulary**: not a system a scene can name, no
+    /// codec, no editable row, no system a load registers.
+    #[test]
+    fn a_runtime_component_is_placed_and_never_part_of_the_scene() {
+        let mut registry = registry();
+        registry.register_runtime::<Ball>("balls");
+
+        assert_eq!(
+            registry.systems().collect::<Vec<_>>(),
+            ["beacons", "blocks"]
+        );
+        assert!(!registry.contains("balls"));
+        assert!(registry.codec("balls").is_none());
+        assert_eq!(registry.codecs().len(), 2);
+        assert_eq!(registry.component_type("balls"), None);
+
+        let mut world = World::new();
+        registry.register_systems(&mut world);
+        assert_eq!(
+            world.schedule().len(),
+            2,
+            "a load registered the runtime system"
+        );
+        assert!(
+            registry.runtime_entities(&mut world).is_empty(),
+            "a world nothing plays has runtime entities",
+        );
+
+        // What the module that owns it does in its own `register` and `tick`.
+        let mut balls = System::<Ball>::new("balls");
+        let ball = world.spawn();
+        balls.attach(
+            ball,
+            Ball {
+                centre: [1.0, 2.0, 3.0],
+            },
+        );
+        world.register_system(Box::new(balls));
+
+        assert_eq!(registry.runtime_entities(&mut world), [ball]);
+        assert_eq!(
+            registry.placement(&mut world, ball),
+            Some((DVec3::new(1.0, 2.0, 3.0), DVec3::splat(0.25))),
+        );
+        assert!(
+            registry.component(&mut world, ball).is_none(),
+            "a ball is editable"
+        );
+        assert_eq!(registry.system_of(&mut world, ball), None);
+    }
+
+    /// **A scene naming a runtime system is refused by name**, because there
+    /// is no codec to read it with — the half of "never saved" a load holds.
+    #[test]
+    fn a_scene_naming_a_runtime_system_is_refused_by_name() {
+        let mut registry = Registry::new();
+        registry.register::<Block>("blocks");
+        registry.register_runtime::<Beacon>("beacons");
+        let mut world = World::new();
+        registry.register_systems(&mut world);
+
+        let error = Scene::load(
+            &scene_source(),
+            std::path::Path::new(""),
+            &registry.codecs(),
+            &mut world,
+        )
+        .expect_err("`beacons` is runtime only");
+        assert!(
+            matches!(&error, ScnError::NoCodec { system } if system == "beacons"),
+            "{error}",
+        );
+    }
+
+    /// A runtime component under a scene system's name is refused like two
+    /// scene components under one.
+    #[test]
+    #[should_panic(expected = "is already registered")]
+    fn a_runtime_component_under_a_scene_systems_name_is_refused() {
+        let mut registry = registry();
+        registry.register_runtime::<Ball>("blocks");
+    }
+
+    /// …and the other way round.
+    #[test]
+    #[should_panic(expected = "is already registered")]
+    fn a_scene_component_under_a_runtime_systems_name_is_refused() {
+        let mut registry = Registry::new();
+        registry.register_runtime::<Ball>("blocks");
+        registry.register::<Block>("blocks");
     }
 
     /// **An unregistered system fails loudly, naming itself.** The failure this

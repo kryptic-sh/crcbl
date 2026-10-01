@@ -5,7 +5,8 @@
 //!
 //! ```text
 //!     play  ──▶ files() ─────────────────────────────▶ the snapshot (text)
-//!           ──▶ Registry::modules(systems) ──▶ register on the world
+//!           ──▶ Registry::modules(systems, the snapshot)
+//!                 ──▶ a game's refusal, or ──▶ register on the world
 //!     each frame, unless paused:
 //!           ──▶ FrameClock at the world's tick rate ──▶ world.tick()
 //!                                                    ──▶ every module's tick
@@ -31,6 +32,15 @@
 //! [`IdMap::reserve`](crcbl::scene::scn::IdMap::reserve): the files spell the
 //! ids the scene holds, not the ones a deleted entity's undo still names. The
 //! selection survives when the entity it names is in the restored scene.
+//!
+//! # What a module spawns
+//!
+//! Towers' creeps: entities in a system the module registered, of a component
+//! the vocabulary knows only as
+//! [runtime](crcbl::registry::Registry::register_runtime). The document draws
+//! them ([`Document::spawned`]) and does nothing else with them — they have no
+//! id, so nothing lists, selects, edits or saves them — and stop throws away
+//! the world they were spawned in, so none outlives play.
 //!
 //! # Why every edit is refused in between
 //!
@@ -127,7 +137,7 @@ impl Document {
     ///
     /// Starting takes the scene's [`files`](Self::files) as the snapshot
     /// [`stop`](Self::stop) restores, builds a fresh instance of every module
-    /// the vocabulary registers for the scene's systems
+    /// the vocabulary registers for the scene's systems from those files
     /// ([`crcbl::registry::Registry::modules`]) and calls each one's
     /// [`register`](GameModule::register) on the document's world. Nothing
     /// ticks until [`advance`](Self::advance) is handed time.
@@ -135,18 +145,30 @@ impl Document {
     /// # Errors
     ///
     /// [`EditError::Scene`] if the scene would not save — an entity with no
-    /// id, which a save refuses rather than drops — in which case play does
-    /// not start and nothing changed. [`EditError::TickRate`] if a module's
-    /// `register` left the world a tick period no fixed step can be taken at;
-    /// the world is restored from the snapshot first, so the document is back
-    /// to editing exactly as it was.
+    /// id, which a save refuses rather than drops — and
+    /// [`EditError::Unplayable`] if a game refuses to play the scene, naming
+    /// why; in either case play does not start and nothing changed, because
+    /// every module is built before any registers. [`EditError::TickRate`] if
+    /// a module's `register` left the world a tick period no fixed step can be
+    /// taken at; the world is restored from the snapshot first, so the
+    /// document is back to editing exactly as it was.
     pub fn play(&mut self) -> Result<(), EditError> {
         if let Some(session) = &mut self.play {
             session.paused = false;
             return Ok(());
         }
         let snapshot = self.files()?;
-        let modules = self.registry.modules(self.scene.systems());
+        // Each game builds its module from the scene's own text, read the way
+        // its loader reads it — and refuses here, before anything registers,
+        // a scene it would not play.
+        let modules = self
+            .registry
+            .modules(
+                self.scene.systems(),
+                &memory_source(snapshot.clone())?,
+                Path::new(""),
+            )
+            .map_err(EditError::Unplayable)?;
         for module in &modules {
             module.register(&mut self.world);
         }

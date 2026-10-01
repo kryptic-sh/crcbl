@@ -3,9 +3,10 @@
 //! play with.
 //!
 //! **The module is a test fixture, not a shipped one.** The editor's own
-//! vocabulary registers no module, and no sample does yet; a module here that
-//! moves every [`Block`](crate::scene::Block) is what lets a test see a tick
-//! land.
+//! [`Block`](crate::scene::Block) has no module, and the one the shipped
+//! vocabulary carries is towers', which plays only towers' field — its tests
+//! are `towers_play_tests`. A module here that moves every block is what lets
+//! a test see a tick land on the compiled-in scene.
 
 use std::time::Duration;
 
@@ -49,7 +50,7 @@ impl GameModule for Drift {
 /// The editor's vocabulary with [`Drift`] registered for its blocks.
 pub(crate) fn drifting() -> Registry {
     let mut registry = crate::scene::vocabulary();
-    registry.module(BLOCKS, || Box::new(Drift));
+    registry.module(BLOCKS, |_, _| Ok(Box::new(Drift)));
     registry
 }
 
@@ -373,7 +374,7 @@ impl GameModule for Stopped {
 #[test]
 fn a_world_with_no_tick_period_does_not_play() {
     let mut registry = crate::scene::vocabulary();
-    registry.module(BLOCKS, || Box::new(Stopped));
+    registry.module(BLOCKS, |_, _| Ok(Box::new(Stopped)));
     let mut document = Document::open(
         &crate::scene::built_in_source(),
         Path::new(GREYBOX),

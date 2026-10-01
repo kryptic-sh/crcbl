@@ -3,8 +3,9 @@
 //!
 //! The editor here plays the compiled-in scene through
 //! `crate::document::play_tests::drifting`, a test vocabulary whose module
-//! moves every block along X each tick; the shipped vocabulary registers no
-//! module.
+//! moves every block along X each tick; the shipped vocabulary's one module
+//! is towers', which plays towers' field and not the greybox scene — the last
+//! test here plays it.
 
 use super::*;
 
@@ -127,7 +128,8 @@ fn pause_while_editing_says_play_is_not_running() {
 }
 
 /// **A scene no registered game plays still plays**, and the status line says
-/// only the world ticks — the shipped vocabulary, which registers no module.
+/// only the world ticks — the compiled-in greybox scene, whose system no
+/// module in the shipped vocabulary is registered under.
 #[test]
 fn a_scene_with_no_module_plays_and_says_only_the_world_ticks() {
     let mut editor = headless(8);
@@ -273,5 +275,73 @@ fn a_gizmo_drag_in_play_mode_is_refused() {
         "the drag moved it"
     );
     assert!(editor.document().log().is_empty());
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **Towers' creeps are drawn while its field plays, and gone once it
+/// stops** — counted off the renderer's own live records as well as the
+/// editor's instances, through the field opened from its committed directory
+/// the way `editor <SCENE_DIR>` opens it.
+#[test]
+fn towers_creeps_are_drawn_while_the_field_plays_and_gone_after_stop() {
+    use crate::app::instances::Drawn;
+
+    /// Ticks handed to each frame: under the clock's catch-up cap, so none is
+    /// dropped, and enough that the build phase runs down in a few dozen
+    /// frames.
+    const TICKS_PER_FRAME: u32 = 4;
+
+    let field = Path::new(env!("CARGO_MANIFEST_DIR")).join("../towers/assets/scenes/field.scn");
+    let mut options = options(400);
+    options.scene = Some(field);
+    let mut editor = Editor::with_shell(Box::new(HeadlessShell::new()), &options)
+        .expect("the null backend opens towers' field");
+    let period = Duration::from_secs_f64(1.0 / f64::from(crcbl_towers::DEFAULT_TICK_HZ));
+    editor.clock_source = Clock::manual(period * TICKS_PER_FRAME);
+
+    let spawned = |editor: &Editor<HeadlessShell>| {
+        editor
+            .instances
+            .instances
+            .iter()
+            .filter(|placed| matches!(placed.drawn, Drawn::Spawned(_)))
+            .count()
+    };
+    let live = |editor: &Editor<HeadlessShell>| {
+        editor
+            .renderer
+            .cull_records()
+            .0
+            .iter()
+            .filter(|record| record.flags & crcbl::shaders::mesh::GpuInstance::LIVE != 0)
+            .count()
+    };
+    editor.frame().expect("a frame");
+    let scene = live(&editor);
+    assert_eq!(spawned(&editor), 0, "an editing field drew a creep");
+
+    tap(&mut editor, KeyCode::F5);
+    assert_eq!(editor.document().playing_modules(), ["towers"]);
+    // The build phase at towers' rate, in frames, and two frames more: the
+    // one whose ticks release the first creep, and the one that draws it.
+    let build = crcbl_towers::wave::GAP_S * f64::from(crcbl_towers::DEFAULT_TICK_HZ);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let frames = (build / f64::from(TICKS_PER_FRAME)).ceil() as u32 + 2;
+    for _ in 0..frames {
+        editor.frame().expect("a frame");
+    }
+    let creeps = editor.document_mut().spawned().len();
+    assert!(creeps > 0, "no creep walked in {frames} frames of play");
+    assert_eq!(spawned(&editor), creeps, "a walking creep is not drawn");
+    assert_eq!(
+        live(&editor),
+        scene + creeps,
+        "the renderer does not draw the creeps"
+    );
+
+    tap(&mut editor, KeyCode::F5);
+    assert_eq!(editor.document().play_state(), PlayState::Editing);
+    assert_eq!(spawned(&editor), 0, "a creep outlived play");
+    assert_eq!(live(&editor), scene, "the renderer still draws a creep");
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }

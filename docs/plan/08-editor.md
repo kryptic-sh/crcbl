@@ -253,8 +253,9 @@ of the same day (below).
   the default context; neither reserved context binds a function key, so they
   reach the editor while a panel holds the keyboard, and only the editing rule
   stops them.
-- **No sample registers a module yet**, and the shipped vocabulary has no demo
-  one: the tests play a test-only module that moves every greybox block.
+- **No sample registered a module in this slice**, and the shipped vocabulary
+  has no demo one: the tests play a test-only module that moves every greybox
+  block. Towers' is slice 9's, below.
 - **Evidence**: the document's play tests hold a tick through the bounds and a
   pick, pause banking nothing, a byte-for-byte restore after play changed the
   scene, an edit, a duplicate and its delete surviving play with the log walked
@@ -274,6 +275,59 @@ of the same day (below).
   unbound, the toolbar's buttons swapped or its clicks dropped, the loop never
   advancing play, and the module-less status reversed; the registry's system
   filter and `IdMap::reserve`'s body each turned their own test red.
+
+**Slice 9, towers' play module, landed 2026-10-01.** F5 on towers' field runs
+towers' game on it, and creeps visibly walk the lane.
+
+- **A module is built from the scene's files and may refuse them.**
+  `ModuleFactory` became `fn(&dyn AssetSource, &Path) -> Result<_, String>`, and
+  `Document::play` hands `Registry::modules` the snapshot it already took:
+  towers builds its map through the same `Map::load` `--scene` runs, so a field
+  its rules refuse (a diagonal leg) does not play, and the status line names the
+  rule (`EditError::Unplayable`). Every module is built before any registers, so
+  a refusal leaves nothing to take out of the world.
+- **Towers ticks as solo, with one local player asking for nothing.**
+  `run_team_tick` holds the run still on a tick with no command frame at all, so
+  towers' module (`crate::game`'s `play`, registered under `waypoints`) ticks
+  through `TowersModule`'s `GameModule` half, which reads empty client inputs as
+  the one solo player's empty frame. The build phase runs down, the waves come,
+  creeps walk and leak, and a lost run restarts itself — the game's own rules,
+  by the same call solo makes.
+- **What a module spawns is a runtime component: drawn, never listed or saved.**
+  `Registry::register_runtime::<T>(system)` records a placement and an entity
+  list and no codec, so a manifest naming the system is refused by `Scene::load`
+  and `Scene::save` has nothing to write it with — the guarantee is the missing
+  codec, not a flag a save must read. Towers mirrors each creep into its own
+  `walkers` system as a `Walker` (the box around its sphere), keyed by the
+  creep's physics body and despawned when it dies or leaks. `Document::spawned`
+  and `spawned_bounds` are what the instances draw, under a
+  `Drawn::Spawned(Entity)` key beside the scene's ids; the outline, the id map
+  and the colliders a click picks by are the scene's alone, and stop throws the
+  world away with every creep in it. Declined: drawing every id-less entity that
+  has a placement, which needs the creeps registered as scene components — and
+  then a scene file could list them.
+- **Evidence**: towers' own tests tick the module as play does and hold the
+  first creep held back through the build phase and released after it, the
+  mirror agreeing with the stage tick by tick while creeps leak and lives drop,
+  and a bent path refused by name. The document's tests on the committed field
+  hold the first creep after the build phase (tick counts derived from towers'
+  constants), a creep drawn at its radius walking the first leg on the lane,
+  every creep that leaves doing so at the exit and no longer drawn, the files
+  unchanged through play and byte-identical after stop with no creep left, no
+  creep listed, counted or picked over the corner it stands on, a bent path
+  refused by name and playing again once undone, and breakout's, puppet's and
+  the greybox scene running no module. The loop test opens the committed
+  directory, plays it through F5 and counts the creeps in the renderer's live
+  records, then none after F5 stops it. The registry's tests hold a refusing
+  factory, a runtime component placed and absent from the vocabulary, a scene
+  naming a runtime system refused, and both name clashes. Each of these
+  mutations turned a test red: the registry's system filter removed, runtime
+  placements or runtime entities skipped, a factory's refusal dropped, the name
+  clash ignored, the stage ticked with no player, the mirror never despawning or
+  never moving a creep, the module playing the committed field whatever the
+  scene, the instances skipping spawned entities, play ignoring a refusal,
+  `spawned_bounds` answering for scene entities, creeps given colliders, and
+  stop not restoring.
 
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
@@ -572,7 +626,7 @@ rules. It stays open in the backlog.
 5. Gizmos.
 6. Asset browser + drag-spawn.
 7. Play/stop with snapshot restore. The mechanism landed in slice 8, restoring
-   from the scene's text; no game registers a module yet.
+   from the scene's text; towers registers the first module (slice 9).
 8. Dogfood pass: build a small playable scene start-to-finish in the editor; fix
    what hurts.
 

@@ -857,6 +857,8 @@ fn run_team_tick(stage: &mut Stage, intents: &[(Sender, Intent)], dt: f64) {
 // The module
 // ---------------------------------------------------------------------------
 
+pub(crate) mod play;
+
 /// The stage, as the server hosts it.
 ///
 /// `register` is empty for the same reason `apps/breach`'s is: the whole

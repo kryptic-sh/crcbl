@@ -28,7 +28,7 @@ fn pose(
         .instances
         .instances
         .iter()
-        .find(|placed| placed.id == id)
+        .find(|placed| placed.drawn == Drawn::Scene(id))
         .expect("placed");
     assert_eq!(
         placed.desc, *current,
@@ -57,7 +57,7 @@ fn edit<S: crcbl::shell::Shell + ?Sized>(
             value: Value::Float(x),
         })
         .expect("a position edit");
-    instance_of(&mut editor.document, id).expect("bounds after the edit")
+    instance_of(&mut editor.document, Drawn::Scene(id)).expect("bounds after the edit")
 }
 
 #[test]
@@ -67,7 +67,7 @@ fn unchanged_draws_settle_motion_and_edits_follow_undo_redo() {
         .renderer
         .set_shadow_cadence(Some(Cadence::EVERY_FRAME));
     let id = SceneEntityId(0);
-    let original = instance_of(&mut editor.document, id).expect("built-in bounds");
+    let original = instance_of(&mut editor.document, Drawn::Scene(id)).expect("built-in bounds");
     let files = editor.document.files().expect("scene files");
     let Value::Float(x) = editor.document.read(id, "position.0").expect("position") else {
         panic!("position is a number");
@@ -113,13 +113,17 @@ fn unchanged_draws_settle_motion_and_edits_follow_undo_redo() {
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 
-/// The ids with an instance and how many of the renderer's records are live.
+/// The scene ids with an instance and how many of the renderer's records are
+/// live.
 fn drawn(editor: &Editor<HeadlessShell>) -> (Vec<SceneEntityId>, usize) {
     let mut ids: Vec<_> = editor
         .instances
         .instances
         .iter()
-        .map(|each| each.id)
+        .filter_map(|each| match each.drawn {
+            Drawn::Scene(id) => Some(id),
+            Drawn::Spawned(_) => None,
+        })
         .collect();
     ids.sort();
     let live = editor
@@ -184,14 +188,14 @@ fn missing_bounds_leave_the_published_instance_unchanged() {
     step(&mut editor, false);
     step(&mut editor, true);
     let (before, _) = editor.renderer.cull_records();
-    let id = editor.instances.instances[0].id;
+    let drawn = editor.instances.instances[0].drawn;
     let desc = editor.instances.instances[0].desc;
-    editor.instances.instances[0].id = SceneEntityId(u32::MAX);
-    assert!(instance_of(&mut editor.document, editor.instances.instances[0].id).is_none());
+    editor.instances.instances[0].drawn = Drawn::Scene(SceneEntityId(u32::MAX));
+    assert!(instance_of(&mut editor.document, editor.instances.instances[0].drawn).is_none());
     step(&mut editor, true);
     assert_eq!(editor.instances.instances[0].desc, desc);
     assert_eq!(editor.renderer.cull_records().0, before);
-    editor.instances.instances[0].id = id;
+    editor.instances.instances[0].drawn = drawn;
     step(&mut editor, true);
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
@@ -252,7 +256,7 @@ fn filtered_editor_images_match_eager_writes_through_history() {
             }
             if eager {
                 for placed in &editor.instances.instances {
-                    if let Some(desc) = instance_of(&mut editor.document, placed.id) {
+                    if let Some(desc) = instance_of(&mut editor.document, placed.drawn) {
                         editor.renderer.set_instance(placed.handle, &desc);
                     }
                 }
@@ -366,7 +370,9 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
     for _ in 0..buffers.len() {
         assert_eq!(tick(&mut renderer, &mut placed, &mut document), 0);
     }
-    let id = placed.instances[0].id;
+    let Drawn::Scene(id) = placed.instances[0].drawn else {
+        panic!("the greybox scene spawns nothing");
+    };
     let original = placed.instances[0].desc;
     let Value::Float(x) = document.read(id, "position.0").expect("position") else {
         panic!("number");
@@ -378,7 +384,7 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
             value: Value::Float(x + 1.0),
         })
         .expect("move");
-    let moved = instance_of(&mut document, id).expect("moved bounds");
+    let moved = instance_of(&mut document, Drawn::Scene(id)).expect("moved bounds");
     assert_eq!(
         tick(&mut renderer, &mut placed, &mut document),
         INSTANCE_STRIDE

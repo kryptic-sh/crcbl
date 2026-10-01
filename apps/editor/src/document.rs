@@ -148,6 +148,10 @@ pub enum EditError {
     /// one a fixed step can be taken at — zero, negative or not a number,
     /// which a module's [`register`](crcbl::ecs::GameModule::register) set.
     TickRate(f64),
+
+    /// A game whose system the scene lists refused to play it, saying why —
+    /// towers' path with a diagonal leg is the case. Play does not start.
+    Unplayable(String),
 }
 
 impl fmt::Display for EditError {
@@ -175,6 +179,7 @@ impl fmt::Display for EditError {
                 "the scene's world ticks every {dt} s, which is not a period play mode can \
                  step at"
             ),
+            Self::Unplayable(reason) => write!(f, "the scene's game will not play it: {reason}"),
         }
     }
 }
@@ -383,6 +388,39 @@ impl Document {
     #[must_use]
     pub fn bounds(&mut self, id: SceneEntityId) -> Option<(Vec3, Vec3)> {
         let entity = self.ids.entity(id)?;
+        self.placed(entity)
+    }
+
+    /// The entities a playing module spawned that the vocabulary can place —
+    /// a [runtime](crcbl::registry::Registry::register_runtime) component's,
+    /// towers' creeps — in the order they are drawn. Empty while editing.
+    ///
+    /// **Drawn, and nothing else.** They have no [`SceneEntityId`], so the
+    /// [`outline`](Self::outline) does not list them, no command can name
+    /// them, and a save has no row to write them as; a click does not select
+    /// one, because only the scene's systems are given colliders; and
+    /// [`stop`](Self::stop) throws away the world they are in.
+    #[must_use]
+    pub fn spawned(&mut self) -> Vec<Entity> {
+        self.registry.runtime_entities(&mut self.world)
+    }
+
+    /// Where a [`spawned`](Self::spawned) entity stands and how far it
+    /// reaches, in render space.
+    ///
+    /// [`None`] for an entity no longer in the world, and for one of the
+    /// scene's — [`bounds`](Self::bounds) answers for those, by id.
+    #[must_use]
+    pub fn spawned_bounds(&mut self, entity: Entity) -> Option<(Vec3, Vec3)> {
+        if self.ids.id(entity).is_some() {
+            return None;
+        }
+        self.placed(entity)
+    }
+
+    /// `entity`'s placement as a render-space box: what [`bounds`](Self::bounds)
+    /// and [`spawned_bounds`](Self::spawned_bounds) both answer with.
+    fn placed(&mut self, entity: Entity) -> Option<(Vec3, Vec3)> {
         let (centre, half) = self.registry.placement(&mut self.world, entity)?;
         let (centre, half) = (narrow(centre), narrow(half));
         Some((centre - half, centre + half))
@@ -1002,6 +1040,9 @@ mod entity_tests;
 
 #[cfg(test)]
 pub(crate) mod play_tests;
+
+#[cfg(test)]
+mod towers_play_tests;
 
 #[cfg(test)]
 mod tests {

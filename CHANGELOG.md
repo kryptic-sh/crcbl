@@ -494,15 +494,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   left in the played scene. A scene no module plays still plays: its world's
   schedule ticks. `Document::play`, `pause`, `stop`, `advance`, `play_state` and
   `playing_modules` are the headless half; `EditError::Playing` and `TickRate`
-  are new. No shipped vocabulary registers a module yet.
+  are new. **Towers' field plays**: towers registers a module that builds its
+  stage from the scene's text through its own `Map::load` and ticks it as solo's
+  one local player asking for nothing, so the build phase runs down, the waves
+  come, and creeps walk the lane and cost lives at the exit. The creeps are
+  drawn as greybox boxes the size of their sphere and are never listed,
+  selected, edited or saved; stop removes them with the world they walked in
+  (`Document::spawned` and `spawned_bounds`). A scene its game refuses — towers'
+  path with a diagonal leg — does not play, and the status line names the rule
+  (`EditError::Unplayable`).
 
 - **A game can register its behaviour beside its components.**
   `crcbl::registry::Registry::module(system, ModuleFactory)` records how to
   build a `GameModule` for any scene whose manifest lists `system`, and
-  `Registry::modules(systems)` builds a fresh instance of each, in registration
-  order — what the editor's play mode ticks. Keyed by a system, as `check` is,
-  so one game's rules never run on another game's scene in a registry holding
-  several vocabularies.
+  `Registry::modules(systems, source, dir)` builds a fresh instance of each from
+  the scene's files, in registration order — what the editor's play mode ticks.
+  A `ModuleFactory` is `fn(&dyn AssetSource, &Path) -> Result<_, String>`, so a
+  game reads its rules off the scene and refuses one it will not play, and
+  `modules` answers with the first refusal. Keyed by a system, as `check` is, so
+  one game's rules never run on another game's scene in a registry holding
+  several vocabularies. `Registry::register_runtime::<T>(system)` records a
+  component a module spawns while a scene plays — placement only, no codec, so a
+  scene can never list it and a save never writes it — and
+  `Registry::runtime_entities` lists them for a tool to draw.
 
 - **`crcbl_scene::scn::IdMap::reserve(next)`** raises the map's high-water mark,
   so a map read back from saved files — which spell the ids a scene holds, not

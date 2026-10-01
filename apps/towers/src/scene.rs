@@ -181,17 +181,25 @@ impl Placement for Plot {
 }
 
 /// This game's scene vocabulary: two components, under the names their chunk
-/// files are spelled with, and the rule a scene holding them is held to.
+/// files are spelled with, the rule a scene holding them is held to, and the
+/// module a tool plays that scene with — with the creeps it walks as a runtime
+/// component, drawn and never saved.
 ///
 /// **The one place `waypoints` and `plots` are joined to their types.**
 /// [`Map::load`] uses it and so does any tool that opens this game's field, so
 /// the vocabulary the game ships and the vocabulary an editor sees are the same
 /// list rather than two that agree today — `docs/plan/08-editor.md`'s component
 /// registry.
+///
+/// The module is registered under `waypoints` alone, so it is built once per
+/// play and only for a scene that holds a path; `crate::game`'s `play` module
+/// has what it does.
 pub fn register_components(registry: &mut Registry) {
     registry.register::<Waypoint>(WAYPOINTS);
     registry.register::<Plot>(PLOTS);
     registry.check(WAYPOINTS, check_field);
+    registry.module(WAYPOINTS, crate::game::play::start);
+    registry.register_runtime::<crate::game::play::Walker>(crate::game::play::WALKERS);
 }
 
 /// This game's rule over a scene that holds its waypoints: that

@@ -81,7 +81,8 @@ above is a requirement rather than an aspiration.
 2. Map from editor: author the real map in stage 8 editor — this milestone _is_
    stage 8 dogfood. **The map is scene data since 2026-09-30**: the path and the
    plots are `apps/towers/assets/scenes/field.scn/`, which the game reads and
-   the editor opens; authoring the real map in the editor is what is left.
+   the editor opens, **and since 2026-10-01 the editor plays it** (F5);
+   authoring the real map in the editor is what is left.
 3. Co-op over real transport + browser client (stage 10 exit demo: wasm client
    into native dedicated server). **Its LAN half is built (2026-10-01)**:
    `--host`, `--serve`, `--join` and `--browse` over `crcbl::lan` — see "Where
@@ -234,6 +235,17 @@ not built anywhere yet.
   with no ECS system, which is fine for a map — the scene is read into a `Map`
   and the stage plays on that — and would not be for anything the editor should
   place that moves.
+- **The editor plays the field (2026-10-01).** `register_components` also
+  registers towers' play module (`crate::game`'s `play`, under `waypoints`): F5
+  in the editor builds a `Stage` from the scene through `Map::load` and ticks it
+  through `TowersModule`'s solo half, as one local player asking for nothing, so
+  the build phase runs down, the waves come and the creeps walk the lane and
+  leak. Each creep is mirrored into the editor's world as a `Walker`, a runtime
+  component the editor draws as a greybox box and never lists or saves, and a
+  field `Map::load` refuses does not play, naming the rule. What the editor
+  cannot do in play is build a tower — it has no towers UI and no input path to
+  the stage — so a played field always loses; towers, bolts and bursts are not
+  mirrored until something can put one there.
 - **Milestone 3's co-op over real transport is built; its exit criterion is not
   met.** Since 2026-10-01 `towers --host [PORT]` runs the stage on a
   `crcbl_server::Host` behind `crcbl::lan`'s UDP listener and announcer, and the

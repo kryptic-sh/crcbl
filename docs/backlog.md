@@ -11671,20 +11671,27 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   draws every entity as a greybox cube today — and a pane for the browser, which
   under the splitters-only docking decision is a fourth pane and a layout the
   saved `settings.toml` of an older build refuses (`crate::layout::load`).
-- **Play mode's mechanism landed 2026-10-01; what plays is owed.**
+- **Play mode landed 2026-10-01, and towers' field plays in it.**
   `Registry::module(system, factory)` registers a game's `GameModule` beside its
   components, and `Document::play`/`pause`/`stop`/`advance` (F5, F6 and a
   toolbar outside the dock) tick the scene's modules on a fixed step and restore
-  the scene's text on stop, refusing every edit in between;
-  `docs/plan/08-editor.md`'s slice 8 has the design. Owed, in order:
-  - **Towers' play module**, the next slice: a `GameModule` registered under
-    towers' `waypoints` system that builds its `Stage` from the scene's map on
-    `register` and steps it each tick, with creeps as `replica` entities the
-    editor can draw. **The editor draws and lists only entities with a
-    `SceneEntityId`** (`app::instances::Placed` and `Document::outline` both go
-    through the id map), so an entity a module spawns is ticked and invisible
-    until the editor draws id-less entities too — from a registered placement,
-    as `Document::bounds` does for scene entities.
+  the scene's text on stop, refusing every edit in between; towers registers a
+  module whose creeps the editor draws as runtime entities.
+  `docs/plan/08-editor.md`'s slices 8 and 9 have the design. Owed:
+  - **Placing towers in play.** A module is ticked with `ClientInputs::empty()`
+    — the editor has no client and no towers UI — so a played field has no
+    towers and always loses (and restarts itself after `RESTART_S`, as solo
+    does). It needs an input path from the editor to a module: either the editor
+    sealing a game's command frames (towers' `Intent` wire form is private to
+    `crate::game`, so the game would have to expose an encoder) or a per-game
+    play panel the vocabulary registers. Towers, bolts and bursts are not
+    mirrored into the editor's world until then (`crate::game`'s `play` module
+    mirrors creeps only); mirroring them is the same `Walker` pattern with a
+    placement each.
+  - **Nothing of the run is shown but the creeps.** Lives, gold, the wave and a
+    lost run are in the stage and nowhere in the editor: the status line says
+    "Playing towers" and nothing else. Owed with the input path above, or as a
+    module-provided debug section.
   - **An edit-mode schedule, only if something needs one.** Nothing ticks while
     editing, so play needs no schedule to switch from; the selection, gizmo and
     camera systems the plan put in one are plain editor code today (the
@@ -11701,12 +11708,25 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     The decision's wording was "every registered module"; the shipped vocabulary
     holds four games, so a module is keyed by the system that says a scene is
     its game's, as `Registry::check` is.
+  - **Considered and declined: drawing every id-less entity that has a
+    placement**, with the creeps registered as ordinary scene components. A
+    scene component needs a codec, so a scene could list `walkers` in its
+    manifest and load creeps from a file — runtime state leaking into authoring
+    — and a save's only defence would be the manifest never naming it.
+    `Registry::register_runtime` records a placement and no codec, so a manifest
+    naming the system is refused and a save has nothing to write it with.
+  - **Decided in slice 9: a module is built from the scene's files, not the
+    world's rows.** `ModuleFactory` takes the snapshot's text (`AssetSource` and
+    a directory), so towers builds its map through the same `Map::load`
+    `--scene` runs — waypoint order, the repeated-order refusal and plot order
+    by id included — rather than re-deriving it from a world that holds no id
+    order. The snapshot is the world saved, byte for byte.
   - **Coverage gaps**: the toolbar has never been looked at on a device
     (headless tests click its laid-out rectangles); clicking a toolbar button
     takes the keyboard, as an outliner row does, so the arrows walk the panels
-    until a viewport click; the `membership` bump on stop that makes the
-    outliner and the instances re-read after a play that spawned or despawned
-    has no test of its own, because no test module changes the entity set.
+    until a viewport click. Towers' play has never been looked at on a device
+    either: the creeps are drawn in the greybox grey, one material for every
+    kind, and the camera frames the scene's own entities, not the creeps.
 - **The remaining command variants**: rename, attach/detach system data and
   scene-load and save markers (_Task 4's commands_ above says what each waits
   on). Spawn, delete, duplicate, batch and the undo property test landed
@@ -11718,11 +11738,12 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
 - **The dogfood pass**, which is towers' milestone 2. Towers' map is a `.scn/`
   directory the editor opens since 2026-09-30
   (`crcbl_towers::register_components` in
-  `apps/editor/src/scene.rs::vocabulary`), so what is left is authoring the
-  field in the editor and committing what it saves. Towers' _simulation_ still
-  lives in `Stage` rather than ECS systems; the 2026-09-16 decision that games
-  keep editable state in ECS systems applies to what an editor should place that
-  moves, and nothing in towers' map does.
+  `apps/editor/src/scene.rs::vocabulary`) and plays since 2026-10-01, so what is
+  left is authoring the field in the editor, playing it there, and committing
+  what it saves. Towers' _simulation_ still lives in `Stage` rather than ECS
+  systems; the 2026-09-16 decision that games keep editable state in ECS systems
+  applies to what an editor should place that moves, and nothing in towers' map
+  does.
 - **The exit criteria**: empty scene to play and stop without a text editor
   (owed), and the editor never linking `crcbl-vk` directly (kept so far:
   `apps/editor/Cargo.toml`'s dependencies name the `crcbl` umbrella and no
