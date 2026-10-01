@@ -843,8 +843,9 @@ impl PhysicsSystem {
                 half_extents,
                 is_trigger,
             } => {
-                let centre = world_centre + *offset;
-                let collider = self.world.add_box(BoxCollider::new(centre, *half_extents));
+                let collider = self
+                    .world
+                    .add_box(query_box(*offset, *half_extents, transform));
                 self.world.set_trigger(collider, *is_trigger);
                 collider
             }
@@ -1619,7 +1620,7 @@ fn place_collider(
             half_extents,
             ..
         } => {
-            world.set_box(collider, BoxCollider::new(centre + *offset, *half_extents));
+            world.set_box(collider, query_box(*offset, *half_extents, transform));
         }
         ColliderComponent::Capsule {
             offset,
@@ -1639,6 +1640,17 @@ fn place_collider(
             world.set_mesh(collider, mesh.clone(), *transform);
         }
     }
+}
+
+/// What the query world holds for a box collider `offset` from a body at
+/// `transform`: the box turned with the body, its offset turned too, as the
+/// contact pipeline places it ([`crate::contact::shape::ContactShape::placed`]).
+fn query_box(offset: DVec3, half_extents: DVec3, transform: &Transform) -> BoxCollider {
+    BoxCollider::new(
+        transform.position + transform.rotation * offset,
+        half_extents,
+    )
+    .with_rotation(transform.rotation)
 }
 
 /// What the query world holds for a compound: one box around every part as

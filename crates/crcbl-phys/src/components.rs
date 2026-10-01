@@ -517,16 +517,21 @@ pub enum ColliderComponent {
         /// Whether this collider is a trigger (non-solid, overlap-only).
         is_trigger: bool,
     },
-    /// An axis-aligned box collider.
+    /// A box collider, turned with its body: the offset and the faces are
+    /// turned by the body's rotation, in the contact pipeline and the query
+    /// world ([`crate::PhysicsSystem::world`]) alike.
     Box {
-        /// Offset from the entity's [`Transform::position`] in local space.
+        /// Offset from the entity's [`Transform::position`] in the body's
+        /// frame.
         offset: DVec3,
-        /// Half-extents on each axis, in metres.
+        /// Half-extents along the body's own axes, in metres.
         half_extents: DVec3,
         /// Whether this collider is a trigger.
         is_trigger: bool,
     },
-    /// A Y-aligned capsule collider.
+    /// A capsule collider along the body's `Y`: the contact pipeline turns it
+    /// with the body, while the query world keeps it upright along the world's
+    /// `Y` and its offset unturned, whatever the rotation.
     Capsule {
         /// Offset from the entity's [`Transform::position`] in local space.
         offset: DVec3,

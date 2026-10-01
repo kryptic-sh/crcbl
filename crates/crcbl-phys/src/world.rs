@@ -5,7 +5,7 @@
 //! maintains a lazily-rebuilt BVH over their AABBs, and dispatches rays and
 //! sweeps to the shape-level intersection functions.
 
-use glam::{DQuat, DVec3};
+use glam::DVec3;
 
 use crate::broadphase::{Bvh, BvhHit, Ray, Segment};
 use crate::collider::{Aabb, BoxCollider, Capsule, LyingCapsule, Sphere};
@@ -750,7 +750,7 @@ fn overlap_sphere_core(
             .filter(|data| filter.admits(slot, data))
             .is_some_and(|data| match &data.entry {
                 ColliderEntry::Sphere(s) => query::sphere_overlaps_sphere(query_sphere, s),
-                ColliderEntry::Box(b) => query::sphere_overlaps_aabb(query_sphere, &b.aabb()),
+                ColliderEntry::Box(b) => query::sphere_overlaps_box(query_sphere, b),
                 ColliderEntry::Capsule(c) => query::sphere_overlaps_capsule(query_sphere, c),
                 ColliderEntry::Mesh(m) => m.overlaps_sphere(query_sphere, &mut scratch.mesh),
             });
@@ -856,7 +856,7 @@ fn sweep_sphere_core(
         filter,
         |entry| match entry {
             ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
-            ColliderEntry::Box(b) => query::swept_sphere_vs_aabb(segment, radius, &b.aabb()),
+            ColliderEntry::Box(b) => query::swept_sphere_vs_box(segment, radius, b),
             ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
             ColliderEntry::Mesh(m) => m.sweep(segment, radius, DVec3::ZERO, &mut scratch.mesh),
         },
@@ -905,9 +905,7 @@ fn sweep_capsule_core(
             ColliderEntry::Sphere(s) => {
                 query::swept_capsule_vs_sphere(segment, radius, half_height, s)
             }
-            ColliderEntry::Box(b) => {
-                query::swept_capsule_vs_aabb(segment, radius, half_height, &b.aabb())
-            }
+            ColliderEntry::Box(b) => query::swept_capsule_vs_box(segment, radius, half_height, b),
             ColliderEntry::Capsule(c) => {
                 query::swept_capsule_vs_capsule(segment, radius, half_height, c)
             }
@@ -952,7 +950,7 @@ fn capsule_penetrations_core(
         }
         let penetration = match &slot.entry {
             ColliderEntry::Sphere(s) => query::capsule_penetration_vs_sphere(capsule, s),
-            ColliderEntry::Box(b) => query::capsule_penetration_vs_aabb(capsule, &b.aabb()),
+            ColliderEntry::Box(b) => query::capsule_penetration_vs_box(capsule, b),
             ColliderEntry::Capsule(c) => query::capsule_penetration_vs_capsule(capsule, c),
             ColliderEntry::Mesh(m) => m.capsule_penetration(capsule, &mut scratch.mesh),
         };
@@ -969,8 +967,9 @@ fn capsule_penetrations_core(
 ///
 /// The parametric shapes are measured by the contact pipeline's own [`gap`],
 /// which already takes a capsule at any angle: the lying capsule is its core
-/// segment from head to feet, and the query world's unturned shapes are placed
-/// as that pipeline places them — a box unrotated, a capsule along `+Y`. A mesh
+/// segment from head to feet, and the query world's shapes are placed as that
+/// pipeline places them — a box turned as its collider is, a capsule along
+/// `+Y`. A mesh
 /// is measured by its own capsule push-out, turned to lie along the core.
 /// Either way it is a *penetration* that blocks, as in
 /// [`capsule_penetrations_core`]: a shape the capsule only touches does not.
@@ -1006,11 +1005,7 @@ fn lying_capsule_blocker_core(
                 centre: s.centre,
                 radius: s.radius,
             }),
-            ColliderEntry::Box(b) => inside(ContactShape::Box {
-                centre: b.centre,
-                rotation: DQuat::IDENTITY,
-                half: b.half_extents,
-            }),
+            ColliderEntry::Box(b) => inside(query::contact_box(b)),
             ColliderEntry::Capsule(c) => inside(ContactShape::Capsule {
                 a: c.bottom(),
                 b: c.top(),
@@ -1119,11 +1114,7 @@ fn sweep_lying_capsule_core(
                 centre: s.centre,
                 radius: s.radius,
             }),
-            ColliderEntry::Box(b) => advance(ContactShape::Box {
-                centre: b.centre,
-                rotation: DQuat::IDENTITY,
-                half: b.half_extents,
-            }),
+            ColliderEntry::Box(b) => advance(query::contact_box(b)),
             ColliderEntry::Capsule(c) => advance(ContactShape::Capsule {
                 a: c.bottom(),
                 b: c.top(),
@@ -1168,7 +1159,7 @@ fn closest_hit_core(
         }
         let hit = match &slot.entry {
             ColliderEntry::Sphere(s) => query::ray_vs_sphere(ray, s),
-            ColliderEntry::Box(b) => query::ray_vs_aabb(ray, &b.aabb()),
+            ColliderEntry::Box(b) => query::ray_vs_box(ray, b),
             ColliderEntry::Capsule(c) => query::ray_vs_capsule(ray, c),
             ColliderEntry::Mesh(m) => m.cast_ray(ray, mesh),
         };
@@ -1290,7 +1281,9 @@ impl PhysicsWorld {
         self.add(ColliderEntry::Sphere(sphere))
     }
 
-    /// Register a box collider.
+    /// Register a box collider, turned or not: every query answers for the
+    /// turned box itself ([`crate::query::ray_vs_box`] and its siblings), and
+    /// the broadphase holds the world-axis box around it.
     pub fn add_box(&mut self, box_collider: BoxCollider) -> ColliderId {
         self.add(ColliderEntry::Box(box_collider))
     }
@@ -1535,8 +1528,9 @@ impl PhysicsWorld {
     /// Return all collider ids whose AABB intersects the query AABB.
     ///
     /// This is a broadphase-only query — it tests AABB-vs-AABB without
-    /// exact shape overlap. Use [`PhysicsWorld::overlap_sphere`] for exact
-    /// shape-aware overlap. Triggers are included.
+    /// exact shape overlap, so a turned box is reported wherever the world-axis
+    /// box around it meets the query. Use [`PhysicsWorld::overlap_sphere`] for
+    /// exact shape-aware overlap. Triggers are included.
     #[must_use]
     pub fn overlap_aabb(&mut self, aabb: &Aabb) -> Vec<ColliderId> {
         self.overlap_aabb_filtered(aabb, QueryFilter::ALL)
@@ -2333,7 +2327,7 @@ mod tests {
     fn scan_ray_one(ray: &Ray, entry: &ColliderEntry) -> Option<ShapeHit> {
         match entry {
             ColliderEntry::Sphere(s) => query::ray_vs_sphere(ray, s),
-            ColliderEntry::Box(b) => query::ray_vs_aabb(ray, &b.aabb()),
+            ColliderEntry::Box(b) => query::ray_vs_box(ray, b),
             ColliderEntry::Capsule(c) => query::ray_vs_capsule(ray, c),
             ColliderEntry::Mesh(_) => unreachable!("the fixture holds no meshes"),
         }
@@ -2343,7 +2337,7 @@ mod tests {
     fn scan_sweep_one(segment: &Segment, radius: f64, entry: &ColliderEntry) -> Option<ShapeHit> {
         match entry {
             ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
-            ColliderEntry::Box(b) => query::swept_sphere_vs_aabb(segment, radius, &b.aabb()),
+            ColliderEntry::Box(b) => query::swept_sphere_vs_box(segment, radius, b),
             ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
             ColliderEntry::Mesh(_) => unreachable!("the fixture holds no meshes"),
         }
@@ -3444,3 +3438,7 @@ mod query_filter_tests;
 #[cfg(test)]
 #[path = "world/lying_capsule_tests.rs"]
 mod lying_capsule_tests;
+
+#[cfg(test)]
+#[path = "world/turned_box_tests.rs"]
+mod turned_box_tests;

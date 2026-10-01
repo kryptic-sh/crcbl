@@ -36,8 +36,8 @@ use std::path::{Path, PathBuf};
 
 use crcbl::assets::{AssetSource, MemorySource};
 use crcbl::ecs::{Entity, World};
-use crcbl::math::{DQuat, DVec3, Vec3};
-use crcbl::phys::{ColliderComponent, PhysicsSystem, Ray, RigidBody, Transform, TriangleMesh};
+use crcbl::math::{DVec3, Vec3};
+use crcbl::phys::{ColliderComponent, PhysicsSystem, Ray, RigidBody, Transform};
 use crcbl::reflect::{PathError, Reflect, Value, get_path, set_path};
 use crcbl::registry::{OrientedBox, Registry};
 use crcbl::render::ViewRay;
@@ -1252,72 +1252,17 @@ fn sync_colliders(
         let transform = Transform::new(placement.centre, placement.rotation);
         phys.set_body(entity, RigidBody::new_kinematic());
         phys.set_transform(entity, transform);
-        phys.set_collider(entity, &pick_collider(&placement), &transform);
-    }
-}
-
-/// The least half extent a turned box's picking mesh is given on any axis, in
-/// metres: a millimetre, so a turned block scaled flat still has faces a ray
-/// can strike rather than triangles [`TriangleMesh::new`] refuses as
-/// degenerate.
-const PICK_MIN_HALF_EXTENT: f64 = 0.001;
-
-/// The eight corners' triangles, two per face, each wound so its normal faces
-/// out of the box — corner `i` taking the box's far `x` for bit 0, `y` for
-/// bit 1 and `z` for bit 2, as [`OrientedBox::corners`] numbers them.
-const BOX_TRIANGLES: [[u32; 3]; 12] = [
-    [0, 4, 6],
-    [0, 6, 2],
-    [1, 3, 7],
-    [1, 7, 5],
-    [0, 1, 5],
-    [0, 5, 4],
-    [2, 6, 7],
-    [2, 7, 3],
-    [0, 2, 3],
-    [0, 3, 1],
-    [4, 5, 7],
-    [4, 7, 6],
-];
-
-/// What a ray picks `placement` by: its box, and for a turned one the same
-/// box as a triangle mesh in the turned frame.
-///
-/// **A mesh for a turned box because the query world's boxes do not turn**:
-/// `crcbl_phys` keeps a `ColliderComponent::Box` in its query world as an
-/// axis-aligned box whatever the transform's rotation, where a mesh is placed
-/// by its whole transform (`docs/backlog.md`'s "rotating query colliders").
-/// An unturned box keeps the box collider, which is exact for a zero extent
-/// and costs no mesh to build.
-///
-/// A turned box whose mesh cannot be built — extents so large its faces'
-/// areas overflow — picks by the world-axis box around it
-/// ([`OrientedBox::reach`]) and says so in the log, rather than not picking.
-fn pick_collider(placement: &OrientedBox) -> ColliderComponent {
-    let unturned = |half_extents| ColliderComponent::Box {
-        offset: DVec3::ZERO,
-        half_extents,
-        is_trigger: false,
-    };
-    if placement.rotation == DQuat::IDENTITY {
-        return unturned(placement.half_extents);
-    }
-    let reach = placement
-        .half_extents
-        .max(DVec3::splat(PICK_MIN_HALF_EXTENT));
-    let corners = OrientedBox::axis_aligned(DVec3::ZERO, reach).corners();
-    match TriangleMesh::new(&corners, &BOX_TRIANGLES) {
-        Ok(mesh) => ColliderComponent::Mesh {
-            mesh,
-            is_trigger: false,
-        },
-        Err(error) => {
-            crcbl::log::warn!(
-                "editor: a turned box of half extents {} picks by its bounds: {error}",
-                placement.half_extents,
-            );
-            unturned(placement.reach())
-        }
+        // A box on the turned transform turns with it in the query world, so
+        // a ray picks the turned box itself.
+        phys.set_collider(
+            entity,
+            &ColliderComponent::Box {
+                offset: DVec3::ZERO,
+                half_extents: placement.half_extents,
+                is_trigger: false,
+            },
+            &transform,
+        );
     }
 }
 

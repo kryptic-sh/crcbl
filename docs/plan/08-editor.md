@@ -488,9 +488,9 @@ of the same day (below).
   `position` and its placement centre. The editor draws and picks the motion
   through the paths it already has; stop throws the world away.
 - **Rotation is locked**: a dynamic body gets no inertia tensor, so it never
-  turns, and the box that collides is the axis-aligned box that is drawn. What
-  rotation needs is in the backlog. (Slice 14 creates a body at its placement's
-  rotation, still locked.)
+  turns, and the box that collides is the axis-aligned box that is drawn. (Slice
+  14 creates a body at its placement's rotation, still locked; unlocked on
+  2026-10-01 — _Physics rotation_, after slice 15.)
 - **The picking boxes are not the simulated bodies.** `sync_colliders` keeps one
   kinematic box per placed entity in the document's own `PhysicsSystem`; the
   bodies live in the `Simulation`, a different type, so the sync after a tick
@@ -609,16 +609,17 @@ of the same day (below).
   component growing a rotation could forget. `Document::placement` hands it out;
   `Document::bounds` is the world-axis box around it (`OrientedBox::bounds`),
   exactly the old numbers for an unturned box.
-- **Picking, drawing and outlining turn.** A turned box picks by a
+- **Picking, drawing and outlining turn.** A turned box picked by a
   twelve-triangle box mesh on a turned transform, because `crcbl_phys`'s query
-  world keeps a box collider axis-aligned whatever its transform; an unturned
-  one keeps the box collider. The greybox cube's instance transform and a mesh's
-  parts carry the rotation, and the selection is outlined as its turned box
-  (`DebugDraw::box_edges` over `OrientedBox::corners`).
+  world kept a box collider axis-aligned whatever its transform; since the query
+  world turns boxes (_Physics rotation_, after slice 15) every box picks by its
+  box collider on its turned transform. The greybox cube's instance transform
+  and a mesh's parts carry the rotation, and the selection is outlined as its
+  turned box (`DebugDraw::box_edges` over `OrientedBox::corners`).
 - **Decided 2026-10-01: physics keeps rotation locked.** A scene `Body` is
   created at its placement's rotation — a turned collider and transform, so a
   tipped cube lands on its edge — and keeps it: no inertia, and only the centre
-  is written back. What unlocking needs is in the backlog.
+  is written back. Unlocked the same day (_Physics rotation_, after slice 15).
 - **Evidence**: the umbrella's tests hold the tolerance kept as written, both
   refusals by name and on load naming the file, only the exact identity left
   out, an off-unit reflected write read as its direction, turned corners and
@@ -669,6 +670,35 @@ of the same day (below).
   play; the panel's drag a rotation angle over four frames to one command and
   one undo, and the angles compose back to the quaternion. The mutations each
   turned a test red are listed in the commit that landed this.
+
+**Physics rotation, landed 2026-10-01.**
+
+- **The query world turns boxes.** `crcbl_phys::BoxCollider` carries a rotation,
+  and every query of the physics query world — rays, sphere and capsule sweeps,
+  overlaps, push-outs — answers for the turned box. The editor's picking boxes
+  are box colliders on the placement's turned transform, so a turned block or
+  mesh picks by its own box; the twelve-triangle mesh slice 14 picked turned
+  boxes by is gone, with its least half extent.
+- **A body turns where its placing component can show it.** In play, a dynamic
+  `Body` beside a component with a `rotation` field (the editor's `Block`, a
+  `scene_mesh::Mesh`) has its box's inertia, so a block landing on its corner
+  tips onto a face, and each tick the module writes its orientation into the
+  component's `rotation` leaves (`crcbl::registry::ROTATION`, the spelling the
+  rotate gizmo writes too) beside its `position`, turning the component's offset
+  from its centre with it. A component with no `rotation` (breakout's, puppet's,
+  towers') keeps its body locked. Stop puts the file back byte for byte, the
+  turn included.
+- **Evidence**: `crcbl-phys`'s tests hold rays, sweeps, overlaps and push-outs
+  against a box turned 45° hitting where the unturned box misses and missing
+  where it hits, a body's box and offset turned in the query world, a cube
+  dropped on its corner tipping onto a face with no energy gained, a locked cube
+  keeping its orientation to the bit, a free tumble keeping its momentum, and
+  the drop hashing the same twice; `scene_physics`'s hold a turned body's row
+  written to the simulated orientation and centre every tick, two plays
+  identical, and a component standing on its position swinging about its body's
+  centre; the editor's hold a turned block tipping in play, picking where it
+  rests and restored by stop, and a turned block picking by its turned box. The
+  mutations each turned a test red are listed in the commits that landed this.
 
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
@@ -925,7 +955,7 @@ and recorded, as above):
 - **Play builds simulated bodies through a module registered under `bodies`**,
   and each tick the simulated pose is written into the placing component's
   `position` through the registry's reflected path, never naming a game's type.
-  Rotation is locked (above, slice 12).
+  Rotation is locked (above, slice 12; unlocked 2026-10-01).
 - **Edit mode keeps kinematic pick bodies**, and during play the pick boxes are
   kept apart from the simulated bodies; stop's restore discards everything.
 - **Static and kinematic bodies collide and do not move**; a kinematic velocity
@@ -969,7 +999,8 @@ above):
   entity's centre, Ctrl snapping to an angle step that is a setting beside the
   grid and scale steps, one undo per drag, refused in play. Built in slice 15.
 - **Physics keeps rotation locked** for now: a body is created at its rotation
-  and does not spin. Built in slice 14; unlocking is in the backlog.
+  and does not spin. Built in slice 14; unlocked on 2026-10-01 (_Physics
+  rotation_, in _Status_).
 
 **Still the owner's:** a file watcher dependency for hot reload (`notify`),
 because adding a crates.io dependency is the owner's call by the workspace's

@@ -3,6 +3,7 @@
 
 use super::*;
 
+use crcbl::math::DQuat;
 use crcbl::registry::Rotation;
 
 use crate::scene::BLOCKS;

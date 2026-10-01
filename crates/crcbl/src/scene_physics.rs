@@ -14,8 +14,9 @@
 //!          ──▶ register: one simulated body per Body row, a box at its
 //!              entity's placement, in a Simulation system of its own
 //!     each tick ──▶ the world's schedule steps the Simulation
-//!               ──▶ the module writes each moving body's centre into its
-//!                   entity's placing component, at `position`
+//!               ──▶ the module writes each moving body's pose into its
+//!                   entity's placing component, at `position` and, where
+//!                   the component has one, `rotation`
 //! ```
 //!
 //! # The shape is the placement
@@ -31,34 +32,40 @@
 //! # Which pose wins: the simulation's, written into the placing component
 //!
 //! The simulation owns the pose while the scene plays, and each tick writes it
-//! into the placing component's [`POSITION`] leaves through the registry's
-//! reflected path — the same leaves and the same generic route an editor's
-//! translate handle uses, so no game's type is named here and a tool draws the
-//! motion through the path it already draws edits through. Stop throws the
-//! played world away, so the written poses go with it.
+//! into the placing component's [`POSITION`] and [`ROTATION`] leaves through
+//! the registry's reflected path — the same leaves and the same generic route
+//! an editor's translate and rotate handles use, so no game's type is named
+//! here and a tool draws the motion through the path it already draws edits
+//! through. Stop throws the played world away, so the written poses go with
+//! it.
 //!
 //! The write keeps the component's own offset between its `position` and its
 //! placement centre: a component whose centre stands half a height above its
 //! `position` (a platform standing on its origin) is moved by the distance its
-//! body moved, not put with its origin where the centre should be. For a
-//! component whose `position` **is** its centre, the written value is the
-//! simulated centre exactly.
+//! body moved, not put with its origin where the centre should be. Once the
+//! body has turned from the orientation the component is placed at, the
+//! offset turns with it, so a component placed about an origin away from its
+//! centre (a mesh, whose box is its asset's bounds) swings about the centre
+//! as the body does. For a component whose `position` **is** its centre, the
+//! written value is the simulated centre exactly.
 //!
-//! # A body starts at its rotation, and keeps it
+//! # A body turns where its placing component can show it
 //!
 //! A placement may be turned ([`OrientedBox::rotation`], from a placing
-//! component's `rotation` field), and the body's box is created turned the
+//! component's [`ROTATION`] field), and the body's box is created turned the
 //! same way, so a slab tilted in the editor is a ramp that things slide down.
-//! **The rotation is then locked**: a dynamic body is built with no rotational
-//! inertia, which `crcbl_phys` reads as "torque does nothing and the spin
-//! never changes", so it keeps the orientation it was placed at — and the box
-//! that collides is still the box that is drawn, because only the centre
-//! moves and only the centre is written back. Unlocking it needs the module to
-//! write the orientation into the placing component's `rotation` leaves beside
-//! [`POSITION`], and an inertia from `crcbl_phys::MassProperties` for the box;
-//! `docs/backlog.md` has the entry. Simulating rotation without writing it
-//! back was declined: a box resting on its corner while the picture shows it
-//! flat is a simulation the picture lies about.
+//! A dynamic body placed by a component **with** a [`ROTATION`] field tumbles:
+//! its inertia is its box's (`crcbl_phys::MassProperties::of_collider`), so a
+//! block landing on its corner tips onto a face, and each tick its orientation
+//! is written into that field beside its [`POSITION`].
+//!
+//! A dynamic body placed by a component **without** one keeps its rotation
+//! locked: it is built with no rotational inertia, which `crcbl_phys` reads as
+//! "torque does nothing and the spin never changes", so it stays the unturned
+//! box the component is drawn as, and only its centre is written back.
+//! Simulating a turn the component has nowhere to keep was declined: a box
+//! resting on its corner while the picture shows it flat is a simulation the
+//! picture lies about.
 //!
 //! # The simulated bodies are not the picking ones
 //!
@@ -89,13 +96,15 @@ use crcbl_ecs::{
     ClientInputs, ComponentHash, DebugCtx, Entity, GameModule, System, SystemTrait, World,
 };
 use crcbl_phys::{
-    ColliderComponent, ContactSettings, GravityForce, PhysicsSystem, RigidBody, SurfaceMaterial,
-    Transform,
+    ColliderComponent, ContactSettings, GravityForce, MassProperties, PhysicsSystem, RigidBody,
+    SurfaceMaterial, Transform,
 };
 use crcbl_reflect::{Reflect, Value, get_path, set_path};
 use crcbl_scene::scn::{Scene, SceneEntityId};
 
-use crate::registry::{OrientedBox, POSITION, Placement, Registry, check_chunk};
+use crate::registry::{
+    OrientedBox, POSITION, Placement, ROTATION, Registry, Rotation, check_chunk,
+};
 
 /// The scene system every [`Body`] is a row of: the manifest entry, the chunk
 /// file's stem, and the system the module is registered under.
@@ -375,14 +384,21 @@ impl fmt::Display for ShapeError {
     }
 }
 
+/// The box a body collides as, and whether it may turn.
+#[derive(Clone, Copy, Debug)]
+struct Shape {
+    /// The entity's placement.
+    placed: OrientedBox,
+    /// Whether the placing component has [`ROTATION`] leaves to write a
+    /// simulated orientation into: a body turns only if it does — see the
+    /// [module docs](self).
+    turns: bool,
+}
+
 /// The box `entity` collides as: its placement, checked to be a box a
 /// collider can be and placed by a component whose [`POSITION`] the module
-/// can write.
-fn shape_of(
-    registry: &Registry,
-    world: &mut World,
-    entity: Entity,
-) -> Result<OrientedBox, ShapeError> {
+/// can write — and whether that component can take an orientation too.
+fn shape_of(registry: &Registry, world: &mut World, entity: Entity) -> Result<Shape, ShapeError> {
     let system = registry
         .placing_system(world, entity)
         .ok_or(ShapeError::Unplaced)?;
@@ -396,25 +412,35 @@ fn shape_of(
     let Some(component) = registry.component(world, &system, entity) else {
         return Err(ShapeError::Unplaced);
     };
-    for axis in 0..3 {
-        let path = format!("{POSITION}.{axis}");
+    if let Err(why) = numbers_at(component, POSITION, POSITION_LEAVES) {
+        return Err(ShapeError::NoPosition { system, why });
+    }
+    Ok(Shape {
+        placed: shape,
+        turns: numbers_at(component, ROTATION, Rotation::LEAVES).is_ok(),
+    })
+}
+
+/// The leaves of a placing component's [`POSITION`], as a path names them.
+const POSITION_LEAVES: [&str; 3] = ["0", "1", "2"];
+
+/// The numbers at each of `field`'s `leaves` in `component`, or why the
+/// first one is not a number.
+fn numbers_at<const N: usize>(
+    component: &dyn Reflect,
+    field: &str,
+    leaves: [&str; N],
+) -> Result<[f64; N], String> {
+    let mut numbers = [0.0; N];
+    for (leaf, number) in leaves.into_iter().zip(&mut numbers) {
+        let path = format!("{field}.{leaf}");
         match get_path(component, &path) {
-            Ok(Value::Float(_)) => {}
-            Ok(other) => {
-                return Err(ShapeError::NoPosition {
-                    system,
-                    why: format!("`{path}` is {}, not a number", other.kind()),
-                });
-            }
-            Err(error) => {
-                return Err(ShapeError::NoPosition {
-                    system,
-                    why: error.to_string(),
-                });
-            }
+            Ok(Value::Float(value)) => *number = value,
+            Ok(other) => return Err(format!("`{path}` is {}, not a number", other.kind())),
+            Err(error) => return Err(error.to_string()),
         }
     }
-    Ok(shape)
+    Ok(numbers)
 }
 
 /// Every [`Body`] in `world`'s [`BODIES`] system, in storage order — the order
@@ -456,16 +482,16 @@ impl Simulation {
         &self.physics
     }
 
-    /// Each dynamic body's centre as the last step left it, in the order the
-    /// bodies were created.
+    /// Each dynamic body's pose — its centre and its orientation — as the last
+    /// step left it, in the order the bodies were created.
     #[must_use]
-    pub fn poses(&self) -> Vec<(Entity, DVec3)> {
+    pub fn poses(&self) -> Vec<(Entity, Transform)> {
         self.moving
             .iter()
             .filter_map(|&entity| {
                 self.physics
                     .transform(entity)
-                    .map(|transform| (entity, transform.position))
+                    .map(|transform| (entity, *transform))
             })
             .collect()
     }
@@ -543,29 +569,34 @@ impl GameModule for BodyPlay {
                 log::warn!("{entity:?} is left out of the simulation: {error}");
                 continue;
             }
-            let shape = match shape_of(&self.registry, world, entity) {
+            let Shape { placed, turns } = match shape_of(&self.registry, world, entity) {
                 Ok(shape) => shape,
                 Err(error) => {
                     log::warn!("{entity:?} is left out of the simulation: it {error}");
                     continue;
                 }
             };
-            let transform = Transform::new(shape.centre, shape.rotation);
+            let transform = Transform::new(placed.centre, placed.rotation);
+            let collider = ColliderComponent::Box {
+                offset: DVec3::ZERO,
+                half_extents: placed.half_extents,
+                is_trigger: false,
+            };
             physics.set_transform(entity, transform);
-            physics.set_collider(
-                entity,
-                &ColliderComponent::Box {
-                    offset: DVec3::ZERO,
-                    half_extents: shape.half_extents,
-                    is_trigger: false,
-                },
-                &transform,
-            );
+            physics.set_collider(entity, &collider, &transform);
             match body.kind {
-                // No inertia tensor: the body keeps the rotation it was
-                // placed at — see the module docs.
                 BodyKind::Dynamic => {
-                    physics.set_body(entity, RigidBody::new_dynamic(body.mass));
+                    let dynamic = RigidBody::new_dynamic(body.mass);
+                    // No inertia where the component has no rotation to
+                    // write: the body keeps the rotation it was placed at —
+                    // see the module docs.
+                    let dynamic = if turns {
+                        dynamic
+                            .with_inertia(MassProperties::of_collider(&collider, body.mass).inertia)
+                    } else {
+                        dynamic
+                    };
+                    physics.set_body(entity, dynamic);
                     moving.push(entity);
                 }
                 BodyKind::Kinematic => physics.set_body(entity, RigidBody::new_kinematic()),
@@ -583,48 +614,61 @@ impl GameModule for BodyPlay {
             .system_mut::<Simulation>()
             .map(|simulation| simulation.poses())
             .unwrap_or_default();
-        for (entity, centre) in poses {
-            if let Err(why) = follow(&self.registry, world, entity, centre) {
+        for (entity, pose) in poses {
+            if let Err(why) = follow(&self.registry, world, entity, pose) {
                 log::warn!("{entity:?}'s simulated pose was not written back: {why}");
             }
         }
     }
 }
 
-/// Writes `centre` into `entity`'s placing component, keeping the component's
-/// own offset between its [`POSITION`] and its placement centre — see the
-/// [module docs](self). Writes nothing where the component already stands
-/// there.
+/// Writes `pose` into `entity`'s placing component: its centre into
+/// [`POSITION`], keeping the component's own offset between its position and
+/// its placement centre, turned by however far the body has turned from the
+/// placement; and its orientation into [`ROTATION`] once that differs from the
+/// placement's — see the [module docs](self). Writes nothing where the
+/// component already stands there.
 fn follow(
     registry: &Registry,
     world: &mut World,
     entity: Entity,
-    centre: DVec3,
+    pose: Transform,
 ) -> Result<(), String> {
     let system = registry
         .placing_system(world, entity)
         .ok_or("nothing places it any more")?;
     let placed = registry
         .placement(world, entity)
-        .ok_or("nothing places it any more")?
-        .centre;
+        .ok_or("nothing places it any more")?;
     let component = registry
         .component(world, &system, entity)
         .ok_or("its placing component is gone")?;
-    for (axis, (centre, placed)) in centre
-        .to_array()
-        .into_iter()
-        .zip(placed.to_array())
-        .enumerate()
-    {
-        let path = format!("{POSITION}.{axis}");
-        let Value::Float(at) = get_path(component, &path).map_err(|error| error.to_string())?
-        else {
-            return Err(format!("`{path}` is not a number"));
-        };
-        let to = centre - (placed - at);
+    let at = numbers_at(component, POSITION, POSITION_LEAVES)?;
+    // Turned when the body's orientation is neither the placement's, which
+    // reads the stored numbers normalised, nor the numbers stored — what the
+    // last tick wrote — so a body at rest writes nothing, whether or not it
+    // has turned before.
+    let stored = numbers_at(component, ROTATION, Rotation::LEAVES).ok();
+    let turned = pose.rotation != placed.rotation && stored != Some(pose.rotation.to_array());
+    let offset = placed.centre - DVec3::from_array(at);
+    // Turned only when the body has turned, so an unturned body's write is
+    // its centre less the offset to the bit.
+    let offset = if turned {
+        pose.rotation * placed.rotation.inverse() * offset
+    } else {
+        offset
+    };
+    let to = pose.position - offset;
+    for ((leaf, to), at) in POSITION_LEAVES.into_iter().zip(to.to_array()).zip(at) {
         if to != at {
+            let path = format!("{POSITION}.{leaf}");
             set_path(component, &path, &Value::Float(to)).map_err(|error| error.to_string())?;
+        }
+    }
+    if turned {
+        for (leaf, value) in Rotation::LEAVES.into_iter().zip(pose.rotation.to_array()) {
+            let path = format!("{ROTATION}.{leaf}");
+            set_path(component, &path, &Value::Float(value)).map_err(|error| error.to_string())?;
         }
     }
     Ok(())

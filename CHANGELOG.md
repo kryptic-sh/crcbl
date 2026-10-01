@@ -16,6 +16,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_phys::BoxCollider` gained a public `rotation`**, a unit quaternion
+  turning the box about its centre (see Added), so a struct literal naming every
+  field must add it; `BoxCollider::new` makes an unturned box as before.
+
 - **`crcbl::registry::Placement::placement` returns `Option<OrientedBox>`**, not
   `Option<(DVec3, DVec3)>`, and `Registry::placement` answers the same: a
   centre, half extents along the box's own axes, and a rotation (see Added). An
@@ -516,6 +520,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Turned boxes in `crcbl_phys`'s query world.** `BoxCollider::with_rotation`
+  turns a box, and `PhysicsWorld`'s rays, sphere and capsule sweeps, sphere
+  overlaps, capsule push-outs and lying-capsule queries answer for the turned
+  box itself rather than the box unturned; its broadphase holds the world-axis
+  box around it (`BoxCollider::aabb`). The shape-level forms are public:
+  `ray_vs_box`, `swept_sphere_vs_box`, `sphere_overlaps_box`,
+  `swept_capsule_vs_box` and `capsule_penetration_vs_box`. A ray, a sphere sweep
+  and a sphere overlap are answered exactly in the box's frame; an upright
+  capsule, which is not upright there, is swept by the contact pipeline's
+  conservative advancement and stops a little short of the contact. An unturned
+  box gives the answers it gave before, to the bit.
+
 - **The editor's rotate gizmo.** E shows a ring about each world axis (it put a
   refusal on the status line before), hit-tested against the drawn ring; a drag
   turns the selection about that axis through its centre by the angle swept
@@ -542,9 +558,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `crcbl::registry::OrientedBox` is the turned box a placement answers, with
   `corners`, `bounds` and `reach`. The editor draws a turned block's cube and a
   turned mesh's parts turned, outlines the selection as its turned box, and
-  picks a turned box exactly (a box mesh in its frame, since the physics query
-  world's boxes do not turn). `scene_physics` creates a turned body's box
-  turned; the rotation stays locked while the scene plays.
+  picks a turned box exactly, by its box collider turned in the physics query
+  world. `scene_physics` creates a turned body's box turned, and writes its
+  simulated orientation back while the scene plays.
 
 - **Connection tokens on `crcbl_net::udp`**, netcode.io's connect-token pattern
   minted by the listener itself. A hello without a valid token is answered with
@@ -693,14 +709,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   has no shape of its own: it collides as its entity's placement box. While a
   scene plays, the module simulates every body in a `Simulation` system of its
   own (a `PhysicsSystem` with contacts and Earth gravity) and writes each
-  dynamic body's centre back into its entity's placing component at
-  `position.N`, keeping that component's own offset, so a tool draws the motion
-  the way it draws an edit. Rotation is locked: a dynamic body has no rotational
-  inertia, so the box that collides is the axis-aligned box that is drawn. A
-  body whose entity has nothing placing it, a placement with no extent on an
-  axis, or a placing component with no `position` refuses play naming the
-  entity. `crcbl::registry::POSITION` is the one spelling of the `position`
-  field a tool and the module write.
+  dynamic body's pose back into its entity's placing component: its centre at
+  `position.N`, keeping that component's own offset (turned as the body turns),
+  and its orientation at `rotation.x` to `rotation.w`, so a tool draws the
+  motion the way it draws an edit. A dynamic body whose placing component has a
+  `rotation` tumbles, with its box's inertia (`MassProperties::of_collider`): a
+  block landing on its corner tips onto a face. One whose component has no
+  `rotation` keeps its rotation locked — no rotational inertia — so the box that
+  collides is the unturned box that is drawn. `Simulation::poses` answers each
+  moving body's `Transform`. A body whose entity has nothing placing it, a
+  placement with no extent on an axis, or a placing component with no `position`
+  refuses play naming the entity. `crcbl::registry::POSITION` and
+  `crcbl::registry::ROTATION` are the one spelling of the `position` and
+  `rotation` fields a tool and the module write.
 
 - **Meshes on scene components: `crcbl::scene_mesh`** (features `scn` or
   `scene`). A `Mesh` — `asset`, a glTF key in the asset source, and `position`,
@@ -763,12 +784,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `scene` feature, for the glTF importer.
 
 - **The editor plays physics.** Its vocabulary registers `scene_physics`, so a
-  greybox block with a body beside it falls, collides and comes to rest when the
-  scene plays, the picture and the pick following it; stop puts the scene back
-  byte for byte. The document's picking boxes stay kinematic and apart from the
-  simulation. Play now runs the world its snapshot loads into, so a play is a
-  function of the scene's text alone — two plays of one scene end in the same
-  poses to the bit, even after an edit history reordered the systems' storage.
+  greybox block with a body beside it falls, collides, tips over if it lands
+  turned and comes to rest when the scene plays, the picture and the pick
+  following it; stop puts the scene back byte for byte. The document's picking
+  boxes stay kinematic and apart from the simulation. Play now runs the world
+  its snapshot loads into, so a play is a function of the scene's text alone —
+  two plays of one scene end in the same poses to the bit, even after an edit
+  history reordered the systems' storage.
 
 - **A game can register its behaviour beside its components.**
   `crcbl::registry::Registry::module(system, ModuleFactory)` records how to
@@ -4297,6 +4319,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **A `PhysicsSystem` body's box collider turns with the body in the query
+  world**, as it already did in the contact solver: `ColliderComponent::Box`'s
+  offset and faces are turned by the body's rotation, so a ray, sweep or overlap
+  through `PhysicsSystem::world` meets a turned body's box where it is drawn,
+  where it met the unturned box at the unturned offset before. Bodies that never
+  turn are unaffected. Capsules and spheres there are unchanged: a capsule stays
+  upright along the world's `Y`, and both keep their offset unturned.
 
 - **The same `SceneEntityId` in two chunk files is one entity in two systems**,
   where it used to be refused as `ScnError::DuplicateId`. The same id twice in

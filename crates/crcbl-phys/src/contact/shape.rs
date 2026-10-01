@@ -1,12 +1,12 @@
 //! The shapes the contact pipeline collides: a collider placed on its body.
 //!
-//! [`crate::world::PhysicsWorld`] keeps colliders unturned — a box is an AABB
-//! and a capsule stands up the Y axis whatever its body's orientation. The
-//! solver cannot: a capsule lying on its side must roll on its side. So this is
-//! the contact pipeline's own placement of a [`ColliderComponent`], built each
-//! tick from the body's transform, with the offset, the capsule's axis and the
-//! box's faces all turned by the body's rotation. The query world's unturned
-//! colliders are unchanged by it.
+//! [`crate::world::PhysicsWorld`] turns a box with its body but keeps a capsule
+//! standing up the Y axis whatever its body's orientation. The solver cannot:
+//! a capsule lying on its side must roll on its side. So this is the contact
+//! pipeline's own placement of a [`ColliderComponent`], built each tick from
+//! the body's transform, with the offset, the capsule's axis and the box's
+//! faces all turned by the body's rotation. The query world's colliders are
+//! unchanged by it.
 
 use glam::{DMat3, DQuat, DVec3};
 

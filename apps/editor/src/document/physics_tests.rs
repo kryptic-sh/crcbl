@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use super::*;
 
+use crcbl::math::DQuat;
+use crcbl::registry::Rotation;
 use crcbl::scene_physics::{BODIES, Simulation};
 
 use crate::scene::{BLOCKS, GREYBOX};
@@ -34,6 +36,13 @@ const REST_TOLERANCE: f64 = 0.01;
 
 /// The compiled-in blocks with [`FALLING`] added over the middle step.
 fn blocks() -> String {
+    falling_blocks("")
+}
+
+/// The compiled-in blocks with [`FALLING`] added over the middle step, its row
+/// ending in `rotation` — a `rotation` line as the writer spells it, or
+/// nothing for an unturned block.
+fn falling_blocks(rotation: &str) -> String {
     let built_in = crate::scene::built_in_source();
     let text = String::from_utf8(
         built_in
@@ -43,7 +52,7 @@ fn blocks() -> String {
     .expect("utf-8");
     let falling = format!(
         "        ({}, Block(\n            position: (0.0, {DROP_Y:?}, 0.0),\n            \
-         half_extents: ({HALF:?}, {HALF:?}, {HALF:?}),\n        )),\n    ],\n)",
+         half_extents: ({HALF:?}, {HALF:?}, {HALF:?}),\n{rotation}        )),\n    ],\n)",
         FALLING.0
     );
     let text = text
@@ -64,6 +73,11 @@ fn body(id: SceneEntityId, kind: &str) -> String {
 /// A document of the greybox blocks plus [`FALLING`], with a bodies chunk of
 /// `rows`.
 fn document_with(rows: &str) -> Document {
+    document_of(&blocks(), rows)
+}
+
+/// A document of the blocks chunk `blocks`, with a bodies chunk of `rows`.
+fn document_of(blocks: &str, rows: &str) -> Document {
     let mut source = MemorySource::new();
     let bodies = format!("Chunk(\n    system: \"bodies\",\n    entities: [\n{rows}    ],\n)");
     for (key, text) in [
@@ -77,7 +91,7 @@ fn document_with(rows: &str) -> Document {
             )
             .expect("utf-8")
         }),
-        ("sys/blocks.ron", blocks()),
+        ("sys/blocks.ron", blocks.to_owned()),
         ("sys/bodies.ron", bodies),
     ] {
         source
@@ -94,15 +108,19 @@ fn document_with(rows: &str) -> Document {
 
 /// The ground slab and the steps static, and [`FALLING`] dynamic.
 pub(crate) fn falling() -> Document {
-    let rows = [
+    document_with(&falling_rows())
+}
+
+/// [`falling`]'s bodies chunk rows.
+fn falling_rows() -> String {
+    [
         body(SceneEntityId(0), "Static"),
         body(SceneEntityId(1), "Static"),
         body(STEP, "Static"),
         body(SceneEntityId(3), "Static"),
         body(FALLING, "Dynamic"),
     ]
-    .concat();
-    document_with(&rows)
+    .concat()
 }
 
 /// Runs `ticks` ticks of play, a tick's time at a time: one call handed it
@@ -204,6 +222,70 @@ fn a_block_with_a_body_falls_in_play_and_stop_puts_it_back() {
         "stop did not put the scene back byte for byte",
     );
     assert_eq!(document.pick(&ray_at(0.0, DROP_Y)), Some(FALLING));
+}
+
+/// `id`'s block's orientation, read the way an inspector reads it.
+fn rotation(document: &mut Document, id: SceneEntityId) -> DQuat {
+    let leaves = Rotation::LEAVES.map(|leaf| {
+        match document
+            .read(id, BLOCKS, &format!("rotation.{leaf}"))
+            .expect("a block has a rotation")
+        {
+            Value::Float(value) => value,
+            other => panic!("a rotation leaf is a number, not {other:?}"),
+        }
+    });
+    DQuat::from_array(leaves)
+}
+
+/// **In play, a turned block with a body lands on its edge and tips onto a
+/// face, its block's `rotation` written back as it turns, and the block picks
+/// where it rests; stop puts every file back byte for byte**, the turn in
+/// the file included.
+#[test]
+fn a_turned_block_tips_in_play_and_stop_puts_its_rotation_back() {
+    let tipped = DQuat::from_rotation_z(std::f64::consts::FRAC_PI_6);
+    let [x, y, z, w] = tipped.to_array();
+    let line = format!("            rotation: ({x:?}, {y:?}, {z:?}, {w:?}),\n");
+    let mut document = document_of(&falling_blocks(&line), &falling_rows());
+    let before = document.files().expect("the scene saves");
+    assert_eq!(rotation(&mut document, FALLING), tipped);
+
+    document.play().expect("every body here is placed");
+    let rest = ticks_in(&document, 3.0);
+    play_ticks(&mut document, rest);
+    let turned = rotation(&mut document, FALLING);
+    let upright = [DVec3::X, DVec3::Y, DVec3::Z]
+        .map(|axis| (turned * axis).y.abs())
+        .into_iter()
+        .fold(0.0, f64::max);
+    assert!(
+        upright > 1.0 - 1e-3,
+        "the block came to rest turned {turned:?}, not on a face",
+    );
+    let rested = position(&mut document, FALLING);
+    assert!(
+        (rested[1] - (STEP_TOP + HALF)).abs() < REST_TOLERANCE,
+        "the block came to rest at {rested:?}, not flat on the step's top",
+    );
+    assert_eq!(
+        document.pick(&ray_at(rested[0], rested[1])),
+        Some(FALLING),
+        "the block does not pick where it came to rest",
+    );
+    assert_ne!(
+        document.files().expect("the scene saves"),
+        before,
+        "play changed nothing, so the restore below proves nothing",
+    );
+
+    assert!(document.stop().expect("the snapshot reloads"));
+    assert_eq!(
+        document.files().expect("the scene saves"),
+        before,
+        "stop did not put the scene back byte for byte",
+    );
+    assert_eq!(rotation(&mut document, FALLING), tipped);
 }
 
 /// **The picking boxes are never the simulated bodies**: in edit mode and in
