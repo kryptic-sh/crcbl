@@ -842,3 +842,34 @@ fn a_listed_system_is_saved_and_unlisting_it_restores_the_files() {
         before
     );
 }
+
+/// **A system listed at a position takes that place in the manifest**, so an
+/// unlisting of a system inside the manifest is undone by listing it back
+/// where it was, and the save is the one before it.
+#[test]
+fn a_system_listed_at_a_position_takes_that_place() {
+    let (mut scene, ids, mut world) = load(HEADER, ENV, MARKS).expect("the canonical scene loads");
+    world.register_system(Box::new(System::<Mark>::new("pins")));
+    world.register_system(Box::new(System::<Mark>::new("flags")));
+    let codecs = vec![
+        chunk_of::<Mark>("marks"),
+        chunk_of::<Mark>("pins"),
+        chunk_of::<Mark>("flags"),
+    ];
+    assert!(scene.list_system_at(0, "pins"));
+    assert!(scene.list_system("flags"));
+    assert!(
+        !scene.list_system_at(1, "pins"),
+        "a system was listed twice"
+    );
+    assert_eq!(scene.systems(), ["pins", "marks", "flags"]);
+    let before = scene.save(&mut world, &ids, &codecs).expect("saves");
+
+    assert!(scene.unlist_system("marks"));
+    assert!(scene.list_system_at(1, "marks"));
+    assert_eq!(scene.systems(), ["pins", "marks", "flags"]);
+    assert_eq!(
+        scene.save(&mut world, &ids, &codecs).expect("saves"),
+        before
+    );
+}

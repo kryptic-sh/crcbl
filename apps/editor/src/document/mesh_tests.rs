@@ -5,6 +5,7 @@
 use super::*;
 
 use crcbl::scene_mesh::{MESHES, MIN_HALF_EXTENT, PLACEHOLDER_HALF_EXTENT};
+use crcbl::scene_physics::BODIES;
 use crcbl_scene::gltf_fixture::{BIN_CHUNK_BUFFER, glb, triangle_bin, triangle_json};
 
 use crate::command::SystemRow;
@@ -316,8 +317,9 @@ fn a_drop_in_play_mode_is_refused() {
     ));
 }
 
-/// **A system holding rows is not unlisted, and one listed is not listed
-/// again**: the refusals that keep a save from dropping rows.
+/// **A system holding rows is not unlisted, one listed is not listed again,
+/// and none is listed past the manifest's end**: the refusals that keep a save
+/// from dropping rows or a listing from naming a place there is not.
 #[test]
 fn listing_and_unlisting_refuse_what_would_lose_rows() {
     let mut document = props();
@@ -329,15 +331,24 @@ fn listing_and_unlisting_refuse_what_would_lose_rows() {
     ));
     assert!(matches!(
         document.apply(EditCommand::ListSystem {
-            system: MESHES.to_owned()
+            system: MESHES.to_owned(),
+            at: 0,
         }),
         Err(EditError::Listed(system)) if system == MESHES
     ));
     assert!(matches!(
         document.apply(EditCommand::ListSystem {
-            system: "nonsense".to_owned()
+            system: "nonsense".to_owned(),
+            at: 0,
         }),
         Err(EditError::NoSystem(_))
+    ));
+    assert!(matches!(
+        document.apply(EditCommand::ListSystem {
+            system: BODIES.to_owned(),
+            at: 3,
+        }),
+        Err(EditError::PastManifest { at: 3, len: 2, .. })
     ));
     assert_eq!(document.log().position(), 0);
 }

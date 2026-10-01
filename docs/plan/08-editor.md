@@ -994,6 +994,15 @@ term and recorded, as above):
   system's last entity leaves it listed** — an empty entry saves an empty chunk
   and loads as nothing, and unlisting is an explicit `UnlistSystem`, so a
   detach's inverse keeps one shape.
+- **The undo property test plays drops and the manifest's edits**: a mesh drop
+  (listing `meshes` when the manifest lacks it), a `ListSystem` at a random
+  place, an `UnlistSystem` of an empty listed system and an attach to an
+  unlisted one, beside the earlier steps, comparing every file — `scene.ron`
+  included — at each step down and back up, and failing if any of those steps
+  never ran. It found that an unlisting's undo put the system back at the
+  manifest's end, saving a reordered `scene.ron`: `ListSystem` now carries its
+  place (`at`) and `Scene::list_system_at` inserts there. Putting the undo back
+  at the end, and an unlisting whose inverse did nothing, each turned it red.
 
 **Decided 2026-10-01, for rotation** (taken for the long term and recorded, as
 above):

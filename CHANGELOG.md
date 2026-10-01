@@ -803,12 +803,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Dropping into a scene that lists no `meshes` lists the system in the same
   entry: `EditCommand::ListSystem` and its inverse `UnlistSystem`, refused for a
   system already listed (`EditError::Listed`) or still holding entities
-  (`EditError::Populated`), so one undo puts the files back as they were.
+  (`EditError::Populated`), so one undo puts the files back as they were. A
+  listing carries the place it takes in the manifest (`at`; refused past the end
+  with `EditError::PastManifest`), so undoing an unlisting puts the system back
+  where it stood rather than at the end, and the `scene.ron` saved is the one
+  before it.
 
 - **`crcbl::scene::scn::Scene::list_system` and `unlist_system`** add a system
   to the end of a scene's manifest, so the next save writes its chunk, and take
   one out; listing one already listed, or unlisting one that is not, changes
-  nothing and says so.
+  nothing and says so. `Scene::list_system_at` lists one at a given place in the
+  manifest, which is the order its chunks are saved in.
 
 - **The editor has an asset browser**, a fourth pane under the outliner, listing
   the `.glb` and `.gltf` assets under the asset root as a tree of the folders

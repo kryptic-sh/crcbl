@@ -7,6 +7,9 @@ use super::*;
 use super::systems_tests::{SUN, two_systems};
 use crate::command::SystemRow;
 
+use crcbl::scene_mesh::MESHES;
+use crcbl::scene_physics::BODIES;
+
 use crcbl::core::rand::{hash_u64, hash_unit};
 
 fn document() -> Document {
@@ -299,35 +302,60 @@ const NAMES: [Option<&str>; 4] = [Some("Gate"), Some("Spawner"), Some("Tower"), 
 ///
 /// Each step is one of a nudge by an arbitrary float, a duplicate, a delete, a
 /// paste of two entities as one batch, a rename — to one of a few names, or
-/// to none — an attach of a system the entity is not in, or a detach of one of
-/// several it is in, of entities chosen from those the document holds at that
-/// moment. The document is [`two_systems`]', so an entity starts in two
-/// systems and a delete, duplicate or paste of it carries both rows. The text
-/// compared includes `names.ron` and the header's `names` entry, so a name an
-/// undo failed to put back, or a delete failed to take away, differs here,
-/// and every chunk, so a row an undone detach failed to put back differs too.
-/// The choices come from [`hash_u64`] over `(seed, index)`, so a failure names
-/// the history that produced it and replays exactly.
+/// to none — an attach of a system the entity is not in, a detach of one of
+/// several it is in, a drop of a mesh asset (listing `meshes` in the same
+/// entry when the manifest lacks it), a listing of a registered system at a
+/// random place in the manifest, an unlisting of a listed system holding no
+/// entity, and an attach to a system the manifest does not list — of
+/// entities chosen from those the document holds at that moment. The
+/// document is [`two_systems`]', so an entity starts in two systems and a
+/// delete, duplicate or paste of it carries both rows. The text compared is
+/// every file: `scene.ron`, so a manifest entry an undo failed to take out or
+/// put back in its place differs here; `names.ron` and the header's `names`
+/// entry, so a name an undo failed to put back, or a delete failed to take
+/// away, differs; and every chunk, so a row an undone detach failed to put
+/// back differs too. The choices come from [`hash_u64`] over `(seed, index)`,
+/// so a failure names the history that produced it and replays exactly.
 #[test]
 fn random_histories_walk_back_through_every_state() {
-    // How many states held a name, and how many attaches and detaches ran, so
-    // a run whose renames never landed in a file, or that never attached or
-    // detached anything, cannot pass as one that walked them back.
-    let mut named = 0;
-    let mut attached = 0;
-    let mut detached = 0;
+    // How many times each kind of step that can be skipped for want of a
+    // target ran, so a run that never reached one cannot pass as one that
+    // walked it back.
+    let mut ran = Ran::default();
     for seed in 0..HISTORIES {
         let mut document = two_systems();
+        document.set_assets(Box::new(super::mesh_tests::assets()));
         let start = document.entity_count();
         let mut states = vec![document.files().expect("ids")];
         for step in 0..HISTORY_LEN {
-            let draw = |k: u64| hash_u64(seed, step * 4 + k);
+            let draw = |k: u64| hash_u64(seed, step * DRAWS + k);
             let held = ids(&mut document);
             let len = u64::try_from(held.len()).expect("a handful of entities");
             let target = held[usize::try_from(draw(0) % len).expect("an index into held")];
             let joinable = document.attachable(target);
             let systems = document.systems_of(target);
-            match draw(1) % 8 {
+            let listed = document.scene.systems().to_vec();
+            let unlisted: Vec<String> = document
+                .registry
+                .systems()
+                .filter(|system| !listed.iter().any(|each| each == system))
+                .map(str::to_owned)
+                .collect();
+            let empty: Vec<String> = listed
+                .iter()
+                .filter(|system| {
+                    document
+                        .registry
+                        .entities(&mut document.world, &document.ids, system)
+                        .is_empty()
+                })
+                .cloned()
+                .collect();
+            let joinable_unlisted: Vec<&String> = joinable
+                .iter()
+                .filter(|system| unlisted.contains(system))
+                .collect();
+            match draw(1) % 12 {
                 0 if held.len() > 1 => document.delete(target).expect("a held entity"),
                 1 => {
                     document.duplicate(target).expect("a held entity");
@@ -352,27 +380,60 @@ fn random_histories_walk_back_through_every_state() {
                     document
                         .attach(target, system)
                         .expect("a system it is not in");
-                    attached += 1;
+                    ran.attached += 1;
                 }
                 5 if systems.len() > 1 => {
                     let system = &systems[pick(draw(2), systems.len())];
                     document
                         .detach(target, system)
                         .expect("one of several systems");
-                    detached += 1;
+                    ran.detached += 1;
+                }
+                6 => {
+                    let asset = DROPPED[pick(draw(2), DROPPED.len())];
+                    let point = DVec3::new(
+                        (hash_unit(seed, step * DRAWS + 3) - 0.5) * DROP_SPREAD,
+                        0.0,
+                        (hash_unit(seed, step * DRAWS + 4) - 0.5) * DROP_SPREAD,
+                    );
+                    if !listed.iter().any(|system| system == MESHES) {
+                        ran.dropped_listing += 1;
+                    }
+                    document.spawn_mesh(asset, point).expect("a mesh asset key");
+                    ran.dropped += 1;
+                }
+                7 if !unlisted.is_empty() => {
+                    let system = unlisted[pick(draw(2), unlisted.len())].clone();
+                    let at = pick(draw(3), listed.len() + 1);
+                    document
+                        .apply(EditCommand::ListSystem { system, at })
+                        .expect("a registered system the manifest lacks");
+                    ran.listed += 1;
+                }
+                8 if !empty.is_empty() => {
+                    let system = empty[pick(draw(2), empty.len())].clone();
+                    if listed.last() != Some(&system) {
+                        ran.unlisted_inside += 1;
+                    }
+                    document
+                        .apply(EditCommand::UnlistSystem { system })
+                        .expect("a listed system holding no entity");
+                    ran.unlisted += 1;
+                }
+                9 if !joinable_unlisted.is_empty() => {
+                    let system = joinable_unlisted[pick(draw(2), joinable_unlisted.len())];
+                    document
+                        .attach(target, system)
+                        .expect("a registered system it is not in");
+                    ran.attached_unlisted += 1;
                 }
                 _ => {
-                    // The placing component's position, or a sun's period for
-                    // an entity nothing places.
-                    let (system, path) = match document.placing_system(target) {
-                        Some(system) => (system, format!("position.{}", draw(2) % 3)),
-                        None => (SUN.to_owned(), "period".to_owned()),
-                    };
+                    let (system, path) = nudged_leaf(&mut document, target, draw(2));
                     let Value::Float(was) = document.read(target, &system, &path).expect("a leaf")
                     else {
                         panic!("{path} is a float");
                     };
-                    let delta = (hash_unit(seed, step * 4 + 3) - 0.5) * 4.0;
+                    let delta = (hash_unit(seed, step * DRAWS + 5) - 0.5) * 4.0;
                     document
                         .apply(EditCommand::SetProperty {
                             entity: target,
@@ -406,14 +467,84 @@ fn random_histories_walk_back_through_every_state() {
                 "seed {seed}: redoing to position {position} did not restore that state",
             );
         }
-        named += states
+        ran.named += states
             .iter()
             .filter(|state| state.contains_key("names.ron"))
             .count();
     }
-    assert!(named > 0, "no history named an entity");
-    assert!(attached > 0, "no history attached a system");
-    assert!(detached > 0, "no history detached a system");
+    ran.assert_every_kind_ran();
+}
+
+/// How many draws one step of [`random_histories_walk_back_through_every_state`]
+/// takes from [`hash_u64`] and [`hash_unit`]: the indices `step * DRAWS + k`
+/// never overlap between steps.
+const DRAWS: u64 = 8;
+
+/// The width of the square about the origin a drop in
+/// [`random_histories_walk_back_through_every_state`] lands in.
+const DROP_SPREAD: f64 = 16.0;
+
+/// The assets a drop in [`random_histories_walk_back_through_every_state`]
+/// places: one the asset root holds, and one it does not (a placeholder).
+const DROPPED: [&str; 2] = [super::mesh_tests::TRIANGLE, super::mesh_tests::GONE];
+
+/// What [`random_histories_walk_back_through_every_state`] counts, each kind
+/// of step that may be skipped for want of a target.
+#[derive(Default)]
+struct Ran {
+    /// States that held a name.
+    named: usize,
+    attached: usize,
+    detached: usize,
+    dropped: usize,
+    /// Drops into a manifest without `meshes`, which list it too.
+    dropped_listing: usize,
+    listed: usize,
+    unlisted: usize,
+    /// Unlistings of a system that was not the manifest's last, whose undo
+    /// has to put it back where it was rather than at the end.
+    unlisted_inside: usize,
+    attached_unlisted: usize,
+}
+
+impl Ran {
+    /// Panics naming the first kind of step no history ran.
+    fn assert_every_kind_ran(&self) {
+        for (count, what) in [
+            (self.named, "no history named an entity"),
+            (self.attached, "no history attached a system"),
+            (self.detached, "no history detached a system"),
+            (self.dropped, "no history dropped a mesh"),
+            (self.dropped_listing, "no drop listed meshes"),
+            (self.listed, "no history listed a system"),
+            (self.unlisted, "no history unlisted a system"),
+            (self.unlisted_inside, "no unlisting was of a middle system"),
+            (
+                self.attached_unlisted,
+                "no history attached to an unlisted system",
+            ),
+        ] {
+            assert!(count > 0, "{what}");
+        }
+    }
+}
+
+/// The leaf a nudge of `target` moves, from the draw `value`: its placing
+/// component's position, or for an entity nothing places a float of a
+/// component it holds — a sun's period, else a body's friction.
+fn nudged_leaf(document: &mut Document, target: SceneEntityId, value: u64) -> (String, String) {
+    if let Some(system) = document.placing_system(target) {
+        return (system, format!("position.{}", value % 3));
+    }
+    if document
+        .systems_of(target)
+        .iter()
+        .any(|system| system == SUN)
+    {
+        (SUN.to_owned(), "period".to_owned())
+    } else {
+        (BODIES.to_owned(), "friction".to_owned())
+    }
 }
 
 /// An index below `len` from the draw `value`.

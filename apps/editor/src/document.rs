@@ -144,6 +144,16 @@ pub enum EditError {
     /// A listing named a system the manifest already lists.
     Listed(String),
 
+    /// A listing named a place past the manifest's end.
+    PastManifest {
+        /// The system it would have listed.
+        system: String,
+        /// The place it named.
+        at: usize,
+        /// How many systems the manifest lists.
+        len: usize,
+    },
+
     /// An unlisting named a system still holding entities, whose rows the
     /// next save would drop.
     Populated(String),
@@ -238,6 +248,10 @@ impl fmt::Display for EditError {
                 write!(f, "the scene has no system `{system}` to put an entity in")
             }
             Self::Listed(system) => write!(f, "the scene already lists `{system}`"),
+            Self::PastManifest { system, at, len } => write!(
+                f,
+                "the scene lists {len} systems, so `{system}` cannot be listed at place {at}"
+            ),
             Self::Populated(system) => write!(
                 f,
                 "`{system}` still holds entities, which a save without it would drop"
@@ -1030,7 +1044,7 @@ impl Document {
             } => self.attach_row(*id, system, row),
             EditCommand::Detach { entity: id, system } => self.detach_row(*id, system),
             EditCommand::Rename { entity: id, name } => self.set_name(*id, name.clone()),
-            EditCommand::ListSystem { system } => self.list_system(system),
+            EditCommand::ListSystem { system, at } => self.list_system(system, *at),
             EditCommand::UnlistSystem { system } => self.unlist_system(system),
             EditCommand::Batch(commands) => {
                 let mut undo = Vec::with_capacity(commands.len());

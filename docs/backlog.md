@@ -11782,7 +11782,8 @@ says what that cleared and what it did not. The allow-list entry in
   `IdMap::next_id`, and Delete, Ctrl+D, F2 and the inspector's add and remove
   buttons drive them. The undo property test is
   `document::entity_tests::random_histories_walk_back_through_every_state`, run
-  on `document::systems_tests::two_systems` with renames, attaches and detaches.
+  on `document::systems_tests::two_systems` with renames, attaches and detaches,
+  mesh drops, listings and unlistings of systems, and attaches to unlisted ones.
   Names are `crcbl_scene::scn::names`' `names.ron`; `08-editor.md`'s decisions
   of 2026-10-01 say why a chunk the header declares, and its slice 11 how one
   entity spans systems. Still owed:
@@ -12014,8 +12015,6 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     recorded in a per-project file, which is a new file format for what the
     manifest already marks. Not covered: a workspace whose game crate sits under
     another `Cargo.toml` takes the nearest one, which is the game's own.
-  - **The undo property test does not play drops or `ListSystem`.** The drop's
-    undo is held by its own tests against the saved files.
   - **Not tested:** a body on a mesh in play (the bodies module reads the
     placement, so it should fall as its measured box), a glTF with several nodes
     and primitives (the fixture triangle has one part), and a source answering

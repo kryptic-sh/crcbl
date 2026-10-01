@@ -205,6 +205,7 @@ impl Document {
         EditCommand::Batch(vec![
             EditCommand::ListSystem {
                 system: system.to_owned(),
+                at: self.scene.systems().len(),
             },
             command,
         ])
@@ -223,15 +224,29 @@ impl Document {
             .ok_or_else(|| EditError::NoSystem(system.to_owned()))
     }
 
-    /// Adds `system` to the manifest, and hands back the unlisting that undoes
-    /// it. The outline gains its group, so the membership moves.
-    pub(super) fn list_system(&mut self, system: &str) -> Result<EditCommand, EditError> {
+    /// Adds `system` to the manifest at position `at`, and hands back the
+    /// unlisting that undoes it. The outline gains its group, so the
+    /// membership moves.
+    pub(super) fn list_system(
+        &mut self,
+        system: &str,
+        at: usize,
+    ) -> Result<EditCommand, EditError> {
         if !self.registry.contains(system) {
             return Err(EditError::NoSystem(system.to_owned()));
         }
-        if !self.scene.list_system(system) {
+        if self.scene.systems().iter().any(|listed| listed == system) {
             return Err(EditError::Listed(system.to_owned()));
         }
+        let len = self.scene.systems().len();
+        if at > len {
+            return Err(EditError::PastManifest {
+                system: system.to_owned(),
+                at,
+                len,
+            });
+        }
+        self.scene.list_system_at(at, system);
         self.membership += 1;
         Ok(EditCommand::UnlistSystem {
             system: system.to_owned(),
@@ -239,7 +254,8 @@ impl Document {
     }
 
     /// Takes `system`, which must hold no entity, out of the manifest, and
-    /// hands back the listing that undoes it.
+    /// hands back the listing that undoes it — at the place it held, so the
+    /// manifest's order and the `scene.ron` it saves come back too.
     pub(super) fn unlist_system(&mut self, system: &str) -> Result<EditCommand, EditError> {
         self.listed_codec(system)?;
         if !self
@@ -249,10 +265,17 @@ impl Document {
         {
             return Err(EditError::Populated(system.to_owned()));
         }
+        let at = self
+            .scene
+            .systems()
+            .iter()
+            .position(|listed| listed == system)
+            .ok_or_else(|| EditError::NoSystem(system.to_owned()))?;
         self.scene.unlist_system(system);
         self.membership += 1;
         Ok(EditCommand::ListSystem {
             system: system.to_owned(),
+            at,
         })
     }
 

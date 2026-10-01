@@ -844,11 +844,25 @@ impl Scene {
     /// calls first. Not checked against a codec: a save refuses a system with
     /// none, as a load does.
     pub fn list_system(&mut self, name: impl Into<String>) -> bool {
+        self.list_system_at(self.systems.len(), name)
+    }
+
+    /// [`list_system`](Self::list_system), at position `index` of the
+    /// manifest rather than its end — what undoing an
+    /// [`unlist_system`](Self::unlist_system) needs, since the manifest's
+    /// order is the order its chunks are read and written in, and a system
+    /// put back at the end would save a different `scene.ron`.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is past the manifest's end, as [`Vec::insert`] does: a
+    /// position is the caller's to read off [`systems`](Self::systems).
+    pub fn list_system_at(&mut self, index: usize, name: impl Into<String>) -> bool {
         let name = name.into();
         if self.systems.contains(&name) {
             return false;
         }
-        self.systems.push(name);
+        self.systems.insert(index, name);
         true
     }
 
@@ -857,7 +871,9 @@ impl Scene {
     /// The world is not consulted: rows still in that system are left out of
     /// the next save, so a caller takes them out first — the inverse of
     /// [`list_system`](Self::list_system) for a system that never gained a
-    /// row is the case it is for.
+    /// row is the case it is for, and of
+    /// [`list_system_at`](Self::list_system_at) at the position it held for
+    /// one that held a place inside the manifest.
     pub fn unlist_system(&mut self, name: &str) -> bool {
         let before = self.systems.len();
         self.systems.retain(|listed| listed != name);
