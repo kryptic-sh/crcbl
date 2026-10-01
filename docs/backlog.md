@@ -11500,11 +11500,11 @@ says what that cleared and what it did not. The allow-list entry in
   `Registry::placing_system` takes the first system in name order whose
   `Placement` answers; the gizmo and the arrows move that one, and a second
   placing component (a block beside a brick) is drawn by nothing and edited only
-  in its inspector section. Considered and declined for now: refusing an attach
-  of a second placing component — it would refuse the very case physics on scene
-  components needs, a body beside a block, until bodies read their pose from the
-  block. A check (`Registry::check`-style) reporting placements that disagree is
-  what it would take if it bites.
+  in its inspector section. Refusing an attach of a second placing component was
+  declined because it would have refused a body beside a block; slice 12's
+  `Body` places nothing and takes its box from the block, so that reason is gone
+  and refusing is open again. A check (`Registry::check`-style) reporting
+  placements that disagree is the other way, if it bites.
 - **Attach offers only the systems the scene's manifest lists** (slice 11). A
   registered system the manifest does not list cannot be attached: a save writes
   the manifest's chunks and no others, so the row would be lost. Offering it
@@ -11712,22 +11712,50 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     editing, so play needs no schedule to switch from; the selection, gizmo and
     camera systems the plan put in one are plain editor code today (the
     edit-mode schedule bullet above).
-  - **Physics on scene components — unblocked by slice 11, not built.** The
-    world's `PhysicsSystem` holds one kinematic box per entity for picking,
-    rebuilt from `Placement` after each tick that ran; nothing gives a scene
-    component a simulated body, so a module that wants collision or gravity has
-    to bring its own. A scene can now hold an entity in a body system beside its
-    block. What it takes: a registered, serialisable body component (mass, shape
-    or "use the placement", kinematic/dynamic) in a vocabulary — a scene
-    component needs a codec, `Default` and `Placement`; play building a
-    `PhysicsSystem` body per row of it instead of the editor's picking kinematic
-    boxes, or beside them on another layer, since today `sync_colliders` sets a
-    kinematic body on every placed entity and would overwrite a simulated one;
-    and a rule for which pose wins when the body moves — writing the simulated
-    transform back into the placing component each tick, or the body owning the
-    pose and the block reading it — which is also the second-placement question
-    in _An entity with two placing components_ above. Not tested: nothing in the
-    tree registers such a component.
+  - **Physics on scene components (slice 12, 2026-10-01): what it leaves.**
+    `crcbl::scene_physics` registers `Body` under `bodies`, a check and a play
+    module; the editor's vocabulary takes it. Deferred, each with what it takes:
+    - **Rotation.** A dynamic body has no rotational inertia, so it never turns
+      and the axis-aligned box that collides is the one drawn. Simulating
+      rotation needs a rotation in the scene format (a `rotation` field on the
+      placing component, or a scene-level transform system), a rotated box in
+      `Placement` and in what every tool draws and picks by, a rotate gizmo
+      mode, and the module writing the orientation back beside `position` — then
+      `RigidBody::with_inertia` from `crcbl_phys::MassProperties` for the box.
+      Declined meanwhile: simulating rotation without drawing it, which shows a
+      box flat while it rests on its corner.
+    - **A kinematic velocity field.** A kinematic body stands where it was
+      placed, since nothing gives it a velocity; a moving platform needs a
+      `velocity` (and an angular one, after rotation) on `Body`, set on the
+      simulated body at register and its pose written back like a dynamic one's.
+      Not added until a scene wants a moving platform.
+    - **Joints.** `crcbl_phys` has distance, revolute, prismatic, weld and
+      spherical joints; a scene has no component naming two bodies. It takes a
+      joint component whose row names the other entity by `SceneEntityId` (and
+      survives a delete and its undo), validated on load like `Body`.
+    - **Switching a body's kind in the inspector.** `crcbl_reflect` describes an
+      enum's active variant and cannot change it, so `kind` is shown and edited
+      only in the file. Needs variant switching in `crcbl-reflect` (a default
+      per variant's fields) and a drop-down in the inspector.
+    - **The samples adopting `Body`.** Breakout, puppet and towers keep their
+      physics in their own code; a sample moving a scene object onto `Body`
+      calls `scene_physics::register` in its vocabulary and adds a `bodies`
+      chunk. Not done: none of their objects is a free rigid body today.
+    - **Gravity and the solver settings are fixed** (Earth gravity down `-Y`,
+      `ContactSettings::DEFAULT`). Per-scene settings belong in `env.ron` or a
+      settings component, when a scene wants other ones.
+    - **An invalid value set in the inspector is caught at save, not at the
+      edit.** `#[reflect(min, max)]` is advisory, so a panel can set a mass of
+      zero; the bodies check reports it on the status line when the scene is
+      saved (`Document::problems`) and play refuses it, but the save still
+      writes it, and a scene saved so does not reopen until the file is fixed.
+      Refusing at the edit needs a validation hook on `Registry::register` that
+      `SetProperty` runs.
+    - **Not tested:** a module despawning an entity that has a body (the
+      `Simulation`'s sweep takes the body out; no module despawns one), and a
+      body on a placing component whose centre is offset from `position` in the
+      shipped vocabulary (the offset rule is held by `scene_physics`'s own tests
+      on a test component).
   - **A module despawning a scene entity** is swept and leaves the outline and
     the picture (both re-read when the world's entity count moves), but its id
     stays in the document's id map until stop, so selecting it shows "no

@@ -398,6 +398,9 @@ pub mod perf;
 #[cfg(any(feature = "scene", feature = "scn"))]
 pub mod registry;
 
+#[cfg(any(feature = "scene", feature = "scn"))]
+pub mod scene_physics;
+
 pub mod session;
 
 pub mod settings;

@@ -238,15 +238,15 @@ fn modules_are_built_fresh_for_scenes_listing_their_system() {
     }
 
     let mut registry = registry();
-    registry.module("beacons", |_, _| {
+    registry.module("beacons", |_, _, _| {
         BUILT.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(Named("first")))
     });
-    registry.module("bricks", |_, _| {
+    registry.module("bricks", |_, _, _| {
         BUILT.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(Named("elsewhere")))
     });
-    registry.module("blocks", |_, _| {
+    registry.module("blocks", |_, _, _| {
         BUILT.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(Named("second")))
     });
@@ -277,6 +277,8 @@ fn modules_are_built_fresh_for_scenes_listing_their_system() {
 
 /// **A factory reads the scene it is handed and may refuse it**, and the
 /// refusal is what `modules` answers — no module is handed back beside it.
+/// It is handed the vocabulary building it, too: the registry `modules` was
+/// called on, so a module that loads the files reads them with its codecs.
 #[test]
 fn a_factory_that_refuses_the_scene_refuses_the_play() {
     struct Rules;
@@ -288,11 +290,20 @@ fn a_factory_that_refuses_the_scene_refuses_the_play() {
         fn register(&self, _world: &mut World) {}
     }
 
-    /// Plays a scene with a header, and refuses one without.
-    fn start(source: &dyn AssetSource, dir: &Path) -> Result<Box<dyn GameModule>, String> {
+    /// Plays a scene with a header that its vocabulary can load, and refuses
+    /// one without.
+    fn start(
+        registry: &Registry,
+        source: &dyn AssetSource,
+        dir: &Path,
+    ) -> Result<Box<dyn GameModule>, String> {
         source
             .read(&dir.join("scene.ron"))
             .map_err(|error| format!("no header: {error}"))?;
+        let mut world = World::new();
+        registry.register_systems(&mut world);
+        Scene::load(source, dir, &registry.codecs(), &mut world)
+            .map_err(|error| format!("not this vocabulary's: {error}"))?;
         Ok(Box::new(Rules))
     }
 

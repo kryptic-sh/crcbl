@@ -39,7 +39,7 @@ use crcbl::assets::AssetSource;
 use crcbl::ecs::{ClientInputs, ComponentHash, Entity, GameModule, System, World};
 use crcbl::math::DVec3;
 use crcbl::phys::ColliderId;
-use crcbl::registry::Placement;
+use crcbl::registry::{Placement, Registry};
 
 use super::{DEFAULT_TICK_HZ, Stage, TowersModule, lock};
 use crate::map::{CREEP_RADIUS, Map};
@@ -73,11 +73,17 @@ impl Placement for Walker {
 ///
 /// What this game registers as its [`crcbl::registry::ModuleFactory`]: the
 /// loader `--scene` runs, so a tool plays exactly the field the game would.
+/// The vocabulary it is handed goes unused for the same reason: [`Map::load`]
+/// builds this game's own, which is the one `--scene` loads with.
 ///
 /// # Errors
 ///
 /// [`Map::load`]'s refusal, as text.
-pub(crate) fn start(source: &dyn AssetSource, dir: &Path) -> Result<Box<dyn GameModule>, String> {
+pub(crate) fn start(
+    _: &Registry,
+    source: &dyn AssetSource,
+    dir: &Path,
+) -> Result<Box<dyn GameModule>, String> {
     let map = Map::load(source, dir).map_err(|error| error.to_string())?;
     Ok(Box::new(FieldPlay::new(map)))
 }
@@ -307,12 +313,12 @@ mod tests {
             .insert(Path::new(&key), bent.into_bytes())
             .expect("a legal key");
 
-        let refusal = start(&source, Path::new(FIELD))
+        let refusal = start(&Registry::new(), &source, Path::new(FIELD))
             .err()
             .expect("a diagonal leg is not a lane");
         assert!(refusal.contains("neither X nor Z"), "{refusal}");
         assert!(
-            start(&built_in_source(), Path::new(FIELD)).is_ok(),
+            start(&Registry::new(), &built_in_source(), Path::new(FIELD)).is_ok(),
             "the committed field is refused"
         );
     }

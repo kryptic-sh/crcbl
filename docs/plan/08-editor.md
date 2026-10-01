@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 11 2026-10-01, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 12 2026-10-01, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -451,6 +451,70 @@ the decisions of the same day (below).
   document with attach and detach steps and asserts both ran. Each mutation
   listed in the commit that landed this turned a test red.
 
+**Slice 12, physics on scene components, landed 2026-10-01**, on the decisions
+of the same day (below).
+
+- **A body is a scene component.** `crcbl::scene_physics` (behind the umbrella's
+  `scn`/`scene` features, so any vocabulary takes it with
+  `scene_physics::register`) registers
+  `Body { kind, mass, friction, restitution }` under `bodies`, with
+  `BodyKind::{Dynamic, Static, Kinematic}`, the parameters `crcbl_phys` takes
+  (`RigidBody::new_dynamic(mass)`,
+  `SurfaceMaterial::new(friction, restitution)`). It derives `Reflect` and
+  serde; its `Default` is dynamic, one kilogram, `SurfaceMaterial::DEFAULT`'s
+  surface. Values are validated on load through serde's `try_from` — a mass not
+  finite and above zero (for every kind, so switching a row to dynamic never
+  makes it invalid), a friction not finite and non-negative, a restitution
+  outside `0..=1` is `ScnError::Parse` naming the file, line and field — and a
+  `Registry::check` under `bodies` reports the same of a value a panel set.
+  `crcbl-phys` gained no dependency: the component lives in the umbrella, which
+  depends on both sides.
+- **The shape is the placement.** A body collides as the box
+  `Registry::placement` gives its entity; `Body` itself answers no placement, so
+  the block beside it places the entity. `ModuleFactory` became
+  `fn(&Registry, &dyn AssetSource, &Path)`, so the bodies' factory loads the
+  scene's files with the vocabulary's codecs and refuses, naming the entity, a
+  body with nothing placing it, a placement with no extent on an axis, or a
+  placing component with no `position` leaves.
+- **Play builds simulated bodies and the simulation's pose wins.** The module
+  registers a `Simulation` system — a `PhysicsSystem` with contacts and Earth
+  gravity, under a type of its own — with a box per body at its placement
+  (static: a transform and a collider with no body; kinematic: a body with zero
+  velocity; dynamic: a body of its mass). The world's schedule steps it, and the
+  module writes each dynamic body's centre into the placing component's
+  `position.N` through the registry's reflected path (`registry::POSITION`, the
+  leaf the gizmo writes too), keeping the component's own offset between its
+  `position` and its placement centre. The editor draws and picks the motion
+  through the paths it already has; stop throws the world away.
+- **Rotation is locked**: a dynamic body gets no inertia tensor, so it never
+  turns, and the box that collides is the axis-aligned box that is drawn. What
+  rotation needs is in the backlog.
+- **The picking boxes are not the simulated bodies.** `sync_colliders` keeps one
+  kinematic box per placed entity in the document's own `PhysicsSystem`; the
+  bodies live in the `Simulation`, a different type, so the sync after a tick
+  cannot overwrite them and picks follow the written-back placements.
+- **Play runs the world its snapshot loads into.** `Document::play` reloads the
+  snapshot before the modules register, so storage order — the order bodies are
+  created and stepped in — is the files' order whatever an edit history did, and
+  two plays of one scene end in the same poses to the bit.
+- **Evidence**: `scene_physics`'s tests hold a dynamic body falling (a quarter
+  second in, near `½gt²`) and resting on a static slab, a body dropped from 40 m
+  resting on a slab thinner than a tick's travel, static and kinematic bodies
+  never moving, a component standing on its `position` coming to rest with it at
+  the ground, a block landing half off a narrow pillar resting level and
+  unrotated, two plays of a stack identical to the bit, the round trip and an
+  entity with a block and a body as one entity placed by the block, the default
+  row, every invalid value refused on load by field and reported by the check,
+  each play refusal, and the simulation apart from any `PhysicsSystem`. The
+  editor's hold a block falling in play with its bounds and pick following and
+  coming to rest on the middle step, which never moves, stop restoring the files
+  byte for byte, the picking boxes kinematic in edit mode and in play, a body
+  with no block refusing play by name, a body attached in the editor falling,
+  and two plays identical even after a delete and its undo reordered the stack's
+  storage; the instances' test sees the renderer's record of the falling block
+  move. The mutations each turned a test red are listed in the commit that
+  landed this.
+
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
 opens the vocabularies it was compiled with. The shipped build registers its own
@@ -690,6 +754,25 @@ long term and recorded, as above):
 - **One entity in several systems is allowed, keyed by the shared
   `SceneEntityId` across chunks.** Needed for physics on scene components and
   for attach/detach. Built in slice 11, above.
+
+**Decided 2026-10-01, for physics on scene components** (taken for the long term
+and recorded, as above):
+
+- **A scene-carried body component**,
+  `Body { kind, mass, friction, restitution }`, in a module of the umbrella
+  behind its scene feature (`crcbl::scene_physics`), registered under `bodies`
+  with one call; the editor's vocabulary registers it. No new crate, and no
+  serde or scene dependency in `crcbl-phys`.
+- **Shape from the placement**: the collider is the entity's placement box; a
+  body with no placement is refused at play start by name.
+- **Play builds simulated bodies through a module registered under `bodies`**,
+  and each tick the simulated pose is written into the placing component's
+  `position` through the registry's reflected path, never naming a game's type.
+  Rotation is locked (above, slice 12).
+- **Edit mode keeps kinematic pick bodies**, and during play the pick boxes are
+  kept apart from the simulated bodies; stop's restore discards everything.
+- **Static and kinematic bodies collide and do not move**; a kinematic velocity
+  is not added until something needs one.
 
 **Still the owner's:** a file watcher dependency for hot reload (`notify`),
 because adding a crates.io dependency is the owner's call by the workspace's

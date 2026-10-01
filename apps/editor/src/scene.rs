@@ -159,6 +159,9 @@ impl Placement for Block {
 pub fn vocabulary() -> Registry {
     let mut registry = Registry::new();
     registry.register::<Block>(BLOCKS);
+    // Physics on scene components: a body beside a block makes that block
+    // fall, collide and come to rest while the scene plays.
+    crcbl::scene_physics::register(&mut registry);
     // The games the workspace wants edited, through the call each one's own
     // loader makes: `docs/plan/sample/07-towers.md`'s milestone 2 is an editor
     // dogfood pass, and an editor that could not open a sample's committed
@@ -245,6 +248,7 @@ mod tests {
             registry.systems().collect::<Vec<_>>(),
             [
                 BLOCKS,
+                crcbl::scene_physics::BODIES,
                 "bricks",
                 "plots",
                 "spawn",

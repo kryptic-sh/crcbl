@@ -88,7 +88,8 @@
 //!   which no vocabulary registers yet.
 //! * **Not a schedule.** [`Registry::register_systems`] adds the systems a
 //!   scene's chunks load into and nothing else; a tool that also wants physics,
-//!   or a game that wants its own, registers it beside them.
+//!   or a game that wants its own, registers it beside them — or plays a
+//!   scene's bodies through [`crate::scene_physics`]'s module.
 //! * **Not a loop.** [`Registry::module`] records how to build a game's
 //!   [`GameModule`] and [`Registry::modules`] builds them; registering their
 //!   systems and ticking them is the caller's — the editor's play mode is one,
@@ -145,6 +146,16 @@ use crcbl_scene::scn::{IdMap, ScnError, SystemChunk, chunk_of, row_text};
 // Placement
 // ---------------------------------------------------------------------------
 
+/// The field a tool moves an entity by: its placing component's centre, as the
+/// three leaves `position.0`, `position.1` and `position.2`.
+///
+/// Found by name through [`crcbl_reflect`]'s paths, never by naming a component
+/// type — the editor's translate handle and arrow keys write it, and
+/// [`crate::scene_physics`] writes a simulated body's pose into it. A
+/// [`Placement`] is what a tool reads; this is the leaf it writes, and one
+/// spelling of it is what keeps the two writers moving the same field.
+pub const POSITION: &str = "position";
+
 /// Where a component's entity stands in the world, and how far it reaches.
 ///
 /// **The smallest honest answer to "which of a component's fields is a
@@ -188,6 +199,11 @@ pub trait Placement {
 /// one and asks it; a game hands one out, and uses the same one to load its own
 /// scene, so the vocabulary a game ships and the vocabulary a tool sees are the
 /// same list rather than two that agree today.
+///
+/// `Clone`, and cheap to clone — a table of names and function pointers — so a
+/// module that reads and writes components through the vocabulary while it
+/// plays ([`crate::scene_physics`]'s is the one) can keep its own copy: a
+/// [`GameModule`] is `'static` and cannot borrow the tool's.
 ///
 /// ```
 /// use crcbl::ecs::{ComponentHash, World};
@@ -243,7 +259,7 @@ pub trait Placement {
 ///     "(position:(0.0,0.0,0.0))",
 /// );
 /// ```
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Registry {
     /// Keyed by system name, which is what a manifest entry, a chunk file's stem
     /// and [`Scene::load`](crcbl_scene::scn::Scene::load) all join on. Sorted, so
@@ -288,7 +304,14 @@ pub type SceneCheck = fn(&dyn AssetSource, &Path) -> Result<(), String>;
 /// have to panic or sit inert. The files rather than the world, for
 /// [`SceneCheck`]'s reason: they are what the game's own loader reads, so the
 /// module plays the scene the way the game would load it.
-pub type ModuleFactory = fn(&dyn AssetSource, &Path) -> Result<Box<dyn GameModule>, String>;
+///
+/// **Handed the vocabulary too**, which is the registry building the module: a
+/// module that works on components it does not name — a body that moves
+/// whichever component places its entity — reads and writes them through the
+/// registry's accessors, and loads the files the way [`Registry::codecs`]
+/// reads them.
+pub type ModuleFactory =
+    fn(&Registry, &dyn AssetSource, &Path) -> Result<Box<dyn GameModule>, String>;
 
 /// One registered component, reduced to the calls a tool makes.
 ///
@@ -471,7 +494,11 @@ impl Registry {
     ///     fn tick(&mut self, _world: &mut World, _inputs: ClientInputs<'_>) {}
     /// }
     ///
-    /// fn start(_: &dyn AssetSource, _: &Path) -> Result<Box<dyn GameModule>, String> {
+    /// fn start(
+    ///     _: &Registry,
+    ///     _: &dyn AssetSource,
+    ///     _: &Path,
+    /// ) -> Result<Box<dyn GameModule>, String> {
     ///     Ok(Box::new(Rules))
     /// }
     ///
@@ -515,7 +542,7 @@ impl Registry {
         self.modules
             .iter()
             .filter(|(system, _)| systems.contains(system))
-            .map(|(_, factory)| factory(source, dir))
+            .map(|(_, factory)| factory(self, source, dir))
             .collect()
     }
 

@@ -1125,6 +1125,14 @@ fn memory_source(files: BTreeMap<String, String>) -> Result<MemorySource, EditEr
 /// Kinematic bodies: the body is what the broadphase tracks, and nothing moves
 /// it but this — no velocity is ever given to one, so a tick of play leaves it
 /// where the last sync put it.
+///
+/// **These are picking boxes, never simulated bodies.** A scene that plays
+/// with [`crcbl::scene_physics`] simulates its bodies in that module's own
+/// [`Simulation`](crcbl::scene_physics::Simulation) system, a type of its own,
+/// so the [`PhysicsSystem`] found here is still this tool's and setting a
+/// kinematic box cannot overwrite a body being simulated. The simulation
+/// writes each body's pose into its placing component, and the sync after a
+/// tick reads it from there like any other move.
 fn sync_colliders(
     registry: &Registry,
     world: &mut World,
@@ -1184,6 +1192,9 @@ mod field_tests;
 
 #[cfg(test)]
 mod naming_tests;
+
+#[cfg(test)]
+pub(crate) mod physics_tests;
 
 #[cfg(test)]
 pub(crate) mod play_tests;

@@ -6,7 +6,8 @@
 //! ```text
 //!     play  ──▶ files() ─────────────────────────────▶ the snapshot (text)
 //!           ──▶ Registry::modules(systems, the snapshot)
-//!                 ──▶ a game's refusal, or ──▶ register on the world
+//!                 ──▶ a game's refusal, or ──▶ the snapshot loaded again
+//!                                          ──▶ register on that world
 //!     each frame, unless paused:
 //!           ──▶ FrameClock at the world's tick rate ──▶ world.tick()
 //!                                                    ──▶ every module's tick
@@ -138,9 +139,11 @@ impl Document {
     /// Starting takes the scene's [`files`](Self::files) as the snapshot
     /// [`stop`](Self::stop) restores, builds a fresh instance of every module
     /// the vocabulary registers for the scene's systems from those files
-    /// ([`crcbl::registry::Registry::modules`]) and calls each one's
-    /// [`register`](GameModule::register) on the document's world. Nothing
-    /// ticks until [`advance`](Self::advance) is handed time.
+    /// ([`crcbl::registry::Registry::modules`]), loads the snapshot into a
+    /// fresh world as stop would — so what plays is the scene's text and not
+    /// the order an edit history left its systems in — and calls each
+    /// module's [`register`](GameModule::register) on it. Nothing ticks until
+    /// [`advance`](Self::advance) is handed time.
     ///
     /// # Errors
     ///
@@ -148,7 +151,10 @@ impl Document {
     /// id, which a save refuses rather than drops — and
     /// [`EditError::Unplayable`] if a game refuses to play the scene, naming
     /// why; in either case play does not start and nothing changed, because
-    /// every module is built before any registers. [`EditError::TickRate`] if
+    /// every module is built before any registers; the reload that follows
+    /// is the load stop runs, and a snapshot it refused is
+    /// [`EditError::Scene`] with the document still editing.
+    /// [`EditError::TickRate`] if
     /// a module's `register` left the world a tick period no fixed step can be
     /// taken at; the world is restored from the snapshot first, so the
     /// document is back to editing exactly as it was.
@@ -169,6 +175,12 @@ impl Document {
                 Path::new(""),
             )
             .map_err(EditError::Unplayable)?;
+        // The world played is the one the snapshot loads into, so a play is a
+        // function of the scene's text alone: a module that walks a system in
+        // storage order — the bodies' simulation creates its bodies that way,
+        // and steps them in that order — sees the file's order, not whatever
+        // order an edit history's attaches and detaches left.
+        self.restore(&snapshot)?;
         for module in &modules {
             module.register(&mut self.world);
         }

@@ -599,19 +599,52 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   path with a diagonal leg — does not play, and the status line names the rule
   (`EditError::Unplayable`).
 
+- **Physics on scene components: `crcbl::scene_physics`** (features `scn` or
+  `scene`). A `Body` — `kind` (`BodyKind::Dynamic`, `Static` or `Kinematic`),
+  `mass`, `friction`, `restitution` — is a scene component under the `bodies`
+  system, registered with the check and the play module by one call,
+  `scene_physics::register(&mut registry)`; it derives `Reflect`, and its
+  `Default` is a dynamic body of one kilogram on `crcbl_phys`'s default surface.
+  A row no simulation takes (a mass not finite and above zero, a friction not
+  finite and non-negative, a restitution outside `0..=1`) is refused on load
+  with the file, line and field, and the check reports one a panel set. A body
+  has no shape of its own: it collides as its entity's placement box. While a
+  scene plays, the module simulates every body in a `Simulation` system of its
+  own (a `PhysicsSystem` with contacts and Earth gravity) and writes each
+  dynamic body's centre back into its entity's placing component at
+  `position.N`, keeping that component's own offset, so a tool draws the motion
+  the way it draws an edit. Rotation is locked: a dynamic body has no rotational
+  inertia, so the box that collides is the axis-aligned box that is drawn. A
+  body whose entity has nothing placing it, a placement with no extent on an
+  axis, or a placing component with no `position` refuses play naming the
+  entity. `crcbl::registry::POSITION` is the one spelling of the `position`
+  field a tool and the module write.
+
+- **The editor plays physics.** Its vocabulary registers `scene_physics`, so a
+  greybox block with a body beside it falls, collides and comes to rest when the
+  scene plays, the picture and the pick following it; stop puts the scene back
+  byte for byte. The document's picking boxes stay kinematic and apart from the
+  simulation. Play now runs the world its snapshot loads into, so a play is a
+  function of the scene's text alone — two plays of one scene end in the same
+  poses to the bit, even after an edit history reordered the systems' storage.
+
 - **A game can register its behaviour beside its components.**
   `crcbl::registry::Registry::module(system, ModuleFactory)` records how to
   build a `GameModule` for any scene whose manifest lists `system`, and
   `Registry::modules(systems, source, dir)` builds a fresh instance of each from
   the scene's files, in registration order — what the editor's play mode ticks.
-  A `ModuleFactory` is `fn(&dyn AssetSource, &Path) -> Result<_, String>`, so a
-  game reads its rules off the scene and refuses one it will not play, and
-  `modules` answers with the first refusal. Keyed by a system, as `check` is, so
-  one game's rules never run on another game's scene in a registry holding
-  several vocabularies. `Registry::register_runtime::<T>(system)` records a
-  component a module spawns while a scene plays — placement only, no codec, so a
-  scene can never list it and a save never writes it — and
-  `Registry::runtime_entities` lists them for a tool to draw.
+  A `ModuleFactory` is
+  `fn(&Registry, &dyn AssetSource, &Path) -> Result<_, String>`, so a game reads
+  its rules off the scene and refuses one it will not play, and `modules`
+  answers with the first refusal; the registry it is handed is the one `modules`
+  was called on, for a module that loads the files with its codecs or works on
+  components it does not name (`Registry` is `Clone` so such a module can keep
+  its own copy). Keyed by a system, as `check` is, so one game's rules never run
+  on another game's scene in a registry holding several vocabularies.
+  `Registry::register_runtime::<T>(system)` records a component a module spawns
+  while a scene plays — placement only, no codec, so a scene can never list it
+  and a save never writes it — and `Registry::runtime_entities` lists them for a
+  tool to draw.
 
 - **`crcbl_scene::scn::IdMap::reserve(next)`** raises the map's high-water mark,
   so a map read back from saved files — which spell the ids a scene holds, not

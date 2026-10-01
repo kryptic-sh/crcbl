@@ -48,8 +48,10 @@ use crcbl::math::{DVec3, Vec2, Vec3};
 use crcbl::render::Camera;
 use crcbl::ui::draw_list::DrawList;
 
-/// The field translate writes: a component's centre, as `position.N`.
-pub const POSITION: &str = "position";
+/// The field translate writes: a component's centre, as `position.N` —
+/// [`crcbl::registry::POSITION`], the one spelling of it, which a simulated
+/// body's pose is written into as well.
+pub const POSITION: &str = crcbl::registry::POSITION;
 
 /// The field scale writes: a component's half size on each axis, as
 /// `half_extents.N`.

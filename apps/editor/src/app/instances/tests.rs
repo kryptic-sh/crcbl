@@ -222,6 +222,48 @@ fn step_any(editor: &mut Editor<HeadlessShell>) {
     assert_eq!(editor.frame().expect("a presented frame"), Flow::Continue);
 }
 
+/// **A block falling under its body moves its drawn instance**: the pose the
+/// simulation writes into the block reaches the renderer's records through
+/// the instances' ordinary publish, with nothing physics-specific drawing it.
+#[test]
+fn a_falling_body_moves_its_drawn_instance() {
+    use crate::document::physics_tests::{FALLING, falling, play_ticks, ticks_in};
+
+    let mut editor = headless(16);
+    step_any(&mut editor);
+    editor.document = falling();
+    // Play moves the membership, so the next frame reconciles the swapped
+    // document's instances.
+    editor.document.play().expect("every body here is placed");
+    step_any(&mut editor);
+    let height = |editor: &Editor<HeadlessShell>| {
+        let placed = editor
+            .instances
+            .instances
+            .iter()
+            .find(|placed| placed.drawn == Drawn::Scene(FALLING))
+            .expect("the falling block is drawn");
+        let (records, _) = editor.renderer.cull_records();
+        let index = usize::try_from(placed.handle.index()).expect("a host index");
+        assert_eq!(
+            records[index].transform,
+            placed.desc.transform.to_cols_array(),
+            "the renderer holds another pose than the one published",
+        );
+        placed.desc.transform.w_axis.y
+    };
+    let before = height(&editor);
+    let half = ticks_in(&editor.document, 0.5);
+    play_ticks(&mut editor.document, half);
+    step_any(&mut editor);
+    let after = height(&editor);
+    assert!(
+        after < before - 0.5,
+        "the instance stood at y = {before} and then {after}: it did not fall with its block",
+    );
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
 #[test]
 fn missing_bounds_leave_the_published_instance_unchanged() {
     let mut editor = headless(16);

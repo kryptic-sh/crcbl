@@ -50,7 +50,7 @@ impl GameModule for Drift {
 /// The editor's vocabulary with [`Drift`] registered for its blocks.
 pub(crate) fn drifting() -> Registry {
     let mut registry = crate::scene::vocabulary();
-    registry.module(BLOCKS, |_, _| Ok(Box::new(Drift)));
+    registry.module(BLOCKS, |_, _, _| Ok(Box::new(Drift)));
     registry
 }
 
@@ -354,11 +354,13 @@ impl SystemTrait for Ticks {
 #[test]
 fn a_vocabulary_with_no_modules_plays_and_the_world_still_ticks() {
     let mut document = Document::built_in().expect("the compiled-in scene is a scene");
-    document.world.register_system(Box::new(Ticks::default()));
     let before = document.files().expect("ids");
 
     document.play().expect("a scene no game plays still plays");
     assert!(document.playing_modules().is_empty());
+    // Registered once playing: play runs the world its snapshot loads into,
+    // which holds what the files and the modules put there and nothing else.
+    document.world.register_system(Box::new(Ticks::default()));
     let period = Duration::from_secs_f64(World::DEFAULT_TICK_DT);
     assert_eq!(document.advance(period * 3), 3);
     assert_eq!(
@@ -389,7 +391,7 @@ impl GameModule for Stopped {
 #[test]
 fn a_world_with_no_tick_period_does_not_play() {
     let mut registry = crate::scene::vocabulary();
-    registry.module(BLOCKS, |_, _| Ok(Box::new(Stopped)));
+    registry.module(BLOCKS, |_, _, _| Ok(Box::new(Stopped)));
     let mut document = Document::open(
         &crate::scene::built_in_source(),
         Path::new(GREYBOX),
