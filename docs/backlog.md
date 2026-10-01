@@ -11720,10 +11720,15 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   - **The asset key is free text in the inspector.** A typed key is checked when
     the scene is saved (the meshes check) and re-measured at once, but there is
     no picker; one would be the browser opened as a chooser.
-  - **The asset root defaults to the directory holding the scene**, so a scene
-    moved to another directory keeps its keys and loses its assets unless
-    `--assets` names the old root. A root recorded per project, or keys relative
-    to the scene, would be the alternatives; neither is decided.
+  - **Decided and built 2026-10-01: the asset root defaults to the game's root**
+    — `document::asset_root`, the nearest directory above the scene holding a
+    `Cargo.toml` (what `crcbl new` writes and every sample has), or the scene's
+    own directory outside any project; `--assets` still overrides. A key then
+    names the same file when a scene moves between the game's folders. Declined:
+    keys relative to the scene, which break on every such move, and a root
+    recorded in a per-project file, which is a new file format for what the
+    manifest already marks. Not covered: a workspace whose game crate sits under
+    another `Cargo.toml` takes the nearest one, which is the game's own.
   - **Attaching a mesh does not list `meshes`.** `Document::attachable` offers
     only the manifest's systems; the drop lists the system itself (one entry
     with the spawn), and attaching could do the same.

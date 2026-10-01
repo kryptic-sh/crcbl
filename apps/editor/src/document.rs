@@ -346,8 +346,8 @@ impl Document {
     /// Opens the scene directory at `path` on this machine's filesystem.
     ///
     /// The document remembers where it came from, so [`Document::save`] writes
-    /// back over it, and reads its meshes' assets from the directory holding
-    /// it until [`Document::set_assets`] says otherwise.
+    /// back over it, and reads its meshes' assets from [`asset_root`] of it
+    /// until [`Document::set_assets`] says otherwise.
     ///
     /// # Errors
     ///
@@ -360,8 +360,7 @@ impl Document {
         // root is how a caller says where the scene is.
         let source = crcbl::assets::DirSource::at(path.clone());
         let mut document = Self::open(&source, Path::new(""), registry)?;
-        let holding = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        document.set_assets(Box::new(crcbl::assets::DirSource::at(holding)));
+        document.set_assets(Box::new(crcbl::assets::DirSource::at(asset_root(&path))));
         document.origin = Some(path);
         Ok(document)
     }
@@ -1238,6 +1237,27 @@ fn narrow(value: DVec3) -> Vec3 {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// The marker of a game's root: the manifest `crcbl new` writes and every
+/// sample has.
+const PROJECT_MARKER: &str = "Cargo.toml";
+
+/// Where a scene at `scene` reads its meshes' assets from when the command
+/// line names no `--assets`: the nearest directory above it holding a
+/// `Cargo.toml` — the game's own root — or, outside any project, the
+/// directory holding the scene.
+///
+/// The game's root rather than the scene's directory so an asset key keeps
+/// naming the same file when a scene moves between the game's folders: a key
+/// relative to the scene would break on every such move (decided 2026-10-01).
+pub fn asset_root(scene: &Path) -> PathBuf {
+    let scene = std::path::absolute(scene).unwrap_or_else(|_| scene.to_path_buf());
+    let holding = scene.parent().map(Path::to_path_buf).unwrap_or_default();
+    holding
+        .ancestors()
+        .find(|dir| dir.join(PROJECT_MARKER).is_file())
+        .map_or(holding.clone(), Path::to_path_buf)
+}
+
 #[cfg(test)]
 mod entity_tests;
 
@@ -1264,6 +1284,23 @@ mod towers_play_tests;
 
 #[cfg(test)]
 mod tests {
+
+    /// **A scene reads its assets from its game's root**, the nearest
+    /// directory above it with a manifest, and from the directory holding it
+    /// outside any project.
+    #[test]
+    fn a_scenes_asset_root_is_its_games_root() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let game = dir.path().join("game");
+        let scenes = game.join("levels").join("one");
+        std::fs::create_dir_all(&scenes).expect("the scene folders");
+        let scene = scenes.join("field.scn");
+
+        assert_eq!(asset_root(&scene), scenes, "outside a project");
+
+        std::fs::write(game.join(PROJECT_MARKER), "").expect("a manifest");
+        assert_eq!(asset_root(&scene), game, "inside a project");
+    }
     use super::*;
 
     /// The document every test here opens: this build's compiled-in greybox

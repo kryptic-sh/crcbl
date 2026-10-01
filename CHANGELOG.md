@@ -661,10 +661,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   chosen. It is read when the panels open and on its Refresh button (there is no
   watcher), stops after `MAX_DEPTH` folders or `MAX_LISTED` entries, and says so
   when the source cannot list or holds no mesh. The `--assets` flag names the
-  asset root; without it a scene's is the directory holding it. **A saved layout
-  from an older build is migrated, not discarded**: its three panes and dividers
-  stay as they were and the browser is docked below the outliner, sharing its
-  slot (`layout::migrate`); the older default becomes the new default.
+  asset root; without it a scene's is its game's root, the nearest directory
+  above it holding a `Cargo.toml`, or the directory holding it outside any
+  project. **A saved layout from an older build is migrated, not discarded**:
+  its three panes and dividers stay as they were and the browser is docked below
+  the outliner, sharing its slot (`layout::migrate`); the older default becomes
+  the new default.
 
 - **The editor draws a scene's meshes.** Its vocabulary registers `scene_mesh`,
   so a scene listing `meshes` opens with each mesh boxed by its asset — measured

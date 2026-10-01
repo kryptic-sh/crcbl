@@ -23,8 +23,9 @@ pub struct Options {
     /// The `.scn/` directory to open, or [`None`] for the compiled-in scene.
     pub scene: Option<std::path::PathBuf>,
     /// The directory a mesh's asset key is read from and the asset browser
-    /// lists, or [`None`] for the directory holding the scene — and for the
-    /// compiled-in scene, none at all.
+    /// lists, or [`None`] for the scene's game root
+    /// ([`crate::document::asset_root`]) — and for the compiled-in scene, none
+    /// at all.
     pub assets: Option<std::path::PathBuf>,
 }
 
@@ -103,8 +104,10 @@ ARGS:
 
 ASSETS:
     --assets <DIR>       The directory a mesh's asset key is read from, and the
-                         one the asset browser lists. Default: the directory
-                         holding SCENE_DIR; the compiled-in scene has none
+                         one the asset browser lists. Default: the nearest
+                         directory above SCENE_DIR holding a Cargo.toml, else
+                         the directory holding it; the compiled-in scene has
+                         none
 
 PANELS:
     The scene's entities are listed on the left, grouped by the system whose
