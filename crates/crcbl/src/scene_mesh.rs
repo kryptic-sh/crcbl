@@ -18,9 +18,10 @@
 //!
 //! # The asset is a key, checked where it enters
 //!
-//! [`Mesh::asset`] is a key into whatever [`AssetSource`] a tool reads its
-//! assets through — relative, `/`-separated, and ending in an extension the
-//! glTF importer reads ([`MESH_EXTENSIONS`]). [`check_asset`] is the rule, by
+//! [`Mesh::asset`] is a key into whatever
+//! [asset source](crate::assets::AssetSource) a tool reads its assets
+//! through — relative, `/`-separated, and ending in an extension the glTF
+//! importer reads ([`MESH_EXTENSIONS`]). [`check_asset`] is the rule, by
 //! name: an absolute path, a `..`, another extension, a byte no asset key may
 //! hold and a key spelled other than its canonical form are each refused with
 //! the reason. It is [`Mesh`]'s [`Validate`] rule, so a scene row is read
@@ -78,6 +79,7 @@ use std::path::Path;
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "scene")]
 use crcbl_assets::AssetSource;
 use crcbl_ecs::{ComponentHash, Entity, System, World};
 use crcbl_reflect::Reflect;
