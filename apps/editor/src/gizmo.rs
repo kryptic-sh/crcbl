@@ -64,8 +64,10 @@ pub const POSITION: &str = crcbl::registry::POSITION;
 pub const HALF_EXTENTS: &str = "half_extents";
 
 /// The field rotate writes: a component's `crcbl::registry::Rotation`, as its
-/// four leaves `rotation.x` to `rotation.w`.
-pub const ROTATION: &str = "rotation";
+/// four leaves `rotation.x` to `rotation.w` — [`crcbl::registry::ROTATION`],
+/// the one spelling of it, which a simulated body's orientation is written
+/// into as well.
+pub const ROTATION: &str = crcbl::registry::ROTATION;
 
 /// How long a handle is on screen, in logical pixels — the UI's, which the
 /// window's scale turns into physical ones.

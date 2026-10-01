@@ -160,6 +160,15 @@ pub use rotation::{ROTATION_TOLERANCE, Rotation, RotationError};
 /// spelling of it is what keeps the two writers moving the same field.
 pub const POSITION: &str = "position";
 
+/// The field a tool turns an entity by: its placing component's [`Rotation`],
+/// as the four leaves `rotation.x` to `rotation.w` ([`Rotation::LEAVES`]).
+///
+/// Found by name, as [`POSITION`] is — the editor's rotate handle writes it,
+/// and [`crate::scene_physics`] writes a simulated body's orientation into it.
+/// A placing component without it cannot be turned, and its body's rotation
+/// stays locked.
+pub const ROTATION: &str = "rotation";
+
 /// Where a component's entity stands in the world, and how far it reaches.
 ///
 /// **The smallest honest answer to "which of a component's fields is a

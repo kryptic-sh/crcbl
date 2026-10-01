@@ -177,13 +177,17 @@ fn load(registry: &Registry, source: &MemorySource) -> (World, IdMap) {
 /// A world playing `source`: loaded, with the bodies' module built from the
 /// same files and registered on it, as a tool's play does.
 fn playing(source: &MemorySource) -> (World, IdMap, Box<dyn GameModule>) {
-    let registry = registry();
+    playing_with(&registry(), source)
+}
+
+/// [`playing`] through `registry`.
+fn playing_with(registry: &Registry, source: &MemorySource) -> (World, IdMap, Box<dyn GameModule>) {
     let mut modules = registry
         .modules(&[BODIES.to_owned()], source, Path::new(""))
         .expect("every body here can be simulated");
     assert_eq!(modules.len(), 1, "the bodies' module is registered once");
     let module = modules.remove(0);
-    let (mut world, ids) = load(&registry, source);
+    let (mut world, ids) = load(registry, source);
     module.register(&mut world);
     (world, ids, module)
 }
@@ -631,13 +635,18 @@ fn the_simulation_is_a_system_of_its_own() {
     let falling = ids.entity(SceneEntityId(1)).expect("the falling block");
     assert_eq!(
         simulation.poses(),
-        [(falling, DVec3::new(0.0, DROP_Y, 0.0))]
+        [(
+            falling,
+            Transform::from_position(DVec3::new(0.0, DROP_Y, 0.0))
+        )]
     );
 }
 
-/// **Rotation is locked**: a block dropped half over the edge of a narrow
-/// pillar would tip off it if it could turn. It cannot, so it comes to rest
-/// level on the pillar's top, unrotated, exactly as it is drawn.
+/// **Rotation is locked where the placing component has none**: a block
+/// dropped half over the edge of a narrow pillar would tip off it if it could
+/// turn. A test `Block` has no `rotation` to write a turn into, so its body
+/// cannot turn: it comes to rest level on the pillar's top, unrotated,
+/// exactly as it is drawn.
 #[test]
 fn a_body_does_not_rotate_even_landing_off_centre() {
     const PILLAR_HALF: f64 = 0.2;
@@ -702,64 +711,175 @@ impl Placement for Tilt {
     }
 }
 
-/// **A turned body starts at its rotation and keeps it**: a cube tipped a
-/// twelfth of a turn about `+Z` falls onto the slab, lands on its edge and
-/// rests there, still tipped — its collider was made turned, so it rests
-/// with its lowest edge on the slab rather than its face, and its rotation is
-/// locked, so it never falls over onto that face.
-#[test]
-fn a_turned_body_starts_at_its_rotation_and_keeps_it() {
-    let mut registry = registry();
-    registry.register::<Tilt>("tilts");
-    let tip = std::f64::consts::FRAC_PI_6;
-    let rotation = glam::DQuat::from_rotation_z(tip);
+/// How far from lying on a face an orientation is: one less the largest `|y|`
+/// of its own axes, zero exactly when one of them stands upright.
+fn off_face(rotation: glam::DQuat) -> f64 {
+    let up = [DVec3::X, DVec3::Y, DVec3::Z]
+        .map(|axis| (rotation * axis).y.abs())
+        .into_iter()
+        .fold(0.0, f64::max);
+    1.0 - up
+}
+
+/// How far from a face a body that has come to rest may lie.
+const FACE_TOLERANCE: f64 = 1e-3;
+
+/// A cube of [`HALF`] filed under 1, tipped a twelfth of a turn about `+Z`,
+/// its centre at [`DROP_Y`], over the slab — as a `tilts` row.
+fn tipped_tilt() -> (glam::DQuat, String) {
+    let rotation = glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_6);
     let [x, y, z, w] = rotation.to_array();
-    let tilts = format!(
+    let row = format!(
         "(1, (position: (0.0, {DROP_Y:?}, 0.0), half_extents: ({HALF:?}, {HALF:?}, {HALF:?}), \
          rotation: ({x:?}, {y:?}, {z:?}, {w:?})))"
     );
+    (rotation, row)
+}
+
+/// The slab static and entity 1 dynamic.
+const ONE_FALLS: &str = "(0, (kind: Static, mass: 1.0, friction: 0.6, restitution: 0.0)), \
+     (1, (kind: Dynamic, mass: 1.0, friction: 0.6, restitution: 0.0))";
+
+/// The simulated pose of the body filed under `id`.
+fn simulated(world: &mut World, ids: &IdMap, id: u32) -> Transform {
+    let entity = ids.entity(SceneEntityId(id)).expect("in the scene");
+    world
+        .system_mut::<Simulation>()
+        .and_then(|simulation| simulation.physics().transform(entity).copied())
+        .expect("the body is simulated")
+}
+
+/// **A turned body tips onto a face, and its rotation is written back**: a
+/// cube tipped a twelfth of a turn about `+Z` lands on its lowest edge, which
+/// is not under its centre, so it falls onto the face it leans towards and
+/// rests there flat. Its row's `rotation` is the simulated orientation and its
+/// `position` the simulated centre, to the bit, while it turns and once it
+/// rests; and two plays end in the same row, to the bit.
+#[test]
+fn a_turned_body_tips_onto_a_face_and_its_rotation_is_written_back() {
+    let mut registry = registry();
+    registry.register::<Tilt>("tilts");
+    let (rotation, tilts) = tipped_tilt();
     let source = scene(
         &["blocks", "tilts", "bodies"],
-        &[
-            ("blocks", SLAB),
-            ("tilts", &tilts),
-            (
-                "bodies",
-                "(0, (kind: Static, mass: 1.0, friction: 0.6, restitution: 0.0)), \
-                 (1, (kind: Dynamic, mass: 1.0, friction: 0.6, restitution: 0.0))",
-            ),
-        ],
+        &[("blocks", SLAB), ("tilts", &tilts), ("bodies", ONE_FALLS)],
     );
-    let mut modules = registry
-        .modules(&[BODIES.to_owned()], &source, Path::new(""))
-        .expect("every body here can be simulated");
-    let mut module = modules.remove(0);
-    let (mut world, ids) = load(&registry, &source);
-    module.register(&mut world);
-    let entity = ids.entity(SceneEntityId(1)).expect("in the scene");
-    let simulated = |world: &mut World| {
-        world
-            .system_mut::<Simulation>()
-            .and_then(|simulation| simulation.physics().transform(entity).copied())
-            .expect("the tipped cube is simulated")
+    let written = |world: &mut World, ids: &IdMap| -> Tilt { component(world, ids, "tilts", 1) };
+    let play = || {
+        let (mut world, ids, mut module) = playing_with(&registry, &source);
+        assert_eq!(simulated(&mut world, &ids, 1).rotation, rotation);
+        run(&mut world, module.as_mut(), ticks_in(3.0));
+        written(&mut world, &ids)
     };
-    assert_eq!(
-        simulated(&mut world).rotation,
-        rotation,
-        "it started unturned"
-    );
 
-    run(&mut world, module.as_mut(), ticks_in(3.0));
-    let rested = simulated(&mut world);
-    assert_eq!(rested.rotation, rotation, "a locked rotation turned");
-    let tipped: Tilt = component(&mut world, &ids, "tilts", 1);
-    assert_eq!(tipped.rotation.quat(), rotation, "the row's rotation moved");
-    // Resting on its lowest edge: the centre stands as high as the turned
-    // cube reaches down, which is more than its half extent.
-    let reach = HALF * (tip.cos() + tip.sin());
+    let (mut world, ids, mut module) = playing_with(&registry, &source);
+    // Falling, it has not touched anything, so it has not turned.
+    run(&mut world, module.as_mut(), ticks_in(0.25));
+    assert_eq!(written(&mut world, &ids).rotation.quat(), rotation);
+    let mut turned = false;
+    for _ in 0..ticks_in(2.75) {
+        run(&mut world, module.as_mut(), 1);
+        let pose = simulated(&mut world, &ids, 1);
+        let row = written(&mut world, &ids);
+        if pose.rotation != rotation {
+            turned = true;
+            assert_eq!(row.rotation.to_array(), pose.rotation.to_array());
+        }
+        assert_eq!(row.position, pose.position.to_array());
+    }
+    assert!(turned, "the tipped cube never turned");
+    let rested = written(&mut world, &ids);
     assert!(
-        (tipped.position[1] - reach).abs() < REST_TOLERANCE,
-        "the tipped cube came to rest at {:?}, not on its edge at y = {reach}",
-        tipped.position,
+        off_face(rested.rotation.quat()) < FACE_TOLERANCE,
+        "it came to rest {} off a face, at {:?}",
+        off_face(rested.rotation.quat()),
+        rested.rotation,
+    );
+    assert!(
+        (rested.position[1] - HALF).abs() < REST_TOLERANCE,
+        "it came to rest at {:?}, not flat on the slab",
+        rested.position,
+    );
+    rested
+        .rotation
+        .check()
+        .expect("a written rotation is one a file can hold");
+
+    let bits = |tilt: Tilt| -> Vec<u64> {
+        let numbers = tilt.position.into_iter().chain(tilt.rotation.to_array());
+        numbers.map(f64::to_bits).collect()
+    };
+    assert_eq!(bits(play()), bits(play()));
+}
+
+/// A placing component that may be turned and **stands on** its `position`,
+/// as a mesh stands on its asset's origin: its centre is [`PAD_HALF`] up its
+/// own `Y` from its position, so turning it swings the centre about the
+/// position.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(crate = "crcbl_reflect")]
+struct Swing {
+    position: [f64; 3],
+    #[serde(
+        default,
+        skip_serializing_if = "crate::registry::Rotation::is_identity"
+    )]
+    rotation: crate::registry::Rotation,
+}
+
+impl ComponentHash for Swing {
+    fn hash_component(&self, hasher: &mut dyn Hasher) {
+        for value in self.position.into_iter().chain(self.rotation.to_array()) {
+            hasher.write(&value.to_bits().to_le_bytes());
+        }
+    }
+}
+
+impl Placement for Swing {
+    fn placement(&self) -> Option<OrientedBox> {
+        let rotation = self.rotation.quat();
+        Some(OrientedBox::new(
+            DVec3::from_array(self.position) + rotation * DVec3::new(0.0, PAD_HALF, 0.0),
+            DVec3::splat(PAD_HALF),
+            rotation,
+        ))
+    }
+}
+
+/// **A turned component's offset turns with its body**: a swing tipped a
+/// twelfth of a turn tips onto a face, and at every tick its placement — its
+/// written `position` with its centre swung about it by its written
+/// `rotation` — stands where the simulated body is.
+#[test]
+fn a_turned_components_offset_from_its_centre_turns_with_its_body() {
+    let mut registry = registry();
+    registry.register::<Swing>("swings");
+    let rotation = glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_6);
+    let [x, y, z, w] = rotation.to_array();
+    let swings =
+        format!("(1, (position: (0.0, 3.0, 0.0), rotation: ({x:?}, {y:?}, {z:?}, {w:?})))");
+    let source = scene(
+        &["blocks", "swings", "bodies"],
+        &[("blocks", SLAB), ("swings", &swings), ("bodies", ONE_FALLS)],
+    );
+    let (mut world, ids, mut module) = playing_with(&registry, &source);
+    let entity = ids.entity(SceneEntityId(1)).expect("in the scene");
+    let mut worst: f64 = 0.0;
+    for _ in 0..ticks_in(3.0) {
+        run(&mut world, module.as_mut(), 1);
+        let pose = simulated(&mut world, &ids, 1);
+        let placed = registry
+            .placement(&mut world, entity)
+            .expect("the swing places it");
+        worst = worst.max((placed.centre - pose.position).length());
+    }
+    let rested = simulated(&mut world, &ids, 1);
+    assert!(
+        off_face(rested.rotation) < FACE_TOLERANCE,
+        "the swing never tipped onto a face: {rested:?}",
+    );
+    assert!(
+        worst < 1e-9,
+        "the swing's placement stood {worst} m from its body",
     );
 }
