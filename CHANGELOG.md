@@ -520,6 +520,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Ordered slide contacts from `crcbl_phys::CharacterController`.**
+  `move_and_slide_into(world, motion, &mut contacts)` makes exactly the move
+  `move_and_slide` makes, to the bit, and writes every sweep that met something
+  into the caller's `Vec<SlideContact>` in the order the slide met it — floors a
+  falling character lands on, ceilings, walls it was touching and moving away
+  from, not only the one that stopped it. Each `SlideContact` names the
+  collider, the surface normal, the straight displacement that sweep asked for,
+  the fraction of it covered before touching, whether it started touching, the
+  displacement the sweep applied, what the slide carried on with afterwards, and
+  whether it stepped up. The fraction is a distance share along that one
+  straight sweep, not a time along the tick or along an accelerated arc. The
+  move's query mask, self-collider exclusion and the write-back to the
+  character's own collider are the ones `move_and_slide` uses; `MoveOutcome` is
+  unchanged.
+
 - **Turned boxes in `crcbl_phys`'s query world.** `BoxCollider::with_rotation`
   turns a box, and `PhysicsWorld`'s rays, sphere and capsule sweeps, sphere
   overlaps, capsule push-outs and lying-capsule queries answer for the turned

@@ -33,22 +33,41 @@ the same solid/trigger, layer-mask and self-exclusion rules as the closest-hit
 query, rather than a callback filter — the ordered list is what both of EW's
 braking cases read, and a filter can be built on it but not the reverse.
 
-- **Expose ordered character-slide contacts for game motion forecasting.** EW's
-  `src/controller_contact_forecast.rs` repeats shortened
-  `CharacterController::move_and_slide` previews to recover normals that
-  `MoveOutcome` does not retain. A floor, ceiling or non-approaching wall can
-  hide a later wall, and a finite wall can be absent from endpoint overlaps.
-  Provide contact normals and clearly defined sweep fractions/displacements for
-  each slide through an API that preserves existing movement behavior. Fractions
-  along a straight sweep are not elapsed time along an accelerated trajectory;
-  define that distinction so callers do not infer time from total removed
-  displacement. Preserve query masks, self-collider exclusion and collider
-  synchronization. EW's `controller_contact_forecast_tests.rs`,
-  `controller_wall_ceiling_timing_tests.rs` and
-  `controller_wall_contact_timing_tests.rs` provide reproductions. Keep
-  game-specific air-control limits and input rules in EW. The engine owner
-  should implement this request; EW will migrate and remove its superseded
-  preview logic after validation.
+**The slide contacts shipped (2026-10-01)** as
+`CharacterController::move_and_slide_into(world, motion, &mut Vec<SlideContact>)`:
+every blocked sweep in order, with its collider, normal, straight-sweep
+fraction, requested, applied and remaining displacements, `started_inside` and
+`stepped_up`; `MoveOutcome` is unchanged. EW migrates
+`controller_contact_forecast.rs` onto it and deletes its shortened previews.
+What it left:
+
+- **No times along a curved path.** `SlideContact::fraction` is a distance share
+  along one straight sweep, documented as not being time. A caller integrating
+  gravity or air control that needs when an arc touches still has to sweep the
+  arc in chords short enough to stand in for it. Doing it in the engine means a
+  sweep whose motion is a polynomial in t (conservative advancement over the
+  gap, as the turned-box capsule sweep already does for straight motion) and a
+  slide loop that re-integrates the remainder after each clip, which changes
+  movement and so cannot share `move_and_slide`'s bit-for-bit promise. Not
+  started; EW's ballistic braking forecast is the consumer that would justify
+  it.
+- **`move_lying` records nothing.** The slide records through the same loop for
+  a lying body (`slide` takes the sink for both), but only the upright move
+  exposes it. A `move_lying_into` is a few lines once a caller asks for it.
+- **A numerically zero advance drops the crease, and a character can hang in
+  mid-air** — found while building the contact tests, not fixed (it would change
+  movement, and this slice promised none). In `slide`, any `travel > 0.0` resets
+  the plane set; a sweep that touches within floating-point noise of the skin
+  width advances about 1e-17 and still resets it. A falling character pressed
+  into the corner of an axis wall and a turned box then keeps only the second
+  plane, the clip against it opposes the move, and it stops dead every tick with
+  gravity applied — its contacts show the wall at fraction ~0.02 with zero
+  applied, then the box with ~1e-17 applied and zero remaining. Reproduced with
+  a 30°-turned box beside an axis box, both vertical, and moves of (0.08, -0.01,
+  -0.03); the fix is a travel threshold (e.g. `MIN_MOVE`) for resetting the
+  plane set, which needs the corner and crease tests rerun and every character
+  test's figures rechecked.
+
 - **Provide access to sweep candidates for airborne braking forecasts.** EW's
   `src/controller_ballistic.rs` enlarges its probe by the arc/chord deviation to
   find wall-normal turning points. A closest-only query hides other candidates

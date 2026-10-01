@@ -119,8 +119,10 @@ use crate::query::{Penetration, ShapeHit};
 use crate::world::{ALL_LAYERS, ColliderId, PhysicsWorld, QueryFilter, SweptContact};
 
 mod lying;
+mod slide_contact;
 
 pub use lying::{LyingMoveOutcome, LyingTurnOutcome};
+pub use slide_contact::SlideContact;
 
 /// The world's up axis. `crcbl` is right-handed with `+Y` up, and
 /// [`Capsule`] is Y-aligned, so a character controller has exactly one.
@@ -601,12 +603,44 @@ impl CharacterController {
     /// The moment the ground stops being walkable, or the caller asks to go
     /// up, `motion` is used as given and gravity does what gravity does.
     pub fn move_and_slide(&mut self, world: &mut PhysicsWorld, motion: DVec3) -> MoveOutcome {
+        self.move_upright(world, motion, None)
+    }
+
+    /// [`move_and_slide`](Self::move_and_slide), writing every sweep that met
+    /// something into `contacts` (which is cleared first), in the order the
+    /// slide met them.
+    ///
+    /// The move itself is the same one, to the bit: recording reads what the
+    /// slide found and never feeds back into it. See [`SlideContact`] for what
+    /// each entry holds, and why its fraction is a distance along one straight
+    /// sweep rather than a time.
+    ///
+    /// `contacts` is the caller's so a game recording every tick reuses one
+    /// buffer rather than allocating a list per move; the slide never records
+    /// more than [`max_slides`](CharacterConfig::max_slides) of them.
+    pub fn move_and_slide_into(
+        &mut self,
+        world: &mut PhysicsWorld,
+        motion: DVec3,
+        contacts: &mut Vec<SlideContact>,
+    ) -> MoveOutcome {
+        contacts.clear();
+        self.move_upright(world, motion, Some(contacts))
+    }
+
+    /// The one upright move, recording into `contacts` when there are any.
+    fn move_upright(
+        &mut self,
+        world: &mut PhysicsWorld,
+        motion: DVec3,
+        contacts: Option<&mut Vec<SlideContact>>,
+    ) -> MoveOutcome {
         let depenetration = self.depenetrate(world);
         let start = self.position;
         let was_grounded = self.ground.is_some();
 
         let adjusted = self.ground_adjusted(motion, was_grounded);
-        let report = self.slide(world, adjusted, was_grounded, Body::Upright);
+        let report = self.slide(world, adjusted, was_grounded, Body::Upright, contacts);
         self.settle_on_ground(world, was_grounded, motion);
 
         if let Some(collider) = self.self_collider {
@@ -684,13 +718,23 @@ impl CharacterController {
     ///
     /// Only an upright body steps up; a grounded lying one meets a wall as
     /// though the wall were upright.
+    ///
+    /// Each sweep that meets something is pushed onto `contacts`, when given,
+    /// once the slide has decided what to do about it. Nothing read back from
+    /// a contact steers the loop, so recording cannot change the move.
     fn slide(
         &mut self,
         world: &mut PhysicsWorld,
         motion: DVec3,
         was_grounded: bool,
         body: Body,
+        mut contacts: Option<&mut Vec<SlideContact>>,
     ) -> SlideReport {
+        let mut record = |contact| {
+            if let Some(contacts) = contacts.as_deref_mut() {
+                contacts.push(contact);
+            }
+        };
         let mut report = SlideReport::default();
         let primal = motion;
         let mut remaining = motion;
@@ -710,11 +754,21 @@ impl CharacterController {
             let direction = remaining / distance;
             let target = self.position + remaining;
 
-            let Some(hit) = self.sweep_body(world, body, remaining) else {
+            let Some((collider, hit)) = self.sweep_body(world, body, remaining) else {
                 self.position = target;
                 return report;
             };
             report.slides += 1;
+            let mut contact = SlideContact {
+                collider,
+                normal: hit.normal,
+                requested: remaining,
+                fraction: hit.t,
+                started_inside: hit.started_inside,
+                applied: DVec3::ZERO,
+                remaining: DVec3::ZERO,
+                stepped_up: false,
+            };
 
             let travel = (hit.t * distance - self.config.skin_width).clamp(0.0, distance);
             if travel > 0.0 {
@@ -723,6 +777,7 @@ impl CharacterController {
                 remaining -= step;
                 clip_from = remaining;
                 plane_count = 0;
+                contact.applied = step;
             } else if hit.started_inside {
                 // The sweep began *on* the surface rather than short of it, so
                 // clipping alone would leave the next sweep starting on it too
@@ -730,7 +785,9 @@ impl CharacterController {
                 // exactly on the floor is the ordinary way to arrive here, and
                 // it must still be able to walk. Back off by the gap every
                 // other sweep already keeps.
-                self.position += hit.normal * self.config.skin_width;
+                let back_off = hit.normal * self.config.skin_width;
+                self.position += back_off;
+                contact.applied = back_off;
             }
 
             let mut plane = hit.normal;
@@ -743,11 +800,17 @@ impl CharacterController {
                     && matches!(body, Body::Upright)
                     && let Some(step) = self.try_step_up(world, remaining)
                 {
+                    contact.applied += step.position - self.position;
                     self.position = step.position;
                     remaining -= step.advance;
                     clip_from = remaining;
                     plane_count = 0;
                     report.stepped_up = true;
+                    record(SlideContact {
+                        remaining,
+                        stepped_up: true,
+                        ..contact
+                    });
                     continue;
                 }
                 if was_grounded && matches!(body, Body::Lying(_)) {
@@ -767,6 +830,7 @@ impl CharacterController {
             }
 
             if plane_count == MAX_PLANES {
+                record(contact);
                 return report;
             }
             planes[plane_count] = plane;
@@ -774,8 +838,13 @@ impl CharacterController {
 
             remaining = clip_to_planes(clip_from, &planes[..plane_count], remaining);
             if remaining.dot(primal) <= 0.0 {
+                record(contact);
                 return report;
             }
+            record(SlideContact {
+                remaining,
+                ..contact
+            });
         }
         report
     }
@@ -940,21 +1009,19 @@ impl CharacterController {
         world: &mut PhysicsWorld,
         body: Body,
         delta: DVec3,
-    ) -> Option<SweptContact> {
+    ) -> Option<(ColliderId, SweptContact)> {
         match body {
             Body::Upright => self
                 .sweep(world, self.position, self.position + delta)
-                .map(|(_, hit)| hit.into()),
-            Body::Lying(lying) => world
-                .sweep_lying_capsule(
-                    &LyingCapsule {
-                        head: self.position,
-                        ..lying
-                    },
-                    delta,
-                    self.filter(),
-                )
-                .map(|(_, hit)| hit),
+                .map(|(collider, hit)| (collider, hit.into())),
+            Body::Lying(lying) => world.sweep_lying_capsule(
+                &LyingCapsule {
+                    head: self.position,
+                    ..lying
+                },
+                delta,
+                self.filter(),
+            ),
         }
     }
 
@@ -1871,3 +1938,7 @@ mod lying_move_tests;
 #[cfg(test)]
 #[path = "character/lying_turn_tests.rs"]
 mod lying_turn_tests;
+
+#[cfg(test)]
+#[path = "character/slide_contact_tests.rs"]
+mod slide_contact_tests;

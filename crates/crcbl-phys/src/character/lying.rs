@@ -196,7 +196,7 @@ impl CharacterController {
         let was_grounded = self.ground.is_some();
 
         let motion = self.ground_adjusted(motion, was_grounded);
-        let report = self.slide(world, motion, was_grounded, Body::Lying(*body));
+        let report = self.slide(world, motion, was_grounded, Body::Lying(*body), None);
         let slid = LyingCapsule {
             head: self.position,
             ..*body
