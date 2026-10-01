@@ -3751,9 +3751,11 @@ Behaviour to know, and gaps in what shipped:
   behaviour and hashes.
 - **The query world does not see what the solver sees**: `add_plane` is
   solver-only (rays and sweeps pass through planes), the query world keeps its
-  own tree beside the contact broadphase's two, and its capsules and boxes are
-  still Y-aligned and axis-aligned where the solver turns them with the body.
-  Folding the trees together and rotating query colliders are one piece of work.
+  own tree beside the contact broadphase's two, and its capsules are still
+  upright along the world's Y where the solver turns them with the body. Boxes
+  turn there since 2026-10-01; see _Rotation in physics: what unlocking it left_
+  below for the capsules and the rest. Folding the trees together is its own
+  piece of work.
 - **The rotation cap per substep** exists only in systems with contacts;
   `SemiImplicitEuler` on its own does not enforce it.
 - **Measured costs worth a look** (release, settled 1000-ball pit): 0.022 ms
@@ -3772,9 +3774,70 @@ Behaviour to know, and gaps in what shipped:
 - **Tumble's scenes never exercise `crcbl_core::trig`**: bodies with inertia
   turn by the Cayley rotation, which needs no sine.
 - **Not verified**: tumble's browser gates ran locally on the hardware adapter,
-  not SwiftShader; Metal and D3D12 are CI's verdict only. Shape, manifold,
-  broadphase and softness unit tests were not sabotaged; the integration tests
-  in `crates/crcbl-phys/tests/contacts.rs` were.
+  not SwiftShader; Metal and D3D12 are CI's verdict only. Shape, broadphase and
+  softness unit tests were not sabotaged, nor were the manifold tests but the
+  box pair's; the integration tests in `crates/crcbl-phys/tests/contacts.rs`
+  were. The box pair's face, corner and edge-on-edge tests (`box_box.rs`) each
+  went red on 2026-10-01 under a mutation of the depth, the contact point or the
+  edge support.
+
+## Rotation in physics: what unlocking it left (2026-10-01)
+
+The query world's boxes turn (`BoxCollider::rotation`, answered by
+`crcbl_phys::query::ray_vs_box` and its siblings), a `PhysicsSystem` puts a
+body's box there turned with the body, and a scene `Body` whose placing
+component has a `rotation` tumbles and has its orientation written back
+(`crcbl::scene_physics`). The rotational dynamics, the box pair's separating
+axis test, the sweeps' turning bound and sleep were all already built. What is
+left, each with what it takes:
+
+- **The query world's capsules stay upright**, along the world's Y whatever the
+  body's rotation, and a sphere's or a capsule's offset stays unturned there
+  (`place_collider` in `crates/crcbl-phys/src/system.rs`), where the contact
+  pipeline turns both. A turned capsule entry needs a ray and a sphere sweep in
+  the capsule's frame (as `query::boxes` does for a box) and, for an upright
+  capsule swept against it, the contact pipeline's advancement the lying capsule
+  already uses. The character controller's own capsule is upright on purpose, so
+  this is for bodies, and it changes what a tipped capsule body answers to a
+  ray. Not needed by anything yet.
+- **A compound is one world-axis box in the query world**
+  (`compound_query_box`), its exact per-part queries through `AabbCompound`. Its
+  parts could now be turned boxes of their own; that is a query-world entry
+  holding several, and the id-per-part question `AabbCompound` answers.
+- **An upright capsule swept against a turned box stops a little short**: it is
+  conservative advancement over `contact::manifold::gap`
+  (`query::swept_capsule_vs_box`), within the advancement's tolerance of the
+  contact, where against an unturned box it is exact. An exact form is the
+  segment swept against the box grown by the capsule's core — a hexagonal prism
+  rounded by the radius — which nothing has needed.
+- **`overlap_aabb` answers a turned box by its world-axis bounds**, as it does
+  every parametric shape; exact AABB-against-OBB is fifteen axes of
+  `box_box::gap` if a caller wants it.
+- **Convex hulls and capsules on scene bodies**: a `Body` collides as its
+  placement's box; a scene has no way to say "this is a capsule". Hulls are the
+  contact solver's later rung, above.
+- **A scene body's inertia is its box's**, about the box's centre: right for a
+  greybox block, and for a `scene_mesh::Mesh` it is the asset's bounds weighed
+  as a solid box, not the model's own distribution. A mesh body turns about its
+  box's centre, its `position` (the asset's origin) swinging round it.
+- **Bodies of games whose components have no `rotation` stay locked**
+  (breakout's, puppet's and towers' rows), so their play is unchanged; giving a
+  game's component a rotation now also lets its bodies tumble.
+- **Considered and declined: refusing a body on a component with no
+  `rotation`.** The entry this replaces said the factory would then have to
+  refuse such a body by name. It need not: such a component places an unturned
+  box and has nowhere to show a turn, so its body is locked instead and plays as
+  it always did, which a refusal would have broken for every game.
+- **Not tested: `follow`'s comparison with the stored numbers.** The write-back
+  turns a body only when its orientation differs from the placement's (the
+  stored numbers normalised) and from the stored numbers themselves, so a body
+  at rest after turning does not rewrite equal numbers or swing its offset by a
+  rounding of the identity. No test observes the difference: the values written
+  would be the same, and a resting body sleeps.
+- **Not verified**: a windowed play of a tipping block (the editor's play test
+  is headless), and a shipped `Mesh` with a body tumbling in play — the offset
+  rule is held by `scene_physics`'s own test on a component that stands on its
+  position the way a mesh does.
 
 ## What the deleted 24-tumble plan left unbuilt (2026-09-25)
 
@@ -11688,11 +11751,6 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     save by the meshes check, which reads through `Rotation`'s `try_from`; the
     editor's `Block` registers no check. Same root as `Body`'s mass: a
     validation hook on `Registry::register` that `SetProperty` runs.
-  - **The physics query world's boxes do not turn**, so a turned block picks by
-    a twelve-triangle box mesh in its frame (`pick_collider` in
-    `apps/editor/src/document.rs`), each half extent at least
-    `PICK_MIN_HALF_EXTENT`. "Rotating query colliders" in the physics section is
-    the fix that would let it be a box again.
 - **Multi-select transforms**: not MVP by the plan, and not reachable yet — the
   document holds one selection (`Document::selected`), the outliner's Ctrl and
   Shift clicks select rows of which the document takes the first, and every
@@ -11795,24 +11853,11 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   - **Physics on scene components (slice 12, 2026-10-01): what it leaves.**
     `crcbl::scene_physics` registers `Body` under `bodies`, a check and a play
     module; the editor's vocabulary takes it. Deferred, each with what it takes:
-    - **Rotation is locked (decided 2026-10-01).** A body is created at its
-      placing component's rotation (`OrientedBox::rotation`, turned collider and
-      transform) and keeps it: a dynamic body has no rotational inertia, so it
-      never turns, and only its centre is written back. Unlocking it takes the
-      module writing the simulated orientation into the placing component's
-      `rotation` leaves (`Rotation::LEAVES`) beside `position` after each tick —
-      `follow` in `crates/crcbl/src/scene_physics.rs`, rotating the component's
-      offset from its centre too, since a mesh's centre swings about its origin
-      — and `RigidBody::with_inertia` from `crcbl_phys::MassProperties` for the
-      box. Placing components with no rotation field (breakout's, puppet's,
-      towers') could then not take a turned body, and the factory would have to
-      refuse one by name. Declined meanwhile: simulating rotation without
-      writing it back, which shows a box flat while it rests on its corner.
     - **A kinematic velocity field.** A kinematic body stands where it was
       placed, since nothing gives it a velocity; a moving platform needs a
-      `velocity` (and an angular one, after rotation) on `Body`, set on the
-      simulated body at register and its pose written back like a dynamic one's.
-      Not added until a scene wants a moving platform.
+      `velocity` and an angular one on `Body`, set on the simulated body at
+      register and its pose written back like a dynamic one's. Not added until a
+      scene wants a moving platform.
     - **Joints.** `crcbl_phys` has distance, revolute, prismatic, weld and
       spherical joints; a scene has no component naming two bodies. It takes a
       joint component whose row names the other entity by `SceneEntityId` (and
