@@ -180,8 +180,9 @@ fn a_codec_with_no_system_in_the_world_is_refused() {
     );
 }
 
-/// **One id, one entity.** Two rows claiming the same id would drop one out
-/// of the map and come back as a save that lost a row.
+/// **One id, one row per chunk.** Two rows of one chunk claiming the same id
+/// would be two components of one system for one entity, and the second would
+/// silently replace the first.
 #[test]
 fn a_repeated_scene_entity_id_is_refused() {
     let doubled = MARKS.replace(
@@ -614,4 +615,195 @@ fn a_row_that_is_not_the_component_is_refused_and_attaches_nothing() {
     );
     let system = world.system_mut::<System<Mark>>().expect("registered");
     assert!(system.get(entity).is_none());
+}
+
+/// A second system's component, so a scene can hold one entity in two
+/// systems of two different types.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct Tag {
+    weight: u32,
+}
+
+impl ComponentHash for Tag {
+    fn hash_component(&self, hasher: &mut dyn Hasher) {
+        hasher.write_u32(self.weight);
+    }
+}
+
+/// The canonical scene's header, listing `marks` and then `tags`.
+fn two_system_header() -> String {
+    HEADER.replace(
+        "\"marks\",
+",
+        "\"marks\",
+        \"tags\",
+",
+    )
+}
+
+/// A `tags` chunk: id 0 — the marks chunk's one row — and id 5, which no
+/// other chunk spells.
+const TAGS: &str = "Chunk(
+    system: \"tags\",
+    entities: [
+        (0, Tag(
+            weight: 3,
+        )),
+        (5, Tag(
+            weight: 9,
+        )),
+    ],
+)";
+
+fn two_system_codecs() -> Vec<Box<dyn SystemChunk>> {
+    vec![chunk_of::<Mark>("marks"), chunk_of::<Tag>("tags")]
+}
+
+/// [`load`], with `tags` registered and its chunk at `one.scn/sys/tags.ron`.
+fn load_two(header: &str, tags: &str) -> Result<(Scene, IdMap, World), ScnError> {
+    let mut source = source(header, ENV, MARKS);
+    source
+        .insert(Path::new("one.scn/sys/tags.ron"), tags.as_bytes().to_vec())
+        .expect("a nested scene key is a legal asset key");
+    let mut world = world_with_marks();
+    world.register_system(Box::new(System::<Tag>::new("tags")));
+    let (scene, ids) = Scene::load(
+        &source,
+        Path::new("one.scn"),
+        &two_system_codecs(),
+        &mut world,
+    )?;
+    Ok((scene, ids, world))
+}
+
+/// **An id spelled by two chunks is one entity holding both components**, and
+/// the scene writes back byte for byte — each system's row in its own chunk.
+#[test]
+fn an_id_in_two_chunks_is_one_entity_in_both_systems() {
+    let (scene, ids, mut world) =
+        load_two(&two_system_header(), TAGS).expect("one entity in two systems is a scene");
+    assert_eq!(ids.len(), 2, "ids 0 and 5, not three entities");
+    let both = ids.entity(SceneEntityId(0)).expect("id 0");
+    let tagged = ids.entity(SceneEntityId(5)).expect("id 5");
+    assert_ne!(both, tagged);
+
+    let marks = world.system_mut::<System<Mark>>().expect("registered");
+    assert_eq!(
+        marks.get(both).map(|mark| mark.label.as_str()),
+        Some("first"),
+    );
+    assert!(marks.get(tagged).is_none(), "5 has no mark");
+    let tags = world.system_mut::<System<Tag>>().expect("registered");
+    assert_eq!(tags.get(both), Some(&Tag { weight: 3 }));
+    assert_eq!(tags.get(tagged), Some(&Tag { weight: 9 }));
+    assert_eq!(
+        world.entity_count(),
+        2,
+        "a second entity was spawned for id 0"
+    );
+
+    let files = scene
+        .save(&mut world, &ids, &two_system_codecs())
+        .expect("a scene that loaded can be written");
+    assert_eq!(files["scene.ron"], two_system_header());
+    assert_eq!(files["sys/marks.ron"], MARKS);
+    assert_eq!(files["sys/tags.ron"], TAGS);
+}
+
+/// **The same id twice in one chunk is still refused**, though the same id in
+/// two chunks is not — the check is the chunk's, not the map's.
+#[test]
+fn an_id_twice_in_one_chunk_of_a_two_system_scene_is_refused() {
+    let doubled = TAGS.replace("(5, Tag(", "(0, Tag(");
+    let error = load_two(&two_system_header(), &doubled).expect_err("0 is tagged twice");
+    assert!(
+        matches!(&error, ScnError::DuplicateId { key, id }
+            if key == "one.scn/sys/tags.ron" && *id == SceneEntityId(0)),
+        "{error}"
+    );
+}
+
+/// **A manifest naming a system twice is refused by the header and the
+/// system**, before any chunk is read over itself.
+#[test]
+fn a_manifest_naming_a_system_twice_is_refused() {
+    let twice = HEADER.replace(
+        "\"marks\",
+",
+        "\"marks\",
+        \"marks\",
+",
+    );
+    let error = load(&twice, ENV, MARKS).expect_err("marks is listed twice");
+    assert!(
+        matches!(&error, ScnError::RepeatedSystem { key, system }
+            if key == "one.scn/scene.ron" && system == "marks"),
+        "{error}"
+    );
+}
+
+/// **A detached row is the component's row, and the entity keeps every other
+/// system's**: detaching from a system that does not hold it changes nothing,
+/// and the row attaches back to the same scene text.
+#[test]
+fn a_detached_row_leaves_the_entity_and_attaches_back() {
+    let (scene, ids, mut world) = load_two(&two_system_header(), TAGS).expect("the scene loads");
+    let both = ids.entity(SceneEntityId(0)).expect("id 0");
+    let tagged = ids.entity(SceneEntityId(5)).expect("id 5");
+    let marks = chunk_of::<Mark>("marks");
+    let before = scene
+        .save(&mut world, &ids, &two_system_codecs())
+        .expect("writable");
+
+    assert_eq!(
+        marks.detach_row(&mut world, tagged).expect("registered"),
+        None,
+        "a system that does not hold the entity detached something",
+    );
+    let row = marks
+        .detach_row(&mut world, both)
+        .expect("registered")
+        .expect("marks holds id 0");
+    assert_eq!(
+        row,
+        row_text(
+            "marks",
+            &Mark {
+                position: [1.0, 0.0, -1.0],
+                label: "first".to_owned(),
+            },
+        )
+        .expect("a mark serializes"),
+    );
+    assert!(world.is_alive(both), "a detach despawned the entity");
+    assert!(
+        world
+            .system_mut::<System<Mark>>()
+            .expect("registered")
+            .get(both)
+            .is_none()
+    );
+    assert_eq!(
+        world
+            .system_mut::<System<Tag>>()
+            .expect("registered")
+            .get(both),
+        Some(&Tag { weight: 3 }),
+        "a detach from marks took the tag too",
+    );
+    let detached = scene
+        .save(&mut world, &ids, &two_system_codecs())
+        .expect("writable");
+    assert!(!detached["sys/marks.ron"].contains("(0, Mark("));
+    assert_eq!(detached["sys/tags.ron"], before["sys/tags.ron"]);
+
+    marks
+        .attach_row(&mut world, both, &row)
+        .expect("its own row reads back");
+    assert_eq!(
+        scene
+            .save(&mut world, &ids, &two_system_codecs())
+            .expect("writable"),
+        before,
+    );
 }

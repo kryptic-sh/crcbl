@@ -427,6 +427,29 @@ impl Placement for Surface {
     }
 }
 
+/// The side of the platform a new surface is: a step a person can see and
+/// then resize.
+const NEW_PLATFORM_SIDE: f64 = 1.0;
+
+/// An untinted platform of `NEW_PLATFORM_SIDE` standing on the origin — what
+/// a tool attaching a surface to an entity starts it as, which is why
+/// `Registry::register` asks for one. White is no tint: the grid page is
+/// multiplied by it.
+impl Default for Surface {
+    fn default() -> Self {
+        Self {
+            label: "surface".to_owned(),
+            position: [0.0; 3],
+            shape: Shape::Platform {
+                width: NEW_PLATFORM_SIDE,
+                depth: NEW_PLATFORM_SIDE,
+                height: NEW_PLATFORM_SIDE,
+            },
+            tint: [1.0; 3],
+        }
+    }
+}
+
 /// Where the character starts, and which way it is turned when it gets there.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl::reflect")]
@@ -469,6 +492,18 @@ impl Placement for Spawn {
             DVec3::from_array(self.position) + DVec3::new(0.0, half_height, 0.0),
             DVec3::new(CHARACTER_RADIUS, half_height, CHARACTER_RADIUS),
         ))
+    }
+}
+
+/// The committed map's own spawn, facing the zero yaw — what a tool attaching a
+/// spawn to an entity starts it as, which is why `Registry::register` asks for
+/// one.
+impl Default for Spawn {
+    fn default() -> Self {
+        Self {
+            position: SPAWN.to_array(),
+            facing: 0.0,
+        }
     }
 }
 
@@ -523,6 +558,20 @@ impl ComponentHash for Sun {
 impl Placement for Sun {
     fn placement(&self) -> Option<(DVec3, DVec3)> {
         None
+    }
+}
+
+/// The sun the committed map is lit by, from the constants its row was written
+/// from — what a tool attaching a sun to an entity starts it as, which is why
+/// `Registry::register` asks for one.
+impl Default for Sun {
+    fn default() -> Self {
+        Self {
+            elevation: SUN_ELEVATION,
+            color: SUN_COLOR,
+            intensity: SUN_INTENSITY,
+            period: SUN_PERIOD,
+        }
     }
 }
 
@@ -1908,8 +1957,8 @@ mod tests {
 
         // And two spawns is not "the first one" either, which is the half a
         // chunk with no rows cannot show. Numbered past every id the chunks
-        // beside it claim: a second claim on one of those is the format's own
-        // `DuplicateId`, which would refuse this directory for another reason.
+        // beside it claim: one of those would put the spawn on that entity as
+        // well, which is a different scene from the one this case is about.
         std::fs::write(
             dir.join("sys").join("spawn.ron"),
             "Chunk(system: \"spawn\", entities: [\n    (7, (position: (0.0, 0.0, 0.0), \

@@ -87,8 +87,9 @@ impl Placed {
     /// what play spawned.
     ///
     /// A removal clears the handle's live bit, so a deleted entity stops being
-    /// drawn rather than standing where it was; an entity with no bounds gets no
-    /// instance, as at start-up.
+    /// drawn rather than standing where it was. An entity with no bounds is one
+    /// the document does not draw: it gets no instance, as at start-up, and
+    /// loses the one it had when the component placing it was detached.
     fn reconcile(
         &mut self,
         renderer: &mut ForwardRenderer,
@@ -100,8 +101,12 @@ impl Placed {
             .flat_map(|(_, ids)| ids)
             .map(Drawn::Scene);
         let spawned = document.spawned().into_iter().map(Drawn::Spawned);
-        let wanted: Vec<Drawn> = scene.chain(spawned).collect();
-        let held: HashSet<Drawn> = wanted.iter().copied().collect();
+        let listed: Vec<Drawn> = scene.chain(spawned).collect();
+        let wanted: Vec<(Drawn, InstanceDesc)> = listed
+            .into_iter()
+            .filter_map(|drawn| instance_of(document, drawn).map(|desc| (drawn, desc)))
+            .collect();
+        let held: HashSet<Drawn> = wanted.iter().map(|(drawn, _)| *drawn).collect();
         self.instances.retain(|instance| {
             let keep = held.contains(&instance.drawn);
             if !keep {
@@ -110,10 +115,10 @@ impl Placed {
             keep
         });
         let placed: HashSet<Drawn> = self.instances.iter().map(|each| each.drawn).collect();
-        for drawn in wanted.into_iter().filter(|drawn| !placed.contains(drawn)) {
-            let Some(desc) = instance_of(document, drawn) else {
-                continue;
-            };
+        for (drawn, desc) in wanted
+            .into_iter()
+            .filter(|(drawn, _)| !placed.contains(drawn))
+        {
             self.instances.push(PlacedInstance {
                 drawn,
                 handle: renderer.add_instance(&desc)?,

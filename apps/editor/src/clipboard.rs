@@ -2,7 +2,7 @@
 //! paste waits for.
 //!
 //! `docs/plan/08-editor.md`'s feature 8. A copy is the selected entity's
-//! system and row — the same RON [`crate::Document::duplicate`] spawns from —
+//! systems and rows — the same RON [`crate::Document::duplicate`] spawns from —
 //! offered as both [`MimeType::CrcblRon`] and plain text, so it pastes into a
 //! second editor, into a text editor or a chat, and back. A paste spawns every
 //! entity the text names under ids the document hands out fresh, so a clipping
@@ -31,6 +31,22 @@
 //! now as an unnamed entity. Where the name lands is
 //! [`crate::Document::paste`]'s rule.
 //!
+//! **An entity in several systems** writes its first system's row as
+//! `system` and `row`, as before, and every other one in `others` after them;
+//! an entity in one system writes no `others` at all. So a single-system
+//! clipping is the text it always was, and one written before an entity could
+//! span systems decodes as an entity in one.
+//!
+//! ```text
+//! Entity(
+//!     system: "blocks",
+//!     row: "(position:(3.0,1.25,0.0),half_extents:(1.2,1.25,1.5))",
+//!     others: [
+//!         Row(system: "sun", row: "(elevation:0.78, …)"),
+//!     ],
+//! )
+//! ```
+//!
 //! # Why a paste reads plain text
 //!
 //! [`Paste::ask`] requests [`MimeType::TextUtf8`], not the RON mime: the copy
@@ -48,6 +64,8 @@
 
 use crcbl::ron;
 use crcbl::scene::scn::SceneEntityId;
+
+use crate::command::SystemRow;
 use crcbl::serde::{Deserialize, Serialize};
 use crcbl::shell::{
     ClipboardContent, ClipboardRequestId, MimeType, Shell, ShellError, ShellEvent, WindowId,
@@ -60,18 +78,69 @@ struct Clipping {
     entities: Vec<Clipped>,
 }
 
-/// One copied entity: the system it goes back into, its row, and its name.
+/// One copied entity: the systems it goes back into, their rows, and its
+/// name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(crate = "crcbl::serde", rename = "Entity", deny_unknown_fields)]
 pub struct Clipped {
-    /// The scene system whose chunk the row belongs to.
+    /// The scene system whose chunk the first row belongs to.
     pub system: String,
-    /// The component, as one chunk row's RON text.
+    /// That system's component, as one chunk row's RON text.
     pub row: String,
+    /// Every other system's row, in the order they were copied — empty, and
+    /// not written, for an entity in one system. See the module docs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub others: Vec<ClippedRow>,
     /// What the entity was called, if it was named — unchecked text, because a
     /// clipping is whatever the clipboard holds; a paste checks it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+impl Clipped {
+    /// The clipping of an entity whose components are `rows`, called `name` —
+    /// or [`None`] for no rows, which is no entity a paste could spawn.
+    #[must_use]
+    pub fn of(rows: Vec<SystemRow>, name: Option<String>) -> Option<Self> {
+        let mut rows = rows.into_iter();
+        let first = rows.next()?;
+        Some(Self {
+            system: first.system,
+            row: first.row,
+            others: rows
+                .map(|row| ClippedRow {
+                    system: row.system,
+                    row: row.row,
+                })
+                .collect(),
+            name,
+        })
+    }
+
+    /// Every system's row, the first one first: what a paste spawns.
+    #[must_use]
+    pub fn rows(&self) -> Vec<SystemRow> {
+        let first = SystemRow {
+            system: self.system.clone(),
+            row: self.row.clone(),
+        };
+        std::iter::once(first)
+            .chain(self.others.iter().map(|other| SystemRow {
+                system: other.system.clone(),
+                row: other.row.clone(),
+            }))
+            .collect()
+    }
+}
+
+/// One more system's row of a copied entity: see [`Clipped::others`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(crate = "crcbl::serde", rename = "Row", deny_unknown_fields)]
+pub struct ClippedRow {
+    /// The scene system whose chunk the row belongs to.
+    pub system: String,
+    /// The component, as one chunk row's RON text.
+    pub row: String,
 }
 
 /// The clipboard text for `entities`.
@@ -104,6 +173,8 @@ pub enum PasteTarget {
     Field {
         /// Whose component.
         entity: SceneEntityId,
+        /// Which of its components: the system holding it.
+        system: String,
         /// The leaf's path.
         path: String,
     },
@@ -173,8 +244,40 @@ mod tests {
         Clipped {
             system: system.to_owned(),
             row: row.to_owned(),
+            others: Vec::new(),
             name: name.map(str::to_owned),
         }
+    }
+
+    fn row(system: &str, row: &str) -> SystemRow {
+        SystemRow {
+            system: system.to_owned(),
+            row: row.to_owned(),
+        }
+    }
+
+    /// **An entity in several systems clips every row and reads back as all of
+    /// them, the first first** — and one in a single system writes no `others`,
+    /// so its text is what it was before entities could span systems.
+    #[test]
+    fn a_clipping_carries_every_systems_row() {
+        let rows = vec![
+            row("blocks", "(position:(1.0,2.0,3.0))"),
+            row("sun", "(intensity:2.0)"),
+            row("marks", "(label:\"m\")"),
+        ];
+        let several = Clipped::of(rows.clone(), Some("Gate".to_owned())).expect("three rows");
+        let text = encode(vec![several]);
+        assert!(text.contains("others:"), "{text}");
+        let decoded = decode(&text).expect("its own text");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].rows(), rows);
+        assert_eq!(decoded[0].name.as_deref(), Some("Gate"));
+
+        let single = Clipped::of(rows[..1].to_vec(), None).expect("one row");
+        assert_eq!(single, clipped("blocks", "(position:(1.0,2.0,3.0))", None));
+        assert!(!encode(vec![single]).contains("others"));
+        assert_eq!(Clipped::of(Vec::new(), None), None);
     }
 
     /// **A clipping reads back as the entities it was written from**, including

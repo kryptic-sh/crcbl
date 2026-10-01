@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 10 2026-10-01, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 11 2026-10-01, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -127,10 +127,9 @@ full-window draw under a hole in the panels is gone.
   `EditCommand::Batch`, so one undo takes a paste back and a paste with one
   entity the scene cannot hold spawns none. The field half of feature 8 landed
   in slice 10, below.
-- **Still owed from task 4's list**: attach and detach (one entity in two
-  systems, decided 2026-10-01 as the next format slice) and load/save markers
-  (nothing for them to mean while a load replaces the log). Rename landed in
-  slice 10. The backlog's editor entry says what each waits on.
+- **Still owed from task 4's list**: load/save markers (nothing for them to mean
+  while a load replaces the log). Rename landed in slice 10, attach and detach
+  in slice 11. The backlog's editor entry says what the markers wait on.
 
 **Slice 6, the translate gizmo (task 5's first half), landed 2026-09-30.**
 
@@ -388,6 +387,70 @@ the decisions of the same day (below).
   survived, being equivalent — serde reads a missing `Option` field as `None` —
   so the attribute was removed.
 
+**Slice 11, one entity in several systems and attach/detach, landed
+2026-10-01**, on the decision of the same day (below).
+
+- **The format.** A `SceneEntityId` may appear in several chunk files, and every
+  row it has belongs to one `Entity`: `ChunkOf::read` attaches a row to the
+  entity an earlier chunk (in manifest order) bound its id to, and spawns one
+  only for an id not yet bound. One pass rather than a bind pass and an attach
+  pass, because a chunk's rows are typed by its codec and a second pass would
+  have to hold them type-erased in between; manifest order already makes the
+  entity bits a function of the files. An id twice in **one** chunk is still
+  `ScnError::DuplicateId`, the check moved from `IdMap::bind` to the chunk read,
+  and a header naming a system twice is `ScnError::RepeatedSystem`. The writer
+  is unchanged and `Scene::FORMAT` is still 0: every committed `.scn/` writes
+  back byte for byte. `SystemChunk::detach_row` takes one system's component off
+  an entity as a row; `scn::row_text` is the one spelling of a row.
+- **The registry answers per system.** `Registry::component` takes the system;
+  `systems_of` lists every system holding an entity (name order) and replaces
+  `system_of`. **The placement rule**: `placing_system` is the first system in
+  name order whose `Placement` answers, and `placement` reads it. Name order is
+  the registry's own, a function of the names alone, so a pair of components
+  places an entity the same way in every scene and every tool of one vocabulary,
+  where manifest order would differ between scenes and registration order would
+  be a fact about which game's line ran first; a component answering `None` (a
+  sun) passes the question on. It stands in for one placement per entity, which
+  a scene-level transform system would be.
+- **A new component starts at its type's `Default`**, which `register` now
+  requires, for `Placement`'s reason: a component a tool cannot make fails to
+  compile rather than arriving as nothing to attach, and the game chooses the
+  value beside its fields. Copying another entity's row was declined: it ties a
+  new component to whichever entity comes first, and a scene holding none of a
+  system has nothing to copy.
+- **The editor.** `EditCommand::Attach` and `Detach` are each other's inverse,
+  through the log and refused in play. **Detaching the last system is refused**
+  (`EditError::NoComponent`), not turned into a delete: a delete's inverse is a
+  spawn carrying the name too, so a detach that sometimes deleted would have an
+  inverse of two shapes, and "remove this component" removing the entity is not
+  what was asked. `Spawn` carries every system's row, so delete, its undo,
+  duplicate and paste carry all of them; `SetProperty` names its system. The
+  clipping writes the other systems' rows in `others`, only when there are any,
+  so older clippings paste. The outliner lists an entity once, under the first
+  manifest system holding it; the inspector draws a section per system (manifest
+  order) with a Remove button while there is more than one, and an add button
+  per **manifest** system the entity is not in — a component in an unlisted
+  system would be dropped by the next save, and adding a manifest entry is a
+  header change no command makes yet. Arrow keys and the gizmo move the placing
+  component. A detach that takes the placement away removes the entity's pick
+  collider and its instance.
+- **There is no `crcbl scene` subcommand** in `crates/crcbl-cli` to update: the
+  CLI's verbs are `new`, `run`, `build`, `screenshot`, `replay`, `crpix`, `lod`,
+  `import`, `bench`, `sim` and `settings`.
+- **Evidence**: the scene's tests hold one entity across two chunks loading as
+  one `Entity` with both components and writing back byte for byte, an id twice
+  in one chunk and a system twice in a manifest refused, and a detached row that
+  leaves the rest and attaches back; the registry's hold per-system answers, the
+  placement rule with a non-placing component in the way, and the default row.
+  The editor's hold the two-system document listed once, attach/detach with undo
+  and redo against the saved text, every refusal, a delete's undo restoring both
+  rows, duplicate and paste carrying both, an older clipping pasting, refusal in
+  play, the outliner's one row per entity, the inspector's sections and buttons,
+  a field edit landing in its section's system, a lost placement leaving the
+  drawn instances, and the undo property test, which now runs on the two-system
+  document with attach and detach steps and asserts both ran. Each mutation
+  listed in the commit that landed this turned a test red.
+
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
 opens the vocabularies it was compiled with. The shipped build registers its own
@@ -398,11 +461,10 @@ Run-time discovery needs a link-time distributed slice (`linkme` or
 
 Everything else below stands unchanged: the server still drops commands, there
 is one schedule per `World`, there is no snapshot of a `World` (play restores
-from the scene's text, slice 8), the samples' state is outside the ECS, the
-format cannot hold one entity in two systems (decided 2026-10-01 that it will,
-as the next format slice), and there are no `serve`/`scene`/`edit` subcommands.
-(Debug draw is still not a gizmo layer; the gizmo does not need it to be — slice
-6, above. `AssetSource` lists since 2026-09-30.)
+from the scene's text, slice 8), the samples' state is outside the ECS, and
+there are no `serve`/`scene`/`edit` subcommands. (One entity in several systems
+landed in slice 11.) (Debug draw is still not a gizmo layer; the gizmo does not
+need it to be — slice 6, above. `AssetSource` lists since 2026-09-30.)
 
 Two things sit behind it, in both directions:
 
@@ -627,10 +689,7 @@ long term and recorded, as above):
   the one rule covers both, since a duplicate's original always bears its name.
 - **One entity in several systems is allowed, keyed by the shared
   `SceneEntityId` across chunks.** Needed for physics on scene components and
-  for attach/detach. Not built in the slice that decided it: it is the next
-  format slice, and the backlog's _Task 4's commands_ says precisely what
-  refuses it today and what the loader, `IdMap`, the registry and the editor
-  each have to change.
+  for attach/detach. Built in slice 11, above.
 
 **Still the owner's:** a file watcher dependency for hot reload (`notify`),
 because adding a crates.io dependency is the owner's call by the workspace's

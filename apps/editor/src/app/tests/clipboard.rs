@@ -15,13 +15,16 @@ fn hover(editor: &mut Editor<HeadlessShell>, at: PhysicalPoint) {
     editor.frame().expect("a frame");
 }
 
-/// The middle of the drag-value editing component `axis` of the inspector's
-/// first row, `position`: a vector row is a label and then one axis cell per
-/// component, each a label and then its widget.
+/// The middle of the drag-value editing component `axis` of the first row,
+/// `position`, of the inspector's first section: a vector row is a label and
+/// then one axis cell per component, each a label and then its widget.
 fn position_field(editor: &Editor<HeadlessShell>, axis: usize) -> PhysicalPoint {
     let ui = editor.panels.ui();
-    let props = editor.panels.props_key().expect("the inspector was built");
-    let row = ui.child_keys(props)[0];
+    let fields = editor
+        .panels
+        .section_fields(0)
+        .expect("the inspector drew a section");
+    let row = ui.child_keys(fields)[0];
     let cell = ui.child_keys(row)[1 + axis];
     centre(editor, ui.child_keys(cell)[1])
 }
@@ -80,7 +83,7 @@ fn the_clipboard_keys_act_on_the_field_under_the_pointer_or_else_the_entity() {
     assert_eq!(
         editor
             .document_mut()
-            .read(step, "position.0")
+            .read(step, crate::scene::BLOCKS, "position.0")
             .expect("an x"),
         Value::Float(1.25),
         "the field under the pointer did not take the paste",
@@ -137,7 +140,7 @@ fn a_field_paste_lands_where_it_was_asked_and_a_bad_one_changes_nothing() {
     assert_eq!(
         editor
             .document_mut()
-            .read(step, "position.0")
+            .read(step, crate::scene::BLOCKS, "position.0")
             .expect("an x"),
         Value::Float(2.5),
     );

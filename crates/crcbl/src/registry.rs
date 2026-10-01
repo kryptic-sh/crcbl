@@ -15,8 +15,10 @@
 //!                     ├── codecs()          the chunk file, read and written
 //!                     ├── register_systems  the System<Brick> a load spawns into
 //!                     ├── component()       &mut dyn Reflect, for an edit
-//!                     └── placement()       a centre and half extents, for a
-//!                                           collider and a bounds box
+//!                     ├── placement()       a centre and half extents, for a
+//!                     │                     collider and a bounds box
+//!                     └── default_row()     a new Brick's row, for a tool
+//!                                           attaching one to an entity
 //!
 //!     a game ──▶ Registry::module("bricks", start)
 //!                     │
@@ -30,20 +32,20 @@
 //!                     └── runtime_entities()  stands, for a tool to draw it
 //! ```
 //!
-//! # One call registers all four, which is why they cannot drift
+//! # One call registers every half, which is why they cannot drift
 //!
 //! [`Registry::register`] takes **one** type parameter and produces every half
 //! at once. There is no way to register a codec and forget the system, or to
-//! register a system the editor cannot reach a component of: the four are
+//! register a system the editor cannot reach a component of: the halves are
 //! monomorphised from one `T` at one call site, and a type that cannot answer
-//! all four does not compile. That is the failure this module exists to remove —
+//! all of them does not compile. That is the failure this module exists to remove —
 //! "not registered" arriving as "nothing to edit" — closed at compile time
 //! rather than detected at run time.
 //!
 //! What is left for run time is the other direction: a scene whose manifest
 //! names a system **nobody registered**. [`Scene::load`](crcbl_scene::scn::Scene::load)
 //! already refuses that by name
-//! ([`ScnError::NoCodec`](crcbl_scene::scn::ScnError::NoCodec)), and because
+//! ([`ScnError::NoCodec`]), and because
 //! [`Registry::codecs`] is the whole registry there is no way to hand it a
 //! shorter list than the one the systems were registered from.
 //!
@@ -79,11 +81,11 @@
 //! * **Not a type registry.** Nothing here constructs a component, names one by
 //!   string, or reflects over a type that was never registered.
 //!   `crates/crcbl-reflect/src/lib.rs` says why that is a different job.
-//! * **Not a scene-format change.** An entity's placement comes from the
-//!   [`Placement`] impl of the component it already has, not from a new chunk
-//!   row: `crcbl::phys::Transform` on the entity is the general answer and it is
-//!   a format change nobody has decided yet — `docs/plan/08-editor.md`'s missing
-//!   piece 6.
+//! * **Not a transform.** An entity's placement comes from the [`Placement`]
+//!   impl of a component it already has. The general answer is a
+//!   `crcbl::phys::Transform` of the entity's own, which a scene can now hold as
+//!   one more system beside the rest (_One entity, several systems_, below) and
+//!   which no vocabulary registers yet.
 //! * **Not a schedule.** [`Registry::register_systems`] adds the systems a
 //!   scene's chunks load into and nothing else; a tool that also wants physics,
 //!   or a game that wants its own, registers it beside them.
@@ -91,6 +93,26 @@
 //!   [`GameModule`] and [`Registry::modules`] builds them; registering their
 //!   systems and ticking them is the caller's — the editor's play mode is one,
 //!   and it decides the rate and the inputs.
+//!
+//! # One entity, several systems
+//!
+//! A scene may hold one entity in several systems (`crcbl_scene::scn`'s
+//! _One entity, several systems_), so a question about a **component** names
+//! the system it means — [`Registry::component`] takes one — and a question
+//! about the **entity** answers with all of them: [`Registry::systems_of`].
+//!
+//! [`Registry::placement`] is the one question about the entity that wants a
+//! single answer, and it takes **the first system in name order whose
+//! component answers one** ([`Registry::placing_system`]). Name order because
+//! it is the registry's own order, a function of the names alone: the same
+//! pair of components places an entity the same way in every scene and every
+//! tool built from one vocabulary, where a scene's manifest order would let two
+//! scenes place one pair differently, and registration order would make it a
+//! fact about whichever game's line ran first. A component that answers
+//! [`None`] — a row that is not a thing in space — passes the question on, so a
+//! block that also carries a sun is still placed by the block. The rule is a
+//! stand-in for one placement per entity: the day a scene carries a
+//! `crcbl::phys::Transform` of its own, that is the one component that answers.
 //!
 //! # A runtime component is placed and never saved
 //!
@@ -117,7 +139,7 @@ use serde::de::DeserializeOwned;
 use crcbl_assets::AssetSource;
 use crcbl_ecs::{ComponentHash, Entity, GameModule, System, World};
 use crcbl_reflect::Reflect;
-use crcbl_scene::scn::{IdMap, SystemChunk, chunk_of};
+use crcbl_scene::scn::{IdMap, ScnError, SystemChunk, chunk_of, row_text};
 
 // ---------------------------------------------------------------------------
 // Placement
@@ -128,10 +150,11 @@ use crcbl_scene::scn::{IdMap, SystemChunk, chunk_of};
 /// **The smallest honest answer to "which of a component's fields is a
 /// placement".** `#[derive(Reflect)]` says which fields a panel may edit and
 /// deliberately says nothing about which of them is a position; a collider and a
-/// selection box both need one, and until a scene can carry a
-/// `crcbl::phys::Transform` of its own — the format change
-/// `docs/plan/08-editor.md`'s missing piece 6 describes, and an open decision —
-/// the component is the only thing that knows.
+/// selection box both need one, and until a scene carries a
+/// `crcbl::phys::Transform` of its own — a system no vocabulary registers yet,
+/// though a scene could now hold it beside the rest — the component is the only
+/// thing that knows. Which component answers for an entity in several systems
+/// is [`Registry::placing_system`]'s rule.
 ///
 /// A trait rather than a derive attribute or an accessor stored in the registry,
 /// for two reasons:
@@ -159,7 +182,7 @@ pub trait Placement {
 // ---------------------------------------------------------------------------
 
 /// What a tool needs, per scene system name: the codec, the system, the
-/// `&mut dyn Reflect` and the [`Placement`].
+/// `&mut dyn Reflect`, the [`Placement`] and a new component's row.
 ///
 /// Built once at start-up, from one `register` call per component. A tool holds
 /// one and asks it; a game hands one out, and uses the same one to load its own
@@ -195,6 +218,12 @@ pub trait Placement {
 ///     }
 /// }
 ///
+/// impl Default for Prop {
+///     fn default() -> Self {
+///         Self { position: [0.0; 3] }
+///     }
+/// }
+///
 /// let mut registry = Registry::new();
 /// registry.register::<Prop>("props");
 ///
@@ -206,6 +235,13 @@ pub trait Placement {
 /// let mut world = World::new();
 /// registry.register_systems(&mut world);
 /// assert_eq!(world.schedule().len(), 1);
+///
+/// // A tool attaching a prop to an entity starts it from the type's own
+/// // `Default`, spelled as a chunk row.
+/// assert_eq!(
+///     registry.default_row("props").expect("props is registered"),
+///     "(position:(0.0,0.0,0.0))",
+/// );
 /// ```
 #[derive(Default)]
 pub struct Registry {
@@ -269,6 +305,7 @@ struct Entry {
     component_mut: for<'w> fn(&'w mut World, &str, Entity) -> Option<&'w mut dyn Reflect>,
     placement: fn(&mut World, &str, Entity) -> Option<(DVec3, DVec3)>,
     entities: fn(&mut World, &str) -> Vec<Entity>,
+    default_row: fn(&str) -> Result<String, ScnError>,
 }
 
 /// One runtime component, reduced to the two calls a tool drawing it makes —
@@ -291,8 +328,18 @@ impl Registry {
     /// Registers `T` as the component of the scene system called `system`.
     ///
     /// The one call that produces the codec, the system registration, the
-    /// `&mut dyn Reflect` accessor and the [`Placement`] — see the
-    /// [module docs](self) for why they are one call and not four.
+    /// `&mut dyn Reflect` accessor, the [`Placement`] and the row a new
+    /// component starts as — see the [module docs](self) for why they are one
+    /// call and not several.
+    ///
+    /// **`Default` is a bound for [`Placement`]'s reason**: a tool attaching
+    /// this component to an entity needs a value to start it at, and a
+    /// component it could not make would fail at run time as "nothing to
+    /// attach" where the bound fails to compile. The game chooses the value,
+    /// beside the fields it fills, rather than a tool inventing one — and
+    /// rather than a tool copying another entity's row, which would tie a new
+    /// component to whichever entity happened to come first and leave a scene
+    /// holding none of a system with nothing to copy.
     ///
     /// # Panics
     ///
@@ -302,7 +349,7 @@ impl Registry {
     /// of the two lost would be a component silently never reached.
     pub fn register<T>(&mut self, system: impl Into<String>)
     where
-        T: Serialize + DeserializeOwned + ComponentHash + Reflect + Placement + 'static,
+        T: Serialize + DeserializeOwned + ComponentHash + Reflect + Placement + Default + 'static,
     {
         let system = system.into();
         let entry = Entry {
@@ -312,6 +359,7 @@ impl Registry {
             component_mut: component_of::<T>,
             placement: placement_of::<T>,
             entities: entities_of::<T>,
+            default_row: default_row_of::<T>,
         };
         self.refuse_taken(&system, entry.component);
         self.entries.insert(system, entry);
@@ -531,12 +579,33 @@ impl Registry {
         self.entries.get(system).map(|entry| (entry.codec)(system))
     }
 
-    /// The name of the registered system holding `entity`, or [`None`] for an
-    /// entity none of them holds — the first in name order, for
-    /// [`component`](Self::component)'s reason.
+    /// The row a new component of the system called `system` starts as: its
+    /// type's `Default`, spelled as [`SystemChunk::attach_row`] reads it.
+    ///
+    /// # Errors
+    ///
+    /// [`ScnError::NoCodec`] for a name this registry does not know, or
+    /// [`ScnError::Write`] if the component's own `Serialize` refuses its
+    /// default.
+    pub fn default_row(&self, system: &str) -> Result<String, ScnError> {
+        let entry = self.entries.get(system).ok_or_else(|| ScnError::NoCodec {
+            system: system.to_owned(),
+        })?;
+        (entry.default_row)(system)
+    }
+
+    /// Every registered scene system holding `entity`, in name order — empty
+    /// for an entity none of them holds.
+    ///
+    /// The question about an **entity**: one scene may hold it in several
+    /// systems. See the [module docs](self).
     #[must_use]
-    pub fn system_of(&self, world: &mut World, entity: Entity) -> Option<String> {
-        self.holder(world, entity).map(|(system, _)| system)
+    pub fn systems_of(&self, world: &mut World, entity: Entity) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|&(system, entry)| (entry.component_mut)(world, system, entity).is_some())
+            .map(|(system, _)| system.clone())
+            .collect()
     }
 
     /// Registers one [`System<T>`](crcbl_ecs::System) per registered component,
@@ -550,56 +619,57 @@ impl Registry {
         }
     }
 
-    /// `entity`'s component, as the rows an inspector draws and an edit is
-    /// applied to.
+    /// `entity`'s component in the system called `system`, as the rows an
+    /// inspector draws and an edit is applied to.
     ///
-    /// [`None`] for an entity no registered system holds — an id from another
-    /// scene, or one this vocabulary has nothing for.
+    /// [`None`] for a name this registry does not know and for an entity that
+    /// system does not hold — an id from another scene, or an entity whose
+    /// other systems hold it and this one does not.
     ///
     /// `&mut World` although a read would do:
     /// [`crcbl_ecs::SystemTrait`] exposes `as_any_mut` and no shared `as_any`,
     /// so the only way to reach a `System<T>` by name is through a unique borrow.
     /// [`SystemChunk::write`] carries the same note for the same reason.
-    ///
-    /// # The first system that holds it
-    ///
-    /// Systems are tried in name order and the first hit wins. A scene cannot put
-    /// one entity in two chunks — each row spawns its own entity, so the same id
-    /// in two files is a duplicate-id error — so "the first" and "the only" are
-    /// the same entity today, and the day the format changes
-    /// (`docs/plan/08-editor.md`'s missing piece 6) this becomes a choice that has
-    /// to be made rather than one that is made here.
     pub fn component<'w>(
         &self,
         world: &'w mut World,
+        system: &str,
         entity: Entity,
     ) -> Option<&'w mut dyn Reflect> {
-        // Resolved to one entry first and borrowed once, rather than looped over
-        // with the borrow live: a `&'w mut World` handed to a call inside the
-        // loop cannot be handed to the next iteration.
-        let (system, entry) = self.holder(world, entity)?;
-        (entry.component_mut)(world, &system, entity)
+        let entry = self.entries.get(system)?;
+        (entry.component_mut)(world, system, entity)
     }
 
-    /// Where `entity` stands and how far it reaches, from the [`Placement`] of
-    /// whichever registered component it has — a scene component's, or a
-    /// [runtime](Self::register_runtime) one's.
+    /// The scene system whose component places `entity`: the first in name
+    /// order whose [`Placement`] answers — see the [module docs](self) for why
+    /// that rule. [`None`] for an entity none of whose scene components is a
+    /// thing in space.
     ///
-    /// [`None`] both for an entity no registered system holds and for one whose
-    /// component is not a thing in space — see [`Placement`].
+    /// What a tool moving the entity writes to, so that what it moves is what
+    /// [`placement`](Self::placement) reads.
+    #[must_use]
+    pub fn placing_system(&self, world: &mut World, entity: Entity) -> Option<String> {
+        self.entries
+            .iter()
+            .find(|&(system, entry)| (entry.placement)(world, system, entity).is_some())
+            .map(|(system, _)| system.clone())
+    }
+
+    /// Where `entity` stands and how far it reaches: the [`Placement`] of its
+    /// [`placing_system`](Self::placing_system)'s component, or else of a
+    /// [runtime](Self::register_runtime) component it has.
+    ///
+    /// [`None`] both for an entity no registered system holds and for one none
+    /// of whose components is a thing in space — see [`Placement`].
     #[must_use]
     pub fn placement(&self, world: &mut World, entity: Entity) -> Option<(DVec3, DVec3)> {
-        let scene = self
-            .entries
+        if let Some(system) = self.placing_system(world, entity) {
+            let entry = &self.entries[&system];
+            return (entry.placement)(world, &system, entity);
+        }
+        self.runtime
             .iter()
-            .map(|(system, entry)| (system, entry.placement));
-        let runtime = self
-            .runtime
-            .iter()
-            .map(|(system, entry)| (system, entry.placement));
-        scene
-            .chain(runtime)
-            .find_map(|(system, placement)| placement(world, system, entity))
+            .find_map(|(system, entry)| (entry.placement)(world, system, entity))
     }
 
     /// Every entity a [runtime](Self::register_runtime) system holds in
@@ -642,17 +712,6 @@ impl Registry {
             .collect();
         rows.sort_by_key(|(id, _)| *id);
         rows.into_iter().map(|(_, entity)| entity).collect()
-    }
-
-    /// The name and entry of the first registered system holding `entity`.
-    ///
-    /// The name is cloned because the entries are borrowed from `self` while the
-    /// caller still needs `&mut World`, and an entry is a handful of function
-    /// pointers.
-    fn holder(&self, world: &mut World, entity: Entity) -> Option<(String, Entry)> {
-        self.entries.iter().find_map(|(system, entry)| {
-            (entry.component_mut)(world, system, entity).map(|_| (system.clone(), *entry))
-        })
     }
 }
 
@@ -727,6 +786,14 @@ where
     T: ComponentHash + Placement + 'static,
 {
     system_named::<T>(world, name)?.get(entity)?.placement()
+}
+
+/// [`Entry::default_row`] for `T`.
+fn default_row_of<T>(name: &str) -> Result<String, ScnError>
+where
+    T: Serialize + Default,
+{
+    row_text(name, &T::default())
 }
 
 /// [`Entry::entities`] for `T`, in storage order — [`Registry::entities`] is what

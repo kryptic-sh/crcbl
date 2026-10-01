@@ -212,6 +212,7 @@ fn the_field_target_follows_focus_then_the_pointer() {
         page.panels.field_target(),
         Some(&FieldTarget {
             entity: id,
+            system: crate::scene::BLOCKS.to_owned(),
             path: "position.1".to_owned(),
         }),
     );

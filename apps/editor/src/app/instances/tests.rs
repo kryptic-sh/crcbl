@@ -53,6 +53,7 @@ fn edit<S: crcbl::shell::Shell + ?Sized>(
         .document
         .apply(EditCommand::SetProperty {
             entity: id,
+            system: crate::scene::BLOCKS.to_owned(),
             path: "position.0".into(),
             value: Value::Float(x),
         })
@@ -69,7 +70,11 @@ fn unchanged_draws_settle_motion_and_edits_follow_undo_redo() {
     let id = SceneEntityId(0);
     let original = instance_of(&mut editor.document, Drawn::Scene(id)).expect("built-in bounds");
     let files = editor.document.files().expect("scene files");
-    let Value::Float(x) = editor.document.read(id, "position.0").expect("position") else {
+    let Value::Float(x) = editor
+        .document
+        .read(id, crate::scene::BLOCKS, "position.0")
+        .expect("position")
+    else {
         panic!("position is a number");
     };
     step(&mut editor, false);
@@ -174,6 +179,44 @@ fn deleted_and_spawned_entities_leave_and_join_the_drawn_instances() {
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 
+/// **An entity whose placing component is detached stops being drawn**, and
+/// the undo draws it again — a sun alone is no thing in space.
+#[test]
+fn an_entity_that_loses_its_placement_stops_being_drawn() {
+    let mut editor = headless(16);
+    step_any(&mut editor);
+    editor.document = crate::document::systems_tests::two_systems();
+    let ids = |range: &[u32]| range.iter().copied().map(SceneEntityId).collect::<Vec<_>>();
+    // Any edit that moves the membership reconciles the swapped document; a
+    // sun attached to a block leaves it drawn as the block.
+    editor
+        .document
+        .attach(SceneEntityId(2), crate::document::systems_tests::SUN)
+        .expect("2 has no sun");
+    step_any(&mut editor);
+    assert_eq!(
+        drawn(&editor),
+        (ids(&[0, 1, 2, 3]), 4),
+        "a lone sun was drawn"
+    );
+
+    editor
+        .document
+        .detach(SceneEntityId(1), crate::scene::BLOCKS)
+        .expect("1 keeps its sun");
+    step_any(&mut editor);
+    assert_eq!(
+        drawn(&editor),
+        (ids(&[0, 2, 3]), 3),
+        "the detached block is still drawn"
+    );
+
+    editor.act(&Action::Undo);
+    step_any(&mut editor);
+    assert_eq!(drawn(&editor), (ids(&[0, 1, 2, 3]), 4));
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
 /// A frame, whatever the shadow cache did.
 fn step_any(editor: &mut Editor<HeadlessShell>) {
     assert_eq!(editor.frame().expect("a presented frame"), Flow::Continue);
@@ -236,7 +279,11 @@ fn filtered_editor_images_match_eager_writes_through_history() {
             .set_shadow_cadence(Some(Cadence::EVERY_FRAME));
         let directory = tempfile::tempdir().expect("capture directory");
         let id = SceneEntityId(0);
-        let Value::Float(x) = editor.document.read(id, "position.0").expect("position") else {
+        let Value::Float(x) = editor
+            .document
+            .read(id, crate::scene::BLOCKS, "position.0")
+            .expect("position")
+        else {
             panic!("position is a number");
         };
         let mut images = Vec::new();
@@ -374,12 +421,16 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
         panic!("the greybox scene spawns nothing");
     };
     let original = placed.instances[0].desc;
-    let Value::Float(x) = document.read(id, "position.0").expect("position") else {
+    let Value::Float(x) = document
+        .read(id, crate::scene::BLOCKS, "position.0")
+        .expect("position")
+    else {
         panic!("number");
     };
     document
         .apply(EditCommand::SetProperty {
             entity: id,
+            system: crate::scene::BLOCKS.to_owned(),
             path: "position.0".into(),
             value: Value::Float(x + 1.0),
         })

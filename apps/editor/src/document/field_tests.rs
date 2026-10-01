@@ -15,10 +15,10 @@ fn a_field_copies_as_the_chunk_files_own_text() {
     let mut document = document();
     let step = SceneEntityId(3);
     let y = document
-        .copy_field(step, "position.1")
+        .copy_field(step, crate::scene::BLOCKS, "position.1")
         .expect("a block has a y");
     let width = document
-        .copy_field(step, "half_extents.0")
+        .copy_field(step, crate::scene::BLOCKS, "half_extents.0")
         .expect("and a half width");
     assert_eq!((y.as_str(), width.as_str()), ("1.25", "1.2"));
 
@@ -33,7 +33,7 @@ fn a_field_copies_as_the_chunk_files_own_text() {
     );
 
     let error = document
-        .copy_field(step, "position")
+        .copy_field(step, crate::scene::BLOCKS, "position")
         .expect_err("a vector is not a leaf");
     assert!(matches!(error, EditError::Path(_)), "{error}");
 }
@@ -46,19 +46,25 @@ fn a_field_paste_applies_as_one_command_and_undoes() {
     let before = document.files().expect("ids");
     let step = SceneEntityId(3);
 
-    let y = document.copy_field(step, "position.1").expect("a y");
+    let y = document
+        .copy_field(step, crate::scene::BLOCKS, "position.1")
+        .expect("a y");
     document
-        .paste_field(SceneEntityId(1), "position.1", &y)
+        .paste_field(SceneEntityId(1), crate::scene::BLOCKS, "position.1", &y)
         .expect("a y pastes into a y");
     assert_eq!(
-        document.read(SceneEntityId(1), "position.1").expect("a y"),
+        document
+            .read(SceneEntityId(1), crate::scene::BLOCKS, "position.1")
+            .expect("a y"),
         Value::Float(1.25),
     );
     document
-        .paste_field(step, "position.0", " -7.5\n")
+        .paste_field(step, crate::scene::BLOCKS, "position.0", " -7.5\n")
         .expect("ron reads past surrounding whitespace");
     assert_eq!(
-        document.read(step, "position.0").expect("an x"),
+        document
+            .read(step, crate::scene::BLOCKS, "position.0")
+            .expect("an x"),
         Value::Float(-7.5)
     );
     assert_eq!(document.log().len(), 2, "a paste is one command");
@@ -67,9 +73,14 @@ fn a_field_paste_applies_as_one_command_and_undoes() {
     // A value only an `f64` holds copies back exactly as it was pasted.
     let fine = "1.0000000000000002";
     document
-        .paste_field(step, "position.2", fine)
+        .paste_field(step, crate::scene::BLOCKS, "position.2", fine)
         .expect("a float");
-    assert_eq!(document.copy_field(step, "position.2").expect("a z"), fine);
+    assert_eq!(
+        document
+            .copy_field(step, crate::scene::BLOCKS, "position.2")
+            .expect("a z"),
+        fine
+    );
 
     while document.undo().expect("each inverse applies") {}
     assert_eq!(document.files().expect("ids"), before);
@@ -85,7 +96,7 @@ fn a_bad_field_paste_is_refused_and_changes_nothing() {
     let step = SceneEntityId(3);
     for text in ["up a bit", "true", "\"1.0\"", "(1.0, 2.0, 3.0)", ""] {
         let error = document
-            .paste_field(step, "position.1", text)
+            .paste_field(step, crate::scene::BLOCKS, "position.1", text)
             .expect_err("not a float");
         assert!(
             matches!(&error, EditError::FieldPaste { path, .. } if path == "position.1"),
@@ -94,11 +105,11 @@ fn a_bad_field_paste_is_refused_and_changes_nothing() {
         assert!(error.to_string().contains("position.1"), "{error}");
     }
     let error = document
-        .paste_field(step, "position.1", "inf")
+        .paste_field(step, crate::scene::BLOCKS, "position.1", "inf")
         .expect_err("a position is finite");
     assert!(matches!(error, EditError::Path(_)), "{error}");
     let error = document
-        .paste_field(step, "position", "(1.0, 2.0, 3.0)")
+        .paste_field(step, crate::scene::BLOCKS, "position", "(1.0, 2.0, 3.0)")
         .expect_err("not a leaf");
     assert!(matches!(error, EditError::Path(_)), "{error}");
 
@@ -115,7 +126,7 @@ fn a_field_paste_is_refused_in_play_mode() {
     document.play().expect("the greybox scene plays");
     for text in ["2.0", "up a bit"] {
         let error = document
-            .paste_field(SceneEntityId(3), "position.1", text)
+            .paste_field(SceneEntityId(3), crate::scene::BLOCKS, "position.1", text)
             .expect_err("play mode refuses edits");
         assert!(matches!(error, EditError::Playing), "{text:?}: {error}");
     }

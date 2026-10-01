@@ -12,7 +12,7 @@ use super::*;
 
 /// A component in the shape a real one has: a position, an extent, and a
 /// placement built from both.
-#[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl_reflect")]
 struct Block {
     position: [f64; 3],
@@ -39,7 +39,7 @@ impl Placement for Block {
 /// A second vocabulary, and one that is **not** a thing in space — the
 /// `apps/puppet` `Sun` shape, so the tests below are about two component
 /// types rather than one registered twice.
-#[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl_reflect")]
 struct Beacon {
     intensity: f32,
@@ -166,16 +166,10 @@ fn an_entity_resolves_to_its_system_and_that_systems_row() {
 
     let block = ids.entity(SceneEntityId(1)).expect("the second block");
     let beacon = ids.entity(SceneEntityId(2)).expect("the beacon");
-    assert_eq!(
-        registry.system_of(&mut world, block).as_deref(),
-        Some("blocks")
-    );
-    assert_eq!(
-        registry.system_of(&mut world, beacon).as_deref(),
-        Some("beacons")
-    );
+    assert_eq!(registry.systems_of(&mut world, block), ["blocks"]);
+    assert_eq!(registry.systems_of(&mut world, beacon), ["beacons"]);
     let stranger = world.spawn();
-    assert_eq!(registry.system_of(&mut world, stranger), None);
+    assert!(registry.systems_of(&mut world, stranger).is_empty());
 
     let row = registry
         .codec("beacons")
@@ -383,10 +377,10 @@ fn a_runtime_component_is_placed_and_never_part_of_the_scene() {
         Some((DVec3::new(1.0, 2.0, 3.0), DVec3::splat(0.25))),
     );
     assert!(
-        registry.component(&mut world, ball).is_none(),
+        registry.component(&mut world, "balls", ball).is_none(),
         "a ball is editable"
     );
-    assert_eq!(registry.system_of(&mut world, ball), None);
+    assert!(registry.systems_of(&mut world, ball).is_empty());
 }
 
 /// **A scene naming a runtime system is refused by name**, because there
@@ -504,7 +498,7 @@ fn the_component_accessor_reads_and_writes_the_entity_it_names() {
         .expect("id 1");
 
     let component = registry
-        .component(&mut world, first)
+        .component(&mut world, "blocks", first)
         .expect("a block is a registered component");
     assert_eq!(get_path(component, "position.1"), Ok(Value::Float(2.0)));
     crcbl_reflect::set_path(component, "position.1", &Value::Float(9.0)).expect("a block has a y");
@@ -546,7 +540,7 @@ fn a_component_that_is_not_in_space_has_a_reflect_row_and_no_placement() {
         .expect("id 2");
 
     assert!(
-        registry.component(&mut world, beacon).is_some(),
+        registry.component(&mut world, "beacons", beacon).is_some(),
         "a beacon is editable",
     );
     assert_eq!(registry.placement(&mut world, beacon), None);
@@ -561,7 +555,7 @@ fn an_entity_with_no_registered_component_has_neither_half() {
     registry.register_systems(&mut world);
     let stranger = world.spawn();
 
-    assert!(registry.component(&mut world, stranger).is_none());
+    assert!(registry.component(&mut world, "blocks", stranger).is_none());
     assert_eq!(registry.placement(&mut world, stranger), None);
 }
 
@@ -608,4 +602,167 @@ fn the_debug_form_names_every_system_and_its_component() {
     assert!(text.contains("beacons"), "{text}");
     assert!(text.contains("Block"), "{text}");
     assert!(text.contains("Beacon"), "{text}");
+}
+
+/// A second component that is a thing in space, registered under a name that
+/// sorts after `blocks` — so the placement rule has two answers to choose
+/// between.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
+#[reflect(crate = "crcbl_reflect")]
+struct Crate {
+    centre: [f64; 3],
+}
+
+impl ComponentHash for Crate {
+    fn hash_component(&self, hasher: &mut dyn Hasher) {
+        for value in self.centre {
+            hasher.write(&value.to_bits().to_le_bytes());
+        }
+    }
+}
+
+impl Placement for Crate {
+    fn placement(&self) -> Option<(DVec3, DVec3)> {
+        Some((DVec3::from_array(self.centre), DVec3::splat(2.0)))
+    }
+}
+
+/// Every component here, `crates` included.
+fn three_registry() -> Registry {
+    let mut registry = registry();
+    registry.register::<Crate>("crates");
+    registry
+}
+
+/// A scene whose id 0 is in `crates` and `blocks`, and whose id 1 is in
+/// `crates` and `beacons`, loaded through `registry`.
+fn spanning_scene(registry: &Registry) -> (World, IdMap) {
+    let mut source = MemorySource::new();
+    for (key, text) in [
+        (
+            "scene.ron",
+            "(format: 0, name: \"spans\", systems: [\"crates\", \"blocks\", \"beacons\"])",
+        ),
+        (
+            "env.ron",
+            "(camera: (position: (0.0, 0.0, 8.0), look_at: (0.0, 0.0, 0.0)), \
+             ambient: (0.1, 0.1, 0.1))",
+        ),
+        (
+            "sys/crates.ron",
+            "(system: \"crates\", entities: [(0, (centre: (9.0, 9.0, 9.0))), \
+             (1, (centre: (7.0, 0.0, 0.0)))])",
+        ),
+        (
+            "sys/blocks.ron",
+            "(system: \"blocks\", entities: [\
+             (0, (position: (1.0, 2.0, 3.0), half_extents: (0.5, 0.5, 0.5)))])",
+        ),
+        (
+            "sys/beacons.ron",
+            "(system: \"beacons\", entities: [(1, (intensity: 3.0))])",
+        ),
+    ] {
+        source
+            .insert(Path::new(key), text.as_bytes().to_vec())
+            .expect("a scene key is a legal asset key");
+    }
+    let mut world = World::new();
+    registry.register_systems(&mut world);
+    let (_, ids) = Scene::load(&source, Path::new(""), &registry.codecs(), &mut world)
+        .expect("one entity in several systems is a scene");
+    (world, ids)
+}
+
+/// **An entity in several systems answers with every one of them, and each
+/// system's component is its own** — a write through one leaves the other.
+#[test]
+fn an_entity_in_several_systems_answers_per_system() {
+    let registry = three_registry();
+    let (mut world, ids) = spanning_scene(&registry);
+    let both = ids.entity(SceneEntityId(0)).expect("id 0");
+    let lit = ids.entity(SceneEntityId(1)).expect("id 1");
+    assert_eq!(registry.systems_of(&mut world, both), ["blocks", "crates"]);
+    assert_eq!(registry.systems_of(&mut world, lit), ["beacons", "crates"]);
+
+    let block = registry
+        .component(&mut world, "blocks", both)
+        .expect("id 0 is a block");
+    assert_eq!(get_path(block, "position.0"), Ok(Value::Float(1.0)));
+    let held = registry
+        .component(&mut world, "crates", both)
+        .expect("and a crate");
+    assert_eq!(get_path(held, "centre.0"), Ok(Value::Float(9.0)));
+    crcbl_reflect::set_path(held, "centre.0", &Value::Float(4.0)).expect("a crate has an x");
+    let block = registry
+        .component(&mut world, "blocks", both)
+        .expect("still a block");
+    assert_eq!(
+        get_path(block, "position.0"),
+        Ok(Value::Float(1.0)),
+        "a write to the crate reached the block",
+    );
+    assert!(
+        registry.component(&mut world, "beacons", both).is_none(),
+        "id 0 has no beacon",
+    );
+    assert!(registry.component(&mut world, "bricks", both).is_none());
+}
+
+/// **The placement is the first system in name order whose component answers
+/// one**: a block beside a crate is placed by the block, and a beacon — no
+/// thing in space — passes the question to the crate beside it.
+#[test]
+fn the_first_placing_system_in_name_order_places_an_entity() {
+    let registry = three_registry();
+    let (mut world, ids) = spanning_scene(&registry);
+    let both = ids.entity(SceneEntityId(0)).expect("id 0");
+    let lit = ids.entity(SceneEntityId(1)).expect("id 1");
+
+    assert_eq!(
+        registry.placing_system(&mut world, both).as_deref(),
+        Some("blocks")
+    );
+    assert_eq!(
+        registry.placement(&mut world, both),
+        Some((DVec3::new(1.0, 2.0, 3.0), DVec3::splat(0.5))),
+    );
+    assert_eq!(
+        registry.placing_system(&mut world, lit).as_deref(),
+        Some("crates")
+    );
+    assert_eq!(
+        registry.placement(&mut world, lit),
+        Some((DVec3::new(7.0, 0.0, 0.0), DVec3::splat(2.0))),
+    );
+    let stranger = world.spawn();
+    assert_eq!(registry.placing_system(&mut world, stranger), None);
+}
+
+/// **A new component's row is its type's `Default`, spelled as a row**, and
+/// it attaches back through the system's own codec; a name the registry does
+/// not know is refused by that name.
+#[test]
+fn a_default_row_is_the_types_default_and_attaches() {
+    let registry = registry();
+    assert_eq!(
+        registry.default_row("beacons").expect("registered"),
+        "(intensity:0.0)"
+    );
+    let error = registry.default_row("bricks").expect_err("not registered");
+    assert!(
+        matches!(&error, ScnError::NoCodec { system } if system == "bricks"),
+        "{error}"
+    );
+
+    let mut world = World::new();
+    registry.register_systems(&mut world);
+    let entity = world.spawn();
+    let row = registry.default_row("blocks").expect("registered");
+    registry
+        .codec("blocks")
+        .expect("registered")
+        .attach_row(&mut world, entity, &row)
+        .expect("a default row reads back");
+    assert_eq!(registry.systems_of(&mut world, entity), ["blocks"]);
 }

@@ -97,7 +97,12 @@ const FIELD_PLOTS_RON: &str = include_str!("../assets/scenes/field.scn/sys/plots
 /// In `f64` like `apps/breakout`'s `Brick`, because that is what the physics
 /// world a creep's sphere is written into is spelled in, and a path written as
 /// `f32` would round on the way through the file and move the lane.
-#[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+///
+/// `Default` is the first order at the origin: what a tool attaching a
+/// waypoint to an entity starts it as, which is why `Registry::register` asks
+/// for one. A second waypoint of the same order is a map `Map::new` refuses,
+/// which the editor reports on save rather than refusing the attach.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl::reflect")]
 #[serde(crate = "crcbl::serde")]
 pub struct Waypoint {
@@ -135,7 +140,10 @@ impl Placement for Waypoint {
 }
 
 /// One place a tower can be built.
-#[derive(Clone, Debug, PartialEq, Reflect, Serialize, Deserialize)]
+///
+/// `Default` is an unlabelled plot at the origin: what a tool attaching a plot
+/// to an entity starts it as, which is why `Registry::register` asks for one.
+#[derive(Clone, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl::reflect")]
 #[serde(crate = "crcbl::serde")]
 pub struct Plot {

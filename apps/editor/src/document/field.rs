@@ -42,42 +42,51 @@ use super::{Document, EditError};
 use crate::command::EditCommand;
 
 impl Document {
-    /// The text of the leaf `path` names inside `id`'s component, as the
-    /// scene's chunk file spells it — see the module docs.
+    /// The text of the leaf `path` names inside `id`'s component in `system`,
+    /// as the scene's chunk file spells it — see the module docs.
     ///
     /// # Errors
     ///
     /// As [`read`](Self::read): [`EditError::NoEntity`] for an id this document
-    /// does not hold, [`EditError::Path`] for a path that names nothing or
-    /// stops short of a leaf.
-    pub fn copy_field(&mut self, id: SceneEntityId, path: &str) -> Result<String, EditError> {
-        Ok(text_of(&self.read(id, path)?))
+    /// does not hold, [`EditError::NotAttached`] for a system that does not
+    /// hold it, [`EditError::Path`] for a path that names nothing or stops
+    /// short of a leaf.
+    pub fn copy_field(
+        &mut self,
+        id: SceneEntityId,
+        system: &str,
+        path: &str,
+    ) -> Result<String, EditError> {
+        Ok(text_of(&self.read(id, system, path)?))
     }
 
     /// Writes the value `text` spells into the leaf `path` names inside `id`'s
-    /// component, as one [`EditCommand::SetProperty`].
+    /// component in `system`, as one [`EditCommand::SetProperty`].
     ///
     /// # Errors
     ///
-    /// [`EditError::Playing`] in play mode; [`EditError::NoEntity`] or
-    /// [`EditError::Path`] as [`read`](Self::read);
+    /// [`EditError::Playing`] in play mode; [`EditError::NoEntity`],
+    /// [`EditError::NotAttached`] or [`EditError::Path`] as
+    /// [`read`](Self::read);
     /// [`EditError::FieldPaste`] for text that is not a value of the leaf's
     /// kind; and [`EditError::Path`] again for a value the leaf refuses. The
     /// field is unchanged and nothing is recorded in every case.
     pub fn paste_field(
         &mut self,
         id: SceneEntityId,
+        system: &str,
         path: &str,
         text: &str,
     ) -> Result<(), EditError> {
         self.refuse_in_play()?;
-        let current = self.read(id, path)?;
+        let current = self.read(id, system, path)?;
         let value = value_of(&current, text).map_err(|error| EditError::FieldPaste {
             path: path.to_owned(),
             message: error.code.to_string(),
         })?;
         self.apply(EditCommand::SetProperty {
             entity: id,
+            system: system.to_owned(),
             path: path.to_owned(),
             value,
         })

@@ -4,6 +4,9 @@
 
 use super::*;
 
+use super::systems_tests::{SUN, two_systems};
+use crate::command::SystemRow;
+
 use crcbl::core::rand::{hash_u64, hash_unit};
 
 fn document() -> Document {
@@ -73,8 +76,12 @@ fn a_duplicate_copies_the_row_under_the_next_id() {
         for axis in 0..3 {
             let path = format!("{field}.{axis}");
             assert_eq!(
-                document.read(copy, &path).expect("the copy is a block"),
-                document.read(SceneEntityId(3), &path).expect("a block"),
+                document
+                    .read(copy, crate::scene::BLOCKS, &path)
+                    .expect("the copy is a block"),
+                document
+                    .read(SceneEntityId(3), crate::scene::BLOCKS, &path)
+                    .expect("a block"),
                 "the copy's {path} is not the original's",
             );
         }
@@ -102,6 +109,7 @@ fn an_edit_to_a_restored_entity_finds_it_by_its_old_id() {
     document
         .apply(EditCommand::SetProperty {
             entity: first,
+            system: crate::scene::BLOCKS.to_owned(),
             path: "position.0".to_owned(),
             value: Value::Float(-4.0),
         })
@@ -112,7 +120,9 @@ fn an_edit_to_a_restored_entity_finds_it_by_its_old_id() {
     document.undo().expect("restore it");
     document.undo().expect("and walk the move back");
     assert_eq!(
-        document.read(first, "position.0").expect("restored"),
+        document
+            .read(first, crate::scene::BLOCKS, "position.0")
+            .expect("restored"),
         Value::Float(-3.0),
     );
 }
@@ -139,8 +149,10 @@ fn a_spawn_the_scene_cannot_hold_is_refused_and_leaves_nothing() {
     let error = document
         .apply(EditCommand::Spawn {
             entity: SceneEntityId(2),
-            system: crate::scene::BLOCKS.to_owned(),
-            row: row.clone(),
+            rows: vec![SystemRow {
+                system: crate::scene::BLOCKS.to_owned(),
+                row: row.clone(),
+            }],
             name: None,
         })
         .expect_err("2 is the second step's");
@@ -152,8 +164,10 @@ fn a_spawn_the_scene_cannot_hold_is_refused_and_leaves_nothing() {
     let error = document
         .apply(EditCommand::Spawn {
             entity: SceneEntityId(9),
-            system: "bricks".to_owned(),
-            row,
+            rows: vec![SystemRow {
+                system: "bricks".to_owned(),
+                row,
+            }],
             name: None,
         })
         .expect_err("the greybox scene has no bricks");
@@ -165,8 +179,10 @@ fn a_spawn_the_scene_cannot_hold_is_refused_and_leaves_nothing() {
     let error = document
         .apply(EditCommand::Spawn {
             entity: SceneEntityId(9),
-            system: crate::scene::BLOCKS.to_owned(),
-            row: "(position:(0.0,0.0,0.0))".to_owned(),
+            rows: vec![SystemRow {
+                system: crate::scene::BLOCKS.to_owned(),
+                row: "(position:(0.0,0.0,0.0))".to_owned(),
+            }],
             name: None,
         })
         .expect_err("a block has half extents");
@@ -210,10 +226,10 @@ fn a_paste_spawns_every_entity_and_one_undo_takes_them_back() {
     for (copy, original) in [(4, 1), (5, 3)] {
         assert_eq!(
             document
-                .read(SceneEntityId(copy), "position.0")
+                .read(SceneEntityId(copy), crate::scene::BLOCKS, "position.0")
                 .expect("pasted"),
             document
-                .read(SceneEntityId(original), "position.0")
+                .read(SceneEntityId(original), crate::scene::BLOCKS, "position.0")
                 .expect("held"),
         );
     }
@@ -235,6 +251,7 @@ fn a_paste_with_one_bad_entity_spawns_none() {
     let clipped = |system: &str, row: &str| crate::clipboard::Clipped {
         system: system.to_owned(),
         row: row.to_owned(),
+        others: Vec::new(),
         name: None,
     };
     for bad in [
@@ -281,27 +298,36 @@ const NAMES: [Option<&str>; 4] = [Some("Gate"), Some("Spawner"), Some("Tower"), 
 /// two states that differ in any field or any row differ here.
 ///
 /// Each step is one of a nudge by an arbitrary float, a duplicate, a delete, a
-/// paste of two entities as one batch, or a rename — to one of a few names, or
-/// to none — of entities chosen from those the document holds at that moment.
-/// The text compared includes `names.ron` and the header's `names` entry, so a
-/// name an undo failed to put back, or a delete failed to take away, differs
-/// here. The
-/// choices come from [`hash_u64`] over `(seed, index)`, so a failure names the
-/// history that produced it and replays exactly.
+/// paste of two entities as one batch, a rename — to one of a few names, or
+/// to none — an attach of a system the entity is not in, or a detach of one of
+/// several it is in, of entities chosen from those the document holds at that
+/// moment. The document is [`two_systems`]', so an entity starts in two
+/// systems and a delete, duplicate or paste of it carries both rows. The text
+/// compared includes `names.ron` and the header's `names` entry, so a name an
+/// undo failed to put back, or a delete failed to take away, differs here,
+/// and every chunk, so a row an undone detach failed to put back differs too.
+/// The choices come from [`hash_u64`] over `(seed, index)`, so a failure names
+/// the history that produced it and replays exactly.
 #[test]
 fn random_histories_walk_back_through_every_state() {
-    // How many states held a name, so a run whose renames never landed in a
-    // file cannot pass as one that walked them back.
+    // How many states held a name, and how many attaches and detaches ran, so
+    // a run whose renames never landed in a file, or that never attached or
+    // detached anything, cannot pass as one that walked them back.
     let mut named = 0;
+    let mut attached = 0;
+    let mut detached = 0;
     for seed in 0..HISTORIES {
-        let mut document = document();
+        let mut document = two_systems();
+        let start = document.entity_count();
         let mut states = vec![document.files().expect("ids")];
         for step in 0..HISTORY_LEN {
             let draw = |k: u64| hash_u64(seed, step * 4 + k);
             let held = ids(&mut document);
             let len = u64::try_from(held.len()).expect("a handful of entities");
             let target = held[usize::try_from(draw(0) % len).expect("an index into held")];
-            match draw(1) % 6 {
+            let joinable = document.attachable(target);
+            let systems = document.systems_of(target);
+            match draw(1) % 8 {
                 0 if held.len() > 1 => document.delete(target).expect("a held entity"),
                 1 => {
                     document.duplicate(target).expect("a held entity");
@@ -321,20 +347,40 @@ fn random_histories_walk_back_through_every_state() {
                     let text = clipping_of(&mut document, &[target, other]);
                     assert_eq!(document.paste(&text).expect("a clipping").len(), 2);
                 }
+                4 if !joinable.is_empty() => {
+                    let system = &joinable[pick(draw(2), joinable.len())];
+                    document
+                        .attach(target, system)
+                        .expect("a system it is not in");
+                    attached += 1;
+                }
+                5 if systems.len() > 1 => {
+                    let system = &systems[pick(draw(2), systems.len())];
+                    document
+                        .detach(target, system)
+                        .expect("one of several systems");
+                    detached += 1;
+                }
                 _ => {
-                    let axis = draw(2) % 3;
-                    let path = format!("position.{axis}");
-                    let Value::Float(was) = document.read(target, &path).expect("a block") else {
-                        panic!("a position is a float");
+                    // The placing component's position, or a sun's period for
+                    // an entity nothing places.
+                    let (system, path) = match document.placing_system(target) {
+                        Some(system) => (system, format!("position.{}", draw(2) % 3)),
+                        None => (SUN.to_owned(), "period".to_owned()),
+                    };
+                    let Value::Float(was) = document.read(target, &system, &path).expect("a leaf")
+                    else {
+                        panic!("{path} is a float");
                     };
                     let delta = (hash_unit(seed, step * 4 + 3) - 0.5) * 4.0;
                     document
                         .apply(EditCommand::SetProperty {
                             entity: target,
+                            system,
                             path,
                             value: Value::Float(was + delta),
                         })
-                        .expect("a block has that axis");
+                        .expect("the component has that leaf");
                 }
             }
             states.push(document.files().expect("ids"));
@@ -349,7 +395,7 @@ fn random_histories_walk_back_through_every_state() {
             );
         }
         assert!(!document.undo().expect("nothing left"), "seed {seed}");
-        assert_eq!(document.entity_count(), 4, "seed {seed}");
+        assert_eq!(document.entity_count(), start, "seed {seed}");
         assert!(!document.is_dirty(), "seed {seed}");
 
         for (position, state) in states.iter().enumerate().skip(1) {
@@ -366,4 +412,12 @@ fn random_histories_walk_back_through_every_state() {
             .count();
     }
     assert!(named > 0, "no history named an entity");
+    assert!(attached > 0, "no history attached a system");
+    assert!(detached > 0, "no history detached a system");
+}
+
+/// An index below `len` from the draw `value`.
+fn pick(value: u64, len: usize) -> usize {
+    usize::try_from(value % u64::try_from(len).expect("a handful of systems"))
+        .expect("an index below len")
 }

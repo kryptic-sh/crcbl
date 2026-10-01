@@ -17,11 +17,13 @@
 //!
 //! # The shape of an edit
 //!
-//! A command names **the entity, the dotted path and the new value** — exactly
-//! what [`crcbl::reflect::set_path`] takes, which is why that crate's
-//! [`Value`] is the payload rather than a second one declared here. Applying a
-//! property reads the leaf first and hands back the command that puts it back:
-//! an inverse is produced, never derived later from a rule that could be wrong.
+//! A command names **the entity, the system, the dotted path and the new
+//! value** — the system because one entity may hold a component in several,
+//! and the rest exactly what [`crcbl::reflect::set_path`] takes, which is why
+//! that crate's [`Value`] is the payload rather than a second one declared
+//! here. Applying a property reads the leaf first and hands back the command
+//! that puts it back: an inverse is produced, never derived later from a rule
+//! that could be wrong.
 //!
 //! ```
 //! use crcbl::reflect::{Reflect, Value};
@@ -35,29 +37,48 @@
 //! }
 //!
 //! let mut brick = Brick { position: [1.0, 2.0, 3.0] };
-//! let inverse = set_property(&mut brick, SceneEntityId(7), "position.1", &Value::Float(9.0))
-//!     .expect("a brick has a y");
+//! let inverse = set_property(
+//!     &mut brick,
+//!     SceneEntityId(7),
+//!     "bricks",
+//!     "position.1",
+//!     &Value::Float(9.0),
+//! )
+//! .expect("a brick has a y");
 //! assert_eq!(brick.position, [1.0, 9.0, 3.0]);
-//! let EditCommand::SetProperty { entity, path, value } = inverse else {
+//! let EditCommand::SetProperty { entity, system, path, value } = inverse else {
 //!     unreachable!("a property's inverse is a property");
 //! };
-//! set_property(&mut brick, entity, &path, &value).expect("and it still has one");
+//! set_property(&mut brick, entity, &system, &path, &value).expect("and it still has one");
 //! assert_eq!(brick.position, [1.0, 2.0, 3.0]);
 //! ```
 //!
 //! # Creating and removing entities
 //!
 //! [`Spawn`](EditCommand::Spawn) and [`Delete`](EditCommand::Delete) are each
-//! other's inverse, and a spawn carries **the id and the row** — the entity's
-//! component as one chunk row's RON text, which
+//! other's inverse, and a spawn carries **the id and every system's row** —
+//! each of the entity's components as one chunk row's RON text, which
 //! [`crcbl::scene::scn::SystemChunk::row`] reads and `attach_row` rebuilds. So
-//! undoing a delete brings the entity back under the id it had, and a later
-//! command in the history that names it still finds it. A **duplicate** is not
+//! undoing a delete brings the entity back under the id it had, in every system
+//! it was in, and a later command in the history that names it still finds
+//! it. A **duplicate** is not
 //! a variant of its own: it is a spawn whose row was read off the original and
 //! whose id is the next one the document would hand out
 //! ([`crate::Document::duplicate`]). A **paste** is a
 //! [`Batch`](EditCommand::Batch) of spawns, one per entity the clipboard holds
 //! ([`crate::Document::paste`]), so one undo takes the whole paste back.
+//!
+//! # Attaching and detaching one system's data
+//!
+//! [`Attach`](EditCommand::Attach) gives an entity a component in one more
+//! system, from a row; [`Detach`](EditCommand::Detach) takes one system's
+//! component away and hands back the attach of the row it removed. Each is the
+//! other's inverse. **Detaching an entity's last system is refused**, not
+//! turned into a delete: a delete's inverse is a spawn carrying the name as well
+//! as the rows, so a detach that sometimes deleted would sometimes have an
+//! inverse of another shape, and "remove this component" quietly removing the
+//! entity is not what the person asked for. [`Delete`](EditCommand::Delete) is
+//! how an entity goes.
 //!
 //! # Names
 //!
@@ -70,17 +91,12 @@
 //!
 //! # What task 4 does not have yet
 //!
-//! The plan's task 4 lists about ten commands for the MVP. Two of them wait on
+//! The plan's task 4 lists about ten commands for the MVP. One waits on
 //! something outside this crate, and an arm nothing could apply would be an
-//! inverse nothing could show was right:
-//!
-//! * **attach and detach system data** — the format cannot hold one entity in
-//!   two systems yet. Decided 2026-10-01 that it will, keyed by the shared
-//!   [`SceneEntityId`], as the next format slice (`docs/plan/08-editor.md`).
-//! * **scene load and save markers** — the log's position against the position
-//!   of the last save already is the dirty marker, and a load replaces the
-//!   document and its log wholesale, so there is nothing in between for a
-//!   marker entry to mean yet.
+//! inverse nothing could show was right: **scene load and save markers** — the
+//! log's position against the position of the last save already is the dirty
+//! marker, and a load replaces the document and its log wholesale, so there is
+//! nothing in between for a marker entry to mean yet.
 //!
 //! A **transform** command is not a second variant either, and that is not an
 //! omission: a brick's placement *is* `position`, a field its `#[derive(Reflect)]`
@@ -102,10 +118,13 @@ use crcbl::scene::scn::{EntityName, SceneEntityId};
 /// one an undo entry can still name after a reload.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EditCommand {
-    /// Write `value` into the leaf `path` names inside `entity`'s component.
+    /// Write `value` into the leaf `path` names inside `entity`'s component in
+    /// `system`.
     SetProperty {
         /// Whose component: the id the scene file spells.
         entity: SceneEntityId,
+        /// Which of its components: the scene system holding it.
+        system: String,
         /// The dotted path, in [`crcbl::reflect`]'s grammar — `"position.1"`
         /// is a brick's `y`.
         path: String,
@@ -113,24 +132,43 @@ pub enum EditCommand {
         value: Value,
     },
 
-    /// Create `entity` in `system`, holding the component `row` spells.
+    /// Create `entity` holding a component in each system `rows` names.
     Spawn {
         /// The id the entity is filed under: one no entity holds, which is
         /// [`crcbl::scene::scn::IdMap::next_id`] for a new one and the id it had
         /// for one a delete removed.
         entity: SceneEntityId,
-        /// The scene system whose chunk file it is written into.
-        system: String,
-        /// Its component, as one chunk row's RON text.
-        row: String,
+        /// Its components, one per system and at least one — an entity in no
+        /// system is in no chunk file, and a save would lose it.
+        rows: Vec<SystemRow>,
         /// What it is called, or [`None`] for an unnamed entity.
         name: Option<EntityName>,
     },
 
-    /// Remove `entity` from the scene, component, name and all.
+    /// Remove `entity` from the scene, every component and its name.
     Delete {
         /// Whose.
         entity: SceneEntityId,
+    },
+
+    /// Give `entity`, which `system` does not hold, the component `row` spells
+    /// there.
+    Attach {
+        /// Whose.
+        entity: SceneEntityId,
+        /// The scene system it joins.
+        system: String,
+        /// The component, as one chunk row's RON text.
+        row: String,
+    },
+
+    /// Take `entity`'s component out of `system`, leaving every other one —
+    /// refused for its last system (see the [module docs](self)).
+    Detach {
+        /// Whose.
+        entity: SceneEntityId,
+        /// The scene system it leaves.
+        system: String,
     },
 
     /// Name `entity` `name`, or take its name away with [`None`].
@@ -153,9 +191,19 @@ pub enum EditCommand {
     Batch(Vec<EditCommand>),
 }
 
+/// One system's component of an entity: the system, and the component as one
+/// chunk row's RON text — what a spawn carries per system.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SystemRow {
+    /// The scene system whose chunk file the row is written into.
+    pub system: String,
+    /// The component, as [`crcbl::scene::scn::SystemChunk::row`] spells it.
+    pub row: String,
+}
+
 /// Writes `value` into the leaf `path` names inside `component` — `entity`'s
-/// component, which the caller has already resolved — and hands back the
-/// [`EditCommand::SetProperty`] that undoes it.
+/// component in `system`, which the caller has already resolved — and hands
+/// back the [`EditCommand::SetProperty`] that undoes it.
 ///
 /// The inverse carries **the value that was replaced**, read out of the
 /// component immediately before the write. So an undo restores the bits that
@@ -171,6 +219,7 @@ pub enum EditCommand {
 pub fn set_property(
     component: &mut dyn Reflect,
     entity: SceneEntityId,
+    system: &str,
     path: &str,
     value: &Value,
 ) -> Result<EditCommand, PathError> {
@@ -178,6 +227,7 @@ pub fn set_property(
     set_path(component, path, value)?;
     Ok(EditCommand::SetProperty {
         entity,
+        system: system.to_owned(),
         path: path.to_owned(),
         value: replaced,
     })
@@ -343,7 +393,7 @@ impl UndoLog {
     }
 }
 
-/// Whether `a` and `b` set the same leaves of the same entities: two property
+/// Whether `a` and `b` set the same leaves of the same components: two property
 /// sets of one leaf, or two batches of such sets naming the same leaves in the
 /// same order — a plane drag writes two leaves a frame and a uniform scale
 /// three, as one batch each.
@@ -352,15 +402,17 @@ fn same_leaves(a: &EditCommand, b: &EditCommand) -> bool {
         (
             EditCommand::SetProperty {
                 entity: first,
+                system: this,
                 path: here,
                 ..
             },
             EditCommand::SetProperty {
                 entity: second,
+                system: that,
                 path: there,
                 ..
             },
-        ) => first == second && here == there,
+        ) => first == second && this == that && here == there,
         (EditCommand::Batch(first), EditCommand::Batch(second)) => {
             first.len() == second.len() && first.iter().zip(second).all(|(a, b)| same_leaves(a, b))
         }
@@ -395,6 +447,7 @@ mod tests {
     fn set(path: &str, value: Value) -> EditCommand {
         EditCommand::SetProperty {
             entity: SceneEntityId(3),
+            system: "bricks".to_owned(),
             path: path.to_owned(),
             value,
         }
@@ -419,13 +472,14 @@ mod tests {
             }
             let EditCommand::SetProperty {
                 entity,
+                system,
                 path,
                 value,
             } = self
             else {
                 panic!("this module's tests apply property commands and batches of them: {self:?}");
             };
-            set_property(component, *entity, path, value)
+            set_property(component, *entity, system, path, value)
         }
     }
 
@@ -670,6 +724,24 @@ mod tests {
             brick(),
             "the undo did not reach the value before the drag"
         );
+    }
+
+    /// **A gesture's writes to one path of two systems' components are two
+    /// entries**: one entity's block and its body each have a `position`, and
+    /// folding the second into the first would lose the first's inverse.
+    #[test]
+    fn writes_to_one_path_in_two_systems_do_not_fold() {
+        let mut log = UndoLog::new();
+        for system in ["bricks", "bodies"] {
+            let command = EditCommand::SetProperty {
+                entity: SceneEntityId(3),
+                system: system.to_owned(),
+                path: "position.0".to_owned(),
+                value: Value::Float(1.0),
+            };
+            log.record_in(command.clone(), command, Gesture(1));
+        }
+        assert_eq!(log.len(), 2, "a write to another system folded");
     }
 
     /// An empty log has nothing to walk in either direction.

@@ -657,16 +657,21 @@ impl<S: Shell + ?Sized> Editor<S> {
         )
     }
 
-    /// The three numbers `field.0` to `field.2` of `id`'s component hold, or
-    /// [`None`] where it has no such field.
+    /// The three numbers `field.0` to `field.2` of the component placing `id`
+    /// hold ([`Document::placing_system`]), or [`None`] where nothing places it
+    /// or it has no such field.
     ///
     /// **By name, through the component's reflected paths** — the way an arrow
     /// key finds `position` — so any registered component with the field has
-    /// handles for it and no component type is named here.
+    /// handles for it and no component type is named here. The placing
+    /// component's, so the handles move what the picture is drawn from.
     fn field_values(&mut self, id: SceneEntityId, field: &str) -> Option<[f64; 3]> {
+        let system = self.document.placing_system(id)?;
         let mut values = [0.0; 3];
         for (index, value) in values.iter_mut().enumerate() {
-            let Ok(Value::Float(read)) = self.document.read(id, &format!("{field}.{index}")) else {
+            let Ok(Value::Float(read)) =
+                self.document.read(id, &system, &format!("{field}.{index}"))
+            else {
                 return None;
             };
             *value = read;
@@ -729,10 +734,16 @@ impl<S: Shell + ?Sized> Editor<S> {
         let Some(writes) = drag.writes(&self.pointer_at(at), snap) else {
             return;
         };
+        // Read each move rather than held by the drag: nothing but the drag
+        // edits the scene while it runs, so the answer cannot move under it.
+        let Some(system) = self.document.placing_system(drag.entity) else {
+            return;
+        };
         let commands: Vec<EditCommand> = writes
             .into_iter()
             .map(|write| EditCommand::SetProperty {
                 entity: drag.entity,
+                system: system.clone(),
                 path: write.path,
                 value: Value::Float(write.value),
             })
@@ -800,13 +811,16 @@ impl<S: Shell + ?Sized> Editor<S> {
                 Tone::Info,
             );
         }
-        let kind = self.document.component(id).map_or("entity", |component| {
-            component
-                .type_name()
-                .rsplit("::")
-                .next()
-                .unwrap_or("entity")
-        });
+        let placing = self.document.placing_system(id);
+        let kind = placing
+            .and_then(|system| self.document.component(id, &system))
+            .map_or("entity", |component| {
+                component
+                    .type_name()
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or("entity")
+            });
         (
             format!(
                 "Scale: this {kind} has no `{}` field, so it has nothing to resize",
@@ -884,6 +898,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                     .field_target()
                     .map_or(PasteTarget::Entities, |field| PasteTarget::Field {
                         entity: field.entity,
+                        system: field.system.clone(),
                         path: field.path.clone(),
                     });
                 if let Err(error) = self.paste.ask(self.shell.as_mut(), self.window, target) {
@@ -1011,7 +1026,9 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// system that wants a recent input event first.
     fn copy(&mut self) -> Result<(), EditError> {
         if let Some(field) = self.panels.field_target().cloned() {
-            let text = self.document.copy_field(field.entity, &field.path)?;
+            let text = self
+                .document
+                .copy_field(field.entity, &field.system, &field.path)?;
             self.offer(&[ClipboardOffer::text(&text)]);
             self.panels
                 .set_status(format!("Copied `{}`: {text}", field.path), Tone::Info);
@@ -1047,7 +1064,11 @@ impl<S: Shell + ?Sized> Editor<S> {
                     self.document.select(Some(first));
                 }
             }),
-            PasteTarget::Field { entity, path } => self.document.paste_field(*entity, path, text),
+            PasteTarget::Field {
+                entity,
+                system,
+                path,
+            } => self.document.paste_field(*entity, system, path, text),
         };
         if let Err(error) = outcome {
             crcbl::log::warn!("editor: {error}");
@@ -1072,19 +1093,28 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// **The command is built from what the field currently holds**, read back
     /// through the same dotted path it will be written through — so a nudge is
     /// relative without the command being relative, which is what keeps an
-    /// inverse exact.
+    /// inverse exact. It moves the component placing the entity
+    /// ([`Document::placing_system`]), as the gizmo does.
     fn nudge(&mut self, axis: usize, delta: f64) -> Result<(), EditError> {
         let Some(entity) = self.document.selected() else {
             crcbl::log::info!("editor: nothing is selected");
             return Ok(());
         };
+        let Some(system) = self.document.placing_system(entity) else {
+            self.panels.set_status(
+                format!("#{entity} is not a thing in space, so nothing moves it"),
+                Tone::Info,
+            );
+            return Ok(());
+        };
         let path = format!("position.{axis}");
-        let Value::Float(was) = self.document.read(entity, &path)? else {
+        let Value::Float(was) = self.document.read(entity, &system, &path)? else {
             crcbl::log::warn!("editor: {path} is not a number");
             return Ok(());
         };
         self.document.apply(EditCommand::SetProperty {
             entity,
+            system,
             path,
             value: Value::Float(was + delta),
         })

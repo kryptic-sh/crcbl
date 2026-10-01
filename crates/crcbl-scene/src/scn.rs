@@ -36,6 +36,28 @@
 //! entities. So the file owns a [`SceneEntityId`], and [`IdMap`] is the
 //! correspondence between the two for as long as the scene is loaded.
 //!
+//! # One entity, several systems
+//!
+//! A [`SceneEntityId`] may appear in more than one chunk, and every row it
+//! has, in every chunk, belongs to **one** [`crcbl_ecs::Entity`]: a block's
+//! box in one system's chunk and its body in another's are one thing in the
+//! world. The first chunk in manifest order that spells an id spawns its
+//! entity, and each later chunk attaches its row to that entity. One pass, in
+//! manifest order, rather than a first pass collecting every id and a second
+//! spawning them: a chunk's rows are typed by its codec, so a second pass would
+//! need every chunk's rows held type-erased in between, and the single pass
+//! already makes an entity's bits a function of the files — the order the ids
+//! first appear in, chunk by chunk.
+//!
+//! Within one chunk an id still appears at most once
+//! ([`ScnError::DuplicateId`]): a system holds one component per entity, so a
+//! second row would silently replace the first. For the same reason the
+//! manifest may name a system only once ([`ScnError::RepeatedSystem`]). The
+//! writer needs nothing new: each chunk writes its own system's rows by id, so
+//! an entity in two systems is a row in each of two files. A scene written
+//! before this was allowed is one of the new form, which is why
+//! [`Scene::FORMAT`] did not move.
+//!
 //! # Registration, and why `crcbl-ecs` gains nothing
 //!
 //! A chunk file holds one system's component array, so reading it needs that
@@ -67,7 +89,7 @@
 //!   "Scaling" subsection.
 
 use std::any::type_name;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::marker::PhantomData;
 use std::path::Path;
@@ -231,9 +253,10 @@ impl IdMap {
 
     /// Records the file's own id for a freshly spawned entity.
     ///
-    /// Refuses a second use of one id: two chunk files that both claim `7` would
-    /// otherwise silently lose an entity out of the map, and it would come back
-    /// as a save that dropped a row.
+    /// Refuses an id already bound: filing a second entity under it would
+    /// silently lose the first out of the map, and it would come back as a save
+    /// that dropped a row. A chunk read attaches to an id an earlier chunk
+    /// bound rather than binding it again ([`SystemChunk::read`]).
     fn bind(&mut self, key: &str, id: SceneEntityId, entity: Entity) -> Result<(), ScnError> {
         if self.to_entity.contains_key(&id) {
             return Err(ScnError::DuplicateId {
@@ -334,7 +357,9 @@ pub trait SystemChunk: fmt::Debug {
     /// The system's name, which is the manifest entry and the file stem.
     fn name(&self) -> &str;
 
-    /// Spawns `text`'s entities into `world` and records their ids in `ids`.
+    /// Attaches `text`'s rows in `world`: each to the entity `ids` already
+    /// files its id under — an earlier chunk's — or else to one spawned for it
+    /// and recorded in `ids`. See the [module docs](self).
     ///
     /// `key` is the asset key the text came from, so a refusal can say which
     /// file it is about.
@@ -342,8 +367,8 @@ pub trait SystemChunk: fmt::Debug {
     /// # Errors
     ///
     /// [`ScnError`] if the text is not this system's chunk, if the world holds
-    /// no system of the right name and component type, or if an id is claimed
-    /// twice.
+    /// no system of the right name and component type, or if the chunk spells
+    /// one id twice.
     fn read(
         &self,
         world: &mut World,
@@ -389,6 +414,40 @@ pub trait SystemChunk: fmt::Debug {
     /// system's component, or [`ScnError::NoSystem`] if the world holds no such
     /// system. Nothing is attached when it refuses.
     fn attach_row(&self, world: &mut World, entity: Entity, text: &str) -> Result<(), ScnError>;
+
+    /// Takes `entity`'s component out of this system and hands it back as one
+    /// [`row`](Self::row)'s text, or [`None`] — changing nothing — if this
+    /// system does not hold `entity`.
+    ///
+    /// The entity stays alive and keeps every other system's component: what
+    /// an edit that detaches one system's data does, and what
+    /// [`attach_row`](Self::attach_row) puts back.
+    ///
+    /// # Errors
+    ///
+    /// [`ScnError::NoSystem`] if the world holds no such system, or
+    /// [`ScnError::Write`] if the component's own `Serialize` fails — in which
+    /// case the component is left attached.
+    fn detach_row(&self, world: &mut World, entity: Entity) -> Result<Option<String>, ScnError>;
+}
+
+/// `value` as one chunk row's text — the component alone, in compact RON —
+/// which is what [`SystemChunk::row`] hands out and
+/// [`SystemChunk::attach_row`] reads back.
+///
+/// Public so that a component made somewhere other than a world — a tool
+/// starting a new row from the type's `Default` — is spelled exactly as a row
+/// read out of one is.
+///
+/// # Errors
+///
+/// [`ScnError::Write`], naming `system`, if the component's own `Serialize`
+/// fails.
+pub fn row_text<T: Serialize>(system: &str, value: &T) -> Result<String, ScnError> {
+    ron::to_string(value).map_err(|error| ScnError::Write {
+        system: system.to_owned(),
+        message: error.to_string(),
+    })
 }
 
 /// The codec for a `System<T>` registered under `name`.
@@ -473,17 +532,33 @@ where
             });
         }
 
-        // Spawn first, attach second: `World::spawn` and the borrow of the
-        // system out of the schedule are both `&mut world`, so they cannot be
-        // held at once.
-        let mut spawned = Vec::with_capacity(file.entities.len());
+        // Every row resolved to its entity first, attached second:
+        // `World::spawn` and the borrow of the system out of the schedule are
+        // both `&mut world`, so they cannot be held at once.
+        let mut seen = BTreeSet::new();
+        let mut rows = Vec::with_capacity(file.entities.len());
         for (id, data) in file.entities {
-            let entity = world.spawn();
-            ids.bind(key, id, entity)?;
-            spawned.push((entity, data));
+            // Checked here and not by the map: an id an earlier chunk bound is
+            // this chunk's to attach to, and only a repeat within one chunk
+            // would replace a row.
+            if !seen.insert(id) {
+                return Err(ScnError::DuplicateId {
+                    key: key.to_string(),
+                    id,
+                });
+            }
+            let entity = match ids.entity(id) {
+                Some(entity) => entity,
+                None => {
+                    let entity = world.spawn();
+                    ids.bind(key, id, entity)?;
+                    entity
+                }
+            };
+            rows.push((entity, data));
         }
         let system = system_named::<T>(world, &self.name)?;
-        for (entity, data) in spawned {
+        for (entity, data) in rows {
             system.attach(entity, data);
         }
         Ok(())
@@ -520,18 +595,23 @@ where
         let Some(data) = system.get(entity) else {
             return Ok(None);
         };
-        ron::to_string(data)
-            .map(Some)
-            .map_err(|error| ScnError::Write {
-                system: self.name.clone(),
-                message: error.to_string(),
-            })
+        row_text(&self.name, data).map(Some)
     }
 
     fn attach_row(&self, world: &mut World, entity: Entity, text: &str) -> Result<(), ScnError> {
         let data: T = ron::from_str(text).map_err(|error| ScnError::parse(&self.name, &error))?;
         system_named::<T>(world, &self.name)?.attach(entity, data);
         Ok(())
+    }
+
+    fn detach_row(&self, world: &mut World, entity: Entity) -> Result<Option<String>, ScnError> {
+        // Written before it is taken out, so a component whose `Serialize`
+        // refuses stays where it was rather than going with no row to show.
+        let Some(row) = self.row(world, entity)? else {
+            return Ok(None);
+        };
+        system_named::<T>(world, &self.name)?.detach(entity);
+        Ok(Some(row))
     }
 }
 
@@ -613,8 +693,9 @@ impl Scene {
     /// a key that will not read, text that is not RON or is RON that is not
     /// this format (an unknown field included — every file type sets
     /// `deny_unknown_fields`), a `format` this build does not know, a manifest
-    /// entry with no codec in `chunks`, a chunk whose declared system is not
-    /// the one its file is named for, or a names file naming an id no chunk
+    /// naming a system twice or naming one with no codec in `chunks`, a chunk
+    /// whose declared system is not the one its file is named for, a chunk
+    /// spelling one id twice, or a names file naming an id no chunk
     /// holds, an id twice, nothing at all, or text that is not an
     /// [`EntityName`].
     pub fn load(
@@ -643,6 +724,19 @@ impl Scene {
         let env_key = join_key(prefix, "env.ron");
         let text = read_text(source, &env_key)?;
         let env: Env = ron::from_str(&text).map_err(|error| ScnError::parse(&env_key, &error))?;
+
+        // Before any chunk is read: a system read twice would attach its rows
+        // over themselves, which an entity spanning two systems makes
+        // indistinguishable from a scene that means it.
+        let mut listed = BTreeSet::new();
+        for name in &header.systems {
+            if !listed.insert(name.as_str()) {
+                return Err(ScnError::RepeatedSystem {
+                    key: header_key,
+                    system: name.clone(),
+                });
+            }
+        }
 
         let mut ids = IdMap::new();
         for name in &header.systems {
@@ -936,13 +1030,28 @@ pub enum ScnError {
         component: &'static str,
     },
 
-    /// Two rows claim one [`SceneEntityId`].
+    /// Two rows of one file claim one [`SceneEntityId`]: two rows of a chunk,
+    /// which would be two components of one system for one entity, or two
+    /// names in a names file.
+    ///
+    /// The same id in **two** chunks is not this: it is one entity in two
+    /// systems — see the [module docs](self).
     #[error("`{key}` reuses the scene entity id {id}")]
     DuplicateId {
         /// The chunk's key.
         key: String,
         /// The id claimed twice.
         id: SceneEntityId,
+    },
+
+    /// The header's manifest names one system twice, so its chunk would be
+    /// read over itself.
+    #[error("`{key}` lists the system `{system}` twice")]
+    RepeatedSystem {
+        /// The header's key.
+        key: String,
+        /// The system named twice.
+        system: String,
     },
 
     /// An entity attached to a manifest system was never given an id, so the

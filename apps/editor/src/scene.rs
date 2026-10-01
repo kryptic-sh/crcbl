@@ -125,6 +125,21 @@ impl ComponentHash for Block {
     }
 }
 
+/// Half the side of the cube a new block is.
+const NEW_BLOCK_HALF_EXTENT: f64 = 0.5;
+
+/// A cube standing on the ground at the origin, its half extents
+/// `NEW_BLOCK_HALF_EXTENT` — what attaching a block to an entity starts it
+/// as, which is why `Registry::register` asks for one.
+impl Default for Block {
+    fn default() -> Self {
+        Self {
+            position: [0.0, NEW_BLOCK_HALF_EXTENT, 0.0],
+            half_extents: [NEW_BLOCK_HALF_EXTENT; 3],
+        }
+    }
+}
+
 /// A block's own box, which is what its collider already is: the two fields
 /// spell a centre and half extents directly.
 impl Placement for Block {
@@ -305,6 +320,7 @@ mod tests {
         document
             .apply(crate::command::EditCommand::SetProperty {
                 entity: crcbl::scene::scn::SceneEntityId(4),
+                system: "plots".to_owned(),
                 path: "position.2".to_owned(),
                 value: crcbl::reflect::Value::Float(8.0),
             })

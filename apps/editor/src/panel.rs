@@ -73,12 +73,15 @@
 //!
 //! # An inspector edit is a command
 //!
-//! [`Ui::inspector_with`] edits the component and reports each write as a
-//! `FieldEdit`. Each becomes an [`EditCommand`](crate::command::EditCommand)
+//! The inspector draws a section per system holding the selected entity
+//! (`inspector`'s module docs), each through [`Ui::inspector_with`], which
+//! edits that component and reports each write as a `FieldEdit`. Each becomes
+//! an [`EditCommand`](crate::command::EditCommand) on that section's system
 //! through [`Document::record_edit`], which rewinds the panel's own write first
 //! so the inverse the log records is exact — that method's docs say why. Undo,
 //! redo, the dirty marker and the collider all follow, because they follow
-//! every command.
+//! every command. A section's remove button and the add buttons under the
+//! sections are [`Document::detach`] and [`Document::attach`].
 //!
 //! # What the outliner costs
 //!
@@ -94,9 +97,9 @@ use crcbl::math::Vec2;
 use crcbl::scene::scn::SceneEntityId;
 use crcbl::ui::style::Declaration;
 use crcbl::ui::tree::{
-    AvailableSpace, ClipboardRequest, DockLayout, Engagement, FieldEdit, InspectorOptions,
-    LengthAuto, NavInput, NodeKey, OUTLINER_ROW_HEIGHT, OutlinerId, OutlinerOptions, OutlinerState,
-    Overrides, SelectMode, TextInput, TextInputOptions, Ui,
+    AvailableSpace, ClipboardRequest, DockLayout, Engagement, FieldEdit, LengthAuto, NavInput,
+    NodeKey, OUTLINER_ROW_HEIGHT, OutlinerId, OutlinerOptions, OutlinerState, Overrides,
+    SelectMode, TextInput, TextInputOptions, Ui,
 };
 use crcbl::ui::{DrawList, FontAtlas, PointerInput, TextureId};
 
@@ -104,6 +107,8 @@ use crate::command::Gesture;
 use crate::document::{Document, EditError, PlayState};
 use crate::keys::Action;
 use crate::layout::{self, PANE_MIN};
+
+mod inspector;
 
 /// The name the viewport pane's picture goes by in the panels' draw list —
 /// see the module docs. The only texture the editor draws, so the first
@@ -184,7 +189,26 @@ const EDITOR_CSS: &str = "
 
 .outliner-rename { flex-grow: 1; min-width: 0; }
 
-#props { flex-grow: 1; min-width: 0; min-height: 0; overflow: scroll; }
+#props {
+  flex-direction: column;
+  flex-grow: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: scroll;
+}
+
+.inspector-section, .inspector-add { flex-direction: column; flex-shrink: 0; }
+
+.section-head {
+  align-items: center;
+  padding: 2px 4px;
+  background: #1b1f27;
+  color: #9aa3b2;
+}
+
+.section-title { flex-grow: 1; min-width: 0; }
+
+.inspector-add .section-title { padding: 2px 4px; color: #9aa3b2; }
 ";
 
 /// Where a system's row sits in an [`OutlinerId`], above every entity's.
@@ -232,6 +256,8 @@ pub struct PanelInput {
 pub struct FieldTarget {
     /// Whose component the inspector was drawn for.
     pub entity: SceneEntityId,
+    /// Which of its components: the system of the section the leaf is in.
+    pub system: String,
     /// The leaf's path inside it.
     pub path: String,
 }
@@ -295,9 +321,11 @@ pub struct Panels {
     outliner_key: Option<NodeKey>,
     /// The inspector block, as the last frame laid it out.
     props_key: Option<NodeKey>,
-    /// The field a held pointer is dragging and the gesture its edits share —
-    /// see [`Panels::apply_edits`].
-    field_gesture: Option<(SceneEntityId, String, Gesture)>,
+    /// The inspector's sections and add buttons, as the last frame built them.
+    inspector: (Vec<inspector::Section>, Vec<(String, NodeKey)>),
+    /// The field a held pointer is dragging — its system and path — and the
+    /// gesture its edits share; see [`Panels::apply_edits`].
+    field_gesture: Option<(SceneEntityId, String, String, Gesture)>,
     /// The line under the panes: what the editor last had to say, and whether
     /// it is a warning — see [`Panels::set_status`].
     status: (String, Tone),
@@ -354,6 +382,7 @@ impl Panels {
             viewport: (Vec2::ZERO, Vec2::ZERO),
             outliner_key: None,
             props_key: None,
+            inspector: (Vec::new(), Vec::new()),
             field_gesture: None,
             status: (READY.to_owned(), Tone::Info),
             status_key: None,
@@ -574,6 +603,42 @@ impl Panels {
         self.props_key
     }
 
+    /// The systems of the inspector's sections, in the order the last frame
+    /// drew them: the selection's systems, in manifest order.
+    #[must_use]
+    pub fn section_systems(&self) -> Vec<String> {
+        self.inspector
+            .0
+            .iter()
+            .map(|section| section.system.clone())
+            .collect()
+    }
+
+    /// The rows of the inspector's `index`th section — its inspector block —
+    /// as the last frame laid it out, or [`None`] past the last section.
+    #[must_use]
+    pub fn section_fields(&self, index: usize) -> Option<NodeKey> {
+        self.inspector.0.get(index).map(|section| section.fields)
+    }
+
+    /// The remove button of the section the last frame drew for `system`, if
+    /// it drew one — it draws none while the selection is in one system.
+    #[must_use]
+    pub fn remove_button(&self, system: &str) -> Option<NodeKey> {
+        self.inspector
+            .0
+            .iter()
+            .find(|section| section.system == system)
+            .and_then(|section| section.remove)
+    }
+
+    /// The add buttons under the sections, each with the system it attaches,
+    /// as the last frame laid them out.
+    #[must_use]
+    pub fn add_buttons(&self) -> Vec<(String, NodeKey)> {
+        self.inspector.1.clone()
+    }
+
     /// Which rows the outliner shows as selected.
     #[cfg(test)]
     pub(crate) fn selected_rows(&self) -> Vec<OutlinerId> {
@@ -611,14 +676,15 @@ impl Panels {
         let extent = Vec2::new(input.extent.0 as f32, input.extent.1 as f32);
         let selected = document.selected();
         let play = document.play_state();
+        let selected_label = selected.map_or_else(String::new, |id| {
+            label_of(&self.outline, &self.names, entity_row(id))
+        });
         let mut toolbar = None;
         let mut toolbar_key = None;
-        let mut edits: Vec<FieldEdit> = Vec::new();
         let mut viewport = None;
         let mut status_key = None;
         let mut outliner_key = None;
-        let mut props = None;
-        let mut field = None;
+        let mut built = inspector::Built::default();
         let mut rename_input = None;
         let mut double_clicked = None;
 
@@ -674,9 +740,8 @@ impl Panels {
                         double_clicked = outliner.double_clicked().and_then(entity_of);
                     }
                     layout::INSPECTOR => {
-                        props = Some(build_inspector(
-                            ui, document, selected, overrides, &mut edits, &mut field,
-                        ));
+                        built =
+                            inspector::build(ui, document, selected, &selected_label, overrides);
                     }
                     other => {
                         // Unreachable while `crate::layout::load` refuses a
@@ -717,15 +782,38 @@ impl Panels {
         self.outliner_key = outliner_key;
         self.status_key = status_key;
         self.toolbar_key = toolbar_key;
-        self.props_key = props.flatten();
+        let inspector::Built {
+            props,
+            sections,
+            adds,
+            edits,
+            field,
+            change,
+        } = built;
+        self.props_key = props;
+        self.inspector = (sections, adds);
         self.field = selected
             .zip(field)
-            .map(|(entity, path)| FieldTarget { entity, path });
+            .map(|(entity, (system, path))| FieldTarget {
+                entity,
+                system,
+                path,
+            });
         if let (Some(key), Some(id)) = (outliner_key, self.reveal.take()) {
             self.reveal_row(key, id);
         }
 
         let commands = self.apply_edits(document, selected, &edits, input.pointer);
+        if let (Some(id), Some(change)) = (selected, change) {
+            let outcome = match &change {
+                inspector::Change::Attach(system) => document.attach(id, system),
+                inspector::Change::Detach(system) => document.detach(id, system),
+            };
+            if let Err(error) = outcome {
+                crcbl::log::warn!("editor: {error}");
+                self.set_status(error.to_string(), Tone::Warning);
+            }
+        }
         self.follow_outliner(document);
         self.follow_rename(document, rename_input);
         if let Some(id) = double_clicked
@@ -848,24 +936,33 @@ impl Panels {
         &mut self,
         document: &mut Document,
         selected: Option<SceneEntityId>,
-        edits: &[FieldEdit],
+        edits: &[(String, FieldEdit)],
         pointer: PointerInput,
     ) -> usize {
         let held = pointer.down || pointer.released;
         let mut applied = 0;
         if let Some(id) = selected {
-            for edit in edits {
+            for (system, edit) in edits {
                 let gesture = held.then(|| match &self.field_gesture {
-                    Some((entity, path, gesture)) if *entity == id && *path == edit.path => {
+                    Some((entity, held_system, path, gesture))
+                        if *entity == id && held_system == system && *path == edit.path =>
+                    {
                         *gesture
                     }
                     _ => {
                         let gesture = document.begin_gesture();
-                        self.field_gesture = Some((id, edit.path.clone(), gesture));
+                        self.field_gesture = Some((id, system.clone(), edit.path.clone(), gesture));
                         gesture
                     }
                 });
-                match document.record_edit(id, &edit.path, &edit.before, &edit.after, gesture) {
+                match document.record_edit(
+                    id,
+                    system,
+                    &edit.path,
+                    &edit.before,
+                    &edit.after,
+                    gesture,
+                ) {
                     Ok(()) => applied += 1,
                     Err(error) => {
                         crcbl::log::warn!("editor: {error}");
@@ -1027,46 +1124,6 @@ fn build_outliner(
     }
 }
 
-/// The inspector pane: a title naming what is selected, and its component's
-/// rows — or a note, when nothing is. `field` is set to the path of the leaf
-/// a clipboard key means, if there is one; see the module docs.
-fn build_inspector(
-    ui: &mut Ui,
-    document: &mut Document,
-    selected: Option<SceneEntityId>,
-    overrides: &Overrides,
-    edits: &mut Vec<FieldEdit>,
-    field: &mut Option<String>,
-) -> Option<NodeKey> {
-    let mut key = None;
-    ui.block(".editor-panel", &[], |ui| {
-        let Some(id) = selected else {
-            ui.span(".editor-title", "Properties", &[]);
-            ui.span(".editor-note", "Nothing is selected", &[]);
-            return;
-        };
-        let Some(component) = document.component(id) else {
-            ui.span(".editor-title", "Properties", &[]);
-            let note = format!("#{id} has no editable component");
-            ui.span(".editor-note", note.as_str(), &[]);
-            return;
-        };
-        let title = format!("#{id} {}", component.type_name());
-        ui.span(".editor-title", title.as_str(), &[]);
-        let options = InspectorOptions {
-            overrides: Some(overrides),
-            ..InspectorOptions::default()
-        };
-        let inspection = ui.inspector_with("#props", component, &options);
-        key = Some(inspection.response.key);
-        edits.extend(inspection.edits);
-        // Focus first: the keyboard's own target is the one a key means, and
-        // the pointer only stands in when nothing in the inspector has it.
-        *field = inspection.focused.or(inspection.hovered);
-    });
-    key
-}
-
 /// Every named entity's name, as the outliner shows it.
 fn names_of(document: &Document) -> BTreeMap<SceneEntityId, String> {
     document
@@ -1135,6 +1192,7 @@ mod tests {
 
     use crate::layout::default_layout;
 
+    mod inspector;
     mod naming;
 
     /// The framebuffer every page here is laid out over: the size the editor's
@@ -1249,13 +1307,17 @@ mod tests {
             (min + max) * 0.5
         }
 
-        /// The drag-value editing component `axis` of the inspector's `row`th
-        /// row: a vector row is a label span and then one `.inspector-axis`
-        /// block per axis, each a label span and then its widget.
+        /// The drag-value editing component `axis` of the `row`th row of the
+        /// inspector's first section: a vector row is a label span and then
+        /// one `.inspector-axis` block per axis, each a label span and then
+        /// its widget.
         fn axis_field(&self, row: usize, axis: usize) -> NodeKey {
-            let props = self.panels.props_key().expect("the inspector was built");
+            let fields = self
+                .panels
+                .section_fields(0)
+                .expect("the inspector drew a section");
             let ui = self.panels.ui();
-            let rows = ui.child_keys(props);
+            let rows = ui.child_keys(fields);
             let cells = ui.child_keys(rows[row]);
             assert_eq!(
                 cells.len(),

@@ -168,6 +168,7 @@ fn edits_before_play_survive_it_and_undo_still_reverts_them() {
     document
         .apply(EditCommand::SetProperty {
             entity: STEP,
+            system: crate::scene::BLOCKS.to_owned(),
             path: "position.1".to_owned(),
             value: Value::Float(2.5),
         })
@@ -213,6 +214,7 @@ fn every_edit_is_refused_in_play_mode() {
     document
         .apply(EditCommand::SetProperty {
             entity: STEP,
+            system: crate::scene::BLOCKS.to_owned(),
             path: "position.2".to_owned(),
             value: Value::Float(1.0),
         })
@@ -231,6 +233,7 @@ fn every_edit_is_refused_in_play_mode() {
                 "apply",
                 document.apply(EditCommand::SetProperty {
                     entity: STEP,
+                    system: crate::scene::BLOCKS.to_owned(),
                     path: "position.0".to_owned(),
                     value: Value::Float(9.0),
                 }),
@@ -240,6 +243,7 @@ fn every_edit_is_refused_in_play_mode() {
                 document.apply_in(
                     EditCommand::SetProperty {
                         entity: STEP,
+                        system: crate::scene::BLOCKS.to_owned(),
                         path: "position.0".to_owned(),
                         value: Value::Float(9.0),
                     },
@@ -248,10 +252,21 @@ fn every_edit_is_refused_in_play_mode() {
             }),
             ("record_edit", {
                 // What a panel does: write the field, then report it.
-                let before = document.read(STEP, "position.0").expect("an x");
-                let component = document.component(STEP).expect("a block");
+                let before = document
+                    .read(STEP, crate::scene::BLOCKS, "position.0")
+                    .expect("an x");
+                let component = document
+                    .component(STEP, crate::scene::BLOCKS)
+                    .expect("a block");
                 set_path(component, "position.0", &Value::Float(9.0)).expect("an x");
-                document.record_edit(STEP, "position.0", &before, &Value::Float(9.0), None)
+                document.record_edit(
+                    STEP,
+                    crate::scene::BLOCKS,
+                    "position.0",
+                    &before,
+                    &Value::Float(9.0),
+                    None,
+                )
             }),
             ("delete", document.delete(STEP)),
             ("duplicate", document.duplicate(STEP).map(drop)),

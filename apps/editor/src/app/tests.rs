@@ -144,7 +144,7 @@ fn an_action_applied_through_the_loop_records_a_command() {
     editor.document_mut().select(Some(SceneEntityId(0)));
     let before = editor
         .document_mut()
-        .read(SceneEntityId(0), "position.0")
+        .read(SceneEntityId(0), crate::scene::BLOCKS, "position.0")
         .expect("a brick has an x");
 
     editor.act(&Action::Nudge { axis: 0, sign: 1.0 });
@@ -156,7 +156,7 @@ fn an_action_applied_through_the_loop_records_a_command() {
     assert_eq!(
         editor
             .document_mut()
-            .read(SceneEntityId(0), "position.0")
+            .read(SceneEntityId(0), crate::scene::BLOCKS, "position.0")
             .expect("a brick has an x"),
         Value::Float(was + NUDGE_M),
     );
@@ -555,11 +555,11 @@ fn a_copied_entity_pastes_back_through_the_clipboard() {
     assert_eq!(
         editor
             .document_mut()
-            .read(pasted, "position.1")
+            .read(pasted, crate::scene::BLOCKS, "position.1")
             .expect("pasted"),
         editor
             .document_mut()
-            .read(SceneEntityId(2), "position.1")
+            .read(SceneEntityId(2), crate::scene::BLOCKS, "position.1")
             .expect("held"),
     );
 
@@ -791,7 +791,7 @@ fn typing_in_a_field_does_not_nudge_the_selection() {
         .find(|id| {
             editor
                 .document_mut()
-                .component(*id)
+                .component(*id, "surfaces")
                 .is_some_and(|component| component.type_name().ends_with("Surface"))
         })
         .expect("puppet's blockout holds a surface");
@@ -800,8 +800,11 @@ fn typing_in_a_field_does_not_nudge_the_selection() {
 
     // Click into the `Label` field: the first inspector row, whose widget
     // is the node built straight after its label span.
-    let props = editor.panels.props_key().expect("the inspector was built");
-    let label_row = editor.panels.ui().child_keys(props)[0];
+    let fields = editor
+        .panels
+        .section_fields(0)
+        .expect("the inspector drew a section");
+    let label_row = editor.panels.ui().child_keys(fields)[0];
     let field = editor.panels.ui().child_keys(label_row)[1];
     let on_field = centre(&editor, field);
     click(&mut editor, on_field);
@@ -810,7 +813,10 @@ fn typing_in_a_field_does_not_nudge_the_selection() {
         "the first inspector row is not a text field, so this proves nothing",
     );
 
-    let before = editor.document_mut().read(selected, "position.0").unwrap();
+    let before = editor
+        .document_mut()
+        .read(selected, "surfaces", "position.0")
+        .unwrap();
     let commands = editor.document().log().position();
     for key in [
         KeyCode::ArrowLeft,
@@ -823,7 +829,10 @@ fn typing_in_a_field_does_not_nudge_the_selection() {
         tap(&mut editor, key);
     }
     assert_eq!(
-        editor.document_mut().read(selected, "position.0").unwrap(),
+        editor
+            .document_mut()
+            .read(selected, "surfaces", "position.0")
+            .unwrap(),
         before,
         "an arrow typed into a field moved the entity",
     );

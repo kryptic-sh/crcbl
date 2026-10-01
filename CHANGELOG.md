@@ -16,6 +16,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl::registry::Registry` answers per system.** `component(world, entity)`
+  is `component(world, system, entity)`: one entity may now hold a component in
+  several systems (see Added), so a caller names the one it means — the system
+  an edit, a read or an inspector section is about. `system_of` is gone;
+  `systems_of` returns every scene system holding the entity, in name order, and
+  a caller that wanted "the" system takes the one it needs from it, or
+  `placing_system` for the one whose component places the entity.
+  **`Registry::register` requires `T: Default`** as well, the value a tool
+  attaching that component to an entity starts it at, so every registered
+  component needs a `Default` impl (breakout's `Brick`, puppet's `Surface`,
+  `Spawn` and `Sun`, towers' `Waypoint` and `Plot` and the editor's `Block` have
+  one).
+
+- **`crcbl::scene::scn::SystemChunk` has a required `detach_row`** (see Added);
+  an implementation outside `crcbl-scene` must add it. `chunk_of`'s codec, the
+  only one in the workspace, has it.
+
+- **`crcbl::scene::scn::ScnError` has a `RepeatedSystem` variant** for a
+  manifest naming one system twice (see Changed), so an exhaustive `match` must
+  handle it.
+
 - **`crcbl::scene::scn::ScnError` has three more variants**, `NameOfNoEntity`,
   `Name` and `NoNames`, for the names file (see Added); an exhaustive `match` on
   it must handle them.
@@ -492,6 +513,39 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   name and a declared file that names nothing; a save refuses a name whose
   entity is gone. `Scene::entity_name`, `entity_names` and `set_entity_name` are
   the runtime half.
+
+- **A scene can hold one entity in several systems**, keyed by the shared
+  `SceneEntityId` across chunk files: every row an id has, in every chunk,
+  belongs to one `Entity` — the first chunk in manifest order that spells the id
+  spawns it and later chunks attach to it. A save writes each system's rows in
+  its own chunk as before, so every existing scene loads and saves
+  byte-identically and `Scene::FORMAT` is still 0. `SystemChunk::detach_row`
+  takes one system's component off an entity and hands it back as a row, and
+  `crcbl_scene::scn::row_text` spells any component the way a row is spelled.
+
+- **`crcbl::registry`'s per-system answers**: `Registry::systems_of` (every
+  scene system holding an entity), `placing_system` (the one whose component
+  places it: the first in name order whose `Placement` answers, so one pair of
+  components places an entity the same way in every scene) and `default_row` (a
+  new component's row, from its type's `Default`). `placement` follows
+  `placing_system`, then the runtime components as before.
+
+- **The editor attaches and detaches system data.** `EditCommand::Attach` (an
+  entity, a system and a row) and `Detach` (an entity and a system) are each
+  other's inverse through the undo log and refused in play mode; detaching an
+  entity's last system is refused, since Delete is how an entity goes. The
+  inspector draws a section per system holding the selection, each with a Remove
+  button while there is more than one, and an add button per system of the
+  scene's manifest the entity is not in, which attaches that component at its
+  type's `Default`. The outliner lists an entity once, under the first system
+  holding it. `EditCommand::Spawn` carries every system's row
+  (`rows: Vec<SystemRow>`), so a delete's undo, a duplicate and a paste bring
+  all of them; `SetProperty` names the system its component is in. A clipping
+  writes an entity's other systems' rows in `others`, written only for an entity
+  in several, so a single-system clipping is the text it was and older clippings
+  paste. The arrow keys and the gizmo move the component that places the entity,
+  and an entity whose placing component is detached stops being drawn and
+  picked.
 
 - **The editor renames entities, and copies and pastes single fields.** The
   outliner shows a named entity as its name and id. F2, or a double-click on a
@@ -4020,6 +4074,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **The same `SceneEntityId` in two chunk files is one entity in two systems**,
+  where it used to be refused as `ScnError::DuplicateId`. The same id twice in
+  **one** chunk is still `DuplicateId`, and a header listing one system twice is
+  now refused as `ScnError::RepeatedSystem` rather than reading that chunk over
+  itself.
 
 - **`crcbl::screenshot::READBACK_DEADLINE` is thirty seconds, up from ten.** It
   decides when an offscreen readback or a screenshot is given up as hung, and

@@ -11486,55 +11486,41 @@ says what that cleared and what it did not. The allow-list entry in
   game is the way. `cargo machete` cannot see either sample's use, because their
   `[lib]` names differ from their package names; the manifest carries an
   `ignored` entry.
-- **Placement is a trait, and the scene format is still the open question.**
-  `crcbl::registry::Placement` returns a centre and half extents, or `None` for
-  a component that is not a thing in space (puppet's `Sun`), and it is a bound
-  on `register`, so a component a tool cannot locate fails to compile. Rejected:
-  a `#[reflect(placement)]` attribute — a spatial concept in a crate whose
-  charter is what a panel needs, and it could not express "nowhere" — and a
-  closure stored in the registry, which is a second thing to forget. The general
-  answer is still `crcbl::phys::Transform` on the entity, which is the
-  scene-format change and the user's open decision.
-- **Task 4's commands (2026-09-30, rename 2026-10-01).** `EditCommand` has
-  `SetProperty`, `Spawn`, `Delete` and `Rename`; a duplicate is a `Spawn` of the
-  original's row under `IdMap::next_id`, and Delete, Ctrl+D and F2 drive them.
-  The undo property test is
-  `document::entity_tests::random_histories_walk_back_through_every_state`, and
-  renames since 2026-10-01. Names are `crcbl_scene::scn::names`' `names.ron`;
-  `08-editor.md`'s decisions of 2026-10-01 say why a chunk the header declares.
-  Still owed:
-  - **Attach and detach system data, and one entity in several systems — the
-    next format slice.** Decided 2026-10-01: allowed, keyed by the shared
-    `SceneEntityId` across chunks; physics on scene components needs it too.
-    What refuses it today, each read in the tree on 2026-10-01:
-    - _The loader_: `ChunkOf::read` (`crcbl_scene::scn`) spawns a fresh `Entity`
-      for every row and `IdMap::bind` refuses an id already bound with
-      `ScnError::DuplicateId`, so the same id in a second chunk file is a
-      refusal. The change: a row whose id an earlier chunk bound attaches to
-      that entity; a repeat **within** one chunk stays refused, which needs the
-      check moved from `bind` (the map) to the chunk read. Load stays in
-      manifest order, so `Entity` bits stay a function of the files. The writer
-      needs nothing: each chunk already writes its own rows by id.
-      `Scene::FORMAT` can stay 0 — a scene of today is one of the new form.
-    - _The registry_: `Registry::system_of`, `component` and `placement`
-      (`crates/crcbl/src/registry.rs`) answer the first system in name order
-      that holds the entity — `component`'s docs say this becomes a choice the
-      day the format changes. Each needs a per-system form (the systems an
-      entity is in; one system's component) and `placement` a rule for which
-      component places an entity.
-    - _The editor_: `EditCommand::Spawn` carries one system and one row, and
-      `Document::row`, `remove` and `copy` read one, so a delete's undo would
-      lose every system but the first — a spawn needs every row. `Attach` (an
-      entity, a system and a row) and `Detach` (an entity and a system) would be
-      each other's inverse, with detaching an entity's last system refused
-      (Delete is that). `Document::outline` lists an entity under every system
-      that holds it and `panel.rs`'s `entity_row` keys a row by the id alone, so
-      two system headers would build two rows with one `OutlinerId` — rows keyed
-      by system and id, or an entity listed once. The inspector draws the one
-      component `Registry::component` returns; it needs a section per system.
-      `clipboard::Clipped` holds one system and row; a list of them, keeping the
-      single-system fields readable, keeps older clippings pasting.
-      `sync_colliders` places by `Registry::placement`'s first match.
+- **Placement is a trait.** `crcbl::registry::Placement` returns a centre and
+  half extents, or `None` for a component that is not a thing in space (puppet's
+  `Sun`), and it is a bound on `register`, so a component a tool cannot locate
+  fails to compile. Rejected: a `#[reflect(placement)]` attribute — a spatial
+  concept in a crate whose charter is what a panel needs, and it could not
+  express "nowhere" — and a closure stored in the registry, which is a second
+  thing to forget. The general answer is still a transform of the entity's own,
+  which a scene can now hold as one more system (slice 11) and which no
+  vocabulary registers.
+- **An entity with two placing components is placed by the first in name order
+  and nothing says the other disagrees** (slice 11, 2026-10-01).
+  `Registry::placing_system` takes the first system in name order whose
+  `Placement` answers; the gizmo and the arrows move that one, and a second
+  placing component (a block beside a brick) is drawn by nothing and edited only
+  in its inspector section. Considered and declined for now: refusing an attach
+  of a second placing component — it would refuse the very case physics on scene
+  components needs, a body beside a block, until bodies read their pose from the
+  block. A check (`Registry::check`-style) reporting placements that disagree is
+  what it would take if it bites.
+- **Attach offers only the systems the scene's manifest lists** (slice 11). A
+  registered system the manifest does not list cannot be attached: a save writes
+  the manifest's chunks and no others, so the row would be lost. Offering it
+  needs a command that adds a system to the manifest (and its inverse removing
+  it, refused while any entity is in it), which changes `scene.ron` — a header
+  edit no command makes today.
+- **Task 4's commands (2026-09-30, rename and attach/detach 2026-10-01).**
+  `EditCommand` has `SetProperty`, `Spawn`, `Delete`, `Rename`, `Attach` and
+  `Detach`; a duplicate is a `Spawn` of every one of the original's rows under
+  `IdMap::next_id`, and Delete, Ctrl+D, F2 and the inspector's add and remove
+  buttons drive them. The undo property test is
+  `document::entity_tests::random_histories_walk_back_through_every_state`, run
+  on `document::systems_tests::two_systems` with renames, attaches and detaches.
+  Names are `crcbl_scene::scn::names`' `names.ron`; `08-editor.md`'s decisions
+  of 2026-10-01 say why a chunk the header declares, and its slice 11 how one
+  entity spans systems. Still owed:
   - **Scene load and save markers**: the log's position against `saved_at` is
     already the dirty marker, and a load replaces the document and its log, so a
     marker entry has nothing to mean until the log outlives a load (the server
@@ -11616,9 +11602,9 @@ says what that cleared and what it did not. The allow-list entry in
 **What it still waits on (re-verified 2026-09-24).** Neither of the two things
 this paragraph used to name is missing any more: `crcbl_scene::scn` is the
 format feature 5 opens and saves, and `Ui::inspector` is the inspector slice 3
-draws. What is left is the scene-format change for entities spanning systems
-(below) and, for feature 6's asset browser, a watcher and `crcbl bake` — see
-_Asset hot reload: two polled watches, and no engine reload path_ above.
+draws. What is left, for feature 6's asset browser, is a watcher and
+`crcbl bake` — see _Asset hot reload: two polled watches, and no engine reload
+path_ above.
 
 **Its four owner decisions were answered 2026-09-16** and are recorded in
 `08-editor.md`: the edit command enum and undo log exist from day one and are
@@ -11629,9 +11615,9 @@ restores by reloading the scene (amended 2026-10-01: from the scene's text held
 in memory since play began, so unsaved edits survive); and a component's
 editable fields come from `#[derive(Reflect)]`, the workspace's first proc-macro
 dependency. Still open: docking and tabs, file dialogs, and the `notify`
-watcher; the scene-format change for entities spanning systems was decided
-2026-10-01 and is the next format slice. The viewport's shape was decided and
-built 2026-09-30 (a rendered view sampled by a UI rectangle).
+watcher; entities spanning systems were decided 2026-10-01 and built the same
+day (slice 11). The viewport's shape was decided and built 2026-09-30 (a
+rendered view sampled by a UI rectangle).
 
 **It blocks two sample plans:** `docs/plan/sample/07-towers.md`, whose milestone
 2 _is_ the editor dogfood pass and whose exit criterion is "map authored 100% in
@@ -11726,12 +11712,22 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     editing, so play needs no schedule to switch from; the selection, gizmo and
     camera systems the plan put in one are plain editor code today (the
     edit-mode schedule bullet above).
-  - **Physics on scene components.** The world's `PhysicsSystem` holds one
-    kinematic box per entity for picking, rebuilt from `Placement` after each
-    tick that ran; nothing gives a scene component a simulated body, so a module
-    that wants collision or gravity has to bring its own. A body beside a scene
-    component is one entity in two systems: the next format slice (_Task 4's
-    commands_ above).
+  - **Physics on scene components — unblocked by slice 11, not built.** The
+    world's `PhysicsSystem` holds one kinematic box per entity for picking,
+    rebuilt from `Placement` after each tick that ran; nothing gives a scene
+    component a simulated body, so a module that wants collision or gravity has
+    to bring its own. A scene can now hold an entity in a body system beside its
+    block. What it takes: a registered, serialisable body component (mass, shape
+    or "use the placement", kinematic/dynamic) in a vocabulary — a scene
+    component needs a codec, `Default` and `Placement`; play building a
+    `PhysicsSystem` body per row of it instead of the editor's picking kinematic
+    boxes, or beside them on another layer, since today `sync_colliders` sets a
+    kinematic body on every placed entity and would overwrite a simulated one;
+    and a rule for which pose wins when the body moves — writing the simulated
+    transform back into the placing component each tick, or the body owning the
+    pose and the block reading it — which is also the second-placement question
+    in _An entity with two placing components_ above. Not tested: nothing in the
+    tree registers such a component.
   - **A module despawning a scene entity** is swept and leaves the outline and
     the picture (both re-read when the world's entity count moves), but its id
     stays in the document's id map until stop, so selecting it shows "no
@@ -11759,12 +11755,13 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     until a viewport click. Towers' play has never been looked at on a device
     either: the creeps are drawn in the greybox grey, one material for every
     kind, and the camera frames the scene's own entities, not the creeps.
-- **The remaining command variants**: attach/detach system data and scene-load
-  and save markers (_Task 4's commands_ above says what each waits on). Spawn,
-  delete, duplicate, batch and the undo property test landed 2026-09-30, and so
-  did entity copy and paste (`apps/editor/src/clipboard.rs`: dual-mime RON, ids
-  re-minted on paste, one undo per paste). Rename and feature 8's field half
-  landed 2026-10-01 (`08-editor.md`'s slice 10). What the field half leaves:
+- **The remaining command variants**: scene-load and save markers (_Task 4's
+  commands_ above says what they wait on); attach and detach landed 2026-10-01
+  (`08-editor.md`'s slice 11). Spawn, delete, duplicate, batch and the undo
+  property test landed 2026-09-30, and so did entity copy and paste
+  (`apps/editor/src/clipboard.rs`: dual-mime RON, ids re-minted on paste, one
+  undo per paste). Rename and feature 8's field half landed 2026-10-01
+  (`08-editor.md`'s slice 10). What the field half leaves:
   - **A field is one leaf.** A whole `position` does not copy: its ron shape is
     the component type's serde derive (a `[f64; 3]` is a tuple, a `Vec` a list),
     which the reflected value does not carry, and a text built from the

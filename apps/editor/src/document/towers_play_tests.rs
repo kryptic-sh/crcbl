@@ -263,6 +263,7 @@ fn a_field_that_breaks_the_rules_refuses_play_by_name() {
     document
         .apply(EditCommand::SetProperty {
             entity: waypoints[2],
+            system: "waypoints".to_owned(),
             path: "position.0".to_owned(),
             value: Value::Float(2.0),
         })

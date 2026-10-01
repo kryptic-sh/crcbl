@@ -187,7 +187,7 @@ fn puppets_sun_is_editable_and_has_no_bounds() {
     );
     assert_eq!(
         document
-            .read(sun, "intensity")
+            .read(sun, "sun", "intensity")
             .expect("the sun's own row is reachable through the registry"),
         Value::Float(f64::from(2.2_f32)),
     );
@@ -320,20 +320,21 @@ fn an_edit_reaches_a_nested_field_of_puppets_surface() {
     // the committed file was written from.
     let gentle = SceneEntityId(3);
     let before = document
-        .read(gentle, "shape.radius")
+        .read(gentle, "surfaces", "shape.radius")
         .expect("a dome has a radius");
     assert_eq!(before, Value::Float(crcbl_puppet::map::GENTLE_MOUND.2));
 
     document
         .apply(EditCommand::SetProperty {
             entity: gentle,
+            system: "surfaces".to_owned(),
             path: "shape.radius".to_owned(),
             value: Value::Float(7.5),
         })
         .expect("a dome's radius is a leaf");
     assert_eq!(
         document
-            .read(gentle, "shape.radius")
+            .read(gentle, "surfaces", "shape.radius")
             .expect("the edited leaf is still there"),
         Value::Float(7.5),
     );
@@ -354,7 +355,7 @@ fn an_edit_reaches_a_nested_field_of_puppets_surface() {
     assert!(document.undo().expect("one entry"));
     assert_eq!(
         document
-            .read(gentle, "shape.radius")
+            .read(gentle, "surfaces", "shape.radius")
             .expect("and after the undo"),
         before,
     );

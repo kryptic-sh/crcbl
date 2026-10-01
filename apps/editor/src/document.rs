@@ -30,7 +30,7 @@
 //! **clean**, which a flag could not say and which this module's
 //! `the_dirty_marker_follows_the_logs_position` holds.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -44,11 +44,12 @@ use crcbl::render::ViewRay;
 use crcbl::scene::scn::{EntityName, IdMap, NameError, Scene, SceneEntityId, ScnError};
 use crcbl::store::{NativeStorage, StorageError, StorageSource};
 
-use crate::command::{EditCommand, Gesture, UndoLog, set_property};
+use crate::command::{EditCommand, Gesture, SystemRow, UndoLog, set_property};
 
 mod field;
 mod naming;
 mod play;
+mod systems;
 
 pub use play::PlayState;
 
@@ -118,12 +119,37 @@ pub enum EditError {
     /// scene's id map, and it would come back as a save that lost a row.
     IdInUse(SceneEntityId),
 
-    /// A spawn named a system this scene's manifest does not list, or one the
-    /// document's vocabulary cannot read a row of.
+    /// A spawn or an attach named a system this scene's manifest does not
+    /// list, or one the document's vocabulary cannot read a row of.
     ///
     /// Refused rather than attached: a save writes the manifest's chunks and no
-    /// others, so the entity would be dropped by the next one.
+    /// others, so the row would be dropped by the next one.
     NoSystem(String),
+
+    /// A command named a component of `entity` in a system that does not hold
+    /// it — an edit, a read or a detach.
+    NotAttached {
+        /// Whose.
+        entity: SceneEntityId,
+        /// The system named.
+        system: String,
+    },
+
+    /// An attach, or a spawn's second row, named a system that already holds
+    /// `entity`: a system holds one component per entity, so the row would
+    /// replace the one there and its undo would lose it.
+    Attached {
+        /// Whose.
+        entity: SceneEntityId,
+        /// The system named.
+        system: String,
+    },
+
+    /// An edit would leave `entity` in no system: a spawn of no rows, or a
+    /// detach of its last component. An entity in no system is in no chunk
+    /// file, so a save would lose it; [`Document::delete`] is how an entity
+    /// goes.
+    NoComponent(SceneEntityId),
 
     /// A paste's text is not a clipping of entities — the ordinary case of
     /// pasting something copied from anywhere else.
@@ -182,6 +208,16 @@ impl fmt::Display for EditError {
             Self::NoSystem(system) => {
                 write!(f, "the scene has no system `{system}` to put an entity in")
             }
+            Self::NotAttached { entity, system } => {
+                write!(f, "entity {entity} has no component in `{system}`")
+            }
+            Self::Attached { entity, system } => {
+                write!(f, "entity {entity} already has a component in `{system}`")
+            }
+            Self::NoComponent(entity) => write!(
+                f,
+                "entity {entity} would be left with no component; delete it instead"
+            ),
             Self::Paste(error) => write!(f, "the clipboard holds no entities: {error}"),
             Self::Name(error) => write!(f, "{error}"),
             Self::FieldPaste { path, message } => {
@@ -325,10 +361,14 @@ impl Document {
     }
 
     /// The entities this document holds, grouped by the system whose chunk file
-    /// they came out of and in the order that file spells them.
+    /// they came out of and in the order that file spells them — **each entity
+    /// once**, under the first system in manifest order that holds it.
     ///
     /// The outliner's rows — `docs/plan/08-editor.md` feature 2's "grouped by
-    /// system (the natural shape of scene files)".
+    /// system (the natural shape of scene files)". Once rather than under every
+    /// system holding it, because a row is the entity: selecting it selects
+    /// the entity, and the inspector shows each of its systems
+    /// ([`systems_of`](Self::systems_of)).
     #[must_use]
     pub fn outline(&mut self) -> Vec<(String, Vec<SceneEntityId>)> {
         let systems = self.scene.systems().to_vec();
@@ -337,6 +377,7 @@ impl Document {
         let ids = &self.ids;
         let world = &mut self.world;
         let registry = &self.registry;
+        let mut listed = HashSet::new();
         systems
             .into_iter()
             .map(|system| {
@@ -344,6 +385,7 @@ impl Document {
                     .entities(world, ids, &system)
                     .into_iter()
                     .filter_map(|entity| ids.id(entity))
+                    .filter(|id| listed.insert(*id))
                     .collect();
                 (system, entities)
             })
@@ -356,12 +398,15 @@ impl Document {
         self.ids.len()
     }
 
-    /// A number that moves every time an entity enters or leaves the document —
-    /// a spawn, a delete, and either one undone or redone.
+    /// A number that moves every time an entity enters or leaves the document,
+    /// or enters or leaves one of its systems — a spawn, a delete, an attach, a
+    /// detach, and any of them undone or redone.
     ///
     /// What a view of the entity list re-reads on. Not
     /// [`entity_count`](Self::entity_count): a delete followed by a duplicate
-    /// leaves the count where it was and the list different.
+    /// leaves the count where it was and the list different, and an attach or a
+    /// detach can move an entity to another system's group in the
+    /// [`outline`](Self::outline) or take away what places it.
     #[must_use]
     pub const fn membership(&self) -> u64 {
         self.membership
@@ -449,7 +494,8 @@ impl Document {
         Some((centre - half, centre + half))
     }
 
-    /// What the leaf `path` names inside `id`'s component currently holds.
+    /// What the leaf `path` names inside `id`'s component in `system` currently
+    /// holds.
     ///
     /// The read half of an [`EditCommand`], through the same
     /// [`crcbl::reflect`] path resolution the write goes through: a caller
@@ -459,26 +505,41 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// [`EditError::NoEntity`] for an id this document does not hold, or
+    /// [`EditError::NoEntity`] for an id this document does not hold,
+    /// [`EditError::NotAttached`] for a system that does not hold it, or
     /// [`EditError::Path`] if the path names nothing or stops short of a leaf.
-    pub fn read(&mut self, id: SceneEntityId, path: &str) -> Result<Value, EditError> {
-        let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
-        let component = self
-            .registry
-            .component(&mut self.world, entity)
-            .ok_or(EditError::NoEntity(id))?;
-        Ok(get_path(component, path)?)
+    pub fn read(
+        &mut self,
+        id: SceneEntityId,
+        system: &str,
+        path: &str,
+    ) -> Result<Value, EditError> {
+        Ok(get_path(self.component_of(id, system)?, path)?)
     }
 
-    /// The component of the entity `id` names, as the editable value a panel
-    /// draws: [`crcbl::registry`]'s `&mut dyn Reflect`, which is the same one
-    /// an [`EditCommand`] is applied to.
+    /// The component the entity `id` names has in `system`, as the editable
+    /// value a panel draws: [`crcbl::registry`]'s `&mut dyn Reflect`, which is
+    /// the same one an [`EditCommand`] is applied to.
     ///
-    /// [`None`] for an id this document does not hold, and for an entity no
-    /// registered system holds a component of.
-    pub fn component(&mut self, id: SceneEntityId) -> Option<&mut dyn Reflect> {
-        let entity = self.ids.entity(id)?;
-        self.registry.component(&mut self.world, entity)
+    /// [`None`] for an id this document does not hold, and for a system that
+    /// does not hold it.
+    pub fn component(&mut self, id: SceneEntityId, system: &str) -> Option<&mut dyn Reflect> {
+        self.component_of(id, system).ok()
+    }
+
+    /// [`component`](Self::component), saying why there is none.
+    fn component_of(
+        &mut self,
+        id: SceneEntityId,
+        system: &str,
+    ) -> Result<&mut dyn Reflect, EditError> {
+        let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
+        self.registry
+            .component(&mut self.world, system, entity)
+            .ok_or_else(|| EditError::NotAttached {
+                entity: id,
+                system: system.to_owned(),
+            })
     }
 
     /// Turns an edit a panel **has already made** into an [`EditCommand`], so
@@ -504,7 +565,8 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// [`EditError::NoEntity`] for an id this document does not hold, or
+    /// [`EditError::NoEntity`] for an id this document does not hold,
+    /// [`EditError::NotAttached`] for a system that does not hold it, or
     /// [`EditError::Path`] if the path names nothing in that component or the
     /// leaf refuses either value. A refusal on the way back in leaves the
     /// rewind standing, which is the panel's own `before` and so still a value
@@ -520,22 +582,19 @@ impl Document {
     pub fn record_edit(
         &mut self,
         id: SceneEntityId,
+        system: &str,
         path: &str,
         before: &Value,
         after: &Value,
         gesture: Option<Gesture>,
     ) -> Result<(), EditError> {
-        let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
-        let component = self
-            .registry
-            .component(&mut self.world, entity)
-            .ok_or(EditError::NoEntity(id))?;
-        set_path(component, path, before)?;
+        set_path(self.component_of(id, system)?, path, before)?;
         // After the rewind, so a panel's write into a playing scene is taken
         // back rather than left standing beside the refusal.
         self.refuse_in_play()?;
         let command = EditCommand::SetProperty {
             entity: id,
+            system: system.to_owned(),
             path: path.to_owned(),
             value: after.clone(),
         };
@@ -596,10 +655,11 @@ impl Document {
         self.apply(EditCommand::Delete { entity: id })
     }
 
-    /// Copies `id` into a new entity of the same system, and returns the new
+    /// Copies `id` into a new entity in the same systems, and returns the new
     /// entity's id.
     ///
-    /// An [`EditCommand::Spawn`] of the original's row under the next id the
+    /// An [`EditCommand::Spawn`] of every one of the original's rows under the
+    /// next id the
     /// document would hand out, so the copy is the original's component to the
     /// bit and its undo is the spawn's own inverse — there is no duplicate
     /// variant whose inverse could be wrong on its own. The copy stands where
@@ -617,34 +677,30 @@ impl Document {
     /// [`EditError::Scene`] if the component would not serialise, or
     /// [`EditError::Playing`] in play mode.
     pub fn duplicate(&mut self, id: SceneEntityId) -> Result<SceneEntityId, EditError> {
-        let (system, row) = self.row(id)?;
+        let rows = self.rows(id)?;
         let copy = self.ids.next_id();
         self.apply(EditCommand::Spawn {
             entity: copy,
-            system,
-            row,
+            rows,
             name: None,
         })?;
         Ok(copy)
     }
 
-    /// The clipboard text for `id`: its system, its row and its name, in
+    /// The clipboard text for `id`: every system's row and its name, in
     /// [`crate::clipboard`]'s format.
     ///
     /// # Errors
     ///
     /// As [`duplicate`](Self::duplicate).
     pub fn copy(&mut self, id: SceneEntityId) -> Result<String, EditError> {
-        let (system, row) = self.row(id)?;
+        let rows = self.rows(id)?;
         let name = self
             .scene
             .entity_name(id)
             .map(|name| name.as_str().to_owned());
-        Ok(crate::clipboard::encode(vec![crate::clipboard::Clipped {
-            system,
-            row,
-            name,
-        }]))
+        let clipped = crate::clipboard::Clipped::of(rows, name).ok_or(EditError::NoEntity(id))?;
+        Ok(crate::clipboard::encode(vec![clipped]))
     }
 
     /// Spawns every entity the clipboard text `text` names, under ids this
@@ -661,7 +717,8 @@ impl Document {
     ///
     /// [`EditError::Paste`] if the text is not a clipping, [`EditError::Name`]
     /// if a clipping's name is not a name, and otherwise as a spawn:
-    /// [`EditError::NoSystem`] for a system this scene does not list, or
+    /// [`EditError::NoSystem`] for a system this scene does not list,
+    /// [`EditError::Attached`] for a clipping naming one system twice, or
     /// [`EditError::Scene`] for a row that is not that system's component.
     /// [`EditError::Playing`] in play mode, before the text is read.
     pub fn paste(&mut self, text: &str) -> Result<Vec<SceneEntityId>, EditError> {
@@ -685,8 +742,7 @@ impl Document {
             ids.push(id);
             spawns.push(EditCommand::Spawn {
                 entity: id,
-                system: clipped.system,
-                row: clipped.row,
+                rows: clipped.rows(),
                 name,
             });
         }
@@ -854,25 +910,27 @@ impl Document {
         match command {
             EditCommand::SetProperty {
                 entity: id,
+                system,
                 path,
                 value,
             } => {
+                let undo = set_property(self.component_of(*id, system)?, *id, system, path, value)?;
                 let entity = self.ids.entity(*id).ok_or(EditError::NoEntity(*id))?;
-                let component = self
-                    .registry
-                    .component(&mut self.world, entity)
-                    .ok_or(EditError::NoEntity(*id))?;
-                let undo = set_property(component, *id, path, value)?;
                 sync_colliders(&self.registry, &mut self.world, [entity]);
                 Ok(undo)
             }
             EditCommand::Spawn {
                 entity: id,
+                rows,
+                name,
+            } => self.spawn(*id, rows, name.as_ref()),
+            EditCommand::Delete { entity: id } => self.remove(*id),
+            EditCommand::Attach {
+                entity: id,
                 system,
                 row,
-                name,
-            } => self.spawn(*id, system, row, name.as_ref()),
-            EditCommand::Delete { entity: id } => self.remove(*id),
+            } => self.attach_row(*id, system, row),
+            EditCommand::Detach { entity: id, system } => self.detach_row(*id, system),
             EditCommand::Rename { entity: id, name } => self.set_name(*id, name.clone()),
             EditCommand::Batch(commands) => {
                 let mut undo = Vec::with_capacity(commands.len());
@@ -894,31 +952,44 @@ impl Document {
         }
     }
 
-    /// Creates `id` in `system` from `row`, called `name`, and hands back the
-    /// delete that undoes it.
+    /// Creates `id` with a component per row of `rows`, called `name`, and
+    /// hands back the delete that undoes it.
+    ///
+    /// Every row's system is checked before anything is spawned, and a row
+    /// that will not read takes the whole entity back out — every system it
+    /// had joined with it — so a refused spawn leaves nothing.
     fn spawn(
         &mut self,
         id: SceneEntityId,
-        system: &str,
-        row: &str,
+        rows: &[SystemRow],
         name: Option<&EntityName>,
     ) -> Result<EditCommand, EditError> {
         if self.ids.entity(id).is_some() {
             return Err(EditError::IdInUse(id));
         }
-        let codec = self
-            .scene
-            .systems()
-            .iter()
-            .any(|listed| listed == system)
-            .then(|| self.registry.codec(system))
-            .flatten()
-            .ok_or_else(|| EditError::NoSystem(system.to_owned()))?;
+        if rows.is_empty() {
+            return Err(EditError::NoComponent(id));
+        }
+        let mut codecs = Vec::with_capacity(rows.len());
+        for (index, row) in rows.iter().enumerate() {
+            if rows[..index]
+                .iter()
+                .any(|earlier| earlier.system == row.system)
+            {
+                return Err(EditError::Attached {
+                    entity: id,
+                    system: row.system.clone(),
+                });
+            }
+            codecs.push(self.listed_codec(&row.system)?);
+        }
         let entity = self.world.spawn();
-        if let Err(error) = codec.attach_row(&mut self.world, entity, row) {
-            self.world.despawn(entity);
-            self.world.sweep();
-            return Err(error.into());
+        for (codec, row) in codecs.iter().zip(rows) {
+            if let Err(error) = codec.attach_row(&mut self.world, entity, &row.row) {
+                self.world.despawn(entity);
+                self.world.sweep();
+                return Err(error.into());
+            }
         }
         // The id was free a moment ago and the entity is this call's own, so
         // both halves of the map are empty for them.
@@ -935,13 +1006,13 @@ impl Document {
     }
 
     /// Removes `id` from the scene, and hands back the spawn that undoes it: the
-    /// same id, the same system, the component's row read immediately before it
-    /// went, and its name.
+    /// same id, every system's row read immediately before it went, and its
+    /// name.
     ///
     /// The name goes with the entity: a scene holding a name for an id it does
     /// not hold is one [`Scene::save`] refuses to write.
     fn remove(&mut self, id: SceneEntityId) -> Result<EditCommand, EditError> {
-        let (system, row) = self.row(id)?;
+        let rows = self.rows(id)?;
         let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
         self.world.despawn(entity);
         // Swept now rather than at the end of a tick, because nothing ticks
@@ -956,28 +1027,34 @@ impl Document {
         }
         Ok(EditCommand::Spawn {
             entity: id,
-            system,
-            row,
+            rows,
             name,
         })
     }
 
-    /// The system holding `id` and its component as one row's text — what a
-    /// delete's undo and a duplicate are both built from.
-    fn row(&mut self, id: SceneEntityId) -> Result<(String, String), EditError> {
+    /// Every system holding `id`, in manifest order, with its component as one
+    /// row's text — what a delete's undo, a duplicate and a copy are built
+    /// from. Never empty: an id no system holds is [`EditError::NoEntity`].
+    fn rows(&mut self, id: SceneEntityId) -> Result<Vec<SystemRow>, EditError> {
         let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
-        let system = self
-            .registry
-            .system_of(&mut self.world, entity)
-            .ok_or(EditError::NoEntity(id))?;
-        let codec = self
-            .registry
-            .codec(&system)
-            .ok_or_else(|| EditError::NoSystem(system.clone()))?;
-        let row = codec
-            .row(&mut self.world, entity)?
-            .ok_or(EditError::NoEntity(id))?;
-        Ok((system, row))
+        let mut rows = Vec::new();
+        for system in self.systems_of(id) {
+            let codec = self.listed_codec(&system)?;
+            let row =
+                codec
+                    .row(&mut self.world, entity)?
+                    .ok_or_else(|| EditError::NotAttached {
+                        entity: id,
+                        system: system.clone(),
+                    })?;
+            rows.push(SystemRow { system, row });
+        }
+        // An id still in the map whose entity no system holds — one a playing
+        // module despawned — has nothing to copy or bring back.
+        if rows.is_empty() {
+            return Err(EditError::NoEntity(id));
+        }
+        Ok(rows)
     }
 
     /// Applies a command the log handed back, discarding the inverse: the entry
@@ -1030,17 +1107,20 @@ fn memory_source(files: BTreeMap<String, String>) -> Result<MemorySource, EditEr
 }
 
 /// Gives every entity in `entities` the collider a ray picks it by, replacing any
-/// it already had, from whatever [`crcbl::registry::Placement`] its component
-/// answers.
+/// it already had, from the [`crcbl::registry::Placement`]
+/// [`Registry::placement`] answers for it — and takes the collider of one it
+/// answers none for.
 ///
 /// Called once after a load and again after any edit that moved or resized the
 /// thing edited — **not** only after a load. A collider left where the entity
 /// used to be is the failure this exists to prevent, and it is one a picture
 /// would not show: the thing draws in its new place and picks in its old one.
 ///
-/// An entity whose component is not a thing in space — `apps/puppet`'s `Sun` is
-/// the case — gets no collider and so cannot be picked, which is the honest
-/// answer rather than a box at the origin.
+/// An entity none of whose components is a thing in space — `apps/puppet`'s
+/// `Sun` is the case — has no collider and so cannot be picked, which is the
+/// honest answer rather than a box at the origin. That includes one whose
+/// placing component was just detached: a collider left behind would pick a
+/// thing nothing draws.
 ///
 /// Kinematic bodies: the body is what the broadphase tracks, and nothing moves
 /// it but this — no velocity is ever given to one, so a tick of play leaves it
@@ -1050,18 +1130,18 @@ fn sync_colliders(
     world: &mut World,
     entities: impl IntoIterator<Item = Entity>,
 ) {
-    let placements: Vec<(Entity, DVec3, DVec3)> = entities
+    let placements: Vec<(Entity, Option<(DVec3, DVec3)>)> = entities
         .into_iter()
-        .filter_map(|entity| {
-            registry
-                .placement(world, entity)
-                .map(|(centre, half_extents)| (entity, centre, half_extents))
-        })
+        .map(|entity| (entity, registry.placement(world, entity)))
         .collect();
     let Some(phys) = world.system_mut::<PhysicsSystem>() else {
         return;
     };
-    for (entity, centre, half_extents) in placements {
+    for (entity, placement) in placements {
+        let Some((centre, half_extents)) = placement else {
+            phys.remove_entity(entity);
+            continue;
+        };
         let transform = Transform::from_position(centre);
         phys.set_body(entity, RigidBody::new_kinematic());
         phys.set_transform(entity, transform);
@@ -1109,6 +1189,9 @@ mod naming_tests;
 pub(crate) mod play_tests;
 
 #[cfg(test)]
+pub(crate) mod systems_tests;
+
+#[cfg(test)]
 mod towers_play_tests;
 
 #[cfg(test)]
@@ -1140,6 +1223,7 @@ mod tests {
         let was = f64::from([centre.x, centre.y, centre.z][axis]);
         EditCommand::SetProperty {
             entity: id,
+            system: crate::scene::BLOCKS.to_owned(),
             path: format!("position.{axis}"),
             value: Value::Float(was + delta),
         }
@@ -1295,6 +1379,7 @@ mod tests {
         document
             .apply(EditCommand::SetProperty {
                 entity: id,
+                system: crate::scene::BLOCKS.to_owned(),
                 path: "position.1".to_owned(),
                 value: Value::Float(-3.5),
             })
@@ -1480,6 +1565,7 @@ mod tests {
         let error = document
             .apply(EditCommand::SetProperty {
                 entity: SceneEntityId(9_999),
+                system: crate::scene::BLOCKS.to_owned(),
                 path: "position.0".to_owned(),
                 value: Value::Float(0.0),
             })
@@ -1501,6 +1587,7 @@ mod tests {
         let error = document
             .apply(EditCommand::SetProperty {
                 entity: SceneEntityId(0),
+                system: crate::scene::BLOCKS.to_owned(),
                 path: "rotation.0".to_owned(),
                 value: Value::Float(1.0),
             })

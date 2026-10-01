@@ -137,6 +137,26 @@ impl Placement for Brick {
     }
 }
 
+/// How far a brick reaches either side of its centre along `Z`: the depth every
+/// row of the committed board is written with.
+const BRICK_HALF_DEPTH: f64 = 0.5;
+
+/// A brick of the board's own size at the origin — what a tool attaching a
+/// brick to an entity starts it as, which is why
+/// [`Registry::register`] asks for one.
+impl Default for Brick {
+    fn default() -> Self {
+        Self {
+            position: [0.0; 3],
+            half_extents: [
+                crate::game::BRICK_WIDTH / 2.0,
+                crate::game::BRICK_HEIGHT / 2.0,
+                BRICK_HALF_DEPTH,
+            ],
+        }
+    }
+}
+
 /// This game's scene vocabulary: one component, under the name its chunk file is
 /// spelled with.
 ///
