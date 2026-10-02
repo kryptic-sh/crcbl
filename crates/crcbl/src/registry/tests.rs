@@ -279,6 +279,38 @@ fn modules_are_built_fresh_for_scenes_listing_their_system() {
     assert!(build(&[]).is_empty());
 }
 
+/// **Each module comes with the system it was registered under**, in the
+/// order `modules` builds them — what a tool keys a game's commands by.
+#[test]
+fn keyed_modules_name_the_system_each_was_registered_under() {
+    struct Named(&'static str);
+
+    impl GameModule for Named {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn register(&self, _world: &mut World) {}
+    }
+
+    let mut registry = registry();
+    registry.module("beacons", |_, _, _| Ok(Box::new(Named("lights"))));
+    registry.module("blocks", |_, _, _| Ok(Box::new(Named("stacks"))));
+    let keyed = registry
+        .keyed_modules(
+            &["blocks".to_owned(), "beacons".to_owned()],
+            &scene_source(),
+            Path::new(""),
+        )
+        .expect("no factory here refuses");
+    assert_eq!(
+        keyed
+            .iter()
+            .map(|(system, module)| (system.as_str(), module.name()))
+            .collect::<Vec<_>>(),
+        [("beacons", "lights"), ("blocks", "stacks")],
+    );
+}
+
 /// **A factory reads the scene it is handed and may refuse it**, and the
 /// refusal is what `modules` answers — no module is handed back beside it.
 /// It is handed the vocabulary building it, too: the registry `modules` was

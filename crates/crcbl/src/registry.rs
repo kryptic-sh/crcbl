@@ -37,6 +37,12 @@
 //!                     │
 //!                     ├── placement()       where a thing its module spawned
 //!                     └── runtime_entities()  stands, for a tool to draw it
+//!
+//!     a game ──▶ Registry::play_controls("bricks", CONTROLS)
+//!                     │
+//!                     └── encode_play()     a person's action as the game's
+//!                                           command bytes, and the run's
+//!                                           numbers — see `PlayControls`
 //! ```
 //!
 //! # One call registers every half, which is why they cannot drift
@@ -154,9 +160,13 @@ use crcbl_ecs::{ComponentHash, Entity, GameModule, System, World};
 use crcbl_reflect::Reflect;
 use crcbl_scene::scn::{IdMap, ScnError, SystemChunk, chunk_ruled, row_text};
 
+mod play;
 mod rotation;
 mod validate;
 
+pub use play::{
+    ParamKind, PlayAction, PlayArg, PlayControls, PlayEncoder, PlayRefusals, PlayStatus,
+};
 pub use rotation::{ROTATION_TOLERANCE, Rotation, RotationError};
 pub use validate::{FieldError, Validate};
 
@@ -406,6 +416,9 @@ pub struct Registry {
     /// sorted by system name as `entries` is — see
     /// [`Registry::register_runtime`].
     runtime: BTreeMap<String, RuntimeEntry>,
+    /// What each game offers a tool playing its scene, keyed by the system
+    /// its module is registered under — see [`Registry::play_controls`].
+    controls: BTreeMap<String, PlayControls>,
 }
 
 /// A game's rule over a whole scene: the scene's files, read through `source`
@@ -442,6 +455,11 @@ pub type SceneCheck = fn(&dyn AssetSource, &Path) -> Result<(), String>;
 /// reads them.
 pub type ModuleFactory =
     fn(&Registry, &dyn AssetSource, &Path) -> Result<Box<dyn GameModule>, String>;
+
+/// A game's module and the system it was registered under — what
+/// [`Registry::keyed_modules`] hands back, so a tool can key a game's
+/// commands by the name its [`PlayControls`] are registered under.
+pub type KeyedModule = (String, Box<dyn GameModule>);
 
 /// One registered component, reduced to the calls a tool makes.
 ///
@@ -778,10 +796,31 @@ impl Registry {
         source: &dyn AssetSource,
         dir: &Path,
     ) -> Result<Vec<Box<dyn GameModule>>, String> {
+        Ok(self
+            .keyed_modules(systems, source, dir)?
+            .into_iter()
+            .map(|(_, module)| module)
+            .collect())
+    }
+
+    /// [`modules`](Self::modules), each with the system it was registered
+    /// under: what a tool that hands a module commands keys them by, so one
+    /// game's commands reach that game's module and no other
+    /// ([`play_controls`](Self::play_controls) are keyed by the same name).
+    ///
+    /// # Errors
+    ///
+    /// As [`modules`](Self::modules).
+    pub fn keyed_modules(
+        &self,
+        systems: &[String],
+        source: &dyn AssetSource,
+        dir: &Path,
+    ) -> Result<Vec<KeyedModule>, String> {
         self.modules
             .iter()
             .filter(|(system, _)| systems.contains(system))
-            .map(|(_, factory)| factory(self, source, dir))
+            .map(|(system, factory)| Ok((system.clone(), factory(self, source, dir)?)))
             .collect()
     }
 
