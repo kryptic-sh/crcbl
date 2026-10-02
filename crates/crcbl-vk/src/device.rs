@@ -1230,13 +1230,12 @@ impl DeviceInner {
     /// `wait_semaphores`, which all report the same failure themselves — so
     /// this logs and returns.
     pub(crate) fn poll_retire(&self, state: &mut DeviceState) {
-        let completed = match self.retire_completed() {
+        let completed = match self.retired(state) {
             Ok(completed) => completed,
             Err(error) => {
                 crcbl_core::log::error!(
-                    "crcbl-vk: vkGetSemaphoreCounterValue on the retire timeline failed \
-                     ({error:?}); {} object(s) stay parked and nothing will be freed until it \
-                     succeeds",
+                    "crcbl-vk: reading the retire timeline failed ({error}); {} object(s) stay \
+                     parked and nothing will be freed until it succeeds",
                     state.trash.pending()
                 );
                 return;
@@ -1279,6 +1278,21 @@ impl DeviceInner {
     fn retire_completed(&self) -> Result<u64, vk::Result> {
         // SAFETY: `retire_timeline` is a live timeline semaphore of this device.
         unsafe { self.raw.get_semaphore_counter_value(self.retire_timeline) }
+    }
+
+    /// The retire timeline's value, refused when it is one no submission
+    /// signalled — the answer a completion check must use rather than
+    /// [`Self::retire_completed`].
+    ///
+    /// Takes the state lock's guard because `submit` holds that lock from
+    /// `vkQueueSubmit2` until it commits the counter: outside it, the timeline
+    /// can already have reached a value the counter does not yet name, and a
+    /// live device would read as a lost one.
+    fn retired(&self, _locked: &DeviceState) -> Result<u64, HalError> {
+        let reached = self
+            .retire_completed()
+            .map_err(|error| conv::hal_error("vkGetSemaphoreCounterValue", error))?;
+        retire_reading(reached, self.submissions())
     }
 
     /// A kept command pool of `family` whose last submission has completed,
@@ -1724,6 +1738,28 @@ fn take_owned<E: Owned, M>(
     pool.remove(local)
 }
 
+/// What a retire-timeline reading of `reached` means once `submitted` is the
+/// last value a submission was issued to signal.
+///
+/// Only `submit` signals the retire timeline, so a live device can never read
+/// past `submitted`. A lost one can: AMD's Windows driver (25.10.36, RX 7900
+/// XTX) answers `vkGetSemaphoreCounterValue` with `VK_SUCCESS` and `u64::MAX`
+/// once it has lost the device, and `vkDeviceWaitIdle` with `VK_SUCCESS` too.
+/// Taken at its word that reading completes every wait, so a readback copied
+/// memory the GPU never wrote and a test failed on a blank frame with no error
+/// anywhere. `docs/notes/ci.md`'s "More than twenty Vulkan devices at once"
+/// has the runs.
+fn retire_reading(reached: u64, submitted: u64) -> Result<u64, HalError> {
+    if reached > submitted {
+        return Err(HalError::DeviceLost(format!(
+            "the retire timeline reads {reached}, past the {submitted} this device has submitted \
+             — no submission signalled that value, so the driver has lost the device and said \
+             VK_SUCCESS"
+        )));
+    }
+    Ok(reached)
+}
+
 /// The "this device cannot" answer, in one place so the message is uniform.
 ///
 /// P1.1 used this for the whole pipeline surface; P1.2 implemented it, so what
@@ -2108,6 +2144,9 @@ impl Device for VkDevice {
         if reached < entry.wait_value {
             return Ok(ReadbackState::Pending);
         }
+        // Whichever semaphore it waited on, a lost device wrote nothing worth
+        // copying, and the retire timeline is the one this backend can bound.
+        self.inner.retired(&state)?;
         if entry.size > 0 {
             // Resolve the buffer's mapped pointer from the handle stored at
             // request time. If the buffer was destroyed between request and
@@ -2779,6 +2818,9 @@ impl Device for VkDevice {
         unsafe { self.inner.raw.device_wait_idle() }
             .map_err(|error| conv::hal_error("vkDeviceWaitIdle", error))?;
         let mut state = self.inner.state();
+        // `vkDeviceWaitIdle` has answered `VK_SUCCESS` on a lost device; the
+        // timeline is what can still say so.
+        self.inner.retired(&state)?;
         self.inner.poll_retire(&mut state);
         Ok(())
     }
@@ -4246,6 +4288,25 @@ impl Drop for DeviceInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reading a lost device gave on the RX 7900 XTX is refused, and every
+    /// reading a live one can give — up to and including the last value
+    /// submitted — is passed through unchanged.
+    #[test]
+    fn a_retire_timeline_past_every_submission_is_a_lost_device() {
+        assert_eq!(retire_reading(0, 0).ok(), Some(0));
+        assert_eq!(retire_reading(34, 35).ok(), Some(34));
+        assert_eq!(retire_reading(35, 35).ok(), Some(35));
+        for (reached, submitted) in [(36, 35), (1, 0), (u64::MAX, 35)] {
+            assert!(
+                matches!(
+                    retire_reading(reached, submitted),
+                    Err(HalError::DeviceLost(_))
+                ),
+                "{reached} against {submitted} submitted must read as a lost device"
+            );
+        }
+    }
 
     /// `vkWaitForPresentKHR` counts nanoseconds and the seam hands over a
     /// `Duration`, so the conversion is the whole contract of the timeout.
