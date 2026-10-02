@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use glam::{DMat3, DQuat, DVec3};
 
-use crate::collider::Aabb;
+use crate::collider::{Aabb, BoxCollider};
 use crate::components::{ColliderComponent, RigidBody, Transform};
 use crate::compound::{AabbCompound, CompoundError};
 use crate::contact::shape::ContactShape;
@@ -78,6 +78,19 @@ impl CompoundPart {
     pub fn volume(&self) -> f64 {
         let h = self.half_extents;
         8.0 * h.x * h.y * h.z
+    }
+
+    /// This part with its shape `offset` from a body at `transform`: the
+    /// offset and the part's centre and faces all turned by the body. The
+    /// contact pipeline ([`ContactShape::compound_part`]) and the query world
+    /// both place a part by it.
+    #[must_use]
+    pub(crate) fn placed(&self, offset: DVec3, transform: &Transform) -> BoxCollider {
+        BoxCollider::new(
+            transform.position + transform.rotation * (offset + self.centre),
+            self.half_extents,
+        )
+        .with_rotation(transform.rotation * self.rotation)
     }
 
     /// Its mass properties as a solid of `density`: [`MassProperties::cuboid`]

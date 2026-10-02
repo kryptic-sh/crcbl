@@ -10,6 +10,7 @@ use glam::DVec3;
 use crate::broadphase::{Bvh, BvhHit, Ray, Segment};
 use crate::collider::{Aabb, BoxCollider, Capsule, LyingCapsule, Sphere};
 use crate::components::Transform;
+use crate::compound_shape::CompoundShape;
 use crate::contact::manifold::gap;
 use crate::contact::shape::ContactShape;
 use crate::contact::sweep::time_of_contact;
@@ -19,13 +20,13 @@ use crate::query::{self, Penetration, ShapeHit};
 mod candidate_sweeps;
 mod entry;
 
-use entry::{ColliderEntry, Primitive};
+use entry::{ColliderEntry, PlacedCompound, Primitive};
 
 /// Opaque identifier for a registered collider.
 ///
 /// Created by [`PhysicsWorld::add_sphere`], [`PhysicsWorld::add_box`],
-/// [`PhysicsWorld::add_capsule`] or [`PhysicsWorld::add_mesh`]. Use it to
-/// remove or update the collider.
+/// [`PhysicsWorld::add_capsule`], [`PhysicsWorld::add_mesh`] or
+/// [`PhysicsWorld::add_compound`]. Use it to remove or update the collider.
 ///
 /// This is a *generational* id — a storage slot plus the generation that slot
 /// was issued with — for the same reason [`crcbl_ecs::Entity`] is: removing a
@@ -726,7 +727,7 @@ fn overlap_sphere_core(
             .and_then(|s| s.as_ref())
             .filter(|data| filter.admits(slot, data))
             .is_some_and(|data| {
-                data.entry.primitives().any(|shape| match shape {
+                data.entry.primitives().any(|(_, shape)| match shape {
                     Primitive::Sphere(s) => query::sphere_overlaps_sphere(query_sphere, s),
                     Primitive::Box(b) => query::sphere_overlaps_box(query_sphere, b),
                     Primitive::Capsule(c) => query::sphere_overlaps_capsule(query_sphere, c),
@@ -744,7 +745,9 @@ fn overlap_sphere_core(
 /// Broadphase-only by design for the parametric shapes — the BVH's leaves
 /// *are* their AABBs, so there is nothing to refine beyond the filter. A
 /// mesh's leaf is the bounds of a whole level, which would meet every query,
-/// so a mesh is refined against its triangles, exactly. Both
+/// so a mesh is refined against its triangles, exactly, and a compound's leaf
+/// is the bounds of all its parts, so a compound is refined against each
+/// part's own bounds. Both
 /// [`PhysicsWorld::overlap_aabb`] and [`OverlapQueries::overlap_aabb_into`]
 /// come through here.
 fn overlap_aabb_core(
@@ -765,9 +768,10 @@ fn overlap_aabb_core(
             .and_then(|s| s.as_ref())
             .filter(|data| filter.admits(slot as usize, data))
             .is_some_and(|data| {
-                data.entry.primitives().any(|shape| match shape {
+                data.entry.primitives().any(|(_, shape)| match shape {
                     Primitive::Mesh(m) => m.overlaps_aabb(aabb, &mut scratch.mesh),
-                    Primitive::Sphere(_) | Primitive::Box(_) | Primitive::Capsule(_) => true,
+                    Primitive::Box(b) => aabb.intersects(&b.aabb()),
+                    Primitive::Sphere(_) | Primitive::Capsule(_) => true,
                 })
             });
         if admitted {
@@ -909,7 +913,8 @@ fn sweep_capsule_hits(
 /// Triggers are non-solid and are skipped, and so is the filter's exclusion —
 /// a character whose own capsule is registered in the world is inside itself
 /// by the whole of its own radius, which is the deepest contact it would ever
-/// find.
+/// find. A compound is one entry, its deepest part's push-out; of two parts
+/// equally deep, the lower.
 fn capsule_penetrations_core(
     bvh: &Bvh,
     colliders: &[Option<ColliderSlot>],
@@ -932,7 +937,7 @@ fn capsule_penetrations_core(
             continue;
         }
         let mut deepest: Option<Penetration> = None;
-        for shape in slot.entry.primitives() {
+        for (_, shape) in slot.entry.primitives() {
             let penetration = match shape {
                 Primitive::Sphere(s) => query::capsule_penetration_vs_sphere(capsule, s),
                 Primitive::Box(b) => query::capsule_penetration_vs_box(capsule, b),
@@ -991,7 +996,7 @@ fn lying_capsule_blocker_core(
         if !filter.admits(idx, slot) {
             continue;
         }
-        let blocked = slot.entry.primitives().any(|shape| match shape {
+        let blocked = slot.entry.primitives().any(|(_, shape)| match shape {
             Primitive::Sphere(s) => inside(ContactShape::Sphere {
                 centre: s.centre,
                 radius: s.radius,
@@ -1029,6 +1034,8 @@ pub(crate) struct SweptContact {
     /// Whether the swept shape began already touching or inside the collider,
     /// as [`ShapeHit::started_inside`] means it; `t` is then zero.
     pub(crate) started_inside: bool,
+    /// The part of the collider met, as [`ShapeHit::part`] means it.
+    pub(crate) part: usize,
 }
 
 impl From<ShapeHit> for SweptContact {
@@ -1037,6 +1044,7 @@ impl From<ShapeHit> for SweptContact {
             t: hit.t,
             normal: hit.normal,
             started_inside: hit.started_inside,
+            part: hit.part,
         }
     }
 }
@@ -1084,6 +1092,7 @@ fn sweep_lying_capsule_core(
                 t: 0.0,
                 normal: start.1,
                 started_inside: true,
+                part: 0,
             });
         }
         let t = time_of_contact(&target, at, motion, start)?;
@@ -1091,6 +1100,7 @@ fn sweep_lying_capsule_core(
             t,
             normal: gap(&target, &at(t)).1,
             started_inside: false,
+            part: 0,
         })
     };
     let centre = (head + feet) * 0.5;
@@ -1148,7 +1158,7 @@ fn closest_hit_core(
         if !filter.admits(idx, slot) {
             continue;
         }
-        for shape in slot.entry.primitives() {
+        for (part, shape) in slot.entry.primitives() {
             let hit = match shape {
                 Primitive::Sphere(s) => query::ray_vs_sphere(ray, s),
                 Primitive::Box(b) => query::ray_vs_box(ray, b),
@@ -1158,7 +1168,8 @@ fn closest_hit_core(
             if let Some(hit) = hit
                 && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
             {
-                best = Some((hit.t, id_for_slot_in(generations, bvh_hit.element_id), hit));
+                let id = id_for_slot_in(generations, bvh_hit.element_id);
+                best = Some((hit.t, id, ShapeHit { part, ..hit }));
             }
         }
     }
@@ -1194,11 +1205,11 @@ fn swept_hits_core<H: SweptHit>(
         if !filter.admits(idx, slot) {
             continue;
         }
-        for shape in slot.entry.primitives() {
+        for (part, shape) in slot.entry.primitives() {
             if let Some(hit) = narrow(shape)
                 && hit.t() < f64::INFINITY
             {
-                visit(id_for_slot_in(generations, element), hit);
+                visit(id_for_slot_in(generations, element), hit.with_part(part));
             }
         }
     }
@@ -1229,16 +1240,20 @@ fn closest_swept_core<H: SweptHit>(
 
 /// Replace `closest` with `(id, hit)` if that comes first by [`sweep_order`].
 fn keep_closest<H: SweptHit>(closest: &mut Option<(ColliderId, H)>, id: ColliderId, hit: H) {
-    if closest
-        .as_ref()
-        .is_none_or(|&(best, best_hit)| sweep_order((id, hit.t()), (best, best_hit.t())).is_lt())
-    {
+    if closest.as_ref().is_none_or(|&(best, best_hit)| {
+        sweep_order(
+            (id, hit.part_index(), hit.t()),
+            (best, best_hit.part_index(), best_hit.t()),
+        )
+        .is_lt()
+    }) {
         *closest = Some((id, hit));
     }
 }
 
-/// The order a sweep's hits come in: nearer `t` first, and of two at the
-/// same `t` the one in the lower storage slot.
+/// The order a sweep's hits come in: nearer `t` first, of two at the same
+/// `t` the one in the lower storage slot, and of two parts of one compound
+/// at the same `t` the lower part.
 ///
 /// The tie needs a rule because the alternative is the order the broadphase
 /// happened to offer the candidates in, which follows the tree's shape and so
@@ -1246,31 +1261,51 @@ fn keep_closest<H: SweptHit>(closest: &mut Option<(ColliderId, H)>, id: Collider
 /// for the collider's whole life. The closest sweeps and the candidate sweeps
 /// both rank by this, which is what makes the candidate list's first entry
 /// the closest sweep's answer.
-fn sweep_order(a: (ColliderId, f64), b: (ColliderId, f64)) -> std::cmp::Ordering {
-    if a.1 < b.1 {
+fn sweep_order(a: (ColliderId, usize, f64), b: (ColliderId, usize, f64)) -> std::cmp::Ordering {
+    if a.2 < b.2 {
         std::cmp::Ordering::Less
-    } else if b.1 < a.1 {
+    } else if b.2 < a.2 {
         std::cmp::Ordering::Greater
     } else {
-        a.0.index.cmp(&b.0.index)
+        (a.0.index, a.1).cmp(&(b.0.index, b.1))
     }
 }
 
 /// What [`closest_swept_core`] ranks a sweep's hits by: how far along the
-/// sweep each one is.
+/// sweep each one is, and which part of its collider it met.
 trait SweptHit: Copy {
     fn t(&self) -> f64;
+    fn part_index(&self) -> usize;
+    /// This hit, on part `part` of its collider.
+    #[must_use]
+    fn with_part(self, part: usize) -> Self;
 }
 
 impl SweptHit for ShapeHit {
     fn t(&self) -> f64 {
         self.t
     }
+
+    fn part_index(&self) -> usize {
+        self.part
+    }
+
+    fn with_part(self, part: usize) -> Self {
+        Self { part, ..self }
+    }
 }
 
 impl SweptHit for SweptContact {
     fn t(&self) -> f64 {
         self.t
+    }
+
+    fn part_index(&self) -> usize {
+        self.part
+    }
+
+    fn with_part(self, part: usize) -> Self {
+        Self { part, ..self }
     }
 }
 
@@ -1354,6 +1389,29 @@ impl PhysicsWorld {
         self.add(ColliderEntry::Mesh(PlacedMesh::new(mesh, transform)))
     }
 
+    /// Register a [`CompoundShape`] `offset` from a body at `transform`: its
+    /// parts placed as [`crate::ColliderComponent::Compound`] places them,
+    /// turned with the body.
+    ///
+    /// It is one collider — one id, one trigger flag, one set of layers — and
+    /// every query answers for its parts themselves, not for the world-axis
+    /// box around them that the broadphase holds: a ray down the gap between
+    /// two parts passes through. A hit names the part it met in
+    /// [`ShapeHit::part`], an index into [`CompoundShape::parts`].
+    pub fn add_compound(
+        &mut self,
+        shape: &CompoundShape,
+        offset: DVec3,
+        transform: &Transform,
+    ) -> ColliderId {
+        self.add(ColliderEntry::Compound(PlacedCompound::place(
+            Vec::new(),
+            shape,
+            offset,
+            transform,
+        )))
+    }
+
     /// Update an existing sphere collider. Returns `true` if the id was valid.
     ///
     /// If the BVH is built, this refits the tree in O(log n). Otherwise the
@@ -1375,6 +1433,33 @@ impl PhysicsWorld {
     /// Update an existing collider to be `mesh` at `transform`.
     pub fn set_mesh(&mut self, id: ColliderId, mesh: TriangleMesh, transform: Transform) -> bool {
         self.set(id, ColliderEntry::Mesh(PlacedMesh::new(mesh, transform)))
+    }
+
+    /// Update an existing collider to be `shape` `offset` from a body at
+    /// `transform`, as [`add_compound`](Self::add_compound) places it.
+    /// Returns `true` if the id was valid.
+    ///
+    /// A collider that was already a compound lends its parts' buffer to the
+    /// new placement, so a moving compound placed every tick reuses one
+    /// buffer rather than allocating a new one each time.
+    pub fn set_compound(
+        &mut self,
+        id: ColliderId,
+        shape: &CompoundShape,
+        offset: DVec3,
+        transform: &Transform,
+    ) -> bool {
+        let Some(slot) = self.slot_of(id) else {
+            return false;
+        };
+        let buffer = match self.colliders[slot].as_mut().map(|s| &mut s.entry) {
+            Some(ColliderEntry::Compound(placed)) => placed.take_parts(),
+            _ => Vec::new(),
+        };
+        self.set(
+            id,
+            ColliderEntry::Compound(PlacedCompound::place(buffer, shape, offset, transform)),
+        )
     }
 
     /// Mark a collider as a trigger.
@@ -2385,7 +2470,9 @@ mod tests {
             ColliderEntry::Sphere(s) => query::ray_vs_sphere(ray, s),
             ColliderEntry::Box(b) => query::ray_vs_box(ray, b),
             ColliderEntry::Capsule(c) => query::ray_vs_capsule(ray, c),
-            ColliderEntry::Mesh(_) => unreachable!("the fixture holds no meshes"),
+            ColliderEntry::Mesh(_) | ColliderEntry::Compound(_) => {
+                unreachable!("the fixture holds no meshes or compounds")
+            }
         }
     }
 
@@ -2395,7 +2482,9 @@ mod tests {
             ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
             ColliderEntry::Box(b) => query::swept_sphere_vs_box(segment, radius, b),
             ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
-            ColliderEntry::Mesh(_) => unreachable!("the fixture holds no meshes"),
+            ColliderEntry::Mesh(_) | ColliderEntry::Compound(_) => {
+                unreachable!("the fixture holds no meshes or compounds")
+            }
         }
     }
 
@@ -3510,3 +3599,7 @@ mod query_digest_tests;
 #[cfg(test)]
 #[path = "world/turned_body_tests.rs"]
 mod turned_body_tests;
+
+#[cfg(test)]
+#[path = "world/compound_tests.rs"]
+mod compound_tests;

@@ -549,12 +549,13 @@ pub enum ColliderComponent {
     /// Several boxes fixed in the body's frame, turning with it: see
     /// [`CompoundShape`].
     ///
-    /// Unlike the shapes above, the offset and every part are turned by the
-    /// body's rotation wherever they are placed. In a system with contacts
-    /// each part collides on its own; the query world
-    /// ([`crate::PhysicsSystem::world`]) holds one box around all of them, so
-    /// a ray or an overlap there answers for the bounds, and
-    /// [`crate::AabbCompound`] is the per-part query.
+    /// The offset and every part are turned by the body's rotation wherever
+    /// they are placed. In a system with contacts each part collides on its
+    /// own; in the query world ([`crate::PhysicsSystem::world`]) the compound
+    /// is one collider whose rays, sweeps and overlaps answer for the parts
+    /// themselves, each hit naming its part in
+    /// [`ShapeHit::part`](crate::ShapeHit::part)
+    /// ([`crate::PhysicsWorld::add_compound`]).
     Compound {
         /// Offset of the shape's frame from the entity's
         /// [`Transform::position`], in the body's frame: minus the centre of

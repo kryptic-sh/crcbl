@@ -83,6 +83,7 @@ impl TriangleMesh {
                 point: ray.origin + ray.dir * t,
                 normal: if ray.dir.dot(n) <= 0.0 { n } else { -n },
                 started_inside: false,
+                part: 0,
             },
         })
     }
@@ -165,6 +166,7 @@ impl TriangleMesh {
                 point: closest.on_triangle.point,
                 normal: facing(away, distance, normal, centre - corners[0]),
                 started_inside,
+                part: 0,
             },
         })
     }

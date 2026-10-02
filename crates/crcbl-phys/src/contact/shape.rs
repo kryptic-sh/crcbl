@@ -145,11 +145,7 @@ impl ContactShape {
     /// the offset and the part's centre and faces all turned by the body.
     #[must_use]
     pub(crate) fn compound_part(part: &CompoundPart, offset: DVec3, transform: &Transform) -> Self {
-        Self::Box {
-            centre: transform.position + transform.rotation * (offset + part.centre),
-            rotation: transform.rotation * part.rotation,
-            half: part.half_extents,
-        }
+        crate::query::contact_box(&part.placed(offset, transform))
     }
 
     /// The order a contact's two shapes are kept in: the lower rank is shape

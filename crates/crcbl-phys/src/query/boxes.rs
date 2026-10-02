@@ -134,6 +134,7 @@ pub fn swept_capsule_vs_box(
         point: nearest_on_box(target, centre - up, centre + up),
         normal,
         started_inside,
+        part: 0,
     })
 }
 

@@ -28,6 +28,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `EditError::Rotation` and `Document::rotation_problems` are gone, replaced by
   `EditError::Invalid` and `Document::problems` (see Added).
 
+- **`crcbl_phys::ShapeHit` gained a public `part`**, the index of the part of a
+  compound a query met (see the compound entry under Added), so a struct literal
+  naming every field must add it; every shape-level function, and every collider
+  that is not a compound, gives `0`.
+
 - **`crcbl_phys::BoxCollider` gained a public `rotation`**, a unit quaternion
   turning the box about its centre (see Added), so a struct literal naming every
   field must add it; `BoxCollider::new` makes an unturned box as before.
@@ -2015,9 +2020,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   warm starting, islands and sleep work for compounds unchanged; a compound
   resting on two parts has two contacts, and raises a `KineticContact` for each.
   `ContactReport::part_a` and `part_b` name the parts, and
-  `ColliderComponent::part_count` counts them. The query world
-  (`PhysicsSystem::world`) holds one box around a compound's parts. A state with
-  no compound in it hashes as before: `apps/tumble`'s pinned hash is unchanged.
+  `ColliderComponent::part_count` counts them. In the query world
+  (`PhysicsSystem::world`) a compound is one collider answered part by part: a
+  ray, sweep or overlap meets the parts themselves, not the box around them, so
+  a ray down the gap between two parts passes through, and each hit names its
+  part in `ShapeHit::part`. A candidate sweep (`sweep_sphere_all`,
+  `sweep_capsule_all`) lists every part it meets, a push-out is the deepest
+  part's, and `PhysicsWorld::add_compound` and `set_compound` register and move
+  one directly. A state with no compound in it hashes as before: `apps/tumble`'s
+  pinned hash is unchanged.
 
 - **Islands and sleep: rung 3 of the contact solver** (`36-contact-solver.md`).
   In a system made with `PhysicsSystem::with_contacts`, dynamic bodies joined by

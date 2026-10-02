@@ -280,11 +280,11 @@ fn every_collider_kind_stops_a_turn_into_it() {
     }
 }
 
-/// **A compound stops the turn at its bounds**, as the query world holds it:
-/// one box around its parts, here reaching the feet's quarter-turn pose only
-/// through a part overhead.
+/// **A compound stops a turn only at its parts, not at the box around
+/// them**: the box reaches the feet's quarter-turn pose only through a part
+/// overhead, which the feet pass under, so the turn is whole.
 #[test]
-fn a_compound_stops_a_turn_at_its_bounds() {
+fn a_compound_lets_a_turn_pass_under_a_part_overhead() {
     let mut phys = PhysicsSystem::new();
     let floor_entity = Entity::from_bits((1u64 << 32) | 1).expect("generation 1 is never zero");
     let floor_at = Transform::from_position(DVec3::new(0.0, -1.0, 0.0));
@@ -319,13 +319,13 @@ fn a_compound_stops_a_turn_at_its_bounds() {
     let (character, body) = lying_at(world, 0.0, 0.0, 0.0);
     let outcome = turn(world, &character, &body, FRAC_PI_2);
     assert!(
-        outcome.blocker.is_some() && outcome.fraction < 1.0,
+        outcome.blocker.is_none() && outcome.fraction == 1.0,
         "{outcome:?}"
     );
-    let gap = WALL - (outcome.body.feet().x + body.radius);
+    let reach = outcome.body.feet().x + body.radius;
     assert!(
-        gap >= 0.0 && gap <= 0.5 * prone_config().skin_width,
-        "the feet stopped {gap} short of the compound's bounds"
+        reach > WALL,
+        "the feet reached {reach}, not under the part overhead from {WALL}"
     );
 }
 

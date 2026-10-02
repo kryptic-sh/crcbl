@@ -95,6 +95,11 @@ pub struct ShapeHit {
     /// position. A hit with this set is a resolution case (push out), not an
     /// approach.
     pub started_inside: bool,
+    /// Which part of the collider was struck: for a compound
+    /// ([`crate::PhysicsWorld::add_compound`]) the index of the part in its
+    /// [`CompoundShape::parts`](crate::CompoundShape::parts), and `0` for
+    /// every other collider and from every shape-level function here.
+    pub part: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +220,7 @@ pub fn ray_vs_sphere(ray: &Ray, sphere: &Sphere) -> Option<ShapeHit> {
         point,
         normal,
         started_inside,
+        part: 0,
     })
 }
 
@@ -244,6 +250,7 @@ pub fn ray_vs_aabb(ray: &Ray, aabb: &Aabb) -> Option<ShapeHit> {
         point,
         normal,
         started_inside,
+        part: 0,
     })
 }
 
@@ -332,6 +339,7 @@ pub fn ray_vs_capsule(ray: &Ray, capsule: &Capsule) -> Option<ShapeHit> {
         point,
         normal,
         started_inside,
+        part: 0,
     })
 }
 
@@ -374,6 +382,7 @@ pub fn swept_sphere_vs_sphere(
                 point: segment.start - normal * (swept_radius - overlap * 0.5),
                 normal,
                 started_inside: true,
+                part: 0,
             });
         }
         return None;
@@ -402,6 +411,7 @@ pub fn swept_sphere_vs_sphere(
         point: contact_point,
         normal,
         started_inside,
+        part: 0,
     })
 }
 
@@ -448,6 +458,7 @@ pub fn swept_sphere_vs_capsule(
             point: axis_point + normal * capsule.radius,
             normal,
             started_inside: true,
+            part: 0,
         });
     }
 
@@ -469,6 +480,7 @@ pub fn swept_sphere_vs_capsule(
             point: contact_point,
             normal: hit.normal,
             started_inside: hit.started_inside,
+            part: 0,
         }
     })
 }

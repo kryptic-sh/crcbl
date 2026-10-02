@@ -55,7 +55,6 @@ use glam::{DQuat, DVec3};
 
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
 use crate::components::{ColliderComponent, RigidBody, Transform};
-use crate::compound_shape::CompoundShape;
 use crate::contact::broadphase::ProxyId;
 use crate::contact::island::{self, IslandId, Islands};
 use crate::contact::{
@@ -867,9 +866,7 @@ impl PhysicsSystem {
                 shape,
                 is_trigger,
             } => {
-                let collider = self
-                    .world
-                    .add_box(compound_query_box(shape, *offset, transform));
+                let collider = self.world.add_compound(shape, *offset, transform);
                 self.world.set_trigger(collider, *is_trigger);
                 collider
             }
@@ -969,7 +966,8 @@ impl PhysicsSystem {
     }
 
     /// Put `entity`'s query collider on the layers in `bits`: see
-    /// [`PhysicsWorld::set_layers`]. For a compound that is its one query box.
+    /// [`PhysicsWorld::set_layers`]. For a compound that is the one collider
+    /// holding all its parts.
     /// Returns `false`, and changes nothing, if the entity has no collider.
     ///
     /// The layers belong to the entity rather than to one [`ColliderId`]:
@@ -1000,8 +998,8 @@ impl PhysicsSystem {
     }
 
     /// The query collider [`set_collider`](Self::set_collider) made for
-    /// `entity` — for a compound, its one query box — or `None` if the entity
-    /// has no collider.
+    /// `entity` — for a compound, the one collider holding all its parts — or
+    /// `None` if the entity has no collider.
     ///
     /// The id changes when the collider is replaced, so read it again after a
     /// `set_collider` rather than keeping it: an old one resolves to nothing.
@@ -1636,7 +1634,7 @@ fn place_collider(
             );
         }
         ColliderComponent::Compound { offset, shape, .. } => {
-            world.set_box(collider, compound_query_box(shape, *offset, transform));
+            world.set_compound(collider, shape, *offset, transform);
         }
         ColliderComponent::Mesh { mesh, .. } => {
             world.set_mesh(collider, mesh.clone(), *transform);
@@ -1668,13 +1666,6 @@ fn query_box(offset: DVec3, half_extents: DVec3, transform: &Transform) -> BoxCo
         half_extents,
     )
     .with_rotation(transform.rotation)
-}
-
-/// What the query world holds for a compound: one box around every part as
-/// the body has them turned — see [`ColliderComponent::Compound`].
-fn compound_query_box(shape: &CompoundShape, offset: DVec3, transform: &Transform) -> BoxCollider {
-    let bounds = shape.world_bounds(offset, transform);
-    BoxCollider::new(bounds.centre(), bounds.extents() * 0.5)
 }
 
 /// `value`'s bits with every zero and every `NaN` made one: `-0.0` hashes as
