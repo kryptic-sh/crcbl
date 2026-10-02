@@ -172,7 +172,8 @@ browser's own gate and the demo site's deploy.
   Headless-runnable, with no render dependency.
 - **`crcbl-client`** — the rendering client: sends input each tick, buffers
   snapshots by server tick and plays them back at an adaptive playout delay
-  sized from measured jitter, handles snapshot reordering.
+  sized from a decaying histogram of arrival delays, handles snapshot
+  reordering.
 - **`crcbl-input`** — the device-agnostic action system: `ActionMap`
   (bindings→actions, WASD composite, mouse motion/scroll), `ButtonAction` with
   just-pressed/just-released edges, `InputTickState` for client→server tick

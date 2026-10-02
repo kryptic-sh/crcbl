@@ -350,6 +350,70 @@ fn queued_jitter_never_runs_dry_once_converged() {
     }
 }
 
+/// **A link that delivers in bursts is covered once the delay converges.**
+/// A server ticking at [`BURST_TICK_HZ`] has every snapshot held on the way
+/// and released [`BURST`] at a time, so playback sees nothing for a burst's
+/// length and then everything at once. Once converged, playback never runs
+/// dry, and on the frame each burst lands it trails the newest snapshot by
+/// at least the burst's length — enough to play on until the next one.
+#[test]
+fn bursty_delivery_never_runs_dry_once_converged() {
+    let tick = Duration::from_secs(1) / BURST_TICK_HZ;
+    let (transport, mut peer) = InMemoryTransport::pair();
+    let mut client =
+        Client::new_with_compatibility(World::new(), transport, BURST_TICK_HZ, COMPATIBILITY);
+    client.set_inbound_rate_limit_config(InboundRateLimitConfig {
+        messages_per_second: 100_000,
+        bytes_per_second: 100_000_000,
+    });
+    let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+    let settle = BURST_SETTLE.div_duration_f64(tick) as u64;
+    let mut now = Duration::ZERO;
+    let mut settled = None;
+    let mut shortest_lag = f64::INFINITY;
+    for server_tick in 1..=2 * settle {
+        now += tick;
+        let released = server_tick.is_multiple_of(BURST);
+        if released {
+            for sent in server_tick + 1 - BURST..=server_tick {
+                crate::tests::send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(sent, &[]));
+            }
+        }
+        client.update(now);
+        // The client's acks, which a full channel would refuse.
+        while peer.recv().expect("the link is up").is_some() {}
+        if server_tick == settle {
+            settled = Some(client.playout_stats());
+        }
+        if released && server_tick > settle {
+            let lag = server_tick as f64 - client.playback_tick().expect("playing");
+            shortest_lag = shortest_lag.min(lag);
+        }
+    }
+    let settled = settled.expect("the run settled");
+    let end = client.playout_stats();
+    assert_eq!(client.processing_error_count(), 0);
+    assert_eq!(
+        end.underruns, settled.underruns,
+        "bursts of {BURST} ran dry at a delay of {:?}",
+        end.delay
+    );
+    assert!(
+        shortest_lag >= BURST as f64,
+        "playback trailed a burst by {shortest_lag} ticks, under the {BURST} to the next"
+    );
+}
+
+/// The server tick rate of [`bursty_delivery_never_runs_dry_once_converged`],
+/// the backlog's probe.
+const BURST_TICK_HZ: u32 = 240;
+
+/// Snapshots per burst, and server ticks between bursts.
+const BURST: u64 = 40;
+
+/// How long the burst run takes to settle, and then how long it is watched.
+const BURST_SETTLE: Duration = Duration::from_secs(10);
+
 /// **A gap longer than the longest delay holds the last state, counts one
 /// underrun, and recovers.** Every snapshot is lost for twice
 /// [`MAX_PLAYOUT_DELAY`]: playback stands at the newest snapshot it holds —
@@ -406,19 +470,25 @@ fn a_gap_longer_than_the_max_delay_holds_counts_one_underrun_and_recovers() {
     assert_monotonic(&[gap, recovering].concat());
 }
 
-/// **A snapshot overtaken or repeated never enters the buffer or the
-/// estimate.** Tick 2 arrives after tick 3, and tick 3 arrives twice: the
-/// buffer holds 1, 3 and 4 in order, and the interval measured is what 1, 3
-/// and 4 make of it.
+/// **A snapshot overtaken or repeated never enters the buffer, and an
+/// overtaken one takes back the spacing it inflated.** Tick 3 arrives
+/// before tick 2, which takes the interval to 2 at once; tick 2 then
+/// arrives, and tick 3 again, and tick 4. The buffer holds 1, 3 and 4 in
+/// order, and the interval is what 1, 2, 3 and 4 in order make of it.
 #[test]
 fn an_overtaken_or_duplicate_snapshot_is_dropped() {
     let (transport, mut peer) = InMemoryTransport::pair();
     let mut client = client(transport);
     let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
-    for tick in [1, 3, 2, 3, 4] {
+    for tick in [1, 3] {
         crate::tests::send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(tick, &[]));
     }
     client.update(TICK);
+    assert_eq!(client.playout_stats().snapshot_interval_ticks, 2.0);
+    for tick in [2, 3, 4] {
+        crate::tests::send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(tick, &[]));
+    }
+    client.update(2 * TICK);
 
     let buffered: Vec<u64> = client.frames[&SectorId::ZERO]
         .iter()
@@ -430,13 +500,33 @@ fn an_overtaken_or_duplicate_snapshot_is_dropped() {
         0,
         "dropping them is no error"
     );
-    // 1 → 3 takes the interval to 2 at once; 3 → 4 draws it back by the gain.
-    let expected = 2.0 + (1.0 - 2.0) * playout::ESTIMATOR_GAIN;
-    assert!(
-        (client.playout_stats().snapshot_interval_ticks - expected).abs() < 1e-12,
-        "interval {}",
-        client.playout_stats().snapshot_interval_ticks
-    );
+    assert_eq!(client.playout_stats().snapshot_interval_ticks, 1.0);
+}
+
+/// **Reordering does not pass for a slower cadence.** Under the latency
+/// spread of [`jitter_grows_the_delay_without_underruns_and_calm_shrinks_it_gradually`]
+/// a snapshot every tick is overtaken often, and the client drops what was
+/// overtaken; the interval still reads one tick, not the spacing between
+/// survivors. A gap stands until the snapshots overtaken in it arrive, so
+/// for a frame or two the interval can read wider — on average it does not.
+#[test]
+fn reordering_does_not_inflate_the_interval() {
+    let mut link = Link::new();
+    link.set_conditions(SimConditions {
+        latency: Duration::from_millis(60),
+        jitter: Duration::from_millis(40),
+        seed: 0x6A17_7E55,
+        ..SimConditions::default()
+    });
+    link.run(SETTLE_TICKS, 1);
+    let shown = link.run(SETTLE_TICKS, 1);
+    let mean = shown
+        .iter()
+        .map(|shown| shown.stats.snapshot_interval_ticks)
+        .sum::<f64>()
+        / shown.len() as f64;
+    eprintln!("mean {mean}");
+    assert!(mean < 1.5, "reordering took the interval to {mean} ticks");
 }
 
 /// **Another sector's copy of a tick is not another arrival.** Two sectors

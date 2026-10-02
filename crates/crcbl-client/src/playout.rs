@@ -18,24 +18,50 @@
 //!
 //! - **The interarrival jitter `J`**, exactly as RFC 3550 §6.4.1 computes
 //!   it: `D = (Rj − Ri) − (Sj − Si)`, then `J += (|D| − J) · gain`. It is a
-//!   smoothed mean absolute deviation of the transit time, so a snapshot lost
-//!   on the way moves it not at all: the next one is on time.
+//!   smoothed mean absolute deviation of the transit time, reported in
+//!   [`PlayoutStats`] for a netgraph; the delay is not sized from it, because
+//!   averaging consecutive changes reads a stream that arrives in bursts as
+//!   nearly steady.
 //! - **The snapshot interval `I`**, the server ticks between consecutive
 //!   arrivals. A longer spacing takes over at once, so a rate drop is covered
 //!   from its first slower snapshot instead of starving playback while an
 //!   average catches up, and a shorter one is approached by the gain. A
 //!   spacing is first capped at [`LOSS_SPACING_CAP`] times the interval held:
 //!   a run of lost snapshots is an outage, not a cadence, and taking it at
-//!   face value would leave the delay at the outage's length.
+//!   face value would leave the delay at the outage's length. The spacings
+//!   are taken in tick order, not arrival order: a snapshot that arrives
+//!   after one newer than it — overtaken, and dropped from the buffer —
+//!   still takes its place among the recent ticks, so reordering does not
+//!   read as a slower cadence.
 //! - **The clock offset `O`**, `S − R` smoothed: the server's tick as seen
 //!   from here, minus the mean transit time.
 //!
-//! The delay is `I + JITTER_MULTIPLE · J + PLAYOUT_MARGIN`, no shorter than
-//! `I + PLAYOUT_MARGIN` and [`MIN_PLAYOUT_DELAY`], and no longer than
-//! [`MAX_PLAYOUT_DELAY`] unless the interval alone is: a delay shorter than
-//! the spacing starves on every snapshot, whatever the jitter. Playback aims
-//! at `R_now + O − delay` — the latest server time, estimated from the
-//! arrivals, less the delay.
+//! Playback aims at `R_now + O − delay` — the latest server time, estimated
+//! from the arrivals, less the delay — so it reaches a tick `S` at local time
+//! `S − O + delay`, and runs dry when it passes the newest snapshot held
+//! before the next has arrived. Each arrival therefore has a **relative
+//! arrival delay** `R + O − S_prev`, with `S_prev` the newest tick held
+//! before it and `O` as it stood before it: how long after a playback with
+//! no delay would have passed `S_prev` the snapshot after it came. Playback
+//! at delay `d`, its offset unchanged, has it in time when it is at most
+//! `d`. A steady stream's is its interval; a burst's first snapshot's is
+//! near the time since the burst before.
+//!
+//! The delay covers [`DELAY_QUANTILE`] of the relative arrival delays, read
+//! from a histogram that forgets, in the manner of WebRTC NetEq's delay
+//! manager (its `UnderrunOptimizer` and `Histogram`; see `histogram.rs`
+//! beside this module): buckets [`DELAY_BUCKET_WIDTH`] wide, one sample per
+//! [`DELAY_RESAMPLE_INTERVAL`] — the largest relative delay seen in it, so a
+//! burst counts by its worst snapshot rather than being outvoted by the
+//! punctual ones behind it — and each older sample weighed
+//! [`DELAY_FORGET_FACTOR`] less. The quantile's bucket gives its lower edge,
+//! and [`PLAYOUT_MARGIN`], never narrower than a bucket, covers the rest of
+//! it. The delay is `max(I, quantile) + PLAYOUT_MARGIN`, no shorter than
+//! [`MIN_PLAYOUT_DELAY`], and no longer than [`MAX_PLAYOUT_DELAY`] unless
+//! `I + PLAYOUT_MARGIN` alone is: a delay shorter than the spacing starves
+//! on every snapshot, whatever the histogram says. When late arrivals stop,
+//! their weight fades by the forget factor and the quantile falls once it is
+//! no more than `1 − DELAY_QUANTILE`.
 //!
 //! # The clock
 //!
@@ -54,9 +80,14 @@
 //! snapshot is prediction's job, and prediction is hooks, not an
 //! implementation (`docs/notes/simulation.md`).
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use crcbl_core::TickId;
+
+use histogram::DelayHistogram;
+
+mod histogram;
 
 /// The shortest playout delay chosen whatever the snapshot interval: one
 /// display frame at 60 Hz. A client's arrivals are only seen once a frame, so
@@ -68,16 +99,46 @@ pub const MIN_PLAYOUT_DELAY: Duration = Duration::from_millis(16);
 /// than this still gets a delay of its own length: see the module docs.
 pub const MAX_PLAYOUT_DELAY: Duration = Duration::from_millis(250);
 
-/// Added to every playout delay, so that a perfectly steady stream —
-/// measured jitter zero — still reaches each snapshot a little after it
-/// arrives rather than in the same instant.
+/// Added to every playout delay, so that a perfectly steady stream — every
+/// relative arrival delay exactly its interval — still reaches each snapshot
+/// a little after it arrives rather than in the same instant.
 pub const PLAYOUT_MARGIN: Duration = Duration::from_millis(4);
 
-/// How many measured jitters the playout delay holds beyond the snapshot
-/// interval. Four is the multiple RFC 6298 puts on its smoothed deviation
-/// (`K`) for the retransmission timeout, the same shape of question — how
-/// long to wait so that a late arrival is rarely too late.
-pub const JITTER_MULTIPLE: f64 = 4.0;
+/// The share of relative arrival delays the playout delay covers: NetEq's
+/// default quantile (`DelayManager::Config::quantile`). Its histogram takes
+/// the worst arrival of each [`DELAY_RESAMPLE_INTERVAL`], so the share left
+/// out is of those intervals, not of snapshots.
+pub const DELAY_QUANTILE: f64 = 0.95;
+
+/// How much less each older sample of the relative arrival delay weighs
+/// than the one after it: NetEq's default (the `forget_factor` of
+/// `DelayManager::Config`). Delays that stop fade from the histogram by
+/// this factor per [`DELAY_RESAMPLE_INTERVAL`].
+pub const DELAY_FORGET_FACTOR: f64 = 0.983;
+
+/// How far a new histogram's forget factor starts from evenly weighing the
+/// samples it has, ramping to [`DELAY_FORGET_FACTOR`]: NetEq's default
+/// (`DelayManager::Config::start_forget_weight`).
+pub const DELAY_START_FORGET_WEIGHT: f64 = 2.0;
+
+/// The width of one bucket of the relative arrival delay histogram. NetEq's
+/// is 20 ms (`kBucketSizeMs`), as long as a typical audio packet; a server
+/// tick can be far shorter, and this is no wider than [`PLAYOUT_MARGIN`],
+/// which covers the part of a bucket its lower edge leaves out.
+pub const DELAY_BUCKET_WIDTH: Duration = Duration::from_millis(4);
+
+const _: () = assert!(DELAY_BUCKET_WIDTH.as_nanos() <= PLAYOUT_MARGIN.as_nanos());
+
+/// How often the histogram takes a sample: the largest relative arrival
+/// delay since the last. NetEq resamples every 500 ms, which holds a delay
+/// long after its jitter stops; this brings it back sooner (`playout::tests`
+/// times it) and still spans several snapshots at the slowest rate drop
+/// interval.
+pub const DELAY_RESAMPLE_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The histogram's buckets: enough to reach [`MAX_PLAYOUT_DELAY`], past
+/// which the delay is capped anyway.
+const DELAY_BUCKETS: usize = histogram::bucket_count(DELAY_BUCKET_WIDTH, MAX_PLAYOUT_DELAY);
 
 /// The gain every smoothed playout estimate moves by per arrival: RFC 3550
 /// §6.4.1's `1/16`, chosen there for "a good noise reduction ratio while
@@ -114,7 +175,12 @@ pub const LOSS_SPACING_CAP: f64 = 2.0;
 pub struct PlayoutStats {
     /// How far behind the estimated latest server time playback aims.
     pub delay: Duration,
-    /// The measured interarrival jitter (RFC 3550 §6.4.1).
+    /// The relative arrival delay the playout delay covers: the lower edge
+    /// of the histogram's [`DELAY_QUANTILE`] bucket, zero before its first
+    /// sample. See the [module docs](self).
+    pub relative_delay: Duration,
+    /// The measured interarrival jitter (RFC 3550 §6.4.1). Reported, not
+    /// what the delay is sized from.
     pub jitter: Duration,
     /// The measured server ticks between snapshots.
     pub snapshot_interval_ticks: f64,
@@ -133,13 +199,42 @@ struct Arrival {
     at: f64,
 }
 
+/// The largest relative arrival delay since a resample interval began, in
+/// server ticks, and when it began.
+#[derive(Debug, Clone, Copy)]
+struct Resample {
+    began_at: f64,
+    largest: f64,
+}
+
+/// The interval after a spacing of `spacing` ticks follows `interval`: a
+/// longer spacing, up to [`LOSS_SPACING_CAP`] times the interval, takes over
+/// at once, and a shorter one is approached by [`ESTIMATOR_GAIN`].
+fn next_interval(interval: f64, spacing: f64) -> f64 {
+    let spacing = spacing.min(LOSS_SPACING_CAP * interval);
+    if spacing > interval {
+        spacing
+    } else {
+        interval + (spacing - interval) * ESTIMATOR_GAIN
+    }
+}
+
 /// The playout delay estimator and the playback clock it steers. See the
 /// [module docs](self).
 #[derive(Debug, Clone)]
 pub(crate) struct Playout {
     tick_rate_hz: f64,
     newest: Option<Arrival>,
+    /// The last [`JITTER_BUFFER_CAPACITY`] ticks received, oldest first,
+    /// overtaken ones in their place: the interval is their spacings taken
+    /// in tick order. One older than all of them is older than any snapshot
+    /// the buffer could hold, and says nothing about the cadence now.
+    recent_ticks: VecDeque<f64>,
+    /// The interval as measured up to the oldest of `recent_ticks`.
+    interval_through_oldest: f64,
     interval_ticks: f64,
+    delays: DelayHistogram,
+    resample: Option<Resample>,
     jitter_ticks: f64,
     offset_ticks: f64,
     /// Where playback is, in server ticks; `None` until the first arrival.
@@ -157,7 +252,11 @@ impl Playout {
         Self {
             tick_rate_hz,
             newest: None,
+            recent_ticks: VecDeque::with_capacity(JITTER_BUFFER_CAPACITY + 1),
+            interval_through_oldest: INITIAL_INTERVAL_TICKS,
             interval_ticks: INITIAL_INTERVAL_TICKS,
+            delays: DelayHistogram::new(DELAY_BUCKETS),
+            resample: None,
             jitter_ticks: 0.0,
             offset_ticks: 0.0,
             playback_tick: None,
@@ -177,29 +276,103 @@ impl Playout {
     }
 
     /// Record a snapshot of `tick` drained at `now`. One no newer than the
-    /// newest already recorded — another sector's copy of the same tick —
-    /// changes nothing.
+    /// newest already recorded — another sector's copy of the same tick, or
+    /// one overtaken on the way — is not an arrival; an overtaken one only
+    /// corrects the interval (see the module docs).
     pub(crate) fn observe(&mut self, tick: TickId, now: Duration) {
         let tick = tick.get() as f64;
         let at = self.ticks(now);
         match self.newest {
-            Some(newest) if tick <= newest.tick => return,
+            Some(newest) if tick < newest.tick => {
+                self.take_tick(tick);
+                return;
+            }
+            Some(newest) if tick == newest.tick => return,
             Some(newest) => {
                 let spacing = tick - newest.tick;
                 let transit_change = (at - newest.at) - spacing;
                 self.jitter_ticks += (transit_change.abs() - self.jitter_ticks) * ESTIMATOR_GAIN;
-                let spacing = spacing.min(LOSS_SPACING_CAP * self.interval_ticks);
-                if spacing > self.interval_ticks {
-                    self.interval_ticks = spacing;
-                } else {
-                    self.interval_ticks += (spacing - self.interval_ticks) * ESTIMATOR_GAIN;
-                }
+                self.take_tick(tick);
+                self.record_relative_delay(at + self.offset_ticks - newest.tick, at);
                 self.offset_ticks += ((tick - at) - self.offset_ticks) * ESTIMATOR_GAIN;
             }
-            None => self.offset_ticks = tick - at,
+            None => {
+                self.take_tick(tick);
+                self.offset_ticks = tick - at;
+            }
         }
         self.newest = Some(Arrival { tick, at });
         self.dry = false;
+    }
+
+    /// Put `tick` among the recent ticks in its place and measure the
+    /// interval again from them. A tick already there, or older than all of
+    /// them, changes nothing.
+    fn take_tick(&mut self, tick: f64) {
+        let index = match self
+            .recent_ticks
+            .binary_search_by(|recent| recent.total_cmp(&tick))
+        {
+            Ok(_) => return,
+            Err(0) if !self.recent_ticks.is_empty() => return,
+            Err(index) => index,
+        };
+        self.recent_ticks.insert(index, tick);
+        if self.recent_ticks.len() > JITTER_BUFFER_CAPACITY
+            && let Some(oldest) = self.recent_ticks.pop_front()
+            && let Some(&next) = self.recent_ticks.front()
+        {
+            self.interval_through_oldest =
+                next_interval(self.interval_through_oldest, next - oldest);
+        }
+        let mut interval = self.interval_through_oldest;
+        for (&earlier, &later) in self
+            .recent_ticks
+            .iter()
+            .zip(self.recent_ticks.iter().skip(1))
+        {
+            interval = next_interval(interval, later - earlier);
+        }
+        self.interval_ticks = interval;
+    }
+
+    /// Take a relative arrival delay of `delay` ticks, arrived at `at`, into
+    /// the current resample interval, and the interval's largest into the
+    /// histogram once it has run [`DELAY_RESAMPLE_INTERVAL`]: NetEq's
+    /// `UnderrunOptimizer::Update`. NetEq restarts the interval at the
+    /// arrival that closes it; here intervals keep to a fixed grid from the
+    /// first, because a frame clock a hair short of the interval — six
+    /// frames of a 60 Hz `Duration` are just under 100 ms — would otherwise
+    /// stretch every interval by a frame.
+    fn record_relative_delay(&mut self, delay: f64, at: f64) {
+        let window = self.ticks(DELAY_RESAMPLE_INTERVAL);
+        let Some(resample) = &mut self.resample else {
+            self.resample = Some(Resample {
+                began_at: at,
+                largest: delay,
+            });
+            return;
+        };
+        let elapsed = ((at - resample.began_at) / window).floor();
+        if elapsed < 1.0 {
+            resample.largest = resample.largest.max(delay);
+            return;
+        }
+        let largest = resample.largest / self.tick_rate_hz;
+        resample.began_at += elapsed * window;
+        resample.largest = delay;
+        self.delays.add(histogram::bucket_of(
+            largest,
+            DELAY_BUCKET_WIDTH,
+            DELAY_BUCKETS,
+        ));
+    }
+
+    /// The relative arrival delay the playout delay covers, in server ticks.
+    fn relative_delay_ticks(&self) -> f64 {
+        self.delays
+            .quantile(DELAY_QUANTILE)
+            .map_or(0.0, |bucket| bucket as f64 * self.ticks(DELAY_BUCKET_WIDTH))
     }
 
     /// The playout delay now, in server ticks.
@@ -207,7 +380,7 @@ impl Playout {
         let margin = self.ticks(PLAYOUT_MARGIN);
         let floor = (self.interval_ticks + margin).max(self.ticks(MIN_PLAYOUT_DELAY));
         let ceiling = self.ticks(MAX_PLAYOUT_DELAY).max(floor);
-        (self.interval_ticks + JITTER_MULTIPLE * self.jitter_ticks + margin).clamp(floor, ceiling)
+        (self.relative_delay_ticks() + margin).clamp(floor, ceiling)
     }
 
     /// Move playback on to `now`. See the [module docs](self).
@@ -263,6 +436,7 @@ impl Playout {
     pub(crate) fn stats(&self) -> PlayoutStats {
         PlayoutStats {
             delay: self.duration(self.delay_ticks()),
+            relative_delay: self.duration(self.relative_delay_ticks()),
             jitter: self.duration(self.jitter_ticks),
             snapshot_interval_ticks: self.interval_ticks,
             underruns: self.underruns,
@@ -305,19 +479,37 @@ mod tests {
         assert!((playout.offset_ticks - offset).abs() < 1e-12);
     }
 
-    /// **The delay is the interval, the jitter allowance and the margin,
-    /// held between its floor and ceiling.** Huge jitter is capped at
+    /// **The delay is the larger of the interval and the relative delay
+    /// covered, plus the margin, held between its floor and ceiling.** A
+    /// relative delay of ten buckets outgrows an interval of one 60 Hz tick
+    /// and sets the delay; one of two buckets does not, and the interval
+    /// does. A relative delay in the last bucket is capped at
     /// [`MAX_PLAYOUT_DELAY`]; an interval longer than that cap still gets a
     /// delay of its own length plus the margin; and a server ticking so fast
     /// that a tick and the margin fall under [`MIN_PLAYOUT_DELAY`] gets that.
     #[test]
     fn the_delay_is_held_between_its_floor_and_ceiling() {
+        let mut late = Playout::new(60.0);
+        late.delays.add(10);
+        assert_eq!(late.stats().relative_delay, DELAY_BUCKET_WIDTH * 10);
+        assert_near(late.stats().delay, DELAY_BUCKET_WIDTH * 10 + PLAYOUT_MARGIN);
+
+        let mut punctual = Playout::new(60.0);
+        punctual.delays.add(2);
+        assert_eq!(punctual.stats().relative_delay, DELAY_BUCKET_WIDTH * 2);
+        assert!(DELAY_BUCKET_WIDTH * 2 < Duration::from_secs(1) / 60);
+        assert_near(
+            punctual.stats().delay,
+            Duration::from_secs(1) / 60 + PLAYOUT_MARGIN,
+        );
+
         let mut jittery = Playout::new(60.0);
-        jittery.jitter_ticks = 1000.0;
+        jittery.delays.add(DELAY_BUCKETS - 1);
         assert_eq!(jittery.stats().delay, MAX_PLAYOUT_DELAY);
 
         let mut sparse = Playout::new(60.0);
         sparse.interval_ticks = 60.0;
+        sparse.delays.add(DELAY_BUCKETS - 1);
         assert_eq!(
             sparse.stats().delay,
             Duration::from_secs(1) + PLAYOUT_MARGIN
@@ -325,11 +517,110 @@ mod tests {
 
         let fast = Playout::new(10_000.0);
         assert_eq!(fast.stats().delay, MIN_PLAYOUT_DELAY);
+    }
 
-        let mut plain = Playout::new(60.0);
-        plain.jitter_ticks = 0.5;
-        let expected = (1.0 + JITTER_MULTIPLE * 0.5) / 60.0 + PLAYOUT_MARGIN.as_secs_f64();
-        assert!((plain.stats().delay.as_secs_f64() - expected).abs() < 1e-9);
+    fn assert_near(actual: Duration, expected: Duration) {
+        assert!(
+            actual.abs_diff(expected) < Duration::from_nanos(10),
+            "{actual:?} against {expected:?}"
+        );
+    }
+
+    /// A playout clock at a thousand ticks a second, so a tick is a
+    /// millisecond and [`DELAY_BUCKET_WIDTH`] a whole number of them.
+    fn at_one_kilohertz() -> Playout {
+        Playout::new(1000.0)
+    }
+
+    /// **The relative arrival delay is `R + O − S_prev`, and the histogram
+    /// takes the largest of each resample interval**, by hand at one tick a
+    /// millisecond. Ticks 0 to 49 arrive on time, so the offset is exactly
+    /// zero; tick 50 arrives 20 ms late with ticks 51 to 70 behind it, then
+    /// the stream is on time again. Tick 50's relative delay is
+    /// `70 + 0 − 49 = 21`, the largest in the interval that began at tick
+    /// 1's arrival; until an arrival a whole [`DELAY_RESAMPLE_INTERVAL`]
+    /// later closes it nothing is sampled, and then the 21 lands in the
+    /// bucket from 20 ms, which sets the delay.
+    #[test]
+    fn the_worst_relative_delay_of_an_interval_is_sampled() {
+        assert_eq!(DELAY_RESAMPLE_INTERVAL, Duration::from_millis(100));
+        assert_eq!(DELAY_BUCKET_WIDTH, Duration::from_millis(4));
+        let mut playout = at_one_kilohertz();
+        for tick in 0..50 {
+            arrive_ms(&mut playout, tick, tick);
+        }
+        assert_eq!(playout.offset_ticks, 0.0);
+        for tick in 50..=70 {
+            arrive_ms(&mut playout, tick, 70);
+        }
+        for tick in 71..=100 {
+            arrive_ms(&mut playout, tick, tick);
+        }
+        assert_eq!(playout.stats().relative_delay, Duration::ZERO);
+        assert_eq!(playout.stats().delay, MIN_PLAYOUT_DELAY);
+        arrive_ms(&mut playout, 101, 101);
+        assert_eq!(playout.stats().relative_delay, Duration::from_millis(20));
+        assert_near(
+            playout.stats().delay,
+            Duration::from_millis(20) + PLAYOUT_MARGIN,
+        );
+    }
+
+    fn arrive_ms(playout: &mut Playout, tick: u64, at_ms: u64) {
+        playout.observe(TickId::from_raw(tick), Duration::from_millis(at_ms));
+    }
+
+    /// **A delay whose cause stops holds, then falls, at the forget rate.**
+    /// Every resample interval for a long while carries the same late burst,
+    /// so every sample lands in one bucket; then the stream is on time. The
+    /// delay holds at the burst's for as many samples as it takes the
+    /// histogram's old weight, `DELAY_FORGET_FACTOR^n`, to come down to
+    /// `1 − DELAY_QUANTILE`, and drops to the steady delay on that sample:
+    /// a step, not a slide, and not before.
+    #[test]
+    fn a_stopped_delay_holds_then_falls_at_the_forget_rate() {
+        const WINDOW: u64 = 100;
+        assert_eq!(DELAY_RESAMPLE_INTERVAL, Duration::from_millis(WINDOW));
+        let held = ((1.0 - DELAY_QUANTILE).ln() / DELAY_FORGET_FACTOR.ln()).ceil() as u64;
+        let mut playout = at_one_kilohertz();
+        let mut tick = 0;
+        for _ in 0..1000 {
+            // Twenty snapshots held back and released together, then the
+            // rest of the interval on time.
+            for _ in 0..20 {
+                arrive_ms(&mut playout, tick, tick - tick % WINDOW + 20);
+                tick += 1;
+            }
+            for _ in 20..WINDOW {
+                arrive_ms(&mut playout, tick, tick);
+                tick += 1;
+            }
+        }
+        let bursty = playout.stats().delay;
+
+        // The delay after each punctual sample: one taken from a resample
+        // interval whose largest relative delay was under a bucket.
+        let mut delays = Vec::new();
+        for _ in 0..2 * held * WINDOW {
+            let open = playout.resample.expect("sampling");
+            let samples = playout.delays.samples;
+            arrive_ms(&mut playout, tick, tick);
+            tick += 1;
+            if playout.delays.samples > samples {
+                if open.largest >= playout.ticks(DELAY_BUCKET_WIDTH) {
+                    assert!(delays.is_empty(), "a late sample after punctual ones");
+                } else {
+                    delays.push(playout.stats().delay);
+                }
+            }
+        }
+        let punctual = delays.iter().position(|&delay| delay != bursty);
+        assert_eq!(
+            punctual.map(|position| position + 1),
+            Some(held as usize),
+            "the delay left {bursty:?} after {punctual:?} punctual samples, not {held}"
+        );
+        assert_eq!(delays[held as usize - 1], MIN_PLAYOUT_DELAY);
     }
 
     /// **A rate drop is covered from its first slower snapshot**: as the
@@ -354,6 +645,47 @@ mod tests {
         }
         arrive(&mut outage, 30, 30.0);
         assert_eq!(outage.interval_ticks, LOSS_SPACING_CAP);
+    }
+
+    /// **The interval is the spacings in tick order, and remembers those
+    /// older than the recent ticks.** An overtaken tick takes its place: 0,
+    /// 2, 1 measures 0 → 1 → 2, an interval of one, not two, and a second
+    /// copy of a tick is no spacing of zero. Forty spacings of one after an
+    /// interval of three bring it to
+    /// `1 + 2 · (15/16)^40` — the gain applied forty times — although only
+    /// the last [`JITTER_BUFFER_CAPACITY`] ticks are kept, and no more.
+    #[test]
+    fn the_interval_takes_spacings_in_tick_order() {
+        let mut playout = at_one_hertz();
+        arrive(&mut playout, 0, 0.0);
+        arrive(&mut playout, 2, 1.0);
+        assert_eq!(playout.interval_ticks, 2.0);
+        arrive(&mut playout, 1, 2.0);
+        assert_eq!(playout.interval_ticks, 1.0);
+
+        let mut playout = at_one_hertz();
+        for tick in [0, 2, 5] {
+            arrive(&mut playout, tick, tick as f64);
+        }
+        const SPACINGS: u64 = 40;
+        const { assert!(SPACINGS as usize > JITTER_BUFFER_CAPACITY) };
+        let mut expected = 3.0;
+        assert_eq!(playout.interval_ticks, expected);
+        for tick in 6..6 + SPACINGS {
+            arrive(&mut playout, tick, tick as f64);
+            expected += (1.0 - expected) * ESTIMATOR_GAIN;
+            if tick == 6 {
+                arrive(&mut playout, 5, 6.0);
+                assert_eq!(playout.interval_ticks, expected, "a copy of 5 counted");
+            }
+        }
+        assert_eq!(playout.recent_ticks.len(), JITTER_BUFFER_CAPACITY);
+        assert!(
+            (playout.interval_ticks - expected).abs() < 1e-12,
+            "interval {}, expected {expected}",
+            playout.interval_ticks
+        );
+        assert!((expected - (1.0 + 2.0 * (15.0_f64 / 16.0).powi(40))).abs() < 1e-9);
     }
 
     /// **A long frame lands playback on its target, not past it.** Over a

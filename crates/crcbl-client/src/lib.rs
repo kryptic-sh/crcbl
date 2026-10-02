@@ -297,8 +297,9 @@ impl<T: Transport> Client<T> {
         self.playout.playback_tick()
     }
 
-    /// The playout delay, the jitter it was sized from, and how often
-    /// playback ran dry or had to step. See [`playout`].
+    /// The playout delay, the relative arrival delay it was sized from, the
+    /// jitter, and how often playback ran dry or had to step. See
+    /// [`playout`].
     #[must_use]
     pub fn playout_stats(&self) -> PlayoutStats {
         self.playout.stats()
@@ -961,6 +962,11 @@ impl<T: Transport> Client<T> {
                 .expect("empty snapshot is valid")
         });
         if delta.tick <= baseline.tick {
+            // A duplicate, or a snapshot another overtook: never buffered,
+            // but an overtaken one still takes its place in the playout
+            // clock's snapshot interval, which reordering would otherwise
+            // read as a slower cadence.
+            self.playout.observe(delta.tick, self.now);
             return;
         }
         if delta.is_keyframe && delta.baseline_tick.is_some() {

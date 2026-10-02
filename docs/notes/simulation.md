@@ -724,14 +724,17 @@ for the determinism test, and per-system tick time.
   built 2026-10-01 as `crcbl_client::playout`). One tick of delay survives no
   jitter and no dropped snapshot; the industry norm, documented in Valve's
   Source networking, is two snapshot intervals plus a jitter margin, growing
-  under measured jitter and shrinking when calm. What was built is one measured
-  interval plus `JITTER_MULTIPLE` RFC 3550 jitters plus `PLAYOUT_MARGIN`,
-  clamped by `MIN_PLAYOUT_DELAY` and `MAX_PLAYOUT_DELAY`: a lost snapshot is
-  covered by the interval estimate taking over the longer spacing, not by a
-  second interval held in reserve. Playback eases towards a changed delay within
-  `MAX_PLAYOUT_RATE_DEVIATION` of the tick rate. `26-prediction.md` assumed
-  about 100 ms, which the delay reaches only under jitter; at a steady snapshot
-  every 60 Hz tick it is about 21 ms.
+  under measured jitter and shrinking when calm. What was built is the larger of
+  one measured interval and the `DELAY_QUANTILE` quantile of a decaying
+  histogram of relative arrival delays, plus `PLAYOUT_MARGIN`, clamped by
+  `MIN_PLAYOUT_DELAY` and `MAX_PLAYOUT_DELAY`: a lost snapshot is covered by the
+  interval estimate taking over the longer spacing, not by a second interval
+  held in reserve. The histogram is WebRTC NetEq's delay manager's (decided
+  2026-10-02, replacing `I + 4J` sized from RFC 3550's jitter `J`, which reads a
+  link that delivers in bursts as nearly steady). Playback eases towards a
+  changed delay within `MAX_PLAYOUT_RATE_DEVIATION` of the tick rate.
+  `26-prediction.md` assumed about 100 ms, which the delay reaches only under
+  jitter; at a steady snapshot every 60 Hz tick it is about 21 ms.
 - **Prediction is hooks, not an implementation**, until the arena era; the
   buffer is shaped so client-side prediction can slot in. A dry buffer holds the
   last state rather than extrapolating, because guessing past the newest

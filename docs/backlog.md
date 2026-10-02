@@ -10692,21 +10692,68 @@ parallel schedule are under _Jobs and threading_.
 term: the client buffers snapshots by server tick (at most
 `JITTER_BUFFER_CAPACITY` per sector) and plays them back at the latest server
 time it estimates from their arrivals less an adaptive playout delay — the
-measured snapshot interval plus `JITTER_MULTIPLE` times RFC 3550 §6.4.1's
-interarrival jitter plus `PLAYOUT_MARGIN`, between `MIN_PLAYOUT_DELAY` and
-`MAX_PLAYOUT_DELAY` and never under the interval. The delay changes gradually:
-playback runs within `MAX_PLAYOUT_RATE_DEVIATION` of the tick rate towards its
-target and steps only after falling behind by more than `MAX_PLAYOUT_DELAY`. A
-dry buffer holds the last state and counts an underrun; nothing extrapolates.
-`Client::playout_stats` reports the delay, jitter, interval, underruns and
-steps. The module docs give the estimator in full. Tests, each shown red by a
-mutation: `playout::tests` (the RFC arithmetic by hand, the delay's floor and
-ceiling, a longer spacing taking over the interval and an outage not, a long
-frame not overshooting) and `playout_tests` (steady streams at intervals 1 to 3,
-the alpha across a four-tick span, reordering and queued jitter, a gap past the
-longest delay, overtaken and duplicate snapshots, one arrival per tick across
-sectors, the capacity), plus
-`host::rate_tests::a_client_interpolates_smoothly_at_the_slowest_interval`.
+larger of the measured snapshot interval and the `DELAY_QUANTILE` quantile of a
+decaying histogram of relative arrival delays, plus `PLAYOUT_MARGIN`, between
+`MIN_PLAYOUT_DELAY` and `MAX_PLAYOUT_DELAY` and never under the interval. The
+delay changes gradually: playback runs within `MAX_PLAYOUT_RATE_DEVIATION` of
+the tick rate towards its target and steps only after falling behind by more
+than `MAX_PLAYOUT_DELAY`. A dry buffer holds the last state and counts an
+underrun; nothing extrapolates. `Client::playout_stats` reports the delay, the
+relative delay it covers, the RFC 3550 §6.4.1 jitter (measured, no longer
+driving the delay), interval, underruns and steps. The module docs give the
+estimator in full.
+
+**Decided 2026-10-02 for the long term: the delay comes from a quantile of a
+decaying histogram, not from `I + 4J`.** RFC 3550's `J` averages consecutive
+transit changes, so a link that holds snapshots and releases them together read
+as nearly steady: the probe (240 Hz, bursts of 40 every 40 ticks, now
+`playout_tests::bursty_delivery_never_runs_dry_once_converged`) measured a 28 ms
+delay against bursts 167 ms apart and kept running dry; it now converges to 120
+ms and runs dry no more. The histogram follows WebRTC NetEq's delay manager
+(`UnderrunOptimizer`, `Histogram`, defaults from `DelayManager::Config`):
+quantile 0.95, forget factor 0.983, start forget weight 2, and one sample per
+resample interval taking the worst arrival in it. A snapshot's relative arrival
+delay is `R + O − S_prev`: when it arrived, measured from when a playback with
+no delay would have passed the newest snapshot before it, `O` being the smoothed
+offset playback is anchored to. The quantile bucket's lower edge plus
+`PLAYOUT_MARGIN` (never narrower than a bucket) covers it, so a steady stream
+keeps exactly `I + PLAYOUT_MARGIN`. The interval is now measured in tick order
+over the last `JITTER_BUFFER_CAPACITY` ticks received, overtaken ones included,
+so reordering no longer reads as a slower cadence. Tests, each shown red by a
+mutation: `playout::histogram::tests` (bucket placement, the forget ramp,
+fading, the quantile walk, the hold-then-drop count), `playout::tests` (the
+worst of an interval sampled, the delay's max and clamp, a stopped delay holding
+then falling on the predicted sample, the interval in tick order and its memory)
+and `playout_tests` (bursts, reordering not inflating the interval).
+
+**Considered and declined (2026-10-02):**
+
+- **One histogram sample per snapshot.** A burst's first snapshot is the only
+  late one; the rest arrive with it and read as punctual, so per snapshot the
+  late share of a burst of 40 is one in forty, under any 0.95–0.97 quantile.
+  NetEq's resampling (the worst arrival per interval) is what covers it.
+- **NetEq's 500 ms resample interval.** With its forget factor and quantile a
+  stopped delay holds for as many samples as
+  `playout::histogram::tests::a_stopped_delay_holds_then_drops_at_the_forget_rate`
+  counts; at 500 ms each that is well over a minute of extra latency after the
+  jitter ends. `DELAY_RESAMPLE_INTERVAL` is a fifth of it.
+- **NetEq's bucket upper edge as the target.** It puts a bucket's worth of delay
+  on a steady stream; the lower edge plus the margin covers the same span and
+  leaves the steady delay where it was.
+- **Lateness relative to the fastest arrival in a window** (NetEq's
+  `PacketArrivalHistory`). Playback here is anchored to the smoothed mean
+  offset, so lateness measured from that same offset is what decides whether it
+  runs dry; a fastest-arrival anchor would need playback re-anchored too.
+- **Keeping `4J` in the delay alongside the quantile.** Nothing regressed
+  without it: every playout, client, server and rate-drop test passes on the
+  quantile alone. Tests, each shown red by a mutation: `playout::tests` (the RFC
+  arithmetic by hand, the delay's floor and ceiling, a longer spacing taking
+  over the interval and an outage not, a long frame not overshooting) and
+  `playout_tests` (steady streams at intervals 1 to 3, the alpha across a
+  four-tick span, reordering and queued jitter, a gap past the longest delay,
+  overtaken and duplicate snapshots, one arrival per tick across sectors, the
+  capacity), plus
+  `host::rate_tests::a_client_interpolates_smoothly_at_the_slowest_interval`.
 
 **Left, and what each would take:**
 
@@ -10721,24 +10768,39 @@ sectors, the capacity), plus
   predicted; nothing needs it until prediction lands.
 - **The constants were chosen, not tuned.** `MIN_PLAYOUT_DELAY`,
   `MAX_PLAYOUT_DELAY`, `PLAYOUT_MARGIN`, `PLAYOUT_CORRECTION_TIME`,
-  `MAX_PLAYOUT_RATE_DEVIATION`, `LOSS_SPACING_CAP` and `JITTER_BUFFER_CAPACITY`
-  are unmeasured on a real link; every test drives in-memory links, some through
-  `crcbl_net::ConditionSimulator` on a `ManualClock`.
-- **Bursty delivery reads as little jitter.** RFC 3550's estimator averages
-  consecutive transit changes, so a stream that arrives in bursts — a link
-  holding many snapshots and releasing them together — measures far less jitter
-  than its spread. A discarded probe at 240 Hz with bursts of 40 every 40 ticks
-  measured a delay of 28 ms against bursts 167 ms apart — far too short to
-  bridge them (its underruns were not counted). Jitter that queues without
-  bursting is covered: `queued_jitter_never_runs_dry_once_converged` holds up to
-  100 ms at 60 Hz. A quantile of the transit-time spread (WebRTC NetEq keeps a
-  delay histogram for this) would cover bursts. Not built.
-- **The estimator sees only the snapshots it keeps.** Under reordering jitter
-  the client drops what was overtaken, and the spacing between survivors
-  inflates the interval estimate: ±40 ms at 60 Hz in
-  `jitter_grows_the_delay_without_underruns_and_calm_shrinks_it_gradually`
-  measured an interval near three ticks. The delay then covers the jitter partly
-  through the interval term. Behaviour, not a bug.
+  `MAX_PLAYOUT_RATE_DEVIATION`, `LOSS_SPACING_CAP`, `JITTER_BUFFER_CAPACITY`,
+  `DELAY_BUCKET_WIDTH` and `DELAY_RESAMPLE_INTERVAL` are unmeasured on a real
+  link, and the NetEq defaults (`DELAY_QUANTILE`, `DELAY_FORGET_FACTOR`,
+  `DELAY_START_FORGET_WEIGHT`) were tuned for audio, not snapshots; every test
+  drives in-memory links, some through `crcbl_net::ConditionSimulator` on a
+  `ManualClock`.
+- **The buffer is too small for the burst probe.** At 240 Hz the probe settles
+  at a 120 ms delay, and just after each burst playback trails the newest by 40
+  ticks, more than the `JITTER_BUFFER_CAPACITY` frames a sector keeps; the
+  oldest go, playback sits behind the oldest frame held, and the interpolated
+  entity stands still until playback reaches it. The playout clock does not run
+  dry, but the picture stalls once per burst. Not fixed: the capacity would have
+  to cover `MAX_PLAYOUT_DELAY` at the fastest tick rate, or playback be told
+  what the buffer holds. Seen by reasoning about `playback_index`, not observed
+  in a test.
+- **A gap at the top reads as a wider interval until it fills.** Under
+  reordering the newest snapshot has often overtaken others still in flight;
+  until they arrive the interval reads the gap (capped at `LOSS_SPACING_CAP`),
+  then falls back. Under ±40 ms at 60 Hz
+  (`playout_tests::reordering_does_not_inflate_the_interval`) the interval
+  averaged 1.38 ticks over a converged run, where taking survivors only had it
+  at 2.63. Behaviour, not a bug: a gap cannot be told from a rate drop until it
+  fills.
+- **Loss now raises the delay.** A snapshot after a lost one has a relative
+  arrival delay of two spacings, so a link losing snapshots often enough to put
+  one in most resample intervals holds the delay at about two intervals. That is
+  the delay a lost snapshot needs, but no test drives loss against the
+  histogram.
+- **A stopped delay holds, then steps down.** When late arrivals stop the
+  quantile stays put until their weight fades under `1 − DELAY_QUANTILE`, then
+  drops a bucket at a time; for a delay all in one bucket that is one step after
+  the sample count `histogram::tests` asserts, times `DELAY_RESAMPLE_INTERVAL`.
+  Playback then slews at the rate bound. Behaviour, by design (NetEq's).
 - **A step lerps across the outage.** After a gap the pair either side of
   playback is the last snapshot before it and the first after, so an entity
   glides across the outage's motion over a delay's worth of frames. Behaviour,

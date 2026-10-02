@@ -535,20 +535,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **A jitter buffer with an adaptive playout delay in `crcbl_client`**
   (`crcbl_client::playout`). The client buffers snapshots by server tick, up to
   `JITTER_BUFFER_CAPACITY` per sector, and plays them back at the latest server
-  time it estimates from their arrivals less a playout delay: the measured
-  snapshot interval plus `JITTER_MULTIPLE` times the measured interarrival
-  jitter (RFC 3550 §6.4.1's estimator, gain `ESTIMATOR_GAIN`) plus
-  `PLAYOUT_MARGIN`, held between `MIN_PLAYOUT_DELAY` and `MAX_PLAYOUT_DELAY` and
-  never under the interval itself. A longer snapshot spacing takes over the
-  interval at once, so the rate drop's slower cadences are covered from their
-  first snapshot. The delay changes gradually: playback runs at most
+  time it estimates from their arrivals less a playout delay: the larger of the
+  measured snapshot interval and the `DELAY_QUANTILE` quantile of a decaying
+  histogram of relative arrival delays, plus `PLAYOUT_MARGIN`, held between
+  `MIN_PLAYOUT_DELAY` and `MAX_PLAYOUT_DELAY` and never under the interval
+  itself. A snapshot's relative arrival delay is how long after a playback with
+  no delay would have passed the snapshot before it that it arrived; the
+  histogram is WebRTC NetEq's delay manager's — buckets `DELAY_BUCKET_WIDTH`
+  wide, one sample per `DELAY_RESAMPLE_INTERVAL` taking the worst arrival in it,
+  older samples weighed `DELAY_FORGET_FACTOR` less after a ramp set by
+  `DELAY_START_FORGET_WEIGHT` — so a link that holds snapshots and releases them
+  in bursts is covered, where the RFC 3550 jitter the delay was first sized from
+  (`interval + 4 · J`) read 240 Hz bursts of 40 as a 28 ms delay against 167 ms
+  between bursts. When the late arrivals stop, the delay holds and then falls
+  back as their weight fades. `JITTER_MULTIPLE` is gone; the RFC 3550 §6.4.1
+  jitter (gain `ESTIMATOR_GAIN`) is still measured and reported. A longer
+  snapshot spacing takes over the interval at once, so the rate drop's slower
+  cadences are covered from their first snapshot, and spacings are taken in tick
+  order, so a snapshot overtaken and dropped no longer inflates the interval.
+  The delay changes gradually: playback runs at most
   `MAX_PLAYOUT_RATE_DEVIATION` faster or slower than the tick rate while it
   drifts to its target, and steps only after falling further behind than
   `MAX_PLAYOUT_DELAY`. When the buffer runs dry playback holds the last state —
   nothing extrapolates — and counts an underrun. New on `Client`:
   `playback_tick()` (where playback is, in server ticks) and `playout_stats()`,
-  a `PlayoutStats` with the delay, the jitter, the interval, `underruns` and
-  `steps`.
+  a `PlayoutStats` with the delay, the `relative_delay` it covers, the jitter,
+  the interval, `underruns` and `steps`.
 
 - **Every hit along a straight sweep from `crcbl_phys::PhysicsWorld`.**
   `sweep_sphere_all(segment, radius, filter, &mut hits)` and
