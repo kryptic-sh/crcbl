@@ -10,7 +10,7 @@
 //! keyboard speaking, and neither does a zero delta. It is tracked from every
 //! event the map receives, whether or not any binding reads that input.
 
-use super::ActionMap;
+use super::{ActionMap, Binding};
 
 /// A kind of input device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -37,10 +37,87 @@ impl ActionMap {
     }
 }
 
+impl Binding {
+    /// The kind of device this binding listens to — which list of a binding
+    /// asset it is written in (`binding_asset.rs`), and what a glyph hint will
+    /// match against [`ActionMap::last_device`].
+    ///
+    /// A binding that reads two devices belongs to the one its value comes
+    /// from: a [`Binding::ScrollChord`] is the wheel with a key held, so it is
+    /// [`Device::Pointer`]'s. [`Binding::PointerPosition`] is the pointer's
+    /// too, though a phone's primary contact drives it — the platform hands
+    /// that contact over as a pointer.
+    #[must_use]
+    pub const fn device(&self) -> Device {
+        match self {
+            Self::Key(_) | Self::Chord { .. } | Self::KeyAxis { .. } | Self::Wasd { .. } => {
+                Device::Keyboard
+            }
+            Self::MouseButton(_)
+            | Self::ButtonChord { .. }
+            | Self::MouseMotion
+            | Self::MouseScroll
+            | Self::ScrollChord { .. }
+            | Self::PointerPosition { .. } => Device::Pointer,
+            Self::Virtual(_) => Device::Touch,
+            Self::PadButton(_)
+            | Self::PadChord { .. }
+            | Self::PadDpad
+            | Self::PadStick { .. }
+            | Self::PadTrigger { .. } => Device::Gamepad,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{PadButton, PointerAxis};
     use crcbl_core::input::{KeyCode, PointerButton};
+
+    /// A binding that reads two devices belongs to the one its value comes
+    /// from, as [`Binding::device`] documents.
+    #[test]
+    fn a_binding_belongs_to_the_device_its_value_comes_from() {
+        for (binding, device) in [
+            (
+                Binding::Chord {
+                    modifier: crate::Modifier::Shift,
+                    key: KeyCode::KeyR,
+                },
+                Device::Keyboard,
+            ),
+            (
+                Binding::ScrollChord {
+                    held: KeyCode::ControlLeft,
+                },
+                Device::Pointer,
+            ),
+            (
+                Binding::ButtonChord {
+                    modifier: crate::Modifier::Alt,
+                    button: PointerButton::Right,
+                },
+                Device::Pointer,
+            ),
+            (
+                Binding::PointerPosition {
+                    axis: PointerAxis::Y,
+                },
+                Device::Pointer,
+            ),
+            (Binding::Virtual("stick".to_owned()), Device::Touch),
+            (
+                Binding::PadChord {
+                    modifier: PadButton::LeftShoulder,
+                    button: PadButton::South,
+                },
+                Device::Gamepad,
+            ),
+        ] {
+            assert_eq!(binding.device(), device, "{binding}");
+        }
+    }
 
     /// **Each device takes over when it speaks**, whether or not anything is
     /// bound to what it said — and a release or a still pointer does not.

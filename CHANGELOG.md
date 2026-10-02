@@ -226,6 +226,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   (see Added). `Binding` is not `#[non_exhaustive]`, so an exhaustive `match` on
   it needs the new arm.
 
+- **`crcbl_input::ActionMapError` has `NotAButton` and `EmitsItself`**, returned
+  only by the new `ActionMap::set_emits` (see Added). The enum is not
+  `#[non_exhaustive]`, so an exhaustive `match` on it needs both arms.
+
 - **`crcbl_render::Atmosphere` and `crcbl_shaders::atmosphere::Atmosphere` have
   a `km_per_unit` field**, the scale the new aerial perspective marches a
   scene's distances at, so a struct literal of either needs it:
@@ -536,6 +540,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **RON binding assets: a game's default actions as a file.**
+  `crcbl_input::ActionMap::from_ron(text)` declares every record of a list like
+  `[(action: "jump", kind: Button, keyboard: ["Space"], gamepad: ["Pad:South"], patterns: [Hold(400, "jump_charge")]), (action: "jump_charge", kind: Button)]`
+  in file order, and `ActionMap::to_ron()` writes a map's declared defaults back
+  in one canonical form (` ` newlines on every platform, empty fields left out),
+  byte for byte what a canonical file held. A record has `action`, `kind`
+  (`Button`, `Axis1`, `Axis2`), an optional `context`, the lists `keyboard`,
+  `mouse`, `gamepad` and `touch`, and `patterns` (`Tap(ms, name)`,
+  `Hold(ms, name)`, `DoubleTap(tap_ms, window_ms, name)`,
+  `DoubleTapOnRelease(…)`). Bindings are written in the text form rebinds
+  already use (`crcbl_input::binding_text`), and the four lists flatten into the
+  action's one binding list in that fixed order
+  (`crcbl_input::binding_asset::DEVICE_LISTS`). A file is refused with a
+  `BindingAssetError` carrying the line, the column and an `AssetRefusal` that
+  names what was wrong: a binding in another device's list, bad binding text, a
+  duplicate action, an unknown kind or field, a duplicate or zero-length
+  pattern, or a pattern emitting an action the file does not declare, emits
+  itself, or is not a `Button`. `to_ron` returns `AssetWriteError` for a map the
+  schema cannot say — a repeat schedule, a pattern with no emitted action, a
+  time that is not whole milliseconds, bindings with devices interleaved —
+  rather than writing a file that reads back differently. Rebinds stay a diff
+  over the asset's defaults through `overrides`/`apply_overrides`.
+  `Binding::device()` names the `Device` each binding listens to. `apps/horde`
+  now loads its controls from `assets/bindings.ron`.
+- **A pattern can press a named action when it fires.**
+  `ActionMap::set_emits(source, Pattern::Hold, Some("jump_charge"))` makes the
+  tap, hold or double tap on `source` press the `Button` action `jump_charge` on
+  the tick it fires, released at the next `begin_tick`, so the game, a replay
+  and a captured `InputTickState` read it as an action like any other;
+  `emits(source, pattern)` reads it back. The edges do not depend on the order
+  the actions were declared in, and a disabled emitted action is not pressed.
 
 - **`crcbl::screenshot::OffscreenSetup::probe` reports the device a setup would
   draw on without building a scene.** It opens the backend, the pinned adapter

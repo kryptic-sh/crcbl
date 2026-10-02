@@ -4435,3 +4435,72 @@ fn a_prefilled_field_is_the_size_and_shape_it_was_asked_for() {
     // The cap is honoured rather than ignored.
     assert_eq!(game.stage_field(500), 0, "the prefill went past the cap");
 }
+
+/// The declarations [`BINDINGS_RON`] replaced, exactly as the code wrote them
+/// before the file existed.
+fn the_code_declared_actions() -> ActionMap {
+    use crcbl::input::{ActionDecl, ActionKind, Binding};
+
+    let mut action_map = ActionMap::new();
+    action_map.declare(ActionDecl {
+        name: ACTION_MOVE.into(),
+        kind: ActionKind::Axis2,
+        bindings: vec![
+            Binding::Wasd {
+                up: KeyCode::KeyW,
+                down: KeyCode::KeyS,
+                left: KeyCode::KeyA,
+                right: KeyCode::KeyD,
+            },
+            Binding::Wasd {
+                up: KeyCode::ArrowUp,
+                down: KeyCode::ArrowDown,
+                left: KeyCode::ArrowLeft,
+                right: KeyCode::ArrowRight,
+            },
+            Binding::Virtual(STICK_MOVE.into()),
+        ],
+    });
+    for (name, keys) in [
+        (ACTION_RESTART, vec![KeyCode::KeyR, KeyCode::Space]),
+        (ACTION_CHOOSE[0], vec![KeyCode::Digit1]),
+        (ACTION_CHOOSE[1], vec![KeyCode::Digit2]),
+        (ACTION_CHOOSE[2], vec![KeyCode::Digit3]),
+    ] {
+        action_map.declare(ActionDecl {
+            name: name.into(),
+            kind: ActionKind::Button,
+            bindings: keys.into_iter().map(Binding::Key).collect(),
+        });
+    }
+    action_map
+}
+
+/// **The committed bindings are the ones the code declared**: the same
+/// actions in the same order, each of the same kind in the same context with
+/// the same bindings in the same order and no patterns — so moving them into
+/// a file changed nothing a player can press. The file is also the canonical
+/// form `to_ron` writes, so a tool rewriting it leaves it alone.
+#[test]
+fn the_committed_bindings_are_the_ones_the_code_declared() {
+    use crcbl::input::Pattern;
+
+    let loaded = built_in_actions();
+    let declared = the_code_declared_actions();
+    let names: Vec<&str> = declared.action_names().collect();
+    assert_eq!(loaded.action_names().collect::<Vec<_>>(), names);
+    for name in names {
+        assert_eq!(loaded.bindings(name), declared.bindings(name), "{name}");
+        assert_eq!(loaded.context_of(name), declared.context_of(name), "{name}");
+        let kind = |map: &ActionMap| map.action(name).map(std::mem::discriminant);
+        assert_eq!(kind(&loaded), kind(&declared), "{name}");
+        assert_eq!(loaded.tap(name), None, "{name}");
+        assert_eq!(loaded.hold(name), None, "{name}");
+        assert_eq!(loaded.double_tap(name), None, "{name}");
+        for pattern in Pattern::ALL {
+            assert_eq!(loaded.emits(name, pattern), None, "{name}");
+        }
+    }
+    assert_eq!(declared.to_ron().as_deref(), Ok(BINDINGS_RON));
+    assert_eq!(loaded.to_ron().as_deref(), Ok(BINDINGS_RON));
+}

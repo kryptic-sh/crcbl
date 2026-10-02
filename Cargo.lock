@@ -503,6 +503,8 @@ name = "crcbl-input"
 version = "0.1.0"
 dependencies = [
  "crcbl-core",
+ "ron",
+ "serde",
 ]
 
 [[package]]

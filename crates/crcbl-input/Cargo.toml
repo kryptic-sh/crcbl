@@ -8,6 +8,13 @@ repository.workspace = true
 
 [dependencies]
 crcbl-core = { workspace = true }
+# A game's default actions as a file (`src/binding_asset.rs`), in the format
+# every other engine data file is written in — `crcbl_render::stack` and
+# `crcbl_inventory`'s catalogue among them — so a game hand-editing one file
+# does not learn a second syntax for the next. `serde`'s derive is the record's
+# shape; `ron` reads it and writes it back with one pinned `PrettyConfig`.
+serde = { workspace = true }
+ron = { workspace = true }
 
 [lints]
 workspace = true

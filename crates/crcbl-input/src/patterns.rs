@@ -69,6 +69,7 @@
 //! not a new press — the patterns time the press, not where it points.
 
 use super::{ActionMap, ActionMapError, ActionValue};
+use crate::Pattern;
 use crate::repeat::Held;
 
 /// The longest a press can last and still be a tap, in seconds.
@@ -269,9 +270,27 @@ pub(crate) struct PatternState {
     tapped: bool,
     hold_fired: bool,
     double_tapped: bool,
+    /// The slot each pattern emits when it fires, in [`Pattern::ALL`]'s order
+    /// — see `emit.rs`.
+    pub(crate) emits: [Option<usize>; Pattern::ALL.len()],
 }
 
 impl PatternState {
+    /// What has fired on this tick, in [`Pattern::ALL`]'s order.
+    pub(crate) const fn fired(&self) -> [bool; Pattern::ALL.len()] {
+        [self.tapped, self.hold_fired, self.double_tapped]
+    }
+
+    /// Queue the slot of every pattern that fired since `before` was read
+    /// from [`PatternState::fired`] and emits one.
+    pub(crate) fn queue_emits(&self, before: [bool; Pattern::ALL.len()], queue: &mut Vec<usize>) {
+        for ((was, now), target) in before.into_iter().zip(self.fired()).zip(self.emits) {
+            if now && !was {
+                queue.extend(target);
+            }
+        }
+    }
+
     /// Clear what fired on the last tick — [`ActionMap::begin_tick`]'s share.
     pub(crate) fn clear_fired(&mut self) {
         self.tapped = false;

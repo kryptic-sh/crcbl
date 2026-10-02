@@ -12501,13 +12501,17 @@ deleted 19-input plan left behind_.
 
 - **Pattern gaps after tap/hold/double-tap landed (2026-09-23).**
   `ActionMap::set_tap`, `set_hold` and `set_double_tap` exist
-  (`crates/crcbl-input/src/patterns.rs`). Still missing: the plan's RON form
-  that emits a _named_ action; pattern edges in `InputTickState`, so a server
-  applying captured ticks sees values but no pattern edges. EW is migrating its
-  input onto `ActionMap` (2026-09-24); a waiting single tap fires at `>` the
-  window against EW's `>=`, one tick apart at exact boundaries — deliberate,
-  since a second press at exactly the window still completes the double (the
-  `patterns.rs` module docs).
+  (`crates/crcbl-input/src/patterns.rs`), and since 2026-10-03
+  `ActionMap::set_emits` makes one press a named button action
+  (`crates/crcbl-input/src/emit.rs`), which a binding asset's
+  `Hold(400, "jump_charge")` spells. Still missing: pattern edges in
+  `InputTickState` for a pattern that emits nothing, so a server applying
+  captured ticks sees `jump_charge` go down but not `tapped("jump")`; and a
+  repeat schedule cannot emit (`Pattern` has no repeat), which nothing has asked
+  for. EW is migrating its input onto `ActionMap` (2026-09-24); a waiting single
+  tap fires at `>` the window against EW's `>=`, one tick apart at exact
+  boundaries — deliberate, since a second press at exactly the window still
+  completes the double (the `patterns.rs` module docs).
 - **Suppress and scroll-chord coverage gaps (2026-09-24).**
   `ActionMap::suppress_held`/`suppress_held_action` and `Binding::ScrollChord`
   are tested on one pad and one context stack each. Not covered by a test: two
@@ -12518,22 +12522,39 @@ deleted 19-input plan left behind_.
   lift). A stick with no `PadStick` binding lifts only at exactly centre, so a
   drifting unbound stick stays withheld; harmless while nothing reads it, and
   the lift re-checks on every pad event once something does.
-- **RON binding assets.** Nothing parses one; a game declares actions in code
-  through `ActionDecl`. The plan's sketch was one record per action — `action`,
-  `kind`, a binding list per device class (`keyboard`, `mouse`, `gamepad`,
-  `touch`), and `patterns` whose entries emit a _named_ action, as
-  `Hold(400, "jump_charge")` does — loaded as the game's defaults. As built,
-  bindings are one flat `Vec<Binding>` per action and nothing downstream can
-  tell which spoke; a per-class grouping in the asset would be presentation over
-  that list, not a change to it. `ron` has been a workspace dependency since
-  2026-09-06, so what is owed is the binding asset's schema, not a reader.
+- **RON binding assets: what the 2026-10-03 slice left out.**
+  `ActionMap::from_ron`/`to_ron` (`crates/crcbl-input/src/binding_asset.rs`)
+  read and write the schema, and `apps/horde/assets/bindings.ron` is the one
+  sample on it. **Decided 2026-10-03, long term:** an asset's bindings are
+  written in `binding_text`'s spelling (`"Alt+Mouse:Right"`), never a second
+  serde shape for `Binding`, so a file, a rebind override and the asset cannot
+  drift; the device lists flatten in `binding_asset::DEVICE_LISTS` order and a
+  binding in another device's list is refused by name; every pattern in the file
+  emits a named `Button` action the same file declares. Not done:
+  - **A repeat schedule has no asset form**, so `to_ron` refuses a map with
+    `set_repeat` on it (`AssetWriteError::Repeat`) — including any map the
+    reserved `ui` context was declared into. Adding
+    `Repeat(delay_ms, interval_ms)` without a name would break the
+    every-pattern-emits rule; which way to go is open.
+  - **`from_ron` builds a fresh map**; there is no loading an asset into a map
+    that already holds actions (the engine's `ui` ones), and no
+    `--bindings <FILE>` door in any sample. Horde's file is `include_str!`ed.
+  - **Patterns declared in code without an emitted action** are not writable
+    (`AssetWriteError::NoEmit`), nor are times that are not whole milliseconds
+    or bindings declared with devices interleaved — each refused rather than
+    written as a file that reads back differently.
+  - **Only horde is on it**, and no sample binds a pad or a pattern in its
+    asset; the other samples still declare in code.
+  - Refusals of a whole record (a duplicate name, a wrong list, an unknown
+    emitted action) point at the end of the record, not at the offending word:
+    serde gives a visitor no position, and the message names the word instead.
 - **Rebind persistence: the engine half shipped 2026-09-25.** `Binding`'s text
   form (`crcbl_input::binding_text`) and `ActionMap::overrides` /
   `apply_overrides` keep the rule that a player's rebinds are **diffs over the
   game's defaults**; each game stores the list where it likes (EW in its
-  `settings.toml` under `[game.input]`). Not built: a `crcbl-store` profile type
-  for it, which nothing has asked for, and a binding's text inside the RON
-  binding asset above, once that asset has a schema.
+  `settings.toml` under `[game.input]`). A binding asset declares those defaults
+  in the same text form, and `to_ron` writes the defaults whatever was rebound.
+  Not built: a `crcbl-store` profile type for it, which nothing has asked for.
 - **Glyph hints.** No glyph anything in `crcbl-input`. The design: a hint shows
   the binding for `ActionMap::last_device` (Ⓐ against `Space`, switching as the
   player does), and a pad's printed label comes from its family —
@@ -12603,12 +12624,13 @@ deleted 19-input plan left behind_.
       `pads::for_run` branch's log line observed in a run.
   - Not built: rumble, glyphs, the Guide button on XInput (only the undocumented
     ordinal-100 `XInputGetStateEx` reports it), per-player device assignment
-    (every pad drives every binding), a d-pad composite and pad rows in a RON
-    binding asset.
+    (every pad drives every binding) and a d-pad composite. A binding asset's
+    `gamepad` list takes every pad binding, but no sample's asset has one.
 
 **Built:** `ActionMap`, `ActionDecl`, the three `ActionKind`s, `Binding::Key`,
 `MouseButton`, `Virtual`, `PointerPosition`, `KeyAxis`, `Wasd`, `Chord`, the
-context stack, `ActionMap::set_repeat`, `ActionMap::last_device`, and
+context stack, `ActionMap::set_repeat`, `ActionMap::last_device`,
+`ActionMap::set_emits`, RON binding assets (`ActionMap::from_ron`/`to_ron`), and
 `virtual_stick` driving `crcbl_ui::touch`'s `TouchStick` — `apps/horde` is the
 caller. `virtual_button` is built and **unjoined**: no production code calls it,
 because the two `TouchButton` users read the widget's own `take_fired` instead.
