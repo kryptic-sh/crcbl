@@ -66,6 +66,7 @@ mod best;
 mod controls;
 mod game;
 mod gpu;
+mod hud;
 mod menu;
 
 #[cfg(target_arch = "wasm32")]

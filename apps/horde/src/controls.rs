@@ -464,9 +464,9 @@ mod tests {
     fn the_pause_button_sits_clear_of_the_hud_panel() {
         let (min, _) = playing().pause.rect();
         assert!(
-            min.x >= crate::app::HUD_PANEL_RIGHT,
+            min.x >= crate::hud::HUD_PANEL_RIGHT,
             "the button overlaps the HUD panel, which ends at {}: {min}",
-            crate::app::HUD_PANEL_RIGHT,
+            crate::hud::HUD_PANEL_RIGHT,
         );
     }
 

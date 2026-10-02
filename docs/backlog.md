@@ -5536,8 +5536,9 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   a ring observation and omitting teardown each failed before restoration. This
   verifies release and regrowth behavior only; no regrowth latency or allocation
   profile was collected. It does not bound retention while a smaller UI remains
-  active. Freshly read `HordeApp::draw` and `draw_hud` in
-  `apps/horde/src/app.rs` append a HUD backdrop and labels on every draw, so
+  active. Freshly read `HordeApp::draw` in `apps/horde/src/app.rs` and
+  `draw_hud` in `apps/horde/src/hud.rs` append a HUD backdrop and labels on
+  every draw, so
   empty-frame release alone will not shed an active Horde UI burst. Price an
   explicit policy for sustained smaller geometry, actual workload transitions,
   and the cost of regrowth before keeping a production memory policy. The
