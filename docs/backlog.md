@@ -4066,6 +4066,20 @@ Behaviour to know, and gaps in what shipped:
 
 ## Rotation in physics: what unlocking it left (2026-10-01)
 
+**In progress, parked 2026-10-02 on branch `feat/phys-query-shapes`** (pushed,
+not merged). It holds four commits on top of `8ed97066`. A test pinning every
+query answer on unturned scenes, so later changes can be held bit-identical.
+Sphere and capsule offsets turned with their body in the query world. A move of
+the query world's entry type into `crates/crcbl-phys/src/world/entry.rs`. And an
+unfinished parking commit, started on compound children as separate query
+entries. Only `cargo check -p crcbl-phys` was run on the branch's tip; the first
+two commits went through their own check runs, which were never reviewed here.
+Still owed from that slice: compound children answered exactly (hits on the
+child, not a world-axis box around the compound), turned capsules in queries,
+and an exact `overlap_aabb` against a turned box. Finishing means reviewing the
+branch, completing those three, running the full check set with mutation tests,
+then merging. The items below are the same gaps as they stood before the branch.
+
 The query world's boxes turn (`BoxCollider::rotation`, answered by
 `crcbl_phys::query::ray_vs_box` and its siblings), a `PhysicsSystem` puts a
 body's box there turned with the body, and a scene `Body` whose placing
