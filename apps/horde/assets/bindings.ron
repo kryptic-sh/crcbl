@@ -3,6 +3,7 @@
         action: "move",
         kind: Axis2,
         keyboard: ["Wasd:KeyW,KeyS,KeyA,KeyD", "Wasd:ArrowUp,ArrowDown,ArrowLeft,ArrowRight"],
+        gamepad: ["PadStick:Left>0.2", "Pad:Dpad"],
         touch: ["Virtual:stick_move"],
     ),
     (

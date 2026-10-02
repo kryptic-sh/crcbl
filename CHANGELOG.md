@@ -552,7 +552,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   engine ships no glyph images. A game prints its own words or symbols by
   implementing `crcbl_input::HintLabels` — every entry defaults to the engine's
   table (`DefaultLabels`) — and passing it to `ActionMap::hint_with`, or maps
-  the `Hint` to its own icon atlas.
+  the `Hint` to its own icon atlas. `apps/horde` now walks on a pad's left stick
+  and d-pad as well, and its playing line prints `WASD to move` or
+  `Left stick to move` by whichever the player last used.
 - **RON binding assets: a game's default actions as a file.**
   `crcbl_input::ActionMap::from_ron(text)` declares every record of a list like
   `[(action: "jump", kind: Button, keyboard: ["Space"], gamepad: ["Pad:South"], patterns: [Hold(400, "jump_charge")]), (action: "jump_charge", kind: Button)]`

@@ -1,10 +1,13 @@
 //! Horde's HUD: the stat line and the state line over the field, and the band
 //! behind them.
 
+use std::borrow::Cow;
+
+use crcbl::input::{ActionMap, Device, HintLabels};
 use crcbl::math::Vec2;
 use crcbl::ui::draw_list::DrawList;
 
-use crate::game::{GameState, RenderState};
+use crate::game::{ACTION_MOVE, GameState, RenderState};
 
 /// The HUD's lines, rebuilt only when the numbers behind them change.
 ///
@@ -12,6 +15,12 @@ use crate::game::{GameState, RenderState};
 /// per line every frame at whatever rate the window runs. The clock is keyed on
 /// **tenths of a second** rather than on the raw `f64`, which is both what the
 /// line shows and the only way an `f64` can be part of an `Eq` key.
+///
+/// The control hint is keyed on the device the player last used, which is
+/// what moves it between frames; the pad's family does not, since a stick and
+/// a d-pad print the same on every family. A rebind typed at the console
+/// reaches it on the next tenth of a second, since the clock is in the key and
+/// the hint is only printed while the run's clock runs.
 #[derive(Debug, Default)]
 pub(crate) struct HudStrings {
     stats: String,
@@ -19,7 +28,29 @@ pub(crate) struct HudStrings {
     last: Option<HudKey>,
 }
 
-type HudKey = (u64, u64, u32, u32, u64, usize, u32, Option<GameState>, bool);
+type HudKey = (
+    u64,
+    u64,
+    u32,
+    u32,
+    u64,
+    usize,
+    u32,
+    Option<GameState>,
+    bool,
+    Option<Device>,
+);
+
+/// What the HUD calls each input: the engine's labels, except for the
+/// on-screen stick, the one control this game draws, which the engine knows
+/// only by its binding id.
+struct HudLabels;
+
+impl HintLabels for HudLabels {
+    fn control(&self, _id: &str) -> Cow<'static, str> {
+        "Stick".into()
+    }
+}
 
 /// `seconds` as `m:ss`.
 fn clock(seconds: f64) -> String {
@@ -32,7 +63,11 @@ impl HudStrings {
     /// fixed: the status line used to read straight off the *server's* idea of
     /// what was happening, and the server is still playing while the window sits
     /// behind a browser.
-    pub(crate) fn refresh(&mut self, render: &RenderState, paused: bool) {
+    ///
+    /// `actions` is the map the game plays on, which the playing line's
+    /// control hint is read from — `WASD` until the player picks up a pad,
+    /// `Left stick` from then on.
+    pub(crate) fn refresh(&mut self, render: &RenderState, paused: bool, actions: &ActionMap) {
         let key = (
             (render.elapsed * 10.0) as u64,
             render.kills,
@@ -43,6 +78,7 @@ impl HudStrings {
             render.best,
             render.state,
             paused,
+            actions.last_device(),
         );
         if self.last == Some(key) {
             return;
@@ -88,9 +124,14 @@ impl HudStrings {
                 Some(GameState::LevelUp) => {
                     self.state.push_str("LEVEL UP - press 1, 2 or 3");
                 }
-                Some(GameState::Playing) => {
-                    self.state.push_str("WASD to move - the gun aims itself");
-                }
+                // The start line keeps its `WASD`: it sits beside the start
+                // button's printed `SPACE`, a menu hint that does not switch.
+                Some(GameState::Playing) => match actions.hint_with(ACTION_MOVE, &HudLabels) {
+                    Some(hint) => {
+                        let _ = write!(self.state, "{} to move - the gun aims itself", hint.label);
+                    }
+                    None => self.state.push_str("the gun aims itself"),
+                },
             }
         }
     }
@@ -151,8 +192,22 @@ const HUD_STATE_SIZE: f32 = 14.0;
 
 #[cfg(test)]
 mod tests {
+    use crcbl::core::input::KeyCode;
+    use crcbl::input::{GamepadEvent, GamepadId, GamepadSnapshot, PadAxis, PadKind};
+
     use super::*;
     use crate::game;
+
+    /// A pad of `kind` with its left stick pushed right, as the map's pad
+    /// event — past the threshold that makes the pad the device that spoke.
+    fn stick_pushed(kind: PadKind) -> GamepadEvent {
+        let mut snapshot = GamepadSnapshot::neutral(kind);
+        snapshot.axes[PadAxis::LeftX as usize] = 1.0;
+        GamepadEvent::State {
+            id: GamepadId(1),
+            snapshot,
+        }
+    }
 
     /// The HUD reports the pause rather than the simulation's state, and the
     /// death line says how the run ended.
@@ -170,13 +225,14 @@ mod tests {
             xp_needed: 16,
             ..RenderState::default()
         };
-        hud.refresh(&render, false);
+        let actions = game::built_in_actions();
+        hud.refresh(&render, false, &actions);
         assert!(hud.state.contains("WASD"), "{}", hud.state);
         assert!(hud.stats.contains("1:14"), "{}", hud.stats);
         assert!(hud.stats.contains("Kills: 12"), "{}", hud.stats);
         assert!(hud.stats.contains("Lv 3 (5/16)"), "{}", hud.stats);
 
-        hud.refresh(&render, true);
+        hud.refresh(&render, true, &actions);
         assert!(hud.state.contains("PAUSED"), "{}", hud.state);
 
         hud.refresh(
@@ -185,6 +241,7 @@ mod tests {
                 ..render.clone()
             },
             false,
+            &actions,
         );
         assert!(hud.state.contains("LEVEL UP"), "{}", hud.state);
 
@@ -196,6 +253,7 @@ mod tests {
                 ..render
             },
             false,
+            &actions,
         );
         assert!(hud.state.contains("YOU DIED"), "{}", hud.state);
         assert!(hud.state.contains("2:13"), "{}", hud.state);
@@ -239,15 +297,31 @@ mod tests {
             ..RenderState::default()
         };
         let mut hud = HudStrings::default();
-        hud.refresh(&render, false);
-
-        for (line, size) in [(&hud.stats, HUD_STAT_SIZE), (&hud.state, HUD_STATE_SIZE)] {
+        let mut actions = game::built_in_actions();
+        hud.refresh(&render, false, &actions);
+        let fits = |line: &str, size: f32| {
             let right = HUD_TEXT_X + atlas.text_width(line, size / NATURAL_FONT_SIZE);
             assert!(
                 right <= HUD_PANEL_RIGHT,
                 "\"{line}\" ends at {right:.0} px, past the panel's {HUD_PANEL_RIGHT:.0}",
             );
-        }
+        };
+        fits(&hud.stats, HUD_STAT_SIZE);
+        fits(&hud.state, HUD_STATE_SIZE);
+
+        // The playing line with its longest control hint, the pad's.
+        actions.gamepad_event(&stick_pushed(PadKind::Generic));
+        let mut playing = HudStrings::default();
+        playing.refresh(
+            &RenderState {
+                state: Some(GameState::Playing),
+                ..render.clone()
+            },
+            false,
+            &actions,
+        );
+        assert!(playing.state.contains("Left stick"), "{}", playing.state);
+        fits(&playing.state, HUD_STATE_SIZE);
         // …and the panel is not simply enormous: it fits the window the game
         // opens at, which is what makes the assertion above a fit rather than a
         // licence.
@@ -256,6 +330,46 @@ mod tests {
         // asserted about the wrong string.
         assert!(hud.state.starts_with("Best 5:59"), "{}", hud.state);
         assert!(!hud.stats.contains("Best"), "{}", hud.stats);
+    }
+
+    /// **The playing line names the move binding on the device the player
+    /// last used**, and switches as they do — the keys, a pad's stick, the
+    /// on-screen stick in this game's own word for it, and back.
+    #[test]
+    fn the_playing_line_names_the_move_binding_on_the_last_device() {
+        let render = RenderState {
+            state: Some(GameState::Playing),
+            ..RenderState::default()
+        };
+        let mut actions = game::built_in_actions();
+        let mut hud = HudStrings::default();
+        let mut line = |actions: &ActionMap| {
+            hud.refresh(&render, false, actions);
+            hud.state.clone()
+        };
+        assert_eq!(
+            line(&actions),
+            "Best 0:00   WASD to move - the gun aims itself",
+            "before any device spoke, the first binding"
+        );
+
+        actions.gamepad_event(&stick_pushed(PadKind::Xbox));
+        assert_eq!(
+            line(&actions),
+            "Best 0:00   Left stick to move - the gun aims itself"
+        );
+
+        actions.virtual_stick("stick_move", 0.0, 1.0);
+        assert_eq!(
+            line(&actions),
+            "Best 0:00   Stick to move - the gun aims itself"
+        );
+
+        actions.key_event(KeyCode::KeyQ, true);
+        assert_eq!(
+            line(&actions),
+            "Best 0:00   WASD to move - the gun aims itself"
+        );
     }
 
     /// The clock is `m:ss`, including the cases a naive `{}:{}` gets wrong.

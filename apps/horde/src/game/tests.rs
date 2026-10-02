@@ -4437,9 +4437,10 @@ fn a_prefilled_field_is_the_size_and_shape_it_was_asked_for() {
 }
 
 /// The declarations [`BINDINGS_RON`] replaced, exactly as the code wrote them
-/// before the file existed.
+/// before the file existed — and the pad's two `move` bindings, which the file
+/// gained after, so this stays the whole of it.
 fn the_code_declared_actions() -> ActionMap {
-    use crcbl::input::{ActionDecl, ActionKind, Binding};
+    use crcbl::input::{ActionDecl, ActionKind, Binding, Stick};
 
     let mut action_map = ActionMap::new();
     action_map.declare(ActionDecl {
@@ -4458,6 +4459,11 @@ fn the_code_declared_actions() -> ActionMap {
                 left: KeyCode::ArrowLeft,
                 right: KeyCode::ArrowRight,
             },
+            Binding::PadStick {
+                stick: Stick::Left,
+                deadzone: 0.2,
+            },
+            Binding::PadDpad,
             Binding::Virtual(STICK_MOVE.into()),
         ],
     });

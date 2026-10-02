@@ -339,6 +339,12 @@ impl HostedGame for Horde {
         self.game.key_event(key, pressed);
     }
 
+    /// Forwarded like a key, for the same reason: the game replays it into its
+    /// action map at the start of the next tick.
+    fn gamepad_event(&mut self, event: &crcbl::input::GamepadEvent) {
+        self.game.gamepad_event(event);
+    }
+
     /// The map the console's `bind` and `unbind` rebind.
     ///
     /// The same map `key_event` above feeds, so a rebind typed at the console
@@ -447,7 +453,8 @@ impl HostedGame for Horde {
         self.game.render_state(&mut self.render_state);
         gpu.set_world(&self.render_state);
         self.scene = gpu.scene_stats();
-        self.hud.refresh(&self.render_state, frame.paused);
+        self.hud
+            .refresh(&self.render_state, frame.paused, self.game.action_map());
         draw_hud(draw_list, &self.hud);
         // After the HUD and before the menu, which is appended to this same list
         // by the loop: a control belongs over the field it is steering something
@@ -713,6 +720,64 @@ mod tests {
             "the fixture never left the title screen, so no control is live",
         );
         engine
+    }
+
+    /// A pad source a test scripts: what is queued is reported on the loop's
+    /// next poll, once. Cloned so the test keeps a handle after the loop owns
+    /// it.
+    #[derive(Clone, Debug, Default)]
+    struct ScriptedPads(std::rc::Rc<std::cell::RefCell<Vec<crcbl::input::GamepadEvent>>>);
+
+    impl crcbl::engine::PadSource for ScriptedPads {
+        fn poll(&mut self, emit: &mut dyn FnMut(crcbl::input::GamepadEvent)) {
+            for event in self.0.borrow_mut().drain(..) {
+                emit(event);
+            }
+        }
+    }
+
+    /// **The control hint on screen switches from the keys to the pad and
+    /// back**, through the loop: a key from the shell, then a pad from the
+    /// loop's pad poll, each into the game's action map and out as the HUD
+    /// line the frame drew.
+    #[test]
+    fn the_control_hint_follows_the_player_from_the_keys_to_the_pad() {
+        use crcbl::input::{GamepadEvent, GamepadId, GamepadSnapshot, PadAxis, PadKind};
+
+        let mut engine = playing(64);
+        let pads = ScriptedPads::default();
+        engine.set_pad_source(Some(Box::new(pads.clone())));
+        let hint = |engine: &Loop<HeadlessShell>| {
+            ui_text(engine.gpu().draw_list())
+                .into_iter()
+                .find_map(|line| {
+                    line.strip_suffix(" to move - the gun aims itself")
+                        .map(|front| front.rsplit("   ").next().unwrap_or(front).to_owned())
+                })
+        };
+
+        tap(&mut engine, KeyCode::KeyD);
+        assert_eq!(hint(&engine).as_deref(), Some("WASD"));
+
+        let id = GamepadId(1);
+        let mut pushed = GamepadSnapshot::neutral(PadKind::Xbox);
+        pushed.axes[PadAxis::LeftX as usize] = 1.0;
+        pads.0.borrow_mut().extend([
+            GamepadEvent::Connected {
+                id,
+                kind: PadKind::Xbox,
+            },
+            GamepadEvent::State {
+                id,
+                snapshot: pushed,
+            },
+        ]);
+        run_frames(&mut engine, 2);
+        assert_eq!(hint(&engine).as_deref(), Some("Left stick"));
+
+        tap(&mut engine, KeyCode::KeyD);
+        run_frames(&mut engine, 1);
+        assert_eq!(hint(&engine).as_deref(), Some("WASD"));
     }
 
     /// **A finger on the field walks the wizard, and letting go stops him.**

@@ -108,7 +108,7 @@ use std::time::Duration;
 
 use crcbl::core::input::KeyCode;
 use crcbl::ecs::{ClientInputs, Entity, GameModule, World};
-use crcbl::input::ActionMap;
+use crcbl::input::{ActionMap, GamepadEvent};
 use crcbl::jobs::{Inline, Pool, Spawn, default_spawner};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
@@ -1369,13 +1369,14 @@ pub fn push_out_of_props(position: DVec3, radius: f64, props: &[PropView]) -> DV
 /// binding layer ever saw it, which of eight directions the thumb meant. So the
 /// keyboard's four keys are a [`Binding::Wasd`] composite now — the same
 /// normalised vector, from the same action — and the on-screen stick is a
-/// [`Binding::Virtual`] beside it. Nothing downstream can tell them apart, which
-/// is the whole of the input design's claim (`docs/notes/simulation.md`, _What
-/// the deleted 19-input plan left behind_).
+/// [`Binding::Virtual`] beside it, as a pad's left stick and d-pad are.
+/// Nothing downstream can tell them apart, which is the whole of the input
+/// design's claim (`docs/notes/simulation.md`, _What the deleted 19-input plan
+/// left behind_).
 ///
 /// [`Binding::Wasd`]: crcbl::input::Binding::Wasd
 /// [`Binding::Virtual`]: crcbl::input::Binding::Virtual
-const ACTION_MOVE: &str = "move";
+pub(crate) const ACTION_MOVE: &str = "move";
 
 /// The id the on-screen stick reports under — the input plan's binding sketch
 /// spelled it `Virtual("stick_move")`.
@@ -1424,11 +1425,14 @@ const ACTION_CHOOSE: [&str; UPGRADE_CHOICES] = ["choose1", "choose2", "choose3"]
 /// default bindings, in the binding asset's schema (`crcbl::input`'s
 /// `binding_asset` module).
 ///
-/// **Three bindings, three devices, one action** for `move`: two keyboard
-/// composites because this game has always taken WASD *and* the arrows, and one
-/// on-screen stick, [`STICK_MOVE`], because a phone has neither. They sum
-/// inside the unit disc, so a player pressing a key while pushing the stick
-/// asks for one direction rather than for twice the speed.
+/// **Five bindings, three devices, one action** for `move`: two keyboard
+/// composites because this game has always taken WASD *and* the arrows, a
+/// pad's left stick and d-pad, and one on-screen stick, [`STICK_MOVE`],
+/// because a phone has neither. They sum inside the unit disc, so a player
+/// pressing a key while pushing a stick asks for one direction rather than
+/// for twice the speed. The pad stick's own dead zone keeps a resting stick's
+/// drift out of that sum, and [`MOVE_DEAD_ZONE`] still applies to the sum, so
+/// a pad stick walks once it is past both.
 ///
 /// `include_str!`ed for the reason `apps/asteroids/src/balance.rs` gives about
 /// its table: a browser has no filesystem, and a game that could fail to find
@@ -1442,7 +1446,7 @@ const BINDINGS_RON: &str = include_str!("../assets/bindings.ron");
 /// # Panics
 ///
 /// If the committed file is not a binding asset, which its test rules out.
-fn built_in_actions() -> ActionMap {
+pub(crate) fn built_in_actions() -> ActionMap {
     ActionMap::from_ron(BINDINGS_RON)
         .unwrap_or_else(|error| panic!("apps/horde/assets/bindings.ron: {error}"))
 }
@@ -3282,6 +3286,9 @@ pub struct Game {
     /// The on-screen stick's deflection since the last tick — see
     /// [`Game::stick_moved`]. `None` on a tick nothing reported one.
     pending_stick: Option<(f32, f32)>,
+    /// Queued pad events from the loop's pad poll, replayed after the keys
+    /// and the stick — see [`Game::gamepad_event`].
+    pending_pads: Vec<GamepadEvent>,
     /// The output stream and the six cues. On the facade rather than in the
     /// simulation: the module runs inside the server's tick and must stay a pure
     /// function of its inputs, and an audio device is neither.
@@ -3508,6 +3515,7 @@ impl Game {
             ticks_run: 0,
             pending_keys: Vec::new(),
             pending_stick: None,
+            pending_pads: Vec::new(),
             audio: crate::audio::Audio::new(setup.headless),
             best: crate::best::Best::load(setup.headless),
             state: GameState::WaitingToStart,
@@ -3544,6 +3552,24 @@ impl Game {
     /// map asks for, and it is what makes a frame that runs no ticks lossless.
     pub fn key_event(&mut self, key: KeyCode, pressed: bool) {
         self.pending_keys.push((key, pressed));
+    }
+
+    /// Queue a pad event for replay at the start of the next tick, for the
+    /// reason [`Game::key_event`] queues a key.
+    ///
+    /// Every event, in order, rather than the last snapshot only: a press and
+    /// its release inside one frame are two edges, and a connection carries
+    /// the pad's family. Replayed after the keys and the stick because the
+    /// loop polls the pads after the shell's events, so that is the order the
+    /// player made them in.
+    pub fn gamepad_event(&mut self, event: &GamepadEvent) {
+        self.pending_pads.push(*event);
+    }
+
+    /// The action map, for the HUD's control hint
+    /// ([`ActionMap::hint`](crcbl::input::ActionMap::hint)).
+    pub const fn action_map(&self) -> &ActionMap {
+        &self.action_map
     }
 
     /// The action map, for the debug console's `bind` and `unbind`.
@@ -3584,6 +3610,9 @@ impl Game {
         // centre the stick under a thumb that never let go.
         if let Some((x, y)) = self.pending_stick.take() {
             self.action_map.virtual_stick(STICK_MOVE, x, y);
+        }
+        for event in self.pending_pads.drain(..) {
+            self.action_map.gamepad_event(&event);
         }
 
         // First match wins, so two digits in one frame take the earlier button

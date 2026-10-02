@@ -5538,11 +5538,11 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   profile was collected. It does not bound retention while a smaller UI remains
   active. Freshly read `HordeApp::draw` in `apps/horde/src/app.rs` and
   `draw_hud` in `apps/horde/src/hud.rs` append a HUD backdrop and labels on
-  every draw, so
-  empty-frame release alone will not shed an active Horde UI burst. Price an
-  explicit policy for sustained smaller geometry, actual workload transitions,
-  and the cost of regrowth before keeping a production memory policy. The
-  original unlimited-retention fixture remains separate and unchanged.
+  every draw, so empty-frame release alone will not shed an active Horde UI
+  burst. Price an explicit policy for sustained smaller geometry, actual
+  workload transitions, and the cost of regrowth before keeping a production
+  memory policy. The original unlimited-retention fixture remains separate and
+  unchanged.
 
   A matched repeated-transition caller trial now prices unlimited retention
   against unconditional empty-frame release on the same pinned CPU, in
@@ -12565,11 +12565,50 @@ deleted 19-input plan left behind_.
   `settings.toml` under `[game.input]`). A binding asset declares those defaults
   in the same text form, and `to_ron` writes the defaults whatever was rebound.
   Not built: a `crcbl-store` profile type for it, which nothing has asked for.
-- **Glyph hints.** No glyph anything in `crcbl-input`. The design: a hint shows
-  the binding for `ActionMap::last_device` (Ⓐ against `Space`, switching as the
-  player does), and a pad's printed label comes from its family —
-  `crcbl_input::gamepad::PadKind` exists for exactly this and bindings never
-  read it, because pad buttons are positional.
+- **Control hints: decided 2026-10-03, the engine half shipped; what is left.**
+  `ActionMap::hint` and `hint_with` (`crates/crcbl-input/src/hint.rs`) pick the
+  binding for the device that last spoke, falling back through the devices heard
+  before it, and label it; `apps/horde`'s playing line is the one adopter. The
+  decisions, long term:
+  - **The engine provides labels, not artwork.** A `Hint` carries the device,
+    the binding, the pad family and a text label. No glyph images ship: how a
+    button looks is a game's art direction, and the families' own button art is
+    theirs to license, so the call is the game's. A game with an icon atlas maps
+    the `Hint` to its sprites.
+  - **No Unicode symbols by default** (`Ⓐ`, `△`): a font that lacks one draws a
+    box or nothing where the hint should be. A game whose font has them
+    implements `HintLabels`, whose every entry defaults to the engine's table,
+    and overrides only what it prints differently.
+  - **The pad family is the pad that last spoke** (`ActionMap::last_pad_kind`),
+    else the first connected pad, else `PadKind::Generic`'s positional names.
+
+  Deferred, none started:
+  - **Icon atlases**: the game's, per the first decision; nothing engine-side is
+    owed unless a game asks for a shared sprite-name scheme.
+  - **Localised labels**: `HintLabels` is the seam; the engine has no
+    translation tables, and the defaults are English words.
+  - **Layout-aware key labels**: a `KeyCode` is a position, so AZERTY's Z key
+    prints `W`. The shell knows the keysym; nothing carries it into the map, so
+    the default key table prints US-QWERTY legends.
+  - **DualShock 4 versus DualSense**: `PadKind::PlayStation` cannot tell `Share`
+    from `Create`, so the older word is printed.
+  - **Per-player hints** for local multiplayer: every pad drives every binding
+    until device assignment lands, and the hint follows whichever pad spoke.
+
+  Surprising, not a bug: **horde's menu buttons press real keys**
+  (`HordeAction::Restart` presses `RESTART_KEY` into the game's map, for the
+  replay reason `crate::app` gives), so a pad confirming `TRY AGAIN` makes the
+  keyboard the last device and the HUD hint reads `WASD` until the pad moves
+  again. Horde's start line keeps a literal `WASD` beside the start button's
+  printed `SPACE`, which is a fixed menu hint.
+
+  Not verified: the Switch, Steam Deck and PlayStation tables are written from
+  the families' published layouts, never checked on the hardware; no label has
+  been seen on screen beside a real pad of any family; horde's new pad controls
+  (`PadStick:Left>0.2` and `Pad:Dpad` on `move`) have been driven only by a
+  scripted pad source in headless tests, and the stick's dead zone stacked on
+  `MOVE_DEAD_ZONE` was not tuned by hand.
+
 - **Gamepad: the seam and all four backends are built; verification and the
   items below are owed (2026-09-23).** `crates/crcbl-input/src/gamepad.rs` is
   the seam every backend emits (`GamepadEvent`, `GamepadSnapshot`,

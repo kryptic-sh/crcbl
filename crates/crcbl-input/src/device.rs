@@ -59,8 +59,8 @@ impl ActionMap {
 
 impl Binding {
     /// The kind of device this binding listens to — which list of a binding
-    /// asset it is written in (`binding_asset.rs`), and what a glyph hint will
-    /// match against [`ActionMap::last_device`].
+    /// asset it is written in (`binding_asset.rs`), and what
+    /// [`ActionMap::hint`] matches against [`ActionMap::last_device`].
     ///
     /// A binding that reads two devices belongs to the one its value comes
     /// from: a [`Binding::ScrollChord`] is the wheel with a key held, so it is
