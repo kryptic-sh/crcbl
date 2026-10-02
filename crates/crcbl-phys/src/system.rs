@@ -305,8 +305,9 @@ impl EntityOverlapQueries<'_> {
     ///
     /// `out` is cleared and then filled with the same entities in the same
     /// order the `&mut self` form produces, because that form is this one.
-    /// Broadphase-only, exactly like [`PhysicsSystem::overlap_aabb`]: an entity
-    /// whose *AABB* meets `aabb` is named, whatever its shape does.
+    /// It answers as [`PhysicsSystem::overlap_aabb`] does: a box, a compound
+    /// or a mesh where its shape meets `aabb`, a sphere or a capsule wherever
+    /// the box around it does.
     pub fn overlap_aabb_into(
         &self,
         aabb: &Aabb,
@@ -1449,7 +1450,10 @@ impl PhysicsSystem {
         }
     }
 
-    /// Overlap query: return all entities whose AABB intersects `aabb`.
+    /// Overlap query: return all entities whose collider meets `aabb`, as
+    /// [`PhysicsWorld::overlap_aabb`] answers it — a box, a compound or a mesh
+    /// where its shape meets it, a sphere or a capsule wherever the world-axis
+    /// box around it does.
     #[must_use]
     pub fn overlap_aabb(&mut self, aabb: &Aabb) -> Vec<Entity> {
         self.overlap_aabb_filtered(aabb, QueryFilter::ALL)

@@ -11,7 +11,7 @@ use core::f64::consts::FRAC_PI_4;
 use glam::DVec3;
 
 use crate::broadphase::{Ray, Segment};
-use crate::collider::{BoxCollider, Capsule, LyingCapsule};
+use crate::collider::{Aabb, BoxCollider, Capsule, LyingCapsule};
 use crate::components::{ColliderComponent, RigidBody, Transform};
 use crate::system::PhysicsSystem;
 
@@ -139,4 +139,16 @@ fn a_bodys_box_turns_with_the_body_in_the_query_world() {
     let down = Ray::new(centre + DVec3::new(1.3, 5.0, 0.0), DVec3::NEG_Y);
     let (hit, _) = phys.cast_ray(&down).expect("the turned corner");
     assert_eq!(hit, entity);
+}
+
+/// **An AABB query reports the turned box only where it meets the box**: one
+/// in the corner of the diamond's bounds, touching the unturned cube, is
+/// clear of the diamond, and one at the diamond's point on `+X`, past the
+/// unturned cube, meets it.
+#[test]
+fn an_aabb_query_meets_the_turned_box_only_where_it_is() {
+    let corner = Aabb::new(DVec3::new(1.0, -0.5, 1.0), DVec3::new(1.5, 0.5, 1.5));
+    turned_answers(|world| !world.overlap_aabb(&corner).is_empty(), false);
+    let point = Aabb::new(DVec3::new(1.3, -0.5, -0.05), DVec3::new(1.6, 0.5, 0.05));
+    turned_answers(|world| !world.overlap_aabb(&point).is_empty(), true);
 }

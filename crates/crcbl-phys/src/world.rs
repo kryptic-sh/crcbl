@@ -740,14 +740,15 @@ fn overlap_sphere_core(
     }
 }
 
-/// The one implementation of "which colliders' AABBs meet this AABB".
+/// The one implementation of "which colliders meet this AABB".
 ///
-/// Broadphase-only by design for the parametric shapes — the BVH's leaves
-/// *are* their AABBs, so there is nothing to refine beyond the filter. A
-/// mesh's leaf is the bounds of a whole level, which would meet every query,
-/// so a mesh is refined against its triangles, exactly, and a compound's leaf
-/// is the bounds of all its parts, so a compound is refined against each
-/// part's own bounds. Both
+/// A box, turned or not, is refined against the box itself
+/// ([`query::aabb_overlaps_box`]), and so is each part of a compound, whose
+/// leaf is the bounds of all its parts. A mesh's leaf is the bounds of a
+/// whole level, which would meet every query, so a mesh is refined against
+/// its triangles, exactly. A sphere and a capsule are broadphase-only: their
+/// leaves are their bounds, and a query meeting a corner of those bounds
+/// reports them though it misses the round surface. Both
 /// [`PhysicsWorld::overlap_aabb`] and [`OverlapQueries::overlap_aabb_into`]
 /// come through here.
 fn overlap_aabb_core(
@@ -770,7 +771,7 @@ fn overlap_aabb_core(
             .is_some_and(|data| {
                 data.entry.primitives().any(|(_, shape)| match shape {
                     Primitive::Mesh(m) => m.overlaps_aabb(aabb, &mut scratch.mesh),
-                    Primitive::Box(b) => aabb.intersects(&b.aabb()),
+                    Primitive::Box(b) => query::aabb_overlaps_box(aabb, b),
                     Primitive::Sphere(_) | Primitive::Capsule(_) => true,
                 })
             });
@@ -1677,12 +1678,14 @@ impl PhysicsWorld {
         }
     }
 
-    /// Return all collider ids whose AABB intersects the query AABB.
+    /// Return all collider ids that meet the query AABB.
     ///
-    /// This is a broadphase-only query — it tests AABB-vs-AABB without
-    /// exact shape overlap, so a turned box is reported wherever the world-axis
-    /// box around it meets the query. Use [`PhysicsWorld::overlap_sphere`] for
-    /// exact shape-aware overlap. Triggers are included.
+    /// A box, turned or not, is reported only where it meets the query itself
+    /// ([`crate::aabb_overlaps_box`]), a compound only where one of its parts
+    /// does, and a mesh only where one of its triangles does. A sphere or a
+    /// capsule is reported wherever the world-axis box around it meets the
+    /// query, round surface or not; use [`PhysicsWorld::overlap_sphere`] for an
+    /// exact round query. Triggers are included.
     #[must_use]
     pub fn overlap_aabb(&mut self, aabb: &Aabb) -> Vec<ColliderId> {
         self.overlap_aabb_filtered(aabb, QueryFilter::ALL)

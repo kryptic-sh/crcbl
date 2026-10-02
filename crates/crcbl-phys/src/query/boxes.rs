@@ -5,6 +5,8 @@
 //! so its answers are the same to the bit. A turned box is answered in its own
 //! frame, where it is a world-axis box at the origin:
 //!
+//! - **An axis-aligned box's overlap** is the contact pipeline's separating
+//!   axis test for two boxes ([`aabb_overlaps_box`]).
 //! - **A ray, a swept sphere and a sphere overlap** are moved into the box's
 //!   frame — the point relative to the centre, turned back by the rotation —
 //!   tested against the box there, and the hit's point and normal turned back
@@ -21,7 +23,7 @@
 //!
 //! [`time_of_contact`]: crate::contact::sweep::time_of_contact
 
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 
 use super::capsules::advance_upright_capsule;
 use super::{
@@ -29,7 +31,7 @@ use super::{
     swept_capsule_vs_aabb, swept_sphere_vs_aabb,
 };
 use crate::broadphase::{Ray, Segment};
-use crate::collider::{BoxCollider, Capsule, Sphere};
+use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
 use crate::contact::manifold::{closest_on_segment_to_box, gap};
 use crate::contact::shape::ContactShape;
 
@@ -42,6 +44,33 @@ pub fn sphere_overlaps_box(sphere: &Sphere, target: &BoxCollider) -> bool {
     }
     let local = Sphere::new(target.local_point(sphere.centre), sphere.radius);
     sphere_overlaps_aabb(&local, &target.local_aabb())
+}
+
+/// Test whether an axis-aligned box overlaps a box collider, turned or not
+/// (touching counts as overlapping), as [`Aabb::intersects`] does for two
+/// unturned ones.
+///
+/// An unturned box is [`Aabb::intersects`] against [`BoxCollider::aabb`]. A
+/// turned one is the separating axis test the contact pipeline runs for two
+/// boxes, over their faces' six normals and the nine crosses of their edges:
+/// exact, but for edge pairs too near parallel for their cross to be
+/// trusted, which that test skips and whose crosses the face normals then
+/// stand in for, so two boxes apart by a sliver along such a cross can read
+/// as touching. An empty `aabb` overlaps nothing.
+#[must_use]
+pub fn aabb_overlaps_box(aabb: &Aabb, target: &BoxCollider) -> bool {
+    if !target.is_turned() {
+        return aabb.intersects(&target.aabb());
+    }
+    if aabb.is_empty() {
+        return false;
+    }
+    let query = ContactShape::Box {
+        centre: aabb.centre(),
+        rotation: DQuat::IDENTITY,
+        half: aabb.extents() * 0.5,
+    };
+    gap(&query, &contact_box(target)).0 <= 0.0
 }
 
 /// Intersect a ray with a box collider, turned or not, treated as solid: the

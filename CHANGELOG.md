@@ -615,16 +615,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   unchanged.
 
 - **Turned boxes in `crcbl_phys`'s query world.** `BoxCollider::with_rotation`
-  turns a box, and `PhysicsWorld`'s rays, sphere and capsule sweeps, sphere
-  overlaps, capsule push-outs and lying-capsule queries answer for the turned
-  box itself rather than the box unturned; its broadphase holds the world-axis
-  box around it (`BoxCollider::aabb`). The shape-level forms are public:
-  `ray_vs_box`, `swept_sphere_vs_box`, `sphere_overlaps_box`,
-  `swept_capsule_vs_box` and `capsule_penetration_vs_box`. A ray, a sphere sweep
-  and a sphere overlap are answered exactly in the box's frame; an upright
-  capsule, which is not upright there, is swept by the contact pipeline's
-  conservative advancement and stops a little short of the contact. An unturned
-  box gives the answers it gave before, to the bit.
+  turns a box, and `PhysicsWorld`'s rays, sphere and capsule sweeps, sphere and
+  AABB overlaps, capsule push-outs and lying-capsule queries answer for the
+  turned box itself rather than the box unturned; its broadphase holds the
+  world-axis box around it (`BoxCollider::aabb`). The shape-level forms are
+  public: `ray_vs_box`, `swept_sphere_vs_box`, `sphere_overlaps_box`,
+  `aabb_overlaps_box`, `swept_capsule_vs_box` and `capsule_penetration_vs_box`.
+  `overlap_aabb` tests a turned box by the separating axis test the contact
+  pipeline runs for two boxes, where it reported every box whose bounds met the
+  query; spheres and capsules are still reported by their bounds. A ray, a
+  sphere sweep and a sphere overlap are answered exactly in the box's frame; an
+  upright capsule, which is not upright there, is swept by the contact
+  pipeline's conservative advancement and stops a little short of the contact.
+  An unturned box gives the answers it gave before, to the bit.
 
 - **The editor's rotate gizmo.** E shows a ring about each world axis (it put a
   refusal on the status line before), hit-tested against the drawn ring; a drag

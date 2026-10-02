@@ -244,3 +244,118 @@ fn a_short_sweep_keeps_its_contact_time_against_a_turned_box() {
         assert!(!hit.started_inside);
     }
 }
+
+/// **An axis-aligned box overlaps the turned box by its faces**: one in the
+/// corner of the diamond's bounds misses it, where it touches the unturned
+/// cube, and one at the diamond's point on `+X`, past the unturned cube,
+/// meets it.
+#[test]
+fn an_aabb_overlaps_the_turned_box_by_its_faces() {
+    let corner = Aabb::new(DVec3::new(1.0, -0.5, 1.0), DVec3::new(1.5, 0.5, 1.5));
+    assert!(aabb_overlaps_box(&corner, &unturned()));
+    assert!(!aabb_overlaps_box(&corner, &turned_about(DVec3::Y)));
+
+    let point = Aabb::new(DVec3::new(1.3, -0.5, -0.05), DVec3::new(1.6, 0.5, 0.05));
+    assert!(!aabb_overlaps_box(&point, &unturned()));
+    assert!(aabb_overlaps_box(&point, &turned_about(DVec3::Y)));
+
+    // Inverted by a sliver on X alone, around the box's centre: empty all the
+    // same.
+    let empty = Aabb::new(DVec3::new(0.1, -1.0, -1.0), DVec3::new(0.0, 1.0, 1.0));
+    assert!(!aabb_overlaps_box(&empty, &turned_about(DVec3::Y)));
+
+    // A half turn about `Y` is exact, so the face stays at x = 1 to the bit,
+    // and a box resting on it touches it, which counts.
+    let half_turn = unturned().with_rotation(DQuat::from_xyzw(0.0, 1.0, 0.0, 0.0));
+    let resting = Aabb::new(DVec3::new(1.0, -0.5, -0.5), DVec3::new(2.0, 0.5, 0.5));
+    assert!(aabb_overlaps_box(&resting, &half_turn));
+}
+
+/// **The overlap agrees with a separating axis test written out here**, over
+/// random boxes turned every way and random axis-aligned ones about them.
+///
+/// The reference tries all fifteen axes, dropping only an edge cross too
+/// short to normalise, and the cases where its widest separation is within
+/// a hair of zero — a touch either answer may round to — are left out.
+#[test]
+fn the_overlap_agrees_with_a_separating_axis_test() {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut unit = || {
+        // xorshift64*, Vigna, "An experimental exploration of Marsaglia's
+        // xorshift generators, scrambled" (2016).
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let (mut apart, mut met) = (0, 0);
+    for _ in 0..4000 {
+        let mut vector = |reach: f64| {
+            DVec3::new(
+                (unit() * 2.0 - 1.0) * reach,
+                (unit() * 2.0 - 1.0) * reach,
+                (unit() * 2.0 - 1.0) * reach,
+            )
+        };
+        let axis = vector(1.0);
+        let turn =
+            crate::rotation_from_scaled_axis(axis.normalize_or(DVec3::X) * 3.0 * axis.x.abs());
+        let target = BoxCollider::new(vector(1.0), vector(1.0).abs() + 0.1).with_rotation(turn);
+        let centre = vector(2.0);
+        let half = vector(1.0).abs() + 0.05;
+        let query = Aabb::new(centre - half, centre + half);
+
+        let separation = widest_separation(&query, &target);
+        if separation.abs() < 1e-9 {
+            continue;
+        }
+        let expected = separation <= 0.0;
+        assert_eq!(
+            aabb_overlaps_box(&query, &target),
+            expected,
+            "{query:?} against {target:?}: separation {separation}"
+        );
+        if expected {
+            met += 1;
+        } else {
+            apart += 1;
+        }
+    }
+    assert!(apart > 500 && met > 500, "apart {apart}, met {met}");
+}
+
+/// The widest gap between the projections of `query` and `target` onto the
+/// fifteen axes of the separating axis theorem for two boxes — Ericson,
+/// _Real-Time Collision Detection_ §4.4.1 — positive when one separates them.
+fn widest_separation(query: &Aabb, target: &BoxCollider) -> f64 {
+    let a_axes = [DVec3::X, DVec3::Y, DVec3::Z];
+    let b_axes = [
+        target.rotation * DVec3::X,
+        target.rotation * DVec3::Y,
+        target.rotation * DVec3::Z,
+    ];
+    let a_half = query.extents() * 0.5;
+    let between = target.centre - query.centre();
+    let radius = |axis: DVec3, axes: &[DVec3; 3], half: DVec3| {
+        axes[0].dot(axis).abs() * half.x
+            + axes[1].dot(axis).abs() * half.y
+            + axes[2].dot(axis).abs() * half.z
+    };
+    let mut candidates: Vec<DVec3> = a_axes.iter().chain(&b_axes).copied().collect();
+    for a in a_axes {
+        for b in b_axes {
+            let cross = a.cross(b);
+            if cross.length() > 1e-9 {
+                candidates.push(cross.normalize());
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .map(|axis| {
+            between.dot(axis).abs()
+                - radius(axis, &a_axes, a_half)
+                - radius(axis, &b_axes, target.half_extents)
+        })
+        .fold(f64::NEG_INFINITY, f64::max)
+}
