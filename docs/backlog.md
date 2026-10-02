@@ -164,6 +164,14 @@ and Windows and aarch64 macOS jobs, and wasm32 in the `pages.yml` browser gate
 `docs/notes/simulation.md` holds on 0.33.10. Dependabot PR #23 is superseded by
 main.
 
+**Re-surveyed 2026-10-02:** `cargo update` moved `glam` 0.33.10 → 0.33.12,
+`lazy_static` 1.5.1 and `zerocopy` 0.8.59, and the fuzz workspace's own lock
+(`crates/crcbl-net/fuzz/Cargo.lock`, which had fallen behind to `glam` 0.33.2)
+to the same versions. Every direct dependency was already on its latest release
+(`cargo info` from outside the workspace). The native tests, tumble's pinned
+hash among them, pass unchanged on 0.33.12; the browser gate holds wasm32 to the
+same pin.
+
 **What is left:**
 
 - **Slang 2026.14 → 2026.18.2: done 2026-09-25** (`7c536496`, `42fd36b0`),
