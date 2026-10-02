@@ -21,6 +21,13 @@
 //! have to be compared with each other, not only with what the semaphore
 //! already holds.
 //!
+//! # And the reading that rule makes impossible
+//!
+//! Because every value a fence takes is one this crate issued, a reading past
+//! the highest one issued cannot come from a live device. [`fence_reading`] is
+//! where that becomes the device-removed error, for every fence read that
+//! decides whether work has finished.
+//!
 //! # Not Windows-only, and that is the point
 //!
 //! This module holds no `windows` type — it is `u64` arithmetic and one
@@ -68,6 +75,43 @@ pub(crate) fn signal_value(timeline: bool, floor: u64, requested: u64) -> Result
         )));
     }
     Ok(requested)
+}
+
+/// What a fence reading of `reached` means once `signalled` is the highest
+/// value this crate has issued that fence to reach — or the device-removed
+/// error, built from `diagnosis`, when it is a value nothing issued.
+///
+/// Every value an `ID3D12Fence` of this crate takes comes from a `Signal` this
+/// crate issued, on the queue or from the host, so a live device can never read
+/// past `signalled`. A removed one does: `GetCompletedValue` answers
+/// `UINT64_MAX` once the device is removed, which is Microsoft's documented
+/// behaviour, and taken at its word that reading completes every wait — a
+/// readback would hand back a buffer the GPU never wrote as finished, the
+/// failure `crcbl-vk` met on AMD's Windows driver (its `retire_reading`).
+///
+/// `diagnosis` is called only on that path, because what it names is
+/// `GetDeviceRemovedReason`'s answer and the debug layer's messages, which cost
+/// a walk of the info queue a healthy reading should not pay for.
+///
+/// A caller that signalled `u64::MAX` itself reads it back unrefused: that
+/// reading is one it issued, and indistinguishable from a removal.
+///
+/// # Errors
+///
+/// [`HalError::DeviceLost`] for a reading past `signalled`.
+pub(crate) fn fence_reading(
+    reached: u64,
+    signalled: u64,
+    diagnosis: impl FnOnce() -> String,
+) -> Result<u64, HalError> {
+    if reached > signalled {
+        return Err(HalError::DeviceLost(format!(
+            "a fence reads {reached}, past the {signalled} this crate signalled it towards — no \
+             signal set that value, so the device has been removed{}",
+            diagnosis()
+        )));
+    }
+    Ok(reached)
 }
 
 #[cfg(test)]
@@ -142,5 +186,39 @@ mod tests {
         // Two in a row, which is what the intra-submission floor produces.
         let first = signal_value(false, 2, 0).expect("binary");
         assert_eq!(signal_value(false, first, 0).expect("binary"), first + 1);
+    }
+
+    /// **A fence past everything signalled is a removed device**, and every
+    /// reading a live one can give — up to and including the last value
+    /// signalled — passes through unchanged.
+    ///
+    /// Red if the check is dropped (the `UINT64_MAX` a removed device reads
+    /// would complete every wait) or written as `>=` (a fence that has reached
+    /// its last signal, the ordinary idle device, would read as removed).
+    #[test]
+    fn a_fence_past_every_signal_is_a_removed_device() {
+        let unreached = || -> String { panic!("diagnosis is for the removed path only") };
+        assert_eq!(fence_reading(0, 0, unreached).ok(), Some(0));
+        assert_eq!(fence_reading(34, 35, unreached).ok(), Some(34));
+        assert_eq!(fence_reading(35, 35, unreached).ok(), Some(35));
+        assert_eq!(
+            fence_reading(u64::MAX, u64::MAX, unreached).ok(),
+            Some(u64::MAX)
+        );
+        for (reached, signalled) in [(36, 35), (1, 0), (u64::MAX, 35)] {
+            let error = fence_reading(reached, signalled, || "\n  the diagnosis".to_string())
+                .expect_err("past every signal");
+            let HalError::DeviceLost(text) = &error else {
+                panic!("{reached} against {signalled} signalled: {error:?}");
+            };
+            // Both numbers and the diagnosis, or the report cannot be told
+            // from a fence this crate mis-signalled.
+            assert!(
+                text.contains(&reached.to_string())
+                    && text.contains(&signalled.to_string())
+                    && text.ends_with("the diagnosis"),
+                "{text}"
+            );
+        }
     }
 }

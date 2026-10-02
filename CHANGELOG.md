@@ -3985,6 +3985,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   blank frame with no error anywhere. A retire timeline past the device's last
   submission is now `HalError::DeviceLost` from both, and from `query_results`,
   `semaphore_value` and `wait_semaphores`, which trusted the same answers.
+- **`crcbl-dx12` reports a removed device instead of a finished readback.** A
+  removed device's fences read `UINT64_MAX`, past every value a poll or wait
+  compares against: an empty readback came back `Ready`, `semaphore_value`
+  returned `u64::MAX`, `wait_semaphores` returned `Ok(true)` and the retire
+  queue released what the GPU might still name. A fence reading past every value
+  this backend signalled is now `HalError::DeviceLost`, carrying
+  `GetDeviceRemovedReason`'s answer, from `poll_readback`, `semaphore_value`,
+  `wait_semaphores`, `query_results` and `wait_idle`, and the retire queue keeps
+  what it holds.
 - **An editor save removes the chunk files its scene no longer names.** A system
   unlisted, or the last entity name cleared, used to leave its `sys/<name>.ron`
   or `names.ron` on disk beside a `scene.ron` that no longer read it.

@@ -460,6 +460,10 @@ struct SemaphoreEntry {
     /// in flight can signal the same value and the second wait is satisfied by
     /// the first submission's work.
     ///
+    /// The same rule makes it the ceiling of an honest reading: a fence that
+    /// reads past it was set by nothing this crate issued, which is
+    /// [`sync::fence_reading`]'s device-removed case.
+    ///
     /// It is also what a binary semaphore's wait and signal are *made of*: the
     /// seam says a binary semaphore's `value` field is ignored, so a signal
     /// takes the next integer and a wait takes the one most recently handed
@@ -1284,6 +1288,9 @@ impl DeviceInner {
     /// has not moved in seven weeks.
     fn wait_for(&self, value: u64) -> Result<(), HalError> {
         if self.wait_fence_until(&self.fence, value, Duration::MAX)? {
+            // A removed device's fence reads `UINT64_MAX`, which satisfies the
+            // wait at once; only the bound can tell that from finished work.
+            self.completed(&self.state())?;
             return Ok(());
         }
         Err(HalError::DeviceLost(format!(
@@ -1375,16 +1382,52 @@ impl DeviceInner {
         Ok(true)
     }
 
-    /// What the GPU has finished.
-    fn completed(&self) -> u64 {
+    /// What the GPU has finished, refused as a removed device when the fence
+    /// reads a value no signal issued — see [`sync::fence_reading`].
+    ///
+    /// Takes the state lock's guard because the bound is
+    /// [`DeviceState::next_fence_value`], which [`Self::signal`] raises before
+    /// issuing each `Signal`, under that lock. A copy of it taken earlier can
+    /// be behind a value the fence has since reached, and a live device would
+    /// read as a removed one.
+    fn completed(&self, state: &DeviceState) -> Result<u64, HalError> {
         // SAFETY: `fence` is live and `GetCompletedValue` reads no pointer of
         // ours and returns a `u64` by value.
-        unsafe { self.fence.GetCompletedValue() }
+        let reached = unsafe { self.fence.GetCompletedValue() };
+        sync::fence_reading(reached, state.next_fence_value, || {
+            debug::diagnosis(&self.raw)
+        })
+    }
+
+    /// What a timeline semaphore has reached, refused as a removed device when
+    /// it reads a value no signal issued — see [`sync::fence_reading`].
+    ///
+    /// `entry` is borrowed from the locked state, which is what makes
+    /// [`SemaphoreEntry::submitted`] a bound: every path that signals the fence
+    /// records the value under that lock.
+    fn semaphore_reached(&self, entry: &SemaphoreEntry) -> Result<u64, HalError> {
+        // SAFETY: `raw` is a live fence this device created, and
+        // `GetCompletedValue` reads no pointer of ours and returns a `u64` by
+        // value.
+        let reached = unsafe { entry.raw.GetCompletedValue() };
+        sync::fence_reading(reached, entry.submitted, || debug::diagnosis(&self.raw))
     }
 
     /// Releases everything the fence has passed. See [`crate::retire`].
+    ///
+    /// A reading refused as a removed device releases nothing: the caller of
+    /// whichever call swept learns of the removal from its own fence read, so
+    /// this logs and returns, and what is parked stays parked rather than
+    /// being freed on the word of a fence nothing signalled.
     fn poll_retire(&self, state: &mut DeviceState) {
-        state.retire.retire(self.completed());
+        match self.completed(state) {
+            Ok(completed) => state.retire.retire(completed),
+            Err(error) => crcbl_core::log::error!(
+                "crcbl-dx12: reading the device fence failed ({error}); {} payload(s) stay parked \
+                 and nothing will be released until it succeeds",
+                state.retire.pending()
+            ),
+        }
     }
 }
 
@@ -2628,15 +2671,14 @@ impl Device for Dx12Device {
                 out.len()
             )));
         }
+        // Both readings are bounded by what was signalled, so a removed
+        // device is an error here rather than a frame the GPU never wrote.
         let reached = match wait {
-            ReadbackWait::Submission(after) => self.inner.completed() >= after,
+            ReadbackWait::Submission(after) => self.inner.completed(&state)? >= after,
             ReadbackWait::Timeline { semaphore, value } => {
                 let entry =
                     handle::lookup(&state.semaphores, "semaphore", semaphore, self.inner.owner)?;
-                // SAFETY: `raw` is a live fence this device created, and
-                // `GetCompletedValue` reads no pointer of ours.
-                let completed = unsafe { entry.raw.GetCompletedValue() };
-                completed >= value
+                self.inner.semaphore_reached(entry)? >= value
             }
         };
         if !reached {
@@ -3909,9 +3951,11 @@ impl Device for Dx12Device {
     ///
     /// # Errors
     ///
-    /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`], and
+    /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`];
     /// [`HalError::Unsupported`] for a binary semaphore, whose counter is this
-    /// crate's private bookkeeping rather than a value the seam defines.
+    /// crate's private bookkeeping rather than a value the seam defines; and
+    /// [`HalError::DeviceLost`] for a reading past every value signalled, which
+    /// is what a removed device's fence gives.
     fn semaphore_value(&self, semaphore: SemaphoreHandle) -> Result<u64, HalError> {
         let state = self.state();
         let entry = handle::lookup(&state.semaphores, "semaphore", semaphore, self.inner.owner)?;
@@ -3921,10 +3965,7 @@ impl Device for Dx12Device {
                 what: "a binary semaphore has no value to read",
             });
         }
-        // SAFETY: `raw` is a live fence this device created and
-        // `GetCompletedValue` reads no pointer of ours, returning a `u64` by
-        // value.
-        Ok(unsafe { entry.raw.GetCompletedValue() })
+        self.inner.semaphore_reached(entry)
     }
 
     /// Advances a timeline from the host with `ID3D12Fence::Signal`.
@@ -4010,7 +4051,8 @@ impl Device for Dx12Device {
     /// [`HalError::InvalidHandle`] or [`HalError::ForeignObject`],
     /// [`HalError::Unsupported`] for a binary semaphore — which D3D12 can only
     /// wait on from a queue — and [`HalError::DeviceLost`] if the wait could not
-    /// be armed or returned with the fence short of its value.
+    /// be armed, returned with the fence short of its value, or was satisfied
+    /// by a device whose fence reads past every value signalled.
     fn wait_semaphores(
         &self,
         waits: &[crcbl_hal::SemaphoreWait],
@@ -4050,6 +4092,11 @@ impl Device for Dx12Device {
                 return Ok(false);
             }
         }
+        // A removed device reads `UINT64_MAX` on every fence it made, which
+        // satisfies each wait above at once. The device fence is the one whose
+        // bound is always to hand — a semaphore destroyed during the wait has
+        // none left to look up — so it is the one asked.
+        self.inner.completed(&self.state())?;
         Ok(true)
     }
 
@@ -4827,6 +4874,7 @@ pub(crate) mod tests {
     };
 
     use crate::instance::tests::{desc as device_desc, open as open_instance, pinned_adapter};
+    use windows::Win32::Graphics::Direct3D12::ID3D12Device5;
 
     /// Every [`MemoryLocation`] the seam has, so the buffer tests cover all
     /// three rather than the one that was convenient.
@@ -10878,9 +10926,10 @@ pub(crate) mod tests {
     /// It cannot make it because the failure mode is a *hang*: a backend that
     /// deadlocked rather than refusing would take the shared suite down with it,
     /// so that suite leaves the capability unexercised and the evidence has to
-    /// live here — where a test can reach `ID3D12Fence::Signal` directly, which
-    /// is the CPU-side signal the seam has no verb for and `crcbl-mtl`'s
-    /// divergence entry names as the thing it is missing.
+    /// live here. The release is [`Device::signal_semaphore`], the CPU-side
+    /// `ID3D12Fence::Signal`, rather than the raw call: a signal that bypassed
+    /// it would leave the fence past every value this crate recorded, which
+    /// [`sync::fence_reading`] rightly reads as a removed device.
     ///
     /// **Both halves are asserted, and the first is what makes this a test
     /// rather than a demonstration.** After the wait-only submission the device
@@ -10909,20 +10958,6 @@ pub(crate) mod tests {
                 kind: SemaphoreKind::Timeline { initial_value: 0 },
             })
             .expect("every D3D12 device creates fences");
-        // The fence itself, so this test can play the part no seam call has: a
-        // signal that does not come from a submission.
-        let raw = {
-            let state = device.state();
-            handle::lookup(
-                &state.semaphores,
-                "semaphore",
-                semaphore,
-                device.inner.owner,
-            )
-            .expect("the semaphore was created a moment ago")
-            .raw
-            .clone()
-        };
 
         device
             .submit(
@@ -10949,9 +10984,9 @@ pub(crate) mod tests {
              signalled, so the Wait was dropped rather than issued"
         );
 
-        // SAFETY: `raw` is the semaphore's live fence, held by this test for the
-        // duration of the call, and `Signal` takes a scalar.
-        unsafe { raw.Signal(AWAITED) }.expect("the CPU side of an ID3D12Fence");
+        device
+            .signal_semaphore(semaphore, AWAITED)
+            .expect("the CPU side of an ID3D12Fence");
         device
             .wait_idle()
             .expect("the CPU signal released the queue");
@@ -11169,6 +11204,206 @@ pub(crate) mod tests {
         device.destroy_semaphore(binary);
         device.destroy_semaphore(timeline);
         device.destroy_buffer(target);
+    }
+
+    /// **A removed device's readback is the device-lost error, never a frame.**
+    ///
+    /// `GetCompletedValue` answers `UINT64_MAX` once a device is removed, which
+    /// is past every value a wait or a poll compares against.
+    /// `ID3D12Device5::RemoveDevice` removes the device on purpose, and every
+    /// fence read that decides "finished" is then asked: both kinds of
+    /// readback, the timeline's value, a CPU wait on it, a query read and an
+    /// idle. Each must be [`HalError::DeviceLost`] carrying
+    /// `GetDeviceRemovedReason`'s answer, and the retire sweep must release
+    /// nothing.
+    ///
+    /// Without [`sync::fence_reading`] (run 2026-10-02, RX 7900 XTX and WARP)
+    /// an empty readback came back `Ready`, a sized one and the query read
+    /// failed in `Map` as [`HalError::Backend`], the timeline read `u64::MAX`,
+    /// the CPU wait returned `Ok(true)` and the sweep released what was parked.
+    ///
+    /// **Process-per-test only.** A D3D12 device is a singleton per adapter
+    /// within a process, so removing this one removes every device a sibling
+    /// test in the same process opened on the adapter. nextest gives each test
+    /// a process of its own, which is how `tests/run-dx12-e2e.sh` and CI run
+    /// this crate; under a shared-process runner this test refuses up front
+    /// rather than taking its neighbours down with it.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_removed_device_answers_every_fence_read_as_lost() {
+        /// The variable nextest sets in each test's environment, and the value
+        /// meaning that test has its process to itself.
+        const EXECUTION_MODE: (&str, &str) = ("NEXTEST_EXECUTION_MODE", "process-per-test");
+        /// What the held submission waits for, which nothing ever signals.
+        const GATE: u64 = 1;
+        const BYTES: usize = 4;
+
+        assert_eq!(
+            std::env::var(EXECUTION_MODE.0).ok().as_deref(),
+            Some(EXECUTION_MODE.1),
+            "this test removes the adapter's one D3D12 device in this process, which would remove \
+             every sibling test's device with it; run it under cargo nextest"
+        );
+        let (instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let gate = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("never signalled"),
+                kind: SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .expect("every D3D12 device creates fences");
+        let target = readback_buffer(&device, BYTES);
+        let set = device
+            .create_query_set(&QuerySetDesc {
+                label: Some("read after removal"),
+                kind: QueryKind::Timestamp,
+                count: 1,
+            })
+            .expect("a timestamp query set");
+
+        // Held behind a value nothing signals, so the device fence stays short
+        // of this submission and the readbacks below are in flight when the
+        // device goes.
+        device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[SemaphoreWait {
+                        semaphore: gate,
+                        value: GATE,
+                    }],
+                    signals: &[],
+                },
+            )
+            .expect("a wait on an unsignalled value is accepted");
+        let request = |after, size: usize| {
+            device
+                .request_readback(&ReadbackDesc {
+                    label: Some("in flight at removal"),
+                    buffer: target,
+                    offset: 0,
+                    size: size as u64,
+                    after,
+                })
+                .expect("a readback of a HostReadback buffer")
+        };
+        let keyed = || {
+            Some(SemaphoreWait {
+                semaphore: gate,
+                value: GATE,
+            })
+        };
+        // The empty readbacks come first because they are the ones a removal
+        // answered `Ready` before the fence reading was bounded: with no bytes
+        // to copy there is no `Map` to fail on the removed device. A sized one
+        // failed in `Map` instead, as `HalError::Backend` rather than lost.
+        let readbacks = [
+            ("of nothing, after the submission", request(None, 0), 0),
+            ("of nothing, keyed on the timeline", request(keyed(), 0), 0),
+            ("after the submission", request(None, BYTES), BYTES),
+            ("keyed on the timeline", request(keyed(), BYTES), BYTES),
+        ];
+        let mut out = [POISON; BYTES];
+        for (what, readback, bytes) in readbacks {
+            assert!(
+                matches!(
+                    device.poll_readback(readback, &mut out[..bytes]),
+                    Ok(ReadbackState::Pending)
+                ),
+                "the readback {what} was not in flight before the removal"
+            );
+        }
+
+        // What the layer says from here on is about the removal, which is this
+        // test's own doing; what it said about everything before is held to
+        // the clean line every other device test is.
+        let before = instance.report();
+        assert!(
+            before.is_clean(),
+            "the layer objected before the removal:\n{}",
+            before.summary()
+        );
+        instance.defuse();
+        let removable = device
+            .inner
+            .raw
+            .cast::<ID3D12Device5>()
+            .expect("ID3D12Device5 is Windows 10 1809's, which every runner has");
+        // SAFETY: `removable` is this device's own live interface, and the call
+        // takes nothing. Removing the device is the point of the test, and
+        // nothing below reads memory the GPU was meant to write.
+        unsafe { removable.RemoveDevice() };
+        // SAFETY: the device fence is live and `GetCompletedValue` returns a
+        // `u64` by value.
+        let reading = unsafe { device.inner.fence.GetCompletedValue() };
+        assert_eq!(
+            reading,
+            u64::MAX,
+            "Microsoft documents UINT64_MAX as a removed device's fence reading, and it is the \
+             reading every check below exists to refuse"
+        );
+
+        let lost = |what: &str, result: Result<String, HalError>| match result {
+            Err(HalError::DeviceLost(text)) => assert!(
+                text.contains("GetDeviceRemovedReason"),
+                "{what} on a removed device did not say why: {text}"
+            ),
+            other => panic!("{what} on a removed device answered {other:?}, not DeviceLost"),
+        };
+        for (what, readback, bytes) in readbacks {
+            lost(
+                &format!("the readback {what}"),
+                device
+                    .poll_readback(readback, &mut out[..bytes])
+                    .map(|state| format!("{state:?}")),
+            );
+            assert_eq!(
+                out, [POISON; BYTES],
+                "a poll of a removed device wrote bytes"
+            );
+        }
+        lost(
+            "semaphore_value",
+            device.semaphore_value(gate).map(|value| value.to_string()),
+        );
+        lost(
+            "wait_semaphores",
+            device
+                .wait_semaphores(
+                    &[SemaphoreWait {
+                        semaphore: gate,
+                        value: GATE,
+                    }],
+                    0,
+                )
+                .map(|waited| waited.to_string()),
+        );
+        let mut results = [0u64; 1];
+        lost(
+            "query_results",
+            device
+                .query_results(set, 0, &mut results)
+                .map(|()| format!("{results:?}")),
+        );
+        lost("wait_idle", device.wait_idle().map(|()| "Ok".to_string()));
+
+        for (_, readback, _) in readbacks {
+            device.destroy_readback(readback);
+        }
+        device.destroy_query_set(set);
+        device.destroy_buffer(target);
+        // Parked behind the held submission, and the sweep that follows must
+        // not release it on the word of a fence nothing signalled.
+        let parked = device.state().retire.pending();
+        device.destroy_semaphore(gate);
+        assert_eq!(
+            device.state().retire.pending(),
+            parked + 1,
+            "a removed device's retire sweep released what was parked"
+        );
     }
 
     /// **A timeline signal that does not move forwards is refused**, because the
@@ -12196,7 +12431,10 @@ pub(crate) mod tests {
                 result.map(|()| nanos)
             });
             let returned = received.recv_timeout(PATIENCE).is_ok();
-            let completed = device.inner.completed();
+            let completed = device
+                .inner
+                .completed(&device.state())
+                .expect("a live device's fence reads no further than it was signalled");
             device
                 .signal_semaphore(gate, GATE)
                 .expect("the CPU side of the gate");

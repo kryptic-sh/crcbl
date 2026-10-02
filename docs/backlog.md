@@ -351,24 +351,52 @@ the frame's submission so no one command buffer runs long.
 
 The `gpu` test group holds every device-opening suite to eight at a time, and
 `crcbl-vk` now reports a retire timeline past its last submission as
-`DeviceLost` from `poll_readback` and `wait_idle`. Both are measured in
-`docs/notes/ci.md`'s "More than twenty Vulkan devices at once". Not done:
+`DeviceLost` from `poll_readback`, `wait_idle`, `query_results`,
+`semaphore_value` and `wait_semaphores`. Both are measured in
+`docs/notes/ci.md`'s "More than twenty Vulkan devices at once". `crcbl-dx12`
+does the same through `sync::fence_reading`, proven on a removed device by
+`device::tests::a_removed_device_answers_every_fence_read_as_lost`. Not done:
 
-- **D3D12 has the same shape, unexercised.** `crcbl-dx12`'s `poll_readback`
-  calls a readback ready once `GetCompletedValue` reaches its value, and a
-  removed device's fence reads `UINT64_MAX` — Microsoft's documented behaviour,
-  not an AMD quirk. So a removal mid-frame would hand back an unwritten buffer
-  as Ready, as `crcbl-vk` did. Not fixed because D3D12 never lost a device here
-  (64 concurrent copies of the cube test all passed), so there was no run to
-  check a fix against. `ID3D12Device5::RemoveDevice` can remove a device on
-  purpose and would make that test.
-- **The rest of `crcbl-vk`'s waits are unguarded.** The check covers
-  `poll_readback` (on any semaphore) and `wait_idle`. `query_results` waits on
-  the retire timeline with `vkWaitSemaphores` and then reads the pool, and
-  `wait_semaphores` answers for a caller's own timelines, whose highest signal
-  this backend does not track. Both presumably return success on the device that
-  lost here, whose retire timeline read `u64::MAX`, but neither was run on a
-  lost device.
+- **`crcbl-vk`'s new checks never ran on a lost device.** The predicate
+  (`retire_reading`) is unit-tested, but `query_results`, `semaphore_value` and
+  `wait_semaphores` calling it is checked by nothing: Vulkan has no
+  `RemoveDevice`, and the only way to lose one here is the twenty-device cliff.
+  A test that opened 21 devices in one process and asked each call would cover
+  it, on this adapter and driver only.
+- **`crcbl-vk` reads it does not bound, considered and left.**
+  `take_command_pool` resets a pool once the raw timeline passes its last use; a
+  lost device runs nothing, so a reset on its `u64::MAX` frees nothing the GPU
+  still reads, and the loss surfaces at the next poll. The WSI waits (the
+  acquire fences in `acquire_next_frame` and `drain_pending_acquires`,
+  `vkWaitForPresentKHR`) gate image reuse, not finished work. `signal_semaphore`
+  on a lost device already fails, as `InvalidDescriptor` (the counter reads
+  `u64::MAX`, so every value is "not forwards") rather than `DeviceLost`. The
+  `Debug` impl prints the raw reading on purpose.
+- **What D3D12 did before the bound (2026-10-02, RX 7900 XTX and WARP).** After
+  `RemoveDevice` every fence read `UINT64_MAX`. A sized readback did not come
+  back `Ready`: `ID3D12Resource::Map` failed with `DXGI_ERROR_DEVICE_REMOVED`,
+  as `HalError::Backend`, and so did `query_results`. An empty readback did come
+  back `Ready`, `semaphore_value` returned `u64::MAX`, `wait_semaphores`
+  returned `Ok(true)`, and the retire queue released what it held. So the
+  backlog's "unwritten buffer as Ready" was half right on these two adapters;
+  whether another driver's `Map` succeeds on a removed device is not known.
+- **The removal test needs a process to itself.** D3D12 hands back the same
+  device object for a second `D3D12CreateDevice` on the same adapter in one
+  process (checked on both adapters above), so removing it removes every
+  sibling's device. The test asserts `NEXTEST_EXECUTION_MODE=process-per-test`
+  and fails otherwise. Its debug-layer coverage is unverified: this machine has
+  no Graphics Tools, so the run was `CRCBL_DX12_VALIDATION=0`. It asserts the
+  report clean before the removal and stands the teardown assertion down after,
+  so a layer that objects to the setup will fail it on CI's WARP job.
+- **Metal: not the same shape, one half unknown.** Read only. `crcbl-mtl`'s
+  `poll_readback` on a submission and `wait_idle` read `MTLCommandBufferStatus`,
+  and `Error` there is already `DeviceLost`, so a failed command buffer cannot
+  read as finished. The timeline paths (`poll_readback` with `after`,
+  `semaphore_value`, `wait_semaphores`) read `MTLSharedEvent::signaledValue`
+  with no bound. Whether Metal still signals an event encoded after a command
+  buffer that failed is not known here. If it does, those paths answer `Ready`
+  over unwritten memory. If it does not, they stay `Pending` until the readback
+  deadline. No Metal machine here can check which.
 - **The limit is one adapter and one driver.** Twenty was measured on the RX
   7900 XTX under AMD 25.10.36 only. Whether it is the same on the 9060 XT box,
   on other AMD drivers, or on NVIDIA or Intel under Windows is not measured, and
