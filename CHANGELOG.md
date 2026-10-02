@@ -3983,7 +3983,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   with `VK_SUCCESS`, the timeline at `u64::MAX`, so `poll_readback` handed back
   a buffer the GPU never wrote as `Ready` and `wait_idle` returned `Ok` — a
   blank frame with no error anywhere. A retire timeline past the device's last
-  submission is now `HalError::DeviceLost` from both.
+  submission is now `HalError::DeviceLost` from both, and from `query_results`,
+  `semaphore_value` and `wait_semaphores`, which trusted the same answers.
 - **An editor save removes the chunk files its scene no longer names.** A system
   unlisted, or the last entity name cleared, used to leave its `sys/<name>.ron`
   or `names.ron` on disk beside a `scene.ron` that no longer read it.

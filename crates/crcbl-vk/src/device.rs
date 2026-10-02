@@ -2601,6 +2601,10 @@ impl Device for VkDevice {
             .map_err(|error| conv::hal_error("vkWaitSemaphores", error))?;
 
         let state = self.inner.state();
+        // The wait above is on the retire timeline, which a lost device has
+        // read as `u64::MAX` with `VK_SUCCESS`, so its success proves nothing
+        // about the pool; the bound does.
+        self.inner.retired(&state)?;
         let entry = lookup(&state.query_sets, "query set", set, &self.inner)?;
         let end = first_query as u64 + out.len() as u64;
         if end > u64::from(entry.count) {
@@ -2727,8 +2731,13 @@ impl Device for VkDevice {
             });
         }
         // SAFETY: `entry.raw` is a live timeline semaphore of this device.
-        unsafe { self.inner.raw.get_semaphore_counter_value(entry.raw) }
-            .map_err(|error| conv::hal_error("vkGetSemaphoreCounterValue", error))
+        let reached = unsafe { self.inner.raw.get_semaphore_counter_value(entry.raw) }
+            .map_err(|error| conv::hal_error("vkGetSemaphoreCounterValue", error))?;
+        // This backend does not track a caller's highest signal, so the
+        // caller's value cannot be bounded; the retire timeline, which a lost
+        // device reads past its last submission, can.
+        self.inner.retired(&state)?;
+        Ok(reached)
     }
 
     /// `vkSignalSemaphore`, with the seam's forwards-only rule checked first.
@@ -2801,6 +2810,10 @@ impl Device for VkDevice {
         let result = unsafe { self.inner.raw.wait_semaphores(&info, timeout_ns) };
         match result {
             Ok(()) => {
+                // A lost device's timelines have read as `u64::MAX` with
+                // `VK_SUCCESS`, which would satisfy any wait, so the retire
+                // timeline is asked, as `semaphore_value` does.
+                self.inner.retired(&state)?;
                 // A satisfied wait is the cheapest possible moment to free what
                 // the GPU has finished with.
                 self.inner.poll_retire(&mut state);
