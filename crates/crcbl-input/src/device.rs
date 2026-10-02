@@ -1,6 +1,6 @@
 //! Which kind of device spoke last — what a UI's mixed-input rule reads to
-//! decide between showing hover and showing focus, and what a glyph hint will
-//! read to show `Space` or a pad button.
+//! decide between showing hover and showing focus, and what
+//! [`ActionMap::hint`] reads to show `Space` or a pad button.
 //!
 //! **Only activity counts.** A key or button press, pointer movement, a wheel
 //! turn, an on-screen control pressed or deflected, and a pad button pressed or
@@ -10,7 +10,7 @@
 //! keyboard speaking, and neither does a zero delta. It is tracked from every
 //! event the map receives, whether or not any binding reads that input.
 
-use super::{ActionMap, Binding};
+use super::{ActionMap, Binding, PadKind};
 
 /// A kind of input device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -33,7 +33,27 @@ impl ActionMap {
     /// The kind of device that last spoke, or `None` before any did.
     #[must_use]
     pub fn last_device(&self) -> Option<Device> {
-        self.last_device
+        self.devices.first().copied()
+    }
+
+    /// The family of the pad that last spoke, by the same rule, or `None`
+    /// before any pad did — what [`ActionMap::hint`] names a pad button after.
+    ///
+    /// Kept apart from [`ActionMap::last_device`] because it outlives it: a
+    /// player who put the pad down for the keyboard and picks it up again is
+    /// still holding the pad they were.
+    #[must_use]
+    pub fn last_pad_kind(&self) -> Option<PadKind> {
+        self.last_pad_kind
+    }
+
+    /// Records that `device` spoke: it moves to the front of the recency
+    /// list, and the rest keep their order.
+    pub(crate) fn spoke(&mut self, device: Device) {
+        if let Some(index) = self.devices.iter().position(|&seen| seen == device) {
+            self.devices.remove(index);
+        }
+        self.devices.insert(0, device);
     }
 }
 

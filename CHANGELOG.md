@@ -536,6 +536,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Control hints: how an action's binding is shown to the player right now.**
+  `crcbl_input::ActionMap::hint(action)` returns a `Hint` — the binding's
+  `Device`, the `Binding`, the pad family (`Option<PadKind>`, set for a pad
+  binding) and a text `label` — for the first binding on
+  `ActionMap::last_device`, falling back through the devices used before it,
+  most recent first, then to the action's first binding; `None` for an unknown
+  or unbound action. Keys print their US-QWERTY legend (`Space`, `W`, `Shift`,
+  `Up`), mouse buttons `LMB`/`RMB`/`MMB`, and a pad button what its family
+  prints in that position: `A`/`B`/`X`/`Y` and `LB`/`RB` on Xbox,
+  `Cross`/`Circle`/`Square`/`Triangle` and `L1`/`R1` on PlayStation,
+  `B`/`A`/`Y`/`X` and `L`/`R` on Switch, positional names (`South`, `East`) on a
+  pad the backend could not place. The family is the pad that last spoke, read
+  back with the new `ActionMap::last_pad_kind()`. Labels are text only; the
+  engine ships no glyph images. A game prints its own words or symbols by
+  implementing `crcbl_input::HintLabels` — every entry defaults to the engine's
+  table (`DefaultLabels`) — and passing it to `ActionMap::hint_with`, or maps
+  the `Hint` to its own icon atlas.
 - **RON binding assets: a game's default actions as a file.**
   `crcbl_input::ActionMap::from_ron(text)` declares every record of a list like
   `[(action: "jump", kind: Button, keyboard: ["Space"], gamepad: ["Pad:South"], patterns: [Hold(400, "jump_charge")]), (action: "jump_charge", kind: Button)]`

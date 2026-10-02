@@ -283,8 +283,8 @@ pub enum Trigger {
     Right,
 }
 
-/// What family a pad is, for the glyphs a hint shows. Bindings never read it:
-/// buttons are positional.
+/// What family a pad is, for the labels a hint shows
+/// ([`ActionMap::hint`]). Bindings never read it: buttons are positional.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PadKind {
     /// An Xbox-layout pad, and anything XInput reports.
@@ -443,8 +443,9 @@ impl ActionMap {
     /// Optional: the events mean the same to a game that reads them directly
     /// and never calls this (see the module docs).
     ///
-    /// **Activity** makes [`Device::Gamepad`] the last device, by the rule
-    /// `device.rs` states for the others: a button going down, or a stick or
+    /// **Activity** makes [`Device::Gamepad`] the last device, and the pad's
+    /// [`PadKind`] the [`ActionMap::last_pad_kind`], by the rule `device.rs`
+    /// states for the others: a button going down, or a stick or
     /// trigger moving out past [`PAD_ACTIVITY_THRESHOLD`]. A release does not,
     /// a stick returning to centre does not, and neither does a stick held
     /// where it already was — holding it over is like holding a key down, and
@@ -476,7 +477,8 @@ impl ActionMap {
                     .zip(deflected(&snapshot))
                     .any(|(was, is)| is && !was);
                 if pressed || went_over {
-                    self.last_device = Some(Device::Gamepad);
+                    self.spoke(Device::Gamepad);
+                    self.last_pad_kind = Some(snapshot.kind);
                 }
             }
         }

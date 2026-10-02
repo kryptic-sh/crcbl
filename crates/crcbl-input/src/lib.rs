@@ -25,7 +25,9 @@
 //! what [`ActionMap::cancel_patterns`] cancels). [`ActionMap::set_emits`] makes
 //! one of the last three press a named button action when it fires
 //! (`emit.rs`).
-//! [`ActionMap::last_device`] names the kind of [`Device`] that last spoke.
+//! [`ActionMap::last_device`] names the kind of [`Device`] that last spoke,
+//! and [`ActionMap::hint`] how an action's binding is shown to the player on
+//! it ([`hint`]).
 //!
 //! # Gamepads
 //!
@@ -62,6 +64,7 @@ mod float_axis;
 #[cfg(any(target_os = "macos", test))]
 pub mod game_controller;
 mod gamepad;
+pub mod hint;
 mod overrides;
 mod patterns;
 // The name match the browser and GameController backends name a pad's family
@@ -94,6 +97,7 @@ pub use gamepad::{
     GamepadEvent, GamepadId, GamepadSnapshot, PAD_ACTIVITY_THRESHOLD, PadAxis, PadButton,
     PadButtons, PadKind, Stick, Trigger,
 };
+pub use hint::{DefaultLabels, Hint, HintLabels};
 pub use overrides::ActionOverride;
 pub use patterns::{DOUBLE_TAP_WINDOW, DoubleTap, HOLD_TIME, Hold, TAP_TIME, Tap};
 pub use repeat::{Cardinal, REPEAT_DELAY, REPEAT_INTERVAL, Repeat};
@@ -810,8 +814,13 @@ pub struct ActionMap {
     /// Held inputs withheld from their owner until released, because the
     /// stack changed under them.
     suppressed: Suppressed,
-    /// The kind of device that last spoke — see [`ActionMap::last_device`].
-    last_device: Option<Device>,
+    /// Every kind of device that has spoken, most recent first and each
+    /// once — see [`ActionMap::last_device`], and `hint.rs` for why the ones
+    /// behind it are kept.
+    devices: Vec<Device>,
+    /// The family of the pad that last spoke — see
+    /// [`ActionMap::last_pad_kind`].
+    last_pad_kind: Option<PadKind>,
 
     // Raw input state -------------------------------------------------------
     held_keys: HeldKeys,
@@ -867,7 +876,8 @@ impl ActionMap {
             modal: Vec::new(),
             routes: Routes::default(),
             suppressed: Suppressed::default(),
-            last_device: None,
+            devices: Vec::new(),
+            last_pad_kind: None,
             held_keys: HeldKeys::new(),
             key_presses: 0,
             held_buttons: HashSet::new(),
@@ -1039,7 +1049,7 @@ impl ActionMap {
                 self.key_presses += 1;
                 self.held_keys.insert(key, self.key_presses);
             }
-            self.last_device = Some(Device::Keyboard);
+            self.spoke(Device::Keyboard);
         } else {
             self.held_keys.remove(&key);
             self.suppressed.keys.remove(&key);
@@ -1061,7 +1071,7 @@ impl ActionMap {
     pub fn mouse_button(&mut self, button: PointerButton, pressed: bool) {
         if pressed {
             self.held_buttons.insert(button);
-            self.last_device = Some(Device::Pointer);
+            self.spoke(Device::Pointer);
         } else {
             self.held_buttons.remove(&button);
             self.suppressed.buttons.remove(&button);
@@ -1079,7 +1089,7 @@ impl ActionMap {
             return;
         }
         if dx != 0.0 || dy != 0.0 {
-            self.last_device = Some(Device::Pointer);
+            self.spoke(Device::Pointer);
         }
         self.mouse_delta.0 += dx;
         self.mouse_delta.1 += dy;
@@ -1096,7 +1106,7 @@ impl ActionMap {
             return;
         }
         if dx != 0.0 || dy != 0.0 {
-            self.last_device = Some(Device::Pointer);
+            self.spoke(Device::Pointer);
         }
         self.scroll_delta.0 += dx;
         self.scroll_delta.1 += dy;
@@ -1124,7 +1134,7 @@ impl ActionMap {
             return;
         }
         self.pointer = moved;
-        self.last_device = Some(Device::Pointer);
+        self.spoke(Device::Pointer);
 
         for i in 0..self.slots.len() {
             let slot = &self.slots[i];
@@ -1162,7 +1172,7 @@ impl ActionMap {
             if !self.held_controls.contains(control) {
                 self.held_controls.insert(control.to_owned());
             }
-            self.last_device = Some(Device::Touch);
+            self.spoke(Device::Touch);
         } else {
             self.held_controls.remove(control);
             self.suppressed.controls.remove(control);
@@ -1185,7 +1195,7 @@ impl ActionMap {
             return;
         }
         if x != 0.0 || y != 0.0 {
-            self.last_device = Some(Device::Touch);
+            self.spoke(Device::Touch);
         }
         if let Some(held) = self.control_sticks.get_mut(control) {
             *held = (x, y);
@@ -1654,7 +1664,8 @@ impl std::fmt::Debug for ActionMap {
             .field("control_sticks", &self.control_sticks)
             .field("pads", &self.pads)
             .field("contexts", &self.active_contexts().collect::<Vec<_>>())
-            .field("last_device", &self.last_device)
+            .field("devices", &self.devices)
+            .field("last_pad_kind", &self.last_pad_kind)
             .field("pointer", &self.pointer)
             .field("elapsed", &self.elapsed)
             .finish_non_exhaustive()
