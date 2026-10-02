@@ -24,6 +24,13 @@
 //! arrives through [`crcbl::engine::HostedGame::text_event`], with the layout
 //! applied, and Backspace takes a character off it.
 //!
+//! # What it knows is the engine's, how it looks is towers'
+//!
+//! Which hosts are rows and which are lines, the typed address, which host
+//! a pick means and what last went wrong are [`crcbl::lan::lobby`]'s, which
+//! the sandbox's lobby reads too. The rows, their words, the solo run under
+//! them and the map a host plays are towers', here.
+//!
 //! # The lobby picks, and `crate::app` starts
 //!
 //! A pick is `Lobby::pick`: it opens the [`Game`] a host row asks for, or the
@@ -65,11 +72,12 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crcbl::core::input::KeyCode;
+use crcbl::lan::lobby::{self, LobbyChoice, LobbyNotice, LobbyPick, PickRefused};
 use crcbl::lan::{LanBind, LanClient, LanGame};
-use crcbl::net::ProtocolCompatibility;
-use crcbl::net::udp::discovery::{Browser, HostEntry};
-use crcbl::ui::edit::LineEdit;
+use crcbl::net::udp::discovery::Browser;
 use crcbl::ui::menu::{Caption, Menu, MenuItem};
+
+pub use crcbl::lan::lobby::Unjoinable;
 
 use crate::game::Game;
 use crate::lan::{JOIN_TIMEOUT, Joining};
@@ -107,96 +115,20 @@ pub(crate) enum Picked {
     Joining(Joining),
 }
 
-/// Why a host the browser heard cannot be joined.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Unjoinable {
-    /// Its protocol version is not this build's: the wire itself differs.
-    Version,
-    /// Its engine build is not this one.
-    Build,
-    /// Its schema hash is not towers': another game on towers' protocol id.
-    /// The map is not in it — a host sends its own at join.
-    Game,
-    /// It has every player it takes.
-    Full,
-}
-
-impl Unjoinable {
-    /// Why `host` cannot be joined by a session hand-shaking on `ours`, or
-    /// `None` when it can. The handshake's own order — version, build,
-    /// schema — and then room, which is the one that changes while it runs.
-    #[must_use]
-    pub fn of(ours: ProtocolCompatibility, host: &HostEntry) -> Option<Self> {
-        let theirs = host.compatibility;
-        if theirs.protocol_version != ours.protocol_version {
-            Some(Self::Version)
-        } else if theirs.engine_build_id != ours.engine_build_id {
-            Some(Self::Build)
-        } else if theirs.schema_hash != ours.schema_hash {
-            Some(Self::Game)
-        } else if host.players >= host.max_players {
-            Some(Self::Full)
-        } else {
-            None
-        }
-    }
-
-    /// What the lobby says beside the host.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Version => "ANOTHER VERSION",
-            Self::Build => "ANOTHER BUILD",
-            Self::Game => "ANOTHER GAME",
-            Self::Full => "FULL",
-        }
-    }
-}
-
-/// What a host's row and line are drawn from: everything [`HostEntry`] holds
-/// but when it was last heard, which moves on every announce and would
-/// rebuild the menu — and throw its selection away — for nothing.
-fn shown(host: &HostEntry) -> (&str, SocketAddr, u16, u16, ProtocolCompatibility) {
-    (
-        &host.name,
-        host.addr,
-        host.players,
-        host.max_players,
-        host.compatibility,
-    )
-}
-
-/// The lobby: the browser, the hosts it heard, the address being typed, and
-/// the last thing that went wrong.
+/// The lobby: the engine's [`lobby::Lobby`] — the browser, the hosts it
+/// heard, the address being typed, and the last thing that went wrong — and
+/// what towers starts for a pick.
 #[derive(Debug)]
 pub struct Lobby {
-    /// The session this build would play: what a host is compared against,
-    /// and what a join hand-shakes on.
-    session: LanGame,
+    /// What the lobby knows.
+    model: lobby::Lobby,
     /// Where [`Pick::Host`] binds: every interface, as `--host` does, outside
     /// the tests.
     host_bind: LanBind,
     tick_hz: u32,
-    /// Listening for hosts, or why not — shown under the title, and the rest
-    /// of the lobby still works.
-    browser: Result<Browser, String>,
-    /// The hosts that are rows, in row order.
-    joinable: Vec<HostEntry>,
-    /// The hosts that are lines, with why.
-    passed_over: Vec<(HostEntry, Unjoinable)>,
-    /// The address [`Pick::Connect`] joins.
-    address: LineEdit,
-    /// Why the last pick did not start anything, or the last join failed.
-    notice: Option<String>,
-    /// Where the join under way is going, while one is.
-    joining: Option<String>,
     /// How long a chosen host has to send its map: [`JOIN_TIMEOUT`], unless a
     /// test asked for less.
     join_timeout: Duration,
-    /// Whether the rows or the lines changed since [`Lobby::take_changed`].
-    changed: bool,
-    /// Whether text arrived since [`Lobby::take_typed`].
-    typed: bool,
 }
 
 impl Lobby {
@@ -220,18 +152,10 @@ impl Lobby {
         tick_hz: u32,
     ) -> Self {
         Self {
-            session,
+            model: lobby::Lobby::new(session, browser),
             host_bind,
             tick_hz,
-            browser,
-            joinable: Vec::new(),
-            passed_over: Vec::new(),
-            address: LineEdit::new(),
-            notice: None,
-            joining: None,
             join_timeout: JOIN_TIMEOUT,
-            changed: true,
-            typed: false,
         }
     }
 
@@ -248,76 +172,46 @@ impl Lobby {
     /// Reads what the browser heard, and sorts it into rows and lines. Every
     /// frame the lobby is on screen: the browser asks only while polled.
     pub fn poll(&mut self) {
-        let Ok(browser) = &mut self.browser else {
-            return;
-        };
-        browser.poll();
-        let mut joinable = Vec::new();
-        let mut passed_over = Vec::new();
-        for host in browser.hosts() {
-            match Unjoinable::of(self.session.compatibility, &host) {
-                None => joinable.push(host),
-                Some(why) => passed_over.push((host, why)),
-            }
-        }
-        let same = joinable.len() == self.joinable.len()
-            && passed_over.len() == self.passed_over.len()
-            && joinable
-                .iter()
-                .zip(&self.joinable)
-                .all(|(new, old)| shown(new) == shown(old))
-            && passed_over
-                .iter()
-                .zip(&self.passed_over)
-                .all(|((new, why), (old, was))| shown(new) == shown(old) && why == was);
-        if !same {
-            self.joinable = joinable;
-            self.passed_over = passed_over;
-            self.changed = true;
-        }
+        self.model.poll();
     }
 
     /// Text typed while the lobby is up: it goes on the end of the address.
     pub fn text(&mut self, text: &str) {
-        if self.address.insert(text) {
-            self.typed = true;
-        }
+        self.model.text(text);
     }
 
     /// A key the menu did not take. Backspace takes a character off the
     /// address; nothing else here means anything.
     pub fn key(&mut self, key: KeyCode, pressed: bool) {
-        if pressed && key == KeyCode::Backspace && self.address.backspace() {
-            self.typed = true;
-        }
+        self.model.key(key, pressed);
     }
 
     /// The address typed so far.
     #[must_use]
     pub fn address(&self) -> &str {
-        self.address.text()
+        self.model.address()
     }
 
     /// What [`Pick::Connect`]'s row shows where a key hint would be.
     #[must_use]
     pub fn connect_hint(&self) -> String {
-        if self.address.is_empty() {
+        if self.model.address().is_empty() {
             "TYPE IP:PORT".to_string()
         } else {
-            self.address.text().to_string()
+            self.model.address().to_string()
         }
     }
 
     /// Whether the menu is stale, clearing it — the rows or the lines moved,
     /// or a pick failed and there is a warning to show.
     pub fn take_changed(&mut self) -> bool {
-        core::mem::take(&mut self.changed)
+        self.model.take_changed()
     }
 
     /// Whether text arrived since the last ask, clearing it: the menu moves
     /// its selection onto the connect row, which is where it is going.
     pub fn take_typed(&mut self) -> bool {
-        core::mem::take(&mut self.typed)
+        self.model.take_typed()
     }
 
     /// The panel: the rows, and under the title the lines and the warning.
@@ -327,7 +221,7 @@ impl Lobby {
             MenuItem::new(SOLO_ID, "SOLO", ""),
             MenuItem::new(HOST_ID, "HOST", "LAN"),
         ];
-        for (id, host) in (FIRST_LISTED_ID..).zip(&self.joinable) {
+        for (id, host) in (FIRST_LISTED_ID..).zip(self.model.joinable()) {
             items.push(MenuItem::new(
                 id,
                 format!("JOIN {}", host.name),
@@ -336,14 +230,14 @@ impl Lobby {
         }
         items.push(MenuItem::new(CONNECT_ID, "CONNECT", self.connect_hint()));
         let mut menu = Menu::new(TITLE, items);
-        match &self.browser {
-            Err(why) => menu.subtitle.push(Caption::warning(why.clone())),
-            Ok(_) if self.joinable.is_empty() && self.passed_over.is_empty() => {
+        match self.model.browser_error() {
+            Some(why) => menu.subtitle.push(Caption::warning(why.to_string())),
+            None if self.model.joinable().is_empty() && self.model.passed_over().is_empty() => {
                 menu.subtitle.push("LOOKING FOR HOSTS ON THE LAN".into());
             }
-            Ok(_) => {}
+            None => {}
         }
-        for (host, why) in &self.passed_over {
+        for (host, why) in self.model.passed_over() {
             menu.subtitle.push(
                 format!(
                     "{} {} {}/{} {}",
@@ -356,11 +250,11 @@ impl Lobby {
                 .into(),
             );
         }
-        if let Some(host) = &self.joining {
+        if let Some(host) = self.model.joining() {
             menu.subtitle.push(format!("JOINING {host}").into());
         }
-        if let Some(notice) = &self.notice {
-            menu.subtitle.push(Caption::warning(notice.clone()));
+        if let Some(notice) = self.model.notice() {
+            menu.subtitle.push(Caption::warning(notice_line(notice)));
         }
         menu
     }
@@ -368,54 +262,47 @@ impl Lobby {
     /// The join a pick started ended without a game: the lobby says why, and
     /// is what the player picks from again.
     pub(crate) fn join_failed(&mut self, why: &str) {
-        self.joining = None;
-        self.notice = Some(format!("JOIN FAILED: {why}"));
-        self.changed = true;
+        self.model.join_failed(why);
     }
 
     /// The session a join from here started has ended, and the player is
     /// back: the lobby says how, and is what the player picks from again.
     pub(crate) fn session_ended(&mut self, how: &str) {
-        self.joining = None;
-        self.notice = Some(format!("SESSION ENDED: {how}"));
-        self.changed = true;
+        self.model.session_ended(how);
     }
 
     /// Starts what `pick` asks for — a host on `map`, the local one — or
     /// records why it could not. A join does not use `map`: it plays on the
     /// host's.
     pub(crate) fn pick(&mut self, pick: Pick, map: &Map) -> Option<Picked> {
-        let started = match pick {
+        let pick = match pick {
             Pick::Solo => {
-                self.joining = None;
+                self.model.clear_joining();
                 return Some(Picked::Solo);
             }
-            Pick::Host => Game::host(self.tick_hz, map, self.host_bind)
+            Pick::Host => LobbyPick::Host,
+            Pick::Listed(row) => LobbyPick::Listed(row),
+            Pick::Connect => LobbyPick::Connect,
+        };
+        // Whatever this pick starts — or fails to — replaces the join that
+        // was under way, which the caller drops; a refusal is the notice.
+        let started = match self.model.pick(pick).ok()? {
+            LobbyChoice::Host => Game::host(self.tick_hz, map, self.host_bind)
                 .map(Picked::Session)
                 .map_err(|error| format!("CANNOT HOST: {error}")),
-            Pick::Listed(row) => match self.joinable.get(row) {
-                Some(host) => self.join(host.addr),
-                None => Err("THAT HOST IS GONE".to_string()),
-            },
-            Pick::Connect => match self.address.text().trim().parse::<SocketAddr>() {
-                Ok(addr) => self.join(addr),
-                Err(_) => Err(format!("NOT AN IP:PORT: {:?}", self.address.text())),
-            },
+            LobbyChoice::Join(addr) => self.join(addr),
         };
-        // Whatever this pick started — or failed to — replaces the join that
-        // was under way, which the caller drops.
-        self.joining = None;
-        self.changed = true;
         match started {
             Ok(picked) => {
-                if let Picked::Joining(joining) = &picked {
-                    self.joining = joining.lan().host().map(|host| host.to_string());
-                    self.notice = None;
+                if let Picked::Joining(joining) = &picked
+                    && let Some(host) = joining.lan().host()
+                {
+                    self.model.join_started(host);
                 }
                 Some(picked)
             }
             Err(why) => {
-                self.notice = Some(why);
+                self.model.start_failed(why);
                 None
             }
         }
@@ -423,9 +310,22 @@ impl Lobby {
 
     /// A join to the host at `addr`, which waits for the host's map.
     fn join(&self, addr: SocketAddr) -> Result<Picked, String> {
-        LanClient::join(self.session, addr, self.tick_hz)
+        LanClient::join(self.model.session(), addr, self.tick_hz)
             .map(|client| Picked::Joining(Joining::new(client, self.tick_hz, self.join_timeout)))
             .map_err(|error| format!("CANNOT JOIN {addr}: {error}"))
+    }
+}
+
+/// The warning line `notice` is, in towers' words.
+fn notice_line(notice: &LobbyNotice) -> String {
+    match notice {
+        LobbyNotice::Refused(PickRefused::HostGone) => "THAT HOST IS GONE".to_string(),
+        LobbyNotice::Refused(PickRefused::NotAnAddress(typed)) => {
+            format!("NOT AN IP:PORT: {typed:?}")
+        }
+        LobbyNotice::CannotStart(why) => why.clone(),
+        LobbyNotice::JoinFailed(why) => format!("JOIN FAILED: {why}"),
+        LobbyNotice::SessionEnded(how) => format!("SESSION ENDED: {how}"),
     }
 }
 

@@ -84,12 +84,12 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crcbl::client::{Client, Ended};
+use crcbl::client::Client;
 use crcbl::core::FrameClock;
 use crcbl::ecs::World;
-use crcbl::lan::{LanBind, LanClient, LanGame, LanHost};
-use crcbl::net::udp::{CONNECT_TIMEOUT, UdpTransport};
-use crcbl::net::{InMemoryTransport, SessionEndReason};
+use crcbl::lan::{LanBind, LanClient, LanGame, LanHost, how_it_ended};
+use crcbl::net::InMemoryTransport;
+use crcbl::net::udp::CONNECT_TIMEOUT;
 use crcbl::server::{Host, PeerEvent, PeerId};
 
 use crate::game::{COMPATIBILITY, Field, Game, GameError, Refusal, TowersModule};
@@ -393,22 +393,6 @@ impl RemoteLink {
         self.lan.client().map_or_else(Decoded::default, |client| {
             replica::decode(client.replicated(replica::SYSTEM))
         })
-    }
-}
-
-/// How a session `client` was in ended, in words: what the host said, or
-/// what the link reported. What a failed join and an ended game both show.
-fn how_it_ended(ended: Ended, client: &Client<UdpTransport>) -> String {
-    match ended {
-        Ended::ByServer(SessionEndReason::HOST_LEFT) => "the host left".to_string(),
-        Ended::ByServer(SessionEndReason::SHUTTING_DOWN) => "the server shut down".to_string(),
-        Ended::ByServer(SessionEndReason::KICKED) => "the host removed this player".to_string(),
-        // A code this build does not know still ends the session.
-        Ended::ByServer(reason) => format!("the host ended the session: {reason:?}"),
-        Ended::Lost => match client.transport().end_reason() {
-            Some(reason) => format!("the link ended: {reason:?}"),
-            None => "the link ended".to_string(),
-        },
     }
 }
 

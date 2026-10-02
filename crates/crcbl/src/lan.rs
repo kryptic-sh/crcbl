@@ -19,9 +19,12 @@
 //! - **[`LanClient`]** connects a [`UdpTransport`] to an address and runs a
 //!   [`Client`] over it — direct connect, first-class — or polls a
 //!   [`Browser`], prints every host it heard, and joins the first one this
-//!   build can play with. A sample that lets the player choose runs its own
-//!   [`Browser`] and joins the chosen address — `apps/towers/src/lobby.rs`
-//!   does.
+//!   build can play with. A sample that lets the player choose runs a
+//!   [`lobby::Lobby`] instead and joins the address it picks.
+//! - **[`lobby`]** is that choosing, without its look: the hosts a
+//!   [`Browser`] heard sorted into joinable and not (with why), the address
+//!   typed for a direct connect, what a pick asks for, and the reason a join
+//!   failed or a session ended — the game draws its own menu from it.
 //! - **[`LanMode`]** is what `--host [PORT]`, `--join <IP:PORT>` and
 //!   `--browse` ask for, parsed by [`LanMode::consume`] so every sample reads
 //!   the three flags alike.
@@ -57,10 +60,10 @@ use std::time::Duration;
 use crate::args::Consumed;
 use crate::client::{Client, Ended};
 use crate::ecs::World;
-use crate::net::ProtocolCompatibility;
 use crate::net::reliable::MAX_UNRELIABLE_PAYLOAD;
 use crate::net::udp::discovery::{Announcement, Announcer, Browser, DISCOVERY_PORT};
 use crate::net::udp::{ConnectError, UdpListener, UdpTransport};
+use crate::net::{ProtocolCompatibility, SessionEndReason};
 use crate::server::{Host, HostConfig, PeerEvent};
 use crate::ui::{DebugModule, DebugSection};
 
@@ -661,6 +664,24 @@ impl DebugModule for LanClient {
         );
     }
 }
+
+/// How a session `client` was in ended, in words: what the host said, or
+/// what the link reported. What a failed join and an ended game both show.
+pub fn how_it_ended(ended: Ended, client: &Client<UdpTransport>) -> String {
+    match ended {
+        Ended::ByServer(SessionEndReason::HOST_LEFT) => "the host left".to_string(),
+        Ended::ByServer(SessionEndReason::SHUTTING_DOWN) => "the server shut down".to_string(),
+        Ended::ByServer(SessionEndReason::KICKED) => "the host removed this player".to_string(),
+        // A code this build does not know still ends the session.
+        Ended::ByServer(reason) => format!("the host ended the session: {reason:?}"),
+        Ended::Lost => match client.transport().end_reason() {
+            Some(reason) => format!("the link ended: {reason:?}"),
+            None => "the link ended".to_string(),
+        },
+    }
+}
+
+pub mod lobby;
 
 #[cfg(test)]
 mod tests;
