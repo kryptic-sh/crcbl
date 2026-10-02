@@ -239,6 +239,59 @@ its frames here), and then a long tail of 60–90 s per-path equivalence tests
 was near the per-test limit except `shadow_block_reads`. The job's length is the
 tail's sum, not one outlier.
 
+**Re-ranked 2026-10-02** from `4eae6db4`'s Metal job (run 36941988616, green,
+23:40 to 00:22): mesh 120 tests in 998.8 s, render 103 in 898.2 s, forward 53 in
+465.3 s, with 2,972 s, 2,694 s and 1,377 s of test time. The slowest were
+`bucket_price::two_material_modes_price_as_one` (145 s),
+`shadow_tiles::a_demoted_rig_…` (92 s),
+`grass_shells::the_levers_restyle_cards_and_shells_alike` (91 s),
+`occlusion_culling_draws_the_same_frames_along_the_path` (88 s),
+`shadow_block_reads` (86 s), the still pool's per-path test (77 s),
+`rect_bound::how_much_…` (77 s), `grass::the_price_of_the_blade_passes` (72 s),
+`area_light::the_price_…` (71 s) and `shadow_tiles::a_budgeted_frame_…` (70 s).
+The median test took about 22 s in both mesh and render, so on this runner most
+of a test's cost is opening devices and building pipelines, not drawing frames.
+
+**Cut 2026-10-02: price helpers draw a short run on a device that cannot time a
+pass.** The Apple Paravirtual device reports no `TIMESTAMP_QUERY`, so every
+mesh-suite price test drew `PRICE_WARMUP` plus 48 frames per configuration and
+measured nothing. `area_light::price_run` now gives such a device `GATE_WARMUP`
+plus `GATE_FRAMES` (bucket_price's suite-run counts, moved beside it). The cut
+covers `forward_pass_prices` (the area-light and rect-bound prices),
+`grass_prices` (three tests), `depth_only`, `debug_draw`, `water`,
+`shadow_tiles`' two prices and `shadow_cache`'s moving-camera price.
+`shadow_tiles` still asserts its tile sides and its budget over the short run's
+frames. That was shown red under the short run by raising the cadence to three
+tiles against the asserted two. Timed devices, meaning every other CI job and
+every local GPU, draw what they drew before. `CRCBL_PRICE_UNTIMED=1` makes any
+device take the short run. The touched tests took 577.7 s of test time on the
+run above. Locally (RX 7900 XTX) the fifteen price tests' run went from 8.9 s to
+5.1 s on Vulkan and from 10.3 s to 3.7 s on D3D12 with the variable set. **CI
+must confirm** the Metal job's new mesh step and total. They were not measured:
+there is no Metal on the machine that made the change.
+
+**Not cut, and why:**
+
+- `occlusion_price`: with no timer it asserts draw counts over the occluders'
+  path, and a short run would read only the path's first frames.
+- `bucket_price`: already at its gate scene. What it costs here is building its
+  renderers, not drawing its frames.
+- The render suite's per-path tests
+  (`…_draws_the_same_frame_on_every_geometry_path`) and the grass tests: each is
+  a set of device opens at the goldens' extent, and the scene is the golden's,
+  so a smaller scene would need re-blessing. A possible cut: the per-path helper
+  builds a whole scene only to read the device's features, and a device-only
+  probe would save one open per test. That needs a `crcbl::screenshot` API.
+- `occlusion_cull`: its path is built to disocclude at particular frames, so
+  fewer frames changes the claim. `rect_bound::how_much_…` builds a renderer per
+  aspect ratio, and fewer ratios would assert fewer rows.
+- **The grass Metal hang: not fixed.** The field is already two tiles by two.
+  The strand and fin claims at `CLAIM_EXTENT` are calibrated on that field (174
+  roots of tile 3, `FINS_COVER`), so a smaller field means re-measuring their
+  constants on lavapipe, radv and Metal. The hang did not recur in the run
+  above. Only the mesh suite's grass price tests now draw fewer grass frames on
+  Metal. Splitting the frame's submission is still the other option.
+
 **Grass frames stall software and paravirtual devices (2026-09-30), three
 times.**
 `grass_shells::shells_draw_strands_at_the_roots_a_card_field_leaves_open` failed

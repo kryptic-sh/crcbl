@@ -49,7 +49,7 @@
 //! [`GeometryPath::IndirectPerBatch`](crcbl::hal::GeometryPath), so the price
 //! remains about `depthVertexMain` even on a device that supports mesh stages.
 
-use crate::area_light::{PRICE_WARMUP, price_frame};
+use crate::area_light::{price_frame, price_run, timed};
 use crate::harness::Headless;
 use crate::mesh_scene::place;
 use crate::shadow_cache::turning_sun;
@@ -169,8 +169,9 @@ fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; PRICE
     let device = headless.device.as_ref();
     // Asked for rather than required, on `area_light.rs`'s terms: a backend
     // that cannot time a pass cannot price one, and the frames are drawn
-    // either way.
-    let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
+    // either way — a short run of them there, by `price_run`.
+    let timed = timed(device);
+    let (warmup, frames) = price_run(timed, frames);
     let camera = field_camera();
     let mut priced = PRICED_FIELDS.map(|side| {
         let (renderer, pool) = dunes_field(&headless, side);
@@ -208,7 +209,7 @@ fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; PRICE
          of the frames this priced"
     );
 
-    for index in 0..PRICE_WARMUP + frames {
+    for index in 0..warmup + frames {
         for (renderer, pool, timers, stats, recorded) in &mut priced {
             let acquired = device
                 .acquire_next_frame(headless.swapchain)
@@ -254,7 +255,7 @@ fn depth_pass_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; PRICE
                     },
                 )
                 .expect("present");
-            if let (true, Some(timers)) = (index >= PRICE_WARMUP, timers.as_ref()) {
+            if let (true, Some(timers)) = (index >= warmup, timers.as_ref()) {
                 stats.record(timers.latest());
             }
             recorded.push(commands);

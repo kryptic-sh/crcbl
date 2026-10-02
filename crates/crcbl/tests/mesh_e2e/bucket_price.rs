@@ -41,7 +41,7 @@
 
 use std::time::Instant;
 
-use crate::area_light::{PRICE_WARMUP, price_frame};
+use crate::area_light::{GATE_FRAMES, GATE_WARMUP, PRICE_WARMUP, price_frame, timed};
 use crate::harness::Headless;
 use crate::shadow_cache::turning_sun;
 use crcbl::hal::{
@@ -74,21 +74,6 @@ const INSTANCES: u32 = 17_219;
 /// shows both. The milliseconds only mean something on a price run, which asks
 /// for the measured scene with `CRCBL_PRICE_FRAMES`.
 const GATE_MANY: u32 = 64;
-
-/// The frames a suite run records per row, after [`gate_warmup`]'s.
-///
-/// A suite run asserts call counts, which every frame after the warm-up
-/// records identically, so it needs a few frames rather than the percentile
-/// floor [`price_frame`] enforces. On the macOS runner, under Metal's API and
-/// shader validation, two rows of that many frames alone outlasted nextest's
-/// per-test limit.
-const GATE_FRAMES: usize = 4;
-
-/// The frames a suite run draws and discards first: enough for every frame in
-/// flight to have been through the ring once, and the draw counts to settle.
-const fn gate_warmup() -> usize {
-    crcbl::render::forward::FRAMES_IN_FLIGHT + 2
-}
 
 /// Whether this run is a price run, asked for with `CRCBL_PRICE_FRAMES`.
 fn priced() -> bool {
@@ -290,12 +275,8 @@ fn price(
     };
     let headless = Headless::open_at(extent, asked);
     let device = headless.device.as_ref();
-    let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
-    let warmup = if priced() {
-        PRICE_WARMUP
-    } else {
-        gate_warmup()
-    };
+    let timed = timed(device);
+    let warmup = if priced() { PRICE_WARMUP } else { GATE_WARMUP };
     let mut rows = [many(), FEW].map(|buckets| row(&headless, buckets, modes, path, timed));
     let camera = camera();
 

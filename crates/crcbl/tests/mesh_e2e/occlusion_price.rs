@@ -162,7 +162,7 @@ fn price(scene: Priced, extent: (u32, u32), frames: usize) -> (f64, f64, u64) {
             .union(Features::DEBUG_MARKERS),
     );
     let device = headless.device.as_ref();
-    let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
+    let timed = crate::area_light::timed(device);
     let mut rows = [OCCLUDERS_CULLING, OcclusionCulling::OFF]
         .map(|culling| configuration(&headless, scene, culling, timed));
     let meadow_camera = crcbl::screenshot::meadow_camera();

@@ -718,8 +718,10 @@ fn debug_draw_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; PRICE
     );
     let device = headless.device.as_ref();
     // Asked for rather than required, on `depth_only.rs`'s terms: a backend that
-    // cannot time a pass cannot price one, and the frames are drawn either way.
-    let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
+    // cannot time a pass cannot price one, and the frames are drawn either way
+    // — a short run of them there, by `price_run`.
+    let timed = crate::area_light::timed(device);
+    let (warmup, frames) = crate::area_light::price_run(timed, frames);
     let camera = oblique_camera();
     let sun = crcbl::render::DirectionalLight::default();
     let mut priced = PRICED_BUFFERS.map(|_| {
@@ -742,7 +744,7 @@ fn debug_draw_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; PRICE
         )
     });
 
-    for index in 0..crate::area_light::PRICE_WARMUP + frames {
+    for index in 0..warmup + frames {
         for (boxes, (renderer, pool, timers, stats, recorded)) in
             PRICED_BUFFERS.iter().zip(&mut priced)
         {
@@ -799,9 +801,7 @@ fn debug_draw_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; PRICE
                     },
                 )
                 .expect("present");
-            if let (true, Some(timers)) =
-                (index >= crate::area_light::PRICE_WARMUP, timers.as_ref())
-            {
+            if let (true, Some(timers)) = (index >= warmup, timers.as_ref()) {
                 stats.record(timers.latest());
             }
             recorded.push(commands);

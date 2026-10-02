@@ -51,7 +51,8 @@ fn grass_prices(
         Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
     );
     let device = headless.device.as_ref();
-    let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
+    let timed = crate::area_light::timed(device);
+    let (warmup, frames) = crate::area_light::price_run(timed, frames);
     let mut priced: Vec<_> = fields
         .iter()
         .map(|field| {
@@ -81,7 +82,7 @@ fn grass_prices(
         })
         .collect();
 
-    for index in 0..crate::area_light::PRICE_WARMUP + frames {
+    for index in 0..warmup + frames {
         for (scene, pool, timers, stats, recorded) in &mut priced {
             let acquired = device
                 .acquire_next_frame(headless.swapchain)
@@ -130,9 +131,7 @@ fn grass_prices(
                     },
                 )
                 .expect("present");
-            if let (true, Some(timers)) =
-                (index >= crate::area_light::PRICE_WARMUP, timers.as_ref())
-            {
+            if let (true, Some(timers)) = (index >= warmup, timers.as_ref()) {
                 stats.record(timers.latest());
             }
             recorded.push(commands);

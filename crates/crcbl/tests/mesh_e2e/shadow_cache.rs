@@ -528,6 +528,9 @@ struct MovingCameraPrice {
     light_groups: u64,
     /// Tiles redrawn, summed over the recorded frames.
     faces: u64,
+    /// The recorded frames the sums are over: the frames asked for where the
+    /// device times a pass, and `price_run`'s short run where it does not.
+    frames: usize,
 }
 
 /// The shadow pass under a camera that turns about a still field lit by three
@@ -539,7 +542,6 @@ struct MovingCameraPrice {
 /// the camera, so a cache keyed on what they are drawn from holds them while
 /// the cascades, which are fitted to the eye, redraw.
 fn moving_camera_price(extent: (u32, u32), frames: usize, stirred: bool) -> MovingCameraPrice {
-    use crate::area_light::PRICE_WARMUP;
     use crcbl::hal::{CommandEncoderDesc, PresentInfo, ResourceState, SubmitInfo};
 
     let headless = Headless::open_at(
@@ -547,7 +549,8 @@ fn moving_camera_price(extent: (u32, u32), frames: usize, stirred: bool) -> Movi
         Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
     );
     let device = headless.device.as_ref();
-    let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
+    let timed = crate::area_light::timed(device);
+    let (warmup, frames) = crate::area_light::price_run(timed, frames);
     let mut renderer =
         ForwardRenderer::new(device, headless.queue, headless.format).expect("the renderer builds");
     // Every map that is out of date redrawn on the frame it went out of date,
@@ -610,8 +613,9 @@ fn moving_camera_price(extent: (u32, u32), frames: usize, stirred: bool) -> Movi
         groups: 0,
         light_groups: 0,
         faces: 0,
+        frames,
     };
-    for index in 0..PRICE_WARMUP + frames {
+    for index in 0..warmup + frames {
         #[expect(
             clippy::cast_precision_loss,
             reason = "a few hundred frames, and the angle is what is wanted"
@@ -639,7 +643,7 @@ fn moving_camera_price(extent: (u32, u32), frames: usize, stirred: bool) -> Movi
         renderer
             .begin_frame(device, &camera, &sun, extent)
             .expect("the uniform buffer is writable");
-        if index >= PRICE_WARMUP {
+        if index >= warmup {
             let cascades = (0..crcbl::render::shadow::CASCADES)
                 .filter(|cascade| renderer.shadow_cascade_redrawn(*cascade))
                 .count();
@@ -699,7 +703,7 @@ fn moving_camera_price(extent: (u32, u32), frames: usize, stirred: bool) -> Movi
             else {
                 continue;
             };
-            if drawn >= PRICE_WARMUP {
+            if drawn >= warmup {
                 stats.record(timings);
             }
         }
@@ -775,6 +779,7 @@ fn a_moving_camera_prices_the_shadow_pass() {
     let (extent, frames) = crate::area_light::price_frame();
     for stirred in [false, true] {
         let price = moving_camera_price(extent, frames, stirred);
+        let frames = price.frames;
         #[expect(
             clippy::cast_precision_loss,
             reason = "counts over a few hundred frames, printed as averages"

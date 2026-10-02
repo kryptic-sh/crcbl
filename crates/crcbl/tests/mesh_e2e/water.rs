@@ -38,7 +38,8 @@ fn water_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; 2]> {
         Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
     );
     let device = headless.device.as_ref();
-    let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
+    let timed = crate::area_light::timed(device);
+    let (warmup, frames) = crate::area_light::price_run(timed, frames);
     let bodies = [vec![crcbl::screenshot::still_pool_body()], Vec::new()];
     let mut priced = bodies.map(|bodies| {
         let scene =
@@ -61,7 +62,7 @@ fn water_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; 2]> {
         )
     });
 
-    for index in 0..crate::area_light::PRICE_WARMUP + frames {
+    for index in 0..warmup + frames {
         for (scene, pool, timers, stats, recorded) in &mut priced {
             let acquired = device
                 .acquire_next_frame(headless.swapchain)
@@ -110,9 +111,7 @@ fn water_prices(extent: (u32, u32), frames: usize) -> Option<[Priced; 2]> {
                     },
                 )
                 .expect("present");
-            if let (true, Some(timers)) =
-                (index >= crate::area_light::PRICE_WARMUP, timers.as_ref())
-            {
+            if let (true, Some(timers)) = (index >= warmup, timers.as_ref()) {
                 stats.record(timers.latest());
             }
             recorded.push(commands);

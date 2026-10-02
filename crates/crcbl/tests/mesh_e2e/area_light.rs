@@ -440,6 +440,57 @@ pub(crate) fn price_frame() -> ((u32, u32), usize) {
 /// latency and the first draws with every pipeline the frame uses.
 pub(crate) const PRICE_WARMUP: usize = crcbl::render::forward::FRAMES_IN_FLIGHT + 2 + 16;
 
+/// The frames a short run draws and throws away first: enough for every frame
+/// in flight to have been through the ring once, and the draw counts to settle.
+pub(crate) const GATE_WARMUP: usize = crcbl::render::forward::FRAMES_IN_FLIGHT + 2;
+
+/// The frames a short run records, after [`GATE_WARMUP`]'s.
+///
+/// A short run asserts what the renderer reports — call counts, tiles redrawn,
+/// instances submitted — which every frame after the warm-up reports alike, so
+/// it needs a few frames rather than the percentile floor [`price_frame`]
+/// enforces. On the macOS runner, under Metal's API and shader validation, two
+/// of `bucket_price.rs`'s rows of that many frames alone outlasted nextest's
+/// per-test limit.
+pub(crate) const GATE_FRAMES: usize = 4;
+
+/// Set to any value, every price helper treats its device as one that cannot
+/// time a pass.
+///
+/// CI's Apple Paravirtual device reports no `TIMESTAMP_QUERY`, so the short run
+/// [`price_run`] draws there runs on none of the devices that do. This
+/// reproduces that runner's shape on any device:
+///
+/// ```text
+/// CRCBL_PRICE_UNTIMED=1 CRCBL_GPU=vk crates/crcbl/tests/run-mesh-e2e.sh price
+/// ```
+const UNTIMED_ENV_VAR: &str = "CRCBL_PRICE_UNTIMED";
+
+/// Whether a price helper on `device` times its passes: the device reports
+/// [`Features::TIMESTAMP_QUERY`] and [`UNTIMED_ENV_VAR`] is not set.
+pub(crate) fn timed(device: &dyn crcbl::hal::Device) -> bool {
+    device.caps().features.contains(Features::TIMESTAMP_QUERY)
+        && std::env::var_os(UNTIMED_ENV_VAR).is_none()
+}
+
+/// How many frames a price helper draws and throws away, and how many it then
+/// records, given whether it is [`timed`] and the `frames` [`price_frame`]
+/// asked for.
+///
+/// **A helper that cannot time a pass draws a short run.** Its price goes
+/// unmeasured whatever it draws, so the [`PRICE_WARMUP`] and the percentile
+/// window are there for nothing; what it can still assert — that the frames go
+/// through every pass, and what the renderer reports about them — holds from
+/// the first frame after [`GATE_WARMUP`]. `bucket_price.rs`'s suite run is the
+/// same cut, for the same runner.
+pub(crate) fn price_run(timed: bool, frames: usize) -> (usize, usize) {
+    if timed {
+        (PRICE_WARMUP, frames)
+    } else {
+        (GATE_WARMUP, GATE_FRAMES)
+    }
+}
+
 /// How many lights of each kind the price is measured with.
 ///
 /// `crcbl_shaders::light::CLUSTER_LIGHT_CAPACITY` is the number and the
@@ -488,9 +539,10 @@ pub(crate) fn forward_pass_prices(
     // cannot price one. CI's Apple Paravirtual device is the case: it reports
     // no `TIMESTAMP_QUERY`, so this answers `None` and the caller says the
     // price went unmeasured rather than asserting an ordering between three
-    // zeroes. The frames are still drawn either way, which is the half of this
-    // helper every backend can run.
-    let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
+    // zeroes. The frames are still drawn either way — a short run of them, by
+    // `price_run` — which is the half of this helper every backend can run.
+    let timed = timed(device);
+    let (warmup, frames) = price_run(timed, frames);
     let camera = mesh_camera(Projection::default());
     let sun = dim_sun();
     let mut priced: Vec<_> = sets
@@ -515,7 +567,7 @@ pub(crate) fn forward_pass_prices(
         })
         .collect();
 
-    for index in 0..PRICE_WARMUP + frames {
+    for index in 0..warmup + frames {
         for (renderer, pool, timers, stats, recorded) in &mut priced {
             let acquired = device
                 .acquire_next_frame(headless.swapchain)
@@ -561,7 +613,7 @@ pub(crate) fn forward_pass_prices(
                     },
                 )
                 .expect("present");
-            if let (true, Some(timers)) = (index >= PRICE_WARMUP, timers.as_ref()) {
+            if let (true, Some(timers)) = (index >= warmup, timers.as_ref()) {
                 stats.record(timers.latest());
             }
             recorded.push(commands);

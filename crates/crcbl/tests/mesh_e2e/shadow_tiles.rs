@@ -35,7 +35,7 @@
 //! stipple in. So this file opens its own ring at [`EXTENT`] — the extent
 //! `apps/lantern`'s review frames already run at on both measurable tiers.
 
-use crate::area_light::{PRICE_WARMUP, price_frame};
+use crate::area_light::{price_frame, price_run, timed};
 use crate::harness::Headless;
 use crate::mesh_scene::{place, render_mesh_lit};
 use crcbl::hal::Features;
@@ -607,7 +607,10 @@ fn price_lights() -> Vec<Light> {
 ///
 /// The two prices are [`None`] where the device reports no way to time a pass,
 /// on `depth_only.rs`'s terms exactly: a backend that cannot time a pass cannot
-/// price one, and the frames are drawn either way.
+/// price one, and the frames are drawn either way. There they are
+/// [`price_run`]'s short run, and the tile sides and the fewest tiles redrawn
+/// are read over its recorded frames, which report them as every later frame
+/// would.
 fn shadow_pass_prices(
     extent: (u32, u32),
     frames: usize,
@@ -622,7 +625,8 @@ fn shadow_pass_prices(
         Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
     );
     let device = headless.device.as_ref();
-    let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
+    let timed = timed(device);
+    let (warmup, frames) = price_run(timed, frames);
     let mut renderer =
         ForwardRenderer::new(device, headless.queue, headless.format).expect("the renderer builds");
     let mut pool = TransientPool::new();
@@ -671,7 +675,7 @@ fn shadow_pass_prices(
 
     // Twice through, because each camera takes every other frame — and the
     // warm-up is doubled with them so both windows start in the steady state.
-    for index in 0..2 * (PRICE_WARMUP + frames) {
+    for index in 0..2 * (warmup + frames) {
         let eye = index % 2;
         let acquired = device
             .acquire_next_frame(headless.swapchain)
@@ -704,7 +708,7 @@ fn shadow_pass_prices(
         renderer
             .begin_frame(device, &cameras[eye], &sun, extent)
             .expect("the uniform buffer is writable");
-        if index >= 2 * PRICE_WARMUP {
+        if index >= 2 * warmup {
             faces[eye] = faces[eye].min(renderer.shadow_faces_redrawn());
         }
         sides[eye] = renderer
@@ -767,7 +771,7 @@ fn shadow_pass_prices(
             else {
                 continue;
             };
-            if drawn >= 2 * PRICE_WARMUP {
+            if drawn >= 2 * warmup {
                 stats[drawn % 2].record(timings);
             }
         }
