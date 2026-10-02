@@ -18,9 +18,12 @@
 //!   advancement over the same distance ([`time_of_contact`]) — the method
 //!   the query world's lying capsule is swept by — which stops a little short
 //!   of the contact, within the advancement's tolerance, rather than on it.
+//!
+//! [`time_of_contact`]: crate::contact::sweep::time_of_contact
 
 use glam::DVec3;
 
+use super::capsules::advance_upright_capsule;
 use super::{
     Penetration, ShapeHit, capsule_penetration_vs_aabb, ray_vs_aabb, sphere_overlaps_aabb,
     swept_capsule_vs_aabb, swept_sphere_vs_aabb,
@@ -29,7 +32,6 @@ use crate::broadphase::{Ray, Segment};
 use crate::collider::{BoxCollider, Capsule, Sphere};
 use crate::contact::manifold::{closest_on_segment_to_box, gap};
 use crate::contact::shape::ContactShape;
-use crate::contact::sweep::time_of_contact;
 
 /// Test whether a sphere overlaps a box collider, turned or not (touching
 /// counts as overlapping).
@@ -110,25 +112,14 @@ pub fn swept_capsule_vs_box(
     if !target.is_turned() {
         return swept_capsule_vs_aabb(segment, swept_radius, swept_half_height, &target.aabb());
     }
-    let obstacle = contact_box(target);
-    let motion = segment.end - segment.start;
+    let (t, normal, started_inside) = advance_upright_capsule(
+        &contact_box(target),
+        segment,
+        swept_radius,
+        swept_half_height,
+    )?;
     let up = DVec3::Y * swept_half_height;
-    let at = |t: f64| {
-        let centre = segment.start + motion * t;
-        ContactShape::Capsule {
-            a: centre - up,
-            b: centre + up,
-            radius: swept_radius,
-        }
-    };
-    let start = gap(&obstacle, &at(0.0));
-    let (t, normal, started_inside) = if start.0 <= 0.0 {
-        (0.0, start.1, true)
-    } else {
-        let t = time_of_contact(&obstacle, at, motion, start)?;
-        (t, gap(&obstacle, &at(t)).1, false)
-    };
-    let centre = segment.start + motion * t;
+    let centre = segment.start + (segment.end - segment.start) * t;
     Some(ShapeHit {
         t,
         point: nearest_on_box(target, centre - up, centre + up),

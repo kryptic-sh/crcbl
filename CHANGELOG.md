@@ -4546,12 +4546,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
-- **A turned body's sphere and capsule offsets turn with it in
-  `crcbl_phys::PhysicsSystem`'s query world**, as its box's offset already did
+- **A turned body's sphere and capsule offsets, and its capsule itself, turn
+  with it in `crcbl_phys::PhysicsSystem`'s query world**, as its box already did
   and as the contact pipeline places all three: a sphere offset up a body turned
-  on its side is queried beside the body, not above it. A body whose rotation is
-  the identity, or a collider with no offset, is placed exactly as before, to
-  the bit.
+  on its side is queried beside the body, not above it, and a tipped capsule
+  body lies along its turned core, where it stood up the world's `Y` before. A
+  ray, a sphere sweep and a sphere overlap meet the turned capsule exactly; an
+  upright capsule is pushed out of it exactly and swept against it by
+  conservative advancement, stopping a little short of the contact, as against a
+  turned box. A body whose rotation is the identity, or a collider with no
+  offset, is placed exactly as before, and a capsule turned about `Y` alone — a
+  character's facing — answers as it did, to the bit.
 
 - **`crcbl_client::Client` interpolates between the snapshots either side of its
   playback position, not the newest two.** Playback trails the newest snapshot
@@ -4579,8 +4584,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   offset and faces are turned by the body's rotation, so a ray, sweep or overlap
   through `PhysicsSystem::world` meets a turned body's box where it is drawn,
   where it met the unturned box at the unturned offset before. Bodies that never
-  turn are unaffected. Capsules and spheres there are unchanged: a capsule stays
-  upright along the world's `Y`, and both keep their offset unturned.
+  turn are unaffected.
 
 - **The same `SceneEntityId` in two chunk files is one entity in two systems**,
   where it used to be refused as `ScnError::DuplicateId`. The same id twice in

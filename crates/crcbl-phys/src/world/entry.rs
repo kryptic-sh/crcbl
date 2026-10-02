@@ -10,17 +10,19 @@
 
 use glam::DVec3;
 
-use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
+use crate::collider::{Aabb, BoxCollider, Sphere};
 use crate::components::Transform;
 use crate::compound_shape::CompoundShape;
 use crate::mesh::PlacedMesh;
+use crate::query::TurnedCapsule;
 
 /// A collider instance stored in the [`PhysicsWorld`](super::PhysicsWorld).
 #[derive(Debug, Clone)]
 pub(super) enum ColliderEntry {
     Sphere(Sphere),
     Box(BoxCollider),
-    Capsule(Capsule),
+    /// A capsule, standing or turned with its body.
+    Capsule(TurnedCapsule),
     /// A triangle mesh at a transform: one entry, descending its own tree.
     Mesh(PlacedMesh),
     /// A compound's parts, placed: one entry, each part tested on its own.
@@ -33,7 +35,7 @@ pub(super) enum ColliderEntry {
 pub(super) enum Primitive<'a> {
     Sphere(&'a Sphere),
     Box(&'a BoxCollider),
-    Capsule(&'a Capsule),
+    Capsule(&'a TurnedCapsule),
     Mesh(&'a PlacedMesh),
 }
 

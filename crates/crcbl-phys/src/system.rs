@@ -855,9 +855,10 @@ impl PhysicsSystem {
                 is_trigger,
             } => {
                 let centre = placed_centre(*offset, transform);
-                let collider = self
-                    .world
-                    .add_capsule(Capsule::new(centre, *radius, *half_height));
+                let collider = self.world.add_turned_capsule(
+                    Capsule::new(centre, *radius, *half_height),
+                    transform.rotation,
+                );
                 self.world.set_trigger(collider, *is_trigger);
                 collider
             }
@@ -1628,9 +1629,10 @@ fn place_collider(
             half_height,
             ..
         } => {
-            world.set_capsule(
+            world.set_turned_capsule(
                 collider,
                 Capsule::new(placed_centre(*offset, transform), *radius, *half_height),
+                transform.rotation,
             );
         }
         ColliderComponent::Compound { offset, shape, .. } => {

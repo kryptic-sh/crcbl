@@ -531,10 +531,9 @@ pub enum ColliderComponent {
         /// Whether this collider is a trigger.
         is_trigger: bool,
     },
-    /// A capsule collider along the body's `Y`: the contact pipeline turns it
-    /// with the body, while the query world turns its offset with the body
-    /// but keeps the capsule itself upright along the world's `Y`, whatever
-    /// the rotation.
+    /// A capsule collider along the body's `Y`, turned with its body: the
+    /// offset and the core are turned by the body's rotation, in the contact
+    /// pipeline and the query world ([`crate::PhysicsSystem::world`]) alike.
     Capsule {
         /// Offset from the entity's [`Transform::position`] in the body's
         /// frame.

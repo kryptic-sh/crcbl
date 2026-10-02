@@ -5,7 +5,7 @@
 //! `+Y`, its footprint is the diamond `|x| + |z| ≤ √2`, its faces' normals
 //! `(±1, 0, ±1) / √2`, each face 1 from the centre.
 
-use core::f64::consts::{FRAC_PI_4, SQRT_2};
+use core::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_4, SQRT_2};
 
 use super::*;
 
@@ -154,6 +154,14 @@ fn a_sideways_capsule_meets_the_turned_face() {
         hit.t,
     );
     assert!((hit.normal - face_normal()).length() < 1e-6, "{hit:?}");
+    // On the face, a radius from the core along the normal: the core is at
+    // z = 1.25, so the point is a radius's share of z below it.
+    let on_face = hit.point.z - hit.point.x;
+    assert!((on_face - SQRT_2).abs() < 1e-3, "{hit:?}");
+    assert!(
+        (hit.point.z - (1.25 - 0.1 * FRAC_1_SQRT_2)).abs() < 1e-3,
+        "{hit:?}"
+    );
 }
 
 /// **A capsule that starts inside the turned box meets it at once**, and one

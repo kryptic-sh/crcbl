@@ -9,6 +9,7 @@
 //! query world answers its boxes with.
 
 mod boxes;
+mod capsules;
 
 use crate::broadphase::Ray;
 use crate::collider::{Aabb, Capsule, Sphere};
@@ -18,6 +19,11 @@ pub(crate) use self::boxes::contact_box;
 pub use self::boxes::{
     capsule_penetration_vs_box, ray_vs_box, sphere_overlaps_box, swept_capsule_vs_box,
     swept_sphere_vs_box,
+};
+pub(crate) use self::capsules::{
+    TurnedCapsule, capsule_penetration_vs_turned_capsule, ray_vs_turned_capsule,
+    sphere_overlaps_turned_capsule, swept_capsule_vs_turned_capsule,
+    swept_sphere_vs_turned_capsule,
 };
 
 // ---------------------------------------------------------------------------

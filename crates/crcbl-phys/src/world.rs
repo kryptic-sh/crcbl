@@ -5,7 +5,7 @@
 //! maintains a lazily-rebuilt BVH over their AABBs, and dispatches rays and
 //! sweeps to the shape-level intersection functions.
 
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 
 use crate::broadphase::{Bvh, BvhHit, Ray, Segment};
 use crate::collider::{Aabb, BoxCollider, Capsule, LyingCapsule, Sphere};
@@ -15,7 +15,7 @@ use crate::contact::manifold::gap;
 use crate::contact::shape::ContactShape;
 use crate::contact::sweep::time_of_contact;
 use crate::mesh::{MeshScratch, PlacedMesh, TriangleMesh};
-use crate::query::{self, Penetration, ShapeHit};
+use crate::query::{self, Penetration, ShapeHit, TurnedCapsule};
 
 mod candidate_sweeps;
 mod entry;
@@ -730,7 +730,7 @@ fn overlap_sphere_core(
                 data.entry.primitives().any(|(_, shape)| match shape {
                     Primitive::Sphere(s) => query::sphere_overlaps_sphere(query_sphere, s),
                     Primitive::Box(b) => query::sphere_overlaps_box(query_sphere, b),
-                    Primitive::Capsule(c) => query::sphere_overlaps_capsule(query_sphere, c),
+                    Primitive::Capsule(c) => query::sphere_overlaps_turned_capsule(query_sphere, c),
                     Primitive::Mesh(m) => m.overlaps_sphere(query_sphere, &mut scratch.mesh),
                 })
             });
@@ -842,7 +842,7 @@ fn sweep_sphere_hits(
         |shape| match shape {
             Primitive::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
             Primitive::Box(b) => query::swept_sphere_vs_box(segment, radius, b),
-            Primitive::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
+            Primitive::Capsule(c) => query::swept_sphere_vs_turned_capsule(segment, radius, c),
             Primitive::Mesh(m) => m.sweep(segment, radius, DVec3::ZERO, &mut scratch.mesh),
         },
         visit,
@@ -893,7 +893,7 @@ fn sweep_capsule_hits(
             Primitive::Sphere(s) => query::swept_capsule_vs_sphere(segment, radius, half_height, s),
             Primitive::Box(b) => query::swept_capsule_vs_box(segment, radius, half_height, b),
             Primitive::Capsule(c) => {
-                query::swept_capsule_vs_capsule(segment, radius, half_height, c)
+                query::swept_capsule_vs_turned_capsule(segment, radius, half_height, c)
             }
             Primitive::Mesh(m) => {
                 m.sweep(segment, radius, DVec3::Y * half_height, &mut scratch.mesh)
@@ -941,7 +941,7 @@ fn capsule_penetrations_core(
             let penetration = match shape {
                 Primitive::Sphere(s) => query::capsule_penetration_vs_sphere(capsule, s),
                 Primitive::Box(b) => query::capsule_penetration_vs_box(capsule, b),
-                Primitive::Capsule(c) => query::capsule_penetration_vs_capsule(capsule, c),
+                Primitive::Capsule(c) => query::capsule_penetration_vs_turned_capsule(capsule, c),
                 Primitive::Mesh(m) => m.capsule_penetration(capsule, &mut scratch.mesh),
             };
             if let Some(penetration) = penetration
@@ -1002,11 +1002,7 @@ fn lying_capsule_blocker_core(
                 radius: s.radius,
             }),
             Primitive::Box(b) => inside(query::contact_box(b)),
-            Primitive::Capsule(c) => inside(ContactShape::Capsule {
-                a: c.bottom(),
-                b: c.top(),
-                radius: c.radius,
-            }),
+            Primitive::Capsule(c) => inside(c.contact_shape()),
             Primitive::Mesh(m) => m
                 .turned_capsule_penetration(
                     (head + feet) * 0.5,
@@ -1116,11 +1112,7 @@ fn sweep_lying_capsule_core(
                 radius: s.radius,
             }),
             Primitive::Box(b) => advance(query::contact_box(b)),
-            Primitive::Capsule(c) => advance(ContactShape::Capsule {
-                a: c.bottom(),
-                b: c.top(),
-                radius: c.radius,
-            }),
+            Primitive::Capsule(c) => advance(c.contact_shape()),
             Primitive::Mesh(m) => m
                 .sweep(&path, radius, (head - feet) * 0.5, &mut scratch.mesh)
                 .map(SweptContact::from),
@@ -1162,7 +1154,7 @@ fn closest_hit_core(
             let hit = match shape {
                 Primitive::Sphere(s) => query::ray_vs_sphere(ray, s),
                 Primitive::Box(b) => query::ray_vs_box(ray, b),
-                Primitive::Capsule(c) => query::ray_vs_capsule(ray, c),
+                Primitive::Capsule(c) => query::ray_vs_turned_capsule(ray, c),
                 Primitive::Mesh(m) => m.cast_ray(ray, mesh),
             };
             if let Some(hit) = hit
@@ -1374,9 +1366,19 @@ impl PhysicsWorld {
         self.add(ColliderEntry::Box(box_collider))
     }
 
-    /// Register a capsule collider.
+    /// Register a capsule collider, standing up the world's `Y`.
     pub fn add_capsule(&mut self, capsule: Capsule) -> ColliderId {
-        self.add(ColliderEntry::Capsule(capsule))
+        self.add(ColliderEntry::Capsule(TurnedCapsule::upright(capsule)))
+    }
+
+    /// Register `capsule` turned by `rotation` about its centre, its core
+    /// along `rotation * Y`, as the contact pipeline places a body's capsule.
+    /// A turn that leaves the core along `Y` answers as
+    /// [`add_capsule`](Self::add_capsule) does, to the bit.
+    pub(crate) fn add_turned_capsule(&mut self, capsule: Capsule, rotation: DQuat) -> ColliderId {
+        self.add(ColliderEntry::Capsule(TurnedCapsule::new(
+            capsule, rotation,
+        )))
     }
 
     /// Register a triangle mesh, its vertices in the frame of `transform`.
@@ -1425,9 +1427,23 @@ impl PhysicsWorld {
         self.set(id, ColliderEntry::Box(box_collider))
     }
 
-    /// Update an existing capsule collider.
+    /// Update an existing capsule collider, standing up the world's `Y`.
     pub fn set_capsule(&mut self, id: ColliderId, capsule: Capsule) -> bool {
-        self.set(id, ColliderEntry::Capsule(capsule))
+        self.set(id, ColliderEntry::Capsule(TurnedCapsule::upright(capsule)))
+    }
+
+    /// Update an existing collider to be `capsule` turned by `rotation`, as
+    /// [`add_turned_capsule`](Self::add_turned_capsule) places it.
+    pub(crate) fn set_turned_capsule(
+        &mut self,
+        id: ColliderId,
+        capsule: Capsule,
+        rotation: DQuat,
+    ) -> bool {
+        self.set(
+            id,
+            ColliderEntry::Capsule(TurnedCapsule::new(capsule, rotation)),
+        )
     }
 
     /// Update an existing collider to be `mesh` at `transform`.
@@ -2469,7 +2485,7 @@ mod tests {
         match entry {
             ColliderEntry::Sphere(s) => query::ray_vs_sphere(ray, s),
             ColliderEntry::Box(b) => query::ray_vs_box(ray, b),
-            ColliderEntry::Capsule(c) => query::ray_vs_capsule(ray, c),
+            ColliderEntry::Capsule(c) => query::ray_vs_capsule(ray, &c.capsule),
             ColliderEntry::Mesh(_) | ColliderEntry::Compound(_) => {
                 unreachable!("the fixture holds no meshes or compounds")
             }
@@ -2481,7 +2497,9 @@ mod tests {
         match entry {
             ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
             ColliderEntry::Box(b) => query::swept_sphere_vs_box(segment, radius, b),
-            ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
+            ColliderEntry::Capsule(c) => {
+                query::swept_sphere_vs_capsule(segment, radius, &c.capsule)
+            }
             ColliderEntry::Mesh(_) | ColliderEntry::Compound(_) => {
                 unreachable!("the fixture holds no meshes or compounds")
             }
@@ -2542,7 +2560,7 @@ mod tests {
         let capsule = Capsule::new(DVec3::new(0.0, 0.0, 3.0), 0.3, 1.0);
         fixture.push((
             world.add_capsule(capsule),
-            ColliderEntry::Capsule(capsule),
+            ColliderEntry::Capsule(TurnedCapsule::upright(capsule)),
             true,
         ));
         let boxed = BoxCollider::new(DVec3::new(1.5, 1.5, 0.0), DVec3::splat(0.5));
@@ -3603,3 +3621,7 @@ mod turned_body_tests;
 #[cfg(test)]
 #[path = "world/compound_tests.rs"]
 mod compound_tests;
+
+#[cfg(test)]
+#[path = "world/turned_capsule_tests.rs"]
+mod turned_capsule_tests;
