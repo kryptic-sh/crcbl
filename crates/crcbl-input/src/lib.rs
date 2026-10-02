@@ -22,7 +22,9 @@
 //! [`ActionMap::set_double_tap`] attach a [`Tap`], a [`Hold`] and a
 //! [`DoubleTap`], all evaluated on the clock [`ActionMap::begin_tick`] advances
 //! (`repeat.rs`, and `patterns.rs` for how the last three share a press and
-//! what [`ActionMap::cancel_patterns`] cancels).
+//! what [`ActionMap::cancel_patterns`] cancels). [`ActionMap::set_emits`] makes
+//! one of the last three press a named button action when it fires
+//! (`emit.rs`).
 //! [`ActionMap::last_device`] names the kind of [`Device`] that last spoke.
 //!
 //! # Gamepads
@@ -38,9 +40,11 @@
 //! backend yet, and none has a stand-in that would report "no pads" as though
 //! it had looked.
 
+pub mod binding_asset;
 pub mod binding_text;
 mod context;
 mod device;
+mod emit;
 // Linux-only: the `evdev` backend. Compiled into every target's tests too, so
 // its mapping, normalisation, layouts and poller run on the Windows and macOS
 // runners; only the device access is Linux-only.
@@ -81,9 +85,11 @@ pub mod web_gamepad;
 #[cfg(any(windows, test))]
 pub mod xinput;
 
+pub use binding_asset::{AssetRefusal, AssetWriteError, BindingAssetError};
 pub use binding_text::BindingParseError;
 pub use context::{GAMEPLAY_CONTEXT, GLOBAL_CONTEXT};
 pub use device::Device;
+pub use emit::Pattern;
 pub use gamepad::{
     GamepadEvent, GamepadId, GamepadSnapshot, PAD_ACTIVITY_THRESHOLD, PadAxis, PadButton,
     PadButtons, PadKind, Stick, Trigger,
@@ -644,6 +650,10 @@ struct ActionSlot {
     repeat: Option<RepeatState>,
     /// The tap, hold and double-tap patterns — see [`ActionMap::set_tap`].
     patterns: PatternState,
+    /// Whether a pattern emitting this action fired since the last
+    /// [`ActionMap::begin_tick`], which holds it down until then — see
+    /// `emit.rs`.
+    emitted: bool,
     /// The current resolved value.
     value: ActionValue,
     /// True when at least one binding for this action is "down" (key held,
@@ -673,6 +683,7 @@ impl ActionSlot {
             context,
             repeat: None,
             patterns: PatternState::default(),
+            emitted: false,
             value,
             active: false,
             hold_start: None,
@@ -693,6 +704,7 @@ impl ActionSlot {
             repeat.reset();
         }
         self.patterns.reset();
+        self.emitted = false;
         match &mut self.value {
             ActionValue::Button(a) => {
                 a.state = ButtonState::Released;
@@ -734,6 +746,12 @@ pub enum ActionMapError {
     /// A [`Binding::PadStick`]'s dead zone or a [`Binding::PadTrigger`]'s
     /// threshold on the named action is not finite and in `0.0..1.0`.
     InvalidDeadzone(String),
+    /// [`ActionMap::set_emits`] was asked to make a pattern emit an action
+    /// that is not an [`ActionKind::Button`].
+    NotAButton(String),
+    /// [`ActionMap::set_emits`] was asked to make a pattern emit the action it
+    /// is attached to.
+    EmitsItself(String),
 }
 
 impl std::fmt::Display for ActionMapError {
@@ -748,6 +766,12 @@ impl std::fmt::Display for ActionMapError {
             }
             Self::InvalidDeadzone(name) => {
                 write!(f, "dead zone or threshold not in 0..1: {name}")
+            }
+            Self::NotAButton(name) => {
+                write!(f, "a pattern can emit only a button action: {name}")
+            }
+            Self::EmitsItself(name) => {
+                write!(f, "a pattern cannot emit the action it is on: {name}")
             }
         }
     }
@@ -818,6 +842,9 @@ pub struct ActionMap {
     /// last thing the player actually asked for. See
     /// [`Binding::PointerPosition`].
     pointer: Option<(f32, f32)>,
+    /// Slots a pattern fired an emission at, waiting to be pressed — see
+    /// `emit.rs`. Empty between calls.
+    pending_emits: Vec<usize>,
 
     /// Seconds elapsed since creation (advanced by `begin_tick`).
     ///
@@ -851,6 +878,7 @@ impl ActionMap {
             mouse_delta: (0.0, 0.0),
             scroll_delta: (0.0, 0.0),
             pointer: None,
+            pending_emits: Vec::new(),
             elapsed: 0.0,
         }
     }
@@ -1178,6 +1206,8 @@ impl ActionMap {
     ///   [`ActionMap::repeated`], [`ActionMap::tapped`],
     ///   [`ActionMap::hold_fired`] and [`ActionMap::double_tapped`] read).
     /// - Zeroes accumulated mouse-motion and scroll deltas.
+    /// - Releases every action a pattern emitted since the last tick, and
+    ///   presses the ones a pattern emits as this tick begins — see `emit.rs`.
     /// - Advances the internal clock by `dt` seconds so that [`ButtonState::Held`]
     ///   durations are up-to-date next time a button action is resolved.
     pub fn begin_tick(&mut self, dt: f32) {
@@ -1188,6 +1218,11 @@ impl ActionMap {
         }
         self.mouse_delta = (0.0, 0.0);
         self.scroll_delta = (0.0, 0.0);
+        // Every slot, live or not: one taken off the stack while pressed must
+        // not come back pressed.
+        for slot in &mut self.slots {
+            slot.emitted = false;
+        }
 
         // Reset edge flags and re-resolve every action so that Held durations
         // and axis values reflect the new elapsed time and cleared deltas.
@@ -1209,8 +1244,11 @@ impl ActionMap {
                 ActionValue::Axis2(_) => {}
             }
             // Re-resolve to update Held duration and zero out axis deltas.
-            self.resolve_one(i);
+            // Not `resolve_one`: what a pattern emits now waits for the loop
+            // to finish, so the edges do not depend on declaration order.
+            self.resolve_slot(i);
         }
+        self.drain_emits();
     }
 
     // -- reading resolved state ----------------------------------------------
@@ -1323,11 +1361,19 @@ impl ActionMap {
         }
     }
 
-    /// Compute the current value of a single action slot from raw state.
+    /// Compute the current value of a single action slot from raw state, and
+    /// press whatever its patterns emitted on the way.
+    fn resolve_one(&mut self, idx: usize) {
+        self.resolve_slot(idx);
+        self.drain_emits();
+    }
+
+    /// Compute the current value of a single action slot from raw state,
+    /// queueing what its patterns emit for [`ActionMap::drain_emits`].
     ///
     /// Reads raw input only through the slot's context's [`View`], which is
     /// where consumption happens.
-    fn resolve_one(&mut self, idx: usize) {
+    fn resolve_slot(&mut self, idx: usize) {
         let control_sticks = &self.control_sticks;
         let pads = &self.pads;
         let mouse_delta = self.mouse_delta;
@@ -1350,35 +1396,44 @@ impl ActionMap {
 
         match kind {
             ActionKind::Button => {
-                let down = bindings.iter().any(|b| match b {
-                    Binding::Key(k) => view.key(*k),
-                    Binding::Chord { modifier, key } => view.chord(*modifier, *key),
-                    Binding::MouseButton(b) => view.button(*b),
-                    Binding::ButtonChord { modifier, button } => {
-                        view.button_chord(*modifier, *button)
-                    }
-                    Binding::Virtual(id) => view.control(id),
-                    Binding::PadButton(button) => view.pad_button(*button),
-                    Binding::PadChord { modifier, button } => view.pad_chord(*modifier, *button),
-                    Binding::PadDpad => PadButton::DPAD.iter().any(|&b| view.pad_button(b)),
-                    Binding::PadTrigger { trigger, threshold } => {
-                        view.trigger(*trigger) && gamepad::pad_trigger(pads, *trigger) > *threshold
-                    }
-                    Binding::MouseMotion
-                    | Binding::MouseScroll
-                    | Binding::ScrollChord { .. }
-                    | Binding::PointerPosition { .. }
-                    | Binding::PadStick { .. } => false,
-                    Binding::KeyAxis { negative, positive } => {
-                        view.key(*negative) || view.key(*positive)
-                    }
-                    Binding::Wasd {
-                        up,
-                        down: w_down,
-                        left,
-                        right,
-                    } => view.key(*up) || view.key(*w_down) || view.key(*left) || view.key(*right),
-                });
+                let down = slot.emitted
+                    || bindings.iter().any(|b| match b {
+                        Binding::Key(k) => view.key(*k),
+                        Binding::Chord { modifier, key } => view.chord(*modifier, *key),
+                        Binding::MouseButton(b) => view.button(*b),
+                        Binding::ButtonChord { modifier, button } => {
+                            view.button_chord(*modifier, *button)
+                        }
+                        Binding::Virtual(id) => view.control(id),
+                        Binding::PadButton(button) => view.pad_button(*button),
+                        Binding::PadChord { modifier, button } => {
+                            view.pad_chord(*modifier, *button)
+                        }
+                        Binding::PadDpad => PadButton::DPAD.iter().any(|&b| view.pad_button(b)),
+                        Binding::PadTrigger { trigger, threshold } => {
+                            view.trigger(*trigger)
+                                && gamepad::pad_trigger(pads, *trigger) > *threshold
+                        }
+                        Binding::MouseMotion
+                        | Binding::MouseScroll
+                        | Binding::ScrollChord { .. }
+                        | Binding::PointerPosition { .. }
+                        | Binding::PadStick { .. } => false,
+                        Binding::KeyAxis { negative, positive } => {
+                            view.key(*negative) || view.key(*positive)
+                        }
+                        Binding::Wasd {
+                            up,
+                            down: w_down,
+                            left,
+                            right,
+                        } => {
+                            view.key(*up)
+                                || view.key(*w_down)
+                                || view.key(*left)
+                                || view.key(*right)
+                        }
+                    });
 
                 let was_active = slot.active;
                 slot.active = down;
@@ -1574,7 +1629,9 @@ impl ActionMap {
         if let Some(repeat) = &mut slot.repeat {
             repeat.update(&slot.value, elapsed);
         }
+        let before = slot.patterns.fired();
         slot.patterns.update(&slot.value, elapsed);
+        slot.patterns.queue_emits(before, &mut self.pending_emits);
     }
 }
 

@@ -1367,14 +1367,16 @@ controls are interchangeable binding sources behind one layer. Built from it, in
 `crcbl-input`: `ActionMap`, `ActionDecl` and the three `ActionKind`s; every
 `Binding` from `Key` to `PadTrigger`; the context stack (`context.rs`) over
 `GAMEPLAY_CONTEXT` with the reserved `ui` context; the tap, hold, double-tap and
-repeat patterns (`patterns.rs`, `repeat.rs`); `ActionMap::last_device`; the
-in-memory `ActionMap::rebind`; the `GamepadEvent` seam (`gamepad.rs`) with the
-evdev, XInput, GameController and Web Gamepad backends; and
-`ActionMap::virtual_stick`, driven by `crcbl_ui::touch`'s `TouchStick` in
-`apps/horde`. The rest is in `docs/backlog.md` under _Input: patterns, RON
-bindings, rebind persistence and every gamepad backend_, _Input: no rebind
-screen, no input inspector, no `crcbl input` CLI_ and _Input thread, stacked
-`InputTickState`, last-N ring_.
+repeat patterns (`patterns.rs`, `repeat.rs`), with `ActionMap::set_emits` making
+a pattern press a named action (`emit.rs`); the binding sketch's RON asset
+(`binding_asset.rs`, `ActionMap::from_ron` and `to_ron`);
+`ActionMap::last_device`; the in-memory `ActionMap::rebind`; the `GamepadEvent`
+seam (`gamepad.rs`) with the evdev, XInput, GameController and Web Gamepad
+backends; and `ActionMap::virtual_stick`, driven by `crcbl_ui::touch`'s
+`TouchStick` in `apps/horde`. The rest is in `docs/backlog.md` under _Input:
+patterns, RON bindings, rebind persistence and every gamepad backend_, _Input:
+no rebind screen, no input inspector, no `crcbl input` CLI_ and _Input thread,
+stacked `InputTickState`, last-N ring_.
 
 Code cites the plan by its layers, its pattern evaluator, its binding sketch and
 its quirk-table scoping. Those resolve here:
@@ -1399,8 +1401,11 @@ actions rather than devices, and rebinding never touches netcode.
 bindings are one flat `Vec<Binding>`, not the sketch's per-device-class record:
 horde's `move` takes a `Binding::Wasd` and a `Binding::Virtual` side by side and
 reads one normalised vector. That is the rule arriving a level lower than the
-plan drew it, and a RON asset grouping bindings by class would be presentation
-over the same list.
+plan drew it, and the binding asset's `keyboard`, `mouse`, `gamepad` and `touch`
+lists are presentation over the same list: they flatten in that fixed order, and
+a binding in another device's list is refused. Each binding in the asset is
+written in the same text form a player's rebinds are, so the two cannot spell
+one binding two ways.
 
 **Contexts are a stack, and the topmost binder consumes.** Unbound inputs fall
 through; a held input is withheld from a new owner until released. One
