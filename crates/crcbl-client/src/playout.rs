@@ -154,12 +154,50 @@ pub const MAX_PLAYOUT_RATE_DEVIATION: f64 = 0.1;
 /// rate not capped by [`MAX_PLAYOUT_RATE_DEVIATION`].
 pub const PLAYOUT_CORRECTION_TIME: Duration = Duration::from_millis(100);
 
-/// The most snapshots buffered per sector. Playback needs only the ones
-/// from just behind its position to the newest, and frames behind it are
-/// dropped as it passes them, so this binds only for a server sending more
-/// snapshots within [`MAX_PLAYOUT_DELAY`] than it holds; the oldest then go,
-/// and playback trails the newest by less than the delay asked for.
-pub const JITTER_BUFFER_CAPACITY: usize = 32;
+/// The furthest playback trails the newest snapshot without stepping: a
+/// delay that jitter has raised to [`MAX_PLAYOUT_DELAY`], plus as far again
+/// behind its target, which playback may fall before it steps — as it does
+/// when the link's latency drops and the estimated server time moves ahead
+/// faster than playback's bounded rate follows. Every snapshot within it is
+/// one playback can still reach and show.
+pub const MAX_PLAYBACK_LAG: Duration = MAX_PLAYOUT_DELAY.saturating_mul(2);
+
+/// Frames a sector's buffer holds beyond the ticks [`MAX_PLAYBACK_LAG`]
+/// spans: the frame at or behind playback, and the pairs a slow server
+/// needs, whose snapshot interval — and so its delay — can outgrow the lag
+/// at a tick rate low enough that the lag spans a tick or less.
+pub const JITTER_BUFFER_SLACK: usize = 8;
+
+/// The most frames any sector's buffer holds, whatever the tick rate. The
+/// capacity grows with the tick rate, which the client is constructed with
+/// and [`crcbl_core::FrameClock`] accepts far beyond any a game runs at;
+/// without a ceiling, a server sending that fast would have the client hold
+/// a frame per tick across all of [`MAX_PLAYBACK_LAG`]. Past the tick rate
+/// whose lag fills it, the oldest frames go and the picture can stall once
+/// playback trails the newest by more than the buffer holds. A frame is one
+/// transform per replicated entity in the sector.
+pub const MAX_JITTER_BUFFER_FRAMES: usize = 256;
+
+/// The most snapshots a sector's buffer holds at `tick_hz`: every one from
+/// playback to the newest across [`MAX_PLAYBACK_LAG`], plus
+/// [`JITTER_BUFFER_SLACK`], and never more than [`MAX_JITTER_BUFFER_FRAMES`].
+/// Frames behind playback are dropped as it passes them, so the capacity
+/// binds only when more have arrived ahead of playback than it can reach
+/// without stepping; the oldest then go.
+pub(crate) fn jitter_buffer_capacity(tick_hz: u32) -> usize {
+    let lag_ticks = (MAX_PLAYBACK_LAG.as_nanos() * u128::from(tick_hz))
+        .div_ceil(Duration::from_secs(1).as_nanos());
+    usize::try_from(lag_ticks)
+        .unwrap_or(usize::MAX)
+        .saturating_add(JITTER_BUFFER_SLACK)
+        .min(MAX_JITTER_BUFFER_FRAMES)
+}
+
+/// The most recent server ticks the snapshot interval is measured over. A
+/// snapshot overtaken by more than this many newer ones says nothing about
+/// the cadence now. Every arrival walks the window again, so it stays this
+/// size whatever the tick rate rather than growing with the frame buffer.
+pub const INTERVAL_TICK_WINDOW: usize = 32;
 
 /// The snapshot interval assumed before two arrivals have measured one: a
 /// session starts at a snapshot every tick.
@@ -225,10 +263,9 @@ fn next_interval(interval: f64, spacing: f64) -> f64 {
 pub(crate) struct Playout {
     tick_rate_hz: f64,
     newest: Option<Arrival>,
-    /// The last [`JITTER_BUFFER_CAPACITY`] ticks received, oldest first,
+    /// The last [`INTERVAL_TICK_WINDOW`] ticks received, oldest first,
     /// overtaken ones in their place: the interval is their spacings taken
-    /// in tick order. One older than all of them is older than any snapshot
-    /// the buffer could hold, and says nothing about the cadence now.
+    /// in tick order. One older than all of them is ignored.
     recent_ticks: VecDeque<f64>,
     /// The interval as measured up to the oldest of `recent_ticks`.
     interval_through_oldest: f64,
@@ -252,7 +289,7 @@ impl Playout {
         Self {
             tick_rate_hz,
             newest: None,
-            recent_ticks: VecDeque::with_capacity(JITTER_BUFFER_CAPACITY + 1),
+            recent_ticks: VecDeque::with_capacity(INTERVAL_TICK_WINDOW + 1),
             interval_through_oldest: INITIAL_INTERVAL_TICKS,
             interval_ticks: INITIAL_INTERVAL_TICKS,
             delays: DelayHistogram::new(DELAY_BUCKETS),
@@ -318,7 +355,7 @@ impl Playout {
             Err(index) => index,
         };
         self.recent_ticks.insert(index, tick);
-        if self.recent_ticks.len() > JITTER_BUFFER_CAPACITY
+        if self.recent_ticks.len() > INTERVAL_TICK_WINDOW
             && let Some(oldest) = self.recent_ticks.pop_front()
             && let Some(&next) = self.recent_ticks.front()
         {
@@ -526,6 +563,18 @@ mod tests {
         );
     }
 
+    /// **The buffer's capacity spans [`MAX_PLAYBACK_LAG`] at the tick rate,
+    /// plus the slack, up to the hard maximum.** At 240 Hz the lag is 120
+    /// ticks; at one tick a second it rounds up to one; and no tick rate,
+    /// however large, overflows the arithmetic or passes the ceiling.
+    #[test]
+    fn the_capacity_spans_the_lag_up_to_the_hard_maximum() {
+        assert_eq!(MAX_PLAYBACK_LAG, Duration::from_millis(500));
+        assert_eq!(jitter_buffer_capacity(240), 120 + JITTER_BUFFER_SLACK);
+        assert_eq!(jitter_buffer_capacity(1), 1 + JITTER_BUFFER_SLACK);
+        assert_eq!(jitter_buffer_capacity(u32::MAX), MAX_JITTER_BUFFER_FRAMES);
+    }
+
     /// A playout clock at a thousand ticks a second, so a tick is a
     /// millisecond and [`DELAY_BUCKET_WIDTH`] a whole number of them.
     fn at_one_kilohertz() -> Playout {
@@ -653,7 +702,7 @@ mod tests {
     /// copy of a tick is no spacing of zero. Forty spacings of one after an
     /// interval of three bring it to
     /// `1 + 2 · (15/16)^40` — the gain applied forty times — although only
-    /// the last [`JITTER_BUFFER_CAPACITY`] ticks are kept, and no more.
+    /// the last [`INTERVAL_TICK_WINDOW`] ticks are kept, and no more.
     #[test]
     fn the_interval_takes_spacings_in_tick_order() {
         let mut playout = at_one_hertz();
@@ -668,7 +717,7 @@ mod tests {
             arrive(&mut playout, tick, tick as f64);
         }
         const SPACINGS: u64 = 40;
-        const { assert!(SPACINGS as usize > JITTER_BUFFER_CAPACITY) };
+        const { assert!(SPACINGS as usize > INTERVAL_TICK_WINDOW) };
         let mut expected = 3.0;
         assert_eq!(playout.interval_ticks, expected);
         for tick in 6..6 + SPACINGS {
@@ -679,7 +728,7 @@ mod tests {
                 assert_eq!(playout.interval_ticks, expected, "a copy of 5 counted");
             }
         }
-        assert_eq!(playout.recent_ticks.len(), JITTER_BUFFER_CAPACITY);
+        assert_eq!(playout.recent_ticks.len(), INTERVAL_TICK_WINDOW);
         assert!(
             (playout.interval_ticks - expected).abs() < 1e-12,
             "interval {}, expected {expected}",

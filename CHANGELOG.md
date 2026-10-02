@@ -533,17 +533,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 ### Added
 
 - **A jitter buffer with an adaptive playout delay in `crcbl_client`**
-  (`crcbl_client::playout`). The client buffers snapshots by server tick, up to
-  `JITTER_BUFFER_CAPACITY` per sector, and plays them back at the latest server
-  time it estimates from their arrivals less a playout delay: the larger of the
-  measured snapshot interval and the `DELAY_QUANTILE` quantile of a decaying
-  histogram of relative arrival delays, plus `PLAYOUT_MARGIN`, held between
-  `MIN_PLAYOUT_DELAY` and `MAX_PLAYOUT_DELAY` and never under the interval
-  itself. A snapshot's relative arrival delay is how long after a playback with
-  no delay would have passed the snapshot before it that it arrived; the
-  histogram is WebRTC NetEq's delay manager's — buckets `DELAY_BUCKET_WIDTH`
-  wide, one sample per `DELAY_RESAMPLE_INTERVAL` taking the worst arrival in it,
-  older samples weighed `DELAY_FORGET_FACTOR` less after a ramp set by
+  (`crcbl_client::playout`). The client buffers snapshots by server tick and
+  plays them back at the latest server time it estimates from their arrivals
+  less a playout delay: the larger of the measured snapshot interval and the
+  `DELAY_QUANTILE` quantile of a decaying histogram of relative arrival delays,
+  plus `PLAYOUT_MARGIN`, held between `MIN_PLAYOUT_DELAY` and
+  `MAX_PLAYOUT_DELAY` and never under the interval itself. A snapshot's relative
+  arrival delay is how long after a playback with no delay would have passed the
+  snapshot before it that it arrived; the histogram is WebRTC NetEq's delay
+  manager's — buckets `DELAY_BUCKET_WIDTH` wide, one sample per
+  `DELAY_RESAMPLE_INTERVAL` taking the worst arrival in it, older samples
+  weighed `DELAY_FORGET_FACTOR` less after a ramp set by
   `DELAY_START_FORGET_WEIGHT` — so a link that holds snapshots and releases them
   in bursts is covered, where the RFC 3550 jitter the delay was first sized from
   (`interval + 4 · J`) read 240 Hz bursts of 40 as a 28 ms delay against 167 ms
@@ -560,7 +560,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   nothing extrapolates — and counts an underrun. New on `Client`:
   `playback_tick()` (where playback is, in server ticks) and `playout_stats()`,
   a `PlayoutStats` with the delay, the `relative_delay` it covers, the jitter,
-  the interval, `underruns` and `steps`.
+  the interval, `underruns` and `steps`. Each sector's buffer is sized from the
+  client's tick rate to hold every snapshot across `MAX_PLAYBACK_LAG` (twice
+  `MAX_PLAYOUT_DELAY`: the delay at its cap, and as far again that playback may
+  fall behind its target before it steps) plus `JITTER_BUFFER_SLACK`, never more
+  than `MAX_JITTER_BUFFER_FRAMES`, so a frame playback has yet to reach is not
+  dropped: the fixed 32-frame `JITTER_BUFFER_CAPACITY` it replaces dropped them
+  under 240 Hz bursts of 40, and the picture froze once per burst. The snapshot
+  interval is measured over the last `INTERVAL_TICK_WINDOW` ticks, which no
+  longer follows the buffer's size.
 
 - **Every hit along a straight sweep from `crcbl_phys::PhysicsWorld`.**
   `sweep_sphere_all(segment, radius, filter, &mut hits)` and

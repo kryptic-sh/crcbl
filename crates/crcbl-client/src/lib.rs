@@ -28,8 +28,8 @@ use crcbl_phys::{PhysicsSystem, Transform};
 
 pub mod playout;
 
+use playout::Playout;
 pub use playout::PlayoutStats;
-use playout::{JITTER_BUFFER_CAPACITY, Playout};
 
 /// How long the client waits for a handshake reply before assuming the hello
 /// (or its answer) was lost and trying again.
@@ -135,8 +135,11 @@ pub struct Client<T: Transport> {
     subscribed_sectors: HashSet<SectorId>,
     /// Buffered frames after delta apply, oldest first, keyed by sector: from
     /// the one at or just behind playback to the newest, at most
-    /// [`JITTER_BUFFER_CAPACITY`].
+    /// `frame_capacity`.
     frames: HashMap<SectorId, VecDeque<Frame>>,
+    /// The most frames a sector's buffer holds at this client's tick rate:
+    /// see [`playout::jitter_buffer_capacity`].
+    frame_capacity: usize,
     /// Input data to send on the next tick.
     pending_input: Vec<u8>,
     /// Accumulated baselines for delta application, keyed by sector.
@@ -215,6 +218,7 @@ impl<T: Transport> Client<T> {
             clock,
             subscribed_sectors: HashSet::from([SectorId::ZERO]),
             frames: HashMap::new(),
+            frame_capacity: playout::jitter_buffer_capacity(tick_hz),
             pending_input: Vec::new(),
             baselines: HashMap::new(),
             playout: Playout::new(tick_rate_hz),
@@ -1002,7 +1006,7 @@ impl<T: Transport> Client<T> {
         // above.
         let buffered = self.frames.entry(sector).or_default();
         buffered.push_back(frame);
-        if buffered.len() > JITTER_BUFFER_CAPACITY {
+        if buffered.len() > self.frame_capacity {
             buffered.pop_front();
         }
         self.playout.observe(delta.tick, self.now);

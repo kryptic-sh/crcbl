@@ -6,7 +6,10 @@
 use std::time::Duration;
 
 use crcbl_net::auth::SessionCrypto;
-use crcbl_net::{ConditionSimulator, InMemoryTransport, ManualClock, Message, SimConditions};
+use crcbl_net::{
+    ConditionSimulator, IN_MEMORY_CHANNEL_CAPACITY, InMemoryTransport, ManualClock, Message,
+    SimConditions,
+};
 
 use super::*;
 use crate::playout::{MAX_PLAYOUT_DELAY, MAX_PLAYOUT_RATE_DEVIATION, PLAYOUT_MARGIN, PlayoutStats};
@@ -358,41 +361,19 @@ fn queued_jitter_never_runs_dry_once_converged() {
 /// at least the burst's length — enough to play on until the next one.
 #[test]
 fn bursty_delivery_never_runs_dry_once_converged() {
-    let tick = Duration::from_secs(1) / BURST_TICK_HZ;
-    let (transport, mut peer) = InMemoryTransport::pair();
-    let mut client =
-        Client::new_with_compatibility(World::new(), transport, BURST_TICK_HZ, COMPATIBILITY);
-    client.set_inbound_rate_limit_config(InboundRateLimitConfig {
-        messages_per_second: 100_000,
-        bytes_per_second: 100_000_000,
-    });
-    let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
-    let settle = BURST_SETTLE.div_duration_f64(tick) as u64;
-    let mut now = Duration::ZERO;
     let mut settled = None;
     let mut shortest_lag = f64::INFINITY;
-    for server_tick in 1..=2 * settle {
-        now += tick;
-        let released = server_tick.is_multiple_of(BURST);
-        if released {
-            for sent in server_tick + 1 - BURST..=server_tick {
-                crate::tests::send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(sent, &[]));
-            }
-        }
-        client.update(now);
-        // The client's acks, which a full channel would refuse.
-        while peer.recv().expect("the link is up").is_some() {}
-        if server_tick == settle {
+    let client = run_burst_probe(|client, server_tick, released| {
+        if server_tick == burst_settle_ticks() {
             settled = Some(client.playout_stats());
         }
-        if released && server_tick > settle {
+        if released && server_tick > burst_settle_ticks() {
             let lag = server_tick as f64 - client.playback_tick().expect("playing");
             shortest_lag = shortest_lag.min(lag);
         }
-    }
+    });
     let settled = settled.expect("the run settled");
     let end = client.playout_stats();
-    assert_eq!(client.processing_error_count(), 0);
     assert_eq!(
         end.underruns, settled.underruns,
         "bursts of {BURST} ran dry at a delay of {:?}",
@@ -404,8 +385,93 @@ fn bursty_delivery_never_runs_dry_once_converged() {
     );
 }
 
-/// The server tick rate of [`bursty_delivery_never_runs_dry_once_converged`],
-/// the backlog's probe.
+/// **Bursty delivery keeps the picture moving every frame once converged**,
+/// not only the playout clock. Just after a burst lands playback trails the
+/// newest snapshot by more than a burst, so a buffer that held fewer frames
+/// than that dropped ones playback had yet to reach: playback then sat
+/// behind the oldest frame held and the entity stood still until playback
+/// caught up with it, once per burst. Every frame, playback lies within the
+/// pair it interpolates, and the entity moves on along its path.
+#[test]
+fn bursty_delivery_keeps_the_picture_moving_once_converged() {
+    let mut previous_x = None;
+    let mut frames_watched = 0;
+    run_burst_probe(|client, server_tick, _| {
+        if server_tick <= burst_settle_ticks() {
+            return;
+        }
+        let playback = client.playback_tick().expect("playing");
+        let (prev, current) = client.playback_pair(SectorId::ZERO).expect("a pair held");
+        assert!(
+            prev.tick.get() as f64 <= playback && playback <= current.tick.get() as f64,
+            "tick {server_tick}: playback {playback} outside the pair {} to {}",
+            prev.tick.get(),
+            current.tick.get()
+        );
+        let x = client
+            .interpolate(client.interpolation_alpha())
+            .transforms
+            .iter()
+            .find(|(bits, _)| *bits == ENTITY)
+            .map(|(_, transform)| transform.position.x)
+            .expect("the entity");
+        if let Some(previous_x) = previous_x {
+            assert!(
+                x > previous_x,
+                "tick {server_tick}: the entity stood still at {x} (playback {playback})"
+            );
+        }
+        previous_x = Some(x);
+        frames_watched += 1;
+    });
+    assert_eq!(
+        frames_watched,
+        burst_settle_ticks(),
+        "every converged frame watched"
+    );
+}
+
+/// Drive the backlog's burst probe: a client at [`BURST_TICK_HZ`] fed
+/// snapshots of [`ENTITY`] moving [`STEP`] a tick, held and released
+/// [`BURST`] at a time, for twice [`BURST_SETTLE`]. After each client update
+/// `frame` sees the client, the server tick, and whether a burst landed on
+/// it. Returns the client, with no snapshot having failed to apply.
+fn run_burst_probe(
+    mut frame: impl FnMut(&Client<InMemoryTransport>, u64, bool),
+) -> Client<InMemoryTransport> {
+    let tick = Duration::from_secs(1) / BURST_TICK_HZ;
+    let (transport, mut peer) = InMemoryTransport::pair();
+    let mut client =
+        Client::new_with_compatibility(World::new(), transport, BURST_TICK_HZ, COMPATIBILITY);
+    client.set_inbound_rate_limit_config(InboundRateLimitConfig {
+        messages_per_second: 100_000,
+        bytes_per_second: 100_000_000,
+    });
+    let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+    let mut now = Duration::ZERO;
+    for server_tick in 1..=2 * burst_settle_ticks() {
+        now += tick;
+        let released = server_tick.is_multiple_of(BURST);
+        if released {
+            for sent in server_tick + 1 - BURST..=server_tick {
+                let snapshot = keyframe_snapshot(
+                    sent,
+                    &[(physics(), transform_blob(&[(ENTITY, sent as f64 * STEP)]))],
+                );
+                crate::tests::send_sealed(&mut peer, &mut crypto, &snapshot);
+            }
+        }
+        client.update(now);
+        // The client's acks, which a full channel would refuse.
+        while peer.recv().expect("the link is up").is_some() {}
+        frame(&client, server_tick, released);
+    }
+    assert_eq!(client.processing_error_count(), 0);
+    client
+}
+
+/// The server tick rate of the burst probe ([`run_burst_probe`]), the
+/// backlog's.
 const BURST_TICK_HZ: u32 = 240;
 
 /// Snapshots per burst, and server ticks between bursts.
@@ -413,6 +479,11 @@ const BURST: u64 = 40;
 
 /// How long the burst run takes to settle, and then how long it is watched.
 const BURST_SETTLE: Duration = Duration::from_secs(10);
+
+/// [`BURST_SETTLE`] in server ticks at [`BURST_TICK_HZ`].
+fn burst_settle_ticks() -> u64 {
+    BURST_SETTLE.as_secs() * u64::from(BURST_TICK_HZ)
+}
 
 /// **A gap longer than the longest delay holds the last state, counts one
 /// underrun, and recovers.** Every snapshot is lost for twice
@@ -554,58 +625,55 @@ fn the_same_tick_in_two_sectors_is_one_arrival() {
     assert_eq!(client.playout_stats().snapshot_interval_ticks, 2.0);
 }
 
-/// **The buffer holds at most [`playout::JITTER_BUFFER_CAPACITY`]
-/// snapshots**, dropping the oldest. A fast-ticking server's link stalls with
-/// playback holding at the newest snapshot, then delivers everything it
-/// queued at once: more snapshots than the buffer holds, all ahead of a
-/// playback that will drift — not step — towards them, since the stall was
-/// shorter than [`MAX_PLAYOUT_DELAY`].
+/// **The buffer holds at most its tick rate's capacity, dropping the
+/// oldest, and a tick rate past any a game runs at is held to
+/// [`playout::MAX_JITTER_BUFFER_FRAMES`].** A server floods more snapshots
+/// than the buffer holds, all before playback has moved at all.
+/// At [`BURST_TICK_HZ`] the capacity is the frames across
+/// [`playout::MAX_PLAYBACK_LAG`] plus [`playout::JITTER_BUFFER_SLACK`]; at
+/// the most [`crcbl_core::FrameClock`] accepts, the same arithmetic would
+/// ask for hundreds of millions of frames, and the hard maximum holds it.
 #[test]
 fn the_buffer_is_bounded() {
-    const TICK_HZ: u32 = 240;
-    const QUEUED: u64 = playout::JITTER_BUFFER_CAPACITY as u64 + 8;
-    let tick = Duration::from_secs(1) / TICK_HZ;
-    let (transport, mut peer) = InMemoryTransport::pair();
-    let mut client =
-        Client::new_with_compatibility(World::new(), transport, TICK_HZ, COMPATIBILITY);
-    client.set_inbound_rate_limit_config(InboundRateLimitConfig {
-        messages_per_second: 100_000,
-        bytes_per_second: 100_000_000,
-    });
-    let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
-    let mut now = Duration::ZERO;
-    let update =
-        |client: &mut Client<InMemoryTransport>, peer: &mut InMemoryTransport, now: Duration| {
-            client.update(now);
-            // The client's acks, which a full channel would refuse.
+    const FASTEST_TICK_HZ: u32 = 1_000_000_000;
+    for (tick_hz, capacity) in [
+        (BURST_TICK_HZ, 128),
+        (FASTEST_TICK_HZ, playout::MAX_JITTER_BUFFER_FRAMES),
+    ] {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut client =
+            Client::new_with_compatibility(World::new(), transport, tick_hz, COMPATIBILITY);
+        assert_eq!(client.frame_capacity, capacity, "at {tick_hz} Hz");
+        client.set_inbound_rate_limit_config(InboundRateLimitConfig {
+            messages_per_second: 100_000,
+            bytes_per_second: 100_000_000,
+        });
+        // Every update at a later time would run the client's input clock
+        // through each tick since; at the fastest rate that is millions.
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+        let newest = capacity as u64 + 8;
+        let ticks: Vec<u64> = (1..=newest).collect();
+        // In drains the in-memory link's queues hold, acks and all.
+        for drain in ticks.chunks(IN_MEMORY_CHANNEL_CAPACITY / 2) {
+            for &server_tick in drain {
+                crate::tests::send_sealed(
+                    &mut peer,
+                    &mut crypto,
+                    &keyframe_snapshot(server_tick, &[]),
+                );
+            }
+            client.recv_snapshots().expect("the link is up");
             while peer.recv().expect("the link is up").is_some() {}
-        };
+        }
 
-    let steady = SETTLE_TICKS;
-    for server_tick in 1..=steady {
-        now += tick;
-        crate::tests::send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(server_tick, &[]));
-        update(&mut client, &mut peer, now);
+        assert_eq!(client.processing_error_count(), 0);
+        assert_eq!(client.last_applied_tick(), TickId::from_raw(newest));
+        let buffered = &client.frames[&SectorId::ZERO];
+        assert_eq!(buffered.len(), capacity, "at {tick_hz} Hz");
+        assert_eq!(
+            buffered.front().map(|frame| frame.tick.get()),
+            Some(newest + 1 - capacity as u64),
+            "at {tick_hz} Hz, the oldest went"
+        );
     }
-    for _ in 0..QUEUED {
-        now += tick;
-        update(&mut client, &mut peer, now);
-    }
-    let newest = steady + QUEUED;
-    for server_tick in steady + 1..=newest {
-        crate::tests::send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(server_tick, &[]));
-    }
-    now += tick;
-    update(&mut client, &mut peer, now);
-
-    assert_eq!(client.processing_error_count(), 0);
-    assert_eq!(client.last_applied_tick(), TickId::from_raw(newest));
-    assert_eq!(client.playout_stats().steps, 0, "playback stepped");
-    let buffered = &client.frames[&SectorId::ZERO];
-    assert_eq!(buffered.len(), playout::JITTER_BUFFER_CAPACITY);
-    assert_eq!(
-        buffered.front().map(|frame| frame.tick.get()),
-        Some(newest + 1 - playout::JITTER_BUFFER_CAPACITY as u64),
-        "the oldest went"
-    );
 }

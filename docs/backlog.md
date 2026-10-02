@@ -10690,18 +10690,18 @@ parallel schedule are under _Jobs and threading_.
 
 **Built (2026-10-01): `crcbl_client::playout`.** Decided 2026-10-01 for the long
 term: the client buffers snapshots by server tick (at most
-`JITTER_BUFFER_CAPACITY` per sector) and plays them back at the latest server
-time it estimates from their arrivals less an adaptive playout delay — the
-larger of the measured snapshot interval and the `DELAY_QUANTILE` quantile of a
-decaying histogram of relative arrival delays, plus `PLAYOUT_MARGIN`, between
-`MIN_PLAYOUT_DELAY` and `MAX_PLAYOUT_DELAY` and never under the interval. The
-delay changes gradually: playback runs within `MAX_PLAYOUT_RATE_DEVIATION` of
-the tick rate towards its target and steps only after falling behind by more
-than `MAX_PLAYOUT_DELAY`. A dry buffer holds the last state and counts an
-underrun; nothing extrapolates. `Client::playout_stats` reports the delay, the
-relative delay it covers, the RFC 3550 §6.4.1 jitter (measured, no longer
-driving the delay), interval, underruns and steps. The module docs give the
-estimator in full.
+`playout::jitter_buffer_capacity` per sector) and plays them back at the latest
+server time it estimates from their arrivals less an adaptive playout delay —
+the larger of the measured snapshot interval and the `DELAY_QUANTILE` quantile
+of a decaying histogram of relative arrival delays, plus `PLAYOUT_MARGIN`,
+between `MIN_PLAYOUT_DELAY` and `MAX_PLAYOUT_DELAY` and never under the
+interval. The delay changes gradually: playback runs within
+`MAX_PLAYOUT_RATE_DEVIATION` of the tick rate towards its target and steps only
+after falling behind by more than `MAX_PLAYOUT_DELAY`. A dry buffer holds the
+last state and counts an underrun; nothing extrapolates. `Client::playout_stats`
+reports the delay, the relative delay it covers, the RFC 3550 §6.4.1 jitter
+(measured, no longer driving the delay), interval, underruns and steps. The
+module docs give the estimator in full.
 
 **Decided 2026-10-02 for the long term: the delay comes from a quantile of a
 decaying histogram, not from `I + 4J`.** RFC 3550's `J` averages consecutive
@@ -10718,8 +10718,8 @@ no delay would have passed the newest snapshot before it, `O` being the smoothed
 offset playback is anchored to. The quantile bucket's lower edge plus
 `PLAYOUT_MARGIN` (never narrower than a bucket) covers it, so a steady stream
 keeps exactly `I + PLAYOUT_MARGIN`. The interval is now measured in tick order
-over the last `JITTER_BUFFER_CAPACITY` ticks received, overtaken ones included,
-so reordering no longer reads as a slower cadence. Tests, each shown red by a
+over the last `INTERVAL_TICK_WINDOW` ticks received, overtaken ones included, so
+reordering no longer reads as a slower cadence. Tests, each shown red by a
 mutation: `playout::histogram::tests` (bucket placement, the forget ramp,
 fading, the quantile walk, the hold-then-drop count), `playout::tests` (the
 worst of an interval sampled, the delay's max and clamp, a stopped delay holding
@@ -10755,6 +10755,13 @@ and `playout_tests` (bursts, reordering not inflating the interval).
   capacity), plus
   `host::rate_tests::a_client_interpolates_smoothly_at_the_slowest_interval`.
 
+- **Telling playback what the buffer holds, instead of sizing the buffer**
+  (decided 2026-10-02). Clamping playback to the oldest frame held would keep
+  the picture moving after an eviction, but only by jumping it forward over the
+  frames that went — the stall becomes a skip. Sizing the buffer from the tick
+  rate to cover everything playback can reach without stepping drops nothing it
+  still needs, bounded by `MAX_JITTER_BUFFER_FRAMES` for memory.
+
 **Left, and what each would take:**
 
 - **Extrapolation belongs to prediction, which is hooks only** (the notes:
@@ -10768,21 +10775,29 @@ and `playout_tests` (bursts, reordering not inflating the interval).
   predicted; nothing needs it until prediction lands.
 - **The constants were chosen, not tuned.** `MIN_PLAYOUT_DELAY`,
   `MAX_PLAYOUT_DELAY`, `PLAYOUT_MARGIN`, `PLAYOUT_CORRECTION_TIME`,
-  `MAX_PLAYOUT_RATE_DEVIATION`, `LOSS_SPACING_CAP`, `JITTER_BUFFER_CAPACITY`,
-  `DELAY_BUCKET_WIDTH` and `DELAY_RESAMPLE_INTERVAL` are unmeasured on a real
-  link, and the NetEq defaults (`DELAY_QUANTILE`, `DELAY_FORGET_FACTOR`,
+  `MAX_PLAYOUT_RATE_DEVIATION`, `LOSS_SPACING_CAP`, `JITTER_BUFFER_SLACK`,
+  `MAX_JITTER_BUFFER_FRAMES`, `INTERVAL_TICK_WINDOW`, `DELAY_BUCKET_WIDTH` and
+  `DELAY_RESAMPLE_INTERVAL` are unmeasured on a real link, and the NetEq
+  defaults (`DELAY_QUANTILE`, `DELAY_FORGET_FACTOR`,
   `DELAY_START_FORGET_WEIGHT`) were tuned for audio, not snapshots; every test
   drives in-memory links, some through `crcbl_net::ConditionSimulator` on a
   `ManualClock`.
-- **The buffer is too small for the burst probe.** At 240 Hz the probe settles
-  at a 120 ms delay, and just after each burst playback trails the newest by 40
-  ticks, more than the `JITTER_BUFFER_CAPACITY` frames a sector keeps; the
-  oldest go, playback sits behind the oldest frame held, and the interpolated
-  entity stands still until playback reaches it. The playout clock does not run
-  dry, but the picture stalls once per burst. Not fixed: the capacity would have
-  to cover `MAX_PLAYOUT_DELAY` at the fastest tick rate, or playback be told
-  what the buffer holds. Seen by reasoning about `playback_index`, not observed
-  in a test.
+- **Past `MAX_JITTER_BUFFER_FRAMES` the buffer can still drop frames ahead of
+  playback.** Each sector's capacity is `playout::jitter_buffer_capacity`: the
+  ticks across `MAX_PLAYBACK_LAG` (twice `MAX_PLAYOUT_DELAY`) plus
+  `JITTER_BUFFER_SLACK`, held to `MAX_JITTER_BUFFER_FRAMES`. A tick rate whose
+  lag fills the hard maximum gets a buffer shorter than playback's reach, and
+  the oldest frames go there as they did everywhere before: the picture stalls
+  until playback reaches the oldest frame held. Worst-case memory is
+  `MAX_JITTER_BUFFER_FRAMES` frames per subscribed sector, each one transform
+  per replicated entity in it; nothing measures that against a real scene.
+- **The second `MAX_PLAYOUT_DELAY` of `MAX_PLAYBACK_LAG` is reasoned, not
+  observed.** It covers playback falling behind its target by up to the step
+  threshold, as when the link's latency drops and the offset estimate moves
+  ahead faster than playback's bounded rate follows. The burst probe needs far
+  less (`playout_tests::bursty_delivery_keeps_the_picture_moving_once_converged`
+  went red at the old 32 frames, and passes at a single `MAX_PLAYOUT_DELAY`
+  too); no test drives a latency drop with the delay at its cap.
 - **A gap at the top reads as a wider interval until it fills.** Under
   reordering the newest snapshot has often overtaken others still in flight;
   until they arrive the interval reads the gap (capped at `LOSS_SPACING_CAP`),
