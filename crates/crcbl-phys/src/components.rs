@@ -508,9 +508,11 @@ impl Default for Transform {
 /// physics system is responsible for syncing colliders into the world.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColliderComponent {
-    /// A sphere collider.
+    /// A sphere collider, its offset turned with its body in the contact
+    /// pipeline and the query world ([`crate::PhysicsSystem::world`]) alike.
     Sphere {
-        /// Offset from the entity's [`Transform::position`] in local space.
+        /// Offset from the entity's [`Transform::position`] in the body's
+        /// frame.
         offset: DVec3,
         /// Radius in metres.
         radius: f64,
@@ -530,10 +532,12 @@ pub enum ColliderComponent {
         is_trigger: bool,
     },
     /// A capsule collider along the body's `Y`: the contact pipeline turns it
-    /// with the body, while the query world keeps it upright along the world's
-    /// `Y` and its offset unturned, whatever the rotation.
+    /// with the body, while the query world turns its offset with the body
+    /// but keeps the capsule itself upright along the world's `Y`, whatever
+    /// the rotation.
     Capsule {
-        /// Offset from the entity's [`Transform::position`] in local space.
+        /// Offset from the entity's [`Transform::position`] in the body's
+        /// frame.
         offset: DVec3,
         /// Radius in metres.
         radius: f64,

@@ -3512,3 +3512,7 @@ mod candidate_sweep_tests;
 #[cfg(test)]
 #[path = "world/query_digest_tests.rs"]
 mod query_digest_tests;
+
+#[cfg(test)]
+#[path = "world/turned_body_tests.rs"]
+mod turned_body_tests;

@@ -4535,6 +4535,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A turned body's sphere and capsule offsets turn with it in
+  `crcbl_phys::PhysicsSystem`'s query world**, as its box's offset already did
+  and as the contact pipeline places all three: a sphere offset up a body turned
+  on its side is queried beside the body, not above it. A body whose rotation is
+  the identity, or a collider with no offset, is placed exactly as before, to
+  the bit.
+
 - **`crcbl_client::Client` interpolates between the snapshots either side of its
   playback position, not the newest two.** Playback trails the newest snapshot
   by the playout delay (see Added), so the alpha `Client::update` and
