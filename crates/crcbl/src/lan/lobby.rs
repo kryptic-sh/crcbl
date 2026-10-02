@@ -30,7 +30,7 @@
 //! with the layout applied, and Backspace through
 //! [`HostedGame::key_event`](crate::engine::HostedGame::key_event).
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use crate::core::input::KeyCode;
 use crate::net::ProtocolCompatibility;
@@ -113,6 +113,9 @@ pub enum PickRefused {
     HostGone,
     /// What was typed is not an `IP:PORT`; this is what was typed.
     NotAnAddress(String),
+    /// What was typed is an `IP:PORT` no host can be at: port 0, or an
+    /// unspecified, broadcast or multicast address.
+    NotAHost(SocketAddr),
 }
 
 impl std::fmt::Display for PickRefused {
@@ -120,6 +123,7 @@ impl std::fmt::Display for PickRefused {
         match self {
             Self::HostGone => write!(f, "that host is gone"),
             Self::NotAnAddress(typed) => write!(f, "not an IP:PORT: {typed:?}"),
+            Self::NotAHost(addr) => write!(f, "no host can be at {addr}"),
         }
     }
 }
@@ -137,6 +141,22 @@ pub enum LobbyNotice {
     JoinFailed(String),
     /// The session a join from here started has ended, and how.
     SessionEnded(String),
+}
+
+/// The most characters the connect address takes: the longest an `IP:PORT`
+/// can be written, an IPv6 address with an embedded IPv4 one, a scope id and
+/// a five-digit port. Text past it is dropped, so what a menu draws stays
+/// one row's worth.
+pub const MAX_ADDRESS_CHARS: usize = 64;
+
+/// Whether a host could be listening at `addr`: a port to send to, and one
+/// machine's address rather than none or many.
+fn can_be_a_host(addr: SocketAddr) -> bool {
+    let many = match addr.ip() {
+        IpAddr::V4(ip) => ip.is_broadcast() || ip.is_multicast(),
+        IpAddr::V6(ip) => ip.is_multicast(),
+    };
+    addr.port() != 0 && !addr.ip().is_unspecified() && !many
 }
 
 /// What a host's row and line are drawn from: everything [`HostEntry`] holds
@@ -262,9 +282,16 @@ impl Lobby {
         &self.passed_over
     }
 
-    /// Text typed while the lobby is up: it goes on the end of the address.
+    /// Text typed while the lobby is up: it goes on the end of the address,
+    /// up to [`MAX_ADDRESS_CHARS`], with control characters dropped.
     pub fn text(&mut self, text: &str) {
-        if self.address.insert(text) {
+        let room = MAX_ADDRESS_CHARS.saturating_sub(self.address.len());
+        let text: String = text
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(room)
+            .collect();
+        if self.address.insert(&text) {
             self.typed = true;
         }
     }
@@ -315,7 +342,7 @@ impl Lobby {
     ///
     /// [`PickRefused::HostGone`] for a listed row that is not there, and
     /// [`PickRefused::NotAnAddress`] for a connect whose text is not an
-    /// `IP:PORT`.
+    /// `IP:PORT`, and [`PickRefused::NotAHost`] for one no host can be at.
     pub fn pick(&mut self, pick: LobbyPick) -> Result<LobbyChoice, PickRefused> {
         let choice = match pick {
             LobbyPick::Host => Ok(LobbyChoice::Host),
@@ -324,7 +351,8 @@ impl Lobby {
                 None => Err(PickRefused::HostGone),
             },
             LobbyPick::Connect => match self.address.text().trim().parse::<SocketAddr>() {
-                Ok(addr) => Ok(LobbyChoice::Join(addr)),
+                Ok(addr) if can_be_a_host(addr) => Ok(LobbyChoice::Join(addr)),
+                Ok(addr) => Err(PickRefused::NotAHost(addr)),
                 Err(_) => Err(PickRefused::NotAnAddress(self.address.text().to_string())),
             },
         };

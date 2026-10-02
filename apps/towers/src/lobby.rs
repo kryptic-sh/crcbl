@@ -323,6 +323,7 @@ fn notice_line(notice: &LobbyNotice) -> String {
         LobbyNotice::Refused(PickRefused::NotAnAddress(typed)) => {
             format!("NOT AN IP:PORT: {typed:?}")
         }
+        LobbyNotice::Refused(PickRefused::NotAHost(addr)) => format!("NO HOST AT {addr}"),
         LobbyNotice::CannotStart(why) => why.clone(),
         LobbyNotice::JoinFailed(why) => format!("JOIN FAILED: {why}"),
         LobbyNotice::SessionEnded(how) => format!("SESSION ENDED: {how}"),

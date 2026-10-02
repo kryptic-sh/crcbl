@@ -553,16 +553,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `ProtocolCompatibility` and player count); keeps the direct-connect address
   typed through `text` and Backspace through `key`; answers a `LobbyPick`
   (`Host`, `Listed(row)`, `Connect`) with a `LobbyChoice` (`Host` or
-  `Join(addr)`) or a `PickRefused` (`HostGone`, `NotAnAddress(typed)`); and
-  holds the `LobbyNotice` a player is sent back to it with — `join_failed`,
-  `session_ended`, `start_failed` — beside the join under way (`joining`). It
-  draws nothing and starts nothing: the game builds its menu from it, in its own
-  words, and starts what a choice asks for. `take_changed` and `take_typed` say
-  when that menu needs rebuilding or the connect row selecting. Towers' lobby is
-  built on it, unchanged to look at; `crcbl_towers::lobby::Unjoinable` is now a
-  re-export of it. `crcbl::lan::how_it_ended(ended, client)` is the words for
-  how a session ended (the host left, shut down or removed this player, or the
-  link ended), moved from towers.
+  `Join(addr)`) or a `PickRefused` (`HostGone`, `NotAnAddress(typed)`, or
+  `NotAHost(addr)` for port 0 or an unspecified, broadcast or multicast address
+  — towers says `NO HOST AT …`; the field takes at most `MAX_ADDRESS_CHARS`, the
+  longest an `IP:PORT` can be written); and holds the `LobbyNotice` a player is
+  sent back to it with — `join_failed`, `session_ended`, `start_failed` — beside
+  the join under way (`joining`). It draws nothing and starts nothing: the game
+  builds its menu from it, in its own words, and starts what a choice asks for.
+  `take_changed` and `take_typed` say when that menu needs rebuilding or the
+  connect row selecting. Towers' lobby is built on it, unchanged to look at;
+  `crcbl_towers::lobby::Unjoinable` is now a re-export of it.
+  `crcbl::lan::how_it_ended(ended, client)` is the words for how a session ended
+  (the host left, shut down or removed this player, or the link ended), moved
+  from towers.
 
 - **Play controls: a game's actions and status for a tool that plays it.**
   `crcbl::registry::Registry::play_controls(system, PlayControls)` registers,

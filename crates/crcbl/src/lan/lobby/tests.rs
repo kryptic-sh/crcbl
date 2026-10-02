@@ -331,3 +331,55 @@ fn a_lobby_that_is_not_browsing_says_why_and_still_picks() {
         "a browsing lobby has no reason"
     );
 }
+
+/// **An address no host can be at is refused by name** — port 0, nobody's
+/// address, everybody's, a group's — and the longest `IP:PORT` there is
+/// fits the field exactly, while typing past it is dropped.
+#[test]
+fn an_address_no_host_can_be_at_is_refused_and_the_field_holds_the_longest() {
+    for typed in [
+        "127.0.0.1:0",
+        "0.0.0.0:5000",
+        "[::]:5000",
+        "255.255.255.255:5000",
+        "224.0.0.1:5000",
+        "[ff02::1]:5000",
+    ] {
+        let mut lobby = alone();
+        lobby.text(typed);
+        let addr: SocketAddr = typed.parse().expect("an IP:PORT");
+        assert_eq!(
+            lobby.pick(LobbyPick::Connect),
+            Err(PickRefused::NotAHost(addr)),
+            "{typed}"
+        );
+        assert_eq!(
+            lobby.notice(),
+            Some(&LobbyNotice::Refused(PickRefused::NotAHost(addr)))
+        );
+    }
+
+    let longest = "[fe80:ffff:ffff:ffff:ffff:ffff:255.255.255.255%4294967295]:65535";
+    assert_eq!(longest.chars().count(), MAX_ADDRESS_CHARS);
+    let mut lobby = alone();
+    lobby.text(longest);
+    lobby.text("9");
+    assert_eq!(lobby.address(), longest, "typing past the field was kept");
+    assert_eq!(
+        lobby.pick(LobbyPick::Connect),
+        Ok(LobbyChoice::Join(
+            longest.parse().expect("the longest parses")
+        ))
+    );
+
+    // A control character is dropped before the room is counted, so it
+    // takes none of it.
+    let mut lobby = alone();
+    lobby.text(&longest[..MAX_ADDRESS_CHARS - 1]);
+    lobby.text("\u{7}5");
+    assert_eq!(
+        lobby.address(),
+        longest,
+        "a control character took the room"
+    );
+}
