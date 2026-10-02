@@ -1369,14 +1369,14 @@ controls are interchangeable binding sources behind one layer. Built from it, in
 `GAMEPLAY_CONTEXT` with the reserved `ui` context; the tap, hold, double-tap and
 repeat patterns (`patterns.rs`, `repeat.rs`), with `ActionMap::set_emits` making
 a pattern press a named action (`emit.rs`); the binding sketch's RON asset
-(`binding_asset.rs`, `ActionMap::from_ron` and `to_ron`);
-`ActionMap::last_device`; the in-memory `ActionMap::rebind`; the `GamepadEvent`
-seam (`gamepad.rs`) with the evdev, XInput, GameController and Web Gamepad
-backends; and `ActionMap::virtual_stick`, driven by `crcbl_ui::touch`'s
-`TouchStick` in `apps/horde`. The rest is in `docs/backlog.md` under _Input:
-patterns, RON bindings, rebind persistence and every gamepad backend_, _Input:
-no rebind screen, no input inspector, no `crcbl input` CLI_ and _Input thread,
-stacked `InputTickState`, last-N ring_.
+(`binding_asset.rs`, `ActionMap::from_ron` and `to_ron`), which `apps/horde`
+loads its controls from; `ActionMap::last_device`; the in-memory
+`ActionMap::rebind`; the `GamepadEvent` seam (`gamepad.rs`) with the evdev,
+XInput, GameController and Web Gamepad backends; and `ActionMap::virtual_stick`,
+driven by `crcbl_ui::touch`'s `TouchStick` in `apps/horde`. The rest is in
+`docs/backlog.md` under _Input: patterns, RON bindings, rebind persistence and
+every gamepad backend_, _Input: no rebind screen, no input inspector, no
+`crcbl input` CLI_ and _Input thread, stacked `InputTickState`, last-N ring_.
 
 Code cites the plan by its layers, its pattern evaluator, its binding sketch and
 its quirk-table scoping. Those resolve here:

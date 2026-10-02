@@ -1,0 +1,28 @@
+[
+    (
+        action: "move",
+        kind: Axis2,
+        keyboard: ["Wasd:KeyW,KeyS,KeyA,KeyD", "Wasd:ArrowUp,ArrowDown,ArrowLeft,ArrowRight"],
+        touch: ["Virtual:stick_move"],
+    ),
+    (
+        action: "restart",
+        kind: Button,
+        keyboard: ["KeyR", "Space"],
+    ),
+    (
+        action: "choose1",
+        kind: Button,
+        keyboard: ["Digit1"],
+    ),
+    (
+        action: "choose2",
+        kind: Button,
+        keyboard: ["Digit2"],
+    ),
+    (
+        action: "choose3",
+        kind: Button,
+        keyboard: ["Digit3"],
+    ),
+]

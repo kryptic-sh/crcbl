@@ -558,7 +558,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   time that is not whole milliseconds, bindings with devices interleaved —
   rather than writing a file that reads back differently. Rebinds stay a diff
   over the asset's defaults through `overrides`/`apply_overrides`.
-  `Binding::device()` names the `Device` each binding listens to.
+  `Binding::device()` names the `Device` each binding listens to. `apps/horde`
+  now loads its controls from `assets/bindings.ron`.
 - **A pattern can press a named action when it fires.**
   `ActionMap::set_emits(source, Pattern::Hold, Some("jump_charge"))` makes the
   tap, hold or double tap on `source` press the `Button` action `jump_charge` on

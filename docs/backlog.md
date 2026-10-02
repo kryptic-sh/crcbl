@@ -12533,12 +12533,13 @@ deleted 19-input plan left behind_.
   the lift re-checks on every pad event once something does.
 - **RON binding assets: what the 2026-10-03 slice left out.**
   `ActionMap::from_ron`/`to_ron` (`crates/crcbl-input/src/binding_asset.rs`)
-  read and write the schema. **Decided 2026-10-03, long term:** an asset's
-  bindings are written in `binding_text`'s spelling (`"Alt+Mouse:Right"`), never
-  a second serde shape for `Binding`, so a file, a rebind override and the asset
-  cannot drift; the device lists flatten in `binding_asset::DEVICE_LISTS` order
-  and a binding in another device's list is refused by name; every pattern in
-  the file emits a named `Button` action the same file declares. Not done:
+  read and write the schema, and `apps/horde/assets/bindings.ron` is the one
+  sample on it. **Decided 2026-10-03, long term:** an asset's bindings are
+  written in `binding_text`'s spelling (`"Alt+Mouse:Right"`), never a second
+  serde shape for `Binding`, so a file, a rebind override and the asset cannot
+  drift; the device lists flatten in `binding_asset::DEVICE_LISTS` order and a
+  binding in another device's list is refused by name; every pattern in the file
+  emits a named `Button` action the same file declares. Not done:
   - **A repeat schedule has no asset form**, so `to_ron` refuses a map with
     `set_repeat` on it (`AssetWriteError::Repeat`) — including any map the
     reserved `ui` context was declared into. Adding
@@ -12546,12 +12547,13 @@ deleted 19-input plan left behind_.
     every-pattern-emits rule; which way to go is open.
   - **`from_ron` builds a fresh map**; there is no loading an asset into a map
     that already holds actions (the engine's `ui` ones), and no
-    `--bindings <FILE>` door in any sample.
+    `--bindings <FILE>` door in any sample. Horde's file is `include_str!`ed.
   - **Patterns declared in code without an emitted action** are not writable
     (`AssetWriteError::NoEmit`), nor are times that are not whole milliseconds
     or bindings declared with devices interleaved — each refused rather than
     written as a file that reads back differently.
-  - **No sample is on it yet**; every sample still declares in code.
+  - **Only horde is on it**, and no sample binds a pad or a pattern in its
+    asset; the other samples still declare in code.
   - Refusals of a whole record (a duplicate name, a wrong list, an unknown
     emitted action) point at the end of the record, not at the offending word:
     serde gives a visitor no position, and the message names the word instead.

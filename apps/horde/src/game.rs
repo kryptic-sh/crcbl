@@ -108,7 +108,7 @@ use std::time::Duration;
 
 use crcbl::core::input::KeyCode;
 use crcbl::ecs::{ClientInputs, Entity, GameModule, World};
-use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
+use crcbl::input::ActionMap;
 use crcbl::jobs::{Inline, Pool, Spawn, default_spawner};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
@@ -1372,6 +1372,9 @@ pub fn push_out_of_props(position: DVec3, radius: f64, props: &[PropView]) -> DV
 /// [`Binding::Virtual`] beside it. Nothing downstream can tell them apart, which
 /// is the whole of the input design's claim (`docs/notes/simulation.md`, _What
 /// the deleted 19-input plan left behind_).
+///
+/// [`Binding::Wasd`]: crcbl::input::Binding::Wasd
+/// [`Binding::Virtual`]: crcbl::input::Binding::Virtual
 const ACTION_MOVE: &str = "move";
 
 /// The id the on-screen stick reports under — the input plan's binding sketch
@@ -1379,7 +1382,8 @@ const ACTION_MOVE: &str = "move";
 ///
 /// Private on purpose: `crate::app` owns the widget and hands its deflection to
 /// [`Game::stick_moved`], so nothing outside this file has to know that the
-/// binding layer calls it this.
+/// binding layer calls it this. [`BINDINGS_RON`] spells it too, as
+/// `Virtual:stick_move`, and its test holds the two to the same name.
 const STICK_MOVE: &str = "stick_move";
 
 /// How far the stick has to be pushed before it asks for anything, as a
@@ -1415,6 +1419,33 @@ const ACTION_RESTART: &str = "restart";
 /// makes for its `FLY` button, and it matters more here: which upgrade a run
 /// took is simulation state a seeded script has to be able to replay.
 const ACTION_CHOOSE: [&str; UPGRADE_CHOICES] = ["choose1", "choose2", "choose3"];
+
+/// `assets/bindings.ron`, as it is committed: every action above with its
+/// default bindings, in the binding asset's schema (`crcbl::input`'s
+/// `binding_asset` module).
+///
+/// **Three bindings, three devices, one action** for `move`: two keyboard
+/// composites because this game has always taken WASD *and* the arrows, and one
+/// on-screen stick, [`STICK_MOVE`], because a phone has neither. They sum
+/// inside the unit disc, so a player pressing a key while pushing the stick
+/// asks for one direction rather than for twice the speed.
+///
+/// `include_str!`ed for the reason `apps/asteroids/src/balance.rs` gives about
+/// its table: a browser has no filesystem, and a game that could fail to find
+/// its own controls is one whose behaviour depends on the directory it was run
+/// from. `the_committed_bindings_are_the_ones_the_code_declared` holds the file
+/// to the declarations it replaced.
+const BINDINGS_RON: &str = include_str!("../assets/bindings.ron");
+
+/// The map [`BINDINGS_RON`] declares.
+///
+/// # Panics
+///
+/// If the committed file is not a binding asset, which its test rules out.
+fn built_in_actions() -> ActionMap {
+    ActionMap::from_ron(BINDINGS_RON)
+        .unwrap_or_else(|error| panic!("apps/horde/assets/bindings.ron: {error}"))
+}
 
 /// One tick of player intent.
 ///
@@ -3381,43 +3412,7 @@ impl Game {
 
         let player_entity = world.spawn();
 
-        let mut action_map = ActionMap::new();
-        // **Three bindings, three devices, one action.** Two keyboard
-        // composites because this game has always taken WASD *and* the arrows,
-        // and one on-screen stick because a phone has neither. They sum inside
-        // the unit disc, so a player pressing a key while pushing the stick asks
-        // for one direction rather than for twice the speed.
-        action_map.declare(ActionDecl {
-            name: ACTION_MOVE.into(),
-            kind: ActionKind::Axis2,
-            bindings: vec![
-                Binding::Wasd {
-                    up: KeyCode::KeyW,
-                    down: KeyCode::KeyS,
-                    left: KeyCode::KeyA,
-                    right: KeyCode::KeyD,
-                },
-                Binding::Wasd {
-                    up: KeyCode::ArrowUp,
-                    down: KeyCode::ArrowDown,
-                    left: KeyCode::ArrowLeft,
-                    right: KeyCode::ArrowRight,
-                },
-                Binding::Virtual(STICK_MOVE.into()),
-            ],
-        });
-        for (name, keys) in [
-            (ACTION_RESTART, vec![KeyCode::KeyR, KeyCode::Space]),
-            (ACTION_CHOOSE[0], vec![KeyCode::Digit1]),
-            (ACTION_CHOOSE[1], vec![KeyCode::Digit2]),
-            (ACTION_CHOOSE[2], vec![KeyCode::Digit3]),
-        ] {
-            action_map.declare(ActionDecl {
-                name: name.into(),
-                kind: ActionKind::Button,
-                bindings: keys.into_iter().map(Binding::Key).collect(),
-            });
-        }
+        let action_map = built_in_actions();
 
         let shared = Arc::new(Mutex::new(GameLogic {
             player: player_entity,
