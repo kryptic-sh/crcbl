@@ -48,9 +48,9 @@
 //! drive them across `requestAnimationFrame` frames.
 //!
 //! The blocking entry points — `OffscreenSetup::open`,
-//! `OffscreenSetup::open_with`, `OffscreenSetup::open_forward` and
-//! `OffscreenSetup::draw_and_readback` — remain as a **native-only**
-//! convenience: each drives its poll core to completion with
+//! `OffscreenSetup::open_with`, `OffscreenSetup::open_forward`,
+//! `OffscreenSetup::probe` and `OffscreenSetup::draw_and_readback` — remain as
+//! a **native-only** convenience: each drives its poll core to completion with
 //! [`std::thread::yield_now`] (never a sleep) and is
 //! `#[cfg(not(target_arch = "wasm32"))]`, because a busy loop on the browser's
 //! one thread would hang it. `crcbl screenshot` and every headless test use
@@ -6389,16 +6389,25 @@ enum OpenPhase {
     },
     /// The instance is open and the surface, adapter and format are decided;
     /// polling [`PendingDevice`] for the device.
-    Device {
-        instance: Box<dyn Instance>,
-        surface: SurfaceHandle,
-        adapter: crate::hal::AdapterInfo,
-        format: Format,
-        pending: Box<dyn PendingDevice>,
-    },
+    Device(DeviceOpening),
     /// The setup has been handed over (or an open failed). A further poll is a
     /// caller bug.
     Finished,
+}
+
+/// What [`OffscreenSetup::start_device`] decided the moment the instance was
+/// open, and the device request it started on that adapter.
+///
+/// A struct rather than [`OpenPhase::Device`]'s fields because two paths wait on
+/// it: [`PendingOffscreen::poll`] goes on to build a ring and a scene, and
+/// `OffscreenSetup::probe` reads the device and gives it back. Both take the
+/// same surface, adapter pin and feature request from the one function.
+struct DeviceOpening {
+    instance: Box<dyn Instance>,
+    surface: SurfaceHandle,
+    adapter: crate::hal::AdapterInfo,
+    format: Format,
+    pending: Box<dyn PendingDevice>,
 }
 
 /// An [`OffscreenSetup`] open in flight — the non-blocking half of
@@ -6443,25 +6452,15 @@ impl PendingOffscreen<'_> {
                     // call: the surface and adapter work between the two is
                     // synchronous, so parking here would waste a frame.
                     Some(instance) => {
-                        self.phase =
-                            OffscreenSetup::start_device(instance, self.optional_features)?;
+                        self.phase = OpenPhase::Device(OffscreenSetup::start_device(
+                            instance,
+                            self.optional_features,
+                        )?);
                     }
                 },
-                OpenPhase::Device {
-                    instance,
-                    surface,
-                    adapter,
-                    format,
-                    mut pending,
-                } => match pending.poll()? {
+                OpenPhase::Device(mut opening) => match opening.pending.poll()? {
                     DeviceRequestState::Pending => {
-                        self.phase = OpenPhase::Device {
-                            instance,
-                            surface,
-                            adapter,
-                            format,
-                            pending,
-                        };
+                        self.phase = OpenPhase::Device(opening);
                         return Ok(None);
                     }
                     DeviceRequestState::Ready(device) => {
@@ -6471,10 +6470,10 @@ impl PendingOffscreen<'_> {
                             .expect("the scene builder is present until the setup is handed over");
                         let setup = OffscreenSetup::finish_open(
                             build,
-                            instance,
-                            surface,
-                            adapter,
-                            format,
+                            opening.instance,
+                            opening.surface,
+                            opening.adapter,
+                            opening.format,
                             (self.width, self.height),
                             device,
                         )?;
@@ -6872,7 +6871,7 @@ impl OffscreenSetup {
             height,
             optional_features,
             build: Some(builtin_scene_build(scene, None)?),
-            phase: Self::start_device(instance, optional_features)?,
+            phase: OpenPhase::Device(Self::start_device(instance, optional_features)?),
         };
         Self::block_open(pending)
     }
@@ -6914,12 +6913,12 @@ impl OffscreenSetup {
     ///
     /// Everything here answers *now* — a foreign surface, a missing adapter, an
     /// unusable format all fail from this call. Only the device itself waits on a
-    /// driver, and that is what [`PendingOffscreen::poll`] drives from the
-    /// returned [`OpenPhase::Device`].
+    /// driver, and that is what [`PendingOffscreen::poll`] (and
+    /// `Self::probe`) drives from the returned [`DeviceOpening`].
     fn start_device(
         instance: Box<dyn Instance>,
         optional_features: Features,
-    ) -> Result<OpenPhase, OffscreenError> {
+    ) -> Result<DeviceOpening, OffscreenError> {
         let target = SurfaceTarget::Offscreen;
         // SAFETY: `Offscreen` names no platform object, so nothing can dangle.
         let surface = unsafe {
@@ -6952,7 +6951,7 @@ impl OffscreenSetup {
             })
             .map_err(OffscreenError::Hal)?;
 
-        Ok(OpenPhase::Device {
+        Ok(DeviceOpening {
             instance,
             surface,
             // Cloned out of `adapters`, which is dropped at the end of this call;
@@ -7032,6 +7031,77 @@ impl OffscreenSetup {
             }
             std::thread::yield_now();
         }
+    }
+
+    /// Opens the device `Self::open` would draw on and reports what it is,
+    /// without building a ring or a scene.
+    ///
+    /// For a caller that has to know what the device can do before it chooses
+    /// how to open a setup — `tests/render_e2e.rs` asks which geometry tails
+    /// exist before it opens a scene on each — and that used to build a whole
+    /// scene and throw it away to find out. The backend, the adapter pin, the
+    /// surface the device is made compatible with and the request for
+    /// [`Self::OPTIONAL_FEATURES`] all come from the `start_device` every open
+    /// goes through, so the answer is what [`Self::backend`], [`Self::adapter`]
+    /// and [`Self::caps`] would have said of a setup opened instead.
+    ///
+    /// The device is given back before this returns, and asked on the way out
+    /// what [`Self::finish`] asks a setup's: a capability read off a device that
+    /// was lost, or that the validation layer complained about, is not one to
+    /// choose a path by.
+    ///
+    /// **Blocks**, like `Self::open`, so `wasm32` has no `probe`.
+    ///
+    /// # Errors
+    ///
+    /// What `Self::open` reports before a scene exists: no backend, an adapter
+    /// pin that missed, an unusable surface or a refused device. Then, from the
+    /// teardown, what [`Self::finish`] reports.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn probe() -> Result<DeviceProbe, OffscreenError> {
+        let mut pending = crate::backend::request_open()?;
+        let instance = loop {
+            if let Some(instance) = pending.poll()? {
+                break instance;
+            }
+            std::thread::yield_now();
+        };
+        Self::probe_on(instance)
+    }
+
+    /// [`Self::probe`] on an instance that has already been opened — split, as
+    /// the test-only `Self::open_on` is, so the tests below can hold it to
+    /// `crcbl_hal::null`'s recorder: nothing left alive, and the same caps an
+    /// opened setup reports.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn probe_on(instance: Box<dyn Instance>) -> Result<DeviceProbe, OffscreenError> {
+        let DeviceOpening {
+            instance,
+            surface,
+            adapter,
+            format: _,
+            mut pending,
+        } = Self::start_device(instance, Self::OPTIONAL_FEATURES)?;
+        let device = loop {
+            match pending.poll()? {
+                DeviceRequestState::Pending => std::thread::yield_now(),
+                DeviceRequestState::Ready(device) => break device,
+            }
+        };
+        drop(pending);
+        let probe = DeviceProbe {
+            backend: device.backend(),
+            adapter,
+            caps: device.caps(),
+        };
+        // `Self::finish`'s order, less the frame's objects this never made.
+        let idle = device.wait_idle();
+        instance.destroy_surface(surface);
+        let reported = device.take_error();
+        drop(device);
+        drop(instance);
+        teardown_verdict(idle, reported)?;
+        Ok(probe)
     }
 
     /// The surface format the readback bytes are in.
@@ -7584,14 +7654,36 @@ impl OffscreenSetup {
         let reported = self.device.take_error();
         drop(self.device);
         drop(self.instance);
-        // A device lost outranks it: it explains every other symptom, including
-        // any message the layer produced on the way down.
-        idle.map_err(OffscreenError::Hal)?;
-        match reported {
-            Some(message) => Err(OffscreenError::DeviceReported(message)),
-            None => Ok(()),
-        }
+        teardown_verdict(idle, reported)
     }
+}
+
+/// What a device given back said on its way out: whether it reached idle, then
+/// anything it reported out of band — the verdict [`OffscreenSetup::finish`]
+/// and `OffscreenSetup::probe` both return.
+fn teardown_verdict(
+    idle: Result<(), crate::hal::HalError>,
+    reported: Option<String>,
+) -> Result<(), OffscreenError> {
+    // A device lost outranks it: it explains every other symptom, including
+    // any message the layer produced on the way down.
+    idle.map_err(OffscreenError::Hal)?;
+    match reported {
+        Some(message) => Err(OffscreenError::DeviceReported(message)),
+        None => Ok(()),
+    }
+}
+
+/// What `OffscreenSetup::probe` found: the device an [`OffscreenSetup`] would
+/// have drawn on, read without building one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceProbe {
+    /// What [`OffscreenSetup::backend`] would have answered.
+    pub backend: crate::hal::BackendKind,
+    /// What [`OffscreenSetup::adapter`] would have answered.
+    pub adapter: crate::hal::AdapterInfo,
+    /// What [`OffscreenSetup::caps`] would have answered.
+    pub caps: crate::hal::DeviceCaps,
 }
 
 /// A recorded, submitted frame whose readback copy has not yet landed — the
@@ -8281,8 +8373,10 @@ mod tests {
                     height: 16,
                     optional_features,
                     build: Some(builtin_scene_build(scene, requested).unwrap()),
-                    phase: OffscreenSetup::start_device(Box::new(instance), optional_features)
-                        .unwrap(),
+                    phase: OpenPhase::Device(
+                        OffscreenSetup::start_device(Box::new(instance), optional_features)
+                            .unwrap(),
+                    ),
                 };
                 let setup = loop {
                     if let Some(setup) = pending.poll().unwrap() {
@@ -8310,6 +8404,65 @@ mod tests {
         }
     }
 
+    /// `OffscreenSetup::probe` answers what an opened setup would, and gives
+    /// back everything it made. A latency on the device request drives its
+    /// wait loop through more than one poll.
+    #[test]
+    fn a_probe_reports_what_an_opened_setup_does_and_leaves_nothing_alive() {
+        use crate::hal::null::{NullInstance, Recorder};
+
+        /// Polls the null device request answers `Pending` before it is ready.
+        const DEVICE_LATENCY: u32 = 3;
+
+        let probed = Recorder::new();
+        probed.set_device_latency(DEVICE_LATENCY);
+        let probe = OffscreenSetup::probe_on(Box::new(
+            NullInstance::gpu_driven().with_recorder(probed.clone()),
+        ))
+        .expect("the null backend answers a probe");
+        assert_eq!(probed.total_live_objects(), 0, "the probe leaked resources");
+        probed.assert_valid();
+
+        let opened = Recorder::new();
+        let setup = OffscreenSetup::open_on(
+            Box::new(NullInstance::gpu_driven().with_recorder(opened.clone())),
+            16,
+            16,
+            Scene::Cube,
+            OffscreenSetup::OPTIONAL_FEATURES,
+        )
+        .expect("the null backend opens an offscreen setup");
+        let expected = DeviceProbe {
+            backend: setup.backend(),
+            adapter: setup.adapter().clone(),
+            caps: setup.caps(),
+        };
+        setup.finish().expect("the null device reaches idle");
+        assert_eq!(probe, expected);
+    }
+
+    /// A device that reports out of band while it is probed fails the probe,
+    /// as it fails [`OffscreenSetup::finish`] — and is still given back.
+    #[test]
+    fn a_probe_fails_on_what_the_device_reported() {
+        use crate::hal::null::{NullInstance, Recorder};
+
+        let recorder = Recorder::new();
+        recorder.report_device_error("raised while probed");
+        let result = OffscreenSetup::probe_on(Box::new(
+            NullInstance::gpu_driven().with_recorder(recorder.clone()),
+        ));
+        assert!(
+            matches!(&result, Err(OffscreenError::DeviceReported(message)) if message == "raised while probed"),
+            "{result:?}"
+        );
+        assert_eq!(
+            recorder.total_live_objects(),
+            0,
+            "the probe leaked resources"
+        );
+    }
+
     #[test]
     fn builtin_geometry_selection_rejects_unsupported_tail_and_cleans_pending_open() {
         use crate::hal::GeometryPath;
@@ -8323,7 +8476,9 @@ mod tests {
             height: 16,
             optional_features,
             build: Some(builtin_scene_build(Scene::Cube, Some(GeometryPath::MeshShader)).unwrap()),
-            phase: OffscreenSetup::start_device(Box::new(instance), optional_features).unwrap(),
+            phase: OpenPhase::Device(
+                OffscreenSetup::start_device(Box::new(instance), optional_features).unwrap(),
+            ),
         };
         assert!(
             matches!(OffscreenSetup::block_open(pending), Err(OffscreenError::Hal(crate::hal::HalError::UnsupportedFeatures { missing })) if missing == Features::MESH_SHADER)

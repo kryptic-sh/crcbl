@@ -532,6 +532,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::screenshot::OffscreenSetup::probe` reports the device a setup would
+  draw on without building a scene.** It opens the backend, the pinned adapter
+  and a device asking for `OffscreenSetup::OPTIONAL_FEATURES` through the same
+  code every open goes through, reads the backend, the adapter and the device
+  caps into a `DeviceProbe`, and gives the device back, returning what
+  `OffscreenSetup::finish` would report on the way out. Native only, like the
+  other blocking opens. A caller choosing a geometry path or a feature set
+  before opening a setup no longer builds a whole scene to find out.
 - **A jitter buffer with an adaptive playout delay in `crcbl_client`**
   (`crcbl_client::playout`). The client buffers snapshots by server tick and
   plays them back at the latest server time it estimates from their arrivals

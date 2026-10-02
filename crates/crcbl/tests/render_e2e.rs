@@ -76,7 +76,7 @@
 use crcbl::adapter::{ADAPTER_ENV_VAR, device_type_from_name};
 use crcbl::backend::{BACKEND_ENV_VAR, GpuBackend};
 use crcbl::hal::{Features, Format, GeometryPath};
-use crcbl::screenshot::{ForwardScene, OffscreenSetup, Scene};
+use crcbl::screenshot::{DeviceProbe, ForwardScene, OffscreenSetup, Scene};
 use crcbl::shaders::tonemap::TonemapCurve;
 use crcbl_golden::{ChannelOrder, Golden, Image, srgb_decode, srgb_encode};
 use crcbl_render::{Antialiasing, RenderEffects};
@@ -5726,11 +5726,10 @@ fn the_cube_scene_draws_the_same_frame_on_every_pass_of_the_ring() {
     // (see `docs/notes/metal-geometry-preference.md`), so a run that took the
     // preference would never reach the per-cluster stage this test is about.
     let mesh_stage = Features::MESH_SHADER.union(Features::TASK_SHADER);
-    let probe = OffscreenSetup::open(EXTENT.0, EXTENT.1, Scene::Cube)
-        .unwrap_or_else(|why| panic!("a GPU backend opens for the cube scene: {why}"));
-    let probe = Offscreen::guard(SUITE, probe);
-    let features = probe.caps().features;
-    probe.finish();
+    let features = OffscreenSetup::probe()
+        .unwrap_or_else(|why| panic!("a GPU backend opens for the cube scene: {why}"))
+        .caps
+        .features;
     if !features.contains(mesh_stage) {
         eprintln!(
             "{SUITE}: no amplification stage on this device, so there is no per-cluster ring to \
@@ -6270,10 +6269,45 @@ fn the_ui_scene_draws_the_same_frame_under_device_feature_requests() {
     );
 }
 
+/// **The device probe is the device a setup draws on.** Every per-path test
+/// chooses its tails from [`OffscreenSetup::probe`] rather than from a scene it
+/// built and threw away, and asserts each arm's features against it. If the
+/// probe opened another adapter or asked for other features, those arms would
+/// compare against the wrong answer, or skip a tail the device has without
+/// saying so. So the probe is held here to what a setup opened on the same
+/// backend reports.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_device_probe_reports_what_an_opened_setup_does() {
+    crcbl_core::log::init_logging();
+    let probe = OffscreenSetup::probe().unwrap_or_else(|why| panic!("a GPU backend opens: {why}"));
+    let setup = OffscreenSetup::open(EXTENT.0, EXTENT.1, Scene::Cube)
+        .unwrap_or_else(|why| panic!("a GPU backend opens for the cube scene: {why}"));
+    let setup = Offscreen::guard(SUITE, setup);
+    let opened = DeviceProbe {
+        backend: setup.backend(),
+        adapter: setup.adapter().clone(),
+        caps: setup.caps(),
+    };
+    setup.finish();
+    assert_eq!(
+        probe, opened,
+        "the probe and an opened setup disagree about the device"
+    );
+    eprintln!(
+        "crcbl render e2e: the probe on {} adapter {:?} reports what the cube setup does: {:?}",
+        probe.backend, probe.adapter.name, probe.caps.features
+    );
+}
+
 /// Draws each supported forward geometry tail explicitly and compares every
 /// lesser tail with the highest supported one. Device feature negotiation and
 /// performance preferences cannot turn this into a same-path comparison.
 /// Every frame still has to hold the scene and obey the original image budget.
+///
+/// The tails come from [`OffscreenSetup::probe`], which opens the device and no
+/// scene; `the_device_probe_reports_what_an_opened_setup_does` holds it to what
+/// a setup reports.
 fn draw_scene_on_every_geometry_path(
     scene: Scene,
     name: &str,
@@ -6303,13 +6337,11 @@ fn draw_scene_on_every_geometry_path_measuring(
 ) {
     crcbl_core::log::init_logging();
     assert!(!matches!(scene, Scene::Sprite | Scene::Ui));
-    let setup = OffscreenSetup::open(EXTENT.0, EXTENT.1, scene)
+    let probe = OffscreenSetup::probe()
         .unwrap_or_else(|why| panic!("a GPU backend opens for the {name} scene: {why}"));
-    let setup = Offscreen::guard(SUITE, setup);
-    let features = setup.caps().features;
-    let adapter = setup.adapter().name.clone();
-    let backend = setup.backend();
-    setup.finish();
+    let features = probe.caps.features;
+    let adapter = probe.adapter.name;
+    let backend = probe.backend;
 
     let paths: Vec<_> = [
         GeometryPath::MeshShader,
@@ -6452,12 +6484,9 @@ fn a_call_per_range_draws_every_scene_as_a_call_per_bucket_does(
     dropped: Features,
 ) {
     crcbl_core::log::init_logging();
-    let probe = OffscreenSetup::open(EXTENT.0, EXTENT.1, Scene::Cube)
-        .unwrap_or_else(|why| panic!("a GPU backend opens: {why}"));
-    let probe = Offscreen::guard(SUITE, probe);
-    let features = probe.caps().features;
-    let backend = probe.backend();
-    probe.finish();
+    let probe = OffscreenSetup::probe().unwrap_or_else(|why| panic!("a GPU backend opens: {why}"));
+    let features = probe.caps.features;
+    let backend = probe.backend;
     if !features.contains(Features::DRAW_INDEX | Features::MULTI_DRAW_INDIRECT) {
         eprintln!(
             "crcbl render e2e: {backend} declares no draw index, so every tail records a call \

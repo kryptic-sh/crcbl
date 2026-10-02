@@ -270,6 +270,38 @@ run above. Locally (RX 7900 XTX) the fifteen price tests' run went from 8.9 s to
 must confirm** the Metal job's new mesh step and total. They were not measured:
 there is no Metal on the machine that made the change.
 
+**Cut 2026-10-02: the per-path helper reads the device from a probe, not a
+scene.** `draw_scene_on_every_geometry_path_measuring` built the test's whole
+scene (renderer, pipelines, uploads, ring) only to read the device's features,
+adapter and backend before opening one setup per tail.
+`crcbl::screenshot::OffscreenSetup::probe` opens the instance and the device
+through the same `start_device` every open uses (adapter pin, offscreen surface,
+`OPTIONAL_FEATURES`), returns a `DeviceProbe` and gives the device back. The
+cube ring test and the `a_call_per_range_…` family's probe use it too. Each arm
+still asserts its features, adapter and backend against the probe, and
+`the_device_probe_reports_what_an_opened_setup_does` asserts the probe equals
+what an opened cube setup reports. Both went red when the probe dropped
+`DRAW_INDIRECT_COUNT` from its caps (Vulkan and D3D12), and when it asked for
+neither mesh stage (Vulkan). Asking for no `MESH_SHADER` alone stayed green on
+Vulkan: the RX 7900 XTX device is granted the mesh stage when `TASK_SHADER` is
+asked for, so that mutation changed nothing. On `crcbl_hal::null`,
+`screenshot::tests`' two probe tests went red when the probe kept its surface,
+ignored a reported device error or dropped a feature. Locally (RX 7900 XTX,
+serial `-j 1`), the 21 per-path tests' summed time went from 39.68 s to 32.86 s
+on Vulkan (four opens each, now three plus a device) and from 45.90 s to 38.61 s
+on D3D12 (three, now two plus a device). The family's run including the ring and
+call-per-range tests went from 93.6 s to 85.4 s on Vulkan and from 51.1 s to
+40.6 s on D3D12. **CI must confirm** the Metal render step's time: there is no
+Metal on the machine that made the change, and the saving there is a scene build
+per per-path test under Metal's validation, not measured.
+
+**Seen while measuring, not investigated:** at nextest's default concurrency (32
+threads on that machine) the Vulkan render suite failed 11 of 103 tests on
+`969af69f`, before this change: `ERROR_DEVICE_LOST` in grass tests and
+single-colour frames in atmosphere, occluder and meadow-blade tests. The same
+tests passed serially, and after it the whole suite passed at `-j 4`. CI runners
+have fewer threads and have not shown it.
+
 **Not cut, and why:**
 
 - `occlusion_price`: with no timer it asserts draw counts over the occluders'
@@ -279,9 +311,8 @@ there is no Metal on the machine that made the change.
 - The render suite's per-path tests
   (`…_draws_the_same_frame_on_every_geometry_path`) and the grass tests: each is
   a set of device opens at the goldens' extent, and the scene is the golden's,
-  so a smaller scene would need re-blessing. A possible cut: the per-path helper
-  builds a whole scene only to read the device's features, and a device-only
-  probe would save one open per test. That needs a `crcbl::screenshot` API.
+  so a smaller scene would need re-blessing. Their throwaway scene build is cut
+  (above); each arm still opens a device and builds its scene.
 - `occlusion_cull`: its path is built to disocclude at particular frames, so
   fewer frames changes the claim. `rect_bound::how_much_…` builds a renderer per
   aspect ratio, and fewer ratios would assert fewer rows.
