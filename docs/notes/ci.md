@@ -109,6 +109,47 @@ present, the end-of-run log and the PNG absent. The next demo to die at the cap
 is the first one that will say where it stopped — and if it stopped rather than
 crawled, that log is what proves it.
 
+## More than twenty Vulkan devices at once lose the rest (2026-10-02)
+
+At nextest's default of one thread per CPU — 32 on the RX 7900 XTX machine —
+`run-render-e2e.sh` on Vulkan failed 17, 20, 18, 19 and 20 of its 104 tests in
+five runs, with or without the validation layer. Most failures were frames of
+one colour with no error anywhere; the rest were `ERROR_DEVICE_LOST` from
+`vkQueueSubmit2`. The same suite passed at `-j 24`, `16`, `8` and `4`, and on
+D3D12 at 32, twice.
+
+**The driver keeps twenty.** N copies of
+`the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden`,
+started at once as separate processes, lost exactly N − 20 devices for N = 21,
+22, 24 (twice), 28, 32 and 48, and none at 20 (twice); the copies that lost were
+the last to start. Opening one queue per device instead of three changed nothing
+(12 lost of 32, 28 of 48), so the limit is devices, not hardware queues. It is
+not memory: twenty copies of a 1024×768 grass test added about 6 GB to the
+adapter's 24 GB, and the 32-thread render suite peaked under 11 GB in all. It is
+not a leak either, since nextest gives every test its own process and the cube
+test alone reproduces it. D3D12 on the same adapter kept 64 copies alive. No TDR
+event (4101) was logged in the System event log.
+
+**And `crcbl-vk` reported the loss as success.** On a lost device AMD's driver
+(25.10.36) answers `vkGetSemaphoreCounterValue` with `VK_SUCCESS` and
+`u64::MAX`, and `vkDeviceWaitIdle` with `VK_SUCCESS`. `poll_readback` took that
+for a finished frame and copied a buffer the GPU never wrote, and
+`OffscreenSetup::finish` said the device "reached idle and reported nothing". A
+retire timeline past the last value submitted is now `DeviceLost`
+(`retire_reading`); with the group switched off, the next 32-thread run failed
+31 tests and every one named the lost device. That run failing more tests than
+the five before it suggests some tests had been passing on a lost device.
+
+**Fixed by a `gpu` test group with eight threads**, in `.config/nextest.toml`,
+covering every device-opening suite (the `crcbl` `*_e2e` binaries, `vk_e2e`,
+`cli_e2e`, `quarry`'s `device` and every app's `golden`). The config gives the
+numbers behind eight. Afterwards, at the default invocation: render 104/104 on
+Vulkan three times (38.0–38.3 s, against 41–45 s for the failing validated runs)
+and twice on D3D12 (23.5–23.6 s, against 20.4–21.5 s ungrouped); mesh 120/120
+and forward 53/53 on both. CI's runners have four cores, so nextest runs four
+threads there and the cap never binds. `docs/backlog.md`'s "Concurrent GPU
+devices" has what is left.
+
 ## Surprises worth keeping — not bugs
 
 ### A Pages run whose browser jobs never end is a lost runner, and the next push is the remedy (2026-09-05)

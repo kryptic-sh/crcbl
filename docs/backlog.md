@@ -297,12 +297,12 @@ call-per-range tests went from 93.6 s to 85.4 s on Vulkan and from 51.1 s to
 Metal on the machine that made the change, and the saving there is a scene build
 per per-path test under Metal's validation, not measured.
 
-**Seen while measuring, not investigated:** at nextest's default concurrency (32
-threads on that machine) the Vulkan render suite failed 11 of 103 tests on
-`969af69f`, before this change: `ERROR_DEVICE_LOST` in grass tests and
-single-colour frames in atmosphere, occluder and meadow-blade tests. The same
-tests passed serially, and after it the whole suite passed at `-j 4`. CI runners
-have fewer threads and have not shown it.
+**The render suite's failures at nextest's default concurrency, diagnosed
+2026-10-02:** AMD's Windows Vulkan driver keeps 20 devices alive per adapter and
+loses the rest, and `crcbl-vk` took the loss for success. The `gpu` test group
+in `.config/nextest.toml` and `crcbl-vk`'s `retire_reading` are the fixes; the
+evidence is `docs/notes/ci.md`'s "More than twenty Vulkan devices at once". What
+is left is below, under "Concurrent GPU devices: what the fix left".
 
 **Not cut, and why:**
 
@@ -346,6 +346,41 @@ which was a `DeviceLost` from the paravirtual driver's watchdog rather than a
 deadline, and which no deadline changes. If it recurs, give the grass tests a
 smaller field on that runner (the `bucket_price` gate-scene pattern) or split
 the frame's submission so no one command buffer runs long.
+
+## Concurrent GPU devices: what the fix left (2026-10-02)
+
+The `gpu` test group holds every device-opening suite to eight at a time, and
+`crcbl-vk` now reports a retire timeline past its last submission as
+`DeviceLost` from `poll_readback` and `wait_idle`. Both are measured in
+`docs/notes/ci.md`'s "More than twenty Vulkan devices at once". Not done:
+
+- **D3D12 has the same shape, unexercised.** `crcbl-dx12`'s `poll_readback`
+  calls a readback ready once `GetCompletedValue` reaches its value, and a
+  removed device's fence reads `UINT64_MAX` — Microsoft's documented behaviour,
+  not an AMD quirk. So a removal mid-frame would hand back an unwritten buffer
+  as Ready, as `crcbl-vk` did. Not fixed because D3D12 never lost a device here
+  (64 concurrent copies of the cube test all passed), so there was no run to
+  check a fix against. `ID3D12Device5::RemoveDevice` can remove a device on
+  purpose and would make that test.
+- **The rest of `crcbl-vk`'s waits are unguarded.** The check covers
+  `poll_readback` (on any semaphore) and `wait_idle`. `query_results` waits on
+  the retire timeline with `vkWaitSemaphores` and then reads the pool, and
+  `wait_semaphores` answers for a caller's own timelines, whose highest signal
+  this backend does not track. Both presumably return success on the device that
+  lost here, whose retire timeline read `u64::MAX`, but neither was run on a
+  lost device.
+- **The limit is one adapter and one driver.** Twenty was measured on the RX
+  7900 XTX under AMD 25.10.36 only. Whether it is the same on the 9060 XT box,
+  on other AMD drivers, or on NVIDIA or Intel under Windows is not measured, and
+  nor is any Linux driver. Eight is far enough under twenty to hold if the limit
+  is somewhat lower elsewhere; a machine whose limit is under eight would need
+  its own number.
+- **The Vulkan runs finish in lockstep, unexplained.** With N copies of the cube
+  test running, every copy exited together after about N × 0.13 s (20 at 2.5 s,
+  32 at 4.1 s, 48 at 6.3 s), and the render suite's test times at `-j 16` and
+  `-j 32` bunch at multiples of about 2 s and 4 s. D3D12 shows neither. It is
+  why more than eight threads buys nothing on Vulkan, and it looks like the
+  driver giving each device a turn, but nothing here measured that.
 
 ## EW's engine port requests (2026-09-27)
 

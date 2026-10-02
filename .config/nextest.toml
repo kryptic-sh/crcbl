@@ -48,13 +48,38 @@ path = "junit.xml"
 # of a second each, and they only exist on Windows at all.
 [test-groups]
 windows-desktop = { max-threads = 1 }
+gpu = { max-threads = 8 }
 
 [[profile.default.overrides]]
 filter = 'test(/^win32::shell::tests::/)'
 test-group = 'windows-desktop'
+
+# Every suite that opens a GPU device, held to a few at a time. Measured on an
+# RX 7900 XTX under AMD's Windows Vulkan driver 25.10.36 (2026-10-02): the
+# adapter keeps 20 concurrent Vulkan devices alive and loses every one past
+# that. N copies of the cube golden test, started together, lost exactly
+# N - 20 devices at each N tried from 21 to 48 and none at 20, with one queue
+# per device as with three, so the limit is devices, not queues or memory:
+# twenty copies of a 1024x768 grass test add about 6 GB to the adapter's 24.
+# nextest's default of one thread per CPU is 32 there, which is how the render
+# suite came to fail 17 to 20 of its tests a run. D3D12 on the same adapter
+# kept 64 alive.
+#
+# Eight, because more buys nothing and the cliff is far: the render suite took
+# 56 s at -j 4, 39 s at 8, 41-63 s at 16 and 47 s at 24 on Vulkan, so the GPU
+# is already the bottleneck at 8, and eight tests holding two devices each
+# would still be under twenty. CI's runners have four cores, so the cap
+# never binds there. The losses are written up in `docs/notes/ci.md`.
+[[profile.default.overrides]]
+filter = 'binary_id(crcbl::*_e2e) | binary_id(crcbl-vk::vk_e2e) | binary_id(crcbl-cli::cli_e2e) | binary_id(quarry::device) | binary_id(*::golden)'
+test-group = 'gpu'
 
 # Repeated for the same reason `slow-timeout` is: a profile does not inherit
 # the default profile's overrides, and CI runs `--profile ci`.
 [[profile.ci.overrides]]
 filter = 'test(/^win32::shell::tests::/)'
 test-group = 'windows-desktop'
+
+[[profile.ci.overrides]]
+filter = 'binary_id(crcbl::*_e2e) | binary_id(crcbl-vk::vk_e2e) | binary_id(crcbl-cli::cli_e2e) | binary_id(quarry::device) | binary_id(*::golden)'
+test-group = 'gpu'
