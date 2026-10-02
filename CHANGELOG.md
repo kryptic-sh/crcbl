@@ -3950,6 +3950,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **An editor save removes the chunk files its scene no longer names.** A system
+  unlisted, or the last entity name cleared, used to leave its `sys/<name>.ron`
+  or `names.ron` on disk beside a `scene.ron` that no longer read it.
+  `Document::save` (and `save_to` the document's own directory) now removes
+  exactly the files the document owned there — the manifest it opened, and what
+  its saves wrote — and no longer writes, only after every new file has landed,
+  and never a file the scene did not write. `Document::save_to` another
+  directory is a copy that removes nothing and now refuses, writing nothing, if
+  a file it would write is already there: the new `EditError::Occupied`. A
+  removal that fails is the new `EditError::Remove`, and leaves the document
+  dirty.
+
 - **The editor no longer panics on a placement no collider can be.** A placing
   component whose box has a negative half extent or a non-finite number — one
   registered without a `Validate` rule, or a value written past the commands —

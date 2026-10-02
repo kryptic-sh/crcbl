@@ -11780,10 +11780,34 @@ says what that cleared and what it did not. The allow-list entry in
     tests that read `Panels::add_buttons` would need to open it first. Not
     looked at on a device: the grouped list is held by headless layout tests
     only.
-  - **A save does not delete a chunk file the manifest stopped listing.** A
-    listing saved and then undone and saved again leaves `sys/<system>.ron` on
-    disk beside a `scene.ron` that no longer names it; `Scene::load` reads only
-    the manifest's systems, so it is inert. A drop's undo has the same shape.
+  - **Decided 2026-10-02, for the long term: a save removes exactly the chunks
+    the scene stopped owning.** `Document::owned` is the set of scene-relative
+    keys the document stands behind in its `origin`: the files the manifest
+    named at `open_dir` (read as `Document::files`' keys, so the writer's own
+    spelling), plus each key a save there wrote, inserted as it lands. A save
+    into the origin removes `owned` minus what it wrote
+    (`document::ownership::remove_unwritten`) after every write succeeded; only
+    `sys/<name>.ron` and `names.ron` can fall out, since every save writes
+    `scene.ron` and `env.ron`. Never a directory listing, never a glob: a
+    person's file beside the scene and a `sys/` chunk no manifest named are not
+    candidates. A key gone already counts as removed; a directory or link where
+    an owned file was is left alone and dropped from `owned`. The origin is
+    compared spelled-or-canonicalized (`ownership::same_dir`); two paths that do
+    not resolve are different, the side that cannot delete. **Save-as refuses
+    rather than merges**: `save_to` another directory removes nothing and
+    returns `EditError::Occupied`, writing nothing, if any file it would write
+    is already there — a merge would overwrite another scene's `scene.ron` and
+    orphan its chunks with no owner to remove them, and a refusal loses nothing.
+    It also does not adopt the new directory as the origin, so a document with
+    no origin (the compiled-in scene) saving to one directory twice is refused
+    the second time; the app has no save-as yet, and a save-as that moves
+    `origin` would also have to decide whether `set_assets` follows it —
+    undecided, revisit with the save-as UI. **Gaps**: `EditError::Remove` (a
+    removal failing after every write landed) has no test — no portable way to
+    make `remove_file` fail headlessly was found, and the code keeps the key
+    owned and the document dirty. A `sys` directory that is itself a link out of
+    the scene directory is followed by the removal exactly as by the writes; not
+    guarded, since a save already writes through it.
 - **Task 4's commands (2026-09-30, rename and attach/detach 2026-10-01).**
   `EditCommand` has `SetProperty`, `Spawn`, `Delete`, `Rename`, `Attach` and
   `Detach`; a duplicate is a `Spawn` of every one of the original's rows under

@@ -1032,6 +1032,17 @@ term and recorded, as above):
   `Document::attachable_groups` heads the manifest's systems "In this scene",
   then each game's group by label, and the inspector draws one line per group,
   so towers' `waypoints` is offered on a breakout scene under "towers".
+- **A save removes the chunks the scene stopped owning** (decided and built
+  2026-10-02, for the long term). A document opened from a directory owns the
+  files its manifest there names, and each save into it owns what it wrote; a
+  save there removes the owned files it did not write this time — an unlisted
+  system's `sys/<name>.ron`, `names.ron` once the last name is cleared — and
+  nothing else, after every file has landed, so a failed save loses no chunk.
+  **A save into any other directory is a copy**: it removes nothing, and
+  refuses, writing nothing, if a file it would write is already there
+  (`EditError::Occupied`) — merging would overwrite another scene's `scene.ron`
+  and orphan its chunks. `document::ownership` holds the rule;
+  `document::save_tests` hold it against a real directory.
 
 **Decided 2026-10-01, for rotation** (taken for the long term and recorded, as
 above):

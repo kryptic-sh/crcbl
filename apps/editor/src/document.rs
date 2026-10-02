@@ -30,7 +30,7 @@
 //! **clean**, which a flag could not say and which this module's
 //! `the_dirty_marker_follows_the_logs_position` holds.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -51,6 +51,7 @@ use crate::command::{EditCommand, Gesture, SystemRow, UndoLog, set_property};
 mod field;
 mod meshes;
 mod naming;
+mod ownership;
 mod play;
 mod systems;
 mod validation;
@@ -91,6 +92,12 @@ pub struct Document {
     /// directory this document was opened from, or [`None`] for one opened out
     /// of a compiled-in source.
     origin: Option<PathBuf>,
+    /// The files of [`origin`](Self::origin) this document stands behind: the
+    /// ones its manifest named when it was opened, and every one a save has
+    /// written there since and not removed — so the only files a save there
+    /// may remove. Empty for a document with no origin. See
+    /// `document::ownership`.
+    owned: BTreeSet<String>,
     /// The scene as it stood when play began, and what is running it — or
     /// [`None`] while editing. See [`Document::play`].
     play: Option<play::Session>,
@@ -232,6 +239,32 @@ pub enum EditError {
         source: StorageError,
     },
 
+    /// A save to a directory other than the document's own found a file it
+    /// would write already there, and wrote nothing.
+    ///
+    /// Refused rather than overwritten: the file is some other scene's, or
+    /// something a person put there, and a save that replaced another scene's
+    /// `scene.ron` would orphan that scene's chunks beside it.
+    Occupied {
+        /// The directory the save was asked to write into.
+        dir: PathBuf,
+        /// The scene-relative key already there.
+        key: String,
+    },
+
+    /// A save wrote every file, then could not remove one its scene no longer
+    /// names.
+    ///
+    /// The document stays dirty and still owns the file, so the next save
+    /// tries again; until then the file is inert, because the loader reads only
+    /// what the manifest names.
+    Remove {
+        /// The scene-relative key that would not go.
+        key: String,
+        /// What the storage said.
+        source: StorageError,
+    },
+
     /// [`Document::save`] was asked to write a document that was never opened
     /// from a directory.
     NoOrigin,
@@ -303,6 +336,16 @@ impl fmt::Display for EditError {
                 write!(f, "the clipboard holds no value for `{path}`: {message}")
             }
             Self::Write { key, source } => write!(f, "writing `{key}`: {source}"),
+            Self::Occupied { dir, key } => write!(
+                f,
+                "`{}` already holds `{key}`, and a save into a directory other than the \
+                 document's own does not overwrite; name an empty directory",
+                dir.display()
+            ),
+            Self::Remove { key, source } => write!(
+                f,
+                "removing `{key}`, which the scene no longer names: {source}"
+            ),
             Self::NoOrigin => f.write_str(
                 "this document was not opened from a directory, so there is nowhere to save \
                  it back to; name a directory",
@@ -376,6 +419,7 @@ impl Document {
             naming: 0,
             gestures: 0,
             origin: None,
+            owned: BTreeSet::new(),
             play: None,
             assets: Box::new(MemorySource::new()),
             meshes: MeshLibrary::new(),
@@ -390,7 +434,9 @@ impl Document {
     ///
     /// The document remembers where it came from, so [`Document::save`] writes
     /// back over it, and reads its meshes' assets from [`asset_root`] of it
-    /// until [`Document::set_assets`] says otherwise.
+    /// until [`Document::set_assets`] says otherwise. It owns the files the
+    /// manifest there names, so a save that stops writing one of them removes
+    /// it — and owns nothing else in the directory.
     ///
     /// # Errors
     ///
@@ -404,6 +450,9 @@ impl Document {
         let source = crcbl::assets::DirSource::at(path.clone());
         let mut document = Self::open(&source, Path::new(""), registry)?;
         document.set_assets(Box::new(crcbl::assets::DirSource::at(asset_root(&path))));
+        // The files the scene as loaded would write are exactly the files its
+        // manifest names, spelled the way the writer spells them.
+        document.owned = document.files()?.into_keys().collect();
         document.origin = Some(path);
         Ok(document)
     }
@@ -979,17 +1028,38 @@ impl Document {
     /// [`crcbl::store::write_atomic`] — so an interrupted save leaves the
     /// previous chunk rather than half of a new one.
     ///
+    /// **Into the document's own directory** ([`origin`](Self::origin)), a save
+    /// then removes every chunk the document owned there and no longer writes
+    /// — a system unlisted, the last name cleared — and nothing else: not a file
+    /// a person put beside the scene, not a chunk the manifest never named.
+    /// The removal comes only after every file landed, so a save that fails
+    /// part way loses no chunk the old manifest still names.
+    ///
+    /// **Into any other directory** it is a copy: it writes nothing if a file it
+    /// would write is already there, and it removes nothing. See
+    /// `document::ownership` for both rules.
+    ///
     /// # Errors
     ///
-    /// [`EditError::Scene`] as [`files`](Self::files), or [`EditError::Write`]
-    /// naming the key that would not write. **The document is marked saved only
-    /// when every file landed**, so a partial write leaves the dirty marker up.
-    /// [`EditError::Playing`] in play mode, writing nothing: a played state is
-    /// not the scene that was authored.
+    /// [`EditError::Scene`] as [`files`](Self::files), [`EditError::Occupied`]
+    /// for a copy that would overwrite, [`EditError::Write`] naming the key that
+    /// would not write, or [`EditError::Remove`] naming the one that would not
+    /// go. **The document is marked saved only when every file landed and every
+    /// file it stopped writing is gone**, so a partial save leaves the dirty
+    /// marker up. [`EditError::Playing`] in play mode, writing nothing: a played
+    /// state is not the scene that was authored.
     pub fn save_to(&mut self, dir: impl AsRef<Path>) -> Result<(), EditError> {
         self.refuse_in_play()?;
+        let dir = dir.as_ref();
         let files = self.files()?;
-        let storage = NativeStorage::at(dir.as_ref().to_path_buf());
+        let storage = NativeStorage::at(dir.to_path_buf());
+        let own = self
+            .origin
+            .as_deref()
+            .is_some_and(|origin| ownership::same_dir(origin, dir));
+        if !own {
+            ownership::refuse_occupied(&storage, &files)?;
+        }
         for (key, text) in &files {
             storage
                 .write(Path::new(key), text.as_bytes())
@@ -997,6 +1067,15 @@ impl Document {
                     key: key.clone(),
                     source,
                 })?;
+            if own {
+                // As each lands rather than after the loop: a save that fails
+                // on a later file has still put this one there, and the
+                // manifest naming it may be the one on disk now.
+                self.owned.insert(key.clone());
+            }
+        }
+        if own {
+            ownership::remove_unwritten(&storage, &mut self.owned, &files)?;
         }
         self.saved_at = self.log.position();
         // A drag carried on past the save writes an entry of its own, so the
@@ -1430,6 +1509,9 @@ pub(crate) mod play_tests;
 
 #[cfg(test)]
 pub(crate) mod rotation_tests;
+
+#[cfg(test)]
+mod save_tests;
 
 #[cfg(test)]
 pub(crate) mod systems_tests;
