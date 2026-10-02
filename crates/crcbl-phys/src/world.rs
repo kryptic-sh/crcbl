@@ -3508,3 +3508,7 @@ mod turned_box_tests;
 #[cfg(test)]
 #[path = "world/candidate_sweep_tests.rs"]
 mod candidate_sweep_tests;
+
+#[cfg(test)]
+#[path = "world/query_digest_tests.rs"]
+mod query_digest_tests;
