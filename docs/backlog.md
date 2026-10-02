@@ -266,9 +266,11 @@ tiles against the asserted two. Timed devices, meaning every other CI job and
 every local GPU, draw what they drew before. `CRCBL_PRICE_UNTIMED=1` makes any
 device take the short run. The touched tests took 577.7 s of test time on the
 run above. Locally (RX 7900 XTX) the fifteen price tests' run went from 8.9 s to
-5.1 s on Vulkan and from 10.3 s to 3.7 s on D3D12 with the variable set. **CI
-must confirm** the Metal job's new mesh step and total. They were not measured:
-there is no Metal on the machine that made the change.
+5.1 s on Vulkan and from 10.3 s to 3.7 s on D3D12 with the variable set.
+**Measured on CI** (run 36955595869, `969af69f`, which has this cut and not the
+probe below): the Metal job took 34 min 45 s against 41 min 57 s on `4eae6db4`'s
+run; its steps were mesh 857 s (was 998.8), render 803 s (was 898.2) and forward
+333 s (was 465.3). Runner noise between two runs is not separated from the cut.
 
 **Cut 2026-10-02: the per-path helper reads the device from a probe, not a
 scene.** `draw_scene_on_every_geometry_path_measuring` built the test's whole
