@@ -17,6 +17,9 @@ use crate::mesh::{MeshScratch, PlacedMesh, TriangleMesh};
 use crate::query::{self, Penetration, ShapeHit};
 
 mod candidate_sweeps;
+mod entry;
+
+use entry::ColliderEntry;
 
 /// Opaque identifier for a registered collider.
 ///
@@ -229,27 +232,6 @@ impl ResolvedFilter {
     /// Whether the collider at storage slot `idx` may be reported.
     fn admits(&self, idx: usize, slot: &ColliderSlot) -> bool {
         Some(idx) != self.skip && slot.layers & self.mask != 0 && !(self.solid && slot.is_trigger)
-    }
-}
-
-/// A collider instance stored in the [`PhysicsWorld`].
-#[derive(Debug, Clone)]
-enum ColliderEntry {
-    Sphere(Sphere),
-    Box(BoxCollider),
-    Capsule(Capsule),
-    /// A triangle mesh at a transform: one entry, descending its own tree.
-    Mesh(PlacedMesh),
-}
-
-impl ColliderEntry {
-    fn aabb(&self) -> Aabb {
-        match self {
-            ColliderEntry::Sphere(s) => s.aabb(),
-            ColliderEntry::Box(b) => b.aabb(),
-            ColliderEntry::Capsule(c) => c.aabb(),
-            ColliderEntry::Mesh(m) => m.bounds,
-        }
     }
 }
 
