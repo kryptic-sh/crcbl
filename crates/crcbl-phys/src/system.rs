@@ -51,11 +51,10 @@ use std::collections::HashMap;
 
 use crcbl_core::{Handle, Pool};
 use crcbl_ecs::{DebugCtx, Entity, SystemTrait};
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
 use crate::components::{ColliderComponent, RigidBody, Transform};
-use crate::compound_shape::CompoundShape;
 use crate::contact::broadphase::ProxyId;
 use crate::contact::island::{self, IslandId, Islands};
 use crate::contact::{
@@ -306,8 +305,9 @@ impl EntityOverlapQueries<'_> {
     ///
     /// `out` is cleared and then filled with the same entities in the same
     /// order the `&mut self` form produces, because that form is this one.
-    /// Broadphase-only, exactly like [`PhysicsSystem::overlap_aabb`]: an entity
-    /// whose *AABB* meets `aabb` is named, whatever its shape does.
+    /// It answers as [`PhysicsSystem::overlap_aabb`] does: a box, a compound
+    /// or a mesh where its shape meets `aabb`, a sphere or a capsule wherever
+    /// the box around it does.
     pub fn overlap_aabb_into(
         &self,
         aabb: &Aabb,
@@ -793,7 +793,8 @@ impl PhysicsSystem {
 
     /// Add or replace a collider for `entity`.
     ///
-    /// The world-space position is `transform.position + component.offset`.
+    /// The collider sits at `transform.position` plus the component's offset
+    /// turned by `transform.rotation`, as the contact pipeline places it.
     /// The component is cached so [`PhysicsSystem::step`] can reposition the
     /// collider after integration.
     ///
@@ -826,14 +827,13 @@ impl PhysicsSystem {
         *self.transform_slot(id) = *transform;
         self.remove_collider(entity);
 
-        let world_centre = transform.position;
         let collider = match component {
             ColliderComponent::Sphere {
                 offset,
                 radius,
                 is_trigger,
             } => {
-                let centre = world_centre + *offset;
+                let centre = placed_centre(*offset, transform);
                 let collider = self.world.add_sphere(Sphere::new(centre, *radius));
                 self.world.set_trigger(collider, *is_trigger);
                 collider
@@ -855,10 +855,11 @@ impl PhysicsSystem {
                 half_height,
                 is_trigger,
             } => {
-                let centre = world_centre + *offset;
-                let collider = self
-                    .world
-                    .add_capsule(Capsule::new(centre, *radius, *half_height));
+                let centre = placed_centre(*offset, transform);
+                let collider = self.world.add_turned_capsule(
+                    Capsule::new(centre, *radius, *half_height),
+                    transform.rotation,
+                );
                 self.world.set_trigger(collider, *is_trigger);
                 collider
             }
@@ -867,9 +868,7 @@ impl PhysicsSystem {
                 shape,
                 is_trigger,
             } => {
-                let collider = self
-                    .world
-                    .add_box(compound_query_box(shape, *offset, transform));
+                let collider = self.world.add_compound(shape, *offset, transform);
                 self.world.set_trigger(collider, *is_trigger);
                 collider
             }
@@ -969,7 +968,8 @@ impl PhysicsSystem {
     }
 
     /// Put `entity`'s query collider on the layers in `bits`: see
-    /// [`PhysicsWorld::set_layers`]. For a compound that is its one query box.
+    /// [`PhysicsWorld::set_layers`]. For a compound that is the one collider
+    /// holding all its parts.
     /// Returns `false`, and changes nothing, if the entity has no collider.
     ///
     /// The layers belong to the entity rather than to one [`ColliderId`]:
@@ -1000,8 +1000,8 @@ impl PhysicsSystem {
     }
 
     /// The query collider [`set_collider`](Self::set_collider) made for
-    /// `entity` — for a compound, its one query box — or `None` if the entity
-    /// has no collider.
+    /// `entity` — for a compound, the one collider holding all its parts — or
+    /// `None` if the entity has no collider.
     ///
     /// The id changes when the collider is replaced, so read it again after a
     /// `set_collider` rather than keeping it: an old one resolves to nothing.
@@ -1450,7 +1450,10 @@ impl PhysicsSystem {
         }
     }
 
-    /// Overlap query: return all entities whose AABB intersects `aabb`.
+    /// Overlap query: return all entities whose collider meets `aabb`, as
+    /// [`PhysicsWorld::overlap_aabb`] answers it — a box, a compound or a mesh
+    /// where its shape meets it, a sphere or a capsule wherever the world-axis
+    /// box around it does.
     #[must_use]
     pub fn overlap_aabb(&mut self, aabb: &Aabb) -> Vec<Entity> {
         self.overlap_aabb_filtered(aabb, QueryFilter::ALL)
@@ -1610,10 +1613,12 @@ fn place_collider(
     component: &ColliderComponent,
     transform: &Transform,
 ) {
-    let centre = transform.position;
     match component {
         ColliderComponent::Sphere { offset, radius, .. } => {
-            world.set_sphere(collider, Sphere::new(centre + *offset, *radius));
+            world.set_sphere(
+                collider,
+                Sphere::new(placed_centre(*offset, transform), *radius),
+            );
         }
         ColliderComponent::Box {
             offset,
@@ -1628,17 +1633,33 @@ fn place_collider(
             half_height,
             ..
         } => {
-            world.set_capsule(
+            world.set_turned_capsule(
                 collider,
-                Capsule::new(centre + *offset, *radius, *half_height),
+                Capsule::new(placed_centre(*offset, transform), *radius, *half_height),
+                transform.rotation,
             );
         }
         ColliderComponent::Compound { offset, shape, .. } => {
-            world.set_box(collider, compound_query_box(shape, *offset, transform));
+            world.set_compound(collider, shape, *offset, transform);
         }
         ColliderComponent::Mesh { mesh, .. } => {
             world.set_mesh(collider, mesh.clone(), *transform);
         }
+    }
+}
+
+/// Where a sphere or a capsule `offset` from a body at `transform` is
+/// centred: the offset turned by the body's rotation, as the contact pipeline
+/// places it ([`crate::contact::shape::ContactShape::placed`]).
+///
+/// An unturned body, or no offset, adds the offset as it is: the product
+/// with the identity can change a zero's sign, and the colliders of unturned
+/// bodies keep the centres they had before offsets turned, to the bit.
+fn placed_centre(offset: DVec3, transform: &Transform) -> DVec3 {
+    if transform.rotation == DQuat::IDENTITY || offset == DVec3::ZERO {
+        transform.position + offset
+    } else {
+        transform.position + transform.rotation * offset
     }
 }
 
@@ -1651,13 +1672,6 @@ fn query_box(offset: DVec3, half_extents: DVec3, transform: &Transform) -> BoxCo
         half_extents,
     )
     .with_rotation(transform.rotation)
-}
-
-/// What the query world holds for a compound: one box around every part as
-/// the body has them turned — see [`ColliderComponent::Compound`].
-fn compound_query_box(shape: &CompoundShape, offset: DVec3, transform: &Transform) -> BoxCollider {
-    let bounds = shape.world_bounds(offset, transform);
-    BoxCollider::new(bounds.centre(), bounds.extents() * 0.5)
 }
 
 /// `value`'s bits with every zero and every `NaN` made one: `-0.0` hashes as

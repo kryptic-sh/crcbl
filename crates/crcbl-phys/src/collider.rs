@@ -490,10 +490,9 @@ impl Capsule {
 /// A capsule lying on its side: a prone body, its core running from the head
 /// back to the feet, level or pitched to follow the ground.
 ///
-/// A query shape, not a collider — the world's own capsules stand up the Y
-/// axis — for asking whether a body lying at a pose would be inside anything,
-/// see [`crate::PhysicsWorld::lying_capsule_blocker`], and for moving one, see
-/// [`crate::CharacterController::move_lying`].
+/// A query shape, not a collider, for asking whether a body lying at a pose
+/// would be inside anything, see [`crate::PhysicsWorld::lying_capsule_blocker`],
+/// and for moving one, see [`crate::CharacterController::move_lying`].
 ///
 /// # The pose
 ///

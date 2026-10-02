@@ -487,12 +487,12 @@ fn every_collider_kind_stops_a_body_crawling_back_into_it() {
     }
 }
 
-/// **A compound stops the feet at its bounds**, as the query world holds it:
-/// one box around its parts. Here the part level with the body lies a metre
-/// further back, and only a part overhead reaches [`NEAR`]; the feet stop at
-/// [`NEAR`] all the same.
+/// **A compound stops the feet at its parts, not at the box around them**:
+/// only a part overhead reaches [`NEAR`], and the part level with the body
+/// lies a metre further back, so the feet pass under the first and stop at
+/// the second.
 #[test]
-fn a_compound_stops_a_body_crawling_back_at_its_bounds() {
+fn a_compound_stops_a_body_crawling_back_at_its_parts() {
     let mut phys = PhysicsSystem::new();
     let floor_entity = Entity::from_bits((1u64 << 32) | 1).expect("generation 1 is never zero");
     let floor_at = Transform::from_position(DVec3::new(0.0, -1.0, 0.0));
@@ -525,11 +525,16 @@ fn a_compound_stops_a_body_crawling_back_at_its_bounds() {
 
     let world = phys.world_mut();
     let (mut character, body) = lying_at(world, 0.0, 0.0, 0.0);
-    let outcome = crawl_back(world, &mut character, &body);
+    // Far enough to pass under the part overhead and on into the low one.
+    let outcome = character.move_lying(world, &body, DVec3::new(0.0, 0.0, 2.0));
+    let heels = outcome.body.feet().z + outcome.body.radius;
+    let low_part = NEAR + 1.0;
     assert!(
-        heels_at_near(&outcome),
-        "the heels stopped at {}, and the compound's bounds begin at {NEAR}",
-        outcome.body.feet().z + body.radius
+        outcome.hit_wall
+            && outcome.body.pitch_sine == 0.0
+            && heels <= low_part
+            && heels >= low_part - prone_config().skin_width - SWEEP_TOLERANCE,
+        "the heels stopped at {heels}, and the low part begins at {low_part}"
     );
 }
 

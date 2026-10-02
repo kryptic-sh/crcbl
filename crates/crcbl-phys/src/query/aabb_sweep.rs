@@ -40,6 +40,7 @@ pub fn swept_sphere_vs_aabb(
                 point: closest,
                 normal,
                 started_inside: true,
+                part: 0,
             });
         }
         return None;
@@ -77,6 +78,7 @@ pub fn swept_sphere_vs_aabb(
         point: contact_point,
         normal,
         started_inside,
+        part: 0,
     })
 }
 

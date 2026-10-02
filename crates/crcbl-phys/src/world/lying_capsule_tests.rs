@@ -4,6 +4,7 @@ use glam::DVec3;
 
 use crate::collider::{BoxCollider, Capsule, LyingCapsule, Sphere};
 use crate::components::Transform;
+use crate::compound_shape::{CompoundPart, CompoundShape};
 use crate::integrator::rotation_from_scaled_axis;
 use crate::mesh::TriangleMesh;
 
@@ -102,12 +103,13 @@ fn a_wall_behind_the_head_blocks_the_legs_until_the_body_turns_away() {
 /// `z = LENGTH + RADIUS = 2`; each obstacle is placed to reach `z = 1.9`, then
 /// `z = 2.1`.
 ///
-/// A compound reaches the query world as one box and a plane not at all; the
-/// compound is checked through a whole system in the character's tests.
+/// The compound's part on the axis reaches the feet end and the one above it
+/// stands clear of the body, so only the part itself can block. A plane does
+/// not reach the query world at all.
 #[test]
 fn every_collider_kind_blocks_a_capsule_lying_into_it() {
     type Place = fn(&mut PhysicsWorld, f64) -> ColliderId;
-    let kinds: [(&str, Place); 4] = [
+    let kinds: [(&str, Place); 5] = [
         ("sphere", |world, near| {
             world.add_sphere(Sphere::new(DVec3::new(0.0, RADIUS, near + 0.4), 0.4))
         }),
@@ -121,6 +123,21 @@ fn every_collider_kind_blocks_a_capsule_lying_into_it() {
             world.add_capsule(Capsule::new(DVec3::new(0.0, 1.0, near + 0.4), 0.4, 1.0))
         }),
         ("mesh", mesh_wall),
+        ("compound", |world, near| {
+            let part =
+                |centre: DVec3, half: DVec3| CompoundPart::new(centre, glam::DQuat::IDENTITY, half);
+            let shape = CompoundShape::new(vec![
+                // Overhead, reaching back over the feet end.
+                part(DVec3::new(0.0, 2.5, -0.5), DVec3::new(1.0, 0.5, 1.0)),
+                part(DVec3::new(0.0, 1.0, 0.5), DVec3::new(1.0, 1.0, 0.5)),
+            ])
+            .expect("a valid shape");
+            world.add_compound(
+                &shape,
+                DVec3::ZERO,
+                &Transform::from_position(DVec3::new(0.0, 0.0, near)),
+            )
+        }),
     ];
     for (kind, place) in kinds {
         let mut world = PhysicsWorld::new();

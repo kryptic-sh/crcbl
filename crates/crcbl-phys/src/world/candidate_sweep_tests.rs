@@ -6,6 +6,7 @@ use glam::DVec3;
 use crate::broadphase::Segment;
 use crate::collider::{BoxCollider, Capsule, Sphere};
 use crate::components::Transform;
+use crate::compound_shape::{CompoundPart, CompoundShape};
 use crate::integrator::rotation_from_scaled_axis;
 use crate::mesh::TriangleMesh;
 use crate::query::ShapeHit;
@@ -280,6 +281,7 @@ enum Placed {
     Box(BoxCollider),
     Capsule(Capsule),
     Mesh(TriangleMesh, Transform),
+    Compound(CompoundShape, Transform),
 }
 
 /// A value in `[low, high)` from draw `index` of `seed`.
@@ -294,6 +296,24 @@ fn point(seed: u64, index: &mut u64, reach: f64) -> DVec3 {
         draw(seed, index, -reach, reach),
         draw(seed, index, -reach, reach),
     )
+}
+
+/// Two boxes side by side with a gap between them, the second turned in the
+/// shape's frame, as an item's parts are.
+fn item(size: f64, turn: glam::DQuat) -> CompoundShape {
+    CompoundShape::new(vec![
+        CompoundPart::new(
+            DVec3::new(-size, 0.0, 0.0),
+            glam::DQuat::IDENTITY,
+            DVec3::new(size * 0.5, size, size * 0.5),
+        ),
+        CompoundPart::new(
+            DVec3::new(size, 0.0, 0.0),
+            turn,
+            DVec3::new(size * 0.5, size * 0.5, size),
+        ),
+    ])
+    .expect("a valid shape")
 }
 
 /// A tilted quad, two triangles, as a mesh collider would hold a ramp.
@@ -321,7 +341,7 @@ fn random_scene(seed: u64, count: u32) -> (PhysicsWorld, Vec<(ColliderId, bool)>
         let centre = point(seed, &mut index, 4.0);
         let size = draw(seed, &mut index, 0.2, 1.2);
         let turn = rotation_from_scaled_axis(point(seed, &mut index, 1.5));
-        let shape = match n % 5 {
+        let shape = match n % 6 {
             0 => Placed::Sphere(Sphere::new(centre, size)),
             1 => Placed::Box(BoxCollider::new(centre, DVec3::splat(size))),
             2 => Placed::Box(
@@ -329,13 +349,15 @@ fn random_scene(seed: u64, count: u32) -> (PhysicsWorld, Vec<(ColliderId, bool)>
                     .with_rotation(turn),
             ),
             3 => Placed::Capsule(Capsule::new(centre, size * 0.5, size)),
-            _ => Placed::Mesh(ramp(), Transform::new(centre, turn)),
+            4 => Placed::Mesh(ramp(), Transform::new(centre, turn)),
+            _ => Placed::Compound(item(size, turn), Transform::new(centre, turn)),
         };
         let id = match shape {
             Placed::Sphere(s) => world.add_sphere(s),
             Placed::Box(b) => world.add_box(b),
             Placed::Capsule(c) => world.add_capsule(c),
             Placed::Mesh(m, at) => world.add_mesh(m, at),
+            Placed::Compound(shape, at) => world.add_compound(&shape, DVec3::ZERO, &at),
         };
         assert!(world.set_layers(id, 1 << n));
         let trigger = n % 7 == 3;
@@ -346,7 +368,7 @@ fn random_scene(seed: u64, count: u32) -> (PhysicsWorld, Vec<(ColliderId, bool)>
 }
 
 /// Every bit a hit carries, so two compare as identical rather than equal.
-fn bits(hit: Option<(ColliderId, ShapeHit)>) -> Option<(ColliderId, [u64; 7], bool)> {
+fn bits(hit: Option<(ColliderId, ShapeHit)>) -> Option<(ColliderId, [u64; 7], bool, usize)> {
     hit.map(|(id, hit)| {
         let [x, y, z] = hit.point.to_array().map(f64::to_bits);
         let [nx, ny, nz] = hit.normal.to_array().map(f64::to_bits);
@@ -354,14 +376,15 @@ fn bits(hit: Option<(ColliderId, ShapeHit)>) -> Option<(ColliderId, [u64; 7], bo
             id,
             [hit.t.to_bits(), x, y, z, nx, ny, nz],
             hit.started_inside,
+            hit.part,
         )
     })
 }
 
 /// **The first hit is the closest sweep's answer, to the bit, and every hit
 /// is the one that collider gives on its own.** Random scenes of spheres,
-/// boxes turned and not, capsules, meshes and triggers, swept by spheres and
-/// capsules along random segments.
+/// boxes turned and not, capsules, meshes, compounds and triggers, swept by
+/// spheres and capsules along random segments.
 ///
 /// The list is held to two oracles that share no ordering code with it: the
 /// closest sweep, for which comes first, and the closest sweep masked down to
@@ -375,7 +398,9 @@ fn the_first_hit_is_the_closest_sweeps_and_each_hit_its_colliders_own() {
     let (mut most, mut started_inside, mut sweeps) = (0, 0, 0);
     // Hits per kind of collider, in `random_scene`'s order of kinds, so a
     // kind the sweeps never met is a gap the run reports.
-    let mut met = [0_usize; 5];
+    let mut met = [0_usize; 6];
+    // Compound entries past each compound's first: the parts behind a part.
+    let mut later_parts = 0;
     for seed in 0..40_u64 {
         let (mut world, placed) = random_scene(seed, count);
         let mut index = 1_000;
@@ -450,7 +475,9 @@ fn the_first_hit_is_the_closest_sweeps_and_each_hit_its_colliders_own() {
                 for pair in all.windows(2) {
                     let (a, b) = (pair[0], pair[1]);
                     assert!(
-                        a.1.t < b.1.t || (a.1.t == b.1.t && a.0.index() < b.0.index()),
+                        a.1.t < b.1.t
+                            || (a.1.t == b.1.t
+                                && (a.0.index(), a.1.part) < (b.0.index(), b.1.part)),
                         "out of order: {pair:?}, {context}"
                     );
                 }
@@ -462,6 +489,11 @@ fn the_first_hit_is_the_closest_sweeps_and_each_hit_its_colliders_own() {
                         assert_eq!(listed, None, "a trigger, {context}");
                     }
                     met[n % met.len()] += usize::from(listed.is_some());
+                    later_parts += all
+                        .iter()
+                        .filter(|&&(listed, _)| listed == id)
+                        .count()
+                        .saturating_sub(1);
                 }
                 for &(_, hit) in &all {
                     assert!((0.0..=1.0).contains(&hit.t), "{hit:?}, {context}");
@@ -478,7 +510,11 @@ fn the_first_hit_is_the_closest_sweeps_and_each_hit_its_colliders_own() {
     );
     assert!(
         met.iter().all(|&hits| hits > 0),
-        "hits per kind (sphere, box, turned box, capsule, mesh): {met:?}"
+        "hits per kind (sphere, box, turned box, capsule, mesh, compound): {met:?}"
+    );
+    assert!(
+        later_parts > 0,
+        "no sweep met a second part of one compound, so per-part entries went untested"
     );
     assert!(
         started_inside > 0,

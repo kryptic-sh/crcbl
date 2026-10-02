@@ -33,6 +33,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `EditError::Rotation` and `Document::rotation_problems` are gone, replaced by
   `EditError::Invalid` and `Document::problems` (see Added).
 
+- **`crcbl_phys::ShapeHit` gained a public `part`**, the index of the part of a
+  compound a query met (see the compound entry under Added), so a struct literal
+  naming every field must add it; every shape-level function, and every collider
+  that is not a compound, gives `0`.
+
 - **`crcbl_phys::BoxCollider` gained a public `rotation`**, a unit quaternion
   turning the box about its centre (see Added), so a struct literal naming every
   field must add it; `BoxCollider::new` makes an unturned box as before.
@@ -702,16 +707,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   unchanged.
 
 - **Turned boxes in `crcbl_phys`'s query world.** `BoxCollider::with_rotation`
-  turns a box, and `PhysicsWorld`'s rays, sphere and capsule sweeps, sphere
-  overlaps, capsule push-outs and lying-capsule queries answer for the turned
-  box itself rather than the box unturned; its broadphase holds the world-axis
-  box around it (`BoxCollider::aabb`). The shape-level forms are public:
-  `ray_vs_box`, `swept_sphere_vs_box`, `sphere_overlaps_box`,
-  `swept_capsule_vs_box` and `capsule_penetration_vs_box`. A ray, a sphere sweep
-  and a sphere overlap are answered exactly in the box's frame; an upright
-  capsule, which is not upright there, is swept by the contact pipeline's
-  conservative advancement and stops a little short of the contact. An unturned
-  box gives the answers it gave before, to the bit.
+  turns a box, and `PhysicsWorld`'s rays, sphere and capsule sweeps, sphere and
+  AABB overlaps, capsule push-outs and lying-capsule queries answer for the
+  turned box itself rather than the box unturned; its broadphase holds the
+  world-axis box around it (`BoxCollider::aabb`). The shape-level forms are
+  public: `ray_vs_box`, `swept_sphere_vs_box`, `sphere_overlaps_box`,
+  `aabb_overlaps_box`, `swept_capsule_vs_box` and `capsule_penetration_vs_box`.
+  `overlap_aabb` tests a turned box by the separating axis test the contact
+  pipeline runs for two boxes, where it reported every box whose bounds met the
+  query; spheres and capsules are still reported by their bounds. A ray, a
+  sphere sweep and a sphere overlap are answered exactly in the box's frame; an
+  upright capsule, which is not upright there, is swept by the contact
+  pipeline's conservative advancement and stops a little short of the contact.
+  An unturned box gives the answers it gave before, to the bit.
 
 - **The editor's rotate gizmo.** E shows a ring about each world axis (it put a
   refusal on the status line before), hit-tested against the drawn ring; a drag
@@ -2107,9 +2115,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   warm starting, islands and sleep work for compounds unchanged; a compound
   resting on two parts has two contacts, and raises a `KineticContact` for each.
   `ContactReport::part_a` and `part_b` name the parts, and
-  `ColliderComponent::part_count` counts them. The query world
-  (`PhysicsSystem::world`) holds one box around a compound's parts. A state with
-  no compound in it hashes as before: `apps/tumble`'s pinned hash is unchanged.
+  `ColliderComponent::part_count` counts them. In the query world
+  (`PhysicsSystem::world`) a compound is one collider answered part by part: a
+  ray, sweep or overlap meets the parts themselves, not the box around them, so
+  a ray down the gap between two parts passes through, and each hit names its
+  part in `ShapeHit::part`. A candidate sweep (`sweep_sphere_all`,
+  `sweep_capsule_all`) lists every part it meets, a push-out is the deepest
+  part's, and `PhysicsWorld::add_compound` and `set_compound` register and move
+  one directly. A state with no compound in it hashes as before: `apps/tumble`'s
+  pinned hash is unchanged.
 
 - **Islands and sleep: rung 3 of the contact solver** (`36-contact-solver.md`).
   In a system made with `PhysicsSystem::with_contacts`, dynamic bodies joined by
@@ -4627,6 +4641,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A turned body's sphere and capsule offsets, and its capsule itself, turn
+  with it in `crcbl_phys::PhysicsSystem`'s query world**, as its box already did
+  and as the contact pipeline places all three: a sphere offset up a body turned
+  on its side is queried beside the body, not above it, and a tipped capsule
+  body lies along its turned core, where it stood up the world's `Y` before. A
+  ray, a sphere sweep and a sphere overlap meet the turned capsule exactly; an
+  upright capsule is pushed out of it exactly and swept against it by
+  conservative advancement, stopping a little short of the contact, as against a
+  turned box. A body whose rotation is the identity, or a collider with no
+  offset, is placed exactly as before, and a capsule turned about `Y` alone — a
+  character's facing — answers as it did, to the bit.
+
 - **`crcbl_client::Client` interpolates between the snapshots either side of its
   playback position, not the newest two.** Playback trails the newest snapshot
   by the playout delay (see Added), so the alpha `Client::update` and
@@ -4653,8 +4679,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   offset and faces are turned by the body's rotation, so a ray, sweep or overlap
   through `PhysicsSystem::world` meets a turned body's box where it is drawn,
   where it met the unturned box at the unturned offset before. Bodies that never
-  turn are unaffected. Capsules and spheres there are unchanged: a capsule stays
-  upright along the world's `Y`, and both keep their offset unturned.
+  turn are unaffected.
 
 - **The same `SceneEntityId` in two chunk files is one entity in two systems**,
   where it used to be refused as `ScnError::DuplicateId`. The same id twice in

@@ -697,7 +697,12 @@ pub fn closest_on_segment(p: DVec3, a: DVec3, b: DVec3) -> (f64, DVec3) {
 
 /// The nearest points of two segments — Ericson, *Real-Time Collision
 /// Detection*, §5.1.9, whose parameters [`segment_parameters`] finds.
-fn closest_between_segments(p1: DVec3, q1: DVec3, p2: DVec3, q2: DVec3) -> (DVec3, DVec3) {
+pub(crate) fn closest_between_segments(
+    p1: DVec3,
+    q1: DVec3,
+    p2: DVec3,
+    q2: DVec3,
+) -> (DVec3, DVec3) {
     let (s, t) = segment_parameters(p1, q1, p2, q2);
     (p1 + (q1 - p1) * s, p2 + (q2 - p2) * t)
 }

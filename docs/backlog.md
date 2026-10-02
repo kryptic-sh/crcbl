@@ -4066,50 +4066,43 @@ Behaviour to know, and gaps in what shipped:
 
 ## Rotation in physics: what unlocking it left (2026-10-01)
 
-**In progress, parked 2026-10-02 on branch `feat/phys-query-shapes`** (pushed,
-not merged). It holds four commits on top of `8ed97066`. A test pinning every
-query answer on unturned scenes, so later changes can be held bit-identical.
-Sphere and capsule offsets turned with their body in the query world. A move of
-the query world's entry type into a file of its own beside `world.rs`. And an
-unfinished parking commit, started on compound children as separate query
-entries. Only `cargo check -p crcbl-phys` was run on the branch's tip; the first
-two commits went through their own check runs, which were never reviewed here.
-Still owed from that slice: compound children answered exactly (hits on the
-child, not a world-axis box around the compound), turned capsules in queries,
-and an exact `overlap_aabb` against a turned box. Finishing means reviewing the
-branch, completing those three, running the full check set with mutation tests,
-then merging. The items below are the same gaps as they stood before the branch.
-
 The query world's boxes turn (`BoxCollider::rotation`, answered by
 `crcbl_phys::query::ray_vs_box` and its siblings), a `PhysicsSystem` puts a
-body's box there turned with the body, and a scene `Body` whose placing
-component has a `rotation` tumbles and has its orientation written back
+body's box, capsule and offsets there turned with the body, a compound there is
+answered part by part (`PhysicsWorld::add_compound`), and a scene `Body` whose
+placing component has a `rotation` tumbles and has its orientation written back
 (`crcbl::scene_physics`). The rotational dynamics, the box pair's separating
 axis test, the sweeps' turning bound and sleep were all already built. What is
 left, each with what it takes:
 
-- **The query world's capsules stay upright**, along the world's Y whatever the
-  body's rotation, and a sphere's or a capsule's offset stays unturned there
-  (`place_collider` in `crates/crcbl-phys/src/system.rs`), where the contact
-  pipeline turns both. A turned capsule entry needs a ray and a sphere sweep in
-  the capsule's frame (as `query::boxes` does for a box) and, for an upright
-  capsule swept against it, the contact pipeline's advancement the lying capsule
-  already uses. The character controller's own capsule is upright on purpose, so
-  this is for bodies, and it changes what a tipped capsule body answers to a
-  ray. Not needed by anything yet.
-- **A compound is one world-axis box in the query world**
-  (`compound_query_box`), its exact per-part queries through `AabbCompound`. Its
-  parts could now be turned boxes of their own; that is a query-world entry
-  holding several, and the id-per-part question `AabbCompound` answers.
-- **An upright capsule swept against a turned box stops a little short**: it is
-  conservative advancement over `contact::manifold::gap`
-  (`query::swept_capsule_vs_box`), within the advancement's tolerance of the
-  contact, where against an unturned box it is exact. An exact form is the
-  segment swept against the box grown by the capsule's core — a hexagonal prism
-  rounded by the radius — which nothing has needed.
-- **`overlap_aabb` answers a turned box by its world-axis bounds**, as it does
-  every parametric shape; exact AABB-against-OBB is fifteen axes of
-  `box_box::gap` if a caller wants it.
+- **An upright capsule swept against a turned box or a turned capsule stops a
+  little short**: it is conservative advancement over `contact::manifold::gap`
+  (`query::capsules::advance_upright_capsule`, behind
+  `query::swept_capsule_vs_box` and the turned capsule's sweep), within the
+  advancement's tolerance of the contact, where against an unturned box or a
+  standing capsule it is exact. An exact form against the box is the segment
+  swept against the box grown by the capsule's core — a hexagonal prism rounded
+  by the radius — and against the capsule the segment swept against the two
+  cores' sum, a parallelogram rounded by both radii; nothing has needed either.
+- **`overlap_aabb` reports a sphere or a capsule by its bounds**: a query
+  meeting a corner of the box around one reports it though it misses the round
+  surface. Boxes (`query::aabb_overlaps_box`), compounds and meshes are exact.
+  `aabb_overlaps_box` on a turned box is the contact pipeline's fifteen-axis
+  test, which skips edge pairs within `EDGE_SINE` of parallel, so boxes apart by
+  a sliver along such a cross can read as touching.
+- **The query world's turned capsule is crate-internal**:
+  `PhysicsWorld::add_turned_capsule` and `set_turned_capsule` are `pub(crate)`,
+  used by `PhysicsSystem`, and the shape-level functions behind them
+  (`query::capsules`) are not exported, where the turned box's are. Exporting
+  them is the call for whoever first wants a turned capsule in a world they
+  build by hand.
+- **Not tested: tie-breaking two parts of one compound in the closest sweep.**
+  `keep_closest` ranks by part as well as by `t` and collider, but the parts of
+  one compound are visited in part order and only a strictly earlier hit
+  replaces the kept one, so dropping the part from that comparison changes no
+  answer; the mutation survives as an equivalent. The candidate sweeps' sort,
+  where the part does decide, is held by
+  `world::compound_tests::many_tied_parts_are_sorted_into_part_order`.
 - **Convex hulls and capsules on scene bodies**: a `Body` collides as its
   placement's box; a scene has no way to say "this is a capsule". Hulls are the
   contact solver's later rung, above.
@@ -11608,8 +11601,6 @@ force providers_. From rung 2:
     touching part pair and `CompoundShape::MAX_PARTS` (32). Not timed.
   - One `KineticContact` per part-pair contact, so an item landing on two parts
     raises two events; EW's impact audio may want one per body pair.
-  - The query world holds one box per compound; exact queries go through
-    `AabbCompound`.
   - `PhysicsSystem::put_to_sleep` restores a body asleep (2026-09-24), but each
     restored body sleeps as an island of its own: a restored stack is three
     sleeping islands where the saved one was one, joining only when something
@@ -27533,8 +27524,9 @@ already carries.
   changes behaviour: `query::ray_vs_aabb` with a zero direction from inside a
   box yields a `NaN` point (`t = +inf`); `query::sphere_overlaps_aabb` panics on
   a `NaN` box corner (`f64::clamp` asserts), which rebuilding it on
-  `Aabb::closest_point` would turn into "no overlap". Not done: compound sweeps
-  and compound-vs-shape overlap, which EW did not ask for.
+  `Aabb::closest_point` would turn into "no overlap". `AabbCompound` has no
+  sweeps or shape overlaps, which EW did not ask for; a compound in the query
+  world (`PhysicsWorld::add_compound`) has both, part by part.
 - **Two-bone IK shipped; EW's migration is parked on EW's side.**
   `crcbl_anim::{rotate_joint, solve_two_bone}` landed 2026-09-23 with EW's
   argument order, returning `IkError` (the validation choices are in the `ik`

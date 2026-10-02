@@ -41,11 +41,16 @@ impl PhysicsWorld {
     /// A triangle mesh is one collider, so it reports the first of its
     /// triangles the sweep meets and none of the others: a floor and a wall
     /// that are one mesh hide each other as they would from the closest sweep.
+    /// A compound reports each of its parts the sweep meets, as an entry of
+    /// its own carrying the compound's id and the part's
+    /// [`ShapeHit::part`]: a column behind another column of one item is
+    /// still reported.
     ///
     /// # Order
     ///
-    /// Nearer first, and of two at the same `t` the one in the lower
-    /// [`ColliderId::index`]. The closest sweep breaks ties the same way, so
+    /// Nearer first, of two at the same `t` the one in the lower
+    /// [`ColliderId::index`], and of two parts of one compound the lower
+    /// part. The closest sweep breaks ties the same way, so
     /// `hits.first()` is what `sweep_sphere_filtered` returns for the same
     /// arguments, to the bit — and when nothing starts overlapping, so is the
     /// first entry without `started_inside`.
@@ -73,8 +78,9 @@ impl PhysicsWorld {
     ///
     /// [`sweep_capsule_filtered`](Self::sweep_capsule_filtered) with nothing
     /// dropped, as [`sweep_sphere_all`](Self::sweep_sphere_all) is the sphere
-    /// sweep's: one entry per collider at its first touch, starting overlaps
-    /// kept and flagged, nearer first with ties in collider index order, and
+    /// sweep's: one entry per collider — per part, for a compound — at its
+    /// first touch, starting overlaps kept and flagged, nearer first with
+    /// ties in collider index and then part order, and
     /// `hits.first()` the closest sweep's answer to the bit. `segment` is the
     /// path of the capsule's centre, as the closest sweep takes it.
     ///
@@ -117,7 +123,7 @@ impl OverlapQueries<'_> {
         sweep_sphere_hits(*self, segment, radius, filter, scratch, |id, hit| {
             hits.push((id, hit));
         });
-        hits.sort_unstable_by(|a, b| sweep_order((a.0, a.1.t), (b.0, b.1.t)));
+        hits.sort_unstable_by(|a, b| sweep_order((a.0, a.1.part, a.1.t), (b.0, b.1.part, b.1.t)));
     }
 
     /// [`PhysicsWorld::sweep_capsule_all`] under a shared borrow, working in
@@ -136,6 +142,6 @@ impl OverlapQueries<'_> {
         sweep_capsule_hits(*self, &capsule, segment.end, filter, scratch, |id, hit| {
             hits.push((id, hit));
         });
-        hits.sort_unstable_by(|a, b| sweep_order((a.0, a.1.t), (b.0, b.1.t)));
+        hits.sort_unstable_by(|a, b| sweep_order((a.0, a.1.part, a.1.t), (b.0, b.1.part, b.1.t)));
     }
 }

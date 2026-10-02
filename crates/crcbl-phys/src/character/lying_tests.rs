@@ -113,7 +113,7 @@ fn a_collider_off_the_query_mask_does_not_block_a_prone_body() {
 }
 
 /// **A static compound blocks a prone body** through the query world a
-/// [`PhysicsSystem`] keeps, where it is one box around its parts.
+/// [`PhysicsSystem`] keeps, where each of its parts blocks on its own.
 #[test]
 fn a_static_compound_blocks_a_prone_body() {
     let mut phys = PhysicsSystem::new();
