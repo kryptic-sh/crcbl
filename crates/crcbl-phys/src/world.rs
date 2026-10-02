@@ -19,7 +19,7 @@ use crate::query::{self, Penetration, ShapeHit};
 mod candidate_sweeps;
 mod entry;
 
-use entry::ColliderEntry;
+use entry::{ColliderEntry, Primitive};
 
 /// Opaque identifier for a registered collider.
 ///
@@ -725,11 +725,13 @@ fn overlap_sphere_core(
             .get(slot)
             .and_then(|s| s.as_ref())
             .filter(|data| filter.admits(slot, data))
-            .is_some_and(|data| match &data.entry {
-                ColliderEntry::Sphere(s) => query::sphere_overlaps_sphere(query_sphere, s),
-                ColliderEntry::Box(b) => query::sphere_overlaps_box(query_sphere, b),
-                ColliderEntry::Capsule(c) => query::sphere_overlaps_capsule(query_sphere, c),
-                ColliderEntry::Mesh(m) => m.overlaps_sphere(query_sphere, &mut scratch.mesh),
+            .is_some_and(|data| {
+                data.entry.primitives().any(|shape| match shape {
+                    Primitive::Sphere(s) => query::sphere_overlaps_sphere(query_sphere, s),
+                    Primitive::Box(b) => query::sphere_overlaps_box(query_sphere, b),
+                    Primitive::Capsule(c) => query::sphere_overlaps_capsule(query_sphere, c),
+                    Primitive::Mesh(m) => m.overlaps_sphere(query_sphere, &mut scratch.mesh),
+                })
             });
         if hit {
             out.push(ColliderId::new(idx, generations[slot]));
@@ -762,11 +764,11 @@ fn overlap_aabb_core(
             .get(slot as usize)
             .and_then(|s| s.as_ref())
             .filter(|data| filter.admits(slot as usize, data))
-            .is_some_and(|data| match &data.entry {
-                ColliderEntry::Mesh(m) => m.overlaps_aabb(aabb, &mut scratch.mesh),
-                ColliderEntry::Sphere(_) | ColliderEntry::Box(_) | ColliderEntry::Capsule(_) => {
-                    true
-                }
+            .is_some_and(|data| {
+                data.entry.primitives().any(|shape| match shape {
+                    Primitive::Mesh(m) => m.overlaps_aabb(aabb, &mut scratch.mesh),
+                    Primitive::Sphere(_) | Primitive::Box(_) | Primitive::Capsule(_) => true,
+                })
             });
         if admitted {
             out.push(id_for_slot_in(generations, slot));
@@ -833,11 +835,11 @@ fn sweep_sphere_hits(
         view.generations,
         &scratch.candidates,
         filter,
-        |entry| match entry {
-            ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
-            ColliderEntry::Box(b) => query::swept_sphere_vs_box(segment, radius, b),
-            ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
-            ColliderEntry::Mesh(m) => m.sweep(segment, radius, DVec3::ZERO, &mut scratch.mesh),
+        |shape| match shape {
+            Primitive::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
+            Primitive::Box(b) => query::swept_sphere_vs_box(segment, radius, b),
+            Primitive::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
+            Primitive::Mesh(m) => m.sweep(segment, radius, DVec3::ZERO, &mut scratch.mesh),
         },
         visit,
     );
@@ -883,15 +885,13 @@ fn sweep_capsule_hits(
         view.generations,
         &scratch.candidates,
         filter,
-        |entry| match entry {
-            ColliderEntry::Sphere(s) => {
-                query::swept_capsule_vs_sphere(segment, radius, half_height, s)
-            }
-            ColliderEntry::Box(b) => query::swept_capsule_vs_box(segment, radius, half_height, b),
-            ColliderEntry::Capsule(c) => {
+        |shape| match shape {
+            Primitive::Sphere(s) => query::swept_capsule_vs_sphere(segment, radius, half_height, s),
+            Primitive::Box(b) => query::swept_capsule_vs_box(segment, radius, half_height, b),
+            Primitive::Capsule(c) => {
                 query::swept_capsule_vs_capsule(segment, radius, half_height, c)
             }
-            ColliderEntry::Mesh(m) => {
+            Primitive::Mesh(m) => {
                 m.sweep(segment, radius, DVec3::Y * half_height, &mut scratch.mesh)
             }
         },
@@ -931,13 +931,21 @@ fn capsule_penetrations_core(
         if !filter.admits(idx, slot) {
             continue;
         }
-        let penetration = match &slot.entry {
-            ColliderEntry::Sphere(s) => query::capsule_penetration_vs_sphere(capsule, s),
-            ColliderEntry::Box(b) => query::capsule_penetration_vs_box(capsule, b),
-            ColliderEntry::Capsule(c) => query::capsule_penetration_vs_capsule(capsule, c),
-            ColliderEntry::Mesh(m) => m.capsule_penetration(capsule, &mut scratch.mesh),
-        };
-        if let Some(penetration) = penetration {
+        let mut deepest: Option<Penetration> = None;
+        for shape in slot.entry.primitives() {
+            let penetration = match shape {
+                Primitive::Sphere(s) => query::capsule_penetration_vs_sphere(capsule, s),
+                Primitive::Box(b) => query::capsule_penetration_vs_box(capsule, b),
+                Primitive::Capsule(c) => query::capsule_penetration_vs_capsule(capsule, c),
+                Primitive::Mesh(m) => m.capsule_penetration(capsule, &mut scratch.mesh),
+            };
+            if let Some(penetration) = penetration
+                && deepest.is_none_or(|deepest| penetration.depth > deepest.depth)
+            {
+                deepest = Some(penetration);
+            }
+        }
+        if let Some(penetration) = deepest {
             out.push((id_for_slot_in(generations, element), penetration));
         }
     }
@@ -983,18 +991,18 @@ fn lying_capsule_blocker_core(
         if !filter.admits(idx, slot) {
             continue;
         }
-        let blocked = match &slot.entry {
-            ColliderEntry::Sphere(s) => inside(ContactShape::Sphere {
+        let blocked = slot.entry.primitives().any(|shape| match shape {
+            Primitive::Sphere(s) => inside(ContactShape::Sphere {
                 centre: s.centre,
                 radius: s.radius,
             }),
-            ColliderEntry::Box(b) => inside(query::contact_box(b)),
-            ColliderEntry::Capsule(c) => inside(ContactShape::Capsule {
+            Primitive::Box(b) => inside(query::contact_box(b)),
+            Primitive::Capsule(c) => inside(ContactShape::Capsule {
                 a: c.bottom(),
                 b: c.top(),
                 radius: c.radius,
             }),
-            ColliderEntry::Mesh(m) => m
+            Primitive::Mesh(m) => m
                 .turned_capsule_penetration(
                     (head + feet) * 0.5,
                     (head - feet) * 0.5,
@@ -1002,7 +1010,7 @@ fn lying_capsule_blocker_core(
                     &mut scratch.mesh,
                 )
                 .is_some(),
-        };
+        });
         if blocked {
             return Some(id_for_slot_in(generations, element));
         }
@@ -1092,18 +1100,18 @@ fn sweep_lying_capsule_core(
         generations,
         &scratch.candidates,
         filter,
-        |entry| match entry {
-            ColliderEntry::Sphere(s) => advance(ContactShape::Sphere {
+        |shape| match shape {
+            Primitive::Sphere(s) => advance(ContactShape::Sphere {
                 centre: s.centre,
                 radius: s.radius,
             }),
-            ColliderEntry::Box(b) => advance(query::contact_box(b)),
-            ColliderEntry::Capsule(c) => advance(ContactShape::Capsule {
+            Primitive::Box(b) => advance(query::contact_box(b)),
+            Primitive::Capsule(c) => advance(ContactShape::Capsule {
                 a: c.bottom(),
                 b: c.top(),
                 radius: c.radius,
             }),
-            ColliderEntry::Mesh(m) => m
+            Primitive::Mesh(m) => m
                 .sweep(&path, radius, (head - feet) * 0.5, &mut scratch.mesh)
                 .map(SweptContact::from),
         },
@@ -1140,16 +1148,18 @@ fn closest_hit_core(
         if !filter.admits(idx, slot) {
             continue;
         }
-        let hit = match &slot.entry {
-            ColliderEntry::Sphere(s) => query::ray_vs_sphere(ray, s),
-            ColliderEntry::Box(b) => query::ray_vs_box(ray, b),
-            ColliderEntry::Capsule(c) => query::ray_vs_capsule(ray, c),
-            ColliderEntry::Mesh(m) => m.cast_ray(ray, mesh),
-        };
-        if let Some(hit) = hit
-            && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
-        {
-            best = Some((hit.t, id_for_slot_in(generations, bvh_hit.element_id), hit));
+        for shape in slot.entry.primitives() {
+            let hit = match shape {
+                Primitive::Sphere(s) => query::ray_vs_sphere(ray, s),
+                Primitive::Box(b) => query::ray_vs_box(ray, b),
+                Primitive::Capsule(c) => query::ray_vs_capsule(ray, c),
+                Primitive::Mesh(m) => m.cast_ray(ray, mesh),
+            };
+            if let Some(hit) = hit
+                && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
+            {
+                best = Some((hit.t, id_for_slot_in(generations, bvh_hit.element_id), hit));
+            }
         }
     }
     best.map(|(_, id, hit)| (id, hit))
@@ -1173,7 +1183,7 @@ fn swept_hits_core<H: SweptHit>(
     generations: &[u32],
     candidates: &[u32],
     filter: ResolvedFilter,
-    mut narrow: impl FnMut(&ColliderEntry) -> Option<H>,
+    mut narrow: impl FnMut(Primitive<'_>) -> Option<H>,
     mut visit: impl FnMut(ColliderId, H),
 ) {
     for &element in candidates {
@@ -1184,10 +1194,12 @@ fn swept_hits_core<H: SweptHit>(
         if !filter.admits(idx, slot) {
             continue;
         }
-        if let Some(hit) = narrow(&slot.entry)
-            && hit.t() < f64::INFINITY
-        {
-            visit(id_for_slot_in(generations, element), hit);
+        for shape in slot.entry.primitives() {
+            if let Some(hit) = narrow(shape)
+                && hit.t() < f64::INFINITY
+            {
+                visit(id_for_slot_in(generations, element), hit);
+            }
         }
     }
 }
@@ -1199,7 +1211,7 @@ fn closest_swept_core<H: SweptHit>(
     generations: &[u32],
     candidates: &[u32],
     filter: ResolvedFilter,
-    narrow: impl FnMut(&ColliderEntry) -> Option<H>,
+    narrow: impl FnMut(Primitive<'_>) -> Option<H>,
 ) -> Option<(ColliderId, H)> {
     let mut closest = None;
     swept_hits_core(
