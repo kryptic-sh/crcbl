@@ -4070,7 +4070,7 @@ Behaviour to know, and gaps in what shipped:
 not merged). It holds four commits on top of `8ed97066`. A test pinning every
 query answer on unturned scenes, so later changes can be held bit-identical.
 Sphere and capsule offsets turned with their body in the query world. A move of
-the query world's entry type into `crates/crcbl-phys/src/world/entry.rs`. And an
+the query world's entry type into a file of its own beside `world.rs`. And an
 unfinished parking commit, started on compound children as separate query
 entries. Only `cargo check -p crcbl-phys` was run on the branch's tip; the first
 two commits went through their own check runs, which were never reviewed here.
