@@ -175,6 +175,22 @@ struct Intent {
     restart: bool,
 }
 
+/// The frame a client seals for what its player asked: what
+/// [`Game::set_controls`] holds for the next tick, and what a tool's play
+/// controls encode (`play`'s `controls`), so the two cannot spell one command
+/// two ways.
+impl From<Controls> for Intent {
+    fn from(controls: Controls) -> Self {
+        Self {
+            place: controls.place,
+            kind: controls.kind,
+            upgrade: controls.upgrade,
+            start_wave: controls.start_wave,
+            restart: controls.restart,
+        }
+    }
+}
+
 const INTENT_START: u8 = 1 << 0;
 const INTENT_RESTART: u8 = 1 << 1;
 
@@ -1367,13 +1383,7 @@ impl Game {
 
     /// Records what the player asked for, to be sent on the next tick.
     pub fn set_controls(&mut self, controls: Controls) {
-        self.pending = Intent {
-            place: controls.place,
-            kind: controls.kind,
-            upgrade: controls.upgrade,
-            start_wave: controls.start_wave,
-            restart: controls.restart,
-        };
+        self.pending = controls.into();
     }
 
     /// Sends this tick's command and advances this player's client by exactly

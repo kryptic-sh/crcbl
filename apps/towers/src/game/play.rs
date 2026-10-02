@@ -4,33 +4,43 @@
 //! ```text
 //!   the scene's files ──▶ Map::load ──▶ Stage ──▶ TowersModule::tick, as the
 //!                                         │         one local player
-//!                                         └──▶ every creep, as a Walker entity
+//!                                         ├──▶ every creep, tower, bolt and
+//!                                         │    burst, as runtime entities
+//!                                         └──▶ the readout `controls` reads
 //! ```
 //!
-//! # The game's own tick, as one local player asking for nothing
+//! # The game's own tick, as one local player
 //!
 //! `run_team_tick` holds the run still on a tick with no command frame at all —
-//! a dedicated server nobody has joined — and a tool has no client to send
-//! one. So this module ticks through [`TowersModule`]'s [`GameModule`] half,
-//! which is solo's: it reads the [`ClientInputs`] it is handed as the frames of
-//! the one local player, and an empty set is that player asking for nothing
-//! this tick — `run_tick` hands `run_team_tick` one empty command, not none.
-//! The build phase runs down, the waves come, the creeps walk and leak, a lost
-//! run starts itself again: the run solo plays with nobody at the keys, by the
-//! same rules, because it is the same call.
+//! a dedicated server nobody has joined. So this module ticks through
+//! [`TowersModule`]'s [`GameModule`] half, which is solo's: it reads the
+//! [`ClientInputs`] it is handed as the frames of the one local player, and an
+//! empty set is that player asking for nothing this tick — `run_tick` hands
+//! `run_team_tick` one empty command, not none. The build phase runs down, the
+//! waves come, the creeps walk and leak, a lost run starts itself again: the
+//! run solo plays, by the same rules, because it is the same call.
 //!
-//! # Creeps as entities a tool can draw
+//! **A tool's commands are that player's.** The frames a tool hands the module
+//! are the bytes `controls` encodes, which are the bytes solo's client seals
+//! for the same command; the stage validates them as it validates any client's
+//! and records a refusal, which `controls` hands the tool to tell.
 //!
-//! The stage keeps its creeps outside the ECS — see `crate::game`'s module
-//! docs — and a tool draws entities. So after every tick this module mirrors
-//! each creep as a [`Walker`] in the [`WALKERS`] system, keyed by the creep's
-//! physics body so one creep is one entity for as long as it lives, and
-//! despawns the entity of a creep that died or leaked. `Walker` is a
-//! **runtime** component ([`crcbl::registry::Registry::register_runtime`]): a
-//! tool draws it from its placement and never lists, edits or saves it.
+//! # What the stage holds, as entities a tool can draw
 //!
-//! Towers, bolts and bursts are not mirrored: no tool can build a tower yet,
-//! so a field it plays has none of the three.
+//! The stage keeps its creeps, towers, bolts and bursts outside the ECS — see
+//! `crate::game`'s module docs — and a tool draws entities. So after every
+//! tick this module mirrors each into a runtime system of its own
+//! ([`crcbl::registry::Registry::register_runtime`]): a tool draws them from
+//! their placements and never lists, edits or saves them.
+//!
+//! - A creep is a [`Walker`] in [`WALKERS`], keyed by the creep's physics body
+//!   so one creep is one entity for as long as it lives — the stage
+//!   swap-removes a creep that dies, so its place in the list is not its own.
+//! - A tower is a [`Turret`] in [`TURRETS`], a bolt a [`Shot`] in [`SHOTS`]
+//!   and a burst a [`Blast`] in [`BLASTS`], each by its **place** in the
+//!   stage's list: towers are only ever added (a restart empties them), and a
+//!   bolt or a burst is gone within a fraction of a second, so an entity that
+//!   stood for one bolt and now stands for the next draws the same picture.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -42,22 +52,42 @@ use crcbl::phys::ColliderId;
 use crcbl::registry::{OrientedBox, Placement, Registry};
 
 use super::{DEFAULT_TICK_HZ, Stage, TowersModule, lock};
-use crate::map::{CREEP_RADIUS, Map};
+use crate::map::{BOLT_RADIUS, CREEP_RADIUS, Map, TOWER_HEIGHT, TOWER_RADIUS, UPGRADED_SCALE};
+use crate::tower::Tier;
+
+mod controls;
 
 /// The runtime system every [`Walker`] is a row of, while the field plays.
-pub(crate) const WALKERS: &str = "walkers";
+const WALKERS: &str = "walkers";
+
+/// The runtime system every [`Turret`] is a row of. Not `towers`, which is
+/// this game's [`Registry::group`] label: a tool listing both would read one
+/// name as two things.
+const TURRETS: &str = "turrets";
+
+/// The runtime system every [`Shot`] is a row of.
+const SHOTS: &str = "bolts";
+
+/// The runtime system every [`Blast`] is a row of.
+const BLASTS: &str = "bursts";
+
+/// Hashes `values` by their bits, in order: every runtime component here is
+/// a few numbers.
+fn hash_values(hasher: &mut dyn std::hash::Hasher, values: impl IntoIterator<Item = f64>) {
+    for value in values {
+        hasher.write(&value.to_bits().to_le_bytes());
+    }
+}
 
 /// One creep on a played field, as a tool draws it: where its centre is.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Walker {
+struct Walker {
     centre: DVec3,
 }
 
 impl ComponentHash for Walker {
     fn hash_component(&self, hasher: &mut dyn std::hash::Hasher) {
-        for value in self.centre.to_array() {
-            hasher.write(&value.to_bits().to_le_bytes());
-        }
+        hash_values(hasher, self.centre.to_array());
     }
 }
 
@@ -71,6 +101,97 @@ impl Placement for Walker {
     }
 }
 
+/// One built tower on a played field, as a tool draws it: where its feet are,
+/// and how much bigger than a base tower it stands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Turret {
+    feet: DVec3,
+    /// 1 for a base tower, [`UPGRADED_SCALE`] for a stepped-up one — the
+    /// scale the game's own frame draws it at.
+    scale: f64,
+}
+
+impl ComponentHash for Turret {
+    fn hash_component(&self, hasher: &mut dyn std::hash::Hasher) {
+        hash_values(hasher, self.feet.to_array().into_iter().chain([self.scale]));
+    }
+}
+
+/// The box around the tower's cylinder, standing on its feet: as wide as
+/// [`TOWER_RADIUS`] and as tall as [`TOWER_HEIGHT`], both scaled as the frame
+/// scales a stepped-up tower.
+impl Placement for Turret {
+    fn placement(&self) -> Option<OrientedBox> {
+        let (radius, half_height) = (TOWER_RADIUS * self.scale, 0.5 * TOWER_HEIGHT * self.scale);
+        Some(OrientedBox::axis_aligned(
+            self.feet + DVec3::new(0.0, half_height, 0.0),
+            DVec3::new(radius, half_height, radius),
+        ))
+    }
+}
+
+/// One bolt in the air on a played field: where it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Shot {
+    centre: DVec3,
+}
+
+impl ComponentHash for Shot {
+    fn hash_component(&self, hasher: &mut dyn std::hash::Hasher) {
+        hash_values(hasher, self.centre.to_array());
+    }
+}
+
+/// The box around the bolt's sphere.
+impl Placement for Shot {
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::axis_aligned(
+            self.centre,
+            DVec3::splat(BOLT_RADIUS),
+        ))
+    }
+}
+
+/// One splash burst on a played field, while the game still draws it: where
+/// the bolt stopped, and how far the burst reached.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Blast {
+    centre: DVec3,
+    radius_m: f64,
+}
+
+impl ComponentHash for Blast {
+    fn hash_component(&self, hasher: &mut dyn std::hash::Hasher) {
+        hash_values(
+            hasher,
+            self.centre.to_array().into_iter().chain([self.radius_m]),
+        );
+    }
+}
+
+/// The box around the burst's sphere — the overlap that wounded, so the
+/// picture is the query, as the game's own frame draws it.
+impl Placement for Blast {
+    fn placement(&self) -> Option<OrientedBox> {
+        Some(OrientedBox::axis_aligned(
+            self.centre,
+            DVec3::splat(self.radius_m),
+        ))
+    }
+}
+
+/// Registers every runtime component this module mirrors into, under its
+/// system, and the controls a tool plays the field with: what this game's
+/// vocabulary adds so a tool can draw a played field and take part in it.
+pub(crate) fn register_play(registry: &mut Registry, system: &str) {
+    registry.module(system, start);
+    registry.play_controls(system, controls::CONTROLS);
+    registry.register_runtime::<Walker>(WALKERS);
+    registry.register_runtime::<Turret>(TURRETS);
+    registry.register_runtime::<Shot>(SHOTS);
+    registry.register_runtime::<Blast>(BLASTS);
+}
+
 /// The field whose files `source` holds under `dir`, as a module that plays it
 /// — or the rule the layout breaks, as [`Map::load`] names it.
 ///
@@ -82,7 +203,7 @@ impl Placement for Walker {
 /// # Errors
 ///
 /// [`Map::load`]'s refusal, as text.
-pub(crate) fn start(
+fn start(
     _: &Registry,
     source: &dyn AssetSource,
     dir: &Path,
@@ -91,13 +212,65 @@ pub(crate) fn start(
     Ok(Box::new(FieldPlay::new(map)))
 }
 
-/// A stage on one field, ticked as solo ticks it, with its creeps mirrored
+/// A stage on one field, ticked as solo ticks it, with what it holds mirrored
 /// into the world it plays in — see the module docs.
 #[derive(Debug)]
 struct FieldPlay {
     towers: TowersModule,
     /// Each live creep's body and the entity mirroring it.
     walkers: Vec<(ColliderId, Entity)>,
+    /// The entity mirroring each of the stage's towers, by its place.
+    turrets: Vec<Entity>,
+    /// …each bolt in the air, by its place.
+    shots: Vec<Entity>,
+    /// …and each burst still drawn, by its place.
+    blasts: Vec<Entity>,
+}
+
+/// What the stage holds this tick, copied out from under its lock so the
+/// world can be written without holding it.
+struct Mirrored {
+    creeps: Vec<(ColliderId, DVec3)>,
+    turrets: Vec<Turret>,
+    shots: Vec<Shot>,
+    blasts: Vec<Blast>,
+}
+
+impl Mirrored {
+    /// What `stage` holds, as the rows a tool draws.
+    fn of(stage: &Stage) -> Self {
+        Self {
+            creeps: stage
+                .creeps
+                .iter()
+                .map(|creep| (creep.body(), creep.centre()))
+                .collect(),
+            turrets: stage
+                .towers
+                .iter()
+                .map(|tower| Turret {
+                    feet: stage.map.plots()[tower.plot()].at(),
+                    scale: match tower.tier() {
+                        Tier::Base => 1.0,
+                        Tier::Upgraded => f64::from(UPGRADED_SCALE),
+                    },
+                })
+                .collect(),
+            shots: stage
+                .bolts
+                .iter()
+                .map(|bolt| Shot { centre: bolt.at() })
+                .collect(),
+            blasts: stage
+                .bursts
+                .iter()
+                .map(|burst| Blast {
+                    centre: burst.at,
+                    radius_m: burst.radius_m,
+                })
+                .collect(),
+        }
+    }
 }
 
 impl FieldPlay {
@@ -109,19 +282,27 @@ impl FieldPlay {
                 shared: Arc::new(Mutex::new(Stage::new(Arc::new(map)))),
             },
             walkers: Vec::new(),
+            turrets: Vec::new(),
+            shots: Vec::new(),
+            blasts: Vec::new(),
         }
+    }
+
+    /// Brings every runtime system into line with what the stage holds. The
+    /// world sweeps what this despawned after the module's tick, as a
+    /// server's does.
+    fn mirror(&mut self, world: &mut World) {
+        let mirrored = Mirrored::of(&lock(&self.towers.shared));
+        self.mirror_creeps(world, mirrored.creeps);
+        mirror_places(world, &mut self.turrets, mirrored.turrets);
+        mirror_places(world, &mut self.shots, mirrored.shots);
+        mirror_places(world, &mut self.blasts, mirrored.blasts);
     }
 
     /// Brings the [`WALKERS`] system into line with the stage's creeps: an
     /// entity for each creep that arrived, every mirrored creep where it now
-    /// is, and a despawn for each that is gone. The world sweeps the despawned
-    /// after the module's tick, as a server's does.
-    fn mirror(&mut self, world: &mut World) {
-        let creeps: Vec<(ColliderId, DVec3)> = lock(&self.towers.shared)
-            .creeps
-            .iter()
-            .map(|creep| (creep.body(), creep.centre()))
-            .collect();
+    /// is, and a despawn for each that is gone.
+    fn mirror_creeps(&mut self, world: &mut World, creeps: Vec<(ColliderId, DVec3)>) {
         self.walkers.retain(|(body, entity)| {
             let alive = creeps.iter().any(|(live, _)| live == body);
             if !alive {
@@ -152,16 +333,43 @@ impl FieldPlay {
     }
 }
 
+/// Brings the runtime system of `T` into line with `rows`, one entity per
+/// place in the stage's list: an entity spawned for each place the list grew
+/// by, one despawned for each it shrank by, and every remaining entity given
+/// its place's row.
+fn mirror_places<T>(world: &mut World, entities: &mut Vec<Entity>, rows: Vec<T>)
+where
+    T: ComponentHash + 'static,
+{
+    for gone in entities.drain(rows.len().min(entities.len())..) {
+        world.despawn(gone);
+    }
+    while entities.len() < rows.len() {
+        entities.push(world.spawn());
+    }
+    let system = world
+        .system_mut::<System<T>>()
+        .expect("`register` put every mirrored system in the world before the first tick");
+    for (entity, row) in entities.iter().zip(rows) {
+        system.attach(*entity, row);
+    }
+}
+
 impl GameModule for FieldPlay {
     fn name(&self) -> &str {
         self.towers.name()
     }
 
     /// Sets the world to this game's rate — the stage's rules are written for
-    /// it — and registers the system the creeps are mirrored into.
+    /// it — and registers the systems the stage is mirrored into and the
+    /// readout a tool's controls read.
     fn register(&self, world: &mut World) {
         world.set_tick_dt(1.0 / f64::from(DEFAULT_TICK_HZ));
         world.register_system(Box::new(System::<Walker>::new(WALKERS)));
+        world.register_system(Box::new(System::<Turret>::new(TURRETS)));
+        world.register_system(Box::new(System::<Shot>::new(SHOTS)));
+        world.register_system(Box::new(System::<Blast>::new(BLASTS)));
+        world.register_system(controls::readout(Arc::clone(&self.towers.shared)));
     }
 
     fn tick(&mut self, world: &mut World, inputs: ClientInputs<'_>) {
@@ -175,6 +383,7 @@ mod tests {
     use super::*;
 
     use crate::scene::{FIELD, built_in_source};
+    use crate::tower;
     use crate::wave::{GAP_S, STARTING_LIVES, WAVES};
 
     /// A played field in a world of its own, registered as a tool registers it.
@@ -209,6 +418,25 @@ mod tests {
     /// How many ticks the stage takes, at most, to release its first creep.
     fn ticks_to_the_first_creep() -> u32 {
         build_phase_ticks() + RELEASE_SLACK
+    }
+
+    /// How many ticks the first wave takes, from its first release, for its
+    /// slowest creep to walk the whole path after the last of them is
+    /// released.
+    fn first_wave_ticks(module: &FieldPlay) -> u32 {
+        let first = WAVES[0];
+        let slowest = (0..first.creeps())
+            .filter_map(|index| first.kind_at(index))
+            .map(|kind| kind.spec().speed)
+            .fold(f64::INFINITY, f64::min);
+        let span: f64 = (0..first.creeps())
+            .filter_map(|index| first.gap_after(index))
+            .sum();
+        let length = lock(&module.towers.shared).map.path().length();
+        let seconds = span + length / slowest;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let ticks = (seconds * f64::from(DEFAULT_TICK_HZ)).ceil() as u32;
+        ticks
     }
 
     /// The centres of every mirrored creep.
@@ -264,22 +492,8 @@ mod tests {
             "the first creep did not walk"
         );
 
-        // Long enough for the slowest creep of the first wave to walk the
-        // whole path after the last of them is released.
-        let first = WAVES[0];
-        let slowest = (0..first.creeps())
-            .filter_map(|index| first.kind_at(index))
-            .map(|kind| kind.spec().speed)
-            .fold(f64::INFINITY, f64::min);
-        let span: f64 = (0..first.creeps())
-            .filter_map(|index| first.gap_after(index))
-            .sum();
-        let length = lock(&module.towers.shared).map.path().length();
-        let seconds = span + length / slowest;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let ticks = (seconds * f64::from(DEFAULT_TICK_HZ)).ceil() as u32;
         let mut leaked = false;
-        for _ in 0..ticks {
+        for _ in 0..first_wave_ticks(&module) {
             tick(&mut module, &mut world);
             let stage = lock(&module.towers.shared);
             assert_eq!(
@@ -324,6 +538,137 @@ mod tests {
             start(&Registry::new(), &built_in_source(), Path::new(FIELD)).is_ok(),
             "the committed field is refused"
         );
+    }
+
+    /// One tick as a tool's play runs it, with `frame` arriving from its one
+    /// player.
+    fn tick_with(module: &mut FieldPlay, world: &mut World, frame: Vec<u8>) {
+        let frames = [(crcbl::core::TickId::ZERO, frame)];
+        world.tick();
+        module.tick(world, ClientInputs::new(&frames, 0));
+        world.sweep();
+    }
+
+    /// The frame this game's controls encode for `action` taking `args`.
+    fn command(action: &str, args: &[crcbl::registry::PlayArg]) -> Vec<u8> {
+        let index = controls::CONTROLS
+            .actions
+            .iter()
+            .position(|each| each.name == action)
+            .expect("an action towers offers");
+        (controls::CONTROLS.encode)(index, args).expect("towers spells it")
+    }
+
+    /// Every mirrored row of `T`, by entity.
+    fn rows<T: ComponentHash + Copy + 'static>(world: &mut World) -> Vec<(Entity, T)> {
+        world
+            .system_mut::<System<T>>()
+            .expect("registered")
+            .iter_entities()
+            .map(|(entity, row)| (entity, *row))
+            .collect()
+    }
+
+    /// **A tower a tool's command builds is mirrored where its plot is, at
+    /// its tier's size** — and stepping it up grows the same entity rather
+    /// than adding one.
+    #[test]
+    fn a_built_tower_is_mirrored_on_its_plot_and_grows_when_stepped_up() {
+        use crcbl::registry::PlayArg;
+
+        let (mut module, mut world) = played();
+        let plot = 1;
+        tick_with(
+            &mut module,
+            &mut world,
+            command("Place tower", &[PlayArg::Picked(plot), PlayArg::Choice(0)]),
+        );
+        let feet = Map::built_in().plots()[plot].at();
+        let built = rows::<Turret>(&mut world);
+        assert_eq!(
+            built.iter().map(|(_, turret)| *turret).collect::<Vec<_>>(),
+            [Turret { feet, scale: 1.0 }],
+        );
+        let placed = built[0].1.placement().expect("a tower is in space");
+        assert!(
+            (placed.centre.y - 0.5 * TOWER_HEIGHT).abs() < 1e-12
+                && (placed.half_extents.x - TOWER_RADIUS).abs() < 1e-12,
+            "a base tower is drawn as {placed:?}",
+        );
+
+        tick_with(
+            &mut module,
+            &mut world,
+            command("Upgrade", &[PlayArg::Picked(plot)]),
+        );
+        let stepped = rows::<Turret>(&mut world);
+        assert_eq!(stepped.len(), 1, "an upgrade mirrored a second tower");
+        assert_eq!(
+            stepped[0].0, built[0].0,
+            "an upgrade moved to another entity"
+        );
+        assert_eq!(stepped[0].1.scale, f64::from(UPGRADED_SCALE));
+    }
+
+    /// **Bolts and bursts are mirrored for as long as the stage holds them,
+    /// tick by tick, and leave with them**: a splash tower on the lane's
+    /// side, through the first wave, with every entity in the world one of
+    /// the stage's four lists.
+    #[test]
+    fn bolts_and_bursts_are_mirrored_while_the_stage_holds_them() {
+        use crcbl::registry::PlayArg;
+
+        let (mut module, mut world) = played();
+        let splash = tower::ALL
+            .iter()
+            .position(|kind| *kind == tower::Kind::Splash)
+            .expect("towers has a splash tower");
+        tick_with(
+            &mut module,
+            &mut world,
+            command(
+                "Place tower",
+                &[PlayArg::Picked(0), PlayArg::Choice(splash)],
+            ),
+        );
+        let (mut shot, mut blasted) = (false, false);
+        for _ in 0..ticks_to_the_first_creep() + first_wave_ticks(&module) {
+            tick(&mut module, &mut world);
+            let (bolts, bursts, held) = {
+                let stage = lock(&module.towers.shared);
+                let held = stage.creeps.len() + stage.towers.len();
+                (stage.bolts.clone(), stage.bursts.clone(), held)
+            };
+            let shots = rows::<Shot>(&mut world);
+            let blasts = rows::<Blast>(&mut world);
+            assert_eq!(shots.len(), bolts.len(), "the mirror lost or kept a bolt");
+            assert_eq!(
+                blasts.len(),
+                bursts.len(),
+                "the mirror lost or kept a burst"
+            );
+            for ((_, mirrored), bolt) in shots.iter().zip(&bolts) {
+                assert_eq!(
+                    mirrored.centre,
+                    bolt.at(),
+                    "a bolt is drawn where it is not"
+                );
+            }
+            for ((_, mirrored), burst) in blasts.iter().zip(&bursts) {
+                assert_eq!(
+                    (mirrored.centre, mirrored.radius_m),
+                    (burst.at, burst.radius_m)
+                );
+            }
+            assert_eq!(
+                world.entity_count(),
+                held + bolts.len() + bursts.len(),
+                "the world holds an entity the stage does not",
+            );
+            shot |= !bolts.is_empty();
+            blasted |= !bursts.is_empty();
+        }
+        assert!(shot && blasted, "the splash tower never fired and burst");
     }
 
     /// A creep is drawn as the box around its sphere.

@@ -1,7 +1,8 @@
 //! Play mode on towers' committed field, through the shipped vocabulary: the
 //! module towers registers runs the game, its creeps walk the lane as
-//! entities the document draws and never lists or saves, and stop leaves the
-//! scene exactly as it was.
+//! entities the document draws and never lists or saves, towers placed
+//! through its play controls stand on their plots and cost their price, and
+//! stop leaves the scene exactly as it was.
 //!
 //! Every tick count here is derived from towers' own constants — the build
 //! phase, the tick rate, the creep table, the path — rather than written as a
@@ -12,9 +13,12 @@ use std::time::Duration;
 
 use super::*;
 
-use crcbl_towers::map::{CREEP_RADIUS, EXIT_HALF, LANE_WIDTH};
-use crcbl_towers::wave::GAP_S;
-use crcbl_towers::{CREEPS, DEFAULT_TICK_HZ, FIELD, Map, WAVES};
+use crcbl::registry::PlayArg;
+use crcbl_towers::game::Refusal;
+use crcbl_towers::map::{CREEP_RADIUS, EXIT_HALF, LANE_WIDTH, TOWER_HEIGHT, TOWER_RADIUS};
+use crcbl_towers::tower::Kind;
+use crcbl_towers::wave::{GAP_S, STARTING_GOLD};
+use crcbl_towers::{CREEPS, DEFAULT_TICK_HZ, FIELD, Map, Tier, WAVES};
 
 /// The ticks past the build phase by which the first creep is out: the tick
 /// that releases it, and one more, because the stage's clock is a sum of tick
@@ -308,4 +312,289 @@ fn scenes_of_other_games_do_not_run_towers_module() {
         run(&mut document, 1);
         assert!(document.spawned().is_empty(), "{dir} spawned creeps");
     }
+}
+
+/// The system towers' module and play controls are registered under.
+const TOWERS_SYSTEM: &str = "waypoints";
+
+/// The index of the action named `name` in towers' play controls.
+fn action(document: &Document, name: &str) -> usize {
+    let controls = document.play_controls();
+    let (system, controls) = controls.first().expect("towers offers play controls");
+    assert_eq!(*system, TOWERS_SYSTEM);
+    controls
+        .actions
+        .iter()
+        .position(|each| each.name == name)
+        .expect("an action towers offers")
+}
+
+/// The `index`th plot of the field, in file order, selected.
+fn select_plot(document: &mut Document, index: usize) -> Vec3 {
+    let (_, plots) = document
+        .outline()
+        .into_iter()
+        .find(|(system, _)| system == "plots")
+        .expect("the field has plots");
+    document.select(Some(plots[index]));
+    assert_eq!(document.picked("plots"), Some(index));
+    narrow(Map::built_in().plots()[index].at())
+}
+
+/// The value the run's status gives `label`.
+fn status_of(document: &mut Document, label: &str) -> String {
+    document
+        .play_status()
+        .into_iter()
+        .find(|(each, _)| *each == label)
+        .map(|(_, value)| value)
+        .unwrap_or_else(|| panic!("the status has no {label}"))
+}
+
+/// What a base tower of `kind` costs.
+fn cost(kind: Kind) -> u32 {
+    kind.spec(Tier::Base).cost
+}
+
+/// Sends `Place tower` on the selected plot, of the kind at `kind` in
+/// towers' table.
+fn place(document: &mut Document, kind: usize) {
+    let plot = document.picked("plots").expect("a plot is selected");
+    let index = action(document, "Place tower");
+    document
+        .send_play(
+            TOWERS_SYSTEM,
+            index,
+            &[PlayArg::Picked(plot), PlayArg::Choice(kind)],
+        )
+        .expect("towers encodes a build");
+}
+
+/// The spawned entities whose box stands on `feet`, across the ground.
+fn standing_on(document: &mut Document, feet: Vec3) -> Vec<Entity> {
+    document
+        .spawned()
+        .into_iter()
+        .filter(|&entity| {
+            let (centre, _) = centre_and_half(document, entity);
+            (centre.x - feet.x).abs() < 1e-4 && (centre.z - feet.z).abs() < 1e-4
+        })
+        .collect()
+}
+
+/// **A tower placed through towers' play controls stands on the selected
+/// plot and is drawn, and the purse pays its price** — the command reaching
+/// the module on its next tick as a client's would, and nothing before it.
+#[test]
+fn a_tower_placed_through_the_controls_stands_on_its_plot_and_costs_its_price() {
+    let mut document = field();
+    document.play().expect("towers plays its committed field");
+    let feet = select_plot(&mut document, 0);
+    assert_eq!(status_of(&mut document, "Gold"), STARTING_GOLD.to_string());
+
+    place(&mut document, Kind::Bolt.index());
+    assert!(
+        standing_on(&mut document, feet).is_empty(),
+        "a tower stood before a tick read the command",
+    );
+    run(&mut document, 1);
+    let towers = standing_on(&mut document, feet);
+    assert_eq!(towers.len(), 1, "the tower is not drawn on its plot");
+    let (centre, half) = centre_and_half(&mut document, towers[0]);
+    #[allow(clippy::cast_possible_truncation)]
+    let (radius, height) = (TOWER_RADIUS as f32, TOWER_HEIGHT as f32);
+    assert!(
+        (half.x - radius).abs() < 1e-5 && (centre.y - 0.5 * height).abs() < 1e-5,
+        "a tower is drawn as {centre} reaching {half}",
+    );
+    assert_eq!(
+        status_of(&mut document, "Gold"),
+        (STARTING_GOLD - cost(Kind::Bolt)).to_string(),
+    );
+
+    // Read by one tick and then gone: a frame handed to the next tick too
+    // would build on the taken plot again and be refused.
+    run(&mut document, 1);
+    assert!(
+        document.take_play_refusals().is_empty(),
+        "the command was read twice"
+    );
+    assert_eq!(
+        status_of(&mut document, "Gold"),
+        (STARTING_GOLD - cost(Kind::Bolt)).to_string(),
+    );
+}
+
+/// **A command reaches the module of the system it was sent under and no
+/// other**: a recording module registered under towers' `plots`, ahead of
+/// towers' own, is handed nothing when towers is sent a build.
+#[test]
+fn a_command_reaches_only_the_module_it_was_sent_to() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crcbl::ecs::{ClientInputs, GameModule, World};
+
+    /// How many frames [`Recorder`] has been handed.
+    static HANDED: AtomicUsize = AtomicUsize::new(0);
+
+    struct Recorder;
+
+    impl GameModule for Recorder {
+        fn name(&self) -> &str {
+            "recorder"
+        }
+        fn register(&self, _world: &mut World) {}
+        fn tick(&mut self, _world: &mut World, inputs: ClientInputs<'_>) {
+            HANDED.fetch_add(inputs.len(), Ordering::Relaxed);
+        }
+    }
+
+    let mut registry = Registry::new();
+    registry.module("plots", |_, _, _| Ok(Box::new(Recorder)));
+    crcbl_towers::register_components(&mut registry);
+    let mut document = Document::open(&crcbl_towers::built_in_source(), Path::new(FIELD), registry)
+        .expect("towers' vocabulary opens its field");
+    document.play().expect("plays");
+    assert_eq!(document.playing_modules(), ["recorder", "towers"]);
+    let feet = select_plot(&mut document, 0);
+    place(&mut document, Kind::Bolt.index());
+    run(&mut document, 1);
+    assert_eq!(
+        HANDED.load(Ordering::Relaxed),
+        0,
+        "towers' command reached another module"
+    );
+    assert_eq!(
+        standing_on(&mut document, feet).len(),
+        1,
+        "towers did not build"
+    );
+}
+
+/// **A build the rules refuse is refused by the game, which says why**: a
+/// second tower on a taken plot, and one the purse cannot pay for — and
+/// neither costs a coin.
+#[test]
+fn a_refused_build_says_why_and_costs_nothing() {
+    let mut document = field();
+    document.play().expect("plays");
+    select_plot(&mut document, 0);
+    place(&mut document, Kind::Bolt.index());
+    run(&mut document, 1);
+    let paid = status_of(&mut document, "Gold");
+
+    place(&mut document, Kind::Bolt.index());
+    run(&mut document, 1);
+    assert_eq!(document.take_play_refusals(), [Refusal::PlotTaken.label()]);
+    assert_eq!(
+        status_of(&mut document, "Gold"),
+        paid,
+        "a refusal was charged"
+    );
+
+    // The dearest kind on every free plot, until the purse is short.
+    let dearest = crcbl_towers::tower::ALL
+        .into_iter()
+        .max_by_key(|kind| cost(*kind))
+        .expect("towers has tower kinds");
+    let plots = Map::built_in().plots().len();
+    let mut refused = Vec::new();
+    for plot in 1..plots {
+        select_plot(&mut document, plot);
+        place(&mut document, dearest.index());
+        run(&mut document, 1);
+        refused.extend(document.take_play_refusals());
+        if !refused.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(refused, [Refusal::NotEnoughGold.label()]);
+}
+
+/// **`Start wave` brings the first wave forward**: the status counts it and
+/// a creep walks before the build phase would have run out.
+#[test]
+fn start_wave_sends_the_first_wave_before_the_build_phase_ends() {
+    let mut document = field();
+    document.play().expect("plays");
+    assert_eq!(
+        status_of(&mut document, "Wave"),
+        format!("0/{}", WAVES.len())
+    );
+    let start = action(&document, "Start wave");
+    document
+        .send_play(TOWERS_SYSTEM, start, &[])
+        .expect("towers encodes it");
+    run(&mut document, RELEASE_SLACK);
+    assert_eq!(
+        status_of(&mut document, "Wave"),
+        format!("1/{}", WAVES.len())
+    );
+    assert!(
+        !document.spawned().is_empty(),
+        "no creep walked after the wave was sent"
+    );
+    assert!(RELEASE_SLACK < build_phase_ticks());
+}
+
+/// **Stop takes the placed towers away with every creep, and the files are
+/// byte for byte the ones play began with.**
+#[test]
+fn stop_after_a_build_restores_the_files_and_leaves_nothing_spawned() {
+    let mut document = field();
+    let before = document.files().expect("every row has an id");
+    document.play().expect("plays");
+    let feet = select_plot(&mut document, 0);
+    place(&mut document, Kind::Bolt.index());
+    run(&mut document, build_phase_ticks() + RELEASE_SLACK);
+    assert_eq!(
+        standing_on(&mut document, feet).len(),
+        1,
+        "nothing was built"
+    );
+    assert_eq!(
+        document.files().expect("ids"),
+        before,
+        "a tower reached the files"
+    );
+
+    assert!(document.stop().expect("the snapshot loads again"));
+    assert!(document.spawned().is_empty(), "a tower outlived play");
+    assert_eq!(document.world.entity_count(), document.entity_count());
+    assert_eq!(document.files().expect("ids"), before);
+    assert!(
+        document.play_status().is_empty(),
+        "the status outlived play"
+    );
+    assert!(document.play_controls().is_empty());
+}
+
+/// **A command is sent only to a game that is playing**: none while
+/// editing, none to a system no running module is under, and none the
+/// controls cannot encode — each refused before anything is queued.
+#[test]
+fn a_command_is_refused_unless_a_running_game_can_encode_it() {
+    let mut document = field();
+    let error = document
+        .send_play(TOWERS_SYSTEM, 0, &[])
+        .expect_err("nothing is playing");
+    assert!(matches!(error, EditError::NotPlaying), "{error}");
+
+    document.play().expect("plays");
+    let start = action(&document, "Start wave");
+    let error = document
+        .send_play("plots", start, &[])
+        .expect_err("no module runs under plots");
+    assert!(matches!(error, EditError::PlayCommand(_)), "{error}");
+    let error = document
+        .send_play(TOWERS_SYSTEM, start, &[PlayArg::Picked(0)])
+        .expect_err("Start wave takes nothing");
+    assert!(matches!(error, EditError::PlayCommand(_)), "{error}");
+
+    run(&mut document, RELEASE_SLACK);
+    assert_eq!(
+        status_of(&mut document, "Wave"),
+        format!("0/{}", WAVES.len()),
+        "a refused command reached the game",
+    );
 }

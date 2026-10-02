@@ -70,7 +70,7 @@ use crate::map::{
 const WAYPOINTS: &str = "waypoints";
 
 /// The system every build plot is a row of.
-const PLOTS: &str = "plots";
+pub(crate) const PLOTS: &str = "plots";
 
 /// The directory `--scene` defaults to, relative to nothing: the committed
 /// field is compiled in, and this is the name its keys are spelled under.
@@ -228,8 +228,9 @@ impl Validate for Plot {
 
 /// This game's scene vocabulary: two components, under the names their chunk
 /// files are spelled with, the rule a scene holding them is held to, and the
-/// module a tool plays that scene with — with the creeps it walks as a runtime
-/// component, drawn and never saved.
+/// module a tool plays that scene with — with the controls a person takes part
+/// through, and the creeps, towers, bolts and bursts it holds as runtime
+/// components, drawn and never saved.
 ///
 /// **The one place `waypoints` and `plots` are joined to their types.**
 /// [`Map::load`] uses it and so does any tool that opens this game's field, so
@@ -249,8 +250,7 @@ pub fn register_components(registry: &mut Registry) {
         registry.register::<Plot>(PLOTS);
     });
     registry.check(WAYPOINTS, check_field);
-    registry.module(WAYPOINTS, crate::game::play::start);
-    registry.register_runtime::<crate::game::play::Walker>(crate::game::play::WALKERS);
+    crate::game::play::register_play(registry, WAYPOINTS);
 }
 
 /// The [`Registry::group`] this game's components are registered in.

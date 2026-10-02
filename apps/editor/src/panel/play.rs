@@ -17,7 +17,7 @@
 //! takes those off the document.
 //!
 //! **Drawn only while a game offers controls**, so a scene whose games offer
-//! none — every scene being edited, and every game but towers today — shows no
+//! none — every scene being edited, and every game that registers none — shows no
 //! strip and keeps the viewport its full height.
 
 use std::collections::BTreeMap;

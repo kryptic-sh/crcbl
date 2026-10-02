@@ -575,6 +575,12 @@ impl<S: Shell + ?Sized> Editor<S> {
         // any key in it was read, so the frame that starts play does not tick
         // for time spent editing, and the one that pauses ticks what it played.
         self.ticks += u64::from(self.document.advance(dt));
+        // The newest of what the game turned down in those ticks: a command
+        // sent from the play strip is told here, a frame after it was sent.
+        if let Some(refusal) = self.document.take_play_refusals().pop() {
+            self.panels
+                .set_status(format!("{REFUSED}{refusal}"), Tone::Warning);
+        }
         for action in asked {
             self.act(&action);
         }
@@ -1523,6 +1529,10 @@ impl<S: Shell + ?Sized> Editor<S> {
         Ok(summary)
     }
 }
+
+/// What the status line puts before the reason a playing game turned a
+/// command down.
+const REFUSED: &str = "Refused: ";
 
 /// What the status line says once play mode has stopped.
 const STOPPED: &str = "Stopped: the scene is back as it was when play began";

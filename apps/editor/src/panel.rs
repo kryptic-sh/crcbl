@@ -40,6 +40,10 @@
 //! on here: [`PanelFrame::toolbar`] hands the [`Action`] its key would have
 //! asked for back to [`crate::app`], which carries both out the same way.
 //!
+//! While a scene plays and its game offers play controls, a second strip
+//! under the toolbar lists them and the run's numbers (`play`'s module docs):
+//! a click there is a command the game's module is sent, not an edit.
+//!
 //! # Selection, in both directions
 //!
 //! One witness carries it: the selection the outliner was last told about. At
@@ -113,6 +117,7 @@ use crate::layout::{self, PANE_MIN};
 
 mod assets;
 mod inspector;
+mod play;
 
 /// The name the viewport pane's picture goes by in the panels' draw list —
 /// see the module docs. The only texture the editor draws, so the first
@@ -164,6 +169,20 @@ const EDITOR_CSS: &str = "
 #toolbar button { margin-right: 4px; }
 
 #play-state { padding: 0 6px; color: #9aa3b2; }
+
+#play-controls {
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 2px 4px;
+  background: #1b1f27;
+}
+
+.play-game { flex-direction: row; align-items: center; }
+
+.play-game button { margin-right: 4px; }
+
+.play-status { padding: 0 6px; color: #9aa3b2; }
 
 #panes split,
 #panes .split-pane,
@@ -358,6 +377,8 @@ pub struct Panels {
     toolbar_key: Option<NodeKey>,
     /// The asset browser's listing and rows — see `assets`.
     browser: assets::Browser,
+    /// The play strip's choices and what it last drew — see `play`.
+    strip: play::Strip,
 }
 
 /// How the status line reads a message.
@@ -413,6 +434,7 @@ impl Panels {
             status_key: None,
             toolbar_key: None,
             browser: assets::Browser::new(document.assets()),
+            strip: play::Strip::default(),
         };
         // One idle frame, so the first real one has rectangles to hit-test
         // against: the tree resolves a click against the *previous* layout, and
@@ -616,6 +638,26 @@ impl Panels {
         [keys[0], keys[1]]
     }
 
+    /// The play strip, as the last frame laid it out — [`None`] on a frame
+    /// that drew none.
+    #[cfg(test)]
+    pub(crate) const fn play_strip(&self) -> Option<NodeKey> {
+        self.strip.key()
+    }
+
+    /// The play strip's buttons, as the last frame laid them out, each with
+    /// the label it read: an action's name, or a choice's current pick.
+    #[cfg(test)]
+    pub(crate) fn play_buttons(&self) -> &[(String, NodeKey)] {
+        self.strip.buttons()
+    }
+
+    /// The run's numbers the play strip last drew, each with its label.
+    #[cfg(test)]
+    pub(crate) fn play_readout(&self) -> &[(&'static str, String)] {
+        self.strip.shown()
+    }
+
     /// The outliner block, as the last frame laid it out.
     #[cfg(test)]
     pub(crate) const fn outliner_key(&self) -> Option<NodeKey> {
@@ -775,6 +817,16 @@ impl Panels {
         let mut rename_input = None;
         let mut double_clicked = None;
         let mut relist = false;
+        let mut asked_play = None;
+        // Owned, so the strip is built while the inspector borrows the
+        // document: the controls are a few pointers and the numbers a few
+        // strings.
+        let controls: Vec<_> = document
+            .play_controls()
+            .into_iter()
+            .map(|(system, controls)| (system.to_owned(), *controls))
+            .collect();
+        let play_status = document.play_status();
 
         // Last frame's scrolling blocks, read before the fields are borrowed
         // below — and last frame's is the right answer anyway, because that is
@@ -795,6 +847,7 @@ impl Panels {
             renaming,
             status,
             browser,
+            strip,
             ..
         } = self;
         let options = OutlinerOptions {
@@ -813,6 +866,7 @@ impl Panels {
             ],
             |ui| {
                 (toolbar_key, toolbar) = build_toolbar(ui, play);
+                asked_play = strip.build(ui, &controls, play_status);
                 ui.dock("#panes", layout, PANE_MIN, |ui, pane| match pane {
                     // Built empty: the scene's picture is pushed over its
                     // rectangle once it is laid out. See the module docs.
@@ -917,6 +971,15 @@ impl Panels {
         };
         if relist {
             self.relist_assets(document);
+        }
+        if let Some(asked) = asked_play {
+            match self.strip.send(document, &controls, &asked) {
+                Ok(sent) => self.set_status(sent, Tone::Info),
+                Err(unsent) => {
+                    crcbl::log::warn!("editor: {unsent}");
+                    self.set_status(unsent, Tone::Warning);
+                }
+            }
         }
         self.follow_outliner(document);
         self.follow_rename(document, rename_input);

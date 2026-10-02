@@ -285,6 +285,15 @@ pub enum EditError {
     /// A game whose system the scene lists refused to play it, saying why —
     /// towers' path with a diagonal leg is the case. Play does not start.
     Unplayable(String),
+
+    /// A play action was asked for while the scene is being edited: there is
+    /// no game running to send it to.
+    NotPlaying,
+
+    /// A play action that could not be sent, saying why: no running module
+    /// under that system, or an action or arguments its game's controls
+    /// would not encode. Nothing was sent.
+    PlayCommand(String),
 }
 
 impl fmt::Display for EditError {
@@ -360,6 +369,10 @@ impl fmt::Display for EditError {
                  step at"
             ),
             Self::Unplayable(reason) => write!(f, "the scene's game will not play it: {reason}"),
+            Self::NotPlaying => {
+                f.write_str("the scene is not playing, so there is no game to send that to")
+            }
+            Self::PlayCommand(reason) => write!(f, "the command was not sent: {reason}"),
         }
     }
 }

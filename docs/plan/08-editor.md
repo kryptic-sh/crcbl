@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls 2026-10-03, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -328,6 +328,67 @@ towers' game on it, and creeps visibly walk the lane.
   scene, the instances skipping spawned entities, play ignoring a refusal,
   `spawned_bounds` answering for scene entities, creeps given colliders, and
   stop not restoring.
+
+**Play controls, landed 2026-10-03**, on the decisions of the same day (below):
+the editor takes part in a played scene through the game's own commands, and
+shows the run's numbers.
+
+- **A vocabulary registers a play-controls description beside its module.**
+  `Registry::play_controls(system, PlayControls)`, keyed by the system the
+  module is registered under: a list of `PlayAction { name, params }`, each
+  parameter `ParamKind::Picked(system)` or `ParamKind::Choice(labels)`; an
+  `encode` function from an action's index and its `PlayArg`s to the game's
+  command bytes; and `status` and `refusals` functions over the world the module
+  plays in. `Registry::encode_play` holds the arguments to the action's
+  parameters before the game's encoder sees them, and `Registry::keyed_modules`
+  hands each module back with its system. A picked argument is the entity's
+  place among its system's rows in file order, which is how a game numbers them
+  — towers' plots are numbered so.
+- **The editor sends commands; the module's next tick reads them as a
+  client's.** `Document::send_play` encodes an action and queues the frame for
+  the module under that system alone; `Document::advance` hands each module its
+  queue as `ClientInputs` (stamped with the play's tick count) and empties it,
+  where every module had been ticked with `ClientInputs::empty()`. A paused
+  scene holds the queue until it resumes. `Document::take_play_refusals` and
+  `Document::play_status` read through the controls' functions;
+  `Document::picked` is the selection as a picked argument. A command is not an
+  edit: it is refused while editing (`EditError::NotPlaying`) and touches
+  neither the files nor the log.
+- **The play strip** (`panel::play`) is drawn under the toolbar only while a
+  running game offers controls, so every other scene keeps its viewport: a
+  button per action, a button per choice that shows the current label and steps
+  on a click, and the run's numbers as `Label value`. A click gathers the
+  arguments (a choice's current label, a picked system off the selection) and
+  sends them; the status line says it was sent, or why not, and a game's refusal
+  arrives on it as a warning after the tick that read the command.
+- **Towers registers controls**: _Place tower_ (a picked plot and a kind),
+  _Start wave_, _Upgrade_ (a picked plot) and _Restart_, encoded through the
+  same conversion `Game::set_controls` makes, and Lives, Gold, Wave and Outcome
+  read off a readout system its module registers in the world. Its towers, bolts
+  and bursts are mirrored as runtime components beside the creeps, so a placed
+  tower is drawn on its plot at its tier's size.
+- **Evidence**: the registry's tests hold arguments that fit reaching the
+  encoder and every misfit refused by name, two descriptions under one system
+  refused, and keyed modules naming their systems. Towers' tests hold every
+  action's bytes equal to the frame solo's client seals for the same `Controls`
+  (each kind included) and decoding field by field to what was asked, the action
+  indices naming their actions, a plot past the frame's range refused, the
+  readout reading the stage and telling each refusal once, a built tower
+  mirrored on its plot and growing in place when stepped up, and bolts and
+  bursts mirrored tick by tick with every world entity one of the stage's. The
+  document's tests on the committed field hold a placed tower standing on the
+  selected plot only after a tick, drawn at its size, the gold dropping by its
+  price; a taken plot and a short purse refused by the game's reason at no cost;
+  _Start wave_ counting the wave and a creep walking before the build phase
+  would end; stop restoring the files with nothing spawned and no status; and a
+  command refused while editing, under a system no module runs, or with
+  arguments the action does not take. The loop's tests click the strip through
+  the headless shell: a tower placed and drawn and the strip's gold dropping, a
+  second click refused on the status line with the game's label, a kind choice
+  stepped and taken, _Start wave_ counted, a build with nothing selected saying
+  what to select, stop taking the strip and the towers away, and a game with no
+  controls showing no strip and keeping the viewport. The mutations each turned
+  a test red are listed in the commit that landed this.
 
 **Slice 10, entity names, rename and field copy/paste, landed 2026-10-01**, on
 the decisions of the same day (below).
@@ -902,7 +963,8 @@ long term and recorded):
 - **A vocabulary registers behaviour beside components.** The registry gains a
   module factory; play builds every module registered for the scene's systems,
   registers it on the play world and ticks it with empty client inputs at the
-  world's tick rate on a fixed step from the frame's time.
+  world's tick rate on a fixed step from the frame's time. _Amended 2026-10-03,
+  below_: a module is handed the commands the editor sent it.
 - **Play snapshots the scene to memory and stop restores from it** (the scene's
   files, read back through the load `Document::open` runs). This amends the
   2026-09-16 decision's accepted cost: unsaved edits survive play. The undo log
@@ -1061,6 +1123,29 @@ above):
 - **Physics keeps rotation locked** for now: a body is created at its rotation
   and does not spin. Built in slice 14; unlocked on 2026-10-01 (_Physics
   rotation_, in _Status_).
+
+**Decided 2026-10-03, for taking part in play** (taken for the long term and
+recorded, as above):
+
+- **Commands, not a bespoke panel per game.** The editor feeds play the same
+  command bytes a networked client would, through the module's next
+  `ClientInputs`, and the game validates them like any client's. A vocabulary
+  registers a small play-controls description beside its module — named actions
+  whose parameters are a picked scene entity or a choice from a fixed list, and
+  an encoder to the game's command bytes — which the editor renders generically.
+  A parameter kind "none" was not added: an action that takes nothing has an
+  empty parameter list. This amends the 2026-10-01 decision's "ticks it with
+  empty client inputs".
+- **The status is registry-side, read off the world**: `PlayControls::status`
+  (and `refusals`) are functions of the world the module plays in, and a game
+  puts what a tool may read into that world — towers registers a readout system
+  holding its stage. Declined: a provided `GameModule::status` method answering
+  an empty list. It is the cheapest for every other game, but the module trait
+  is the engine's seam with every game, its server and its wasm binding, none of
+  which needs a tool's readout, and a change there is one EW has to read; the
+  world is already the seam a tool reads a module through (runtime components).
+- **Towers, bolts and bursts are mirrored as runtime entities**, the `Walker`
+  pattern, so what play builds is drawn.
 
 **Still the owner's:** a file watcher dependency for hot reload (`notify`),
 because adding a crates.io dependency is the owner's call by the workspace's

@@ -8,9 +8,12 @@
 //!           ──▶ Registry::modules(systems, the snapshot)
 //!                 ──▶ a game's refusal, or ──▶ the snapshot loaded again
 //!                                          ──▶ register on that world
+//!     a play action ──▶ Registry::encode_play ──▶ the game's command bytes,
+//!                                                 queued for its module
 //!     each frame, unless paused:
 //!           ──▶ FrameClock at the world's tick rate ──▶ world.tick()
-//!                                                    ──▶ every module's tick
+//!                                                    ──▶ every module's tick,
+//!                                                        handed its queue
 //!                                                    ──▶ world.sweep()
 //!     stop  ──▶ the snapshot ──▶ MemorySource ──▶ the load Document::open runs
 //! ```
@@ -43,6 +46,19 @@
 //! id, so nothing lists, selects, edits or saves them — and stop throws away
 //! the world they were spawned in, so none outlives play.
 //!
+//! # Taking part: a game's play controls
+//!
+//! A game that registers [`PlayControls`] beside its module offers actions —
+//! towers' `Place tower`, `Start wave` — and [`Document::send_play`] turns a
+//! chosen one into **the bytes that game's client would send**, through the
+//! game's own encoder, and queues them for that game's module alone. The
+//! module's next tick is handed them as [`ClientInputs`], as a server hands a
+//! client's commands, so the game validates them as it validates any
+//! client's; what it turns down comes back through
+//! [`Document::take_play_refusals`], and the run's numbers through
+//! [`Document::play_status`]. A command is no edit: it changes the played
+//! world, which stop throws away, and nothing of the scene's files or log.
+//!
 //! # Why every edit is refused in between
 //!
 //! What play changes is thrown away on stop, so an edit made into a playing
@@ -57,8 +73,9 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use crcbl::core::FrameClock;
-use crcbl::ecs::{ClientInputs, GameModule};
+use crcbl::core::{FrameClock, TickId};
+use crcbl::ecs::{ClientInputs, GameModule, World};
+use crcbl::registry::{PlayArg, PlayControls};
 
 use super::{Document, EditError, load, memory_source, sync_scene_colliders};
 
@@ -80,7 +97,10 @@ pub(super) struct Session {
     snapshot: BTreeMap<String, String>,
     /// One fresh instance of every module the vocabulary has for this scene's
     /// systems, in the order they tick.
-    modules: Vec<Box<dyn GameModule>>,
+    modules: Vec<Running>,
+    /// How many ticks this play has run: the tick a queued command frame is
+    /// stamped with, as a client stamps the tick it sampled its input on.
+    ticks: u64,
     /// The fixed-step accumulator, at the world's tick period.
     clock: FrameClock,
     /// How much frame time play has been handed while not paused: the
@@ -89,6 +109,19 @@ pub(super) struct Session {
     played: Duration,
     /// Whether ticking is held.
     paused: bool,
+}
+
+/// One module running the scene, and the command frames waiting for its next
+/// tick.
+struct Running {
+    /// The system it was registered under — what its game's play controls
+    /// are keyed by, so a command reaches the game it was encoded for.
+    system: String,
+    module: Box<dyn GameModule>,
+    /// The frames [`Document::send_play`] queued since its last tick, in the
+    /// order they were sent: handed to that tick and then gone, as a server's
+    /// per-tick queue is.
+    inputs: Vec<(TickId, Vec<u8>)>,
 }
 
 impl fmt::Debug for Session {
@@ -103,9 +136,10 @@ impl fmt::Debug for Session {
                 &self
                     .modules
                     .iter()
-                    .map(|module| module.name())
+                    .map(|running| running.module.name())
                     .collect::<Vec<_>>(),
             )
+            .field("ticks", &self.ticks)
             .field("clock", &self.clock)
             .field("played", &self.played)
             .field("paused", &self.paused)
@@ -129,8 +163,107 @@ impl Document {
     #[must_use]
     pub fn playing_modules(&self) -> Vec<&str> {
         self.play.as_ref().map_or_else(Vec::new, |session| {
-            session.modules.iter().map(|module| module.name()).collect()
+            session
+                .modules
+                .iter()
+                .map(|running| running.module.name())
+                .collect()
         })
+    }
+
+    /// The play controls of every running module whose game registered some,
+    /// each with the system it is keyed by, in the order the modules tick —
+    /// empty while editing, and for a scene whose games offer none.
+    #[must_use]
+    pub fn play_controls(&self) -> Vec<(&str, &PlayControls)> {
+        self.play.as_ref().map_or_else(Vec::new, |session| {
+            session
+                .modules
+                .iter()
+                .filter_map(|running| {
+                    let controls = self.registry.controls_for(&running.system)?;
+                    Some((running.system.as_str(), controls))
+                })
+                .collect()
+        })
+    }
+
+    /// Encodes the action at index `action` of the play controls under
+    /// `system`, taking `args`, into its game's command bytes, and queues
+    /// them for that game's module: its next tick is handed them as a
+    /// client's command frame. A paused scene holds them until it resumes.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NotPlaying`] while editing, and
+    /// [`EditError::PlayCommand`] for a system with no running module, or an
+    /// action or arguments the controls refuse to encode — naming why. Nothing
+    /// is queued in either case.
+    pub fn send_play(
+        &mut self,
+        system: &str,
+        action: usize,
+        args: &[PlayArg],
+    ) -> Result<(), EditError> {
+        let Some(session) = &mut self.play else {
+            return Err(EditError::NotPlaying);
+        };
+        let running = session
+            .modules
+            .iter_mut()
+            .find(|running| running.system == system)
+            .ok_or_else(|| {
+                EditError::PlayCommand(format!("no module registered under `{system}` is running"))
+            })?;
+        let frame = self
+            .registry
+            .encode_play(system, action, args)
+            .map_err(EditError::PlayCommand)?;
+        running
+            .inputs
+            .push((TickId::from_raw(session.ticks), frame));
+        Ok(())
+    }
+
+    /// The selected entity's place among `system`'s entities in the order its
+    /// chunk file spells them: the [`PlayArg::Picked`] a play action naming
+    /// that system takes. [`None`] with nothing selected, or a selection
+    /// `system` does not hold.
+    #[must_use]
+    pub fn picked(&mut self, system: &str) -> Option<usize> {
+        let entity = self.ids.entity(self.selected?)?;
+        self.registry
+            .entities(&mut self.world, &self.ids, system)
+            .iter()
+            .position(|&each| each == entity)
+    }
+
+    /// The run's numbers, labelled, from every running module's play
+    /// controls in tick order — empty while editing.
+    #[must_use]
+    pub fn play_status(&mut self) -> Vec<(&'static str, String)> {
+        self.read_play(|controls| controls.status)
+    }
+
+    /// Takes what the running games turned down since the last call, each as
+    /// the reason it gave, oldest first within each game — empty while
+    /// editing.
+    pub fn take_play_refusals(&mut self) -> Vec<String> {
+        self.read_play(|controls| controls.refusals)
+    }
+
+    /// What the reader `pick` chooses out of each running module's play
+    /// controls returns, called on the world they play in, in tick order.
+    fn read_play<T>(&mut self, pick: impl Fn(&PlayControls) -> fn(&mut World) -> Vec<T>) -> Vec<T> {
+        let readers: Vec<_> = self
+            .play_controls()
+            .into_iter()
+            .map(|(_, controls)| pick(controls))
+            .collect();
+        readers
+            .into_iter()
+            .flat_map(|read| read(&mut self.world))
+            .collect()
     }
 
     /// Starts play mode, or resumes a paused one; a scene already playing is
@@ -167,22 +300,29 @@ impl Document {
         // Each game builds its module from the scene's own text, read the way
         // its loader reads it — and refuses here, before anything registers,
         // a scene it would not play.
-        let modules = self
+        let modules: Vec<Running> = self
             .registry
-            .modules(
+            .keyed_modules(
                 self.scene.systems(),
                 &memory_source(snapshot.clone())?,
                 Path::new(""),
             )
-            .map_err(EditError::Unplayable)?;
+            .map_err(EditError::Unplayable)?
+            .into_iter()
+            .map(|(system, module)| Running {
+                system,
+                module,
+                inputs: Vec::new(),
+            })
+            .collect();
         // The world played is the one the snapshot loads into, so a play is a
         // function of the scene's text alone: a module that walks a system in
         // storage order — the bodies' simulation creates its bodies that way,
         // and steps them in that order — sees the file's order, not whatever
         // order an edit history's attaches and detaches left.
         self.restore(&snapshot)?;
-        for module in &modules {
-            module.register(&mut self.world);
+        for running in &modules {
+            running.module.register(&mut self.world);
         }
         let dt = self.world.tick_dt();
         let Some(period) = Duration::try_from_secs_f64(dt)
@@ -201,6 +341,7 @@ impl Document {
         self.play = Some(Session {
             snapshot,
             modules,
+            ticks: 0,
             clock,
             played: Duration::ZERO,
             paused: false,
@@ -250,9 +391,10 @@ impl Document {
     /// editing or paused.
     ///
     /// Each tick is the server's order (`crates/crcbl-server/src/lib.rs`'s
-    /// `Server::tick`): the world's schedule, then every module with
-    /// [`ClientInputs::empty`] — the editor has no client to send input — then
-    /// a sweep of what the modules despawned. Ticks past the clock's catch-up
+    /// `Server::tick`): the world's schedule, then every module with the
+    /// command frames [`send_play`](Self::send_play) queued for it since its
+    /// last tick — the editor is its one client — then a sweep of what the
+    /// modules despawned. Ticks past the clock's catch-up
     /// cap are dropped rather than owed, which is
     /// [`FrameClock::set_max_catch_up_ticks`]'s spiral-of-death guard: a frame
     /// that stalled does not come back as a burst.
@@ -269,10 +411,14 @@ impl Document {
         let mut ticks = 0;
         while session.clock.consume_tick() {
             self.world.tick();
-            for module in &mut session.modules {
-                module.tick(&mut self.world, ClientInputs::empty());
+            for running in &mut session.modules {
+                let inputs = std::mem::take(&mut running.inputs);
+                running
+                    .module
+                    .tick(&mut self.world, ClientInputs::new(&inputs, 0));
             }
             self.world.sweep();
+            session.ticks += 1;
             ticks += 1;
         }
         if ticks > 0 {

@@ -16,6 +16,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **The editor's `EditError` gained `NotPlaying` and `PlayCommand`** (see Added:
+  play controls), so an exhaustive match over it must add them. Nothing in the
+  engine's public API breaks with the play controls: `GameModule` is unchanged,
+  and `crcbl::registry` only gains items.
+
 - **`crcbl::registry::Registry::register` is bounded on `Validate`** (see
   Added), so every registered component needs an impl: `impl Validate for T {}`
   for one with no rule of its own. Every component in the workspace states one
@@ -536,6 +541,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Play controls: a game's actions and status for a tool that plays it.**
+  `crcbl::registry::Registry::play_controls(system, PlayControls)` registers,
+  beside a game's module, a description a tool renders generically: a list of
+  `PlayAction { name, params }`, each parameter a `ParamKind::Picked(system)`
+  (an entity of that scene system, picked in the scene) or a
+  `ParamKind::Choice(labels)`; an `encode` function turning an action's index
+  and its `PlayArg`s into the bytes the game's own client sends for that
+  command; a `status` function reading the run's labelled numbers off the world
+  the module plays in; and a `refusals` function taking the reasons the game
+  turned commands down. `Registry::encode_play(system, action, args)` checks the
+  arguments against the action's parameters (count, kind, choice range) before
+  the game's encoder sees them, `Registry::controls_for(system)` finds the
+  description, and `Registry::keyed_modules` is `modules` with each module's
+  system (as a `KeyedModule`), so a tool hands one game's commands to that
+  game's module alone. The status is registry-side rather than a `GameModule`
+  method, so the module trait EW implements is unchanged. **The editor plays
+  through it:** while a scene plays, a strip under the toolbar lists each
+  running game's actions (a choice is a button that steps through its labels; a
+  picked argument is the selection) and its numbers; a click is sent through
+  `Document::send_play(system, action, args)`, which queues the encoded frame
+  for that module's next tick as its `ClientInputs` — the editor had ticked
+  every module with `ClientInputs::empty()` — and the status line says it was
+  sent, or names the game's refusal after the tick that read it.
+  `Document::play_controls`, `play_status`, `take_play_refusals` and `picked`
+  are the rest of the document's side. **Towers registers controls**: _Place
+  tower_ (a picked plot and a kind), _Start wave_, _Upgrade_ (a picked plot) and
+  _Restart_, encoded through the same `Controls`-to-frame conversion
+  `Game::set_controls` makes, so the bytes are the client's; the status is
+  Lives, Gold, Wave and Outcome, and a refusal is the label a player is shown
+  (`THAT PLOT IS TAKEN`). Towers' play module now also mirrors its towers, bolts
+  and bursts as runtime components (`turrets`, `bolts` and `bursts`), so a tower
+  placed in the editor is drawn on its plot at its tier's size.
 - **Control hints: how an action's binding is shown to the player right now.**
   `crcbl_input::ActionMap::hint(action)` returns a `Hint` — the binding's
   `Device`, the `Binding`, the pad family (`Option<PadKind>`, set for a pad

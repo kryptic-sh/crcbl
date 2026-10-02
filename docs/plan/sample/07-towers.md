@@ -81,8 +81,9 @@ above is a requirement rather than an aspiration.
 2. Map from editor: author the real map in stage 8 editor — this milestone _is_
    stage 8 dogfood. **The map is scene data since 2026-09-30**: the path and the
    plots are `apps/towers/assets/scenes/field.scn/`, which the game reads and
-   the editor opens, **and since 2026-10-01 the editor plays it** (F5);
-   authoring the real map in the editor is what is left.
+   the editor opens, **and since 2026-10-01 the editor plays it** (F5) — and
+   since 2026-10-03 builds towers on it in play, through the game's own
+   commands; authoring the real map in the editor is what is left.
 3. Co-op over real transport + browser client (stage 10 exit demo: wasm client
    into native dedicated server). **Its LAN half is built (2026-10-01)**:
    `--host`, `--serve`, `--join` and `--browse` over `crcbl::lan` — see "Where
@@ -242,10 +243,21 @@ not built anywhere yet.
   the build phase runs down, the waves come and the creeps walk the lane and
   leak. Each creep is mirrored into the editor's world as a `Walker`, a runtime
   component the editor draws as a greybox box and never lists or saves, and a
-  field `Map::load` refuses does not play, naming the rule. What the editor
-  cannot do in play is build a tower — it has no towers UI and no input path to
-  the stage — so a played field always loses; towers, bolts and bursts are not
-  mirrored until something can put one there.
+  field `Map::load` refuses does not play, naming the rule.
+- **The editor takes part in a played field (2026-10-03).** Towers registers
+  play controls beside its module (`crate::game`'s `play::controls`): _Place
+  tower_ on a picked plot with a kind, _Start wave_, _Upgrade_ on a picked plot
+  and _Restart_. The editor lists them in a strip under its toolbar while the
+  field plays, and a click is encoded into the four bytes solo's client sends
+  for the same command — through the one `Controls`-to-frame conversion
+  `Game::set_controls` makes — and handed to the module's next tick as its
+  client inputs, so the stage validates it as it validates any player's. A
+  refusal reaches the editor's status line as the label a player is shown, and
+  the strip shows Lives, Gold, Wave and Outcome, read off a readout system the
+  module registers in the world it plays in. Towers, bolts and bursts are
+  mirrored beside the creeps (`Turret`, `Shot` and `Blast`, runtime components
+  drawn as greybox boxes), so a placed tower stands on its plot, at its tier's
+  size. Not looked at on a device: every check is headless.
 - **Milestone 3's co-op over real transport is built; its exit criterion is not
   met.** Since 2026-10-01 `towers --host [PORT]` runs the stage on a
   `crcbl_server::Host` behind `crcbl::lan`'s UDP listener and announcer, and the
