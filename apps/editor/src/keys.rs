@@ -12,8 +12,10 @@
 //! consumes it", and `crcbl_input::ui`'s docs say in as many words that it is
 //! "the disambiguator, not a list of special cases". So the editor's own keys
 //! are ordinary actions in the map's default context, with [`ui`] pushed over
-//! them while a panel holds the keyboard and [`text`] over that while a field
-//! is engaged.
+//! them while a panel holds the keyboard, [`text`] over that while a field
+//! is engaged, and [`list`] over it instead while a drop-down's list or a
+//! context menu is open — which takes the letters, the digits, Home, End,
+//! Page Up and Page Down for the list's typeahead and jumps.
 //!
 //! What that buys, stated as the thing a test can see: with `text` pushed, the
 //! `s` of a typed word is `text_type` and not [`SAVE`], and the arrows are the
@@ -41,7 +43,8 @@
 //! reaches the editor however deep the stack is — and Page Up and Page Down are
 //! such keys: `text` binds what a single-line field types and edits with and
 //! deliberately not these, and `ui` binds neither. Without a rule they would go
-//! on moving the selection along Z while someone types a name.
+//! on moving the selection along Z while someone types a name. (`list` does
+//! bind them, so while a list is open they page it and lift nothing.)
 //!
 //! So [`actions`] takes `editing` and asks for **nothing** while a field is
 //! engaged. One rule rather than a list of keys to keep in step with
@@ -52,7 +55,7 @@
 
 use crcbl::core::input::{KeyCode, Modifiers};
 use crcbl::input::{
-    ActionDecl, ActionKind, ActionMap, Binding, Cardinal, Modifier, Repeat, text, ui,
+    ActionDecl, ActionKind, ActionMap, Binding, Cardinal, Modifier, Repeat, list, text, ui,
 };
 
 use crate::panel::RecoveryAnswer;
@@ -391,6 +394,7 @@ pub fn map() -> ActionMap {
 
     ui::declare(&mut map).expect("nothing reserved clashes with the editor's names");
     text::declare(&mut map).expect("nothing reserved clashes with the editor's names");
+    list::declare(&mut map).expect("nothing reserved clashes with the editor's names");
 
     // **The reserved `ui` context's WASD is rebound away**, to the arrows
     // alone. Its default binds `s`, so a pushed `ui` would own the key and
@@ -422,10 +426,11 @@ pub fn map() -> ActionMap {
 /// Puts the reserved `ui` context on `map`'s stack, if it is not already there.
 ///
 /// **Pushed and never popped here**, which is the engine loop's own asymmetry
-/// (`crcbl::engine`'s menu pump): `text` goes on *over* `ui`, and the stack
-/// refuses an out-of-order pop, so the frame that stops needing `ui` may still
-/// have `text` above it. [`pop_ui`] is what the *next* frame calls, by which
-/// time [`crcbl::input::text::sync`] has taken `text` off.
+/// (`crcbl::engine`'s menu pump): `text` or `list` goes on *over* `ui`, and the
+/// stack refuses an out-of-order pop, so the frame that stops needing `ui` may
+/// still have one above it. [`pop_ui`] is what the *next* frame calls, by which
+/// time [`crcbl::input::text::sync`] and [`crcbl::input::list::sync`] have
+/// taken them off.
 ///
 /// # Panics
 ///
@@ -440,7 +445,10 @@ pub fn push_ui(map: &mut ActionMap) {
 /// Takes the reserved `ui` context back off, if it is on and nothing is over
 /// it. See [`push_ui`].
 pub fn pop_ui(map: &mut ActionMap) {
-    if map.is_context_active(ui::CONTEXT) && !map.is_context_active(text::CONTEXT) {
+    if map.is_context_active(ui::CONTEXT)
+        && !map.is_context_active(text::CONTEXT)
+        && !map.is_context_active(list::CONTEXT)
+    {
         map.pop_context(ui::CONTEXT)
             .expect("nothing is above the ui context");
     }
@@ -1008,6 +1016,46 @@ mod tests {
                 Action::Frame,
             ],
             "the keys did not come back when both contexts came off",
+        );
+    }
+
+    /// **While `list` is over `ui` the letters and Page Up are the list's**:
+    /// W switches no tool, Page Up lifts nothing and Ctrl+S saves nothing
+    /// while a drop-down's list is open, `ui` stays on under it, and all
+    /// three come back once it is off.
+    #[test]
+    fn an_open_list_takes_the_letters_and_page_up_from_the_editor() {
+        let taps = |keys: &mut Keyboard| {
+            let mut asked = Vec::new();
+            asked.extend(keys.tap(KeyCode::KeyW, Modifiers::empty()));
+            asked.extend(keys.tap(KeyCode::PageUp, Modifiers::empty()));
+            asked.extend(keys.tap(KeyCode::KeyS, Modifiers::CTRL));
+            asked
+        };
+        let mut keys = Keyboard::new();
+        push_ui(&mut keys.map);
+        list::sync(&mut keys.map, true).expect("declared, and `ui` is below");
+        assert_eq!(
+            taps(&mut keys),
+            [],
+            "a key the list takes reached the editor"
+        );
+        pop_ui(&mut keys.map);
+        assert!(
+            keys.map.is_context_active(ui::CONTEXT),
+            "`ui` came off from under the list"
+        );
+
+        list::sync(&mut keys.map, false).expect("declared and on top");
+        pop_ui(&mut keys.map);
+        assert_eq!(
+            taps(&mut keys),
+            [
+                Action::Translate,
+                Action::Nudge { axis: 2, sign: 1.0 },
+                Action::Save,
+            ],
+            "the keys did not come back when the list came off",
         );
     }
 

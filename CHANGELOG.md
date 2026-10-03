@@ -17,14 +17,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 ### Breaking
 
 - **`crcbl_ui::PointerInput` gained `secondary_pressed`, `NavInput` gained
-  `menu`, and the reserved `ui` context gained `ui_menu`** (see Added: context
-  menus). A struct literal of either type must name the new field — `false`
-  keeps what it did — or build from `PointerInput::hovering` or a `NavInput`
-  constant. `crcbl_input::ui::declare` refuses a map that already declares
-  `ui_menu`, as it refuses every reserved name, and a pushed `ui` context now
-  takes the menu key and Shift+F10 from the game beneath; the engine loop's own
-  `menu_actions` rebinds `ui_menu` to nothing, so its menus leave both keys to
-  the game. `crcbl_input::ui::ACTIONS` lists every reserved action.
+  `menu` and `jump`, and the reserved `ui` context gained `ui_menu`** (see
+  Added: context menus, and the pop-up layer). A struct literal of either type
+  must name the new fields — `false` and `None` keep what it did — or build from
+  `PointerInput::hovering` or a `NavInput` constant. `crcbl_input::ui::declare`
+  refuses a map that already declares `ui_menu`, as it refuses every reserved
+  name, and a pushed `ui` context now takes the menu key and Shift+F10 from the
+  game beneath; the engine loop's own `menu_actions` rebinds `ui_menu` to
+  nothing, so its menus leave both keys to the game. `crcbl_input::ui::ACTIONS`
+  lists every reserved action.
 
 - **`#[derive(Reflect)]` on an enum needs `Default` for every variant's fields**
   (see Added: switching an enum's variant). A switch makes the new variant from
@@ -638,18 +639,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   closes the whole chain; a disabled item is never focused or picked; a submenu
   opens beside its item on a click, accept or the right arrow, and left closes
   it again; back closes one level at a time, and a press outside closes them all
-  and is spent. A secondary press elsewhere moves the menu rather than only
-  closing it. Its look is `default.css`'s `.context-menu`, `.context-item`,
-  `.context-item-arrow` and `.context-separator` rules. Underneath:
-  `PointerInput::secondary_pressed`, fed by the engine loop's `PointerCapture`
-  from every shell's right button; `NavInput::menu`, read from the reserved
-  `ui_menu` action; and `Ui::open_popup_at` with a `Placement` — `Below` as
-  before, `Beside` for a submenu, flipped left at the viewport's right edge, or
-  `At` a point, flipped up and left at the far edges. In the editor a
-  right-click on an entity's outliner row offers Rename, Duplicate and Delete,
-  each carried out exactly as its key is (so undoable the same way) and disabled
-  while a scene plays; a right-click on a row outside the selection selects it
-  first, and one inside a multi-selection acts on the whole selection.
+  and is spent. Up and down wrap at a menu's ends, as a Windows menu's arrows do
+  (`nav-wrap: vertical` on `.context-menu`) — to its first item even when it is
+  scrolled out of view, since `nav-wrap` wraps to the far side of a container's
+  content rather than of its box. A secondary press elsewhere moves the menu
+  rather than only closing it. Its look is `default.css`'s `.context-menu`,
+  `.context-item`, `.context-item-arrow` and `.context-separator` rules.
+  Underneath: `PointerInput::secondary_pressed`, fed by the engine loop's
+  `PointerCapture` from every shell's right button; `NavInput::menu`, read from
+  the reserved `ui_menu` action; and `Ui::open_popup_at` with a `Placement` —
+  `Below` as before, `Beside` for a submenu, flipped left at the viewport's
+  right edge, or `At` a point, flipped up and left at the far edges. In the
+  editor a right-click on an entity's outliner row offers Rename, Duplicate and
+  Delete, each carried out exactly as its key is (so undoable the same way) and
+  disabled while a scene plays; a right-click on a row outside the selection
+  selects it first, and one inside a multi-selection acts on the whole
+  selection.
 - **`crcbl-ui` has tooltips, and the editor's toolbar and play strip use them.**
   `Ui::tooltip(&response, text)`, called after a widget every frame it is built,
   shows `text` once the pointer has rested on the widget — or, with a keyboard
@@ -679,10 +684,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   into it and stays; back closes the topmost (and `Ui::back_requested` does not
   report that back), a press outside closes it and is spent there rather than
   reaching what it covered, and every close gives focus back to the anchor. One
-  the frame does not build closes. `Ui::select(selector, options, &mut chosen)`
-  is a button showing the chosen option that opens the options in a pop-up at
-  least as wide as itself, picked by click or by moves and accept, reporting a
-  pick through `Response::changed`; `default.css` styles `popup`, `select` and
+  the frame does not build closes. A pop-up is never taller than the viewport
+  less `POPUP_MARGIN`: `Ui::popup` caps its `max-height` and `default.css` makes
+  `popup` `overflow: scroll`, so a long list scrolls under the wheel and to keep
+  the focused item in view, and a node `Ui::set_focus` asks for is scrolled into
+  view at that frame's layout. Inside the topmost pop-up `NavInput::jump` — a
+  `Jump`: Home and End to the first and last item focus can rest on, Page Up and
+  Page Down a view's height — moves focus, and a drop-down's list or any level
+  of a context menu takes typeahead from the frame's `TextInput`: typed letters
+  focus the next enabled item they begin, ignoring case, one letter typed again
+  steps through the items it begins, and the prefix starts afresh after
+  `TYPEAHEAD_TIMEOUT` on the text clock. Those keys come through a new reserved
+  `list` context (`crcbl_input::list`: `list_first`, `list_last`,
+  `list_page_up`, `list_page_down`, and `list_type` on every key that types a
+  character), pushed over `ui` while `Ui::popup_list_open` says a list is open,
+  as `text` is while a field is engaged; `crcbl::ui_nav::nav_input` reads its
+  jumps, and `TextPump` collects the typing when told a list is open. The editor
+  pushes it, so its variant picker and outliner row menus take typeahead, Home,
+  End and the page keys, and a letter or Page Up there no longer switches a tool
+  or lifts the selection. `Ui::select(selector, options, &mut chosen)` is a
+  button showing the chosen option that opens the options in a pop-up at least
+  as wide as itself, scrolled to the chosen one, picked by click or by moves and
+  accept, reporting a pick through `Response::changed`; its arrows stop at the
+  list's ends, as a list box's do. `default.css` styles `popup`, `select` and
   its `.select-label`, `.select-caret` (`SELECT_CARET`), `.select-list`,
   `.select-option` and `.select-option-label` parts, `:open` while the list is.
 - **Towers has a dev fly/walk camera** (`docs/plan/sample/07-towers.md` slice 4,

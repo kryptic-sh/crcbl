@@ -73,6 +73,10 @@
 //! focused widget by `ui_menu`, with submenus beside their items.
 //! `widgets/context_menu.rs` has the rules.
 //!
+//! A pop-up taller than the viewport is capped and scrolls, and inside the
+//! topmost one Home, End, Page Up and Page Down ([`Jump`]) and a list's
+//! typeahead move focus; `popup_nav.rs` has those rules.
+//!
 //! [`Ui::tooltip`] hangs a line of text from a widget the same way once the
 //! pointer has rested on it, or navigation has held focus on it, for
 //! [`TOOLTIP_DELAY`]: a pop-up of its own kind, drawn over every other but
@@ -180,6 +184,7 @@ pub mod focus;
 mod font_tests;
 mod layout;
 mod popup;
+mod popup_nav;
 #[cfg(test)]
 mod popup_tests;
 mod resolve;
@@ -217,10 +222,11 @@ use store::{Interaction, NodeStore};
 pub use crate::font::layout::TextAlign;
 pub use crate::font::{FamilyName, FontFamily};
 pub use focus::{
-    Behavior, Direction, Engagement, FOCUS_HISTORY, InputMode, NavInput, NavScore, NavStep, Role,
-    Scope,
+    Behavior, Direction, Engagement, FOCUS_HISTORY, InputMode, Jump, NavInput, NavScore, NavStep,
+    Role, Scope,
 };
-pub use popup::Placement;
+pub use popup::{POPUP_MARGIN, Placement};
+pub use popup_nav::TYPEAHEAD_TIMEOUT;
 pub use store::NodeKey;
 pub use style::{
     Align, BorderImage, BorderImageWidth, Display, Edges, FlexDirection, FlexWrap, ImageName,
@@ -498,6 +504,8 @@ pub struct Ui {
     /// asked for, and where it goes, until its [`Ui::context_menu`] call
     /// opens it; see `widgets/context_menu.rs`.
     context_request: Option<(NodeKey, Placement)>,
+    /// What has been typed into the topmost list; see `popup_nav.rs`.
+    typeahead: popup_nav::Typeahead,
 }
 
 impl Ui {
@@ -537,6 +545,7 @@ impl Ui {
         self.pointer = pointer;
         self.tree_toggled = None;
         self.popup_roots.clear();
+        self.typeahead.built = None;
         let clicked = self.resolve_pointer(pointer);
         self.clicked = clicked;
         self.resolve_navigation(nav, clicked, self.dragged);
@@ -1060,6 +1069,9 @@ impl Ui {
         self.fit_text_inputs(atlas);
         self.clamp_scroll();
         self.place(origin);
+        if self.reveal_requested() {
+            self.place(origin);
+        }
     }
 
     /// The text `node` shows: `None` unless it is a text span.

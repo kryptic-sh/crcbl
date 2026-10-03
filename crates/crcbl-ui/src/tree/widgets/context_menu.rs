@@ -44,11 +44,19 @@
 //! Back closes the topmost menu, a level at a time, and a press outside every
 //! menu closes them all and is spent — the pop-up stack's rules.
 //!
+//! **Up and down wrap at a menu's ends**, as a Windows menu's arrows do
+//! (`default.css`'s `nav-wrap` on `.context-menu`), where a drop-down's list
+//! stops. A menu taller than the viewport scrolls (`popup.rs`), and Home, End,
+//! Page Up, Page Down and typeahead move through the topmost level as
+//! `popup_nav.rs` says; typing onto an item with a submenu focuses it without
+//! opening it.
+//!
 //! Items are keyed by their label, as a drop-down's options are, so two items
 //! of one label in one menu are a duplicate key.
 
 use super::{Ui, WidgetState};
 use crate::style::PseudoClasses;
+use crate::tree::popup_nav::ListItem;
 use crate::tree::{
     Behavior, Direction, KeySource, NavInput, NodeKey, Placement, hash_of, popup::OpenPopup,
 };
@@ -283,6 +291,23 @@ impl Ui {
     /// [`Ui::context_menu`] for what each holds.
     fn build_context_menu<T: Copy>(&mut self, menu: NodeKey, items: &[ContextItem<'_, T>]) {
         let root = Self::popup_key(menu);
+        // Every row of an outliner asks for its menu every frame; only an
+        // open one lists its items.
+        if self.is_popup_open(menu) {
+            let listed: Vec<ListItem<'_>> = items
+                .iter()
+                .filter_map(|item| match *item {
+                    ContextItem::Action { label, enabled, .. }
+                    | ContextItem::Submenu { label, enabled, .. } => Some(ListItem {
+                        key: Self::context_item_key(root, label),
+                        label,
+                        enabled,
+                    }),
+                    ContextItem::Separator => None,
+                })
+                .collect();
+            self.typeahead(menu, &listed);
+        }
         self.popup(menu, ".context-menu", &[], |ui| {
             for (index, item) in items.iter().enumerate() {
                 let (label, enabled, submenu) = match *item {

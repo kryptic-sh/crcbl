@@ -3375,7 +3375,10 @@ variant picker; tooltips on the same layer (`tree/tooltip.rs`: `Ui::tooltip`,
 `TOOLTIP_DELAY`), adopted for the editor's toolbar and play strip; context menus
 on the same layer (`tree/widgets/context_menu.rs`: `Ui::context_menu`,
 `ContextItem`, `ContextMenuResponse`, `Ui::open_popup_at`, `Placement`), adopted
-for the editor's outliner rows. Decisions, then what is left.
+for the editor's outliner rows; list navigation inside pop-ups
+(`tree/popup_nav.rs`: `Jump`, `NavInput::jump`, `Ui::popup_list_open`,
+`TYPEAHEAD_TIMEOUT`; `POPUP_MARGIN` in `popup.rs`; the reserved `list` context
+in `crcbl_input::list`). Decisions, then what is left.
 
 - **Decided: a press outside every pop-up is spent closing them**, not passed
   through to what is under it — the long-term rule. A click meant to dismiss a
@@ -3549,12 +3552,87 @@ for the editor's outliner rows. Decisions, then what is left.
 - **Deferred: a shortcut column in context items.** The editor writes each key
   into the label (`Delete (Del)`), as its toolbar does; a right-aligned column
   needs a second span per item and a field on `ContextItem`.
-- **Deferred: a list taller than the viewport scrolls.** It is shifted to the
-  viewport's top and the rest is clipped; `max-height` with `overflow: scroll`
-  on `.select-list` would bound it, and focus scrolls an `overflow: scroll`
-  block's focused node into view, but no rule sets it and nothing tests it.
-  Typeahead, Home and End, and wrapping at the list's ends (`nav-wrap` on
-  `.select-list` should do it) are not built or tested either.
+- **Decided: every pop-up is capped at the viewport's height less `POPUP_MARGIN`
+  and scrolls**, not only a drop-down's list: `Ui::popup` puts the cap in front
+  of the caller's `inline` (so a caller's own `max-height` wins) and
+  `default.css` makes `popup` `overflow: scroll`. The cap is the viewport the
+  last layout was given — the only one there is while a frame is built — so it
+  is a frame late to follow a resize and absent in a tree's first frame, as the
+  list's `min-width` is a frame late to follow its button. Focus scrolls the
+  capped list by the existing `overflow: scroll` rule, and the wheel by
+  `Ui::scroll_wheel`; no second scroll mechanism.
+- **Decided: a node `Ui::set_focus` asks for is scrolled into view at that
+  frame's layout** (`Ui::reveal_requested`, then the tree is placed a second
+  time, only on frames where it moved something), so a drop-down opens drawn at
+  its chosen option and typeahead's target is in view the frame it is typed,
+  rather than one frame late. Every `set_focus` caller gets it; the only others
+  are a pop-up handing focus back to its anchor, which the next frame's focus
+  would scroll to anyway.
+- **Decided: `nav-wrap` wraps to the far side of a container's content, not of
+  its box** (`move_spatially` in `focus/mod.rs`): wrapping a scrolled menu from
+  its last item reaches its first item, not the first one in view.
+- **Decided: arrows wrap in a context menu and stop in a drop-down's list**:
+  Windows menus wrap and Windows list boxes do not. `nav-wrap: vertical` on
+  `default.css`'s `.context-menu`; nothing on `.select-list`. macOS menus do not
+  wrap; Windows was followed because the menu-key pair it gave `ui_menu` is
+  Windows' too.
+- **Decided: Home, End, Page Up and Page Down are a `Jump` on `NavInput`, and
+  act in the topmost pop-up only** (`Ui::jump_in_popup`): the first or last node
+  focus can rest on (so past a disabled item), or the furthest node whose far
+  edge is within the pop-up's content height of the focused one. **Not panels**:
+  a virtualized list or outliner builds only its window of rows, so its first
+  and last built rows are not its first and last.
+- **Decided: the keys come through a reserved `list` context, not new `ui_*`
+  actions** (`crcbl_input::list`: `list_first`, `list_last`, `list_page_up`,
+  `list_page_down` repeating, and `list_type` on every character key —
+  `crcbl_input::text::KEYS` less Space, Backspace, Delete, Home, End and the
+  side arrows). It is pushed over `ui` while `Ui::popup_list_open` says a list
+  is open, as `text` is while a field is engaged, and `nav_input` reads it into
+  `NavInput::jump`. **Considered and declined: adding the four keys to
+  `crcbl_input::ui::ACTIONS`**, as `ui_menu` was. A pushed `ui` would take them
+  from every game under every panel, and from the editor's own Page Up/Page Down
+  lift whenever a panel held the keyboard; and typeahead needs the letters,
+  which `ui` binds as WASD by default — only a context that is on exactly while
+  a list is open can own both without changing what any other screen's keys do.
+  Typed characters reach the tree as the shell's `TextCommit`s through
+  `TextPump`, which a caller tells to collect while a list is open
+  (`text_editing() || popup_list_open()`); the list reads inserts and ignores
+  every other edit. No pad bindings. The engine loop's `menu_actions` does not
+  declare it: the loop's own menus have no pop-ups.
+- **Decided: typeahead is Windows' list and menu rule.** The prefix extends
+  while characters come within `TYPEAHEAD_TIMEOUT` of each other on the text
+  clock, and focus goes to the first enabled item from the focused one whose
+  label starts with it, ignoring case (`str::to_lowercase`); one letter typed
+  again and again starts after the focused item, so it steps through the items
+  it begins. White space and control characters are not typed — Space is
+  `ui_accept`. `TYPEAHEAD_TIMEOUT` is one second, chosen rather than taken from
+  a platform figure. It runs in the widgets (`Ui::typeahead`, called by
+  `Ui::select` and each level of `Ui::context_menu`), which know the labels; the
+  tree keeps no text per node between frames.
+- **Behaviour that is not a bug: the editor needed `ui` under `list`.** A
+  right-click opens a row menu before focus has moved into it, so
+  `Panels::holds_keyboard` was false and `list` went on with no `ui` beneath;
+  `ui` then went on over it and `list::sync`'s pop was refused as out of order.
+  `holds_keyboard` now counts an open list.
+- **Behaviour that is not a bug: keys the `list` context does not bind still
+  reach the editor under an open row menu** — Delete, F2, F5 — as they do under
+  a focused panel. Only the letters, digits, punctuation and the jump keys are
+  the list's.
+- **Deferred: a capped list covers its anchor.** It hangs below or above its
+  anchor as before and is then shifted inside; a Windows combo box instead sizes
+  its list to the room on the side it opens toward. That is a cap per placement
+  in `Ui::popup` and `hang`, with `Placement::At` and `Beside` needing their own
+  answer.
+- **Deferred: a pop-up wider than the viewport.** Only its height is capped; it
+  is still shifted to the viewport's left edge and clipped at its right.
+- **Deferred: Page Down as Windows does it** — first to the last item in view,
+  then a page further — rather than a view's height from the focused item.
+- **Deferred: Backspace editing the typeahead prefix, and a space inside one**
+  (`New Y` for `New York`), which Windows' list views take; Space is accept
+  here, and the `list` context leaves Backspace unbound.
+- **Deferred: handing a `Jump` to an engaged widget** — Home and End as a
+  slider's minimum and maximum, as WAI-ARIA's slider pattern has them. An
+  engaged node ignores a jump; `NavStep` would need the variants.
 - **Not tested:** the pop-up, the drop-down and the context menu have never been
   looked at on a device or in a golden; the inspector golden leaves variants off
   and did not change, and no golden builds a context menu, so its `default.css`
@@ -3563,23 +3641,25 @@ for the editor's outliner rows. Decisions, then what is left.
   arrives as `WM_SYSKEYDOWN`, which `proc.rs` forwards), the menu key on X11 and
   Wayland, and a right-click on the canvas in a browser. Also untested for
   context menus: a menu nested deeper than one submenu, one opened inside a
-  scrolled block, typeahead, Home and End, wrapping at the ends, and a menu
-  taller than the viewport (shifted to its top and clipped, as a list is). The
-  drop-down's look is `default.css`'s `popup`, `select` and `.select-option`
-  rules, read only through the accent colour in `crcbl-ui`'s inspector test, and
-  the layer is held by draw-list order and clips in `tree::popup_tests`. Also
-  untested: the wheel over a pop-up (`scroll_wheel` walks the layered hit
-  chain), a pop-up nested more than one deep, a pop-up opened from inside a base
-  modal, gamepad input, and the editor's Escape with the unsaved bar up while a
-  drop-down is open (the bar answers Escape through its own binding, outside the
-  tree). For tooltips (`tree::tooltip_tests`, `editor`'s
-  `panel::tests::tooltips`): an anchor inside a pop-up that closes while the
-  frame is built (the `CLOSED_LAYER` branch in `Ui::layers`), an anchor built
-  `display: none` (the hidden branch in `Ui::place`), nested widgets that both
-  ask (the innermost wins by stacking), accept dismissing, the play strip's
-  tooltips through the loop and a choice's tooltip text, and the `tooltip`
-  rule's look — the tests restyle its background to find it. No golden builds a
-  tooltip.
+  scrolled block, Page Up and Page Down in a menu (tested in a drop-down's
+  list), and the wheel over a capped menu (tested over a list). Not tested: a
+  jump arriving while a widget is engaged (ignored by the code), and the cap
+  following a resize. Not verified on a device: typeahead through a real shell's
+  `TextCommit`s (the headless shell's only) and an input method composing while
+  a list is open. The drop-down's look is `default.css`'s `popup`, `select` and
+  `.select-option` rules, read only through the accent colour in `crcbl-ui`'s
+  inspector test, and the layer is held by draw-list order and clips in
+  `tree::popup_tests`. Also untested: a pop-up nested more than one deep, a
+  pop-up opened from inside a base modal, gamepad input, and the editor's Escape
+  with the unsaved bar up while a drop-down is open (the bar answers Escape
+  through its own binding, outside the tree). For tooltips
+  (`tree::tooltip_tests`, `editor`'s `panel::tests::tooltips`): an anchor inside
+  a pop-up that closes while the frame is built (the `CLOSED_LAYER` branch in
+  `Ui::layers`), an anchor built `display: none` (the hidden branch in
+  `Ui::place`), nested widgets that both ask (the innermost wins by stacking),
+  accept dismissing, the play strip's tooltips through the loop and a choice's
+  tooltip text, and the `tooltip` rule's look — the tests restyle its background
+  to find it. No golden builds a tooltip.
 
 ## What UI rung 8b shipped without (2026-09-16)
 

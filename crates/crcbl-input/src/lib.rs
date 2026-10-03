@@ -13,7 +13,8 @@
 //! held while the stack changes, and what [`ActionMap::suppress_held`] and
 //! [`ActionMap::suppress_held_action`] withhold on request. [`ui`] declares the
 //! engine's reserved `ui`
-//! context, and [`text`] the `text` context a text field pushes over it.
+//! context, [`text`] the `text` context a text field pushes over it, and
+//! [`list`] the `list` context an open pop-up list pushes over it.
 //!
 //! # Patterns and devices
 //!
@@ -65,6 +66,7 @@ mod float_axis;
 pub mod game_controller;
 mod gamepad;
 pub mod hint;
+pub mod list;
 mod overrides;
 mod patterns;
 // The name match the browser and GameController backends name a pad's family

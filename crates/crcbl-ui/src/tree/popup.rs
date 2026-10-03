@@ -35,10 +35,19 @@
 //!   bottom right hangs up and to the left of the pointer.
 //!
 //! It is then shifted the least that keeps it inside the viewport on both
-//! axes — its top-left corner wins when it is larger than the viewport.
+//! axes — its top-left corner wins when it is wider than the viewport.
 //! The viewport is the space [`Ui::layout`] was given, from its origin; an
 //! axis laid out under content-sized space bounds nothing. A pop-up's own
 //! margin and offsets do not move it.
+//!
+//! **A pop-up is never taller than the viewport less [`POPUP_MARGIN`]**: its
+//! root's `max-height` is that, and `default.css` makes every `popup`
+//! `overflow: scroll`, so a list longer than the viewport scrolls — under the
+//! wheel ([`Ui::scroll_wheel`]), and to keep the focused item in view — rather
+//! than running off the bottom. The cap is the viewport the last layout was
+//! given, as a drop-down's width is its button's as last laid out, so it is a
+//! frame late to follow a resize and absent in a tree's first frame; a
+//! caller's `inline` `max-height` overrides it.
 //!
 //! **It is clipped to the viewport, and to nothing its anchor is under**: a
 //! list hanging out of a scrolled, clipped panel draws whole over it. Each
@@ -72,7 +81,9 @@
 //! modal by layer, so focus moves into it the frame after it is built — onto
 //! the node [`Ui::set_focus`] asked for, else by the landing rule in
 //! `focus/mod.rs` — and no move or tree-order step leaves it. Inside, the
-//! frame's [`NavInput`](super::NavInput) moves focus as anywhere else.
+//! frame's [`NavInput`](super::NavInput) moves focus as anywhere else, and its
+//! [`Jump`](super::Jump) — Home, End, Page Up and Page Down — and a list's
+//! typeahead move it as `popup_nav.rs` says.
 //! **Closing a pop-up, by any of the ways above, gives focus back to its
 //! anchor** when the next frame begins, or at once for back.
 
@@ -81,7 +92,7 @@ use glam::Vec2;
 use super::store::NodeKey;
 use super::tooltip::TOOLTIP_LAYER;
 use super::widgets::typed;
-use super::{Behavior, KeySource, ROOT_KEY, Response, Ui};
+use super::{Behavior, KeySource, LengthAuto, ROOT_KEY, Response, Ui};
 use crate::draw_list::ClipRect;
 use crate::style::{Declaration, PseudoClasses};
 use crate::widget::PointerInput;
@@ -89,6 +100,11 @@ use crate::widget::PointerInput;
 /// The layer a node is given when it was built in a pop-up that closed
 /// before layout: never hit, focused or drawn.
 pub(super) const CLOSED_LAYER: usize = usize::MAX;
+
+/// How much of the viewport's height a pop-up taller than it leaves
+/// uncovered: its `max-height` is the viewport's height less this, in pixels,
+/// so some of what it hangs over always shows round it.
+pub const POPUP_MARGIN: f32 = 16.0;
 
 /// What a press spent closing pop-ups is captured by: a key no node has, so
 /// nothing is pressed, hovered or clicked until the press is released.
@@ -164,9 +180,9 @@ impl Ui {
 
     /// The pop-up hanging from `anchor`, while it is open: a `popup` block —
     /// `selector` is its `#id.class`, as a widget's is, though an `#id` does
-    /// not key it: its anchor does — whose children `build` adds, placed and
-    /// drawn as the module docs say. `inline` overrides every rule, as
-    /// [`Ui::block`]'s does.
+    /// not key it: its anchor does — whose children `build` adds, placed,
+    /// capped and drawn as the module docs say. `inline` overrides every rule,
+    /// as [`Ui::block`]'s does, and the cap on its height.
     ///
     /// Returns the root's [`Response`], or `None` without building anything
     /// while the pop-up is closed.
@@ -181,10 +197,17 @@ impl Ui {
             return None;
         }
         let selector = typed("popup", selector);
+        let viewport = self.viewport();
+        let room = viewport.max.y - viewport.min.y;
+        // An axis laid out under content-sized space is unbounded: no cap.
+        let cap = room
+            .is_finite()
+            .then(|| Declaration::MaxHeight(LengthAuto::Px((room - POPUP_MARGIN).max(0.0))));
+        let inline: Vec<Declaration> = cap.into_iter().chain(inline.iter().copied()).collect();
         let (index, response) = self.open_root(
             Self::popup_key(anchor),
             &selector,
-            inline,
+            &inline,
             Behavior::MODAL,
             build,
         );

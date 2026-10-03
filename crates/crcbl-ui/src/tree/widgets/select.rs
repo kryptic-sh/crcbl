@@ -13,11 +13,17 @@
 //! **Arrowing over a closed drop-down moves past it**, as the LOCKED focus
 //! rule in `focus/mod.rs` wants: only accept or a click opens the list, and
 //! the list, not the button, is what navigation then drives.
+//!
+//! **The arrows stop at the list's ends**, as a Windows list box's do, where a
+//! context menu's wrap. A list taller than the viewport scrolls, opening
+//! scrolled to the chosen option (`popup.rs`); Home, End, Page Up, Page Down
+//! and typeahead move through it as `popup_nav.rs` says.
 
 use std::panic::Location;
 
 use super::{Ui, typed};
 use crate::style::{Declaration, PseudoClasses};
+use crate::tree::popup_nav::ListItem;
 use crate::tree::{Behavior, KeySource, LengthAuto, NodeKey, Response, hash_of};
 
 /// What a drop-down's `.select-caret` shows: a letter rather than an arrow,
@@ -107,12 +113,25 @@ impl Ui {
                     ui.span(".select-option-label", option, &[]);
                 });
                 // Focus moves into the list on the chosen option, rather than
-                // wherever the landing rule would put it.
+                // wherever the landing rule would put it, and the list opens
+                // scrolled to it.
                 if opening && index == chosen {
                     ui.set_focus(built.key);
                 }
             }
         });
+        if self.is_popup_open(key) {
+            let items: Vec<ListItem<'_>> = options
+                .iter()
+                .zip(&keys)
+                .map(|(&label, &key)| ListItem {
+                    key,
+                    label,
+                    enabled: true,
+                })
+                .collect();
+            self.typeahead(key, &items);
+        }
         response
     }
 }

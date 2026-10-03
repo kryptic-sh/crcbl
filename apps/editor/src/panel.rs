@@ -614,12 +614,14 @@ impl Panels {
     }
 
     /// Whether a panel holds the keyboard: something in the tree has focus, or
-    /// is engaged.
+    /// is engaged, or a list is open — a menu a right-click opened holds it
+    /// before focus has moved into it.
     ///
-    /// What the reserved `ui` context is pushed on — see [`crate::keys`].
+    /// What the reserved `ui` context is pushed on — see [`crate::keys`] — so
+    /// it is always under the `list` context [`Self::popup_list_open`] pushes.
     #[must_use]
     pub fn holds_keyboard(&self) -> bool {
-        self.ui.focused().is_some() || self.ui.engaged().is_some()
+        self.ui.focused().is_some() || self.ui.engaged().is_some() || self.ui.popup_list_open()
     }
 
     /// Whether a text field is being typed into: what the reserved `text`
@@ -627,6 +629,14 @@ impl Panels {
     #[must_use]
     pub fn text_editing(&self) -> bool {
         self.ui.text_editing()
+    }
+
+    /// Whether a drop-down's list or a context menu is open and takes the
+    /// keyboard's typing and jump keys: what the reserved `list` context is
+    /// pushed on.
+    #[must_use]
+    pub fn popup_list_open(&self) -> bool {
+        self.ui.popup_list_open()
     }
 
     /// Takes the keyboard back from the panels, committing whatever was being

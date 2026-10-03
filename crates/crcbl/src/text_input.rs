@@ -8,8 +8,9 @@
 //! # How a caller drives it
 //!
 //! ```text
-//! every ShellEvent ─→ TextPump::observe(event, ui.text_editing())
-//!                     (and the ActionMap, with input::text::sync(map, ui.text_editing()))
+//! every ShellEvent ─→ TextPump::observe(event, ui.text_editing() || ui.popup_list_open())
+//!                     (and the ActionMap, with input::text::sync(map, ui.text_editing())
+//!                      and input::list::sync(map, ui.popup_list_open()))
 //! ui.begin_frame_with(pointer, nav_input(map))
 //! ui.set_text_input(pump.frame(dt))
 //! ... build ...
@@ -22,6 +23,17 @@
 //! owns every key that types or edits, so none of them is also `ui_move`,
 //! `ui_accept` or a game's binding. The pump reads the same key events for
 //! the edits they make, and only while the tree is editing.
+//!
+//! **An open pop-up list takes typing too**, for its typeahead:
+//! [`input::list::sync`](crate::input::list::sync) pushes the `list` context
+//! over `ui` while [`Ui::popup_list_open`] says so, which owns the keys that
+//! type a character, and the pump is told to collect while it is. The list
+//! reads the committed text and nothing else, so the edits the same keys make
+//! for a field are collected and ignored. Never both at once: a list takes no
+//! keys while something is engaged, so pop whichever is coming off before
+//! pushing the other.
+//!
+//! [`Ui::popup_list_open`]: crate::ui::tree::Ui::popup_list_open
 //!
 //! # The clipboard, per backend
 //!
@@ -75,8 +87,9 @@ impl TextPump {
         Self::default()
     }
 
-    /// Takes what `event` means to a text input: while `editing`, a key
-    /// press's or repeat's [`Edit`] and a commit's text; and, whenever it
+    /// Takes what `event` means to a text input: while `editing` — a field
+    /// engaged, or a list open for its typeahead (see the module docs) — a
+    /// key press's or repeat's [`Edit`] and a commit's text; and, whenever it
     /// arrives, the answer to this pump's outstanding read. Returns whether
     /// the event was the text input's — a key press that makes no edit is
     /// not, and neither is another caller's clipboard answer.
@@ -180,7 +193,7 @@ mod tests {
 
     use super::*;
     use crate::core::input::{KeyCode, Modifiers};
-    use crate::input::{ActionDecl, ActionKind, ActionMap, Binding, text, ui};
+    use crate::input::{ActionDecl, ActionKind, ActionMap, Binding, list, text, ui};
     use crate::shell::{HeadlessShell, ShellCaps, WindowDesc};
     use crate::ui::draw_list::{DrawCommand, DrawList};
     use crate::ui::text::FontAtlas;
@@ -191,9 +204,13 @@ mod tests {
     const FRAME: Duration = Duration::from_millis(16);
     const TICK: f32 = 1.0 / 60.0;
 
-    /// A menu: a text input `#name` above a button `#ok`, over a game that
-    /// walks on WASD — with the shell, the action map and the pump that join
-    /// them, driven the way the module docs say.
+    /// What the menu's drop-down offers.
+    const FRUIT: [&str; 3] = ["apple", "banana", "cherry"];
+
+    /// A menu: a text input `#name`, a button `#ok` and a drop-down `#fruit`
+    /// over [`FRUIT`], over a game that walks on WASD — with the shell, the
+    /// action map and the pump that join them, driven the way the module docs
+    /// say.
     struct Menu {
         shell: HeadlessShell,
         window: WindowId,
@@ -201,6 +218,7 @@ mod tests {
         pump: TextPump,
         ui: Ui,
         name: String,
+        fruit: usize,
         list: DrawList,
     }
 
@@ -222,6 +240,7 @@ mod tests {
             });
             ui::declare(&mut map).expect("nothing reserved is taken");
             text::declare(&mut map).expect("nothing reserved is taken");
+            list::declare(&mut map).expect("nothing reserved is taken");
             map.push_context(ui::CONTEXT).expect("declared");
             let mut menu = Self {
                 shell,
@@ -230,6 +249,7 @@ mod tests {
                 pump: TextPump::new(),
                 ui: Ui::new(),
                 name: String::new(),
+                fruit: 0,
                 list: DrawList::new(),
             };
             menu.frame();
@@ -240,7 +260,7 @@ mod tests {
         /// tree, and serve its clipboard requests. Returns the frame's
         /// navigation input.
         fn frame(&mut self) -> NavInput {
-            let editing = self.ui.text_editing();
+            let editing = self.ui.text_editing() || self.ui.popup_list_open();
             self.map.begin_tick(TICK);
             let mut events = Vec::new();
             self.shell.pump(&mut |event| events.push(event));
@@ -260,10 +280,11 @@ mod tests {
             self.ui
                 .begin_frame_with(PointerInput::hovering(Vec2::splat(-1.0)), nav);
             self.ui.set_text_input(self.pump.frame(FRAME));
-            let name = &mut self.name;
+            let (name, fruit) = (&mut self.name, &mut self.fruit);
             self.ui.block("#page", &[], |ui| {
                 ui.text_input("#name", name);
                 ui.button("#ok", "OK");
+                ui.select("#fruit", &FRUIT, fruit);
             });
             self.ui.layout(
                 Vec2::ZERO,
@@ -274,7 +295,13 @@ mod tests {
             self.ui.emit(&mut self.list);
             let requests = self.ui.take_clipboard_requests();
             self.pump.serve(requests, &mut self.shell, self.window);
-            text::sync(&mut self.map, self.ui.text_editing()).expect("declared and on top");
+            // Whichever is coming off first: the two are never on together.
+            let (editing, open) = (self.ui.text_editing(), self.ui.popup_list_open());
+            if !editing {
+                text::sync(&mut self.map, false).expect("declared and on top");
+            }
+            list::sync(&mut self.map, open).expect("declared and on top");
+            text::sync(&mut self.map, editing).expect("declared and on top");
             nav
         }
 
@@ -375,6 +402,46 @@ mod tests {
             "S is not ui_move after the commit"
         );
         assert_eq!(menu.name, "wasd qx", "a key typed after the commit");
+    }
+
+    /// **An open drop-down's list takes the letters and the jump keys**: a
+    /// typed `c` reaches cherry through the shell's commit, and W — `ui_move`
+    /// anywhere else — reaches neither navigation nor the game, Home goes to
+    /// the first option and End to the last, nothing is typed into the field,
+    /// and once the list closes W is `ui_move` again.
+    #[test]
+    fn an_open_list_takes_the_letters_and_the_jump_keys() {
+        let mut menu = Menu::new(HeadlessShell::new());
+        for _ in 0..3 {
+            menu.tap(KeyCode::Tab, Modifiers::empty());
+        }
+        menu.tap(KeyCode::Enter, Modifiers::empty());
+        assert!(menu.ui.popup_list_open(), "Enter did not open the list");
+        // The focused option's label is its first child.
+        let option = |menu: &Menu| {
+            let focused = menu.ui.focused().expect("focus is in the list");
+            let label = menu.ui.child_keys(focused).first().copied();
+            FRUIT
+                .into_iter()
+                .find(|&fruit| label.is_some_and(|label| menu.ui.text(label) == Some(fruit)))
+                .expect("focus is on an option")
+        };
+        menu.type_text(&[KeyCode::KeyC], "c");
+        assert_eq!(option(&menu), "cherry", "the typed c was not followed");
+        let navs = menu.type_text(&[KeyCode::KeyW], "w");
+        assert_eq!(navs, [NavInput::NAVIGATION], "W reached the ui");
+        assert_eq!(menu.map.axis2("walk"), (0.0, 0.0), "W walked");
+        menu.tap(KeyCode::Home, Modifiers::empty());
+        assert_eq!(option(&menu), "apple", "Home did not reach the first");
+        menu.tap(KeyCode::End, Modifiers::empty());
+        assert_eq!(option(&menu), "cherry", "End did not reach the last");
+        assert_eq!(menu.name, "", "the typing reached the field");
+
+        menu.tap(KeyCode::Escape, Modifiers::empty());
+        assert!(!menu.ui.popup_list_open(), "Escape left the list open");
+        let walk = menu.tap(KeyCode::KeyW, Modifiers::empty());
+        assert_eq!(walk, NavInput::toward(Direction::Up), "W is not ui_move");
+        assert_eq!(menu.fruit, 0, "nothing was picked");
     }
 
     /// **Copy offers the selection to the shell's clipboard, and paste reads

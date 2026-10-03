@@ -418,7 +418,23 @@ The rules, each with its _why_:
   one `Beside` its anchor (right of it, flipped left at the viewport's edge) or
   `At` a point (flipped up and left at the far edges) instead. `Ui::select`, the
   inspector's variant picker, is its first user. This is not `z-index`: inside
-  the tree paint order is still tree order.
+  the tree paint order is still tree order. **A pop-up is capped at the
+  viewport's height less `POPUP_MARGIN` and scrolls** (`overflow: scroll` in
+  `default.css`), by the wheel and to keep focus in view, opening scrolled to
+  what `Ui::set_focus` asked for.
+- **Lists in pop-ups take Home, End, the page keys and typeahead** (decided
+  2026-10-03). Inside the topmost pop-up Home and End go to the first and last
+  item focus can rest on and Page Up and Page Down a view's height; a
+  drop-down's list and every context-menu level move focus to the next enabled
+  item the typed prefix begins, ignoring case, cycling on one repeated letter,
+  the prefix starting afresh after `TYPEAHEAD_TIMEOUT` on the frame clock.
+  **Arrows wrap in a context menu and stop in a drop-down's list** — Windows
+  menus wrap, list boxes do not. The keys come through the reserved `list`
+  context, pushed over `ui` only while a list is open, as `text` is while a
+  field is engaged: a pushed `ui` taking Home, End, the page keys or the letters
+  would take them from every game and from the editor's own bindings under every
+  panel, and Home and End in a virtualized panel would land on its first and
+  last built rows rather than its first and last.
 - **A context menu is a pop-up opened by the secondary button or `ui_menu`**
   (decided 2026-10-03). `Ui::context_menu` marks a widget and, on a secondary
   press over it (`PointerInput::secondary_pressed`, from every shell's right
@@ -456,6 +472,11 @@ The rules, each with its _why_:
   | `ui_accept`         | Enter, Space    | South            | the same event path as a click; a widget cannot tell    |
   | `ui_back`           | Esc             | East             | close a modal or pop a screen                           |
   | `ui_menu`           | Menu, Shift+F10 | none             | open the focused widget's context menu                  |
+
+  The `list` context over it, only while a pop-up list is open, adds
+  `list_first` (Home), `list_last` (End), `list_page_up` and `list_page_down`
+  (Page Up and Page Down, repeating) and `list_type` on every key that types a
+  character, for typeahead. No pad buttons: a pad has no keys for them.
 
   WASD in a menu conflicts with nothing by construction: the `ui` context is
   active while a menu has input and gameplay's WASD sits in the `gameplay`
