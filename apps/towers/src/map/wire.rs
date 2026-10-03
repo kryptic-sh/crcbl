@@ -371,6 +371,51 @@ mod tests {
         ));
     }
 
+    /// **No cut of a map is a map, and no flipped bit reads as anything but
+    /// what the bytes say**: the committed field cut at every length is
+    /// refused as truncated, and with each bit flipped in turn it is refused
+    /// or read back as a map that encodes to exactly those bytes. Towers has
+    /// no fuzz crate (`docs/backlog.md` says why), so this sweep is what holds
+    /// the decoder against bytes nobody chose.
+    #[test]
+    fn every_cut_and_every_flipped_bit_is_refused_or_read_as_written() {
+        let whole = Map::built_in().to_wire();
+        for cut in 0..whole.len() {
+            assert!(
+                matches!(
+                    Map::from_wire(&whole[..cut]),
+                    Err(MapWireError::Truncated { .. })
+                ),
+                "cut at {cut} of {}",
+                whole.len()
+            );
+        }
+        let (mut refusals, mut reads) = (0, 0);
+        for at in 0..whole.len() {
+            for bit in 0..8 {
+                let mut flipped = whole.clone();
+                flipped[at] ^= 1 << bit;
+                match Map::from_wire(&flipped) {
+                    Err(_) => refusals += 1,
+                    Ok(map) => {
+                        assert_eq!(
+                            map.to_wire(),
+                            flipped,
+                            "bit {bit} of byte {at} flipped was read as another map",
+                        );
+                        reads += 1;
+                    }
+                }
+            }
+        }
+        // Both arms ran: a coordinate's lowest bit moves a point a hair and
+        // leaves a legal map, and the tag takes no bit but its own.
+        assert!(
+            refusals > 0 && reads > 0,
+            "{refusals} refused, {reads} read"
+        );
+    }
+
     /// **A count or a length past its cap is refused before anything is
     /// allocated for it** — a count of four billion arrives as the rule it
     /// breaks, not as an allocation — and so is a label that is not UTF-8.

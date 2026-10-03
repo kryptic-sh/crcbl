@@ -1,8 +1,8 @@
-//! Named seeds from the fuzzer's corpus, replayed through the delta decoder and
-//! the replay spool's recovery.
+//! Named seeds from the fuzzer's corpus, replayed through the delta decoder,
+//! the replay spool's recovery and the save container's reader.
 //!
 //! `fuzz_targets/decoder.rs` runs the decoders against bytes libFuzzer invents.
-//! This target runs two of them against bytes somebody named, and the two are
+//! This target runs three of them against bytes somebody named, and the two are
 //! not the same job. A fuzzer finds a crashing or wrongly-accepted input once
 //! and then moves on; nothing makes it generate that input again, so a fix that
 //! regresses is a fix nobody notices. Pinning the seed here — with the exact
@@ -15,10 +15,10 @@
 //! milliseconds with no nightly toolchain and no `cargo fuzz`. That matters
 //! because `crates/crcbl-net/fuzz/Cargo.toml` declares its own `[workspace]`:
 //! the repository's `cargo nextest run --workspace` sweep does not reach this
-//! directory, so these two tests have to be cheap enough to run on their own.
+//! directory, so these tests have to be cheap enough to run on their own.
 //!
-//! Every seed is decoded at [`Trust::Untrusted`], which is the level they were
-//! written to exercise.
+//! Every delta seed is decoded at [`Trust::Untrusted`], which is the level they
+//! were written to exercise.
 
 use crcbl_net::{DeltaDecodeError, Trust, decode_delta};
 
@@ -97,4 +97,86 @@ fn named_replay_spool_seeds_reach_their_intended_paths() {
         torn.dropped_bytes, 22,
         "a 25-byte hash record, cut by three"
     );
+}
+
+/// The save seeds reach the container reader's three ends: a whole save opens
+/// with every field, the same save a byte short is refused by both reads as cut
+/// off inside its last sector's data, and the same save with one bit of that
+/// data flipped is refused by the checked read and salvaged, flagged, by the
+/// other. They go through `crcbl_net_fuzz::open_save`, the call the fuzz target
+/// makes.
+#[test]
+fn named_save_seeds_reach_their_intended_paths() {
+    use crcbl_net::types::SectorId;
+    use crcbl_net_fuzz::open_save;
+    use crcbl_store::save::{SaveData, SaveWriter};
+    use crcbl_store::{MemoryStorage, StorageSource};
+
+    let seed = include_bytes!("../corpus/decoder/save");
+    let whole = open_save(seed);
+    let read = whole.checked.expect("the whole save opens").into_data();
+    assert!(read.checksum_valid);
+    assert_eq!(read.header.tick.get(), 42);
+    assert_eq!(read.header.playtime_secs.to_bits(), 120.5_f64.to_bits());
+    let sectors: Vec<(SectorId, &[u8])> = read
+        .sectors
+        .iter()
+        .map(|sector| (sector.sector_id, sector.snapshot_data.as_slice()))
+        .collect();
+    assert_eq!(
+        sectors,
+        [
+            (SectorId::ZERO, &[1, 2, 3, 4][..]),
+            (SectorId { x: 1, y: -2, z: 3 }, &[0xAA, 0xBB][..]),
+        ]
+    );
+    assert!(
+        whole
+            .salvaged
+            .expect("the salvage read opens it too")
+            .data()
+            .checksum_valid
+    );
+    // The seed is what the writer itself writes for what it holds, so a change
+    // to the container's layout shows up here as a seed to regenerate rather
+    // than as a corpus that quietly stopped being saves.
+    let rewritten = {
+        let SaveData {
+            header, sectors, ..
+        } = read;
+        let mut writer = SaveWriter::new(header);
+        for sector in sectors {
+            writer.add_sector(sector);
+        }
+        let storage = MemoryStorage::new();
+        let path = std::path::Path::new("rewritten.crb");
+        writer
+            .write(&storage, path)
+            .expect("a memory storage takes every write");
+        storage.read(path).expect("the file just written")
+    };
+    assert_eq!(rewritten, seed);
+
+    let truncated = include_bytes!("../corpus/decoder/save-truncated");
+    assert_eq!(truncated[..], seed[..seed.len() - 1]);
+    let cut = open_save(truncated);
+    for (read, which) in [(cut.checked, "checked"), (cut.salvaged, "salvage")] {
+        let error = read.expect_err("a save a byte short was opened");
+        assert!(
+            error.to_string().contains("truncated in sector data"),
+            "{which} read: {error}"
+        );
+    }
+
+    let flipped = open_save(include_bytes!("../corpus/decoder/save-bit-flipped"));
+    let error = flipped
+        .checked
+        .expect_err("a save with a flipped bit was opened");
+    assert!(error.to_string().contains("checksum mismatch"), "{error}");
+    let salvaged = flipped
+        .salvaged
+        .expect("the salvage read takes a save whose checksum fails")
+        .into_data();
+    assert!(!salvaged.checksum_valid);
+    assert_eq!(salvaged.sectors[1].snapshot_data, [0xAA, 0xBA]);
 }

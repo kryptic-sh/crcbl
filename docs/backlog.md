@@ -13411,13 +13411,21 @@ What it left:
     to be recovered, and holding them too would be two copies to keep equal.
   - Not covered: the move over `path` failing, and a file appearing at `path`
     between `recover`'s two checks, are each handled by a path no test drives.
-    The fuzz crate's `decoder` bin cannot link on Windows without the fuzzing
-    runtime, so `cargo test --manifest-path crates/crcbl-net/fuzz/Cargo.toml`
-    does not run here; its new spool test
-    (`named_replay_spool_seeds_reach_their_intended_paths`) was run as a
-    throwaway copy inside `crcbl-store` against the same seed files, and CI's
-    `decoder-fuzz` job is the first real run of it and of the target's new
-    `recover_spool` call.
+    The fuzz crate's `decoder` bin does not link under MSVC as it stands
+    (`LNK1561: entry point must be defined`): `#![no_main]` leaves `main` to
+    libFuzzer, whose `main` sits in `libfuzzer-sys`'s static archive, and
+    `link.exe` does not pull an archive member in to find an entry point. A
+    plain `cargo test` of the fuzz crate builds that bin for its integration
+    tests, so it fails there too. Forcing the symbol in links it:
+    `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS="-Clink-arg=/include:main" cargo test --manifest-path crates/crcbl-net/fuzz/Cargo.toml --locked --target x86_64-pc-windows-msvc --test corpus`
+    (`--target` keeps the flag off the host's proc macros, whose DLLs have no
+    `main`). Run that way on 2026-10-03, all four corpus tests passed, the spool
+    test included, and the uninstrumented `decoder.exe` ran every seed once
+    (`-runs=0`). **A coverage-instrumented build does not link here**: with
+    cargo-fuzz's sancov flags `__stop___sancov_pcs` is unresolved, an ELF
+    section symbol `link.exe` never defines, and without the PC table LLVM
+    aborts on associative COMDAT symbols. So fuzzing proper runs only in CI's
+    `decoder-fuzz` job.
 - **What a recording leaves out at its edges.** An update that ran several ticks
   to catch up is hashed at its last only. `Host::shutdown`'s `Ended` changes
   land in no tick, since none runs after a `quit`, so the file ends with the
@@ -15930,13 +15938,51 @@ frame, and the page shows it for `NOTICE_FOR` (in `crate::app`); tested by
   every limit `Map::new` measures and would pass it. Whether a `.scn/` file can
   carry a NaN through `crcbl::scene`'s RON is not checked; if it can, the check
   belongs in `Map::new` as a `MapError` variant.
-- **`Map::from_wire` has no fuzz target**, and neither has towers' save decoder
-  (`crcbl_towers::save::decode`). Both read untrusted bytes, but towers has no
-  fuzz crate; `crates/crcbl-net/fuzz` covers the event's envelope
-  (`decode_server_to_client`) and not towers' payloads — nor `crcbl-store`'s
-  `SaveReader` itself. Unit tests cover each refusal, every prefix of a save
-  payload and every byte of one flipped. Adding them means a fuzz crate for
-  towers, or a shared one that depends on it.
+- **`Map::from_wire` and towers' save decoder (`crcbl_towers::save::decode`)
+  have no fuzz target — deferred on purpose (2026-10-03), with exhaustive unit
+  sweeps in its place.** Both read untrusted bytes. `crcbl-store`'s
+  `SaveReader`, the container under the save, is fuzzed now: the
+  `crates/crcbl-net/fuzz` target calls `crcbl_net_fuzz::open_save`, and
+  `named_save_seeds_reach_their_intended_paths` pins the `save`,
+  `save-truncated` and `save-bit-flipped` seeds. Towers' payloads were left out
+  because **towers' lib cannot be taken by a fuzz crate cheaply**: its one
+  dependency is the `crcbl` facade (the samples' one-engine-dependency rule in
+  `apps/towers/Cargo.toml`), and the facade brings the renderer, the shell,
+  audio and every GPU backend.
+  `cargo tree -p towers -e normal,build --target x86_64-unknown-linux-gnu` lists
+  110 packages, `crcbl-render`, `crcbl-vk`/`ash`, `crcbl-shell` and
+  `crcbl-audio`/`cpal`/`alsa` among them, where
+  `crates/crcbl-net/fuzz/Cargo.lock` holds 75. The options and their costs:
+  - (a) A fuzz crate of towers' own beside `apps/towers/src`, with its own
+    lockfile and a CI step. Every engine crate is compiled again under sancov
+    and ASan on the pinned nightly, inside `decoder-fuzz`'s 20-minute budget or
+    in a new job. A second fuzz lock would also go stale on any dependency edge
+    anywhere under the facade, where today's lock follows only `crcbl-net`,
+    `-ecs`, `-phys` and `-store`.
+  - (b) The decoders on a light part of towers. Both reach `Map`, which lives in
+    `map.rs` beside its greybox meshes and `crcbl::render` instance pools, and
+    `decode` reads `tower::TOWERS`, `creep::ALL` and `wave::WAVES`. Moving the
+    map, path, plot, tower, creep and wave tables into a crate the shared fuzz
+    crate could take is a split of towers' core, and it breaks the
+    one-dependency rule.
+  - (c), taken: the unit sweeps.
+    `map::wire::tests::every_cut_and_every_flipped_bit_is_refused_or_read_as_written`
+    cuts the committed map at every length (each refused as truncated) and flips
+    each bit in turn (each refused, or read back as a map that encodes to
+    exactly those bytes). The flip sweep in
+    `save::tests::a_byte_this_build_never_wrote_is_refused_by_name` now flips
+    every bit with the same read-back assertion; it was `let _ =`, which only a
+    panic could fail. What the sweeps do not do that a fuzzer would: mutate more
+    than one bit at a time or the structure (a count raised along with the bytes
+    it counts), or start from anything but the committed field and one
+    checkpoint. Revisit when towers' simulation is split from its drawing for
+    another reason — a headless server crate, say — which makes (b) cheap, or
+    when either format grows nested variable-length structure.
+  - Noticed on the way: `decoder-fuzz` installs the ALSA headers on a comment
+    saying `cargo test` of the fuzz crate reaches `crcbl-audio`, and
+    `crates/crcbl-net/fuzz/Cargo.lock` holds no `crcbl-audio`, `cpal` or `alsa`.
+    The step costs the job an apt install today and would only be needed under
+    (a). Left as it is: not checked whether removing it is safe on the CI image.
 - **`Gpu::set_map` is run only on the null backend.** The app tests rebuild the
   field for the host's map headless and read the pools placed; no windowed run
   on a real device, and the carried-over video settings and debug view are not

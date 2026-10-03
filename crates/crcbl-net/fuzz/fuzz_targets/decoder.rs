@@ -55,6 +55,10 @@ fuzz_target!(|data: &[u8]| {
     // recording left: its header, then framed records up to the first that
     // is cut short, damaged or refused, each decoded and checked.
     let _ = crcbl_store::replay::recover_spool(std::io::Cursor::new(data), &mut std::io::sink());
+    // A save file, the container every game's saves go in: a player can be
+    // handed one, and a damaged one is still read field by field by the
+    // salvage path.
+    let _ = crcbl_net_fuzz::open_save(data);
     let _ = decode_delta(data, Trust::Untrusted);
     let _ = decode_delta(data, Trust::Authenticated);
     // A snapshot's entity blobs, once it has opened and applied: the client

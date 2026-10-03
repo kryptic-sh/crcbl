@@ -428,12 +428,33 @@ fn a_byte_this_build_never_wrote_is_refused_by_name() {
         Err(SaveError::NotOneSector)
     ));
 
-    // Every byte flipped, one at a time: refused or read, never a panic.
+    // Every bit flipped, one at a time: refused, or read as exactly the run
+    // the bytes say — never a panic, and never a run that writes back as
+    // other bytes, which would be a field read wrong or not read at all.
+    let (mut refusals, mut reads) = (0, 0);
     for at in 0..payload.len() {
-        let mut flipped = payload.clone();
-        flipped[at] ^= 0xFF;
-        let _ = refused(flipped);
+        for bit in 0..8 {
+            let mut flipped = payload.clone();
+            flipped[at] ^= 1 << bit;
+            match refused(flipped.clone()) {
+                Err(_) => refusals += 1,
+                Ok(read) => {
+                    assert_eq!(
+                        encode(&read),
+                        flipped,
+                        "bit {bit} of byte {at} flipped was read as another run",
+                    );
+                    reads += 1;
+                }
+            }
+        }
     }
+    // Both arms ran: a counter nothing else checks takes any value, and the
+    // magic takes none but its own.
+    assert!(
+        refusals > 0 && reads > 0,
+        "{refusals} refused, {reads} read"
+    );
 }
 
 /// **A headless run keeps nothing and writes nothing**: the rule that lets
