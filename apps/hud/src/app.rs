@@ -7,16 +7,18 @@
 //!   pump, input, menu, pause, resize
 //!   run_ticks  ─────────────────────→ Hud::tick      (one turn of the ticker)
 //!   draw_list.clear()
-//!     ─────────────────────────────→ Hud::draw      (the whole page)
+//!     ─────────────────────────────→ Hud::draw      (the whole page: the
+//!                                                    styled tree, then the
+//!                                                    draw-list half)
 //!     menu, debug overlay             ← the engine's
 //!   gpu.frame()
 //! ```
 //!
 //! What is left here is start-up, because a window's title is this sample's, and
 //! the trait methods, because they are what a hosted game is. Both are shorter
-//! than any other sample's: hud has no input to route and no animation on the
-//! frame's clock, so [`Hud::draw`] does two things — snapshot the ticker, draw
-//! the page — and nothing else.
+//! than any other sample's: hud has no input to route, so [`Hud::draw`] does
+//! three things — snapshot the ticker, poll the stylesheet on the frame's
+//! clock, draw the page — and nothing else.
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{Booted, Clock, FrameInfo, HostedGame, RunSummary, wait_for_configure};
@@ -27,6 +29,7 @@ use crate::game::{Game, HudStats, RenderState};
 use crate::gpu::Gpu;
 use crate::menu::{MenuKind, Menus};
 use crate::page::PageStats;
+use crate::styled::StyledHud;
 
 pub use crate::args::Options;
 
@@ -73,6 +76,9 @@ pub struct Hud {
     stats: HudStats,
     /// What the last page drew, from the same snapshot.
     page: PageStats,
+    /// The vitals panel, the minimap frame and the wave banner, and the
+    /// stylesheet they are drawn in.
+    styled: StyledHud,
 }
 
 /// The loop hud runs in.
@@ -156,6 +162,10 @@ fn assemble<S: Shell + ?Sized>(
 ) -> Result<Loop<S>, HudError> {
     let booted = crcbl::engine::arm_screenshot(booted, &options.common);
     let game = Game::new(options.common.tick_hz, options.seed).map_err(HudError::Game)?;
+    let sheets: Box<dyn crcbl::assets::AssetSource> = match &options.styles {
+        Some(dir) => Box::new(crcbl::assets::DirSource::at(dir.clone())),
+        None => Box::new(crate::sheet::built_in_source()),
+    };
     Ok(Loop::new(
         booted,
         Hud {
@@ -163,6 +173,7 @@ fn assemble<S: Shell + ?Sized>(
             render_state: RenderState::default(),
             stats: HudStats::default(),
             page: PageStats::default(),
+            styled: StyledHud::new(sheets),
         },
         options.common.loop_config(),
     ))
@@ -245,17 +256,22 @@ impl HostedGame for Hud {
         &mut self,
         gpu: &mut Gpu,
         draw_list: &mut crcbl::ui::draw_list::DrawList,
-        _frame: FrameInfo,
+        frame: FrameInfo,
     ) {
         self.game.render_state(&mut self.render_state);
         self.stats = self.game.stats();
         let (width, height) = gpu.extent();
-        self.page = crate::page::draw(
+        let screen = crcbl::math::Vec2::new(width as f32, height as f32);
+        let first = draw_list.len();
+        self.styled.draw(
             draw_list,
-            crcbl::math::Vec2::new(width as f32, height as f32),
+            screen,
             gpu.atlas(),
             &self.render_state,
+            frame.render_dt,
         );
+        crate::page::draw(draw_list, screen, gpu.atlas(), &self.render_state);
+        self.page = PageStats::of(&draw_list.commands()[first..]);
     }
 
     /// **hud's two modules, and no third.**

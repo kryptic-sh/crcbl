@@ -552,6 +552,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/hud`'s vitals, minimap frame and wave banner are styled by a `.css`
+  file, restyled live.** The health and mana bars, a new minimap frame and the
+  wave banner are a `crcbl_ui::tree` styled by `apps/hud/assets/hud.css`, which
+  is compiled in. `hud --styles <DIR>` reads `DIR/hud.css` instead, refusing a
+  directory where it cannot be read, and re-reads it every
+  `crcbl::ui::style::STYLESHEET_POLL_INTERVAL` of the frame clock while the run
+  is live — paused or not — so saving the file restyles the running HUD. A save
+  that does not parse keeps the last good sheet and draws the error count and
+  the first located error under the vitals panel until a good save replaces it.
+  The ability row and the damage ticker draw as before; the debug panel's `page`
+  section now counts the styled half's commands too.
 - **`crcbl::lan::lobby`: a LAN lobby's model, without its look** (native
   builds). `lobby::Lobby` polls a `Browser` and sorts what it hears into
   `joinable()` hosts and `passed_over()` ones, each with an `Unjoinable` reason

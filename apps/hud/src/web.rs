@@ -21,7 +21,7 @@
 //! **What this sample does not add to that.** There is no `asset_source`
 //! accessor here, because hud has nothing to read out of it:
 //! it keeps no high score — there is no score — and every byte it draws with
-//! (the glyph atlas, the shaders) is compiled into the module. The two backends
+//! (the glyph atlas, the shaders, the stylesheet) is compiled into the module. The two backends
 //! are still installed by the macro's `prepare`, because the shared shim's boot
 //! sequence drives both ABIs before it boots the demo and both must answer.
 //!

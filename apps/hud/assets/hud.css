@@ -1,0 +1,109 @@
+/*
+ * hud's stylesheet: the vitals panel, the minimap frame and the wave banner.
+ *
+ * `src/styled.rs` builds the tree these rules match, and builds nothing about
+ * its look: every colour, size and position below is this file's. The binary
+ * compiles a copy in, so a run needs no file on disk; `hud --styles <DIR>`
+ * reads `DIR/hud.css` through a `DirSource` instead and polls it while the
+ * run is live, so saving this file restyles the running HUD:
+ *
+ *   hud --styles apps/hud/assets
+ *
+ * A save that does not parse keeps the last good sheet, and the error is drawn
+ * on screen under the vitals panel until a good save replaces it.
+ *
+ * Colours are sRGB, as CSS's are; the palette is the one the page drew in
+ * linear light before it was styled, encoded.
+ */
+
+#hud {
+  color: #e5e7ef;
+}
+
+/* ---- vitals: the health and mana bars ----------------------------------- */
+
+#vitals {
+  position: absolute;
+  top: 24px;
+  left: 24px;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  background: #505565db;
+}
+
+.bar {
+  flex-direction: column;
+}
+
+.caption {
+  height: 18px;
+  font-size: 14px;
+}
+
+.track {
+  width: 280px;
+  height: 18px;
+  background: #6f7381;
+  border-width: 1px;
+  border-color: #adb3c4;
+}
+
+.fill {
+  height: 100%;
+}
+
+#health .fill {
+  background: #ea8690;
+}
+
+#mana .fill {
+  background: #8bb8f6;
+}
+
+/* Right-aligned inside the track, where a health readout goes. */
+.value {
+  position: absolute;
+  top: 2px;
+  right: 5px;
+  font-size: 13px;
+  color: #ffffff;
+}
+
+/* ---- the minimap's frame ------------------------------------------------- */
+
+#minimap {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  width: 160px;
+  height: 160px;
+  padding: 6px;
+  background: #505565db;
+  border-width: 1px;
+  border-color: #adb3c4;
+  font-size: 13px;
+}
+
+/* ---- the wave banner ----------------------------------------------------- */
+
+/* A full-width row, so the banner centres against the surface. */
+#banner-row {
+  position: absolute;
+  top: 24px;
+  left: 0;
+  right: 0;
+  justify-content: center;
+}
+
+#banner {
+  width: 240px;
+  height: 44px;
+  justify-content: center;
+  align-items: center;
+  background: #615538e6;
+  border-width: 1px;
+  border-color: #ffeca2;
+  color: #ffeca2;
+  font-size: 22px;
+}

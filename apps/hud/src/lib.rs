@@ -1,9 +1,12 @@
 //! hud — the UI system's living fixture.
 //!
-//! A game-style HUD with no game behind it: health and mana bars, an ability row
-//! with cooldown states, a wave banner and a damage ticker, all of it driven by
-//! a scripted ticker on the server and all of it built out of the draw list's
-//! primitives — filled rectangles, outlines and text spans.
+//! A game-style HUD with no game behind it: health and mana bars, a minimap
+//! frame, an ability row with cooldown states, a wave banner and a damage
+//! ticker, all of it driven by a scripted ticker on the server. The vitals
+//! panel, the minimap frame and the wave banner are a `crcbl_ui::tree` styled
+//! by `assets/hud.css` ([`styled`]), which `--styles` makes editable while the
+//! run is live ([`sheet`]); the ability row and the ticker are still the draw
+//! list's primitives ([`page`]).
 //!
 //! # Why it exists
 //!
@@ -14,13 +17,12 @@
 //! [`docs/plan/sample/04-hud.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/04-hud.md).
 //!
 //! What is here is that document's **milestone 1**: "P4 skeleton — HUD page with
-//! the slice-1 primitives (blocks, spans, text, bars)". What is deliberately not
-//! here is everything the document files under P10 — the CSS subset and its
-//! stylesheets, the two themes and the runtime switcher, the widget gallery, the
-//! UI inspector, the hot-reload showcase and the per-theme golden frames. They
-//! waited on a styling system that has since landed in `crcbl-ui`, and what is
-//! left is this sample's port onto it (the UI inspector aside, which `crcbl-ui`
-//! does not have yet). `docs/backlog.md` records each one.
+//! the slice-1 primitives (blocks, spans, text, bars)" — and the first of P10:
+//! a stylesheet, restyled live. What is deliberately not here is the rest the
+//! document files under P10 — the two themes and the runtime switcher, the
+//! widget gallery, the UI inspector, the ability row's and ticker's port onto
+//! the tree, and the per-theme golden frames. `docs/backlog.md` records each
+//! one.
 //!
 //! # It is a real client/server sample
 //!
@@ -54,6 +56,8 @@ pub mod game;
 mod gpu;
 pub mod menu;
 pub mod page;
+pub mod sheet;
+pub mod styled;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web;

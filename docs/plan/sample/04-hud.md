@@ -95,16 +95,29 @@ here it is the dogfood case: the panel is built out of these widgets.
   every button on it is one the loop already owns, so `MenuAction` is
   `Infallible`.
 
-Not built: hud's stylesheets, the theme switcher, the gallery page, the UI
-inspector, hot reload, and per-theme golden frames — see `docs/backlog.md`. They
-waited on the styling system, which has since landed in `crcbl-ui` (the tree,
-the CSS subset, polled reload, focus and the widgets — rules in
-[../../notes/tooling.md](../../notes/tooling.md)); what is left is this sample's
-port onto it. **The UI inspector is the exception** (checked 2026-09-25):
-`Ui::inspector` is a reflection-driven _property_ inspector, and nothing in
-`crcbl-ui` shows an element's boxes, matched rules and computed values, so that
-half is engine work first — `docs/backlog.md`, _hud's whole P10 half is
-unbuilt_.
+### What P10 has landed so far
+
+**One stylesheet, restyled live (2026-10-03).** The vitals panel's health and
+mana bars, a **minimap frame** and the wave banner moved off the draw list onto
+a `crcbl_ui::tree` (`apps/hud/src/styled.rs`), styled by
+`apps/hud/assets/hud.css`. The sheet is compiled in and read back through a
+`MemorySource`; `hud --styles <DIR>` reads `DIR/hud.css` through a `DirSource`
+instead and polls it every `STYLESHEET_POLL_INTERVAL` of the frame clock, so
+saving the file restyles the running HUD. A save that does not parse keeps the
+last good sheet and draws the error under the vitals panel until a good save
+replaces it (`apps/hud/src/sheet.rs`). The ability row and the damage ticker are
+still `page.rs`'s draw-list primitives.
+
+Not built: the second theme and the switcher, the gallery page, the UI
+inspector, the rest of the page's port onto the tree, the headless before/after
+screenshot of a restyle, and per-theme golden frames — see `docs/backlog.md`.
+The styling system they use has landed in `crcbl-ui` (the tree, the CSS subset,
+polled reload, focus and the widgets — rules in
+[../../notes/tooling.md](../../notes/tooling.md)). **The UI inspector is the
+exception** (checked 2026-09-25): `Ui::inspector` is a reflection-driven
+_property_ inspector, and nothing in `crcbl-ui` shows an element's boxes,
+matched rules and computed values, so that half is engine work first —
+`docs/backlog.md`, _hud's P10 half is mostly unbuilt_.
 
 **The wasm front end and the Pages demo are not among them, and this section
 used to say they were.** `apps/hud/src/web.rs` is the browser entry point,

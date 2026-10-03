@@ -1,20 +1,18 @@
-//! The HUD page: the whole of what this sample draws.
+//! The HUD page's unstyled half: the ability row and the damage ticker.
 //!
-//! Everything here is built from the four primitives
+//! Everything here is built from the primitives
 //! [`docs/plan/sample/04-hud.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/04-hud.md)
-//! names for milestone 1 — blocks, spans, text and bars — which in
-//! [`DrawList`]'s vocabulary are [`DrawList::rect`], [`DrawList::rect_outline`],
-//! [`DrawList::text`], and a pair of rects where the inner one is a fraction of
-//! the outer's width. There is no widget type in this file and no styling
-//! system behind it: the CSS subset, the stylesheets and the two themes are P10
-//! work, and the layout engine they depend on has since landed in `crcbl-ui`;
-//! porting this page onto it is owed (`docs/backlog.md`).
+//! names for milestone 1 — blocks, spans and text — which in [`DrawList`]'s
+//! vocabulary are [`DrawList::rect`], [`DrawList::rect_outline`] and
+//! [`DrawList::text`]. There is no widget type in this file and no styling
+//! system behind it. The vitals panel, the minimap frame and the wave banner
+//! moved onto the tree and the stylesheet — [`crate::styled`] — and are drawn
+//! before this; porting the rest is owed (`docs/backlog.md`).
 //!
 //! ```text
-//!  ┌ vitals ─────────┐        ┌ WAVE 3 ┐
-//!  │ HEALTH ▰▰▰▰▱▱▱▱ │                          145
-//!  │ MANA   ▰▰▱▱▱▱▱▱ │                                72
-//!  └─────────────────┘                    38
+//!                                                 145
+//!                                                       72
+//!                                           38
 //!
 //!                   [STRIKE][CLEAVE][BOLT][NOVA]
 //! ```
@@ -22,8 +20,8 @@
 //! # Laid out against the surface, not against a fixed 960×720
 //!
 //! Every position below is derived from the extent the swapchain was actually
-//! acquired at. The vitals panel is inset from the top-left, the banner and the
-//! ability row are centred, and the damage ticker hangs off the right edge — so
+//! acquired at. The ability row is centred, and the damage ticker hangs off the
+//! right edge — so
 //! the page is correct in a resized window and in the headless offscreen ring at
 //! whatever `--size` asked for, rather than only at the size it was written at.
 //!
@@ -51,15 +49,8 @@ use crate::game::{ABILITIES, ABILITY_COUNT, DAMAGE_LANES, RenderState};
 /// colour rather than a rect, so the page owes no full-screen quad.
 pub const BACKDROP: [f32; 4] = [0.05, 0.06, 0.09, 1.0];
 
-const PANEL_BG: [f32; 4] = [0.08, 0.09, 0.13, 0.86];
-const TRACK: [f32; 4] = [0.16, 0.17, 0.22, 1.0];
-const HEALTH_FILL: [f32; 4] = [0.82, 0.24, 0.28, 1.0];
-const MANA_FILL: [f32; 4] = [0.26, 0.48, 0.92, 1.0];
 const BORDER: [f32; 4] = [0.42, 0.45, 0.55, 1.0];
-const LABEL: [f32; 4] = [0.78, 0.80, 0.86, 1.0];
 const VALUE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-const BANNER_BG: [f32; 4] = [0.12, 0.09, 0.04, 0.90];
-const BANNER_TEXT: [f32; 4] = [1.0, 0.84, 0.36, 1.0];
 const SLOT_READY: [f32; 4] = [0.13, 0.20, 0.18, 0.95];
 const SLOT_COOLING: [f32; 4] = [0.10, 0.11, 0.14, 0.95];
 const SWEEP: [f32; 4] = [0.03, 0.04, 0.06, 0.80];
@@ -72,43 +63,26 @@ const DAMAGE_TEXT: [f32; 3] = [1.0, 0.86, 0.36];
 /// How far the page keeps off every edge of the surface, in pixels.
 const MARGIN: f32 = 24.0;
 
-/// Padding between a panel's edge and its content, in pixels.
-const PAD: f32 = 10.0;
-
-/// The width of a vitals bar's track, in pixels.
-const BAR_WIDTH: f32 = 280.0;
-/// The height of a vitals bar's track, in pixels.
-const BAR_HEIGHT: f32 = 18.0;
-/// The gap between a bar's caption and its track, in pixels.
-const CAPTION_GAP: f32 = 18.0;
-/// The gap between one bar row and the next, in pixels.
-const ROW_GAP: f32 = 10.0;
-
 /// The side of one ability slot, in pixels.
 const SLOT: f32 = 84.0;
 /// The gap between one ability slot and the next, in pixels.
 const SLOT_GAP: f32 = 12.0;
-
-/// The banner's size, in pixels.
-const BANNER: Vec2 = Vec2::new(240.0, 44.0);
 
 /// How wide one damage lane is, in pixels.
 const LANE_WIDTH: f32 = 88.0;
 /// How far a damage number climbs over its whole life, in pixels.
 const DAMAGE_RISE: f32 = 150.0;
 
-const CAPTION_SIZE: f32 = 14.0;
-const VALUE_SIZE: f32 = 13.0;
 const SLOT_NAME_SIZE: f32 = 13.0;
-const BANNER_SIZE: f32 = 22.0;
 const DAMAGE_SIZE: f32 = 18.0;
 
-/// The border every framed element on this page is drawn with, in pixels.
+/// The border every framed element in this file is drawn with, in pixels.
 const BORDER_THICKNESS: f32 = 1.0;
 
 // ---- what a frame drew -------------------------------------------------------
 
-/// How many commands of each kind one call to [`draw`] emitted.
+/// How many commands of each kind a frame's page emitted: the styled half
+/// [`crate::styled`] lays out and the half [`draw`] adds after it.
 ///
 /// Counted off the draw list itself rather than tallied as the page goes, so the
 /// numbers the debug panel reports are the commands the UI pass will actually
@@ -119,8 +93,8 @@ pub struct PageStats {
     /// Filled rectangles — the plan doc's "blocks", and the two halves of every
     /// bar.
     pub rects: usize,
-    /// Rectangle outlines — the frames around the panel's bars, the banner and
-    /// each ability slot.
+    /// Rectangle outlines — the frames around the bars' tracks, the banner, the
+    /// minimap and each ability slot.
     pub outlines: usize,
     /// Text spans, in the bitmap font or as a parsed font's glyph run.
     pub text: usize,
@@ -169,110 +143,15 @@ impl crcbl::ui::DebugModule for PageStats {
 
 // ---- the page ----------------------------------------------------------------
 
-/// Draws the whole page into `dl`, and reports what it drew.
+/// Draws the ability row and the damage ticker into `dl`.
 ///
 /// `screen` is the extent the swapchain was acquired at, and `atlas` must be the
-/// one the UI pass will render with — every centred string on this page is
-/// centred by measuring through it, so a page measured with a different atlas
-/// would draw its banner off to one side.
-pub fn draw(dl: &mut DrawList, screen: Vec2, atlas: &FontAtlas, state: &RenderState) -> PageStats {
-    let first = dl.len();
-    vitals(dl, atlas, state);
-    wave_banner(dl, screen, atlas, state);
+/// one the UI pass will render with — every centred string here is centred by
+/// measuring through it, so a page measured with a different atlas would draw
+/// its slot names off to one side.
+pub fn draw(dl: &mut DrawList, screen: Vec2, atlas: &FontAtlas, state: &RenderState) {
     ability_row(dl, screen, atlas, state);
     damage_ticker(dl, screen, atlas, state);
-    PageStats::of(&dl.commands()[first..])
-}
-
-/// The health and mana bars, in a panel inset from the top-left.
-fn vitals(dl: &mut DrawList, atlas: &FontAtlas, state: &RenderState) {
-    let row_height = CAPTION_GAP + BAR_HEIGHT;
-    let panel = Vec2::new(
-        BAR_WIDTH + PAD * 2.0,
-        row_height * 2.0 + ROW_GAP + PAD * 2.0,
-    );
-    let origin = Vec2::splat(MARGIN);
-    dl.rect(origin, origin + panel, PANEL_BG);
-
-    let content = origin + Vec2::splat(PAD);
-    bar(
-        dl,
-        atlas,
-        content,
-        "HEALTH",
-        state.health_fraction(),
-        HEALTH_FILL,
-        &format!("{} / {}", state.health, crate::game::HEALTH_MAX),
-    );
-    bar(
-        dl,
-        atlas,
-        content + Vec2::new(0.0, row_height + ROW_GAP),
-        "MANA",
-        state.mana_fraction(),
-        MANA_FILL,
-        &format!("{} / {}", state.mana, crate::game::MANA_MAX),
-    );
-}
-
-/// One bar: a caption, a track, the part of it that is full, and a frame.
-///
-/// The fill is emitted only when there is some, so an empty pool draws a track
-/// and no zero-width quad inside it.
-fn bar(
-    dl: &mut DrawList,
-    atlas: &FontAtlas,
-    origin: Vec2,
-    caption: &str,
-    fraction: f32,
-    fill: [f32; 4],
-    value: &str,
-) {
-    dl.text(origin, caption, LABEL, CAPTION_SIZE);
-
-    let track_min = origin + Vec2::new(0.0, CAPTION_GAP);
-    let track_max = track_min + Vec2::new(BAR_WIDTH, BAR_HEIGHT);
-    dl.rect(track_min, track_max, TRACK);
-
-    let fraction = fraction.clamp(0.0, 1.0);
-    if fraction > 0.0 {
-        dl.rect(
-            track_min,
-            Vec2::new(track_min.x + BAR_WIDTH * fraction, track_max.y),
-            fill,
-        );
-    }
-    dl.rect_outline(track_min, track_max, BORDER_THICKNESS, BORDER);
-
-    // Right-aligned inside the track, where a health readout goes.
-    let width = atlas.text_width(value, VALUE_SIZE / NATURAL_FONT_SIZE);
-    dl.text(
-        Vec2::new(track_max.x - width - PAD * 0.5, track_min.y + 3.0),
-        value,
-        VALUE,
-        VALUE_SIZE,
-    );
-}
-
-/// The wave banner, centred at the top — on screen only while the ticker says
-/// so, which is what makes it a banner rather than a heading.
-fn wave_banner(dl: &mut DrawList, screen: Vec2, atlas: &FontAtlas, state: &RenderState) {
-    if !state.banner {
-        return;
-    }
-    let min = Vec2::new((screen.x - BANNER.x) * 0.5, MARGIN);
-    let max = min + BANNER;
-    dl.rect(min, max, BANNER_BG);
-    dl.rect_outline(min, max, BORDER_THICKNESS, BANNER_TEXT);
-    centred(
-        dl,
-        atlas,
-        min,
-        max,
-        &format!("WAVE {}", state.wave),
-        BANNER_TEXT,
-        BANNER_SIZE,
-    );
 }
 
 /// The ability row, centred along the bottom.
@@ -375,12 +254,13 @@ mod tests {
 
     fn drawn(state: &RenderState) -> (DrawList, PageStats) {
         let mut dl = DrawList::new();
-        let stats = draw(&mut dl, SCREEN, &FontAtlas::built_in(), state);
+        draw(&mut dl, SCREEN, &FontAtlas::built_in(), state);
+        let stats = PageStats::of(dl.commands());
         (dl, stats)
     }
 
-    /// A page with every element on it: both pools part-full, the banner up, two
-    /// slots cooling and three numbers in the air.
+    /// A page with every element on it: two slots cooling and three numbers in
+    /// the air.
     fn busy() -> RenderState {
         RenderState {
             tick: 601,
@@ -435,85 +315,16 @@ mod tests {
         let state = busy();
         let (dl, stats) = drawn(&state);
 
-        // Rects: the vitals panel, plus a track and a fill for each of the two
-        // bars; the banner's block; one per ability slot, plus a sweep for each
-        // of the two that are cooling.
-        assert_eq!(stats.rects, 1 + 2 * 2 + 1 + ABILITY_COUNT + 2);
-        // Outlines: one per bar, one for the banner, one per slot.
-        assert_eq!(stats.outlines, 2 + 1 + ABILITY_COUNT);
-        // Text: a caption and a readout per bar, the banner's line, a name and a
-        // status per slot, and one number per damage entry.
-        assert_eq!(stats.text, 2 * 2 + 1 + 2 * ABILITY_COUNT + 3);
+        // Rects: one per ability slot, plus a sweep for each of the two that
+        // are cooling.
+        assert_eq!(stats.rects, ABILITY_COUNT + 2);
+        // Outlines: one per slot.
+        assert_eq!(stats.outlines, ABILITY_COUNT);
+        // Text: a name and a status per slot, and one number per damage entry.
+        assert_eq!(stats.text, 2 * ABILITY_COUNT + 3);
 
         assert_eq!(stats.total(), dl.len(), "the page counted its own commands");
-        assert_eq!(stats, PageStats::of(dl.commands()));
-        assert_eq!(dl.len(), 35, "the whole page, on one screen");
-    }
-
-    /// An empty pool draws its track and nothing inside it, and a full one fills
-    /// the track exactly — the two ends of the one arithmetic a bar is.
-    #[test]
-    fn a_bars_fill_spans_exactly_its_fraction_of_the_track() {
-        let full = RenderState {
-            health: HEALTH_MAX,
-            ..RenderState::default()
-        };
-        let (dl, stats) = drawn(&full);
-        // Health is full and mana is empty, so exactly one of the two bars has a
-        // fill: the panel, two tracks, one fill.
-        assert_eq!(stats.rects, 1 + 2 + 1 + ABILITY_COUNT);
-
-        let widths = fill_widths(&dl);
-        assert_eq!(widths, vec![BAR_WIDTH], "a full pool fills its whole track");
-
-        let half = RenderState {
-            health: HEALTH_MAX / 2,
-            mana: MANA_MAX,
-            ..RenderState::default()
-        };
-        let (dl, _) = drawn(&half);
-        assert_eq!(fill_widths(&dl), vec![BAR_WIDTH * 0.5, BAR_WIDTH]);
-    }
-
-    /// The width of every bar fill on the page, in draw order.
-    ///
-    /// Found by colour rather than by position: a fill and the track under it
-    /// share a left edge, and the fill is the only rect on the page painted in
-    /// a pool's own colour.
-    fn fill_widths(dl: &DrawList) -> Vec<f32> {
-        dl.commands()
-            .iter()
-            .filter_map(|command| match command {
-                DrawCommand::Rect { min, max, color }
-                    if *color == HEALTH_FILL || *color == MANA_FILL =>
-                {
-                    Some(max.x - min.x)
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The banner is on the page only while the ticker raises it.
-    #[test]
-    fn the_wave_banner_is_on_the_page_only_while_the_ticker_raises_it() {
-        let up = busy();
-        let (dl, with) = drawn(&up);
-        assert!(
-            text_of(&dl).iter().any(|line| line == "WAVE 2"),
-            "the banner names its wave: {:?}",
-            text_of(&dl),
-        );
-
-        let down = RenderState {
-            banner: false,
-            ..up
-        };
-        let (dl, without) = drawn(&down);
-        assert!(!text_of(&dl).iter().any(|line| line.starts_with("WAVE")));
-        assert_eq!(with.rects - without.rects, 1, "the banner's block");
-        assert_eq!(with.outlines - without.outlines, 1);
-        assert_eq!(with.text - without.text, 1);
+        assert_eq!(dl.len(), 21, "this half of the page, on one screen");
     }
 
     /// A cooling slot is covered by a sweep and says how long it has left; a
@@ -613,8 +424,8 @@ mod tests {
             Vec2::new(1440.0, 400.0),
         ] {
             let mut dl = DrawList::new();
-            let stats = draw(&mut dl, screen, &FontAtlas::built_in(), &busy());
-            assert!(stats.total() > 0, "{screen:?} drew nothing");
+            draw(&mut dl, screen, &FontAtlas::built_in(), &busy());
+            assert!(!dl.is_empty(), "{screen:?} drew nothing");
             for command in dl.commands() {
                 let (min, max) = match command {
                     DrawCommand::Rect { min, max, .. }
@@ -653,7 +464,7 @@ mod tests {
             .collect();
         assert_eq!(
             rows,
-            vec![("rects", "12"), ("outlines", "7"), ("text", "16")],
+            vec![("rects", "6"), ("outlines", "4"), ("text", "11")],
         );
     }
 

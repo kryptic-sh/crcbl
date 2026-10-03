@@ -2,16 +2,21 @@
 //!
 //! ```text
 //! hud [--headless] [--frames N] [--tick-hz N] [--backend B] [--seed N]
+//!     [--styles DIR]
 //! ```
 //!
 //! # What is left here after the engine took the shared half
 //!
 //! [`crcbl::args::Common`] owns `--headless`, `--frames`, `--tick-hz`,
 //! `--backend`, `--size` and the debug-overlay pair, because those are the
-//! *engine's* vocabulary. This file is hud's own: its usage prose, its `--seed`,
-//! and the default seed that goes with it.
+//! *engine's* vocabulary. This file is hud's own: its usage prose, its `--seed`
+//! and the default seed that goes with it, and `--styles`, the directory the
+//! stylesheet is read and re-read from.
+
+use std::path::{Path, PathBuf};
 
 use crcbl::args::{Common, Consumed};
+use crcbl::assets::{AssetSource, DirSource};
 
 /// The `--help` text.
 ///
@@ -52,6 +57,11 @@ OPTIONS:
                          the order given. The one way to set a console variable
                          on a --headless run, which reads no autoexec.cfg.
     --seed <N>           Ticker seed. The same seed is the same damage numbers.
+    --styles <DIR>       Read the stylesheet from DIR/hud.css instead of the
+                         copy compiled in, and re-read it while the run is
+                         live: saving it restyles the HUD. A save that does not
+                         parse keeps the last good sheet and shows the error.
+                         apps/hud/assets is the committed sheet's directory.
     --screenshot <PATH>  Write the run's last presented frame to PATH as a PNG.
                          Turns --headless on: the frame is read back off the
                          offscreen ring, which is the only surface every backend
@@ -68,6 +78,9 @@ pub struct Options {
     pub common: Common,
     /// The ticker seed. The same seed is the same damage numbers.
     pub seed: u64,
+    /// The directory `--styles` named, whose `hud.css` the HUD is styled by
+    /// and polled from; `None` for the copy compiled in.
+    pub styles: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -82,6 +95,7 @@ impl Default for Options {
             #[cfg(target_arch = "wasm32")]
             common: Common::new(crate::game::DEFAULT_TICK_HZ),
             seed: crate::game::DEFAULT_SEED,
+            styles: None,
         }
     }
 }
@@ -111,11 +125,33 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 Ok(seed) => options.seed = seed,
                 Err(message) => return Invocation::BadUsage(message),
             },
+            "--styles" => match args.next() {
+                Some(dir) => match readable_sheet(&dir) {
+                    Ok(dir) => options.styles = Some(dir),
+                    Err(message) => return Invocation::BadUsage(message),
+                },
+                None => return Invocation::BadUsage("--styles needs a value".into()),
+            },
             other => return Invocation::BadUsage(format!("unknown argument: {other}")),
         }
     }
 
     Invocation::Run(options)
+}
+
+/// `dir`, if a [`DirSource`] over it can read the stylesheet, or the message
+/// to refuse the run with.
+///
+/// Only that it can be read: a sheet that does not parse is the case the live
+/// reload exists for — drawn in the last good sheet, with the error on screen
+/// until a save fixes it — so refusing the run over it would refuse the edit
+/// loop's first step.
+fn readable_sheet(dir: &str) -> Result<PathBuf, String> {
+    let root = PathBuf::from(dir);
+    DirSource::at(root.clone())
+        .read(Path::new(crate::sheet::SHEET_KEY))
+        .map(|_| root)
+        .map_err(|error| format!("--styles {dir}: {error}"))
 }
 
 #[cfg(test)]
@@ -176,6 +212,33 @@ mod tests {
         assert!(rejected(&["--seed", "kittens"]).contains("seed"));
     }
 
+    /// **`--styles` names a directory whose sheet can be read**, and one whose
+    /// sheet cannot is refused at the command line rather than drawn in the
+    /// built-in sheet with nothing said.
+    #[test]
+    fn the_styles_flag_takes_a_directory_holding_the_sheet_and_refuses_one_without() {
+        assert_eq!(parsed(&[]).styles, None, "the built-in sheet by default");
+
+        let dir = std::env::temp_dir().join(format!("hud-styles-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the temporary directory is made");
+        let path = dir.to_str().expect("the temporary directory is UTF-8");
+        assert!(
+            rejected(&["--styles", path]).contains(crate::sheet::SHEET_KEY),
+            "a directory with no sheet in it must be refused, naming the sheet",
+        );
+
+        std::fs::write(dir.join(crate::sheet::SHEET_KEY), "#hud { }")
+            .expect("the temporary sheet is written");
+        assert_eq!(parsed(&["--styles", path]).styles, Some(dir.clone()));
+        assert!(rejected(&["--styles"]).contains("--styles needs a value"));
+
+        // A leftover directory in the temporary directory is harmless; a panic
+        // here would hide nothing, but a failed clean-up is worth a line.
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            eprintln!("{}: not removed: {error}", dir.display());
+        }
+    }
+
     #[test]
     fn nonsense_is_refused_rather_than_ignored() {
         assert!(rejected(&["--nonsense"]).contains("nonsense"));
@@ -188,9 +251,8 @@ mod tests {
         crcbl::args::assert_shared_help(USAGE);
         crcbl::args::assert_screenshot_help(USAGE);
         assert!(USAGE.contains("hud — the UI system's living fixture"));
-        assert!(
-            USAGE.contains("--seed"),
-            "this sample's own flag is missing"
-        );
+        for flag in ["--seed", "--styles"] {
+            assert!(USAGE.contains(flag), "this sample's own {flag} is missing");
+        }
     }
 }

@@ -2975,16 +2975,8 @@ and _The debug draw layer's console switch is one bit, not a category set_.
 
 ### The UI stage's exit criteria are not demonstrated
 
-Two of the plan's six exit criteria are open; re-checked 2026-10-03.
+One of the plan's six exit criteria is open; re-checked 2026-10-03.
 
-- **A HUD built by editing a `.css` file plus about thirty lines of tree code,
-  restyled live without a recompile** — the health bar, minimap frame and wave
-  banner that demonstrate the web-workflow claim. Nothing loads a sheet from a
-  file: `apps/editor/src/panel.rs` adds `editor.css` as a string through
-  `Ui::add_stylesheet`, and no application calls the polled reload. `apps/hud`
-  is the natural home (_hud's whole P10 half is unbuilt_); what it needs is a
-  sheet read through the asset source and polled each frame, with the reload's
-  last-good-sheet behaviour visible on screen.
 - **The debug overlay running in the sandbox over a live scene, with entity
   selection and console commands against the server.** Selecting an entity
   should have each system that owns it draw its data through a per-system
@@ -3004,6 +2996,36 @@ job, refuses any closure of `crcbl-ui` or `crcbl-server` — default features an
 first, on 2026-10-03: a `crcbl-vk` edge on the server, an optional macOS-only
 `crcbl-mtl` behind a feature on the UI, and a build-dependency on
 `crcbl-shaders` were each refused with the path that pulled them in.
+
+**The live-restyled HUD is built (2026-10-03).** `apps/hud/src/styled.rs` builds
+the health and mana bars, the minimap frame and the wave banner as a
+`crcbl_ui::tree` in two short functions, `build` and `bar`, whose only
+declarations are the surface's size and each bar's fill fraction;
+`apps/hud/assets/hud.css` is everything about their look.
+`apps/hud/src/sheet.rs`'s `LiveSheet` reads the sheet through an `AssetSource` —
+the compiled-in copy through a `MemorySource` by default, `hud --styles <DIR>`
+through a `DirSource` — every `STYLESHEET_POLL_INTERVAL` of the frame clock
+(`FrameInfo::render_dt`, so a paused frame polls too), and hands changed bytes
+to `Ui::replace_stylesheet`. A save with a parse error keeps the last good
+sheet, and its refusal (the count and the first located diagnostic) is drawn
+under the vitals panel in fixed colours, not through the sheet that failed.
+Evidence: `styled::tests` — a changed sheet in a temporary `DirSource` recolours
+the health fill on the next poll and not inside the interval, a broken sheet
+keeps the old colour with the error's lines in the draw list, and a fixed sheet
+clears it — each shown red under a mutation (polling disabled, the interval gate
+removed, `Styles::replace` accepting an erroring sheet, the refusal not
+recorded, never cleared, or not drawn). `Ui::poll_stylesheets` is deliberately
+not what polls: it reads with `std::fs` behind the asset source's back and
+reports a refused reload only as a log line.
+**`apps/hud/tests/golden/panels.png` is stale until re-blessed**: the minimap
+frame is new pixels, so CI's _Draw hud's panels on lavapipe_ step fails until
+the reference is re-blessed on lavapipe
+(`CRCBL_GPU=vk CRCBL_VK_ICD=<lavapipe ICD> CRCBL_BLESS=1 apps/hud/tests/run-hud-golden.sh`,
+or the `golden-diff-lavapipe` artifact's rendered image). The vitals panel and
+the banner kept their geometry, so the suite's four pixel claims still read the
+fills they were written against. Not blessed here: the machine that built this
+has no lavapipe, and a reference blessed on another driver is the drift
+`docs/notes/process.md` warns about.
 
 ## What UI rung 6 shipped without (2026-09-16)
 
@@ -14962,25 +14984,32 @@ just this one.
 
 ## hud (`docs/plan/sample/04-hud.md`)
 
-### hud's whole P10 half is unbuilt, and the styling system it waited on has landed (2026-08-27, re-checked 2026-09-24)
+### hud's P10 half is mostly unbuilt, and the styling system it waited on has landed (2026-08-27, re-checked 2026-10-03)
 
-**Not built:** hud's stylesheets, the theme switcher, the gallery page, the UI
-inspector in the demo, the hot-reload showcase, and per-theme golden frames.
-`apps/hud/src/page.rs` still draws everything out of `DrawList::rect`,
-`DrawList::rect_outline` and `DrawList::text`, with no style resolution. **What
-they waited on is no longer missing:** `crcbl-ui`'s rungs 1 to 8b built the
-tree, the CSS subset (`crcbl_ui::style`: `cssparser`, selectors, the cascade,
-`default.css`), polled stylesheet reload (`Ui::poll_stylesheets`), the widget
-set and the inspector (`Ui::inspector`), and `apps/editor` already styles its
-panels with a sheet of its own. What is left is hud's port onto them. The **wasm
-front end and the Pages demo are NOT among the gaps**: `apps/hud/src/web.rs`,
-`web/demos/hud/` and the `hud` row in `web/build.sh`'s `DEMOS` all exist, and
+**Built (2026-10-03):** one stylesheet, `apps/hud/assets/hud.css`, styling the
+vitals panel, the minimap frame and the wave banner as a tree
+(`apps/hud/src/styled.rs`), polled through the asset source and restyled live
+under `--styles` — _The UI stage's exit criteria are not demonstrated_ has the
+detail. **Not built:** the second theme and the switcher, the gallery page, the
+UI inspector in the demo, the ability row's and the damage ticker's port (still
+`DrawList::rect`, `DrawList::rect_outline` and `DrawList::text` in
+`apps/hud/src/page.rs`), per-theme golden frames, and the plan's headless proof
+of the live restyle — a `crcbl screenshot` before and after a `.css` edit; the
+restyle is tested at the draw list, not in pixels. **What they waited on is no
+longer missing:** `crcbl-ui`'s rungs 1 to 8b built the tree, the CSS subset
+(`crcbl_ui::style`: `cssparser`, selectors, the cascade, `default.css`), polled
+stylesheet reload (`Ui::poll_stylesheets`), the widget set and the inspector
+(`Ui::inspector`), and `apps/editor` already styles its panels with a sheet of
+its own. What is left is hud's port onto them. The **wasm front end and the
+Pages demo are NOT among the gaps**: `apps/hud/src/web.rs`, `web/demos/hud/` and
+the `hud` row in `web/build.sh`'s `DEMOS` all exist, and
 `apps/hud/tests/run-hud-golden.sh` runs in CI against lavapipe with
 `apps/hud/tests/golden/panels.png` as its reference. The doc used to record the
 web build as deferred; that has been corrected.
 
-**What it would take:** rebuilding `page.rs` on `crcbl_ui::tree` with a
-stylesheet per theme, then the gallery, switcher and goldens on top. **What it
+**What it would take:** moving the rest of `page.rs` onto `crcbl_ui::tree`, a
+second sheet beside `hud.css` (`StyledHud` holds one `LiveSheet`; a theme is a
+second source key), then the gallery, switcher and goldens on top. **What it
 blocks:** hud's exit criteria in full, and the wider claim that the engine's own
 UI — debug overlay, editor chrome, every sample HUD — is styled by stylesheets.
 
@@ -24262,12 +24291,9 @@ them are P10 in the sample's own doc, and when milestone 1 shipped all of them
 rested on a layout/styling engine that did not exist. It does now: `crcbl-ui`
 has the `tree` (Taffy flexbox), `style` (stylesheets, selectors, the cascade,
 polled reload), the widget set and the inspector, while the old `Hud` and
-`HudPanel` are deleted and only `Anchor` is left of them. None of it is in hud
-yet — _hud's whole P10 half is unbuilt_ above is the entry that owns the port.
-The one thing worth recording for whoever starts it: `page::draw` is one
-function that positions everything from named constants at the top of
-`apps/hud/src/page.rs`, so the styling work replaces that function's body rather
-than restructuring the sample.
+`HudPanel` are deleted and only `Anchor` is left of them. Little of it is in hud
+yet beyond the vitals panel, the minimap frame and the wave banner — _hud's P10
+half is mostly unbuilt_ above is the entry that owns the rest of the port.
 
 **Sample rule 7 is met now** — hud has a `web.rs`, a `cdylib` lib named
 `crcbl_hud`, polled `PolledGpu`/`PendingLoop` bring-up, and an entry at every
