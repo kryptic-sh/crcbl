@@ -132,6 +132,20 @@ pub trait Transport: Send {
     fn max_unreliable_message_bytes(&self) -> usize {
         MAX_IN_MEMORY_MESSAGE_BYTES
     }
+
+    /// The link's measured health — round trip, jitter, loss, resends and
+    /// bytes, over the session and over the last
+    /// [`STATS_WINDOW`](crate::reliable::STATS_WINDOW) — for a transport
+    /// that measures it, and while it has a link to measure.
+    ///
+    /// This is how a host reaches the figures of peers it holds as
+    /// `Box<dyn Transport>`, which is what the netgraph shows for each. The
+    /// default is `None`: a transport with nothing to measure — an
+    /// in-memory pair, a recording — says so rather than reporting zeros a
+    /// panel would show as a perfect link.
+    fn link_stats(&self) -> Option<crate::reliable::EndpointStats> {
+        None
+    }
 }
 
 // ── In-memory transport ───────────────────────────────────────────────────────

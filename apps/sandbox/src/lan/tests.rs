@@ -238,3 +238,41 @@ fn a_browser_passes_over_a_host_of_another_build() {
     }
     assert_eq!(client.host(), None, "still looking");
 }
+
+/// The section titles a sandbox's [`super::Lan`] adds to a shown panel.
+fn lan_sections(lan: &super::Lan) -> Vec<String> {
+    let mut panel = crcbl::ui::DebugPanel::new();
+    panel.set_visible(true);
+    panel.begin_frame();
+    lan.debug_sections(&mut panel);
+    panel
+        .sections()
+        .iter()
+        .map(|section| section.title().to_owned())
+        .collect()
+}
+
+/// **A session adds the netgraph beside the "lan" section, on either end**,
+/// and no session adds neither. The join goes to a socket that never
+/// answers, which is enough: the netgraph shows a link still connecting.
+#[test]
+fn a_session_adds_the_netgraph_beside_the_lan_section() {
+    assert!(lan_sections(&super::Lan::off()).is_empty());
+
+    let hosting = super::Lan::host(
+        crcbl::lan::LanBind {
+            listen: loopback(),
+            announce_at: loopback(),
+            broadcast_to: None,
+        },
+        TICK_HZ,
+        None,
+    )
+    .expect("loopback UDP must be available to these tests");
+    assert_eq!(lan_sections(&hosting), ["lan", "net"]);
+
+    let silent = std::net::UdpSocket::bind(loopback()).expect("loopback UDP");
+    let joining =
+        super::Lan::join(silent.local_addr().expect("bound"), TICK_HZ).expect("a connect starts");
+    assert_eq!(lan_sections(&joining), ["lan", "net"]);
+}

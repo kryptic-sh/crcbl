@@ -15060,8 +15060,9 @@ layout and MAC by hand and flip every byte and bound input. The discovery
 **Not built in the packet layer, deliberately:** congestion control and pacing —
 a reliable message's fragments all go out in one poll, capped only by
 `MAX_RELIABLE_BYTES_IN_FLIGHT`; fine on a LAN, a question if the link ever
-crosses anything slower. Path-MTU discovery. Bandwidth rates for the netgraph
-(the stats carry byte counters; a rate is a window over them).
+crosses anything slower. Path-MTU discovery: every datagram is held to
+`MAX_DATAGRAM_BYTES`, the conservative MTU the stack is sized against, and
+nothing probes for more.
 
 **The design, for whoever builds the rest** (Gaffer / netcode.io lineage):
 
@@ -15260,10 +15261,11 @@ read, and `client_server_session`'s convergence to the quantized value.
   narrow reported limit. Its signal is only what the budget held back, so a link
   that fits every snapshot and still loses packets, or a session whose datagrams
   fit but whose bandwidth does not, is never slowed; RTT, loss and send
-  bandwidth are not inputs, and the netgraph that would show them is not built.
-  Decided 2026-10-01 for the long term: steps are tick-rate fractions
-  (`SNAPSHOT_INTERVAL_STEPS`), per session, with distinct down and up
-  thresholds; a withheld oversized update does not count against the rate.
+  bandwidth are not inputs, though the netgraph now shows each per peer
+  (`crcbl::lan::netgraph`, from `EndpointStats::recent`). Decided 2026-10-01 for
+  the long term: steps are tick-rate fractions (`SNAPSHOT_INTERVAL_STEPS`), per
+  session, with distinct down and up thresholds; a withheld oversized update
+  does not count against the rate.
 - **Relevance** is `DEFAULT_RELEVANCE` for every update: `fit` takes a
   `Fn(system_id, entity_bits) -> NonZeroU32`, and `send_snapshot` passes the
   constant. A game's interest model (distance, view, ownership) is what would
@@ -15326,12 +15328,70 @@ sheds by priority, never silently fragments.
 
 ### Netgraph HUD, LAN discovery (2026-08-27)
 
-**The netgraph is not built; LAN discovery's socket layer is (2026-09-30).** No
-netgraph (RTT, jitter, loss, send/recv bandwidth, snapshot size, resend counts,
-tick-lead — per client on the server panel, self on the client) in `crcbl-ui`'s
-debug overlay. It is scheduled for P10, so this is scope, not slip. Why it
-cannot be written yet is under _The debug overlay, and what is left of it_
-below.
+**The netgraph is built (2026-10-04): `crcbl::lan::netgraph`.** A "net" section
+beside "lan", a row per peer on a host and the one link on a joiner, with a
+graph of the round trip and the snapshot per link; towers and the sandbox add
+it. Decided for the long term:
+
+- **It lives in the umbrella's `crcbl::lan`, not in `crcbl-client`.** This
+  supersedes the 2026-09-24 placement under _The debug overlay, and what is left
+  of it_: a host's rows need `crcbl-server`'s peers as much as a joiner's need
+  `crcbl-client`, the history is fed by whoever runs the frame
+  (`LanHost::frame`, `LanClient::frame`), and `crcbl::lan` already names both
+  halves and the panel. Neither the client nor the server crate depends on
+  `crcbl-ui`, and this keeps it so. A sample adds it with one
+  `panel.add(lan.netgraph())`.
+- **The figures are the packet layer's.** Round trip and jitter are
+  `RttEstimator`'s RFC 6298 SRTT and RTTVAR — jitter is the mean deviation of
+  the round trip, not RFC 3550's interarrival jitter, which is what the client's
+  `PlayoutStats::jitter` reports. Loss, resends and bytes each way are counted
+  per `STATS_BUCKET` (100 ms) inside `Endpoint` and read over `STATS_WINDOW`
+  (one second, complete buckets only, so a reading moves once a bucket and a
+  rate is always a whole window's count over its whole length):
+  `EndpointStats::recent`. The loss column is that window's, not the smoothed
+  `packet_loss`, which averages from the link's start and lags a link that just
+  went bad. The window sits in the endpoint because it owns the clock and the
+  counters; a meter outside would need the counters' timing back.
+- **A host reaches its peers through `Transport::link_stats`**, default `None`,
+  answered by `UdpTransport` once keyed and passed through by
+  `ConditionSimulator`. A link that measures nothing — a listen host's own
+  player on an in-memory pair, a link connecting or down — reads as dashes,
+  never as a perfect link.
+- **The snapshot size is the last sealed snapshot**, per peer on a host
+  (`PeerStats::last_snapshot_bytes`) and as opened on a client
+  (`Client::last_snapshot_bytes`); `Host::largest_snapshot_bytes` stays the
+  high-water mark the "lan" section shows.
+- **History:** a sample per `HISTORY_INTERVAL` (100 ms) on the interval's
+  boundaries, `HISTORY_SAMPLES` (64) held — about six seconds. Round-trip graphs
+  share one scale across links, the largest sample but no less than
+  `RTT_SCALE_FLOOR_MS` (20 ms), so peers compare and LAN noise is not drawn as a
+  spike; the snapshot graph's full scale is `MAX_UNRELIABLE_PAYLOAD`.
+- **Graphs are bars in `crcbl-ui`** (`DebugSection::graph`, a block per sample
+  in the debug tree), not a polyline primitive: the draw list has rects and the
+  tree lays them out beside the label column with nothing new in the renderer.
+
+**What the netgraph left, and what each would take:**
+
+- **Tick-lead is not shown**, nor anything else of the client's clock. A joiner
+  has `Client::playout_stats` (delay, jitter, underruns) to put in its rows; a
+  host's tick-lead per peer needs the client's input lead, which the host does
+  not measure.
+- **`towers --serve` shows no netgraph.** A dedicated server has no panel; its
+  status line could print a line per peer from `LanHost::netgraph` on its
+  cadence.
+- **The Steam path has none.** `SteamTransport` does not implement `link_stats`;
+  Steam's own connection status (ping, quality, bytes) would supply it, and the
+  sandbox's Steam link would add the section as `crcbl::lan` does.
+- **Only the round trip and the snapshot are graphed.** Bandwidth each way and
+  loss are numbers; a graph per figure per peer would double the section's
+  height for every peer. Add them when someone needs to see one over time.
+- **`crcbl_server::Server`**, the single-session server, has no
+  `peer_link_stats`; nothing that shows a netgraph runs one.
+- **Coverage gaps:** the graph's look has never been seen — its tests are
+  draw-list rects, like the rest of the overlay (_Coverage gaps_). Towers'
+  waiting-on-a-join branch (`joining.lan().netgraph()`) is not covered by a
+  test; the joined and hosting ones are. Every figure was checked over loopback
+  and scripted wires, none on a real LAN.
 
 **Built (slice D1): `crcbl_net::udp::discovery`**, native only like `udp`. A
 host's `Announcer` binds `DISCOVERY_PORT`, answers each padded query with a
@@ -17273,7 +17333,9 @@ no restart to survive.
 **Separately, the exit criterion "the netgraph shows service traffic sensibly"**
 — rule 4's network module on request/response traffic rather than tick traffic,
 where a panel that reads as broken is a finding about the panel — cannot be
-checked until the transport milestone carries traffic.
+checked until the transport milestone carries traffic. The netgraph exists now
+(`crcbl::lan::netgraph`), but it is fed by `crcbl::lan`'s host and client, which
+bracket's service does not run on.
 
 ### bracket's client, parties and nightly soak are smaller than the plan's (2026-09-25)
 
@@ -23886,30 +23948,10 @@ left:
 The modular panel is built and every sample switches it on with F3 (or
 `--debug-overlay`): `crcbl_ui::debug` owns `DebugPanel`, `DebugSection`,
 `DebugModule`, `FrameStats` and `DebugOverlay`; `crcbl-render` contributes the
-`gpu` section by implementing `DebugModule` for `FrameTimings`. What is left:
+`gpu` section by implementing `DebugModule` for `FrameTimings`. The network
+module is the netgraph, built 2026-10-04 in `crcbl::lan` (its decisions and what
+it left are under _Netgraph HUD, LAN discovery_). What is left:
 
-- **There is no network module, and no sample could show one yet.** The panel is
-  ready for it — a module is a `DebugModule` impl and one `add` call — but
-  nothing was written, for two reasons. The first is that the netgraph list
-  (_Netgraph HUD, LAN discovery_ above) (RTT, jitter, loss, send/recv bandwidth,
-  snapshot size, resend counts, tick-lead) is **not measurable today**:
-  `InMemoryTransport` has no timing, no loss and no byte accounting, and
-  `Client` exposes only `is_connected`, `session_id`, `last_applied_tick`,
-  `baseline_entity_count`, `baseline_system_count`, `processing_error_count`,
-  `auth_failure_count` and
-  `rate_limited_message_count`/`rate_limited_byte_count`. Those are real numbers
-  and a module could show them, but they are a connection-health readout, not a
-  netgraph, and shipping them under that name would make the P10 work look done.
-  The second was placement: the module belongs in the crate that owns the
-  numbers (`crcbl-client`, following `crcbl-render`'s example), which means a
-  `crcbl-client → crcbl-ui` dependency. **That half is settled** — nothing
-  `crcbl-ui` depends on (`crcbl-core`, `crcbl-reflect` and third-party crates,
-  re-verified 2026-09-24) reaches `crcbl-client`, so there is no cycle, and
-  `crcbl-render` has since set the precedent twice, with `FrameTimings` and
-  `FrameCounters` both implementing `DebugModule`. What is left is the work, not
-  the decision. **What it would take**: the transport growing byte and timing
-  counters, then a `DebugModule` impl beside them, then one `add` line in each
-  sample that has a connection.
 - **The overlay starts hidden in a release wasm build.** The default is
   `cfg!(debug_assertions)`, which is sample rule 4's "on by default in dev
   builds" taken literally; the demos on `crcbl.kryptic.sh` are release builds,

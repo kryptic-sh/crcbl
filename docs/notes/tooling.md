@@ -523,13 +523,15 @@ The rules, each with its _why_:
   ordinary `DebugModule`/`DebugSection` rows. **Frame timing is unconditional**:
   every sample has a frame, so the first module has no precondition. **Every
   other module is contributed by the system it reports on**, and appears because
-  that system is present: the netgraph belongs in `crcbl-client`, so a
-  `crcbl-client` dependency on `crcbl-ui` is decided, with no cycle, and
-  `crcbl-render`'s `FrameTimings` and `FrameCounters` are the precedent.
-  Breakout and flappy, both on `InMemoryTransport`, are the check that the
-  composition is real — a panel that cannot render without a network module is
-  broken. **Switching it on is one thing**; a sample needing more is a finding
-  about the panel, the failure being a per-sample surface written once per game.
+  that system is present: `crcbl-render`'s `FrameTimings` and `FrameCounters`
+  are the precedent. The netgraph, which needs a session's host and client
+  halves both, lives where they meet, in the umbrella's `crcbl::lan`
+  (2026-10-04), so neither `crcbl-client` nor `crcbl-server` depends on
+  `crcbl-ui`. Breakout and flappy, both on `InMemoryTransport`, are the check
+  that the composition is real — a panel that cannot render without a network
+  module is broken. **Switching it on is one thing**; a sample needing more is a
+  finding about the panel, the failure being a per-sample surface written once
+  per game.
 - **The inspector is generic; systems describe themselves.** Selecting an entity
   has each system that owns it show its data — as data, not as a debug-UI
   callback, so `crcbl-ecs` names no UI (decided 2026-10-03):

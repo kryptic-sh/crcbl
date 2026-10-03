@@ -77,8 +77,9 @@ pub use console::{
     SEND_ID, SEND_LABEL, TouchKeyboard, caret_shown,
 };
 pub use debug::{
-    DEFAULT_FRAME_WINDOW, DebugModule, DebugOverlay, DebugPanel, DebugRow, DebugSection,
-    DebugStyle, FrameStats, REFLECTED_DECIMALS, ReflectedSection,
+    DEFAULT_FRAME_WINDOW, DebugGraph, DebugModule, DebugOverlay, DebugPanel, DebugRow,
+    DebugSection, DebugStyle, FrameStats, GRAPH_BAR_WIDTH, GRAPH_HEIGHT, MIN_BAR_HEIGHT,
+    REFLECTED_DECIMALS, ReflectedSection,
 };
 pub use draw_list::{
     Border, ClipRect, ClipUnderflow, CornerRadii, DrawCommand, DrawList, Primitive, TextureRun,

@@ -11,11 +11,13 @@
 //!
 //! # The panel does not know what a system is
 //!
-//! [`DebugPanel`] holds [`DebugSection`]s, and a section is a title and a list
-//! of `label: value` rows. Nothing here names a renderer, a network client or a
-//! clock. A system contributes by implementing [`DebugModule`] — one method,
-//! which fills a section it is handed — and the frame that wants the panel calls
-//! [`DebugPanel::add`] once per system it actually has:
+//! [`DebugPanel`] holds [`DebugSection`]s, and a section is a title, a list of
+//! `label: value` rows, and any rolling graphs under them ([`DebugGraph`], a
+//! bar per sample — a network link's round trip, say). Nothing here names a
+//! renderer, a network client or a clock. A system contributes by
+//! implementing [`DebugModule`] — one method, which fills a section it is
+//! handed — and the frame that wants the panel calls [`DebugPanel::add`] once
+//! per system it actually has:
 //!
 //! ```text
 //! overlay.record(frame_clock.render_dt());   // always, even while hidden
@@ -40,8 +42,9 @@
 //! nothing.
 //!
 //! Visible, the cost is one [`DrawList`] text command per row plus one
-//! background rect. Section and row strings are reused across frames; the draw
-//! commands are not, because [`DrawList::text`] takes an owned `String`.
+//! background rect, and a rect per graph bar. Section and row strings are
+//! reused across frames; the draw commands are not, because
+//! [`DrawList::text`] takes an owned `String`.
 //!
 //! # The panel is built on the element tree
 //!
@@ -72,8 +75,8 @@ use crate::budget::BudgetStats;
 use crate::draw_list::DrawList;
 use crate::hud::Anchor;
 use crate::style::{Declaration, Sides};
-use crate::text::FontAtlas;
-use crate::tree::{AvailableSpace, Length, LengthAuto, NodeKey, Ui};
+use crate::text::{FontAtlas, LINE_HEIGHT};
+use crate::tree::{Align, AvailableSpace, Length, LengthAuto, NodeKey, Ui};
 use crate::widget::{NATURAL_FONT_SIZE, PointerInput};
 
 mod reflected;
@@ -93,18 +96,32 @@ pub struct DebugRow {
     pub value: String,
 }
 
-/// One system's contribution to the panel: a title and its rows.
+/// One rolling graph in a [`DebugSection`]: what it plots, and a bar per
+/// sample, oldest first.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DebugGraph {
+    /// What the bars are.
+    pub label: String,
+    /// Each sample's height as a fraction of the graph's, 0 to 1.
+    pub bars: Vec<f32>,
+}
+
+/// One system's contribution to the panel: a title, its rows, and any graphs
+/// under them.
 ///
-/// Rows are kept in a `Vec` that is reused rather than reallocated:
-/// [`DebugSection::clear`] resets the length without dropping the strings, so a
-/// module that writes the same rows every frame allocates on the first frame
-/// only.
+/// Rows and graphs are kept in `Vec`s that are reused rather than
+/// reallocated: [`DebugSection::clear`] resets the lengths without dropping
+/// the strings, so a module that writes the same rows every frame allocates
+/// on the first frame only.
 #[derive(Debug, Clone, Default)]
 pub struct DebugSection {
     title: String,
     rows: Vec<DebugRow>,
     /// How many of `rows` are live. The rest are retained allocations.
     used: usize,
+    graphs: Vec<DebugGraph>,
+    /// How many of `graphs` are live.
+    graphs_used: usize,
 }
 
 impl DebugSection {
@@ -158,16 +175,47 @@ impl DebugSection {
         &self.rows[..self.used]
     }
 
-    /// Whether this section has no rows.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.used == 0
+    /// Appends a graph of `samples`, oldest first, drawn under the rows as a
+    /// bar each, full height at `scale` and above. A `scale` that is not
+    /// above zero draws every bar empty rather than dividing by it.
+    ///
+    /// The graph says nothing of its scale; a module that wants it read
+    /// writes it in a row.
+    pub fn graph(&mut self, label: &str, samples: impl IntoIterator<Item = f32>, scale: f32) {
+        if self.graphs_used == self.graphs.len() {
+            self.graphs.push(DebugGraph::default());
+        }
+        let graph = &mut self.graphs[self.graphs_used];
+        graph.label.clear();
+        graph.label.push_str(label);
+        graph.bars.clear();
+        graph.bars.extend(samples.into_iter().map(|sample| {
+            if scale > 0.0 {
+                (sample / scale).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        }));
+        self.graphs_used += 1;
     }
 
-    /// Drops the title and the rows, keeping their allocations.
+    /// The live graphs.
+    #[must_use]
+    pub fn graphs(&self) -> &[DebugGraph] {
+        &self.graphs[..self.graphs_used]
+    }
+
+    /// Whether this section has no rows and no graphs.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.used == 0 && self.graphs_used == 0
+    }
+
+    /// Drops the title, the rows and the graphs, keeping their allocations.
     pub fn clear(&mut self) {
         self.title.clear();
         self.used = 0;
+        self.graphs_used = 0;
     }
 }
 
@@ -379,6 +427,8 @@ pub struct DebugStyle {
     pub label: [f32; 4],
     /// Row values.
     pub value: [f32; 4],
+    /// A graph's bars.
+    pub graph: [f32; 4],
     /// Text size in pixels.
     pub font_size: f32,
     /// Space between the backing rect and the text.
@@ -396,6 +446,7 @@ impl Default for DebugStyle {
             title: [0.45, 0.85, 1.0, 1.0],
             label: [0.72, 0.72, 0.78, 1.0],
             value: [1.0, 1.0, 1.0, 1.0],
+            graph: [0.45, 0.85, 1.0, 0.9],
             font_size: NATURAL_FONT_SIZE,
             padding: 6.0,
             column_gap: 10.0,
@@ -568,8 +619,10 @@ impl DebugPanel {
         let scale = style.font_size / NATURAL_FONT_SIZE;
         let mut label_width = 0.0f32;
         for section in self.sections() {
-            for row in section.rows() {
-                label_width = label_width.max(atlas.text_width(&row.label, scale));
+            let rows = section.rows().iter().map(|row| &row.label);
+            let graphs = section.graphs().iter().map(|graph| &graph.label);
+            for label in rows.chain(graphs) {
+                label_width = label_width.max(atlas.text_width(label, scale));
             }
         }
 
@@ -585,6 +638,11 @@ impl DebugPanel {
             D::MinWidth(LengthAuto::Px(label_width + style.column_gap)),
         ];
         let value = [D::Color(style.value)];
+        let graph_height = GRAPH_HEIGHT * scale;
+        let graph = [
+            D::Height(LengthAuto::Px(graph_height)),
+            D::AlignItems(Some(Align::FlexEnd)),
+        ];
 
         ui.block("debug-panel", &panel, |ui| {
             for (index, section) in self.sections().iter().enumerate() {
@@ -594,6 +652,23 @@ impl DebugPanel {
                         ui.block_keyed(row_index, ".debug-row", &[], |ui| {
                             ui.span(".debug-label", row.label.as_str(), &label);
                             ui.span(".debug-value", row.value.as_str(), &value);
+                        });
+                    }
+                    for (graph_index, plotted) in section.graphs().iter().enumerate() {
+                        let key = (section.rows().len(), graph_index);
+                        ui.block_keyed(key, ".debug-row", &[], |ui| {
+                            ui.span(".debug-label", plotted.label.as_str(), &label);
+                            ui.block(".debug-graph", &graph, |ui| {
+                                for (bar_index, bar) in plotted.bars.iter().enumerate() {
+                                    let height = (bar * graph_height).max(MIN_BAR_HEIGHT);
+                                    let bar = [
+                                        D::Width(LengthAuto::Px(GRAPH_BAR_WIDTH * scale)),
+                                        D::Height(LengthAuto::Px(height)),
+                                        D::Background(style.graph),
+                                    ];
+                                    ui.block_keyed(bar_index, ".debug-bar", &bar, |_| {});
+                                }
+                            });
                         });
                     }
                 });
@@ -612,6 +687,18 @@ thread_local! {
 /// Where [`DebugPanel::laid_out`]'s pointer is: above and left of every
 /// rectangle the panel lays out, which all start at the origin.
 const OFF_SCREEN: Vec2 = Vec2::splat(-1.0);
+
+/// A graph's height at [`NATURAL_FONT_SIZE`]: one line of text, so a graph
+/// takes a row's place in the panel and no more.
+pub const GRAPH_HEIGHT: f32 = LINE_HEIGHT;
+
+/// One bar's width at [`NATURAL_FONT_SIZE`]: narrow enough that a few
+/// seconds of samples fit beside the labels.
+pub const GRAPH_BAR_WIDTH: f32 = 2.0;
+
+/// The least a bar is drawn: an empty sample still shows as a tick on the
+/// baseline, so a graph with nothing to plot is told from no graph at all.
+pub const MIN_BAR_HEIGHT: f32 = 1.0;
 
 // ---------------------------------------------------------------------------
 // Overlay
@@ -1413,6 +1500,141 @@ mod tests {
         };
         assert_eq!(panel.size(&atlas), measured);
         assert_ne!(measured, Vec2::ZERO, "a zero panel proves nothing");
+    }
+
+    // -- graphs -------------------------------------------------------------
+
+    /// A module that plots what it is told to.
+    struct Plot {
+        samples: &'static [f32],
+        scale: f32,
+    }
+
+    impl DebugModule for Plot {
+        fn debug_section(&self, out: &mut DebugSection) {
+            out.set_title("net");
+            out.row_str("rtt", "12.0 ms");
+            out.graph("rtt graph", self.samples.iter().copied(), self.scale);
+        }
+    }
+
+    /// Every rect drawn in the graph colour: the bars, in draw order.
+    fn bars(dl: &DrawList, colour: [f32; 4]) -> Vec<(Vec2, Vec2)> {
+        dl.commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Rect { min, max, color } if *color == colour => Some((*min, *max)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A graph draws a bar per sample**, oldest first and left to right,
+    /// each as tall as its sample over the scale, clamped to the graph, never
+    /// less than the baseline tick, and all standing on one baseline.
+    #[test]
+    fn a_graph_draws_a_bar_per_sample_scaled_to_its_height() {
+        let atlas = FontAtlas::built_in();
+        let mut panel = shown();
+        panel.add(&Plot {
+            samples: &[0.0, 5.0, 10.0, 40.0],
+            scale: 20.0,
+        });
+        let mut dl = DrawList::new();
+        panel.render(&mut dl, screen(), &atlas);
+
+        let drawn = bars(&dl, panel.style.graph);
+        let heights: Vec<f32> = drawn.iter().map(|(min, max)| max.y - min.y).collect();
+        assert_eq!(
+            heights,
+            [
+                MIN_BAR_HEIGHT,
+                GRAPH_HEIGHT / 4.0,
+                GRAPH_HEIGHT / 2.0,
+                GRAPH_HEIGHT
+            ],
+            "0 is the baseline tick, 5 and 10 of 20 a quarter and a half, 40 clamped full",
+        );
+        for (min, max) in &drawn {
+            assert_eq!(max.x - min.x, GRAPH_BAR_WIDTH);
+            assert_eq!(max.y, drawn[0].1.y, "every bar stands on one baseline");
+        }
+        for pair in drawn.windows(2) {
+            assert_eq!(pair[1].0.x, pair[0].1.x, "oldest first, side by side");
+        }
+        assert!(
+            texts(&dl).iter().any(|text| text == "rtt graph"),
+            "the graph's label is drawn: {:?}",
+            texts(&dl)
+        );
+    }
+
+    /// A scale of zero — a graph of nothing yet measured — draws every bar
+    /// as the baseline tick rather than dividing by it.
+    #[test]
+    fn a_graph_with_no_scale_draws_its_bars_empty() {
+        let mut section = DebugSection::new("net");
+        section.graph("rtt graph", [3.0, f32::MAX], 0.0);
+        assert_eq!(section.graphs()[0].bars, [0.0, 0.0]);
+    }
+
+    /// The graph's bars start in the value column, past every label, its own
+    /// included: a long graph label pushes the values of the rows above it
+    /// along.
+    #[test]
+    fn a_graph_label_counts_toward_the_value_column() {
+        let atlas = FontAtlas::built_in();
+        let mut panel = shown();
+        panel.add(&Plot {
+            samples: &[1.0],
+            scale: 1.0,
+        });
+        let mut dl = DrawList::new();
+        panel.render(&mut dl, screen(), &atlas);
+        let scale = panel.style.font_size / NATURAL_FONT_SIZE;
+        let widest = atlas.text_width("rtt graph", scale);
+        let label_x = dl
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { pos, text, .. } if text == "rtt" => Some(pos.x),
+                _ => None,
+            })
+            .expect("the row's label is drawn");
+        let value_x = dl
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Text { pos, text, .. } if text == "12.0 ms" => Some(pos.x),
+                _ => None,
+            })
+            .expect("the row's value is drawn");
+        assert!(
+            value_x >= label_x + widest,
+            "the value at {value_x} sits under the {widest}px graph label at {label_x}",
+        );
+        let (bar_min, _) = bars(&dl, panel.style.graph)[0];
+        assert_eq!(bar_min.x, value_x, "the bars start in the value column");
+    }
+
+    /// Clearing a section drops its graphs with its rows, so a frame that
+    /// plots nothing draws no bars from the last.
+    #[test]
+    fn clearing_a_section_drops_its_graphs() {
+        let mut section = DebugSection::new("net");
+        section.graph("a", [1.0], 1.0);
+        assert!(!section.is_empty(), "a graph alone is something to draw");
+        section.clear();
+        assert!(section.graphs().is_empty());
+        assert!(section.is_empty());
+        section.graph("b", [0.5, 0.25], 1.0);
+        assert_eq!(
+            section.graphs(),
+            [DebugGraph {
+                label: "b".to_owned(),
+                bars: vec![0.5, 0.25],
+            }]
+        );
     }
 
     #[test]

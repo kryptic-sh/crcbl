@@ -215,9 +215,11 @@ in `web/demos/towers/main.js` — which synthesise the very `keydown`/`keyup` pa
 the canvas listens for, because the browser gate still clicks the row rather
 than the canvas and moving that check is unwritten (`docs/backlog.md`). The
 debug panel has a "lan" section during a LAN session — the port, the players and
-the largest snapshot on a host, the session on a joiner — but the netgraph the
-network module was specified for (RTT, jitter, loss, tick-lead) is not built
-anywhere yet.
+the largest snapshot on a host, the session on a joiner — and beside it the
+netgraph's "net" section (`crcbl::lan::netgraph`, 2026-10-04): a row per peer on
+a host and the one link on a joiner, with round trip, jitter, loss, resends,
+bandwidth and the snapshot's size, and a graph of the round trip and the
+snapshot. Tick-lead is not in it yet (`docs/backlog.md`).
 
 **What it is waiting on, and it is not one thing.**
 

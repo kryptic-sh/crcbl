@@ -506,6 +506,15 @@ impl<C: Clock + Clone> Transport for UdpTransport<C> {
     fn max_unreliable_message_bytes(&self) -> usize {
         MAX_UNRELIABLE_PAYLOAD
     }
+
+    /// [`UdpStats::endpoint`] once the link is keyed; `None` while
+    /// connecting, when there is no packet layer yet to measure anything.
+    fn link_stats(&self) -> Option<EndpointStats> {
+        match self.state() {
+            UdpState::Connecting => None,
+            UdpState::Connected | UdpState::Ended(_) => Some(self.stats().endpoint),
+        }
+    }
 }
 
 impl<C: Clock + Clone> Drop for UdpTransport<C> {

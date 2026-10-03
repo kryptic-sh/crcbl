@@ -65,6 +65,7 @@
 //! * [`rtt`] — the RFC 6298 round-trip estimator the resend timeout comes from.
 //! * `outgoing` — reliable messages held and resent until acknowledged.
 //! * `fragment` — where a message is cut, and bounded reassembly on receive.
+//! * [`window`] — the link's counts over the last second, for rates.
 //! * [`endpoint`] — the per-peer state machine that ties them together.
 
 mod ack;
@@ -74,7 +75,10 @@ mod outgoing;
 pub mod packet;
 pub mod rtt;
 pub mod sequence;
+pub mod window;
 
+#[cfg(test)]
+mod stats_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -90,3 +94,4 @@ pub use packet::{
 };
 pub use rtt::RttEstimator;
 pub use sequence::{sequence_greater_than, sequence_less_than};
+pub use window::{STATS_BUCKET, STATS_BUCKETS, STATS_WINDOW, WindowCounts};

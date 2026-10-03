@@ -30,7 +30,10 @@
 //!   `--browse` ask for, parsed by [`LanMode::consume`] so every sample reads
 //!   the three flags alike.
 //!
-//! Both sides add a "lan" section to the F3 panel saying where they stand.
+//! Both sides add a "lan" section to the F3 panel saying where they stand,
+//! and keep a [`netgraph::Netgraph`] — a "net" section with each link's round
+//! trip, jitter, loss, resends, bytes and snapshot size, and a graph of the
+//! round trip and the snapshot — that a sample adds beside it.
 //!
 //! A host records its session on request ([`LanHost::record`], what
 //! `--record <FILE>` asks for) through a [`Recorder`] it pulls after every
@@ -70,12 +73,13 @@ use crate::ecs::World;
 use crate::net::reliable::MAX_UNRELIABLE_PAYLOAD;
 use crate::net::udp::discovery::{Announcement, Announcer, Browser, DISCOVERY_PORT};
 use crate::net::udp::{ConnectError, UdpListener, UdpTransport};
-use crate::net::{ProtocolCompatibility, SessionEndReason};
+use crate::net::{ProtocolCompatibility, SessionEndReason, Transport};
 use crate::replay_record::{RecordError, RecordSummary, Recorder};
 use crate::server::{Host, HostConfig, PeerEvent};
 use crate::ui::{DebugModule, DebugSection};
 
 use self::lobby::Unjoinable;
+use self::netgraph::{LinkReading, Netgraph, Role};
 
 /// The least time between two logged snapshot refusals, or two withheld
 /// updates: one a second says the world is too big without a line every
@@ -265,6 +269,8 @@ pub struct LanHost {
     refusals: ThrottledLog,
     /// Withheld updates logged.
     withheld: ThrottledLog,
+    /// Each peer's link, for the "net" section.
+    netgraph: Netgraph,
 }
 
 impl LanHost {
@@ -339,6 +345,7 @@ impl LanHost {
             recorder: None,
             refusals: ThrottledLog::default(),
             withheld: ThrottledLog::default(),
+            netgraph: Netgraph::new(Role::Host),
         })
     }
 
@@ -400,6 +407,12 @@ impl LanHost {
         &mut self.host
     }
 
+    /// Each peer's link, as of the last [`frame`](Self::frame): what a sample
+    /// adds to its panel beside this host's own "lan" section.
+    pub fn netgraph(&self) -> &Netgraph {
+        &self.netgraph
+    }
+
     /// What the host announces, while it announces.
     pub fn announcement(&self) -> Option<&Announcement> {
         self.announcer.as_ref().map(Announcer::announcement)
@@ -433,6 +446,19 @@ impl LanHost {
         for event in &events {
             crate::log::info!("lan: {event:?}");
         }
+        let host = &self.host;
+        self.netgraph.record(
+            now,
+            host.peers().map(|peer| {
+                let reading = LinkReading {
+                    stats: host.peer_link_stats(peer),
+                    snapshot_bytes: host
+                        .peer_stats(peer)
+                        .map_or(0, |stats| stats.last_snapshot_bytes),
+                };
+                (peer.get(), reading)
+            }),
+        );
         self.report_refusals(now);
         if let Some(announcer) = &mut self.announcer {
             let players = u16::try_from(self.host.peer_count()).unwrap_or(u16::MAX);
@@ -563,6 +589,8 @@ pub struct LanClient {
     /// Whether the session's start and end have been logged.
     reported_session: bool,
     reported_end: bool,
+    /// The link to the host, for the "net" section.
+    netgraph: Netgraph,
 }
 
 #[derive(Debug)]
@@ -616,6 +644,7 @@ impl LanClient {
             tick_hz,
             reported_session: false,
             reported_end: false,
+            netgraph: Netgraph::new(Role::Client),
         }
     }
 
@@ -636,6 +665,13 @@ impl LanClient {
         }
     }
 
+    /// The link to the host, as of the last [`frame`](Self::frame) — none
+    /// while looking for one: what a sample adds to its panel beside this
+    /// client's own "lan" section.
+    pub fn netgraph(&self) -> &Netgraph {
+        &self.netgraph
+    }
+
     /// The host joined, once one is chosen.
     pub fn host(&self) -> Option<SocketAddr> {
         match &self.phase {
@@ -646,6 +682,15 @@ impl LanClient {
 
     /// Browses or plays for one frame, at `now`.
     pub fn frame(&mut self, now: Duration) {
+        self.play(now);
+        let link = self.client().map(|client| LinkReading {
+            stats: client.transport().link_stats(),
+            snapshot_bytes: client.last_snapshot_bytes(),
+        });
+        self.netgraph.record(now, link.map(|reading| (0, reading)));
+    }
+
+    fn play(&mut self, now: Duration) {
         let game = self.game;
         match &mut self.phase {
             Phase::Browsing(browser) => {
@@ -771,6 +816,7 @@ pub fn how_it_ended(ended: Ended, client: &Client<UdpTransport>) -> String {
 }
 
 pub mod lobby;
+pub mod netgraph;
 
 #[cfg(test)]
 mod tests;

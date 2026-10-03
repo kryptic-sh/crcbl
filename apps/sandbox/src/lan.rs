@@ -3,7 +3,8 @@
 //!
 //! The session machinery is the engine's — the listener, the announcer, the
 //! accept loop feeding a [`crcbl::server::Host`], the client connecting by
-//! address or browsing, the "lan" section of the F3 panel — and what is left
+//! address or browsing, the "lan" section of the F3 panel and the netgraph's
+//! "net" section beside it — and what is left
 //! here is what is the sandbox's: which of the three the command line asked
 //! for — or the lobby picked (`crate::lobby`), which watches a join it
 //! started through `Standing` — and what the host's world holds.
@@ -273,13 +274,20 @@ mod imp {
             }
         }
 
-        /// Adds the "lan" section to the F3 panel — only with a session, so
-        /// a run without one has the panel it always had.
+        /// Adds the "lan" section and the netgraph's "net" section beside it
+        /// to the F3 panel — only with a session, so a run without one has
+        /// the panel it always had.
         pub fn debug_sections(&self, panel: &mut DebugPanel) {
             match &self.role {
                 Role::Off => {}
-                Role::Host(host) => panel.add(host.as_ref()),
-                Role::Client(client) => panel.add(client.as_ref()),
+                Role::Host(host) => {
+                    panel.add(host.as_ref());
+                    panel.add(host.lan.netgraph());
+                }
+                Role::Client(client) => {
+                    panel.add(client.as_ref());
+                    panel.add(client.netgraph());
+                }
             }
         }
     }

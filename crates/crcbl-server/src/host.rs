@@ -37,6 +37,7 @@ use crcbl_console::{Registry, SimVars};
 use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::{ClientInputs, World};
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
+use crcbl_net::reliable::EndpointStats;
 use crcbl_net::{
     ConsoleReply, ConsoleSet, EditNotice, EditReply, EditRequest, EditTooLong, HandshakeGate,
     HandshakeResult, Hello, ProtocolCompatibility, RejectReason, ResumeToken, SectorId,
@@ -1021,6 +1022,20 @@ impl Host {
             .iter()
             .find(|p| p.id == peer)
             .map(|p| p.link.stats())
+    }
+
+    /// What `peer`'s transport measures of its link — round trip, jitter,
+    /// loss, resends and bytes ([`Transport::link_stats`]) — or `None` while
+    /// its link is down, once its session has ended, or when its transport
+    /// measures nothing, as an in-memory one does not.
+    #[must_use]
+    pub fn peer_link_stats(&self, peer: PeerId) -> Option<EndpointStats> {
+        self.peers
+            .iter()
+            .find(|p| p.id == peer)?
+            .transport
+            .as_ref()?
+            .link_stats()
     }
 
     /// Reconnect grace configuration. Applies to links that drop from now on.

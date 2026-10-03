@@ -586,6 +586,12 @@ impl<T: Transport, C: Clock> Transport for ConditionSimulator<T, C> {
     fn max_unreliable_message_bytes(&self) -> usize {
         self.inner.max_unreliable_message_bytes()
     }
+
+    /// The wrapped transport's: what the simulator adds is invisible to any
+    /// measurement but one taken above it.
+    fn link_stats(&self) -> Option<crate::reliable::EndpointStats> {
+        self.inner.link_stats()
+    }
 }
 
 impl<T: Transport, C: Clock> std::fmt::Debug for ConditionSimulator<T, C> {
@@ -1340,6 +1346,46 @@ mod tests {
         let (a, _b) = InMemoryTransport::pair();
         let sim = ConditionSimulator::new(a, SimConditions::default());
         assert!(sim.is_connected());
+    }
+
+    /// The simulator passes its inner transport's link figures through: a
+    /// wrapper that answered `None` would show every link under it as
+    /// unmeasured.
+    #[test]
+    fn the_simulator_reports_the_link_stats_of_the_transport_it_wraps() {
+        struct Measured(InMemoryTransport);
+        impl Transport for Measured {
+            fn send_reliable(&mut self, msg: Message) -> Result<(), TransportError> {
+                self.0.send_reliable(msg)
+            }
+            fn send_unreliable(&mut self, msg: Message) -> Result<(), TransportError> {
+                self.0.send_unreliable(msg)
+            }
+            fn recv(&mut self) -> Result<Option<Message>, TransportError> {
+                self.0.recv()
+            }
+            fn is_connected(&self) -> bool {
+                self.0.is_connected()
+            }
+            fn link_stats(&self) -> Option<crate::reliable::EndpointStats> {
+                Some(crate::reliable::EndpointStats {
+                    rtt: Some(Duration::from_millis(7)),
+                    ..crate::reliable::EndpointStats::default()
+                })
+            }
+        }
+
+        let (a, _b) = InMemoryTransport::pair();
+        let sim = ConditionSimulator::new(Measured(a), SimConditions::default());
+        assert_eq!(
+            sim.link_stats().and_then(|stats| stats.rtt),
+            Some(Duration::from_millis(7))
+        );
+        let (plain, _other) = InMemoryTransport::pair();
+        assert_eq!(
+            ConditionSimulator::new(plain, SimConditions::default()).link_stats(),
+            None
+        );
     }
 
     #[test]

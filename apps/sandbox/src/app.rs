@@ -748,7 +748,7 @@ impl HostedGame for Sandbox {
 
     /// The "scene" section and the selected entity's systems' (see
     /// [`crate::scene`]), the "steam" section, when the `steam` feature is
-    /// live, and the "lan" one during a LAN session.
+    /// live, and the "lan" and "net" ones during a LAN session.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         self.scene.debug_sections(panel);
         self.steam.debug_sections(panel);

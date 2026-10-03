@@ -1704,6 +1704,18 @@ impl Game {
         }
     }
 
+    /// The F3 panel's "net" section — each link's round trip, loss, bytes
+    /// and snapshot size — during a LAN session.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn netgraph(&self) -> Option<&crcbl::lan::netgraph::Netgraph> {
+        match &self.link {
+            Link::Solo(_) => None,
+            Link::Host(host) => Some(host.lan().netgraph()),
+            Link::Remote(remote) => Some(remote.lan().netgraph()),
+        }
+    }
+
     /// The LAN host, while this game hosts one.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]

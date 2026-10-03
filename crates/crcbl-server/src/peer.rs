@@ -158,6 +158,12 @@ pub struct PeerStats {
     /// snapshot could carry one ([`UpdateTooLarge`]), summed over every
     /// snapshot sent; one entity too long for the wire adds one a snapshot.
     pub oversized_updates: u64,
+    /// The sealed length of the last snapshot this peer's transport
+    /// accepted, in bytes; zero before the first. What the netgraph graphs
+    /// against the transport's unreliable limit, peer by peer, where
+    /// [`Host::largest_snapshot_bytes`](crate::Host::largest_snapshot_bytes)
+    /// is the high-water mark over them all.
+    pub last_snapshot_bytes: usize,
 }
 
 /// One peer's session state.
@@ -208,6 +214,8 @@ pub(crate) struct PeerSession {
     cadence: SnapshotCadence,
     /// Updates withheld from this session's snapshots as too long for any.
     oversized_updates: u64,
+    /// The sealed length of the last snapshot sent.
+    last_snapshot_bytes: usize,
 }
 
 impl PeerSession {
@@ -234,6 +242,7 @@ impl PeerSession {
             edit_requests: Vec::new(),
             cadence: SnapshotCadence::default(),
             oversized_updates: 0,
+            last_snapshot_bytes: 0,
         }
     }
 
@@ -265,6 +274,7 @@ impl PeerSession {
         PeerStats {
             snapshot_interval_ticks: self.cadence.interval(),
             oversized_updates: self.oversized_updates,
+            last_snapshot_bytes: self.last_snapshot_bytes,
         }
     }
 
@@ -480,6 +490,7 @@ impl PeerSession {
         let size = payload.len();
         match transport.send_unreliable(Message::unreliable(payload)) {
             Ok(()) => {
+                self.last_snapshot_bytes = size;
                 counters.largest_snapshot_bytes = counters.largest_snapshot_bytes.max(size);
                 let held_back = fitted.shed + fitted.deferred_removals;
                 counters.held_back_updates =

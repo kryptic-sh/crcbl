@@ -269,6 +269,8 @@ pub struct Client<T: Transport> {
     auth_failure_count: u64,
     rate_limited_message_count: u64,
     rate_limited_byte_count: u64,
+    /// The sealed length of the last snapshot that opened.
+    last_snapshot_bytes: usize,
 }
 
 impl<T: Transport> Client<T> {
@@ -331,6 +333,7 @@ impl<T: Transport> Client<T> {
             auth_failure_count: 0,
             rate_limited_message_count: 0,
             rate_limited_byte_count: 0,
+            last_snapshot_bytes: 0,
         }
     }
 
@@ -743,6 +746,15 @@ impl<T: Transport> Client<T> {
         self.rate_limited_byte_count
     }
 
+    /// The sealed length, in bytes, of the last snapshot that opened under
+    /// the session key — applied or not — or zero before the first. The
+    /// figure the host's `PeerStats::last_snapshot_bytes` reports for this
+    /// client, read at this end; what the netgraph graphs on a joiner.
+    #[must_use]
+    pub fn last_snapshot_bytes(&self) -> usize {
+        self.last_snapshot_bytes
+    }
+
     /// Whether the transport is connected.
     #[must_use]
     pub fn is_connected(&self) -> bool {
@@ -1135,6 +1147,7 @@ impl<T: Transport> Client<T> {
         // The MAC verified, so the sender holds this session's key: the
         // handshake that produced it was the real server's, and the session has
         // proved itself for good.
+        self.last_snapshot_bytes = envelope.len();
         self.session_proof_deadline = None;
         self.unproven_sessions = 0;
         // The same fact retires the hostile-input system cap here.

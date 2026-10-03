@@ -1421,10 +1421,11 @@ uncertainty.
   (inspector, console, culling stats, debug-draw controls, UI inspector); the
   console, the counters and the debug-draw layer have since landed, and what is
   left is under _The debug overlay, and what is left of it_ in
-  `docs/backlog.md`, with netcode's netgraph (`docs/backlog.md`, _Netgraph HUD,
-  LAN discovery_), which is unbuildable before the transport can measure itself.
-  _Changes it_: a sample that needs one of those sooner, which is the same
-  argument that moved the frame-timing core.
+  `docs/backlog.md`. Netcode's netgraph has landed too (2026-10-04,
+  `crcbl::lan::netgraph`, once the UDP transport could measure itself); what it
+  left is under _Netgraph HUD, LAN discovery_ in `docs/backlog.md`. _Changes
+  it_: a sample that needs one of those sooner, which is the same argument that
+  moved the frame-timing core.
 
 - **How does a module register with the panel — retained list or per frame?**
   Taken: **per frame**, `DebugPanel::add(&dyn DebugModule)` once per system the

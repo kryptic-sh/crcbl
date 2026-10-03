@@ -37,6 +37,7 @@ use super::packet::{
 };
 use super::rtt::RttEstimator;
 use super::sequence::{HALF_RANGE, sequence_greater_than};
+use super::window::{StatsWindow, WindowCounts};
 use crate::{Clock, MessageKind, TransportError};
 
 /// Reliable messages a sender may have unacknowledged, and so the width of the
@@ -241,6 +242,10 @@ pub struct EndpointStats {
     pub bytes_received: u64,
     /// Unreliable messages dropped on arrival: stale, or no room to deliver.
     pub unreliable_dropped: u64,
+    /// The same counts over the last [`super::STATS_WINDOW`] alone — where a
+    /// rate, or a loss figure that has not been smoothing for minutes, is
+    /// read from. See [`super::window`].
+    pub recent: WindowCounts,
 }
 
 /// What the endpoint remembers about a packet it sent.
@@ -291,6 +296,8 @@ pub struct Endpoint<C: Clock> {
     last_received: Duration,
     disconnects_left: u8,
     stats: EndpointStats,
+    /// What `stats` counts, bucketed by when, for [`EndpointStats::recent`].
+    window: StatsWindow,
 }
 
 impl<C: Clock> Endpoint<C> {
@@ -330,6 +337,7 @@ impl<C: Clock> Endpoint<C> {
             last_received: now,
             disconnects_left: 0,
             stats: EndpointStats::default(),
+            window: StatsWindow::default(),
         }
     }
 
@@ -339,13 +347,15 @@ impl<C: Clock> Endpoint<C> {
         self.state
     }
 
-    /// The netgraph's inputs.
+    /// The netgraph's inputs, with [`EndpointStats::recent`] read at the
+    /// clock's now.
     #[must_use]
     pub fn stats(&self) -> EndpointStats {
         EndpointStats {
             rtt: self.rtt.smoothed(),
             rtt_variance: self.rtt.variance(),
             rto: self.rtt.rto(),
+            recent: self.window.read(self.clock.now()),
             ..self.stats
         }
     }
@@ -491,6 +501,8 @@ impl<C: Clock> Endpoint<C> {
         self.last_received = now;
         self.stats.packets_received += 1;
         self.stats.bytes_received += datagram.len() as u64;
+        self.window
+            .count(now, |recent| recent.bytes_received += datagram.len() as u64);
         if ack_eliciting {
             self.unacked_eliciting += 1;
             if self.unacked_eliciting >= ACK_SNAPSHOT_INTERVAL {
@@ -551,6 +563,7 @@ impl<C: Clock> Endpoint<C> {
             );
             if resend {
                 self.stats.resends += 1;
+                self.window.count(now, |recent| recent.resends += 1);
             }
             self.unacked_eliciting = 0;
             return Some(self.record_sent(datagram, true, Some(fragment), now));
@@ -598,7 +611,7 @@ impl<C: Clock> Endpoint<C> {
         if let Some(evicted) = slot.take()
             && !evicted.counted
         {
-            count_fate(&mut self.stats, true);
+            count_fate(&mut self.stats, &mut self.window, now, true);
         }
         *slot = Some(SentPacket {
             sequence,
@@ -615,6 +628,8 @@ impl<C: Clock> Endpoint<C> {
         }
         self.stats.packets_sent += 1;
         self.stats.bytes_sent += datagram.len() as u64;
+        self.window
+            .count(now, |recent| recent.bytes_sent += datagram.len() as u64);
         datagram
     }
 
@@ -630,7 +645,7 @@ impl<C: Clock> Endpoint<C> {
             record.acked = true;
             if !record.counted {
                 record.counted = true;
-                count_fate(&mut self.stats, false);
+                count_fate(&mut self.stats, &mut self.window, now, false);
             }
             if record.ack_eliciting {
                 self.rtt.sample(now.saturating_sub(record.sent_at));
@@ -645,12 +660,12 @@ impl<C: Clock> Endpoint<C> {
                 self.largest_acked = Some(sequence);
             }
         }
-        self.detect_losses();
+        self.detect_losses(now);
     }
 
     /// Declare lost every packet [`PACKET_LOSS_THRESHOLD`] or more behind the
     /// largest acknowledged that was never acknowledged itself.
-    fn detect_losses(&mut self) {
+    fn detect_losses(&mut self, now: Duration) {
         let Some(largest) = self.largest_acked else {
             return;
         };
@@ -668,7 +683,7 @@ impl<C: Clock> Endpoint<C> {
                 && !record.counted
             {
                 record.counted = true;
-                count_fate(&mut self.stats, true);
+                count_fate(&mut self.stats, &mut self.window, now, true);
             }
             self.loss_scan_from = sequence.wrapping_add(1);
         }
@@ -759,13 +774,15 @@ impl<C: Clock> Endpoint<C> {
     }
 }
 
-/// Count one sent packet as acknowledged or lost, and fold it into the loss
-/// estimate.
-fn count_fate(stats: &mut EndpointStats, lost: bool) {
+/// Count one sent packet as acknowledged or lost, at `now`, and fold it into
+/// the loss estimate.
+fn count_fate(stats: &mut EndpointStats, window: &mut StatsWindow, now: Duration, lost: bool) {
     if lost {
         stats.packets_lost += 1;
+        window.count(now, |recent| recent.packets_lost += 1);
     } else {
         stats.packets_acked += 1;
+        window.count(now, |recent| recent.packets_acked += 1);
     }
     let sample = if lost { 1.0 } else { 0.0 };
     stats.packet_loss += (sample - stats.packet_loss) * LOSS_SMOOTHING;

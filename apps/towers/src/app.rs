@@ -1361,11 +1361,14 @@ impl HostedGame for Towers {
     ///
     /// The "lan" section is `crcbl::lan`'s: the port, the players and the
     /// snapshot's size against a datagram on a host, the session and the last
-    /// applied tick on a joiner. Solo has no connection to report on, so it
-    /// has no section. The netgraph `docs/plan/sample/07-towers.md` wants —
-    /// RTT, jitter, loss — is not built anywhere yet. The "audio" section is
-    /// there when the run plays sound — never headless, where there is no
-    /// [`Audio`] for it to report on.
+    /// applied tick on a joiner. Beside it the "net" section, the netgraph
+    /// `docs/plan/sample/07-towers.md` wants, is `crcbl::lan::netgraph`'s: a
+    /// row per peer on a host, the one link on a joiner — round trip,
+    /// jitter, loss, resends, bytes each way and the snapshot's size — with
+    /// a graph of the round trip and the snapshot. Solo has no connection to
+    /// report on, so it has neither. The "audio" section is there when the
+    /// run plays sound — never headless, where there is no [`Audio`] for it
+    /// to report on.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.stats);
         panel.add(&self.paths);
@@ -1376,8 +1379,14 @@ impl HostedGame for Towers {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(joining) = &self.joining {
             panel.add(joining.lan());
-        } else if let Some(lan) = self.game.lan_section() {
-            panel.add(lan);
+            panel.add(joining.lan().netgraph());
+        } else {
+            if let Some(lan) = self.game.lan_section() {
+                panel.add(lan);
+            }
+            if let Some(netgraph) = self.game.netgraph() {
+                panel.add(netgraph);
+            }
         }
     }
 
@@ -2231,6 +2240,70 @@ mod tests {
             !engine.menus().is_showing(),
             "the joining panel is still up"
         );
+    }
+
+    /// **A joiner's panel carries the netgraph beside the "lan" section, and
+    /// the host's shows a row per peer.** A `--join` to a host on loopback,
+    /// with the overlay on: once the joiner plays, its panel's sections end
+    /// "lan", "net", and the "net" section's one link is to the host with a
+    /// round trip measured. The host's netgraph lists its own player — an
+    /// in-memory link, which measures nothing — and the joiner, measured.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_joiner_and_its_host_show_the_netgraph() {
+        use crate::lan::tests::{FRAME, MAX_FRAMES, PAUSE};
+
+        let (mut host, address) = loopback_host();
+        let mut engine = scripted(&Options {
+            lan: crcbl::lan::LanMode::Join(address),
+            ..headless_with(4000, |common| common.debug_overlay = Some(true))
+        });
+        let measured = |netgraph: &crcbl::lan::netgraph::Netgraph| {
+            netgraph
+                .links()
+                .iter()
+                .filter(|link| link.reading.stats.is_some_and(|stats| stats.rtt.is_some()))
+                .count()
+        };
+        for _ in 0..MAX_FRAMES {
+            let joiner = engine.game().game().netgraph().map_or(0, measured);
+            let hosted = host.netgraph().map_or(0, measured);
+            if joined(&engine).is_some() && joiner == 1 && hosted == 1 {
+                break;
+            }
+            host.tick();
+            host.frame(FRAME);
+            frames(&mut engine, 1);
+            std::thread::sleep(PAUSE);
+        }
+        assert_eq!(joined(&engine), Some(address), "the join never played");
+        frames(&mut engine, 1);
+
+        let titles: Vec<&str> = engine
+            .debug()
+            .panel
+            .sections()
+            .iter()
+            .map(crcbl::ui::DebugSection::title)
+            .collect();
+        assert!(titles.ends_with(&["lan", "net"]), "{titles:?}");
+        let net = engine.debug().panel.sections().last().expect("a section");
+        let links: Vec<&str> = net
+            .rows()
+            .iter()
+            .map(|row| row.label.as_str())
+            .filter(|label| *label == "host" || label.starts_with("peer "))
+            .collect();
+        assert_eq!(links, ["host"], "a joiner shows its one link");
+        assert_eq!(
+            engine.game().game().netgraph().map(measured),
+            Some(1),
+            "the link's round trip is measured"
+        );
+
+        let hosted = host.netgraph().expect("a host's netgraph");
+        assert_eq!(hosted.links().len(), 2, "its own player and the joiner");
+        assert_eq!(measured(hosted), 1, "only the joiner's link is measured");
     }
 
     /// A dedicated server on loopback playing `map`, and where a joiner

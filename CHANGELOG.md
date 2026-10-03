@@ -16,6 +16,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_net::reliable::EndpointStats` gained `recent`, and
+  `crcbl_ui::DebugStyle` gained `graph`** (see Added: the netgraph). A struct
+  literal of either must name the new field — `WindowCounts::default()` and any
+  colour, or `..Default::default()`.
+
 - **`crcbl_ui::PointerInput` gained `secondary_pressed`, `NavInput` gained
   `menu` and `jump`, and the reserved `ui` context gained `ui_menu`** (see
   Added: context menus, and the pop-up layer). A struct literal of either type
@@ -639,6 +644,36 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **The netgraph: a "net" section of the F3 panel showing each link of a LAN
+  session.** `crcbl::lan::netgraph::Netgraph`, kept by `LanHost` and `LanClient`
+  and fed every frame (`LanHost::netgraph`, `LanClient::netgraph`), lists a row
+  per peer on a host and the one link to the host on a joiner: round trip and
+  jitter (the packet layer's RFC 6298 estimate), loss and resends over the last
+  second, bytes a second in and out, and the size of the last snapshot — with a
+  rolling graph of the round trip and of the snapshot against a datagram's
+  payload under the figures. A link that measures nothing — a listen host's own
+  player over an in-memory pair, or a link still connecting — reads as dashes,
+  not as a perfect link. Towers (hosting, joining, or waiting on a join) and the
+  sandbox add it beside their "lan" section; it toggles with the rest of the
+  panel and starts hidden in a release build, as the overlay does. Underneath:
+  - `crcbl_net::reliable::EndpointStats::recent` (a
+    `crcbl_net::reliable::WindowCounts`) is what the link did over the last
+    `STATS_WINDOW` (one second, in `STATS_BUCKET` steps of 100 ms, complete
+    buckets only): bytes each way, packets acknowledged and lost, and resends,
+    with `loss()`, `sent_per_second()` and `received_per_second()`. The
+    session-long counters and the smoothed `packet_loss` are unchanged.
+  - `crcbl_net::Transport::link_stats` reports a link's `EndpointStats`;
+    `UdpTransport` answers once keyed, `ConditionSimulator` passes its inner
+    transport's through, and the default is `None`.
+  - `crcbl_server::Host::peer_link_stats(peer)` reads a peer's through its
+    transport, and `PeerStats::last_snapshot_bytes` is the sealed length of the
+    last snapshot a peer's transport accepted.
+    `crcbl_client::Client::last_snapshot_bytes` is the same figure at the
+    client's end.
+  - `crcbl_ui::DebugSection::graph(label, samples, scale)` draws a bar per
+    sample under a section's rows (`DebugGraph`, `GRAPH_HEIGHT`,
+    `GRAPH_BAR_WIDTH`, `MIN_BAR_HEIGHT`), in `DebugStyle::graph`'s colour.
 
 - **The editor edits the scene's environment in the inspector.** With nothing
   selected the inspector's scene pane draws `env.ron` under the add buttons: the
