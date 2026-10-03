@@ -57,7 +57,9 @@
 //! `crcbl-ui`'s `default.css` draws the frames with, and emits the scrim, each
 //! frame and the text on it in paint order.
 
-use crcbl_sprite::load::{Loaded, load_baked};
+#[cfg(test)]
+use crcbl_sprite::load::Loaded;
+use crcbl_sprite::load::load_baked;
 use crcbl_ui::image::{AtlasError, AtlasImage, ImageAtlas, NineSliceImage};
 use crcbl_ui::menu::MenuSkin;
 use crcbl_ui::{ButtonSkin, SkinInsets};
@@ -117,7 +119,10 @@ pub fn menu_skin(images: &mut ImageAtlas) -> Result<MenuSkin, AtlasError> {
             .get(index)
             .expect("menu.crpix has the five frames this module names")
             .rect;
-        images.register(rect.w, rect.h, &frame_pixels(&art, index))
+        let pixels = art
+            .frame_pixels(index)
+            .expect("the frame was looked up above");
+        images.register(rect.w, rect.h, &pixels)
     };
     let panel = register(PANEL_FRAME)?;
     let idle = register(IDLE_FRAME)?;
@@ -134,19 +139,6 @@ pub fn menu_skin(images: &mut ImageAtlas) -> Result<MenuSkin, AtlasError> {
         },
         scrim,
     })
-}
-
-/// Frame `index` of a loaded sheet, as its own block of RGBA cut out of the
-/// strip, rows top to bottom.
-fn frame_pixels(loaded: &Loaded, index: usize) -> Vec<u8> {
-    let rect = loaded.sheet.frames[index].rect;
-    let stride = loaded.image.width as usize * 4;
-    (0..rect.h as usize)
-        .flat_map(|row| {
-            let start = (rect.y as usize + row) * stride + rect.x as usize * 4;
-            loaded.image.pixels[start..start + rect.w as usize * 4].to_vec()
-        })
-        .collect()
 }
 
 /// Decodes the baked sheet at *this crate's* bake rate, for the tests below.
@@ -295,7 +287,7 @@ mod tests {
         let art = baked("menu", MENU_PNG, MENU_JSON);
         let frames: Vec<Vec<u8>> = [IDLE_FRAME, HOVERED_FRAME, PRESSED_FRAME]
             .iter()
-            .map(|i| frame_pixels(&art, *i))
+            .map(|i| art.frame_pixels(*i).expect("the sheet has the frame"))
             .collect();
         for (index, frame) in frames.iter().enumerate() {
             assert_eq!(frame.len(), 16 * 16 * 4, "frame {index} is not 16x16");
@@ -383,7 +375,7 @@ mod tests {
             (SCRIM_FRAME, skin.scrim),
         ] {
             assert_eq!((image.width, image.height), (16, 16), "frame {index}");
-            let expected = frame_pixels(&art, index);
+            let expected = art.frame_pixels(index).expect("the sheet has the frame");
             let mut actual = Vec::with_capacity(expected.len());
             for row in 0..16 {
                 let start = ((image.y as usize + row) * page + image.x as usize) * 4;

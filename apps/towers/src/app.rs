@@ -30,25 +30,23 @@
 //! `docs/plan/sample/07-towers.md` needs for co-op: four players each have their
 //! own cursor and one server has the purse.
 //!
-//! # This sample is played with the keyboard
+//! # The keyboard, or a click on a plot
 //!
-//! No [`pointer_event`](HostedGame::pointer_event) and no
-//! [`touch_event`](HostedGame::touch_event) override: the two lists are picked
-//! through with keys rather than clicked on. **The browser demo does not change
-//! that in the window**, which is a decision rather than an omission: what a tap
-//! wants to land on is the build menu
-//! `docs/plan/sample/07-towers.md`'s slice 3b brings with the `.crpix` art, and a
-//! hit test written against the untextured lists [`crate::page`] draws today
-//! would be thrown away with it.
+//! Every command has a key, and a pointer reaches the same commands through
+//! the build menu: a click or a tap on a plot opens [`crate::build_menu`] there,
+//! and a pick in it is **the keys' own command** — it moves the cursor to the
+//! plot, picks the kind and latches the build (or the upgrade) for the next
+//! tick, where [`Towers::tick`] seals it exactly as it seals `B`. So there is no
+//! second command path for the server to disagree with, and the keyboard is
+//! untouched by the menu being open. [`pointer_event`](HostedGame::pointer_event)
+//! is overridden for that and nothing else; there is no
+//! [`touch_event`](HostedGame::touch_event) override, because a finger's primary
+//! contact already arrives as the pointer and a tap is one finger.
 //!
-//! **What a phone gets instead is a row of buttons on the page**, outside the
-//! canvas: `web/demos/towers/main.js` puts the plot cursor, the three kinds,
-//! `B` and `U` under the field and **synthesises the key each stands for**. That
-//! is the same input path a keyboard takes — the shell's own `keydown` listener
-//! — rather than a second one, so there is nothing for the two to disagree
-//! about, and it is thrown away with the hint text rather than built into the
-//! engine. The pointer and the finger **inside the canvas** are still owed, and
-//! that document records them.
+//! **The page still has its row of buttons**, outside the canvas:
+//! `web/demos/towers/main.js` puts the plot cursor, the three kinds, `B` and `U`
+//! under the field and synthesises the key each stands for. It is kept while the
+//! browser gate's canvas click is unwritten — `docs/backlog.md` says why.
 //!
 //! # `C` is the dev camera's
 //!
@@ -89,6 +87,7 @@ use crcbl::prelude::*;
 use crcbl::shell::DisplayMode;
 
 use crate::audio::Audio;
+use crate::build_menu::{BuildMenu, Pick};
 use crate::cue::Watcher;
 use crate::dev_camera::{DevCamera, Mode, Steer};
 use crate::game::{Controls, Game, RenderState, Stats};
@@ -300,6 +299,13 @@ pub struct Towers {
     /// A `RESTART` pressed on the pause menu, waiting for the next tick. The
     /// menu cannot reach the stage — see [`crate::menu`].
     pending_restart: bool,
+    /// A build, and an upgrade, picked in the build menu and waiting for the
+    /// next tick — where they stand in for `B` and `U`, on the plot the pick
+    /// moved the cursor to. See [`Towers::apply_pick`].
+    pending_build: bool,
+    pending_upgrade: bool,
+    /// The menu a click or a tap on a plot opens — see [`crate::build_menu`].
+    build_menu: BuildMenu,
     /// Which plot the build cursor is on. **Presentation**: it never crosses
     /// the wire, and what does is the plot number a build command names.
     selected: u8,
@@ -561,6 +567,29 @@ impl Towers {
         &self.page
     }
 
+    /// The build menu, for this crate's own tests.
+    pub const fn build_menu(&self) -> &BuildMenu {
+        &self.build_menu
+    }
+
+    /// Does what a pick in the build menu asks, the way the keys would: the
+    /// cursor goes to its plot, a build's kind becomes the picked kind, and the
+    /// build or the upgrade is latched for the next tick — which seals it as
+    /// it seals `B` or `U`.
+    fn apply_pick(&mut self, pick: Pick) {
+        match pick {
+            Pick::Build { plot, kind } => {
+                self.selected = plot;
+                self.kind = kind;
+                self.pending_build = true;
+            }
+            Pick::Upgrade { plot } => {
+                self.selected = plot;
+                self.pending_upgrade = true;
+            }
+        }
+    }
+
     /// The dev camera, for this crate's own tests.
     pub const fn dev_camera(&self) -> &DevCamera {
         &self.dev_camera
@@ -768,6 +797,9 @@ impl Towers {
         self.dev_camera = DevCamera::new(game.map());
         self.pending_keys.clear();
         self.pending_restart = false;
+        self.pending_build = false;
+        self.pending_upgrade = false;
+        self.build_menu.close();
         self.stats = Stats::default();
         self.notice = None;
         // Another game's field: nothing in it was heard happening.
@@ -891,8 +923,10 @@ fn assemble<S: Shell + ?Sized>(
     booted: Booted<S, Gpu>,
     options: &Options,
 ) -> Result<Loop<S>, TowersError> {
-    let booted = crcbl::engine::arm_screenshot(booted, &options.common);
+    let mut booted = crcbl::engine::arm_screenshot(booted, &options.common);
     let paths = booted.gpu.paths();
+    let build_menu = BuildMenu::new(booted.gpu.images_mut())
+        .map_err(|error| TowersError::Game(crate::game::GameError::Art(error)))?;
     let vault = Vault::player(options.common.headless);
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
     let (game, joining) = open_game(options, &vault).map_err(TowersError::Game)?;
@@ -904,6 +938,9 @@ fn assemble<S: Shell + ?Sized>(
             actions: action_map(),
             pending_keys: Vec::new(),
             pending_restart: false,
+            pending_build: false,
+            pending_upgrade: false,
+            build_menu,
             selected: 0,
             kind: tower::Kind::default(),
             dev_camera,
@@ -1102,15 +1139,16 @@ impl HostedGame for Towers {
             }
         }
 
+        // A pick in the build menu is the key it stands in for. Taken before
+        // the frame is built, so a pick and a key on one tick are one command
+        // and neither latch outlives the tick.
+        let picked_build = core::mem::take(&mut self.pending_build);
+        let picked_upgrade = core::mem::take(&mut self.pending_upgrade);
         self.game.set_controls(Controls {
-            place: self
-                .actions
-                .just_pressed(ACTION_BUILD)
+            place: (self.actions.just_pressed(ACTION_BUILD) || picked_build)
                 .then_some(self.selected),
             kind: self.kind,
-            upgrade: self
-                .actions
-                .just_pressed(ACTION_UPGRADE)
+            upgrade: (self.actions.just_pressed(ACTION_UPGRADE) || picked_upgrade)
                 .then_some(self.selected),
             start_wave: self.actions.just_pressed(ACTION_WAVE),
             restart: self.actions.just_pressed(ACTION_RESTART)
@@ -1138,6 +1176,15 @@ impl HostedGame for Towers {
         // Queued rather than fed straight in: the map's edges belong to the
         // tick, not to the frame. See [`Towers::pending_keys`].
         self.pending_keys.push((key, pressed));
+    }
+
+    /// The pointer, for the build menu — and nothing else, while the lobby is
+    /// open: the lobby's panel is the loop's, and it has had the press.
+    fn pointer_event(&mut self, pointer: crcbl::engine::PointerUpdate) {
+        if self.in_the_lobby() {
+            return;
+        }
+        self.build_menu.pointer(pointer);
     }
 
     /// The lobby's connect address, typed. Nothing else here takes text.
@@ -1277,6 +1324,15 @@ impl HostedGame for Towers {
             let bars = crate::bars::bars(&self.render_state, &camera, gpu.extent());
             crate::bars::draw(draw_list, &bars);
         }
+        let menu_frame = crate::build_menu::Frame {
+            camera: &camera,
+            extent: gpu.extent(),
+            state: &self.render_state,
+            plots: self.game.map().plots(),
+            live: !frame.paused && !self.in_front(),
+        };
+        // The hover outline under the page too, for the bars' reason.
+        self.build_menu.draw_highlight(draw_list, &menu_frame);
         if let Some((line, _)) = &self.notice {
             crate::page::draw_notice(draw_list, gpu.atlas(), gpu.extent(), line);
         }
@@ -1289,6 +1345,11 @@ impl HostedGame for Towers {
             self.selected,
             self.kind,
         );
+        // Over the page: the menu opens where the plot is, which may be under
+        // a panel's corner.
+        if let Some(pick) = self.build_menu.frame(draw_list, gpu.atlas(), &menu_frame) {
+            self.apply_pick(pick);
+        }
     }
 
     /// **Towers' three modules, and a fourth during a LAN session.**
@@ -1406,6 +1467,8 @@ crcbl::impl_pending_loop!(
 
 #[cfg(test)]
 mod audio_tests;
+#[cfg(test)]
+mod build_menu_tests;
 #[cfg(test)]
 mod dev_camera_tests;
 #[cfg(test)]

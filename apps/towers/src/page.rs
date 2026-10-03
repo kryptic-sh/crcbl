@@ -43,14 +43,14 @@
 //! **A price a player cannot pay is drawn in the warning colour**, on both
 //! lists, which is the whole of why a refused build is never a surprise.
 //!
-//! # Rule 11 is owed, and by more than this panel
+//! # Rule 11 is half met, and not by this panel
 //!
-//! No `.crpix` art anywhere: the tower and creep icons, the wave banner and the
-//! build menu that `docs/plan/sample/07-towers.md` asks for are all still
-//! untextured rectangles and the engine's built-in font. This sample is not
-//! claiming rule 11's exemption — a tower defense is exactly the kind of game
-//! that should have pixel art — it simply has not got there yet, and that
-//! document's status section says so.
+//! The build menu a click opens on a plot draws `.crpix` icons
+//! (`crate::build_menu`, `crate::art`), but these lists, the creep icons and the
+//! wave banner are still untextured rectangles and the engine's built-in font.
+//! This sample is not claiming rule 11's exemption — a tower defense is exactly
+//! the kind of game that should have pixel art — and
+//! `docs/plan/sample/07-towers.md`'s status section says what is left.
 //!
 //! # One column, because the debug panel owns the other one
 //!

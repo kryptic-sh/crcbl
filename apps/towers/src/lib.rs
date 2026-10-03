@@ -1,9 +1,10 @@
 //! Towers — co-op tower defense, and the ladder's flagship.
 //!
-//! `docs/plan/sample/07-towers.md`, **milestone 1's slices 1, 2 and 3a, slice
-//! 3b's part B, and slices 4 and 5**: the solo loop on one map, natively and in
-//! a browser, with the combat content milestone 1 asks for, heard and wearing
-//! health bars, a dev fly/walk camera, saved and resumed between waves.
+//! `docs/plan/sample/07-towers.md`, **milestone 1's slices 1 to 5**: the solo
+//! loop on one map, natively and in a browser, with the combat content
+//! milestone 1 asks for, a build menu a click or a tap opens on a plot, heard
+//! and wearing health bars, a dev fly/walk camera, saved and resumed between
+//! waves.
 //! The map is scene data — [`scene`] reads it out of a
 //! `.scn/` directory the editor opens, which is milestone 2's first step. Three kinds of tower and an upgrade tier each,
 //! three kinds of creep, ten scripted waves; creeps walk a path, towers shoot,
@@ -86,14 +87,12 @@
 //!
 //! # What is not here yet
 //!
-//! **Slice 3b's art half is owed.** No `.crpix` art and so no build menu worth
-//! the name (rule 11 is owed, not exempted). Its other half is here: every event
-//! on the field is a sound played from where it happened ([`audio`], read off
-//! the replicated field by [`cue`]), and every creep wears a health bar
-//! ([`bars`]). There is
-//! no pointer or touch input **inside the canvas** either, on the page as well
-//! as in the window — [`app`] says why a tap waits for the build menu, and what
-//! a touch player gets on the page instead.
+//! **Rule 11 is half met.** A click or a tap on a plot opens [`build_menu`]
+//! there, with the sample's first `.crpix` art ([`art`]) — placeholder icons,
+//! typed by hand — while the creep icons, the wave banner and [`page`]'s lists
+//! are still untextured. Every event on the field is a sound played from where
+//! it happened ([`audio`], read off the replicated field by [`cue`]), and every
+//! creep wears a health bar ([`bars`]).
 //!
 //! **A run saves and resumes between waves** — [`save`] has the rule, the
 //! format and where it is kept.
@@ -112,8 +111,10 @@
 
 pub mod app;
 mod args;
+pub mod art;
 pub mod audio;
 pub mod bars;
+pub mod build_menu;
 pub mod camera;
 pub mod creep;
 pub mod cue;

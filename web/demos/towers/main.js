@@ -3,17 +3,18 @@
 // Everything shared with the other demos — boot order, the log drain, the
 // canvas, the status bar — is `web/engine/demo.js`. What is here is this
 // sample's ten export names, the one line of hint text under its canvas, and
-// the one thing no other demo has: a row of buttons a visitor with no keyboard
-// can play the game with.
+// the one thing no other demo has: a row of buttons under the field that plays
+// the game down the keyboard's own path.
 //
 // **The names are written out literally.** `web/tools/check-exports.mjs` scans
 // this shim for `.__crcbl_…` to learn which exports the JS depends on, and then
 // checks the built `.wasm` actually has them; a template literal would hide
 // every one of them from it.
 //
-// `hint` leads with the build keys because they are the only thing on this page
-// a visitor has to do: the waves arrive on their own after the build phase, and
-// a run that is won or lost plays itself again. `N` brings the next wave
+// `hint` leads with building because it is the only thing on this page a
+// visitor has to do — a click or a tap on a plot opens the build menu, and the
+// keys do the same — while the waves arrive on their own after the build phase,
+// and a run that is won or lost plays itself again. `N` brings the next wave
 // forward rather than being the only way to see one — see
 // `apps/towers/src/wave.rs`.
 //
@@ -31,12 +32,13 @@ import { bootDemo } from '../../engine/demo.js';
  * **WHY THIS DEMO HAS THEM AND NO OTHER DOES.** Towers is the one sample on the
  * site whose whole subject is a command: a visitor who cannot build a tower is
  * watching a field play itself and cannot touch the thing the page exists to
- * show. A phone has no keyboard, and
- * `apps/towers/src/app.rs` says why a tap **inside the canvas** waits for the
- * build menu `docs/plan/sample/07-towers.md`'s slice 3b brings — a hit test
- * written against the untextured lists the overlay draws today would be thrown
- * away with them. These buttons are outside the canvas, so they are thrown away
- * with the hint text instead of with engine code.
+ * show. A tap **inside the canvas** reaches the game now — it opens the build
+ * menu on the plot it lands on, `apps/towers/src/build_menu.rs` — and these
+ * buttons predate it. **They stay while the browser gate clicks them** rather
+ * than the canvas: `web/tools/browser-e2e.mjs`'s `towers` row reads one of them
+ * reach the game, and moving that check into the canvas is unwritten —
+ * `docs/backlog.md` says what it would take. They are outside the canvas, so
+ * they go with the hint text rather than with engine code.
  *
  * **THEY SYNTHESISE THE KEY RATHER THAN CALLING ANYTHING.** Each dispatches the
  * `keydown`/`keyup` pair `web/engine/shell.js` already listens for on the
@@ -65,7 +67,7 @@ const BUTTONS = [
 
 bootDemo({
   init,
-  hint: 'LEFT/RIGHT pick a build plot · 1/2/3 pick a tower kind (bolt, splash, slow) · B builds it · U steps the tower on the plot up a tier · N sends the next wave now · R restarts the run · ESC opens the panel · F3 shows the stats · F11 fullscreen',
+  hint: 'Click or tap a plot to build or upgrade there · LEFT/RIGHT pick a build plot · 1/2/3 pick a tower kind (bolt, splash, slow) · B builds it · U steps the tower on the plot up a tier · N sends the next wave now · R restarts the run · ESC opens the panel · F3 shows the stats · F11 fullscreen',
   savedLabel: 'Nothing',
   bind: (ex) => ({
     prepare: () => ex.__crcbl_towers_prepare(),
@@ -110,7 +112,7 @@ function addControlRow() {
   // name because the shared ids in `web/templates/demo-window.html` are not.
   row.id = 'towers-controls';
   const label = document.createElement('span');
-  label.textContent = 'Play with a finger:';
+  label.textContent = 'The keys, as buttons:';
   row.append(label);
 
   for (const { label: text, code, key } of BUTTONS) {

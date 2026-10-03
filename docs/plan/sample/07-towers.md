@@ -92,9 +92,9 @@ above is a requirement rather than an aspiration.
 
 ## Where this stands
 
-**Milestone 1's first three slices are built.** `apps/towers` is the solo loop
-on one map, with the combat content this milestone's scope line asks for: creeps
-of three kinds walk a path as kinematic bodies, **three** kinds of tower answer
+**Every slice in the table below is built.** `apps/towers` is the solo loop on
+one map, with the combat content this milestone's scope line asks for: creeps of
+three kinds walk a path as kinematic bodies, **three** kinds of tower answer
 them — a single-target bolt, a splash tower whose shot bursts where it lands,
 and a slow tower that holds what is inside its reach — each with one upgrade
 tier, a kill pays gold, a scripted table of **ten** waves runs out, and the run
@@ -148,14 +148,14 @@ that tells a working touch control from a rendered one. Every price and label it
 writes out is held against this crate's own tables by `apps/towers`'
 `the_browser_gates_game_constants_are_the_ones_this_crate_declares`.
 
-| Slice | What it is                                                                                                                                                                                                                             | Status                                                                     |
-| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| 1     | Solo loop on the hardcoded map: the polyline path, one creep archetype, one single-target tower, three scripted waves, shared gold and lives, the three commands over the loopback, a fixed overhead camera, the debug panel           | **Built 2026-09-07**                                                       |
-| 2     | The browser demo: `src/web.rs`, a `towers` directory under `web/demos/`, the `DEMOS` row, the Pages steps, the feature card and the browser gate                                                                                       | **Built 2026-09-07**                                                       |
-| 3a    | The combat content: the splash and slow towers, one upgrade tier each behind an `UpgradeTower` command, the tanky and swarm creeps, all ten waves, a material per kind and a burst instance at a splash impact                         | **Built 2026-09-10**                                                       |
-| 3b    | The presentation content milestone 1 still owes: `.crpix` art and the build menu it makes possible, spatial audio, world-space health bars                                                                                             | **Part B built 2026-10-04** (audio, bars); the art and the build menu owed |
-| 4     | The dev fly/walk camera — `CharacterController` on this map, which is the controller's first real terrain                                                                                                                              | **Built 2026-10-03**                                                       |
-| 5     | Save and resume between waves (topic 14): `S` and an autosave at each wave's end, refused mid-wave; the lobby's _Continue_ and `--resume` (solo, host, dedicated server); `save`/`load` at a server's console; the browser's OPFS save | **Built 2026-10-03**                                                       |
+| Slice | What it is                                                                                                                                                                                                                             | Status                                                                            |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| 1     | Solo loop on the hardcoded map: the polyline path, one creep archetype, one single-target tower, three scripted waves, shared gold and lives, the three commands over the loopback, a fixed overhead camera, the debug panel           | **Built 2026-09-07**                                                              |
+| 2     | The browser demo: `src/web.rs`, a `towers` directory under `web/demos/`, the `DEMOS` row, the Pages steps, the feature card and the browser gate                                                                                       | **Built 2026-09-07**                                                              |
+| 3a    | The combat content: the splash and slow towers, one upgrade tier each behind an `UpgradeTower` command, the tanky and swarm creeps, all ten waves, a material per kind and a burst instance at a splash impact                         | **Built 2026-09-10**                                                              |
+| 3b    | The presentation content milestone 1 still owes: `.crpix` art and the build menu it makes possible, spatial audio, world-space health bars                                                                                             | **Built 2026-10-04** (part A the build menu and its icons, part B audio and bars) |
+| 4     | The dev fly/walk camera — `CharacterController` on this map, which is the controller's first real terrain                                                                                                                              | **Built 2026-10-03**                                                              |
+| 5     | Save and resume between waves (topic 14): `S` and an autosave at each wave's end, refused mid-wave; the lobby's _Continue_ and `--resume` (solo, host, dedicated server); `save`/`load` at a server's console; the browser's OPFS save | **Built 2026-10-03**                                                              |
 
 **What these slices prove is narrower than the "Proves" list above**, and it is
 three `crcbl-phys` L0 queries this document named towers as the forcing function
@@ -195,28 +195,27 @@ kinematic bodies, exactly as the bullet below predicted; `docs/backlog.md`
 carries it rather than the sample working around it.
 
 **What the slices do not have, stated as gaps rather than as decisions.** Rule
-11 is **owed, not exempted**: there is no `.crpix` art anywhere, so the tower
-and creep icons, the wave banner and the two build lists are untextured
-rectangles and the built-in font. Rule 8 is **met for the field's events and no
-further** — see the slice 3b bullet below: every event is a cue played from
-where it happened, heard from the camera, but of the "audio grammar in anger"
-bullet above only the panning with the camera is built. Nothing tells an
-off-screen wave apart by ear beyond what the grammar's distance and direction
-already give, and nothing muffles a lane behind terrain — `crcbl-audio` has no
-occlusion, and this field has no terrain to be behind. Rule 12 is half met — the
-three selectors are on the debug panel, the `[HUD]` line and the summary, but
-there is no flag to hold a path below what the device offers. **There is no
-pointer or touch input inside the canvas**, in the window or on the page: what a
-tap wants to land on is the build menu slice 3b brings with the `.crpix` art, so
-a hit test against the untextured lists `page` draws today would be written to
-be thrown away. What a phone has instead is a row of buttons **outside** the
-canvas — plot, kind, build and upgrade, in `web/demos/towers/main.js` — which
-synthesise the very `keydown`/`keyup` pair the canvas already listens for, so a
-finger and a keyboard reach the game down one path and the row is thrown away
-with the hint text rather than with engine code. The debug panel has a "lan"
-section during a LAN session — the port, the players and the largest snapshot on
-a host, the session on a joiner — but the netgraph the network module was
-specified for (RTT, jitter, loss, tick-lead) is not built anywhere yet.
+11 is **half met, not exempted**: the build menu's icons are `.crpix`, but
+placeholder art typed by hand, and the creep icons, the wave banner and the two
+build lists `page` draws are still untextured rectangles and the built-in font.
+Rule 8 is **met for the field's events and no further** — see the slice 3b part
+B bullet below: every event is a cue played from where it happened, heard from
+the camera, but of the "audio grammar in anger" bullet above only the panning
+with the camera is built. Nothing tells an off-screen wave apart by ear beyond
+what the grammar's distance and direction already give, and nothing muffles a
+lane behind terrain — `crcbl-audio` has no occlusion, and this field has no
+terrain to be behind. Rule 12 is half met — the three selectors are on the debug
+panel, the `[HUD]` line and the summary, but there is no flag to hold a path
+below what the device offers. **The pointer and a finger reach the game inside
+the canvas** through the build menu (slice 3b part A, below); the page also
+keeps its row of buttons **outside** the canvas — plot, kind, build and upgrade,
+in `web/demos/towers/main.js` — which synthesise the very `keydown`/`keyup` pair
+the canvas listens for, because the browser gate still clicks the row rather
+than the canvas and moving that check is unwritten (`docs/backlog.md`). The
+debug panel has a "lan" section during a LAN session — the port, the players and
+the largest snapshot on a host, the session on a joiner — but the netgraph the
+network module was specified for (RTT, jitter, loss, tick-lead) is not built
+anywhere yet.
 
 **What it is waiting on, and it is not one thing.**
 
@@ -240,6 +239,24 @@ specified for (RTT, jitter, loss, tick-lead) is not built anywhere yet.
   with no ECS system, which is fine for a map — the scene is read into a `Map`
   and the stage plays on that — and would not be for anything the editor should
   place that moves.
+- **A click or a tap on a plot opens a build menu there (slice 3b part A,
+  2026-10-04).** `crate::build_menu` picks the plot under the pointer with a ray
+  through the pixel against each plot's pad and tower, outlines it, and on a
+  press opens a `crcbl::ui` pop-up at the pad: every tower kind with its icon
+  and price on a free plot, greyed when the purse cannot reach it, or the
+  tower's upgrade and price — `MAX TIER` once there is none. **A pick is the
+  keys' command**: it moves the cursor to the plot, picks the kind and latches
+  the build or the upgrade for the next tick, so it is sealed into the same four
+  bytes, validated by the same server and refused on the page as a key is
+  (`a_pick_sends_exactly_the_command_the_keys_send` holds a clicked run and a
+  keyed one to the same stage, tick for tick). A press outside the menu closes
+  it and is spent. A phone's tap is the pointer's press and release, held a
+  frame apart when they arrive together. The keyboard plays as it did, with the
+  menu open or shut, and opening and closing it leaves the stage hash alone. The
+  icons are the sample's first `.crpix` art (`assets/icons.crpix`, baked by
+  `build.rs` and registered by `crate::art`), typed by hand as placeholders.
+  **Not seen on a device**, and **the browser gate is unverified locally** and
+  does not reach into the canvas: every check of the menu is headless.
 - **The field is heard, and its creeps wear health bars (slice 3b part B,
   2026-10-04).** Every event is a procedural sound played through
   `crcbl-audio`'s spatial grammar from where it happened (`crate::audio`,

@@ -228,6 +228,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Lobby` and `Joining` variants (see Added: towers opens on a lobby), and
   `MenuAction` a `Lobby(lobby::Pick)` variant.
 
+- **`crcbl_towers::GameError` has an `Art` variant** (see Added: towers has a
+  build menu): the build menu's icons not fitting the UI pass's image atlas,
+  which stops start-up. An exhaustive `match` over it must name the new arm.
+
 - **`crcbl_towers`' map is a value rather than constants** (see Added):
   `map::PATH`, `LEGS`, `PLOTS`, `MAX_BOLTS`, `MAX_BURSTS`, the mesh slots after
   the lane (`PAD_MESH` … `MESHES`) and the crate-root `PLOTS` re-export are
@@ -809,6 +813,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and `tag`, `BurstView` gains `tag`, and `Creep` gains `numbered` and `id`; the
   snapshot carries a creep's health and a creep's and a burst's tag (see
   Breaking).
+- **Towers has a build menu in the canvas, played with the pointer or a finger**
+  (`docs/plan/sample/07-towers.md` slice 3b, part A;
+  `crcbl_towers::build_menu`). A click or a tap on a plot opens a menu at its
+  pad: on a free plot every tower kind with its icon and price, greyed when the
+  purse cannot reach it; on a built tower its upgrade and price, or `MAX TIER`.
+  A pick sends the very command the keys send — the cursor goes to the plot, the
+  kind is picked and the build or upgrade is latched for the next tick — so the
+  server validates it and a refusal shows as a key's does. The plot under the
+  pointer is outlined, picked by a ray through the pixel against each plot's pad
+  and tower. The menu is a `crcbl_ui::tree` pop-up at a point, styled with the
+  context menu's classes, so a press outside closes it and is spent. A phone's
+  tap — press and release in one frame — is a click. The keyboard plays exactly
+  as before, and opening and closing the menu leaves the stage hash alone. The
+  icons are the sample's first `.crpix` art, `apps/towers/assets/icons.crpix`,
+  baked by a new `build.rs`: hand-typed placeholder art for each kind and the
+  upgrade. `Towers::build_menu` exposes the menu.
+- **`crcbl_sprite::load::Loaded::frame_pixels`** cuts one frame of a loaded
+  sheet out as its own block of RGBA8, for registering into an image atlas —
+  what `crcbl_render::menu_skin` did with a private copy, now shared.
 - **`HostedGame::exiting`**: a game's last word on the way out. `Loop::finish`
   calls it once, with the run's `ExitReason`, before the summary and before the
   GPU and the window are released — on every way a run ends, a browser page's
@@ -5305,6 +5328,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **The towers demo page says a click or a tap on a plot builds**: the hint
+  under the canvas leads with the build menu (see Added: towers has a build
+  menu), and the row of buttons under the field is labelled as the keys it
+  presses. The row itself is unchanged, and so is the browser gate that clicks
+  it.
 
 - **The editor's command model is `crcbl_scene::edit`** (reached as
   `crcbl::scene::edit`). `EditCommand`, `SystemRow`, `UndoLog`, `Gesture`,

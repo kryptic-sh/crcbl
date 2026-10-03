@@ -56,6 +56,29 @@ pub struct Loaded {
     pub image: Rgba8,
 }
 
+impl Loaded {
+    /// Frame `index`'s texels, cut out of the sheet as a block of tightly
+    /// packed RGBA8 of their own, rows top to bottom — what an image atlas
+    /// registers one picture from. `None` past the last frame.
+    ///
+    /// The cut cannot run off the image: [`load`] refuses a sidecar whose
+    /// frame lies outside the sheet ([`SheetError::FrameOutsideSheet`]) or a
+    /// sheet whose size is not the PNG's.
+    #[must_use]
+    pub fn frame_pixels(&self, index: usize) -> Option<Vec<u8>> {
+        let rect = self.sheet.frames.get(index)?.rect;
+        let stride = self.image.width as usize * 4;
+        Some(
+            (0..rect.h as usize)
+                .flat_map(|row| {
+                    let start = (rect.y as usize + row) * stride + rect.x as usize * 4;
+                    self.image.pixels[start..start + rect.w as usize * 4].to_vec()
+                })
+                .collect(),
+        )
+    }
+}
+
 /// Why a sheet could not be loaded.
 ///
 /// Deliberately one variant per way of being wrong rather than a single
@@ -1426,6 +1449,34 @@ mod tests {
         // not the file's shape.
         let fine = decode_png(&png_bytes(6, 3)).expect("a sane PNG still decodes");
         assert_eq!((fine.width, fine.height), (6, 3));
+    }
+
+    /// **A frame's texels are its own rectangle of the strip, row by row** —
+    /// here the second of [`SIDECAR`]'s two 2×3 frames, the right half of a
+    /// 4×3 image whose every texel is numbered, so a cut from the wrong column
+    /// or with the wrong stride reads back the wrong numbers.
+    #[test]
+    fn a_frame_is_cut_out_of_the_strip_row_by_row() {
+        let loaded = Loaded {
+            sheet: sheet(),
+            image: Rgba8 {
+                width: 4,
+                height: 3,
+                pixels: (0..4 * 3)
+                    .flat_map(|texel: u8| [texel, texel, texel, 0xff])
+                    .collect(),
+            },
+        };
+        let red = |pixels: Vec<u8>| pixels.chunks(4).map(|rgba| rgba[0]).collect::<Vec<_>>();
+        assert_eq!(
+            red(loaded.frame_pixels(0).expect("frame 0")),
+            [0, 1, 4, 5, 8, 9]
+        );
+        assert_eq!(
+            red(loaded.frame_pixels(1).expect("frame 1")),
+            [2, 3, 6, 7, 10, 11]
+        );
+        assert_eq!(loaded.frame_pixels(2), None, "there is no third frame");
     }
 
     /// §7 writes no sidecar for a still sprite, so the loader has to invent the

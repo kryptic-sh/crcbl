@@ -1359,6 +1359,9 @@ pub enum GameError {
     /// `--resume` was asked for and there is no saved run it would resume —
     /// none at all, or one refused by name. See [`crate::save`].
     Resume(SaveError),
+    /// The build menu's icons did not fit the UI pass's image atlas. See
+    /// [`crate::art`].
+    Art(crcbl::ui::image::AtlasError),
 }
 
 impl std::fmt::Display for GameError {
@@ -1368,6 +1371,7 @@ impl std::fmt::Display for GameError {
             #[cfg(not(target_arch = "wasm32"))]
             Self::Lan(error) => write!(f, "LAN session failed: {error}"),
             Self::Resume(error) => write!(f, "cannot resume: {error}"),
+            Self::Art(error) => write!(f, "cannot register the build menu's icons: {error}"),
         }
     }
 }

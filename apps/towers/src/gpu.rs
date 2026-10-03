@@ -391,6 +391,12 @@ impl Gpu {
         self.ctx.video()
     }
 
+    /// The image atlas the UI pass draws pictures from, for the build menu's
+    /// icons to be registered into — see [`crate::art`].
+    pub const fn images_mut(&mut self) -> &mut crcbl::ui::image::ImageAtlas {
+        self.ui.images_mut()
+    }
+
     /// The glyph atlas the UI pass renders text from.
     ///
     /// The overlay right-aligns its readings with it, and must measure with the

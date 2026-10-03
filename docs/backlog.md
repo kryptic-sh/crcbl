@@ -16098,8 +16098,10 @@ row. **Slice 3a shipped 2026-09-10:** three tower kinds with one upgrade tier
 each and an `UpgradeTower` command beside `PlaceTower`, three creep kinds, all
 ten waves, a material per kind and a burst instance at a splash impact. **Slice
 3b's part B shipped 2026-10-04**: spatial audio and world-space health bars
-(_towers' spatial audio and health bars_ below). What is left of slice 3 is the
-rest of **3b**: `.crpix` art and the build menu it makes possible.
+(_towers' spatial audio and health bars_ below). **Slice 3b's part A shipped the
+same day**: the build menu in the canvas, played with the pointer or a finger,
+and its `.crpix` icons (_towers' build menu, pointer and icons_ below) — which
+finishes slice 3.
 
 **The one engine gap the slice found is a spline type.** Nothing in `crcbl-phys`
 or `crcbl-scene` offers a curve a body can be put on — the only splines in the
@@ -16130,20 +16132,11 @@ it would be sample code.
    native, and the milestone line has not been reconciled with them.
 
 **Rules owed rather than exempted, stated so the next slice does not read them
-as decisions:** rule 11 (no `.crpix` art anywhere — the tower and creep icons,
-the wave banner and the two build lists are untextured rectangles and the
-built-in font), rule 8 (the sample ships silent), and rule 12's third selector
-(the three paths are reported on the panel, the `[HUD]` line and the summary,
-but there is no flag to hold one below what the device offers).
-
-**There is still no pointer or touch input inside the canvas**, in the window or
-on the page, and slice 3a did not add any on purpose: the only tap target there
-is `page`'s untextured build list, which 3b replaces with the `.crpix` build
-menu, so a hit test written now would be thrown away with it. What a touch
-visitor has instead is a row of buttons **outside** the canvas —
-`web/demos/towers/main.js` — which synthesise the `keydown`/`keyup` pair
-`web/engine/shell.js` already listens for and are thrown away with the hint text
-rather than with engine code.
+as decisions:** rule 11 is half met — the build menu's icons are `.crpix`, but
+they are placeholder art, and the creep icons, the wave banner and `page`'s two
+build lists are still untextured rectangles and the built-in font — and rule
+12's third selector (the three paths are reported on the panel, the `[HUD]` line
+and the summary, but there is no flag to hold one below what the device offers).
 
 ### What towers' LAN co-op shipped without (2026-10-01)
 
@@ -16690,6 +16683,88 @@ judged a bar's size, height or colours. The browser's audio path is the same
 `AudioStream::open` every demo takes and is not exercised by any gate for
 towers. The joiner claims rest on one loopback test
 (`lan::tests::presentation`), one process, one joiner.
+
+### towers' build menu, pointer and icons: decisions, and what they left (2026-10-04)
+
+Slice 3b part A, `crcbl_towers::{build_menu, art}`. **Decided, for the long
+term:**
+
+- **A pick is the keys' command, not a command of its own.** `Pick` moves the
+  cursor to its plot, sets the kind and latches the build or upgrade
+  (`Towers::pending_build`, `pending_upgrade`) for the next tick, where
+  `Towers::tick` ORs it with `B` or `U` into the one `Controls` frame. So the
+  server validates it, a refusal shows as a key's does, and nothing on the wire
+  changed. `a_pick_sends_exactly_the_command_the_keys_send` holds a clicked run
+  and a keyed run to the same stage fingerprint, tick for tick. The latches are
+  taken before the frame is built, so a pick and a key on one tick are one
+  command.
+- **On the pop-up layer, styled with the context menu's classes.** The menu is a
+  `crcbl_ui::tree` pop-up opened with `Ui::open_popup_at(.., Placement::At)` at
+  the plot's pad pixel, hanging from a block covering the window, its items
+  `.context-item` blocks inside a `popup.context-menu`, each an icon span, a
+  label and a price. `Ui::context_menu` itself was **not** used: it opens on a
+  secondary press or `ui_menu` and its items carry a label and nothing else, so
+  there is nowhere for an icon or a price. **Rejected:** the loop's `MenuSet` —
+  centred, pause-shaped panels whose keys the loop claims.
+- **A press outside the menu closes it and is spent**, the pop-up layer's own
+  rule — a press on another plot closes the menu rather than moving it there.
+  The menu opens on the **press**, not the click, and does not follow a moving
+  dev camera once open: it stays at the pixel it opened at.
+- **A plot is picked by a ray against the map's own numbers**:
+  `Camera::ray_through` the pixel's centre, then
+  `crcbl::phys::query::ray_vs_aabb` against each plot's box from its pad to an
+  upgraded tower's top (`build_menu::pick_box`), the nearest winning. **Not the
+  stage's physics world**, which has no pads and which a joiner does not have.
+- **Touch is the pointer stream.** The browser shim forwards a finger's primary
+  contact as the pointer (`web/engine/shell.js`), so a tap is a press and a
+  release; `build_menu::Pointer` holds a release that came in the same batch as
+  its press over to the next frame, because the element tree reads a press off
+  the button being held. No `touch_event` override: a tap is one finger.
+- **The page keeps its row of buttons, and the browser gate is unchanged.**
+  Removing the row means `web/tools/browser-e2e.mjs` clicking inside the canvas
+  twice — the plot, then an item of a menu Taffy laid out — in device pixels,
+  and the gate runs only in CI, so every attempt at it is a full CI round with
+  nothing run locally first. The row still reaches the game down the key path,
+  which the gate holds. **What removing it would take:** the `[HUD]` line (or a
+  page export) giving the cursor plot's pad pixel and the open menu's first
+  enabled item's centre, the gate converting framebuffer pixels to CSS pixels
+  (`devicePixelRatio`, which the touch group already reads) and dispatching two
+  clicks, then reading the build arrive as it does now — and `buttonRow`,
+  `buttonKeys`, `buttonKey` and `buttonKindLabel` going from the gate and from
+  `the_browser_gates_game_constants_are_the_ones_this_crate_declares`.
+- **The icons are hand-typed placeholder art.** `apps/towers/assets/icons.crpix`
+  is four 16-texel frames — `bolt`, `splash`, `slow` (found by
+  `tower::Kind::label`) and `upgrade` — typed as text, which is the source
+  `build.rs` bakes through `crcbl_sprite::bake::bake_dir`; no artist drew them
+  and no image tool was used. They echo what each kind puts on the field (the
+  bolt's yellow, the burst's orange, the slow hold's blue) because the three
+  towers are one grey post apiece. **What an art pass would replace:** the four
+  frames with drawn icons — of the towers themselves once the towers have models
+  of their own — at whatever size reads on a phone, and `art::ICON_PX` with it.
+- **`crcbl_sprite::load::Loaded::frame_pixels`** is where a frame is cut out of
+  a sheet; `crcbl_render::menu_skin` had the only copy, privately, and towers is
+  the second caller.
+
+**Deferred:** keyboard and pad navigation of the menu — the tree is fed the
+pointer and no `NavInput`, so the arrows stay the build cursor's; the menu
+following the camera while open; a sell or a tower's stats on the menu; the
+creep icons, the wave banner and `page`'s build lists as `.crpix`; a hover
+outline that is drawn under the field's towers rather than over them (it is a UI
+polyline with no depth). **Found, not fixed:** `Towers::tick`'s
+`restart: just_pressed(ACTION_RESTART) || mem::take(&mut pending_restart)`
+short-circuits, so a pause-menu `RESTART` latched on the same tick as an `R`
+press stays latched and restarts the run again on the next tick — the build
+menu's latches are taken before the `||` for this reason; out of this slice's
+scope.
+
+**Coverage gaps:** **nothing was seen on a device** — every check is headless,
+natively; no eye has judged the icons, the menu's size or placement, or the
+outline, and no finger has tapped the canvas. **The browser gate is unverified
+locally** and does not exercise the canvas at all: it still clicks the button
+row. The engine's touch-to-pointer path on the page is the shim's, unchanged,
+and covered only by the gate's touch group for other demos. Picking is tested
+through the overhead camera; through the fly and walk cameras it is the same
+code and untested.
 
 ## arena (`docs/plan/sample/08-arena.md`)
 
