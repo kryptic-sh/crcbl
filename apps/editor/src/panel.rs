@@ -2078,10 +2078,20 @@ mod tests {
         assert_eq!(page.document.files().expect("ids"), before);
 
         // A second drag of the same field is a second entry, not folded into
-        // the first.
+        // the first. A frame with the button up between them, as between any
+        // two drags a hand makes: pressed on the frame straight after a
+        // release, the second drag carried the field back to where it began,
+        // which since 2026-10-03 records nothing (`UndoLog::record_in`).
         page.idle();
         page.drag_in_steps(at, Vec2::new(10.0, 0.0), 3);
+        let one = page.document.files().expect("ids");
+        page.idle();
         page.drag_in_steps(at, Vec2::new(10.0, 0.0), 3);
+        assert_ne!(
+            page.document.files().expect("ids"),
+            one,
+            "the second drag moved nothing"
+        );
         assert_eq!(page.document.log().len(), 2, "two drags, two entries");
     }
 

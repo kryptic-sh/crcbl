@@ -58,11 +58,13 @@ pub(super) enum Op {
     /// The translate gizmo dragged over several frames: each frame every
     /// selected entity set to where it started plus that frame's offset, one
     /// `Document::apply_in` a frame under one gesture, as
-    /// `App::move_handle` writes it.
+    /// `App::move_handle` writes it — and, with `switch`, a second axis
+    /// written from a frame part-way, so the frames report different leaves.
     Drag {
         selection: Pair,
         axis: Index,
         offsets: Vec<f64>,
+        switch: Option<Switch>,
     },
     /// The rotate gizmo: the placing component's four rotation leaves as one
     /// batch, set to `quaternion` normalised.
@@ -124,6 +126,16 @@ pub(super) struct Pair {
     pub(super) second: Option<Index>,
 }
 
+/// Where a [`Op::Drag`] starts writing another leaf: from the frame `at`
+/// names — never the first — the second `axis` too, or instead of the first
+/// unless `keep_first`.
+#[derive(Clone, Debug)]
+pub(super) struct Switch {
+    pub(super) at: Index,
+    pub(super) axis: Index,
+    pub(super) keep_first: bool,
+}
+
 /// The draws a leaf's new value is made from.
 #[derive(Clone, Debug)]
 pub(super) struct Draw {
@@ -168,15 +180,20 @@ pub(super) fn op() -> impl Strategy<Value = Op> {
                 delta,
             })
             .boxed(),
-        1 => (
+        2 => (
             pair(),
             any::<Index>(),
-            proptest::collection::vec(-4.0..4.0f64, 2..=4),
+            proptest::collection::vec(offset(), 2..=4),
+            proptest::option::of(
+                (any::<Index>(), any::<Index>(), any::<bool>())
+                    .prop_map(|(at, axis, keep_first)| Switch { at, axis, keep_first }),
+            ),
         )
-            .prop_map(|(selection, axis, offsets)| Op::Drag {
+            .prop_map(|(selection, axis, offsets, switch)| Op::Drag {
                 selection,
                 axis,
                 offsets,
+                switch,
             })
             .boxed(),
         1 => (any::<Index>(), proptest::array::uniform4(-1.0..1.0f64))
@@ -223,6 +240,12 @@ fn through() -> impl Strategy<Value = Through> {
         Just(Through::Inspector),
         Just(Through::FieldPaste),
     ]
+}
+
+/// A drag frame's offset from where the drag began: sometimes none at all,
+/// so a drag can end where it started.
+fn offset() -> impl Strategy<Value = f64> {
+    prop_oneof![4 => -4.0..4.0f64, 1 => Just(0.0)]
 }
 
 fn pair() -> impl Strategy<Value = Pair> {

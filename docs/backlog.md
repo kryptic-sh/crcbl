@@ -12225,16 +12225,32 @@ says what that cleared and what it did not. The allow-list entry in
     four leaves to one `record_edits` is not a step (its turn is the rotate
     gizmo's batch through `apply`). Driving the real inspector per step needs a
     `Ui` and a laid-out page per history.
-  - **A gesture whose reported leaves change part-way splits into two entries**
-    (`UndoLog::record_in` folds only the same leaves). The rotation row now
-    writes `+0.0` for a zero so a sign flip does not cause it, but a leaf
-    landing exactly on its old value on one frame of a drag still would: two
-    undos, each exact. Merging leaf sets in the fold would remove it; that
-    reverses `a_new_gesture_leaf_or_seal_starts_a_new_entry`'s rule and is the
-    user's call.
-  - **A gesture that writes a second leaf part-way** (`UndoLog::record_in`
-    starts a new entry for it) is not generated: every drag writes one leaf, or
-    one batch of the same leaves, throughout.
+  - **Decided 2026-10-03, for the long term: one gesture is one undo entry.**
+    `UndoLog::record_in` merges a gesture's writes whatever leaves each names:
+    per leaf the earliest value before the gesture wrote it and the latest value
+    it left, dropping a leaf whose two are bit-identical, and the entry when
+    none is left. It used to fold only writes naming the same leaves, so a drag
+    whose frames reported different leaves — a leaf landing on its old value for
+    a frame, an inspector row skipping an unchanged leaf — split into several
+    undos, each exact but none the gesture. The property test's drag step now
+    writes a second leaf part-way, with or without the first, and offsets that
+    end the drag where it began.
+  - **A drag back to where it began still drops the redo above the log.** Its
+    first write is recorded like any edit, truncating the redo; the entry goes
+    once its leaves net to nothing, but the truncated redo does not come back.
+    Keeping it would need the log to hold a gesture's first write aside until
+    the gesture ends. Not built; the property test models it as it is.
+  - **A drag pressed on the frame straight after another's release ends where it
+    began**, observed 2026-10-03 in
+    `panel::tests::an_inspector_drag_over_many_frames_is_one_undo`'s headless
+    harness: its writes carried the field back to the first drag's end, so it
+    now records nothing where it used to record a no-op entry. Not investigated
+    — whether the drag-value keeps its last drag's origin into a press with no
+    idle frame between, and whether a hand can produce it. The test now puts an
+    idle frame between its two drags.
+  - **A gesture's first write is not netted**: a one-frame drag that writes the
+    value already there records an entry that changes nothing, as
+    `Document::apply` of the same write does. Only the fold drops leaves.
   - **Play mode and saves between edits** are not steps. Every edit refused in
     play is `play_tests`' to hold; a save seals the top entry, which
     `a_drag_carried_past_a_save_is_dirty_again` holds. A save step would need a

@@ -4466,7 +4466,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   no `FieldEdit` — in the editor, a write no command recorded and no undo took
   back, which the rotation row made on every turn about one axis. Floats are now
   compared bit for bit, and the editor's rotation row writes `+0.0` for a zero
-  so a drag stays one undo.
+  so a turn about one axis leaves no `-0.0` in the scene that nobody chose.
 - **`--browse` no longer joins a full host.** `LanClient::browse` picked the
   first host of a compatible build, so towers' and the sandbox's `--browse`
   could connect to one already at its `max_players` and be refused by it. It now
@@ -5030,6 +5030,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **One drag in the editor is one undo, whatever leaves its frames write.**
+  `UndoLog::record_in` merges a gesture's writes: each leaf keeps the value from
+  before the gesture first wrote it and the last value written, and a leaf that
+  ends bit for bit where it began drops out. A drag whose frames reported
+  different leaves — the inspector skipping a leaf left unchanged for a frame, a
+  handle writing another axis part-way — used to split into several undos; it is
+  now one that puts every leaf back. A drag that ends where it began records
+  nothing. "Bit for bit" is the new `crcbl::reflect::Value::identical`, which
+  `crcbl_ui`'s inspector now uses to decide whether a write changed a leaf.
 
 - **A turned body's sphere and capsule offsets, and its capsule itself, turn
   with it in `crcbl_phys::PhysicsSystem`'s query world**, as its box already did

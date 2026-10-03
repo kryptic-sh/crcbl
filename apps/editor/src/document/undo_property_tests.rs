@@ -11,7 +11,9 @@
 //! stands — and checks after each step:
 //!
 //! - a refused step changed nothing and recorded nothing;
-//! - an accepted step recorded exactly one entry, dropping any redo above it;
+//! - an accepted step recorded exactly one entry, dropping any redo above it —
+//!   a drag included, whatever leaves its frames named, or none for a drag
+//!   that ended where it began, whose state must then be the one before it;
 //! - an undo or a redo landed on exactly the state recorded at the position
 //!   it moved to;
 //! - the selection names only entities the document holds, and the document
@@ -73,8 +75,10 @@ struct Tally {
 
 /// The facts [`Tally::reached`] must hold — each a shape of edit whose undo
 /// has its own way to go wrong.
-const MUST_REACH: [&str; 11] = [
+const MUST_REACH: [&str; 13] = [
     "a gesture of several writes",
+    "a drag whose leaves change part-way",
+    "a gesture that ended where it began",
     "a nudge of two entities",
     "a drag of two entities",
     "a delete of two entities",
@@ -121,7 +125,19 @@ fn walk(steps: &[Op], tally: &RefCell<Tally>) -> TestCaseResult {
     for (index, op) in steps.iter().enumerate() {
         let top = history.states.len() - 1;
         let mut reached = Reached::new();
-        let outcome = play::play(&mut document, op, &mut reached);
+        let mut outcome = play::play(&mut document, op, &mut reached);
+        // A gesture's leaves that end where they began drop out of its entry,
+        // and an entry left with none goes (`UndoLog::record_in`), so a drag
+        // back to its start is accepted and records nothing — which `check`
+        // then holds to the state it started from. Its first write dropped
+        // any redo above the log, as every recorded edit does.
+        let gesture = matches!(op, Op::Drag { .. } | Op::FieldDrag { .. });
+        if gesture && outcome == Outcome::Recorded && document.log().position() == history.position
+        {
+            outcome = Outcome::Unchanged;
+            reached.push("a gesture that ended where it began");
+            history.states.truncate(history.position + 1);
+        }
         let mut tally = tally.borrow_mut();
         *tally
             .outcomes

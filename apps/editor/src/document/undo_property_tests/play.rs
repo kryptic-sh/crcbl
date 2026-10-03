@@ -12,7 +12,7 @@ use crcbl::ui::tree::FieldEdit;
 
 use super::super::field::text_of;
 use super::super::{Document, EditError};
-use super::ops::{Draw, Op, Pair, TEXTS, Through};
+use super::ops::{Draw, Op, Pair, Switch, TEXTS, Through};
 use crate::command::EditCommand;
 
 /// An id no entity in the test's document holds: a target drawn past the
@@ -83,7 +83,14 @@ pub(super) fn play(document: &mut Document, op: &Op, reached: &mut Reached) -> O
             selection,
             axis,
             offsets,
-        } => drag(document, selection, axis, offsets, reached),
+            switch,
+        } => drag(
+            document,
+            selection,
+            (axis, switch.as_ref()),
+            offsets,
+            reached,
+        ),
         Op::Turn { target, quaternion } => turn(document, target, *quaternion),
         Op::Scale { target, factor } => scale(document, target, *factor),
         Op::Rename { target, name } => {
@@ -208,9 +215,10 @@ fn nudge(
     delta: f64,
     reached: &mut Reached,
 ) -> Outcome {
-    let Some(placed) = placed(document, selection, axis) else {
+    let Some(ids) = select(document, selection) else {
         return Outcome::Skipped;
     };
+    let placed = placed(document, &ids, axis);
     if placed.is_empty() {
         return Outcome::Unchanged;
     }
@@ -224,26 +232,61 @@ fn nudge(
 
 /// [`Op::Drag`], as `App::move_handle` writes it: one write a frame under
 /// one gesture, each frame every selected entity at where it started plus
-/// that frame's offset. One entry if any frame was accepted.
+/// that frame's offset — along the first axis, and from the `switch` frame on
+/// along its axis too, or instead. One entry if any frame was accepted, or
+/// none if the drag ended where it began.
 fn drag(
     document: &mut Document,
     selection: &Pair,
-    axis: &Index,
+    (axis, switch): (&Index, Option<&Switch>),
     offsets: &[f64],
     reached: &mut Reached,
 ) -> Outcome {
-    let Some(placed) = placed(document, selection, axis).filter(|placed| !placed.is_empty()) else {
+    let Some(ids) = select(document, selection) else {
         return Outcome::Skipped;
     };
+    let first = placed(document, &ids, axis);
+    let (from, second, keep_first) = match switch {
+        Some(switch) => (
+            1 + switch.at.index(offsets.len() - 1),
+            placed(document, &ids, &switch.axis),
+            switch.keep_first,
+        ),
+        None => (offsets.len(), Vec::new(), true),
+    };
+    if first.is_empty() {
+        return Outcome::Skipped;
+    }
     let gesture = document.begin_gesture();
-    let wrote = offsets
-        .iter()
-        .filter(|offset| document.apply_in(moved(&placed, **offset), gesture).is_ok())
-        .count();
+    let (mut early, mut late) = (0, 0);
+    for (frame, offset) in offsets.iter().enumerate() {
+        let leaves: Vec<Placed> = if frame < from {
+            first.clone()
+        } else {
+            let kept = if keep_first { first.as_slice() } else { &[] };
+            kept.iter().chain(&second).cloned().collect()
+        };
+        if leaves.is_empty() || document.apply_in(moved(&leaves, *offset), gesture).is_err() {
+            continue;
+        }
+        if frame < from {
+            early += 1;
+        } else {
+            late += 1;
+        }
+    }
+    let wrote = early + late;
     if wrote > 1 {
         reached.push("a gesture of several writes");
     }
-    if wrote > 0 && placed.len() > 1 {
+    let changed = !keep_first
+        || second
+            .iter()
+            .any(|leaf| first.iter().all(|held| held.2 != leaf.2));
+    if early > 0 && late > 0 && changed {
+        reached.push("a drag whose leaves change part-way");
+    }
+    if wrote > 0 && first.len() > 1 {
         reached.push("a drag of two entities");
     }
     if wrote > 0 {
@@ -257,13 +300,11 @@ fn drag(
 /// moved and the value that leaf held.
 type Placed = (SceneEntityId, String, String, f64);
 
-/// Selects what `selection` names and reads each placed entity's position
-/// along `axis` — or [`None`] for a document holding nothing to select.
-fn placed(document: &mut Document, selection: &Pair, axis: &Index) -> Option<Vec<Placed>> {
-    let ids = select(document, selection)?;
+/// Each of `ids` something places, with its position along `axis`.
+fn placed(document: &mut Document, ids: &[SceneEntityId], axis: &Index) -> Vec<Placed> {
     let path = format!("position.{}", axis.index(3));
     let mut placed = Vec::new();
-    for entity in ids {
+    for &entity in ids {
         let Some(system) = document.placing_system(entity) else {
             continue;
         };
@@ -271,7 +312,7 @@ fn placed(document: &mut Document, selection: &Pair, axis: &Index) -> Option<Vec
             placed.push((entity, system, path.clone(), was));
         }
     }
-    Some(placed)
+    placed
 }
 
 /// Every one of `placed` moved `offset` from where it was, as one entry.

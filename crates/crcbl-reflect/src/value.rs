@@ -86,6 +86,19 @@ impl Value {
             Self::Text(_) => ValueKind::Text,
         }
     }
+
+    /// Whether `self` and `other` are the same value **bit for bit**: `==`,
+    /// except that two floats are compared by their bits. `-0.0 == 0.0` and
+    /// `NaN != NaN`, so `==` alone calls a write of one zero over the other
+    /// no change — and a caller that records only changes would leave that
+    /// write in the leaf with nothing to undo it.
+    #[must_use]
+    pub fn identical(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Float(this), Self::Float(that)) => this.to_bits() == that.to_bits(),
+            _ => self == other,
+        }
+    }
 }
 
 /// Prints in the form a person reads in a row, with text left bare.
@@ -261,6 +274,18 @@ mod tests {
         assert_eq!(Value::UInt(1).kind(), ValueKind::UInt);
         assert_eq!(Value::Float(1.0).kind(), ValueKind::Float);
         assert_eq!(Value::Text("x".into()).kind(), ValueKind::Text);
+    }
+
+    /// **`identical` is `==` with floats compared by their bits**: the two
+    /// zeros differ, a NaN is itself, and other kinds compare as `==` does.
+    #[test]
+    fn identical_compares_floats_bit_for_bit() {
+        assert!(!Value::Float(-0.0).identical(&Value::Float(0.0)));
+        assert!(Value::Float(f64::NAN).identical(&Value::Float(f64::NAN)));
+        assert!(Value::Float(1.5).identical(&Value::Float(1.5)));
+        assert!(Value::Int(3).identical(&Value::Int(3)));
+        assert!(!Value::Int(3).identical(&Value::UInt(3)));
+        assert!(!Value::Text("a".into()).identical(&Value::Text("b".into())));
     }
 
     #[test]

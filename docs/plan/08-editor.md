@@ -154,10 +154,12 @@ full-window draw under a hole in the panels is gone.
 - **A drag is one undo.** Each write is a `position.N` property set through
   `Document::apply_in` with the drag's `Gesture`, and `UndoLog::record_in` folds
   a gesture's writes to one leaf into one entry that keeps the first write's
-  inverse. A save seals the entry, so a drag carried past it is dirty again. The
-  inspector's field drags ride the same mechanism: edits to one leaf while the
-  primary button is held share a gesture (`Panels::apply_edits`), so a field
-  dragged over many frames is one undo too — it was one per frame.
+  inverse (since 2026-10-03 a gesture's writes merge whatever leaves they name —
+  _The undo property test_, below). A save seals the entry, so a drag carried
+  past it is dirty again. The inspector's field drags ride the same mechanism:
+  edits to one leaf while the primary button is held share a gesture
+  (`Panels::apply_edits`), so a field dragged over many frames is one undo too —
+  it was one per frame.
 - **Evidence**: the gizmo's tests hold handle direction, constant size at two
   distances and two scales, hidden axes and the closest-point formula against
   hand-worked rays; the editor's loop test drags the X handle through the
@@ -194,7 +196,8 @@ full-window draw under a hole in the panels is gone.
   default and is logged).
 - **A drag is still one undo.** A plane or centre drag writes its leaves as one
   `EditCommand::Batch` a frame, and `UndoLog::record_in` folds a gesture's batch
-  into the entry on top when it names the same leaves in the same order.
+  into the entry on top when it names the same leaves in the same order (since
+  2026-10-03, whatever leaves it names).
 - **Rotate cannot be entered.** `gizmo::Mode` has no rotate variant, and E puts
   a refusal on the status line and leaves the mode as it was: the scene format
   carried no rotation for a handle to write. (Slice 14 put one in the format,
@@ -1217,8 +1220,9 @@ is a `proptest` property over random histories of every edit, replacing
   `EditCommand` variant was recorded (`variant` is a match with no wildcard, so
   a new variant does not compile until it is named, and naming it fails the run
   until a step records it), every kind of step was accepted, each shape of edit
-  in `MUST_REACH` happened (two-entity edits, a gesture folding writes, listing
-  drops and attaches, an unlisting from the manifest's middle, a name, an edit
+  in `MUST_REACH` happened (two-entity edits, a gesture folding writes, a drag
+  whose leaves change part-way, a drag that ends where it began, listing drops
+  and attaches, an unlisting from the manifest's middle, a name, an edit
   dropping redo, a refusal with redo above it), something was refused, and at
   least `LEAST_ACCEPTED_PERCENT` of the edits played were accepted. A run is
   `CASES` histories of up to `MAX_STEPS` steps.
@@ -1245,10 +1249,10 @@ is a `proptest` property over random histories of every edit, replacing
   write) compared with `==` and reported nothing — a write in the field that no
   command recorded and no undo took back. Both now compare floats bit for bit
   (`tree::widgets::tests::inspector::a_write_that_flips_a_zeros_sign_is_reported`),
-  and the rotation row writes `+0.0` for a zero, since a sign-only edit on the
-  first frame and not the next would split the drag's one entry. The property
-  test's seed is in `apps/editor/proptest-regressions/`, committed as
-  `crcbl-core`'s and `crcbl-water`'s are.
+  and the rotation row writes `+0.0` for a zero, so a turn about one axis leaves
+  no `-0.0` in the scene that nobody chose. The property test's seed is in
+  `apps/editor/proptest-regressions/`, committed as `crcbl-core`'s and
+  `crcbl-water`'s are.
 - **Mutations each turned it red and shrank to a short history**: a rename's
   inverse renaming to the new name (one rename), a delete's inverse dropping its
   last system's row (one delete of the entity in two systems), a gesture's fold
@@ -1262,8 +1266,18 @@ is a `proptest` property over random histories of every edit, replacing
   between edits (which seals the entry on top), the inspector's widgets
   themselves — its steps report edits to `record_edits` directly, so
   `FieldRow::set`'s reporting is the panel tests' to hold — the rotation row
-  reporting four leaves to one `record_edits`, and a gesture that writes a
-  second leaf part-way. `docs/backlog.md` has them.
+  reporting four leaves to one `record_edits`. `docs/backlog.md` has them.
+- **Decided 2026-10-03, for the long term: one gesture is one undo entry.**
+  `UndoLog::record_in` merges a gesture's writes whatever leaves each names,
+  keeping per leaf the earliest value from before the gesture wrote it and the
+  latest it left, and dropping a leaf whose two are bit-identical — and the
+  entry, when no leaf is left, so a drag back to its start records nothing. It
+  used to fold only writes of the same leaves, so a drag whose frames reported
+  different leaves split into several undos. The property test's drag step
+  writes a second leaf part-way and can end where it began;
+  `command::tests::a_drag_whose_frames_report_different_leaves_is_one_undo_restoring_all`
+  is the regression. Keeping the newest inverse instead of the earliest, and
+  dropping a leaf only early frames wrote, each turned both red.
 
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor

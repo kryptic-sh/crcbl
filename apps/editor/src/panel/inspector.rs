@@ -242,8 +242,8 @@ fn rotation_row(ui: &mut Ui, field: &mut FieldRow<'_>) {
         let quat = quat_of(angles);
         // `+ 0.0` turns a `-0.0` the composition produced into `+0.0`: a
         // turn about Y alone gives `x` and `z` of either sign, and writing
-        // `-0.0` over a held `+0.0` is an edit of its own, so a drag's frames
-        // would report different leaves and its one entry would split.
+        // `-0.0` over a held `+0.0` is an edit of its own, which would leave
+        // a sign in the scene's file that nobody chose.
         for (leaf, value) in Rotation::LEAVES.into_iter().zip(quat.to_array()) {
             field.set(leaf, Value::Float(value + 0.0));
         }

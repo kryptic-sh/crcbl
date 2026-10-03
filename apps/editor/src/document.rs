@@ -936,9 +936,9 @@ impl Document {
         Gesture(self.gestures)
     }
 
-    /// [`apply`](Self::apply), as one write of `gesture`: a property set of the
-    /// leaf the gesture's last write set folds into that write's entry, so the
-    /// whole drag is one undo. See [`UndoLog`].
+    /// [`apply`](Self::apply), as one write of `gesture`: a property set, or a
+    /// batch of them, folds into the gesture's entry whatever leaves it names,
+    /// so the whole drag is one undo. See [`UndoLog`].
     ///
     /// # Errors
     ///

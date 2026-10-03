@@ -306,12 +306,15 @@ pub fn set_property(
 /// A drag writes its leaf every frame it moves, and a log that kept each write
 /// would take as many undos to walk back as the drag had frames.
 /// [`record_in`](Self::record_in) folds a property set — or a batch of them —
-/// into the entry on top when both came from the same [`Gesture`] and name the
-/// same leaves: the entry
-/// keeps the inverse of the gesture's **first** write, which holds the value
-/// from before the drag began, and takes the newest write as what a redo
-/// applies. [`seal`](Self::seal) closes the entry on top to further folding,
-/// which a save does so that a drag carried on past it is dirty again.
+/// into the entry on top when both came from the same [`Gesture`], **whatever
+/// leaves each names** (decided 2026-10-03: one gesture is one undo entry).
+/// The entry keeps, per leaf, the value from before the gesture first wrote it
+/// — the earliest inverse — and the value its newest write left, so its undo
+/// puts back every leaf the gesture touched and its redo applies where each
+/// ended. A leaf that ends bit for bit where it began drops out, and an entry
+/// left with no leaf goes, so a drag back to its start records nothing.
+/// [`seal`](Self::seal) closes the entry on top to further folding, which a
+/// save does so that a drag carried on past it is dirty again.
 #[derive(Debug, Default)]
 pub struct UndoLog {
     entries: Vec<Entry>,
@@ -354,20 +357,27 @@ impl UndoLog {
 
     /// [`record`](Self::record), for a command that is part of `gesture` —
     /// folded into the entry on top when that entry is the same gesture's,
-    /// open, at the top of the log, and a property set of the same leaf.
-    ///
-    /// Only then: a gesture that wrote a second leaf would leave the first
-    /// leaf's inverse out of the entry, so a write to another leaf starts an
-    /// entry of its own. A gesture that writes several leaves at once writes
-    /// them as one [`EditCommand::Batch`], which folds into a batch of the
-    /// same leaves.
+    /// open and at the top of the log, and both are property sets or batches
+    /// of them. The leaves are merged (see [`UndoLog`]): a leaf the gesture
+    /// writes for the first time part-way brings its inverse into the entry,
+    /// so a drag whose frames report different leaves is still one undo that
+    /// restores them all.
     pub fn record_in(&mut self, done: EditCommand, undo: EditCommand, gesture: Gesture) {
         if self.position == self.entries.len()
             && let Some(last) = self.entries.last_mut()
             && last.gesture == Some(gesture)
-            && same_leaves(&last.done, &done)
+            && let Some(merged) = Leaves::merged(&last.done, &last.undo, &done, &undo)
         {
-            last.done = done;
+            match merged.into_commands() {
+                Some((done, undo)) => {
+                    last.done = done;
+                    last.undo = undo;
+                }
+                None => {
+                    self.entries.pop();
+                    self.position = self.entries.len();
+                }
+            }
             return;
         }
         self.push(done, undo, Some(gesture));
@@ -442,30 +452,110 @@ impl UndoLog {
     }
 }
 
-/// Whether `a` and `b` set the same leaves of the same components: two property
-/// sets of one leaf, or two batches of such sets naming the same leaves in the
-/// same order — a plane drag writes two leaves a frame and a uniform scale
-/// three, as one batch each.
-fn same_leaves(a: &EditCommand, b: &EditCommand) -> bool {
-    match (a, b) {
-        (
-            EditCommand::SetProperty {
-                entity: first,
-                system: this,
-                path: here,
-                ..
-            },
-            EditCommand::SetProperty {
-                entity: second,
-                system: that,
-                path: there,
-                ..
-            },
-        ) => first == second && this == that && here == there,
-        (EditCommand::Batch(first), EditCommand::Batch(second)) => {
-            first.len() == second.len() && first.iter().zip(second).all(|(a, b)| same_leaves(a, b))
+/// One leaf a property set writes: the entity, the system and the path.
+type Leaf = (SceneEntityId, String, String);
+
+/// A gesture's leaves, in the order it first wrote them, each with the value
+/// from before its first write and the value its newest write left — what
+/// [`UndoLog::record_in`] folds a gesture's writes into.
+struct Leaves(Vec<(Leaf, Value, Value)>);
+
+impl Leaves {
+    /// The entry `done`/`undo` with the write `next`/`next_undo` folded in, or
+    /// [`None`] when any of them is not a property set or a batch of them.
+    ///
+    /// A leaf already in the entry keeps its earliest value and takes
+    /// `next`'s; a leaf new to it takes its earliest value from `next_undo` —
+    /// what it held before this write, which no earlier write of the gesture
+    /// had changed. Leaves ending bit for bit where they began are dropped.
+    fn merged(
+        done: &EditCommand,
+        undo: &EditCommand,
+        next: &EditCommand,
+        next_undo: &EditCommand,
+    ) -> Option<Self> {
+        let mut leaves = Self(Vec::new());
+        leaves.fold(sets(done)?, &sets(undo)?)?;
+        leaves.fold(sets(next)?, &sets(next_undo)?)?;
+        leaves
+            .0
+            .retain(|(_, before, after)| !before.identical(after));
+        Some(leaves)
+    }
+
+    /// Folds in one write's `sets`: a leaf already held takes the newer
+    /// value, and a new one is held with the value `befores` — that write's
+    /// inverse — puts back. [`None`] if the inverse does not name the leaf.
+    fn fold(&mut self, sets: Vec<(Leaf, Value)>, befores: &[(Leaf, Value)]) -> Option<()> {
+        for (leaf, after) in sets {
+            if let Some(held) = self.0.iter_mut().find(|(each, _, _)| *each == leaf) {
+                held.2 = after;
+            } else {
+                let before = earliest(befores, &leaf)?;
+                self.0.push((leaf, before, after));
+            }
         }
-        _ => false,
+        Some(())
+    }
+
+    /// The entry's command and its inverse — the inverse setting the leaves
+    /// in reverse, as a batch's does — or [`None`] when no leaf is left.
+    fn into_commands(self) -> Option<(EditCommand, EditCommand)> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let set = |(entity, system, path): Leaf, value: Value| EditCommand::SetProperty {
+            entity,
+            system,
+            path,
+            value,
+        };
+        let mut done = Vec::with_capacity(self.0.len());
+        let mut undo = Vec::with_capacity(self.0.len());
+        for (leaf, before, after) in self.0 {
+            undo.push(set(leaf.clone(), before));
+            done.push(set(leaf, after));
+        }
+        undo.reverse();
+        Some((
+            EditCommand::one_or_batch(done),
+            EditCommand::one_or_batch(undo),
+        ))
+    }
+}
+
+/// The value an inverse's `sets` puts back into `leaf`: the last one it
+/// names, since an inverse batch runs in reverse and its last write is the
+/// value from before the first.
+fn earliest(sets: &[(Leaf, Value)], leaf: &Leaf) -> Option<Value> {
+    sets.iter()
+        .rev()
+        .find(|(each, _)| each == leaf)
+        .map(|(_, value)| value.clone())
+}
+
+/// Every leaf `command` sets and the value it sets there, in order — a
+/// property set's one, a batch of them its members' — or [`None`] for a
+/// command that is not made of property sets.
+fn sets(command: &EditCommand) -> Option<Vec<(Leaf, Value)>> {
+    match command {
+        EditCommand::SetProperty {
+            entity,
+            system,
+            path,
+            value,
+        } => Some(vec![(
+            (*entity, system.clone(), path.clone()),
+            value.clone(),
+        )]),
+        EditCommand::Batch(members) => {
+            let mut all = Vec::with_capacity(members.len());
+            for member in members {
+                all.extend(sets(member)?);
+            }
+            Some(all)
+        }
+        _ => None,
     }
 }
 
@@ -719,10 +809,15 @@ mod tests {
         assert_eq!(value.position[0], 3.0);
     }
 
-    /// Another gesture, another leaf, or a sealed entry each start an entry of
-    /// their own.
+    /// Another gesture or a sealed entry each start an entry of their own; a
+    /// second leaf of the same gesture folds into its entry.
+    ///
+    /// **The rule changed 2026-10-03**: a write to another leaf used to start
+    /// an entry of its own, because folding it kept only the first leaf's
+    /// inverse. The fold now merges leaves, keeping each one's earliest
+    /// inverse, so one gesture is one entry whatever leaves its frames name.
     #[test]
-    fn a_new_gesture_leaf_or_seal_starts_a_new_entry() {
+    fn a_new_gesture_or_seal_starts_a_new_entry_and_a_new_leaf_folds() {
         let mut value = brick();
         let mut log = UndoLog::new();
         let mut write = |log: &mut UndoLog, path: &str, gesture: u64| {
@@ -734,17 +829,18 @@ mod tests {
         write(&mut log, "position.0", 2);
         assert_eq!(log.len(), 2, "a second gesture folded into the first");
         write(&mut log, "position.1", 2);
-        assert_eq!(log.len(), 3, "a second leaf folded into the first");
+        assert_eq!(log.len(), 2, "a second leaf of one gesture did not fold");
         log.seal();
-        write(&mut log, "position.1", 2);
-        assert_eq!(log.len(), 4, "a sealed entry was folded into");
+        write(&mut log, "position.2", 2);
+        assert_eq!(log.len(), 3, "a sealed entry was folded into");
     }
 
     /// **A gesture that writes two leaves a frame is one entry too**, as one
-    /// batch a frame — a plane drag's shape — and a batch naming other leaves
-    /// starts an entry of its own.
+    /// batch a frame — a plane drag's shape — and so is one whose batches
+    /// name other leaves part-way: one undo puts back every leaf any frame
+    /// wrote.
     #[test]
-    fn a_gestures_batches_of_the_same_leaves_are_one_entry() {
+    fn a_gestures_batches_are_one_entry_whatever_leaves_they_name() {
         let mut value = brick();
         let mut log = UndoLog::new();
         let mut write = |log: &mut UndoLog, paths: [&str; 2], to: f64| {
@@ -758,39 +854,111 @@ mod tests {
         }
         assert_eq!(log.len(), 1, "a batch of the same leaves did not fold");
         write(&mut log, ["position.1", "position.2"], 4.0);
-        assert_eq!(log.len(), 2, "a batch of other leaves folded");
+        assert_eq!(log.len(), 1, "a batch of other leaves did not fold");
 
         log.undo()
-            .expect("the second entry")
+            .expect("the one entry")
             .apply(&mut value)
-            .expect("a brick has both leaves");
-        log.undo()
-            .expect("the first entry")
-            .apply(&mut value)
-            .expect("a brick has both leaves");
+            .expect("a brick has every leaf");
         assert_eq!(
             value,
             brick(),
             "the undo did not reach the value before the drag"
         );
+        log.redo()
+            .expect("the one entry above")
+            .apply(&mut value)
+            .expect("a brick has every leaf");
+        assert_eq!(
+            value.position,
+            [3.0, 4.0, 4.0],
+            "the redo is not where it ended"
+        );
+    }
+
+    /// **The regression for the 2026-10-03 decision: a drag whose second
+    /// frame reports a different leaf set is one undo, restoring every
+    /// leaf** — the one only the first frame wrote, the one only the second
+    /// wrote, and the one both wrote, each to the bits from before the drag.
+    #[test]
+    fn a_drag_whose_frames_report_different_leaves_is_one_undo_restoring_all() {
+        let mut value = brick();
+        let before = value.position.map(f64::to_bits);
+        let mut log = UndoLog::new();
+        let frames: [&[(&str, f64)]; 2] = [
+            &[("position.0", 1.0), ("position.1", 2.0)],
+            &[("position.1", 3.0), ("position.2", 4.0)],
+        ];
+        for frame in frames {
+            let command = EditCommand::one_or_batch(
+                frame
+                    .iter()
+                    .map(|(path, to)| set(path, Value::Float(*to)))
+                    .collect(),
+            );
+            let undo = command.apply(&mut value).expect("a brick has the leaves");
+            log.record_in(command, undo, Gesture(7));
+        }
+        assert_eq!(log.len(), 1, "the drag is more than one entry");
+        assert_eq!(value.position, [1.0, 3.0, 4.0]);
+
+        log.undo()
+            .expect("the one entry")
+            .apply(&mut value)
+            .expect("a brick has the leaves");
+        assert_eq!(
+            value.position.map(f64::to_bits),
+            before,
+            "the undo did not put every leaf back",
+        );
+        assert!(log.undo().is_none(), "the drag left a second entry");
+    }
+
+    /// **A leaf a gesture puts back where it began drops out of the entry**,
+    /// and a gesture that ends exactly where it began records nothing — its
+    /// entry goes, so the log stands where it did before the drag.
+    #[test]
+    fn a_gesture_back_to_its_start_drops_the_leaf_and_then_the_entry() {
+        let mut value = brick();
+        let mut log = UndoLog::new();
+        let start = value.position[0];
+        let mut write = |log: &mut UndoLog, path: &str, to: f64| {
+            let command = set(path, Value::Float(to));
+            let undo = command.apply(&mut value).expect("a brick has that leaf");
+            log.record_in(command, undo, Gesture(3));
+        };
+        write(&mut log, "position.0", 1.0);
+        write(&mut log, "position.1", 9.0);
+        write(&mut log, "position.0", start);
+        let Some(EditCommand::SetProperty { path, .. }) = log.applied().last() else {
+            panic!("a gesture left with one leaf is one property set");
+        };
+        assert_eq!(path, "position.1", "the leaf back at its start stayed");
+        write(&mut log, "position.1", brick().position[1]);
+        assert!(log.is_empty(), "a gesture back at its start left an entry");
+        assert_eq!(log.position(), 0);
     }
 
     /// **A gesture's writes to one path of two systems' components are two
-    /// entries**: one entity's block and its body each have a `position`, and
-    /// folding the second into the first would lose the first's inverse.
+    /// leaves**: one entity's block and its body each have a `position`, so
+    /// the entry holds both inverses rather than taking one for the other.
     #[test]
-    fn writes_to_one_path_in_two_systems_do_not_fold() {
+    fn writes_to_one_path_in_two_systems_are_two_leaves() {
         let mut log = UndoLog::new();
-        for system in ["bricks", "bodies"] {
-            let command = EditCommand::SetProperty {
+        for (system, was) in [("bricks", 1.0), ("bodies", 2.0)] {
+            let at = |value| EditCommand::SetProperty {
                 entity: SceneEntityId(3),
                 system: system.to_owned(),
                 path: "position.0".to_owned(),
-                value: Value::Float(1.0),
+                value: Value::Float(value),
             };
-            log.record_in(command.clone(), command, Gesture(1));
+            log.record_in(at(9.0), at(was), Gesture(1));
         }
-        assert_eq!(log.len(), 2, "a write to another system folded");
+        assert_eq!(log.len(), 1);
+        let EditCommand::Batch(undo) = log.undo().expect("one entry") else {
+            panic!("two leaves' inverse is a batch");
+        };
+        assert_eq!(undo.len(), 2, "one system's inverse was lost: {undo:?}");
     }
 
     /// An empty log has nothing to walk in either direction.
