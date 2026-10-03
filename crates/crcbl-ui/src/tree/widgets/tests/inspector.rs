@@ -674,6 +674,65 @@ fn a_64_bit_leaf_is_dragged_and_stepped_in_its_own_kind() {
     assert_eq!(value.total, u64::MAX, "a step past u64::MAX wrapped");
 }
 
+/// [`page`] over a [`Wide`] with `text` as the frame's text input.
+fn typing_page(ui: &mut Ui, nav: NavInput, text: TextInput, value: &mut Wide) -> Inspection {
+    frame_with_text(ui, idle(), nav, text, |ui| {
+        ui.inspector_with("#props", value, &InspectorOptions::default())
+    })
+}
+
+/// Double-clicks the row labelled `label`, which opens its drag-value for
+/// typing, types `text` over it and accepts; returns every edit the frames
+/// from the first press to the one after the accept reported.
+fn type_into(ui: &mut Ui, label: &str, text: &str, value: &mut Wide) -> Vec<FieldEdit> {
+    let on = centre(ui, field_key(ui, label));
+    let mut edits = Vec::new();
+    for pointer in [press(on), release(on), press(on), release(on)] {
+        edits.extend(page(ui, pointer, NavInput::default(), value, None).edits);
+    }
+    assert!(ui.text_editing(), "the double-click did not open {label}");
+    let typed = TextInput {
+        edits: vec![crate::edit::Edit::Insert(text.to_owned())],
+        ..TextInput::default()
+    };
+    for (nav, text) in [
+        (NavInput::default(), typed),
+        (NavInput::ACCEPT, TextInput::default()),
+        (NavInput::default(), TextInput::default()),
+    ] {
+        edits.extend(typing_page(ui, nav, text, value).edits);
+    }
+    edits
+}
+
+/// **A number typed into a row is one edit** with the exact `f64` before and
+/// after — seventeen significant digits, which no `f32` holds — and text the
+/// row's kind refuses is none.
+#[test]
+fn a_number_typed_into_a_row_is_one_edit_and_a_refused_one_is_none() {
+    const SEVENTEEN: &str = "0.12345678901234567";
+    let want: f64 = SEVENTEEN.parse().expect("a number");
+    let mut ui = Ui::new();
+    let mut value = wide();
+    page(&mut ui, idle(), NavInput::default(), &mut value, None);
+
+    let edits = type_into(&mut ui, "Fine", SEVENTEEN, &mut value);
+    assert_eq!(
+        edits,
+        [FieldEdit {
+            path: "fine".to_owned(),
+            before: Value::Float(FINE),
+            after: Value::Float(want),
+        }],
+        "the typed number is not one exact edit"
+    );
+    assert_eq!(value.fine.to_bits(), want.to_bits());
+
+    let edits = type_into(&mut ui, "Count", "1.5", &mut value);
+    assert!(edits.is_empty(), "a refused number edited: {edits:?}");
+    assert_eq!(value.count, FAR);
+}
+
 // ---------------------------------------------------------------------------
 // Switching an enum's variant
 // ---------------------------------------------------------------------------

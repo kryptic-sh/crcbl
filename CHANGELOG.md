@@ -645,6 +645,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A drag-value can be typed into.** A double-click on a
+  `crcbl_ui::tree::Ui::drag_value`, or accept (Enter, Space, the pad's accept)
+  while it is focused, opens it as a text input holding every digit of its value
+  — all of it selected, so what is typed replaces it — with the text input's
+  caret, selection and clipboard. Accept or a click elsewhere puts the number
+  in, read straight to the field's own kind (`f64`, `i64` or `u64`, never
+  through an `f32`) and held inside its range, as one change; back puts back the
+  value it engaged with, bit for bit. Text that names no number of the kind — a
+  fraction or an exponent for a whole number, one past its type's ends, a float
+  that is not finite — is refused: nothing changes, and on accept the field
+  stays open with `:refused` (a red border in `default.css`) until the next
+  edit. Up and down step the value while it is typed into, and so do a pad's
+  left and right; a keyboard's left and right, which stepped it after accept
+  before, now move the caret. A single click still engages it for stepping as
+  before. Every inspector number row takes it, and the editor records a typed
+  number as one undo. `Ui::text_editing` is true while a drag-value is typed
+  into, so a caller routing keys by it needs no change.
+
 - **The netgraph: a "net" section of the F3 panel showing each link of a LAN
   session.** `crcbl::lan::netgraph::Netgraph`, kept by `LanHost` and `LanClient`
   and fed every frame (`LanHost::netgraph`, `LanClient::netgraph`), lists a row

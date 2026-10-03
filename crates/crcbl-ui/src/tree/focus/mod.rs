@@ -106,7 +106,6 @@ use glam::Vec2;
 
 use super::store::NodeKey;
 use super::style::{NavTarget, Overflow};
-use super::widgets::WidgetState;
 use super::{Response, Ui};
 
 pub use debug::{NAV_DEBUG_BEAM, NAV_DEBUG_CHOSEN, NAV_DEBUG_OUTSIDE, NAV_DEBUG_PATH};
@@ -560,10 +559,7 @@ impl Ui {
             {
                 self.move_focus(target);
                 let (engages, selects) = self.store.by_key(target).map_or((false, false), |node| {
-                    (
-                        node.behavior.role == Role::Engage,
-                        node.widget == WidgetState::TextInput,
-                    )
+                    (node.behavior.role == Role::Engage, node.widget.types())
                 });
                 if engages && (!dragged || selects) && self.focus.engaged != Some(target) {
                     self.focus.engaged = Some(target);
@@ -1044,6 +1040,18 @@ impl Ui {
         value: &mut T,
     ) {
         self.snapshot_for(response.key, response.engagement, value);
+    }
+
+    /// The copy [`Ui::snapshot`] holds for `key`, if it holds one and it is a
+    /// `T`: what a widget that changes how it edits partway through an
+    /// engagement reads, to put back what the engagement began with.
+    pub(super) fn snapshot_of<T: Clone + 'static>(&self, key: NodeKey) -> Option<T> {
+        self.focus
+            .snapshot
+            .as_ref()
+            .filter(|held| held.key == key)
+            .and_then(|held| held.value.downcast_ref::<T>())
+            .cloned()
     }
 
     /// [`Ui::snapshot`] for the node `key`, engaged as `engagement` says: for a

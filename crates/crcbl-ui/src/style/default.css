@@ -216,6 +216,11 @@ drag-value:engaged {
   background: #1d3557;
 }
 
+/* A number typed into it that it refused: text naming no number it holds. */
+drag-value:refused {
+  border-color: #e5484d;
+}
+
 drag-value:disabled {
   background: #23272f;
   color: #7a8190;

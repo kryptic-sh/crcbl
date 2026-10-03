@@ -12,6 +12,7 @@
 //! |---|---|---|
 //! | `button.rs` | [`Ui::button`], [`Ui::checkbox`] | instant activation |
 //! | `value.rs` | [`Ui::slider`], [`Ui::drag_value`] | engaged |
+//! | `number_entry.rs` | a drag-value being typed into | engaged |
 //! | `disclosure.rs` | [`Ui::collapsing`], [`Ui::tree_node`], [`Ui::tree_leaf`] | instant activation |
 //! | `split.rs` | [`Ui::split`], [`Ui::split_at`] | the divider is engaged |
 //! | `list.rs` | [`Ui::list`] | each row is instant activation |
@@ -49,8 +50,8 @@
 //!
 //! Beside `:hover`, `:active`, `:focus`, `:engaged` and `:disabled`, a checked
 //! checkbox has **`:checked`**, an open header, tree row or outliner row has
-//! **`:open`**, and a text input the clipboard refused has **`:refused`**. A
-//! selected outliner row and the tab that is showing have **`:checked`** too:
+//! **`:open`**, and a text input the clipboard refused, or a drag-value that
+//! refused the number typed into it, has **`:refused`**. A selected outliner row and the tab that is showing have **`:checked`** too:
 //! Selectors Level 4 §12.2 gives `:checked` to an `option` element that is
 //! selected, which is what both are, and the eight pseudo-classes fill
 //! [`PseudoClasses`](crate::style::PseudoClasses)' bits.
@@ -68,7 +69,8 @@
 //! then left and right (up and down for a column split) adjust it, accept or a
 //! click elsewhere commits, and back cancels to the value it had when it
 //! engaged. A text input is engaged too; `text_input.rs` has what it takes
-//! while it is. The pointer adjusts without engaging: a press drags the value, and
+//! while it is, and a drag-value opened for typing takes the same
+//! (`number_entry.rs`). The pointer adjusts without engaging: a press drags the value, and
 //! a press that moved past [`super::DRAG_THRESHOLD`] ends focused, not engaged.
 //!
 //! # Disabled
@@ -82,6 +84,7 @@ mod disclosure;
 mod dock;
 mod inspector;
 mod list;
+mod number_entry;
 mod outliner;
 mod select;
 mod split;
@@ -93,6 +96,9 @@ mod value;
 
 use std::borrow::Cow;
 use std::panic::Location;
+use std::time::Duration;
+
+use glam::Vec2;
 
 #[cfg(doc)]
 use super::Response;
@@ -148,9 +154,19 @@ pub(crate) enum WidgetState {
     },
     /// A divider under a press: where it was when the press began.
     Anchor(Option<f32>),
-    /// A drag-value under a press: what its value was when the press began,
-    /// in the number's own kind.
-    Drag(Option<value::sealed::DragAnchor>),
+    /// A drag-value that is not being typed into.
+    Drag {
+        /// What its value was when the press it is under began, in the
+        /// number's own kind; none while no press holds it.
+        anchor: Option<value::sealed::DragAnchor>,
+        /// When on the text clock, and where, its last press that was not a
+        /// drag began: what a second press is a double-click after.
+        last_press: Option<(Duration, Vec2)>,
+    },
+    /// A drag-value being typed into, whose line is [`Ui`]'s `edits` as a
+    /// text input's is: the value it had when it engaged, which back puts
+    /// back.
+    TypedNumber(value::sealed::DragAnchor),
     /// A split: where its divider was put, as the first pane's length.
     Split(Option<f32>),
     /// A virtualized list or outliner: the row that held focus when it was
@@ -166,6 +182,15 @@ pub(crate) enum WidgetState {
     /// A context menu's item that opens a submenu beside it, which the right
     /// arrow opens too.
     MenuBranch,
+}
+
+impl WidgetState {
+    /// Whether the node takes typed text while it is engaged — a text input,
+    /// or a drag-value being typed into — so a drag that ends on it leaves it
+    /// engaged, and [`Ui::text_editing`] is true.
+    pub(crate) const fn types(self) -> bool {
+        matches!(self, Self::TextInput | Self::TypedNumber(_))
+    }
 }
 
 /// `selector` with the widget type `kind` in front, unless it names a type.

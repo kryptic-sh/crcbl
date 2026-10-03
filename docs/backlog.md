@@ -3678,16 +3678,46 @@ in `crcbl_input::list`). Decisions, then what is left.
   dropped, because that struct's own fields carry `range: None` and the widget
   cannot tell "no bound" from "inherit". `Overrides::vectors()` covers the case
   that matters; a general answer needs `Field` to say which.
-- **A 64-bit field can be dragged but not typed.** The 64-bit drag-value
-  (2026-10-03, `DragNumber` in `crates/crcbl-ui/src/tree/widgets/value.rs`)
-  fixed dragging and stepping, but the widget takes no typed number — the
-  click-to-type mode under rung 7's "Drag-value has no snapping" is not built —
-  so a 17-digit `f64` or an `i64` past 2^53 cannot be entered exactly, only
-  reached by steps. When it is built, its text must parse to the field's own
-  kind (`str::parse::<f64>`, `::<i64>`, `::<u64>`, never through `f32`) and show
-  every digit while engaged (`{}` for a float, not the step's decimals). No
-  reflected leaf goes through the slider, so it stayed `f32`. Decisions taken
-  with the 64-bit change:
+- **Typing into a drag-value (2026-10-04,
+  `crates/crcbl-ui/src/tree/widgets/number_entry.rs`) — decisions, each with
+  why:**
+  - **Opened by a double-click or by accept while focused; a single click still
+    engages for stepping.** ImGui and Blender open a number on a double-click
+    and ImGui on Enter. A single click was left alone because the editor's field
+    paste is Ctrl+V over a clicked field, and a field a click opened for typing
+    would hand that chord to the text input instead. egui, Godot and Blender
+    open on a single click; changing to that is re-deciding the editor's field
+    paste, not a widget change.
+  - **Considered and declined: typing a digit on a focused drag-value opens
+    it.** The tree hears typed text only while `Ui::text_editing` is true, which
+    also pushes the `text` context that takes the arrows from navigation. It
+    would take a third state for callers to route keys by.
+  - **Accept with text naming no number keeps the field open** with `:refused`
+    until the next edit, re-engaged through `Ui::engage`, and back after that
+    still puts back the engagement's starting value (the widget keeps it in
+    `WidgetState::TypedNumber`, because the focus snapshot is dropped on the
+    commit). **A click elsewhere with such text drops it**, value unchanged:
+    focus has gone, so there is no open field to mend it in.
+  - **Steps still step while typing**: up and down (which the `text` context
+    leaves to `ui_move`) and a pad's left and right, from the typed number when
+    it parses, writing the value live as a step always has. The keyboard's left
+    and right, which stepped an accept-engaged drag-value before, now move the
+    caret — the one behaviour change for an existing input.
+  - **Text is the value's exact text**: `{}` for an `f64` (the fewest digits
+    that read back bit for bit, no exponent, so `1e300` is 301 characters) and
+    every digit of a whole number. Parsing trims white space and is the kind's
+    own `str::parse`; a float that parses to a non-finite value is refused, as
+    the inspector's leaves refuse one.
+  - **Held at its laid-out width with overflow hidden while typed into**, so an
+    inspector row does not reflow as the text grows; the text scrolls to the
+    caret as a text input's does.
+- **Not covered by typing into a drag-value**: a vector row's three fields have
+  no Tab-to-next-axis (Tab is `ui_next`, captured and ignored while engaged);
+  there is no expression evaluation (`2*3`) and no unit suffix; and a pre-edit
+  (IME) string is not shown, as for every text input.
+- **Decisions taken with the 64-bit drag-value (2026-10-03, `DragNumber` in
+  `crates/crcbl-ui/src/tree/widgets/value.rs`)**, which still bind. No reflected
+  leaf goes through the slider, so it stayed `f32`.
   - **No `f32` impl of `DragNumber`.** An `f32` caller widens with `f64::from`
     and narrows back itself, so the one rounding is at its boundary; the
     `ui_widgets` scene's `#gain` became an `f64` instead.
@@ -3961,9 +3991,8 @@ the gaps below.
 - **A split position is pixels, not a fraction**, so it does not rescale with
   its parent; the divider is one extra navigation stop; `split { flex-grow: 1 }`
   in `default.css` assumes a split fills its parent.
-- **Drag-value has no snapping to `step` while dragged, no fine or coarse
-  modifier, and no click-to-type mode**; `Ui::text_input` exists now, so
-  click-to-type is a composition of the two.
+- **Drag-value has no snapping to `step` while dragged and no fine or coarse
+  modifier.** (Typing into it landed 2026-10-04; see UI rung 8b's section.)
 - **What 7d inherits**: `Menu`'s `Slider` and `Cycler` should map onto
   `Ui::slider` and a cycler that does not exist yet, and pushing the `ui`
   context waits on `Menu` moving onto the tree.
@@ -13198,13 +13227,6 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   three gaps (an entity of a game's own component could not be made, the
   environment could not be edited, a vector row's last field was cut off). What
   it found and left, each with what it takes:
-  - **A drag-value takes no typed number.** `Ui::drag_value` moves by `speed`
-    per pixel or `step` per engaged arrow, unsnapped, so whether a drag lands on
-    the number a person means depends on the pixel it ends on. The pass entered
-    every number by a field paste (Ctrl+V over the field), which reads text
-    exactly. A typed entry is `crcbl-ui`'s widget work: a text mode on the
-    drag-value (entered on a double-click or accept, committed on accept,
-    cancelled on back) parsing through the leaf's kind.
   - **An emptied system cannot be unlisted from the UI.**
     `EditCommand::UnlistSystem` exists and is undoable, but no button reaches
     it, so a system whose last entity was deleted or detached stays in the

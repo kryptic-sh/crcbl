@@ -263,9 +263,9 @@ fn a_steps_decimals_are_counted_without_logarithms() {
 
 /// A lone drag-value over `value`, held inside `range`, moving `speed` a pixel
 /// and `step` a notch, carried from frame to frame.
-struct Lone<N: DragNumber> {
-    ui: Ui,
-    value: N,
+pub(super) struct Lone<N: DragNumber> {
+    pub ui: Ui,
+    pub value: N,
     range: RangeInclusive<N>,
     speed: f64,
     step: N,
@@ -273,7 +273,7 @@ struct Lone<N: DragNumber> {
 
 impl<N: DragNumber> Lone<N> {
     /// The drag-value, laid out by one still frame.
-    fn new(value: N, range: RangeInclusive<N>, speed: f64, step: N) -> Self {
+    pub fn new(value: N, range: RangeInclusive<N>, speed: f64, step: N) -> Self {
         let mut lone = Self {
             ui: Ui::new(),
             value,
@@ -286,7 +286,17 @@ impl<N: DragNumber> Lone<N> {
     }
 
     /// One frame with `pointer` and `nav`.
-    fn frame(&mut self, pointer: PointerInput, nav: NavInput) -> Response {
+    pub fn frame(&mut self, pointer: PointerInput, nav: NavInput) -> Response {
+        self.frame_with_text(pointer, nav, TextInput::default())
+    }
+
+    /// One frame with `pointer`, `nav` and `text` as its text input.
+    pub fn frame_with_text(
+        &mut self,
+        pointer: PointerInput,
+        nav: NavInput,
+        text: TextInput,
+    ) -> Response {
         let Self {
             ui,
             value,
@@ -294,13 +304,13 @@ impl<N: DragNumber> Lone<N> {
             speed,
             step,
         } = self;
-        frame(ui, pointer, nav, |ui| {
+        frame_with_text(ui, pointer, nav, text, |ui| {
             ui.drag_value("#lone", value, range.clone(), *speed, *step)
         })
     }
 
     /// The middle of the drag-value, where last frame laid it out.
-    fn centre(&mut self) -> Vec2 {
+    pub fn centre(&mut self) -> Vec2 {
         let key = self.frame(idle(), NavInput::default()).key;
         centre(&self.ui, key)
     }
@@ -335,10 +345,10 @@ const DRAG_PIXELS: f32 = 8.0;
 
 /// An `f64` an `f32` cannot hold: the nearest `f32` to it is another number,
 /// so a value that went through one lands somewhere else.
-const FINE: f64 = 0.1 + 1e-12;
+pub(super) const FINE: f64 = 0.1 + 1e-12;
 
 /// A distance far below an `f32`'s resolution at [`FINE`].
-const HAIR: f64 = 1e-12;
+pub(super) const HAIR: f64 = 1e-12;
 
 /// **A dragged and a stepped `f64` keep 64-bit precision**: moving [`FINE`]
 /// by a hair lands on exactly the `f64` the same sum gives, which no value

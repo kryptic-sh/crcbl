@@ -3,7 +3,7 @@
 
 use super::*;
 
-use super::files::chord;
+use super::files::{chord, type_and_enter};
 
 /// Towers' path: a system no scene from empty lists, of a component that is
 /// no mesh.
@@ -46,6 +46,13 @@ pub(super) fn scrolled_to(
         editor.frame().expect("a frame");
     }
     panic!("the inspector never scrolled the node into view");
+}
+
+/// Clicks `at` twice, the second inside the double-click time of the first:
+/// what opens a drag-value for typing.
+pub(super) fn double_click(editor: &mut Editor<HeadlessShell>, at: PhysicalPoint) {
+    click(editor, at);
+    click(editor, at);
 }
 
 /// The middle of the add-an-entity button for `system`, as the last frame
@@ -197,5 +204,72 @@ fn the_environment_takes_a_paste_and_a_copy_and_a_drag_is_one_undo() {
     );
     chord(&mut editor, Modifiers::CTRL, KeyCode::KeyZ);
     assert_eq!(editor.document_mut().files().expect("ids"), empty);
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A number typed into a field is one undo**: a double-click opens the
+/// camera's height for typing with its number selected, the number typed
+/// over it and Enter put it in as one entry in the log, and one Ctrl+Z takes
+/// it back. Text the field refuses records nothing.
+#[test]
+fn a_number_typed_into_a_field_is_one_undo() {
+    let mut editor = headless(200);
+    editor.frame().expect("a frame");
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyN);
+    let height = |editor: &Editor<HeadlessShell>| {
+        editor
+            .document()
+            .read_environment("camera.1")
+            .expect("a leaf")
+    };
+    let was = height(&editor);
+    let entries = editor.document().log().len();
+
+    let at = environment_field(&mut editor, CAMERA_ROW, 1);
+    double_click(&mut editor, at);
+    // Typed over two frames, so a number put in as it is typed would be an
+    // entry a frame rather than the one Enter makes.
+    editor.frame().expect("a frame");
+    let window = editor.window;
+    editor
+        .shell_mut()
+        .commit_text(window, "17")
+        .expect("the headless shell takes text");
+    type_and_enter(&mut editor, ".25");
+    assert_eq!(
+        height(&editor),
+        Value::Float(17.25),
+        "the number did not go in"
+    );
+    assert!(
+        !editor.panels.text_editing(),
+        "Enter did not close the field"
+    );
+    assert_eq!(
+        editor.document().log().len(),
+        entries + 1,
+        "a typed number is not one entry",
+    );
+
+    double_click(&mut editor, at);
+    type_and_enter(&mut editor, "seventeen");
+    assert!(
+        editor.panels.text_editing(),
+        "refused text closed the field"
+    );
+    tap(&mut editor, KeyCode::Escape);
+    assert_eq!(height(&editor), Value::Float(17.25));
+    assert_eq!(
+        editor.document().log().len(),
+        entries + 1,
+        "refused text recorded an entry",
+    );
+
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyZ);
+    assert_eq!(
+        height(&editor),
+        was,
+        "one undo did not take the number back"
+    );
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }

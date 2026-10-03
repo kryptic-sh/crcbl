@@ -7,6 +7,7 @@ mod disclosure;
 mod dock;
 mod inspector;
 mod list;
+mod number_entry;
 mod outliner;
 mod select;
 mod split;

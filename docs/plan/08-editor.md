@@ -1453,14 +1453,18 @@ exactly what it saves.
   first corner of the path from `+ waypoints` and each next one Ctrl+D of the
   last, its order, `x` and `z` pasted; a click on the sky to select nothing; the
   first plot from `+ plots` and each next one Ctrl+D of the last, its label
-  typed over the last one's and its `x` and `z` pasted; the toolbar's Save as
-  and a `field.scn` directory under a temporary one typed on the path line. Each
-  step asserts the leaf it wrote, and the scene has no problem a save would
-  report. The saved directory is then `apps/towers/assets/scenes/field.scn/` key
-  for key and byte for byte; `Map::load` reads it as `Map::built_in()`; and a
-  towers game on it holds the first wave with two bolt towers and no leak, as
-  towers' own scripted run does. Numbers are pasted rather than dragged because
-  the clipboard is the one exact entry a number field has (below).
+  typed over the last one's and its `x` and `z` typed into the drag-values'
+  typing mode (a double-click, the number, Enter); the toolbar's Save as and a
+  `field.scn` directory under a temporary one typed on the path line. Each step
+  asserts the leaf it wrote, and the scene has no problem a save would report.
+  The saved directory is then `apps/towers/assets/scenes/field.scn/` key for key
+  and byte for byte; `Map::load` reads it as `Map::built_in()`; and a towers
+  game on it holds the first wave with two bolt towers and no leak, as towers'
+  own scripted run does. Numbers are pasted or typed rather than dragged,
+  because a paste and a typed number are read exactly where a drag lands on
+  whatever its last pixel gives; the pass pasted every number before the
+  drag-value took a typed one (below), and the plots' positions moved to typing
+  once it did, the saved bytes unchanged.
 - **The committed field needed no change.** The editor saves through the same
   writer that wrote it, so what the pass saves is already the shipped bytes —
   nothing was regenerated, and towers' wave, balance and browser-gate tests are
@@ -1485,13 +1489,16 @@ exactly what it saves.
     past the pane's edge, so the `z` field was clipped and a click on it landed
     in the viewport. A row too wide for its pane now wraps.
 - **What it found and did not fix**, each in `docs/backlog.md` under _The
-  dogfood pass_ with what it would take: a drag-value takes no typed number, so
-  a field paste is the only exact entry; an emptied system has no button to
-  unlist it; a new entity starts at its component's `Default` rather than where
-  the view looks; the scene pane is taller than the default layout's inspector,
-  so the environment's rows are scrolled to; and a text field's text is not
-  selected when it is engaged, so retyping a duplicated plot's label takes
-  Ctrl+A first.
+  dogfood pass_ with what it would take: a drag-value took no typed number, so a
+  field paste was the only exact entry — **fixed since**: a double-click, or
+  accept while it is focused, opens a drag-value for typing with its number's
+  every digit selected, and accept puts in the number typed as one edit and one
+  undo (`crcbl-ui`'s `widgets/number_entry.rs`); an emptied system has no button
+  to unlist it; a new entity starts at its component's `Default` rather than
+  where the view looks; the scene pane is taller than the default layout's
+  inspector, so the environment's rows are scrolled to; and a text field's text
+  is not selected when it is engaged, so retyping a duplicated plot's label
+  takes Ctrl+A first.
 - **What it does not cover**: nothing of it has been seen on a device — every
   step is headless, on the null backend, against laid-out rectangles — and the
   authored field is played by towers' `Game`, not by the editor's play mode

@@ -7,16 +7,19 @@
 //! Every step is a key, a click or typed text delivered through the headless
 //! shell, as `exit_criterion` drives its scene: the environment pasted into
 //! the scene's inspector rows; each corner of the path and each plot added
-//! from the inspector's add-an-entity buttons or duplicated with Ctrl+D, its
-//! numbers pasted into its rows and its label typed; the directory typed on
-//! the save-as line. **No file is written by anything but the editor's
-//! save**, and no scene text or RON is written by hand: what the clipboard
-//! carries is one number at a time, as a person copies it from anywhere.
+//! from the inspector's add-an-entity buttons or duplicated with Ctrl+D, a
+//! corner's numbers pasted into its rows, a plot's label and numbers typed;
+//! the directory typed on the save-as line. **No file is written by anything
+//! but the editor's save**, and no scene text or RON is written by hand: what
+//! the clipboard carries is one number at a time, as a person copies it from
+//! anywhere.
 //!
-//! **Numbers are pasted rather than dragged**: a drag-value takes no typed
-//! number — it moves `step` a pixel — so the clipboard is the one way a number
-//! field takes exactly the value a person means (`docs/backlog.md`, the pass's
-//! finding).
+//! **Numbers are pasted or typed rather than dragged**: a drag moves `step` a
+//! pixel, so whether it lands on the number a person means depends on the
+//! pixel it ends on, while a paste and a typed number are read exactly. The
+//! pass pasted every number when a drag-value took no typed one; the plots'
+//! positions are typed now, through the drag-value's typing mode, and the
+//! rest stay pasted so both ways in stay proven.
 
 use super::*;
 
@@ -29,7 +32,7 @@ use crcbl_towers::tower::Kind;
 use crcbl_towers::{Controls, DEFAULT_TICK_HZ, Game, Map, WAVES};
 
 use super::files::{chord, type_and_enter};
-use super::scene_inspector::{entity_add, environment_field};
+use super::scene_inspector::{double_click, entity_add, environment_field};
 use crate::document::origin_tests::tree;
 
 /// The frames the editor may run: enough for every click, paste and key.
@@ -129,6 +132,14 @@ fn paste_into(editor: &mut Editor<HeadlessShell>, at: PhysicalPoint, text: &str)
     }
 }
 
+/// What a person does to type an exact number into a number field:
+/// double-clicks it, which opens it for typing with its number selected,
+/// types `text` over that and presses Enter.
+fn type_number(editor: &mut Editor<HeadlessShell>, at: PhysicalPoint, text: &str) {
+    double_click(editor, at);
+    type_and_enter(editor, text);
+}
+
 /// Clicks `at`, a text field, selects what it holds and types `text` over
 /// it.
 fn type_into(editor: &mut Editor<HeadlessShell>, at: PhysicalPoint, text: &str) {
@@ -209,9 +220,8 @@ fn first_wave_ticks(map: &Map) -> u32 {
 /// 3. The path: the first corner from the inspector's `+ waypoints`, each
 ///    next one Ctrl+D of the last; each one's order and `x` and `z` pasted.
 /// 4. A click on the sky, selecting nothing; then the plots: the first from
-///    `+ plots`, each next one Ctrl+D of the last; each one's label typed and
-///    its `x` and `z` pasted. The scene now has no problem a save would
-///    report.
+///    `+ plots`, each next one Ctrl+D of the last; each one's label, `x` and
+///    `z` typed. The scene now has no problem a save would report.
 /// 5. The toolbar's Save as, a directory named `field.scn` typed, Enter: the
 ///    scene is that directory's, and clean.
 /// 6. That directory, read off the disk, is the committed field's files —
@@ -297,9 +307,9 @@ fn towers_field_authored_from_empty_is_the_committed_field_and_plays() {
         let at = widget(&editor, section(&editor), LABEL_ROW, None);
         type_into(&mut editor, at, label);
         let at = widget(&editor, section(&editor), POSITION_ROW, Some(X));
-        paste_into(&mut editor, at, x);
+        type_number(&mut editor, at, x);
         let at = widget(&editor, section(&editor), POSITION_ROW, Some(Z));
-        paste_into(&mut editor, at, z);
+        type_number(&mut editor, at, z);
         for (path, value) in [
             ("label", Value::Text(label.to_owned())),
             ("position.0", float(x)),

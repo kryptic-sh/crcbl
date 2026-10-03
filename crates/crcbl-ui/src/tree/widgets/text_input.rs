@@ -68,11 +68,12 @@ use std::time::Duration;
 
 use glam::Vec2;
 
+use super::super::store::Interaction;
 use super::{Ui, WidgetState, typed};
 use crate::console::caret_shown;
 use crate::edit::{ClipboardOp, Edit, LineEdit, run_at};
 use crate::font::Font;
-use crate::style::{Declaration, PseudoClasses};
+use crate::style::{Declaration, NodeSelector, PseudoClasses};
 use crate::text::FontAtlas;
 use crate::tree::emit::content_width;
 use crate::tree::{Behavior, Content, DRAG_THRESHOLD, Engagement, NodeKey, NodeStyle, Response};
@@ -162,6 +163,35 @@ pub(crate) struct EditState {
 }
 
 impl EditState {
+    /// A line holding `text`, all of it selected, so the first character typed
+    /// replaces it. `held` says a press still down began it, which then keeps
+    /// the selection rather than placing the caret where the press is, as a
+    /// double-click's word is kept.
+    pub(super) fn selecting_all(text: &str, held: bool) -> Self {
+        let mut state = Self::default();
+        state.select_all_of(text);
+        state.held = held;
+        state.words = held;
+        state
+    }
+
+    /// The line's text.
+    pub(super) fn text(&self) -> &str {
+        self.line.text()
+    }
+
+    /// Replaces the line with `text`, all of it selected, the caret shown.
+    pub(super) fn select_all_of(&mut self, text: &str) {
+        self.line.set_text(text);
+        self.line.select(0..self.line.len());
+        self.blink = Duration::ZERO;
+    }
+
+    /// Sets `:refused` until the next edit, as a refused clipboard does.
+    pub(super) fn refuse(&mut self) {
+        self.refused = true;
+    }
+
     /// The caret stop nearest `x`, measured from the span's content left edge.
     fn index_at(&self, x: f32) -> usize {
         self.boundaries
@@ -178,6 +208,20 @@ impl EditState {
             .rposition(|&left| left <= x)
             .unwrap_or(0)
     }
+}
+
+/// What [`Ui::line_block`] builds on: the node and what it keeps.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Line<'a> {
+    /// The block's key, found before it is built.
+    pub key: NodeKey,
+    /// The block's selector.
+    pub selector: NodeSelector<'a>,
+    /// The block's inline declarations.
+    pub inline: &'a [Declaration],
+    /// What the node keeps between frames: a [`WidgetState`] that
+    /// [`types`](WidgetState::types).
+    pub widget: WidgetState,
 }
 
 /// Where one text input's parts are this frame, for the pass after layout.
@@ -270,9 +314,37 @@ impl Ui {
         let parsed = self.node_selector(&selector);
         let key = self.widget_key(parsed, Location::caller());
         let interaction = self.interaction_of(key);
-        let disabled = self.building_disabled();
         self.snapshot_for(key, interaction.engagement, value);
+        let line = Line {
+            key,
+            selector: parsed,
+            inline: &[],
+            widget: WidgetState::TextInput,
+        };
+        let mut response = self.line_block(line, interaction, value, options);
+        response.changed = *value != before;
+        response
+    }
 
+    /// A text input's block on `line.key`, editing `value` — everything
+    /// [`Ui::text_input_with`] builds once it has its key and has restored a
+    /// cancelled value, which a drag-value being typed into shares: see
+    /// `number_entry.rs`. [`Response::changed`] is left for the caller, whose
+    /// value is not always the text.
+    pub(super) fn line_block(
+        &mut self,
+        line: Line<'_>,
+        interaction: Interaction,
+        value: &mut String,
+        options: TextInputOptions<'_>,
+    ) -> Response {
+        let Line {
+            key,
+            selector: parsed,
+            inline,
+            widget,
+        } = line;
+        let disabled = self.building_disabled();
         let mut state = self.edits.remove(&key).unwrap_or_else(|| {
             let mut state = EditState::default();
             state.line.set_text(value);
@@ -373,7 +445,7 @@ impl Ui {
             active,
             placeholder,
         };
-        let mut response = self.open_block(key, parsed, &[], Behavior::ENGAGE, pseudo, |ui| {
+        let response = self.open_block(key, parsed, inline, Behavior::ENGAGE, pseudo, |ui| {
             if active && !placeholder && !range.is_empty() {
                 fit.selection = Some(ui.nodes.len());
                 ui.block(".text-input-selection", &[], |_| {});
@@ -391,9 +463,8 @@ impl Ui {
             }
         });
         self.edits.insert(key, state);
-        self.set_widget_state(key, WidgetState::TextInput);
+        self.set_widget_state(key, widget);
         self.fits.push(fit);
-        response.changed = *value != before;
         response
     }
 
@@ -410,11 +481,7 @@ impl Ui {
             return !state.words && state.line.place(state.index_at(x), true);
         }
         let pos = self.pointer.pos;
-        let double = state.last_press.is_some_and(|(at, from)| {
-            self.text_clock.saturating_sub(at) <= DOUBLE_CLICK_TIME
-                && (pos - from).length_squared() <= DRAG_THRESHOLD * DRAG_THRESHOLD
-        });
-        if double {
+        if self.second_press(state.last_press) {
             state.last_press = None;
             state.words = true;
             let chars: Vec<char> = state.line.text().chars().collect();
@@ -424,6 +491,16 @@ impl Ui {
             state.words = false;
             state.line.place(state.index_at(x), false)
         }
+    }
+
+    /// Whether a press landing now is the second of a double-click after a
+    /// press that began at `last`: within [`DOUBLE_CLICK_TIME`] of it on the
+    /// text clock, and within [`DRAG_THRESHOLD`] of where it landed.
+    pub(super) fn second_press(&self, last: Option<(Duration, Vec2)>) -> bool {
+        last.is_some_and(|(at, from)| {
+            self.text_clock.saturating_sub(at) <= DOUBLE_CLICK_TIME
+                && (self.pointer.pos - from).length_squared() <= DRAG_THRESHOLD * DRAG_THRESHOLD
+        })
     }
 
     /// Hands the tree this frame's text input; see the module docs. Call it
@@ -441,14 +518,14 @@ impl Ui {
         std::mem::take(&mut self.clipboard_requests)
     }
 
-    /// Whether the engaged node is a text input: while it is, the caller's
-    /// typing and editing keys belong to the tree and not to navigation or a
-    /// game.
+    /// Whether the engaged node is a text input, or a drag-value being typed
+    /// into: while it is, the caller's typing and editing keys belong to the
+    /// tree and not to navigation or a game.
     #[must_use]
     pub fn text_editing(&self) -> bool {
         self.engaged()
             .and_then(|key| self.store.by_key(key))
-            .is_some_and(|node| node.widget == WidgetState::TextInput)
+            .is_some_and(|node| node.widget.types())
     }
 
     /// The text input `key`'s caret and selection anchor, as `char` counts;

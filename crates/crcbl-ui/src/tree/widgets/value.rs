@@ -12,14 +12,18 @@
 //! across its content box from the frame the press lands; a drag-value's
 //! moves only once the press is a drag, by `speed` per pixel the pointer has
 //! moved from where the press began.
+//!
+//! A drag-value can also be typed into, opened by a double-click or by accept
+//! while it is focused; `number_entry.rs` has that mode.
 
 use std::ops::RangeInclusive;
 use std::panic::Location;
 
 use self::sealed::Sealed;
+use super::number_entry::NumberEntry;
 use super::{Ui, WidgetState, clamp_to, typed};
 use crate::style::{Declaration, PseudoClasses};
-use crate::tree::{Behavior, Direction, LengthAuto, NavStep, Response};
+use crate::tree::{Behavior, Direction, Engagement, LengthAuto, NavStep, Response};
 
 /// The most decimals a drag-value shows.
 const MAX_DECIMALS: usize = 6;
@@ -117,6 +121,16 @@ pub(super) mod sealed {
         /// `self` as its drag-value shows it: with as many decimals as `step`
         /// has, and a whole number whole.
         fn text(self, step: Self) -> String;
+        /// `self` with every digit it holds, as typing into its drag-value
+        /// starts from: text that [`parse_text`](Self::parse_text) reads back
+        /// as `self`, bit for bit.
+        fn exact_text(self) -> String;
+        /// The number `text` spells in this kind, read straight to it — a
+        /// float never through an `f32` — with white space around it
+        /// ignored; `None` for text that spells no number of this kind: a
+        /// fraction or an exponent for a whole number, one past the type's
+        /// ends, and a float that is not finite.
+        fn parse_text(text: &str) -> Option<Self>;
         /// Whether `self` is `other` — bit for bit for a float, so a move from
         /// `0.0` to `-0.0` is a change.
         fn same(self, other: Self) -> bool;
@@ -141,6 +155,19 @@ pub(super) mod sealed {
 
         fn text(self, step: Self) -> String {
             format!("{:.*}", super::decimals(step), self)
+        }
+
+        fn exact_text(self) -> String {
+            // `Display` with no precision writes the fewest digits that read
+            // back to the same `f64`, so the text round-trips exactly.
+            self.to_string()
+        }
+
+        fn parse_text(text: &str) -> Option<Self> {
+            text.trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|number| number.is_finite())
         }
 
         fn same(self, other: Self) -> bool {
@@ -191,6 +218,14 @@ pub(super) mod sealed {
 
                 fn text(self, _step: Self) -> String {
                     self.to_string()
+                }
+
+                fn exact_text(self) -> String {
+                    self.to_string()
+                }
+
+                fn parse_text(text: &str) -> Option<Self> {
+                    text.trim().parse::<$type>().ok()
                 }
 
                 fn same(self, other: Self) -> bool {
@@ -282,6 +317,11 @@ impl Ui {
     /// the drag's distance rounded to the nearest whole — so by one at any
     /// magnitude — and saturates at its type's ends; [`DragNumber`] has the
     /// rest. [`Response::changed`] is the frame the value moved.
+    ///
+    /// A double-click, or accept while it is focused, opens it for typing: it
+    /// becomes a text input holding every digit of its value, all selected,
+    /// and accept or a click elsewhere puts in the number typed — see
+    /// `number_entry.rs`.
     #[track_caller]
     pub fn drag_value<N: DragNumber>(
         &mut self,
@@ -298,12 +338,53 @@ impl Ui {
         let key = self.widget_key(parsed, Location::caller());
         let interaction = self.interaction_of(key);
         self.snapshot_for(key, interaction.engagement, value);
-
-        let held = match self.widget_state(key) {
-            WidgetState::Drag(anchor) => anchor.and_then(N::from_anchor),
-            _ => None,
+        let entry = NumberEntry {
+            key,
+            selector: parsed,
+            interaction,
+            min,
+            max,
+            step,
         };
-        let anchor = if interaction.pressed && !self.building_disabled() {
+
+        let (held, last_press) = match self.widget_state(key) {
+            WidgetState::Drag { anchor, last_press } => {
+                (anchor.and_then(N::from_anchor), last_press)
+            }
+            WidgetState::TypedNumber(original) => {
+                if let Some(original) = N::from_anchor(original)
+                    && let Some(mut response) = self.typed_number(entry, value, original)
+                {
+                    response.changed = !value.same(before);
+                    return response;
+                }
+                (None, None)
+            }
+            _ => (None, None),
+        };
+
+        let pressed = interaction.pressed && !self.building_disabled();
+        let starts = pressed && held.is_none();
+        let double = starts && self.second_press(last_press);
+        // Engaged by accept, not by a click: the keyboard's way in to typing.
+        let accepted = interaction.engagement == Engagement::Began
+            && self.clicked_key().is_none()
+            && !self.building_disabled();
+        if double || accepted {
+            let mut response = self.begin_typing(entry, value, double);
+            response.changed = !value.same(before);
+            return response;
+        }
+
+        let last_press = if starts {
+            Some((self.text_clock, self.pointer.pos))
+        } else if pressed && self.dragged {
+            // A drag is not a click, so no press after it is a double-click.
+            None
+        } else {
+            last_press
+        };
+        let anchor = if pressed {
             let anchor = held.unwrap_or(*value);
             if self.dragged {
                 let moved = f64::from(self.pointer.pos.x - self.press_origin.x);
@@ -328,7 +409,17 @@ impl Ui {
                 ui.span(".drag-value-text", text.as_str(), &[]);
             },
         );
-        self.set_widget_state(key, WidgetState::Drag(anchor.map(N::anchor)));
+        // A captured press still reports pressed on the frame it is released,
+        // so only a button still down carries the anchor into the next frame —
+        // and a press after it is one that starts.
+        let anchor = anchor.filter(|_| self.pointer.down);
+        self.set_widget_state(
+            key,
+            WidgetState::Drag {
+                anchor: anchor.map(N::anchor),
+                last_press,
+            },
+        );
         response.changed = !value.same(before);
         response
     }
