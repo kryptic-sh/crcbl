@@ -111,22 +111,33 @@ pub(super) fn encode(
 ) -> Result<(), InputSectionError> {
     buf.extend_from_slice(&count(ticks.len(), "peer ticks")?.to_le_bytes());
     for entry in ticks {
-        buf.extend_from_slice(&entry.tick.get().to_le_bytes());
-        buf.extend_from_slice(&count(entry.roster.len(), "roster changes")?.to_le_bytes());
-        for change in &entry.roster {
-            buf.push(change.kind.code());
-            buf.extend_from_slice(&change.peer.to_le_bytes());
-        }
-        buf.extend_from_slice(&count(entry.peers.len(), "peers' frames")?.to_le_bytes());
-        for peer in &entry.peers {
-            buf.extend_from_slice(&peer.peer.to_le_bytes());
-            buf.extend_from_slice(&peer.dropped.to_le_bytes());
-            buf.extend_from_slice(&count(peer.frames.len(), "frames")?.to_le_bytes());
-            for (tick, data) in &peer.frames {
-                buf.extend_from_slice(&tick.get().to_le_bytes());
-                buf.extend_from_slice(&count(data.len(), "frame bytes")?.to_le_bytes());
-                buf.extend_from_slice(data);
-            }
+        encode_tick(entry, buf)?;
+    }
+    Ok(())
+}
+
+/// Append one `PeerTickEntry` to `buf` — what the track's count is followed
+/// by, one entry at a time, so a writer streaming the track encodes each tick
+/// as it comes. [`check_tick`] holds the counts and lengths this converts.
+pub(in crate::replay) fn encode_tick(
+    entry: &RecordedPeerTick,
+    buf: &mut Vec<u8>,
+) -> Result<(), InputSectionError> {
+    buf.extend_from_slice(&entry.tick.get().to_le_bytes());
+    buf.extend_from_slice(&count(entry.roster.len(), "roster changes")?.to_le_bytes());
+    for change in &entry.roster {
+        buf.push(change.kind.code());
+        buf.extend_from_slice(&change.peer.to_le_bytes());
+    }
+    buf.extend_from_slice(&count(entry.peers.len(), "peers' frames")?.to_le_bytes());
+    for peer in &entry.peers {
+        buf.extend_from_slice(&peer.peer.to_le_bytes());
+        buf.extend_from_slice(&peer.dropped.to_le_bytes());
+        buf.extend_from_slice(&count(peer.frames.len(), "frames")?.to_le_bytes());
+        for (tick, data) in &peer.frames {
+            buf.extend_from_slice(&tick.get().to_le_bytes());
+            buf.extend_from_slice(&count(data.len(), "frame bytes")?.to_le_bytes());
+            buf.extend_from_slice(data);
         }
     }
     Ok(())
@@ -183,45 +194,58 @@ pub(super) fn decode(reader: &mut Reader<'_>) -> Result<Vec<RecordedPeerTick>, I
 /// The rules both directions hold: ticks in order, one entry a peer a tick,
 /// and no more frames, nor longer ones, than a host's tick holds.
 pub(super) fn validate(ticks: &[RecordedPeerTick]) -> Result<(), InputSectionError> {
-    for pair in ticks.windows(2) {
-        if pair[1].tick <= pair[0].tick {
-            return Err(InputSectionError::PeerTickOutOfOrder {
-                previous: pair[0].tick,
-                tick: pair[1].tick,
+    let mut previous = None;
+    for entry in ticks {
+        check_tick(previous, entry)?;
+        previous = Some(entry.tick);
+    }
+    Ok(())
+}
+
+/// The rules `entry` holds after a track whose last tick is `previous`: a
+/// later tick, one entry a peer, and no more frames, nor longer ones, than a
+/// host's tick holds — [`validate`]'s, one entry at a time.
+pub(in crate::replay) fn check_tick(
+    previous: Option<TickId>,
+    entry: &RecordedPeerTick,
+) -> Result<(), InputSectionError> {
+    if let Some(previous) = previous
+        && entry.tick <= previous
+    {
+        return Err(InputSectionError::PeerTickOutOfOrder {
+            previous,
+            tick: entry.tick,
+        });
+    }
+    for (index, peer) in entry.peers.iter().enumerate() {
+        if entry.peers[..index]
+            .iter()
+            .any(|seen| seen.peer == peer.peer)
+        {
+            return Err(InputSectionError::PeerFramesTwice {
+                tick: entry.tick,
+                peer: peer.peer,
             });
         }
-    }
-    for entry in ticks {
-        for (index, peer) in entry.peers.iter().enumerate() {
-            if entry.peers[..index]
-                .iter()
-                .any(|seen| seen.peer == peer.peer)
-            {
-                return Err(InputSectionError::PeerFramesTwice {
-                    tick: entry.tick,
-                    peer: peer.peer,
-                });
-            }
-            if peer.frames.len() > MAX_CLIENT_INPUTS_PER_TICK {
-                return Err(InputSectionError::TooManyFrames {
-                    tick: entry.tick,
-                    peer: peer.peer,
-                    count: peer.frames.len(),
-                    limit: MAX_CLIENT_INPUTS_PER_TICK,
-                });
-            }
-            if let Some((_, data)) = peer
-                .frames
-                .iter()
-                .find(|(_, data)| data.len() > MAX_FIELD_BYTES)
-            {
-                return Err(InputSectionError::FrameTooLong {
-                    tick: entry.tick,
-                    peer: peer.peer,
-                    len: data.len(),
-                    limit: MAX_FIELD_BYTES,
-                });
-            }
+        if peer.frames.len() > MAX_CLIENT_INPUTS_PER_TICK {
+            return Err(InputSectionError::TooManyFrames {
+                tick: entry.tick,
+                peer: peer.peer,
+                count: peer.frames.len(),
+                limit: MAX_CLIENT_INPUTS_PER_TICK,
+            });
+        }
+        if let Some((_, data)) = peer
+            .frames
+            .iter()
+            .find(|(_, data)| data.len() > MAX_FIELD_BYTES)
+        {
+            return Err(InputSectionError::FrameTooLong {
+                tick: entry.tick,
+                peer: peer.peer,
+                len: data.len(),
+                limit: MAX_FIELD_BYTES,
+            });
         }
     }
     Ok(())

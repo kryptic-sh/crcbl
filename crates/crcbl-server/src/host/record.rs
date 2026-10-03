@@ -198,6 +198,15 @@ impl PeerLog {
         });
     }
 
+    /// Take every tick recorded since the last take, in tick order, leaving
+    /// the record empty and still recording.
+    pub(super) fn take_recorded(&mut self) -> Vec<TickInputs> {
+        self.record
+            .as_mut()
+            .map(|record| std::mem::take(&mut record.ticks))
+            .unwrap_or_default()
+    }
+
     /// Every tick recorded so far, in tick order.
     pub(super) fn recorded(&self) -> &[TickInputs] {
         self.record

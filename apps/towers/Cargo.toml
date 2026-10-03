@@ -38,6 +38,7 @@ crcbl = { workspace = true, features = ["greybox", "scn"] }
 # shipped binary; see `apps/crcbl-sample-test/Cargo.toml`.
 [dev-dependencies]
 crcbl-sample-test = { workspace = true }
+tempfile = "3"
 
 [lints]
 workspace = true

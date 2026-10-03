@@ -1518,8 +1518,10 @@ Asset import follow-up:
   avoiding the playback copy, but first establish and price a shipping playback
   consumer. The inspected production CLI reads metadata without calling `recv`;
   repository search found no sample replay transport consumer. Replay writer
-  ownership and large-session memory remain unpriced. No save/replay latency or
-  heap profile was run in this follow-up; prioritize the measured frame paths.
+  ownership and large-session memory remain unpriced for `ReplayWriter`; the
+  live recorder writes through `ReplayStream` instead, which holds only the sets
+  and the hashes and spools the peer track. No save/replay latency or heap
+  profile was run in this follow-up; prioritize the measured frame paths.
 
 Profiling overhead follow-up:
 
@@ -4261,7 +4263,9 @@ base-100 figure is recorded anywhere (grepped `apps/tumble` and
   gusts, submerged fraction against Archimedes and drag from the wind field —
   the scene for _Buoyancy and wind force providers_, which is the engine half.
 - **Scope item 10, "Replay"**: a pile's run recorded and replayed, with both
-  hashes on the page. It needs a replay recorder to exist first (topic 22).
+  hashes on the page. A recorder exists for a `crcbl::server::Host`'s session
+  since 2026-10-03 (`crcbl::replay_record`); whether tumble's pile runs on a
+  host it can record was not checked.
 
 ### Tumble's debug view, page controls and server loopback (2026-09-25)
 
@@ -13061,19 +13065,53 @@ of the rule it names (2026-10-03).
 
 What it left:
 
-- **No recorder calls it.** Nothing in `crates/` or `apps/` calls
-  `ReplayWriter::push_sim_set`, `push_state_hash` or `push_peer_tick`, nor
-  `Host::record_peer_inputs`, outside tests (and nothing calls `ReplayWriter` at
-  all, per the next entry). A host recording a session would push
-  `Host::sim_record` as text, `sim_hash::hash_world` after each tick, and
-  `Host::peer_input_record` converted to `RecordedPeerTick` — the conversion
-  (`PeerId::get`, a match from `RosterChange` to `RosterChangeKind`) exists only
-  in towers' `resim_tests`, since `crcbl-server` and `crcbl-store` do not depend
-  on each other; the first real recorder should own it, likely in the `crcbl`
-  facade, which depends on both. What a per-tick `hash_world` costs on a live
-  host is unpriced, which is why a recorder may hash only some ticks; the input
-  record grows by every peer's frames every tick and has no way to be drained or
-  stopped short of dropping the host.
+- **The live recorder (built 2026-10-03) records no output entries.**
+  `crcbl::replay_record::Recorder` drains `Host::take_sim_record` and
+  `Host::take_peer_input_record` after every update and streams the peer track
+  through `crcbl_store::replay::ReplayStream`, so its files are what a
+  re-simulation checks and nothing a viewer plays: the header counts no ticks.
+  Recording the snapshots too needs the host to hand over a tick's encoded
+  output (it has none to hand: `Host::emit_snapshots` delta-encodes and seals
+  each peer's own) and a second spool, since the entries precede the input
+  section; it waits on the tick-linear delta chain the plan's correction asks
+  for, which nothing writes.
+- **Measured cost of recording (2026-10-03, this Windows machine, release
+  build):** towers' two-player session from `game::resim_tests` stretched to
+  6000 ticks with a build and a wave every 300, timed by a throwaway test that
+  was not kept. Three runs each way: `Host::update` 7.51–7.75 µs a tick
+  unrecorded and 7.66–7.73 µs recorded; `Recorder::record` 2.33–2.72 µs a tick,
+  of which a bare `hash_world` on the same world was 0.46–0.47 µs; the file was
+  575,852 bytes for the 6000 ticks. So a hash every tick is cheap for towers and
+  the pull's cost is mostly the spool's one write a tick. Not measured: a world
+  with many more entities (the hash walks every system's state), the UDP-served
+  session itself, and any machine but this one.
+- **A recording interrupted is unrecoverable.** The file is created empty and
+  written only by `Recorder::finish`, which a `LanHost` runs when stopped or
+  dropped — towers' `--serve` `quit`, a window closing, a panic unwinding
+  through the owner. A kill, Ctrl+C, or a panic under `panic = "abort"` leaves
+  the empty file and its spool (`SPOOL_SUFFIX`), and nothing turns a spool back
+  into a file; the plan's torn-tail-tolerant reader is the long-term answer.
+  Verified by reading: the workspace sets no `panic` profile, so it unwinds; no
+  test panics through a recording host.
+- **What a recording leaves out at its edges.** An update that ran several ticks
+  to catch up is hashed at its last only. `Host::shutdown`'s `Ended` changes
+  land in no tick, since none runs after a `quit`, so the file ends with the
+  peers still in its roster. A recorder started on a host that was already
+  recording its peers' input drops that record (`Recorder::start` takes it), and
+  the roster seed `record_peer_inputs` gives does not happen a second time — no
+  caller does that today.
+- **The sandbox's recordings do not re-simulate.** Its players system spawns and
+  despawns on `PeerEvent`s in `LanHost::apply`, outside its module, so a
+  re-simulating host's world lacks those entities; the recording is still whole.
+  Making it re-simulate means moving that into the module, which reads the
+  roster through `PeerInputs::iter`. Towers' recordings, `--host` and `--serve`,
+  do re-simulate (`a_hosts_recording_is_finished_when_its_game_is_dropped`,
+  `quit_at_the_console_finishes_a_recording_servers_file`).
+- **No record toggle.** `--record <FILE>` starts a recording before the first
+  frame and nothing else does; the plan's server command, reachable from the
+  console, CLI, UI and game code alike, would call `LanHost::record` and
+  `stop_recording` mid-session, and a recording started mid-session needs a
+  re-simulating host rebuilt at that tick, which nothing can do yet.
 - **What a re-simulation does not reproduce:** whatever a game does outside the
   module. A game reacting to `Host::events` (towers' `welcome` sends the map,
   `tell` sends refusals) runs no such code during `resimulate`, which is right
@@ -13083,12 +13121,12 @@ What it left:
   while it runs (`resimulate`'s docs), and its replay roster starts empty, so a
   record must start before the first join or open with the joins
   `record_peer_inputs` seeds.
-- **`crcbl replay` and `crcbl sim` do not re-simulate**, and `crcbl replay` does
-  not report the peer track. `crcbl replay` reports the sets and the hash count;
-  `crcbl sim` runs its own seeded harness world, which has no host and no
-  simulation variables. Re-simulating from the CLI needs a game's host — world,
-  module and registry — built without the game's code, the same blocker as _The
-  determinism smoke test has no input script_.
+- **`crcbl replay` and `crcbl sim` do not re-simulate.** `crcbl replay` reports
+  the sets, the hash count and the peer track's counts; `crcbl sim` runs its own
+  seeded harness world, which has no host and no simulation variables.
+  Re-simulating from the CLI needs a game's host — world, module and registry —
+  built without the game's code, the same blocker as _The determinism smoke test
+  has no input script_.
 - **A replayed set that passes the registry and still fails `SimVars::apply`**
   shows up as a divergence and in `Host::take_console_replies`, not as
   `ResimError::SetRefused`; none can today, since `apply` refuses only a set
@@ -13102,27 +13140,33 @@ What it left:
   overrunning `MAX_CLIENT_INPUTS_PER_TICK`. The roster's `Left` from an expired
   grace period and from `end_unauthenticated_sessions`, and `Ended` from
   `Host::shutdown`, are recorded by the same `PeerLog` calls the tested kick and
-  loss use, and no test drives them.
+  loss use, and no test drives them. Of the recorder: a spool that cannot be
+  removed after the file is written, an output that refuses a write mid-file,
+  and the peer track's `u32` count running out are each handled by a path no
+  test drives; the window-close finish is tested by dropping towers' `Game`, not
+  through the engine's loop.
 
 ### Replay: nothing records, and the viewing and spectating consumers are unbuilt (2026-09-24)
 
 `crcbl_store::replay::ReplayWriter` and `crash_ring::CrashRing` have no caller
 outside `crcbl-store` and `crcbl-cli`'s own tests (grep over `crates/` and
 `apps/`, 2026-09-24; the CLI's non-test path only reads, through
-`FileTransport`). So no server records a session, and there is no record toggle
-— the plan's server command, reachable identically from console, CLI, UI and
-game code, with auto-record as one config flag. Also unbuilt: the time-scrub
-debugger (timeline, any entity's state at a tick, two ticks diffed side by
-side), the replay browser screen with a marker seek bar and 0.25×–8× speed and
-frame-step, and live spectating as a delayed relay of the recording stream,
-where the broadcast delay is read-cursor lag. Spectating rides the dedicated
-server (P13); `crcbl_server::Host` is multi-session since 2026-09-23, so a
-spectator connection would be one more peer rather than a new host. The scrub
-debugger rides topic 7's debug tools (P10). Testing still owes seek == linear
-playback at the same tick, `verify` catching seeded nondeterminism at the right
-tick, and a crash mid-write leaving a playable file (torn tail tolerated).
-Verified: the consumer grep; the UI and relay absence is inferred from no
-matching symbols.
+`FileTransport`). Since 2026-10-03 towers and the sandbox record a hosted
+session with `--record <FILE>` (`crcbl::replay_record`, through `ReplayStream`),
+but only its inputs and hashes, not the output a viewer plays (the input
+section's entry above), and there is no record toggle — the plan's server
+command, reachable identically from console, CLI, UI and game code, with
+auto-record as one config flag. Also unbuilt: the time-scrub debugger (timeline,
+any entity's state at a tick, two ticks diffed side by side), the replay browser
+screen with a marker seek bar and 0.25×–8× speed and frame-step, and live
+spectating as a delayed relay of the recording stream, where the broadcast delay
+is read-cursor lag. Spectating rides the dedicated server (P13);
+`crcbl_server::Host` is multi-session since 2026-09-23, so a spectator
+connection would be one more peer rather than a new host. The scrub debugger
+rides topic 7's debug tools (P10). Testing still owes seek == linear playback at
+the same tick, `verify` catching seeded nondeterminism at the right tick, and a
+crash mid-write leaving a playable file (torn tail tolerated). Verified: the
+consumer grep; the UI and relay absence is inferred from no matching symbols.
 
 ### Replay: the rules the unbuilt recording must keep
 

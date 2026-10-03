@@ -21,10 +21,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   a build from before this change refuses such a file as an unsupported version
   — so a replay sent to someone on an older build no longer opens there, and
   that includes a build that already read version 2's input section without its
-  peer track. This build still reads versions 1 and 2. Nothing in the workspace
-  records a session yet, so only a file EW or a game wrote with `ReplayWriter`
-  itself is affected. `crcbl replay`'s first human line now ends with
-  `, format version N`.
+  peer track. This build still reads versions 1 and 2, and every file it writes
+  — `ReplayWriter`'s, `ReplayStream`'s, and towers' and the sandbox's `--record`
+  (see Added: a live recorder) — is version 3. `crcbl replay`'s first human line
+  now ends with `, format version N`.
+
+- **`crcbl::lan::LanError` gained `Record`** (see Added: a live recorder): a
+  host's recording that would not start — `LanHost::record` refusing a path that
+  exists, a file it could not create, or a host already recording — so an
+  exhaustive match over it must add it.
 
 - **A `Flags::SIM` console variable is set through its simulation, and a
   `ClientToServer::Command`'s `data` has a format** (see Added: simulation
@@ -622,11 +627,42 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the replay reader holds frames to it, and is re-exported from `crcbl_server`
   as before. Towers' server world now hashes its stage (its `towers` system
   contributes to `hash_world`), and a two-player session re-simulates from its
-  file tick for tick. `crcbl replay` reports the format version, every set and
-  the number of hashes (`format_version`, `sim_sets` and `state_hash_count` in
-  `--json`), not the peer track, and does not re-simulate: it cannot build a
-  game's host. `CrashRing::dump` writes through `ReplayWriter`, so a crash dump
-  is version 3 with an empty section.
+  file tick for tick. `crcbl replay` reports the format version, every set, the
+  number of hashes and the peer track — how many ticks have an entry and the
+  first and last, every roster change by tick and peer, and each peer's frame
+  and dropped counts (`format_version`, `sim_sets`, `state_hash_count` and
+  `peer_track` in `--json`) — and does not re-simulate: it cannot build a game's
+  host. `CrashRing::dump` writes through `ReplayWriter`, so a crash dump is
+  version 3 with an empty section.
+- **A live recorder: a host's session to a `.crpl` file, and `--record <FILE>`
+  on towers' `--host` and `--serve` and the sandbox's `--host`.** The new
+  `crcbl::replay_record::Recorder` (native only) is started on a `Host`
+  (`Recorder::start`, refusing by name a path or a spool that exists — a
+  recording never overwrites), pulled after every update (`record`) and finished
+  (`finish`, answering a `RecordSummary`); its file holds every applied
+  `Flags::SIM` set, a state hash for the tick it started on and for each tick an
+  update reached, and the peer track — enough for a host built like the recorded
+  one to re-simulate it, which `replay_record::resimulate` does from a
+  `FileTransport`, and no output entries. The host's records are drained rather
+  than read: the new `Host::take_sim_record` and `Host::take_peer_input_record`
+  leave them empty, so a recorded host holds only what happened since the last
+  pull, and the recorder streams the peer track to a spool beside the file (the
+  file's path with `replay_record::SPOOL_SUFFIX` appended) through the new
+  `crcbl_store::replay::ReplayStream`, which checks each entry against the
+  reader's rules as it is pushed and writes the bytes `ReplayWriter` would for
+  the same input and no entries. The file stays empty until the recording
+  finishes. `replay_record` also has the conversions between the host's
+  `TickInputs` and the file's `RecordedPeerTick` (`recorded_peer_tick`,
+  `tick_inputs`), `refuse_existing`, and `consume` for the flag.
+  `LanHost::record`, `recording` and `stop_recording` drive one on a LAN host,
+  which finishes its recording when it is dropped — a window closing, or a panic
+  unwinding — and logs what it holds. Towers' `--serve` finishes the file on
+  `quit` and prints what it holds, and a recording that does not finish whole is
+  the run's error; towers' and the sandbox's `--host` finish it when the window
+  closes. `--record` is refused without a session the process hosts, and for a
+  file that exists. A towers session recorded either way re-simulates tick for
+  tick; the sandbox's does not, since its players system changes on session
+  events outside its module.
 - **Simulation variables over the transport: `Flags::SIM`'s half is built.** A
   typed set of a `SIM` variable is checked by the new `Registry::sim_set` and
   handed to the host as a `crcbl_console::SimSet` through

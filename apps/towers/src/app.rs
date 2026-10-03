@@ -556,7 +556,13 @@ pub fn serve(options: &Options) -> Result<String, TowersError> {
             "no --serve was asked for".into(),
         )));
     };
-    crate::lan::serve::serve(port, &options.map, options.common.tick_hz).map_err(TowersError::Game)
+    crate::lan::serve::serve(
+        port,
+        &options.map,
+        options.common.tick_hz,
+        options.record.as_deref(),
+    )
+    .map_err(TowersError::Game)
 }
 
 /// Opens a shell, a window, a GPU and the simulation.
@@ -686,7 +692,12 @@ fn open_game(options: &Options) -> Result<(Game, CommandLineJoin), crate::game::
         let client = match options.lan {
             LanMode::Off => return Ok((Game::new(tick_hz, &options.map)?, None)),
             LanMode::Host { port } => {
-                let game = Game::host(tick_hz, &options.map, LanBind::on_the_lan(port))?;
+                let game = Game::host(
+                    tick_hz,
+                    &options.map,
+                    LanBind::on_the_lan(port),
+                    options.record.as_deref(),
+                )?;
                 return Ok((game, None));
             }
             LanMode::Join(addr) => LanClient::join(SESSION, addr, tick_hz),
@@ -1434,6 +1445,7 @@ mod tests {
             crate::game::DEFAULT_TICK_HZ,
             map,
             crate::lan::tests::on_loopback(),
+            None,
         )
         .expect("loopback UDP must be available to these tests");
         let port = host.lan_host().expect("a host").game_port();
@@ -1742,6 +1754,7 @@ mod tests {
             crate::lan::tests::on_loopback(),
             map,
             crate::game::DEFAULT_TICK_HZ,
+            None,
         )
         .expect("loopback UDP must be available to these tests");
         let port = server.lan().game_port();

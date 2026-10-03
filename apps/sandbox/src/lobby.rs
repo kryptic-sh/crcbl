@@ -148,7 +148,7 @@ impl Lobby {
     /// admits this player.
     pub fn pick(&mut self, pick: LobbyPick) -> Option<Started> {
         let started = match self.model.pick(pick).ok()? {
-            LobbyChoice::Host => Lan::host(self.host_bind, self.tick_hz)
+            LobbyChoice::Host => Lan::host(self.host_bind, self.tick_hz, None)
                 .map(Started::Hosting)
                 .map_err(|error| format!("CANNOT HOST: {error}")),
             LobbyChoice::Join(addr) => self.join(addr),

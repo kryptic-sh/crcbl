@@ -368,6 +368,31 @@ fn run(host: &mut Host, ticks: u32, sets: &[(u32, &str)]) {
     }
 }
 
+/// **Taking the record drains it**: each take answers the sets applied since
+/// the one before, in order, and leaves the record empty, so a recorder that
+/// takes after every update holds the host's record to the sets since then.
+#[test]
+fn taking_the_sim_record_answers_each_set_once_and_leaves_it_empty() {
+    let mut host = host(true);
+    run(&mut host, 3, &[(1, "2"), (1, "3")]);
+    let taken = host.take_sim_record();
+    let values: Vec<String> = taken
+        .iter()
+        .map(|applied| applied.set.to_string())
+        .collect();
+    assert_eq!(values, ["t_rate 2", "t_rate 3"]);
+    assert!(host.sim_record().is_empty(), "the take drained it");
+    assert!(host.take_sim_record().is_empty(), "nothing twice");
+
+    run(&mut host, 2, &[(2, "4")]);
+    let taken = host.take_sim_record();
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0].set.to_string(), "t_rate 4");
+    assert_eq!(taken[0].tick, host.tick_id());
+    // The values the sets left are untouched by taking their record.
+    assert_eq!(host.sim_vars().f32(&T_RATE), 4.0);
+}
+
 #[test]
 fn a_replayed_record_reproduces_the_final_state_hash_bit_for_bit() {
     const TICKS: u32 = 90;

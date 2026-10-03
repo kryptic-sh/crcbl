@@ -32,6 +32,11 @@
 //!
 //! Both sides add a "lan" section to the F3 panel saying where they stand.
 //!
+//! A host records its session on request ([`LanHost::record`], what
+//! `--record <FILE>` asks for) through a [`Recorder`] it pulls after every
+//! frame, and finishes the file when it is told to stop or when it is
+//! dropped — a window closing, or a panic unwinding through its owner.
+//!
 //! # One datagram per snapshot
 //!
 //! A UDP snapshot travels on the unreliable channel, which takes one
@@ -56,6 +61,7 @@ use std::io;
 use std::iter::Peekable;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroU16;
+use std::path::Path;
 use std::time::Duration;
 
 use crate::args::Consumed;
@@ -65,6 +71,7 @@ use crate::net::reliable::MAX_UNRELIABLE_PAYLOAD;
 use crate::net::udp::discovery::{Announcement, Announcer, Browser, DISCOVERY_PORT};
 use crate::net::udp::{ConnectError, UdpListener, UdpTransport};
 use crate::net::{ProtocolCompatibility, SessionEndReason};
+use crate::replay_record::{RecordError, RecordSummary, Recorder};
 use crate::server::{Host, HostConfig, PeerEvent};
 use crate::ui::{DebugModule, DebugSection};
 
@@ -196,6 +203,8 @@ pub enum LanError {
     Browse(io::Error),
     /// The connect to a host could not start.
     Connect(ConnectError),
+    /// The host's recording could not start.
+    Record(RecordError),
 }
 
 impl std::fmt::Display for LanError {
@@ -204,6 +213,7 @@ impl std::fmt::Display for LanError {
             Self::Listen(error) => write!(f, "cannot host: {error}"),
             Self::Browse(error) => write!(f, "cannot look for hosts: {error}"),
             Self::Connect(error) => write!(f, "cannot connect: {error}"),
+            Self::Record(error) => write!(f, "cannot record: {error}"),
         }
     }
 }
@@ -247,6 +257,10 @@ pub struct LanHost {
     /// this machine holds it. The session is still joinable by address.
     announcer: Option<Announcer>,
     host: Host,
+    /// The host's tick rate, which a recording's header carries.
+    tick_hz: u32,
+    /// The session's recording, while it records.
+    recorder: Option<Recorder>,
     /// Snapshot refusals logged.
     refusals: ThrottledLog,
     /// Withheld updates logged.
@@ -321,9 +335,53 @@ impl LanHost {
             listener,
             announcer,
             host,
+            tick_hz,
+            recorder: None,
             refusals: ThrottledLog::default(),
             withheld: ThrottledLog::default(),
         })
+    }
+
+    /// Records the session to a new file at `path` from now on, until
+    /// [`stop_recording`](Self::stop_recording) or until this host is
+    /// dropped. Started before the first frame — straight after
+    /// [`open`](Self::open), before any player's transport is added — the
+    /// file is one a fresh host built the same way re-simulates from its
+    /// first tick; [`crate::replay_record`]'s module docs have what a
+    /// recording holds and where one starts.
+    ///
+    /// # Errors
+    ///
+    /// [`LanError::Record`]: something exists at `path` — a recording never
+    /// overwrites — the file could not be created, or this host is already
+    /// recording.
+    pub fn record(&mut self, path: &Path) -> Result<(), LanError> {
+        if let Some(recorder) = &self.recorder {
+            return Err(LanError::Record(RecordError::Recording(
+                recorder.path().to_path_buf(),
+            )));
+        }
+        let recorder =
+            Recorder::start(path, &mut self.host, self.tick_hz).map_err(LanError::Record)?;
+        crate::log::info!("lan: recording the session to {}", path.display());
+        self.recorder = Some(recorder);
+        Ok(())
+    }
+
+    /// The file the session is being recorded to, while it is.
+    pub fn recording(&self) -> Option<&Path> {
+        self.recorder.as_ref().map(Recorder::path)
+    }
+
+    /// Stops recording and finishes the file — `None` when it was not
+    /// recording. The host serves on.
+    ///
+    /// # Errors
+    ///
+    /// The recording's [`RecordError`], from [`Recorder::finish`].
+    pub fn stop_recording(&mut self) -> Option<Result<RecordSummary, RecordError>> {
+        let recorder = self.recorder.take()?;
+        Some(recorder.finish(&mut self.host))
     }
 
     /// The port the listener is bound to.
@@ -365,6 +423,12 @@ impl LanHost {
             self.host.add(Box::new(peer));
         }
         self.host.update(now);
+        if let Some(recorder) = &mut self.recorder
+            && let Err(error) = recorder.record(&mut self.host)
+        {
+            crate::log::error!("lan: {error}; the recording stops here");
+            log_finished(self.stop_recording());
+        }
         let events: Vec<PeerEvent> = self.host.events().collect();
         for event in &events {
             crate::log::info!("lan: {event:?}");
@@ -404,6 +468,26 @@ impl LanHost {
                  datagram on its own, and a remote player sees it stale until it does"
             );
         }
+    }
+}
+
+/// Finishes the recording, if there is one: a window closing drops its host,
+/// and so does a panic unwinding through the host's owner, and the file is
+/// written whole either way with every tick the host ran.
+impl Drop for LanHost {
+    fn drop(&mut self) {
+        log_finished(self.stop_recording());
+    }
+}
+
+/// Logs how a recording that stopped with no one to answer it finished.
+fn log_finished(finished: Option<Result<RecordSummary, RecordError>>) {
+    match finished {
+        Some(Ok(summary)) => crate::log::info!("lan: {summary}"),
+        Some(Err(error)) => {
+            crate::log::error!("lan: the recording did not finish whole: {error}");
+        }
+        None => {}
     }
 }
 

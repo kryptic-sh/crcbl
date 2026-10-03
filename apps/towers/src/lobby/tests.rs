@@ -21,7 +21,8 @@ use crate::lan::{Progress, SESSION};
 
 /// A host on loopback playing `map`, with a player of its own.
 fn host_on(map: &Map) -> Game {
-    Game::host(TICK_HZ, map, on_loopback()).expect("loopback UDP must be available to these tests")
+    Game::host(TICK_HZ, map, on_loopback(), None)
+        .expect("loopback UDP must be available to these tests")
 }
 
 /// Where `host` announces.

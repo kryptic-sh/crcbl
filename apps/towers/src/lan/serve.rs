@@ -44,6 +44,15 @@
 //! last status line; `status` prints the status line now; anything else
 //! prints the commands there are.
 //!
+//! # Recording: `--record <FILE>`
+//!
+//! A server asked to record starts its [`LanHost`]'s recording before its
+//! first frame, so the file opens on a tick no player was in yet and a host
+//! built on the same map re-simulates it from there. `quit` finishes the file
+//! after every session ends and prints what it holds; a recording that does
+//! not finish whole is the run's error. Ctrl+C leaves the file empty, with its
+//! spool beside it, as it leaves the players without a goodbye.
+//!
 //! **Stdin closing is not a quit.** A server started with no console — its
 //! input at its end from the start, under a service manager say — keeps
 //! serving, and only the reader thread ends. Ctrl+C still kills it without
@@ -55,9 +64,12 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use std::path::Path;
+
 use crcbl::core::FrameClock;
-use crcbl::lan::{LanBind, LanHost};
+use crcbl::lan::{LanBind, LanError, LanHost};
 use crcbl::net::SessionEndReason;
+use crcbl::replay_record::{RecordError, RecordSummary};
 
 use super::{APP, MAX_PLAYERS, SESSION, event, tell, welcome};
 use crate::game::{Field, GameError, Stats};
@@ -100,16 +112,26 @@ impl std::fmt::Debug for Server {
 
 impl Server {
     /// Serves a new run on `map`, bound where `bind` says, ticking at
-    /// `tick_hz`. Every player is sent `map` as they join, and the refusals
-    /// of their commands.
+    /// `tick_hz`, recording it to the new file `record` names, if it names
+    /// one. Every player is sent `map` as they join, and the refusals of
+    /// their commands.
     ///
     /// # Errors
     ///
-    /// [`GameError::Lan`] if the listener would not bind.
-    pub fn open(bind: LanBind, map: &Map, tick_hz: u32) -> Result<Self, GameError> {
+    /// [`GameError::Lan`] if the listener would not bind or the recording
+    /// would not start.
+    pub fn open(
+        bind: LanBind,
+        map: &Map,
+        tick_hz: u32,
+        record: Option<&Path>,
+    ) -> Result<Self, GameError> {
         let (field, world, module) = Field::open(map, tick_hz);
         let mut lan = LanHost::open(SESSION, bind, world, tick_hz).map_err(GameError::Lan)?;
         lan.host_mut().set_module(Box::new(module));
+        if let Some(path) = record {
+            lan.record(path).map_err(GameError::Lan)?;
+        }
         Ok(Self {
             lan,
             field,
@@ -153,6 +175,12 @@ impl Server {
         self.lan
             .host_mut()
             .shutdown(SessionEndReason::SHUTTING_DOWN);
+    }
+
+    /// Stops recording and finishes the file, if the server records — see
+    /// [`LanHost::stop_recording`].
+    pub fn stop_recording(&mut self) -> Option<Result<RecordSummary, RecordError>> {
+        self.lan.stop_recording()
     }
 
     /// How many players hold a place in the session, one whose link dropped
@@ -327,43 +355,59 @@ impl std::fmt::Debug for Console {
 
 /// Serves `map` on UDP `port` (0 for any free one), announced on the LAN, at
 /// `tick_hz` on the wall clock, with a console on stdin — until `quit` is
-/// typed at it. Answers the last status line.
+/// typed at it — recording to the new file `record` names, if it names one.
+/// Answers the last status line.
 ///
 /// # Errors
 ///
-/// [`GameError::Lan`] if the listener would not bind.
-pub(crate) fn serve(port: u16, map: &Map, tick_hz: u32) -> Result<String, GameError> {
-    let mut server = Server::open(LanBind::on_the_lan(port), map, tick_hz)?;
+/// [`GameError::Lan`] if the listener would not bind, or the recording would
+/// not start or did not finish whole.
+pub(crate) fn serve(
+    port: u16,
+    map: &Map,
+    tick_hz: u32,
+    record: Option<&Path>,
+) -> Result<String, GameError> {
+    let mut server = Server::open(LanBind::on_the_lan(port), map, tick_hz, record)?;
     println!("{APP}: console: {COMMANDS}");
     let tick = FrameClock::new(tick_hz).tick_dt();
     let started = Instant::now();
-    Ok(serve_until_quit(
+    serve_until_quit(
         &mut server,
         &mut Console::on_stdin(),
         tick,
         || started.elapsed(),
         &mut |line| println!("{line}"),
-    ))
+    )
 }
 
 /// Serves `server` a frame a `tick` on the clock `now` reads, reading
 /// `console` between frames and printing through `print`, until it says
-/// `quit`: then every session ends (`Server::shutdown`) and the last status
+/// `quit`: then every session ends (`Server::shutdown`), the recording, if
+/// there is one, is finished and what it holds printed, and the last status
 /// line is answered.
+///
+/// # Errors
+///
+/// [`GameError::Lan`] when the recording did not finish whole.
 pub(crate) fn serve_until_quit(
     server: &mut Server,
     console: &mut Console,
     tick: Duration,
     mut now: impl FnMut() -> Duration,
     print: &mut dyn FnMut(&str),
-) -> String {
+) -> Result<String, GameError> {
     loop {
         if let Some(status) = server.frame(now()) {
             print(&status);
         }
         if console.obey(server, print) == Next::Quit {
             server.shutdown();
-            return server.status();
+            if let Some(finished) = server.stop_recording() {
+                let summary = finished.map_err(|error| GameError::Lan(LanError::Record(error)))?;
+                print(&format!("{APP}: {summary}"));
+            }
+            return Ok(server.status());
         }
         thread::sleep(until_next_tick(now(), tick));
     }

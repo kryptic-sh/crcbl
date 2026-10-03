@@ -4,18 +4,21 @@
 //! the first consumer of the replay format from outside `crcbl-store` — it reads
 //! a file, validates it, and prints what's inside: the entries' ticks, and from
 //! format version 2 the input section's simulation sets and how many state
-//! hashes it holds. Version 3's peer track is read and checked like the rest of
-//! the file, and not reported.
+//! hashes it holds, and from version 3 its peer track — how many ticks have an
+//! entry, every roster change, and each peer's frame and dropped counts. The
+//! frames themselves are counted, not printed: they are a game's own bytes,
+//! and a session holds thousands.
 //!
 //! It does not re-simulate. `crcbl_server::Host::resimulate` does, but it needs
 //! a host built like the recorded one — the game's world, module and registry —
 //! and the CLI has no way to build a game's host without the game's code
 //! (`docs/backlog.md`, the replay input section's entry).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crcbl_store::NativeStorage;
-use crcbl_store::replay::FileTransport;
+use crcbl_store::replay::{FileTransport, RecordedPeerTick, RosterChangeKind};
 
 use crate::args::ReplayArgs;
 use crate::json::Json;
@@ -65,6 +68,8 @@ pub fn run(args: &ReplayArgs) -> Result<Outcome, Failure> {
         "\nstate hashes: {}",
         transport.state_hashes().len()
     ));
+    let peers = PeerTrack::of(transport.peer_ticks());
+    peers.describe(&mut human);
 
     let sim_sets = transport
         .sim_sets()
@@ -94,12 +99,137 @@ pub fn run(args: &ReplayArgs) -> Result<Outcome, Failure> {
             "state_hash_count",
             Json::Number(transport.state_hashes().len() as i64),
         ),
+        ("peer_track", peers.json()),
     ];
 
     Ok(Outcome {
         human,
         json: json_fields,
     })
+}
+
+/// What a file's peer track says, counted: the ticks with an entry, every
+/// roster change in order, and each peer's frames and dropped frames.
+struct PeerTrack {
+    /// The ticks with an entry, in order.
+    ticks: Vec<u64>,
+    /// Every roster change: its tick, what it was, and the peer's number.
+    roster: Vec<(u64, RosterChangeKind, u64)>,
+    /// Each peer's frames and dropped frames over the whole track, by
+    /// number.
+    peers: BTreeMap<u64, (u64, u64)>,
+}
+
+impl PeerTrack {
+    fn of(track: &[RecordedPeerTick]) -> Self {
+        let mut peers: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
+        for entry in track {
+            for frames in &entry.peers {
+                let counts = peers.entry(frames.peer).or_default();
+                counts.0 += frames.frames.len() as u64;
+                counts.1 += u64::from(frames.dropped);
+            }
+        }
+        Self {
+            ticks: track.iter().map(|entry| entry.tick.get()).collect(),
+            roster: track
+                .iter()
+                .flat_map(|entry| {
+                    entry
+                        .roster
+                        .iter()
+                        .map(|change| (entry.tick.get(), change.kind, change.peer))
+                })
+                .collect(),
+            peers,
+        }
+    }
+
+    fn frames(&self) -> u64 {
+        self.peers.values().map(|(frames, _)| frames).sum()
+    }
+
+    fn dropped(&self) -> u64 {
+        self.peers.values().map(|(_, dropped)| dropped).sum()
+    }
+
+    /// Appends the human report: a line of totals, then each roster change,
+    /// then each peer's counts.
+    fn describe(&self, human: &mut String) {
+        human.push_str(&format!(
+            "\npeer track: {} ticks, {} roster changes, {} frames, {} dropped",
+            self.ticks.len(),
+            self.roster.len(),
+            self.frames(),
+            self.dropped(),
+        ));
+        if let (Some(first), Some(last)) = (self.ticks.first(), self.ticks.last()) {
+            human.push_str(&format!(" (ticks {first} to {last})"));
+        }
+        for (tick, kind, peer) in &self.roster {
+            human.push_str(&format!(
+                "\n  tick {tick}: peer {peer} {}",
+                kind_name(*kind)
+            ));
+        }
+        for (peer, (frames, dropped)) in &self.peers {
+            human.push_str(&format!(
+                "\n  peer {peer}: {frames} frames, {dropped} dropped"
+            ));
+        }
+    }
+
+    fn json(&self) -> Json {
+        let mut fields = vec![("tick_count", Json::Number(self.ticks.len() as i64))];
+        if let (Some(first), Some(last)) = (self.ticks.first(), self.ticks.last()) {
+            fields.push(("first_tick", Json::Number(*first as i64)));
+            fields.push(("last_tick", Json::Number(*last as i64)));
+        }
+        fields.push(("frame_count", Json::Number(self.frames() as i64)));
+        fields.push(("dropped_count", Json::Number(self.dropped() as i64)));
+        fields.push((
+            "roster",
+            Json::Array(
+                self.roster
+                    .iter()
+                    .map(|(tick, kind, peer)| {
+                        Json::Object(vec![
+                            ("tick", Json::Number(*tick as i64)),
+                            ("change", Json::string(kind_name(*kind))),
+                            ("peer", Json::Number(*peer as i64)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ));
+        fields.push((
+            "peers",
+            Json::Array(
+                self.peers
+                    .iter()
+                    .map(|(peer, (frames, dropped))| {
+                        Json::Object(vec![
+                            ("peer", Json::Number(*peer as i64)),
+                            ("frame_count", Json::Number(*frames as i64)),
+                            ("dropped_count", Json::Number(*dropped as i64)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ));
+        Json::Object(fields)
+    }
+}
+
+/// A roster change's kind, as the report words it.
+const fn kind_name(kind: RosterChangeKind) -> &'static str {
+    match kind {
+        RosterChangeKind::Joined => "joined",
+        RosterChangeKind::Lost => "lost",
+        RosterChangeKind::Resumed => "resumed",
+        RosterChangeKind::Left => "left",
+        RosterChangeKind::Ended => "ended",
+    }
 }
 
 #[cfg(test)]
@@ -175,9 +305,10 @@ mod tests {
             outcome.human
         );
         assert!(
-            outcome
-                .human
-                .ends_with("sim sets: 1\n  tick 1: sv_spin_rate 2.5\nstate hashes: 1"),
+            outcome.human.ends_with(
+                "sim sets: 1\n  tick 1: sv_spin_rate 2.5\nstate hashes: 1\npeer track: 0 ticks, \
+                 0 roster changes, 0 frames, 0 dropped"
+            ),
             "{}",
             outcome.human
         );
@@ -194,6 +325,103 @@ mod tests {
             )
         );
         assert_eq!(outcome.json[5], ("state_hash_count", Json::Number(1)));
+    }
+
+    /// **The peer track is reported**: the ticks with an entry, every roster
+    /// change by tick, kind and peer, and each peer's frames and dropped
+    /// frames — in the human lines and in `--json`.
+    #[test]
+    fn replay_command_reports_the_peer_track() {
+        use crcbl_store::replay::{RecordedPeerFrames, RecordedRosterChange};
+
+        let frames = |peer, count: u64, dropped| RecordedPeerFrames {
+            peer,
+            dropped,
+            frames: (0..count)
+                .map(|n| (TickId::from_raw(n), vec![1, 2]))
+                .collect(),
+        };
+        let mut writer = ReplayWriter::new(30);
+        writer.push_peer_tick(RecordedPeerTick {
+            tick: TickId::from_raw(3),
+            roster: vec![
+                RecordedRosterChange {
+                    kind: RosterChangeKind::Joined,
+                    peer: 1,
+                },
+                RecordedRosterChange {
+                    kind: RosterChangeKind::Joined,
+                    peer: 2,
+                },
+            ],
+            peers: vec![frames(1, 2, 0)],
+        });
+        writer.push_peer_tick(RecordedPeerTick {
+            tick: TickId::from_raw(7),
+            roster: vec![RecordedRosterChange {
+                kind: RosterChangeKind::Lost,
+                peer: 2,
+            }],
+            peers: vec![frames(1, 1, 3)],
+        });
+        let storage = MemoryStorage::new();
+        let path = Path::new("peers.crpl");
+        writer.write(&storage, path).unwrap();
+        let dir = std::env::temp_dir().join("crcbl-replay-peer-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("peers.crpl");
+        std::fs::write(&file_path, storage.read(path).unwrap()).unwrap();
+
+        let outcome = run(&ReplayArgs {
+            file: file_path,
+            json: true,
+        })
+        .unwrap();
+        assert!(
+            outcome.human.ends_with(
+                "peer track: 2 ticks, 3 roster changes, 3 frames, 3 dropped (ticks 3 to 7)\n  \
+                 tick 3: peer 1 joined\n  tick 3: peer 2 joined\n  tick 7: peer 2 lost\n  peer \
+                 1: 3 frames, 3 dropped"
+            ),
+            "{}",
+            outcome.human
+        );
+        let change = |tick, change, peer| {
+            Json::Object(vec![
+                ("tick", Json::Number(tick)),
+                ("change", Json::string(change)),
+                ("peer", Json::Number(peer)),
+            ])
+        };
+        assert_eq!(
+            outcome.json[6],
+            (
+                "peer_track",
+                Json::Object(vec![
+                    ("tick_count", Json::Number(2)),
+                    ("first_tick", Json::Number(3)),
+                    ("last_tick", Json::Number(7)),
+                    ("frame_count", Json::Number(3)),
+                    ("dropped_count", Json::Number(3)),
+                    (
+                        "roster",
+                        Json::Array(vec![
+                            change(3, "joined", 1),
+                            change(3, "joined", 2),
+                            change(7, "lost", 2),
+                        ])
+                    ),
+                    (
+                        "peers",
+                        Json::Array(vec![Json::Object(vec![
+                            ("peer", Json::Number(1)),
+                            ("frame_count", Json::Number(3)),
+                            ("dropped_count", Json::Number(3)),
+                        ])])
+                    ),
+                ])
+            )
+        );
     }
 
     #[test]

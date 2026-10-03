@@ -88,7 +88,9 @@
 //! A version 1 file has no section and reads as one with no sets and no
 //! hashes, so it plays back as it always did; a version 2 file's section ends
 //! after its hashes and reads with no peer track. [`ReplayWriter`] writes
-//! version 3.
+//! version 3, holding everything until it writes; so does [`ReplayStream`],
+//! which writes a file with no entries while a session runs, spooling its
+//! peer track rather than holding it.
 //!
 //! [`FileTransport`] reads a `.crpl` file and emits entries as if they were
 //! arriving from a live network transport.
@@ -102,12 +104,14 @@ use crcbl_net::transport::{Message, MessageKind, Transport, TransportError};
 use crate::{StorageError, StorageSource};
 
 mod input;
+mod stream;
 
 use input::InputSection;
 pub use input::{
     InputSectionError, RecordedPeerFrames, RecordedPeerTick, RecordedRosterChange, RecordedSimSet,
     RecordedStateHash, RosterChangeKind,
 };
+pub use stream::ReplayStream;
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -234,13 +238,8 @@ impl ReplayWriter {
             REPLAY_MIN_SIZE + self.entries.iter().map(|(_, d)| d.len()).sum::<usize>(),
         );
 
-        buf.extend_from_slice(REPLAY_MAGIC);
-        buf.extend_from_slice(&REPLAY_FORMAT_VERSION.to_le_bytes());
-        buf.extend_from_slice(&total_entries.to_le_bytes());
-        buf.extend_from_slice(&self.tick_rate.to_le_bytes());
-
         let start_tick = self.entries.first().map(|(t, _)| t.get()).unwrap_or(0);
-        buf.extend_from_slice(&start_tick.to_le_bytes());
+        encode_header(&mut buf, total_entries, self.tick_rate, start_tick);
 
         for (tick, data) in &self.entries {
             buf.extend_from_slice(&tick.get().to_le_bytes());
@@ -264,6 +263,15 @@ impl ReplayWriter {
         let data = self.encode()?;
         storage.write(path, &data)
     }
+}
+
+/// Append the header a version [`REPLAY_FORMAT_VERSION`] file opens with.
+fn encode_header(buf: &mut Vec<u8>, tick_count: u64, tick_rate: u32, start_tick: u64) {
+    buf.extend_from_slice(REPLAY_MAGIC);
+    buf.extend_from_slice(&REPLAY_FORMAT_VERSION.to_le_bytes());
+    buf.extend_from_slice(&tick_count.to_le_bytes());
+    buf.extend_from_slice(&tick_rate.to_le_bytes());
+    buf.extend_from_slice(&start_tick.to_le_bytes());
 }
 
 // ── FileTransport ──────────────────────────────────────────────────────────

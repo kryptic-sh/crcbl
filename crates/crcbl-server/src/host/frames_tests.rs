@@ -116,6 +116,8 @@ struct Live {
     ids: Vec<PeerId>,
     hashes: Vec<(TickId, u64)>,
     now: Duration,
+    /// The record taken after every tick, when the test drains it.
+    taken: Option<Vec<TickInputs>>,
 }
 
 impl Live {
@@ -129,6 +131,7 @@ impl Live {
             ids: Vec::new(),
             hashes: Vec::new(),
             now: Duration::ZERO,
+            taken: None,
         }
     }
 
@@ -144,6 +147,17 @@ impl Live {
         for (index, client) in self.clients.iter_mut().enumerate() {
             client.set_input(vec![index as u8, tick.get() as u8]);
             client.update(self.now);
+        }
+        if let Some(taken) = self.taken.as_mut() {
+            assert!(
+                self.host.peer_input_record().len() <= 1,
+                "the record held more than the tick since the last take"
+            );
+            taken.extend(self.host.take_peer_input_record());
+            assert!(
+                self.host.peer_input_record().is_empty(),
+                "the take drained it"
+            );
         }
         self.host.events().collect()
     }
@@ -182,7 +196,11 @@ impl Live {
 /// Three peers join, one is lost and resumes, one is kicked, and every one
 /// left sends a frame every tick.
 fn session() -> Live {
-    let mut live = Live::new();
+    session_of(Live::new())
+}
+
+/// [`session`], played on `live`.
+fn session_of(mut live: Live) -> Live {
     for _ in 0..3 {
         live.join();
     }
@@ -329,6 +347,28 @@ fn a_record_without_its_frames_diverges_at_the_first_tick_one_was_handed() {
     );
 }
 
+/// **Taking the input record drains it without stopping it**: a host
+/// whose record is taken after every tick holds at most that tick's entry
+/// (`Live::step` asserts it), and what the takes answer, joined, is the
+/// record a host that was never drained keeps for the same session.
+#[test]
+fn taking_the_input_record_drains_it_and_keeps_recording() {
+    let kept = session();
+    let drained = session_of(Live {
+        taken: Some(Vec::new()),
+        ..Live::new()
+    });
+    assert_eq!(drained.host.tick_id(), kept.host.tick_id());
+    assert!(drained.host.peer_input_record().is_empty());
+    let taken = drained.taken.expect("taken every tick");
+    assert_eq!(taken, kept.host.peer_input_record());
+    assert!(
+        taken.len() > 10,
+        "a session's worth was taken: {}",
+        taken.len()
+    );
+}
+
 #[test]
 fn recording_begun_mid_session_opens_with_the_peers_already_in_it() {
     let (host, _) = host();
@@ -339,6 +379,7 @@ fn recording_begun_mid_session_opens_with_the_peers_already_in_it() {
         ids: Vec::new(),
         hashes: Vec::new(),
         now: Duration::ZERO,
+        taken: None,
     };
     live.join();
     live.join();

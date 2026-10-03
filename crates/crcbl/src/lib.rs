@@ -38,6 +38,7 @@
 //! crcbl::engine    → (this crate)    the shell↔HAL join every sample repeats
 //! crcbl::ui_nav    → (this crate)    the `ui` actions as the UI tree's NavInput
 //! crcbl::lan       → (this crate)    LAN host, join and browse (native only)
+//! crcbl::replay_record → (this crate) a host's session to a `.crpl` file (native only)
 //! ```
 //!
 //! # One dependency is the whole point, and it took until S3 to mean it
@@ -394,6 +395,11 @@ pub mod knob;
 pub mod lan;
 
 pub mod perf;
+
+// Native only: it writes through `std::fs`, and the hosts it records are the
+// LAN's, which web builds do not have.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod replay_record;
 
 #[cfg(any(feature = "scene", feature = "scn"))]
 pub mod registry;

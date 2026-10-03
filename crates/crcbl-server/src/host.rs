@@ -975,6 +975,15 @@ impl Host {
         self.sim.record()
     }
 
+    /// Take every set applied since the last take, in the order applied,
+    /// leaving [`sim_record`](Self::sim_record) empty: what a recorder
+    /// streaming a session to a file drains after each update, so the record
+    /// holds only the sets since then rather than every one the host ever
+    /// applied.
+    pub fn take_sim_record(&mut self) -> Vec<AppliedSimSet> {
+        self.sim.take_record()
+    }
+
     /// Replay `record` — another host's [`sim_record`](Self::sim_record):
     /// each entry applies at the start of the tick it names, ahead of any
     /// live set of that tick, through the same checks, and is recorded
@@ -1010,6 +1019,15 @@ impl Host {
     #[must_use]
     pub fn peer_input_record(&self) -> &[TickInputs] {
         self.events.recorded()
+    }
+
+    /// Take every tick's input recorded since the last take, in tick order,
+    /// leaving [`peer_input_record`](Self::peer_input_record) empty and the
+    /// host still recording — empty while not recording. A recorder that
+    /// streams the session to a file drains it after each update, so the
+    /// record holds the ticks since then rather than the whole session.
+    pub fn take_peer_input_record(&mut self) -> Vec<TickInputs> {
+        self.events.take_recorded()
     }
 
     /// Whether `peer` is the host's own player

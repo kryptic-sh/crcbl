@@ -196,6 +196,73 @@ fn with_no_session_a_set_is_given_back_for_the_scene() {
     );
 }
 
+/// **A hosting sandbox records its session when asked**: the file, finished
+/// when the sandbox's session is dropped — its window closing — holds every
+/// tick's hash and the `sv_spin_rate` set the host applied, as the console
+/// prints it.
+#[test]
+fn a_hosting_sandbox_records_its_session_and_its_sets() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("sandbox.crpl");
+    let loopback: std::net::SocketAddr = (std::net::Ipv4Addr::LOCALHOST, 0).into();
+    let mut lan = super::Lan::host(
+        crcbl::lan::LanBind {
+            listen: loopback,
+            announce_at: loopback,
+            broadcast_to: None,
+        },
+        TICK_HZ,
+        Some(&path),
+    )
+    .expect("loopback UDP must be available to these tests");
+    assert!(matches!(
+        lan.route_sim_set(spin_rate("4")),
+        Ok(super::SimRoute::Sent)
+    ));
+    for _ in 0..5 {
+        lan.frame(TICK);
+    }
+    drop(lan);
+
+    let storage = crcbl::store::NativeStorage::at(dir.path().to_path_buf());
+    let file =
+        crcbl::store::replay::FileTransport::open(&storage, std::path::Path::new("sandbox.crpl"))
+            .expect("the recording reads");
+    assert_eq!(file.tick_rate(), TICK_HZ);
+    assert_eq!(file.state_hashes().len(), 6, "the start and five ticks");
+    let sets: Vec<(u64, &str, &str)> = file
+        .sim_sets()
+        .iter()
+        .map(|recorded| {
+            (
+                recorded.tick.get(),
+                recorded.set.name.as_str(),
+                recorded.set.value.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(sets, [(1, "sv_spin_rate", "4")]);
+
+    let existing = super::Lan::host(
+        crcbl::lan::LanBind {
+            listen: loopback,
+            announce_at: loopback,
+            broadcast_to: None,
+        },
+        TICK_HZ,
+        Some(&path),
+    );
+    assert!(
+        matches!(
+            existing,
+            Err(crcbl::lan::LanError::Record(
+                crcbl::replay_record::RecordError::Exists(_)
+            ))
+        ),
+        "{existing:?}"
+    );
+}
+
 /// The one test here with a socket: a hosting sandbox's [`super::Lan`],
 /// bound to loopback only, which is what routes a set and lends the cube.
 #[test]
@@ -208,6 +275,7 @@ fn a_hosting_sandbox_hands_a_set_to_its_host_and_lends_the_hosts_cube() {
             broadcast_to: None,
         },
         TICK_HZ,
+        None,
     )
     .expect("loopback UDP must be available to these tests");
     assert!(matches!(

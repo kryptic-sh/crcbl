@@ -188,6 +188,10 @@ pub struct Options {
     /// builds only: web builds have no networking.
     #[cfg(not(target_arch = "wasm32"))]
     pub lan: crate::lan::LanMode,
+    /// Record the hosted session to this new `.crpl` file — see
+    /// `crcbl::replay_record`. Native builds only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub record: Option<std::path::PathBuf>,
     /// Open on the LAN lobby — see `crate::lobby`.
     ///
     /// [`crate::args::parse`] sets it for a command line that chose no
@@ -216,6 +220,8 @@ impl Default for Options {
             wait_unpresented: false,
             #[cfg(not(target_arch = "wasm32"))]
             lan: crate::lan::LanMode::Off,
+            #[cfg(not(target_arch = "wasm32"))]
+            record: None,
             #[cfg(not(target_arch = "wasm32"))]
             lobby: false,
         }
@@ -521,7 +527,8 @@ pub fn with_shell<S: Shell + ?Sized>(
     // Headless too: a `--headless --host` run is a host with no window.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        sandbox.lan = Lan::start(options.lan, options.tick_hz).map_err(SandboxError::Game)?;
+        sandbox.lan = Lan::start(options.lan, options.tick_hz, options.record.as_deref())
+            .map_err(SandboxError::Game)?;
         if options.lobby {
             sandbox.lobby = Some(crate::lobby::Lobby::on_the_lan(options.tick_hz));
         }
@@ -920,6 +927,8 @@ mod tests {
             wait_unpresented: false,
             #[cfg(not(target_arch = "wasm32"))]
             lan: crate::lan::LanMode::Off,
+            #[cfg(not(target_arch = "wasm32"))]
+            record: None,
             #[cfg(not(target_arch = "wasm32"))]
             lobby: false,
         }

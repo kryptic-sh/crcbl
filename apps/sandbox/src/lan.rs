@@ -15,6 +15,13 @@
 //! change as others come and go — and setting `sv_spin_rate`, which the host
 //! takes from its own console and refuses from a client.
 //!
+//! A host asked to (`--record <FILE>`) records its session through
+//! `crcbl::lan::LanHost::record`, from before its first frame. The file is
+//! whole, and a host built like this one does **not** re-simulate it: the
+//! players system changes on the host's session events, outside its module
+//! (`LanHost::apply`), and nothing replays those — `crcbl::replay_record`'s
+//! module docs say so of any game that does.
+//!
 //! # One datagram per snapshot
 //!
 //! This world's snapshot sits far under
@@ -37,6 +44,7 @@ pub use imp::{LanMode, SANDBOX, Standing};
 mod imp {
     use std::collections::HashMap;
     use std::net::SocketAddr;
+    use std::path::Path;
     use std::time::Duration;
 
     use crcbl::console::{Fault, SimSet};
@@ -120,17 +128,18 @@ mod imp {
         }
 
         /// Starts what `mode` asks for, ticking at `tick_hz` — a host and
-        /// its clients must agree on it. A host prints where it listens,
+        /// its clients must agree on it — a host recording to the new file
+        /// `record` names, if it names one. A host prints where it listens,
         /// since `--join` needs the port.
         ///
         /// # Errors
         ///
-        /// [`LanError`] when a socket could not be bound or a connect could
-        /// not start.
-        pub fn start(mode: LanMode, tick_hz: u32) -> Result<Self, LanError> {
+        /// [`LanError`] when a socket could not be bound, a connect could not
+        /// start or the recording would not.
+        pub fn start(mode: LanMode, tick_hz: u32, record: Option<&Path>) -> Result<Self, LanError> {
             match mode {
                 LanMode::Off => Ok(Self::off()),
-                LanMode::Host { port } => Self::host(LanBind::on_the_lan(port), tick_hz),
+                LanMode::Host { port } => Self::host(LanBind::on_the_lan(port), tick_hz, record),
                 LanMode::Join(addr) => Self::join(addr, tick_hz),
                 LanMode::Browse => Ok(Self::in_role(Role::Client(Box::new(
                     LanClient::browse_the_lan(SANDBOX, tick_hz)?,
@@ -138,14 +147,16 @@ mod imp {
             }
         }
 
-        /// Hosts a session bound where `bind` says, ticking at `tick_hz`.
+        /// Hosts a session bound where `bind` says, ticking at `tick_hz`,
+        /// recording it to the new file `record` names, if it names one.
         ///
         /// # Errors
         ///
-        /// [`LanError`] when the listener could not be bound.
-        pub fn host(bind: LanBind, tick_hz: u32) -> Result<Self, LanError> {
+        /// [`LanError`] when the listener could not be bound or the recording
+        /// would not start.
+        pub fn host(bind: LanBind, tick_hz: u32, record: Option<&Path>) -> Result<Self, LanError> {
             Ok(Self::in_role(Role::Host(Box::new(LanHost::open_with(
-                bind, tick_hz,
+                bind, tick_hz, record,
             )?))))
         }
 
@@ -306,12 +317,16 @@ mod imp {
                     broadcast_to,
                 },
                 tick_hz,
+                None,
             )
         }
 
-        fn open_with(bind: LanBind, tick_hz: u32) -> Result<Self, LanError> {
+        fn open_with(bind: LanBind, tick_hz: u32, record: Option<&Path>) -> Result<Self, LanError> {
             let mut lan = crcbl::lan::LanHost::open(SANDBOX, bind, world(), tick_hz)?;
             serve_spin(lan.host_mut());
+            if let Some(path) = record {
+                lan.record(path)?;
+            }
             Ok(Self {
                 lan,
                 players: HashMap::new(),

@@ -69,6 +69,12 @@ OPTIONS:
                           `--host`, `--join` and `--browse` exclude each
                           other, and are native builds only: web builds have
                           no networking.
+        --record <FILE>   Record the session `--host` runs to a new .crpl
+                          file FILE, which `crcbl replay` reads: every tick's
+                          state hash, every `sv_spin_rate` set and every
+                          player's input. Written when the window closes. A
+                          FILE that exists is refused: a recording never
+                          overwrites.
         --debug-overlay   Start with the debug panel visible. F3 toggles it;
                           PgDn and PgUp select an entity to inspect in it.
         --no-debug-overlay
@@ -105,6 +111,12 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
     while let Some(arg) = args.next() {
         #[cfg(not(target_arch = "wasm32"))]
         match options.lan.consume(&arg, &mut args) {
+            Consumed::Yes => continue,
+            Consumed::Bad(message) => return Invocation::BadUsage(message),
+            Consumed::Help | Consumed::No => {}
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        match crcbl::replay_record::consume(&mut options.record, &arg, &mut args) {
             Consumed::Yes => continue,
             Consumed::Bad(message) => return Invocation::BadUsage(message),
             Consumed::Help | Consumed::No => {}
@@ -194,6 +206,12 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                 return Invocation::BadUsage(format!("unrecognized argument `{other}`"));
             }
         }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if options.record.is_some() && !matches!(options.lan, crcbl::lan::LanMode::Host { .. }) {
+        return Invocation::BadUsage(
+            "--record records a session this process hosts: it needs --host".to_string(),
+        );
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -463,6 +481,43 @@ mod tests {
                 "{args:?} should be rejected"
             );
         }
+    }
+
+    /// **`--record` takes a new file beside `--host`**, and is refused by
+    /// name for a file that exists — a recording never overwrites — and
+    /// without a session this process hosts.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_record_flag_needs_a_hosted_session_and_a_new_file() {
+        let new = format!("{}/target-never-made.crpl", env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            options(&["--host", "--record", &new]).record,
+            Some(std::path::PathBuf::from(&new))
+        );
+        assert_eq!(options(&["--host"]).record, None);
+
+        let existing = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+        match parse_args(&["--host", "--record", &existing]) {
+            Invocation::BadUsage(message) => {
+                assert!(message.contains("Cargo.toml"), "{message}");
+                assert!(message.contains("never overwrites"), "{message}");
+            }
+            other => panic!("an existing file was not refused: {other:?}"),
+        }
+        for args in [
+            vec!["--record", new.as_str()],
+            vec!["--join", "127.0.0.1:1", "--record", &new],
+            vec!["--browse", "--record", &new],
+        ] {
+            assert_eq!(
+                parse_args(&args),
+                Invocation::BadUsage(
+                    "--record records a session this process hosts: it needs --host".to_string()
+                ),
+                "{args:?}"
+            );
+        }
+        assert!(USAGE.contains("--record <FILE>"));
     }
 
     #[test]

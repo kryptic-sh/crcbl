@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! towers [--headless] [--frames N] [--size WxH] [--tick-hz N] [--scene DIR] …
-//!        [--host [PORT] | --join IP:PORT | --browse]
-//! towers --serve [PORT] [--tick-hz N] [--scene DIR]
+//!        [--host [PORT] [--record FILE] | --join IP:PORT | --browse]
+//! towers --serve [PORT] [--tick-hz N] [--scene DIR] [--record FILE]
 //! ```
 //!
 //! # What is left here after the engine took the shared half
@@ -16,9 +16,11 @@
 //! `crcbl::lan::LanMode::consume`'s, native builds only, as `apps/sandbox`
 //! reads them too. `--serve [PORT]` is this sample's own, native only too: a
 //! dedicated server with no window, renderer or player, which takes the tick
-//! rate and the map and refuses every flag that only means something to a
-//! window or a frame — see `crate::lan::serve` for why it is not
-//! `--headless --host`.
+//! rate, the map and a recording and refuses every flag that only means
+//! something to a window or a frame — see `crate::lan::serve` for why it is
+//! not `--headless --host`. `--record <FILE>` is
+//! `crcbl::replay_record::consume`'s, as the sandbox reads it, and records a
+//! session this process hosts — `--host`'s or `--serve`'s.
 //! The shape is `apps/breakout/src/args.rs`'s and `apps/puppet/src/args.rs`'s —
 //! the directory is read *here*, while there is still an exit code to refuse the
 //! run with, and [`Options`] carries the parsed map rather than the path.
@@ -104,8 +106,15 @@ OPTIONS:
                          players come and go and every 10 seconds. Reads a
                          console on stdin: status prints the line now, quit
                          tells every player and stops; stdin closing does not
-                         stop it. Takes --tick-hz and --scene and no other
-                         option.
+                         stop it. Takes --tick-hz, --scene and --record and no
+                         other option.
+    --record <FILE>      Record the session --host or --serve runs to a new
+                         .crpl file FILE, which `crcbl replay` reads: every
+                         tick's state hash and every player's input, enough
+                         for a host built on the same map to re-simulate it.
+                         Written when the session ends — quit at the console,
+                         or the window closing. A FILE that exists is refused:
+                         a recording never overwrites.
     --join <IP:PORT>     Join the co-op session at IP:PORT directly. A joiner
                          plays on the host's map, whatever --scene says.
     --browse             Look for co-op sessions on the local network, print
@@ -139,6 +148,10 @@ pub struct Options {
     /// instead of playing: see `crate::lan::serve`. Native builds only.
     #[cfg(not(target_arch = "wasm32"))]
     pub serve: Option<u16>,
+    /// Record the hosted or served session to this new `.crpl` file — see
+    /// `crcbl::replay_record`. Native builds only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub record: Option<std::path::PathBuf>,
     /// Open on the lobby rather than on the field — see `crate::lobby`.
     ///
     /// [`parse`] sets it for a command line that chose nothing: no session
@@ -167,6 +180,8 @@ impl Default for Options {
             lan: crcbl::lan::LanMode::Off,
             #[cfg(not(target_arch = "wasm32"))]
             serve: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            record: None,
             #[cfg(not(target_arch = "wasm32"))]
             lobby: false,
         }
@@ -198,6 +213,12 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
         }
         #[cfg(not(target_arch = "wasm32"))]
         match options.lan.consume(&arg, &mut args) {
+            Consumed::Yes => continue,
+            Consumed::Bad(message) => return Invocation::BadUsage(message),
+            Consumed::Help | Consumed::No => {}
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        match crcbl::replay_record::consume(&mut options.record, &arg, &mut args) {
             Consumed::Yes => continue,
             Consumed::Bad(message) => return Invocation::BadUsage(message),
             Consumed::Help | Consumed::No => {}
@@ -252,11 +273,21 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
         };
         if options.common != untouched {
             return Invocation::BadUsage(
-                "--serve takes --tick-hz and --scene and no other option: a dedicated server \
-                 has no window, no renderer and no frames"
+                "--serve takes --tick-hz, --scene and --record and no other option: a \
+                 dedicated server has no window, no renderer and no frames"
                     .into(),
             );
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if options.record.is_some()
+        && options.serve.is_none()
+        && !matches!(options.lan, crcbl::lan::LanMode::Host { .. })
+    {
+        return Invocation::BadUsage(
+            "--record records a session this process hosts: it needs --host or --serve".into(),
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -517,11 +548,45 @@ mod tests {
             &["--debug-overlay", "--serve"],
         ] {
             assert!(
-                rejected(argv).contains("--serve takes --tick-hz and --scene"),
+                rejected(argv).contains("--serve takes --tick-hz, --scene and --record"),
                 "{argv:?}: {}",
                 rejected(argv)
             );
         }
+    }
+
+    /// **`--record` takes a new file beside `--host` or `--serve`**, and is
+    /// refused by name for a file that exists — a recording never overwrites
+    /// — and without a session this process hosts.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_record_flag_needs_a_hosted_session_and_a_new_file() {
+        let new = format!("{}/target-never-made.crpl", env!("CARGO_MANIFEST_DIR"));
+        let hosting = parsed(&["--host", "--record", &new]);
+        assert_eq!(hosting.record, Some(std::path::PathBuf::from(&new)));
+        assert_eq!(
+            parsed(&["--record", &new, "--serve"]).record.as_deref(),
+            Some(std::path::Path::new(&new))
+        );
+        assert_eq!(parsed(&["--host"]).record, None);
+
+        let existing = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+        let refusal = rejected(&["--host", "--record", &existing]);
+        assert!(refusal.contains("Cargo.toml"), "{refusal}");
+        assert!(refusal.contains("never overwrites"), "{refusal}");
+
+        for argv in [
+            &["--record", &new][..],
+            &["--join", "127.0.0.1:1", "--record", &new],
+            &["--browse", "--record", &new],
+        ] {
+            assert!(
+                rejected(argv).contains("it needs --host or --serve"),
+                "{argv:?}: {}",
+                rejected(argv)
+            );
+        }
+        assert!(USAGE.contains("--record <FILE>"), "USAGE lists --record");
     }
 
     /// **A command line that chose nothing opens on the lobby, and every

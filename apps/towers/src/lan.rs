@@ -82,6 +82,7 @@
 //! flags and has no LAN link.
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::time::Duration;
 
 use crcbl::client::Client;
@@ -200,24 +201,29 @@ impl HostLink {
     /// Hosts `world` — the replica of `field`'s stage on `map` — ticked by
     /// `module` as `game`, bound where `bind` says, and joins it as this
     /// player. Every other player is sent `map` as they join, and every
-    /// player the stage's refusals of their commands. Answers the link and
-    /// the tick period, with the first tick spent on this player's
-    /// handshake.
+    /// player the stage's refusals of their commands. Records the session to
+    /// the new file `record` names, if it names one, from before the first
+    /// tick. Answers the link and the tick period, with the first tick spent
+    /// on this player's handshake.
     ///
     /// # Errors
     ///
-    /// [`GameError::Lan`] if the listener would not bind, and
-    /// [`GameError::Server`] if this player's session did not come up in the
-    /// first tick.
+    /// [`GameError::Lan`] if the listener would not bind or the recording
+    /// would not start, and [`GameError::Server`] if this player's session
+    /// did not come up in the first tick.
     pub fn open(
         game: LanGame,
         bind: LanBind,
         (field, world, module): (Field, World, TowersModule),
         tick_hz: u32,
         map: &Map,
+        record: Option<&Path>,
     ) -> Result<(Self, Duration), GameError> {
         let mut lan = LanHost::open(game, bind, world, tick_hz).map_err(GameError::Lan)?;
         lan.host_mut().set_module(Box::new(module));
+        if let Some(path) = record {
+            lan.record(path).map_err(GameError::Lan)?;
+        }
         let (server_end, client_end) = InMemoryTransport::pair();
         lan.host_mut().add(Box::new(server_end));
         let mut local =

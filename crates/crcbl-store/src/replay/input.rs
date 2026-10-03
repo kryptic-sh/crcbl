@@ -9,6 +9,7 @@ use crcbl_net::command::{MAX_CONSOLE_NAME_BYTES, MAX_CONSOLE_VALUE_BYTES};
 mod peers;
 
 pub use peers::{RecordedPeerFrames, RecordedPeerTick, RecordedRosterChange, RosterChangeKind};
+pub(super) use peers::{check_tick, encode_tick};
 
 /// The smallest `SimSetEntry`: a tick and two empty texts.
 const MIN_SIM_SET_BYTES: usize = 8 + 2 + 2;
@@ -172,6 +173,17 @@ impl InputSection {
     /// reader would refuse.
     pub(super) fn encode(&self, buf: &mut Vec<u8>) -> Result<(), InputSectionError> {
         self.validate()?;
+        self.encode_sets_and_hashes(buf)?;
+        peers::encode(&self.peer_ticks, buf)
+    }
+
+    /// Append the sets and the hashes to `buf` — the section up to its peer
+    /// track, which a streaming writer appends after them from its spool.
+    /// Their rules are the caller's to have checked.
+    pub(super) fn encode_sets_and_hashes(
+        &self,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), InputSectionError> {
         buf.extend_from_slice(&count(self.sim_sets.len(), "sets")?.to_le_bytes());
         for recorded in &self.sim_sets {
             buf.extend_from_slice(&recorded.tick.get().to_le_bytes());
@@ -193,7 +205,7 @@ impl InputSection {
             buf.extend_from_slice(&recorded.tick.get().to_le_bytes());
             buf.extend_from_slice(&recorded.hash.to_le_bytes());
         }
-        peers::encode(&self.peer_ticks, buf)
+        Ok(())
     }
 
     /// Read the section from `bytes`, which must be the rest of the file —
@@ -244,27 +256,47 @@ impl InputSection {
     /// sets in tick order, hashes one a tick in tick order, and the peer
     /// track's own.
     fn validate(&self) -> Result<(), InputSectionError> {
+        let mut previous = None;
         for recorded in &self.sim_sets {
-            check_len("name", &recorded.set.name, MAX_CONSOLE_NAME_BYTES)?;
-            check_len("value", &recorded.set.value, MAX_CONSOLE_VALUE_BYTES)?;
+            recorded.check_after(previous)?;
+            previous = Some(recorded.tick);
         }
-        for pair in self.sim_sets.windows(2) {
-            if pair[1].tick < pair[0].tick {
-                return Err(InputSectionError::SetOutOfOrder {
-                    previous: pair[0].tick,
-                    tick: pair[1].tick,
-                });
-            }
-        }
-        for pair in self.state_hashes.windows(2) {
-            if pair[1].tick <= pair[0].tick {
-                return Err(InputSectionError::HashOutOfOrder {
-                    previous: pair[0].tick,
-                    tick: pair[1].tick,
-                });
-            }
+        let mut previous = None;
+        for recorded in &self.state_hashes {
+            recorded.check_after(previous)?;
+            previous = Some(recorded.tick);
         }
         peers::validate(&self.peer_ticks)
+    }
+}
+
+impl RecordedSimSet {
+    /// The rules this set holds after one recorded for tick `previous`: texts
+    /// within a console set's limits, and a tick no earlier.
+    pub(super) fn check_after(&self, previous: Option<TickId>) -> Result<(), InputSectionError> {
+        check_len("name", &self.set.name, MAX_CONSOLE_NAME_BYTES)?;
+        check_len("value", &self.set.value, MAX_CONSOLE_VALUE_BYTES)?;
+        match previous {
+            Some(previous) if self.tick < previous => Err(InputSectionError::SetOutOfOrder {
+                previous,
+                tick: self.tick,
+            }),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl RecordedStateHash {
+    /// The rule this hash holds after one for tick `previous`: a later tick,
+    /// since a tick has one end.
+    pub(super) fn check_after(&self, previous: Option<TickId>) -> Result<(), InputSectionError> {
+        match previous {
+            Some(previous) if self.tick <= previous => Err(InputSectionError::HashOutOfOrder {
+                previous,
+                tick: self.tick,
+            }),
+            _ => Ok(()),
+        }
     }
 }
 

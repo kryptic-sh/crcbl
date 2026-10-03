@@ -90,6 +90,10 @@ impl SimConsole {
         &self.record
     }
 
+    pub(super) fn take_record(&mut self) -> Vec<AppliedSimSet> {
+        std::mem::take(&mut self.record)
+    }
+
     /// Queue `set` for the next tick boundary.
     pub(super) fn submit(&mut self, origin: Origin, set: ConsoleSet) {
         self.queue.push((origin, set));

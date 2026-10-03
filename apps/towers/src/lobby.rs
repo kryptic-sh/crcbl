@@ -287,7 +287,7 @@ impl Lobby {
         // Whatever this pick starts — or fails to — replaces the join that
         // was under way, which the caller drops; a refusal is the notice.
         let started = match self.model.pick(pick).ok()? {
-            LobbyChoice::Host => Game::host(self.tick_hz, map, self.host_bind)
+            LobbyChoice::Host => Game::host(self.tick_hz, map, self.host_bind, None)
                 .map(Picked::Session)
                 .map_err(|error| format!("CANNOT HOST: {error}")),
             LobbyChoice::Join(addr) => self.join(addr),

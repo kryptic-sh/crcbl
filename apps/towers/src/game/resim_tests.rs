@@ -1,8 +1,9 @@
 //! A co-op session recorded to a `.crpl` file and re-simulated from it: two
 //! players on one host over in-process transports, building and sending a
-//! wave; a fresh host handed the file's roster and frames
-//! (`crcbl::server::Host::resimulate`), its state hash — the stage's, through
-//! [`FieldReplica`](super::FieldReplica) — compared at the end of every tick.
+//! wave, recorded by the engine's own `crcbl::replay_record::Recorder`; a
+//! fresh host handed the file (`crcbl::replay_record::resimulate`), its
+//! state hash — the stage's, through [`FieldReplica`](super::FieldReplica) —
+//! compared at the end of every tick.
 
 use std::path::Path;
 use std::time::Duration;
@@ -11,15 +12,11 @@ use crcbl::client::Client;
 use crcbl::core::{FrameClock, TickId};
 use crcbl::ecs::World;
 use crcbl::net::InMemoryTransport;
+use crcbl::replay_record::{Recorder, resimulate, tick_inputs};
 use crcbl::server::sim_hash::hash_world;
-use crcbl::server::{
-    Host, HostConfig, PeerEvent, PeerFrames, PeerId, ResimError, RosterChange, TickInputs,
-};
-use crcbl::store::MemoryStorage;
-use crcbl::store::replay::{
-    FileTransport, RecordedPeerFrames, RecordedPeerTick, RecordedRosterChange, ReplayWriter,
-    RosterChangeKind,
-};
+use crcbl::server::{Host, HostConfig, PeerEvent, PeerId, ResimError, RosterChange, TickInputs};
+use crcbl::store::NativeStorage;
+use crcbl::store::replay::FileTransport;
 
 use super::{COMPATIBILITY, Controls, DEFAULT_TICK_HZ, Field, Intent};
 use crate::map::Map;
@@ -86,11 +83,13 @@ struct Session {
     final_hash: u64,
 }
 
-/// Plays the session and records it to a `.crpl` file as a recorder would:
-/// the state hash at the end of every tick, and the host's input record.
+/// Plays the session, recorded by a [`Recorder`] pulled after every update
+/// as a LAN host pulls it, and reads the file back.
 fn record() -> Session {
     let (mut host, field) = host();
-    host.record_peer_inputs();
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("towers.crpl");
+    let mut recorder = Recorder::start(&path, &mut host, TICK_HZ).expect("it starts");
     let mut clients: Vec<Client<InMemoryTransport>> = (0..2)
         .map(|_| {
             let (near, far) = InMemoryTransport::pair();
@@ -99,15 +98,14 @@ fn record() -> Session {
         })
         .collect();
     let period = FrameClock::new(TICK_HZ).tick_dt();
-    let mut writer = ReplayWriter::new(TICK_HZ);
     let mut now = Duration::ZERO;
     let mut joined: Vec<(TickId, PeerId)> = Vec::new();
     let mut built = None;
     for _ in 0..SESSION_TICKS {
         now += period;
         assert_eq!(host.update(now), 1, "one tick a step");
+        recorder.record(&mut host).expect("it records");
         let tick = host.tick_id();
-        writer.push_state_hash(tick, hash_world(host.world(), tick));
         joined.extend(host.events().filter_map(|event| match event {
             PeerEvent::Joined(peer) => Some((tick, peer)),
             _ => None,
@@ -132,79 +130,15 @@ fn record() -> Session {
         panic!("not two joins: {joined:?}");
     };
     assert_eq!(joined, second, "both joined on one tick");
-    for entry in host.peer_input_record() {
-        writer.push_peer_tick(to_file(entry));
-    }
-    let storage = MemoryStorage::new();
-    let path = Path::new("towers.crpl");
-    writer.write(&storage, path).expect("a valid recording");
+    recorder.finish(&mut host).expect("a valid recording");
+    let storage = NativeStorage::at(dir.path().to_path_buf());
     let last = host.tick_id();
     Session {
-        file: FileTransport::open(&storage, path).expect("it reads back"),
+        file: FileTransport::open(&storage, Path::new("towers.crpl")).expect("it reads back"),
         joined,
         built: built.expect("a tower went up"),
         last,
         final_hash: hash_world(host.world(), last),
-    }
-}
-
-/// A host's input record as the file carries it.
-fn to_file(entry: &TickInputs) -> RecordedPeerTick {
-    RecordedPeerTick {
-        tick: entry.tick,
-        roster: entry
-            .roster
-            .iter()
-            .map(|change| RecordedRosterChange {
-                kind: match change {
-                    RosterChange::Joined(_) => RosterChangeKind::Joined,
-                    RosterChange::Lost(_) => RosterChangeKind::Lost,
-                    RosterChange::Resumed(_) => RosterChangeKind::Resumed,
-                    RosterChange::Left(_) => RosterChangeKind::Left,
-                    RosterChange::Ended(_) => RosterChangeKind::Ended,
-                },
-                peer: change.peer().get(),
-            })
-            .collect(),
-        peers: entry
-            .peers
-            .iter()
-            .map(|frames| RecordedPeerFrames {
-                peer: frames.peer.get(),
-                dropped: frames.dropped,
-                frames: frames.frames.clone(),
-            })
-            .collect(),
-    }
-}
-
-/// …and back, as a re-simulation takes it.
-fn from_file(entry: &RecordedPeerTick) -> TickInputs {
-    TickInputs {
-        tick: entry.tick,
-        roster: entry
-            .roster
-            .iter()
-            .map(|change| {
-                let peer = PeerId::from_raw(change.peer);
-                match change.kind {
-                    RosterChangeKind::Joined => RosterChange::Joined(peer),
-                    RosterChangeKind::Lost => RosterChange::Lost(peer),
-                    RosterChangeKind::Resumed => RosterChange::Resumed(peer),
-                    RosterChangeKind::Left => RosterChange::Left(peer),
-                    RosterChangeKind::Ended => RosterChange::Ended(peer),
-                }
-            })
-            .collect(),
-        peers: entry
-            .peers
-            .iter()
-            .map(|frames| PeerFrames {
-                peer: PeerId::from_raw(frames.peer),
-                frames: frames.frames.clone(),
-                dropped: frames.dropped,
-            })
-            .collect(),
     }
 }
 
@@ -216,7 +150,7 @@ fn hashes(file: &FileTransport) -> Vec<(TickId, u64)> {
 }
 
 fn inputs(file: &FileTransport) -> Vec<TickInputs> {
-    file.peer_ticks().iter().map(from_file).collect()
+    file.peer_ticks().iter().map(tick_inputs).collect()
 }
 
 /// The first tick `inputs` makes a fresh host diverge at.
@@ -231,14 +165,15 @@ fn diverges_at(session: &Session, inputs: Vec<TickInputs>) -> TickId {
 #[test]
 fn a_two_player_session_resimulated_from_its_file_reproduces_every_tick() {
     let session = record();
-    assert_eq!(session.file.state_hashes().len(), SESSION_TICKS as usize);
+    // The tick the recording started on, and every one after.
+    assert_eq!(
+        session.file.state_hashes().len(),
+        SESSION_TICKS as usize + 1
+    );
     assert!(!session.file.peer_ticks().is_empty());
 
     let (mut replayed, field) = host();
-    assert_eq!(
-        replayed.resimulate([], hashes(&session.file), inputs(&session.file)),
-        Ok(session.last)
-    );
+    assert_eq!(resimulate(&mut replayed, &session.file), Ok(session.last));
     assert_eq!(
         hash_world(replayed.world(), session.last),
         session.final_hash

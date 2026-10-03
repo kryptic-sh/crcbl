@@ -6,20 +6,23 @@ re-watch), and **live spectating** (esports casting, delayed viewing). Built
 almost entirely from machinery that already exists — the recording _is_ the
 replication stream.
 
-**Status (2026-09-24): the storage half is built and nothing records.** Built:
-the flat `.crpl` container (`crcbl_store::replay`), `FileTransport` playback,
-`crcbl_store::crash_ring::CrashRing` and the `crcbl replay <FILE>` metadata
-report. `ReplayWriter` and `CrashRing` have no caller outside `crcbl-store` and
-`crcbl-cli`'s own tests, so no server records a session and no panic hook dumps
+**Status (2026-10-03): the storage half is built, and a host records its
+inputs.** Built: the flat `.crpl` container (`crcbl_store::replay`),
+`FileTransport` playback, `crcbl_store::crash_ring::CrashRing` and the
+`crcbl replay <FILE>` metadata report. `ReplayWriter` and `CrashRing` have no
+caller outside `crcbl-store` and `crcbl-cli`'s own tests, so no panic hook dumps
 a ring. Since 2026-10-03 a file also carries an input section — the applied
 `Flags::SIM` sets, the recorder's state hashes, and the peers' roster and input
 frames — and `Host::resimulate` re-runs a fresh host from it (_What the input
-section carries_, below). Keyframes, the seek index, deltas, side tracks, the
-record toggle, `verify`/`dump`/`diff`/`clip`, the scrub debugger, the replay
-browser and the spectator relay are all unbuilt; `docs/backlog.md` tracks them
-under _Replay: the container is flat, and every `crcbl replay` subverb is owed_
-and _Replay: nothing records, and the viewing and spectating consumers are
-unbuilt_.
+section carries_, below); a live recorder writes one (_The live recorder_,
+below), which towers and the sandbox run with `--record <FILE>`. What it records
+is the inputs, not the output: a viewer has nothing to play from it yet.
+Keyframes, the seek index, deltas, the output in a live recording, the marker
+and POV tracks, the record toggle, `verify`/`dump`/`diff`/`clip`, the scrub
+debugger, the replay browser and the spectator relay are all unbuilt;
+`docs/backlog.md` tracks them under _Replay: the container is flat, and every
+`crcbl replay` subverb is owed_ and _Replay: nothing records, and the viewing
+and spectating consumers are unbuilt_.
 
 ## Core insight: record the wire
 
@@ -121,9 +124,32 @@ and every roster change against the ones before it before a tick runs, then runs
 to the last hash and answers the first tick whose hash it does not reproduce —
 so a recorded hash per tick locates a divergence to its tick. Towers' two-player
 sessions reproduce from their file tick for tick. What a re-simulation still
-cannot see — a game acting on `Host::events` outside its module — and who
-records nothing yet are in `docs/backlog.md`. Re-simulation is a dev-time check
-on top of playback, never a requirement of it: a viewer still plays the entries.
+cannot see — a game acting on `Host::events` outside its module — is in
+`docs/backlog.md`. Re-simulation is a dev-time check on top of playback, never a
+requirement of it: a viewer still plays the entries.
+
+### The live recorder (built 2026-10-03)
+
+`crcbl::replay_record::Recorder` records a `crcbl_server::Host`'s session: in
+the umbrella crate, because it is the one that names both the host and the
+store, and the conversion between the host's input record and the file's peer
+track lives there once. It is pulled after every update and **drains** the
+host's records (`Host::take_sim_record`, `Host::take_peer_input_record`) rather
+than reading them, so a recorded host holds only what happened since the last
+pull; it hashes the tick the host reached (`hash_world`, once per update, and
+once for the tick it started on), and streams the peer track — the part that
+grows by every peer's frames every tick — to a spool beside the file through
+`crcbl_store::replay::ReplayStream`, which checks each entry against the
+reader's rules as it is pushed. The file is written when the recording finishes,
+in the format's order. It never overwrites: an existing path is refused by name,
+at the command line and again when the file is created.
+`crcbl::lan::LanHost::record` runs one on a LAN host, which finishes it when
+stopped or dropped; `--record <FILE>` starts it before the first frame, so the
+file opens on a tick no player was in and a host built like the recorded one
+re-simulates it from there. Off by default; on, the pull cost about 2.3–2.7 µs a
+tick on towers' two-player session in a release build, the hash about 0.5 µs of
+it (`docs/backlog.md` has the run). It writes no output entries, so its files
+are for re-simulation, not for a viewer.
 
 ### 2. Gameplay replays
 
@@ -172,7 +198,7 @@ on top of playback, never a requirement of it: a viewer still plays the entries.
 | Slice                                                                | Phase                                                           |
 | -------------------------------------------------------------------- | --------------------------------------------------------------- |
 | `.crpl` writer/reader, keyframes+index, `FileTransport` playback     | Writer, reader and playback built; keyframes and the index owed |
-| Black-box ring + crash dump; record-by-default in dev/editor         | The ring is built; nothing installs it, and nothing records     |
+| Black-box ring + crash dump; record-by-default in dev/editor         | The ring is built and nothing installs it; `--record` is opt-in |
 | `crcbl replay` CLI (record/play headless/dump/diff/clip/verify)      | Every subverb beyond the metadata report is still owed          |
 | Time-scrub debugger UI + marker track                                | P10 (with debug tools)                                          |
 | Replay browser screen; determinism verifier in CI (soak runs verify) | P10                                                             |

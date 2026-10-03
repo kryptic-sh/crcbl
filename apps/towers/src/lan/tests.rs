@@ -72,7 +72,8 @@ fn host() -> Game {
 
 /// …playing `map`.
 fn host_on(map: &Map) -> Game {
-    Game::host(TICK_HZ, map, on_loopback()).expect("loopback UDP must be available to these tests")
+    Game::host(TICK_HZ, map, on_loopback(), None)
+        .expect("loopback UDP must be available to these tests")
 }
 
 /// A joiner: waiting for the host's map, then playing on it — or not, and
@@ -155,7 +156,7 @@ struct Dedicated {
 
 fn dedicated() -> Dedicated {
     Dedicated {
-        server: Server::open(on_loopback(), &Map::built_in(), TICK_HZ)
+        server: Server::open(on_loopback(), &Map::built_in(), TICK_HZ, None)
             .expect("loopback UDP must be available to these tests"),
         now: Duration::ZERO,
         printed: Vec::new(),
@@ -1289,7 +1290,8 @@ fn quit_at_the_console_tells_every_player_the_server_shut_down() {
         FRAME,
         || now,
         &mut |line| printed.push(line.to_string()),
-    );
+    )
+    .expect("nothing to record, so nothing to fail");
     let [.., status, unknown] = &printed[..] else {
         panic!("the console answered too little: {printed:?}");
     };
@@ -1315,6 +1317,136 @@ fn quit_at_the_console_tells_every_player_the_server_shut_down() {
             ))
         );
     }
+}
+
+/// **`quit` finishes a recording server's file**, whole: it reads back with
+/// a state hash for the tick the server opened on and for every tick it
+/// ran, the two players' joins and their frames, and the quit prints what it
+/// holds. The players were told the server shut down before the file was
+/// written, and a fresh host on the same map re-simulates it tick for tick.
+#[test]
+fn quit_at_the_console_finishes_a_recording_servers_file() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("served.crpl");
+    let mut rig = Rig {
+        host: Dedicated {
+            server: Server::open(on_loopback(), &Map::built_in(), TICK_HZ, Some(&path))
+                .expect("loopback UDP must be available to these tests"),
+            now: Duration::ZERO,
+            printed: Vec::new(),
+        },
+        joiners: Vec::new(),
+    }
+    .with_playing(2);
+    assert_eq!(rig.host.server.lan().recording(), Some(path.as_path()));
+    rig.joiners[0]
+        .game_mut()
+        .set_controls(build(0, tower::Kind::Bolt));
+    rig.until("the tower built", |rig| rig.host.stats().built == 1);
+    let last = rig.host.server.lan().host().tick_id();
+
+    let (typed, lines) = std::sync::mpsc::channel();
+    typed.send("quit".to_string()).expect("the console is open");
+    let mut printed = Vec::new();
+    let now = rig.host.now + FRAME;
+    serve_until_quit(
+        &mut rig.host.server,
+        &mut Console::new(lines),
+        FRAME,
+        || now,
+        &mut |line| printed.push(line.to_string()),
+    )
+    .expect("the recording finishes");
+    assert_eq!(
+        rig.host.server.lan().recording(),
+        None,
+        "the quit stopped it"
+    );
+    let recorded = printed
+        .iter()
+        .find(|line| line.starts_with("towers: recorded ticks 0 to "))
+        .unwrap_or_else(|| panic!("the quit printed no recording: {printed:?}"));
+    assert!(recorded.contains("served.crpl"), "{recorded}");
+
+    let storage = crcbl::store::NativeStorage::at(dir.path().to_path_buf());
+    let file =
+        crcbl::store::replay::FileTransport::open(&storage, std::path::Path::new("served.crpl"))
+            .expect("the file reads back whole");
+    let hashes = file.state_hashes();
+    assert_eq!(hashes.first().map(|hash| hash.tick.get()), Some(0));
+    // The quit's own frame ran one more tick.
+    let end = hashes.last().expect("hashed").tick;
+    assert!(end > last, "{} after {}", end.get(), last.get());
+    let joins = file
+        .peer_ticks()
+        .iter()
+        .flat_map(|tick| &tick.roster)
+        .filter(|change| change.kind == crcbl::store::replay::RosterChangeKind::Joined)
+        .count();
+    assert_eq!(joins, 2);
+    assert!(
+        file.peer_ticks().iter().any(|tick| !tick.peers.is_empty()),
+        "the players' frames are in it"
+    );
+
+    let (_, world, module) = crate::game::Field::open(&Map::built_in(), TICK_HZ);
+    let mut replayed = Host::new(
+        world,
+        HostConfig {
+            max_peers: usize::from(MAX_PLAYERS),
+            tick_hz: TICK_HZ,
+            compatibility: SESSION.compatibility,
+        },
+    );
+    replayed.set_module(Box::new(module));
+    replayed.update(Duration::ZERO);
+    assert_eq!(
+        crcbl::replay_record::resimulate(&mut replayed, &file),
+        Ok(end)
+    );
+}
+
+/// **A playing host's recording is finished when its game is dropped** — a
+/// window closing — with its own player's input in it beside a joiner's, and
+/// a fresh host on the same map re-simulates it tick for tick.
+#[test]
+fn a_hosts_recording_is_finished_when_its_game_is_dropped() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("hosted.crpl");
+    let mut rig = Rig {
+        host: Game::host(TICK_HZ, &Map::built_in(), on_loopback(), Some(&path))
+            .expect("loopback UDP must be available to these tests"),
+        joiners: Vec::new(),
+    }
+    .with_playing(1);
+    rig.host.set_controls(build(1, tower::Kind::Splash));
+    rig.joiners[0]
+        .game_mut()
+        .set_controls(build(0, tower::Kind::Bolt));
+    rig.until("both towers built", |rig| rig.host.stats().built == 2);
+    let last = rig.host.lan_host().expect("a host").host().tick_id();
+    drop(rig);
+
+    let storage = crcbl::store::NativeStorage::at(dir.path().to_path_buf());
+    let file =
+        crcbl::store::replay::FileTransport::open(&storage, std::path::Path::new("hosted.crpl"))
+            .expect("the file reads back whole");
+    assert_eq!(file.state_hashes().last().map(|hash| hash.tick), Some(last));
+    let (_, world, module) = crate::game::Field::open(&Map::built_in(), TICK_HZ);
+    let mut replayed = Host::new(
+        world,
+        HostConfig {
+            max_peers: usize::from(MAX_PLAYERS),
+            tick_hz: TICK_HZ,
+            compatibility: SESSION.compatibility,
+        },
+    );
+    replayed.set_module(Box::new(module));
+    replayed.update(Duration::ZERO);
+    assert_eq!(
+        crcbl::replay_record::resimulate(&mut replayed, &file),
+        Ok(last)
+    );
 }
 
 /// **A console whose input ended is not a quit**: the server serves on,

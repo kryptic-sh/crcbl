@@ -1863,6 +1863,7 @@ version = "0.1.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
+ "tempfile",
 ]
 
 [[package]]
@@ -2169,6 +2170,7 @@ version = "0.1.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
+ "tempfile",
 ]
 
 [[package]]

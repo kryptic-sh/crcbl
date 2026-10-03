@@ -1397,7 +1397,8 @@ impl Game {
     }
 
     /// Hosts a LAN session of `map` bound where `bind` says, with this player
-    /// one of its clients — see [`crate::lan`].
+    /// one of its clients — see [`crate::lan`] — recording it to the new file
+    /// `record` names, if it names one.
     ///
     /// The server runs on the frame's wall time from here on, through
     /// [`Game::frame`], so a host with its pause menu open goes on serving the
@@ -1406,21 +1407,26 @@ impl Game {
     ///
     /// # Errors
     ///
-    /// [`GameError::Lan`] if the listener would not bind, and
-    /// [`GameError::Server`] if this player's own session did not come up in
-    /// the first tick.
+    /// [`GameError::Lan`] if the listener would not bind or the recording
+    /// asked for would not start, and [`GameError::Server`] if this player's
+    /// own session did not come up in the first tick.
     ///
     /// # Panics
     ///
     /// If `tick_hz` is zero.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn host(tick_hz: u32, map: &Map, bind: crcbl::lan::LanBind) -> Result<Self, GameError> {
+    pub fn host(
+        tick_hz: u32,
+        map: &Map,
+        bind: crcbl::lan::LanBind,
+        record: Option<&std::path::Path>,
+    ) -> Result<Self, GameError> {
         assert!(tick_hz > 0, "tick rate must be positive");
         let map = Arc::new(map.clone());
         let (shared, world, module) = server_world(&map);
         let served = (Field(Arc::clone(&shared)), world, module);
         let (link, tick_period) =
-            crate::lan::HostLink::open(crate::lan::SESSION, bind, served, tick_hz, &map)?;
+            crate::lan::HostLink::open(crate::lan::SESSION, bind, served, tick_hz, &map, record)?;
         log_the_rules(tick_hz, tick_period, &map);
         Ok(Self {
             link: Link::Host(Box::new(link)),
