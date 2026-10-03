@@ -34,7 +34,7 @@
 //! from the reflected shape would be a second serializer that could disagree
 //! with the first. Each axis copies and pastes on its own.
 
-use crate::reflect::Value;
+use crate::reflect::{Kind, Reflect, Value};
 use crate::ron;
 use crate::scene::scn::SceneEntityId;
 
@@ -78,18 +78,116 @@ impl Document {
         path: &str,
         text: &str,
     ) -> Result<(), EditError> {
+        self.paste_fields(id, system, &[(path, text)])
+    }
+
+    /// [`paste_field`](Self::paste_field) for each `(path, text)` of `fields`,
+    /// as **one** entry: an [`EditCommand::Batch`] of the writes in order, or
+    /// the one [`EditCommand::SetProperty`] for one field. Every text is read
+    /// before anything is written, so one that is not a value of its field
+    /// writes none of them. No fields, no entry.
+    ///
+    /// # Errors
+    ///
+    /// As [`paste_field`](Self::paste_field), for the first field refused.
+    pub fn paste_fields(
+        &mut self,
+        id: SceneEntityId,
+        system: &str,
+        fields: &[(&str, &str)],
+    ) -> Result<(), EditError> {
         self.refuse_in_play()?;
-        let current = self.read(id, system, path)?;
-        let value = value_of(&current, text).map_err(|error| EditError::FieldPaste {
-            path: path.to_owned(),
-            message: error.code.to_string(),
-        })?;
-        self.apply(EditCommand::SetProperty {
-            entity: id,
-            system: system.to_owned(),
-            path: path.to_owned(),
-            value,
-        })
+        if fields.is_empty() {
+            return Ok(());
+        }
+        let sets = self.parsed_sets(id, system, fields)?;
+        self.apply(EditCommand::one_or_batch(sets))
+    }
+
+    /// The write of each `(path, text)` of `fields` into `id`'s component in
+    /// `system`, each text read as the kind of value its leaf holds now —
+    /// what a paste applies.
+    pub(super) fn parsed_sets(
+        &mut self,
+        id: SceneEntityId,
+        system: &str,
+        fields: &[(&str, &str)],
+    ) -> Result<Vec<EditCommand>, EditError> {
+        let mut sets = Vec::with_capacity(fields.len());
+        for &(path, text) in fields {
+            let current = self.read(id, system, path)?;
+            let value = value_of(&current, text).map_err(|error| EditError::FieldPaste {
+                path: path.to_owned(),
+                message: error.code.to_string(),
+            })?;
+            sets.push(EditCommand::SetProperty {
+                entity: id,
+                system: system.to_owned(),
+                path: path.to_owned(),
+                value,
+            });
+        }
+        Ok(sets)
+    }
+
+    /// Every field of `id`'s component in `system`, in the order the
+    /// component declares them, as `(path, text)`: each leaf's text as
+    /// [`copy_field`](Self::copy_field) gives it, and each enum by the name
+    /// of the variant it holds, before that variant's own fields. What a
+    /// reader of the whole component — `crcbl scene query` — prints.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NoEntity`] for an id this document does not hold, and
+    /// [`EditError::NotAttached`] for a system that does not hold it.
+    pub fn field_texts(
+        &mut self,
+        id: SceneEntityId,
+        system: &str,
+    ) -> Result<Vec<(String, String)>, EditError> {
+        let component: &dyn Reflect = self.component_of(id, system)?;
+        let mut texts = Vec::new();
+        texts_of(component, "", &mut texts);
+        Ok(texts)
+    }
+}
+
+/// Pushes `value`'s fields, the value itself at `path` included, onto `texts`
+/// — see [`Document::field_texts`].
+fn texts_of(value: &dyn Reflect, path: &str, texts: &mut Vec<(String, String)>) {
+    let child = |name: &str| {
+        if path.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{path}.{name}")
+        }
+    };
+    match value.kind() {
+        Kind::Leaf(_) => {
+            if let Some(leaf) = value.get() {
+                texts.push((path.to_owned(), text_of(&leaf)));
+            }
+        }
+        Kind::List { len } => {
+            for index in 0..len {
+                if let Some(element) = value.field(index) {
+                    texts_of(element, &child(&index.to_string()), texts);
+                }
+            }
+        }
+        kind @ (Kind::Struct | Kind::Enum) => {
+            if kind == Kind::Enum {
+                texts.push((
+                    path.to_owned(),
+                    value.variant().unwrap_or_default().to_owned(),
+                ));
+            }
+            for (index, field) in value.fields().iter().enumerate() {
+                if let Some(inner) = value.field(index) {
+                    texts_of(inner, &child(field.name), texts);
+                }
+            }
+        }
     }
 }
 

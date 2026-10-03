@@ -425,6 +425,7 @@ dependencies = [
  "crcbl-scene",
  "crcbl-sprite",
  "crcbl-store",
+ "editor",
 ]
 
 [[package]]

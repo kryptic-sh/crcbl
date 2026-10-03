@@ -12,7 +12,7 @@ use crate::ecs::ComponentHash;
 use crate::registry::{Placement, Validate};
 
 /// The one system [`vocabulary`] registers.
-const BLOCKS: &str = "blocks";
+pub(super) const BLOCKS: &str = "blocks";
 
 /// A box: where it stands and how far it reaches, with no rule of its own —
 /// so a value written past the commands is not refused by one.
@@ -43,14 +43,14 @@ impl Placement for Block {
 impl Validate for Block {}
 
 /// [`Block`], under [`BLOCKS`].
-fn vocabulary() -> Registry {
+pub(super) fn vocabulary() -> Registry {
     let mut registry = Registry::new();
     registry.register::<Block>(BLOCKS);
     registry
 }
 
 /// A scene of one unit block at the origin, keyed at the source's root.
-fn one_block() -> Document {
+pub(super) fn one_block() -> Document {
     let mut source = empty_source();
     for (key, text) in [
         (
@@ -121,4 +121,69 @@ fn a_box_no_collider_can_be_is_left_unpickable() {
         Some(id),
         "a fixed box picks again"
     );
+}
+
+/// **A spawn with its fields is one entry**, its fields read as their leaves'
+/// kinds, and one undo takes it all back; a field refused spawns nothing.
+#[test]
+fn a_spawn_with_fields_is_one_entry_and_a_refused_field_spawns_nothing() {
+    let mut document = one_block();
+    let before = document.files().expect("ids");
+
+    let refused = document.spawn_with(BLOCKS, &[("position.0", "2.5"), ("height", "1.0")]);
+    assert!(matches!(refused, Err(EditError::Path(_))), "{refused:?}");
+    assert_eq!(
+        document.files().expect("ids"),
+        before,
+        "a refused spawn left a row"
+    );
+    assert!(document.log().is_empty(), "a refused spawn was recorded");
+
+    let id = document
+        .spawn_with(BLOCKS, &[("position.0", "2.5"), ("half_extents.1", "0.25")])
+        .expect("a block spawns");
+    assert_eq!(
+        document.log().len(),
+        1,
+        "the fields took entries of their own"
+    );
+    assert_eq!(
+        document.read(id, BLOCKS, "position.0").ok(),
+        Some(Value::Float(2.5))
+    );
+    assert_eq!(
+        document.read(id, BLOCKS, "half_extents.1").ok(),
+        Some(Value::Float(0.25))
+    );
+    assert!(document.undo().expect("the inverse applies"));
+    assert_eq!(document.files().expect("ids"), before);
+}
+
+/// **A component's fields are listed as the chunk file spells them**, every
+/// leaf by its path, in declaration order.
+#[test]
+fn a_components_fields_are_listed_by_path_as_the_file_spells_them() {
+    let mut document = one_block();
+    let texts = document
+        .field_texts(SceneEntityId(0), BLOCKS)
+        .expect("the block");
+    let expected = [
+        ("position.0", "0.0"),
+        ("position.1", "0.0"),
+        ("position.2", "0.0"),
+        ("half_extents.0", "1.0"),
+        ("half_extents.1", "1.0"),
+        ("half_extents.2", "1.0"),
+    ];
+    assert_eq!(
+        texts,
+        expected
+            .iter()
+            .map(|&(path, text)| (path.to_owned(), text.to_owned()))
+            .collect::<Vec<_>>()
+    );
+    assert!(matches!(
+        document.field_texts(SceneEntityId(9), BLOCKS),
+        Err(EditError::NoEntity(_))
+    ));
 }

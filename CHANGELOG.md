@@ -693,6 +693,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
     sample under a section's rows (`DebugGraph`, `GRAPH_HEIGHT`,
     `GRAPH_BAR_WIDTH`, `MIN_BAR_HEIGHT`), in `DebugStyle::graph`'s colour.
 
+- **`crcbl scene` and `crcbl edit`: a scene directory listed, queried and edited
+  from the CLI, with undo across runs.** `crcbl scene list`, `query`,
+  `spawn [--set <PATH>=<VALUE>]…`, `set`, `delete`, `move <X> <Y> <Z>`, `undo`
+  and `redo`, each `<DIR>` first, and `crcbl edit <DIR> -e <COMMAND>…` for
+  several edits saved once. Every edit goes through
+  `crcbl::scene_edit::Document` with the editor's vocabulary — its validation,
+  its refusals, its inverse — and is saved with an undo history beside the
+  scene, `DIR/.crcbl-history` (`crcbl::scene_edit::HISTORY`), bound to the
+  scene's bytes by a SHA-256 and refused, never replayed, when the scene changed
+  since or the file is damaged. A value is read as the scene's files spell it,
+  so a number never passes through `f32`. A refused edit exits 10 plus the edit
+  protocol's refusal code (14 unknown entity, 16 unknown path, 17 invalid, 19
+  nothing to undo, …), a refused history exits 3, and `--json` prints each
+  verb's documented shape — `crcbl scene --help` lists both. New for it:
+  `Document::open_with_history`, `save_with_history`, `spawn_with`,
+  `paste_fields` and `field_texts`, `crcbl::scene_edit::refusal_of`,
+  `EditError::History`, and `UndoLog::entries` and `UndoLog::restored`.
+  `crcbl edit --serve` is refused by name, not built.
+
 - **The editor edits the scene's environment in the inspector.** With nothing
   selected the inspector's scene pane draws `env.ron` under the add buttons: the
   camera's eye, the point it looks at and the ambient light, three numbers each.

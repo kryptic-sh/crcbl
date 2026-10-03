@@ -12308,8 +12308,12 @@ serve an editor and wait on `apps/editor` growing past its in-process slices
   commands (`.scn.autosave.log`, gitignored), replayed on crash and truncated by
   an explicit save, which flushes the dirty chunks canonically. Git only ever
   sees canonical form. It is the editor's command stream serialized, so it needs
-  a serializable command type; `apps/editor`'s `EditCommand` is not `serde`
-  today.
+  a serializable command type; `EditCommand` is not `serde`, but its wire form
+  (`crcbl::scene::edit::encode_op`) is one. **Not the CLI's history**:
+  `crcbl scene`'s `.crcbl-history` (2026-10-04, _`crcbl scene` and `crcbl edit`_
+  above) is an undo log saved with the scene and bound to its bytes, never
+  replayed onto a scene it was not written beside, so it is no crash journal —
+  but it is the codec and the bounds such a journal would reuse.
 - **Sector sharding.** A system whose array grows huge shards its chunk by
   sector (`sys/<name>/{sector}.ron`), so a sector's scene data and its physics
   load unit coincide. Needs physics sector streaming first.
@@ -12344,44 +12348,114 @@ _`crcbl save list|dump|diff|restore`_, _Golden audio buffers per sample, and
 
 ### `crcbl scene` and `crcbl edit`: the CLI half of the editor protocol
 
-**Not built; the parser rejects both words** (verified 2026-09-25 against
-`crates/crcbl-cli/src/args.rs`'s `Command`). The specification:
+**Built 2026-10-04: the one-shot verbs.**
+`crcbl scene list|query|spawn|set| delete|move|undo|redo <DIR> …` and
+`crcbl edit <DIR> -e <COMMAND>…` (`crates/crcbl-cli/src/scene_cmd.rs`, its
+parser `scene_args.rs`) open a `.scn/` directory through
+`crcbl::scene_edit::Document` — the editor's document, moved into the umbrella
+the same day so the CLI reaches it — apply the verb through the document's own
+entry points (`spawn_with`, `paste_field`, `paste_fields`, `delete`, `undo`,
+`redo`), and save with the history beside the scene.
+`crates/crcbl-cli/tests/scene.rs` holds every verb against temporary copies of
+towers' field and a `Document` given the same edit, byte for byte.
 
-- `crcbl scene <file> spawn|set|delete|move|list|query` — batch scene operations
-  against a headless editor server, commands from arguments or from
-  newline-delimited stdin. Every operation is the same `Command` value the GUI
-  emits, so validation and undo apply identically. `crcbl scene paste -` takes
-  entities copied from the editor (dual-mime RON, ids re-minted on paste).
-- `crcbl edit <scene> --serve [--listen <addr>]` — a headless editor server that
-  the GUI editor, the CLI and scripts connect to concurrently, the command log
-  being the sync point; `crcbl edit <scene> -e '<cmd>' …` — one-shot edits
-  without a session.
+**Decided, for the long term:**
 
-**What it waits on: nothing but itself, and it is the next slice** (re-checked
-2026-10-04). The server half exists — `crcbl_editor::serve::EditServer` applies
-a client's `EditOp` through the editor's `Document`, `Client::send_edit` sends
-one and `Client::edit_replies` reads the reason-coded answer; _Scene edits over
-the transport_, below, has the protocol and what it leaves. What the verbs need
-on top:
+- **The document lives in the umbrella**, as `crcbl::scene_edit` behind the
+  `scene` feature (it measures the glTF assets meshes name, which `scn` alone
+  does not build). Moving it took its tests' private reaches with it: the
+  editor's suite stays in `apps/editor/src/document/` and reads what it reached
+  into through read-only accessors (`manifest`, `ids`, `world`, `entities_in`,
+  `rows`); four tests that needed no vocabulary moved with the code.
+- **The CLI's vocabulary is the editor's**, `crcbl_editor::scene::vocabulary`,
+  through a `crcbl-cli → editor` dependency. The umbrella cannot hold that list
+  (every game depends on the umbrella), and a second list in the CLI would drift
+  from the editor's. The cost is that the CLI links the editor library and opens
+  only the scenes that build of the editor opens.
+- **Flags only, no JSON on the way in** (decided 2026-10-04 by the owner): no
+  serde or JSON dependency; a verb's arguments are words on the command line,
+  and `crates/crcbl-cli/src/json.rs` stays a writer. `--json` is output only.
+- **Values are read as the scene's files spell them**, through the field paste
+  path (`Document::paste_fields`), so a number is parsed as the leaf's own kind
+  and never passes through `f32`; `query` prints each field's text as
+  `Document::copy_field` gives it (`Document::field_texts`), and `--json`
+  carries that text as a string.
+- **`move` writes the placing component's `position`**
+  (`crcbl::registry::POSITION`), the field the editor's gizmo and arrow keys
+  move, as one entry of three writes. A placing component without it is refused
+  as an unknown path.
+- **`spawn --set` is one entry with the spawn** (`Document::spawn_with`): the
+  entity is spawned to read its leaves' kinds, put back, and applied with its
+  writes as one batch, so one undo takes it all back and a field refused spawns
+  nothing.
+- **An entity is named by id (`4`, `#4`) or by its entity name**; `query` takes
+  a system first, since a system is the vocabulary's and a name the scene's.
+  `set` needs `--system` only when the entity is in several systems.
+- **The history lives beside the scene, as `DIR/.crcbl-history`**
+  (`crcbl::scene_edit::HISTORY`, the module `crcbl::scene_edit::history`): a
+  sidecar the loader never reads and a save never removes, in the scene's own
+  directory so it travels with it, ignored by git. It is bound to the scene's
+  bytes (a SHA-256 over every file's key and text) and refused, exit 3, when the
+  scene changed since — by a person, the editor, a checkout — rather than
+  replayed; it ends in a SHA-256 of its own bytes; it keeps the newest
+  `MAX_HISTORY_ENTRIES`, dropping the oldest applied first, and a file past
+  `MAX_HISTORY_BYTES` is refused before it is decoded. Its operations are the
+  edit wire's (`encode_op`), so the server's decoder and fuzz target are the
+  ones that read it. Binary, as `crcbl_store::save`'s container is, rather than
+  text, so no hex codec was written.
+- **Exit codes are the protocol's**: a refused edit exits 10 plus its
+  `EditRefusal` code (`crcbl::scene_edit::refusal_of`, the server's own mapping,
+  which now maps a field paste's unreadable text to `INVALID`): 13 not editable,
+  14 unknown entity, 15 unknown system, 16 unknown path, 17 invalid, 18
+  conflict, 19 nothing to undo, 20 nothing to redo, 21 failed. 1 is a scene that
+  will not open or save, 2 a bad invocation, 3 a refused history
+  (`crates/crcbl-cli/src/report.rs`'s `EXIT_HISTORY` and `REFUSED_BASE`).
+- **`crcbl edit` applies every `-e` as its own entry and saves once**; one
+  refused saves nothing and exits with its code. A `-e` command splits at
+  whitespace but for `set`'s value, which is the rest of the command.
+- **The scene tests run in the ordinary suite**,
+  `crates/crcbl-cli/tests/ scene.rs`, not in `tests/run-cli-e2e.sh`: that script
+  exists to build a scaffolded project, and these build nothing.
 
-- **Where the server runs.** `EditServer` lives in `apps/editor`, beside the
-  `Document` it applies through, and `crcbl-cli` depends on no app. Either the
-  `Document`'s non-UI core moves into the umbrella (a large move, through files
-  the editor's panels touch) or `crcbl edit --serve` is the editor binary run
-  headless. Decide before writing the verb.
-- **Reading a command from arguments or stdin** means parsing input, which is
-  the moment `crates/crcbl-cli/src/json.rs` says to reconsider hand-written
-  JSON; the wire form (`crcbl_scene::edit::encode_op`) is what it sends.
-- **A one-shot `-e` without a session** applies through a `Document` directly
-  and saves; no transport is needed for it.
+**Deferred, each with what it takes:**
 
-**The exit criteria that hang on it**: a scripted `crcbl new` → `crcbl import` →
-`crcbl scene spawn …` → `crcbl screenshot` → `crcbl sim` session that builds and
-verifies a small scene with zero GUI launches, and the towers map modified from
-the CLI (a tower plot spawned, a spawner moved) opening correctly in the GUI
-editor with its undo history intact. Towers' plots and path corners are scene
-rows since 2026-09-30 (`apps/towers/assets/scenes/field.scn/`, in the editor's
-shipped vocabulary), so the towers half waits on the CLI protocol alone.
+- **The GUI half of the exit criterion.** The CLI's runs keep one history
+  between them, but the GUI editor does not read `.crcbl-history`, so a scene
+  edited from the CLI opens in the editor correctly and with an empty undo log.
+  It would take the editor opening a directory with
+  `Document::open_with_history` and saving with `save_with_history` — and a
+  decision about the recovery copy and autosave, which save elsewhere and would
+  leave the history bound to bytes the scene no longer has.
+- **`crcbl edit --serve [--listen <addr>]`**: refused by name. `EditServer` is
+  in the umbrella now, so the verb is a loop around it over a transport; what it
+  waits on is _Scene edits over the transport_'s list below — the GUI as a
+  client, a late joiner fetching the scene, gestures on the wire.
+- **Reading commands from stdin** (`crcbl scene <DIR> -` newline-delimited) and
+  **`crcbl scene paste -`** (a clipping from the editor): `Document::paste`
+  exists, so paste is a verb reading stdin; neither was asked for this slice.
+- **Verbs the document has and the CLI does not**: rename, attach, detach, list
+  and unlist a system, duplicate, a variant switch (a variant cannot be in the
+  history either: the wire refuses a `SetVariant`), and the environment. Each is
+  a verb over an existing `Document` method.
+- **A game's own vocabulary**: a project made by `crcbl new` registers
+  components this CLI does not know, so its scenes are refused by name. It would
+  take the project's own binary serving the verbs (a `crcbl::scene_edit` driver
+  a game links), or the CLI loading a vocabulary it was not built with, which
+  this workspace has no mechanism for.
+- **The scripted zero-GUI session** (`crcbl new` → `crcbl import` →
+  `crcbl scene spawn` → `crcbl screenshot` → `crcbl sim`) still waits on
+  `import --out` writing a scene and on `screenshot`/`sim` taking a scene
+  directory.
+- **Two runs at once on one scene are not locked against each other**: each
+  reads, applies and saves, so the later save can drop the earlier run's edit,
+  or leave a history bound to the other run's bytes, which the next run then
+  refuses. Neither replays a stale inverse — the binding sees to that — but an
+  edit can be lost. A lock file beside the history would serialise them.
+
+**Coverage gaps**: run on Windows only in this slice; the verbs were never run
+against breakout's or puppet's scenes, only towers' field and the umbrella's
+one-block test scene; `query` on a list-valued field was held by the umbrella's
+test of `field_texts` and never through the binary.
 
 ### Scene edits over the transport: the server slice and what it leaves (2026-10-04)
 
@@ -12402,11 +12476,12 @@ served scene's saved text with a `Document` given the same commands.
   (`tools/check-no-renderer-deps.sh`). So the server and `crcbl-net` carry the
   operation as opaque bytes, as a console set carries its value as text, and the
   crate owning the vocabulary decodes it.
-- **`Document` stays in `apps/editor`.** Moving it would take its play, mesh and
-  UI-facing halves with it, through files the editor's panels edit; the server
-  applies through it from `apps/editor/src/serve.rs` instead, so there is one
-  implementation. The CLI entry above carries what that costs
-  `crcbl edit --serve`.
+- **`Document` and `EditServer` live in the umbrella**, as `crcbl::scene_edit` —
+  moved 2026-10-04, superseding this entry's first answer, that the document
+  stayed in `apps/editor` and the server applied through it there. The CLI
+  needed to reach both, and a crate under `crates/` depends on no app; the
+  editor re-exports them from their old paths. The CLI entry above has the
+  move's decisions.
 - **Any admitted peer may edit**, with no host-player rule as console sets have:
   a headless server adds no host player, and the plan's correction has a GUI and
   a CLI editing at once.

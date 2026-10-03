@@ -176,8 +176,11 @@ impl EditServer {
     }
 }
 
-/// The code a document's refusal travels as.
-fn refusal_of(error: &EditError) -> EditRefusal {
+/// The code a document's refusal travels as — to a client of the server, and
+/// as the exit code of the `crcbl` CLI's edits, so both answer one refusal
+/// with one reason.
+#[must_use]
+pub fn refusal_of(error: &EditError) -> EditRefusal {
     match error {
         EditError::Playing => EditRefusal::NOT_EDITABLE,
         EditError::NoEntity(_) => EditRefusal::UNKNOWN_ENTITY,
@@ -188,6 +191,7 @@ fn refusal_of(error: &EditError) -> EditRefusal {
         EditError::Path(_) => EditRefusal::UNKNOWN_PATH,
         // A row that will not read is a value refused, as a leaf's is.
         EditError::Invalid { .. }
+        | EditError::FieldPaste { .. }
         | EditError::Name(_)
         | EditError::NoComponent(_)
         | EditError::Asset(_)

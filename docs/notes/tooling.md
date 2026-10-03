@@ -187,27 +187,27 @@ script, a CI job or an agent. Built from it, in `crates/crcbl-cli`: `new`,
 `args.rs`'s own tests hold, and CI's golden images and determinism hashes run
 through `crcbl screenshot` and `crcbl sim`.
 
-What it left unbuilt is in `docs/backlog.md`: `crcbl scene` and `crcbl edit`
-under _What the deleted 11-cli-headless plan left unbuilt_; `crcbl phys --check`
-under _`crcbl phys stack --check` and the solver's profiler rows_; `sim`'s scene
-argument and input script under _The determinism smoke test has no input
-script_; `import --out` under _`crcbl bake`, `PackSource`, the cooked mesh and
-`import --out`_; `crcbl save` under _`crcbl save list|dump|diff|restore`_; and
-the device bench scenarios under _Profiling: five of the eight gaps are still
-open_.
+What it left unbuilt is in `docs/backlog.md`: `crcbl edit --serve` and the rest
+of the scene verbs under _`crcbl scene` and `crcbl edit`_, whose one-shot verbs
+landed 2026-10-04; `crcbl phys --check` under _`crcbl phys stack --check` and
+the solver's profiler rows_; `sim`'s scene argument and input script under _The
+determinism smoke test has no input script_; `import --out` under _`crcbl bake`,
+`PackSource`, the cooked mesh and `import --out`_; `crcbl save` under
+_`crcbl save list|dump|diff|restore`_; and the device bench scenarios under
+_Profiling: five of the eight gaps are still open_.
 
 Code cites the plan as "topic 11", by its invariant and by its design rules.
 Those resolve here:
 
-| Citation                                                              | What it specified                                                                             |
-| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| The invariant, "a sample linking `crcbl-vk` directly"                 | **No capability is implemented GUI-side**                                                     |
-| "`--json` on every subcommand", "stable JSON schemas", the exit codes | **Machine-readable output and meaningful exit codes**                                         |
-| "No interactive prompts unless a TTY is detected"                     | **Scriptable first**                                                                          |
-| "Workspace member or standalone", "a scene dir"                       | **`crcbl new` scaffolds something that builds**                                               |
-| "Report what was imported/skipped"                                    | `crcbl import`'s report, whose skips ride the engine logger                                   |
-| The exit criteria                                                     | CI through the CLI (built); a scripted zero-GUI session and towers edited from the CLI (owed) |
-| The sketched `scene`, `phys`, `edit`, `sim <scene>`, `import --out`   | **A sketched verb or option is refused by name, not ignored**; the work is in the backlog     |
+| Citation                                                              | What it specified                                                                                                               |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| The invariant, "a sample linking `crcbl-vk` directly"                 | **No capability is implemented GUI-side**                                                                                       |
+| "`--json` on every subcommand", "stable JSON schemas", the exit codes | **Machine-readable output and meaningful exit codes**                                                                           |
+| "No interactive prompts unless a TTY is detected"                     | **Scriptable first**                                                                                                            |
+| "Workspace member or standalone", "a scene dir"                       | **`crcbl new` scaffolds something that builds**                                                                                 |
+| "Report what was imported/skipped"                                    | `crcbl import`'s report, whose skips ride the engine logger                                                                     |
+| The exit criteria                                                     | CI through the CLI (built); towers edited from the CLI (built, its history the CLI's alone); a scripted zero-GUI session (owed) |
+| The sketched `scene`, `phys`, `edit`, `sim <scene>`, `import --out`   | **A sketched verb or option is refused by name, not ignored**; the work is in the backlog                                       |
 
 The rules, each with its _why_:
 

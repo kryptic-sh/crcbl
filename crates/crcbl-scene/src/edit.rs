@@ -613,6 +613,36 @@ impl UndoLog {
         self.entries.is_empty()
     }
 
+    /// Every entry, applied or undone, oldest first, as what was done and
+    /// what puts it back — what a history written to disk is made of, with
+    /// [`position`](Self::position) saying how many are applied.
+    pub fn entries(&self) -> impl Iterator<Item = (&EditCommand, &EditCommand)> {
+        self.entries.iter().map(|entry| (&entry.done, &entry.undo))
+    }
+
+    /// A log holding `entries` — each what was done and what puts it back,
+    /// oldest first — standing at `position`: the log
+    /// [`entries`](Self::entries) and [`position`](Self::position) describe,
+    /// read back. Every entry is sealed and no save has marked it, as a new
+    /// log's are; [`None`] for a position past the entries.
+    ///
+    /// It takes the entries on trust: whether each `undo` puts back what its
+    /// `done` did, against the state the caller restores the log beside, is
+    /// the caller's to have checked — the edit history beside a scene on disk
+    /// binds itself to the scene's bytes for exactly that.
+    #[must_use]
+    pub fn restored(entries: Vec<(EditCommand, EditCommand)>, position: usize) -> Option<Self> {
+        if position > entries.len() {
+            return None;
+        }
+        let mut log = Self::new();
+        for (done, undo) in entries {
+            log.push(done, undo, None);
+        }
+        log.position = position;
+        Some(log)
+    }
+
     /// The applied entries, oldest first — the order they were applied in, and
     /// the order a replay would take.
     pub fn applied(&self) -> impl Iterator<Item = &EditCommand> {
@@ -1231,5 +1261,44 @@ mod tests {
         assert!(log.undo().is_none());
         assert!(log.redo().is_none());
         assert_eq!(log.position(), 0);
+    }
+
+    /// **A restored log walks as the one it was read from**: the same undo
+    /// and redo commands, from the same position — and a position past its
+    /// entries is no log at all.
+    #[test]
+    fn a_restored_log_walks_as_the_log_it_was_read_from() {
+        let mut log = UndoLog::new();
+        log.record(
+            set("position.0", Value::Float(1.0)),
+            set("position.0", Value::Float(0.0)),
+        );
+        log.record(
+            set("position.1", Value::Float(2.0)),
+            set("position.1", Value::Float(0.5)),
+        );
+        log.record(
+            set("position.2", Value::Float(3.0)),
+            set("position.2", Value::Float(0.25)),
+        );
+        log.undo();
+
+        let entries: Vec<_> = log
+            .entries()
+            .map(|(done, undo)| (done.clone(), undo.clone()))
+            .collect();
+        assert_eq!(entries.len(), 3, "the undone entry is an entry too");
+        let mut restored =
+            UndoLog::restored(entries.clone(), log.position()).expect("a position inside");
+        assert_eq!(restored.position(), 2);
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored.redo(), log.redo());
+        for _ in 0..3 {
+            assert_eq!(restored.undo(), log.undo());
+        }
+        assert_eq!(restored.undo(), None);
+
+        assert!(UndoLog::restored(entries.clone(), 3).is_some());
+        assert!(UndoLog::restored(entries, 4).is_none(), "past the entries");
     }
 }

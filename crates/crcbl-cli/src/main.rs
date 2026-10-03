@@ -17,9 +17,9 @@
 //! | No prompt unless a TTY, and never required | `new` |
 //! | Stable JSON schemas | `json`, and each command's field list |
 //!
-//! `screenshot`, `replay`, `crpix`, `lod`, `bench`, `sim`, `settings` and
-//! `import` have landed since; `save`, `scene`, `phys` and `edit` have not. The
-//! argument parser is written so adding one is a `match` arm.
+//! `screenshot`, `replay`, `crpix`, `lod`, `bench`, `sim`, `settings`,
+//! `import`, `scene` and `edit` have landed since; `save` and `phys` have not.
+//! The argument parser is written so adding one is a `match` arm.
 //!
 //! # This binary depends on the engine for GPU subcommands
 //!
@@ -40,6 +40,8 @@ mod lod_cmd;
 mod new;
 mod replay_cmd;
 mod report;
+mod scene_args;
+mod scene_cmd;
 mod screenshot;
 mod settings_cmd;
 mod sim_cmd;
@@ -79,6 +81,8 @@ fn main() -> ExitCode {
                 Command::Bench(args) => bench::run(args),
                 Command::Sim(args) => sim_cmd::run(args),
                 Command::Settings(args) => settings_cmd::run(args),
+                Command::Scene(args) => scene_cmd::run(args),
+                Command::Edit(args) => scene_cmd::run_edit(args),
             };
             report::emit(name, json, result)
         }

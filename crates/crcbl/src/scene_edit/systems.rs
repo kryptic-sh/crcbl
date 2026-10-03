@@ -215,21 +215,58 @@ impl Document {
     /// the default would not serialise. Nothing is spawned, listed or
     /// recorded when it refuses.
     pub fn add_entity(&mut self, system: &str) -> Result<SceneEntityId, EditError> {
+        self.spawn_with(system, &[])
+    }
+
+    /// [`add_entity`](Self::add_entity), with each `(path, text)` of `fields`
+    /// written into the new component as [`paste_fields`](Self::paste_fields)
+    /// writes them — **in the same entry**, so one undo takes the entity, its
+    /// fields and the listing back together, and a field refused spawns
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`add_entity`](Self::add_entity), and as
+    /// [`paste_fields`](Self::paste_fields) for a field refused — a path the
+    /// component lacks, text that is not a value of its field, or a value its
+    /// rule refuses. Nothing is spawned, listed or recorded when it refuses.
+    pub fn spawn_with(
+        &mut self,
+        system: &str,
+        fields: &[(&str, &str)],
+    ) -> Result<SceneEntityId, EditError> {
         self.refuse_in_play()?;
         if !self.registry.contains(system) {
             return Err(EditError::NoSystem(system.to_owned()));
         }
         let row = self.registry.default_row(system)?;
         let id = self.ids.next_id();
-        let spawn = EditCommand::Spawn {
-            entity: id,
-            rows: vec![SystemRow {
-                system: system.to_owned(),
-                row,
-            }],
-            name: None,
-        };
-        self.apply(self.listing_first(system, spawn))?;
+        let spawn = self.listing_first(
+            system,
+            EditCommand::Spawn {
+                entity: id,
+                rows: vec![SystemRow {
+                    system: system.to_owned(),
+                    row,
+                }],
+                name: None,
+            },
+        );
+        if fields.is_empty() {
+            self.apply(spawn)?;
+            return Ok(id);
+        }
+        // A field's text is read as the kind of value its leaf holds, and the
+        // leaf exists only once the entity does: spawned to read them, put
+        // back, then applied with the spawn as one command, which is what
+        // checks the values against the component's rule and records them.
+        let undo = self.perform(&spawn)?;
+        let sets = self.parsed_sets(id, system, fields);
+        self.perform(&undo)
+            .expect("an inverse produced a moment ago applies");
+        let mut commands = vec![spawn];
+        commands.extend(sets?);
+        self.apply(EditCommand::Batch(commands))?;
         Ok(id)
     }
 

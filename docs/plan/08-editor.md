@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls and their polish, multi-selection, a scene from empty and save-as, open and the unsaved bar, recovery offered back and autosave, the undo property test 2026-10-03, the dogfood pass 2026-10-04, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls and their polish, multi-selection, a scene from empty and save-as, open and the unsaved bar, recovery offered back and autosave, the undo property test 2026-10-03, the dogfood pass and the CLI half 2026-10-04, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -686,7 +686,8 @@ the decisions of the same day (below).
   collider and its instance.
 - **There is no `crcbl scene` subcommand** in `crates/crcbl-cli` to update: the
   CLI's verbs are `new`, `run`, `build`, `screenshot`, `replay`, `crpix`, `lod`,
-  `import`, `bench`, `sim` and `settings`.
+  `import`, `bench`, `sim` and `settings`. _Since 2026-10-04 there is_ — see
+  _The CLI half_ in _Status_.
 - **Evidence**: the scene's tests hold one entity across two chunks loading as
   one `Entity` with both components and writing back byte for byte, an id twice
   in one chunk and a system twice in a manifest refused, and a detached row that
@@ -1569,6 +1570,28 @@ Two things sit behind it, in both directions:
   has an app directory; arena is one of five sample plans without one, beside
   mirrors, meadow, mane and relief.
 
+**The CLI half, `crcbl scene` and `crcbl edit`, landed 2026-10-04.** The
+document and the edit server moved into the umbrella as `crcbl::scene_edit`, and
+the CLI edits a scene directory through that one implementation, with the
+editor's vocabulary: `list`, `query`, `spawn`, `set`, `delete`, `move`, `undo`
+and `redo`, one verb a run, and `crcbl edit <DIR> -e …` for several. Each edit
+is saved with an undo history beside the scene (`DIR/.crcbl-history`), bound to
+the scene's bytes, so an undo in one run walks back an edit another made.
+`docs/backlog.md`'s _`crcbl scene` and `crcbl edit`_ holds the decisions and
+what is deferred.
+
+- **The CLI's exit criterion** — towers' map modified from the CLI and opening
+  in the GUI editor with its undo history intact — **is met for the CLI and not
+  for the GUI.** `crates/crcbl-cli/tests/scene.rs` moves a plot of a copy of
+  towers' field through the binary, holds the files to what the editor's
+  document writes for the same move, undoes it in a second run and gets the
+  committed bytes back, and redoes it in a third. The field then opens in the
+  editor as any scene does, but with an empty undo log: the editor does not read
+  the CLI's history yet.
+- **What it does not cover**: `crcbl edit --serve`, stdin batches,
+  `scene paste -`, and the verbs beyond the eight; a scene of a game this build
+  does not register; two runs at once on one scene.
+
 ## Where the tree stands against this design (surveyed 2026-09-15)
 
 **Unparked 2026-09-15 by the user**, to be built after the UI system's rungs
@@ -1649,7 +1672,8 @@ than the rest of this document suggests; each line was checked in the source.
     ASCII bitmap font, and a DPI scale passed as `1.0` everywhere — the rungs of
     topic 7, all built since.
 12. **No `serve`, `scene` or `edit` CLI subcommands**, and no native file
-    dialogs or menus.
+    dialogs or menus. _Since closed for `scene` and `edit -e` (2026-10-04)_;
+    `edit --serve` and the file dialogs still hold.
 13. **Two statements in the 2026-08-09 corrections below are now out of date**:
     X11 does have drag-drop (through XDND), and Win32 OS drops work; only the
     Win32 clipboard file-list half (`CF_HDROP`) stands.

@@ -21,6 +21,16 @@ pub const EXIT_FAILED: u8 = 1;
 /// Exit code for "the invocation was malformed".
 pub const EXIT_USAGE: u8 = 2;
 
+/// Exit code for "the edit history beside a scene was refused" — `crcbl
+/// scene` and `crcbl edit` only; see `crate::scene_args::SCENE_USAGE`.
+pub const EXIT_HISTORY: u8 = 3;
+
+/// What `crcbl scene` and `crcbl edit` add to the edit protocol's refusal
+/// code (`crcbl::net::EditRefusal`) to exit with it, so a refused edit's
+/// reason is its exit code: the codes start at 1, so the lowest a refusal
+/// exits with sits clear of the three above.
+pub const REFUSED_BASE: u8 = 10;
+
 /// A command that worked.
 ///
 /// `PartialEq` but not `Eq`: a [`Json`] field may hold a float.
@@ -109,5 +119,12 @@ mod tests {
     #[test]
     fn the_exit_contract_is_two_numbers() {
         assert_eq!((EXIT_FAILED, EXIT_USAGE), (1, 2));
+    }
+
+    /// The scene verbs' codes are documented numbers, clear of the two
+    /// above: a history refused at 3, and refusals from 10 plus their code.
+    #[test]
+    fn the_scene_codes_sit_clear_of_the_contract() {
+        assert_eq!((EXIT_HISTORY, REFUSED_BASE), (3, 10));
     }
 }

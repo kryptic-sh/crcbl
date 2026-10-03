@@ -23,6 +23,10 @@ use std::fmt::{self, Display, Formatter, Write as _};
 /// `PartialEq` but not `Eq`: [`Float`](Self::Float) holds one.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Json {
+    /// `null`: a field that has no value here, such as an unnamed entity's
+    /// name, written rather than left out so every object of a kind has the
+    /// same keys.
+    Null,
     /// `true` / `false`.
     Bool(bool),
     /// A JSON number, always an integer here.
@@ -69,6 +73,7 @@ impl Json {
 impl Display for Json {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Null => f.write_str("null"),
             Self::Bool(value) => write!(f, "{value}"),
             Self::Number(value) => write!(f, "{value}"),
             Self::Float(value) => write_float(f, value.is_finite(), value),
@@ -171,6 +176,14 @@ mod tests {
             r#"{"files":["Cargo.toml","src/main.rs"]}"#
         );
         assert_eq!(Json::Array(vec![]).to_string(), "[]");
+    }
+
+    #[test]
+    fn null_is_the_word() {
+        assert_eq!(
+            Json::Object(vec![("name", Json::Null)]).to_string(),
+            r#"{"name":null}"#
+        );
     }
 
     /// A float is written as the shortest decimal that reads back as itself,

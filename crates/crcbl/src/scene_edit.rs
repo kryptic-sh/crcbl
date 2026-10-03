@@ -65,6 +65,7 @@ use crate::scene::edit::{EditCommand, Gesture, SystemRow, UndoLog, set_property,
 pub mod clipboard;
 mod environment;
 mod field;
+mod history;
 mod meshes;
 mod naming;
 mod origin;
@@ -78,13 +79,14 @@ mod validation;
 
 pub use environment::Environment;
 pub use field::text_of;
+pub use history::{HISTORY, HistoryError, MAX_HISTORY_BYTES, MAX_HISTORY_ENTRIES};
 pub use origin::{NEW_SCENE_ENV_RON, UNTITLED, empty_source, open_target, save_target};
 pub use play::{Hit, PlayState};
 pub use recovery::{
     IN_USE_SUFFIX, InUse, KEEP_NEWEST, MAX_AGE, Pruned, RECOVERY_DIR, RecoveryCopy, SIDECAR,
     list_copies, mark_in_use, prune_copies, remove_copy,
 };
-pub use serve::EditServer;
+pub use serve::{EditServer, refusal_of};
 pub use systems::{IN_SCENE, SystemGroup, UNGROUPED};
 
 /// A loaded scene and everything the editor knows about it.
@@ -266,7 +268,8 @@ pub enum EditError {
     /// wanted, too long, or holding a control character.
     Name(NameError),
 
-    /// A field paste's text is not a value of the field's kind, read the way
+    /// A field paste's text — from the clipboard, or typed on the `crcbl`
+    /// CLI's command line — is not a value of the field's kind, read the way
     /// the scene's loader reads that kind.
     FieldPaste {
         /// The field pasted into.
@@ -383,6 +386,11 @@ pub enum EditError {
     /// under that system, or an action or arguments its game's controls
     /// would not encode. Nothing was sent.
     PlayCommand(String),
+
+    /// The edit history beside the scene was refused, or would not be
+    /// written — see [`Document::open_with_history`] and
+    /// [`Document::save_with_history`]. Nothing was replayed from it.
+    History(HistoryError),
 }
 
 impl fmt::Display for EditError {
@@ -431,7 +439,7 @@ impl fmt::Display for EditError {
             Self::Paste(error) => write!(f, "the clipboard holds no entities: {error}"),
             Self::Name(error) => write!(f, "{error}"),
             Self::FieldPaste { path, message } => {
-                write!(f, "the clipboard holds no value for `{path}`: {message}")
+                write!(f, "the text pasted is no value for `{path}`: {message}")
             }
             Self::Write { key, source } => write!(f, "writing `{key}`: {source}"),
             Self::Occupied { dir, key } => write!(
@@ -488,6 +496,11 @@ impl fmt::Display for EditError {
                 f.write_str("the scene is not playing, so there is no game to send that to")
             }
             Self::PlayCommand(reason) => write!(f, "the command was not sent: {reason}"),
+            Self::History(error) => write!(
+                f,
+                "the edit history `{HISTORY}` beside the scene is refused: {error}; remove it to \
+                 start a new one"
+            ),
         }
     }
 }
@@ -1697,3 +1710,6 @@ pub fn asset_root(scene: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod history_tests;

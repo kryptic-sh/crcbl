@@ -132,3 +132,31 @@ fn a_field_paste_is_refused_in_play_mode() {
     }
     assert!(document.log().is_empty());
 }
+
+/// **A component's fields read as the inspector's rows**: an enum by the
+/// variant it holds, before the leaves beside it — a body attached to a step
+/// lists its kind, then its mass, each as its chunk file spells it.
+#[test]
+fn a_bodys_fields_read_its_kind_by_variant_and_its_leaves_by_text() {
+    let mut document = document();
+    let step = SceneEntityId(1);
+    document
+        .attach(step, crcbl::scene_physics::BODIES)
+        .expect("a step takes a body");
+    let texts = document
+        .field_texts(step, crcbl::scene_physics::BODIES)
+        .expect("the body");
+    assert_eq!(
+        texts[..2],
+        [
+            ("kind".to_owned(), "Dynamic".to_owned()),
+            (
+                "mass".to_owned(),
+                document
+                    .copy_field(step, crcbl::scene_physics::BODIES, "mass")
+                    .expect("a body's mass")
+            ),
+        ],
+        "{texts:?}"
+    );
+}

@@ -58,6 +58,8 @@ use std::path::PathBuf;
 
 use crcbl_sprite::{NineSlice, SampleMode};
 
+use crate::scene_args::{EditArgs, SceneArgs, parse_edit, parse_scene};
+
 /// Top-level `--help`.
 pub const USAGE: &str = "\
 crcbl — the Crucible engine's headless control CLI
@@ -77,6 +79,8 @@ COMMANDS:
     bench         Run a fixed benchmark scenario and report its distribution.
     sim           Run the determinism harness and print its state hash.
     settings      Read or write a game's settings.toml.
+    scene         List, query or edit a scene directory, with undo.
+    edit          Apply several edits to a scene directory in one run.
 
 OPTIONS (every command):
         --json    Emit one JSON object instead of human output.
@@ -85,6 +89,7 @@ OPTIONS (every command):
 
 EXIT CODES:
     0  ok        1  the command failed        2  bad invocation
+    `scene` and `edit` add their own codes for a refused edit; see their help.
 
 Run `crcbl <COMMAND> --help` for a command's own options.";
 
@@ -554,6 +559,10 @@ pub enum Command {
     Sim(SimArgs),
     /// A game's `settings.toml`, read or written.
     Settings(SettingsArgs),
+    /// A scene directory, read or edited one verb at a time.
+    Scene(SceneArgs),
+    /// A scene directory, edited by several `-e` commands in one run.
+    Edit(EditArgs),
 }
 
 impl Command {
@@ -577,6 +586,9 @@ impl Command {
             Self::Sim(_) => "sim",
             // The branch is a field of its own, for the reason above.
             Self::Settings(_) => "settings",
+            // The verb is a field of its own, for the reason above.
+            Self::Scene(_) => "scene",
+            Self::Edit(_) => "edit",
         }
     }
 
@@ -594,6 +606,8 @@ impl Command {
             Self::Bench(args) => args.json,
             Self::Sim(args) => args.json,
             Self::Settings(args) => args.json,
+            Self::Scene(args) => args.json,
+            Self::Edit(args) => args.json,
         }
     }
 }
@@ -1100,6 +1114,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Invocation {
         Some("bench") => parse_bench(args),
         Some("sim") => parse_sim(args),
         Some("settings") => parse_settings(args),
+        Some("scene") => parse_scene(args),
+        Some("edit") => parse_edit(args),
         Some(other) if other.starts_with('-') => {
             Invocation::BadUsage(format!("unrecognized option `{other}`"))
         }

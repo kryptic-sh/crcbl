@@ -215,6 +215,10 @@ crcbl-sample-test = { path = "apps/crcbl-sample-test", version = "0.1.0" }
 breakout = { path = "apps/breakout", version = "0.1.0" }
 puppet = { path = "apps/puppet", version = "0.1.0" }
 towers = { path = "apps/towers", version = "0.1.0" }
+# The editor, which `crates/crcbl-cli` names for one thing: the scene
+# vocabulary the editor ships (`crcbl_editor::scene::vocabulary`), so `crcbl
+# scene` opens what the editor opens. See that crate's manifest.
+editor = { path = "apps/editor", version = "0.1.0" }
 bytemuck = { version = "1", features = ["derive"] }
 
 [workspace.lints.rust]

@@ -33,7 +33,11 @@ workspace = true
 # `parsed-font` because `crcbl screenshot` draws every golden scene, and
 # `ui_text` is drawn in the committed parsed font. A native tool, so the size
 # that feature costs a browser demo is nothing to it.
-crcbl = { workspace = true, features = ["parsed-font"] }
+#
+# `scene` for `crcbl scene` and `crcbl edit`: they edit through
+# `crcbl::scene_edit`, which measures the glTF assets a scene's meshes name.
+# The importer is already linked below for `lod` and `import`.
+crcbl = { workspace = true, features = ["parsed-font", "scene"] }
 crcbl-golden = { workspace = true }
 # `load`, not `bake`: `crpix` reads PNGs and writes text, so it needs the
 # decoder and nothing else. `bake` is the other direction — a `.crpix` out to a
@@ -53,3 +57,17 @@ crcbl-assets = { workspace = true }
 # off — see the root `Cargo.toml`. This binary is the one that reads the source
 # format, so it is the one that asks for the parser.
 crcbl-scene = { workspace = true, features = ["gltf"] }
+# The scene vocabulary `crcbl scene` opens a directory with:
+# `crcbl_editor::scene::vocabulary`, the editor's own list — its greybox block,
+# the engine's bodies and meshes, and the games whose scenes the workspace edits
+# — rather than a second list here that could drift from it. The umbrella
+# cannot hold that list, because every game depends on the umbrella. Decided
+# 2026-10-04; `docs/backlog.md`'s `crcbl scene` entry has what a game's own
+# vocabulary would take.
+editor = { workspace = true }
+
+# `editor` is named through its `[lib]` name, `crcbl_editor`, and `cargo
+# machete` matches a dependency by its package name, so it cannot see the use —
+# the reason `apps/editor`'s manifest gives for the games it names.
+[package.metadata.cargo-machete]
+ignored = ["editor"]

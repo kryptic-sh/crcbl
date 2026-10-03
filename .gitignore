@@ -19,6 +19,11 @@
 /apps/viewer/assets/shelf/*
 !/apps/viewer/assets/shelf/Suzanne/
 
+# The edit history `crcbl scene` keeps beside a scene it edits
+# (`crcbl::scene_edit::history`): one person's undo, bound to the bytes of their
+# working copy, and meaningless to anyone else's.
+.crcbl-history
+
 # Steamworks (`crates/crcbl-steam`; rules in `docs/notes/backends.md`). The SDK's
 # licence
 # forbids publishing it, so an unzipped SDK dropped into the checkout must not
