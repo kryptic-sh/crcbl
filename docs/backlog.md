@@ -11552,9 +11552,6 @@ and `playout_tests` (bursts, reordering not inflating the interval).
   policy is for the simulation clock's input lead (the next entry); a 50 ms
   playback step is a visible jump that slewing at the rate bound closes in about
   half a second. Considered and declined for playback.
-- **Not on F3.** `crcbl::lan`'s client section lists no playout stats;
-  `Client::playout_stats` is there for it. Left out because the `LanClient` path
-  needs a socket, which the headless tests here must not open.
 - **Not verified:** clock drift between server and client (the offset estimate
   should track it; no test skews a clock), and breakout's replication drift
   warning (`apps/breakout/src/game.rs`, a 1-unit threshold) against the slightly
@@ -15528,8 +15525,8 @@ sheds by priority, never silently fragments.
 
 **The netgraph is built (2026-10-04): `crcbl::lan::netgraph`.** A "net" section
 beside "lan", a row per peer on a host and the one link on a joiner, with a
-graph of the round trip and the snapshot per link; towers and the sandbox add
-it. Decided for the long term:
+graph of the round trip, the loss and the snapshot per link; towers and the
+sandbox add it. Decided for the long term:
 
 - **It lives in the umbrella's `crcbl::lan`, not in `crcbl-client`.** This
   supersedes the 2026-09-24 placement under _The debug overlay, and what is left
@@ -15568,28 +15565,65 @@ it. Decided for the long term:
   in the debug tree), not a polyline primitive: the draw list has rects and the
   tree lays them out beside the label column with nothing new in the renderer.
 
+**Its follow-ups, decided 2026-10-04 for the long term:**
+
+- **A joiner's playout is four rows under its link, not more columns.** The link
+  table is already seven columns; `buffered` (`PlayoutStats::buffered`, the
+  newest snapshot's tick less playback, as time), `playout delay`,
+  `arrival jitter … (RFC 3550)` and `tick lead` (`Client::tick_lead`) are a row
+  each, read through `LinkReading::of_client` into `LinkReading::playout`. The
+  link table's jitter column is now headed `rttvar`, so the two jitters — the
+  round trip's RFC 6298 deviation and the snapshots' RFC 3550 interarrival
+  jitter — never share a name. A host's links carry no playout.
+- **The tick lead is the client's own tick less the newest snapshot's**, signed.
+  Nothing steers the client's `FrameClock` towards the server's (the input
+  jitter buffer, tick lead and rate correction are still absent: _The
+  plan-document audit of 2026-08-23_), so the figure today carries the
+  difference between when the two clocks started as well as the latency: a
+  client that joins a server a minute old reads about minus a minute of ticks.
+  It becomes the steered quantity when the input lead lands. A host's tick lead
+  per peer still needs that lead measured by the client and reported; nothing
+  does.
+- **`towers --serve` prints a line per player under its status line**:
+  `  peer N: rtt R ms, loss L%, in I B/s, out O B/s` (`LinkReading::summary`),
+  from the host's netgraph as of the last frame, players gone since then left
+  out. The headline stays the first line and unchanged, so it still reads, and
+  greps, as before; only its news prints the block early, and a link's figures
+  moving waits for `STATUS_INTERVAL` or `status`. **Considered and declined: a
+  `net` console command printing the whole table.** The extra columns — the
+  round trip's deviation, resends, the snapshot's size — are debugging a
+  joiner's F3 panel already shows of its own link, and printing a debug section
+  as text would be a second renderer of it. Add one if an operator needs resends
+  or snapshot sizes from the server's end.
+- **`crcbl_server::Server::peer_link_stats()` is built**, with no peer id:
+  `Server` holds one client and already reads it as `peer_stats()`. Nothing
+  shows a netgraph over a `Server` yet; `LinkReading` takes it when one does.
+- **Loss is graphed**, a bar per sample of the window's loss against
+  `LOSS_SCALE_PERCENT`, under each link's round trip.
+
 **What the netgraph left, and what each would take:**
 
-- **Tick-lead is not shown**, nor anything else of the client's clock. A joiner
-  has `Client::playout_stats` (delay, jitter, underruns) to put in its rows; a
-  host's tick-lead per peer needs the client's input lead, which the host does
-  not measure.
-- **`towers --serve` shows no netgraph.** A dedicated server has no panel; its
-  status line could print a line per peer from `LanHost::netgraph` on its
-  cadence.
-- **The Steam path has none.** `SteamTransport` does not implement `link_stats`;
-  Steam's own connection status (ping, quality, bytes) would supply it, and the
-  sandbox's Steam link would add the section as `crcbl::lan` does.
-- **Only the round trip and the snapshot are graphed.** Bandwidth each way and
-  loss are numbers; a graph per figure per peer would double the section's
-  height for every peer. Add them when someone needs to see one over time.
-- **`crcbl_server::Server`**, the single-session server, has no
-  `peer_link_stats`; nothing that shows a netgraph runs one.
+- **The Steam path has none.** `SteamTransport` does not implement `link_stats`:
+  `crcbl-steam` binds `GetConnectionInfo` but not `GetConnectionRealTimeStatus`,
+  which is where Steam reports ping, connection quality each way, packets and
+  bytes a second, and what is queued. Building it is FFI work — a manifest
+  entry, the `SteamNetConnectionRealTimeStatus_t` layout with its drift check,
+  the fake library's answer — and needs a decision on the mapping: Steam gives
+  no round-trip deviation and no resend count, and `EndpointStats` reading zero
+  for either would show a perfect link where nothing was measured. Left out of
+  the 2026-10-04 slice, which took no `unsafe`; the sandbox's Steam link would
+  then add the section as `crcbl::lan` does.
+- **Bandwidth each way is a number, not a graph.** Another two graphs per peer
+  would double the section's height again; add them when someone needs to see
+  one over time.
 - **Coverage gaps:** the graph's look has never been seen — its tests are
   draw-list rects, like the rest of the overlay (_Coverage gaps_). Towers'
   waiting-on-a-join branch (`joining.lan().netgraph()`) is not covered by a
   test; the joined and hosting ones are. Every figure was checked over loopback
-  and scripted wires, none on a real LAN.
+  and scripted wires, none on a real LAN: the playout rows over an in-memory
+  pair behind a seeded `ConditionSimulator`, the serve lines over UDP loopback.
+  Nobody has read the serve block in a real terminal beside a server's log
+  lines.
 
 **Built (slice D1): `crcbl_net::udp::discovery`**, native only like `udp`. A
 host's `Announcer` binds `DISCOVERY_PORT`, answers each padded query with a

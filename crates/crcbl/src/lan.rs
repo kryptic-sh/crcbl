@@ -32,8 +32,9 @@
 //!
 //! Both sides add a "lan" section to the F3 panel saying where they stand,
 //! and keep a [`netgraph::Netgraph`] — a "net" section with each link's round
-//! trip, jitter, loss, resends, bytes and snapshot size, and a graph of the
-//! round trip and the snapshot — that a sample adds beside it.
+//! trip, its deviation, loss, resends, bytes and snapshot size, a client's
+//! playout, and a graph of the round trip, the loss and the snapshot — that a
+//! sample adds beside it.
 //!
 //! A host records its session on request ([`LanHost::record`], what
 //! `--record <FILE>` asks for) through a [`Recorder`] it pulls after every
@@ -73,7 +74,7 @@ use crate::ecs::World;
 use crate::net::reliable::MAX_UNRELIABLE_PAYLOAD;
 use crate::net::udp::discovery::{Announcement, Announcer, Browser, DISCOVERY_PORT};
 use crate::net::udp::{ConnectError, UdpListener, UdpTransport};
-use crate::net::{ProtocolCompatibility, SessionEndReason, Transport};
+use crate::net::{ProtocolCompatibility, SessionEndReason};
 use crate::replay_record::{RecordError, RecordSummary, Recorder};
 use crate::server::{Host, HostConfig, PeerEvent};
 use crate::ui::{DebugModule, DebugSection};
@@ -455,6 +456,7 @@ impl LanHost {
                     snapshot_bytes: host
                         .peer_stats(peer)
                         .map_or(0, |stats| stats.last_snapshot_bytes),
+                    playout: None,
                 };
                 (peer.get(), reading)
             }),
@@ -683,10 +685,7 @@ impl LanClient {
     /// Browses or plays for one frame, at `now`.
     pub fn frame(&mut self, now: Duration) {
         self.play(now);
-        let link = self.client().map(|client| LinkReading {
-            stats: client.transport().link_stats(),
-            snapshot_bytes: client.last_snapshot_bytes(),
-        });
+        let link = self.client().map(LinkReading::of_client);
         self.netgraph.record(now, link.map(|reading| (0, reading)));
     }
 

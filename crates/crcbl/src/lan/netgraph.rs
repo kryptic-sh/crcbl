@@ -1,7 +1,9 @@
 //! The netgraph: a debug section showing how each of a session's links is
-//! doing — round trip, jitter, recent loss and resends, bytes each way, and
-//! the snapshot size — with a rolling graph of the round trip and the
-//! snapshot under the figures.
+//! doing — round trip, its deviation, recent loss and resends, bytes each
+//! way, and the snapshot size — with a rolling graph of the round trip, the
+//! loss and the snapshot under the figures. A client's link also shows its
+//! playout: the buffer's depth, the delay it aims for, the arrival jitter
+//! and the tick lead.
 //!
 //! A [`LanHost`](super::LanHost) shows a row per peer; a
 //! [`LanClient`](super::LanClient) one, for its link to the host. Each keeps
@@ -12,13 +14,20 @@
 //!
 //! # Where the numbers come from
 //!
-//! Every figure is the packet layer's own ([`EndpointStats`]): round trip
-//! and jitter are its RFC 6298 estimate, and loss, resends and bytes are its
-//! counts over the last [`STATS_WINDOW`] ([`crate::net::reliable::window`]).
-//! A host reads each peer's through
+//! Every link figure is the packet layer's own ([`EndpointStats`]): round
+//! trip and its deviation (`rttvar`) are its RFC 6298 estimate, and loss,
+//! resends and bytes are its counts over the last [`STATS_WINDOW`]
+//! ([`crate::net::reliable::window`]). A host reads each peer's through
 //! [`Host::peer_link_stats`](crate::server::Host::peer_link_stats), a client
 //! its own through its transport. The snapshot size is the sealed length of
 //! the last snapshot the host sent that peer, or the client opened.
+//!
+//! A client's playout figures are its own
+//! ([`Client::playout_stats`](crate::client::Client::playout_stats) and
+//! [`Client::tick_lead`](crate::client::Client::tick_lead)): the arrival
+//! jitter is RFC 3550's interarrival jitter of the snapshots, a different
+//! figure from the round trip's deviation, and labelled apart from it. A
+//! host has no playout to show, and does not measure its peers' tick lead.
 //!
 //! A link that measures nothing — a listen host's own player, whose
 //! transport is an in-memory pair, or a link still connecting or down —
@@ -33,6 +42,8 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use crate::client::{Client, PlayoutStats};
+use crate::net::Transport;
 use crate::net::reliable::{EndpointStats, MAX_UNRELIABLE_PAYLOAD, STATS_WINDOW};
 use crate::ui::{DebugModule, DebugSection};
 
@@ -49,10 +60,17 @@ pub const HISTORY_SAMPLES: usize = 64;
 /// scheduling noise look like a spike.
 pub const RTT_SCALE_FLOOR_MS: f32 = 20.0;
 
-/// The column heads of a link's row: round trip and jitter in
+/// The loss graph's full scale, as a percentage of the window's packets: a
+/// link losing that much is in trouble whatever the exact figure, and a
+/// percent or two still draws a bar that shows.
+pub const LOSS_SCALE_PERCENT: f32 = 10.0;
+
+/// The column heads of a link's row: round trip and its deviation in
 /// milliseconds, loss as a percentage, resends, bytes a second in and out,
 /// and the snapshot's bytes.
-const HEADS: [&str; 7] = ["rtt", "jit", "loss", "rsnd", "in B/s", "out B/s", "snap B"];
+const HEADS: [&str; 7] = [
+    "rtt", "rttvar", "loss", "rsnd", "in B/s", "out B/s", "snap B",
+];
 
 /// One link's figures at one frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -62,6 +80,56 @@ pub struct LinkReading {
     pub stats: Option<EndpointStats>,
     /// The sealed length of the link's last snapshot, in bytes.
     pub snapshot_bytes: usize,
+    /// The client's playout, on a client's link to its host; `None` on a
+    /// host's links to its peers.
+    pub playout: Option<PlayoutReading>,
+}
+
+impl LinkReading {
+    /// `client`'s link to its host as the netgraph records it: what its
+    /// transport measures, the last snapshot it opened, and its playout.
+    #[must_use]
+    pub fn of_client<T: Transport>(client: &Client<T>) -> Self {
+        Self {
+            stats: client.transport().link_stats(),
+            snapshot_bytes: client.last_snapshot_bytes(),
+            playout: Some(PlayoutReading {
+                stats: client.playout_stats(),
+                tick_lead: client.tick_lead(),
+            }),
+        }
+    }
+
+    /// The link's round trip, loss and rates on one line, for a console:
+    /// `rtt 0.4 ms, loss 0.0%, in 1200 B/s, out 3400 B/s`. A figure the link
+    /// has not measured is a dash, and a link that measures nothing says so.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let Some(stats) = self.stats else {
+            return "not measured".to_owned();
+        };
+        format!(
+            "rtt {}, loss {}, in {} B/s, out {} B/s",
+            stats.rtt.map_or_else(dash, |rtt| format!("{} ms", ms(rtt))),
+            stats
+                .recent
+                .loss()
+                .map_or_else(dash, |loss| format!("{}%", percent(loss))),
+            stats.recent.received_per_second(),
+            stats.recent.sent_per_second(),
+        )
+    }
+}
+
+/// A client's playout at one frame: how deep its jitter buffer is, the
+/// delay it aims for, the arrival jitter, and how its own tick stands
+/// against the snapshots.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayoutReading {
+    /// [`Client::playout_stats`].
+    pub stats: PlayoutStats,
+    /// [`Client::tick_lead`].
+    pub tick_lead: Option<i64>,
 }
 
 /// Which end of a session a netgraph shows.
@@ -123,6 +191,9 @@ pub struct Link {
     /// Its round trip, in milliseconds, a sample per [`HISTORY_INTERVAL`];
     /// zero while it has none.
     pub rtt_ms: History,
+    /// Its loss over the last [`STATS_WINDOW`], as a percentage, a sample
+    /// per [`HISTORY_INTERVAL`]; zero while it has none.
+    pub loss_percent: History,
     /// Its snapshot size, in bytes, a sample per [`HISTORY_INTERVAL`].
     pub snapshot_bytes: History,
 }
@@ -185,6 +256,7 @@ impl Netgraph {
                     id,
                     reading,
                     rtt_ms: History::default(),
+                    loss_percent: History::default(),
                     snapshot_bytes: History::default(),
                 },
             };
@@ -193,6 +265,9 @@ impl Netgraph {
                 let rtt = reading.stats.and_then(|stats| stats.rtt);
                 link.rtt_ms
                     .push(rtt.map_or(0.0, |rtt| rtt.as_secs_f32() * 1_000.0));
+                let loss = reading.stats.and_then(|stats| stats.recent.loss());
+                link.loss_percent
+                    .push(loss.map_or(0.0, |loss| loss * 100.0));
                 link.snapshot_bytes.push(reading.snapshot_bytes as f32);
             }
             self.links.push(link);
@@ -224,8 +299,23 @@ impl Netgraph {
 /// widest figure it is expected to hold, so a row lines up under the heads
 /// in the panel's fixed-advance font.
 fn columns(cells: [&str; 7]) -> String {
-    let [rtt, jitter, loss, resends, received, sent, snapshot] = cells;
-    format!("{rtt:>6} {jitter:>5} {loss:>5} {resends:>4} {received:>7} {sent:>7} {snapshot:>6}")
+    let [rtt, deviation, loss, resends, received, sent, snapshot] = cells;
+    format!("{rtt:>6} {deviation:>6} {loss:>5} {resends:>4} {received:>7} {sent:>7} {snapshot:>6}")
+}
+
+/// What a figure not measured reads as.
+fn dash() -> String {
+    "-".to_owned()
+}
+
+/// `duration` in milliseconds, to a tenth.
+fn ms(duration: Duration) -> String {
+    format!("{:.1}", duration.as_secs_f64() * 1_000.0)
+}
+
+/// A fraction as a percentage, to a tenth.
+fn percent(fraction: f32) -> String {
+    format!("{:.1}", fraction * 100.0)
 }
 
 /// A link's figures, lined up under [`HEADS`]: loss and resends are over the
@@ -236,24 +326,39 @@ fn link_row(reading: &LinkReading) -> String {
     let Some(stats) = reading.stats else {
         return columns(["-", "-", "-", "-", "-", "-", &snapshot]);
     };
-    let ms = |duration: Duration| format!("{:.1}", duration.as_secs_f64() * 1_000.0);
-    let (rtt, jitter) = match stats.rtt {
+    let (rtt, deviation) = match stats.rtt {
         Some(rtt) => (ms(rtt), ms(stats.rtt_variance)),
-        None => ("-".to_owned(), "-".to_owned()),
+        None => (dash(), dash()),
     };
-    let loss = stats
-        .recent
-        .loss()
-        .map_or_else(|| "-".to_owned(), |loss| format!("{:.1}", loss * 100.0));
     columns([
         &rtt,
-        &jitter,
-        &loss,
+        &deviation,
+        &stats.recent.loss().map_or_else(dash, percent),
         &stats.recent.resends.to_string(),
         &stats.recent.received_per_second().to_string(),
         &stats.recent.sent_per_second().to_string(),
         &snapshot,
     ])
+}
+
+/// A client's playout, a row a figure: the buffer's depth and the delay it
+/// aims for, the snapshots' arrival jitter — named for its RFC, as the
+/// round trip's deviation is not the same figure — and the tick lead.
+fn playout_rows(playout: &PlayoutReading, out: &mut DebugSection) {
+    let stats = &playout.stats;
+    match stats.buffered {
+        Some(buffered) => out.row("buffered", format_args!("{} ms", ms(buffered))),
+        None => out.row_str("buffered", "-"),
+    }
+    out.row("playout delay", format_args!("{} ms", ms(stats.delay)));
+    out.row(
+        "arrival jitter",
+        format_args!("{} ms (RFC 3550)", ms(stats.jitter)),
+    );
+    match playout.tick_lead {
+        Some(lead) => out.row("tick lead", format_args!("{lead:+} ticks")),
+        None => out.row_str("tick lead", "-"),
+    }
 }
 
 impl DebugModule for Netgraph {
@@ -270,11 +375,15 @@ impl DebugModule for Netgraph {
                 format_args!("{}", link_row(&link.reading)),
             );
         }
+        for playout in self.links.iter().filter_map(|link| link.reading.playout) {
+            playout_rows(&playout, out);
+        }
         let rtt_scale = self.rtt_scale_ms();
         out.row(
             "graphs",
             format_args!(
-                "rtt to {rtt_scale:.0} ms, snap to {MAX_UNRELIABLE_PAYLOAD} B, {:.1} s",
+                "rtt to {rtt_scale:.0} ms, loss to {LOSS_SCALE_PERCENT:.0}%, snap to \
+                 {MAX_UNRELIABLE_PAYLOAD} B, {:.1} s",
                 (HISTORY_INTERVAL * HISTORY_SAMPLES as u32).as_secs_f32(),
             ),
         );
@@ -285,6 +394,11 @@ impl DebugModule for Netgraph {
         for link in &self.links {
             let name = self.name(link);
             out.graph(&format!("{name} rtt"), link.rtt_ms.iter(), rtt_scale);
+            out.graph(
+                &format!("{name} loss"),
+                link.loss_percent.iter(),
+                LOSS_SCALE_PERCENT,
+            );
             out.graph(
                 &format!("{name} snap"),
                 link.snapshot_bytes.iter(),

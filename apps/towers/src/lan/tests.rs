@@ -1204,9 +1204,10 @@ fn a_dedicated_server_holds_its_run_until_a_player_who_found_it_joins() {
     rig.until("the browsed session", |rig| playing(&rig.joiners[0]));
     let joined = rig.joiners[0].lan().and_then(LanClient::host);
     assert_eq!(joined, Some(rig.address()));
-    let (_, line) = rig.host.printed.last().expect("a line on the join");
-    assert!(line.starts_with("towers: 1/4 players"), "{line}");
-    assert!(line.ends_with("playing"), "{line}");
+    let (_, printed) = rig.host.printed.last().expect("a line on the join");
+    let line = printed.lines().next().unwrap_or_default();
+    assert!(line.starts_with("towers: 1/4 players"), "{printed}");
+    assert!(line.ends_with("playing"), "{printed}");
     rig.until("the build phase running down for the player", |rig| {
         rig.host.stats().next_wave_in.is_some_and(|next| next < due)
     });
@@ -1268,7 +1269,8 @@ fn four_players_win_the_whole_table_on_a_dedicated_server() {
             .all(|joiner| joiner.game().stats().outcome == crate::wave::Outcome::Won)
     });
     assert!(
-        rig.host.printed.iter().any(|(_, line)| {
+        rig.host.printed.iter().any(|(_, printed)| {
+            let line = printed.lines().next().unwrap_or_default();
             line.starts_with(&format!("towers: 4/4 players, wave {waves}/{waves}"))
                 && line.ends_with("won")
         }),
@@ -1308,6 +1310,7 @@ fn quit_at_the_console_tells_every_player_the_server_shut_down() {
         "towers: no command \"frobnicate\"; the commands are status, save, load, quit"
     );
     assert!(last.starts_with("towers: 0/4 players"), "{last}");
+    assert_eq!(last.lines().count(), 1, "a link listed with nobody in");
     assert_eq!(rig.connected(), 0, "a session outlived the quit");
 
     rig.until("every player told the server shut down", |rig| {
@@ -1481,6 +1484,48 @@ fn a_console_whose_input_ended_is_not_a_quit() {
     assert_eq!(printed, Vec::<String>::new());
     rig.step();
     assert_eq!(rig.connected(), 1, "the player's session ended");
+}
+
+/// **A dedicated server's status line lists each player's link under it**:
+/// `  peer N: rtt R ms, loss L%, in I B/s, out O B/s`, a line per player in
+/// the host's order, each with the figures the host's netgraph recorded for
+/// that peer — and the line printed when the second player came in already
+/// carries both.
+#[test]
+fn a_dedicated_servers_status_line_lists_each_players_link() {
+    let mut rig = Rig::serving().with_playing(2);
+    let (_, joined) = rig.host.printed.last().expect("a line on the join");
+    assert_eq!(joined.lines().count(), 3, "{joined}");
+    rig.until("both links measured", |rig| {
+        let links = rig.host.lan_host().netgraph().links();
+        links.len() == 2
+            && links.iter().all(|link| {
+                link.reading
+                    .stats
+                    .is_some_and(|stats| stats.rtt.is_some() && stats.recent.loss().is_some())
+            })
+    });
+
+    let status = rig.host.server.status();
+    let lines: Vec<&str> = status.lines().collect();
+    assert!(lines[0].starts_with("towers: 2/4 players"), "{status}");
+    let host = rig.host.lan_host();
+    let peers: Vec<u64> = host.host().peers().map(|peer| peer.get()).collect();
+    assert_eq!(lines.len(), 1 + peers.len(), "{status}");
+    for ((line, link), peer) in lines[1..].iter().zip(host.netgraph().links()).zip(peers) {
+        assert_eq!(link.id, peer, "in the host's order");
+        let stats = link.reading.stats.expect("measured");
+        let rtt = stats.rtt.expect("measured").as_secs_f64() * 1_000.0;
+        let loss = stats.recent.loss().expect("judged") * 100.0;
+        assert_eq!(
+            *line,
+            format!(
+                "  peer {peer}: rtt {rtt:.1} ms, loss {loss:.1}%, in {} B/s, out {} B/s",
+                stats.recent.received_per_second(),
+                stats.recent.sent_per_second(),
+            )
+        );
+    }
 }
 
 /// **A player leaving mid-run does not stop a dedicated server.** A wave is

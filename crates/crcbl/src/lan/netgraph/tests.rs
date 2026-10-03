@@ -1,15 +1,17 @@
 //! The netgraph's rows and graphs from figures the test chose, its history's
-//! bound and cadence, and a host with two clients over UDP loopback showing
-//! a row per peer and a link per client with the figures their links report.
+//! bound and cadence, a joiner's playout over a scripted link, and a host
+//! with two clients over UDP loopback showing a row per peer and a link per
+//! client with the figures their links report.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::thread;
 
 use super::*;
-use crate::ecs::World;
+use crate::ecs::{GameModule, World};
 use crate::lan::{LanBind, LanClient, LanGame, LanHost};
 use crate::net::reliable::WindowCounts;
-use crate::net::{ProtocolCompatibility, Transport};
+use crate::net::{ProtocolCompatibility, SimConditions, Transport};
+use crate::session::Loopback;
 use crate::ui::DebugRow;
 
 /// `per_second` bytes a second, as the window's count.
@@ -61,6 +63,7 @@ fn a_host_shows_a_row_per_peer_with_its_figures() {
                 LinkReading {
                     stats: Some(measured()),
                     snapshot_bytes: 857,
+                    playout: None,
                 },
             ),
             (
@@ -68,6 +71,7 @@ fn a_host_shows_a_row_per_peer_with_its_figures() {
                 LinkReading {
                     stats: None,
                     snapshot_bytes: 412,
+                    playout: None,
                 },
             ),
         ],
@@ -77,15 +81,26 @@ fn a_host_shows_a_row_per_peer_with_its_figures() {
     assert_eq!(
         &out.rows()[..3],
         [
-            row("link", "   rtt   jit  loss rsnd  in B/s out B/s snap B"),
-            row("peer 1", "  12.0   1.5  25.0    2    1200    3400    857"),
-            row("peer 3", "     -     -     -    -       -       -    412"),
+            row("link", "   rtt rttvar  loss rsnd  in B/s out B/s snap B"),
+            row("peer 1", "  12.0    1.5  25.0    2    1200    3400    857"),
+            row("peer 3", "     -      -     -    -       -       -    412"),
         ]
     );
     let graphs: Vec<&str> = out.graphs().iter().map(|g| g.label.as_str()).collect();
     assert_eq!(
         graphs,
-        ["peer 1 rtt", "peer 1 snap", "peer 3 rtt", "peer 3 snap"]
+        [
+            "peer 1 rtt",
+            "peer 1 loss",
+            "peer 1 snap",
+            "peer 3 rtt",
+            "peer 3 loss",
+            "peer 3 snap"
+        ]
+    );
+    assert!(
+        out.rows().iter().all(|row| row.label != "tick lead"),
+        "a host has no playout to show"
     );
 }
 
@@ -106,6 +121,7 @@ fn a_client_shows_its_one_link_to_the_host() {
             LinkReading {
                 stats: Some(unmeasured),
                 snapshot_bytes: 0,
+                playout: None,
             },
         )],
     );
@@ -115,7 +131,7 @@ fn a_client_shows_its_one_link_to_the_host() {
         links,
         [&row(
             "host",
-            "     -     -  25.0    2    1200    3400      0"
+            "     -      -  25.0    2    1200    3400      0"
         )]
     );
     assert_eq!(
@@ -144,6 +160,7 @@ fn a_peer_that_leaves_takes_its_history_and_a_new_one_starts_empty() {
     let reading = LinkReading {
         stats: Some(measured()),
         snapshot_bytes: 100,
+        playout: None,
     };
     let mut netgraph = Netgraph::new(Role::Host);
     netgraph.record(Duration::ZERO, [(1, reading), (2, reading)]);
@@ -187,6 +204,7 @@ fn the_history_samples_once_an_interval_whatever_the_frame_rate() {
                 ..EndpointStats::default()
             }),
             snapshot_bytes: 0,
+            playout: None,
         };
         netgraph.record(now, [(0, reading)]);
         now += frame;
@@ -219,6 +237,7 @@ fn the_graphs_plot_the_history_against_their_scales() {
             ..EndpointStats::default()
         }),
         snapshot_bytes,
+        playout: None,
     };
     let mut netgraph = Netgraph::new(Role::Host);
     netgraph.record(Duration::ZERO, [(1, reading(5, 0)), (2, reading(10, 0))]);
@@ -248,6 +267,176 @@ fn the_graphs_plot_the_history_against_their_scales() {
     assert_eq!(
         graph("peer 1 snap"),
         [0.0, half as f32 / MAX_UNRELIABLE_PAYLOAD as f32]
+    );
+}
+
+/// **The console summary is the round trip, the loss and the rates**, in
+/// words a status line can carry; a figure not measured is a dash, and a
+/// link that measures nothing says so rather than reading as perfect.
+#[test]
+fn a_links_summary_names_its_round_trip_loss_and_rates() {
+    let reading = |stats| LinkReading {
+        stats,
+        ..LinkReading::default()
+    };
+    assert_eq!(
+        reading(Some(measured())).summary(),
+        "rtt 12.0 ms, loss 25.0%, in 1200 B/s, out 3400 B/s"
+    );
+    let unjudged = EndpointStats {
+        rtt: None,
+        recent: WindowCounts {
+            packets_acked: 0,
+            packets_lost: 0,
+            ..measured().recent
+        },
+        ..measured()
+    };
+    assert_eq!(
+        reading(Some(unjudged)).summary(),
+        "rtt -, loss -, in 1200 B/s, out 3400 B/s"
+    );
+    assert_eq!(reading(None).summary(), "not measured");
+}
+
+/// The packets [`the_loss_graph_holds_its_newest_samples_and_no_more`]
+/// judges each sample over: enough that a lost one is half a percent.
+const JUDGED: u64 = 200;
+
+/// **The loss graph's history is bounded**: past [`HISTORY_SAMPLES`]
+/// intervals the oldest goes, and the bars are the newest samples, in
+/// order, against [`LOSS_SCALE_PERCENT`] — full height at the scale and
+/// above it.
+#[test]
+fn the_loss_graph_holds_its_newest_samples_and_no_more() {
+    let lost_in = |interval: usize| (interval % 30) as u64;
+    let window = |interval: usize| WindowCounts {
+        packets_acked: JUDGED - lost_in(interval),
+        packets_lost: lost_in(interval),
+        ..WindowCounts::default()
+    };
+    let intervals = HISTORY_SAMPLES + 10;
+    let mut netgraph = Netgraph::new(Role::Client);
+    for interval in 0..intervals {
+        let reading = LinkReading {
+            stats: Some(EndpointStats {
+                rtt: Some(Duration::from_millis(1)),
+                recent: window(interval),
+                ..EndpointStats::default()
+            }),
+            ..LinkReading::default()
+        };
+        netgraph.record(HISTORY_INTERVAL * interval as u32, [(0, reading)]);
+    }
+    let newest: Vec<f32> = (intervals - HISTORY_SAMPLES..intervals)
+        .map(|interval| window(interval).loss().expect("judged") * 100.0)
+        .collect();
+    let loss = &netgraph.links()[0].loss_percent;
+    assert_eq!(loss.len(), HISTORY_SAMPLES);
+    assert_eq!(loss.iter().collect::<Vec<_>>(), newest);
+    assert!(
+        newest.iter().any(|&percent| percent > LOSS_SCALE_PERCENT),
+        "some samples pass the scale, to show the bars clamp"
+    );
+
+    let out = section(&netgraph);
+    let bars = &out
+        .graphs()
+        .iter()
+        .find(|graph| graph.label == "host loss")
+        .expect("a loss graph")
+        .bars;
+    let expected: Vec<f32> = newest
+        .iter()
+        .map(|percent| (percent / LOSS_SCALE_PERCENT).min(1.0))
+        .collect();
+    assert_eq!(bars, &expected);
+}
+
+/// A module with nothing to do: the session's snapshots are all
+/// [`a_joiner_shows_its_playout_as_its_client_reports_it`] reads.
+#[derive(Debug)]
+struct Idle;
+
+impl GameModule for Idle {
+    fn name(&self) -> &str {
+        "idle"
+    }
+
+    fn register(&self, _world: &mut World) {}
+}
+
+/// How long [`a_joiner_shows_its_playout_as_its_client_reports_it`] plays,
+/// in ticks: long enough for the playout's estimates to have seen the
+/// link's jitter.
+const SCRIPTED_TICKS: usize = 240;
+
+/// **A joiner shows its own playout, as its client reports it**: the
+/// buffer's depth, the delay it aims for, the arrival jitter labelled for
+/// its RFC, and the tick lead. The link is scripted — an in-memory pair
+/// behind a seeded simulator delaying every message 40 ms, give or take
+/// 15, on a clock the test drives — and measures nothing itself, so its
+/// row is dashes beside the snapshot's size.
+#[test]
+fn a_joiner_shows_its_playout_as_its_client_reports_it() {
+    let (mut session, clock) = Loopback::impaired_on_a_manual_clock(
+        World::new(),
+        Box::new(Idle),
+        TICK_HZ,
+        GAME.compatibility,
+        SimConditions {
+            latency: Duration::from_millis(40),
+            jitter: Duration::from_millis(15),
+            seed: 0x4E47,
+            ..SimConditions::default()
+        },
+    )
+    .expect("OS entropy is available in a test process");
+    let period = session.tick_period();
+    let mut now = Duration::ZERO;
+    let mut netgraph = Netgraph::new(Role::Client);
+    for _ in 0..SCRIPTED_TICKS {
+        now += period;
+        let (server, client) = session.both_mut();
+        client.update(now);
+        server.update(now);
+        client.update(now);
+        clock.advance(period);
+        netgraph.record(now, [(0, LinkReading::of_client(session.client()))]);
+    }
+
+    let client = session.client();
+    let stats = client.playout_stats();
+    let buffered = stats.buffered.expect("playback is under way");
+    let lead = client.tick_lead().expect("snapshots arrived");
+    assert!(
+        stats.jitter > Duration::ZERO,
+        "the link's jitter reached the playout"
+    );
+    assert_ne!(stats.delay, stats.jitter, "the two figures tell apart");
+    let ms = |duration: Duration| format!("{:.1} ms", duration.as_secs_f64() * 1_000.0);
+    let out = section(&netgraph);
+    let value = |label: &str| {
+        out.rows()
+            .iter()
+            .find(|row| row.label == label)
+            .unwrap_or_else(|| panic!("no {label} row: {:?}", out.rows()))
+            .value
+            .clone()
+    };
+    assert_eq!(value("buffered"), ms(buffered));
+    assert_eq!(value("playout delay"), ms(stats.delay));
+    assert_eq!(
+        value("arrival jitter"),
+        format!("{} (RFC 3550)", ms(stats.jitter))
+    );
+    assert_eq!(value("tick lead"), format!("{lead:+} ticks"));
+    assert_eq!(
+        value("host"),
+        format!(
+            "     -      -     -    -       -       - {:>6}",
+            client.last_snapshot_bytes()
+        )
     );
 }
 

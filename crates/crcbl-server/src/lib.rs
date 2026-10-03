@@ -32,6 +32,7 @@ use std::time::Duration;
 
 use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::{ClientInputs, GameModule, World};
+use crcbl_net::reliable::EndpointStats;
 use crcbl_net::{
     HandshakeGate, HandshakeResult, ProtocolCompatibility, SectorId, SessionConfig, SessionId,
     SessionState, Transport,
@@ -506,6 +507,16 @@ impl<T: Transport> Server<T> {
     #[must_use]
     pub fn peer_stats(&self) -> PeerStats {
         self.peer.stats()
+    }
+
+    /// What the client's transport measures of its link — round trip,
+    /// jitter, loss, resends and bytes ([`Transport::link_stats`]) — or
+    /// `None` when the transport measures nothing, as an in-memory one does
+    /// not, or has no link to measure. [`Host::peer_link_stats`] for the one
+    /// peer this server holds.
+    #[must_use]
+    pub fn peer_link_stats(&self) -> Option<EndpointStats> {
+        self.transport.link_stats()
     }
 
     /// Number of unrecoverable transport, encoding, decoding, or lifecycle errors.
@@ -1549,6 +1560,61 @@ mod tests {
             "a snapshot whose system ids collide must not be sent at all"
         );
         assert_eq!(server.processing_error_count(), 1);
+    }
+
+    /// An in-memory transport that measures a link: what a netgraph would
+    /// read through [`Server::peer_link_stats`].
+    struct Measured(InMemoryTransport);
+
+    /// The figures [`Measured`] reports.
+    fn measured_link() -> EndpointStats {
+        EndpointStats {
+            rtt: Some(Duration::from_millis(9)),
+            rtt_variance: Duration::from_millis(2),
+            packets_acked: 40,
+            packets_lost: 3,
+            ..EndpointStats::default()
+        }
+    }
+
+    impl Transport for Measured {
+        fn send_reliable(&mut self, msg: Message) -> Result<(), crcbl_net::TransportError> {
+            self.0.send_reliable(msg)
+        }
+
+        fn send_unreliable(&mut self, msg: Message) -> Result<(), crcbl_net::TransportError> {
+            self.0.send_unreliable(msg)
+        }
+
+        fn recv(&mut self) -> Result<Option<Message>, crcbl_net::TransportError> {
+            self.0.recv()
+        }
+
+        fn is_connected(&self) -> bool {
+            self.0.is_connected()
+        }
+
+        fn link_stats(&self) -> Option<EndpointStats> {
+            Some(measured_link())
+        }
+    }
+
+    /// **The server reads its client's link through its transport**: what a
+    /// measuring transport reports, and nothing over one that measures
+    /// nothing — an in-memory pair — rather than zeros read as a perfect
+    /// link.
+    #[test]
+    fn the_peer_link_stats_are_the_transports() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut measured = server(world_with_one_entity(), Measured(transport));
+        connect(&mut measured, &mut peer);
+        assert_eq!(measured.peer_link_stats(), Some(measured_link()));
+
+        let (transport, _peer) = InMemoryTransport::pair();
+        assert_eq!(
+            server(world_with_one_entity(), transport).peer_link_stats(),
+            None
+        );
     }
 
     /// An in-memory transport whose unreliable channel takes less than it

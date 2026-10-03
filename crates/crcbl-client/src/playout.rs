@@ -228,6 +228,10 @@ pub struct PlayoutStats {
     /// Times playback stepped forward to its target instead of drifting
     /// there, after falling behind by more than [`MAX_PLAYOUT_DELAY`].
     pub steps: u64,
+    /// The playout buffer's depth: how far the newest snapshot held runs
+    /// ahead of playback, as server time. Zero while playback holds at the
+    /// newest, run dry; `None` before playback has a position.
+    pub buffered: Option<Duration>,
 }
 
 /// One arrival: a server tick and when it was drained, both in server ticks.
@@ -478,7 +482,16 @@ impl Playout {
             snapshot_interval_ticks: self.interval_ticks,
             underruns: self.underruns,
             steps: self.steps,
+            buffered: self
+                .newest
+                .zip(self.playback_tick)
+                .map(|(newest, playback)| self.duration(newest.tick - playback)),
         }
+    }
+
+    /// The newest snapshot's tick; `None` before the first arrival.
+    pub(crate) fn newest_tick(&self) -> Option<f64> {
+        self.newest.map(|newest| newest.tick)
     }
 }
 
@@ -554,6 +567,31 @@ mod tests {
 
         let fast = Playout::new(10_000.0);
         assert_eq!(fast.stats().delay, MIN_PLAYOUT_DELAY);
+    }
+
+    /// **The buffer's depth is the newest snapshot less playback.** At one
+    /// tick a second, playback starts one delay behind the first snapshot,
+    /// so that much is buffered; past it, run dry and holding at the newest,
+    /// nothing is. Before any snapshot there is no depth to give.
+    #[test]
+    fn the_buffer_depth_is_the_newest_snapshot_less_playback() {
+        let mut playout = at_one_hertz();
+        playout.advance(Duration::ZERO);
+        assert_eq!(playout.stats().buffered, None);
+
+        arrive(&mut playout, 10, 0.0);
+        playout.advance(Duration::ZERO);
+        let stats = playout.stats();
+        let playback = playout.playback_tick.expect("playing");
+        assert_near(
+            stats.buffered.expect("a snapshot is held"),
+            Duration::from_secs_f64(10.0 - playback),
+        );
+        assert_near(stats.buffered.expect("a snapshot is held"), stats.delay);
+
+        playout.advance(Duration::from_secs(5));
+        assert_eq!(playout.stats().underruns, 1, "run dry");
+        assert_eq!(playout.stats().buffered, Some(Duration::ZERO));
     }
 
     fn assert_near(actual: Duration, expected: Duration) {

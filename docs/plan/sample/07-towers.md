@@ -217,9 +217,12 @@ than the canvas and moving that check is unwritten (`docs/backlog.md`). The
 debug panel has a "lan" section during a LAN session — the port, the players and
 the largest snapshot on a host, the session on a joiner — and beside it the
 netgraph's "net" section (`crcbl::lan::netgraph`, 2026-10-04): a row per peer on
-a host and the one link on a joiner, with round trip, jitter, loss, resends,
-bandwidth and the snapshot's size, and a graph of the round trip and the
-snapshot. Tick-lead is not in it yet (`docs/backlog.md`).
+a host and the one link on a joiner, with round trip, its deviation, loss,
+resends, bandwidth and the snapshot's size, and a graph of the round trip, the
+loss and the snapshot. A joiner's rows add its playout: the buffer's depth, the
+playout delay, the arrival jitter (RFC 3550) and the tick lead, which carries
+the two clocks' start difference until something steers the client's tick
+(`docs/backlog.md`).
 
 **What it is waiting on, and it is not one thing.**
 
@@ -381,31 +384,33 @@ snapshot. Tick-lead is not in it yet (`docs/backlog.md`).
   its own, announced on the LAN and ticking on the wall clock until `quit` is
   typed at its stdin console (`status` prints the status line), so all four
   places are joiners'; it prints a status line (players, wave, lives, gold,
-  outcome) on every change and on an interval. **With nobody in the session the
-  run holds still** — `run_team_tick` sees a tick with no command frame and
-  steps nothing, so no build phase runs out and no wave is sent at an empty
-  field until the first player joins; a player whose link dropped keeps the run
-  going through their grace period. A run whose last player left for good (every
-  grace period over) is reset once, so the next group starts on a fresh field
-  (decided 2026-10-01). `lan::tests` has four joiners of a dedicated server on
-  loopback splitting the plots between them and winning all ten waves, a browser
-  finding an empty server that has sent no wave, and a player leaving mid-run
-  while the other plays on. **A native `towers` opens on a lobby**
-  (`crcbl_towers::lobby`) when its command line chose nothing — no session flag,
-  no `--scene`, no `--headless`, `--frames` or `--screenshot`: solo, host, a row
-  per LAN host this build can join (name and players), the others dimmed under
-  the title with the reason (another version, build or game, or full), and a
-  connect row that joins an `IP:PORT` typed into it; the arrows, Enter and a
-  pad's d-pad and South drive it, as every menu. The web build has none and
-  boots straight into solo. `--browse` still joins the first host of this build
-  it hears. Four players winning the whole table fit every snapshot in one
-  datagram with nothing held back (the largest is 857 of 1158 bytes).
-  **Unverified:** two machines on a real LAN, the broadcast query reaching a
-  host at all, whether a Windows firewall prompt blocks the first run, and
-  `--serve`'s own wall-clock loop — every test is one process on loopback,
-  driving the server a frame at a time. **The host's map is sent at join**
-  (since 2026-10-01): the moment a joiner is admitted the host sends its map
-  sealed on the reliable channel (`Map::to_wire`, through
+  outcome) on every change and on an interval, with a line per player's link
+  under it — `  peer 2: rtt 0.4 ms, loss 0.0%, in 1200 B/s, out 3400 B/s`, from
+  the host's netgraph (2026-10-04); the console has no `net` command. **With
+  nobody in the session the run holds still** — `run_team_tick` sees a tick with
+  no command frame and steps nothing, so no build phase runs out and no wave is
+  sent at an empty field until the first player joins; a player whose link
+  dropped keeps the run going through their grace period. A run whose last
+  player left for good (every grace period over) is reset once, so the next
+  group starts on a fresh field (decided 2026-10-01). `lan::tests` has four
+  joiners of a dedicated server on loopback splitting the plots between them and
+  winning all ten waves, a browser finding an empty server that has sent no
+  wave, and a player leaving mid-run while the other plays on. **A native
+  `towers` opens on a lobby** (`crcbl_towers::lobby`) when its command line
+  chose nothing — no session flag, no `--scene`, no `--headless`, `--frames` or
+  `--screenshot`: solo, host, a row per LAN host this build can join (name and
+  players), the others dimmed under the title with the reason (another version,
+  build or game, or full), and a connect row that joins an `IP:PORT` typed into
+  it; the arrows, Enter and a pad's d-pad and South drive it, as every menu. The
+  web build has none and boots straight into solo. `--browse` still joins the
+  first host of this build it hears. Four players winning the whole table fit
+  every snapshot in one datagram with nothing held back (the largest is 857 of
+  1158 bytes). **Unverified:** two machines on a real LAN, the broadcast query
+  reaching a host at all, whether a Windows firewall prompt blocks the first
+  run, and `--serve`'s own wall-clock loop — every test is one process on
+  loopback, driving the server a frame at a time. **The host's map is sent at
+  join** (since 2026-10-01): the moment a joiner is admitted the host sends its
+  map sealed on the reliable channel (`Map::to_wire`, through
   `crcbl_server::Host::send_event`), and the joiner builds its game — and its
   GPU field — only once `Map::from_wire` has read it back and held it to every
   rule a scene file is; so any joiner plays any host whatever its own `--scene`,

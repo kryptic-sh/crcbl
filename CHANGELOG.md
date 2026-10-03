@@ -21,10 +21,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   it — `false` takes the new behaviour — or end in
   `..TextInputOptions::default()`.
 
-- **`crcbl_net::reliable::EndpointStats` gained `recent`, and
-  `crcbl_ui::DebugStyle` gained `graph`** (see Added: the netgraph). A struct
-  literal of either must name the new field — `WindowCounts::default()` and any
-  colour, or `..Default::default()`.
+- **`crcbl_net::reliable::EndpointStats` gained `recent`, `crcbl_ui::DebugStyle`
+  gained `graph`, and `crcbl_client::PlayoutStats` gained `buffered`** (see
+  Added: the netgraph). A struct literal of any of them must name the new field
+  — `WindowCounts::default()`, any colour, or `None` — or use
+  `..Default::default()` where the type has one.
 
 - **`crcbl_ui::PointerInput` gained `secondary_pressed`, `NavInput` gained
   `menu` and `jump`, and the reserved `ui` context gained `ui_menu`** (see
@@ -682,14 +683,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   session.** `crcbl::lan::netgraph::Netgraph`, kept by `LanHost` and `LanClient`
   and fed every frame (`LanHost::netgraph`, `LanClient::netgraph`), lists a row
   per peer on a host and the one link to the host on a joiner: round trip and
-  jitter (the packet layer's RFC 6298 estimate), loss and resends over the last
-  second, bytes a second in and out, and the size of the last snapshot — with a
-  rolling graph of the round trip and of the snapshot against a datagram's
-  payload under the figures. A link that measures nothing — a listen host's own
-  player over an in-memory pair, or a link still connecting — reads as dashes,
-  not as a perfect link. Towers (hosting, joining, or waiting on a join) and the
-  sandbox add it beside their "lan" section; it toggles with the rest of the
-  panel and starts hidden in a release build, as the overlay does. Underneath:
+  its deviation (`rttvar`, the packet layer's RFC 6298 estimate), loss and
+  resends over the last second, bytes a second in and out, and the size of the
+  last snapshot — with a rolling graph of the round trip, of the loss (full at
+  `LOSS_SCALE_PERCENT`) and of the snapshot against a datagram's payload under
+  the figures. A joiner's link adds its playout, a row each: the buffer's depth
+  (`buffered`), the `playout delay` it aims for, the snapshots' `arrival jitter`
+  (RFC 3550, labelled apart from the round trip's deviation) and the
+  `tick lead`. A link that measures nothing — a listen host's own player over an
+  in-memory pair, or a link still connecting — reads as dashes, not as a perfect
+  link. Towers (hosting, joining, or waiting on a join) and the sandbox add it
+  beside their "lan" section; it toggles with the rest of the panel and starts
+  hidden in a release build, as the overlay does. **`towers --serve`'s status
+  line lists each player's link under it**, a line a peer —
+  `  peer 2: rtt 0.4 ms, loss 0.0%, in 1200 B/s, out 3400 B/s` — on every status
+  line, at the console's `status` as on a change and on the interval.
+  Underneath:
   - `crcbl_net::reliable::EndpointStats::recent` (a
     `crcbl_net::reliable::WindowCounts`) is what the link did over the last
     `STATS_WINDOW` (one second, in `STATS_BUCKET` steps of 100 ms, complete
@@ -703,7 +712,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
     transport, and `PeerStats::last_snapshot_bytes` is the sealed length of the
     last snapshot a peer's transport accepted.
     `crcbl_client::Client::last_snapshot_bytes` is the same figure at the
-    client's end.
+    client's end. `crcbl_server::Server::peer_link_stats()` reads the
+    single-session server's one client the same way.
+  - `crcbl_client::PlayoutStats::buffered` is how far the newest snapshot runs
+    ahead of playback (`None` before playback starts), and
+    `crcbl_client::Client::tick_lead` is the client's own tick less the newest
+    snapshot's. Nothing steers the client's tick towards the server's yet, so
+    the lead carries the difference between the two clocks' starts.
+  - `crcbl::lan::netgraph::LinkReading` gained `playout` (a `PlayoutReading`),
+    `LinkReading::of_client` reads a client's link and playout, and
+    `LinkReading::summary` is the console line; `Link::loss_percent` is the loss
+    graph's history.
   - `crcbl_ui::DebugSection::graph(label, samples, scale)` draws a bar per
     sample under a section's rows (`DebugGraph`, `GRAPH_HEIGHT`,
     `GRAPH_BAR_WIDTH`, `MIN_BAR_HEIGHT`), in `DebugStyle::graph`'s colour.

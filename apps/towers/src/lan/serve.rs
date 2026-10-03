@@ -3,7 +3,8 @@
 //! ```text
 //!  wall clock ─▶ Server::frame ─▶ LanHost ─▶ Host ─▶ TowersModule ─▶ Stage
 //!                    │                        ├─ UDP ─ a player
-//!                    └─▶ the status line      └─ UDP ─ another
+//!                    └─▶ the status line,     └─ UDP ─ another
+//!                        a line per link
 //!  stdin ─▶ reader thread ─▶ channel ─▶ Console::obey, between frames
 //! ```
 //!
@@ -45,6 +46,18 @@
 //! `load` are the run's (below); anything else prints the commands there
 //! are.
 //!
+//! # The status line, and each player's link
+//!
+//! The status line leads with the players, the wave, lives, gold, the run
+//! and how it stands, and under it comes a line per player's link — round
+//! trip, loss and bytes a second each way, from the host's netgraph
+//! ([`crcbl::lan::netgraph::LinkReading::summary`]) — so the line itself
+//! stays one a reader can scan. Only the headline's news prints it early;
+//! a link's figures moving waits for the interval, or for `status`. The
+//! rest of the netgraph's table — the round trip's deviation, resends and
+//! the snapshot's size — is a joiner's F3 panel's to show; the console has
+//! no `net` command.
+//!
 //! # Saving: `save`, `load` and `--resume`
 //!
 //! The server keeps the run between waves in its own file,
@@ -82,6 +95,7 @@ use std::time::{Duration, Instant};
 use std::path::Path;
 
 use crcbl::core::FrameClock;
+use crcbl::lan::netgraph::Link;
 use crcbl::lan::{LanBind, LanError, LanHost};
 use crcbl::net::SessionEndReason;
 use crcbl::replay_record::{RecordError, RecordSummary};
@@ -231,9 +245,19 @@ impl Server {
         self.field.stats()
     }
 
-    /// The status line: who is in, and how the run stands.
+    /// The status line — who is in, and how the run stands — and under it a
+    /// line per player's link, as the netgraph last recorded it. A player
+    /// gone since that frame — every one, straight after a shutdown — is
+    /// not listed.
     pub fn status(&self) -> String {
-        status_line(self.players(), &self.stats())
+        let mut status = status_line(self.players(), &self.stats());
+        let host = self.lan.host();
+        let in_session = |link: &&Link| host.peers().any(|peer| peer.get() == link.id);
+        for link in self.lan.netgraph().links().iter().filter(in_session) {
+            status.push('\n');
+            status.push_str(&link_line(link));
+        }
+        status
     }
 
     /// Saves the run now, if no wave is coming in, and answers
@@ -317,6 +341,12 @@ fn status_line(players: usize, stats: &Stats) -> String {
         stats.gold,
         stats.runs,
     )
+}
+
+/// One player's link under the status line, indented so the status line
+/// still leads: `  peer 2: rtt 0.4 ms, loss 0.0%, in 1200 B/s, out 3400 B/s`.
+fn link_line(link: &Link) -> String {
+    format!("  peer {}: {}", link.id, link.reading.summary())
 }
 
 /// What the console's help line names.

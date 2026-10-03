@@ -397,6 +397,21 @@ impl<T: Transport> Client<T> {
         self.playout.stats()
     }
 
+    /// How far this client's own tick — the one its input is stamped with —
+    /// runs ahead of the newest snapshot it has received, in ticks; negative
+    /// when it runs behind. `None` before the first snapshot.
+    ///
+    /// Nothing steers the client's tick towards the server's yet: it counts
+    /// from this client's first update, so the figure carries the difference
+    /// between when the two clocks started as well as the link's latency.
+    #[must_use]
+    pub fn tick_lead(&self) -> Option<i64> {
+        // Every tick a session reaches is far below 2^53, so the playout's
+        // `f64` holds it exactly.
+        let newest = self.playout.newest_tick()? as i64;
+        Some(self.clock.tick().get() as i64 - newest)
+    }
+
     /// The buffered pair either side of playback in `sector`, oldest first;
     /// `None` with fewer than two frames.
     fn playback_pair(&self, sector: SectorId) -> Option<(&Frame, &Frame)> {
@@ -1544,6 +1559,30 @@ mod tests {
         assert_eq!(client.last_applied_tick(), TickId::ZERO);
         assert_eq!(client.auth_failure_count(), 0);
         assert_eq!(client.processing_error_count(), 0);
+    }
+
+    /// **The tick lead is the client's own tick less the newest snapshot's**:
+    /// none before a snapshot, and once one of tick 4 has arrived, ten ticks
+    /// into the client's clock, six — then behind, negative, when a snapshot
+    /// from further on than the client has counted arrives.
+    #[test]
+    fn the_tick_lead_is_the_clients_tick_less_the_newest_snapshots() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+        for tick in 1..=10 {
+            client.update(TICK * tick);
+        }
+        assert_eq!(client.clock.tick().get(), 10);
+        assert_eq!(client.tick_lead(), None);
+
+        send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(4, &[]));
+        client.update(TICK * 10);
+        assert_eq!(client.tick_lead(), Some(6));
+
+        send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(13, &[]));
+        client.update(TICK * 11);
+        assert_eq!(client.tick_lead(), Some(-2));
     }
 
     #[test]
