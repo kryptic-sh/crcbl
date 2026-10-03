@@ -25,11 +25,12 @@
 //!
 //! **It hides** when the subject changes — the pointer leaves, focus moves or
 //! blurs, the mode changes — and when the widget is not built: the call that
-//! builds it is the widget's. **A press hides it**, as accept does, and so
-//! does a wheel ([`Ui::scroll_wheel`], or [`Ui::dismiss_tooltip`] for a caller
-//! that scrolls its own way); a dismissed tooltip stays hidden until the
-//! subject changes, so a click on a button does not bring its tooltip back
-//! over the result.
+//! builds it is the widget's. **A press of either button hides it**, as accept
+//! and `ui_menu` do — each fires or opens something the tooltip would sit
+//! over — and so does a wheel ([`Ui::scroll_wheel`], or
+//! [`Ui::dismiss_tooltip`] for a caller that scrolls its own way); a dismissed
+//! tooltip stays hidden until the subject changes, so a click on a button does
+//! not bring its tooltip back over the result.
 //!
 //! # Where it is drawn
 //!
@@ -157,7 +158,7 @@ impl Ui {
             state.since = None;
             state.dismissed = false;
         }
-        if pointer.down || nav.accept {
+        if pointer.down || pointer.secondary_pressed || nav.accept || nav.menu {
             state.dismissed = true;
         }
     }

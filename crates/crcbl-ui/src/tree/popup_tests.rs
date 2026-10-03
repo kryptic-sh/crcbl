@@ -127,6 +127,7 @@ fn press(pos: Vec2) -> PointerInput {
         pos,
         down: true,
         released: false,
+        secondary_pressed: false,
     }
 }
 
@@ -135,6 +136,7 @@ fn release(pos: Vec2) -> PointerInput {
         pos,
         down: false,
         released: true,
+        secondary_pressed: false,
     }
 }
 
@@ -245,34 +247,109 @@ fn a_popup_flips_or_shifts_to_stay_inside_the_viewport() {
     let anchor = |x: f32, y: f32| (Vec2::new(x, y), Vec2::new(x + 40.0, y + 20.0));
 
     assert_eq!(
-        hang(anchor(10.0, 10.0), size, viewport),
+        hang(anchor(10.0, 10.0), size, viewport, Placement::Below),
         Vec2::new(10.0, 30.0),
         "room below: below, lined up with the anchor"
     );
     assert_eq!(
-        hang(anchor(10.0, 120.0), size, viewport),
+        hang(anchor(10.0, 120.0), size, viewport, Placement::Below),
         Vec2::new(10.0, 60.0),
         "no room below and more above: flipped above"
     );
     assert_eq!(
-        hang(anchor(10.0, 40.0), Vec2::new(80.0, 100.0), viewport),
+        hang(
+            anchor(10.0, 40.0),
+            Vec2::new(80.0, 100.0),
+            viewport,
+            Placement::Below
+        ),
         Vec2::new(10.0, 50.0),
         "no room below and less above: shifted up from below"
     );
     assert_eq!(
-        hang(anchor(170.0, 10.0), size, viewport),
+        hang(anchor(170.0, 10.0), size, viewport, Placement::Below),
         Vec2::new(120.0, 30.0),
         "past the right edge: shifted left"
     );
     assert_eq!(
-        hang(anchor(10.0, 10.0), Vec2::new(300.0, 60.0), viewport),
+        hang(
+            anchor(10.0, 10.0),
+            Vec2::new(300.0, 60.0),
+            viewport,
+            Placement::Below
+        ),
         Vec2::new(0.0, 30.0),
         "wider than the viewport: its left edge kept"
     );
     assert_eq!(
-        hang(anchor(170.0, 140.0), size, ClipRect::NONE),
+        hang(anchor(170.0, 140.0), size, ClipRect::NONE, Placement::Below),
         Vec2::new(170.0, 160.0),
         "an unbounded viewport moves nothing"
+    );
+}
+
+/// **A pop-up at a point starts there, and flips to end there on each axis
+/// it would run past with more room before the point**; one that fits
+/// neither way is shifted inside instead.
+#[test]
+fn a_popup_at_a_point_flips_on_each_axis_at_the_far_edges() {
+    let viewport = ClipRect {
+        min: Vec2::ZERO,
+        max: Vec2::new(200.0, 150.0),
+    };
+    let size = Vec2::new(80.0, 60.0);
+    let at = |x: f32, y: f32| Placement::At(Vec2::new(x, y));
+    // The anchor plays no part.
+    let anchor = (Vec2::splat(-50.0), Vec2::splat(-40.0));
+
+    assert_eq!(
+        hang(anchor, size, viewport, at(10.0, 10.0)),
+        Vec2::new(10.0, 10.0),
+        "room both ways: its corner at the point"
+    );
+    assert_eq!(
+        hang(anchor, size, viewport, at(190.0, 140.0)),
+        Vec2::new(110.0, 80.0),
+        "the bottom right: flipped on both axes to end at the point"
+    );
+    assert_eq!(
+        hang(anchor, size, viewport, at(60.0, 140.0)),
+        Vec2::new(60.0, 80.0),
+        "the bottom: flipped up only"
+    );
+    assert_eq!(
+        hang(anchor, Vec2::new(180.0, 60.0), viewport, at(70.0, 10.0)),
+        Vec2::new(20.0, 10.0),
+        "less room before than after: not flipped, shifted left"
+    );
+}
+
+/// **A pop-up beside its anchor goes right of it, lined up with its top, and
+/// flips to its left at the right edge** when there is more room there,
+/// shifted up from the bottom like any other.
+#[test]
+fn a_popup_beside_its_anchor_flips_left_at_the_right_edge() {
+    let viewport = ClipRect {
+        min: Vec2::ZERO,
+        max: Vec2::new(200.0, 150.0),
+    };
+    let size = Vec2::new(80.0, 60.0);
+    let anchor = |x: f32, y: f32| (Vec2::new(x, y), Vec2::new(x + 40.0, y + 20.0));
+
+    assert_eq!(
+        hang(anchor(10.0, 10.0), size, viewport, Placement::Beside),
+        Vec2::new(50.0, 10.0),
+        "room on the right: right of it, its top on the anchor's"
+    );
+    assert_eq!(
+        hang(anchor(150.0, 10.0), size, viewport, Placement::Beside),
+        Vec2::new(70.0, 10.0),
+        "no room on the right: flipped to end at the anchor's left edge"
+    );
+    assert_eq!(
+        hang(anchor(10.0, 120.0), size, viewport, Placement::Beside),
+        Vec2::new(50.0, 90.0),
+        "past the bottom: shifted up, not flipped"
     );
 }
 

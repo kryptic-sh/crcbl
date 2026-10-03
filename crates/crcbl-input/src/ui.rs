@@ -9,6 +9,7 @@
 //! | [`PREV`]   | Button  | Shift+Tab                     | the left shoulder             | [`Repeat::UI`] |
 //! | [`ACCEPT`] | Button  | Enter, Space                  | [`PadButton::South`]          | none           |
 //! | [`BACK`]   | Button  | Escape                        | [`PadButton::East`]           | none           |
+//! | [`MENU`]   | Button  | the menu key, Shift+F10       | none                          | none           |
 //!
 //! **Rebindable like every action** — they are ordinary actions in an ordinary
 //! context, so [`ActionMap::rebind`] moves them.
@@ -27,6 +28,10 @@
 //!
 //! **Start is not in the table.** Like Escape's pause, it is the engine loop's,
 //! and the loop binds it outside this context.
+//!
+//! **[`MENU`] has no pad binding.** It opens a context menu, which a pad
+//! reaches through no convention every platform shares; and a pad button
+//! bound here is one a pushed context takes from the game beneath.
 
 use super::{
     ActionDecl, ActionKind, ActionMap, ActionMapError, Binding, Modifier, PAD_ACTIVITY_THRESHOLD,
@@ -46,6 +51,12 @@ pub const PREV: &str = "ui_prev";
 pub const ACCEPT: &str = "ui_accept";
 /// Cancel the engaged widget, or close the screen.
 pub const BACK: &str = "ui_back";
+/// Open the focused widget's context menu: the keyboard's menu key, and
+/// Shift+F10 for a keyboard without one — Windows' pair.
+pub const MENU: &str = "ui_menu";
+
+/// Every reserved action, in the table's order.
+pub const ACTIONS: [&str; 6] = [MOVE, NEXT, PREV, ACCEPT, BACK, MENU];
 
 /// The dead zone [`MOVE`]'s left stick reads through: the pad's own activity
 /// threshold, so the stick navigates exactly when it would also make the pad
@@ -53,7 +64,7 @@ pub const BACK: &str = "ui_back";
 pub const STICK_DEADZONE: f32 = PAD_ACTIVITY_THRESHOLD;
 
 /// The reserved actions with their default bindings.
-fn declarations() -> [ActionDecl; 5] {
+fn declarations() -> [ActionDecl; ACTIONS.len()] {
     let button = |name: &str, bindings: Vec<Binding>| ActionDecl {
         name: name.to_owned(),
         kind: ActionKind::Button,
@@ -115,6 +126,16 @@ fn declarations() -> [ActionDecl; 5] {
                 Binding::PadButton(PadButton::East),
             ],
         ),
+        button(
+            MENU,
+            vec![
+                Binding::Key(KeyCode::ContextMenu),
+                Binding::Chord {
+                    modifier: Modifier::Shift,
+                    key: KeyCode::F10,
+                },
+            ],
+        ),
     ]
 }
 
@@ -172,7 +193,7 @@ mod tests {
     #[test]
     fn the_ui_context_is_declared_off_the_stack() {
         let mut map = declared();
-        for name in [MOVE, NEXT, PREV, ACCEPT, BACK] {
+        for name in ACTIONS {
             assert_eq!(map.context_of(name), Some(CONTEXT), "{name}");
         }
         assert_eq!(
@@ -224,6 +245,20 @@ mod tests {
         map.key_event(KeyCode::Tab, true);
         assert!(map.repeated(PREV), "Shift+Tab is ui_prev");
         assert!(!map.button_held(NEXT), "and not ui_next as well");
+        map.key_event(KeyCode::Tab, false);
+
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::F10, true);
+        assert!(map.just_pressed(MENU), "Shift+F10 is ui_menu");
+        map.key_event(KeyCode::F10, false);
+        map.key_event(KeyCode::ShiftRight, false);
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::F10, true);
+        assert!(!map.button_held(MENU), "F10 alone is not");
+        map.key_event(KeyCode::F10, false);
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::ContextMenu, true);
+        assert!(map.just_pressed(MENU), "the menu key is ui_menu");
     }
 
     /// **Pushed, it takes the table's pad column too**: the left stick past

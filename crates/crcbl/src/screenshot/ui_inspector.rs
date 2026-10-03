@@ -504,6 +504,7 @@ fn build(extent: (u32, u32)) -> (Ui, Parts, UiInspectorSurface, Vec<FieldEdit>) 
                     pos: (min + max) * 0.5,
                     down,
                     released: !down,
+                    secondary_pressed: false,
                 };
                 (pointer, NavInput::default())
             }

@@ -84,6 +84,10 @@
 //! end node, left on a root that is closed or an end node, or right on an open
 //! node with no child built — the move goes where the layout says instead, so
 //! arrowing never stops dead on a tree.
+//!
+//! A context menu's items take them the same way: right on an item with a
+//! submenu opens it, and left inside a submenu closes it, focus going back to
+//! its item (`widgets/context_menu.rs`).
 
 mod debug;
 pub mod spatial;
@@ -159,6 +163,9 @@ pub struct NavInput {
     pub accept: bool,
     /// `ui_back`: cancel the engaged widget, or else [`Ui::back_requested`].
     pub back: bool,
+    /// `ui_menu`: open the focused widget's context menu
+    /// ([`Ui::context_menu`]), as the keyboard's menu key and Shift+F10 do.
+    pub menu: bool,
 }
 
 impl NavInput {
@@ -179,6 +186,7 @@ impl NavInput {
         prev: false,
         accept: false,
         back: false,
+        menu: false,
     };
 
     /// `ui_next`, from the pad or the keyboard.
@@ -205,7 +213,14 @@ impl NavInput {
         ..Self::NAVIGATION
     };
 
-    /// Whether anything but `back` was pressed.
+    /// `ui_menu`, from the keyboard.
+    pub const MENU: Self = Self {
+        menu: true,
+        ..Self::NAVIGATION
+    };
+
+    /// Whether a move, a step or accept was pressed: anything but `back` and
+    /// `menu`, which act on focus where it is.
     const fn steers(self) -> bool {
         self.direction.is_some() || self.next || self.prev || self.accept
     }
@@ -551,7 +566,7 @@ impl Ui {
             }
             if !spent {
                 if let Some(direction) = nav.direction {
-                    if !self.tree_item_step(direction) {
+                    if !self.tree_item_step(direction) && !self.submenu_step(direction) {
                         self.move_spatially(direction, modal);
                     }
                 } else if nav.next || nav.prev {

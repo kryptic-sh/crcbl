@@ -11,6 +11,7 @@ fn click_frames(page: &mut Page, at: Vec2) -> Vec<PanelFrame> {
             pos: at,
             down: true,
             released: false,
+            secondary_pressed: false,
         },
         0.0,
     )];
@@ -19,6 +20,7 @@ fn click_frames(page: &mut Page, at: Vec2) -> Vec<PanelFrame> {
             pos: at,
             down: false,
             released: true,
+            secondary_pressed: false,
         },
         0.0,
     ));

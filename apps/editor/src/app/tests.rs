@@ -9,6 +9,7 @@ use crcbl::ui::tree::NodeKey;
 
 mod assets;
 mod clipboard;
+mod context_menu;
 mod exit_criterion;
 mod files;
 mod open;

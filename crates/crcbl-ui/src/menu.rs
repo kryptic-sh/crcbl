@@ -3636,6 +3636,7 @@ mod tests {
             pos: over_second,
             down: true,
             released: false,
+            secondary_pressed: false,
         };
         assert_eq!(menu.point(&layout, &mut ui, down), None);
         assert_eq!(menu.state(1), ButtonState::Pressed);
@@ -3645,6 +3646,7 @@ mod tests {
             pos: outside,
             down: false,
             released: true,
+            secondary_pressed: false,
         };
         assert_eq!(menu.point(&layout, &mut ui, elsewhere), None);
         assert_eq!(ui.active(), None);
@@ -3656,6 +3658,7 @@ mod tests {
             pos: over_second,
             down: false,
             released: true,
+            secondary_pressed: false,
         };
         assert_eq!(menu.point(&layout, &mut ui, up), Some(2));
         assert_eq!(menu.selected(), 1);
@@ -3703,6 +3706,7 @@ mod tests {
             pos: (first.min + first.max) * 0.5,
             down: true,
             released: false,
+            secondary_pressed: false,
         };
         assert_eq!(menu.point(&layout, &mut ui, down), None);
         assert_eq!(menu.state(0), ButtonState::Pressed);
@@ -3714,6 +3718,7 @@ mod tests {
             pos: (second.min + second.max) * 0.5,
             down: true,
             released: false,
+            secondary_pressed: false,
         };
         assert_eq!(menu.point(&layout, &mut ui, dragged), None);
         assert_eq!(
@@ -3980,6 +3985,7 @@ mod tests {
             pos,
             down: true,
             released: false,
+            secondary_pressed: false,
         }
     }
 
@@ -3988,6 +3994,7 @@ mod tests {
             pos,
             down: false,
             released: true,
+            secondary_pressed: false,
         }
     }
 

@@ -574,6 +574,21 @@ the decisions of the same day (below).
   and engages it once it is laid out (`Panels::begin_rename`); accept or a click
   elsewhere commits through `Document::rename`, back cancels, and a refusal is a
   status-line warning.
+- **An entity's outliner row has a context menu** (2026-10-03,
+  `Ui::context_menu`): a right-click on the row, or the menu key or Shift+F10
+  while it holds focus, offers `Rename (F2)`, `Duplicate (Ctrl+D)` and
+  `Delete (Del)`. **A pick is the key's `Action`**, handed back in
+  `PanelFrame::menu` and carried out by the loop exactly as the key is, so a
+  menu delete is the same one undoable command, refused for the same reasons;
+  all three are disabled while a scene plays. **The menu acts on the
+  selection**: a right-click on a row outside it makes that row the selection
+  first, as a plain click would, and one on a row inside a multi-selection keeps
+  the selection whole — what common editors do. A system's row has no menu. A
+  right press over the panels never orbits: the camera's drag begins only in the
+  viewport. Evidence: `panel::tests::context_menu` (the selection rule both
+  ways, the action handed back once, the items disabled in play) and
+  `app::tests::context_menu` (a right press through the shell, Delete and its
+  undo, Duplicate selecting the copy, Rename's text input).
 - **Feature 8's field half: one leaf at a time.** `crcbl_ui`'s `Inspection`
   names the leaf under the pointer and the one holding focus, and
   `Panels::field_target` is the focused one, else the hovered one. Ctrl+C with a

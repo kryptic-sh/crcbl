@@ -43,6 +43,7 @@ fn press_at(pos: Vec2) -> PointerInput {
         pos,
         down: true,
         released: false,
+        secondary_pressed: false,
     }
 }
 
@@ -51,6 +52,7 @@ fn release_at(pos: Vec2) -> PointerInput {
         pos,
         down: false,
         released: true,
+        secondary_pressed: false,
     }
 }
 

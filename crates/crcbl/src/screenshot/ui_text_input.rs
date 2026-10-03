@@ -260,6 +260,7 @@ fn build(extent: (u32, u32)) -> (Ui, Parts, Values) {
                     pos: Vec2::new(x, (min.y + max.y) * 0.5),
                     down: true,
                     released: false,
+                    secondary_pressed: false,
                 };
                 (pointer, NavInput::default(), still.clone())
             }

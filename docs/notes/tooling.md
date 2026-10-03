@@ -414,10 +414,21 @@ The rules, each with its _why_:
   hit-tested before every lower layer, and a modal focus scope that gives focus
   back to its anchor when it closes. Back closes the topmost, and **a press
   outside is spent closing it** rather than reaching what it covered, so
-  dismissing a list never fires the button under it. `Ui::select`, the
-  inspector's variant picker, is its first user; context menus are the next,
-  recorded in `docs/backlog.md`. This is not `z-index`: inside the tree paint
-  order is still tree order.
+  dismissing a list never fires the button under it. `Ui::open_popup_at` places
+  one `Beside` its anchor (right of it, flipped left at the viewport's edge) or
+  `At` a point (flipped up and left at the far edges) instead. `Ui::select`, the
+  inspector's variant picker, is its first user. This is not `z-index`: inside
+  the tree paint order is still tree order.
+- **A context menu is a pop-up opened by the secondary button or `ui_menu`**
+  (decided 2026-10-03). `Ui::context_menu` marks a widget and, on a secondary
+  press over it (`PointerInput::secondary_pressed`, from every shell's right
+  button), opens its `ContextItem`s at the pointer — or below the widget on
+  `ui_menu` while it holds focus. The innermost widget that asked wins. A pick
+  reports its value once and closes every menu in the chain; submenus open
+  beside their items on a click, accept or the right arrow, and left or back
+  closes one level. A secondary press outside closes what it lands outside of,
+  as a primary press does, and then opens the menu of whatever it landed on, so
+  a right-click elsewhere moves the menu.
 - **A tooltip is an inert pop-up** (decided 2026-10-03). `Ui::tooltip` hangs a
   line of text from a widget, placed as a pop-up is and drawn over every one,
   but never hit-tested or focused: the pointer passes through it, and a press is
@@ -426,8 +437,8 @@ The rules, each with its _why_:
   topmost, focus moves in — reach it. It shows after `TOOLTIP_DELAY` on the
   widget the mixed-input rule names (the hovered one under a pointer, the
   focused one under a keyboard or pad), timed on the frame clock `TextInput::dt`
-  advances rather than wall time, and stays hidden after a press, accept or
-  wheel until that widget changes.
+  advances rather than wall time, and stays hidden after a press of either
+  button, accept, `ui_menu` or a wheel until that widget changes.
 - **Focus is ordinary interaction state.** One focused element per context, so
   `:focus` styles it and **focus rings are stylesheet-driven**. Interactive
   widgets are focusable by default; containers form scopes — a modal traps
@@ -444,6 +455,7 @@ The rules, each with its _why_:
   | `ui_next`/`ui_prev` | Tab, Shift+Tab  | LB/RB            | tree-order traversal, the always-works fallback         |
   | `ui_accept`         | Enter, Space    | South            | the same event path as a click; a widget cannot tell    |
   | `ui_back`           | Esc             | East             | close a modal or pop a screen                           |
+  | `ui_menu`           | Menu, Shift+F10 | none             | open the focused widget's context menu                  |
 
   WASD in a menu conflicts with nothing by construction: the `ui` context is
   active while a menu has input and gameplay's WASD sits in the `gameplay`

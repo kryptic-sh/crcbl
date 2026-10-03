@@ -514,6 +514,7 @@ mod tests {
                 pos: at,
                 down: true,
                 released: false,
+                secondary_pressed: false,
             },
         );
         keyboard.point(
@@ -523,6 +524,7 @@ mod tests {
                 pos: at,
                 down: false,
                 released: true,
+                secondary_pressed: false,
             },
         )
     }
@@ -668,6 +670,7 @@ mod tests {
                 pos: start,
                 down: true,
                 released: false,
+                secondary_pressed: false,
             },
         );
         let typed = keyboard.point(
@@ -677,6 +680,7 @@ mod tests {
                 pos: end,
                 down: false,
                 released: true,
+                secondary_pressed: false,
             },
         );
         assert_eq!(typed, None, "a drag from q to p typed {typed:?}");

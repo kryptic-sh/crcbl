@@ -88,6 +88,10 @@ pub(crate) struct StoredNode {
     /// Whether its builder asked for a tooltip on it last frame
     /// ([`super::Ui::tooltip`]): what makes it a tooltip's subject.
     pub tooltip: bool,
+    /// Whether its builder asked for a context menu on it last frame
+    /// ([`super::Ui::context_menu`]): what a secondary press or `ui_menu`
+    /// opens one on.
+    pub context_menu: bool,
     pub interaction: Interaction,
     /// How it takes part in focus, as its builder declared it last.
     pub behavior: Behavior,
@@ -148,6 +152,7 @@ impl StoredNode {
             hittable: false,
             inert: false,
             tooltip: false,
+            context_menu: false,
             interaction: Interaction::default(),
             behavior: Behavior::NONE,
             state: PseudoClasses::NONE,

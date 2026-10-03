@@ -829,6 +829,7 @@ impl HostedGame for Breach {
                     // Taken rather than read: a release is an edge, and a panel
                     // handed it twice would finish one drag twice.
                     released: std::mem::take(&mut self.pointer_released),
+                    secondary_pressed: false,
                 },
             );
             if let Some((slot, at)) = self.panel.dragged {

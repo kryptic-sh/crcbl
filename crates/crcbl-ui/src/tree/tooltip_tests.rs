@@ -305,6 +305,7 @@ fn a_click_on_what_lies_under_a_tooltip_reaches_it() {
         pos: at,
         down: true,
         released: false,
+        secondary_pressed: false,
     };
     let pressed = page(&mut ui, press, NavInput::default(), Options::default());
     assert!(
@@ -315,6 +316,7 @@ fn a_click_on_what_lies_under_a_tooltip_reaches_it() {
         pos: at,
         down: false,
         released: true,
+        secondary_pressed: false,
     };
     let released = page(&mut ui, release, NavInput::default(), Options::default());
     assert!(
@@ -334,6 +336,7 @@ fn a_press_hides_the_tooltip_until_the_pointer_leaves_and_comes_back() {
         pos: at,
         down: true,
         released: false,
+        secondary_pressed: false,
     };
     let pressed = page(&mut ui, press, NavInput::default(), Options::default());
     assert!(pressed.tip.is_none(), "the press left the tooltip up");
@@ -341,6 +344,7 @@ fn a_press_hides_the_tooltip_until_the_pointer_leaves_and_comes_back() {
         pos: at,
         down: false,
         released: true,
+        secondary_pressed: false,
     };
     page(&mut ui, release, NavInput::default(), Options::default());
     assert!(
@@ -349,6 +353,38 @@ fn a_press_hides_the_tooltip_until_the_pointer_leaves_and_comes_back() {
     );
     rest(&mut ui, Vec2::splat(-1.0), FRAME);
     rest_until_shown(&mut ui, at);
+}
+
+/// **A secondary press hides the tooltip too, and so does `ui_menu`**: each
+/// opens a context menu the tooltip would sit over.
+#[test]
+fn a_secondary_press_or_ui_menu_hides_the_tooltip() {
+    let (mut ui, built) = laid_out();
+    let at = centre(&ui, built.anchor.expect("built").key);
+    rest_until_shown(&mut ui, at);
+    let secondary = PointerInput {
+        secondary_pressed: true,
+        ..PointerInput::hovering(at)
+    };
+    let pressed = page(&mut ui, secondary, NavInput::default(), Options::default());
+    assert!(pressed.tip.is_none(), "the secondary press left it up");
+
+    let (mut ui, built) = laid_out();
+    let anchor = built.anchor.expect("built").key;
+    page(&mut ui, idle(), NavInput::NEXT, Options::default());
+    assert_eq!(ui.focused(), Some(anchor));
+    let held = Options {
+        dt: TOOLTIP_DELAY,
+        ..Options::default()
+    };
+    page(&mut ui, idle(), NavInput::NAVIGATION, held);
+    let shown = page(&mut ui, idle(), NavInput::NAVIGATION, held);
+    assert!(
+        shown.tip.is_some(),
+        "the focused anchor's tooltip never showed"
+    );
+    let menu = page(&mut ui, idle(), NavInput::MENU, Options::default());
+    assert!(menu.tip.is_none(), "ui_menu left it up");
 }
 
 /// **The pointer leaving the anchor hides its tooltip.**

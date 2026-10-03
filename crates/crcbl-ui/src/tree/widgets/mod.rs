@@ -19,6 +19,7 @@
 //! | `outliner.rs` | [`Ui::outliner`], [`Ui::outliner_with`] | each row is instant activation |
 //! | `tabs.rs` | [`Ui::tabs`] | each tab is instant activation |
 //! | `select.rs` | [`Ui::select`] | the button and each option are instant activation |
+//! | `context_menu.rs` | [`Ui::context_menu`] | each item is instant activation |
 //! | `dock.rs` | [`Ui::dock`] | each divider is engaged |
 //! | `inspector.rs` | [`Ui::inspector`], [`Ui::inspector_with`] | each row's own widget |
 //!
@@ -41,7 +42,8 @@
 //! selector that names a type of its own keeps it, which opts the widget out
 //! of every engine rule for its type. The parts inside a widget have classes
 //! named after it (`.slider-fill`, `.tree-row`); each builder's docs name them.
-//! A pop-up's root has the type `popup` (`popup.rs`).
+//! A pop-up's root has the type `popup` (`popup.rs`), and a context menu's is
+//! a `popup.context-menu`.
 //!
 //! # State the stylesheet sees
 //!
@@ -75,6 +77,7 @@
 //! focused, clicked or engaged, and no widget in it moves its value.
 
 mod button;
+mod context_menu;
 mod disclosure;
 mod dock;
 mod inspector;
@@ -98,6 +101,7 @@ use super::store::{Interaction, NodeKey};
 use super::style::LengthAuto;
 use crate::style::NodeSelector;
 
+pub use context_menu::{CONTEXT_ARROW, ContextItem, ContextMenuResponse};
 pub use dock::{DockLayout, DockSide};
 pub use inspector::{
     AXES, FieldEdit, FieldRow, INSPECTOR_STEP, Inspection, InspectorOptions, Overrides, RowBuilder,
@@ -156,6 +160,9 @@ pub(crate) enum WidgetState {
     /// A text input, whose editing state is [`Ui`]'s `edits`: a drag that
     /// ends on it leaves it engaged.
     TextInput,
+    /// A context menu's item that opens a submenu beside it, which the right
+    /// arrow opens too.
+    MenuBranch,
 }
 
 /// `selector` with the widget type `kind` in front, unless it names a type.

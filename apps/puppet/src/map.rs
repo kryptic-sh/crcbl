@@ -2373,6 +2373,7 @@ mod tests {
             pos,
             down: true,
             released: false,
+            secondary_pressed: false,
         };
         inspect(&mut ui, held(on), &mut surface, &overrides);
         let dragged = inspect(

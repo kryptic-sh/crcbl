@@ -42,11 +42,13 @@ fn each_button_on_the_recovery_bar_hands_back_its_answer() {
                 pos: at,
                 down: true,
                 released: false,
+                secondary_pressed: false,
             },
             PointerInput {
                 pos: at,
                 down: false,
                 released: true,
+                secondary_pressed: false,
             },
             PointerInput::hovering(Vec2::splat(-1.0)),
         ] {

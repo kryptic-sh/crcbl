@@ -2,6 +2,7 @@
 //! pointer and by navigation, with the engine's own stylesheet in force.
 
 mod button;
+mod context_menu;
 mod disclosure;
 mod dock;
 mod inspector;
@@ -77,6 +78,7 @@ pub(super) fn press(pos: Vec2) -> PointerInput {
         pos,
         down: true,
         released: false,
+        secondary_pressed: false,
     }
 }
 
@@ -86,6 +88,7 @@ pub(super) fn release(pos: Vec2) -> PointerInput {
         pos,
         down: false,
         released: true,
+        secondary_pressed: false,
     }
 }
 

@@ -549,6 +549,7 @@ fn build(extent: (u32, u32)) -> (Ui, Parts, State) {
                     pos: centre + offset,
                     down,
                     released: !down,
+                    secondary_pressed: false,
                 };
                 (pointer, NavInput::default())
             }

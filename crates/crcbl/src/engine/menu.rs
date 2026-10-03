@@ -103,7 +103,9 @@ pub fn pause_only<K: Copy + Eq>(none: K, paused: K) -> MenuSet<K> {
 /// the menus claimed before the context existed: [`MENU_UP_KEY`],
 /// [`MENU_DOWN_KEY`], [`MENU_LEFT_KEY`] and [`MENU_RIGHT_KEY`] as
 /// [`ui::MOVE`], [`MENU_ACTIVATE_KEY`] as [`ui::ACCEPT`], and nothing for
-/// [`ui::NEXT`], [`ui::PREV`] and [`ui::BACK`].
+/// [`ui::NEXT`], [`ui::PREV`], [`ui::BACK`] and [`ui::MENU`] — the loop's
+/// menus have no context menus, so the menu key and Shift+F10 stay the
+/// game's.
 ///
 /// **Only the keys are narrowed.** The pad column of [`ui::declare`] stays as
 /// it is — every binding [`Binding::reads_gamepad`] names — so the left stick
@@ -153,6 +155,7 @@ pub fn menu_actions() -> ActionMap {
         (ui::NEXT, Vec::new()),
         (ui::PREV, Vec::new()),
         (ui::BACK, Vec::new()),
+        (ui::MENU, Vec::new()),
     ];
     for (name, keys) in rebinds {
         let pads = actions
@@ -180,7 +183,7 @@ pub(super) const PAUSE_ACTION: &str = "engine_pause";
 
 /// Whether `actions`' `ui` context binds `key` at all: a key a menu may take.
 pub(super) fn menu_binds(actions: &ActionMap, key: crcbl_core::input::KeyCode) -> bool {
-    [ui::MOVE, ui::NEXT, ui::PREV, ui::ACCEPT, ui::BACK]
+    ui::ACTIONS
         .iter()
         .filter_map(|name| actions.bindings(name))
         .flatten()
@@ -191,7 +194,7 @@ pub(super) fn menu_binds(actions: &ActionMap, key: crcbl_core::input::KeyCode) -
 /// the game while a panel has input.
 pub(super) fn menu_pad_buttons(actions: &ActionMap) -> PadButtons {
     let mut buttons = PadButtons::EMPTY;
-    for binding in [ui::MOVE, ui::NEXT, ui::PREV, ui::ACCEPT, ui::BACK]
+    for binding in ui::ACTIONS
         .iter()
         .filter_map(|name| actions.bindings(name))
         .flatten()
@@ -229,7 +232,7 @@ pub(super) fn moves_sideways(actions: &ActionMap, key: crcbl_core::input::KeyCod
 /// would be withheld from the next panel, or read as held down for good.
 pub(super) fn release_menu_keys(actions: &mut ActionMap) {
     let mut keys = Vec::new();
-    for name in [ui::MOVE, ui::NEXT, ui::PREV, ui::ACCEPT, ui::BACK] {
+    for name in ui::ACTIONS {
         for binding in actions.bindings(name).unwrap_or_default() {
             binding.visit_keys(|key| keys.push(key));
         }

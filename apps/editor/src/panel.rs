@@ -95,6 +95,22 @@
 //! through [`Document::rename`] — one undoable command, refused in play mode —
 //! and back cancels it. Clearing the text takes the name away.
 //!
+//! # A row's context menu
+//!
+//! A secondary press on an entity's row, or the menu key while the row holds
+//! focus, opens its context menu ([`Ui::context_menu`]): Rename, Duplicate
+//! and Delete, each labelled with its key. A pick is not acted on here:
+//! [`PanelFrame::menu`] hands back the [`Action`] that key asks for, which
+//! [`crate::app`] carries out as it carries out the key — so a menu delete is
+//! the same undoable command as Delete, and refused for the same reasons. All
+//! three are disabled while a scene plays, which refuses each of them.
+//!
+//! **The menu acts on the selection, as the keys do.** A right-click on a row
+//! that is not selected makes that row the selection first, as it would be
+//! after a plain click; one on a row inside a multi-selection keeps the
+//! selection whole, so Delete takes every selected entity — what common
+//! editors do. A system's own row has no menu.
+//!
 //! # Which field a clipboard key means
 //!
 //! [`Panels::field_target`] is the inspector leaf the keyboard means: the one
@@ -131,8 +147,8 @@ use crcbl::registry::PlayControls;
 use crcbl::scene::scn::SceneEntityId;
 use crcbl::ui::style::Declaration;
 use crcbl::ui::tree::{
-    AvailableSpace, ClipboardRequest, DockLayout, Engagement, FieldEdit, LengthAuto, NavInput,
-    NodeKey, OUTLINER_ROW_HEIGHT, OutlinerId, OutlinerOptions, OutlinerState, Overrides,
+    AvailableSpace, ClipboardRequest, ContextItem, DockLayout, Engagement, FieldEdit, LengthAuto,
+    NavInput, NodeKey, OUTLINER_ROW_HEIGHT, OutlinerId, OutlinerOptions, OutlinerState, Overrides,
     SelectMode, TextInput, TextInputOptions, Ui, VariantEdit,
 };
 use crcbl::ui::{DrawList, FontAtlas, PointerInput, TextureId};
@@ -400,6 +416,10 @@ pub struct PanelFrame {
     /// The click on the recovery bar this frame, for the caller to carry out
     /// — see `recovery`'s module docs.
     pub recovery: Option<RecoveryAnswer>,
+    /// What an outliner row's context menu picked this frame — the action
+    /// its key asks for — for the caller to carry out, as a toolbar click is.
+    /// See the module docs.
+    pub menu: Option<Action>,
 }
 
 /// The inspector's sections, add buttons and add-list headings, as a frame
@@ -1058,6 +1078,7 @@ impl Panels {
         let mut outliner_key = None;
         let mut built = inspector::Built::default();
         let mut rename_input = None;
+        let mut row_menu = RowMenu::default();
         let mut double_clicked = None;
         let mut relist = false;
         let mut asked_play = None;
@@ -1127,10 +1148,12 @@ impl Panels {
                             names,
                             renaming: renaming.as_mut(),
                             primary: selected,
+                            editing: play == PlayState::Editing,
                         };
                         let built = build_outliner(ui, outliner, &options, rows);
                         outliner_key = Some(built.key);
                         rename_input = built.rename;
+                        row_menu = built.menu;
                         double_clicked = outliner.double_clicked().and_then(entity_of);
                     }
                     layout::INSPECTOR => {
@@ -1228,7 +1251,16 @@ impl Panels {
             let sent = self.strip.send(document, &controls, &asked);
             self.report_sent(sent);
         }
-        self.follow_outliner(document, input.select);
+        // A right-click on a row outside the selection makes it the
+        // selection, as a plain click would: see the module docs.
+        let mut select = input.select;
+        if let Some(id) = row_menu.opened
+            && !self.outliner.is_selected(entity_row(id))
+        {
+            self.outliner.select(entity_row(id), SelectMode::Replace);
+            select = SelectMode::Replace;
+        }
+        self.follow_outliner(document, select);
         self.follow_rename(document, rename_input);
         let (save_as, open) = match self.path_line.follow(&mut self.ui, path_input) {
             Some((Purpose::SaveAs, text)) => (Some(text), None),
@@ -1249,6 +1281,7 @@ impl Panels {
             open,
             unsaved: answered,
             recovery: recovered,
+            menu: row_menu.picked,
         }
     }
 
@@ -1660,6 +1693,9 @@ struct Rows<'a> {
     renaming: Option<&'a mut Renaming>,
     /// The primary selected entity, whose label is drawn in its own colour.
     primary: Option<SceneEntityId>,
+    /// Whether the scene is being edited rather than played: what enables a
+    /// row's context menu items.
+    editing: bool,
 }
 
 /// What [`build_outliner`] built.
@@ -1669,6 +1705,29 @@ struct BuiltOutliner {
     /// The rename's text input and where its engagement stood, if a row is
     /// being renamed and was built this frame.
     rename: Option<(NodeKey, Engagement)>,
+    /// What the rows' context menus did this frame.
+    menu: RowMenu,
+}
+
+/// What the outliner rows' context menus did in one frame.
+#[derive(Clone, Copy, Debug, Default)]
+struct RowMenu {
+    /// The entity whose row's menu opened.
+    opened: Option<SceneEntityId>,
+    /// The action a menu's pick asked for.
+    picked: Option<Action>,
+}
+
+/// An entity row's context menu: each item the action its key asks for,
+/// labelled with that key, and disabled unless `editing` — play mode refuses
+/// all three. See the module docs.
+fn row_menu_items(editing: bool) -> [ContextItem<'static, Action>; 3] {
+    [
+        ContextItem::action("Rename (F2)", Action::Rename),
+        ContextItem::action("Duplicate (Ctrl+D)", Action::Duplicate),
+        ContextItem::action("Delete (Del)", Action::Delete),
+    ]
+    .map(|item| item.enabled(editing))
 }
 
 /// The placeholder a rename's input shows while it is empty: what committing
@@ -1688,9 +1747,12 @@ fn build_outliner(
         names,
         mut renaming,
         primary,
+        editing,
     } = rows;
     let mut key = None;
     let mut rename = None;
+    let mut menu = RowMenu::default();
+    let items = row_menu_items(editing);
     ui.block(".editor-panel", &[], |ui| {
         ui.span(".editor-title", "Scene", &[]);
         key = Some(
@@ -1724,6 +1786,14 @@ fn build_outliner(
                             ".outliner-label"
                         };
                         ui.span(class, label.as_str(), &[]);
+                        // The row's own block, which the label is built in.
+                        if let (Some(id), Some(row_key)) = (entity_of(row.id), ui.current_key()) {
+                            let response = ui.context_menu(row_key, &items);
+                            if response.opened {
+                                menu.opened = Some(id);
+                            }
+                            menu.picked = menu.picked.or(response.picked);
+                        }
                     }
                 },
             )
@@ -1733,6 +1803,7 @@ fn build_outliner(
     BuiltOutliner {
         key: key.expect("the outliner is built inside its panel"),
         rename,
+        menu,
     }
 }
 
@@ -1805,6 +1876,7 @@ mod tests {
     use crate::layout::default_layout;
 
     mod assets;
+    mod context_menu;
     mod inspector;
     mod naming;
     mod path_line;
@@ -1882,6 +1954,7 @@ mod tests {
                     pos: at,
                     down: true,
                     released: false,
+                    secondary_pressed: false,
                 },
                 0.0,
                 select,
@@ -1891,6 +1964,7 @@ mod tests {
                     pos: at,
                     down: false,
                     released: true,
+                    secondary_pressed: false,
                 },
                 0.0,
                 select,
@@ -1905,6 +1979,7 @@ mod tests {
                 pos,
                 down: true,
                 released: false,
+                secondary_pressed: false,
             };
             self.frame(held(at), 0.0);
             self.frame(held(at + by), 0.0);
@@ -1913,6 +1988,7 @@ mod tests {
                     pos: at + by,
                     down: false,
                     released: true,
+                    secondary_pressed: false,
                 },
                 0.0,
             );
@@ -1925,6 +2001,7 @@ mod tests {
                 pos,
                 down: true,
                 released: false,
+                secondary_pressed: false,
             };
             self.frame(held(at), 0.0);
             for step in 1..=steps {
@@ -1935,6 +2012,7 @@ mod tests {
                     pos: at + by,
                     down: false,
                     released: true,
+                    secondary_pressed: false,
                 },
                 0.0,
             );

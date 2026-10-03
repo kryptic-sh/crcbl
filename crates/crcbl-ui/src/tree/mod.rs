@@ -65,7 +65,13 @@
 //! its own, drawn over the whole tree in a layer of its own, clipped only by
 //! the viewport, hit-tested first and holding focus until it closes — by
 //! [`Ui::close_popup`], by back, or by a press outside it, which it spends.
-//! `popup.rs` has the rules.
+//! [`Ui::open_popup_at`] places one beside its anchor or at a point instead of
+//! below it. `popup.rs` has the rules.
+//!
+//! [`Ui::context_menu`] is a widget's context menu on that layer: a list of
+//! [`ContextItem`]s opened at the pointer by a secondary press, or below the
+//! focused widget by `ui_menu`, with submenus beside their items.
+//! `widgets/context_menu.rs` has the rules.
 //!
 //! [`Ui::tooltip`] hangs a line of text from a widget the same way once the
 //! pointer has rested on it, or navigation has held focus on it, for
@@ -214,6 +220,7 @@ pub use focus::{
     Behavior, Direction, Engagement, FOCUS_HISTORY, InputMode, NavInput, NavScore, NavStep, Role,
     Scope,
 };
+pub use popup::Placement;
 pub use store::NodeKey;
 pub use style::{
     Align, BorderImage, BorderImageWidth, Display, Edges, FlexDirection, FlexWrap, ImageName,
@@ -222,11 +229,12 @@ pub use style::{
 };
 pub use tooltip::TOOLTIP_DELAY;
 pub use widgets::{
-    AXES, ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, DockLayout,
-    DockSide, FieldEdit, FieldRow, INSPECTOR_STEP, Inspection, InspectorOptions, LIST_OVERSCAN,
-    MASK, OUTLINER_INDENT, OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId, OutlinerOptions,
-    OutlinerRow, OutlinerState, Overrides, RowBuilder, SELECT_CARET, SPLIT_NAV_STEP, SelectMode,
-    SplitAxis, TextInput, TextInputOptions, VARIANT_LABEL, VariantEdit, WHOLE_STEP,
+    AXES, CONTEXT_ARROW, ClipboardAnswer, ClipboardReply, ClipboardRequest, ContextItem,
+    ContextMenuResponse, DOUBLE_CLICK_TIME, DockLayout, DockSide, FieldEdit, FieldRow,
+    INSPECTOR_STEP, Inspection, InspectorOptions, LIST_OVERSCAN, MASK, OUTLINER_INDENT,
+    OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId, OutlinerOptions, OutlinerRow, OutlinerState,
+    Overrides, RowBuilder, SELECT_CARET, SPLIT_NAV_STEP, SelectMode, SplitAxis, TextInput,
+    TextInputOptions, VARIANT_LABEL, VariantEdit, WHOLE_STEP,
 };
 
 /// How far the pointer must move from where a press began, in pixels, before
@@ -476,8 +484,8 @@ pub struct Ui {
     /// The tree row [`Ui::tree_item_step`] opened or closed when this frame
     /// began, if it opened or closed one.
     tree_toggled: Option<NodeKey>,
-    /// The anchors of the open pop-ups, the topmost last; see `popup.rs`.
-    popups: Vec<NodeKey>,
+    /// The open pop-ups, the topmost last; see `popup.rs`.
+    popups: Vec<popup::OpenPopup>,
     /// Each pop-up root this frame built, as its index in `nodes` and its
     /// anchor.
     popup_roots: Vec<(usize, NodeKey)>,
@@ -486,6 +494,10 @@ pub struct Ui {
     viewport: Option<ClipRect>,
     /// The tooltip's subject and clock; see `tooltip.rs`.
     tooltip: tooltip::TooltipState,
+    /// The node whose context menu this frame's secondary press or `ui_menu`
+    /// asked for, and where it goes, until its [`Ui::context_menu`] call
+    /// opens it; see `widgets/context_menu.rs`.
+    context_request: Option<(NodeKey, Placement)>,
 }
 
 impl Ui {
@@ -529,6 +541,7 @@ impl Ui {
         self.clicked = clicked;
         self.resolve_navigation(nav, clicked, self.dragged);
         self.resolve_tooltip(pointer, nav);
+        self.resolve_context_menu(pointer, nav);
     }
 
     /// Hover, press capture and click for every stored node, from last frame's
@@ -816,8 +829,9 @@ impl Ui {
         stored.parent = parent.map(|parent| self.nodes[parent].key);
         stored.behavior = behavior;
         stored.state = state;
-        // Until this frame's `Ui::tooltip` asks again.
+        // Until this frame's `Ui::tooltip` and `Ui::context_menu` ask again.
         stored.tooltip = false;
+        stored.context_menu = false;
         stored.id = selector.id.map(NavId::new);
 
         let span = !matches!(content, Content::Block);
@@ -1128,18 +1142,22 @@ impl Ui {
             )
         });
         for layer in 1..=self.popups.len() {
-            let anchor = self.popups[layer - 1];
+            let popup = self.popups[layer - 1];
             let viewport = self.viewport();
             self.place_layer(layer, &layers, &mut placed, |ui, index| {
-                (ui.popup_origin(index, anchor), viewport, false)
+                (ui.popup_origin(index, popup), viewport, false)
             });
         }
         if let Some((_, anchor)) = self.tooltip.built {
             // Hidden with its anchor, which was placed in a lower layer.
-            let (key, hidden) = (self.nodes[anchor].key, placed[anchor].2);
+            let hidden = placed[anchor].2;
+            let popup = popup::OpenPopup {
+                anchor: self.nodes[anchor].key,
+                placement: Placement::Below,
+            };
             let viewport = self.viewport();
             self.place_layer(tooltip::TOOLTIP_LAYER, &layers, &mut placed, |ui, index| {
-                (ui.popup_origin(index, key), viewport, hidden)
+                (ui.popup_origin(index, popup), viewport, hidden)
             });
         }
         self.place_layer(popup::CLOSED_LAYER, &layers, &mut placed, |_, _| {

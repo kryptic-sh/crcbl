@@ -3353,8 +3353,10 @@ and its rungs W2–W6 are separate slices rather than gaps.
 on it (`Ui::select`, `tree/widgets/select.rs`), adopted for the inspector's
 variant picker; tooltips on the same layer (`tree/tooltip.rs`: `Ui::tooltip`,
 `Ui::tooltip_key`, `Ui::set_tooltip_delay`, `Ui::dismiss_tooltip`,
-`TOOLTIP_DELAY`), adopted for the editor's toolbar and play strip. Decisions,
-then what is left.
+`TOOLTIP_DELAY`), adopted for the editor's toolbar and play strip; context menus
+on the same layer (`tree/widgets/context_menu.rs`: `Ui::context_menu`,
+`ContextItem`, `ContextMenuResponse`, `Ui::open_popup_at`, `Placement`), adopted
+for the editor's outliner rows. Decisions, then what is left.
 
 - **Decided: a press outside every pop-up is spent closing them**, not passed
   through to what is under it — the long-term rule. A click meant to dismiss a
@@ -3457,35 +3459,112 @@ then what is left.
 - **Deferred: a tooltip wider than the viewport wraps.** It is `nowrap`, shifted
   to the viewport's left edge and clipped at its right; a `max-width` with
   wrapping would need the span to wrap inside a content-sized root.
-- **Deferred: context menus and submenus.** A context menu needs a secondary
-  button in `PointerInput` (it has one button) and a pop-up anchored at a point
-  rather than a node; a submenu needs placement beside its anchor rather than
-  below it, and opening on hover or a right arrow. The stack already nests (a
-  pop-up opened from inside another goes on top, and a press in the lower one
-  closes only those above it).
+- **Decided: the secondary button is an edge in `PointerInput`**
+  (`secondary_pressed`): the frame its press arrived, and nothing else. Nothing
+  captures, drags or clicks with it, so it needs none of the primary's held
+  state, and a default of `false` keeps every existing caller as it was. The
+  engine loop's `PointerCapture::resolve` sets it from any right press in the
+  batch's `Pending::buttons`, which every shell — Win32, X11, Wayland, AppKit
+  and the browser's — already filled with `PointerButton::Right`; the web shell
+  already suppresses the page's own menu on the canvas. A touch contact never
+  sets it.
+- **Decided: a pop-up's placement is a `Placement` given when it opens**
+  (`Ui::open_popup_at`; `Ui::open_popup` is `Placement::Below`): `Below`,
+  `Beside` (right of the anchor, top edges lined up, flipped left at the
+  viewport's right edge when there is more room there) or `At` a point (its
+  corner there, flipped up or left on each axis it would overrun with more room
+  before the point). One `hang` places all three, flipping per axis by the rule
+  the drop-down already used, then shifting inside; the stack and its rules are
+  unchanged, and a tooltip is placed `Below`.
+- **Decided: `Ui::context_menu(anchor: NodeKey, &[ContextItem<T>])`**, called
+  after the widget every frame, as `Ui::tooltip` is. It takes a key rather than
+  a `Response` because an outliner row's builder sees only `Ui::current_key`,
+  never the row's `Response`. Items carry a value of the caller's type, so a
+  pick needs no index mapping; `ContextMenuResponse` reports `opened` (the frame
+  a caller selects what the menu is for) and `picked`. It marks the node
+  (`StoredNode::context_menu`, reset in `Ui::push`) and the next frame's subject
+  is chosen from the store before anything is built: the innermost node under a
+  secondary press that asked, or for `ui_menu` the focused node or the innermost
+  around it that asked. A disabled anchor's menu never opens.
+- **Decided: a secondary press opens at the pointer, `ui_menu` below the
+  widget** — where the keyboard's attention is, as Windows' Shift+F10 opens a
+  list view's menu at the focused item.
+- **Decided: a secondary press outside an open menu closes what it lands outside
+  of and is not spent**: it opens the menu of whatever it lands on, so a
+  right-click on another row moves the menu, and one on the open menu's own
+  widget reopens it at the new point — what Windows, macOS and GTK do. A primary
+  press outside is still spent, which the long-term rule above decided.
+- **Decided: a pick closes the whole chain and gives focus back to the widget**;
+  back and left close one level, left only inside a submenu. A submenu opens on
+  a click, accept or right on its item (`WidgetState::MenuBranch`, read by
+  `Ui::submenu_step` beside the tree view rule), and a click on an item whose
+  submenu is open closes it on the press and opens it on the release, so it
+  stays open — Windows' result.
+- **Decided: `ui_menu` is a reserved action**, bound to the menu key and
+  Shift+F10 — Windows' pair — and to no pad button: no convention for it is
+  shared across pads, and a pad button bound in `ui` is taken from the game
+  under every pushed context. `NavInput::menu` carries it; the engine loop's
+  `menu_actions` rebinds it to nothing, so the loop's menus leave both keys to
+  games. Every shell reports both keys (`KeyCode::ContextMenu`, `KeyCode::F10`)
+  except AppKit, whose `kVK_*` table has no menu key, so a Mac has Shift+F10
+  only.
+- **Considered and declined: opening on the release**, as Win32's
+  `WM_CONTEXTMENU` does. macOS and GTK open on the press, and a release would
+  need a secondary held state and release edge in `PointerInput` for no
+  behaviour anything here wants.
+- **Decided: the editor's row menu acts on the selection** (see the editor
+  section): a right-click outside the selection selects the row first, one
+  inside a multi-selection keeps it, and each item is the key's `Action`.
+- **Behaviour that is not a bug: a context menu of nothing but disabled items
+  takes no focus.** The landing rule finds nothing focusable in it, so focus
+  stays on the widget — the editor's row menu in play mode — and back or a press
+  outside closes it; `ui_menu` again leaves it where it is and reports no second
+  `opened`.
+- **Deferred: opening a submenu on hover.** It opens on a click, accept or the
+  right arrow. Hover would want Windows' show delay (`SPI_GETMENUSHOWDELAY`) on
+  the `text_clock`, closing a sibling's submenu as the pointer moves on, and
+  some answer to the pointer cutting diagonally across a sibling on its way into
+  the open submenu — a field on the `Ui` and a rule in `Ui::context_menu`.
+- **Deferred: Control-click as the secondary press on macOS.** AppKit reports it
+  as a left press with Control held; mapping it needs the shell or
+  `PointerCapture` to read the modifier, and a decision on whether a game's
+  Control-click binding still sees a left press.
+- **Deferred: a long press as the secondary press on touch**, and a pad button
+  for `ui_menu` (above).
+- **Deferred: a shortcut column in context items.** The editor writes each key
+  into the label (`Delete (Del)`), as its toolbar does; a right-aligned column
+  needs a second span per item and a field on `ContextItem`.
 - **Deferred: a list taller than the viewport scrolls.** It is shifted to the
   viewport's top and the rest is clipped; `max-height` with `overflow: scroll`
   on `.select-list` would bound it, and focus scrolls an `overflow: scroll`
   block's focused node into view, but no rule sets it and nothing tests it.
   Typeahead, Home and End, and wrapping at the list's ends (`nav-wrap` on
   `.select-list` should do it) are not built or tested either.
-- **Not tested:** the pop-up and the drop-down have never been looked at on a
-  device or in a golden; the inspector golden leaves variants off and did not
-  change. The drop-down's look is `default.css`'s `popup`, `select` and
-  `.select-option` rules, read only through the accent colour in `crcbl-ui`'s
-  inspector test, and the layer is held by draw-list order and clips in
-  `tree::popup_tests`. Also untested: the wheel over a pop-up (`scroll_wheel`
-  walks the layered hit chain), a pop-up nested more than one deep, a pop-up
-  opened from inside a base modal, gamepad input, and the editor's Escape with
-  the unsaved bar up while a drop-down is open (the bar answers Escape through
-  its own binding, outside the tree). For tooltips (`tree::tooltip_tests`,
-  `editor`'s `panel::tests::tooltips`): an anchor inside a pop-up that closes
-  while the frame is built (the `CLOSED_LAYER` branch in `Ui::layers`), an
-  anchor built `display: none` (the hidden branch in `Ui::place`), nested
-  widgets that both ask (the innermost wins by stacking), accept dismissing, the
-  play strip's tooltips through the loop and a choice's tooltip text, and the
-  `tooltip` rule's look — the tests restyle its background to find it. No golden
-  builds a tooltip.
+- **Not tested:** the pop-up, the drop-down and the context menu have never been
+  looked at on a device or in a golden; the inspector golden leaves variants off
+  and did not change, and no golden builds a context menu, so its `default.css`
+  rules (`.context-menu`, `.context-item`, `.context-separator`) are read by no
+  test. Not verified on a device: Shift+F10 reaching a Win32 window as a key (it
+  arrives as `WM_SYSKEYDOWN`, which `proc.rs` forwards), the menu key on X11 and
+  Wayland, and a right-click on the canvas in a browser. Also untested for
+  context menus: a menu nested deeper than one submenu, one opened inside a
+  scrolled block, typeahead, Home and End, wrapping at the ends, and a menu
+  taller than the viewport (shifted to its top and clipped, as a list is). The
+  drop-down's look is `default.css`'s `popup`, `select` and `.select-option`
+  rules, read only through the accent colour in `crcbl-ui`'s inspector test, and
+  the layer is held by draw-list order and clips in `tree::popup_tests`. Also
+  untested: the wheel over a pop-up (`scroll_wheel` walks the layered hit
+  chain), a pop-up nested more than one deep, a pop-up opened from inside a base
+  modal, gamepad input, and the editor's Escape with the unsaved bar up while a
+  drop-down is open (the bar answers Escape through its own binding, outside the
+  tree). For tooltips (`tree::tooltip_tests`, `editor`'s
+  `panel::tests::tooltips`): an anchor inside a pop-up that closes while the
+  frame is built (the `CLOSED_LAYER` branch in `Ui::layers`), an anchor built
+  `display: none` (the hidden branch in `Ui::place`), nested widgets that both
+  ask (the innermost wins by stacking), accept dismissing, the play strip's
+  tooltips through the loop and a choice's tooltip text, and the `tooltip`
+  rule's look — the tests restyle its background to find it. No golden builds a
+  tooltip.
 
 ## What UI rung 8b shipped without (2026-09-16)
 

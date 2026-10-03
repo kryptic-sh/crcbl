@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_ui::PointerInput` gained `secondary_pressed`, `NavInput` gained
+  `menu`, and the reserved `ui` context gained `ui_menu`** (see Added: context
+  menus). A struct literal of either type must name the new field — `false`
+  keeps what it did — or build from `PointerInput::hovering` or a `NavInput`
+  constant. `crcbl_input::ui::declare` refuses a map that already declares
+  `ui_menu`, as it refuses every reserved name, and a pushed `ui` context now
+  takes the menu key and Shift+F10 from the game beneath; the engine loop's own
+  `menu_actions` rebinds `ui_menu` to nothing, so its menus leave both keys to
+  the game. `crcbl_input::ui::ACTIONS` lists every reserved action.
+
 - **`#[derive(Reflect)]` on an enum needs `Default` for every variant's fields**
   (see Added: switching an enum's variant). A switch makes the new variant from
   each field's `Default` — a `#[reflect(skip)]` field's too — so an enum with a
@@ -617,22 +627,45 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   met, though the body slid along the wall made upright. `LyingMoveOutcome` is
   unchanged.
 
+- **`crcbl-ui` has context menus, and the editor's outliner rows use them.**
+  `Ui::context_menu(anchor, &items)`, called after a widget every frame it is
+  built, opens a list of `ContextItem`s — actions carrying a value of the
+  caller's type, separators, and submenus — on a secondary press over the
+  widget, with its corner at the pointer, or on `ui_menu` (the menu key or
+  Shift+F10) while the widget holds focus, below it. The innermost widget that
+  asked wins, so a row's menu opens over its panel's. Picking an item by click
+  or by arrows and accept reports its value once in `ContextMenuResponse` and
+  closes the whole chain; a disabled item is never focused or picked; a submenu
+  opens beside its item on a click, accept or the right arrow, and left closes
+  it again; back closes one level at a time, and a press outside closes them all
+  and is spent. A secondary press elsewhere moves the menu rather than only
+  closing it. Its look is `default.css`'s `.context-menu`, `.context-item`,
+  `.context-item-arrow` and `.context-separator` rules. Underneath:
+  `PointerInput::secondary_pressed`, fed by the engine loop's `PointerCapture`
+  from every shell's right button; `NavInput::menu`, read from the reserved
+  `ui_menu` action; and `Ui::open_popup_at` with a `Placement` — `Below` as
+  before, `Beside` for a submenu, flipped left at the viewport's right edge, or
+  `At` a point, flipped up and left at the far edges. In the editor a
+  right-click on an entity's outliner row offers Rename, Duplicate and Delete,
+  each carried out exactly as its key is (so undoable the same way) and disabled
+  while a scene plays; a right-click on a row outside the selection selects it
+  first, and one inside a multi-selection acts on the whole selection.
 - **`crcbl-ui` has tooltips, and the editor's toolbar and play strip use them.**
   `Ui::tooltip(&response, text)`, called after a widget every frame it is built,
   shows `text` once the pointer has rested on the widget — or, with a keyboard
   or pad driving, focus has stayed on it — for `TOOLTIP_DELAY`
   (`Ui::set_tooltip_delay` replaces it), timed on the clock `TextInput::dt`
   advances. It hides when the pointer leaves or focus moves, when the widget is
-  not built, and on a press, accept or wheel (`Ui::scroll_wheel`, or
-  `Ui::dismiss_tooltip` for a caller that scrolls its own way), staying hidden
-  until the pointer or focus moves to another widget. A tooltip is a `tooltip`
-  block (styled in `default.css`) on the pop-up layer: placed as a pop-up is,
-  below its anchor and flipped above at the bottom of the viewport, drawn over
-  every open pop-up, and **inert** — never hit or focused, so a click on what it
-  covers reaches it. `Ui::tooltip_key` names its root. In the editor every
-  toolbar button's tooltip says what it does and its key, and each play-strip
-  action's says what it sends, what it takes and its number key; the labels keep
-  their keys.
+  not built, and on a press of either button, accept, `ui_menu` or a wheel
+  (`Ui::scroll_wheel`, or `Ui::dismiss_tooltip` for a caller that scrolls its
+  own way), staying hidden until the pointer or focus moves to another widget. A
+  tooltip is a `tooltip` block (styled in `default.css`) on the pop-up layer:
+  placed as a pop-up is, below its anchor and flipped above at the bottom of the
+  viewport, drawn over every open pop-up, and **inert** — never hit or focused,
+  so a click on what it covers reaches it. `Ui::tooltip_key` names its root. In
+  the editor every toolbar button's tooltip says what it does and its key, and
+  each play-strip action's says what it sends, what it takes and its number key;
+  the labels keep their keys.
 - **`crcbl-ui` has a pop-up layer, and a drop-down built on it.** Any widget
   hangs a pop-up from a node: `Ui::open_popup` with the node's key, then
   `Ui::popup` every frame it is open with a closure that builds it (it builds

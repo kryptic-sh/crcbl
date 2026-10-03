@@ -631,6 +631,7 @@ mod tests {
                     pos,
                     down,
                     released: !down,
+                    secondary_pressed: false,
                 },
             );
             (stats, list)

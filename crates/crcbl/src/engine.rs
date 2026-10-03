@@ -4045,6 +4045,11 @@ impl PointerCapture {
             pos: self.at.unwrap_or(glam::Vec2::splat(f32::NEG_INFINITY)),
             down,
             released: pending.pointer_released,
+            // An edge, and nothing captures it, so it needs none of the
+            // primary button's held state: any press this batch carried.
+            secondary_pressed: pending.buttons.iter().any(|&(button, pressed)| {
+                pressed && button == crcbl_core::input::PointerButton::Right
+            }),
         }
     }
 
@@ -7723,6 +7728,8 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                 pos: at / self.ui_scale,
                 down,
                 released,
+                // A finger has one way to press.
+                secondary_pressed: false,
             },
         )
     }
@@ -9543,6 +9550,40 @@ mod tests {
         let idle = capture.pending();
         let input = capture.resolve(&idle);
         assert!(!input.down && !input.released, "the capture did not clear");
+    }
+
+    /// **The secondary button's press is a one-frame edge**: the batch that
+    /// carried a right press says so, its release and a middle press do not,
+    /// and the next batch is quiet again — and it leaves the primary's flags
+    /// alone.
+    #[test]
+    fn a_right_press_is_a_secondary_press_for_one_frame() {
+        use crcbl_core::input::PointerButton;
+        let mut capture = PointerCapture::new();
+
+        let mut press = capture.pending();
+        press.buttons.push((PointerButton::Right, true));
+        let input = capture.resolve(&press);
+        assert!(input.secondary_pressed, "the right press was not reported");
+        assert!(
+            !input.down && !input.released,
+            "it moved the primary's flags"
+        );
+
+        let idle = capture.pending();
+        assert!(
+            !capture.resolve(&idle).secondary_pressed,
+            "it was held over"
+        );
+
+        for (button, pressed) in [(PointerButton::Right, false), (PointerButton::Middle, true)] {
+            let mut other = capture.pending();
+            other.buttons.push((button, pressed));
+            assert!(
+                !capture.resolve(&other).secondary_pressed,
+                "{button:?} {pressed} was reported as a secondary press",
+            );
+        }
     }
 
     /// **A cursor that has never been in the window is nowhere, not at the

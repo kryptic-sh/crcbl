@@ -25,7 +25,7 @@
 //! context. `screenshot::ui_focus`'s tests hold the tree's scripted pad to what
 //! the keyboard produces through this.
 
-use crate::input::ui::{ACCEPT, BACK, MOVE, NEXT, PREV};
+use crate::input::ui::{ACCEPT, BACK, MENU, MOVE, NEXT, PREV};
 use crate::input::{ActionMap, Cardinal, Device};
 use crate::ui::tree::{Direction, InputMode, NavInput};
 
@@ -33,7 +33,7 @@ use crate::ui::tree::{Direction, InputMode, NavInput};
 ///
 /// A direction and the tree-order steps are their actions' repeat pulses, so a
 /// held arrow steps once, then again after the delay and on every interval; a
-/// 2-D move is its [`Cardinal`]. Accept and back are press edges. The mode is
+/// 2-D move is its [`Cardinal`]. Accept, back and menu are press edges. The mode is
 /// [`input_mode`] of the last device. A map with the `ui` context off the stack
 /// has idle `ui` actions and yields no press, whatever is held.
 #[must_use]
@@ -50,6 +50,7 @@ pub fn nav_input(actions: &ActionMap) -> NavInput {
         prev: actions.repeated(PREV),
         accept: actions.just_pressed(ACCEPT),
         back: actions.just_pressed(BACK),
+        menu: actions.just_pressed(MENU),
     }
 }
 
@@ -107,8 +108,8 @@ mod tests {
     }
 
     /// **Scripted keys become the tree's vocabulary**: each reserved action
-    /// lands in its field, Shift+Tab is `prev` and not `next` as well, and the
-    /// keyboard puts the tree in navigation mode.
+    /// lands in its field, Shift+Tab is `prev` and not `next` as well,
+    /// Shift+F10 is `menu`, and the keyboard puts the tree in navigation mode.
     #[test]
     fn scripted_keys_become_nav_input() {
         let mut map = map();
@@ -182,6 +183,31 @@ mod tests {
             frame(&mut map, FRAME, &[(KeyCode::Escape, false)]),
             NavInput::NAVIGATION,
             "a release frame presses nothing and the keyboard is still the last device",
+        );
+        assert_eq!(
+            frame(&mut map, FRAME, &[(KeyCode::ContextMenu, true)]),
+            NavInput::MENU,
+        );
+        assert_eq!(
+            frame(
+                &mut map,
+                FRAME,
+                &[
+                    (KeyCode::ContextMenu, false),
+                    (KeyCode::ShiftLeft, true),
+                    (KeyCode::F10, true)
+                ]
+            ),
+            NavInput::MENU,
+            "Shift+F10 is the menu key's stand-in",
+        );
+        assert_eq!(
+            frame(
+                &mut map,
+                FRAME,
+                &[(KeyCode::F10, false), (KeyCode::ShiftLeft, false)]
+            ),
+            NavInput::NAVIGATION,
         );
         assert!(
             !map.button_held("jump"),

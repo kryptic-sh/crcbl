@@ -459,6 +459,7 @@ fn build(extent: (u32, u32)) -> (Ui, Parts, Values) {
                     pos: point,
                     down,
                     released: !down,
+                    secondary_pressed: false,
                 };
                 (pointer, NavInput::default())
             }

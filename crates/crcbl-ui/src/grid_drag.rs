@@ -685,6 +685,7 @@ mod tests {
             pos,
             down: true,
             released: false,
+            secondary_pressed: false,
         }
     }
 
@@ -693,6 +694,7 @@ mod tests {
             pos,
             down: false,
             released: true,
+            secondary_pressed: false,
         }
     }
 

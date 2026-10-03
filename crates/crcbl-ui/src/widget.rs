@@ -334,6 +334,11 @@ pub struct PointerInput {
     pub down: bool,
     /// Whether the primary pointer button came up this frame.
     pub released: bool,
+    /// Whether the secondary pointer button went down this frame: what opens a
+    /// context menu ([`Ui::context_menu`](crate::tree::Ui::context_menu)). An
+    /// edge, not a level — nothing captures or drags with it — so a frame
+    /// carries it once per press.
+    pub secondary_pressed: bool,
 }
 
 impl PointerInput {
@@ -344,6 +349,7 @@ impl PointerInput {
             pos,
             down: false,
             released: false,
+            secondary_pressed: false,
         }
     }
 }
@@ -869,11 +875,13 @@ mod tests {
             pos: centre,
             down: true,
             released: false,
+            secondary_pressed: false,
         };
         let up = PointerInput {
             pos: centre,
             down: false,
             released: true,
+            secondary_pressed: false,
         };
         let (state, clicked) = btn.interact(Vec2::ZERO, &atlas, &mut ui, 1, down);
         assert_eq!(state, ButtonState::Pressed);
@@ -893,6 +901,7 @@ mod tests {
             pos: Vec2::new(-100.0, -100.0),
             down: false,
             released: true,
+            secondary_pressed: false,
         };
         let (state, clicked) = btn.interact(Vec2::ZERO, &atlas, &mut ui, 1, outside);
         assert_eq!(state, ButtonState::Idle);
@@ -922,11 +931,13 @@ mod tests {
             pos,
             down: true,
             released: false,
+            secondary_pressed: false,
         };
         let up = |pos| PointerInput {
             pos,
             down: false,
             released: true,
+            secondary_pressed: false,
         };
 
         // Frame 1: press over A.

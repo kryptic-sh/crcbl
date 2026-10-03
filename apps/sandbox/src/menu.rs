@@ -365,6 +365,7 @@ mod tests {
             pos: over,
             down: true,
             released: false,
+            secondary_pressed: false,
         };
         assert_eq!(point(&mut menus, extent, down), None);
         assert_eq!(
@@ -376,6 +377,7 @@ mod tests {
             pos: over,
             down: false,
             released: true,
+            secondary_pressed: false,
         };
         assert_eq!(point(&mut menus, extent, up), Some(MenuAction::Fullscreen));
 
@@ -383,12 +385,14 @@ mod tests {
             pos: Vec2::new(3.0, 3.0),
             down: true,
             released: false,
+            secondary_pressed: false,
         };
         assert_eq!(point(&mut menus, extent, corner), None);
         let corner_up = PointerInput {
             pos: Vec2::new(3.0, 3.0),
             down: false,
             released: true,
+            secondary_pressed: false,
         };
         assert_eq!(point(&mut menus, extent, corner_up), None);
     }
@@ -410,6 +414,7 @@ mod tests {
                 pos: over,
                 down: true,
                 released: false,
+                secondary_pressed: false,
             },
         );
         assert_eq!(
@@ -432,6 +437,7 @@ mod tests {
                     pos: over,
                     down: false,
                     released: true,
+                    secondary_pressed: false,
                 },
             ),
             None,

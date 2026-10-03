@@ -3,12 +3,13 @@
 //! # Opening one
 //!
 //! Any widget opens a pop-up by naming the node it hangs from:
-//! [`Ui::open_popup`] with that node's key, then — that frame and every frame
-//! it stays open — [`Ui::popup`] with the same key and a closure that builds
-//! what it holds. [`Ui::popup`] builds nothing and answers `None` while the
-//! pop-up is closed, so the call can sit in a widget unconditionally. The
-//! open pop-ups are a stack: one opened while another is open (from a node
-//! inside it, as a submenu would be) goes on top.
+//! [`Ui::open_popup`] with that node's key — or [`Ui::open_popup_at`], which
+//! says where it goes against that node — then, that frame and every frame it
+//! stays open, [`Ui::popup`] with the same key and a closure that builds what
+//! it holds. [`Ui::popup`] builds nothing and answers `None` while the pop-up
+//! is closed, so the call can sit in a widget unconditionally. The open
+//! pop-ups are a stack: one opened while another is open (from a node inside
+//! it, as a submenu is) goes on top.
 //!
 //! **An open pop-up the frame did not build is closed at [`Ui::layout`]**, and
 //! so is one whose anchor the frame did not build, with every pop-up above
@@ -19,10 +20,21 @@
 //!
 //! A pop-up is a **root of its own**: [`Ui::popup`] builds it outside every
 //! block that is open, keyed by its anchor ([`Ui::popup_key`]), and laid out
-//! in the space the tree was given. Its border box goes below its anchor,
-//! lined up with the anchor's left edge; one that would run past the bottom of
-//! the viewport where there is more room above flips to sit above the anchor,
-//! and it is then shifted the least that keeps it inside the viewport on both
+//! in the space the tree was given. Its border box goes where its
+//! [`Placement`] says, flipping at the viewport's edge:
+//!
+//! * [`Placement::Below`], a drop-down's: below its anchor, lined up with the
+//!   anchor's left edge, flipped to sit above the anchor when it would run
+//!   past the bottom of the viewport and there is more room above.
+//! * [`Placement::Beside`], a submenu's: right of its anchor, lined up with
+//!   the anchor's top edge, flipped to its left when it would run past the
+//!   right edge and there is more room on the left.
+//! * [`Placement::At`], a context menu's: its top-left corner at a point,
+//!   flipped to end at the point on each axis where it would run past the far
+//!   edge and there is more room before the point — so a menu opened at the
+//!   bottom right hangs up and to the left of the pointer.
+//!
+//! It is then shifted the least that keeps it inside the viewport on both
 //! axes — its top-left corner wins when it is larger than the viewport.
 //! The viewport is the space [`Ui::layout`] was given, from its origin; an
 //! axis laid out under content-sized space bounds nothing. A pop-up's own
@@ -41,7 +53,10 @@
 //! also closes itself:
 //!
 //! * **A press outside it closes it**, and every pop-up above the layer the
-//!   press landed in. A press outside every pop-up is **spent closing them**:
+//!   press landed in — a secondary press as well as a primary one, though
+//!   only a primary press is captured (`widgets/context_menu.rs` has what a
+//!   secondary press does next). A primary press outside every pop-up is
+//!   **spent closing them**:
 //!   it is captured by no node, so nothing under it is pressed, hovered or
 //!   clicked until it is released. This is the long-term rule, decided
 //!   2026-10-03: a click meant to dismiss a list must not also fire whatever
@@ -79,12 +94,42 @@ pub(super) const CLOSED_LAYER: usize = usize::MAX;
 /// nothing is pressed, hovered or clicked until the press is released.
 const SPENT_PRESS: NodeKey = NodeKey(0x7370_656e_742d_7072);
 
+/// Where an open pop-up goes against the node it hangs from; the module docs
+/// have each rule.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Placement {
+    /// Below the anchor, flipped above it at the viewport's bottom: a
+    /// drop-down's list.
+    Below,
+    /// Right of the anchor, flipped left of it at the viewport's right edge:
+    /// a submenu.
+    Beside,
+    /// At a point in the tree's space, flipped up or left of it at the
+    /// viewport's far edges: a context menu at the pointer.
+    At(Vec2),
+}
+
+/// One open pop-up: what it hangs from, and how.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct OpenPopup {
+    pub anchor: NodeKey,
+    pub placement: Placement,
+}
+
 impl Ui {
-    /// Opens the pop-up hanging from `anchor` on top of every open one, for
-    /// [`Ui::popup`] to build. Does nothing when it is already open.
+    /// Opens the pop-up hanging from `anchor` below it, on top of every open
+    /// one, for [`Ui::popup`] to build: [`Ui::open_popup_at`] with
+    /// [`Placement::Below`].
     pub fn open_popup(&mut self, anchor: NodeKey) {
-        if !self.popups.contains(&anchor) {
-            self.popups.push(anchor);
+        self.open_popup_at(anchor, Placement::Below);
+    }
+
+    /// Opens the pop-up hanging from `anchor`, placed as `placement` says, on
+    /// top of every open one, for [`Ui::popup`] to build. Does nothing when it
+    /// is already open, wherever it was placed.
+    pub fn open_popup_at(&mut self, anchor: NodeKey, placement: Placement) {
+        if !self.is_popup_open(anchor) {
+            self.popups.push(OpenPopup { anchor, placement });
         }
     }
 
@@ -92,7 +137,7 @@ impl Ui {
     /// gives focus back to `anchor` when the next frame begins. Does nothing
     /// when it is not open.
     pub fn close_popup(&mut self, anchor: NodeKey) {
-        if let Some(depth) = self.popups.iter().position(|&open| open == anchor) {
+        if let Some(depth) = self.popup_depth(anchor) {
             self.close_popups_from(depth);
         }
     }
@@ -100,7 +145,13 @@ impl Ui {
     /// Whether the pop-up hanging from `anchor` is open.
     #[must_use]
     pub fn is_popup_open(&self, anchor: NodeKey) -> bool {
-        self.popups.contains(&anchor)
+        self.popup_depth(anchor).is_some()
+    }
+
+    /// Where the pop-up hanging from `anchor` is in the stack, counting from 0
+    /// at the bottom, while it is open.
+    fn popup_depth(&self, anchor: NodeKey) -> Option<usize> {
+        self.popups.iter().position(|open| open.anchor == anchor)
     }
 
     /// The key of the root [`Ui::popup`] builds for `anchor`, which is the
@@ -166,8 +217,8 @@ impl Ui {
     /// Closes every pop-up from `depth` up the stack: what last frame drew of
     /// them stops being hit, focused or trapping focus at once, rather than at
     /// the next layout, and focus goes back to the lowest one's anchor.
-    fn close_popups_from(&mut self, depth: usize) {
-        let Some(&anchor) = self.popups.get(depth) else {
+    pub(super) fn close_popups_from(&mut self, depth: usize) {
+        let Some(&OpenPopup { anchor, .. }) = self.popups.get(depth) else {
             return;
         };
         self.popups.truncate(depth);
@@ -189,17 +240,12 @@ impl Ui {
         pointer: PointerInput,
         over: Vec<NodeKey>,
     ) -> Vec<NodeKey> {
-        if self.popups.is_empty() || !pointer.down || self.capture.active().is_some() {
+        if !pointer.down || self.capture.active().is_some() {
             return over;
         }
-        let layer = over
-            .first()
-            .and_then(|&key| self.store.by_key(key))
-            .map_or(0, |node| node.layer);
-        if layer >= self.popups.len() {
+        let Some(layer) = self.close_above_press(&over) else {
             return over;
-        }
-        self.close_popups_from(layer);
+        };
         if layer > 0 {
             // Inside a lower pop-up: the press is that pop-up's.
             return over;
@@ -207,6 +253,22 @@ impl Ui {
         self.capture
             .interact(SPENT_PRESS.0, true, pointer.down, pointer.released);
         Vec::new()
+    }
+
+    /// Closes every pop-up above the layer a press whose hit chain is `over`
+    /// landed in — the tree's, 0, for a press on nothing — and answers that
+    /// layer; `None`, closing nothing, when the press landed in the topmost
+    /// pop-up or none is open.
+    pub(super) fn close_above_press(&mut self, over: &[NodeKey]) -> Option<usize> {
+        let layer = over
+            .first()
+            .and_then(|&key| self.store.by_key(key))
+            .map_or(0, |node| node.layer);
+        if layer >= self.popups.len() {
+            return None;
+        }
+        self.close_popups_from(layer);
+        Some(layer)
     }
 
     /// Back closes the topmost pop-up when nothing is engaged to cancel, and is
@@ -225,9 +287,12 @@ impl Ui {
     /// [`CLOSED_LAYER`] under a pop-up that closed while the frame was being
     /// built and under a tooltip whose anchor is in one.
     pub(super) fn layers(&mut self) -> Vec<usize> {
-        let unbuilt = self.popups.iter().position(|&anchor| {
-            !self.popup_roots.iter().any(|&(_, built)| built == anchor)
-                || self.store.find(anchor).is_none()
+        let unbuilt = self.popups.iter().position(|open| {
+            !self
+                .popup_roots
+                .iter()
+                .any(|&(_, built)| built == open.anchor)
+                || self.store.find(open.anchor).is_none()
         });
         if let Some(depth) = unbuilt {
             self.close_popups_from(depth);
@@ -235,9 +300,7 @@ impl Ui {
         let mut layers = vec![0; self.nodes.len()];
         for &(root, anchor) in &self.popup_roots {
             layers[root] = self
-                .popups
-                .iter()
-                .position(|&open| open == anchor)
+                .popup_depth(anchor)
                 .map_or(CLOSED_LAYER, |depth| depth + 1);
         }
         // A parent is always built before its children, and a tooltip after
@@ -265,15 +328,20 @@ impl Ui {
         self.viewport.unwrap_or(ClipRect::NONE)
     }
 
-    /// The border-box top-left of the pop-up root `index` of the open pop-up
-    /// hanging from `anchor`, which is placed by now.
-    pub(super) fn popup_origin(&self, index: usize, anchor: NodeKey) -> Vec2 {
+    /// The border-box top-left of the pop-up root `index` of `popup`, whose
+    /// anchor is placed by now.
+    pub(super) fn popup_origin(&self, index: usize, popup: OpenPopup) -> Vec2 {
         let anchor = self
             .store
-            .by_key(anchor)
+            .by_key(popup.anchor)
             .map_or((Vec2::ZERO, Vec2::ZERO), |node| node.rect);
         let size = self.nodes[index].layout.size;
-        hang(anchor, Vec2::new(size.width, size.height), self.viewport())
+        hang(
+            anchor,
+            Vec2::new(size.width, size.height),
+            self.viewport(),
+            popup.placement,
+        )
     }
 }
 
@@ -293,17 +361,42 @@ pub(super) fn viewport_of(origin: Vec2, available: super::AvailableSpace) -> Cli
 }
 
 /// Where a pop-up of `size` hangs from the border box `anchor` inside
-/// `viewport`: below it, flipped above it when it would run past the bottom
-/// and there is more room above, then shifted the least that keeps it inside
-/// — its top-left corner kept when it is larger than the viewport.
-pub(super) fn hang(anchor: (Vec2, Vec2), size: Vec2, viewport: ClipRect) -> Vec2 {
+/// `viewport`, placed as `placement` says — see the module docs — then
+/// shifted the least that keeps it inside, its top-left corner kept when it is
+/// larger than the viewport.
+pub(super) fn hang(
+    anchor: (Vec2, Vec2),
+    size: Vec2,
+    viewport: ClipRect,
+    placement: Placement,
+) -> Vec2 {
     let (anchor_min, anchor_max) = anchor;
-    let mut min = Vec2::new(anchor_min.x, anchor_max.y);
-    let below = viewport.max.y - anchor_max.y;
-    let above = anchor_min.y - viewport.min.y;
-    if size.y > below && above > below {
-        min.y = anchor_min.y - size.y;
-    }
+    let flip = |axis: usize, before: f32, after: f32| {
+        flipped(
+            (before, after),
+            size[axis],
+            (viewport.min[axis], viewport.max[axis]),
+        )
+    };
+    let min = match placement {
+        Placement::Below => Vec2::new(anchor_min.x, flip(1, anchor_min.y, anchor_max.y)),
+        Placement::Beside => Vec2::new(flip(0, anchor_min.x, anchor_max.x), anchor_min.y),
+        Placement::At(point) => Vec2::new(flip(0, point.x, point.x), flip(1, point.y, point.y)),
+    };
     // The far edge first, so the near one wins when both cannot hold.
     min.min(viewport.max - size).max(viewport.min)
+}
+
+/// Where a pop-up `length` long starts on one axis: at `after`, the far side
+/// of what it hangs from, or — when it would run past the viewport's end and
+/// there is more room back from `before` to the viewport's start — ending at
+/// `before`.
+fn flipped((before, after): (f32, f32), length: f32, (start, end): (f32, f32)) -> f32 {
+    let room_after = end - after;
+    let room_before = before - start;
+    if length > room_after && room_before > room_after {
+        before - length
+    } else {
+        after
+    }
 }

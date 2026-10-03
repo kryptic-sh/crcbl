@@ -654,6 +654,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         let panels = self.panels.frame(&mut self.document, input);
         asked.extend(panels.unsaved.map(Action::Unsaved));
         asked.extend(panels.toolbar);
+        asked.extend(panels.menu);
         let accepted = panels.spawn;
         self.draw_gizmo(pointer.pos);
 

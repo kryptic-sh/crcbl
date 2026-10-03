@@ -92,7 +92,8 @@ split > .split-divider:focus,
 text-input:focus,
 .tab-strip > .tab:focus,
 select:focus,
-.select-list > .select-option:focus {
+.select-list > .select-option:focus,
+.context-menu > .context-item:focus {
   outline: 2px #f5c400;
   outline-offset: 1px;
 }
@@ -532,6 +533,49 @@ select:disabled {
 .select-list > .select-option:checked {
   background: #3d8bfd;
   color: #10121a;
+}
+
+/*
+ * Context menu: a pop-up of items opened on a widget
+ * (`widgets/context_menu.rs`). An item with a submenu ends in
+ * `.context-item-arrow` and is `:open` while its submenu is; a separator is a
+ * rule between items. A disabled item keeps the menu's background under the
+ * pointer, so only what can be picked lights up.
+ */
+.context-menu {
+  min-width: 120px;
+}
+
+.context-item {
+  gap: 12px;
+  padding: 1px 6px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.context-menu > .context-item:hover,
+.context-menu > .context-item:open {
+  background: #353d4c;
+}
+
+.context-menu > .context-item:disabled {
+  background: transparent;
+  color: #7a8190;
+}
+
+.context-item-label {
+  flex-grow: 1;
+}
+
+.context-item-arrow {
+  color: #7a8190;
+}
+
+.context-separator {
+  height: 1px;
+  margin: 2px 0;
+  flex-shrink: 0;
+  background: #4a5468;
 }
 
 /*
