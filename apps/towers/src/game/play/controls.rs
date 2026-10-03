@@ -68,18 +68,22 @@ const KIND_LABELS: [&str; tower::KINDS] = {
 const ACTIONS: [PlayAction; 4] = [
     PlayAction {
         name: "Place tower",
+        description: "Build a tower of the chosen kind on a free plot, paid for from the purse",
         params: &[ParamKind::Picked(PLOTS), ParamKind::Choice(&KIND_LABELS)],
     },
     PlayAction {
         name: "Start wave",
+        description: "Bring the next wave in now rather than at the end of the build phase",
         params: &[],
     },
     PlayAction {
         name: "Upgrade",
+        description: "Step a built tower up a tier, paid for from the purse",
         params: &[ParamKind::PickedRuntime(TURRETS)],
     },
     PlayAction {
         name: "Restart",
+        description: "Throw the run away and start a fresh one on the same map",
         params: &[],
     },
 ];
@@ -373,6 +377,28 @@ mod tests {
         assert_eq!(ACTIONS[UPGRADE].name, "Upgrade");
         assert_eq!(ACTIONS[RESTART].name, "Restart");
         assert_eq!(KIND_LABELS, tower::ALL.map(tower::Kind::label));
+    }
+
+    /// **Every action says what it does, each in words of its own** — what
+    /// the editor's strip shows first in its tooltip, so a blank or a
+    /// description pasted onto the wrong action is a red test here rather
+    /// than a panic at registration or a tooltip that misleads.
+    #[test]
+    fn every_action_says_what_it_does() {
+        for (index, action) in ACTIONS.iter().enumerate() {
+            assert!(
+                !action.description.trim().is_empty(),
+                "{} has no description",
+                action.name
+            );
+            assert!(
+                ACTIONS[..index]
+                    .iter()
+                    .all(|earlier| earlier.description != action.description),
+                "{} repeats an earlier action's description",
+                action.name
+            );
+        }
     }
 
     /// **A plot no frame can name, a kind past the table and an upgrade of

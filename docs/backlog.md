@@ -3471,10 +3471,6 @@ for the editor's outliner rows. Decisions, then what is left.
   `TTDT_RESHOW` would show the next sooner, and a tooltip stays up for as long
   as the pointer rests rather than going after `TTDT_AUTOPOP`. Either is a field
   on `TooltipState` and a rule in `resolve_tooltip`.
-- **Deferred: a description on `PlayAction`.** An action's tooltip is read off
-  its `ParamKind`s (_Send Place tower to the game, for the `plots` selected in
-  the scene (1)_), because the registry carries only a name; a game-written
-  sentence needs a field every registered action would fill.
 - **Deferred: a tooltip wider than the viewport wraps.** It is `nowrap`, shifted
   to the viewport's left edge and clipped at its right; a `max-width` with
   wrapping would need the span to wrap inside a content-sized root.
@@ -12869,7 +12865,8 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
       the pick's green outline is held by the boxes handed to the debug draw,
       never by an image. They are drawn in the greybox grey like the creeps, one
       material for every kind and tier, so a splash tower and a slow one look
-      the same.
+      the same. Nor have the strip's tooltips, towers' descriptions in them
+      included.
   - **An edit-mode schedule, only if something needs one.** Nothing ticks while
     editing, so play needs no schedule to switch from; the selection, gizmo and
     camera systems the plan put in one are plain editor code today (the

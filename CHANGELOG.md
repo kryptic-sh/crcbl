@@ -664,8 +664,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   viewport, drawn over every open pop-up, and **inert** — never hit or focused,
   so a click on what it covers reaches it. `Ui::tooltip_key` names its root. In
   the editor every toolbar button's tooltip says what it does and its key, and
-  each play-strip action's says what it sends, what it takes and its number key;
-  the labels keep their keys.
+  each play-strip action's opens with the game's own description of it, then
+  says what it takes and its number key; the labels keep their keys.
 - **`crcbl-ui` has a pop-up layer, and a drop-down built on it.** Any widget
   hangs a pop-up from a node: `Ui::open_popup` with the node's key, then
   `Ui::popup` every frame it is open with a closure that builds it (it builds
@@ -1064,22 +1064,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **Play controls: a game's actions and status for a tool that plays it.**
   `crcbl::registry::Registry::play_controls(system, PlayControls)` registers,
   beside a game's module, a description a tool renders generically: a list of
-  `PlayAction { name, params }`, each parameter a `ParamKind::Picked(system)`
-  (an entity of that scene system, picked in the scene) or a
-  `ParamKind::Choice(labels)`; an `encode` function turning an action's index
-  and its `PlayArg`s into the bytes the game's own client sends for that
-  command; a `status` function reading the run's labelled numbers off the world
-  the module plays in; and a `refusals` function taking the reasons the game
-  turned commands down. `Registry::encode_play(system, action, args)` checks the
-  arguments against the action's parameters (count, kind, choice range) before
-  the game's encoder sees them, `Registry::controls_for(system)` finds the
-  description, and `Registry::keyed_modules` is `modules` with each module's
-  system (as a `KeyedModule`), so a tool hands one game's commands to that
-  game's module alone. The status is registry-side rather than a `GameModule`
-  method, so the module trait EW implements is unchanged. **The editor plays
-  through it:** while a scene plays, a strip under the toolbar lists each
-  running game's actions (a choice is a button that steps through its labels; a
-  picked argument is the selection) and its numbers; a click is sent through
+  `PlayAction { name, description, params }` — the description a phrase the game
+  writes saying what the action does, which a tool shows first in the action's
+  tooltip, and which `Registry::play_controls` panics on when it is empty or
+  only whitespace — each parameter a `ParamKind::Picked(system)` (an entity of
+  that scene system, picked in the scene) or a `ParamKind::Choice(labels)`; an
+  `encode` function turning an action's index and its `PlayArg`s into the bytes
+  the game's own client sends for that command; a `status` function reading the
+  run's labelled numbers off the world the module plays in; and a `refusals`
+  function taking the reasons the game turned commands down.
+  `Registry::encode_play(system, action, args)` checks the arguments against the
+  action's parameters (count, kind, choice range) before the game's encoder sees
+  them, `Registry::controls_for(system)` finds the description, and
+  `Registry::keyed_modules` is `modules` with each module's system (as a
+  `KeyedModule`), so a tool hands one game's commands to that game's module
+  alone. The status is registry-side rather than a `GameModule` method, so the
+  module trait EW implements is unchanged. **The editor plays through it:**
+  while a scene plays, a strip under the toolbar lists each running game's
+  actions (a choice is a button that steps through its labels; a picked argument
+  is the selection) and its numbers; a click is sent through
   `Document::send_play(system, action, args)`, which queues the encoded frame
   for that module's next tick as its `ClientInputs` — the editor had ticked
   every module with `ClientInputs::empty()` — and the status line says it was

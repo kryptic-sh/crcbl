@@ -21,8 +21,8 @@
 //! A tool hands a playing module **the bytes a networked client would**, in
 //! the [`ClientInputs`](crcbl_ecs::ClientInputs) its next tick is given: the
 //! engine's rule that every action is a command value, with nothing reachable
-//! only through a widget. So a game describes its actions as data — a name
-//! and the kind of each argument — and supplies the encoder its own client's
+//! only through a widget. So a game describes its actions as data — a name,
+//! what it does and the kind of each argument — and supplies the encoder its own client's
 //! commands go through; a tool renders that description however it renders
 //! things, and the game validates what arrives as it validates any client's
 //! command, refusing by its own rules.
@@ -99,6 +99,11 @@ impl fmt::Debug for PlayControls {
 pub struct PlayAction {
     /// What a tool labels it with.
     pub name: &'static str,
+    /// What it does, in the game's own words — a phrase in the imperative with
+    /// no closing full stop, as a tooltip reads: what a tool shows beside the
+    /// name. Never empty: [`Registry::play_controls`] refuses an action
+    /// without one.
+    pub description: &'static str,
     /// What it takes, in the order [`PlayControls::encode`] is handed them.
     pub params: &'static [ParamKind],
 }
@@ -174,13 +179,27 @@ impl Registry {
     ///
     /// If `system` already has controls, for [`register`](Self::register)'s
     /// reason: a tool finds them by name, and two under one name would leave
-    /// one of them never shown.
+    /// one of them never shown. And if an action's
+    /// [`description`](PlayAction::description) is empty or only whitespace:
+    /// a tool would show a blank where the game should have said what the
+    /// action does, and the controls are a constant the game wrote, so the
+    /// first run that registers them is where the omission belongs.
     pub fn play_controls(&mut self, system: impl Into<String>, controls: PlayControls) {
         let system = system.into();
         assert!(
             !self.controls.contains_key(&system),
             "play controls are already registered under `{system}`",
         );
+        if let Some(action) = controls
+            .actions
+            .iter()
+            .find(|action| action.description.trim().is_empty())
+        {
+            panic!(
+                "play action `{}` under `{system}` has no description",
+                action.name
+            );
+        }
         self.controls.insert(system, controls);
     }
 
@@ -279,14 +298,17 @@ mod tests {
     const ACTIONS: &[PlayAction] = &[
         PlayAction {
             name: "Build",
+            description: "Build a block of the chosen kind",
             params: &[ParamKind::Picked("blocks"), ParamKind::Choice(KINDS)],
         },
         PlayAction {
             name: "Go",
+            description: "Set everything going",
             params: &[],
         },
         PlayAction {
             name: "Kick",
+            description: "Kick a ball",
             params: &[ParamKind::PickedRuntime(BALLS)],
         },
     ];
@@ -455,5 +477,31 @@ mod tests {
     fn two_sets_of_controls_under_one_system_are_refused() {
         let mut registry = registry();
         registry.play_controls("blocks", CONTROLS);
+    }
+
+    /// An action with nothing to say for itself would leave a tool a blank
+    /// tooltip, and whitespace is nothing to say.
+    #[test]
+    #[should_panic(expected = "play action `Hush` under `quiet` has no description")]
+    fn an_action_without_a_description_is_refused() {
+        const HUSHED: &[PlayAction] = &[
+            PlayAction {
+                name: "Go",
+                description: "Set everything going",
+                params: &[],
+            },
+            PlayAction {
+                name: "Hush",
+                description: " \t",
+                params: &[],
+            },
+        ];
+        Registry::new().play_controls(
+            "quiet",
+            PlayControls {
+                actions: HUSHED,
+                ..CONTROLS
+            },
+        );
     }
 }

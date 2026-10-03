@@ -79,3 +79,41 @@ fn the_wheel_hides_a_toolbar_tooltip() {
     page.rest(at, TOOLTIP_DELAY, 10.0);
     assert_eq!(page.tooltip(play), None, "the wheel left the tooltip up");
 }
+
+/// **A play-strip action's tooltip opens with the game's own description of
+/// it**, then where its arguments come from and its key — read off the
+/// controls towers registers through the shipped vocabulary, not a fixture.
+#[test]
+fn a_play_actions_tooltip_opens_with_the_games_description() {
+    let mut page = Page::over(
+        Document::open(
+            &crcbl_towers::built_in_source(),
+            Path::new(crcbl_towers::FIELD),
+            crate::scene::vocabulary(),
+        )
+        .expect("the shipped vocabulary opens towers' field"),
+    );
+    page.document.play().expect("towers' field plays");
+    page.idle();
+    let description = page.document.play_controls()[0].1.actions[0].description;
+    let (_, place) = page
+        .panels
+        .play_buttons()
+        .iter()
+        .find(|(label, _)| label == "Place tower (1)")
+        .cloned()
+        .expect("the strip's first action");
+    let at = page.centre(place);
+    page.rest(at, TOOLTIP_DELAY, 0.0);
+    page.rest(at, TOOLTIP_DELAY, 0.0);
+    assert_eq!(
+        page.tooltip(place),
+        Some(
+            format!(
+                "{description} — takes the `plots` selected in the scene and the choice \
+                 beside it (1)"
+            )
+            .as_str()
+        )
+    );
+}

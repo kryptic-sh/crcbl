@@ -19,10 +19,10 @@
 //! through [`crate::keys`], so a text field being typed into keeps its
 //! digits.
 //!
-//! **Each button has a tooltip** saying what it sends and what the action
-//! takes — read off its [`ParamKind`]s, since a [`PlayAction`] carries no
-//! description of its own — with the number key again; a choice's says what
-//! it steps through.
+//! **Each button has a tooltip**: the game's own
+//! [`description`](PlayAction::description) of the action first, then where
+//! each argument it takes comes from — read off its [`ParamKind`]s — and the
+//! number key again; a choice's says what it steps through.
 //!
 //! **A choice lasts one play.** Stop takes the strip away and every choice's
 //! pick with it, so each play starts on each choice's first label, as the run
@@ -240,8 +240,9 @@ fn keyed(text: &str, number: usize) -> String {
     }
 }
 
-/// What the tooltip of the `number`th action drawn says: that it sends it,
-/// each argument it takes by where it comes from, and its number key.
+/// What the tooltip of the `number`th action drawn says: what the game says
+/// it does, each argument it takes by where it comes from, and its number
+/// key.
 fn action_tip(described: &PlayAction, number: usize) -> String {
     let takes: Vec<String> = described
         .params
@@ -254,48 +255,48 @@ fn action_tip(described: &PlayAction, number: usize) -> String {
             ParamKind::Choice(_) => "the choice beside it".to_owned(),
         })
         .collect();
-    let sends = if takes.is_empty() {
-        format!("Send {} to the game", described.name)
+    let tip = if takes.is_empty() {
+        described.description.to_owned()
     } else {
-        format!(
-            "Send {} to the game, for {}",
-            described.name,
-            takes.join(" and ")
-        )
+        format!("{} — takes {}", described.description, takes.join(" and "))
     };
-    keyed(&sends, number)
+    keyed(&tip, number)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// **A play-strip tooltip says what the action takes and names its number
-    /// key**, and an action past the keys has no key to name.
+    /// **A play-strip tooltip says what the action does, then what it takes,
+    /// and names its number key**, and an action past the keys has no key to
+    /// name.
     #[test]
-    fn an_actions_tooltip_says_what_it_takes_and_names_its_key() {
+    fn an_actions_tooltip_says_what_it_does_and_takes_and_names_its_key() {
         let place = PlayAction {
             name: "Place tower",
+            description: "Build a tower",
             params: &[ParamKind::Picked("plots"), ParamKind::Choice(&["Bolt"])],
         };
         assert_eq!(
             action_tip(&place, 1),
-            "Send Place tower to the game, for the `plots` selected in the scene and the \
-             choice beside it (1)"
+            "Build a tower — takes the `plots` selected in the scene and the choice beside \
+             it (1)"
         );
         let upgrade = PlayAction {
             name: "Upgrade",
+            description: "Step a tower up",
             params: &[ParamKind::PickedRuntime("towers")],
         };
         let past = crate::keys::PLAY_ACTIONS.len() + 1;
         assert_eq!(
             action_tip(&upgrade, past),
-            "Send Upgrade to the game, for the `towers` last clicked in the viewport"
+            "Step a tower up — takes the `towers` last clicked in the viewport"
         );
         let start = PlayAction {
             name: "Start wave",
+            description: "Bring the wave in",
             params: &[],
         };
-        assert_eq!(action_tip(&start, 3), "Send Start wave to the game (3)");
+        assert_eq!(action_tip(&start, 3), "Bring the wave in (3)");
     }
 }
