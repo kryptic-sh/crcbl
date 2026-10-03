@@ -189,3 +189,170 @@ fn a_history_keeps_its_newest_entries() {
     while kept.undo().expect("every inverse applies") {}
     assert_eq!(kept.files().expect("ids"), states[extra]);
 }
+
+/// **A refused history opens the scene anyway, with an empty log**, and says
+/// why once; the file is not touched until a save replaces it with one that
+/// reads back.
+#[test]
+fn a_refused_history_opens_fresh_and_is_replaced_by_the_next_save() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (dir, mut document) = saved(&base);
+    document.apply(moved(4.0)).expect("a block moves");
+    document.save_with_history().expect("saved");
+    let path = dir.join(HISTORY);
+    let mut tampered = std::fs::read(&path).expect("a history");
+    tampered[POSITION_AT] ^= 1;
+    std::fs::write(&path, &tampered).expect("written");
+
+    let mut opened = Document::open_with_history_or_fresh(&dir, vocabulary())
+        .expect("the scene opens whatever its history says");
+    assert!(opened.log().is_empty(), "a refused history was replayed");
+    assert!(!opened.is_dirty(), "a scene opened fresh is dirty");
+    assert!(matches!(
+        opened.take_history_refusal(),
+        Some(HistoryError::Checksum)
+    ));
+    assert!(opened.take_history_refusal().is_none(), "said twice");
+    assert_eq!(std::fs::read(&path).expect("still there"), tampered);
+
+    opened.apply(moved(9.0)).expect("a block moves");
+    opened.save_with_history().expect("saved");
+    let mut read = reopened(&dir).expect("the save replaced the refused history");
+    assert_eq!((read.log().position(), read.log().len()), (1, 1));
+    assert!(read.undo().expect("its inverse applies"));
+    assert_eq!(
+        read.files().expect("ids"),
+        document.files().expect("ids"),
+        "the undo did not reach the scene the history was opened beside"
+    );
+}
+
+/// **No history at all is no refusal**: the scene opens fresh and there is
+/// nothing to say.
+#[test]
+fn no_history_opens_fresh_with_nothing_to_say() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (dir, _document) = saved(&base);
+    let mut opened = Document::open_with_history_or_fresh(&dir, vocabulary()).expect("opens");
+    assert!(opened.log().is_empty());
+    assert!(opened.take_history_refusal().is_none());
+}
+
+/// **A gesture is one entry on disk**: a drag's writes, folded in the log,
+/// read back as one entry whose undo goes back to where the drag began.
+#[test]
+fn a_folded_gesture_is_one_entry_on_disk() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (dir, mut document) = saved(&base);
+    let before = document.files().expect("ids");
+    let drag = document.begin_gesture();
+    for x in [1.0, 2.0, 3.0] {
+        document.apply_in(moved(x), drag).expect("a block moves");
+    }
+    document.save_with_history().expect("saved");
+    let after = document.files().expect("ids");
+
+    let mut read = reopened(&dir).expect("its own history");
+    assert_eq!(read.log().len(), 1, "a drag is not one entry on disk");
+    assert!(read.undo().expect("the inverse applies"));
+    assert_eq!(read.files().expect("ids"), before);
+    assert!(read.redo().expect("the command applies"));
+    assert_eq!(read.files().expect("ids"), after);
+}
+
+/// **A drag back to where it began keeps the redo, on disk too**: the entry
+/// it held aside is back in the log before the save, so the history read
+/// back still redoes it.
+#[test]
+fn a_gesture_that_nets_to_nothing_keeps_its_redo_on_disk() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (dir, mut document) = saved(&base);
+    let start = document
+        .read(SceneEntityId(0), BLOCKS, "position.0")
+        .expect("a block has a position");
+    let Value::Float(start) = start else {
+        panic!("a position is floats: {start:?}");
+    };
+    document.apply(moved(4.0)).expect("a block moves");
+    let redone = document.files().expect("ids");
+    assert!(document.undo().expect("one entry"));
+    let drag = document.begin_gesture();
+    document.apply_in(moved(7.0), drag).expect("a block moves");
+    document.apply_in(moved(start), drag).expect("and back");
+    assert_eq!(
+        (document.log().position(), document.log().len()),
+        (0, 1),
+        "the held redo was not put back"
+    );
+    document.save_with_history().expect("saved");
+
+    let mut read = reopened(&dir).expect("its own history");
+    assert_eq!((read.log().position(), read.log().len()), (0, 1));
+    assert!(read.redo().expect("the held entry redoes"));
+    assert_eq!(read.files().expect("ids"), redone);
+}
+
+/// **A save-as writes no history, and the next save there writes the whole
+/// log**; the directory saved from keeps its own history, still its scene's.
+/// A save-as into the document's own directory is a save, history and all.
+#[test]
+fn a_save_as_writes_no_history_and_the_next_save_there_does() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (dir, mut document) = saved(&base);
+    document.apply(moved(4.0)).expect("a block moves");
+    document.save_with_history().expect("saved");
+    let left = std::fs::read(dir.join(HISTORY)).expect("a history");
+
+    let mut opened = reopened(&dir).expect("its own history");
+    opened.apply(moved(5.0)).expect("a block moves");
+    let elsewhere = base.path().join("two.scn");
+    opened.save_as(&elsewhere).expect("a fresh directory");
+    assert!(
+        !elsewhere.join(HISTORY).exists(),
+        "a save-as wrote a history"
+    );
+    assert_eq!(std::fs::read(dir.join(HISTORY)).expect("kept"), left);
+    assert_eq!(reopened(&dir).expect("still its own").log().len(), 1);
+
+    opened
+        .save_with_history()
+        .expect("saved where it lives now");
+    let read = reopened(&elsewhere).expect("the whole log, bound to the copy");
+    assert_eq!((read.log().position(), read.log().len()), (2, 2));
+
+    opened.apply(moved(6.0)).expect("a block moves");
+    opened.save_as(&elsewhere).expect("its own directory");
+    let read = reopened(&elsewhere).expect("a save-as into its own directory keeps it");
+    assert_eq!((read.log().position(), read.log().len()), (3, 3));
+}
+
+/// **A recovery copy holds no history and leaves the scene's alone**: the
+/// copy is the scene and its record, read back with an empty log, and the
+/// history beside the scene still reads back, bound to the scene's bytes.
+#[test]
+fn a_recovery_copy_holds_no_history_and_leaves_the_scenes_alone() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (dir, mut document) = saved(&base);
+    document.apply(moved(4.0)).expect("a block moves");
+    document.save_with_history().expect("saved");
+    let history = std::fs::read(dir.join(HISTORY)).expect("a history");
+
+    let mut opened = reopened(&dir).expect("its own history");
+    opened.apply(moved(5.0)).expect("a block moves");
+    let recovery = tempfile::tempdir().expect("a temporary directory");
+    let copy = opened
+        .write_recovery(recovery.path(), 1)
+        .expect("a copy is written");
+    assert!(
+        !copy.join(HISTORY).exists(),
+        "a recovery copy holds a history"
+    );
+    assert_eq!(std::fs::read(dir.join(HISTORY)).expect("kept"), history);
+    assert_eq!(reopened(&dir).expect("still its own").log().len(), 1);
+    assert!(
+        Document::open_recovery(&copy, vocabulary())
+            .expect("the copy opens")
+            .log()
+            .is_empty()
+    );
+}

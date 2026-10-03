@@ -128,7 +128,7 @@ fn a_switch_the_rule_refuses_is_put_back_and_not_recorded() {
             system: BODIES.to_owned(),
             path: "kind".to_owned(),
             value: Snapshot::Variant {
-                name: "Kinematic",
+                name: "Kinematic".into(),
                 fields: Vec::new(),
             },
         })
@@ -149,7 +149,7 @@ fn a_switch_to_a_variant_the_kind_lacks_is_refused() {
             system: BODIES.to_owned(),
             path: "kind".to_owned(),
             value: Snapshot::Variant {
-                name: "Floating",
+                name: "Floating".into(),
                 fields: Vec::new(),
             },
         })
@@ -157,4 +157,28 @@ fn a_switch_to_a_variant_the_kind_lacks_is_refused() {
     assert!(matches!(error, EditError::Path(_)), "{error}");
     assert_eq!(body(&mut document, FALLING).kind, BodyKind::Dynamic);
     assert!(document.log().is_empty());
+}
+
+/// **A switch undoes from the history beside the scene**: saved with its
+/// history and opened in another document, it is one entry whose undo puts
+/// the kind back — what lets the `crcbl scene` CLI undo the inspector's pick.
+#[test]
+fn a_kind_switch_saved_with_its_history_undoes_in_another_document() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let dir = base.path().join("falling.scn");
+    let mut document = falling();
+    document.save_as(&dir).expect("a fresh directory");
+    let before = document.files().expect("the scene saves");
+    switch_kind(&mut document, FALLING, "Static").expect("every kind is a body");
+    document
+        .save_with_history()
+        .expect("a switch is written into the history");
+
+    let mut read =
+        Document::open_with_history(&dir, crate::scene::vocabulary()).expect("its own history");
+    assert_eq!((read.log().position(), read.log().len()), (1, 1));
+    assert_eq!(body(&mut read, FALLING).kind, BodyKind::Static);
+    assert!(read.undo().expect("the switch's inverse applies"));
+    assert_eq!(body(&mut read, FALLING).kind, BodyKind::Dynamic);
+    assert_eq!(read.files().expect("the scene saves"), before);
 }

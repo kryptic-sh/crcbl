@@ -119,7 +119,7 @@ use crcbl::ui::tree::{DockLayout, SelectMode};
 use crate::args::Options;
 use crate::clipboard::{Paste, PasteTarget};
 use crate::command::EditCommand;
-use crate::document::{Document, EditError, Hit, PlayState, RecoveryCopy};
+use crate::document::{Document, EditError, HISTORY, HistoryError, Hit, PlayState, RecoveryCopy};
 use crate::gizmo;
 use crate::keys::Action;
 use crate::layout;
@@ -338,6 +338,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     pub fn with_shell(mut shell: Box<S>, options: &Options) -> Result<Self, EditorError> {
         let mut document = open_document(options)?;
         log_outline(&mut document);
+        let refusal = history_refusal(&mut document);
 
         let mut clock_source = Clock::new(options.common.headless);
         clock_source.set_limit(options.common.limit);
@@ -391,6 +392,16 @@ impl<S: Shell + ?Sized> Editor<S> {
         )?;
         editor.frame_scene();
         editor.offer_recovery(options.scene.as_deref());
+        if let Some(refusal) = refusal {
+            crcbl::log::warn!("editor: {refusal}");
+            let opened = editor
+                .document
+                .origin()
+                .map_or_else(String::new, |dir| format!("Opened {}; ", dir.display()));
+            editor
+                .panels
+                .set_status(format!("{opened}{refusal}"), Tone::Warning);
+        }
         Ok(editor)
     }
 
@@ -1455,27 +1466,58 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
     }
 
-    /// Saves the document, then says what the games it is made for would
-    /// refuse in it — reported, not refused: see [`Document::problems`]. A
-    /// document with no directory to save back to asks for one instead, as
-    /// save-as does.
+    /// Saves the document with its history beside it, then says what the
+    /// games it is made for would refuse in it — reported, not refused: see
+    /// [`Document::problems`]. A document with no directory to save back to
+    /// asks for one instead, as save-as does.
     fn save(&mut self) -> Result<(), EditError> {
-        match self.document.save() {
+        match self.save_in_place() {
             Err(EditError::NoOrigin) => self.begin_save_as(),
             Err(error) => Err(error),
-            Ok(()) => self.report_saved("Saved"),
+            Ok(unwritten) => self.report_saved("Saved", unwritten.as_ref()),
+        }
+    }
+
+    /// [`Document::save_with_history`]: the scene saved into its own
+    /// directory with the history beside it, so the `crcbl scene` CLI's undo
+    /// walks back what was done here. Hands back why the history was not
+    /// written when the scene landed and only the history did not — the
+    /// history there is then the one before, bound to bytes the directory no
+    /// longer holds, which the next open refuses rather than replays.
+    ///
+    /// # Errors
+    ///
+    /// As [`Document::save`], for a scene that did not land.
+    fn save_in_place(&mut self) -> Result<Option<HistoryError>, EditError> {
+        match self.document.save_with_history() {
+            Ok(()) => Ok(None),
+            Err(EditError::History(unwritten)) => Ok(Some(unwritten)),
+            Err(error) => Err(error),
         }
     }
 
     /// Says on the status line that the document was saved, opening with
-    /// `saved` — and what the games it is made for would refuse in it,
-    /// reported rather than refused: see [`Document::problems`].
-    fn report_saved(&mut self, saved: &str) -> Result<(), EditError> {
+    /// `saved` — then that the history beside it was not written, if
+    /// `unwritten` says why, and what the games it is made for would refuse
+    /// in it, reported rather than refused: see [`Document::problems`].
+    fn report_saved(
+        &mut self,
+        saved: &str,
+        unwritten: Option<&HistoryError>,
+    ) -> Result<(), EditError> {
+        let saved = match unwritten {
+            None => saved.to_owned(),
+            Some(error) => {
+                crcbl::log::warn!("editor: saved, but its history `{HISTORY}` was not: {error}");
+                format!("{saved}, but its undo history `{HISTORY}` was not written: {error}")
+            }
+        };
         let problems = self.document.problems()?;
         for problem in &problems {
             crcbl::log::warn!("editor: saved, but its game will refuse it: {problem}");
         }
         match problems.as_slice() {
+            [] if unwritten.is_some() => self.panels.set_status(saved, Tone::Warning),
             [] => self.panels.set_status(saved, Tone::Info),
             [only] => self.panels.set_status(
                 format!("{saved}, but its game will refuse it: {only}"),
@@ -1962,15 +2004,19 @@ fn sun() -> DirectionalLight {
     DirectionalLight::default()
 }
 
-/// Opens what the command line named, or the compiled-in scene, reading its
-/// meshes from the asset root the command line named, if it named one.
+/// Opens what the command line named, with the history beside it, or the
+/// compiled-in scene, reading its meshes from the asset root the command line
+/// named, if it named one. A history that is refused is the document's to hand
+/// back ([`history_refusal`]); the scene opens either way.
 ///
 /// Both through [`crate::scene::vocabulary`], which is the components **this**
 /// build knows: a directory whose manifest names a system it does not is refused
 /// by that system's name rather than opened with the chunk missing.
 fn open_document(options: &Options) -> Result<Document, EditorError> {
     let document = match &options.scene {
-        Some(path) => Document::open_dir(path.clone(), crate::scene::vocabulary()),
+        Some(path) => {
+            Document::open_with_history_or_fresh(path.clone(), crate::scene::vocabulary())
+        }
         None => crate::scene::built_in_document(),
     };
     let mut document = document.map_err(LoopError::Game)?;
@@ -1978,6 +2024,21 @@ fn open_document(options: &Options) -> Result<Document, EditorError> {
         document.set_assets(Box::new(crcbl::assets::DirSource::at(root.clone())));
     }
     Ok(document)
+}
+
+/// What the status line says about the history beside the scene `document`
+/// was opened from, when it was refused — or [`None`] for one read back, for
+/// none at all, and for a document not opened from a directory. Taken once.
+///
+/// It names the file, says the scene opened without it, and says the next
+/// save replaces it: the decision in `crcbl::scene_edit::history`'s module
+/// docs, told to the person it is made for.
+fn history_refusal(document: &mut Document) -> Option<String> {
+    let refusal = document.take_history_refusal()?;
+    Some(format!(
+        "its undo history `{HISTORY}` was not read — {refusal} — so undo starts here, and the \
+         next save replaces it"
+    ))
 }
 
 /// Says in the log what was opened: the scene's name and how many entities it

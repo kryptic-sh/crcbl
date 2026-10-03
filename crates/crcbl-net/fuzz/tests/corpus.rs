@@ -184,9 +184,9 @@ fn named_save_seeds_reach_their_intended_paths() {
 
 /// The edit seeds reach each message's decoder, one per message an edit
 /// travels as: a request, both outcomes of a reply, a notice, and the
-/// operation inside them — a whole one, an environment write, one whose
-/// batches nest past the limit, and a request claiming an operation longer
-/// than any. Each whole seed is also what its encoder writes, so a change to a
+/// operation inside them — a whole one, an environment write, a variant
+/// switch, one whose batches nest past the limit, and a request claiming an
+/// operation longer than any. Each whole seed is also what its encoder writes, so a change to a
 /// layout shows up here as a seed to regenerate rather than as a corpus that
 /// stopped being edits.
 #[test]
@@ -196,7 +196,9 @@ fn named_edit_seeds_reach_their_intended_paths() {
         decode_edit_notice, decode_edit_reply, decode_edit_request, encode_edit_notice,
         encode_edit_reply, encode_edit_request,
     };
-    use crcbl_scene::edit::{EditCommand, EditOp, OpDecodeError, Value, decode_op, encode_op};
+    use crcbl_scene::edit::{
+        EditCommand, EditOp, OpDecodeError, Snapshot, Value, decode_op, encode_op,
+    };
     use crcbl_scene::scn::{EntityName, SceneEntityId};
 
     let delete = encode_op(&EditOp::Apply(EditCommand::Delete {
@@ -271,6 +273,22 @@ fn named_edit_seeds_reach_their_intended_paths() {
     let op = EditOp::Apply(EditCommand::SetEnvironment {
         path: "ambient.0".to_owned(),
         value: Value::Float(0.17),
+    });
+    assert_eq!(decode_op(seed).expect("a whole op"), op);
+    assert_eq!(encode_op(&op).expect("it travels"), seed);
+
+    let seed = include_bytes!("../corpus/decoder/edit-op-variant");
+    let op = EditOp::Apply(EditCommand::SetVariant {
+        entity: SceneEntityId(3),
+        system: "bodies".to_owned(),
+        path: "kind".to_owned(),
+        value: Snapshot::Variant {
+            name: "Platform".into(),
+            fields: vec![
+                Snapshot::Leaf(Value::Float(2.5)),
+                Snapshot::Fields(vec![Snapshot::Leaf(Value::Bool(true))]),
+            ],
+        },
     });
     assert_eq!(decode_op(seed).expect("a whole op"), op);
     assert_eq!(encode_op(&op).expect("it travels"), seed);

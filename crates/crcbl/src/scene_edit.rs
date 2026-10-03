@@ -123,6 +123,10 @@ pub struct Document {
     /// What [`Document::open_recovery`] passed over in the copy's record,
     /// until the caller takes it — see [`Document::take_recovery_notes`].
     recovery_notes: Vec<String>,
+    /// Why [`Document::open_with_history_or_fresh`] read no history from
+    /// beside the scene, until the caller takes it — see
+    /// [`Document::take_history_refusal`]. [`None`] for anything else.
+    history_refusal: Option<HistoryError>,
     /// How many times an entity has entered or left this document — see
     /// [`Document::membership`].
     membership: u64,
@@ -558,6 +562,7 @@ impl Document {
             recovered: None,
             recorded_origin: None,
             recovery_notes: Vec::new(),
+            history_refusal: None,
             membership: 0,
             naming: 0,
             gestures: 0,

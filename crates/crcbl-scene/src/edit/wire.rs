@@ -15,12 +15,15 @@
 //! allocate past its input or recurse without end, and this one is held to it
 //! by the decoder fuzz target (`crates/crcbl-net/fuzz`).
 //!
-//! **A variant switch does not travel yet.** [`EditCommand::SetVariant`]
-//! carries a [`Snapshot`](crcbl_reflect::Snapshot) whose variant names are
-//! `&'static str` — they are the names the type itself answers — and a name
-//! read off the wire has no type to borrow one from until it is resolved
-//! against the component. [`encode_op`] refuses one by name
-//! ([`OpEncodeError::SetVariant`]) and the decoder reserves its kind byte.
+//! **A variant switch travels as the [`Snapshot`] it writes** (decided
+//! 2026-10-04): the variant at each depth by name, as text, and every leaf
+//! under it. A decoded name is owned, since no type is there to borrow one
+//! from, and it is checked only when it is restored — against the component
+//! the command names, which refuses a variant it does not have as it refuses a
+//! leaf's misfit. Nesting is bounded by [`MAX_SNAPSHOT_DEPTH`], as batches are
+//! by [`MAX_BATCH_DEPTH`]. The kind byte was reserved before it was spelled,
+//! and every op an earlier build wrote reads the same, so this did not move
+//! [`WIRE_VERSION`]: an earlier build refuses a switch by its kind byte.
 //!
 //! ```text
 //! op:
@@ -28,7 +31,7 @@
 //!   [1]   0 = apply, then a command; 1 = undo; 2 = redo
 //! command, kind byte first:
 //!   0x01  set property: entity u32, system text, path text, value
-//!   0x02  (a variant switch: reserved, refused)
+//!   0x02  set variant: entity u32, system text, path text, snapshot
 //!   0x03  spawn: entity u32, row count u32, rows (system text, row text),
 //!         name (0 = none, 1 = text)
 //!   0x04  delete: entity u32
@@ -42,10 +45,16 @@
 //! value, tag byte first:
 //!   0 = bool (one byte, 0 or 1), 1 = int i64, 2 = uint u64,
 //!   3 = float (f64 bits), 4 = text
+//! snapshot, tag byte first:
+//!   0 = leaf, then a value
+//!   1 = fields: count u32, then that many snapshots
+//!   2 = variant: name text, count u32, then that many snapshots
 //! text: length u32, then UTF-8; every integer little-endian
 //! ```
 
-use crcbl_reflect::Value;
+use std::borrow::Cow;
+
+use crcbl_reflect::{Snapshot, Value};
 
 use super::{EditCommand, SystemRow};
 use crate::scn::{EntityName, NameError, SceneEntityId};
@@ -63,6 +72,14 @@ pub const WIRE_VERSION: u8 = 1;
 /// a measurement; what it bounds is how far a peer's bytes can recurse the
 /// decoder.
 pub const MAX_BATCH_DEPTH: usize = 8;
+
+/// How deep a variant switch's snapshot may nest inside one op: a struct's or
+/// a list's fields, or a variant's, each one level.
+///
+/// Room, not a measurement, as [`MAX_BATCH_DEPTH`] is: a snapshot is of the
+/// enum a switch names and what is under it, and what this bounds is how far
+/// a peer's bytes can recurse the decoder.
+pub const MAX_SNAPSHOT_DEPTH: usize = 16;
 
 const OP_APPLY: u8 = 0;
 const OP_UNDO: u8 = 1;
@@ -86,12 +103,20 @@ const VALUE_UINT: u8 = 2;
 const VALUE_FLOAT: u8 = 3;
 const VALUE_TEXT: u8 = 4;
 
+const SNAPSHOT_LEAF: u8 = 0;
+const SNAPSHOT_FIELDS: u8 = 1;
+const SNAPSHOT_VARIANT: u8 = 2;
+
 /// The fewest bytes a command can be: a kind byte and a `u32` — a delete's
 /// entity, or an unlisting's empty system name's length.
 const MIN_COMMAND_BYTES: usize = 1 + 4;
 
 /// The fewest bytes a spawn's row can be: two empty texts' lengths.
 const MIN_ROW_BYTES: usize = 4 + 4;
+
+/// The fewest bytes a snapshot can be: a leaf's tag, and a bool's tag and
+/// byte.
+const MIN_SNAPSHOT_BYTES: usize = 1 + 1 + 1;
 
 /// One thing a client asks of a server serving a scene.
 #[derive(Clone, Debug, PartialEq)]
@@ -107,11 +132,6 @@ pub enum EditOp {
 /// Why an [`EditOp`] has no wire form.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum OpEncodeError {
-    /// A variant switch, which does not travel yet: its snapshot's variant
-    /// names are the type's own `&'static str`s, and a name read off the wire
-    /// has no type to borrow one from.
-    #[error("a variant switch does not travel over the wire yet")]
-    SetVariant,
     /// A text or a count past what its `u32` length can say.
     #[error("the {what} is {len} long, past what one op can carry")]
     TooLong {
@@ -123,6 +143,9 @@ pub enum OpEncodeError {
     /// Batches nested past [`MAX_BATCH_DEPTH`].
     #[error("batches nest past the {MAX_BATCH_DEPTH} levels one op may hold")]
     TooDeep,
+    /// A variant switch's snapshot nested past [`MAX_SNAPSHOT_DEPTH`].
+    #[error("a variant switch's value nests past the {MAX_SNAPSHOT_DEPTH} levels one op may hold")]
+    SnapshotTooDeep,
 }
 
 /// Why bytes are not an [`EditOp`].
@@ -150,12 +173,12 @@ pub enum OpDecodeError {
     /// A command kind this version does not have.
     #[error("unknown command kind {0:#04x}")]
     UnknownCommand(u8),
-    /// A variant switch's kind byte, which no op carries yet.
-    #[error("a variant switch does not travel over the wire yet")]
-    SetVariant,
     /// A value tag this version does not have.
     #[error("unknown value tag {0:#04x}")]
     UnknownValue(u8),
+    /// A snapshot tag this version does not have.
+    #[error("unknown snapshot tag {0:#04x}")]
+    UnknownSnapshot(u8),
     /// A flag or a presence byte that is neither 0 nor 1.
     #[error("byte {found:#04x} at offset {offset} is neither 0 nor 1")]
     NotABool {
@@ -188,6 +211,9 @@ pub enum OpDecodeError {
     /// Batches nested past [`MAX_BATCH_DEPTH`].
     #[error("batches nest past the {MAX_BATCH_DEPTH} levels one op may hold")]
     TooDeep,
+    /// A variant switch's snapshot nested past [`MAX_SNAPSHOT_DEPTH`].
+    #[error("a variant switch's value nests past the {MAX_SNAPSHOT_DEPTH} levels one op may hold")]
+    SnapshotTooDeep,
     /// Bytes after the op.
     #[error("{0} bytes after the op")]
     Trailing(usize),
@@ -197,9 +223,10 @@ pub enum OpDecodeError {
 ///
 /// # Errors
 ///
-/// [`OpEncodeError::SetVariant`] for a variant switch anywhere in it,
-/// [`OpEncodeError::TooDeep`] for batches nested past [`MAX_BATCH_DEPTH`], and
-/// [`OpEncodeError::TooLong`] for a text or a count no `u32` can say.
+/// [`OpEncodeError::TooDeep`] for batches nested past [`MAX_BATCH_DEPTH`],
+/// [`OpEncodeError::SnapshotTooDeep`] for a variant switch's snapshot nested
+/// past [`MAX_SNAPSHOT_DEPTH`], and [`OpEncodeError::TooLong`] for a text or a
+/// count no `u32` can say.
 pub fn encode_op(op: &EditOp) -> Result<Vec<u8>, OpEncodeError> {
     let mut out = vec![WIRE_VERSION];
     match op {
@@ -220,8 +247,8 @@ pub fn encode_op(op: &EditOp) -> Result<Vec<u8>, OpEncodeError> {
 /// [`OpDecodeError`] naming what is wrong with them: another version, a kind
 /// or tag this version does not have, a length or count past the bytes there
 /// are, text that is not UTF-8, a name that is not one, batches nested past
-/// [`MAX_BATCH_DEPTH`], or bytes after the op. Never a panic, whatever the
-/// bytes.
+/// [`MAX_BATCH_DEPTH`], a snapshot nested past [`MAX_SNAPSHOT_DEPTH`], or bytes
+/// after the op. Never a panic, whatever the bytes.
 pub fn decode_op(bytes: &[u8]) -> Result<EditOp, OpDecodeError> {
     let mut r = Reader { bytes, offset: 0 };
     let version = r.u8()?;
@@ -258,7 +285,18 @@ fn put_command(
             put_text(out, "path", path)?;
             put_value(out, value)?;
         }
-        EditCommand::SetVariant { .. } => return Err(OpEncodeError::SetVariant),
+        EditCommand::SetVariant {
+            entity,
+            system,
+            path,
+            value,
+        } => {
+            out.push(SET_VARIANT);
+            put_entity(out, *entity);
+            put_text(out, "system", system)?;
+            put_text(out, "path", path)?;
+            put_snapshot(out, value, 0)?;
+        }
         EditCommand::SetEnvironment { path, value } => {
             out.push(SET_ENVIRONMENT);
             put_text(out, "path", path)?;
@@ -380,6 +418,33 @@ fn put_value(out: &mut Vec<u8>, value: &Value) -> Result<(), OpEncodeError> {
     Ok(())
 }
 
+/// `snapshot`, which sits `depth` composites deep in the switch's value.
+fn put_snapshot(out: &mut Vec<u8>, snapshot: &Snapshot, depth: usize) -> Result<(), OpEncodeError> {
+    let children = match snapshot {
+        Snapshot::Leaf(value) => {
+            out.push(SNAPSHOT_LEAF);
+            return put_value(out, value);
+        }
+        Snapshot::Fields(children) => {
+            out.push(SNAPSHOT_FIELDS);
+            children
+        }
+        Snapshot::Variant { name, fields } => {
+            out.push(SNAPSHOT_VARIANT);
+            put_text(out, "variant", name)?;
+            fields
+        }
+    };
+    if depth >= MAX_SNAPSHOT_DEPTH {
+        return Err(OpEncodeError::SnapshotTooDeep);
+    }
+    put_count(out, "field count", children.len())?;
+    for child in children {
+        put_snapshot(out, child, depth + 1)?;
+    }
+    Ok(())
+}
+
 /// A cursor over an op's bytes that checks every read against what is left.
 struct Reader<'a> {
     bytes: &'a [u8],
@@ -472,6 +537,34 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// A snapshot `depth` composites deep in a switch's value. A variant's
+    /// name is taken as it is spelled; the component it is restored into is
+    /// what refuses a name it does not have.
+    fn snapshot(&mut self, depth: usize) -> Result<Snapshot, OpDecodeError> {
+        Ok(match self.u8()? {
+            SNAPSHOT_LEAF => Snapshot::Leaf(self.value()?),
+            SNAPSHOT_FIELDS => Snapshot::Fields(self.snapshots(depth)?),
+            SNAPSHOT_VARIANT => Snapshot::Variant {
+                name: Cow::Owned(self.text()?),
+                fields: self.snapshots(depth)?,
+            },
+            other => return Err(OpDecodeError::UnknownSnapshot(other)),
+        })
+    }
+
+    /// A composite's children, the composite itself `depth` deep.
+    fn snapshots(&mut self, depth: usize) -> Result<Vec<Snapshot>, OpDecodeError> {
+        if depth >= MAX_SNAPSHOT_DEPTH {
+            return Err(OpDecodeError::SnapshotTooDeep);
+        }
+        let count = self.count(MIN_SNAPSHOT_BYTES)?;
+        let mut children = Vec::with_capacity(count);
+        for _ in 0..count {
+            children.push(self.snapshot(depth + 1)?);
+        }
+        Ok(children)
+    }
+
     fn command(&mut self, depth: usize) -> Result<EditCommand, OpDecodeError> {
         Ok(match self.u8()? {
             SET_PROPERTY => EditCommand::SetProperty {
@@ -480,7 +573,12 @@ impl<'a> Reader<'a> {
                 path: self.text()?,
                 value: self.value()?,
             },
-            SET_VARIANT => return Err(OpDecodeError::SetVariant),
+            SET_VARIANT => EditCommand::SetVariant {
+                entity: self.entity()?,
+                system: self.text()?,
+                path: self.text()?,
+                value: self.snapshot(0)?,
+            },
             SPAWN => {
                 let entity = self.entity()?;
                 let count = self.count(MIN_ROW_BYTES)?;

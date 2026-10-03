@@ -278,7 +278,7 @@ fn a_snapshot_holds_the_rows_and_tags_each_enum_by_its_variant() {
     assert_eq!(
         snapshot,
         Snapshot::Variant {
-            name: "Dome",
+            name: "Dome".into(),
             fields: vec![Snapshot::Leaf(Value::Float(6.0))],
         }
     );
@@ -293,7 +293,7 @@ fn a_snapshot_holds_the_rows_and_tags_each_enum_by_its_variant() {
     };
     assert_eq!(*name, "Fixed");
     assert!(
-        matches!(&fields[1], Snapshot::Variant { name: "Platform", fields } if fields.len() == 2)
+        matches!(&fields[1], Snapshot::Variant { name, fields } if name == "Platform" && fields.len() == 2)
     );
 
     let held = snapshot_path(&prop, "mount.shape").expect("an enum");
@@ -313,7 +313,7 @@ fn a_snapshot_holds_the_rows_and_tags_each_enum_by_its_variant() {
 fn a_snapshot_that_does_not_fit_is_refused_and_the_value_put_back() {
     let mut shape = dome();
     let misfit = Snapshot::Variant {
-        name: "Platform",
+        name: "Platform".into(),
         fields: vec![
             Snapshot::Leaf(Value::Float(9.0)),
             Snapshot::Leaf(Value::Text("deep".to_owned())),
@@ -333,7 +333,7 @@ fn a_snapshot_that_does_not_fit_is_refused_and_the_value_put_back() {
         Err(PathError::Set(SetError::Shape { type_name: "Mount" }))
     );
     let too_many = Snapshot::Variant {
-        name: "Dome",
+        name: "Dome".into(),
         fields: vec![
             Snapshot::Leaf(Value::Float(1.0)),
             Snapshot::Leaf(Value::Float(2.0)),

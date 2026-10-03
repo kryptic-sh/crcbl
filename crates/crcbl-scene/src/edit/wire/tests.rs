@@ -91,6 +91,36 @@ fn every_command() -> Vec<EditCommand> {
             path: String::new(),
             value: Value::Text(String::new()),
         },
+        EditCommand::SetVariant {
+            entity: SceneEntityId(4),
+            system: "props".to_owned(),
+            path: "mount".to_owned(),
+            value: Snapshot::Variant {
+                name: "Fixed".into(),
+                fields: vec![
+                    Snapshot::Leaf(Value::Float(-0.0)),
+                    Snapshot::Variant {
+                        name: "Platform".into(),
+                        fields: vec![
+                            Snapshot::Leaf(Value::Text("deck".to_owned())),
+                            Snapshot::Fields(vec![
+                                Snapshot::Leaf(Value::UInt(3)),
+                                Snapshot::Leaf(Value::Bool(false)),
+                            ]),
+                        ],
+                    },
+                ],
+            },
+        },
+        EditCommand::SetVariant {
+            entity: SceneEntityId(0),
+            system: "bodies".to_owned(),
+            path: "kind".to_owned(),
+            value: Snapshot::Variant {
+                name: "Kinematic".into(),
+                fields: Vec::new(),
+            },
+        },
     ];
     let nested = EditCommand::Batch(vec![
         leaves[7].clone(),
@@ -167,25 +197,68 @@ fn an_environment_write_is_spelled_as_the_module_docs_say() {
 }
 
 #[test]
-fn a_variant_switch_is_refused_by_name_both_ways() {
-    let switch = EditCommand::SetVariant {
+fn a_variant_switch_is_spelled_as_the_module_docs_say() {
+    let bytes = encoded(&EditOp::Apply(EditCommand::SetVariant {
+        entity: SceneEntityId(2),
+        system: "b".to_owned(),
+        path: "k".to_owned(),
+        value: Snapshot::Variant {
+            name: "On".into(),
+            fields: vec![
+                Snapshot::Leaf(Value::Bool(true)),
+                Snapshot::Fields(Vec::new()),
+            ],
+        },
+    }));
+    let mut spelled = vec![WIRE_VERSION, OP_APPLY, SET_VARIANT, 2, 0, 0, 0];
+    for text in ["b", "k"] {
+        spelled.extend_from_slice(&1_u32.to_le_bytes());
+        spelled.extend_from_slice(text.as_bytes());
+    }
+    spelled.push(SNAPSHOT_VARIANT);
+    spelled.extend_from_slice(&2_u32.to_le_bytes());
+    spelled.extend_from_slice(b"On");
+    spelled.extend_from_slice(&2_u32.to_le_bytes());
+    spelled.extend_from_slice(&[SNAPSHOT_LEAF, VALUE_BOOL, 1]);
+    spelled.push(SNAPSHOT_FIELDS);
+    spelled.extend_from_slice(&0_u32.to_le_bytes());
+    assert_eq!(bytes, spelled);
+}
+
+/// `depth` lists of fields, each holding the next, around one leaf.
+fn nested_snapshot(depth: usize) -> Snapshot {
+    (0..depth).fold(Snapshot::Leaf(Value::Bool(true)), |inner, _| {
+        Snapshot::Fields(vec![inner])
+    })
+}
+
+/// A switch writing `value` into entity 1's `kind` in `bodies`.
+fn switch_of(value: Snapshot) -> EditOp {
+    EditOp::Apply(EditCommand::SetVariant {
         entity: SceneEntityId(1),
         system: "bodies".to_owned(),
         path: "kind".to_owned(),
-        value: crcbl_reflect::Snapshot::Leaf(Value::Bool(true)),
-    };
+        value,
+    })
+}
+
+#[test]
+fn snapshots_nest_to_the_limit_and_no_further_either_way() {
+    let deepest = switch_of(nested_snapshot(MAX_SNAPSHOT_DEPTH));
+    assert_eq!(decode_op(&encoded(&deepest)), Ok(deepest));
     assert_eq!(
-        encode_op(&EditOp::Apply(switch.clone())),
-        Err(OpEncodeError::SetVariant)
+        encode_op(&switch_of(nested_snapshot(MAX_SNAPSHOT_DEPTH + 1))),
+        Err(OpEncodeError::SnapshotTooDeep)
     );
-    assert_eq!(
-        encode_op(&EditOp::Apply(EditCommand::Batch(vec![switch]))),
-        Err(OpEncodeError::SetVariant)
-    );
-    assert_eq!(
-        decode_op(&[WIRE_VERSION, OP_APPLY, SET_VARIANT]),
-        Err(OpDecodeError::SetVariant)
-    );
+    // Hand-spelled, since the encoder will not: one level past the limit.
+    let mut bytes = encoded(&switch_of(Snapshot::Leaf(Value::Bool(true))));
+    let leaf = bytes.split_off(bytes.len() - MIN_SNAPSHOT_BYTES);
+    for _ in 0..=MAX_SNAPSHOT_DEPTH {
+        bytes.push(SNAPSHOT_FIELDS);
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+    }
+    bytes.extend_from_slice(&leaf);
+    assert_eq!(decode_op(&bytes), Err(OpDecodeError::SnapshotTooDeep));
 }
 
 #[test]
@@ -258,6 +331,15 @@ fn a_decoder_names_what_is_wrong() {
         decode_op(&bad_value),
         Err(OpDecodeError::UnknownValue(0x55))
     );
+    // An unknown snapshot tag.
+    let mut bad_snapshot = encoded(&switch_of(Snapshot::Leaf(Value::Bool(true))));
+    let at = bad_snapshot.len() - MIN_SNAPSHOT_BYTES;
+    bad_snapshot.truncate(at);
+    bad_snapshot.push(0x66);
+    assert_eq!(
+        decode_op(&bad_snapshot),
+        Err(OpDecodeError::UnknownSnapshot(0x66))
+    );
 }
 
 #[test]
@@ -281,6 +363,18 @@ fn a_count_the_bytes_cannot_hold_is_refused_before_it_is_allocated() {
             offset: 7,
             count: 2
         })
+    );
+    // Two fields claimed and room for one: a snapshot is at least a leaf
+    // holding a bool.
+    let mut fields = encoded(&switch_of(Snapshot::Leaf(Value::Bool(true))));
+    fields.truncate(fields.len() - MIN_SNAPSHOT_BYTES);
+    let offset = fields.len() + 1;
+    fields.push(SNAPSHOT_FIELDS);
+    fields.extend_from_slice(&2_u32.to_le_bytes());
+    fields.extend_from_slice(&[SNAPSHOT_LEAF, VALUE_BOOL, 1, 0]);
+    assert_eq!(
+        decode_op(&fields),
+        Err(OpDecodeError::Count { offset, count: 2 })
     );
     // A text longer than the bytes left.
     let mut text = vec![WIRE_VERSION, OP_APPLY, UNLIST_SYSTEM];

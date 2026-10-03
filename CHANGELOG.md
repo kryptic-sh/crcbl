@@ -708,6 +708,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
     sample under a section's rows (`DebugGraph`, `GRAPH_HEIGHT`,
     `GRAPH_BAR_WIDTH`, `MIN_BAR_HEIGHT`), in `DebugStyle::graph`'s colour.
 
+- **The editor shares the CLI's undo history.** Opening a scene directory —
+  `editor <SCENE_DIR>` or Ctrl+O — reads the `.crcbl-history` beside it, so
+  Ctrl+Z walks back what `crcbl scene` did, and Save (Ctrl+S, or the unsaved
+  bar's) writes it back, so `crcbl scene undo` walks back what the editor did: a
+  drag is one entry on disk as it is in the log. A history that is refused —
+  damaged, from another build, or beside a scene changed since — opens the scene
+  with an empty undo log, says why on the status line, and is left alone until
+  the next save replaces it. Save-as into another directory, recovery copies and
+  autosaves write no history; save-as into the scene's own directory is a save
+  and does. A save whose history will not write lands the scene and warns. New
+  for it: `Document::open_with_history_or_fresh` and
+  `Document::take_history_refusal`.
+
 - **`crcbl scene` and `crcbl edit`: a scene directory listed, queried and edited
   from the CLI, with undo across runs.** `crcbl scene list`, `query`,
   `spawn [--set <PATH>=<VALUE>]…`, `set`, `delete`, `move <X> <Y> <Z>`, `undo`
@@ -765,9 +778,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   its notice goes to every client before the author's reply. Refusal codes are
   stable numbers: malformed, unsupported version, not editable (no scene, or the
   scene is playing), unknown entity, unknown system, unknown path, invalid,
-  conflict, nothing to undo, nothing to redo and failed. A variant switch does
-  not travel yet (`OpEncodeError::SetVariant`); an environment write
-  (`EditCommand::SetEnvironment`) does, as command kind `0x0B`. The decoder fuzz
+  conflict, nothing to undo, nothing to redo and failed. A variant switch
+  travels as command kind `0x02` carrying its `Snapshot` — each variant by name,
+  nested at most `MAX_SNAPSHOT_DEPTH` deep — and an environment write
+  (`EditCommand::SetEnvironment`) as command kind `0x0B`. The decoder fuzz
   target reads every new message and the operation inside them, with a named
   seed for each.
 
@@ -969,16 +983,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   from the variant being left. `Snapshot` reads a whole value — leaves, fields,
   and each enum's variant — and writes it back exactly (`Snapshot::of`,
   `Snapshot::restore`, `snapshot_path`, `restore_path`), putting the value back
-  when a snapshot does not fit; `set_variant_path` switches through a path.
-  `crcbl-ui`'s inspector, with `InspectorOptions::variants`, opens an enum's
-  group on a `Variant` row holding a drop-down (`Ui::select`, see the pop-up
-  layer below) that shows the active variant and lists every variant in a
-  pop-up, the active one `:checked`, picked by click or accept; it reports a
-  pick as a `VariantEdit` of the enum's path and its `Snapshot` before and after
-  in `Inspection::switches`, made after the frame's field edits. The editor
-  turns on the drop-down, so a body's `kind` is switched in its inspector
-  section as one undoable `EditCommand::SetVariant`, held to the component's
-  rule like any property write; it saves, reads back and plays as the new kind.
+  when a snapshot does not fit; `set_variant_path` switches through a path. A
+  `Snapshot::Variant`'s name is a `Cow<'static, str>`: borrowed from the type
+  when read off a value, owned when decoded from an edit's bytes. `crcbl-ui`'s
+  inspector, with `InspectorOptions::variants`, opens an enum's group on a
+  `Variant` row holding a drop-down (`Ui::select`, see the pop-up layer below)
+  that shows the active variant and lists every variant in a pop-up, the active
+  one `:checked`, picked by click or accept; it reports a pick as a
+  `VariantEdit` of the enum's path and its `Snapshot` before and after in
+  `Inspection::switches`, made after the frame's field edits. The editor turns
+  on the drop-down, so a body's `kind` is switched in its inspector section as
+  one undoable `EditCommand::SetVariant`, held to the component's rule like any
+  property write; it saves, reads back and plays as the new kind.
 
 - **A `.crpl` replay carries its simulation inputs, and a host re-simulates
   one** (format version 3; see Breaking). The file gains an input section after

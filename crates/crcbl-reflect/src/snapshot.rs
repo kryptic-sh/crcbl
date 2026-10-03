@@ -18,6 +18,8 @@
 //! a variant holding one makes it at its type's `Default`, as any switch does;
 //! a restore within the active variant leaves it alone.
 
+use std::borrow::Cow;
+
 use crate::path::{resolve, resolve_mut};
 use crate::{Kind, PathError, Reflect, SetError, Value};
 
@@ -33,8 +35,11 @@ pub enum Snapshot {
     Fields(Vec<Snapshot>),
     /// An enum: the variant that was active, and its fields in order.
     Variant {
-        /// The variant's name, as [`Reflect::variant`] answered it.
-        name: &'static str,
+        /// The variant's name: borrowed as [`Reflect::variant`] answered it
+        /// for a snapshot read off a value, and owned for one read off bytes
+        /// — an edit's wire form, or the edit history beside a scene — where
+        /// no type is there to borrow it from until it is restored.
+        name: Cow<'static, str>,
         /// Its fields, in [`Reflect::field`] order.
         fields: Vec<Snapshot>,
     },
@@ -55,7 +60,7 @@ impl Snapshot {
             .collect();
         match value.variant() {
             Some(name) => Self::Variant {
-                name,
+                name: Cow::Borrowed(name),
                 fields: children,
             },
             None => Self::Fields(children),

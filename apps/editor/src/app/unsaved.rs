@@ -172,9 +172,9 @@ impl<S: Shell + ?Sized> Editor<S> {
         if self.document.play_state() != PlayState::Editing {
             self.document.stop()?;
         }
-        match self.document.save() {
-            Ok(()) => {
-                let reported = self.report_saved("Saved");
+        match self.save_in_place() {
+            Ok(unwritten) => {
+                let reported = self.report_saved("Saved", unwritten.as_ref());
                 self.proceed(guarded)?;
                 reported
             }

@@ -160,7 +160,8 @@ use crate::scn::{EntityName, SceneEntityId};
 mod wire;
 
 pub use wire::{
-    EditOp, MAX_BATCH_DEPTH, OpDecodeError, OpEncodeError, WIRE_VERSION, decode_op, encode_op,
+    EditOp, MAX_BATCH_DEPTH, MAX_SNAPSHOT_DEPTH, OpDecodeError, OpEncodeError, WIRE_VERSION,
+    decode_op, encode_op,
 };
 
 /// One undoable edit, as a value that could be sent rather than performed.

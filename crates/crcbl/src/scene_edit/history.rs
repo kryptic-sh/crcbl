@@ -24,8 +24,47 @@
 //!   changed is refused rather than half read.
 //! * **Its operations are the wire's** ([`encode_op`] and [`decode_op`]), so
 //!   the history decodes through the decoder the edit server and its fuzz
-//!   target already hold to account, and a variant switch — which the wire
-//!   does not carry yet — is refused by name when it is written.
+//!   target already hold to account. A variant switch is one of them: the wire
+//!   carries its snapshot (`crcbl_scene::edit::wire`'s module docs), so an
+//!   inspector's variant pick undoes from the CLI like any other edit.
+//!
+//! # The GUI editor reads it and writes it (decided 2026-10-04)
+//!
+//! So undo works across the CLI and the editor: `crcbl scene move`, then the
+//! editor's Ctrl+Z, then `crcbl scene redo`.
+//!
+//! * **A refused history opens the scene anyway, with an empty log**
+//!   ([`open_with_history_or_fresh`](Document::open_with_history_or_fresh)),
+//!   and the refusal is handed to the caller to say
+//!   ([`take_history_refusal`](Document::take_history_refusal)) — the scene is
+//!   still the scene, and an editor that would not open it over a sidecar
+//!   would be refusing the one thing it is for. The CLI keeps refusing such a
+//!   history ([`open_with_history`](Document::open_with_history)): an undo
+//!   asked for from a terminal has nothing to stand on without it.
+//! * **The refused file is left alone on open and replaced at the next save**
+//!   into the scene's directory. Never deleted on open: a history written by a
+//!   newer build, or beside a scene a checkout will put back, is still worth
+//!   something until the scene is saved over. Once it is, the file is bound to
+//!   bytes the directory no longer holds, so nothing could replay it, and the
+//!   save writes the history the document holds in its place. The editor says
+//!   both when it opens the scene.
+//! * **Only a save into the document's own directory writes it** — the
+//!   editor's Save, the unsaved bar's, and a save-as onto the directory the
+//!   scene already lives in — never a save-as into another directory, a
+//!   recovery copy or an autosave. Save-as copies the scene into a directory,
+//!   the scene's files and nothing else, which is what towers' committed field
+//!   is made by; the next save there writes the history, the whole of the
+//!   document's log.
+//!   A recovery copy is written by `write_recovery`, which writes the scene
+//!   and its record and nothing else, and read back by `open_recovery`, which
+//!   reads no history: a copy is not where the scene lives, and the history
+//!   beside the scene stays bound to the scene's own bytes, which an autosave
+//!   does not touch.
+//! * **A gesture is one entry on disk** as it is in the log: what is written
+//!   is each entry's `done` and `undo`, and a drag's writes were folded into
+//!   one before it got there. The entries a gesture holds aside
+//!   ([`UndoLog`]'s _Position_) are not written: a save seals the entry on
+//!   top, after which nothing can put them back in the log either.
 //!
 //! # Layout
 //!
@@ -168,11 +207,53 @@ impl Document {
     ) -> Result<Self, EditError> {
         let path = path.into();
         let mut document = Self::open_dir(path.clone(), registry)?;
-        let Some(bytes) = read_bounded(&path.join(HISTORY)).map_err(EditError::History)? else {
-            return Ok(document);
+        document.read_history(&path)?;
+        Ok(document)
+    }
+
+    /// [`open_with_history`](Self::open_with_history), opening the scene
+    /// whatever its history says: a history that is refused leaves the
+    /// document with a fresh log, clean, and the refusal is kept for
+    /// [`take_history_refusal`](Self::take_history_refusal). Nothing is
+    /// replayed from it and the file is not touched — the next
+    /// [`save_with_history`](Self::save_with_history) replaces it. What the
+    /// editor opens a directory with; see the module docs.
+    ///
+    /// # Errors
+    ///
+    /// As [`open_dir`](Self::open_dir): only a scene that will not open.
+    pub fn open_with_history_or_fresh(
+        path: impl Into<PathBuf>,
+        registry: Registry,
+    ) -> Result<Self, EditError> {
+        let path = path.into();
+        let mut document = Self::open_dir(path.clone(), registry)?;
+        match document.read_history(&path) {
+            Err(EditError::History(refusal)) => document.history_refusal = Some(refusal),
+            Err(error) => return Err(error),
+            Ok(()) => {}
+        }
+        Ok(document)
+    }
+
+    /// Hands back, once, why the history beside the scene was not read when
+    /// [`open_with_history_or_fresh`](Self::open_with_history_or_fresh)
+    /// opened it, for the caller to say. [`None`] for a history read back,
+    /// for no history at all, and for a document opened any other way.
+    pub fn take_history_refusal(&mut self) -> Option<HistoryError> {
+        self.history_refusal.take()
+    }
+
+    /// Reads the history beside the scene at `dir` into the log, which then
+    /// stands where the history did, saved there — or leaves the log as it
+    /// was, for no history at all and for one that is refused
+    /// ([`EditError::History`]).
+    fn read_history(&mut self, dir: &Path) -> Result<(), EditError> {
+        let Some(bytes) = read_bounded(&dir.join(HISTORY)).map_err(EditError::History)? else {
+            return Ok(());
         };
         let history = decode(&bytes).map_err(EditError::History)?;
-        if history.scene != scene_digest(&document.files()?) {
+        if history.scene != scene_digest(&self.files()?) {
             return Err(EditError::History(HistoryError::SceneChanged));
         }
         let count = history.entries.len();
@@ -183,8 +264,8 @@ impl Document {
             }),
         )?;
         log.mark_saved();
-        document.log = log;
-        Ok(document)
+        self.log = log;
+        Ok(())
     }
 
     /// [`save`](Self::save), then the document's history written beside the

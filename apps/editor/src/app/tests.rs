@@ -12,6 +12,7 @@ mod clipboard;
 mod context_menu;
 mod exit_criterion;
 mod files;
+mod history;
 mod open;
 mod play;
 mod play_strip;

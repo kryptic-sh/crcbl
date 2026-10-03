@@ -1533,11 +1533,12 @@ not snapshot replication, are how another client follows the scene (the command
 log is the sync point); a host serving no scene refuses edits as not editable.
 `crcbl_editor::serve`'s module docs hold the reasons, and `docs/backlog.md`'s
 _Scene edits over the transport_ entry what the slice leaves — the GUI is not
-yet a client of its own server, a variant switch does not travel, a client
-joining late has no way to fetch the scene, and the author is not in the undo
-log. The dogfood pass's environment write, `EditCommand::SetEnvironment`,
-travels as command kind `0x0B` (a path and a value, as a property's) and the
-server applies it as it applies any command.
+yet a client of its own server, a client joining late has no way to fetch the
+scene, and the author is not in the undo log. A variant switch travels since
+2026-10-04, as command kind `0x02` carrying its snapshot. The dogfood pass's
+environment write, `EditCommand::SetEnvironment`, travels as command kind `0x0B`
+(a path and a value, as a property's) and the server applies it as it applies
+any command.
 
 Everything else below stands unchanged: there is one schedule per `World`, there
 is no snapshot of a `World` (play restores from the scene's text, slice 8), the
@@ -1586,13 +1587,21 @@ the scene's bytes, so an undo in one run walks back an edit another made.
 what is deferred.
 
 - **The CLI's exit criterion** — towers' map modified from the CLI and opening
-  in the GUI editor with its undo history intact — **is met for the CLI and not
-  for the GUI.** `crates/crcbl-cli/tests/scene.rs` moves a plot of a copy of
+  in the GUI editor with its undo history intact — **is met, headlessly
+  (2026-10-04).** `crates/crcbl-cli/tests/scene.rs` moves a plot of a copy of
   towers' field through the binary, holds the files to what the editor's
   document writes for the same move, undoes it in a second run and gets the
-  committed bytes back, and redoes it in a third. The field then opens in the
-  editor as any scene does, but with an empty undo log: the editor does not read
-  the CLI's history yet.
+  committed bytes back, and redoes it in a third. The GUI half is
+  `apps/editor/src/app/tests/history.rs`: a plot moved through the calls the CLI
+  makes, the field opened in the editor with that move as one entry and the
+  document clean, Ctrl+Z putting the committed bytes back, Ctrl+S writing the
+  history, and the CLI's next run redoing the move from it. The editor reads and
+  writes `.crcbl-history` as the CLI does; a history it refuses is said and left
+  until the next save replaces it, and save-as, recovery copies and autosaves
+  write none — `crcbl::scene_edit::history`'s module docs hold the decisions. A
+  variant switch is in the history too: the wire carries it now. The CLI's half
+  runs the binary; the GUI's cannot (the CLI depends on the editor), so it
+  drives the shared `Document` calls instead.
 - **What it does not cover**: `crcbl edit --serve`, stdin batches,
   `scene paste -`, and the verbs beyond the eight; a scene of a game this build
   does not register; two runs at once on one scene.

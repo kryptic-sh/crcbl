@@ -302,7 +302,7 @@ fn switch(
         Ok(()) => snapshot_path(component, &picked.path).expect("the enum is still there"),
         Err(_) if inspector => return Outcome::Refused,
         Err(_) => Snapshot::Variant {
-            name: NO_SUCH_VARIANT,
+            name: NO_SUCH_VARIANT.into(),
             fields: Vec::new(),
         },
     };

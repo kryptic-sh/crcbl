@@ -835,14 +835,14 @@ fn a_pick_in_the_variant_drop_down_reports_one_switch_with_the_enum_before_and_a
     assert_eq!(
         switch.before,
         Snapshot::Variant {
-            name: "Dome",
+            name: "Dome".into(),
             fields: vec![Snapshot::Leaf(Value::Float(6.0))],
         }
     );
     assert_eq!(
         switch.after,
         Snapshot::Variant {
-            name: "Platform",
+            name: "Platform".into(),
             fields: vec![
                 Snapshot::Leaf(Value::Float(0.0)),
                 Snapshot::Leaf(Value::Float(0.0)),

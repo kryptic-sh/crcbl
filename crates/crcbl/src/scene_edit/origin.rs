@@ -148,6 +148,7 @@ impl Document {
         self.log = UndoLog::new();
         self.log.mark_saved();
         self.recovered = None;
+        self.history_refusal = None;
         self.recorded_origin = None;
         self.origin = None;
         self.owned.clear();
@@ -164,8 +165,11 @@ impl Document {
     /// Returns whether the asset source moved with it, which a caller listing
     /// or drawing the assets reads again.
     ///
-    /// Into the document's own origin it is [`save`](Self::save), removals
-    /// and all, and moves nothing.
+    /// Into the document's own origin it is
+    /// [`save_with_history`](Self::save_with_history), removals and all, and
+    /// moves nothing: a save into the directory the scene lives in, which
+    /// keeps the history there bound to it. Into any other directory it
+    /// writes no history — see `scene_edit::history`'s module docs.
     ///
     /// # Errors
     ///
@@ -174,6 +178,9 @@ impl Document {
     /// holds a file the scene would write, and [`EditError::Playing`] in play
     /// mode. **The origin moves only when every file landed**, so a refused
     /// or failed save-as leaves the document where it was, still dirty.
+    /// Into the document's own origin, as
+    /// [`save_with_history`](Self::save_with_history): [`EditError::History`]
+    /// once the scene has landed.
     pub fn save_as(&mut self, dir: impl Into<PathBuf>) -> Result<bool, EditError> {
         self.refuse_in_play()?;
         let dir = dir.into();
@@ -182,7 +189,7 @@ impl Document {
             .as_deref()
             .is_some_and(|origin| ownership::same_dir(origin, &dir))
         {
-            self.save()?;
+            self.save_with_history()?;
             return Ok(false);
         }
         let was = self.name_after(&dir);

@@ -12466,15 +12466,66 @@ towers' field and a `Document` given the same edit, byte for byte.
   `crates/crcbl-cli/tests/ scene.rs`, not in `tests/run-cli-e2e.sh`: that script
   exists to build a scaffolded project, and these build nothing.
 
+**Built 2026-10-04: the GUI half — the editor reads and writes the history.**
+`editor <SCENE_DIR>` and Ctrl+O open a directory with
+`Document::open_with_history_or_fresh`, and Save (Ctrl+S, the unsaved bar's
+Save) writes with `save_with_history`, so undo runs across the CLI and the
+editor in both directions. `apps/editor/src/app/tests/history.rs` holds it
+through the loop on a copy of towers' field;
+`crates/crcbl/src/scene_edit/history_tests.rs` holds the document's rules. The
+module docs of `crcbl::scene_edit::history` carry the reasons.
+
+**Decided, for the long term:**
+
+- **The editor opens a scene whatever its history says.** A refused history
+  (damaged, another layout version, beside a scene changed since) opens the
+  scene with an empty log, clean, and the status line names the file and the
+  refusal (`Document::take_history_refusal`, the app's `history_refusal`). The
+  CLI keeps refusing such a history, exit 3: an undo asked for from a terminal
+  has nothing to stand on without it.
+- **A refused history is left alone on open and replaced at the next save** into
+  the scene's directory, and the status line says so when it opens. Never
+  deleted on open: a newer build's history, or one beside a scene a checkout
+  will put back, is still worth something until the scene is saved over, and
+  after that nothing could replay it.
+- **Only a save into the document's own directory writes the history**: Save,
+  the unsaved bar's Save, and a save-as typed onto the directory the scene
+  already lives in (which is a save — `Document::save_as`'s same-directory
+  branch now calls `save_with_history`). A save-as into another directory writes
+  none: it copies the scene's files and nothing else, which is how towers'
+  committed field is made and what `exit_criterion` and the dogfood test compare
+  byte for byte. The next Save there writes the whole of the document's log,
+  which is the undo the editor holds in process anyway. The directory saved from
+  keeps its own history, still bound to its untouched bytes.
+- **Recovery copies and autosave write no history and read none**:
+  `write_recovery` writes the scene and its record, and `open_recovery` reads no
+  history (a copy is not where the scene lives). The history beside the scene
+  stays bound to the scene's bytes, which an autosave does not touch.
+- **A save whose history will not write still lands the scene**, and the status
+  line warns that the history was not written; the file left is bound to the old
+  bytes, so the next open refuses it rather than replays it.
+- **A gesture is one entry on disk**: the log's folded entry is what is written.
+  The entries a gesture holds aside are not written; a save seals the entry on
+  top, after which the log cannot put them back either, so the history never
+  holds less than the log can still reach.
+- **Variant switches travel and are in the history**: `crcbl_scene::edit::wire`
+  spells `EditCommand::SetVariant` as command kind `0x02` with its `Snapshot`
+  (leaf, fields, or a variant by name), nesting bounded by `MAX_SNAPSHOT_DEPTH`,
+  and `Snapshot::Variant`'s name became a `Cow<'static, str>` so a decoded one
+  can be owned. Chosen over truncating the history at the first switch, which
+  would have left an inspector's variant pick un-undoable from the CLI. No wire
+  version bump: the kind byte was reserved and refused, so every op an earlier
+  build wrote reads the same and an earlier build refuses a switch by its kind.
+  The fuzz corpus has a seed for it (`edit-op-variant`).
+
+**Considered and declined**: the editor refusing to open a scene over a refused
+history (it would refuse the scene over a sidecar); deleting or renaming a
+refused history on open (loses a newer build's file for nothing); a save-as
+writing the history into the new directory (the copy would stop being the
+scene's files alone, and the next Save writes it anyway).
+
 **Deferred, each with what it takes:**
 
-- **The GUI half of the exit criterion.** The CLI's runs keep one history
-  between them, but the GUI editor does not read `.crcbl-history`, so a scene
-  edited from the CLI opens in the editor correctly and with an empty undo log.
-  It would take the editor opening a directory with
-  `Document::open_with_history` and saving with `save_with_history` — and a
-  decision about the recovery copy and autosave, which save elsewhere and would
-  leave the history bound to bytes the scene no longer has.
 - **`crcbl edit --serve [--listen <addr>]`**: refused by name. `EditServer` is
   in the umbrella now, so the verb is a loop around it over a transport; what it
   waits on is _Scene edits over the transport_'s list below — the GUI as a
@@ -12483,8 +12534,7 @@ towers' field and a `Document` given the same edit, byte for byte.
   **`crcbl scene paste -`** (a clipping from the editor): `Document::paste`
   exists, so paste is a verb reading stdin; neither was asked for this slice.
 - **Verbs the document has and the CLI does not**: rename, attach, detach, list
-  and unlist a system, duplicate, a variant switch (a variant cannot be in the
-  history either: the wire refuses a `SetVariant`), and the environment. Each is
+  and unlist a system, duplicate, a variant switch, and the environment. Each is
   a verb over an existing `Document` method.
 - **A game's own vocabulary**: a project made by `crcbl new` registers
   components this CLI does not know, so its scenes are refused by name. It would
@@ -12499,12 +12549,25 @@ towers' field and a `Document` given the same edit, byte for byte.
   reads, applies and saves, so the later save can drop the earlier run's edit,
   or leave a history bound to the other run's bytes, which the next run then
   refuses. Neither replays a stale inverse — the binding sees to that — but an
-  edit can be lost. A lock file beside the history would serialise them.
+  edit can be lost. A lock file beside the history would serialise them. **The
+  editor is a third party to that**: it reads the scene and its history once,
+  when it opens them, and does not see a CLI run made while it is open — its
+  next Save writes its own scene and history over the CLI's edit. Nothing stale
+  is replayed (the CLI's run after that reads the editor's history, bound to the
+  editor's bytes), but the CLI's edit is lost. It would take the editor watching
+  the directory (per-chunk hot reload, under _Asset hot reload_) or the same
+  lock.
 
 **Coverage gaps**: run on Windows only in this slice; the verbs were never run
 against breakout's or puppet's scenes, only towers' field and the umbrella's
 one-block test scene; `query` on a list-valued field was held by the umbrella's
-test of `field_texts` and never through the binary.
+test of `field_texts` and never through the binary. The GUI half: run on Windows
+only, headless; its CLI side is the `Document` calls `crcbl scene` makes, not
+the binary (the CLI depends on the editor, so the editor's tests cannot run it);
+the unsaved bar's Save writes the history through the same `save_in_place` as
+Ctrl+S but has no test of its own; a variant switch through the history is held
+at the document level (`variant_tests`), not through the inspector's drop-down
+and a CLI run.
 
 ### Scene edits over the transport: the server slice and what it leaves (2026-10-04)
 
@@ -12558,10 +12621,6 @@ served scene's saved text with a `Document` given the same commands.
   notices to the view's copy. Gestures would need a gesture id on the wire:
   today each operation is its own history entry, so a drag sent frame by frame
   would be one undo per frame.
-- **A variant switch does not travel**: `Snapshot::Variant`'s name is a
-  `&'static str`, so a decoded snapshot has no name to hold until it is resolved
-  against the component. Either `Snapshot` holds an owned name, or the decoder
-  resolves names against the registry. `encode_op` refuses one by name.
 - **A client joining late, or resuming after a lost link, cannot fetch the
   scene**: notices carry changes, not state, and one missed shows only as a
   revision gap. Wants a "scene files at revision N" message.

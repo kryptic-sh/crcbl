@@ -10,14 +10,21 @@
 //!
 //! Ctrl+O or the toolbar's Open put the path line up for a scene directory;
 //! what is committed is checked ([`open_target`]) and read
-//! ([`Document::open_dir`], with this build's vocabulary) **before** the bar
-//! asks, so a directory that is not a scene is refused by name, the line
-//! opening again holding what was typed, and nothing of the scene being
-//! edited is at stake. The scene read is then put in place whole: its asset
+//! ([`Document::open_with_history_or_fresh`], with this build's vocabulary)
+//! **before** the bar asks, so a directory that is not a scene is refused by
+//! name, the line opening again holding what was typed, and nothing of the
+//! scene being edited is at stake. The scene read is then put in place whole: its asset
 //! root is [`crate::document::asset_root`] of it unless `--assets` named one,
 //! the panels are built over it afresh — the browser lists its assets, the
 //! selection is empty — the history is its own, and the renderer is rebuilt
 //! from its assets on the next draw. Refused in play mode, as a new scene is.
+//!
+//! **The history is the one beside the scene**, `.crcbl-history`, which the
+//! `crcbl scene` CLI keeps: Ctrl+Z walks back an edit made from a terminal,
+//! and Save writes the history back, so the CLI's `undo` walks back the
+//! editor's. A history that is refused is said on the status line, opens as
+//! an empty log, and is replaced at the next save — see
+//! `crcbl::scene_edit::history`'s module docs for why each.
 
 use crcbl::assets::DirSource;
 use crcbl::shell::Shell;
@@ -118,7 +125,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             if self.document.play_state() != PlayState::Editing {
                 return Err(EditError::Playing);
             }
-            Document::open_dir(dir, crate::scene::vocabulary())
+            Document::open_with_history_or_fresh(dir, crate::scene::vocabulary())
         });
         let outcome = match opened {
             Ok(document) => self.guard(Guarded::Open(Box::new(document))),
@@ -162,7 +169,8 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.frame_scene();
         // The panels are new, so the offer is put back up if it stands.
         self.show_offer();
-        let notes = self.document.take_recovery_notes();
+        let mut notes = self.document.take_recovery_notes();
+        notes.extend(super::history_refusal(&mut self.document));
         let mut opened = match (self.document.origin(), self.document.recorded_origin()) {
             (Some(dir), _) => format!("Opened {}", dir.display()),
             // Only a recovery copy is opened with no directory.
@@ -203,11 +211,14 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// [`EditorError`] only when the device refused the rebuilt renderer; a
     /// refused save is on the status line.
     pub(super) fn save_as(&mut self, text: &str) -> Result<(), EditorError> {
-        let saved = save_target(text).and_then(|dir| {
-            let moved = self.document.save_as(&dir)?;
-            Ok((dir, moved))
+        let saved = save_target(text).and_then(|dir| match self.document.save_as(&dir) {
+            Ok(moved) => Ok((dir, moved, None)),
+            // Only a save-as into the scene's own directory writes the
+            // history, and that moves nothing; the scene itself landed.
+            Err(EditError::History(unwritten)) => Ok((dir, false, Some(unwritten))),
+            Err(error) => Err(error),
         });
-        let (dir, moved) = match saved {
+        let (dir, moved, unwritten) = match saved {
             Ok(saved) => saved,
             Err(error) => {
                 crcbl::log::warn!("editor: {error}");
@@ -232,7 +243,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             self.rebuild(&wanted)?;
         }
         let saved = format!("Saved as {}", dir.display());
-        if let Err(error) = self.report_saved(&saved) {
+        if let Err(error) = self.report_saved(&saved, unwritten.as_ref()) {
             crcbl::log::warn!("editor: {error}");
             self.panels.set_status(error.to_string(), Tone::Warning);
         }
