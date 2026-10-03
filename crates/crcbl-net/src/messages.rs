@@ -6,6 +6,24 @@ use crate::types::SectorId;
 
 // ── Typed protocol messages ───────────────────────────────────────────────────
 
+/// The most client input frames one server tick will hold.
+///
+/// **How many arrive is the peer's choice, not ours.** A client sends one
+/// frame per tick its own clock consumed, and
+/// [`DEFAULT_MAX_CATCH_UP_TICKS`](crcbl_core::time::DEFAULT_MAX_CATCH_UP_TICKS)
+/// is the most a well-behaved one hands itself for a single frame — so twice
+/// that leaves room for a client running ahead of the server's rate and still
+/// bounds what a peer that simply keeps sending can make the server allocate.
+/// Whatever a tick does not hold is refused, and the server's dropped-input
+/// count is what says so.
+///
+/// Public because it is a statement to the other end of the wire: a client
+/// that sends more input than this for one server tick is sending some of it
+/// into a counter. A replay's recorded frames are held to it too, since they
+/// are what one tick held.
+pub const MAX_CLIENT_INPUTS_PER_TICK: usize =
+    2 * crcbl_core::time::DEFAULT_MAX_CATCH_UP_TICKS as usize;
+
 /// Messages sent from the client to the server.
 #[derive(Debug)]
 pub enum ClientToServer {

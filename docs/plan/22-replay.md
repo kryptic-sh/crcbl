@@ -12,13 +12,14 @@ the flat `.crpl` container (`crcbl_store::replay`), `FileTransport` playback,
 report. `ReplayWriter` and `CrashRing` have no caller outside `crcbl-store` and
 `crcbl-cli`'s own tests, so no server records a session and no panic hook dumps
 a ring. Since 2026-10-03 a file also carries an input section — the applied
-`Flags::SIM` sets and the recorder's state hashes — and `Host::resimulate`
-re-runs a fresh host from it (_What the input section carries_, below).
-Keyframes, the seek index, deltas, side tracks, the record toggle,
-`verify`/`dump`/`diff`/`clip`, the scrub debugger, the replay browser and the
-spectator relay are all unbuilt; `docs/backlog.md` tracks them under _Replay:
-the container is flat, and every `crcbl replay` subverb is owed_ and _Replay:
-nothing records, and the viewing and spectating consumers are unbuilt_.
+`Flags::SIM` sets, the recorder's state hashes, and the peers' roster and input
+frames — and `Host::resimulate` re-runs a fresh host from it (_What the input
+section carries_, below). Keyframes, the seek index, deltas, side tracks, the
+record toggle, `verify`/`dump`/`diff`/`clip`, the scrub debugger, the replay
+browser and the spectator relay are all unbuilt; `docs/backlog.md` tracks them
+under _Replay: the container is flat, and every `crcbl replay` subverb is owed_
+and _Replay: nothing records, and the viewing and spectating consumers are
+unbuilt_.
 
 ## Core insight: record the wire
 
@@ -41,7 +42,9 @@ flatter.** `crates/crcbl-store/src/replay.rs` owns the format:
 magic  b"CRBLREPL", format_version u16, tick_count u64, tick_rate u32, start_tick u64
 entries  TickEntry[tick_count]
 TickEntry  tick_id u64, msg_len u32, msg_data — one encoded ServerToClient message
-input section (version 2 on)  SIM sets (tick, name, value text), state hashes
+input section (version 2 on)  SIM sets (tick, name, value text), state hashes,
+                              and from version 3 the peer track (per tick: roster
+                              changes, each peer's applied input frames)
 ```
 
 So: no keyframe index, no seek table, one side-track, and **no deltas at all** —
@@ -49,9 +52,8 @@ each entry carries the full server message for its tick. The header comment says
 delta compression against the previous tick is what a future format bump may
 add, which is the same versioning seam the sketch above assumes, and the one the
 input section used. The rest of this section's container — the index, the marker
-and POV tracks, the peers' input frames — is still the plan and nothing reads or
-writes it. Seeking, POV tracks and everything built on them therefore describe
-work not yet started.
+and POV tracks — is still the plan and nothing reads or writes it. Seeking, POV
+tracks and everything built on them therefore describe work not yet started.
 
 - **Keyframes** = full snapshots (the topic-14 save container, reused) every N
   ticks (~5 s): seeking = nearest keyframe + roll deltas forward.
@@ -90,29 +92,38 @@ work not yet started.
 `crates/crcbl-cli/src/args.rs` carries a file path and `--json`, and
 `crcbl replay <FILE>` reads the container and reports its metadata. `verify`,
 `dump`, `diff` and `clip` do not exist as words the parser knows — it rejects
-any option it is not given — and each needs machinery this format does not carry
-yet: `verify` needs the peers' input frames and a game's host to re-simulate on,
-`clip` needs the keyframe index. Those two bullets are the plan, not a
-description.
+any option it is not given — and each needs machinery that does not exist yet:
+`verify` needs a game's host to re-simulate on, `clip` needs the keyframe index.
+Those two bullets are the plan, not a description.
 
 ### What the input section carries (decided 2026-10-03, long term)
 
 A `.crpl` file carries what a re-simulation needs in an **input section** after
 its entries, versioned so an older file still reads: format version 2 added it,
-and a version 1 file reads as one with no sets and no hashes. It holds the
-`Flags::SIM` sets the host applied — tick, name, and the value as the console
-prints it, which is what `Registry::sim_set` parses back to the same value — in
-the order applied, and the recorder's state hashes (`sim_hash::hash_world` at a
-tick's end), at most one a tick. The layout and its rules are in
-`crcbl_store::replay`'s module docs; both directions refuse a section that
-breaks one, by name, and the reader is fuzzed. `Host::resimulate` checks every
-set against the host's registry before a tick runs, schedules them through
-`Host::replay_sim_record`, runs to the last hash and answers the first tick
-whose hash it does not reproduce — so a recorded hash per tick locates a
-divergence to its tick. **Peers' input frames are not in it yet**: a module that
-reads them does not re-simulate, and `docs/backlog.md` has what recording them
-takes. Re-simulation is a dev-time check on top of playback, never a requirement
-of it: a viewer still plays the entries.
+version 3 its peer track, and a version 1 file reads as one with no sets and no
+hashes, a version 2 file as one with no peer track. It holds the `Flags::SIM`
+sets the host applied — tick, name, and the value as the console prints it,
+which is what `Registry::sim_set` parses back to the same value — in the order
+applied, the recorder's state hashes (`sim_hash::hash_world` at a tick's end),
+at most one a tick, and **what the module was handed of its peers**: per tick,
+the roster's changes in the order the host applied them (joined, lost, resumed,
+left, ended by the game) and each peer's input frames as the module read them,
+after the host's checks and per-tick cap. The roster is recorded because
+`PeerInputs` lists every admitted peer, a lost one with nothing, so a module
+reacts to who is in the session as well as to what they sent. The layout and its
+rules are in `crcbl_store::replay`'s module docs; both directions refuse a
+section that breaks one, by name, and the reader is fuzzed. **One step for live
+and replayed ticks**: a live host hands the module its peers' frames through
+`Host::step`, which also keeps the record (`Host::record_peer_inputs`), and a
+re-simulation hands the recorded ones through the same step, so the two paths
+cannot drift. `Host::resimulate` checks every set against the host's registry
+and every roster change against the ones before it before a tick runs, then runs
+to the last hash and answers the first tick whose hash it does not reproduce —
+so a recorded hash per tick locates a divergence to its tick. Towers' two-player
+sessions reproduce from their file tick for tick. What a re-simulation still
+cannot see — a game acting on `Host::events` outside its module — and who
+records nothing yet are in `docs/backlog.md`. Re-simulation is a dev-time check
+on top of playback, never a requirement of it: a viewer still plays the entries.
 
 ### 2. Gameplay replays
 

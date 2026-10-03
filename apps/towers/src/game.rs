@@ -64,6 +64,7 @@
 //! file decides which query to ask and what an answer means.
 
 use std::cell::Cell;
+use std::hash::Hasher;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -506,6 +507,81 @@ impl Stage {
         self.refusals = refusals;
     }
 
+    /// Feeds the stage into `hasher`, value by value: every counter, the clock,
+    /// and every tower, creep, bolt and burst in its list's order — which is
+    /// the order the players' commands and the systems put them there, so a
+    /// run handed its commands in another order hashes otherwise. The physics
+    /// world is left out: every body in it is a creep's sphere, hashed here as
+    /// the creep's centre, or the field's fixed ground and exit. What
+    /// [`FieldReplica`] gives the server's state hash.
+    fn hash_state(&self, hasher: &mut dyn Hasher) {
+        let float = |hasher: &mut dyn Hasher, value: f64| hasher.write_u64(value.to_bits());
+        for count in [
+            self.ticks,
+            self.runs,
+            self.kills,
+            self.leaks,
+            self.shots,
+            self.built,
+            self.upgrades,
+            self.refused,
+        ]
+        .into_iter()
+        .chain(self.built_by_kind)
+        {
+            hasher.write_u64(count);
+        }
+        hasher.write_u32(self.gold);
+        hasher.write_u32(self.lives);
+        hasher.write_usize(self.outcome.label().len());
+        hasher.write(self.outcome.label().as_bytes());
+        float(hasher, self.elapsed);
+        float(hasher, self.ended_at);
+        hasher.write_usize(self.waves.started());
+        match self.waves.next_in(self.elapsed) {
+            Some(seconds) => {
+                hasher.write_u8(1);
+                float(hasher, seconds);
+            }
+            None => hasher.write_u8(0),
+        }
+
+        hasher.write_usize(self.towers.len());
+        for tower in &self.towers {
+            hasher.write_usize(tower.plot());
+            hasher.write_usize(tower.kind().index());
+            hasher.write_usize(tower.tier().index());
+        }
+        hasher.write_usize(self.creeps.len());
+        for creep in &self.creeps {
+            let view = creep.view();
+            hasher.write_usize(view.kind.index());
+            for axis in view.centre.to_array() {
+                float(hasher, axis);
+            }
+            hasher.write_u32(view.facing.to_bits());
+            hasher.write_u8(u8::from(view.hurt));
+            hasher.write_u8(u8::from(view.slowed));
+        }
+        hasher.write_usize(self.bolts.len());
+        for bolt in &self.bolts {
+            for axis in bolt.at().to_array() {
+                float(hasher, axis);
+            }
+        }
+        hasher.write_usize(self.bursts.len());
+        for burst in &self.bursts {
+            for value in burst
+                .at
+                .to_array()
+                .into_iter()
+                .chain([burst.radius_m, burst.raised_at])
+            {
+                float(hasher, value);
+            }
+        }
+    }
+
     /// Counts a refused command and records it against `sender`, to be told.
     fn refuse(&mut self, sender: Sender, refusal: Refusal) {
         self.refused += 1;
@@ -875,6 +951,9 @@ fn run_team_tick(stage: &mut Stage, intents: &[(Sender, Intent)], dt: f64) {
 
 pub(crate) mod play;
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod resim_tests;
+
 /// The stage, as the server hosts it.
 ///
 /// `register` is empty for the same reason `apps/breach`'s is: the whole
@@ -952,6 +1031,18 @@ impl SystemTrait for FieldReplica {
     fn sweep(&mut self, _dead: &[Entity]) {}
 
     fn debug_draw(&mut self, _ctx: &DebugCtx) {}
+
+    /// The stage, which this system is the server world's only view of: a
+    /// re-simulated run (`crcbl::server::Host::resimulate`) compares its state
+    /// hash against the recorded one, and without the stage in it every run
+    /// on one tick would hash alike.
+    fn hash_state(&self, hasher: &mut dyn Hasher) {
+        lock(&self.shared).hash_state(hasher);
+    }
+
+    fn contributes_to_hash(&self) -> bool {
+        true
+    }
 
     fn replicate(&self, out: &mut Vec<u8>) -> bool {
         let (render, stats) = {

@@ -1,10 +1,14 @@
 //! The input section of a `.crpl` file, from format version 2: its records,
-//! its codec and the rules both directions hold. The layout is in the parent
-//! module's docs.
+//! its codec and the rules both directions hold — the peer track, from
+//! version 3, in `peers`. The layout is in the parent module's docs.
 
 use crcbl_core::TickId;
 use crcbl_net::ConsoleSet;
 use crcbl_net::command::{MAX_CONSOLE_NAME_BYTES, MAX_CONSOLE_VALUE_BYTES};
+
+mod peers;
+
+pub use peers::{RecordedPeerFrames, RecordedPeerTick, RecordedRosterChange, RosterChangeKind};
 
 /// The smallest `SimSetEntry`: a tick and two empty texts.
 const MIN_SIM_SET_BYTES: usize = 8 + 2 + 2;
@@ -94,20 +98,78 @@ pub enum InputSectionError {
         /// Its own tick.
         tick: TickId,
     },
+    /// A roster change whose kind byte no build writes.
+    #[error("a recorded roster change has kind {0}, which no build writes")]
+    UnknownRosterChange(u8),
+    /// A peer tick for a tick not after the one before it.
+    #[error(
+        "a peer tick for tick {} follows one for tick {}, and peer ticks are one a tick, in \
+         tick order",
+        tick.get(),
+        previous.get()
+    )]
+    PeerTickOutOfOrder {
+        /// The tick of the peer tick before it.
+        previous: TickId,
+        /// Its own tick.
+        tick: TickId,
+    },
+    /// Two frame entries for one peer in one tick.
+    #[error("tick {} records peer {peer}'s frames twice", tick.get())]
+    PeerFramesTwice {
+        /// The tick.
+        tick: TickId,
+        /// The peer.
+        peer: u64,
+    },
+    /// More frames for one peer in one tick than a host's tick holds.
+    #[error(
+        "tick {} records {count} frames for peer {peer}, past the {limit} a tick holds",
+        tick.get()
+    )]
+    TooManyFrames {
+        /// The tick.
+        tick: TickId,
+        /// The peer.
+        peer: u64,
+        /// How many frames it records.
+        count: usize,
+        /// The most a tick holds.
+        limit: usize,
+    },
+    /// A frame longer than the wire carries one.
+    #[error(
+        "tick {} records a frame of {len} bytes for peer {peer}, past the {limit} the wire \
+         carries",
+        tick.get()
+    )]
+    FrameTooLong {
+        /// The tick.
+        tick: TickId,
+        /// The peer.
+        peer: u64,
+        /// Its length, in bytes.
+        len: usize,
+        /// The most the wire carries, in bytes.
+        limit: usize,
+    },
     /// Bytes after the section, which ends the file.
     #[error("{0} bytes follow the replay input section")]
     TrailingBytes(usize),
 }
 
-/// A replay's input section: the sets, then the state hashes.
+/// A replay's input section: the sets, the state hashes, then the peer
+/// track.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct InputSection {
     pub(super) sim_sets: Vec<RecordedSimSet>,
     pub(super) state_hashes: Vec<RecordedStateHash>,
+    pub(super) peer_ticks: Vec<RecordedPeerTick>,
 }
 
 impl InputSection {
-    /// Append the section to `buf`, refusing what the reader would refuse.
+    /// Append the section to `buf`, peer track included, refusing what the
+    /// reader would refuse.
     pub(super) fn encode(&self, buf: &mut Vec<u8>) -> Result<(), InputSectionError> {
         self.validate()?;
         buf.extend_from_slice(&count(self.sim_sets.len(), "sets")?.to_le_bytes());
@@ -131,11 +193,13 @@ impl InputSection {
             buf.extend_from_slice(&recorded.tick.get().to_le_bytes());
             buf.extend_from_slice(&recorded.hash.to_le_bytes());
         }
-        Ok(())
+        peers::encode(&self.peer_ticks, buf)
     }
 
-    /// Read the section from `bytes`, which must be the rest of the file.
-    pub(super) fn decode(bytes: &[u8]) -> Result<Self, InputSectionError> {
+    /// Read the section from `bytes`, which must be the rest of the file —
+    /// with its peer track when `has_peer_track`, which a version 2 file's
+    /// section ends without.
+    pub(super) fn decode(bytes: &[u8], has_peer_track: bool) -> Result<Self, InputSectionError> {
         let mut reader = Reader { bytes };
 
         let set_count = reader.count("sets", MIN_SIM_SET_BYTES)?;
@@ -158,19 +222,27 @@ impl InputSection {
             state_hashes.push(RecordedStateHash { tick, hash });
         }
 
+        let peer_ticks = if has_peer_track {
+            peers::decode(&mut reader)?
+        } else {
+            Vec::new()
+        };
+
         if !reader.bytes.is_empty() {
             return Err(InputSectionError::TrailingBytes(reader.bytes.len()));
         }
         let section = Self {
             sim_sets,
             state_hashes,
+            peer_ticks,
         };
         section.validate()?;
         Ok(section)
     }
 
     /// The rules both directions hold: texts within a console set's limits,
-    /// sets in tick order, hashes one a tick in tick order.
+    /// sets in tick order, hashes one a tick in tick order, and the peer
+    /// track's own.
     fn validate(&self) -> Result<(), InputSectionError> {
         for recorded in &self.sim_sets {
             check_len("name", &recorded.set.name, MAX_CONSOLE_NAME_BYTES)?;
@@ -192,7 +264,7 @@ impl InputSection {
                 });
             }
         }
-        Ok(())
+        peers::validate(&self.peer_ticks)
     }
 }
 
@@ -289,6 +361,7 @@ mod tests {
                 set(61, "sv_spin_rate", "0.1"),
             ],
             state_hashes: vec![hash(1, 0xA1), hash(2, 0xB2), hash(90, u64::MAX)],
+            peer_ticks: Vec::new(),
         }
     }
 
@@ -298,20 +371,55 @@ mod tests {
         buf
     }
 
+    /// `section` as a version 2 file holds it: without the peer track, which
+    /// for a section with no peer ticks is its last four bytes, a zero count.
+    fn encoded_v2(section: &InputSection) -> Vec<u8> {
+        assert!(section.peer_ticks.is_empty(), "version 2 has no peer track");
+        let mut buf = encoded(section);
+        assert_eq!(buf.split_off(buf.len() - 4), [0; 4]);
+        buf
+    }
+
     #[test]
     fn a_section_reads_back_as_written() {
         let section = sample();
-        assert_eq!(InputSection::decode(&encoded(&section)), Ok(section));
+        assert_eq!(InputSection::decode(&encoded(&section), true), Ok(section));
         let empty = InputSection::default();
-        assert_eq!(encoded(&empty), [0; 8], "two zero counts");
-        assert_eq!(InputSection::decode(&encoded(&empty)), Ok(empty));
+        assert_eq!(encoded(&empty), [0; 12], "three zero counts");
+        assert_eq!(InputSection::decode(&encoded(&empty), true), Ok(empty));
+    }
+
+    #[test]
+    fn a_version_2_section_reads_with_no_peer_track() {
+        let section = sample();
+        assert_eq!(
+            InputSection::decode(&encoded_v2(&section), false),
+            Ok(section)
+        );
+        assert_eq!(encoded_v2(&InputSection::default()), [0; 8]);
+    }
+
+    #[test]
+    fn a_section_read_as_the_wrong_version_is_refused() {
+        // A version 3 section read as version 2: its track's count is four
+        // bytes the older layout ends before.
+        assert_eq!(
+            InputSection::decode(&encoded(&sample()), false),
+            Err(InputSectionError::TrailingBytes(4))
+        );
+        // And a version 2 section read as version 3 ends where its track
+        // should start.
+        assert_eq!(
+            InputSection::decode(&encoded_v2(&sample()), true),
+            Err(InputSectionError::Truncated("peer ticks"))
+        );
     }
 
     #[test]
     fn a_truncated_section_is_refused_by_where_it_ends() {
-        let bytes = encoded(&sample());
+        let bytes = encoded_v2(&sample());
         assert_eq!(
-            InputSection::decode(&[]),
+            InputSection::decode(&[], false),
             Err(InputSectionError::Truncated("sets"))
         );
         // One set whose name is cut short: its tick, a length of 20 and two
@@ -322,13 +430,13 @@ mod tests {
         cut.extend_from_slice(&20u16.to_le_bytes());
         cut.extend_from_slice(b"sv");
         assert_eq!(
-            InputSection::decode(&cut),
+            InputSection::decode(&cut, false),
             Err(InputSectionError::Truncated("name"))
         );
         // Hashes are all one size, so a file cut inside one is caught by its
         // count.
         assert_eq!(
-            InputSection::decode(&bytes[..bytes.len() - 1]),
+            InputSection::decode(&bytes[..bytes.len() - 1], false),
             Err(InputSectionError::CountBeyondFile {
                 what: "state hashes",
                 declared: 3,
@@ -342,7 +450,7 @@ mod tests {
         let mut bytes = u32::MAX.to_le_bytes().to_vec();
         bytes.extend_from_slice(&[0; MIN_SIM_SET_BYTES]);
         assert_eq!(
-            InputSection::decode(&bytes),
+            InputSection::decode(&bytes, false),
             Err(InputSectionError::CountBeyondFile {
                 what: "sets",
                 declared: u32::MAX,
@@ -354,7 +462,7 @@ mod tests {
         bytes.extend_from_slice(&2u32.to_le_bytes());
         bytes.extend_from_slice(&[0; STATE_HASH_BYTES]);
         assert_eq!(
-            InputSection::decode(&bytes),
+            InputSection::decode(&bytes, false),
             Err(InputSectionError::CountBeyondFile {
                 what: "state hashes",
                 declared: 2,
@@ -369,6 +477,7 @@ mod tests {
         let section = InputSection {
             sim_sets: vec![set(1, &long_name, "1")],
             state_hashes: Vec::new(),
+            peer_ticks: Vec::new(),
         };
         let refusal = InputSectionError::TextTooLong {
             field: "name",
@@ -385,7 +494,7 @@ mod tests {
             bytes.extend_from_slice(text.as_bytes());
         }
         bytes.extend_from_slice(&0u32.to_le_bytes());
-        assert_eq!(InputSection::decode(&bytes), Err(refusal));
+        assert_eq!(InputSection::decode(&bytes, false), Err(refusal));
 
         let long_value = InputSection {
             sim_sets: vec![set(
@@ -394,6 +503,7 @@ mod tests {
                 &"9".repeat(MAX_CONSOLE_VALUE_BYTES + 1),
             )],
             state_hashes: Vec::new(),
+            peer_ticks: Vec::new(),
         };
         assert!(matches!(
             long_value.encode(&mut Vec::new()),
@@ -403,14 +513,15 @@ mod tests {
 
     #[test]
     fn text_that_is_not_utf8_is_refused_by_field() {
-        let mut bytes = encoded(&InputSection {
+        let mut bytes = encoded_v2(&InputSection {
             sim_sets: vec![set(1, "ab", "cd")],
             state_hashes: Vec::new(),
+            peer_ticks: Vec::new(),
         });
         // The value's first byte: count, tick, name length, name, value length.
         bytes[4 + 8 + 2 + 2 + 2] = 0xFF;
         assert_eq!(
-            InputSection::decode(&bytes),
+            InputSection::decode(&bytes, false),
             Err(InputSectionError::NotUtf8("value"))
         );
     }
@@ -420,47 +531,51 @@ mod tests {
         let backwards = InputSection {
             sim_sets: vec![set(5, "a", "1"), set(4, "a", "2")],
             state_hashes: Vec::new(),
+            peer_ticks: Vec::new(),
         };
         let refusal = InputSectionError::SetOutOfOrder {
             previous: TickId::from_raw(5),
             tick: TickId::from_raw(4),
         };
         assert_eq!(backwards.encode(&mut Vec::new()), Err(refusal.clone()));
-        let mut bytes = encoded(&InputSection {
+        let mut bytes = encoded_v2(&InputSection {
             sim_sets: vec![set(5, "a", "1"), set(6, "a", "2")],
             state_hashes: Vec::new(),
+            peer_ticks: Vec::new(),
         });
         // The second set's tick: count, then the first set's 14 bytes.
         let second = 4 + 8 + 2 + 1 + 2 + 1;
         bytes[second..second + 8].copy_from_slice(&4u64.to_le_bytes());
-        assert_eq!(InputSection::decode(&bytes), Err(refusal));
+        assert_eq!(InputSection::decode(&bytes, false), Err(refusal));
 
         // Two hashes for one tick: a hash is the state at a tick's end, and a
         // tick has one end.
         let twice = InputSection {
             sim_sets: Vec::new(),
             state_hashes: vec![hash(3, 1), hash(3, 1)],
+            peer_ticks: Vec::new(),
         };
         let refusal = InputSectionError::HashOutOfOrder {
             previous: TickId::from_raw(3),
             tick: TickId::from_raw(3),
         };
         assert_eq!(twice.encode(&mut Vec::new()), Err(refusal.clone()));
-        let mut bytes = encoded(&InputSection {
+        let mut bytes = encoded_v2(&InputSection {
             sim_sets: Vec::new(),
             state_hashes: vec![hash(3, 1), hash(4, 1)],
+            peer_ticks: Vec::new(),
         });
         let second = 4 + 4 + STATE_HASH_BYTES;
         bytes[second..second + 8].copy_from_slice(&3u64.to_le_bytes());
-        assert_eq!(InputSection::decode(&bytes), Err(refusal));
+        assert_eq!(InputSection::decode(&bytes, false), Err(refusal));
     }
 
     #[test]
     fn bytes_after_the_section_are_refused() {
-        let mut bytes = encoded(&sample());
+        let mut bytes = encoded_v2(&sample());
         bytes.push(0);
         assert_eq!(
-            InputSection::decode(&bytes),
+            InputSection::decode(&bytes, false),
             Err(InputSectionError::TrailingBytes(1))
         );
     }

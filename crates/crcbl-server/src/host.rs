@@ -15,6 +15,11 @@
 //! A `Flags::SIM` console set — from the host's own console or from its own
 //! player — applies at the start of the next tick and is recorded for replay;
 //! `sim`'s module docs say who may make one and in what order they apply.
+//!
+//! What the module is handed of its peers — the roster and each peer's frames
+//! — goes through one step whether it came off the transports or out of a
+//! recording, and is recorded on request ([`Host::record_peer_inputs`]);
+//! `record`'s module docs have why.
 
 use std::fmt;
 use std::time::Duration;
@@ -31,10 +36,13 @@ use crcbl_net::{
 
 use crate::peer::{self, Counters, PeerSession, PeerStats, SnapshotTooLarge, UpdateTooLarge};
 
+mod record;
 mod resim;
 mod sim;
 
-pub use resim::ResimError;
+use record::PeerLog;
+pub use record::{PeerFrames, RosterChange, TickInputs};
+pub use resim::{FramesFault, ResimError, RosterFault};
 pub use sim::AppliedSimSet;
 use sim::{Origin, SimConsole};
 
@@ -73,6 +81,20 @@ pub struct HostConfig {
 /// One admitted session, stable from admission to its end and never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PeerId(u64);
+
+impl PeerId {
+    /// The peer a host numbered `raw` — how a recording names it.
+    #[must_use]
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// The number the host gave this peer.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
 
 /// A change in the host's sessions, read with [`Host::events`].
 ///
@@ -155,7 +177,7 @@ pub trait HostModule: Send {
 /// Every peer's input for one tick, as handed to [`HostModule::tick`].
 #[derive(Clone, Copy)]
 pub struct PeerInputs<'a> {
-    peers: &'a [Peer],
+    peers: &'a [PeerFrames],
     sim_vars: &'a SimVars,
 }
 
@@ -163,12 +185,9 @@ impl<'a> PeerInputs<'a> {
     /// Each admitted peer with the frames it sent this tick, in admission
     /// order. A lost peer is listed, with nothing.
     pub fn iter(self) -> impl Iterator<Item = (PeerId, ClientInputs<'a>)> {
-        self.peers.iter().map(|peer| {
-            (
-                peer.id,
-                ClientInputs::new(&peer.link.client_inputs, peer.link.dropped_inputs),
-            )
-        })
+        self.peers
+            .iter()
+            .map(|peer| (peer.peer, ClientInputs::new(&peer.frames, peer.dropped)))
     }
 
     /// The host's simulation variables, with every set this tick's boundary
@@ -241,7 +260,10 @@ pub struct Host {
     pending: Vec<Pending>,
     next_peer_id: u64,
     next_session_id: u64,
-    events: Vec<PeerEvent>,
+    events: PeerLog,
+    /// The frames the current tick hands the module, one entry a peer; kept
+    /// between ticks so its buffers are reused rather than reallocated.
+    tick_inputs: Vec<PeerFrames>,
     module: Option<Box<dyn HostModule>>,
     sim: SimConsole,
 }
@@ -274,7 +296,8 @@ impl Host {
             pending: Vec::new(),
             next_peer_id: 1,
             next_session_id: 1,
-            events: Vec::new(),
+            events: PeerLog::default(),
+            tick_inputs: Vec::new(),
             module: None,
             sim: SimConsole::default(),
         }
@@ -323,17 +346,34 @@ impl Host {
         self.drain_peers();
         self.drain_pending();
         self.update_sessions();
+        let mut inputs = std::mem::take(&mut self.tick_inputs);
+        take_queued_inputs(&mut self.peers, &mut inputs);
+        let roster = self.events.take_roster();
+        self.step(roster, &inputs);
+        self.tick_inputs = inputs;
+    }
+
+    /// The rest of a tick, once its peers' input is in hand: the tick
+    /// boundary for simulation variables, the schedule, the module — handed
+    /// `peers`, every admitted peer in admission order — and the snapshots.
+    /// The live tick and a re-simulation both run it, so a replayed tick
+    /// reaches the module exactly as a live one does; it is also where the
+    /// input record is kept, so what it records is what the module read.
+    /// `roster` is the roster's changes since the tick before, for the
+    /// record.
+    fn step(&mut self, roster: Vec<RosterChange>, peers: &[PeerFrames]) {
         self.apply_sim_sets();
         self.world.tick();
         if let Some(module) = self.module.as_mut() {
             module.tick(
                 &mut self.world,
                 PeerInputs {
-                    peers: &self.peers,
+                    peers,
                     sim_vars: self.sim.vars(),
                 },
             );
         }
+        self.events.record_tick(self.clock.tick(), roster, peers);
         // As in `Server::tick`: the module's despawns must be swept before
         // the snapshot, or it replicates entities that are already gone.
         self.world.sweep();
@@ -766,6 +806,7 @@ impl Host {
         };
         let mut peer = self.peers.remove(index);
         Self::end(&mut peer, SessionEndReason::KICKED, &mut self.counters);
+        self.events.ended(peer.id);
         true
     }
 
@@ -777,6 +818,7 @@ impl Host {
     pub fn shutdown(&mut self, reason: SessionEndReason) {
         for mut peer in self.peers.drain(..) {
             Self::end(&mut peer, reason, &mut self.counters);
+            self.events.ended(peer.id);
         }
         self.pending.clear();
     }
@@ -836,7 +878,7 @@ impl Host {
 
     /// Take the session changes since the last call, oldest first.
     pub fn events(&mut self) -> impl Iterator<Item = PeerEvent> + '_ {
-        self.events.drain(..)
+        self.events.drain()
     }
 
     /// Every admitted peer, lost ones included, in admission order.
@@ -942,6 +984,32 @@ impl Host {
     /// [`take_console_replies`](Self::take_console_replies).
     pub fn replay_sim_record(&mut self, record: impl IntoIterator<Item = AppliedSimSet>) {
         self.sim.schedule(record);
+    }
+
+    /// Record what the module is handed of its peers, from the next tick on:
+    /// read with [`peer_input_record`](Self::peer_input_record), and replayed
+    /// by [`resimulate`](Self::resimulate). Peers already in session open the
+    /// record as joining at the next tick — and being lost, for one whose
+    /// link is down — so the record is whole from its first entry. Does
+    /// nothing while already recording.
+    ///
+    /// Off until called, unlike [`sim_record`](Self::sim_record): a set is a
+    /// rare event, and frames arrive from every peer every tick.
+    pub fn record_peer_inputs(&mut self) {
+        let roster = self.peers.iter().flat_map(|peer| {
+            let lost = (!peer.is_connected()).then_some(RosterChange::Lost(peer.id));
+            std::iter::once(RosterChange::Joined(peer.id)).chain(lost)
+        });
+        self.events.start_recording(roster);
+    }
+
+    /// Every tick's input the module was handed since
+    /// [`record_peer_inputs`](Self::record_peer_inputs), in tick order, one
+    /// entry for each tick that had a roster change or a peer handed
+    /// anything — empty while not recording.
+    #[must_use]
+    pub fn peer_input_record(&self) -> &[TickInputs] {
+        self.events.recorded()
     }
 
     /// Whether `peer` is the host's own player
@@ -1052,6 +1120,20 @@ impl Host {
     }
 }
 
+/// Move the frames each of `peers`' sessions queued this tick into `inputs`,
+/// one entry a peer in admission order. The two swap buffers, so neither
+/// reallocates tick after tick.
+fn take_queued_inputs(peers: &mut [Peer], inputs: &mut Vec<PeerFrames>) {
+    inputs.truncate(peers.len());
+    inputs.resize_with(peers.len(), || PeerFrames::none(PeerId(0)));
+    for (slot, peer) in inputs.iter_mut().zip(peers) {
+        slot.peer = peer.id;
+        slot.frames.clear();
+        std::mem::swap(&mut slot.frames, &mut peer.link.client_inputs);
+        slot.dropped = peer.link.dropped_inputs;
+    }
+}
+
 /// Whether `id` is one of `peers` and the host's own player.
 fn is_host_player(peers: &[Peer], id: PeerId) -> bool {
     peers.iter().any(|peer| peer.id == id && peer.host_player)
@@ -1103,6 +1185,9 @@ mod rate_tests;
 
 #[cfg(test)]
 mod sim_tests;
+
+#[cfg(test)]
+mod frames_tests;
 
 // The UDP transport is native only, by the no-web-networking rule.
 #[cfg(all(test, not(target_arch = "wasm32")))]

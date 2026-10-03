@@ -40,6 +40,21 @@
 //! StateHashEntry[hash_count]:
 //!   tick          u64 little-endian
 //!   hash          u64 little-endian
+//! peer_tick_count u32 little-endian (format version 3 on)
+//! PeerTickEntry[peer_tick_count]:
+//!   tick          u64 little-endian
+//!   change_count  u32 little-endian
+//!   RosterEntry[change_count]:
+//!     kind        u8: 1 joined, 2 lost, 3 resumed, 4 left, 5 ended
+//!     peer        u64 little-endian
+//!   peer_count    u32 little-endian
+//!   PeerFramesEntry[peer_count]:
+//!     peer        u64 little-endian
+//!     dropped     u32 little-endian
+//!     frame_count u32 little-endian
+//!     FrameEntry[frame_count]:
+//!       tick      u64 little-endian
+//!       len       u32 little-endian, then `len` bytes
 //! ```
 //!
 //! A set ([`RecordedSimSet`]) is a `Flags::SIM` console set as the host applied
@@ -49,13 +64,31 @@
 //! Sets are in the order the host applied them, so their ticks never decrease.
 //! A state hash ([`RecordedStateHash`]) is the recorder's state hash at the end
 //! of a tick, at most one a tick and in tick order; a recorder may hash every
-//! tick or only some. Both directions refuse a section that breaks a rule, by
-//! name ([`InputSectionError`]). Peers' input frames are not in it:
-//! `docs/backlog.md` has what recording them takes.
+//! tick or only some.
+//!
+//! The peer track ([`RecordedPeerTick`]) is what the recorded host's module
+//! was handed of its peers, one entry for each tick that had any: the changes
+//! to the roster before the module ran — which peer joined, was lost, resumed,
+//! left or was ended by the game, by the number the host gave it, in the order
+//! the host applied them — and the input frames of every peer that had any,
+//! each with the tick its client stamped on it, as the module read them after
+//! the host's own checks and its per-tick cap, with the count that cap
+//! refused. A peer in the roster with no entry for a tick was handed nothing.
+//! Entries are one a tick in tick order, a peer has at most one in a tick, and
+//! its frames are no more than
+//! [`MAX_CLIENT_INPUTS_PER_TICK`](crcbl_net::MAX_CLIENT_INPUTS_PER_TICK), each
+//! no longer than
+//! [`MAX_FIELD_BYTES`](crcbl_net::codec::MAX_FIELD_BYTES) — what one host tick
+//! holds. Whether the roster's changes make sense one after another is the
+//! re-simulating host's to check, since only it knows what a roster is.
+//!
+//! Both directions refuse a section that breaks a rule, by name
+//! ([`InputSectionError`]).
 //!
 //! A version 1 file has no section and reads as one with no sets and no
-//! hashes, so it plays back as it always did; [`ReplayWriter`] writes version
-//! 2.
+//! hashes, so it plays back as it always did; a version 2 file's section ends
+//! after its hashes and reads with no peer track. [`ReplayWriter`] writes
+//! version 3.
 //!
 //! [`FileTransport`] reads a `.crpl` file and emits entries as if they were
 //! arriving from a live network transport.
@@ -71,7 +104,10 @@ use crate::{StorageError, StorageSource};
 mod input;
 
 use input::InputSection;
-pub use input::{InputSectionError, RecordedSimSet, RecordedStateHash};
+pub use input::{
+    InputSectionError, RecordedPeerFrames, RecordedPeerTick, RecordedRosterChange, RecordedSimSet,
+    RecordedStateHash, RosterChangeKind,
+};
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -80,8 +116,9 @@ pub const REPLAY_MAGIC: &[u8; 8] = b"CRBLREPL";
 
 /// Current replay format version: the one [`ReplayWriter`] writes.
 ///
-/// Version 2 added the input section; version 1, without it, still reads.
-pub const REPLAY_FORMAT_VERSION: u16 = 2;
+/// Version 2 added the input section and version 3 its peer track; versions 1
+/// and 2, without them, still read.
+pub const REPLAY_FORMAT_VERSION: u16 = 3;
 
 /// The oldest format version [`FileTransport`] reads.
 const OLDEST_READABLE_VERSION: u16 = 1;
@@ -89,9 +126,12 @@ const OLDEST_READABLE_VERSION: u16 = 1;
 /// The first format version with an input section.
 const INPUT_SECTION_VERSION: u16 = 2;
 
+/// The first format version whose input section has a peer track.
+const PEER_TRACK_VERSION: u16 = 3;
+
 /// The header's size, which is the smallest a file of any version can be: a
-/// version 1 file with no entries. A version 2 file adds at least its input
-/// section's two counts.
+/// version 1 file with no entries. A later version adds at least its input
+/// section's counts.
 pub const REPLAY_MIN_SIZE: usize = 30;
 
 /// Smallest possible `TickEntry`: `tick_id` + `msg_len`, with no payload.
@@ -104,7 +144,9 @@ const MIN_ENTRY_SIZE: usize = 12;
 /// Call [`push_tick`](Self::push_tick) for each tick's server message — and,
 /// for a file a re-simulation can check, [`push_sim_set`](Self::push_sim_set)
 /// for each applied `Flags::SIM` set and
-/// [`push_state_hash`](Self::push_state_hash) for the ticks it hashed — then
+/// [`push_state_hash`](Self::push_state_hash) for the ticks it hashed, and
+/// [`push_peer_tick`](Self::push_peer_tick) for what its module was handed of
+/// its peers — then
 /// [`write`](Self::write) to persist the replay through a [`StorageSource`].
 ///
 /// # Example
@@ -168,6 +210,17 @@ impl ReplayWriter {
         self.input
             .state_hashes
             .push(RecordedStateHash { tick, hash });
+    }
+
+    /// Record what the host's module was handed of its peers at one tick —
+    /// an entry of `crcbl_server::Host::peer_input_record`, each peer as its
+    /// number.
+    ///
+    /// [`write`](Self::write) refuses an entry for a tick not after the one
+    /// before it, one peer's frames twice in a tick, or more frames, or longer
+    /// ones, than one host tick holds.
+    pub fn push_peer_tick(&mut self, tick: RecordedPeerTick) {
+        self.input.peer_ticks.push(tick);
     }
 
     /// Encode the replay into a byte buffer.
@@ -255,7 +308,8 @@ impl FileTransport {
     /// Validates the magic and format version. Returns an error if the file is
     /// too short, has an invalid magic, contains an unsupported format
     /// version, or — from version 2 — has an input section that breaks one of
-    /// its rules ([`StorageError::ReplayInput`]).
+    /// its rules ([`StorageError::ReplayInput`]), its peer track's from
+    /// version 3.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         if bytes.len() < REPLAY_MIN_SIZE {
             return Err(StorageError::Other(format!(
@@ -328,7 +382,7 @@ impl FileTransport {
         // A version 1 file ends at its entries, and its reader never looked
         // past them, so whatever follows is left unread as it always was.
         let input = if format_version >= INPUT_SECTION_VERSION {
-            InputSection::decode(&bytes[cursor..])?
+            InputSection::decode(&bytes[cursor..], format_version >= PEER_TRACK_VERSION)?
         } else {
             InputSection::default()
         };
@@ -358,6 +412,12 @@ impl FileTransport {
     /// file.
     pub fn state_hashes(&self) -> &[RecordedStateHash] {
         &self.input.state_hashes
+    }
+
+    /// What the recorded host's module was handed of its peers, one entry for
+    /// each tick that had any, in tick order — none before version 3.
+    pub fn peer_ticks(&self) -> &[RecordedPeerTick] {
+        &self.input.peer_ticks
     }
 
     /// The server tick rate recorded in the replay file.
@@ -661,6 +721,98 @@ mod tests {
         // The section follows the entries and leaves them as they were.
         assert_eq!(transport.len(), 3);
         assert_eq!(transport.recv().unwrap().unwrap().payload, b"snapshot_1");
+    }
+
+    fn joined_and_sent(tick: u64) -> RecordedPeerTick {
+        RecordedPeerTick {
+            tick: TickId::from_raw(tick),
+            roster: vec![RecordedRosterChange {
+                kind: RosterChangeKind::Joined,
+                peer: 7,
+            }],
+            peers: vec![RecordedPeerFrames {
+                peer: 7,
+                dropped: 1,
+                frames: vec![(TickId::from_raw(tick - 1), vec![1, 2, 3])],
+            }],
+        }
+    }
+
+    #[test]
+    fn the_peer_track_reads_back_as_written() {
+        let storage = MemoryStorage::new();
+        let mut writer = sample_replay_data();
+        writer.push_sim_set(TickId::from_raw(2), spin_rate("2.5"));
+        writer.push_state_hash(TickId::from_raw(3), 9);
+        writer.push_peer_tick(joined_and_sent(2));
+        writer.push_peer_tick(RecordedPeerTick {
+            tick: TickId::from_raw(3),
+            roster: vec![RecordedRosterChange {
+                kind: RosterChangeKind::Ended,
+                peer: 7,
+            }],
+            peers: Vec::new(),
+        });
+        let path = Path::new("peers.crpl");
+        writer.write(&storage, path).unwrap();
+
+        let mut transport = FileTransport::open(&storage, path).unwrap();
+        assert_eq!(transport.format_version(), 3);
+        assert_eq!(transport.peer_ticks(), writer.input.peer_ticks);
+        assert_eq!(transport.peer_ticks().len(), 2);
+        // The track ends the section and leaves the rest as it was.
+        assert_eq!(transport.sim_sets().len(), 1);
+        assert_eq!(transport.state_hashes().len(), 1);
+        assert_eq!(transport.recv().unwrap().unwrap().payload, b"snapshot_1");
+    }
+
+    #[test]
+    fn a_version_2_file_reads_its_sets_and_hashes_with_no_peer_track() {
+        let mut writer = sample_replay_data();
+        writer.push_sim_set(TickId::from_raw(2), spin_rate("2.5"));
+        writer.push_state_hash(TickId::from_raw(3), 9);
+        // As the version 2 writer wrote it: the same, without the track's
+        // count, which ends a version 3 file with no peer ticks.
+        let mut bytes = writer.encode().unwrap();
+        assert_eq!(bytes.split_off(bytes.len() - 4), [0; 4]);
+        bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
+
+        let mut transport = FileTransport::decode(&bytes).unwrap();
+        assert_eq!(transport.format_version(), 2);
+        assert_eq!(transport.sim_sets(), writer.input.sim_sets);
+        assert_eq!(transport.state_hashes(), writer.input.state_hashes);
+        assert!(transport.peer_ticks().is_empty());
+        assert_eq!(transport.len(), 3);
+        assert_eq!(transport.recv().unwrap().unwrap().payload, b"snapshot_1");
+    }
+
+    #[test]
+    fn a_malformed_peer_track_is_refused_through_the_file() {
+        let mut writer = ReplayWriter::new(60);
+        writer.push_peer_tick(joined_and_sent(5));
+        writer.push_peer_tick(joined_and_sent(5));
+        let storage = MemoryStorage::new();
+        let err = writer.write(&storage, Path::new("bad.crpl")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StorageError::ReplayInput(InputSectionError::PeerTickOutOfOrder { .. })
+            ),
+            "{err}"
+        );
+        assert!(!storage.exists(Path::new("bad.crpl")), "nothing written");
+
+        // A version 3 header over a version 2 body: the track is missing.
+        let mut bytes = ReplayWriter::new(60).encode().unwrap();
+        bytes.truncate(bytes.len() - 4);
+        let err = FileTransport::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StorageError::ReplayInput(InputSectionError::Truncated("peer ticks"))
+            ),
+            "{err}"
+        );
     }
 
     /// A file as the version 1 writer wrote it: the header and the entries,

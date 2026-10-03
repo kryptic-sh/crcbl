@@ -73,8 +73,8 @@ pub use delta::{
 };
 pub use handshake::{HandshakeGate, HandshakeResult, Hello, RejectReason};
 pub use messages::{
-    ClientToServer, ServerToClient, SessionEndReason, SnapshotReader, SnapshotWriter,
-    SystemSnapshot, replicated_system_id,
+    ClientToServer, MAX_CLIENT_INPUTS_PER_TICK, ServerToClient, SessionEndReason, SnapshotReader,
+    SnapshotWriter, SystemSnapshot, replicated_system_id,
 };
 pub use rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 pub use session::{SessionConfig, SessionManager, SessionState};

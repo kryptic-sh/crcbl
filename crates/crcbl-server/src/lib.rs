@@ -13,8 +13,8 @@ mod peer;
 pub mod sim_hash;
 
 pub use host::{
-    AppliedSimSet, EventNotSent, Host, HostConfig, HostModule, PeerEvent, PeerId, PeerInputs,
-    ResimError,
+    AppliedSimSet, EventNotSent, FramesFault, Host, HostConfig, HostModule, PeerEvent, PeerFrames,
+    PeerId, PeerInputs, ResimError, RosterChange, RosterFault, TickInputs,
 };
 pub use peer::{PeerStats, SnapshotTooLarge, UpdateTooLarge};
 
@@ -23,6 +23,9 @@ pub use crcbl_net::rate_limit;
 // existing callers do not churn.
 pub use crcbl_net::rate_limit::InboundRateLimitConfig;
 pub use crcbl_net::replicated_system_id;
+// Moved to `crcbl-net`, where a replay's reader holds recorded frames to it
+// too; kept here so existing callers do not churn.
+pub use crcbl_net::MAX_CLIENT_INPUTS_PER_TICK;
 
 use std::fmt;
 use std::time::Duration;
@@ -50,23 +53,6 @@ use peer::{Counters, PeerSession};
 /// ticks, it would be given only a fraction as many snapshots to make
 /// progress before its client was reset with a keyframe.
 const KEYFRAME_RECOVERY_SNAPSHOTS: u32 = 32;
-
-/// The most client input frames one tick will hold.
-///
-/// **How many arrive is the peer's choice, not ours.** A client sends one
-/// frame per tick its own clock consumed, and
-/// [`DEFAULT_MAX_CATCH_UP_TICKS`](crcbl_core::time::DEFAULT_MAX_CATCH_UP_TICKS)
-/// is the most a well-behaved one hands itself for a single frame — so twice
-/// that leaves room for a client running ahead of this server's rate and still
-/// bounds what a peer that simply keeps sending can make the server allocate.
-/// Whatever a tick does not hold is refused, and
-/// [`Server::dropped_input_count`] is what says so.
-///
-/// Public because it is a statement to the other end of the wire: a client
-/// that sends more input than this for one server tick is sending some of it
-/// into a counter.
-pub const MAX_CLIENT_INPUTS_PER_TICK: usize =
-    2 * crcbl_core::time::DEFAULT_MAX_CATCH_UP_TICKS as usize;
 
 /// The refusal a [`Server`] answers every console set with.
 const SERVER_TAKES_NO_SIM_SETS: &str =

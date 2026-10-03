@@ -481,7 +481,7 @@ fn a_session_resimulated_from_its_file_reproduces_every_recorded_hash() {
 
     let mut replayed = host(true);
     assert_eq!(
-        replayed.resimulate(file_sets(&file), file_hashes(&file)),
+        replayed.resimulate(file_sets(&file), file_hashes(&file), []),
         Ok(recorded.tick_id())
     );
     assert_eq!(hash_world(replayed.world(), replayed.tick_id()), expected);
@@ -500,7 +500,7 @@ fn a_file_without_its_sets_diverges_at_the_first_tick_a_set_changed() {
 
     let mut replayed = host(true);
     let error = replayed
-        .resimulate(file_sets(&file), file_hashes(&file))
+        .resimulate(file_sets(&file), file_hashes(&file), [])
         .expect_err("the sets are what made the run");
     let ResimError::Diverged {
         tick,
@@ -522,7 +522,8 @@ fn a_recorded_set_this_host_refuses_is_named_before_any_tick_runs() {
     assert_eq!(
         refusing.resimulate(
             [(at(3), set("t_rate", "2")), (at(4), set("t_nope", "1"))],
-            [(at(5), 0)]
+            [(at(5), 0)],
+            []
         ),
         Err(ResimError::SetRefused {
             tick: at(4),
@@ -540,7 +541,7 @@ fn a_recorded_set_this_host_refuses_is_named_before_any_tick_runs() {
 
     let mut bare = host(false);
     assert!(matches!(
-        bare.resimulate([(at(1), set("t_rate", "2"))], []),
+        bare.resimulate([(at(1), set("t_rate", "2"))], [], []),
         Err(ResimError::SetRefused { reason, .. }) if reason == "this host takes no simulation variables"
     ));
 }
@@ -552,7 +553,7 @@ fn a_recorded_tick_this_host_has_passed_is_refused() {
     run(&mut late, 5, &[]);
     // A set applies at its tick's start, and tick 5 has started and ended.
     assert_eq!(
-        late.resimulate([(at(5), set("t_rate", "2"))], []),
+        late.resimulate([(at(5), set("t_rate", "2"))], [], []),
         Err(ResimError::TickPassed {
             tick: at(5),
             host_tick: at(5),
@@ -566,7 +567,7 @@ fn a_recorded_tick_this_host_has_passed_is_refused() {
     let hashes = file_hashes(&file);
     let mut replayed = host(true);
     assert_eq!(
-        replayed.resimulate([], [hashes[6], hashes[5]]),
+        replayed.resimulate([], [hashes[6], hashes[5]], []),
         Err(ResimError::TickPassed {
             tick: at(6),
             host_tick: at(7),

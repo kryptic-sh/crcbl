@@ -4,7 +4,8 @@
 //! the first consumer of the replay format from outside `crcbl-store` — it reads
 //! a file, validates it, and prints what's inside: the entries' ticks, and from
 //! format version 2 the input section's simulation sets and how many state
-//! hashes it holds.
+//! hashes it holds. Version 3's peer track is read and checked like the rest of
+//! the file, and not reported.
 //!
 //! It does not re-simulate. `crcbl_server::Host::resimulate` does, but it needs
 //! a host built like the recorded one — the game's world, module and registry —
@@ -169,7 +170,7 @@ mod tests {
         })
         .unwrap();
         assert!(
-            outcome.human.contains("format version 2"),
+            outcome.human.contains("format version 3"),
             "{}",
             outcome.human
         );
@@ -180,7 +181,7 @@ mod tests {
             "{}",
             outcome.human
         );
-        assert_eq!(outcome.json[3], ("format_version", Json::Number(2)));
+        assert_eq!(outcome.json[3], ("format_version", Json::Number(3)));
         assert_eq!(
             outcome.json[4],
             (

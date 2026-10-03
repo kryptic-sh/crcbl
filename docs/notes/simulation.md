@@ -763,10 +763,14 @@ per-system tick time. The `cargo tree` guard is built:
   `f32` is the shortest text that parses back to the same bits. A variable
   without the flag is not a tick input and must not change what the simulation
   computes. The record reaches a file: a `.crpl` replay's input section (format
-  version 2) carries the applied sets and the recorder's state hashes, and
+  version 3) carries the applied sets, the recorder's state hashes and what the
+  module was handed of its peers — the roster's changes and each peer's applied
+  input frames, recorded on request (`Host::record_peer_inputs`) by the same
+  `Host::step` that hands them to the module, live or replayed — and
   `Host::resimulate` re-runs a fresh host from them and names the first tick
-  whose hash it does not reproduce. Peers' input frames are not recorded yet
-  (`docs/backlog.md` has the gap).
+  whose hash it does not reproduce. A game's own reactions to `Host::events`
+  happen outside the module and are not replayed (`docs/backlog.md` has the
+  gap).
 
 Other documents cite the plan as "stage 4". Those resolve here:
 

@@ -166,8 +166,11 @@ pub(crate) struct PeerSession {
     last_ack_progress: Option<TickId>,
     /// The client input frames that arrived since the current tick began, in
     /// arrival order, handed to the module as
-    /// [`ClientInputs`](crcbl_ecs::ClientInputs) and emptied at the start of
-    /// every tick. Bounded by [`MAX_CLIENT_INPUTS_PER_TICK`].
+    /// [`ClientInputs`](crcbl_ecs::ClientInputs) — read in place by
+    /// [`Server`](crate::Server), moved into the tick's
+    /// [`PeerFrames`](crate::PeerFrames) by [`Host`](crate::Host) — and
+    /// emptied at the start of every tick. Bounded by
+    /// [`MAX_CLIENT_INPUTS_PER_TICK`].
     pub(crate) client_inputs: Vec<(TickId, Vec<u8>)>,
     /// Frames the cap refused during the current tick.
     pub(crate) dropped_inputs: u32,

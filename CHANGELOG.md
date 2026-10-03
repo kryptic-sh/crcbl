@@ -16,13 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
-- **`.crpl` replays are format version 2** (see Added: a replay carries its
-  simulation inputs). `ReplayWriter` and `CrashRing::dump` write version 2, and
+- **`.crpl` replays are format version 3** (see Added: a replay carries its
+  simulation inputs). `ReplayWriter` and `CrashRing::dump` write version 3, and
   a build from before this change refuses such a file as an unsupported version
-  — so a replay sent to someone on an older build no longer opens there. This
-  build still reads version 1. Nothing in the workspace records a session yet,
-  so only a file EW or a game wrote with `ReplayWriter` itself is affected.
-  `crcbl replay`'s first human line now ends with `, format version N`.
+  — so a replay sent to someone on an older build no longer opens there, and
+  that includes a build that already read version 2's input section without its
+  peer track. This build still reads versions 1 and 2. Nothing in the workspace
+  records a session yet, so only a file EW or a game wrote with `ReplayWriter`
+  itself is affected. `crcbl replay`'s first human line now ends with
+  `, format version N`.
 
 - **A `Flags::SIM` console variable is set through its simulation, and a
   `ClientToServer::Command`'s `data` has a format** (see Added: simulation
@@ -585,28 +587,46 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 ### Added
 
 - **A `.crpl` replay carries its simulation inputs, and a host re-simulates
-  one** (format version 2; see Breaking). The file gains an input section after
+  one** (format version 3; see Breaking). The file gains an input section after
   its entries: the `Flags::SIM` sets the host applied, each with its tick and as
-  the console's own text, and the recorder's state hashes for the ticks it
-  hashed. `crcbl_store::replay::ReplayWriter` gains `push_sim_set` and
-  `push_state_hash`; `FileTransport` gains `decode` (from bytes, which `open`
-  now calls), `format_version`, `sim_sets` and `state_hashes`, over the new
-  `RecordedSimSet` and `RecordedStateHash`. Both directions refuse a section
-  that breaks a rule by name — `InputSectionError`, carried by the new
-  `StorageError::ReplayInput` — for a truncated section, a count past the file,
-  a name or value past a console set's limits, text that is not UTF-8, sets out
-  of tick order, two hashes for one tick, and bytes after the section; the
-  reader is in the fuzz target, with a seed. A version 1 file still reads, with
-  no sets and no hashes. `crcbl_server::Host::resimulate` takes a file's sets
-  and hashes, schedules the sets through `replay_sim_record` after checking
-  every one against its registry, runs to the last hash, and answers the first
-  tick whose state hash it does not reproduce (`ResimError::Diverged`), a set it
-  refuses (`SetRefused`) or a tick it has passed (`TickPassed`). Peers' input
-  frames are not recorded, so a module that reads them does not re-simulate yet.
-  `crcbl replay` reports the format version, every set and the number of hashes
-  (`format_version`, `sim_sets` and `state_hash_count` in `--json`), and does
-  not re-simulate: it cannot build a game's host. `CrashRing::dump` writes
-  through `ReplayWriter`, so a crash dump is version 2 with an empty section.
+  the console's own text, the recorder's state hashes for the ticks it hashed,
+  and a peer track — per tick, the host's roster changes (joined, lost, resumed,
+  left, ended by the game) in the order applied, and each peer's input frames as
+  its module read them, after the host's checks and per-tick cap, with the count
+  the cap refused. `crcbl_store::replay::ReplayWriter` gains `push_sim_set`,
+  `push_state_hash` and `push_peer_tick`; `FileTransport` gains `decode` (from
+  bytes, which `open` now calls), `format_version`, `sim_sets`, `state_hashes`
+  and `peer_ticks`, over the new `RecordedSimSet`, `RecordedStateHash`,
+  `RecordedPeerTick`, `RecordedPeerFrames`, `RecordedRosterChange` and
+  `RosterChangeKind`. Both directions refuse a section that breaks a rule by
+  name — `InputSectionError`, carried by the new `StorageError::ReplayInput` —
+  for a truncated section, a count past the file, a name or value past a console
+  set's limits, text that is not UTF-8, sets out of tick order, two hashes for
+  one tick, peer ticks out of order, a roster kind no build writes, one peer's
+  frames twice in a tick, more frames than `MAX_CLIENT_INPUTS_PER_TICK` or one
+  longer than `MAX_FIELD_BYTES`, and bytes after the section; the reader is in
+  the fuzz target, with a seed for each version. Version 1 and 2 files still
+  read, with no peer track (and version 1 with no sets and no hashes).
+  `crcbl_server::Host` records what its module is handed of its peers once
+  `record_peer_inputs` is called — `peer_input_record` lists it as `TickInputs`
+  of `RosterChange`s and `PeerFrames` — and `Host::resimulate` takes a file's
+  sets, hashes and that record: it checks every set against its registry and
+  every roster change against the ones before it, runs to the last hash handing
+  the module the recorded roster and frames through the same step a live tick
+  takes, and answers the first tick whose state hash it does not reproduce
+  (`ResimError::Diverged`), a set it refuses (`SetRefused`), a roster that
+  cannot happen (`RosterRefused`, with a `RosterFault`), frames for a peer that
+  cannot have been handed them (`FramesRefused`, with a `FramesFault`) or a tick
+  it has passed (`TickPassed`). `PeerId::from_raw` and `PeerId::get` name a peer
+  as a recording does. `MAX_CLIENT_INPUTS_PER_TICK` moved to `crcbl_net`, where
+  the replay reader holds frames to it, and is re-exported from `crcbl_server`
+  as before. Towers' server world now hashes its stage (its `towers` system
+  contributes to `hash_world`), and a two-player session re-simulates from its
+  file tick for tick. `crcbl replay` reports the format version, every set and
+  the number of hashes (`format_version`, `sim_sets` and `state_hash_count` in
+  `--json`), not the peer track, and does not re-simulate: it cannot build a
+  game's host. `CrashRing::dump` writes through `ReplayWriter`, so a crash dump
+  is version 3 with an empty section.
 - **Simulation variables over the transport: `Flags::SIM`'s half is built.** A
   typed set of a `SIM` variable is checked by the new `Registry::sim_set` and
   handed to the host as a `crcbl_console::SimSet` through

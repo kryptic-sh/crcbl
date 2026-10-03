@@ -47,8 +47,9 @@ fuzz_target!(|data: &[u8]| {
     // any admitted peer — and the reply a client reads back.
     let _ = decode_console_set(data);
     let _ = decode_console_reply(data);
-    // A replay file, header, entries and input section: a file a player may
-    // have been sent, read before anything about it is trusted.
+    // A replay file, header, entries and input section with its peer track:
+    // a file a player may have been sent, read before anything about it is
+    // trusted.
     let _ = crcbl_store::replay::FileTransport::decode(data);
     let _ = decode_delta(data, Trust::Untrusted);
     let _ = decode_delta(data, Trust::Authenticated);
