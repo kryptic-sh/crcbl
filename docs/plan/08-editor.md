@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls and their polish, multi-selection, a scene from empty and save-as, open and the unsaved bar, recovery offered back and autosave, and the undo property test 2026-10-03, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls and their polish, multi-selection, a scene from empty and save-as, open and the unsaved bar, recovery offered back and autosave, the undo property test 2026-10-03, the dogfood pass 2026-10-04, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -1423,6 +1423,73 @@ slice 12 left (a `kind` shown and edited only in the file).
   a command, and `SetVariant` in its command coverage. The mutations each turned
   a test red are listed in the commit that landed this.
 
+**The dogfood pass (task 8) landed 2026-10-04**, on the owner's decision of the
+same day (below). It is towers' milestone 2
+([sample/07-towers.md](sample/07-towers.md)): towers' whole field authored from
+an empty scene in the editor, saved by the editor, and the committed field is
+exactly what it saves.
+
+- **Decided 2026-10-04 by the owner: a scripted, test-driven authoring counts as
+  "authored in the editor"** when every edit goes through the editor's own entry
+  points — panel and keyboard input delivered through the shell the way
+  `app::tests::exit_criterion` delivers it, the asset browser and the outliner,
+  the inspector's rows, and the document command path the UI reaches — and the
+  scene's files are written by the editor's save. Scene text or RON written by
+  hand does not count. The reason: the test is the reproducible evidence of the
+  pass, and it keeps the shipped field byte-identical, so towers' game behaviour
+  cannot move.
+- **The proof** is
+  `app::tests::towers_field::towers_field_authored_from_empty_is_the_committed_field_and_plays`,
+  through the real `Editor` loop on the headless shell and the null backend:
+  Ctrl+N; the environment's nine numbers pasted into the scene pane's rows; the
+  first corner of the path from `+ waypoints` and each next one Ctrl+D of the
+  last, its order, `x` and `z` pasted; a click on the sky to select nothing; the
+  first plot from `+ plots` and each next one Ctrl+D of the last, its label
+  typed over the last one's and its `x` and `z` pasted; the toolbar's Save as
+  and a `field.scn` directory under a temporary one typed on the path line. Each
+  step asserts the leaf it wrote, and the scene has no problem a save would
+  report. The saved directory is then `apps/towers/assets/scenes/field.scn/` key
+  for key and byte for byte; `Map::load` reads it as `Map::built_in()`; and a
+  towers game on it holds the first wave with two bolt towers and no leak, as
+  towers' own scripted run does. Numbers are pasted rather than dragged because
+  the clipboard is the one exact entry a number field has (below).
+- **The committed field needed no change.** The editor saves through the same
+  writer that wrote it, so what the pass saves is already the shipped bytes —
+  nothing was regenerated, and towers' wave, balance and browser-gate tests are
+  untouched.
+- **What the pass found and fixed**, each in its own commit with a test that a
+  mutation turned red:
+  - **A scene from empty could gain only a mesh.** The asset browser's drop was
+    the only way to make an entity, so a scene of a game's own components had to
+    start as a mesh, take its component, lose the mesh, and keep an emptied
+    `meshes` system listed with no button to take it out. With nothing selected
+    the inspector is now the scene's pane, with one `+ system` button per
+    registered system (`Document::add_entity`): one `Spawn` of the component's
+    `Default` under the next id, batched after the listing, and selected.
+  - **The environment could not be edited**, so a scene from empty kept the
+    compiled-in scene's camera and light, and towers' `env.ron` — the game's own
+    camera and ambient — could not be made. The scene pane draws it under the
+    add buttons (`document::Environment`, a reflected mirror of `Env`), each
+    edit an `EditCommand::SetEnvironment` whose inverse is the leaf read before
+    it, a drag one entry, and its fields copy and paste like a component's.
+  - **A vector row's last field was cut off.** At the default side column's
+    width, a position's three drag-values with numbers as wide as `-14.00` ran
+    past the pane's edge, so the `z` field was clipped and a click on it landed
+    in the viewport. A row too wide for its pane now wraps.
+- **What it found and did not fix**, each in `docs/backlog.md` under _The
+  dogfood pass_ with what it would take: a drag-value takes no typed number and
+  edits an `f32`, so a field paste is the only exact entry; an emptied system
+  has no button to unlist it; a new entity starts at its component's `Default`
+  rather than where the view looks; the scene pane is taller than the default
+  layout's inspector, so the environment's rows are scrolled to; and a text
+  field's text is not selected when it is engaged, so retyping a duplicated
+  plot's label takes Ctrl+A first.
+- **What it does not cover**: nothing of it has been seen on a device — every
+  step is headless, on the null backend, against laid-out rectangles — and the
+  authored field is played by towers' `Game`, not by the editor's play mode
+  (which plays the committed field since slice 9, and the saved one is the same
+  bytes).
+
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
 opens the vocabularies it was compiled with. The shipped build registers its own
@@ -1461,8 +1528,8 @@ Two things sit behind it, in both directions:
   scene data since 2026-09-30**: its path and build plots are
   `apps/towers/assets/scenes/field.scn/`, the shipped vocabulary registers
   towers' `Waypoint` and `Plot` beside breakout's and puppet's components, and
-  the editor opens the committed field, so the dogfood pass has a scene to edit
-  and is what is left of that milestone. And
+  the editor opens the committed field. **The dogfood pass met that milestone
+  2026-10-04** (_The dogfood pass_, above). And
   [sample/08-arena.md](sample/08-arena.md) wants an editor-built map too. Towers
   has an app directory; arena is one of five sample plans without one, beside
   mirrors, meadow, mane and relief.
@@ -1920,7 +1987,8 @@ rules. It stays open in the backlog.
 7. Play/stop with snapshot restore. The mechanism landed in slice 8, restoring
    from the scene's text; towers registers the first module (slice 9).
 8. Dogfood pass: build a small playable scene start-to-finish in the editor; fix
-   what hurts.
+   what hurts. **Landed 2026-10-04**: towers' field, authored from empty (_The
+   dogfood pass_, above).
 
 ## Exit criteria
 
