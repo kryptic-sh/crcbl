@@ -14,7 +14,8 @@
 //! # The frame's navigation input
 //!
 //! [`Ui::begin_frame_with`] takes a [`NavInput`]: one directional step, the
-//! tree-order steps, accept, back, and which kind of device spoke last. The
+//! tree-order steps, accept, back, the context menu's key, a [`Jump`] inside
+//! an open pop-up, and which kind of device spoke last. The
 //! tree reads no device; the caller maps its own input to these, which is what
 //! lets this rung land before `crcbl-input` has the context stack the plan's
 //! reserved `ui_*` actions need.
@@ -38,8 +39,9 @@
 //! **clamped**: it looks first inside the innermost scope root, `overflow:
 //! scroll` container or `nav-wrap` container around the focused node, and only
 //! when nothing lies that way inside does it widen to the next one out — or,
-//! for a `nav-wrap` container, wrap round to its far side on that axis. A
-//! [`Scope::Modal`] is never widened past. [`NavInput::next`] and
+//! for a `nav-wrap` container, wrap round to the far side of its content on
+//! that axis — scrolled out of view or not. A [`Scope::Modal`] is never
+//! widened past. [`NavInput::next`] and
 //! [`NavInput::prev`] walk every focusable node in tree order, wrapping at the
 //! ends, inside the modal when there is one: the always-works fallback.
 //!
@@ -58,14 +60,17 @@
 //! **An `overflow: scroll` block scrolls the focused node into view**: its
 //! offset moves the least that puts the node's border box inside the block's
 //! content box — the block's padding is the margin a focus ring is drawn in —
-//! clamped to how far its content reaches.
+//! clamped to how far its content reaches. A node [`Ui::set_focus`] asks for
+//! is scrolled into view at that frame's [`Ui::layout`] already, so it is
+//! drawn in view in the frame that asked rather than the frame after.
 //!
 //! # Focused and engaged (LOCKED)
 //!
 //! Focus never captures navigation. A [`Role::Engage`] node starts consuming it
 //! only once engaged, by a click or by accept while focused. While it is
 //! engaged every directional and tree-order step is handed to it
-//! ([`Response::captured`]) instead of moving focus; accept, or a click
+//! ([`Response::captured`]) instead of moving focus, and a [`Jump`] does
+//! nothing; accept, or a click
 //! anywhere outside it, **commits**; back **cancels**. One node per context is
 //! engaged, and engaging another commits the first in the same frame. The
 //! engaged node has `:engaged`. [`Ui::snapshot`] is the widget's half of the
@@ -166,6 +171,9 @@ pub struct NavInput {
     /// `ui_menu`: open the focused widget's context menu
     /// ([`Ui::context_menu`]), as the keyboard's menu key and Shift+F10 do.
     pub menu: bool,
+    /// The `list` context's Home, End, Page Up and Page Down: a jump inside
+    /// the topmost open pop-up (`popup_nav.rs`).
+    pub jump: Option<Jump>,
 }
 
 impl NavInput {
@@ -174,6 +182,15 @@ impl NavInput {
     pub const fn toward(direction: Direction) -> Self {
         Self {
             direction: Some(direction),
+            ..Self::NAVIGATION
+        }
+    }
+
+    /// A jump inside the topmost open pop-up, from the keyboard.
+    #[must_use]
+    pub const fn jumping(jump: Jump) -> Self {
+        Self {
+            jump: Some(jump),
             ..Self::NAVIGATION
         }
     }
@@ -187,6 +204,7 @@ impl NavInput {
         accept: false,
         back: false,
         menu: false,
+        jump: None,
     };
 
     /// `ui_next`, from the pad or the keyboard.
@@ -219,10 +237,10 @@ impl NavInput {
         ..Self::NAVIGATION
     };
 
-    /// Whether a move, a step or accept was pressed: anything but `back` and
-    /// `menu`, which act on focus where it is.
+    /// Whether a move, a step, a jump or accept was pressed: anything but
+    /// `back` and `menu`, which act on focus where it is.
     const fn steers(self) -> bool {
-        self.direction.is_some() || self.next || self.prev || self.accept
+        self.direction.is_some() || self.next || self.prev || self.accept || self.jump.is_some()
     }
 
     /// The step an engaged node would take from this input.
@@ -234,6 +252,20 @@ impl NavInput {
             (None, false, false) => None,
         }
     }
+}
+
+/// Where a jump inside an open pop-up goes: the `list` context's keys. See
+/// `popup_nav.rs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Jump {
+    /// Home: the first item focus can rest on.
+    First,
+    /// End: the last item focus can rest on.
+    Last,
+    /// Page Up: a view's height up.
+    PageUp,
+    /// Page Down: a view's height down.
+    PageDown,
 }
 
 /// A navigation step an engaged node took instead of focus.
@@ -435,7 +467,7 @@ impl Ui {
     }
 
     /// Every focusable node inside `region`, in tree order.
-    fn focusable_in(&self, region: Option<NodeKey>) -> Vec<NodeKey> {
+    pub(super) fn focusable_in(&self, region: Option<NodeKey>) -> Vec<NodeKey> {
         let mut nodes: Vec<_> = self
             .store
             .iter()
@@ -571,6 +603,8 @@ impl Ui {
                     }
                 } else if nav.next || nav.prev {
                     self.move_in_tree_order(nav.next, modal);
+                } else if let Some(jump) = nav.jump {
+                    self.jump_in_popup(jump);
                 }
                 if nav.accept
                     && let Some(focused) = self.focus.focused
@@ -668,11 +702,12 @@ impl Ui {
 
     /// Moves every `overflow: scroll` block around `key` the least that puts
     /// its border box inside the block's content box, clamped to the block's
-    /// reach.
-    fn scroll_into_view(&mut self, key: NodeKey) {
+    /// reach, and says whether any moved.
+    pub(super) fn scroll_into_view(&mut self, key: NodeKey) -> bool {
         let Some(node) = self.store.by_key(key) else {
-            return;
+            return false;
         };
+        let mut moved = false;
         let (mut min, mut max) = node.rect;
         for ancestor in self.store.ancestry(Some(key)).into_iter().skip(1) {
             let Some(slot) = self.store.find(ancestor) else {
@@ -696,9 +731,11 @@ impl Ui {
             let after = (before + delta).clamp(Vec2::ZERO, container.scroll_max.max(Vec2::ZERO));
             container.scroll_offset = after;
             let applied = after - before;
+            moved |= applied != Vec2::ZERO;
             min -= applied;
             max -= applied;
         }
+        moved
     }
 
     /// A directional move from the focused node; see the module docs.
@@ -791,7 +828,13 @@ impl Ui {
                 && let Some(node) = node
                 && node.resolved.nav_wrap.wraps(direction.is_horizontal())
             {
-                let shifted = wrapped(origin, node.rect, direction);
+                // The content's extent, not the box's: a scrolled list wraps
+                // to its first item, not to the first one in view.
+                let content = (
+                    node.rect.0 - node.scroll_offset,
+                    node.rect.1 + (node.scroll_max - node.scroll_offset).max(Vec2::ZERO),
+                );
+                let shifted = wrapped(origin, content, direction);
                 let around: Vec<_> = candidates
                     .iter()
                     .copied()
@@ -884,8 +927,21 @@ impl Ui {
     /// there if it is another — unless `key` is not a focusable node of the
     /// tree that frame is resolved against, or lies outside an open modal,
     /// which leaves focus where it is.
+    ///
+    /// Asked for while a frame is built, `key` is scrolled into view at that
+    /// frame's [`Ui::layout`], ahead of the focus: a drop-down opening on its
+    /// chosen option draws it in view in the frame it opens.
     pub fn set_focus(&mut self, key: NodeKey) {
         self.focus.requested = Some(key);
+    }
+
+    /// Scrolls the node [`Ui::set_focus`] asked for into view, as last placed,
+    /// and says whether anything moved — so the caller places the tree again.
+    pub(super) fn reveal_requested(&mut self) -> bool {
+        let Some(key) = self.focus.requested else {
+            return false;
+        };
+        self.store.by_key(key).is_some_and(|node| node.hittable) && self.scroll_into_view(key)
     }
 
     /// Takes focus and engagement away from the tree entirely, leaving nothing

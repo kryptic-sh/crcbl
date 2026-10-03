@@ -103,3 +103,54 @@ fn a_rows_duplicate_and_rename_go_the_keys_way() {
     assert_eq!(editor.panels.renaming(), Some(original));
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
+
+/// Types `text` through the shell the way a keyboard does: `key` goes down,
+/// the layout commits the character, and `key` comes up, a frame each.
+fn type_key(editor: &mut Editor<HeadlessShell>, key: KeyCode, text: &str) {
+    let window = editor.window;
+    let shell = editor.shell_mut();
+    shell.key_press(window, key).expect("live");
+    shell.commit_text(window, text).expect("live");
+    editor.frame().expect("a frame");
+    editor.shell_mut().key_release(window, key).expect("live");
+    editor.frame().expect("a frame");
+}
+
+/// **An open row menu takes the letters and Home from the editor**: `d`
+/// reaches Duplicate, Home goes back to Rename, R — the scale tool's key —
+/// switches no tool, and Enter picks Rename, putting the text input in the
+/// row.
+#[test]
+fn an_open_row_menu_takes_typeahead_and_home() {
+    let mut editor = headless(40);
+    editor.frame().expect("a frame");
+    let original = SceneEntityId(1);
+    right_click(&mut editor, original);
+    assert!(
+        editor.panels.popup_list_open(),
+        "the open menu does not take the keys"
+    );
+    let focused_label = |editor: &Editor<HeadlessShell>| {
+        let ui = editor.panels.ui();
+        let item = ui.focused().expect("focus is in the menu");
+        ui.child_keys(item)
+            .first()
+            .and_then(|&label| ui.text(label))
+            .map(str::to_owned)
+            .expect("an item's label")
+    };
+
+    type_key(&mut editor, KeyCode::KeyD, "d");
+    assert_eq!(focused_label(&editor), "Duplicate (Ctrl+D)");
+    tap(&mut editor, KeyCode::Home);
+    assert_eq!(focused_label(&editor), "Rename (F2)", "Home");
+    type_key(&mut editor, KeyCode::KeyR, "r");
+    assert_eq!(
+        editor.gizmo_mode,
+        gizmo::Mode::Translate,
+        "R switched the tool under the menu"
+    );
+    tap(&mut editor, KeyCode::Enter);
+    assert_eq!(editor.panels.renaming(), Some(original));
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}

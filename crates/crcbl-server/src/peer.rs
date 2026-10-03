@@ -13,14 +13,31 @@ use crcbl_ecs::{Inspector, World};
 use crcbl_net::auth::{AUTH_OVERHEAD, SessionCrypto};
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
-    Baseline, ConsoleReply, ConsoleSet, DEFAULT_RELEVANCE, DeltaCodec, HandshakeResult, Message,
-    OversizedUpdate, RejectReason, ResumeToken, SectorId, SessionConfig, SessionEndReason,
-    SessionId, SessionManager, SessionState, SnapshotWriter, Transport, TransportError, Trust,
-    snapshot_budget,
+    Baseline, ConsoleReply, ConsoleSet, DEFAULT_RELEVANCE, DeltaCodec, EditOutcome, EditRefusal,
+    EditReply, EditRequest, HandshakeResult, Message, OversizedUpdate, RejectReason, ResumeToken,
+    SectorId, SessionConfig, SessionEndReason, SessionId, SessionManager, SessionState,
+    SnapshotWriter, Transport, TransportError, Trust, snapshot_budget,
 };
 
 use crate::cadence::SnapshotCadence;
 use crate::{KEYFRAME_RECOVERY_SNAPSHOTS, MAX_CLIENT_INPUTS_PER_TICK, replicated_system_id};
+
+/// The message an edit is refused with by a server serving no scene for
+/// editing: a [`Server`](crate::Server), or a [`Host`](crate::Host) that was
+/// never told to serve edits ([`Host::serve_edits`](crate::Host::serve_edits)).
+const NOT_SERVING_EDITS: &str =
+    "this server serves no scene for editing; a game's server takes no edits";
+
+/// The answer to an edit a server serving no scene was sent.
+pub(crate) fn not_serving_edits(request: &EditRequest) -> EditReply {
+    EditReply {
+        request_id: request.request_id,
+        outcome: EditOutcome::Refused {
+            reason: EditRefusal::NOT_EDITABLE,
+            message: NOT_SERVING_EDITS.to_owned(),
+        },
+    }
+}
 
 /// The failure counters a server reports, shared by every session it runs.
 #[derive(Debug, Default)]
@@ -180,6 +197,13 @@ pub(crate) struct PeerSession {
     /// them. Each is taken in the tick it arrived, and the inbound budgets
     /// bound how many one tick can hold.
     pub(crate) console_sets: Vec<ConsoleSet>,
+    /// The scene edits this peer sent, in arrival order, waiting for the
+    /// server that owns the session to take them — [`Host`](crate::Host)
+    /// hands them to the caller serving a scene, or refuses them when it
+    /// serves none, and [`Server`](crate::Server) refuses them. Taken in the
+    /// tick they arrived, and bounded by the inbound budgets as console sets
+    /// are.
+    pub(crate) edit_requests: Vec<EditRequest>,
     /// How often this session is sent a snapshot.
     cadence: SnapshotCadence,
     /// Updates withheld from this session's snapshots as too long for any.
@@ -207,6 +231,7 @@ impl PeerSession {
             client_inputs: Vec::new(),
             dropped_inputs: 0,
             console_sets: Vec::new(),
+            edit_requests: Vec::new(),
             cadence: SnapshotCadence::default(),
             oversized_updates: 0,
         }
@@ -329,13 +354,25 @@ impl PeerSession {
                     // **A command is not this tick's state.** `Input` is a
                     // sample of what the player was doing when the client
                     // sampled it, which is why it is queued and cleared every
-                    // tick; a command is a request that is answered once. The
-                    // one kind built is a console set, held here for the
-                    // server to check, apply or refuse, and answer.
+                    // tick; a command is a request that is answered once.
+                    // Its kind byte says which: a console set or a scene
+                    // edit, each held here for the server to act on, or
+                    // refuse, and answer.
                     Ok(crcbl_net::ClientToServer::Command { data }) => {
-                        match crcbl_net::decode_console_set(&data) {
-                            Ok(set) => self.console_sets.push(set),
-                            Err(_) => counters.processing_errors += 1,
+                        match data.first().copied() {
+                            Some(crcbl_net::command::CONSOLE_SET_KIND) => {
+                                match crcbl_net::decode_console_set(&data) {
+                                    Ok(set) => self.console_sets.push(set),
+                                    Err(_) => counters.processing_errors += 1,
+                                }
+                            }
+                            Some(crcbl_net::edit::EDIT_KIND) => {
+                                match crcbl_net::decode_edit_request(&data) {
+                                    Ok(request) => self.edit_requests.push(request),
+                                    Err(_) => counters.processing_errors += 1,
+                                }
+                            }
+                            _ => counters.processing_errors += 1,
                         }
                     }
                     Err(_) => counters.processing_errors += 1,
@@ -534,21 +571,66 @@ impl PeerSession {
         reply: &ConsoleReply,
         counters: &mut Counters,
     ) {
+        match crcbl_net::encode_console_reply(reply) {
+            Ok(payload) => {
+                self.send_sealed(transport, &payload, counters);
+            }
+            Err(_) => counters.processing_errors += 1,
+        }
+    }
+
+    /// Answer one of this peer's edits, sealed and on the reliable channel. A
+    /// failure is counted; the client then hears nothing back.
+    pub(crate) fn send_edit_reply<T: Transport + ?Sized>(
+        &mut self,
+        transport: &mut T,
+        reply: &EditReply,
+        counters: &mut Counters,
+    ) {
+        match crcbl_net::encode_edit_reply(reply) {
+            Ok(payload) => {
+                self.send_sealed(transport, &payload, counters);
+            }
+            Err(_) => counters.processing_errors += 1,
+        }
+    }
+
+    /// Tell this peer of an edit the server applied, sealed and on the
+    /// reliable channel: `payload` is the notice, encoded once for every
+    /// peer it goes to. Returns whether it was sent; a failure is counted,
+    /// and the client's copy of the scene then misses the edit, which the
+    /// notice's revision lets it see.
+    pub(crate) fn send_edit_notice<T: Transport + ?Sized>(
+        &mut self,
+        transport: &mut T,
+        payload: &[u8],
+        counters: &mut Counters,
+    ) -> bool {
+        self.send_sealed(transport, payload, counters)
+    }
+
+    /// Seal `payload` under the session key and send it on the reliable
+    /// channel, returning whether it went and counting a failure — what
+    /// every control answer above shares.
+    fn send_sealed<T: Transport + ?Sized>(
+        &mut self,
+        transport: &mut T,
+        payload: &[u8],
+        counters: &mut Counters,
+    ) -> bool {
         let Some(crypto) = self.session_crypto.as_mut() else {
             counters.processing_errors += 1;
-            return;
+            return false;
         };
-        let Ok(payload) = crcbl_net::encode_console_reply(reply) else {
+        let Ok(sealed) = crypto.seal(payload) else {
             counters.processing_errors += 1;
-            return;
-        };
-        let Ok(sealed) = crypto.seal(&payload) else {
-            counters.processing_errors += 1;
-            return;
+            return false;
         };
         if transport.send_reliable(Message::reliable(sealed)).is_err() {
             counters.processing_errors += 1;
+            return false;
         }
+        true
     }
 
     /// The tick this delta should be encoded against, or `None` for a keyframe.

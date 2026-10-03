@@ -20,9 +20,10 @@ use crcbl_ecs::World;
 use crcbl_net::auth::SessionCrypto;
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
-    AuthError, Baseline, ConsoleReply, ConsoleSet, ConsoleTextTooLong, DeltaCodec, HandshakeResult,
-    Hello, Message, MessageKind, ProtocolCompatibility, RejectReason, ResumeToken, SectorId,
-    SessionEndReason, SessionId, Transport, TransportError, Trust, replicated_system_id,
+    AuthError, Baseline, ConsoleReply, ConsoleSet, ConsoleTextTooLong, DeltaCodec, EditNotice,
+    EditReply, EditRequest, EditTooLong, HandshakeResult, Hello, Message, MessageKind,
+    ProtocolCompatibility, RejectReason, ResumeToken, SectorId, SessionEndReason, SessionId,
+    Transport, TransportError, Trust, replicated_system_id,
 };
 use crcbl_phys::{PhysicsSystem, Transform};
 
@@ -73,6 +74,33 @@ impl fmt::Display for ConsoleSetNotSent {
 }
 
 impl std::error::Error for ConsoleSetNotSent {}
+
+/// Why [`Client::send_edit`] sent nothing.
+#[derive(Debug)]
+pub enum EditNotSent {
+    /// No session yet, or it ended: there is no key to seal the edit under,
+    /// and a server would refuse anything sent without one.
+    NotInSession,
+    /// The operation is longer than an edit request carries.
+    TooLong(EditTooLong),
+    /// The session's key has sealed all it may.
+    Seal(AuthError),
+    /// The transport refused the message.
+    Transport(TransportError),
+}
+
+impl fmt::Display for EditNotSent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotInSession => f.write_str("not in a session with a server yet"),
+            Self::TooLong(error) => write!(f, "{error}"),
+            Self::Seal(error) => write!(f, "the edit could not be sealed: {error}"),
+            Self::Transport(error) => write!(f, "the transport refused the edit: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for EditNotSent {}
 
 // ---------------------------------------------------------------------------
 // InterpolatedState
@@ -142,6 +170,18 @@ pub enum Ended {
     /// The transport disconnected without a word from the server: the link
     /// died, or the server did.
     Lost,
+}
+
+/// Hold `item` at the back of `queue`, or refuse it once [`MAX_QUEUED_EVENTS`]
+/// are waiting, returning whether it was held. The newest is the one refused,
+/// for the reason the server refuses the newest input frame past its cap: the
+/// ones held are what the game is about to read, in the order sent.
+fn hold<T>(queue: &mut Vec<T>, item: T) -> bool {
+    if queue.len() >= MAX_QUEUED_EVENTS {
+        return false;
+    }
+    queue.push(item);
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +254,15 @@ pub struct Client<T: Transport> {
     /// [`MAX_QUEUED_EVENTS`]; what arrives past that is counted in
     /// [`Client::dropped_event_count`].
     console_replies: Vec<ConsoleReply>,
+    /// The id the next [`Client::send_edit`] numbers its request with.
+    next_edit_request: u64,
+    /// The server's answers to this client's edits not yet taken by
+    /// [`Client::edit_replies`], oldest first, at most [`MAX_QUEUED_EVENTS`];
+    /// what arrives past that is counted in [`Client::dropped_event_count`].
+    edit_replies: Vec<EditReply>,
+    /// The edits the server applied, anyone's, not yet taken by
+    /// [`Client::edit_notices`], oldest first, held as the replies are.
+    edit_notices: Vec<EditNotice>,
     reliable_rate_limiter: InboundRateLimiter,
     unreliable_rate_limiter: InboundRateLimiter,
     processing_error_count: u64,
@@ -273,6 +322,9 @@ impl<T: Transport> Client<T> {
             events: Vec::new(),
             dropped_event_count: 0,
             console_replies: Vec::new(),
+            next_edit_request: 1,
+            edit_replies: Vec::new(),
+            edit_notices: Vec::new(),
             reliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             unreliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             processing_error_count: 0,
@@ -558,8 +610,8 @@ impl<T: Transport> Client<T> {
         self.events.drain(..)
     }
 
-    /// Events and console replies dropped because [`MAX_QUEUED_EVENTS`] of
-    /// their kind were already waiting to be taken.
+    /// Events, console replies, edit replies and edit notices dropped because
+    /// [`MAX_QUEUED_EVENTS`] of their kind were already waiting to be taken.
     #[must_use]
     pub fn dropped_event_count(&self) -> u64 {
         self.dropped_event_count
@@ -596,6 +648,57 @@ impl<T: Transport> Client<T> {
     /// or why it was refused, and prints as the line a console shows.
     pub fn console_replies(&mut self) -> impl Iterator<Item = ConsoleReply> + '_ {
         self.console_replies.drain(..)
+    }
+
+    /// Send a scene edit to the server, sealed and on the reliable channel,
+    /// as a `ClientToServer::Command`, and return the id its reply will
+    /// name. `op` is the operation in `crcbl_scene::edit`'s wire form
+    /// (`encode_op`): this client frames and seals it and reads none of it.
+    ///
+    /// A server serving a scene for editing applies it or refuses it and
+    /// answers through [`Client::edit_replies`]; one that serves none refuses
+    /// it as not editable. Every edit it applies, this client's included, is
+    /// announced through [`Client::edit_notices`].
+    ///
+    /// # Errors
+    ///
+    /// [`EditNotSent`], naming why nothing was sent: no session, an operation
+    /// too long for the wire, or the key or the transport refused it. No id is
+    /// spent on a request that was not sent.
+    pub fn send_edit(&mut self, op: Vec<u8>) -> Result<u64, EditNotSent> {
+        if !self.handshake_complete {
+            return Err(EditNotSent::NotInSession);
+        }
+        let Some(crypto) = self.session_crypto.as_mut() else {
+            return Err(EditNotSent::NotInSession);
+        };
+        let request_id = self.next_edit_request;
+        let data = crcbl_net::encode_edit_request(&EditRequest { request_id, op })
+            .map_err(EditNotSent::TooLong)?;
+        let payload =
+            crcbl_net::encode_client_to_server(&crcbl_net::ClientToServer::Command { data });
+        let sealed = crypto.seal(&payload).map_err(EditNotSent::Seal)?;
+        self.transport
+            .send_reliable(Message::reliable(sealed))
+            .map_err(EditNotSent::Transport)?;
+        self.next_edit_request = self.next_edit_request.wrapping_add(1);
+        Ok(request_id)
+    }
+
+    /// Take the server's answers to this client's edits since the last call,
+    /// oldest first — each names the request it answers and says whether it
+    /// applied, at which revision, or why it was refused.
+    pub fn edit_replies(&mut self) -> impl Iterator<Item = EditReply> + '_ {
+        self.edit_replies.drain(..)
+    }
+
+    /// Take the edits the server applied since the last call, anyone's and
+    /// this client's own, in the order it applied them — what a copy of the
+    /// scene applies to stay the server's scene. A revision that is not one
+    /// past the last one taken means a notice was dropped
+    /// ([`Client::dropped_event_count`]) and the copy is stale.
+    pub fn edit_notices(&mut self) -> impl Iterator<Item = EditNotice> + '_ {
+        self.edit_notices.drain(..)
     }
 
     /// Request a fresh handshake or resume the accepted session on a replacement
@@ -942,7 +1045,8 @@ impl<T: Transport> Client<T> {
     }
 
     /// Open a sealed control message: the server ending the session, an
-    /// event for the game, or the answer to a console set.
+    /// event for the game, the answer to a console set or an edit, or the
+    /// notice of an edit applied.
     fn handle_sealed_control(&mut self, envelope: &[u8]) {
         let Some(crypto) = self.session_crypto.as_mut() else {
             self.auth_failure_count += 1;
@@ -966,19 +1070,30 @@ impl<T: Transport> Client<T> {
             }
             return;
         }
-        if payload.first() == Some(&crcbl_net::codec::CONSOLE_REPLY_TAG) {
-            let reply = crcbl_net::decode_console_reply(payload);
-            self.session_proof_deadline = None;
-            self.unproven_sessions = 0;
-            match reply {
-                Ok(reply) if self.console_replies.len() < MAX_QUEUED_EVENTS => {
-                    self.console_replies.push(reply);
-                }
-                Ok(_) => self.dropped_event_count = self.dropped_event_count.saturating_add(1),
-                Err(_) => self.processing_error_count += 1,
+        let opened = match payload.first().copied() {
+            Some(crcbl_net::codec::CONSOLE_REPLY_TAG) => crcbl_net::decode_console_reply(payload)
+                .map(|reply| hold(&mut self.console_replies, reply)),
+            Some(crcbl_net::codec::EDIT_REPLY_TAG) => crcbl_net::decode_edit_reply(payload)
+                .map(|reply| hold(&mut self.edit_replies, reply)),
+            Some(crcbl_net::codec::EDIT_NOTICE_TAG) => crcbl_net::decode_edit_notice(payload)
+                .map(|notice| hold(&mut self.edit_notices, notice)),
+            _ => {
+                self.handle_session_end(payload);
+                return;
             }
-            return;
+        };
+        self.session_proof_deadline = None;
+        self.unproven_sessions = 0;
+        match opened {
+            Ok(true) => {}
+            Ok(false) => self.dropped_event_count = self.dropped_event_count.saturating_add(1),
+            Err(_) => self.processing_error_count += 1,
         }
+    }
+
+    /// The session-end message, the one sealed control message left once the
+    /// rest are dispatched — anything else is counted as a processing error.
+    fn handle_session_end(&mut self, payload: &[u8]) {
         let Ok(reason) = crcbl_net::decode_session_ended(payload) else {
             self.processing_error_count += 1;
             return;
@@ -1583,6 +1698,111 @@ mod tests {
         assert_eq!(client.events().count(), 0, "a reply is no game event");
         assert_eq!(client.ended(), None, "nor a session end");
         assert_eq!(client.processing_error_count(), 0);
+    }
+
+    // ── Scene edits ────────────────────────────────────────────────────────
+
+    #[test]
+    fn an_edit_before_the_session_is_refused_and_spends_no_id() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        assert!(matches!(
+            client.send_edit(vec![1, 1]),
+            Err(EditNotSent::NotInSession)
+        ));
+        assert!(peer.recv_reliable().unwrap().is_none(), "nothing went out");
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+        assert_eq!(client.send_edit(vec![1, 1]).expect("in session"), 1);
+        let msg = peer.recv_reliable().unwrap().expect("the edit went out");
+        let _ = crypto
+            .open(&msg.payload)
+            .expect("sealed with the session key");
+    }
+
+    #[test]
+    fn an_edit_goes_sealed_on_the_reliable_channel_as_a_numbered_command() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+        for (op, expected_id) in [(vec![1, 1], 1), (vec![1, 2], 2)] {
+            let id = client.send_edit(op.clone()).expect("in session");
+            assert_eq!(id, expected_id, "each request numbered in turn");
+            let msg = peer.recv_reliable().unwrap().expect("the edit went out");
+            assert_eq!(msg.kind, MessageKind::Reliable);
+            let opened = crypto
+                .open(&msg.payload)
+                .expect("sealed with the session key");
+            let crcbl_net::ClientToServer::Command { data } =
+                crcbl_net::decode_client_to_server(opened).expect("a command")
+            else {
+                panic!("an edit travels as a command");
+            };
+            assert_eq!(
+                crcbl_net::decode_edit_request(&data).expect("an edit"),
+                EditRequest { request_id: id, op }
+            );
+        }
+        let too_long = vec![0; crcbl_net::MAX_EDIT_OP_BYTES + 1];
+        assert!(matches!(
+            client.send_edit(too_long),
+            Err(EditNotSent::TooLong(_))
+        ));
+    }
+
+    #[test]
+    fn sealed_edit_replies_and_notices_are_taken_once_and_not_handed_to_the_game() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+        let reply = EditReply {
+            request_id: 3,
+            outcome: crcbl_net::EditOutcome::Applied { revision: 5 },
+        };
+        let notice = EditNotice {
+            revision: 5,
+            author: 2,
+            op: vec![1, 1],
+        };
+        for payload in [
+            crcbl_net::encode_edit_notice(&notice).expect("short enough"),
+            crcbl_net::encode_edit_reply(&reply).expect("short enough"),
+        ] {
+            let sealed = crypto.seal(&payload).expect("counter space available");
+            peer.send_reliable(Message::reliable(sealed)).unwrap();
+        }
+        client.update(TICK);
+        assert_eq!(client.edit_replies().collect::<Vec<_>>(), [reply]);
+        assert_eq!(client.edit_replies().count(), 0, "taken once");
+        assert_eq!(client.edit_notices().collect::<Vec<_>>(), [notice]);
+        assert_eq!(client.edit_notices().count(), 0, "taken once");
+        assert_eq!(client.events().count(), 0, "neither is a game event");
+        assert_eq!(client.console_replies().count(), 0);
+        assert_eq!(client.ended(), None, "nor a session end");
+        assert_eq!(client.processing_error_count(), 0);
+    }
+
+    #[test]
+    fn edit_notices_past_the_cap_are_dropped_and_counted() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+        for revision in 0..=MAX_QUEUED_EVENTS as u64 {
+            let notice = EditNotice {
+                revision,
+                author: 1,
+                op: Vec::new(),
+            };
+            let payload = crcbl_net::encode_edit_notice(&notice).expect("short enough");
+            let sealed = crypto.seal(&payload).expect("counter space available");
+            peer.send_reliable(Message::reliable(sealed)).unwrap();
+        }
+        client.update(TICK);
+        let taken: Vec<u64> = client
+            .edit_notices()
+            .map(|notice| notice.revision)
+            .collect();
+        assert_eq!(taken, (0..MAX_QUEUED_EVENTS as u64).collect::<Vec<_>>());
+        assert_eq!(client.dropped_event_count(), 1, "the newest one");
     }
 
     // ── Handshake recovery ─────────────────────────────────────────────────

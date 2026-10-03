@@ -295,6 +295,7 @@ fn no_refusals(_: &mut World) -> Vec<String> {
 const PING: PlayControls = PlayControls {
     actions: &[PlayAction {
         name: "Ping",
+        description: "Ping the game",
         params: &[],
     }],
     encode: one_byte,
@@ -327,6 +328,7 @@ fn burst(_: &mut World) -> Vec<String> {
 const BURSTING: PlayControls = PlayControls {
     actions: &[PlayAction {
         name: "Ping",
+        description: "Ping the game",
         params: &[],
     }],
     encode: one_byte,
@@ -378,6 +380,7 @@ fn a_burst_of_refusals_is_one_bounded_line_and_every_one_logged() {
 const BELL: PlayControls = PlayControls {
     actions: &[PlayAction {
         name: "Ring",
+        description: "Ring the bell",
         params: &[ParamKind::Choice(&["loud"])],
     }],
     encode: one_byte,

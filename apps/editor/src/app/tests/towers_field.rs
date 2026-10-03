@@ -14,9 +14,9 @@
 //! carries is one number at a time, as a person copies it from anywhere.
 //!
 //! **Numbers are pasted rather than dragged**: a drag-value takes no typed
-//! number — it moves `step` a pixel, in `f32` arithmetic — so the clipboard is
-//! the one way a number field takes exactly the value a person means
-//! (`docs/backlog.md`, the pass's finding).
+//! number — it moves `step` a pixel — so the clipboard is the one way a number
+//! field takes exactly the value a person means (`docs/backlog.md`, the pass's
+//! finding).
 
 use super::*;
 

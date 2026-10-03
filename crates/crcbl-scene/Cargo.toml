@@ -79,6 +79,11 @@ crcbl-core = { workspace = true }
 # else, and it must keep doing so — the serde bound `scn` needs sits on
 # `chunk_of`, so no `serde` reaches the entity crate. See `src/scn.rs`.
 crcbl-ecs = { workspace = true }
+# `Value`, `Snapshot` and the path grammar an edit command carries and applies
+# through (`src/edit.rs`): the scene's edit vocabulary lives beside the format
+# it edits, so a tool, a server and a fuzz target reach it without linking the
+# editor. Its own dependencies are `glam`, `thiserror` and its derive.
+crcbl-reflect = { workspace = true }
 # `GpuMaterial` is what a glTF PBR material's factors *are*: its
 # `base_color_factor` is linear RGBA and so is `GpuMaterial::base_color`, so the
 # importer produces the shader's own record rather than a parallel copy of it.

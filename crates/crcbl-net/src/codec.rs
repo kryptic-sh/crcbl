@@ -49,6 +49,12 @@ pub const EVENT_TAG: u8 = 0x11;
 /// [`ConsoleReply`](crate::command::ConsoleReply) — only ever sealed, and only
 /// on the reliable channel, beside the session end; see [`crate::command`].
 pub const CONSOLE_REPLY_TAG: u8 = 0x12;
+/// [`EditReply`](crate::edit::EditReply) — only ever sealed, and only on the
+/// reliable channel, as the console reply is; see [`crate::edit`].
+pub const EDIT_REPLY_TAG: u8 = 0x13;
+/// [`EditNotice`](crate::edit::EditNotice) — only ever sealed, and only on
+/// the reliable channel; see [`crate::edit`].
+pub const EDIT_NOTICE_TAG: u8 = 0x14;
 /// [`Hello`].
 pub const HELLO_TAG: u8 = 0x20;
 /// [`HandshakeResult::Accept`].

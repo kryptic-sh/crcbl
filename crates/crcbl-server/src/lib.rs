@@ -159,6 +159,7 @@ impl<T: Transport> Server<T> {
         self.peer.begin_tick();
         self.drain_inputs();
         self.refuse_console_sets();
+        self.refuse_edits();
         self.update_session_for_transport();
         self.world.tick();
         if let Some(ref mut module) = self.module {
@@ -198,6 +199,17 @@ impl<T: Transport> Server<T> {
             };
             self.peer
                 .send_console_reply(&mut self.transport, &reply, &mut self.counters);
+        }
+    }
+
+    /// Answer every edit the peer sent with a refusal: a `Server` serves no
+    /// scene for editing — a [`Host`] told to does — and a client that asked
+    /// is told so, by code, rather than left waiting.
+    fn refuse_edits(&mut self) {
+        for request in std::mem::take(&mut self.peer.edit_requests) {
+            let reply = peer::not_serving_edits(&request);
+            self.peer
+                .send_edit_reply(&mut self.transport, &reply, &mut self.counters);
         }
     }
 
@@ -1094,6 +1106,57 @@ mod tests {
                 outcome: crcbl_net::ConsoleOutcome::Refused(SERVER_TAKES_NO_SIM_SETS.to_owned()),
             }]
         );
+    }
+
+    /// A `Server` serves no scene, so an edit is refused as not editable, by
+    /// the request's own id, and costs the peer nothing; an edit envelope that
+    /// will not decode has no id to answer and is counted instead.
+    #[test]
+    fn an_edit_is_refused_as_not_editable_and_a_malformed_one_is_counted() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+
+        let edit =
+            |data| crcbl_net::encode_client_to_server(&crcbl_net::ClientToServer::Command { data });
+        let request = crcbl_net::EditRequest {
+            request_id: 41,
+            op: vec![1, 1],
+        };
+        send_sealed(
+            &mut peer,
+            &mut crypto,
+            &edit(crcbl_net::encode_edit_request(&request).expect("short enough")),
+        );
+        assert_eq!(server.update(2 * TICK), 1);
+        assert_eq!(server.processing_error_count(), 0);
+
+        let mut replies = Vec::new();
+        while let Some(msg) = peer.recv().unwrap() {
+            if msg.kind != MessageKind::Reliable {
+                continue;
+            }
+            let opened = crypto.open(&msg.payload).expect("sealed by the server");
+            if opened.first() == Some(&crcbl_net::codec::EDIT_REPLY_TAG) {
+                replies.push(crcbl_net::decode_edit_reply(opened).expect("well formed"));
+            }
+        }
+        assert_eq!(replies, [peer::not_serving_edits(&request)]);
+        assert!(matches!(
+            replies[0].outcome,
+            crcbl_net::EditOutcome::Refused {
+                reason: crcbl_net::EditRefusal::NOT_EDITABLE,
+                ..
+            }
+        ));
+
+        send_sealed(
+            &mut peer,
+            &mut crypto,
+            &edit(vec![crcbl_net::edit::EDIT_KIND, 1, 2]),
+        );
+        assert_eq!(server.update(3 * TICK), 1);
+        assert_eq!(server.processing_error_count(), 1);
     }
 
     /// A command whose data is no console set costs the peer its error

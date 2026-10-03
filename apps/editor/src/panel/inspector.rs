@@ -270,11 +270,11 @@ fn scene(ui: &mut Ui, document: &Document, overrides: &Overrides, built: &mut Bu
 const EULER: EulerRot = EulerRot::XYZ;
 
 /// How far one pixel of a drag turns an angle on the rotation row, in degrees.
-const DEGREE_STEP: f32 = 0.5;
+const DEGREE_STEP: f64 = 0.5;
 
 /// How far an angle on the rotation row is held either way of zero, in
 /// degrees: a whole turn, which every orientation is inside.
-const DEGREE_RANGE: f32 = 360.0;
+const DEGREE_RANGE: f64 = 360.0;
 
 /// The inspector's per-type rows: [`Overrides::vectors`], and a
 /// [`Rotation`] drawn as three angles.
@@ -304,8 +304,7 @@ fn rotation_row(ui: &mut Ui, field: &mut FieldRow<'_>) {
     ui.block(".inspector-row", &[], |ui| {
         ui.span(".inspector-label", label, &[]);
         for (index, axis) in AXES.iter().enumerate() {
-            #[allow(clippy::cast_possible_truncation)]
-            let mut number = degrees[index] as f32;
+            let mut number = degrees[index];
             let mut moved = false;
             // Keyed by the axis, as a vector row's are.
             ui.block_keyed(*axis, ".inspector-axis", &[], |ui| {
@@ -321,7 +320,7 @@ fn rotation_row(ui: &mut Ui, field: &mut FieldRow<'_>) {
             });
             if moved {
                 let mut angles = degrees;
-                angles[index] = f64::from(number);
+                angles[index] = number;
                 turned = Some(angles);
             }
         }

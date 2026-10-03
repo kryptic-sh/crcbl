@@ -3375,7 +3375,10 @@ variant picker; tooltips on the same layer (`tree/tooltip.rs`: `Ui::tooltip`,
 `TOOLTIP_DELAY`), adopted for the editor's toolbar and play strip; context menus
 on the same layer (`tree/widgets/context_menu.rs`: `Ui::context_menu`,
 `ContextItem`, `ContextMenuResponse`, `Ui::open_popup_at`, `Placement`), adopted
-for the editor's outliner rows. Decisions, then what is left.
+for the editor's outliner rows; list navigation inside pop-ups
+(`tree/popup_nav.rs`: `Jump`, `NavInput::jump`, `Ui::popup_list_open`,
+`TYPEAHEAD_TIMEOUT`; `POPUP_MARGIN` in `popup.rs`; the reserved `list` context
+in `crcbl_input::list`). Decisions, then what is left.
 
 - **Decided: a press outside every pop-up is spent closing them**, not passed
   through to what is under it — the long-term rule. A click meant to dismiss a
@@ -3471,10 +3474,6 @@ for the editor's outliner rows. Decisions, then what is left.
   `TTDT_RESHOW` would show the next sooner, and a tooltip stays up for as long
   as the pointer rests rather than going after `TTDT_AUTOPOP`. Either is a field
   on `TooltipState` and a rule in `resolve_tooltip`.
-- **Deferred: a description on `PlayAction`.** An action's tooltip is read off
-  its `ParamKind`s (_Send Place tower to the game, for the `plots` selected in
-  the scene (1)_), because the registry carries only a name; a game-written
-  sentence needs a field every registered action would fill.
 - **Deferred: a tooltip wider than the viewport wraps.** It is `nowrap`, shifted
   to the viewport's left edge and clipped at its right; a `max-width` with
   wrapping would need the span to wrap inside a content-sized root.
@@ -3553,12 +3552,87 @@ for the editor's outliner rows. Decisions, then what is left.
 - **Deferred: a shortcut column in context items.** The editor writes each key
   into the label (`Delete (Del)`), as its toolbar does; a right-aligned column
   needs a second span per item and a field on `ContextItem`.
-- **Deferred: a list taller than the viewport scrolls.** It is shifted to the
-  viewport's top and the rest is clipped; `max-height` with `overflow: scroll`
-  on `.select-list` would bound it, and focus scrolls an `overflow: scroll`
-  block's focused node into view, but no rule sets it and nothing tests it.
-  Typeahead, Home and End, and wrapping at the list's ends (`nav-wrap` on
-  `.select-list` should do it) are not built or tested either.
+- **Decided: every pop-up is capped at the viewport's height less `POPUP_MARGIN`
+  and scrolls**, not only a drop-down's list: `Ui::popup` puts the cap in front
+  of the caller's `inline` (so a caller's own `max-height` wins) and
+  `default.css` makes `popup` `overflow: scroll`. The cap is the viewport the
+  last layout was given — the only one there is while a frame is built — so it
+  is a frame late to follow a resize and absent in a tree's first frame, as the
+  list's `min-width` is a frame late to follow its button. Focus scrolls the
+  capped list by the existing `overflow: scroll` rule, and the wheel by
+  `Ui::scroll_wheel`; no second scroll mechanism.
+- **Decided: a node `Ui::set_focus` asks for is scrolled into view at that
+  frame's layout** (`Ui::reveal_requested`, then the tree is placed a second
+  time, only on frames where it moved something), so a drop-down opens drawn at
+  its chosen option and typeahead's target is in view the frame it is typed,
+  rather than one frame late. Every `set_focus` caller gets it; the only others
+  are a pop-up handing focus back to its anchor, which the next frame's focus
+  would scroll to anyway.
+- **Decided: `nav-wrap` wraps to the far side of a container's content, not of
+  its box** (`move_spatially` in `focus/mod.rs`): wrapping a scrolled menu from
+  its last item reaches its first item, not the first one in view.
+- **Decided: arrows wrap in a context menu and stop in a drop-down's list**:
+  Windows menus wrap and Windows list boxes do not. `nav-wrap: vertical` on
+  `default.css`'s `.context-menu`; nothing on `.select-list`. macOS menus do not
+  wrap; Windows was followed because the menu-key pair it gave `ui_menu` is
+  Windows' too.
+- **Decided: Home, End, Page Up and Page Down are a `Jump` on `NavInput`, and
+  act in the topmost pop-up only** (`Ui::jump_in_popup`): the first or last node
+  focus can rest on (so past a disabled item), or the furthest node whose far
+  edge is within the pop-up's content height of the focused one. **Not panels**:
+  a virtualized list or outliner builds only its window of rows, so its first
+  and last built rows are not its first and last.
+- **Decided: the keys come through a reserved `list` context, not new `ui_*`
+  actions** (`crcbl_input::list`: `list_first`, `list_last`, `list_page_up`,
+  `list_page_down` repeating, and `list_type` on every character key —
+  `crcbl_input::text::KEYS` less Space, Backspace, Delete, Home, End and the
+  side arrows). It is pushed over `ui` while `Ui::popup_list_open` says a list
+  is open, as `text` is while a field is engaged, and `nav_input` reads it into
+  `NavInput::jump`. **Considered and declined: adding the four keys to
+  `crcbl_input::ui::ACTIONS`**, as `ui_menu` was. A pushed `ui` would take them
+  from every game under every panel, and from the editor's own Page Up/Page Down
+  lift whenever a panel held the keyboard; and typeahead needs the letters,
+  which `ui` binds as WASD by default — only a context that is on exactly while
+  a list is open can own both without changing what any other screen's keys do.
+  Typed characters reach the tree as the shell's `TextCommit`s through
+  `TextPump`, which a caller tells to collect while a list is open
+  (`text_editing() || popup_list_open()`); the list reads inserts and ignores
+  every other edit. No pad bindings. The engine loop's `menu_actions` does not
+  declare it: the loop's own menus have no pop-ups.
+- **Decided: typeahead is Windows' list and menu rule.** The prefix extends
+  while characters come within `TYPEAHEAD_TIMEOUT` of each other on the text
+  clock, and focus goes to the first enabled item from the focused one whose
+  label starts with it, ignoring case (`str::to_lowercase`); one letter typed
+  again and again starts after the focused item, so it steps through the items
+  it begins. White space and control characters are not typed — Space is
+  `ui_accept`. `TYPEAHEAD_TIMEOUT` is one second, chosen rather than taken from
+  a platform figure. It runs in the widgets (`Ui::typeahead`, called by
+  `Ui::select` and each level of `Ui::context_menu`), which know the labels; the
+  tree keeps no text per node between frames.
+- **Behaviour that is not a bug: the editor needed `ui` under `list`.** A
+  right-click opens a row menu before focus has moved into it, so
+  `Panels::holds_keyboard` was false and `list` went on with no `ui` beneath;
+  `ui` then went on over it and `list::sync`'s pop was refused as out of order.
+  `holds_keyboard` now counts an open list.
+- **Behaviour that is not a bug: keys the `list` context does not bind still
+  reach the editor under an open row menu** — Delete, F2, F5 — as they do under
+  a focused panel. Only the letters, digits, punctuation and the jump keys are
+  the list's.
+- **Deferred: a capped list covers its anchor.** It hangs below or above its
+  anchor as before and is then shifted inside; a Windows combo box instead sizes
+  its list to the room on the side it opens toward. That is a cap per placement
+  in `Ui::popup` and `hang`, with `Placement::At` and `Beside` needing their own
+  answer.
+- **Deferred: a pop-up wider than the viewport.** Only its height is capped; it
+  is still shifted to the viewport's left edge and clipped at its right.
+- **Deferred: Page Down as Windows does it** — first to the last item in view,
+  then a page further — rather than a view's height from the focused item.
+- **Deferred: Backspace editing the typeahead prefix, and a space inside one**
+  (`New Y` for `New York`), which Windows' list views take; Space is accept
+  here, and the `list` context leaves Backspace unbound.
+- **Deferred: handing a `Jump` to an engaged widget** — Home and End as a
+  slider's minimum and maximum, as WAI-ARIA's slider pattern has them. An
+  engaged node ignores a jump; `NavStep` would need the variants.
 - **Not tested:** the pop-up, the drop-down and the context menu have never been
   looked at on a device or in a golden; the inspector golden leaves variants off
   and did not change, and no golden builds a context menu, so its `default.css`
@@ -3567,23 +3641,25 @@ for the editor's outliner rows. Decisions, then what is left.
   arrives as `WM_SYSKEYDOWN`, which `proc.rs` forwards), the menu key on X11 and
   Wayland, and a right-click on the canvas in a browser. Also untested for
   context menus: a menu nested deeper than one submenu, one opened inside a
-  scrolled block, typeahead, Home and End, wrapping at the ends, and a menu
-  taller than the viewport (shifted to its top and clipped, as a list is). The
-  drop-down's look is `default.css`'s `popup`, `select` and `.select-option`
-  rules, read only through the accent colour in `crcbl-ui`'s inspector test, and
-  the layer is held by draw-list order and clips in `tree::popup_tests`. Also
-  untested: the wheel over a pop-up (`scroll_wheel` walks the layered hit
-  chain), a pop-up nested more than one deep, a pop-up opened from inside a base
-  modal, gamepad input, and the editor's Escape with the unsaved bar up while a
-  drop-down is open (the bar answers Escape through its own binding, outside the
-  tree). For tooltips (`tree::tooltip_tests`, `editor`'s
-  `panel::tests::tooltips`): an anchor inside a pop-up that closes while the
-  frame is built (the `CLOSED_LAYER` branch in `Ui::layers`), an anchor built
-  `display: none` (the hidden branch in `Ui::place`), nested widgets that both
-  ask (the innermost wins by stacking), accept dismissing, the play strip's
-  tooltips through the loop and a choice's tooltip text, and the `tooltip`
-  rule's look — the tests restyle its background to find it. No golden builds a
-  tooltip.
+  scrolled block, Page Up and Page Down in a menu (tested in a drop-down's
+  list), and the wheel over a capped menu (tested over a list). Not tested: a
+  jump arriving while a widget is engaged (ignored by the code), and the cap
+  following a resize. Not verified on a device: typeahead through a real shell's
+  `TextCommit`s (the headless shell's only) and an input method composing while
+  a list is open. The drop-down's look is `default.css`'s `popup`, `select` and
+  `.select-option` rules, read only through the accent colour in `crcbl-ui`'s
+  inspector test, and the layer is held by draw-list order and clips in
+  `tree::popup_tests`. Also untested: a pop-up nested more than one deep, a
+  pop-up opened from inside a base modal, gamepad input, and the editor's Escape
+  with the unsaved bar up while a drop-down is open (the bar answers Escape
+  through its own binding, outside the tree). For tooltips
+  (`tree::tooltip_tests`, `editor`'s `panel::tests::tooltips`): an anchor inside
+  a pop-up that closes while the frame is built (the `CLOSED_LAYER` branch in
+  `Ui::layers`), an anchor built `display: none` (the hidden branch in
+  `Ui::place`), nested widgets that both ask (the innermost wins by stacking),
+  accept dismissing, the play strip's tooltips through the loop and a choice's
+  tooltip text, and the `tooltip` rule's look — the tests restyle its background
+  to find it. No golden builds a tooltip.
 
 ## What UI rung 8b shipped without (2026-09-16)
 
@@ -3602,11 +3678,26 @@ for the editor's outliner rows. Decisions, then what is left.
   dropped, because that struct's own fields carry `range: None` and the widget
   cannot tell "no bound" from "inherit". `Overrides::vectors()` covers the case
   that matters; a general answer needs `Field` to say which.
-- **The drag-value is `f32` and `Value` is 64 bits.** A row narrows to show and
-  writes back only in the frame the widget reports a change, so an untouched
-  field keeps every digit — but a _dragged_ `f64` lands on `f64::from(f32)`
-  precision, and a dragged `i64` past 2^24 cannot be moved one at a time. A
-  64-bit drag-value fixes both.
+- **A 64-bit field can be dragged but not typed.** The 64-bit drag-value
+  (2026-10-03, `DragNumber` in `crates/crcbl-ui/src/tree/widgets/value.rs`)
+  fixed dragging and stepping, but the widget takes no typed number — the
+  click-to-type mode under rung 7's "Drag-value has no snapping" is not built —
+  so a 17-digit `f64` or an `i64` past 2^53 cannot be entered exactly, only
+  reached by steps. When it is built, its text must parse to the field's own
+  kind (`str::parse::<f64>`, `::<i64>`, `::<u64>`, never through `f32`) and show
+  every digit while engaged (`{}` for a float, not the step's decimals). No
+  reflected leaf goes through the slider, so it stayed `f32`. Decisions taken
+  with the 64-bit change:
+  - **No `f32` impl of `DragNumber`.** An `f32` caller widens with `f64::from`
+    and narrows back itself, so the one rounding is at its boundary; the
+    `ui_widgets` scene's `#gain` became an `f64` instead.
+  - **A whole number's notch is the step rounded**, with the unrounded step
+    still the drag's speed per pixel — what the `f32` widget did by rounding the
+    result. A step under one half rounds to a notch of zero, which moves
+    nothing, as before.
+  - **A float shows the step's decimals, as before**, so goldens did not move; a
+    whole number shows every digit, which reads the same for any value an `f32`
+    held exactly.
 - **No list resize, no reordering, no reset-to-default, no multi-select and no
   copy/paste of a field** — each needs a mechanism `crcbl-reflect` does not
   have. (An enum's variant switch landed 2026-10-03.)
@@ -12237,13 +12328,23 @@ _`crcbl save list|dump|diff|restore`_, _Golden audio buffers per sample, and
   being the sync point; `crcbl edit <scene> -e '<cmd>' …` — one-shot edits
   without a session.
 
-**What it waits on**: the editor's server command handling —
-`ClientToServer::Command` is matched and dropped by `crcbl-server`, `Client` has
-no send path and a server hosts one session (`docs/plan/08-editor.md`, missing
-piece 1) — and `EditCommand` has only property, spawn, delete and rename
-variants (the editor entry, _Task 4's commands_, lists what is owed). When the
-CLI reads commands it will have to parse input, which is the moment
-`crates/crcbl-cli/src/json.rs` says to reconsider hand-written JSON.
+**What it waits on: nothing but itself, and it is the next slice** (re-checked
+2026-10-04). The server half exists — `crcbl_editor::serve::EditServer` applies
+a client's `EditOp` through the editor's `Document`, `Client::send_edit` sends
+one and `Client::edit_replies` reads the reason-coded answer; _Scene edits over
+the transport_, below, has the protocol and what it leaves. What the verbs need
+on top:
+
+- **Where the server runs.** `EditServer` lives in `apps/editor`, beside the
+  `Document` it applies through, and `crcbl-cli` depends on no app. Either the
+  `Document`'s non-UI core moves into the umbrella (a large move, through files
+  the editor's panels touch) or `crcbl edit --serve` is the editor binary run
+  headless. Decide before writing the verb.
+- **Reading a command from arguments or stdin** means parsing input, which is
+  the moment `crates/crcbl-cli/src/json.rs` says to reconsider hand-written
+  JSON; the wire form (`crcbl_scene::edit::encode_op`) is what it sends.
+- **A one-shot `-e` without a session** applies through a `Document` directly
+  and saves; no transport is needed for it.
 
 **The exit criteria that hang on it**: a scripted `crcbl new` → `crcbl import` →
 `crcbl scene spawn …` → `crcbl screenshot` → `crcbl sim` session that builds and
@@ -12252,6 +12353,76 @@ the CLI (a tower plot spawned, a spawner moved) opening correctly in the GUI
 editor with its undo history intact. Towers' plots and path corners are scene
 rows since 2026-09-30 (`apps/towers/assets/scenes/field.scn/`, in the editor's
 shipped vocabulary), so the towers half waits on the CLI protocol alone.
+
+### Scene edits over the transport: the server slice and what it leaves (2026-10-04)
+
+**Built**: `crcbl_net::edit` (an `EditRequest` as a command of kind `EDIT_KIND`,
+the sealed `EditReply` and `EditNotice`, and the `EditRefusal` codes),
+`crcbl_scene::edit`'s wire form of an `EditOp` (a command, an undo or a redo),
+`Host::serve_edits` with `take_edit_requests`, `send_edit_reply` and
+`broadcast_edit_notice`, `Client::send_edit` with `edit_replies` and
+`edit_notices`, and `crcbl_editor::serve::EditServer` joining them to a
+`Document`. Its tests run two clients over `InMemoryTransport` and compare the
+served scene's saved text with a `Document` given the same commands.
+
+**Decided, for the long term:**
+
+- **The command model lives in `crcbl_scene::edit`**, not in the umbrella: the
+  decoder fuzz target has to reach the operation's decoder and cannot link the
+  umbrella's renderer, and `crcbl-server` may not reach `crcbl-shaders` at all
+  (`tools/check-no-renderer-deps.sh`). So the server and `crcbl-net` carry the
+  operation as opaque bytes, as a console set carries its value as text, and the
+  crate owning the vocabulary decodes it.
+- **`Document` stays in `apps/editor`.** Moving it would take its play, mesh and
+  UI-facing halves with it, through files the editor's panels edit; the server
+  applies through it from `apps/editor/src/serve.rs` instead, so there is one
+  implementation. The CLI entry above carries what that costs
+  `crcbl edit --serve`.
+- **Any admitted peer may edit**, with no host-player rule as console sets have:
+  a headless server adds no host player, and the plan's correction has a GUI and
+  a CLI editing at once.
+- **Undo and redo are protocol operations** on the server's one history, the
+  most recent entry whoever made it.
+- **Other clients follow through notices, not snapshot replication.** Each
+  applied operation's own bytes go to every client, the author included, with
+  the revision; a copy applying them in order is the server's scene. Snapshots
+  carry replicated components, which a rename or a row's field does not have,
+  and the document's world is not the host's (the host's world is empty).
+- **The notice goes before the author's reply**, so a client reading its
+  `Applied` already holds the change.
+- **Refusal codes are an open set of stable numbers** (`EditRefusal(u8)` with
+  named constants), as `SessionEndReason` is: an unknown code is kept, not
+  refused.
+- **A host serving no scene, and every `Server`, refuses an edit as not
+  editable** rather than leaving it unread; an envelope that will not decode has
+  no id to answer and is counted as a processing error.
+
+**Deferred, each with what it takes:**
+
+- **The GUI is not a client of its own server.** `apps/editor`'s app still
+  applies to its `Document` in process; routing it means starting an
+  `EditServer` (or connecting to one), sending each command, and applying
+  notices to the view's copy. Gestures would need a gesture id on the wire:
+  today each operation is its own history entry, so a drag sent frame by frame
+  would be one undo per frame.
+- **A variant switch does not travel**: `Snapshot::Variant`'s name is a
+  `&'static str`, so a decoded snapshot has no name to hold until it is resolved
+  against the component. Either `Snapshot` holds an owned name, or the decoder
+  resolves names against the registry. `encode_op` refuses one by name.
+- **A client joining late, or resuming after a lost link, cannot fetch the
+  scene**: notices carry changes, not state, and one missed shows only as a
+  revision gap. Wants a "scene files at revision N" message.
+- **The author is not in the undo log**: the plan's correction shows each
+  entry's author, `UndoLog` has no author column, and the notice is the only
+  place the author is said.
+- **Play, stop and save are not protocol operations**; the serving editor drives
+  them through `EditServer::document_mut`.
+- **A host serves one session**, so this is one scene per server.
+
+**Coverage gaps**: never run over UDP or between processes; every test is
+in-memory and in one process. The decoder fuzz target was built
+(`cargo check --bins`) and its seeds replayed by `tests/corpus.rs`; it was not
+run under libFuzzer in this slice.
 
 ## Tooling and infrastructure — what the plans still owe
 
@@ -12660,10 +12831,12 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
 (`EditCommand` has one variant, `SetProperty`) and `crcbl-server`'s peer loop
 (`ClientToServer::Command` is matched and dropped).
 
-- **The client+server pair**: server command handling with a client send path,
-  reason-coded replies, one global undo log showing each entry's author,
+- **The client+server pair**: the server half landed 2026-10-04 — command
+  handling, a client send path, reason-coded replies, one global history,
   validation against current state and last-writer-wins (the plan's 2026-07-27
-  correction); and a server hosting more than one session.
+  correction) — and _Scene edits over the transport_ has what it leaves: the GUI
+  as a client of it, each entry's author in the undo log, and a server hosting
+  more than one session.
 - **An edit-mode schedule** for the selection, gizmo and editor-camera systems;
   a `World` has one `Schedule` and no per-system gating.
 - **Rotation on scene components and the rotate gizmo (landed 2026-10-01): what
@@ -12869,7 +13042,8 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
       the pick's green outline is held by the boxes handed to the debug draw,
       never by an image. They are drawn in the greybox grey like the creeps, one
       material for every kind and tier, so a splash tower and a slow one look
-      the same.
+      the same. Nor have the strip's tooltips, towers' descriptions in them
+      included.
   - **An edit-mode schedule, only if something needs one.** Nothing ticks while
     editing, so play needs no schedule to switch from; the selection, gizmo and
     camera systems the plan put in one are plain editor code today (the
@@ -13024,14 +13198,13 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   three gaps (an entity of a game's own component could not be made, the
   environment could not be edited, a vector row's last field was cut off). What
   it found and left, each with what it takes:
-  - **A drag-value takes no typed number, and edits an `f32`.** `Ui::drag_value`
-    takes `&mut f32` and moves by `speed` per pixel or `step` per engaged arrow,
-    unsnapped, so whether a drag lands on the number a person means depends on
-    the pixel it ends on and on `f32` rounding. The pass entered every number by
-    a field paste (Ctrl+V over the field), which reads text exactly. A typed
-    entry is `crcbl-ui`'s widget work: a text mode on the drag-value (entered on
-    a double-click or accept, committed on accept, cancelled on back) parsing
-    through the leaf's kind; its `f64` width is being reworked separately.
+  - **A drag-value takes no typed number.** `Ui::drag_value` moves by `speed`
+    per pixel or `step` per engaged arrow, unsnapped, so whether a drag lands on
+    the number a person means depends on the pixel it ends on. The pass entered
+    every number by a field paste (Ctrl+V over the field), which reads text
+    exactly. A typed entry is `crcbl-ui`'s widget work: a text mode on the
+    drag-value (entered on a double-click or accept, committed on accept,
+    cancelled on back) parsing through the leaf's kind.
   - **An emptied system cannot be unlisted from the UI.**
     `EditCommand::UnlistSystem` exists and is undoable, but no button reaches
     it, so a system whose last entity was deleted or detached stays in the
@@ -13174,8 +13347,9 @@ its rules say so rather than being silent: bracket's rules in
 `docs/notes/samples.md` record that it opens no `World` and implements no
 `GameModule` today, that rule 2 is owed here rather than exempted, and that the
 missing piece is engine work — a way for a `GameModule` to receive a
-`ClientToServer::Command` and reply to it, which `crcbl-server`'s receive loop
-leaves as an empty arm.
+`ClientToServer::Command` and reply to it. (Re-checked 2026-10-04: the receive
+loop takes two kinds of command now, console sets and scene edits, each answered
+by the server or the caller serving a scene; neither reaches a module.)
 
 **Two browser gaps stated in the doc and worth keeping visible:**
 `WebAssembly.instantiate` has neither NaN canonicalization nor fuel, so the
@@ -16903,9 +17077,10 @@ headless soak. `web/demos/bracket/` is the page.
 as things stand would be worse than not doing it — it would put the matchmaker
 behind a tick-shaped input channel and look like the claim while not being it.
 Queueing, leaving the queue and reporting a result are **commands**:
-`crcbl-server`'s receive loop has an arm for `ClientToServer::Command` whose
-body is empty, with a comment saying that a caller must not read it as a command
-being acted on. So the missing piece is a way for a `GameModule` to receive a
+`crcbl-server`'s receive loop decodes a `ClientToServer::Command` by its kind
+byte — a console set or a scene edit (re-checked 2026-10-04), the one answered
+by the host, the other by the caller serving a scene — and has no kind a
+`GameModule` receives. So the missing piece is a way for a module to receive a
 command and reply to it, and it is engine work. `docs/backlog.md` already
 carries this under "bracket does not yet drive the transport (2026-08-24)"; it
 is re-verified and still accurate.
@@ -17304,12 +17479,19 @@ Stated as gaps rather than explained away:
   `a_headless_run_neither_resumes_nor_writes_a_save` pins the headless rule.
   Since 2026-10-03 the save on close is driven through the running loop into a
   real directory: `app::save_tests` hands a headless run a scratch `Vault::at`
-  after start-up and closes it. The cadence itself — `Shard::autosave` firing
-  every `save::save_ticks` — is still covered only by the browser gate; the same
-  injection would drive it natively, and was not written (outside the close's
-  task). **A `--save-dir` flag would close the windowed half** and is what topic
-  14 already asks for under "server deployments: configurable data dir"; it was
-  left out as scope.
+  after start-up and closes it, and the autosave's cadence is driven the same
+  way: `the_autosave_writes_once_a_period_and_never_before_the_first` walks a
+  headless run through several periods on its manual clock and holds the
+  accepted-write counter to the periods played after every frame, each write to
+  its period's last tick and each file to the stage on that tick (shown red by
+  halving the `save_ticks` the loop runs on and by firing a tick early). What
+  stays browser-only is the cadence against a real store — OPFS's queued writes
+  — and on a real frame rate. **Behaviour that is not a bug:**
+  `Shard::autosave`'s `saveable` guard cannot fire, since it runs only after
+  `Game::tick` has raised the counter; removing it turns nothing red, and it is
+  kept because it states the rule the close shares. **A `--save-dir` flag would
+  close the windowed half** and is what topic 14 already asks for under "server
+  deployments: configurable data dir"; it was left out as scope.
 - **The save on a page's close was not run in a browser.** It rests on
   `demo.js`'s `pagehide` running the teardown, and so `exiting`, before its
   storage drain, as towers' does; nothing drove it, and the gate's cleared-store
@@ -18260,10 +18442,10 @@ leaves behind is smaller than it was:
   on every tick there is one, so the handshake tick moved the opening frame.
   Nothing but the golden had pinned that board, and it has its own test now.
 
-- **`ClientToServer::Command` is still not consumed.** It is decoded, charged
-  against the session's error budget if malformed, and dropped, and the code
-  says why: a command is a request that has to be answered once and stay
-  answered, not a per-tick sample, and nothing on this server answers one yet.
+- **`ClientToServer::Command` is consumed for two kinds only** (re-checked
+  2026-10-04): a console set, which a `Host` applies on its tick boundary, and a
+  scene edit, which a host serving a scene hands to its caller (_Scene edits
+  over the transport_). A game's module still receives no command.
 - **The jitter buffer, the client's tick lead and rate correction are still
   absent**, and now they are the next thing rather than blocked behind this.
   Input frames are handed over in arrival order with the `TickId` their client
@@ -28469,13 +28651,12 @@ is pure request/response — no snapshots, no interpolation, no tick", against a
 protocol that "has only ever been driven by tick-shaped traffic".
 
 **What that needs, and it is engine work rather than sample work.**
-`ClientToServer::Command` is decoded and dropped — `crcbl-server/src/peer.rs`'s
-receive loop has an arm for it whose body is empty, and whose comment says so
-plainly ("nothing on this server consumes one yet ... a caller must not read
-this arm as a command being acted on"). Queueing, leaving the queue and
-reporting a result are commands: each is a request that must be answered once
-and stay answered, which is exactly what the `Input` path is not. So the slice
-is a way for a `GameModule` to receive a command and reply to it.
+`ClientToServer::Command` reaches no module — `crcbl-server/src/peer.rs`'s
+receive loop decodes two kinds, a console set and a scene edit (re-checked
+2026-10-04), and neither is a game's. Queueing, leaving the queue and reporting
+a result are commands: each is a request that must be answered once and stay
+answered, which is exactly what the `Input` path is not. So the slice is a way
+for a `GameModule` to receive a command and reply to it.
 
 Routing the demo through `Loopback` **without** that would be worse than what is
 there now — it would put the matchmaker behind a tick-shaped input channel and

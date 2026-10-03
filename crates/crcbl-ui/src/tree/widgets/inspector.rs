@@ -44,14 +44,16 @@
 //! [`Field`](crcbl_reflect::Field) to say otherwise. A [`Kind::Struct`]'s
 //! fields do carry their own, so a parent never overwrites them.
 //!
-//! **The widget edits an `f32` and the leaf may be wider.** [`Ui::drag_value`]
-//! takes `&mut f32`; [`Value::Int`] and [`Value::UInt`] are 64 bits wide and
-//! [`Value::Float`] is an `f64`. A row therefore narrows only to *show* the
-//! value, and writes back **only in the frame the widget reports
-//! [`Response::changed`]** — so a field nobody touched is never written and
-//! never rounded, and a field that was dragged is written to the precision the
-//! person dragged it at. A whole number is rounded to the nearest integer on
-//! the way back, so a drag crosses to the next value halfway.
+//! **The widget edits the leaf's own kind.** A [`Value::Int`] row drags an
+//! `i64`, a [`Value::UInt`] row a `u64` and a [`Value::Float`] row an `f64`
+//! ([`DragNumber`](super::DragNumber)), so a dragged field keeps every digit
+//! its kind holds and a whole number past an `f32`'s 24 bits still moves one
+//! at a time. A whole number's notch is the field's step rounded to the
+//! nearest whole, and a drag crosses to the next value halfway. The row
+//! writes back **only in the frame the widget reports
+//! [`Response::changed`]**, so a field nobody touched is never written — a
+//! narrower leaf, an `f32` or a `u8`, is never put through its own `set` for
+//! nothing.
 //!
 //! # An edit is a command, not a write
 //!
@@ -479,33 +481,51 @@ fn joined(path: &str, segment: &str) -> String {
     }
 }
 
-/// `value` as the number a drag-value edits.
-fn shown(value: &Value) -> f32 {
-    match value {
-        Value::Int(v) => *v as f32,
-        Value::UInt(v) => *v as f32,
-        Value::Float(v) => *v as f32,
-        Value::Bool(_) | Value::Text(_) => 0.0,
-    }
-}
-
-/// A dragged `number` back in the leaf's own kind, rounded to the nearest whole
-/// number for the two integer kinds; see the module docs.
-fn written(kind: ValueKind, number: f32) -> Value {
-    match kind {
-        ValueKind::Int => Value::Int(number.round() as i64),
-        ValueKind::UInt => Value::UInt(number.round() as u64),
-        _ => Value::Float(f64::from(number)),
-    }
-}
-
-/// The interval a drag-value is held inside: the field's when it has one, and
-/// the widget's own type otherwise — a field with no `#[reflect(min, max)]`
-/// says nothing about what it can hold, so a row must not invent a bound.
-fn bounds(range: Option<Range>) -> (f32, f32) {
-    range.map_or((f32::MIN, f32::MAX), |range| {
-        (range.min as f32, range.max as f32)
-    })
+/// A drag-value over the number `before` holds, in its own kind, inside
+/// `range` and moving `step` a pixel and a notch; see the module docs. Returns
+/// its [`Response`] and the value to write back in the frame it changed, or
+/// nothing — no widget at all — when `before` is not a number.
+///
+/// A float's interval without a `#[reflect(min, max)]` is the widget's own
+/// type's, and a whole number's is its type's: a field with no bound says
+/// nothing about what it can hold, so a row must not invent one. A float
+/// bound converts to a whole number's with `as`, which saturates.
+///
+/// `#[track_caller]` so each row's drag-value is keyed by the row builder's
+/// call site, as it would be if the builder called [`Ui::drag_value`] itself.
+#[track_caller]
+fn number_field(
+    ui: &mut Ui,
+    before: &Value,
+    range: Option<Range>,
+    step: f64,
+) -> Option<(Response, Option<Value>)> {
+    const FIELD: &str = ".inspector-field";
+    let edited = match *before {
+        Value::Int(mut number) => {
+            let (min, max) = range.map_or((i64::MIN, i64::MAX), |range| {
+                (range.min as i64, range.max as i64)
+            });
+            let notch = step.round() as i64;
+            let response = ui.drag_value(FIELD, &mut number, min..=max, step, notch);
+            (response, response.changed.then_some(Value::Int(number)))
+        }
+        Value::UInt(mut number) => {
+            let (min, max) = range.map_or((u64::MIN, u64::MAX), |range| {
+                (range.min as u64, range.max as u64)
+            });
+            let notch = step.round() as u64;
+            let response = ui.drag_value(FIELD, &mut number, min..=max, step, notch);
+            (response, response.changed.then_some(Value::UInt(number)))
+        }
+        Value::Float(mut number) => {
+            let (min, max) = range.map_or((f64::MIN, f64::MAX), |range| (range.min, range.max));
+            let response = ui.drag_value(FIELD, &mut number, min..=max, step, step);
+            (response, response.changed.then_some(Value::Float(number)))
+        }
+        Value::Bool(_) | Value::Text(_) => return None,
+    };
+    Some(edited)
 }
 
 /// Three drag-values on one row: [`Overrides::vectors`]' builder.
@@ -515,8 +535,8 @@ fn bounds(range: Option<Range>) -> (f32, f32) {
 /// [`Kind::List`]. Each is labelled by its axis either way, because the axis a
 /// person reads is the axis whatever the path spells it as.
 fn vector_row(ui: &mut Ui, field: &mut FieldRow<'_>, named: bool) {
-    let step = field.step.unwrap_or(INSPECTOR_STEP) as f32;
-    let (min, max) = bounds(field.range);
+    let step = field.step.unwrap_or(INSPECTOR_STEP);
+    let range = field.range;
     let label = field.label;
     ui.block(".inspector-row", &[], |ui| {
         ui.span(".inspector-label", label, &[]);
@@ -529,19 +549,18 @@ fn vector_row(ui: &mut Ui, field: &mut FieldRow<'_>, named: bool) {
             let Some(before) = field.get(&segment) else {
                 continue;
             };
-            let mut number = shown(&before);
-            let mut moved = false;
+            let mut new = None;
             // Keyed by the axis: three drag-values built at one call site,
             // whose state must follow the component rather than its position.
             ui.block_keyed(*axis, ".inspector-axis", &[], |ui| {
                 ui.span(".inspector-axis-label", *axis, &[]);
-                let response =
-                    ui.drag_value(".inspector-field", &mut number, min..=max, step, step);
-                moved = response.changed;
-                field.locate(&segment, &response);
+                if let Some((response, edited)) = number_field(ui, &before, range, step) {
+                    new = edited;
+                    field.locate(&segment, &response);
+                }
             });
-            if moved {
-                field.set(&segment, written(before.kind(), number));
+            if let Some(new) = new {
+                field.set(&segment, new);
             }
         }
     });
@@ -765,13 +784,13 @@ impl Ui {
                     let step = row.step.unwrap_or(match kind {
                         ValueKind::Float => float_step,
                         _ => WHOLE_STEP,
-                    }) as f32;
-                    let (min, max) = bounds(row.range);
-                    let mut number = shown(&before);
-                    let response =
-                        ui.drag_value(".inspector-field", &mut number, min..=max, step, step);
-                    let new = response.changed.then(|| written(kind, number));
-                    (response, new)
+                    });
+                    // A leaf whose value is not of its own kind gets a label
+                    // and no widget, which is all a row can honestly draw.
+                    let Some(edited) = number_field(ui, &before, row.range, step) else {
+                        return;
+                    };
+                    edited
                 }
             };
             report.locate(path, &response);

@@ -522,6 +522,8 @@ impl<S: Shell + ?Sized> Editor<S> {
         // is the one that was on screen when they typed, and the map's stack
         // was synced from the same answer at the end of the frame before.
         let editing = self.panels.text_editing();
+        // An open list reads typed text for its typeahead, as a field does.
+        let typing = editing || self.panels.popup_list_open();
         // The clock is advanced although nothing ticks, because it is what
         // paces the loop — see `crate::args::DEFAULT_TICK_HZ`. Its difference
         // is the frame the map and the caret are driven by, so the tick begins
@@ -564,7 +566,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                     *modifiers = held;
                     actions.key_event(key, state == ButtonState::Pressed);
                 }
-                text_pump.observe(&event, editing);
+                text_pump.observe(&event, typing);
                 paste.observe(&event);
             }
         });
@@ -720,15 +722,24 @@ impl<S: Shell + ?Sized> Editor<S> {
 
     /// Puts the reserved contexts where this frame's panels say they belong.
     ///
-    /// `ui` first and `text` over it, which is the order the stack wants, and
-    /// `ui` comes off only once `text` has — see [`crate::keys::push_ui`].
+    /// `ui` first and `text` or `list` over it, which is the order the stack
+    /// wants, and `ui` comes off only once both have — see
+    /// [`crate::keys::push_ui`]. The two are never on together, so whichever
+    /// is coming off goes before the other goes on.
     fn sync_contexts(&mut self) {
         let holds = self.panels.holds_keyboard();
         if holds {
             crate::keys::push_ui(&mut self.actions);
         }
-        crcbl::input::text::sync(&mut self.actions, self.panels.text_editing())
-            .expect("the editor's map declares the text context and nothing pushes over it");
+        let (editing, listing) = (self.panels.text_editing(), self.panels.popup_list_open());
+        let synced = "the editor's map declares both contexts and nothing pushes over them";
+        if !editing {
+            crcbl::input::text::sync(&mut self.actions, false).expect(synced);
+        }
+        crcbl::input::list::sync(&mut self.actions, listing).expect(synced);
+        if editing {
+            crcbl::input::text::sync(&mut self.actions, true).expect(synced);
+        }
         if !holds {
             crate::keys::pop_ui(&mut self.actions);
         }

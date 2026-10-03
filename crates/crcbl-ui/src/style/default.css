@@ -461,10 +461,12 @@ tabs {
 
 /*
  * Pop-up: a root of its own drawn over the whole tree (`popup.rs`). What is
- * here is a panel's frame; what it holds is its opener's to style.
+ * here is a panel's frame; what it holds is its opener's to style. It
+ * scrolls, because `Ui::popup` caps its height at the viewport's.
  */
 popup {
   flex-direction: column;
+  overflow: scroll;
   padding: 1px;
   border-width: 1px;
   border-color: #4a5468;
@@ -540,10 +542,13 @@ select:disabled {
  * (`widgets/context_menu.rs`). An item with a submenu ends in
  * `.context-item-arrow` and is `:open` while its submenu is; a separator is a
  * rule between items. A disabled item keeps the menu's background under the
- * pointer, so only what can be picked lights up.
+ * pointer, so only what can be picked lights up. Up and down wrap at the
+ * menu's ends, as a Windows menu's arrows do; a drop-down's list, a list box,
+ * stops at them.
  */
 .context-menu {
   min-width: 120px;
+  nav-wrap: vertical;
 }
 
 .context-item {

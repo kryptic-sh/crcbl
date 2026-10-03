@@ -17,14 +17,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 ### Breaking
 
 - **`crcbl_ui::PointerInput` gained `secondary_pressed`, `NavInput` gained
-  `menu`, and the reserved `ui` context gained `ui_menu`** (see Added: context
-  menus). A struct literal of either type must name the new field — `false`
-  keeps what it did — or build from `PointerInput::hovering` or a `NavInput`
-  constant. `crcbl_input::ui::declare` refuses a map that already declares
-  `ui_menu`, as it refuses every reserved name, and a pushed `ui` context now
-  takes the menu key and Shift+F10 from the game beneath; the engine loop's own
-  `menu_actions` rebinds `ui_menu` to nothing, so its menus leave both keys to
-  the game. `crcbl_input::ui::ACTIONS` lists every reserved action.
+  `menu` and `jump`, and the reserved `ui` context gained `ui_menu`** (see
+  Added: context menus, and the pop-up layer). A struct literal of either type
+  must name the new fields — `false` and `None` keep what it did — or build from
+  `PointerInput::hovering` or a `NavInput` constant. `crcbl_input::ui::declare`
+  refuses a map that already declares `ui_menu`, as it refuses every reserved
+  name, and a pushed `ui` context now takes the menu key and Shift+F10 from the
+  game beneath; the engine loop's own `menu_actions` rebinds `ui_menu` to
+  nothing, so its menus leave both keys to the game. `crcbl_input::ui::ACTIONS`
+  lists every reserved action.
+
+- **`crcbl_ui::tree::Ui::drag_value` edits a 64-bit number** (see Fixed: a
+  dragged 64-bit field). It is generic over the new sealed
+  `crcbl_ui::tree::DragNumber` — `f64`, `i64` or `u64` — with `value`, `range`
+  and `step` in that type and `speed` an `f64`, where each was an `f32`. A
+  caller holding an `f32` widens it with `f64::from` and narrows the result back
+  itself.
 
 - **`#[derive(Reflect)]` on an enum needs `Default` for every variant's fields**
   (see Added: switching an enum's variant). A switch makes the new variant from
@@ -65,11 +73,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   own is now an error on the server side. `Client::dropped_event_count` counts
   dropped console replies too.
 
-- **The editor's `EditCommand` gained `SetEnvironment`, and its
-  `panel::FieldTarget` and `clipboard::PasteTarget::Field` name the
-  environment** (see Added: the scene's environment in the inspector). An
-  exhaustive match over `EditCommand` must add the new arm. `FieldTarget` is now
-  an enum — `Component { entity, system, path }`, the struct it was, or
+- **`crcbl_scene::edit::EditCommand` (the editor's `command` re-exports it)
+  gained `SetEnvironment`, and the editor's `panel::FieldTarget` and
+  `clipboard::PasteTarget::Field` name the environment** (see Added: the scene's
+  environment in the inspector). An exhaustive match over `EditCommand` must add
+  the new arm. `FieldTarget` is now an enum —
+  `Component { entity, system, path }`, the struct it was, or
   `Environment { path }` — with `FieldTarget::path` for either, and
   `PasteTarget::Field` holds one rather than the three fields. `PanelFrame`
   gained the public field `add`, so a struct literal must name it.
@@ -645,6 +654,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   empty could only gain a mesh dropped from the asset browser, so towers' path
   and plots had to start as meshes and leave an emptied `meshes` system listed.
 
+- **A client can edit the scene a server serves, and every client hears of each
+  edit.** `crcbl_client::Client::send_edit(op)` sends an operation —
+  `crcbl_scene::edit::encode_op` of an `EditOp`: a command, an undo or a redo —
+  sealed on the reliable channel as a `ClientToServer::Command` of kind
+  `crcbl_net::edit::EDIT_KIND`, and returns the request id its reply names;
+  `Client::edit_replies` yields each `EditReply` (applied at a revision, or
+  refused with an `EditRefusal` code and a message) and `Client::edit_notices`
+  every `EditNotice` of an operation the server applied, anyone's, in order. A
+  `crcbl_server::Host` told to `serve_edits` hands each request over with its
+  peer (`take_edit_requests`), and sends `send_edit_reply` and
+  `broadcast_edit_notice` for the caller; a host serving no scene, and every
+  `Server`, refuses an edit as `EditRefusal::NOT_EDITABLE`. The editor's
+  `crcbl_editor::serve::EditServer` serves a `Document` that way: any admitted
+  peer may edit, each operation applies through `Document::apply`, `undo` and
+  `redo` — the editor's own validation, play-mode refusal and one history — and
+  its notice goes to every client before the author's reply. Refusal codes are
+  stable numbers: malformed, unsupported version, not editable (no scene, or the
+  scene is playing), unknown entity, unknown system, unknown path, invalid,
+  conflict, nothing to undo, nothing to redo and failed. A variant switch does
+  not travel yet (`OpEncodeError::SetVariant`). The decoder fuzz target reads
+  every new message and the operation inside them, with a named seed for each.
+
 - **Slide contacts for a lying body from `crcbl_phys::CharacterController`.**
   `move_lying_into(world, &body, motion, &mut contacts)` makes exactly the move
   `move_lying` makes, to the bit, and writes every sweep of its slide that met
@@ -667,18 +698,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   closes the whole chain; a disabled item is never focused or picked; a submenu
   opens beside its item on a click, accept or the right arrow, and left closes
   it again; back closes one level at a time, and a press outside closes them all
-  and is spent. A secondary press elsewhere moves the menu rather than only
-  closing it. Its look is `default.css`'s `.context-menu`, `.context-item`,
-  `.context-item-arrow` and `.context-separator` rules. Underneath:
-  `PointerInput::secondary_pressed`, fed by the engine loop's `PointerCapture`
-  from every shell's right button; `NavInput::menu`, read from the reserved
-  `ui_menu` action; and `Ui::open_popup_at` with a `Placement` — `Below` as
-  before, `Beside` for a submenu, flipped left at the viewport's right edge, or
-  `At` a point, flipped up and left at the far edges. In the editor a
-  right-click on an entity's outliner row offers Rename, Duplicate and Delete,
-  each carried out exactly as its key is (so undoable the same way) and disabled
-  while a scene plays; a right-click on a row outside the selection selects it
-  first, and one inside a multi-selection acts on the whole selection.
+  and is spent. Up and down wrap at a menu's ends, as a Windows menu's arrows do
+  (`nav-wrap: vertical` on `.context-menu`) — to its first item even when it is
+  scrolled out of view, since `nav-wrap` wraps to the far side of a container's
+  content rather than of its box. A secondary press elsewhere moves the menu
+  rather than only closing it. Its look is `default.css`'s `.context-menu`,
+  `.context-item`, `.context-item-arrow` and `.context-separator` rules.
+  Underneath: `PointerInput::secondary_pressed`, fed by the engine loop's
+  `PointerCapture` from every shell's right button; `NavInput::menu`, read from
+  the reserved `ui_menu` action; and `Ui::open_popup_at` with a `Placement` —
+  `Below` as before, `Beside` for a submenu, flipped left at the viewport's
+  right edge, or `At` a point, flipped up and left at the far edges. In the
+  editor a right-click on an entity's outliner row offers Rename, Duplicate and
+  Delete, each carried out exactly as its key is (so undoable the same way) and
+  disabled while a scene plays; a right-click on a row outside the selection
+  selects it first, and one inside a multi-selection acts on the whole
+  selection.
 - **`crcbl-ui` has tooltips, and the editor's toolbar and play strip use them.**
   `Ui::tooltip(&response, text)`, called after a widget every frame it is built,
   shows `text` once the pointer has rested on the widget — or, with a keyboard
@@ -693,8 +728,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   viewport, drawn over every open pop-up, and **inert** — never hit or focused,
   so a click on what it covers reaches it. `Ui::tooltip_key` names its root. In
   the editor every toolbar button's tooltip says what it does and its key, and
-  each play-strip action's says what it sends, what it takes and its number key;
-  the labels keep their keys.
+  each play-strip action's opens with the game's own description of it, then
+  says what it takes and its number key; the labels keep their keys.
 - **`crcbl-ui` has a pop-up layer, and a drop-down built on it.** Any widget
   hangs a pop-up from a node: `Ui::open_popup` with the node's key, then
   `Ui::popup` every frame it is open with a closure that builds it (it builds
@@ -708,10 +743,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   into it and stays; back closes the topmost (and `Ui::back_requested` does not
   report that back), a press outside closes it and is spent there rather than
   reaching what it covered, and every close gives focus back to the anchor. One
-  the frame does not build closes. `Ui::select(selector, options, &mut chosen)`
-  is a button showing the chosen option that opens the options in a pop-up at
-  least as wide as itself, picked by click or by moves and accept, reporting a
-  pick through `Response::changed`; `default.css` styles `popup`, `select` and
+  the frame does not build closes. A pop-up is never taller than the viewport
+  less `POPUP_MARGIN`: `Ui::popup` caps its `max-height` and `default.css` makes
+  `popup` `overflow: scroll`, so a long list scrolls under the wheel and to keep
+  the focused item in view, and a node `Ui::set_focus` asks for is scrolled into
+  view at that frame's layout. Inside the topmost pop-up `NavInput::jump` — a
+  `Jump`: Home and End to the first and last item focus can rest on, Page Up and
+  Page Down a view's height — moves focus, and a drop-down's list or any level
+  of a context menu takes typeahead from the frame's `TextInput`: typed letters
+  focus the next enabled item they begin, ignoring case, one letter typed again
+  steps through the items it begins, and the prefix starts afresh after
+  `TYPEAHEAD_TIMEOUT` on the text clock. Those keys come through a new reserved
+  `list` context (`crcbl_input::list`: `list_first`, `list_last`,
+  `list_page_up`, `list_page_down`, and `list_type` on every key that types a
+  character), pushed over `ui` while `Ui::popup_list_open` says a list is open,
+  as `text` is while a field is engaged; `crcbl::ui_nav::nav_input` reads its
+  jumps, and `TextPump` collects the typing when told a list is open. The editor
+  pushes it, so its variant picker and outliner row menus take typeahead, Home,
+  End and the page keys, and a letter or Page Up there no longer switches a tool
+  or lifts the selection. `Ui::select(selector, options, &mut chosen)` is a
+  button showing the chosen option that opens the options in a pop-up at least
+  as wide as itself, scrolled to the chosen one, picked by click or by moves and
+  accept, reporting a pick through `Response::changed`; its arrows stop at the
+  list's ends, as a list box's do. `default.css` styles `popup`, `select` and
   its `.select-label`, `.select-caret` (`SELECT_CARET`), `.select-list`,
   `.select-option` and `.select-option-label` parts, `:open` while the list is.
 - **Towers has a dev fly/walk camera** (`docs/plan/sample/07-towers.md` slice 4,
@@ -1093,22 +1147,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **Play controls: a game's actions and status for a tool that plays it.**
   `crcbl::registry::Registry::play_controls(system, PlayControls)` registers,
   beside a game's module, a description a tool renders generically: a list of
-  `PlayAction { name, params }`, each parameter a `ParamKind::Picked(system)`
-  (an entity of that scene system, picked in the scene) or a
-  `ParamKind::Choice(labels)`; an `encode` function turning an action's index
-  and its `PlayArg`s into the bytes the game's own client sends for that
-  command; a `status` function reading the run's labelled numbers off the world
-  the module plays in; and a `refusals` function taking the reasons the game
-  turned commands down. `Registry::encode_play(system, action, args)` checks the
-  arguments against the action's parameters (count, kind, choice range) before
-  the game's encoder sees them, `Registry::controls_for(system)` finds the
-  description, and `Registry::keyed_modules` is `modules` with each module's
-  system (as a `KeyedModule`), so a tool hands one game's commands to that
-  game's module alone. The status is registry-side rather than a `GameModule`
-  method, so the module trait EW implements is unchanged. **The editor plays
-  through it:** while a scene plays, a strip under the toolbar lists each
-  running game's actions (a choice is a button that steps through its labels; a
-  picked argument is the selection) and its numbers; a click is sent through
+  `PlayAction { name, description, params }` — the description a phrase the game
+  writes saying what the action does, which a tool shows first in the action's
+  tooltip, and which `Registry::play_controls` panics on when it is empty or
+  only whitespace — each parameter a `ParamKind::Picked(system)` (an entity of
+  that scene system, picked in the scene) or a `ParamKind::Choice(labels)`; an
+  `encode` function turning an action's index and its `PlayArg`s into the bytes
+  the game's own client sends for that command; a `status` function reading the
+  run's labelled numbers off the world the module plays in; and a `refusals`
+  function taking the reasons the game turned commands down.
+  `Registry::encode_play(system, action, args)` checks the arguments against the
+  action's parameters (count, kind, choice range) before the game's encoder sees
+  them, `Registry::controls_for(system)` finds the description, and
+  `Registry::keyed_modules` is `modules` with each module's system (as a
+  `KeyedModule`), so a tool hands one game's commands to that game's module
+  alone. The status is registry-side rather than a `GameModule` method, so the
+  module trait EW implements is unchanged. **The editor plays through it:**
+  while a scene plays, a strip under the toolbar lists each running game's
+  actions (a choice is a button that steps through its labels; a picked argument
+  is the selection) and its numbers; a click is sent through
   `Document::send_play(system, action, args)`, which queues the encoded frame
   for that module's next tick as its `ClientInputs` — the editor had ticked
   every module with `ClientInputs::empty()` — and the status line says it was
@@ -3191,7 +3248,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Inspection::edits` is a `FieldEdit` per change — the dotted `set_path` path,
   the value the field held and the one it holds now — and undoing one is
   `set_path` with the value it replaced; a field nobody touched is never
-  written, so a 64-bit number keeps every digit the widget cannot show.
+  written, and a number is dragged in its own 64-bit kind.
   `Overrides::register::<T>` takes a row builder matched through
   `Reflect::as_any`, and `Overrides::vectors()` ships one: a three-component
   vector as three drag-values on a row, for `[f64; 3]`, `[f32; 3]`,
@@ -4667,6 +4724,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   clipped, and a click on it landed in the viewport. A row too wide for its pane
   now wraps, so every field stays inside it.
 
+- **A dragged 64-bit field keeps every digit.** The drag-value edited an `f32`,
+  so an inspector row narrowed its leaf to show it: a dragged `f64` was written
+  back at `f32` precision, and an `i64` or `u64` past 2^24 could not be moved
+  one at a time — a step of one rounded back onto the same `f32`. The drag-value
+  now moves an `f64`, `i64` or `u64` in its own arithmetic, and a whole number
+  moves by whole numbers and saturates at its type's ends rather than wrapping.
+  Each inspector row drags its leaf's own kind, and the editor's rotation row
+  drags its angles as `f64`s.
 - **A rotation of negative zero survives a delete's undo, a copy and a reload.**
   `crcbl::registry::Rotation::is_identity` compared with `==`, under which
   `(-0, 0, 0, 1)` — a turn back to nothing about a negative axis — equals the
@@ -5251,6 +5316,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **The editor's command model is `crcbl_scene::edit`** (reached as
+  `crcbl::scene::edit`). `EditCommand`, `SystemRow`, `UndoLog`, `Gesture`,
+  `set_property` and `set_variant` moved out of `apps/editor`, beside the scene
+  format they edit, so a tool or a server reaches them without linking the
+  editor; `crcbl_editor::command` re-exports them unchanged. `crcbl-scene` now
+  depends on `crcbl-reflect`, for the `Value` and `Snapshot` a command carries.
 
 - **One drag in the editor is one undo, whatever leaves its frames write.**
   `UndoLog::record_in` merges a gesture's writes: each leaf keeps the value from

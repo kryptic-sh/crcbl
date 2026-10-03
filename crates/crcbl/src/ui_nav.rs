@@ -1,5 +1,5 @@
-//! The join between `crcbl-input`'s reserved `ui` context and `crcbl-ui`'s
-//! tree: a frame's [`NavInput`], built from an [`ActionMap`].
+//! The join between `crcbl-input`'s reserved `ui` and `list` contexts and
+//! `crcbl-ui`'s tree: a frame's [`NavInput`], built from an [`ActionMap`].
 //!
 //! Here, in the umbrella, because it is the one crate that names both: the
 //! tree reads no device and no action map, so `crcbl-ui` gains no dependency,
@@ -16,6 +16,14 @@
 //! [`nav_input`] is what the frame passes to
 //! [`Ui::begin_frame_with`](crate::ui::tree::Ui::begin_frame_with).
 //!
+//! **The `list` context rides on the same map**: declared with
+//! [`input::list::declare`](crate::input::list::declare) and pushed over `ui`
+//! with [`input::list::sync`](crate::input::list::sync) while
+//! [`Ui::popup_list_open`](crate::ui::tree::Ui::popup_list_open) says so, its
+//! Home, End, Page Up and Page Down become the frame's [`Jump`]. A map without
+//! it declared jumps nowhere. Its typing keys reach the tree as text, through
+//! [`TextPump`](crate::text_input::TextPump), as a field's do.
+//!
 //! **[`Loop`](crate::engine::Loop)'s menus are driven through it.**
 //! [`MenuPump`](crate::engine::MenuPump) feeds the loop's own
 //! [`menu_actions`](crate::engine::menu_actions) map, pushes the context while
@@ -25,17 +33,20 @@
 //! context. `screenshot::ui_focus`'s tests hold the tree's scripted pad to what
 //! the keyboard produces through this.
 
+use crate::input::list::{FIRST, LAST, PAGE_DOWN, PAGE_UP};
 use crate::input::ui::{ACCEPT, BACK, MENU, MOVE, NEXT, PREV};
 use crate::input::{ActionMap, Cardinal, Device};
-use crate::ui::tree::{Direction, InputMode, NavInput};
+use crate::ui::tree::{Direction, InputMode, Jump, NavInput};
 
 /// The frame's navigation input from `actions`' reserved `ui` actions.
 ///
 /// A direction and the tree-order steps are their actions' repeat pulses, so a
 /// held arrow steps once, then again after the delay and on every interval; a
-/// 2-D move is its [`Cardinal`]. Accept, back and menu are press edges. The mode is
-/// [`input_mode`] of the last device. A map with the `ui` context off the stack
-/// has idle `ui` actions and yields no press, whatever is held.
+/// 2-D move is its [`Cardinal`]. Accept, back and menu are press edges, and so
+/// are Home and End; Page Up and Page Down are repeat pulses, as a direction
+/// is. The mode is [`input_mode`] of the last device. A map with the `ui`
+/// context off the stack has idle `ui` actions and yields no press, whatever
+/// is held, and one with the `list` context off it yields no jump.
 #[must_use]
 pub fn nav_input(actions: &ActionMap) -> NavInput {
     let direction = if actions.repeated(MOVE) {
@@ -51,6 +62,22 @@ pub fn nav_input(actions: &ActionMap) -> NavInput {
         accept: actions.just_pressed(ACCEPT),
         back: actions.just_pressed(BACK),
         menu: actions.just_pressed(MENU),
+        jump: jump(actions),
+    }
+}
+
+/// The frame's jump from `actions`' `list` context, if any of its keys spoke.
+fn jump(actions: &ActionMap) -> Option<Jump> {
+    if actions.just_pressed(FIRST) {
+        Some(Jump::First)
+    } else if actions.just_pressed(LAST) {
+        Some(Jump::Last)
+    } else if actions.repeated(PAGE_UP) {
+        Some(Jump::PageUp)
+    } else if actions.repeated(PAGE_DOWN) {
+        Some(Jump::PageDown)
+    } else {
+        None
     }
 }
 
@@ -82,7 +109,7 @@ const fn direction(cardinal: Cardinal) -> Direction {
 mod tests {
     use super::*;
     use crate::core::input::KeyCode;
-    use crate::input::{ActionDecl, ActionKind, Binding, REPEAT_DELAY, REPEAT_INTERVAL, ui};
+    use crate::input::{ActionDecl, ActionKind, Binding, REPEAT_DELAY, REPEAT_INTERVAL, list, ui};
 
     const FRAME: f32 = 1.0 / 60.0;
 
@@ -242,6 +269,42 @@ mod tests {
             frame(&mut map, REPEAT_INTERVAL, &[]),
             down,
             "an interval later"
+        );
+    }
+
+    /// **The `list` context's keys become jumps while it is pushed**: Home,
+    /// End, Page Up and Page Down each land in [`NavInput::jump`], a held Page
+    /// Down repeats, and with the context popped none of them jumps.
+    #[test]
+    fn list_keys_become_jumps_while_the_list_context_is_pushed() {
+        let mut map = map();
+        list::declare(&mut map).expect("no clash");
+        map.push_context(ui::CONTEXT).expect("declared");
+        let tap = |map: &mut ActionMap, key: KeyCode| {
+            let nav = frame(map, FRAME, &[(key, true)]);
+            frame(map, FRAME, &[(key, false)]);
+            nav
+        };
+        assert_eq!(
+            tap(&mut map, KeyCode::Home).jump,
+            None,
+            "popped, Home jumped"
+        );
+        list::sync(&mut map, true).expect("declared");
+        for (key, jump) in [
+            (KeyCode::Home, Jump::First),
+            (KeyCode::End, Jump::Last),
+            (KeyCode::PageUp, Jump::PageUp),
+            (KeyCode::PageDown, Jump::PageDown),
+        ] {
+            assert_eq!(tap(&mut map, key), NavInput::jumping(jump), "{key}");
+        }
+        frame(&mut map, FRAME, &[(KeyCode::PageDown, true)]);
+        assert_eq!(frame(&mut map, FRAME, &[]).jump, None, "held is not a step");
+        assert_eq!(
+            frame(&mut map, REPEAT_DELAY, &[]).jump,
+            Some(Jump::PageDown),
+            "the delay elapsed"
         );
     }
 

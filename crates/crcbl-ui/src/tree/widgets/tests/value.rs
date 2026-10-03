@@ -2,7 +2,9 @@
 //! and clamping.
 
 use super::*;
-use crate::tree::{DRAG_THRESHOLD, Engagement, Response};
+use std::ops::RangeInclusive;
+
+use crate::tree::{DRAG_THRESHOLD, DragNumber, Engagement, Response};
 
 /// The two sliders' and the drag-value's responses from one frame.
 struct Values {
@@ -13,12 +15,22 @@ struct Values {
 
 /// One frame of a column of two sliders on `0..=10` in steps of one, and a
 /// drag-value on `-5..=5` moving `0.5` a pixel and `0.25` a step.
-fn values(ui: &mut Ui, pointer: PointerInput, nav: NavInput, held: &mut [f32; 3]) -> Values {
+///
+/// The values are held as `f64`s, the drag-value's own kind; each slider's is
+/// narrowed to the `f32` a slider edits and widened back here, which is exact
+/// for every value these tests put in one.
+fn values(ui: &mut Ui, pointer: PointerInput, nav: NavInput, held: &mut [f64; 3]) -> Values {
     frame(ui, pointer, nav, |ui| {
         let [volume, pitch, drag] = held;
+        let slider = |ui: &mut Ui, selector: &str, value: &mut f64| {
+            let mut narrow = *value as f32;
+            let response = ui.slider(selector, &mut narrow, 0.0..=10.0, 1.0);
+            *value = f64::from(narrow);
+            response
+        };
         Values {
-            volume: ui.slider("#volume", volume, 0.0..=10.0, 1.0),
-            pitch: ui.slider("#pitch", pitch, 0.0..=10.0, 1.0),
+            volume: slider(ui, "#volume", volume),
+            pitch: slider(ui, "#pitch", pitch),
             drag: ui.drag_value("#drag", drag, -5.0..=5.0, 0.5, 0.25),
         }
     })
@@ -212,7 +224,12 @@ fn a_drag_value_engages_steps_cancels_and_shows_its_steps_decimals() {
     values(&mut ui, idle(), NavInput::ACCEPT, &mut held);
     let shown = values(&mut ui, idle(), NavInput::default(), &mut held);
     assert_eq!(held[2], 0.75, "commit lost the step");
-    let text_node = children_of(&ui, shown.drag.key)[0];
+    assert_eq!(text_of(&ui, shown.drag.key), "0.75");
+}
+
+/// The text the drag-value `key` shows this frame.
+fn text_of(ui: &Ui, key: NodeKey) -> String {
+    let text_node = children_of(ui, key)[0];
     let node = ui
         .nodes
         .iter()
@@ -221,7 +238,7 @@ fn a_drag_value_engages_steps_cancels_and_shows_its_steps_decimals() {
     let crate::tree::Content::Text { start, end } = node.content else {
         panic!("the drag-value's child is not its text");
     };
-    assert_eq!(&ui.text[start..end], "0.75");
+    ui.text[start..end].to_owned()
 }
 
 /// **Decimals follow the step**, by multiplying, for the steps an editor
@@ -238,8 +255,196 @@ fn a_steps_decimals_are_counted_without_logarithms() {
         (0.001, 3),
         (1e-9, 6),
         (0.0, 0),
-        (f32::NAN, 0),
+        (f64::NAN, 0),
     ] {
         assert_eq!(super::super::value::decimals(step), want, "step {step}");
     }
+}
+
+/// A lone drag-value over `value`, held inside `range`, moving `speed` a pixel
+/// and `step` a notch, carried from frame to frame.
+struct Lone<N: DragNumber> {
+    ui: Ui,
+    value: N,
+    range: RangeInclusive<N>,
+    speed: f64,
+    step: N,
+}
+
+impl<N: DragNumber> Lone<N> {
+    /// The drag-value, laid out by one still frame.
+    fn new(value: N, range: RangeInclusive<N>, speed: f64, step: N) -> Self {
+        let mut lone = Self {
+            ui: Ui::new(),
+            value,
+            range,
+            speed,
+            step,
+        };
+        lone.frame(idle(), NavInput::default());
+        lone
+    }
+
+    /// One frame with `pointer` and `nav`.
+    fn frame(&mut self, pointer: PointerInput, nav: NavInput) -> Response {
+        let Self {
+            ui,
+            value,
+            range,
+            speed,
+            step,
+        } = self;
+        frame(ui, pointer, nav, |ui| {
+            ui.drag_value("#lone", value, range.clone(), *speed, *step)
+        })
+    }
+
+    /// The middle of the drag-value, where last frame laid it out.
+    fn centre(&mut self) -> Vec2 {
+        let key = self.frame(idle(), NavInput::default()).key;
+        centre(&self.ui, key)
+    }
+
+    /// A drag `pixels` to the right from the middle — the press, the moved
+    /// press, whose response is returned, and the release where it moved to.
+    fn drag(&mut self, pixels: f32) -> Response {
+        let origin = self.centre();
+        let to = origin + Vec2::new(pixels, 0.0);
+        self.frame(press(origin), NavInput::default());
+        let moved = self.frame(press(to), NavInput::default());
+        self.frame(release(to), NavInput::default());
+        moved
+    }
+
+    /// A click that does not move, which engages it.
+    fn engage(&mut self) {
+        let on = self.centre();
+        self.frame(press(on), NavInput::default());
+        let clicked = self.frame(release(on), NavInput::default());
+        assert_eq!(
+            clicked.engagement,
+            Engagement::Began,
+            "the click did not engage"
+        );
+    }
+}
+
+/// Far enough past [`DRAG_THRESHOLD`] that the press is a drag, and a whole
+/// number of pixels, so a speed of its reciprocal moves by one.
+const DRAG_PIXELS: f32 = 8.0;
+
+/// An `f64` an `f32` cannot hold: the nearest `f32` to it is another number,
+/// so a value that went through one lands somewhere else.
+const FINE: f64 = 0.1 + 1e-12;
+
+/// A distance far below an `f32`'s resolution at [`FINE`].
+const HAIR: f64 = 1e-12;
+
+/// **A dragged and a stepped `f64` keep 64-bit precision**: moving [`FINE`]
+/// by a hair lands on exactly the `f64` the same sum gives, which no value
+/// rounded through an `f32` can be.
+#[test]
+fn an_f64_drags_and_steps_without_rounding_through_an_f32() {
+    let mut lone = Lone::new(FINE, f64::MIN..=f64::MAX, HAIR, HAIR);
+    assert!(lone.drag(DRAG_PIXELS).changed);
+    let want = FINE + f64::from(DRAG_PIXELS) * HAIR;
+    assert_eq!(
+        lone.value.to_bits(),
+        want.to_bits(),
+        "{:e} is not {want:e}: the drag lost precision",
+        lone.value
+    );
+
+    let mut lone = Lone::new(FINE, f64::MIN..=f64::MAX, HAIR, HAIR);
+    lone.engage();
+    assert!(lone.frame(idle(), RIGHT).changed);
+    let want = FINE + HAIR;
+    assert_eq!(
+        lone.value.to_bits(),
+        want.to_bits(),
+        "{:e} is not {want:e}: the step lost precision",
+        lone.value
+    );
+}
+
+/// Far past every whole number an `f32` holds exactly.
+const FAR: i64 = 1 << 40;
+
+/// **A whole number at 2^40 moves by exactly one**, by a drag and by a notch,
+/// and shows every digit: neighbouring `f32`s there are 2^16 apart, so a move
+/// of one through an `f32` goes nowhere.
+#[test]
+fn an_i64_far_past_an_f32s_reach_moves_by_one() {
+    let speed = 1.0 / f64::from(DRAG_PIXELS);
+    let mut lone = Lone::new(FAR, i64::MIN..=i64::MAX, speed, 1);
+    assert!(lone.drag(DRAG_PIXELS).changed);
+    assert_eq!(
+        lone.value,
+        FAR + 1,
+        "a drag of one did not land one past 2^40"
+    );
+
+    let mut lone = Lone::new(FAR, i64::MIN..=i64::MAX, 1.0, 1);
+    lone.engage();
+    lone.frame(idle(), RIGHT);
+    assert_eq!(lone.value, FAR + 1, "a step right is not one");
+    lone.frame(idle(), LEFT);
+    let shown = lone.frame(idle(), LEFT);
+    assert_eq!(lone.value, FAR - 1, "two steps left are not two");
+    assert_eq!(
+        text_of(&lone.ui, shown.key),
+        (FAR - 1).to_string(),
+        "the whole number is not shown digit for digit"
+    );
+}
+
+/// A speed at which a drag of a few pixels is past any whole number type's
+/// whole span.
+const HUGE: f64 = 1e30;
+
+/// **A whole number saturates at its type's ends and is held inside its
+/// range**: a drag whose distance is past the type's whole span lands on its
+/// end rather than wrapping or panicking, a step does the same, and a range
+/// holds a drag at its end.
+#[test]
+fn a_whole_number_saturates_at_its_types_ends_and_clamps_to_its_range() {
+    let full = i64::MIN..=i64::MAX;
+    for (start, pixels, want) in [
+        (i64::MAX - 1, DRAG_PIXELS, i64::MAX),
+        (i64::MAX - 1, -DRAG_PIXELS, i64::MIN),
+        (i64::MIN + 1, DRAG_PIXELS, i64::MAX),
+        (i64::MIN + 1, -DRAG_PIXELS, i64::MIN),
+    ] {
+        let mut lone = Lone::new(start, full.clone(), HUGE, 1);
+        lone.drag(pixels);
+        assert_eq!(lone.value, want, "a drag of {pixels} px from {start}");
+    }
+    for (start, pixels, want) in [
+        (1, DRAG_PIXELS, u64::MAX),
+        (u64::MAX - 1, -DRAG_PIXELS, u64::MIN),
+    ] {
+        let mut lone = Lone::new(start, u64::MIN..=u64::MAX, HUGE, 1);
+        lone.drag(pixels);
+        assert_eq!(lone.value, want, "a drag of {pixels} px from {start}");
+    }
+    for (pixels, want) in [(DRAG_PIXELS, 10), (-DRAG_PIXELS, -10)] {
+        let mut lone = Lone::new(0_i64, -10..=10, HUGE, 1);
+        lone.drag(pixels);
+        assert_eq!(lone.value, want, "a drag of {pixels} px left its range");
+    }
+
+    // A notch as wide as the type cannot wrap either way.
+    let mut lone = Lone::new(i64::MAX - 1, full, 1.0, i64::MAX);
+    lone.engage();
+    lone.frame(idle(), RIGHT);
+    assert_eq!(lone.value, i64::MAX, "a step right did not saturate");
+    for _ in 0..3 {
+        lone.frame(idle(), LEFT);
+    }
+    assert_eq!(lone.value, i64::MIN, "steps left did not saturate");
+
+    let mut lone = Lone::new(3_u64, u64::MIN..=u64::MAX, 1.0, 5);
+    lone.engage();
+    lone.frame(idle(), LEFT);
+    assert_eq!(lone.value, 0, "a step below zero did not saturate");
 }

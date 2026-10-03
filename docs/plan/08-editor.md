@@ -342,15 +342,16 @@ shows the run's numbers.
 
 - **A vocabulary registers a play-controls description beside its module.**
   `Registry::play_controls(system, PlayControls)`, keyed by the system the
-  module is registered under: a list of `PlayAction { name, params }`, each
-  parameter `ParamKind::Picked(system)` or `ParamKind::Choice(labels)`; an
-  `encode` function from an action's index and its `PlayArg`s to the game's
-  command bytes; and `status` and `refusals` functions over the world the module
-  plays in. `Registry::encode_play` holds the arguments to the action's
-  parameters before the game's encoder sees them, and `Registry::keyed_modules`
-  hands each module back with its system. A picked argument is the entity's
-  place among its system's rows in file order, which is how a game numbers them
-  — towers' plots are numbered so.
+  module is registered under: a list of
+  `PlayAction { name, description, params }`, each parameter
+  `ParamKind::Picked(system)` or `ParamKind::Choice(labels)`; an `encode`
+  function from an action's index and its `PlayArg`s to the game's command
+  bytes; and `status` and `refusals` functions over the world the module plays
+  in. `Registry::encode_play` holds the arguments to the action's parameters
+  before the game's encoder sees them, and `Registry::keyed_modules` hands each
+  module back with its system. A picked argument is the entity's place among its
+  system's rows in file order, which is how a game numbers them — towers' plots
+  are numbered so.
 - **The editor sends commands; the module's next tick reads them as a
   client's.** `Document::send_play` encodes an action and queues the frame for
   the module under that system alone; `Document::advance` hands each module its
@@ -451,14 +452,21 @@ deferred, built.
 - **Every toolbar and play-strip button has a tooltip** (2026-10-03,
   `Ui::tooltip`): the toolbar's say what the button does now and its key —
   `Run the scene's games from the scene as it stands (F5)` — and an action's
-  says what it sends and where each argument comes from, read off its
-  `ParamKind`s because a `PlayAction` carries no description, with its number
-  key; a choice's lists what it steps through. **The labels keep their keys**: a
-  tooltip waits on a delay and a label does not, and the loop tests find the
-  strip's buttons by those labels (`Place tower (1)`). The panels scroll by
-  offset rather than through the tree's wheel, so a wheel turn hides a tooltip
-  through `Ui::dismiss_tooltip`. `panel::tests::tooltips` holds the toolbar's to
-  its key and the wheel; `panel::play`'s test holds an action's text.
+  opens with the game's own `PlayAction::description`, then where each argument
+  comes from, read off its `ParamKind`s, and its number key; a choice's lists
+  what it steps through. **The description is required**:
+  `Registry::play_controls` panics on an empty or blank one, as it does on a
+  second set of controls under one system — the controls are a constant the game
+  wrote, so the first run that registers them is where an omission belongs, and
+  a tool would otherwise show a blank where the game should have said what the
+  action does. Towers writes one for each of its four actions. **The labels keep
+  their keys**: a tooltip waits on a delay and a label does not, and the loop
+  tests find the strip's buttons by those labels (`Place tower (1)`). The panels
+  scroll by offset rather than through the tree's wheel, so a wheel turn hides a
+  tooltip through `Ui::dismiss_tooltip`. `panel::tests::tooltips` holds the
+  toolbar's to its key and the wheel, and a played towers field's `Place tower`
+  tooltip to towers' registered description; `panel::play`'s test holds an
+  action's text.
 - **A command sent while paused waits for the tick after resume** — encoded and
   refused by the controls at once, read when the game next ticks, as a server's
   queue holds a frame. Refusing it would make a pause a mode where the strip
@@ -1477,13 +1485,13 @@ exactly what it saves.
     past the pane's edge, so the `z` field was clipped and a click on it landed
     in the viewport. A row too wide for its pane now wraps.
 - **What it found and did not fix**, each in `docs/backlog.md` under _The
-  dogfood pass_ with what it would take: a drag-value takes no typed number and
-  edits an `f32`, so a field paste is the only exact entry; an emptied system
-  has no button to unlist it; a new entity starts at its component's `Default`
-  rather than where the view looks; the scene pane is taller than the default
-  layout's inspector, so the environment's rows are scrolled to; and a text
-  field's text is not selected when it is engaged, so retyping a duplicated
-  plot's label takes Ctrl+A first.
+  dogfood pass_ with what it would take: a drag-value takes no typed number, so
+  a field paste is the only exact entry; an emptied system has no button to
+  unlist it; a new entity starts at its component's `Default` rather than where
+  the view looks; the scene pane is taller than the default layout's inspector,
+  so the environment's rows are scrolled to; and a text field's text is not
+  selected when it is engaged, so retyping a duplicated plot's label takes
+  Ctrl+A first.
 - **What it does not cover**: nothing of it has been seen on a device — every
   step is headless, on the null backend, against laid-out rectangles — and the
   authored field is played by towers' `Game`, not by the editor's play mode
@@ -1498,12 +1506,29 @@ a build for another game adds a line to `apps/editor/src/scene.rs::vocabulary`.
 Run-time discovery needs a link-time distributed slice (`linkme` or
 `inventory`), which is a new dependency and the user's call.
 
-Everything else below stands unchanged: the server still drops commands, there
-is one schedule per `World`, there is no snapshot of a `World` (play restores
-from the scene's text, slice 8), the samples' state is outside the ECS, and
-there are no `serve`/`scene`/`edit` subcommands. (One entity in several systems
-landed in slice 11.) (Debug draw is still not a gizmo layer; the gizmo does not
-need it to be — slice 6, above. `AssetSource` lists since 2026-09-30.)
+**The server half of the editor protocol landed 2026-10-04.** The command model
+moved to `crcbl_scene::edit` (re-exported as `crcbl_editor::command`), and
+`crcbl_editor::serve::EditServer` serves a `Document` over a
+`crcbl_server::Host`: a client sends an `EditOp` — a command, an undo or a redo
+— with `Client::send_edit`, the server applies it through `Document::apply`,
+`undo` or `redo`, announces it to every client as an `EditNotice` and answers
+the author with an `EditReply`, applied at a revision or refused with an
+`EditRefusal` code. **Decided for the long term**: any admitted peer may edit;
+undo and redo are protocol operations on the one global history; the notices,
+not snapshot replication, are how another client follows the scene (the command
+log is the sync point); a host serving no scene refuses edits as not editable.
+`crcbl_editor::serve`'s module docs hold the reasons, and `docs/backlog.md`'s
+_Scene edits over the transport_ entry what the slice leaves — the GUI is not
+yet a client of its own server, a variant switch does not travel, a client
+joining late has no way to fetch the scene, and the author is not in the undo
+log.
+
+Everything else below stands unchanged: there is one schedule per `World`, there
+is no snapshot of a `World` (play restores from the scene's text, slice 8), the
+samples' state is outside the ECS, and there are no `serve`/`scene`/`edit`
+subcommands. (One entity in several systems landed in slice 11.) (Debug draw is
+still not a gizmo layer; the gizmo does not need it to be — slice 6, above.
+`AssetSource` lists since 2026-09-30.)
 
 Two things sit behind it, in both directions:
 
@@ -1575,7 +1600,10 @@ than the rest of this document suggests; each line was checked in the source.
 1. **Commands are dropped on arrival.** `ClientToServer::Command` is encoded,
    but the server's message handler matches it and does nothing, `Client` has no
    way to send one, and `ServerToClient::Event` has no consumer. A server hosts
-   one session, so a GUI and a CLI client cannot share one.
+   one session, so a GUI and a CLI client cannot share one. _Since closed but
+   for the last sentence_: console sets (2026-10-03) and scene edits
+   (2026-10-04, _Status_) are commands a server answers, and `Client::events`
+   reads events; a host still serves one session.
 2. **One schedule per `World`** and no per-system gating, so there is no
    edit-mode schedule to switch from.
 3. **No snapshot or restore of a `World`**, so play/stop has nothing to restore

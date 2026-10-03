@@ -1,5 +1,6 @@
 //! Named seeds from the fuzzer's corpus, replayed through the delta decoder,
-//! the replay spool's recovery and the save container's reader.
+//! the replay spool's recovery, the save container's reader and the scene
+//! edit's messages.
 //!
 //! `fuzz_targets/decoder.rs` runs the decoders against bytes libFuzzer invents.
 //! This target runs three of them against bytes somebody named, and the two are
@@ -179,4 +180,95 @@ fn named_save_seeds_reach_their_intended_paths() {
         .into_data();
     assert!(!salvaged.checksum_valid);
     assert_eq!(salvaged.sectors[1].snapshot_data, [0xAA, 0xBA]);
+}
+
+/// The edit seeds reach each message's decoder, one per message an edit
+/// travels as: a request, both outcomes of a reply, a notice, and the
+/// operation inside them — a whole one, one whose batches nest past the
+/// limit, and a request claiming an operation longer than any. Each whole
+/// seed is also what its encoder writes, so a change to a layout shows up
+/// here as a seed to regenerate rather than as a corpus that stopped being
+/// edits.
+#[test]
+fn named_edit_seeds_reach_their_intended_paths() {
+    use crcbl_net::{
+        DecodeError, EditNotice, EditOutcome, EditRefusal, EditReply, EditRequest,
+        decode_edit_notice, decode_edit_reply, decode_edit_request, encode_edit_notice,
+        encode_edit_reply, encode_edit_request,
+    };
+    use crcbl_scene::edit::{EditCommand, EditOp, OpDecodeError, Value, decode_op, encode_op};
+    use crcbl_scene::scn::{EntityName, SceneEntityId};
+
+    let delete = encode_op(&EditOp::Apply(EditCommand::Delete {
+        entity: SceneEntityId(3),
+    }))
+    .expect("a delete travels");
+
+    let seed = include_bytes!("../corpus/decoder/edit-request");
+    let request = EditRequest {
+        request_id: 7,
+        op: delete.clone(),
+    };
+    assert_eq!(decode_edit_request(seed).expect("a whole request"), request);
+    assert_eq!(encode_edit_request(&request).expect("short enough"), seed);
+
+    assert!(matches!(
+        decode_edit_request(include_bytes!(
+            "../corpus/decoder/edit-request-hostile-op-length"
+        )),
+        Err(DecodeError::InvalidLength(u32::MAX))
+    ));
+
+    for (seed, reply) in [
+        (
+            &include_bytes!("../corpus/decoder/edit-reply-applied")[..],
+            EditReply {
+                request_id: 7,
+                outcome: EditOutcome::Applied { revision: 1 },
+            },
+        ),
+        (
+            &include_bytes!("../corpus/decoder/edit-reply-refused")[..],
+            EditReply {
+                request_id: 8,
+                outcome: EditOutcome::Refused {
+                    reason: EditRefusal::UNKNOWN_ENTITY,
+                    message: "the scene holds no entity 999".to_owned(),
+                },
+            },
+        ),
+    ] {
+        assert_eq!(decode_edit_reply(seed).expect("a whole reply"), reply);
+        assert_eq!(encode_edit_reply(&reply).expect("short enough"), seed);
+    }
+
+    let seed = include_bytes!("../corpus/decoder/edit-notice");
+    let notice = EditNotice {
+        revision: 1,
+        author: 1,
+        op: delete,
+    };
+    assert_eq!(decode_edit_notice(seed).expect("a whole notice"), notice);
+    assert_eq!(encode_edit_notice(&notice).expect("short enough"), seed);
+
+    let seed = include_bytes!("../corpus/decoder/edit-op-batch");
+    let op = EditOp::Apply(EditCommand::Batch(vec![
+        EditCommand::Rename {
+            entity: SceneEntityId(2),
+            name: Some(EntityName::new("Gate").expect("a name")),
+        },
+        EditCommand::SetProperty {
+            entity: SceneEntityId(1),
+            system: "blocks".to_owned(),
+            path: "position.1".to_owned(),
+            value: Value::Float(2.5),
+        },
+    ]));
+    assert_eq!(decode_op(seed).expect("a whole op"), op);
+    assert_eq!(encode_op(&op).expect("it travels"), seed);
+
+    assert_eq!(
+        decode_op(include_bytes!("../corpus/decoder/edit-op-too-deep")),
+        Err(OpDecodeError::TooDeep)
+    );
 }

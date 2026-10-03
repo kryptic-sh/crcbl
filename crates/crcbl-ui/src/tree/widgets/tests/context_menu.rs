@@ -1,11 +1,13 @@
 //! The context menu: opened at the pointer by a secondary press and below the
 //! focused widget by `ui_menu`, picked by a click or by moves and accept,
 //! reported once, with submenus beside their items — and closed a level at a
-//! time by back, or all at once by a pick or a press outside.
+//! time by back, or all at once by a pick or a press outside. The arrows wrap
+//! at a menu's ends; Home, End and typeahead move through the topmost level.
 
 use super::*;
+use crate::edit::Edit;
 use crate::style::Sides;
-use crate::tree::{Behavior, ContextItem, ContextMenuResponse, Position, Ui};
+use crate::tree::{Behavior, ContextItem, ContextMenuResponse, Jump, Position, Ui};
 
 /// What the fixture's items report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -468,4 +470,206 @@ fn a_press_outside_closes_the_menu_and_is_swallowed() {
     let released = page(&mut ui, release(on), NavInput::default());
     assert_eq!(released.menus[0].picked, None);
     assert!(!interaction(&ui).clicked, "the dismissing press clicked it");
+}
+
+/// One frame of a page holding one focusable target with `items` as its
+/// menu, with `text` as the frame's text input. Returns the target's key.
+fn menu_page(
+    ui: &mut Ui,
+    nav: NavInput,
+    text: TextInput,
+    items: &[ContextItem<'_, Pick>],
+) -> NodeKey {
+    frame_with_text(ui, idle(), nav, text, |ui| {
+        let size = [
+            Declaration::Width(LengthAuto::Px(TARGET.x)),
+            Declaration::Height(LengthAuto::Px(TARGET.y)),
+            Declaration::FlexShrink(0.0),
+        ];
+        let target = ui
+            .block_with("#target", &size, Behavior::BUTTON, |_| {})
+            .key;
+        ui.context_menu(target, items);
+        target
+    })
+}
+
+/// A frame's text input typing `text`.
+fn typing(text: &str) -> TextInput {
+    TextInput {
+        edits: vec![Edit::Insert(text.to_owned())],
+        ..TextInput::default()
+    }
+}
+
+/// The target's menu over `items`, opened by `ui_menu` with focus moved into
+/// it. Returns the target's key.
+fn opened_by_key(ui: &mut Ui, items: &[ContextItem<'_, Pick>]) -> NodeKey {
+    menu_page(ui, NavInput::default(), TextInput::default(), items);
+    let target = menu_page(ui, NavInput::NEXT, TextInput::default(), items);
+    menu_page(ui, NavInput::MENU, TextInput::default(), items);
+    menu_page(ui, NavInput::NAVIGATION, TextInput::default(), items);
+    assert!(ui.is_popup_open(target), "ui_menu did not open the menu");
+    target
+}
+
+/// **Home and End go to the first and last item focus can rest on**, past a
+/// disabled item at either end and the separator before the last.
+#[test]
+fn home_and_end_skip_disabled_items() {
+    let items = [
+        ContextItem::action("Locked", Pick::Locked).enabled(false),
+        ContextItem::action("Cut", Pick::Cut),
+        ContextItem::action("Copy", Pick::Copy),
+        ContextItem::Separator,
+        ContextItem::submenu("Size", &SIZES),
+        ContextItem::action("Panel", Pick::Panel).enabled(false),
+    ];
+    let mut ui = Ui::new();
+    let target = opened_by_key(&mut ui, &items);
+    menu_page(&mut ui, DOWN, TextInput::default(), &items);
+    assert_eq!(ui.focused(), Some(item(&ui, target, "Copy")));
+    let end = NavInput::jumping(Jump::Last);
+    menu_page(&mut ui, end, TextInput::default(), &items);
+    assert_eq!(ui.focused(), Some(item(&ui, target, "Size")), "End");
+    let home = NavInput::jumping(Jump::First);
+    menu_page(&mut ui, home, TextInput::default(), &items);
+    assert_eq!(ui.focused(), Some(item(&ui, target, "Cut")), "Home");
+    assert!(ui.is_popup_open(target), "a jump closed the menu");
+}
+
+/// **Up and down wrap at the menu's ends**, as a Windows menu's arrows do:
+/// up from the first item reaches the last, past the disabled item and the
+/// separator, and down from it comes back.
+#[test]
+fn the_arrows_wrap_at_the_menus_ends() {
+    let mut ui = Ui::new();
+    let target = opened_by_key(&mut ui, &items());
+    assert_eq!(ui.focused(), Some(item(&ui, target, "Cut")));
+    menu_page(&mut ui, UP, TextInput::default(), &items());
+    assert_eq!(
+        ui.focused(),
+        Some(item(&ui, target, "Size")),
+        "up did not wrap to the last item"
+    );
+    menu_page(&mut ui, DOWN, TextInput::default(), &items());
+    assert_eq!(
+        ui.focused(),
+        Some(item(&ui, target, "Cut")),
+        "down did not wrap to the first item"
+    );
+}
+
+/// **A menu longer than the viewport scrolls, and wraps to its first item
+/// rather than the first in view**: End scrolls the last item into view, and
+/// down from it reaches the first, scrolled back into view.
+#[test]
+fn a_long_menu_wraps_to_its_first_item_and_scrolls_it_into_view() {
+    let labels: Vec<String> = (0..40).map(|index| format!("item {index:02}")).collect();
+    let items: Vec<ContextItem<'_, Pick>> = labels
+        .iter()
+        .map(|label| ContextItem::action(label.as_str(), Pick::Cut))
+        .collect();
+    let mut ui = Ui::new();
+    let target = opened_by_key(&mut ui, &items);
+    let menu = Ui::popup_key(target);
+    let (menu_min, menu_max) = rect(&ui, menu);
+    assert!(menu_max.y - menu_min.y < PAGE, "the menu was not capped");
+
+    menu_page(
+        &mut ui,
+        NavInput::jumping(Jump::Last),
+        TextInput::default(),
+        &items,
+    );
+    let last = item(&ui, target, "item 39");
+    assert_eq!(ui.focused(), Some(last));
+    assert!(ui.scroll_offset_of(menu).y > 0.0, "End did not scroll");
+    menu_page(&mut ui, DOWN, TextInput::default(), &items);
+    let first = item(&ui, target, "item 00");
+    assert_eq!(
+        ui.focused(),
+        Some(first),
+        "down wrapped to an item other than the first"
+    );
+    assert_eq!(
+        ui.scroll_offset_of(menu).y,
+        0.0,
+        "the first item is not in view"
+    );
+}
+
+/// **Typeahead skips a disabled item**: `c` from Cut steps past the disabled
+/// Copy to Crop.
+#[test]
+fn typeahead_skips_disabled_items() {
+    let items = [
+        ContextItem::action("Cut", Pick::Cut),
+        ContextItem::action("Copy", Pick::Copy).enabled(false),
+        ContextItem::action("Crop", Pick::Small),
+    ];
+    let mut ui = Ui::new();
+    let target = opened_by_key(&mut ui, &items);
+    assert_eq!(ui.focused(), Some(item(&ui, target, "Cut")));
+    menu_page(&mut ui, NavInput::NAVIGATION, typing("c"), &items);
+    menu_page(&mut ui, NavInput::NAVIGATION, TextInput::default(), &items);
+    assert_eq!(ui.focused(), Some(item(&ui, target, "Crop")));
+}
+
+/// **A submenu takes the typing while it is the topmost menu**, and the
+/// menu under it does not: `l` reaches Large, `c` — only the menu under it
+/// has a C — moves nothing, and the right arrow, the pick and its report work
+/// as they did.
+#[test]
+fn a_submenu_takes_typeahead_and_still_picks() {
+    let mut ui = Ui::new();
+    let target = opened_by_key(&mut ui, &items());
+    menu_page(
+        &mut ui,
+        NavInput::jumping(Jump::Last),
+        TextInput::default(),
+        &items(),
+    );
+    let size = item(&ui, target, "Size");
+    menu_page(&mut ui, RIGHT, TextInput::default(), &items());
+    menu_page(
+        &mut ui,
+        NavInput::NAVIGATION,
+        TextInput::default(),
+        &items(),
+    );
+    assert_eq!(ui.focused(), Some(item(&ui, size, "Small")));
+    assert!(ui.popup_list_open(), "the submenu does not take the keys");
+
+    menu_page(&mut ui, NavInput::NAVIGATION, typing("l"), &items());
+    menu_page(
+        &mut ui,
+        NavInput::NAVIGATION,
+        TextInput::default(),
+        &items(),
+    );
+    let large = item(&ui, size, "Large");
+    assert_eq!(ui.focused(), Some(large), "the submenu did not take the l");
+    menu_page(&mut ui, NavInput::NAVIGATION, typing("c"), &items());
+    menu_page(
+        &mut ui,
+        NavInput::NAVIGATION,
+        TextInput::default(),
+        &items(),
+    );
+    assert_eq!(ui.focused(), Some(large), "the menu under it took the c");
+
+    let picked = frame(&mut ui, idle(), NavInput::ACCEPT, |ui| {
+        let size = [
+            Declaration::Width(LengthAuto::Px(TARGET.x)),
+            Declaration::Height(LengthAuto::Px(TARGET.y)),
+            Declaration::FlexShrink(0.0),
+        ];
+        let target = ui
+            .block_with("#target", &size, Behavior::BUTTON, |_| {})
+            .key;
+        ui.context_menu(target, &items()).picked
+    });
+    assert_eq!(picked, Some(Pick::Large));
+    assert!(!ui.is_popup_open(target), "the pick left the menu open");
 }

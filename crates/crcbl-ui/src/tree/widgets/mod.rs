@@ -119,6 +119,7 @@ pub use text_input::{
     TextInputOptions,
 };
 pub(crate) use text_input::{EditState, TextFit};
+pub use value::DragNumber;
 
 /// What a widget keeps on one node between frames; see the module docs.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -145,9 +146,11 @@ pub(crate) enum WidgetState {
         /// whose open state is this node's own.
         item: Option<OutlinerId>,
     },
-    /// A drag-value or a divider under a press: what the value was when the
-    /// press began.
+    /// A divider under a press: where it was when the press began.
     Anchor(Option<f32>),
+    /// A drag-value under a press: what its value was when the press began,
+    /// in the number's own kind.
+    Drag(Option<value::sealed::DragAnchor>),
     /// A split: where its divider was put, as the first pane's length.
     Split(Option<f32>),
     /// A virtualized list or outliner: the row that held focus when it was
