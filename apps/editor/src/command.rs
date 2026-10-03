@@ -64,6 +64,15 @@
 //! puts back its leaf. A switch is never folded into a gesture's entry: it
 //! is one click, and one entry.
 //!
+//! # The scene's environment
+//!
+//! [`SetEnvironment`](EditCommand::SetEnvironment) is a property write whose
+//! leaf is the scene's `env.ron` rather than an entity's component — its
+//! camera and ambient light, by the path `crate::document`'s `Environment`
+//! names them with. Its inverse is the same write of the value it replaced,
+//! read immediately before, as a property's is; and a drag of one folds into
+//! a gesture's entry as a property's does.
+//!
 //! # Creating and removing entities
 //!
 //! [`Spawn`](EditCommand::Spawn) and [`Delete`](EditCommand::Delete) are each
@@ -172,6 +181,16 @@ pub enum EditCommand {
         path: String,
         /// The whole enum it is being set to.
         value: Snapshot,
+    },
+
+    /// Write `value` into the leaf `path` names inside the scene's
+    /// environment — its camera and ambient light.
+    SetEnvironment {
+        /// The dotted path, in [`crcbl::reflect`]'s grammar — `"camera.1"`
+        /// is the camera's height.
+        path: String,
+        /// What the leaf is being set to.
+        value: Value,
     },
 
     /// Create `entity` holding a component in each system `rows` names.
@@ -587,8 +606,29 @@ impl UndoLog {
     }
 }
 
-/// One leaf a property set writes: the entity, the system and the path.
-type Leaf = (SceneEntityId, String, String);
+/// One leaf a property set writes.
+#[derive(Clone, Debug, PartialEq)]
+enum Leaf {
+    /// One of an entity's components': the entity, the system and the path.
+    Component(SceneEntityId, String, String),
+    /// The scene's environment's, by its path.
+    Environment(String),
+}
+
+impl Leaf {
+    /// The write of `value` into this leaf.
+    fn set(self, value: Value) -> EditCommand {
+        match self {
+            Self::Component(entity, system, path) => EditCommand::SetProperty {
+                entity,
+                system,
+                path,
+                value,
+            },
+            Self::Environment(path) => EditCommand::SetEnvironment { path, value },
+        }
+    }
+}
 
 /// A gesture's leaves, in the order it first wrote them, each with the value
 /// from before its first write and the value its newest write left — what
@@ -639,17 +679,11 @@ impl Leaves {
         if self.0.is_empty() {
             return None;
         }
-        let set = |(entity, system, path): Leaf, value: Value| EditCommand::SetProperty {
-            entity,
-            system,
-            path,
-            value,
-        };
         let mut done = Vec::with_capacity(self.0.len());
         let mut undo = Vec::with_capacity(self.0.len());
         for (leaf, before, after) in self.0 {
-            undo.push(set(leaf.clone(), before));
-            done.push(set(leaf, after));
+            undo.push(leaf.clone().set(before));
+            done.push(leaf.set(after));
         }
         undo.reverse();
         Some((
@@ -680,9 +714,12 @@ fn sets(command: &EditCommand) -> Option<Vec<(Leaf, Value)>> {
             path,
             value,
         } => Some(vec![(
-            (*entity, system.clone(), path.clone()),
+            Leaf::Component(*entity, system.clone(), path.clone()),
             value.clone(),
         )]),
+        EditCommand::SetEnvironment { path, value } => {
+            Some(vec![(Leaf::Environment(path.clone()), value.clone())])
+        }
         EditCommand::Batch(members) => {
             let mut all = Vec::with_capacity(members.len());
             for member in members {

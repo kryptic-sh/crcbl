@@ -63,9 +63,9 @@
 //! entity paste.
 
 use crcbl::ron;
-use crcbl::scene::scn::SceneEntityId;
 
 use crate::command::SystemRow;
+use crate::panel::FieldTarget;
 use crcbl::serde::{Deserialize, Serialize};
 use crcbl::shell::{
     ClipboardContent, ClipboardRequestId, MimeType, Shell, ShellError, ShellEvent, WindowId,
@@ -169,15 +169,9 @@ pub fn decode(text: &str) -> Result<Vec<Clipped>, ron::error::SpannedError> {
 pub enum PasteTarget {
     /// Spawn the entities a clipping names.
     Entities,
-    /// Write a value into one leaf of one entity's component.
-    Field {
-        /// Whose component.
-        entity: SceneEntityId,
-        /// Which of its components: the system holding it.
-        system: String,
-        /// The leaf's path.
-        path: String,
-    },
+    /// Write a value into one leaf: of an entity's component, or of the
+    /// scene's environment.
+    Field(FieldTarget),
 }
 
 /// A paste waiting on the clipboard's answer.

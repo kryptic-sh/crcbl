@@ -106,7 +106,7 @@ pub(super) fn text_of(value: &Value) -> String {
 }
 
 /// The [`Value`] of `like`'s kind that `text` spells, read as ron.
-fn value_of(like: &Value, text: &str) -> Result<Value, ron::error::SpannedError> {
+pub(super) fn value_of(like: &Value, text: &str) -> Result<Value, ron::error::SpannedError> {
     Ok(match like {
         Value::Bool(_) => Value::Bool(ron::from_str(text)?),
         Value::Int(_) => Value::Int(ron::from_str(text)?),

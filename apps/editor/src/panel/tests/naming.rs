@@ -210,7 +210,7 @@ fn the_field_target_follows_focus_then_the_pointer() {
     page.frame(PointerInput::hovering(y), 0.0);
     assert_eq!(
         page.panels.field_target(),
-        Some(&FieldTarget {
+        Some(&FieldTarget::Component {
             entity: id,
             system: crate::scene::BLOCKS.to_owned(),
             path: "position.1".to_owned(),
@@ -229,7 +229,7 @@ fn the_field_target_follows_focus_then_the_pointer() {
     page.click(width);
     page.frame(PointerInput::hovering(row), 0.0);
     assert_eq!(
-        page.panels.field_target().map(|field| field.path.as_str()),
+        page.panels.field_target().map(FieldTarget::path),
         Some("half_extents.0"),
         "the focused field was not the target with the pointer elsewhere",
     );

@@ -50,6 +50,7 @@ use crcbl::ui::tree::{FieldEdit, VariantEdit};
 
 use crate::command::{EditCommand, Gesture, SystemRow, UndoLog, set_property, set_variant};
 
+mod environment;
 mod field;
 mod meshes;
 mod naming;
@@ -61,6 +62,7 @@ mod selection;
 mod systems;
 mod validation;
 
+pub use environment::Environment;
 pub use origin::{open_target, save_target};
 pub use play::{Hit, PlayState};
 pub use recovery::{
@@ -1338,6 +1340,7 @@ impl Document {
                 path,
                 value,
             )?),
+            EditCommand::SetEnvironment { path, value } => self.set_environment(path, value),
             EditCommand::Spawn {
                 entity: id,
                 rows,
@@ -1657,6 +1660,9 @@ mod dirty_tests;
 
 #[cfg(test)]
 mod entity_tests;
+
+#[cfg(test)]
+mod environment_tests;
 
 #[cfg(test)]
 mod field_tests;

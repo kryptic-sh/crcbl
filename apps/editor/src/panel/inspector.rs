@@ -24,7 +24,10 @@
 //! **While nothing is selected the pane is the scene's**: one **add an
 //! entity** button per registered system, under the same headings, each
 //! putting a new entity in the scene holding that system's component at its
-//! `Default` ([`Document::add_entity`]). The click is reported as
+//! `Default` ([`Document::add_entity`]); and under them the scene's
+//! environment — `env.ron`'s camera and ambient light, edited as a
+//! component's fields are, each edit an undoable command
+//! (`document::environment`). The click is reported as
 //! [`Built::add`] for [`crate::app`] to carry out and select, as a drop from
 //! the asset browser is: the panels push the outliner's selection back into
 //! the document at the end of the frame, which would drop a selection made
@@ -97,6 +100,14 @@ pub(super) struct Built {
     /// The system an add-an-entity button asked for a new entity in this
     /// frame.
     pub(super) add: Option<String>,
+    /// The scene's environment's rows — its inspector block — drawn only
+    /// while nothing is selected.
+    pub(super) environment: Option<NodeKey>,
+    /// The frame's edits of the environment.
+    pub(super) environment_edits: Vec<FieldEdit>,
+    /// The environment leaf a clipboard key means — its path — if there is
+    /// one.
+    pub(super) environment_field: Option<String>,
 }
 
 /// The inspector pane for `selected`, labelled `label`.
@@ -110,7 +121,7 @@ pub(super) fn build(
     let mut built = Built::default();
     ui.block(".editor-panel", &[], |ui| {
         let Some(id) = selected else {
-            scene(ui, document, &mut built);
+            scene(ui, document, overrides, &mut built);
             return;
         };
         let systems = document.systems_of(id);
@@ -209,12 +220,18 @@ pub(super) fn build(
 }
 
 /// The pane while nothing is selected — see the module docs: the scene's
-/// title, and one add-an-entity button per registered system under the add
-/// list's headings.
-fn scene(ui: &mut Ui, document: &Document, built: &mut Built) {
+/// title, one add-an-entity button per registered system under the add
+/// list's headings, and the environment's rows.
+fn scene(ui: &mut Ui, document: &Document, overrides: &Overrides, built: &mut Built) {
     ui.span(".editor-title", "Scene", &[]);
     let groups = document.addable_groups();
+    let options = InspectorOptions {
+        overrides: Some(overrides),
+        ..InspectorOptions::default()
+    };
     let props = ui.block("#props", &[], |ui| {
+        // The add list first: adding is what the pane is opened for most,
+        // and the environment is set once.
         ui.block(".inspector-add", &[], |ui| {
             ui.span(".section-title", "Add an entity", &[]);
             for group in &groups {
@@ -231,6 +248,18 @@ fn scene(ui: &mut Ui, document: &Document, built: &mut Built) {
                     }
                 });
             }
+        });
+        ui.block(".inspector-section", &[], |ui| {
+            ui.block(".section-head", &[], |ui| {
+                ui.span(".section-title", "Environment", &[]);
+            });
+            // A copy: the edits it reports are applied as commands, with
+            // nothing in the scene to rewind — `document::environment`.
+            let mut environment = document.environment();
+            let inspection = ui.inspector_with(".section-fields", &mut environment, &options);
+            built.environment = Some(inspection.response.key);
+            built.environment_edits = inspection.edits;
+            built.environment_field = inspection.focused.or(inspection.hovered);
         });
     });
     built.props = Some(props.key);

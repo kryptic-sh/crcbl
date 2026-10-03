@@ -123,23 +123,20 @@ fn a_field_in_a_section_belongs_to_that_sections_system() {
     let widget = ui.child_keys(sun_rows[0])[1];
     let at = page.centre(widget);
     page.frame(PointerInput::hovering(at), 0.0);
-    let target = page
-        .panels
-        .field_target()
-        .expect("a field under the pointer")
-        .clone();
-    assert_eq!(target.system, SUN);
-    assert_eq!(target.entity, BOTH);
+    let Some(FieldTarget::Component {
+        entity,
+        system,
+        path,
+    }) = page.panels.field_target().cloned()
+    else {
+        panic!("no component's field under the pointer");
+    };
+    assert_eq!(system, SUN);
+    assert_eq!(entity, BOTH);
 
-    let before = page
-        .document
-        .read(BOTH, SUN, &target.path)
-        .expect("a sun leaf");
+    let before = page.document.read(BOTH, SUN, &path).expect("a sun leaf");
     page.drag(at, Vec2::new(40.0, 0.0));
-    let after = page
-        .document
-        .read(BOTH, SUN, &target.path)
-        .expect("a sun leaf");
+    let after = page.document.read(BOTH, SUN, &path).expect("a sun leaf");
     assert_ne!(after, before, "the drag did not reach the sun");
     let EditCommand::SetProperty { system, .. } = page
         .document

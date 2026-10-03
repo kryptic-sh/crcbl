@@ -65,6 +65,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   own is now an error on the server side. `Client::dropped_event_count` counts
   dropped console replies too.
 
+- **The editor's `EditCommand` gained `SetEnvironment`, and its
+  `panel::FieldTarget` and `clipboard::PasteTarget::Field` name the
+  environment** (see Added: the scene's environment in the inspector). An
+  exhaustive match over `EditCommand` must add the new arm. `FieldTarget` is now
+  an enum — `Component { entity, system, path }`, the struct it was, or
+  `Environment { path }` — with `FieldTarget::path` for either, and
+  `PasteTarget::Field` holds one rather than the three fields. `PanelFrame`
+  gained the public field `add`, so a struct literal must name it.
+
 - **The editor's `EditError` gained `Target`, `OpenTarget`, `Recovery`,
   `NotACopy`, `CopyInUse` and `RemoveCopy`** (see Added: a new scene and
   save-as, open and the unsaved bar, and recovery copies offered back): a typed
@@ -615,6 +624,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **The editor edits the scene's environment in the inspector.** With nothing
+  selected the inspector's scene pane draws `env.ron` under the add buttons: the
+  camera's eye, the point it looks at and the ambient light, three numbers each.
+  Each edit is an undoable `EditCommand::SetEnvironment` — a drag one entry, as
+  a component field's is — and Ctrl+C and Ctrl+V copy and paste one number at a
+  time, as `env.ron` spells it (`Document::environment`,
+  `Document::record_environment`, `Document::copy_environment_field`,
+  `Document::paste_environment_field`). Before this a scene from empty kept the
+  compiled-in scene's camera and light for good.
 
 - **The editor adds an entity in any system while nothing is selected.** With no
   selection the inspector is the scene's pane, offering one `+ system` button

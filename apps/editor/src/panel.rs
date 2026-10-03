@@ -368,13 +368,42 @@ pub struct PanelInput {
 
 /// The inspector leaf a clipboard key means: see the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FieldTarget {
-    /// Whose component the inspector was drawn for.
-    pub entity: SceneEntityId,
-    /// Which of its components: the system of the section the leaf is in.
-    pub system: String,
-    /// The leaf's path inside it.
-    pub path: String,
+pub enum FieldTarget {
+    /// A leaf of the selected entity's component in one system.
+    Component {
+        /// Whose component the inspector was drawn for.
+        entity: SceneEntityId,
+        /// Which of its components: the system of the section the leaf is in.
+        system: String,
+        /// The leaf's path inside it.
+        path: String,
+    },
+    /// A leaf of the scene's environment, which the inspector draws while
+    /// nothing is selected.
+    Environment {
+        /// The leaf's path inside the `Environment`.
+        path: String,
+    },
+}
+
+impl FieldTarget {
+    /// The leaf's path inside its component or the environment.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Component { path, .. } | Self::Environment { path } => path,
+        }
+    }
+}
+
+/// Whose leaves an inspector edit writes: a component of an entity, by its
+/// id and system — or the scene's environment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Owner {
+    /// The entity's component in that system.
+    Component(SceneEntityId, String),
+    /// The scene's environment.
+    Environment,
 }
 
 /// An outliner row being renamed in place: see the module docs.
@@ -476,10 +505,13 @@ pub struct Panels {
     props_key: Option<NodeKey>,
     /// The inspector, as the last frame built it.
     inspector: Inspected,
-    /// The field a held pointer is dragging — its system and the paths it
-    /// writes, comma-joined — and the gesture its edits share; see
+    /// The rows of the scene's environment, as the last frame laid them out
+    /// — drawn only while nothing is selected.
+    environment_key: Option<NodeKey>,
+    /// The field a held pointer is dragging — whose it is, the paths it
+    /// writes, comma-joined, and the gesture its edits share; see
     /// [`Panels::apply_edits`].
-    field_gesture: Option<(SceneEntityId, String, String, Gesture)>,
+    field_gesture: Option<(Owner, String, Gesture)>,
     /// The line under the panes: what the editor last had to say, and whether
     /// it is a warning — see [`Panels::set_status`].
     status: (String, Tone),
@@ -548,6 +580,7 @@ impl Panels {
             outliner_key: None,
             props_key: None,
             inspector: Inspected::default(),
+            environment_key: None,
             field_gesture: None,
             status: (READY.to_owned(), Tone::Info),
             status_key: None,
@@ -975,6 +1008,13 @@ impl Panels {
         self.inspector.adds.clone()
     }
 
+    /// The rows of the scene's environment — its inspector block — as the
+    /// last frame laid them out, or [`None`] while something is selected.
+    #[must_use]
+    pub const fn environment_fields(&self) -> Option<NodeKey> {
+        self.environment_key
+    }
+
     /// The add-an-entity buttons the inspector draws while nothing is
     /// selected, each with the system it puts a new entity in, as the last
     /// frame laid them out.
@@ -1226,6 +1266,9 @@ impl Panels {
             change,
             entity_adds,
             add,
+            environment,
+            environment_edits,
+            environment_field,
         } = built;
         self.props_key = props;
         self.inspector = Inspected {
@@ -1234,18 +1277,26 @@ impl Panels {
             headings,
             entity_adds,
         };
-        self.field = selected
-            .zip(field)
-            .map(|(entity, (system, path))| FieldTarget {
+        self.field = match selected {
+            Some(entity) => field.map(|(system, path)| FieldTarget::Component {
                 entity,
                 system,
                 path,
-            });
+            }),
+            None => environment_field.map(|path| FieldTarget::Environment { path }),
+        };
+        self.environment_key = environment;
         if let (Some(key), Some(id)) = (outliner_key, self.reveal.take()) {
             self.reveal_row(key, id);
         }
 
-        let commands = self.apply_edits(document, selected, &edits, &switches, input.pointer);
+        let commands = self.apply_edits(document, selected, &edits, &switches, input.pointer)
+            + self.apply_environment_edits(document, &environment_edits, input.pointer);
+        // After both, so the frame the button comes up still folds into the
+        // drag it ends: see `apply_edits`.
+        if !input.pointer.down {
+            self.field_gesture = None;
+        }
         if let (Some(id), Some(change)) = (selected, change) {
             let outcome = match &change {
                 inspector::Change::Attach(system) => document.attach(id, system),
@@ -1526,18 +1577,8 @@ impl Panels {
                     .chain(picked.iter().map(|switch| switch.path.as_str()))
                     .collect::<Vec<_>>()
                     .join(",");
-                let gesture = held.then(|| match &self.field_gesture {
-                    Some((entity, held_system, held_paths, gesture))
-                        if *entity == id && held_system == system && *held_paths == paths =>
-                    {
-                        *gesture
-                    }
-                    _ => {
-                        let gesture = document.begin_gesture();
-                        self.field_gesture = Some((id, system.to_owned(), paths.clone(), gesture));
-                        gesture
-                    }
-                });
+                let owner = Owner::Component(id, system.to_owned());
+                let gesture = held.then(|| self.gesture_for(document, owner, paths));
                 match document.record_edits(id, system, &row, &picked, gesture) {
                     Ok(()) => applied += 1,
                     Err(error) => {
@@ -1547,10 +1588,55 @@ impl Panels {
                 }
             }
         }
-        if !pointer.down {
-            self.field_gesture = None;
+        applied
+    }
+
+    /// Turns this frame's edits of the scene's environment — drawn while
+    /// nothing is selected — into one command on `document`, under the same
+    /// gesture rule as [`apply_edits`](Self::apply_edits). Returns how many
+    /// commands that made: one, or none.
+    fn apply_environment_edits(
+        &mut self,
+        document: &mut Document,
+        edits: &[FieldEdit],
+        pointer: PointerInput,
+    ) -> usize {
+        let mut applied = 0;
+        if !edits.is_empty() {
+            let paths = edits
+                .iter()
+                .map(|edit| edit.path.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let held = pointer.down || pointer.released;
+            let gesture = held.then(|| self.gesture_for(document, Owner::Environment, paths));
+            match document.record_environment(edits, gesture) {
+                Ok(()) => applied = 1,
+                Err(error) => {
+                    crcbl::log::warn!("editor: {error}");
+                    self.set_status(error.to_string(), Tone::Warning);
+                }
+            }
         }
         applied
+    }
+
+    /// The gesture a held pointer's edits of `paths` in `owner` share: the
+    /// one the last frame's edits of the same field began, or a new one,
+    /// which this field's edits share from now on.
+    fn gesture_for(&mut self, document: &mut Document, owner: Owner, paths: String) -> Gesture {
+        match &self.field_gesture {
+            Some((held_owner, held_paths, gesture))
+                if *held_owner == owner && *held_paths == paths =>
+            {
+                *gesture
+            }
+            _ => {
+                let gesture = document.begin_gesture();
+                self.field_gesture = Some((owner, paths, gesture));
+                gesture
+            }
+        }
     }
 
     /// Moves the outliner's scroll the least that puts `id`'s row in view, with
