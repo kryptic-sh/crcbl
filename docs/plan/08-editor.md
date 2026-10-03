@@ -1002,6 +1002,13 @@ decisions of the same day (below). The flow is
   until a save-as gives it one (or `--assets` names one). Delete removes that
   copy's directory by the path listed for it, and the bar lists the rest; Later
   puts the bar away for the run.
+- **Decided 2026-10-03: a recovered copy is removed once its scene is safely
+  saved elsewhere.** The document keeps the path of the copy it was read from
+  (`Document::take_recovered`); the first save-as that lands removes that copy
+  through `document::remove_copy`, as Delete does, because the work it held now
+  lives in the scene's own directory and offering it again would only invite a
+  stale restore. A failed save-as leaves it, and a new scene in its place
+  forgets it. A copy that would not go is logged and offered at the next start.
 - **Every removal is by a computed path, checked.** A copy is a directory
   directly under the recovery directory, not a link, named
   `<millis>-<scene name>` as `Document::write_recovery` makes it;
@@ -1030,6 +1037,21 @@ decisions of the same day (below). The flow is
   copy written as the window is taken away replaces it. A run ending on its
   frame budget or limit leaves a dirty session's slot, which the next start
   offers.
+- **Decided 2026-10-03: a live session's autosave is marked as in use.** Each
+  editor marks its slot (`document::mark_in_use`) with a file beside it, named
+  for it with `document::IN_USE_SUFFIX`, holding an **exclusive lock** on it
+  (`std::fs::File::lock`) for as long as the slot is its own; the file also
+  names the process. Another editor's listing, Delete (`EditError::CopyInUse`)
+  and pruning pass over a copy whose marker is locked. **A lock rather than a
+  process-id check**: the standard library cannot ask whether a process runs, a
+  recorded id can be reused after a crash, and the operating system releases a
+  lock when its process ends however it ends — so a crashed session's marker is
+  unlocked, its autosave an ordinary copy that is offered, and the marker goes
+  with the copy. No `unsafe` and no new dependency: the lock is `flock` on Linux
+  and macOS and `LockFileEx` on Windows, all through the standard library.
+  **Fail safe**: a marker that is there but cannot be opened or checked counts
+  as held, so nothing live is ever removed. Verified on Windows only; the Linux
+  and macOS sides compile for both targets but have not run.
 - **Where**: `--recovery <DIR>` names the directory; unnamed, it is
   `<temp>/crcbl-editor-recovery/` as before. **A headless run without the flag
   keeps none** — no offer, no prune, no autosave, no recovery copy — as it keeps
@@ -1049,7 +1071,15 @@ decisions of the same day (below). The flow is
   and only while dirty, not rewritten unchanged, replacing only its own slot,
   the authored scene in play, removed by a clean save and by a discard, and
   replaced by the recovery copy of a window taken away. The mutations each
-  turned a test red are listed in the commit that landed this.
+  turned a test red are listed in the commit that landed this. The two follow-up
+  rules add: a live autosave not listed, its Delete refused by name and not
+  pruned, and an ordinary copy once released (the copies' tests, the lock held
+  in-process); a crashed session's unlocked marker making an ordinary copy; a
+  marker that cannot be checked keeping its copy; only a copy marked; a document
+  remembering its copy once and forgetting it at a new scene; and in the loop,
+  an autosave marked so another start beside it offers nothing and offers it
+  once the session ends, a save-as of a recovered scene removing its copy and no
+  other, and a failed save-as keeping it until one lands.
 - **What it does not cover**: none of it has been seen on a device.
   `docs/backlog.md` lists what is deferred.
 

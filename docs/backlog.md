@@ -12694,17 +12694,23 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     reads) and reading it back in `Document::open_recovery` would restore the
     asset root, and could offer the old directory as the save-as line's text.
     Not asked for; deferred.
-  - **Decided 2026-10-03: a recovered copy is removed once its scene is safely
-    saved elsewhere.** On the first successful save-as of a document opened from
-    a copy, that copy's directory is removed by its computed path (the same
-    `document::remove_copy` the bar's Delete uses), because the work it held now
-    lives in the scene's own directory and offering it again would only invite a
-    stale restore. A failed save-as leaves it. Not built yet.
-  - **Decided 2026-10-03: a live session's autosave is marked as in use.** Each
-    editor writes a marker naming its process beside its autosave slot, and
-    another editor's listing, Delete and pruning skip a slot whose marker names
-    a running process; a marker whose process is gone is treated as an ordinary
-    copy, so a crashed session's autosave is still offered. Not built yet.
+  - **The in-use mark is a lock, not a process-id check** (built 2026-10-03,
+    `document::mark_in_use`): the decision said "a marker naming its process",
+    and the marker does hold the id, but liveness is the exclusive lock the
+    session holds on it, since std cannot ask whether a pid runs and a pid is
+    reused. Behaviour that may surprise: on Windows the marker cannot be read
+    while held (`LockFileEx` blocks reads); a marker that will not open counts
+    as held, so its copy is never listed or removed until a person deletes the
+    marker. **Coverage gaps:** verified on Windows only — the Linux and macOS
+    sides (`flock`) compile but have not run; two processes were never run
+    against one directory (the tests hold the lock in-process, which `flock` and
+    `LockFileEx` both treat as a separate holder); a checker that opens a marker
+    between its creation and its lock sees it unlocked for that instant, which
+    only matters for a slot written in that same instant.
+  - **A recovered copy that would not be removed after a save-as is logged, not
+    shown**: the status line says the save landed, and the copy is offered again
+    at the next start. Putting the failure on the status line would displace the
+    save's own report (`Editor::report_saved`); not asked for.
   - **The recovery bar is pointer-only.** It binds no key: Escape and Enter are
     the text fields' and the unsaved bar's. Whether the panels' keyboard
     navigation reaches its buttons has not been checked.

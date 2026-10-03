@@ -64,8 +64,8 @@ mod validation;
 pub use origin::{open_target, save_target};
 pub use play::PlayState;
 pub use recovery::{
-    KEEP_NEWEST, MAX_AGE, Pruned, RECOVERY_DIR, RecoveryCopy, list_copies, prune_copies,
-    remove_copy,
+    IN_USE_SUFFIX, InUse, KEEP_NEWEST, MAX_AGE, Pruned, RECOVERY_DIR, RecoveryCopy, list_copies,
+    mark_in_use, prune_copies, remove_copy,
 };
 pub use systems::{IN_SCENE, SystemGroup, UNGROUPED};
 
@@ -94,6 +94,10 @@ pub struct Document {
     /// read back, whose edits are saved nowhere until it is written somewhere
     /// ([`Document::open_recovery`]).
     saved_at: Option<usize>,
+    /// The recovery copy this document was read back from, until the caller
+    /// takes it to remove once a save-as has put the scene somewhere of its
+    /// own — see [`Document::take_recovered`]. [`None`] for anything else.
+    recovered: Option<PathBuf>,
     /// How many times an entity has entered or left this document — see
     /// [`Document::membership`].
     membership: u64,
@@ -302,6 +306,10 @@ pub enum EditError {
     /// removed.
     NotACopy(PathBuf),
 
+    /// A removal was asked for of another editor's live autosave — see
+    /// [`mark_in_use`]. Nothing was removed.
+    CopyInUse(PathBuf),
+
     /// A recovery copy would not be removed.
     RemoveCopy {
         /// The copy's directory.
@@ -425,6 +433,11 @@ impl fmt::Display for EditError {
                 "`{}` is not a recovery copy in the recovery directory, so it was not removed",
                 dir.display()
             ),
+            Self::CopyInUse(dir) => write!(
+                f,
+                "`{}` is the autosave of an editor still running, so it was not removed",
+                dir.display()
+            ),
             Self::RemoveCopy { dir, source } => write!(
                 f,
                 "removing the recovery copy `{}`: {source}",
@@ -507,6 +520,7 @@ impl Document {
             selection: Vec::new(),
             log: UndoLog::new(),
             saved_at: Some(0),
+            recovered: None,
             membership: 0,
             naming: 0,
             gestures: 0,

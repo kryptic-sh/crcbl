@@ -14,8 +14,37 @@
 //! it removes anything, so a path from anywhere else is refused by name
 //! ([`EditError::NotACopy`]) rather than deleted.
 //!
+//! # A live session's autosave is in use (decided 2026-10-03)
+//!
+//! Every editor sharing a recovery directory sees every other one's autosave
+//! there, so each marks its slot ([`mark_in_use`]): a file beside the copy,
+//! named for it with [`IN_USE_SUFFIX`], which the session holds an exclusive
+//! lock on ([`std::fs::File::lock`]) for as long as the slot is its own.
+//! Listing, [`remove_copy`] and pruning all pass over a copy whose marker is
+//! locked, so one editor never offers, deletes or prunes another's live
+//! autosave.
+//!
+//! **A lock, not a process id, says the session is alive.** The standard
+//! library cannot ask whether a process is running, and a recorded id can be
+//! reused by an unrelated process after a crash; a lock is released by the
+//! operating system when its process ends, however it ends. So a crashed
+//! session's marker is an unlocked file, its slot an ordinary copy — offered,
+//! deletable and pruned — and removing the copy removes the marker with it.
+//! The marker still holds the process id, for a person reading it once it is
+//! released (Windows refuses a read of a locked file).
+//!
+//! The lock is `flock` on Linux and macOS and `LockFileEx` on Windows
+//! ([`std::fs::File::try_lock`]'s own docs), both released when their
+//! process ends. Verified on Windows; the Linux and macOS sides are the same
+//! standard-library calls, compiled for both targets but not run here.
+//! **What cannot be told is in use**: a marker that is there but would not
+//! open, or whose lock state the platform will not say, keeps its copy out
+//! of the listing and every removal, so nothing live is ever deleted.
+//!
 //! [`Document::write_recovery`]: crate::document::Document::write_recovery
 
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -29,6 +58,18 @@ pub const MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 /// How many copies start-up keeps, newest first, whatever their age: an
 /// editor that crashes in a loop leaves this many and no more.
 pub const KEEP_NEWEST: usize = 20;
+
+/// What a copy's marker is called: the copy's directory name with this
+/// after it — never a copy's name itself, since a copy's name holds no `.`.
+pub const IN_USE_SUFFIX: &str = ".in-use";
+
+/// A live session's hold on its autosave slot: the slot's marker, locked
+/// until this is dropped — see the module docs.
+#[derive(Debug)]
+pub struct InUse {
+    /// The marker, open and locked; the lock goes when the file closes.
+    _marker: File,
+}
 
 /// One copy in a recovery directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,7 +93,8 @@ pub struct Pruned {
     pub failed: Vec<(PathBuf, EditError)>,
 }
 
-/// Every copy under `base`, newest first — none when `base` is not there.
+/// Every copy under `base`, newest first — none when `base` is not there,
+/// and none another session marks in use (see the module docs).
 ///
 /// # Errors
 ///
@@ -84,7 +126,7 @@ pub fn list_copies(base: &Path) -> Result<Vec<RecoveryCopy>, EditError> {
             dir: entry.path(),
             source,
         })?;
-        if file_type.is_dir() {
+        if file_type.is_dir() && !in_use(&entry.path()) {
             copies.push(RecoveryCopy {
                 dir: entry.path(),
                 stamp,
@@ -97,46 +139,83 @@ pub fn list_copies(base: &Path) -> Result<Vec<RecoveryCopy>, EditError> {
 }
 
 /// Removes the copy at `dir`, which must be a copy directly under `base` —
-/// see the module docs. A copy already gone is removed.
+/// see the module docs — and its marker, if it has one. A copy already gone
+/// is removed.
 ///
 /// # Errors
 ///
-/// [`EditError::NotACopy`] for a path that is not a copy under `base`,
-/// removing nothing; [`EditError::RemoveCopy`] if the filesystem would not
-/// remove it.
+/// [`EditError::NotACopy`] for a path that is not a copy under `base`, and
+/// [`EditError::CopyInUse`] for a live session's autosave, each removing
+/// nothing; [`EditError::RemoveCopy`] if the filesystem would not remove the
+/// copy or its marker.
 pub fn remove_copy(base: &Path, dir: &Path) -> Result<(), EditError> {
-    let not_a_copy = || EditError::NotACopy(dir.to_path_buf());
-    let named = dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(parse)
-        .is_some();
-    let under_base = dir
-        .parent()
-        .is_some_and(|parent| ownership::same_dir(parent, base));
-    if !named || !under_base {
-        return Err(not_a_copy());
+    check_copy(base, dir)?;
+    if in_use(dir) {
+        return Err(EditError::CopyInUse(dir.to_path_buf()));
     }
     match std::fs::symlink_metadata(dir) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => {
             return Err(EditError::RemoveCopy {
                 dir: dir.to_path_buf(),
                 source,
             });
         }
-        Ok(metadata) if !metadata.is_dir() => return Err(not_a_copy()),
-        Ok(_) => {}
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(EditError::NotACopy(dir.to_path_buf()));
+        }
+        Ok(_) => std::fs::remove_dir_all(dir).map_err(|source| EditError::RemoveCopy {
+            dir: dir.to_path_buf(),
+            source,
+        })?,
     }
-    std::fs::remove_dir_all(dir).map_err(|source| EditError::RemoveCopy {
-        dir: dir.to_path_buf(),
+    // After the copy, so a copy that would not go keeps its marker: an
+    // unlocked marker is inert, and goes with the copy next time.
+    let marker = marker(dir);
+    match std::fs::remove_file(&marker) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(EditError::RemoveCopy {
+            dir: marker,
+            source: error,
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Marks the copy at `dir`, which must be a copy directly under `base`, as
+/// this session's live autosave until the [`InUse`] handed back is dropped —
+/// see the module docs.
+///
+/// # Errors
+///
+/// [`EditError::NotACopy`] for a path that is not a copy under `base`;
+/// [`EditError::Recovery`] if the marker would not be made, locked or
+/// written. A marker left unlocked by a failure is a crashed session's, and
+/// goes with its copy.
+pub fn mark_in_use(base: &Path, dir: &Path) -> Result<InUse, EditError> {
+    check_copy(base, dir)?;
+    let path = marker(dir);
+    let failed = |source| EditError::Recovery {
+        dir: path.clone(),
         source,
-    })
+    };
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(failed)?;
+    // Blocking rather than trying: another editor's check holds the lock for
+    // the moment it takes to read it, and this one waits that out.
+    file.lock().map_err(failed)?;
+    writeln!(file, "{}", std::process::id()).map_err(failed)?;
+    Ok(InUse { _marker: file })
 }
 
 /// Removes every copy under `base` older than [`MAX_AGE`] at `now`
 /// (milliseconds since the Unix epoch), and every one past the newest
 /// [`KEEP_NEWEST`] — except the copies `keep` names, which a person has open.
+/// A live session's autosave is not listed, so it is neither removed nor
+/// counted among the newest.
 ///
 /// A copy stamped after `now`, from a clock set back since, is not old.
 ///
@@ -159,6 +238,49 @@ pub fn prune_copies(base: &Path, now: u128, keep: &[PathBuf]) -> Result<Pruned, 
         }
     }
     Ok(pruned)
+}
+
+/// [`EditError::NotACopy`] unless `dir` is named as a copy is and its parent
+/// is `base` — what [`remove_copy`] and [`mark_in_use`] check before they
+/// touch anything.
+fn check_copy(base: &Path, dir: &Path) -> Result<(), EditError> {
+    let named = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(parse)
+        .is_some();
+    let under_base = dir
+        .parent()
+        .is_some_and(|parent| ownership::same_dir(parent, base));
+    if named && under_base {
+        Ok(())
+    } else {
+        Err(EditError::NotACopy(dir.to_path_buf()))
+    }
+}
+
+/// The marker beside the copy at `dir`: its name with [`IN_USE_SUFFIX`].
+fn marker(dir: &Path) -> PathBuf {
+    let mut name = dir.file_name().unwrap_or_default().to_os_string();
+    name.push(IN_USE_SUFFIX);
+    dir.with_file_name(name)
+}
+
+/// Whether a live session holds the copy at `dir` as its autosave — see the
+/// module docs. A marker that is there and cannot be checked counts as held.
+fn in_use(dir: &Path) -> bool {
+    // Open for writing too: an exclusive lock on a file open only for reading
+    // is left unspecified by `File::try_lock`'s docs.
+    let file = match OpenOptions::new().read(true).write(true).open(marker(dir)) {
+        Ok(file) => file,
+        Err(error) => return error.kind() != std::io::ErrorKind::NotFound,
+    };
+    // Taken here, the lock is released as `file` drops at the end of this
+    // function: nobody else held it.
+    match file.try_lock() {
+        Ok(()) => false,
+        Err(TryLockError::WouldBlock | TryLockError::Error(_)) => true,
+    }
 }
 
 /// A copy's stamp and name, from its directory name — or [`None`] for a
@@ -311,5 +433,102 @@ mod tests {
             let removed = index == KEEP_NEWEST || index == KEEP_NEWEST + 2;
             assert_eq!(copy.exists(), !removed, "{}", copy.display());
         }
+    }
+
+    /// **A live session's autosave is passed over by everything that
+    /// removes**: not listed, Delete refused by name, and not pruned however
+    /// old — and once the session lets go, it is an ordinary copy, listed,
+    /// pruned and its marker gone with it.
+    #[test]
+    fn a_live_autosave_is_not_listed_removed_or_pruned() {
+        let base = tempfile::tempdir().expect("a temporary directory");
+        let now = 100 * DAY_MS;
+        let live = copy_at(base.path(), &format!("{}-live", now - 30 * DAY_MS));
+        let young = copy_at(base.path(), &format!("{}-young", now - DAY_MS));
+        let held = mark_in_use(base.path(), &live).expect("a copy");
+
+        let listed: Vec<PathBuf> = list_copies(base.path())
+            .expect("readable")
+            .into_iter()
+            .map(|copy| copy.dir)
+            .collect();
+        assert_eq!(listed, std::slice::from_ref(&young), "the live slot listed");
+        assert!(
+            matches!(
+                remove_copy(base.path(), &live),
+                Err(EditError::CopyInUse(path)) if path == live
+            ),
+            "a live slot was not refused"
+        );
+        let pruned = prune_copies(base.path(), now, &[]).expect("readable");
+        assert!(pruned.removed.is_empty(), "{:?}", pruned.removed);
+        assert!(pruned.failed.is_empty(), "{:?}", pruned.failed);
+        assert!(live.join("scene.ron").exists(), "the live slot went");
+
+        drop(held);
+        assert_eq!(list_copies(base.path()).expect("readable").len(), 2);
+        let pruned = prune_copies(base.path(), now, &[]).expect("readable");
+        assert_eq!(pruned.removed, std::slice::from_ref(&live));
+        assert!(!live.exists(), "the released slot was left");
+        assert!(!marker(&live).exists(), "its marker was left");
+        assert!(young.exists(), "a young copy was pruned");
+    }
+
+    /// **A crashed session's marker is an ordinary copy's**: a marker file
+    /// nobody holds, as the operating system leaves one, keeps nothing out
+    /// of the listing, and Delete removes it with its copy.
+    #[test]
+    fn a_crashed_sessions_marker_makes_an_ordinary_copy() {
+        let base = tempfile::tempdir().expect("a temporary directory");
+        let copy = copy_at(base.path(), "1-greybox");
+        std::fs::write(
+            marker(&copy),
+            "4242
+",
+        )
+        .expect("written");
+
+        assert_eq!(list_copies(base.path()).expect("readable").len(), 1);
+        remove_copy(base.path(), &copy).expect("an ordinary copy");
+        assert!(!copy.exists(), "the copy was left");
+        assert!(!marker(&copy).exists(), "its marker was left");
+    }
+
+    /// **Only a copy is marked**: a path that is not a copy directly under
+    /// the base is refused, and no marker is made beside it.
+    #[test]
+    fn only_a_copy_is_marked_in_use() {
+        let base = tempfile::tempdir().expect("a temporary directory");
+        let notes = copy_at(base.path(), "notes");
+        let elsewhere = tempfile::tempdir().expect("a temporary directory");
+        let outside = copy_at(elsewhere.path(), "1-greybox");
+        for refused in [&notes, &outside] {
+            assert!(
+                matches!(
+                    mark_in_use(base.path(), refused),
+                    Err(EditError::NotACopy(path)) if path == *refused
+                ),
+                "{} was marked",
+                refused.display()
+            );
+            assert!(!marker(refused).exists(), "{}", refused.display());
+        }
+    }
+
+    /// **A marker that cannot be checked keeps its copy**: one that would
+    /// not open — here a directory where the file should be — counts as a
+    /// live session's, so the copy is neither listed nor removed.
+    #[test]
+    fn a_marker_that_cannot_be_checked_keeps_its_copy() {
+        let base = tempfile::tempdir().expect("a temporary directory");
+        let copy = copy_at(base.path(), "1-greybox");
+        std::fs::create_dir(marker(&copy)).expect("a fresh base");
+
+        assert_eq!(list_copies(base.path()).expect("readable"), []);
+        assert!(matches!(
+            remove_copy(base.path(), &copy),
+            Err(EditError::CopyInUse(_))
+        ));
+        assert!(copy.join("scene.ron").exists(), "the copy went");
     }
 }

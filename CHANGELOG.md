@@ -37,15 +37,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   dropped console replies too.
 
 - **The editor's `EditError` gained `Target`, `OpenTarget`, `Recovery`,
-  `NotACopy` and `RemoveCopy`** (see Added: a new scene and save-as, open and
-  the unsaved bar, and recovery copies offered back): a typed save-as directory
-  or a typed scene to open refused before anything is written or read, a
-  recovery directory that would not be made or read, a removal refused for a
-  path that is not a recovery copy, and a copy that would not go — so an
-  exhaustive match over it must add them. The editor's `keys::Action` gained
-  `Open` and `Unsaved`, `PanelFrame` gained the public fields `open`, `unsaved`
-  and `recovery`, and `args::Options` gained `recovery`, so an exhaustive match
-  or a struct literal must add those too.
+  `NotACopy`, `CopyInUse` and `RemoveCopy`** (see Added: a new scene and
+  save-as, open and the unsaved bar, and recovery copies offered back): a typed
+  save-as directory or a typed scene to open refused before anything is written
+  or read, a recovery directory that would not be made or read, a removal
+  refused for a path that is not a recovery copy or for another editor's live
+  autosave, and a copy that would not go — so an exhaustive match over it must
+  add them. The editor's `keys::Action` gained `Open` and `Unsaved`,
+  `PanelFrame` gained the public fields `open`, `unsaved` and `recovery`, and
+  `args::Options` gained `recovery`, so an exhaustive match or a struct literal
+  must add those too.
 
 - **The editor's selection is a set** (see Added: multi-selection).
   `Document::selected` is gone — `Document::primary` answers the same entity for
@@ -738,9 +739,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   session's previous one is removed; a clean save, an undo back to the saved
   state, a discard, a new scene, an open or the window closing removes the slot,
   and a recovery copy written as the window is taken away replaces it. So a
-  crash or a killed process loses at most one interval. The new `--recovery
-  <DIR>` names the directory; a `--headless` run without it keeps none, so a
-  test never prunes or writes into a person's own copies.
+  crash or a killed process loses at most one interval. **A live session's slot
+  is marked in use** (`document::mark_in_use`): a `<copy>.in-use` file beside it
+  that the session holds an exclusive lock on (`std::fs::File::lock` — `flock`
+  on Linux and macOS, `LockFileEx` on Windows), so another editor sharing the
+  directory neither lists, deletes (`EditError::CopyInUse`) nor prunes it; the
+  operating system releases the lock when the process ends, however it ends, so
+  a crashed session's autosave is an ordinary copy again and is offered, and its
+  marker goes with it. **A recovered copy is removed once its scene is saved
+  elsewhere**: the first save-as that lands for a document opened from a copy
+  removes that copy by the path the document kept (`Document::take_recovered`),
+  and a failed save-as leaves it. The new `--recovery <DIR>` names the
+  directory; a `--headless` run without it keeps none, so a test never prunes or
+  writes into a person's own copies.
 
 - **`crcbl::lan::lobby`: a LAN lobby's model, without its look** (native
   builds). `lobby::Lobby` polls a `Browser` and sorts what it hears into

@@ -202,6 +202,9 @@ impl<S: Shell + ?Sized> Editor<S> {
                 return Ok(());
             }
         };
+        // Before anything that could put another document in place, which
+        // would take the copy's path with it.
+        self.remove_recovered();
         if moved {
             self.panels.relist_assets(&self.document);
             let wanted = self.document.mesh_assets();

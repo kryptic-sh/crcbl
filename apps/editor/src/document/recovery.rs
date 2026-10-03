@@ -18,8 +18,10 @@
 //! **A copy is read back unowned** ([`Document::open_recovery`]): no origin,
 //! so a save asks for a directory and a copy is never written back over
 //! itself, and dirty, so what it holds is asked about before it is lost.
-//! Listing, pruning and removing copies is `copies`' — each by a path it
-//! checks is a copy, never by a pattern.
+//! It remembers the copy ([`Document::take_recovered`]) so the caller can
+//! remove it once a save-as has put the scene somewhere of its own. Listing,
+//! pruning, removing copies and marking a live session's autosave in use is
+//! `copies`' — each by a path it checks is a copy, never by a pattern.
 
 use std::path::{Path, PathBuf};
 
@@ -31,7 +33,8 @@ use super::{Document, EditError};
 mod copies;
 
 pub use copies::{
-    KEEP_NEWEST, MAX_AGE, Pruned, RecoveryCopy, list_copies, prune_copies, remove_copy,
+    IN_USE_SUFFIX, InUse, KEEP_NEWEST, MAX_AGE, Pruned, RecoveryCopy, list_copies, mark_in_use,
+    prune_copies, remove_copy,
 };
 
 /// The directory under the recovery base every copy is made in — a name of
@@ -85,9 +88,9 @@ impl Document {
     }
 
     /// Opens the recovery copy at `dir` with the components `registry`
-    /// knows, **unowned and dirty** — see the module docs. Its meshes read
-    /// from no asset root until a save-as gives it a directory, whose root it
-    /// takes then.
+    /// knows, **unowned and dirty**, remembering `dir` — see the module docs.
+    /// Its meshes read from no asset root until a save-as gives it a
+    /// directory, whose root it takes then.
     ///
     /// # Errors
     ///
@@ -96,7 +99,17 @@ impl Document {
         let source = crcbl::assets::DirSource::at(dir.to_path_buf());
         let mut document = Self::open(&source, Path::new(""), registry)?;
         document.saved_at = None;
+        document.recovered = Some(dir.to_path_buf());
         Ok(document)
+    }
+
+    /// Hands back the recovery copy this document was read back from, once:
+    /// a caller takes it after the first save-as that lands, when the copy
+    /// holds nothing the scene's own directory does not (decided
+    /// 2026-10-03). [`None`] for a document not read from a copy, or one
+    /// whose copy was taken, and after [`Document::new_scene`].
+    pub fn take_recovered(&mut self) -> Option<PathBuf> {
+        self.recovered.take()
     }
 }
 
@@ -270,6 +283,28 @@ mod tests {
             .expect("an empty directory");
         assert!(!opened.is_dirty(), "a save-as left it dirty");
         assert_eq!(tree(&dir).len(), files.len(), "the copy was touched");
+    }
+
+    /// **A recovered document remembers its copy until it is taken**, once,
+    /// and a new scene in its place forgets it; a scene opened from a
+    /// directory has none.
+    #[test]
+    fn a_recovered_document_remembers_its_copy_once() {
+        let base = tempfile::tempdir().expect("a temporary directory");
+        let mut document = Document::built_in().expect("the compiled-in scene");
+        assert_eq!(document.take_recovered(), None);
+        let dir = document
+            .write_recovery(base.path(), 5)
+            .expect("a fresh base");
+
+        let mut opened =
+            Document::open_recovery(&dir, crate::scene::vocabulary()).expect("a copy opens");
+        assert_eq!(opened.take_recovered(), Some(dir.clone()));
+        assert_eq!(opened.take_recovered(), None, "taken twice");
+        let mut replaced =
+            Document::open_recovery(&dir, crate::scene::vocabulary()).expect("a copy opens");
+        replaced.new_scene().expect("an empty scene");
+        assert_eq!(replaced.take_recovered(), None, "a new scene kept the copy");
     }
 
     /// **A scene's name is made a directory name**: what a path would read as

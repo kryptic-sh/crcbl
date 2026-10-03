@@ -1,6 +1,7 @@
 //! Recovery copies through the loop: offered back at start-up, opened,
-//! deleted or put away from the bar, the directory pruned, and the autosave
-//! written into it on its timer.
+//! deleted or put away from the bar, removed once saved elsewhere, the
+//! directory pruned, and the autosave written into it on its timer and marked
+//! in use.
 
 use super::*;
 
@@ -10,7 +11,7 @@ use super::files::chord;
 use crate::app::recovery::{AUTOSAVE_KEY, AUTOSAVE_SECONDS, Autosave, OFFERED, now_millis};
 use crate::document::origin_tests::tree;
 use crate::document::play_tests::drifting_document;
-use crate::document::{KEEP_NEWEST, MAX_AGE, list_copies};
+use crate::document::{EditError, IN_USE_SUFFIX, KEEP_NEWEST, MAX_AGE, list_copies, remove_copy};
 use crate::scene::BLOCKS;
 
 /// A day, in milliseconds.
@@ -53,8 +54,26 @@ fn click_key(editor: &mut Editor<HeadlessShell>, key: NodeKey) {
     click(editor, at);
 }
 
-/// Every copy under `base`, newest first.
+/// Every copy-named directory under `base`, newest first, in use or not:
+/// what is on disk, where [`list_copies`] passes over a live autosave.
 fn copies(base: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<(u128, PathBuf)> = std::fs::read_dir(base)
+        .expect("readable")
+        .map(|entry| entry.expect("readable").path())
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?;
+            let stamp = name.split_once('-')?.0.parse().ok()?;
+            Some((stamp, path))
+        })
+        .collect();
+    found.sort_by(|a, b| b.cmp(a));
+    found.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Every copy [`list_copies`] lists under `base`: what another editor
+/// would offer.
+fn listed(base: &Path) -> Vec<PathBuf> {
     list_copies(base)
         .expect("readable")
         .into_iter()
@@ -527,4 +546,110 @@ fn a_discarded_close_removes_the_sessions_autosave() {
     );
     assert!(!slot.exists(), "a discarded close left the autosave");
     editor.finish(ExitReason::CloseRequested).expect("teardown");
+}
+
+/// **A save-as of a recovered scene removes its copy**: the copy the bar
+/// opened goes once the scene lands in its own directory, and another copy
+/// stays.
+#[test]
+fn a_save_as_of_a_recovered_scene_removes_its_copy() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (older, _) = copy_in(base.path(), now_millis() - 2000, 3.0);
+    let (newer, files) = copy_in(base.path(), now_millis() - 1000, 7.0);
+    let scenes = tempfile::tempdir().expect("a temporary directory");
+    let scene = scenes.path().join("kept.scn");
+    let mut editor = recovering(base.path(), 64);
+    editor.frame().expect("a frame");
+    let (rows, _) = editor.panels.recovery_buttons();
+    click_key(&mut editor, rows[0][0]);
+
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyS);
+    super::files::type_and_enter(&mut editor, &scene.display().to_string());
+    assert_eq!(editor.document().origin(), Some(scene.as_path()));
+    assert_eq!(tree(&scene).len(), files.len(), "the scene did not land");
+    assert!(!newer.exists(), "the recovered copy was left");
+    assert_eq!(copies(base.path()), [older], "another copy went");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A failed save-as keeps the recovered copy**: a directory that already
+/// holds the scene's files refuses the save, and the copy stays until a
+/// save-as lands.
+#[test]
+fn a_failed_save_as_keeps_the_recovered_copy() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (copy, files) = copy_in(base.path(), now_millis() - 1000, 7.0);
+    let scenes = tempfile::tempdir().expect("a temporary directory");
+    let occupied = scenes.path().join("occupied.scn");
+    Document::built_in()
+        .expect("the compiled-in scene")
+        .save_to(&occupied)
+        .expect("a fresh directory");
+    let mut editor = recovering(base.path(), 64);
+    editor.frame().expect("a frame");
+    let (rows, _) = editor.panels.recovery_buttons();
+    click_key(&mut editor, rows[0][0]);
+
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyS);
+    super::files::type_and_enter(&mut editor, &occupied.display().to_string());
+    assert_eq!(editor.document().origin(), None, "the save-as landed");
+    let (text, _) = editor.panels.status();
+    assert!(text.contains("does not overwrite"), "{text}");
+    assert_eq!(
+        tree(&copy).len(),
+        files.len(),
+        "a failed save-as took the copy"
+    );
+
+    // The line is up again, holding what was typed; a free directory lands.
+    tap(&mut editor, KeyCode::Escape);
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyS);
+    let scene = scenes.path().join("kept.scn");
+    super::files::type_and_enter(&mut editor, &scene.display().to_string());
+    assert_eq!(editor.document().origin(), Some(scene.as_path()));
+    assert!(!copy.exists(), "the copy outlived the save-as that landed");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A live session's autosave is marked in use**: another editor's listing
+/// passes over it and its Delete is refused by name, the next start beside
+/// it does not offer it — and once the session ends without removing it, as
+/// a run on its frame budget does, it is an ordinary copy again.
+#[test]
+fn a_live_autosave_is_marked_in_use() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let mut editor = recovering(base.path(), 256);
+    on_test_clock(&mut editor);
+    edit(&mut editor);
+    frames(&mut editor, interval_frames());
+    let slot = editor.autosave.slot.clone().expect("an autosave");
+    let mut marker = slot.clone().into_os_string();
+    marker.push(IN_USE_SUFFIX);
+    assert!(Path::new(&marker).exists(), "no marker beside the slot");
+
+    assert_eq!(copies(base.path()), std::slice::from_ref(&slot));
+    assert!(listed(base.path()).is_empty(), "the live slot listed");
+    assert!(
+        matches!(
+            remove_copy(base.path(), &slot),
+            Err(EditError::CopyInUse(path)) if path == slot
+        ),
+        "a live slot was not refused"
+    );
+    let beside = recovering(base.path(), 16);
+    assert_eq!(beside.panels.recovery(), None, "a live slot was offered");
+    beside.finish(ExitReason::FrameBudget).expect("teardown");
+
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+    assert_eq!(
+        listed(base.path()),
+        std::slice::from_ref(&slot),
+        "the slot stayed in use"
+    );
+    let after = recovering(base.path(), 16);
+    assert!(
+        after.panels.recovery().is_some(),
+        "a crashed slot was not offered"
+    );
+    after.finish(ExitReason::FrameBudget).expect("teardown");
 }

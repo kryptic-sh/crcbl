@@ -17,8 +17,17 @@
 //!   the next start.
 //! * **Delete** removes that copy's directory, by the path listed for it
 //!   ([`remove_copy`] refuses anything that is not a copy directly under the
-//!   recovery directory), and the bar lists the rest.
+//!   recovery directory, and another editor's live autosave), and the bar
+//!   lists the rest.
 //! * **Later** puts the bar away for this run.
+//!
+//! **A recovered copy goes once its scene is saved elsewhere** (decided
+//! 2026-10-03). The first save-as that lands for a document opened from a
+//! copy removes that copy, by the path the document kept
+//! ([`Document::take_recovered`]) and through [`remove_copy`] as Delete does:
+//! the work it held now lives in the scene's own directory, and offering it
+//! again would only invite a stale restore. A save-as that fails leaves it,
+//! and a copy that would not go is logged and offered at the next start.
 //!
 //! # Pruning
 //!
@@ -49,6 +58,13 @@
 //! its limit leaves a dirty session's slot, which the next start offers. A
 //! recovery copy written as the window is taken away supersedes the slot,
 //! which is removed.
+//!
+//! **A live session's slot is marked in use** ([`mark_in_use`]), so another
+//! editor sharing the directory neither offers, deletes nor prunes it; the
+//! mark goes with the slot, and a crashed session's slot, whose mark the
+//! operating system released, is an ordinary copy — `copies`' module docs in
+//! `crate::document` say how. A slot that would not be marked is logged and
+//! kept: it is still this session's autosave, only unguarded.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -60,7 +76,8 @@ use crcbl::store::settings::SettingsStack;
 use super::Editor;
 use super::unsaved::Guarded;
 use crate::document::{
-    Document, EditError, PlayState, RecoveryCopy, list_copies, prune_copies, remove_copy,
+    Document, EditError, InUse, PlayState, RecoveryCopy, list_copies, mark_in_use, prune_copies,
+    remove_copy,
 };
 use crate::panel::{RecoveryAnswer, Tone};
 
@@ -89,6 +106,9 @@ pub(super) struct Autosave {
     due: Duration,
     /// This session's copy, once one is written.
     pub(super) slot: Option<PathBuf>,
+    /// The mark that keeps other editors off [`slot`](Self::slot), dropped
+    /// before the slot is removed.
+    marked: Option<InUse>,
     /// The files that copy holds, so a scene unchanged since is not written
     /// again.
     written: Option<BTreeMap<String, String>>,
@@ -102,6 +122,7 @@ impl Autosave {
             interval,
             due: interval,
             slot: None,
+            marked: None,
             written: None,
         }
     }
@@ -255,6 +276,24 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
     }
 
+    /// Removes the recovery copy the document was read back from, after a
+    /// save-as landed — see the module docs.
+    pub(super) fn remove_recovered(&mut self) {
+        let (Some(copy), Some(base)) = (self.document.take_recovered(), &self.recovery) else {
+            return;
+        };
+        match remove_copy(base, &copy) {
+            Ok(()) => crcbl::log::info!(
+                "editor: removed the recovery copy {}, saved elsewhere now",
+                copy.display()
+            ),
+            Err(error) => crcbl::log::warn!(
+                "editor: the recovery copy {} was not removed: {error}",
+                copy.display()
+            ),
+        }
+    }
+
     /// Writes the session's autosave once it is due and the document dirty,
     /// and removes the slot once the document is clean — see the module docs.
     pub(super) fn tick_autosave(&mut self) {
@@ -292,8 +331,22 @@ impl<S: Shell + ?Sized> Editor<S> {
             self.document.name(),
             dir.display()
         );
+        let marked = match mark_in_use(&base, &dir) {
+            Ok(marked) => Some(marked),
+            Err(error) => {
+                crcbl::log::warn!(
+                    "editor: the autosave {} is not marked in use: {error}",
+                    dir.display()
+                );
+                None
+            }
+        };
         self.autosave.written = Some(files);
-        if let Some(previous) = self.autosave.slot.replace(dir) {
+        let previous = self.autosave.slot.replace(dir);
+        // The old mark goes first: `remove_copy` refuses a slot in use, this
+        // session's own included.
+        self.autosave.marked = marked;
+        if let Some(previous) = previous {
             remove_slot(&base, &previous);
         }
     }
@@ -302,6 +355,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// docs.
     pub(super) fn end_autosave(&mut self) {
         self.autosave.written = None;
+        self.autosave.marked = None;
         if let (Some(slot), Some(base)) = (self.autosave.slot.take(), &self.recovery) {
             remove_slot(base, &slot);
         }
