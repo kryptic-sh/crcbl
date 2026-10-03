@@ -1982,6 +1982,10 @@ mod lying_move_tests;
 mod lying_turn_tests;
 
 #[cfg(test)]
+#[path = "character/lying_contact_tests.rs"]
+mod lying_contact_tests;
+
+#[cfg(test)]
 #[path = "character/slide_contact_tests.rs"]
 mod slide_contact_tests;
 

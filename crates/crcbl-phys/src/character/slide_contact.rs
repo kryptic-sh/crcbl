@@ -1,21 +1,24 @@
 //! What each blocked sweep of a slide met, in the order it met it:
 //! [`SlideContact`], recorded by
-//! [`CharacterController::move_and_slide_into`](super::CharacterController::move_and_slide_into).
+//! [`CharacterController::move_and_slide_into`](super::CharacterController::move_and_slide_into)
+//! and
+//! [`CharacterController::move_lying_into`](super::CharacterController::move_lying_into).
 
 use glam::DVec3;
 
 use crate::world::ColliderId;
 
-/// One sweep of a [`move_and_slide_into`] that met something, and what the
-/// slide did about it.
+/// One sweep of a [`move_and_slide_into`] or [`move_lying_into`] that met
+/// something, and what the slide did about it.
 ///
 /// A move is a loop of straight sweeps. Each one that hits a collider is one
 /// contact, in the order the loop met them, so the list holds exactly
-/// [`MoveOutcome::slides`] entries. **Every hit is recorded, not only the
-/// ones that stopped the character**: a floor a falling character lands on, a
-/// ceiling a jump grazes, a wall it was already touching and moving along or
-/// away from — each of those still costs a sweep and redirects what is left,
-/// and each can be followed by a later wall within the same move.
+/// [`MoveOutcome::slides`] entries, or [`LyingMoveOutcome::slides`] for a
+/// lying move. **Every hit is recorded, not only the ones that stopped the
+/// character**: a floor a falling character lands on, a ceiling a jump
+/// grazes, a wall it was already touching and moving along or away from —
+/// each of those still costs a sweep and redirects what is left, and each can
+/// be followed by a later wall within the same move.
 ///
 /// # Fractions are distance along one straight sweep, never time
 ///
@@ -61,7 +64,9 @@ use crate::world::ColliderId;
 /// contact's `requested` is this one's `remaining`, exactly.
 ///
 /// [`move_and_slide_into`]: super::CharacterController::move_and_slide_into
+/// [`move_lying_into`]: super::CharacterController::move_lying_into
 /// [`MoveOutcome::slides`]: super::MoveOutcome::slides
+/// [`LyingMoveOutcome::slides`]: super::LyingMoveOutcome::slides
 /// [`skin_width`]: super::CharacterConfig::skin_width
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlideContact {

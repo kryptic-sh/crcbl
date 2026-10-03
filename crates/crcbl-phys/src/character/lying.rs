@@ -1,5 +1,6 @@
-//! Moving a prone body, [`CharacterController::move_lying`], and turning
-//! one, [`CharacterController::turn_lying`].
+//! Moving a prone body, [`CharacterController::move_lying`] (and
+//! [`CharacterController::move_lying_into`], which records its slide), and
+//! turning one, [`CharacterController::turn_lying`].
 //!
 //! A lying body is a [`LyingCapsule`] whose head is the controller's
 //! position. It moves the way the upright capsule does — the same plane-set
@@ -29,7 +30,7 @@ use std::f64::consts::{PI, TAU};
 
 use glam::DVec3;
 
-use super::{Body, CharacterController, GroundProbe, MIN_MOVE, UP};
+use super::{Body, CharacterController, GroundProbe, MIN_MOVE, SlideContact, UP};
 use crate::broadphase::Segment;
 use crate::collider::LyingCapsule;
 use crate::world::{ColliderId, PhysicsWorld};
@@ -189,6 +190,42 @@ impl CharacterController {
         body: &LyingCapsule,
         motion: DVec3,
     ) -> LyingMoveOutcome {
+        self.move_prone(world, body, motion, None)
+    }
+
+    /// [`move_lying`](Self::move_lying), writing every sweep of the slide
+    /// that met something into `contacts` (which is cleared first), in the
+    /// order the slide met them, as
+    /// [`move_and_slide_into`](Self::move_and_slide_into) does for the
+    /// upright move.
+    ///
+    /// The move itself is the same one, to the bit: recording reads what the
+    /// slide found and never feeds back into it. Only the slide is recorded,
+    /// not the settle: the settle's probes under each end and its turn onto an
+    /// edge are not sweeps the body was blocked on, and what they found is in
+    /// the [`body`](LyingMoveOutcome::body) and [`ground`](Self::ground) the
+    /// move leaves. See [`SlideContact`] for what each entry holds; a grounded
+    /// body records a wall's normal as the sweep met it, leaning, though it
+    /// slid along the wall made upright.
+    pub fn move_lying_into(
+        &mut self,
+        world: &mut PhysicsWorld,
+        body: &LyingCapsule,
+        motion: DVec3,
+        contacts: &mut Vec<SlideContact>,
+    ) -> LyingMoveOutcome {
+        contacts.clear();
+        self.move_prone(world, body, motion, Some(contacts))
+    }
+
+    /// The one lying move, recording into `contacts` when there are any.
+    fn move_prone(
+        &mut self,
+        world: &mut PhysicsWorld,
+        body: &LyingCapsule,
+        motion: DVec3,
+        contacts: Option<&mut Vec<SlideContact>>,
+    ) -> LyingMoveOutcome {
         if body.head != self.position {
             self.set_position(body.head);
         }
@@ -196,7 +233,7 @@ impl CharacterController {
         let was_grounded = self.ground.is_some();
 
         let motion = self.ground_adjusted(motion, was_grounded);
-        let report = self.slide(world, motion, was_grounded, Body::Lying(*body), None);
+        let report = self.slide(world, motion, was_grounded, Body::Lying(*body), contacts);
         let slid = LyingCapsule {
             head: self.position,
             ..*body

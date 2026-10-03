@@ -37,9 +37,11 @@ braking cases read, and a filter can be built on it but not the reverse.
 `CharacterController::move_and_slide_into(world, motion, &mut Vec<SlideContact>)`:
 every blocked sweep in order, with its collider, normal, straight-sweep
 fraction, requested, applied and remaining displacements, `started_inside` and
-`stepped_up`; `MoveOutcome` is unchanged. EW migrates
-`controller_contact_forecast.rs` onto it and deletes its shortened previews.
-What it left:
+`stepped_up`; `MoveOutcome` is unchanged. The lying move records the same way
+through
+`CharacterController::move_lying_into(world, &body, motion, &mut Vec<SlideContact>)`
+(its slide only, not the settle). EW migrates `controller_contact_forecast.rs`
+onto it and deletes its shortened previews. What it left:
 
 - **No times along a curved path.** `SlideContact::fraction` is a distance share
   along one straight sweep, documented as not being time. A caller integrating
@@ -51,9 +53,6 @@ What it left:
   movement and so cannot share `move_and_slide`'s bit-for-bit promise. Not
   started; EW's ballistic braking forecast is the consumer that would justify
   it.
-- **`move_lying` records nothing.** The slide records through the same loop for
-  a lying body (`slide` takes the sink for both), but only the upright move
-  exposes it. A `move_lying_into` is a few lines once a caller asks for it.
 - **The slide owns the skin, not the sweep (decided 2026-10-01, long term).** It
   backs off any hit nearer than `CharacterConfig::skin_width`, so every sweep
   with a tolerance (conservative advancement, meshes, future shapes) is covered

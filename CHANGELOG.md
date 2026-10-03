@@ -606,6 +606,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Slide contacts for a lying body from `crcbl_phys::CharacterController`.**
+  `move_lying_into(world, &body, motion, &mut contacts)` makes exactly the move
+  `move_lying` makes, to the bit, and writes every sweep of its slide that met
+  something into the caller's `Vec<SlideContact>`, cleared first, in the order
+  the slide met it — the wall the feet backed into as well as the one ahead — as
+  `move_and_slide_into` does for the upright move. The settle along the body's
+  length records nothing; what it found is in the returned body and the
+  controller's ground. A grounded body's wall contact keeps the normal its sweep
+  met, though the body slid along the wall made upright. `LyingMoveOutcome` is
+  unchanged.
+
 - **`crcbl-ui` has a pop-up layer, and a drop-down built on it.** Any widget
   hangs a pop-up from a node: `Ui::open_popup` with the node's key, then
   `Ui::popup` every frame it is open with a closure that builds it (it builds
