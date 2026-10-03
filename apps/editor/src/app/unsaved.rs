@@ -151,10 +151,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.panels.end_unsaved();
         match answer {
             Unsaved::Cancel => {
-                if matches!(guarded, Guarded::Close) {
-                    self.keep_open();
-                }
-                self.panels.set_status(KEPT, Tone::Info);
+                self.kept(&guarded);
                 Ok(())
             }
             Unsaved::Discard => {
@@ -214,17 +211,27 @@ impl<S: Shell + ?Sized> Editor<S> {
             return;
         }
         if let Some(guarded) = self.after_save.take() {
-            if matches!(guarded, Guarded::Close) {
-                self.keep_open();
-            }
-            self.panels.set_status(KEPT, Tone::Info);
+            self.kept(&guarded);
         }
+    }
+
+    /// Leaves everything as it was once the bar's question ended with
+    /// `guarded` not done: a close is kept open, an offer an Open copy took
+    /// down comes back (see `recovery`), and the status line says so.
+    fn kept(&mut self, guarded: &Guarded) {
+        if matches!(guarded, Guarded::Close) {
+            self.keep_open();
+        }
+        self.restore_offer();
+        self.panels.set_status(KEPT, Tone::Info);
     }
 
     /// Does what `guarded` asked for, which ends the document's session: its
     /// autosave goes — see `recovery`.
     fn proceed(&mut self, guarded: Guarded) -> Result<(), EditError> {
         self.end_autosave();
+        // Whatever goes on, an offer Open copy took down stays down.
+        self.held_offer.clear();
         match guarded {
             Guarded::New => self.new_scene(),
             Guarded::Open(document) => {

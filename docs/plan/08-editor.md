@@ -998,9 +998,14 @@ decisions of the same day (below). The flow is
   save-as and a copy is never written back over itself; and **dirty**, so what
   it holds is asked about before it is lost — and puts it in place through
   Open's path, the unsaved bar asking first; refused in play mode; the bar goes,
-  and the rest are offered at the next start. Delete removes that copy's
-  directory by the path listed for it, and the bar lists the rest; Later puts
-  the bar away for the run.
+  and once the copy is open the rest are offered at the next start. If the
+  unsaved bar's question ends with nothing opened — Cancel, or a Save whose
+  save-as line was closed unsaved — the bar comes back as it was (built
+  2026-10-03: `Editor::restore_offer`, held by a loop test for each way, and one
+  that a later question cancelled after the copy opened brings back nothing,
+  each shown red by a mutation). Delete removes that copy's directory by the
+  path listed for it, and the bar lists the rest; Later puts the bar away for
+  the run.
 - **The bar's keys** (built 2026-10-03): O, Ctrl+Delete and L answer Open copy,
   Delete and Later for the first row, the newest copy (`keys::recovery`), whose
   buttons name them. The loop reads them beside the editor's own keys while the

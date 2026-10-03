@@ -277,6 +277,9 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     recovery: Option<PathBuf>,
     /// The copies the recovery bar offers, as it lists them — see `recovery`.
     offered: Vec<RecoveryCopy>,
+    /// What was offered when Open copy took the bar down to ask about
+    /// unsaved edits, until that question ends — see `recovery`.
+    held_offer: Vec<RecoveryCopy>,
     /// The autosave into [`recovery`](Self::recovery) — see `recovery`.
     autosave: recovery::Autosave,
     /// Whether the window is to close: set by an answer that lets it, and
@@ -467,6 +470,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             assets: options.assets.clone(),
             recovery: unsaved::recovery_base(options),
             offered: Vec::new(),
+            held_offer: Vec::new(),
             autosave,
             closing: false,
             rebuild_due: false,

@@ -843,3 +843,77 @@ fn tab_reaches_the_recovery_bar_and_enter_presses_it() {
     assert_eq!(editor.panels.recovery(), None, "Enter pressed nothing");
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
+
+/// **Cancelling the unsaved bar an Open copy asked brings the offer back**:
+/// the recovery bar goes while the question stands and returns as it was
+/// on Cancel — and once Discard opens the copy, it stays gone, even
+/// through a later question cancelled.
+#[test]
+fn cancelling_the_unsaved_bar_open_copy_asked_keeps_the_offer() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    copy_in(base.path(), now_millis() - 2000, 3.0);
+    let (newer, files) = copy_in(base.path(), now_millis() - 1000, 7.0);
+    let mut editor = recovering(base.path(), 128);
+    edit(&mut editor);
+    let edited = editor.document_mut().files().expect("ids");
+    editor.frame().expect("a frame");
+    let offered = editor
+        .panels
+        .recovery()
+        .map(|(heading, rows)| (heading.to_owned(), rows.to_vec()))
+        .expect("nothing was offered");
+    let (rows, _) = editor.panels.recovery_buttons();
+    click_key(&mut editor, rows[0][0]);
+    assert!(editor.panels.unsaved().is_some(), "Open copy asked nothing");
+    assert_eq!(editor.panels.recovery(), None, "the offer stayed up");
+
+    tap(&mut editor, KeyCode::Escape);
+    assert_eq!(editor.panels.unsaved(), None, "Escape did not cancel");
+    assert_eq!(editor.document_mut().files().expect("ids"), edited);
+    let back = editor
+        .panels
+        .recovery()
+        .map(|(heading, rows)| (heading.to_owned(), rows.to_vec()));
+    assert_eq!(back, Some(offered), "the offer did not come back as it was");
+
+    let (rows, _) = editor.panels.recovery_buttons();
+    click_key(&mut editor, rows[0][0]);
+    tap(&mut editor, KeyCode::KeyD);
+    assert_eq!(editor.document_mut().files().expect("ids"), files);
+    assert_eq!(editor.document().origin(), None);
+    assert_eq!(editor.panels.recovery(), None, "the opened offer came back");
+    assert!(newer.exists());
+
+    // A later question cancelled brings back nothing the open ended.
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyN);
+    assert!(editor.panels.unsaved().is_some(), "Ctrl+N asked nothing");
+    tap(&mut editor, KeyCode::Escape);
+    assert_eq!(editor.panels.recovery(), None, "a stale offer came back");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A Save whose save-as line is closed unsaved brings the offer back
+/// too**: the scene has no directory, so Save asks for one, and Escape on
+/// that line ends the question with nothing opened.
+#[test]
+fn a_save_as_closed_unsaved_after_open_copy_keeps_the_offer() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    copy_in(base.path(), now_millis(), 7.0);
+    let mut editor = recovering(base.path(), 128);
+    edit(&mut editor);
+    editor.frame().expect("a frame");
+    let (rows, _) = editor.panels.recovery_buttons();
+    click_key(&mut editor, rows[0][0]);
+    tap(&mut editor, KeyCode::Enter);
+    assert_eq!(editor.panels.saving_as(), Some(""), "Save asked nothing");
+    assert_eq!(editor.panels.recovery(), None, "the offer stayed up");
+
+    editor.frame().expect("a frame");
+    tap(&mut editor, KeyCode::Escape);
+    assert_eq!(editor.panels.saving_as(), None, "the line stayed up");
+    assert!(
+        editor.panels.recovery().is_some(),
+        "the offer did not come back"
+    );
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}

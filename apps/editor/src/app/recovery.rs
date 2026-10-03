@@ -13,8 +13,10 @@
 //!   save asks for a directory and a copy is never written back over itself,
 //!   and dirty — and puts it in place through Open's own path: the unsaved bar
 //!   asks first about edits to the scene being edited. Refused in play mode,
-//!   as an open is. The bar goes away; the other copies are offered again at
-//!   the next start.
+//!   as an open is. The bar goes away while the unsaved bar asks; once the
+//!   copy is opened the other copies are offered again at the next start,
+//!   and if the question ends with nothing opened — Cancel, or a Save whose
+//!   save-as line was closed unsaved — the bar comes back as it was.
 //! * **Delete** removes that copy's directory, by the path listed for it
 //!   ([`remove_copy`] refuses anything that is not a copy directly under the
 //!   recovery directory, and another editor's live autosave), and the bar
@@ -253,9 +255,14 @@ impl<S: Shell + ?Sized> Editor<S> {
                     return Err(EditError::Playing);
                 }
                 let document = Document::open_recovery(&copy.dir, crate::scene::vocabulary())?;
-                self.offered.clear();
+                let offered = std::mem::take(&mut self.offered);
                 self.panels.end_recovery();
-                self.guard(Guarded::Open(Box::new(document)))
+                self.guard(Guarded::Open(Box::new(document)))?;
+                // Still asking, so the offer is held until the answer.
+                if self.unsaved.is_some() {
+                    self.held_offer = offered;
+                }
+                Ok(())
             }
             RecoveryAnswer::Delete(index) => {
                 let (Some(copy), Some(base)) = (self.offered.get(index), &self.recovery) else {
@@ -278,6 +285,16 @@ impl<S: Shell + ?Sized> Editor<S> {
                 Ok(())
             }
         }
+    }
+
+    /// Puts back the offer Open copy took down, once the unsaved bar it
+    /// asked ended with nothing opened — see the module docs.
+    pub(super) fn restore_offer(&mut self) {
+        if self.held_offer.is_empty() {
+            return;
+        }
+        self.offered = std::mem::take(&mut self.held_offer);
+        self.show_offer();
     }
 
     /// Removes the recovery copy the document was read back from, after a

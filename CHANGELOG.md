@@ -786,35 +786,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   bar holds nothing: the editor works under it. Open copy reads the copy with
   the new `Document::open_recovery` — no origin, so Ctrl+S asks for a directory
   and a copy is never written back over itself, and dirty — and puts it in place
-  through Open's path, the unsaved bar asking first; refused in play mode. **A
-  copy remembers where its scene lived**: `Document::write_recovery`, and so the
-  autosave, writes `origin.txt` (`document::SIDECAR`, which the scene loader
-  never reads) beside the scene's files naming the scene's directory and its
-  asset root, so a recovered scene reads its meshes from that root and the
-  save-as line opens holding the old directory (`Document::recorded_origin`) —
-  still refused there while it holds the scene's files. Neither path is trusted:
-  one that is not an absolute directory now is passed over and said on the
-  status line (`Document::take_recovery_notes`), and nothing is written or
-  removed through either; a copy without the file opens as before. Delete
-  removes that copy only: `document::remove_copy` refuses
-  (`EditError::NotACopy`) anything that is not a `<millis>-<name>` directory
-  directly under the recovery directory, and nothing is ever removed by a
-  pattern (`document::list_copies`, `document::prune_copies`). Later puts the
-  bar away until the next start. A dirty scene is **autosaved** into the same
-  directory every `editor.autosave.interval` seconds of `settings.toml`
-  (default 60) — the authored scene, even in play, and not again while it is
-  unchanged — into one slot per document session, a new copy written before the
-  session's previous one is removed; a clean save, an undo back to the saved
-  state, a discard, a new scene, an open or the window closing removes the slot,
-  and a recovery copy written as the window is taken away replaces it. So a
-  crash or a killed process loses at most one interval. **A live session's slot
-  is marked in use** (`document::mark_in_use`): a `<copy>.in-use` file beside it
-  that the session holds an exclusive lock on (`std::fs::File::lock` — `flock`
-  on Linux and macOS, `LockFileEx` on Windows), so another editor sharing the
-  directory neither lists, deletes (`EditError::CopyInUse`) nor prunes it; the
-  operating system releases the lock when the process ends, however it ends, so
-  a crashed session's autosave is an ordinary copy again and is offered, and its
-  marker goes with it. **A recovered copy is removed once its scene is saved
+  through Open's path, the unsaved bar asking first — the recovery bar going
+  while it asks and coming back as it was if the question ends with nothing
+  opened (Cancel, or a Save whose save-as line was closed unsaved); refused in
+  play mode. **A copy remembers where its scene lived**:
+  `Document::write_recovery`, and so the autosave, writes `origin.txt`
+  (`document::SIDECAR`, which the scene loader never reads) beside the scene's
+  files naming the scene's directory and its asset root, so a recovered scene
+  reads its meshes from that root and the save-as line opens holding the old
+  directory (`Document::recorded_origin`) — still refused there while it holds
+  the scene's files. Neither path is trusted: one that is not an absolute
+  directory now is passed over and said on the status line
+  (`Document::take_recovery_notes`), and nothing is written or removed through
+  either; a copy without the file opens as before. Delete removes that copy
+  only: `document::remove_copy` refuses (`EditError::NotACopy`) anything that is
+  not a `<millis>-<name>` directory directly under the recovery directory, and
+  nothing is ever removed by a pattern (`document::list_copies`,
+  `document::prune_copies`). Later puts the bar away until the next start. A
+  dirty scene is **autosaved** into the same directory every
+  `editor.autosave.interval` seconds of `settings.toml` (default 60) — the
+  authored scene, even in play, and not again while it is unchanged — into one
+  slot per document session, a new copy written before the session's previous
+  one is removed; a clean save, an undo back to the saved state, a discard, a
+  new scene, an open or the window closing removes the slot, and a recovery copy
+  written as the window is taken away replaces it. So a crash or a killed
+  process loses at most one interval. **A live session's slot is marked in use**
+  (`document::mark_in_use`): a `<copy>.in-use` file beside it that the session
+  holds an exclusive lock on (`std::fs::File::lock` — `flock` on Linux and
+  macOS, `LockFileEx` on Windows), so another editor sharing the directory
+  neither lists, deletes (`EditError::CopyInUse`) nor prunes it; the operating
+  system releases the lock when the process ends, however it ends, so a crashed
+  session's autosave is an ordinary copy again and is offered, and its marker
+  goes with it. **A recovered copy is removed once its scene is saved
   elsewhere**: the first save-as that lands for a document opened from a copy
   removes that copy by the path the document kept (`Document::take_recovered`),
   and a failed save-as leaves it. The new `--recovery <DIR>` names the

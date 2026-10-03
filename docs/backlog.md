@@ -12722,9 +12722,6 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     considered for Later and declined**: once focus has landed, the pushed `ui`
     context owns Escape, so it would work only until anything was typed, and it
     is the unsaved bar's Cancel besides.
-  - **Cancelling the unsaved bar an Open copy asked leaves the offer down**: the
-    bar goes when Open copy is clicked, before the unsaved bar asks. The copies
-    are all still on disk and offered at the next start.
   - **A copy's age is the stamp in its name**, not a file time, so a clock set
     wrong when it was written makes it look older or younger; one stamped in the
     future is never old.
