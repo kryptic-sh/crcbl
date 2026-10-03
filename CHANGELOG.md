@@ -594,6 +594,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_store::save::SaveBacking`**: where a game's saves live — the data
+  directory natively, the installed OPFS store in a browser, or nowhere for a
+  headless run — with `platform`, `source` and `label`. `apps/shard` wrote this
+  arm first and its `Vault` is now a wrapper over it; towers is the second user.
 - **A `.crpl` replay carries its simulation inputs, and a host re-simulates
   one** (format version 3; see Breaking). The file gains an input section after
   its entries: the `Flags::SIM` sets the host applied, each with its tick and as

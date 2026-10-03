@@ -435,6 +435,98 @@ impl AutosaveRing {
     }
 }
 
+// ── Where saves live ───────────────────────────────────────────────────────
+
+/// Where a game's saves are kept: the platform's **data** directory natively,
+/// the installed Origin Private File System store in a browser, or nowhere.
+///
+/// The persistence rules in `docs/notes/simulation.md` put saves in the data
+/// directory and records in the config directory, so this is not
+/// [`Backing::platform`](crate::record::Backing::platform), which answers with
+/// the config directory and hands out a path. This hands out the
+/// [`StorageSource`] a [`SaveWriter`] writes through and a [`SaveReader`]
+/// reads from. `apps/shard` wrote the arm first and `apps/towers` is the
+/// second game that needed it, which is why it is here rather than written
+/// out again.
+///
+/// [`SaveBacking::None`] is a state a caller *chooses* rather than a failure:
+/// a headless run must leave nothing behind, so a test suite and CI never
+/// write into whoever's data directory.
+#[derive(Debug)]
+pub enum SaveBacking {
+    /// Kept nowhere: every write is refused and every read finds nothing.
+    None,
+    /// A directory on a real filesystem.
+    #[cfg(not(target_arch = "wasm32"))]
+    Native(crate::NativeStorage),
+    /// The store the page's shim restored the Origin Private File System into.
+    #[cfg(target_arch = "wasm32")]
+    Browser(std::rc::Rc<crate::web::OpfsStorage>),
+}
+
+impl SaveBacking {
+    /// The platform's own place for `app_name`'s saves, or [`SaveBacking::None`]
+    /// with a warning when the platform will not give one — no data directory,
+    /// no OPFS store installed. That is the ordinary no-shim case rather than
+    /// something a caller can act on.
+    ///
+    /// `app_name` names the directory natively and means nothing in a
+    /// browser, where the origin already is the namespace; it stays in the
+    /// signature so no caller writes a `#[cfg]` of its own.
+    #[must_use]
+    pub fn platform(app_name: &str) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match crate::NativeStorage::data(app_name) {
+                Ok(store) => Self::Native(store),
+                Err(error) => {
+                    crcbl_core::log::warn!(
+                        "save: no data dir ({error}); {app_name}'s saves will not persist"
+                    );
+                    Self::None
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            match crate::web::opfs::installed() {
+                Some(store) => Self::Browser(store),
+                None => {
+                    crcbl_core::log::warn!(
+                        "save: no OPFS store installed; {app_name}'s saves will not persist"
+                    );
+                    Self::None
+                }
+            }
+        }
+    }
+
+    /// The backend to write and read through, or `None` for saves kept
+    /// nowhere.
+    #[must_use]
+    pub fn source(&self) -> Option<&dyn StorageSource> {
+        match self {
+            Self::None => None,
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Native(store) => Some(store),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(store) => Some(&**store),
+        }
+    }
+
+    /// Where saves go, in the words a debug panel uses.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::None => "nowhere",
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Native(_) => "data dir",
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(_) => "opfs",
+        }
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -663,6 +755,26 @@ mod tests {
     fn autosave_ring_capacity_at_least_one() {
         let ring = AutosaveRing::new(0, "save_{}.crb").unwrap();
         assert_eq!(ring.capacity(), 1);
+    }
+
+    /// **Saves kept nowhere are refused and read as nothing**, and a native
+    /// backing writes into the directory it was handed — so a caller choosing
+    /// [`SaveBacking::None`] for a headless run really leaves no trace.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_save_backing_writes_where_it_says_and_nowhere_writes_nothing() {
+        assert!(SaveBacking::None.source().is_none());
+        assert_eq!(SaveBacking::None.label(), "nowhere");
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let backing = SaveBacking::Native(crate::NativeStorage::at(dir.path().to_path_buf()));
+        assert_eq!(backing.label(), "data dir");
+        let source = backing.source().expect("a native backing has a source");
+        make_sample_save()
+            .write(source, Path::new("game.crb"))
+            .expect("the scratch directory is writable");
+        assert!(dir.path().join("game.crb").is_file());
+        assert!(SaveReader::open(source, Path::new("game.crb")).is_ok());
     }
 
     #[test]

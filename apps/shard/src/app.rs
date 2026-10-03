@@ -295,7 +295,7 @@ pub struct Shard {
     pointer_released: bool,
     /// What the last frame's inventory panel drew.
     panel: PanelStats,
-    /// Where this run's saves go. [`Vault::None`] for a headless run, which is
+    /// Where this run's saves go: nowhere for a headless run, which is
     /// what keeps the test suite and CI out of a real data directory.
     vault: Vault,
     /// Whether this run opened from a save.

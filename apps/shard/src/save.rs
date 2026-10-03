@@ -31,12 +31,12 @@
 //! and the platform choice above, which is a fact about where saves live rather
 //! than about the container.
 //!
-//! **The platform arm is not [`Backing::platform`](crcbl::store::record::Backing::platform).**
-//! That one answers with the *config* directory, which is where a high score
-//! belongs; the persistence rules put saves in the **data** directory,
-//! and it hands out a path rather than the [`StorageSource`] a [`SaveWriter`]
-//! writes through. `docs/backlog.md` records that a second consumer of *this*
-//! rule would be the moment to hoist it into the engine.
+//! **The platform arm is the engine's [`SaveBacking`]**, not
+//! [`Backing::platform`](crcbl::store::record::Backing::platform): that one
+//! answers with the *config* directory, which is where a high score belongs,
+//! and the persistence rules put saves in the **data** directory. Shard wrote
+//! the arm out first; it moved into `crcbl-store` when `apps/towers` became the
+//! second game that needed it.
 //!
 //! # What is in the payload, and what is deliberately not
 //!
@@ -126,7 +126,7 @@ use crcbl::inventory::{Catalog, Cell, Grid, Rotation, Stack, StackId};
 use crcbl::math::DVec3;
 use crcbl::net::types::SectorId;
 use crcbl::store::StorageSource;
-use crcbl::store::save::{SaveData, SaveHeader, SaveReader, SaveWriter, SectorSave};
+use crcbl::store::save::{SaveBacking, SaveData, SaveHeader, SaveReader, SaveWriter, SectorSave};
 
 use crate::foe::{self, FOES};
 use crate::level;
@@ -572,82 +572,37 @@ fn decode_grid(bytes: &[u8], foes: &[u32; FOES]) -> Option<Grid> {
 
 /// Where this run's saves go, if anywhere.
 ///
-/// The three arms are the table at the top of this module. `None` is a state a
-/// caller *chooses* rather than a failure: a headless run must leave nothing
-/// behind, so the test suite and CI cannot write into whoever's data directory.
+/// The three places are the table at the top of this module, and choosing
+/// among them is the engine's [`SaveBacking`]. Kept nowhere is a state a caller
+/// *chooses* rather than a failure: a headless run must leave nothing behind,
+/// so the test suite and CI cannot write into whoever's data directory.
 #[derive(Debug)]
-pub enum Vault {
-    /// Kept nowhere. A headless run saves in name only.
-    None,
-    /// A directory on a real filesystem.
-    #[cfg(not(target_arch = "wasm32"))]
-    Native(crcbl::store::NativeStorage),
-    /// The store the page's shim restored the Origin Private File System into.
-    #[cfg(target_arch = "wasm32")]
-    Browser(std::rc::Rc<crcbl::store::web::OpfsStorage>),
-}
+pub struct Vault(SaveBacking);
 
 impl Vault {
-    /// Opens the place this platform keeps saves, or [`Vault::None`].
+    /// Opens the place this platform keeps saves, or nowhere.
     ///
-    /// A headless run is always `None`. Everything else is the platform's own
-    /// answer, and a platform that will not give one — no data directory, no
-    /// OPFS store installed — is `None` too, with a warning: it is the ordinary
-    /// no-shim case rather than something a caller can do anything about.
+    /// A headless run is always nowhere. Everything else is the platform's own
+    /// answer — [`SaveBacking::platform`] — which is nowhere too, with a
+    /// warning, when the platform will not give one.
     #[must_use]
     pub fn open(headless: bool) -> Self {
         if headless {
-            return Self::None;
+            return Self(SaveBacking::None);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            match crcbl::store::NativeStorage::data(APP) {
-                Ok(store) => Self::Native(store),
-                Err(error) => {
-                    crcbl::log::warn!(
-                        "save: no data dir ({error}); the character will not persist"
-                    );
-                    Self::None
-                }
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = APP;
-            match crcbl::store::web::opfs::installed() {
-                Some(store) => Self::Browser(store),
-                None => {
-                    crcbl::log::warn!(
-                        "save: no OPFS store installed; the character will not persist"
-                    );
-                    Self::None
-                }
-            }
-        }
+        Self(SaveBacking::platform(APP))
     }
 
     /// The backend a [`SaveWriter`] writes through, or `None` for a run that
     /// keeps nothing.
     fn source(&self) -> Option<&dyn StorageSource> {
-        match self {
-            Self::None => None,
-            #[cfg(not(target_arch = "wasm32"))]
-            Self::Native(store) => Some(store),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(store) => Some(&**store),
-        }
+        self.0.source()
     }
 
     /// Where this run's saves go, in the words the debug panel uses.
     #[must_use]
     pub const fn where_it_goes(&self) -> &'static str {
-        match self {
-            Self::None => "nowhere",
-            #[cfg(not(target_arch = "wasm32"))]
-            Self::Native(_) => "data dir",
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(_) => "opfs",
-        }
+        self.0.label()
     }
 
     /// The character a previous session left, if there is one this build will
@@ -1156,11 +1111,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("the scratch directory is writable");
 
-        let vault = Vault::Native(crcbl::store::NativeStorage::at(dir.clone()));
+        let vault = Vault(SaveBacking::Native(crcbl::store::NativeStorage::at(
+            dir.clone(),
+        )));
         assert!(vault.load().is_none(), "nothing has been written yet");
         assert!(vault.store(&walked()), "the write was refused");
 
-        let reopened = Vault::Native(crcbl::store::NativeStorage::at(dir.clone()));
+        let reopened = Vault(SaveBacking::Native(crcbl::store::NativeStorage::at(
+            dir.clone(),
+        )));
         assert_eq!(reopened.load(), Some(walked()), "it did not reach the disk");
 
         // …and a file whose bytes were tampered with is refused by the
@@ -1171,9 +1130,11 @@ mod tests {
         bytes[last] ^= 0xFF;
         std::fs::write(&file, &bytes).expect("the scratch directory is writable");
         assert!(
-            Vault::Native(crcbl::store::NativeStorage::at(dir.clone()))
-                .load()
-                .is_none(),
+            Vault(SaveBacking::Native(crcbl::store::NativeStorage::at(
+                dir.clone()
+            )))
+            .load()
+            .is_none(),
             "a corrupted save was read as a character",
         );
 
