@@ -2975,7 +2975,7 @@ and _The debug draw layer's console switch is one bit, not a category set_.
 
 ### The UI stage's exit criteria are not demonstrated
 
-Three of the plan's six exit criteria are open; re-checked 2026-09-24.
+Two of the plan's six exit criteria are open; re-checked 2026-10-03.
 
 - **A HUD built by editing a `.css` file plus about thirty lines of tree code,
   restyled live without a recompile** — the health bar, minimap frame and wave
@@ -2991,18 +2991,19 @@ Three of the plan's six exit criteria are open; re-checked 2026-09-24.
   debug-UI callback, which `SystemTrait` does not have; `Inspector::collect`
   reports counts only, and tick times are their own entry. Console commands
   reach the server only through the unbuilt `Flags::SIM` transport half.
-- **A CI check that `crcbl-ui` names no renderer.** It holds today — the
-  manifest names `glam`, `bytemuck`, `crcbl-core`, `crcbl-reflect`, `taffy`,
-  `cssparser` and `skrifa` — but only the manifest's comment says so. One CI
-  step asserting `cargo tree -p crcbl-ui` excludes `crcbl-render` and every
-  backend crate, shown to fail before it is trusted, closes it; the same step
-  shape is owed for `crcbl-server`.
 
 Met, for the record: the fixture corpus passes
 (`crates/crcbl-ui/tests/taffy_fixtures.rs`), draw-list snapshot tests exist in
 `crcbl_ui::draw_list`, and the UI pass is its own profiler row (`ui-overlay`)
 and was measured at 0.005 ms at 1080p on 2026-08-07 against the 0.5 ms budget
-(`docs/notes/samples.md`).
+(`docs/notes/samples.md`). **`crcbl-ui` names no renderer, and CI checks it**:
+`tools/check-no-renderer-deps.sh`, in `.github/workflows/ci.yml`'s `cargo-deny`
+job, refuses any closure of `crcbl-ui` or `crcbl-server` — default features and
+`--all-features`, normal and build edges, `--target all` — that reaches
+`crcbl-hal`, any crate depending on it, or `crcbl-shaders`. It was shown failing
+first, on 2026-10-03: a `crcbl-vk` edge on the server, an optional macOS-only
+`crcbl-mtl` behind a feature on the UI, and a build-dependency on
+`crcbl-shaders` were each refused with the path that pulled them in.
 
 ## What UI rung 6 shipped without (2026-09-16)
 
@@ -11012,17 +11013,14 @@ change the signature of every system that replicates.
 **Decide before P13:** whether per-client visibility is wanted at all, given
 sector scoping may be enough for the samples on the ladder.
 
-### No headless `server` binary, and no `cargo tree` guard (2026-08-27)
+### No headless `server` binary (2026-08-27)
 
-`crcbl-server` is a library with no `[[bin]]`. Its manifest names `crcbl-core`,
-`crcbl-ecs`, `crcbl-net` and `crcbl-rand` and no renderer, so the "no render
-dependency" property holds — but nothing enforces it. There is no `cargo tree`
-check in `.github/workflows/ci.yml`; the only `cargo tree` in the workflows is a
-comment in `cron.yml` about an unrelated install.
-
-**What it would take:** one CI step asserting the dependency closure of
-`crcbl-server` excludes `crcbl-render`/`crcbl-vk`, shown to fail before it is
-trusted.
+`crcbl-server` is a library with no `[[bin]]`. Its "no render dependency"
+property is enforced: `tools/check-no-renderer-deps.sh`, in
+`.github/workflows/ci.yml`'s `cargo-deny` job, refuses any closure of it that
+reaches `crcbl-hal`, anything built on the HAL, or `crcbl-shaders`. What is
+still owed is the binary itself — a headless process hosting a `Server` on a
+real transport.
 
 ### The determinism smoke test has no input script (2026-08-27)
 

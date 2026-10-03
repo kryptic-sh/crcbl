@@ -482,7 +482,9 @@ The rules, each with its _why_:
 - **`crcbl-ui` names no renderer.** It produces draw lists and `crcbl-render`
   owns the pass. Its dependencies are `glam`, `bytemuck`, `crcbl-core`,
   `crcbl-reflect`, `taffy`, `cssparser` and `skrifa`, and `crcbl-reflect` sits
-  at the bottom of the graph. Nothing in CI checks it.
+  at the bottom of the graph. `tools/check-no-renderer-deps.sh` checks it in CI:
+  no closure of the crate, under any feature set or target, reaches `crcbl-hal`,
+  anything built on it, or `crcbl-shaders`.
 - **Docking is splitters plus tabs.** Full docking is the classic time sink and
   was declined for scope; Bevy archived its editor prototypes citing "ballooning
   scope".

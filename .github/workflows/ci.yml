@@ -395,6 +395,17 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny --all-features check
+      # The other policy on the dependency graph, and so in the job that
+      # already reads it. `crcbl-ui` produces draw lists and `crcbl-server`
+      # runs on a box with no GPU; both named no renderer only in their
+      # manifests' comments. The forbidden set is derived from whatever
+      # depends on `crcbl-hal`, so a new backend is covered the day it lands.
+      # Shown failing before it was trusted: a `crcbl-vk` edge on the server,
+      # a macOS-only optional `crcbl-mtl` behind a feature on the UI, and a
+      # build-dependency on `crcbl-shaders` were each refused, named, with
+      # the path that pulled them in.
+      - name: Neither the UI nor the server crate reaches the renderer
+        run: ./tools/check-no-renderer-deps.sh
 
   # The only job that compiles the `cfg(target_arch = "wasm32")` code at all.
   #

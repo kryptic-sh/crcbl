@@ -680,8 +680,10 @@ the netcode section below records; `crcbl-client`'s interpolation and
 
 What it left unbuilt is in `docs/backlog.md` under _ECS, server and client (from
 the deleted 04-ecs-server-client plan, 2026-09-24)_: a client id for
-`replicate`, the headless binary and its `cargo tree` guard, the input script
-for the determinism test, and per-system tick time.
+`replicate`, the headless binary, the input script for the determinism test, and
+per-system tick time. The `cargo tree` guard is built:
+`tools/check-no-renderer-deps.sh`, run by `.github/workflows/ci.yml`'s
+`cargo-deny` job.
 
 - **Systems own arrays; an entity is only an id.** `Entity` is a generational id
   from `crcbl-core`'s `Pool` with no storage of its own. A system owns
@@ -745,13 +747,13 @@ for the determinism test, and per-system tick time.
 
 Other documents cite the plan as "stage 4". Those resolve here:
 
-| Citation                                  | What it specified                                                        |
-| ----------------------------------------- | ------------------------------------------------------------------------ |
-| The stage 4 system registry, inspector    | `Inspector::collect`: name and entity count per system (tick time owed)  |
-| The stage 4 snapshot machinery            | Per-system `replicate`, ack-baseline deltas, full state on join          |
-| The stage 4 determinism harness           | `crcbl sim` and `hash_world` over 1000 ticks, same input, same hash      |
-| The stage 4 exit criterion: no render dep | `crcbl-server` names no renderer (no `cargo tree` guard enforces it yet) |
-| The stage 4 hooks (prediction, interest)  | Prediction hooks on the interpolation buffer; sector-keyed interest      |
+| Citation                                  | What it specified                                                               |
+| ----------------------------------------- | ------------------------------------------------------------------------------- |
+| The stage 4 system registry, inspector    | `Inspector::collect`: name and entity count per system (tick time owed)         |
+| The stage 4 snapshot machinery            | Per-system `replicate`, ack-baseline deltas, full state on join                 |
+| The stage 4 determinism harness           | `crcbl sim` and `hash_world` over 1000 ticks, same input, same hash             |
+| The stage 4 exit criterion: no render dep | `crcbl-server` names no renderer; `tools/check-no-renderer-deps.sh` enforces it |
+| The stage 4 hooks (prediction, interest)  | Prediction hooks on the interpolation buffer; sector-keyed interest             |
 
 ## What the deleted 05-physics plan left behind (2026-09-24)
 
