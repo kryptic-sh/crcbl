@@ -89,8 +89,10 @@
 //! hashes, so it plays back as it always did; a version 2 file's section ends
 //! after its hashes and reads with no peer track. [`ReplayWriter`] writes
 //! version 3, holding everything until it writes; so does [`ReplayStream`],
-//! which writes a file with no entries while a session runs, spooling its
-//! peer track rather than holding it.
+//! which writes a file with no entries while a session runs, appending every
+//! entry to a spool as it comes rather than holding it — and
+//! [`recover_spool`], which writes the same file from a spool whose session
+//! never finished, keeping every whole record ([`spool`]).
 //!
 //! [`FileTransport`] reads a `.crpl` file and emits entries as if they were
 //! arriving from a live network transport.
@@ -104,6 +106,7 @@ use crcbl_net::transport::{Message, MessageKind, Transport, TransportError};
 use crate::{StorageError, StorageSource};
 
 mod input;
+pub mod spool;
 mod stream;
 
 use input::InputSection;
@@ -111,6 +114,7 @@ pub use input::{
     InputSectionError, RecordedPeerFrames, RecordedPeerTick, RecordedRosterChange, RecordedSimSet,
     RecordedStateHash, RosterChangeKind,
 };
+pub use spool::{SpoolEnd, SpoolError, SpoolRecovery, recover_spool};
 pub use stream::ReplayStream;
 
 // ── Constants ──────────────────────────────────────────────────────────────

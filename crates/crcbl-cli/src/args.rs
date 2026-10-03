@@ -683,8 +683,12 @@ pub struct ScreenshotArgs {
 /// `crcbl replay`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplayArgs {
-    /// Path to the .crpl file.
+    /// Path to the .crpl file: the one read, or with `recover` the one
+    /// written.
     pub file: PathBuf,
+    /// `--recover <SPOOL>`: write `file` from the spool of a recording that
+    /// did not finish, rather than read it.
+    pub recover: Option<PathBuf>,
     /// Machine-readable output.
     pub json: bool,
 }
@@ -1062,10 +1066,18 @@ crcbl replay — read a .crpl replay file and dump its metadata
 
 USAGE:
     crcbl replay <FILE> [OPTIONS]
+    crcbl replay --recover <SPOOL> <FILE> [OPTIONS]
+
+A recording that did not finish — a game run with `--record <FILE>` that was
+killed or crashed — leaves FILE empty and its spool, FILE.spool, beside it.
+`--recover` writes FILE from the spool: every record it holds whole, dropping
+one the game died writing. FILE must be empty or not exist; the spool is left
+for you to remove.
 
 OPTIONS:
-        --json    Emit one JSON object instead of human output.
-    -h, --help    Print this text.";
+        --recover <SPOOL>  Write FILE from SPOOL instead of reading it.
+        --json             Emit one JSON object instead of human output.
+    -h, --help             Print this text.";
 
 /// Parses arguments, which must **not** include the program name.
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Invocation {
@@ -1436,17 +1448,24 @@ fn parse_screenshot(mut args: impl Iterator<Item = OsString>) -> Invocation {
     Invocation::Command(Command::Screenshot(parsed))
 }
 
-fn parse_replay(args: impl Iterator<Item = OsString>) -> Invocation {
+fn parse_replay(mut args: impl Iterator<Item = OsString>) -> Invocation {
     let mut parsed = ReplayArgs {
         file: PathBuf::new(),
+        recover: None,
         json: false,
     };
     let mut file = None;
 
-    for arg in args {
+    while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("-h" | "--help") => return Invocation::Help(REPLAY_USAGE),
             Some("--json") => parsed.json = true,
+            // A path, so it stays an `OsString` all the way to `PathBuf`.
+            Some("--recover") => match args.next() {
+                Some(_) if parsed.recover.is_some() => return bad("--recover was given twice"),
+                Some(spool) => parsed.recover = Some(PathBuf::from(spool)),
+                None => return bad("--recover needs a spool path"),
+            },
             Some(other) if other.starts_with('-') => {
                 return Invocation::BadUsage(format!("`replay` has no option `{other}`"));
             }
@@ -1461,7 +1480,11 @@ fn parse_replay(args: impl Iterator<Item = OsString>) -> Invocation {
     }
 
     let Some(file) = file else {
-        return bad("`replay` needs a .crpl file path");
+        return bad(if parsed.recover.is_some() {
+            "`replay --recover` needs the .crpl file path to write"
+        } else {
+            "`replay` needs a .crpl file path"
+        });
     };
     parsed.file = file;
     Invocation::Command(Command::Replay(parsed))
@@ -2396,6 +2419,13 @@ mod tests {
             vec!["build", "--json"],
             vec!["screenshot", "--json"],
             vec!["replay", "file.crpl", "--json"],
+            vec![
+                "replay",
+                "--recover",
+                "file.crpl.spool",
+                "file.crpl",
+                "--json",
+            ],
             vec!["crpix", "a.png", "-o", "a.crpix", "--json"],
             vec!["lod", "stats", "a.gltf", "--json"],
             vec!["lod", "gen", "a.gltf", "-o", "a.dag", "--json"],
@@ -2501,6 +2531,16 @@ mod tests {
             vec!["build", "--target", "ps5"],
             vec!["build", "stray"],
             vec!["replay"],
+            vec!["replay", "--recover"],
+            vec!["replay", "--recover", "file.crpl.spool"],
+            vec![
+                "replay",
+                "--recover",
+                "a.spool",
+                "--recover",
+                "b.spool",
+                "file.crpl",
+            ],
             vec!["screenshot", "--size"],
             vec!["screenshot", "--size", "1920"],
             vec!["screenshot", "--size", "nonsensexthing"],
@@ -2849,6 +2889,18 @@ mod tests {
             panic!("a non-UTF-8 replay file is a usable invocation");
         };
         assert_eq!(args.file, std::path::PathBuf::from(weird()));
+        assert_eq!(args.recover, None);
+
+        let Invocation::Command(Command::Replay(args)) = parse_os(vec![
+            OsString::from("replay"),
+            OsString::from("--recover"),
+            weird(),
+            OsString::from("out.crpl"),
+        ]) else {
+            panic!("a non-UTF-8 spool is a usable invocation");
+        };
+        assert_eq!(args.recover, Some(std::path::PathBuf::from(weird())));
+        assert_eq!(args.file, std::path::PathBuf::from("out.crpl"));
 
         // Game arguments are the game's business, paths included.
         let Invocation::Command(Command::Run(args)) = parse_os(vec![

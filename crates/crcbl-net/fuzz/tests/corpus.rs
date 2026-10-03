@@ -1,7 +1,8 @@
-//! Named seeds from the fuzzer's corpus, replayed through the delta decoder.
+//! Named seeds from the fuzzer's corpus, replayed through the delta decoder and
+//! the replay spool's recovery.
 //!
 //! `fuzz_targets/decoder.rs` runs the decoders against bytes libFuzzer invents.
-//! This target runs one of them against bytes somebody named, and the two are
+//! This target runs two of them against bytes somebody named, and the two are
 //! not the same job. A fuzzer finds a crashing or wrongly-accepted input once
 //! and then moves on; nothing makes it generate that input again, so a fix that
 //! regresses is a fix nobody notices. Pinning the seed here — with the exact
@@ -65,4 +66,35 @@ fn oversized_seed_crosses_the_decoder_limit() {
         decode_delta(oversized, Trust::Untrusted),
         Err(DeltaDecodeError::InvalidLength(65_537))
     ));
+}
+
+/// The replay spool seeds reach both ends of a recovery: the whole spool
+/// keeps every record, and the same spool three bytes short drops its last,
+/// a state hash, as cut short.
+#[test]
+fn named_replay_spool_seeds_reach_their_intended_paths() {
+    use crcbl_store::replay::{SpoolEnd, SpoolRecovery, recover_spool};
+
+    let recover = |seed: &[u8]| -> SpoolRecovery {
+        recover_spool(std::io::Cursor::new(seed), &mut std::io::sink())
+            .expect("a spool with a whole header recovers")
+    };
+    let whole = recover(include_bytes!("../corpus/decoder/replay-spool"));
+    assert_eq!(whole.end, SpoolEnd::Whole);
+    assert_eq!(
+        (whole.sim_sets, whole.state_hashes, whole.peer_ticks),
+        (1, 2, 1)
+    );
+    assert_eq!(whole.dropped_bytes, 0);
+
+    let torn = recover(include_bytes!("../corpus/decoder/replay-spool-torn"));
+    assert_eq!(torn.end, SpoolEnd::CutShort);
+    assert_eq!(
+        (torn.sim_sets, torn.state_hashes, torn.peer_ticks),
+        (1, 1, 1)
+    );
+    assert_eq!(
+        torn.dropped_bytes, 22,
+        "a 25-byte hash record, cut by three"
+    );
 }

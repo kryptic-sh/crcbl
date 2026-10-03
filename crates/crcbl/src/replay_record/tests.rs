@@ -18,6 +18,7 @@ use crate::lan::{LanBind, LanError, LanGame, LanHost};
 use crate::net::{InMemoryTransport, ProtocolCompatibility};
 use crate::server::HostConfig;
 use crate::store::NativeStorage;
+use crate::store::replay::SpoolEnd;
 
 const TICK_HZ: u32 = 60;
 
@@ -170,8 +171,9 @@ fn the_hosts_records_stay_bounded_while_the_recorder_drains_them() {
 }
 
 /// **A recording never overwrites**: a path something exists at is refused
-/// by name and left as it was, and so is one whose spool's name is taken —
-/// which leaves no recording behind either.
+/// by name and left as it was, and the spool the start created first is
+/// removed — so the refusal leaves no recording behind either. A spool's
+/// name taken is `a_stale_spool_refuses_a_new_recording_and_is_kept`'s.
 #[test]
 fn a_recording_refuses_an_existing_path_and_leaves_it_alone() {
     let dir = tempfile::tempdir().expect("a temporary directory");
@@ -186,23 +188,179 @@ fn a_recording_refuses_an_existing_path_and_leaves_it_alone() {
         std::fs::read(&path).expect("still there"),
         b"someone's file"
     );
+    assert!(
+        !spool_path(&path).exists(),
+        "the spool it created was removed"
+    );
     assert!(matches!(
         refuse_existing(&path),
         Err(RecordError::Exists(_))
     ));
+    assert!(refuse_existing(&dir.path().join("new.crpl")).is_ok());
+}
 
+/// Runs `session` for [`TICKS`] ticks recorded to `path`, with a set half way,
+/// and abandons the recorder unfinished — as a process killed mid-session
+/// leaves it, with no code run after the last pull. Answers the last tick.
+fn record_unfinished(session: &mut Session, path: &Path) -> TickId {
+    let mut recorder = Recorder::start(path, &mut session.host, TICK_HZ).expect("it starts");
+    for step in 0..TICKS {
+        session.step();
+        if step == TICKS / 2 {
+            session.host.submit_console_set(ConsoleSet {
+                name: "t_rate".to_owned(),
+                value: "2".to_owned(),
+            });
+        }
+        recorder.record(&mut session.host).expect("it records");
+    }
+    drop(recorder);
+    session.host.tick_id()
+}
+
+/// **A recording that never finished is recovered from its spool** and
+/// re-simulates bit for bit: every tick it pulled when the spool is whole,
+/// and every tick it holds a hash for when its last records are cut short.
+#[test]
+fn an_unfinished_recording_recovers_and_resimulates() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("killed.crpl");
+    let mut session = Session::new();
+    let last = record_unfinished(&mut session, &path);
+    assert_eq!(
+        std::fs::read(&path).expect("left"),
+        b"",
+        "the file is empty"
+    );
+    let spool = spool_path(&path);
+
+    let recovery = recover(&spool, &path).expect("it recovers");
+    assert_eq!(recovery.end, SpoolEnd::Whole);
+    assert_eq!(recovery.dropped_bytes, 0);
+    assert_eq!(
+        recovery.state_hashes,
+        TICKS + 1,
+        "the start, and every tick"
+    );
+    assert_eq!(recovery.sim_sets, 1);
+    assert_eq!(recovery.hashed_ticks.map(|(_, held)| held), Some(last));
+    assert!(spool.exists(), "the spool is left for its owner");
+    assert!(!beside(&path, RECOVERING_SUFFIX).exists());
+    let file = read(&path);
+    assert_eq!(file.peer_ticks().len(), recovery.peer_ticks);
+    assert_eq!(resimulate(&mut host(), &file), Ok(last));
+
+    // Cut a few bytes into its last records, as a kill mid-write leaves it.
+    let bytes = std::fs::read(&spool).expect("the spool reads");
+    for cut in [1, 7, 20, 41] {
+        let torn = dir.path().join(format!("torn-{cut}.spool"));
+        std::fs::write(&torn, &bytes[..bytes.len() - cut]).expect("written");
+        let out = dir.path().join(format!("torn-{cut}.crpl"));
+        let recovery = recover(&torn, &out).expect("it recovers");
+        assert_eq!(recovery.end, SpoolEnd::CutShort, "cut {cut}");
+        assert!(recovery.dropped_bytes > 0, "cut {cut}");
+        assert_eq!(
+            recovery.kept_bytes + recovery.dropped_bytes,
+            (bytes.len() - cut) as u64
+        );
+        let (_, held) = recovery.hashed_ticks.expect("hashes held");
+        assert!(
+            held < last,
+            "cut {cut}: the last tick's hash is its last record"
+        );
+        assert_eq!(resimulate(&mut host(), &read(&out)), Ok(held), "cut {cut}");
+    }
+}
+
+/// **Recovery fills only an empty file or a new one**, and a recovery that
+/// fails leaves the path as it was: a file that holds something is refused
+/// by name, so is a file left from a recovery that did not finish, and a
+/// spool that is not one is refused before anything is moved.
+#[test]
+fn recovery_fills_only_an_empty_file_and_leaves_it_on_failure() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("session.crpl");
+    let mut session = Session::new();
+    record_unfinished(&mut session, &path);
+    let spool = spool_path(&path);
+
+    let filled = dir.path().join("filled.crpl");
+    std::fs::write(&filled, b"someone's file").expect("written");
+    match recover(&spool, &filled) {
+        Err(RecordError::NotEmpty(refused)) => assert_eq!(refused, filled),
+        other => panic!("not refused as filled: {other:?}"),
+    }
+    assert_eq!(std::fs::read(&filled).expect("kept"), b"someone's file");
+
+    let recovering = beside(&path, RECOVERING_SUFFIX);
+    std::fs::write(&recovering, b"half").expect("written");
+    match recover(&spool, &path) {
+        Err(RecordError::Exists(refused)) => assert_eq!(refused, recovering),
+        other => panic!("not refused as existing: {other:?}"),
+    }
+    assert_eq!(std::fs::read(&recovering).expect("kept"), b"half");
+    std::fs::remove_file(&recovering).expect("removed");
+
+    let garbage = dir.path().join("garbage.spool");
+    std::fs::write(&garbage, b"not a spool at all").expect("written");
+    match recover(&garbage, &path) {
+        Err(RecordError::Store { path: named, .. }) => assert_eq!(named, path),
+        other => panic!("not refused by the store: {other:?}"),
+    }
+    assert_eq!(std::fs::read(&path).expect("kept"), b"", "still empty");
+    assert!(!recovering.exists(), "the half-written file is removed");
+
+    recover(&spool, &path).expect("the real spool recovers");
+    assert!(!read(&path).state_hashes().is_empty());
+}
+
+/// **A spool left beside a path refuses a new recording to it**, by name and
+/// with the command that recovers it, and is left exactly as it was — at the
+/// command line, at the start, and with the empty file gone too.
+#[test]
+fn a_stale_spool_refuses_a_new_recording_and_is_kept() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("again.crpl");
+    let mut session = Session::new();
+    record_unfinished(&mut session, &path);
+    let spool = spool_path(&path);
+    let before = std::fs::read(&spool).expect("the spool reads");
+    let stale = |error: RecordError| match error {
+        RecordError::StaleSpool {
+            path: named,
+            spool: left,
+        } => {
+            assert_eq!(named, path);
+            assert_eq!(left, spool);
+        }
+        other => panic!("not refused as a stale spool: {other:?}"),
+    };
+
+    let mut host = host();
+    stale(Recorder::start(&path, &mut host, TICK_HZ).expect_err("refused"));
+    stale(refuse_existing(&path).expect_err("refused"));
+    let refusal = parse(&["--record", path.to_str().expect("UTF-8")]).unwrap_err();
+    assert!(refusal.contains("crcbl replay --recover "), "{refusal}");
+    assert!(refusal.contains("again.crpl.spool"), "{refusal}");
+
+    // With the empty file gone the spool still refuses: it is the recording.
+    std::fs::remove_file(&path).expect("removed");
+    stale(Recorder::start(&path, &mut host, TICK_HZ).expect_err("refused"));
+    assert!(!path.exists(), "nothing was created");
+    assert_eq!(std::fs::read(&spool).expect("kept"), before);
+
+    // A spool's name taken by anything at all refuses the same way.
     let free = dir.path().join("free.crpl");
     std::fs::write(spool_path(&free), b"a spool").expect("written");
     match Recorder::start(&free, &mut host, TICK_HZ) {
-        Err(RecordError::Exists(refused)) => assert_eq!(refused, spool_path(&free)),
-        other => panic!("not refused as existing: {other:?}"),
+        Err(RecordError::StaleSpool { spool: left, .. }) => assert_eq!(left, spool_path(&free)),
+        other => panic!("not refused as a stale spool: {other:?}"),
     }
-    assert!(!free.exists(), "the recording it created was removed");
+    assert!(!free.exists(), "no recording was created");
     assert_eq!(
         std::fs::read(spool_path(&free)).expect("still there"),
         b"a spool"
     );
-    assert!(refuse_existing(&dir.path().join("new.crpl")).is_ok());
 }
 
 /// Every argument of `argv` through [`consume`]: the path, or the first

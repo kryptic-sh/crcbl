@@ -27,11 +27,11 @@
 //!
 //! Both of the host's records are **taken**, not read, so a host that is
 //! recorded holds only what happened since the last update rather than every
-//! frame of the session. The recorder holds the sets and the hashes — the
-//! sets are rare, a hash is a tick and a value — and streams the peer track,
-//! which grows by every peer's frames every tick, to a spool file beside the
-//! recording ([`SPOOL_SUFFIX`]), from which [`Recorder::finish`] copies it
-//! into the file and then removes it.
+//! frame of the session. The recorder holds none of it either: every set,
+//! hash and tick of the peer track goes to a spool file beside the recording
+//! ([`SPOOL_SUFFIX`]) as it is pulled, each a framed record and each pull
+//! one write, from which [`Recorder::finish`] writes the file and then
+//! removes the spool.
 //!
 //! # Where a recording starts
 //!
@@ -56,6 +56,19 @@
 //! its recorder when it is dropped, which is a window closing or a panic
 //! unwinding through its owner.
 //!
+//! # A recording that did not finish
+//!
+//! The spool holds every record written whole, so [`recover`] — which
+//! `crcbl replay --recover <SPOOL> <FILE>` runs — writes the file from it,
+//! dropping a record the process died writing (`crcbl_store::replay::spool`
+//! has the format and the rules). It fills the empty file the recording left,
+//! or a path nothing exists at, and leaves the spool for its owner to remove.
+//! A spool left beside a path is never written over: starting a recording to
+//! that path again is refused by name ([`RecordError::StaleSpool`]), with the
+//! command that recovers it, rather than recovering it unasked — which would
+//! take the file the new recording asked for — or moving it aside, which
+//! would leave a recording's only copy under a name nobody chose.
+//!
 //! # Native only
 //!
 //! It writes through `std::fs`, which a browser does not have.
@@ -73,12 +86,16 @@ use crate::server::{Host, PeerFrames, PeerId, ResimError, RosterChange, TickInpu
 use crate::store::StorageError;
 use crate::store::replay::{
     FileTransport, RecordedPeerFrames, RecordedPeerTick, RecordedRosterChange, ReplayStream,
-    RosterChangeKind,
+    RosterChangeKind, SpoolRecovery, recover_spool,
 };
 
 /// What the spool beside a recording is named: the recording's path with this
 /// appended.
 pub const SPOOL_SUFFIX: &str = ".spool";
+
+/// What the file [`recover`] writes is named until it is whole: the
+/// recording's path with this appended.
+pub const RECOVERING_SUFFIX: &str = ".recovering";
 
 /// Why a recording did not start, or did not finish whole.
 #[derive(Debug)]
@@ -86,6 +103,18 @@ pub const SPOOL_SUFFIX: &str = ".spool";
 pub enum RecordError {
     /// Something already exists at the path: a recording never overwrites.
     Exists(PathBuf),
+    /// A spool is left beside the path, from a recording that did not
+    /// finish: [`recover`] turns it into a file, and a new recording never
+    /// writes over it.
+    StaleSpool {
+        /// The recording's path.
+        path: PathBuf,
+        /// The spool beside it.
+        spool: PathBuf,
+    },
+    /// [`recover`] was asked to write over a file that holds something: it
+    /// fills only the empty file an unfinished recording leaves.
+    NotEmpty(PathBuf),
     /// A file could not be created, written or removed.
     Io {
         /// The file.
@@ -113,6 +142,21 @@ impl std::fmt::Display for RecordError {
                 "refusing to record to {}: it exists, and a recording never overwrites",
                 path.display()
             ),
+            Self::StaleSpool { path, spool } => write!(
+                f,
+                "refusing to record to {}: {} is left from a recording that did not finish; \
+                 recover it with `crcbl replay --recover {} {}`, or move it away",
+                path.display(),
+                spool.display(),
+                spool.display(),
+                path.display()
+            ),
+            Self::NotEmpty(path) => write!(
+                f,
+                "refusing to recover into {}: it holds something, and recovery fills only an \
+                 empty file or a new one",
+                path.display()
+            ),
             Self::Recording(path) => {
                 write!(f, "the host is already recording, to {}", path.display())
             }
@@ -125,7 +169,9 @@ impl std::fmt::Display for RecordError {
 impl std::error::Error for RecordError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Exists(_) | Self::Recording(_) => None,
+            Self::Exists(_) | Self::StaleSpool { .. } | Self::NotEmpty(_) | Self::Recording(_) => {
+                None
+            }
             Self::Io { error, .. } => Some(error),
             Self::Store { error, .. } => Some(error),
         }
@@ -172,31 +218,47 @@ pub struct Recorder {
     /// The recording, created empty and written when it finishes.
     file: File,
     stream: ReplayStream<File>,
-    /// The last tick hashed, once one is.
-    hashed: Option<TickId>,
 }
 
 impl Recorder {
     /// Starts recording `host`, which ticks at `tick_hz`, to a new file at
-    /// `path`: creates it and its spool, starts the host's input record, and
+    /// `path`: creates its spool and it, starts the host's input record, and
     /// hashes the tick it stands at. Sets the host applied before now are
     /// taken and left out, being part of the state the recording starts
     /// from; so is anything an input record the host already kept holds.
     ///
     /// # Errors
     ///
-    /// [`RecordError::Exists`] when something exists at `path` or at its
-    /// spool, and [`RecordError::Io`] when either could not be created —
-    /// leaving nothing behind.
+    /// [`RecordError::StaleSpool`] when a spool is left beside `path` —
+    /// checked first, since the empty file an unfinished recording leaves is
+    /// there too — and [`RecordError::Exists`] when something exists at
+    /// `path`; [`RecordError::Io`] when either could not be created, and
+    /// [`RecordError::Store`] when the spool refused its header. Each leaves
+    /// nothing behind.
     pub fn start(path: &Path, host: &mut Host, tick_hz: u32) -> Result<Self, RecordError> {
         let spool_path = spool_path(path);
-        let file = create_new(path, false)?;
-        let spool = match create_new(&spool_path, true) {
-            Ok(spool) => spool,
+        let spool = create_new(&spool_path, true).map_err(|error| match error {
+            RecordError::Exists(spool) => RecordError::StaleSpool {
+                path: path.to_path_buf(),
+                spool,
+            },
+            other => other,
+        })?;
+        let file = match create_new(path, false) {
+            Ok(file) => file,
+            Err(error) => {
+                drop(spool);
+                remove_created(&spool_path);
+                return Err(error);
+            }
+        };
+        let stream = match ReplayStream::new(tick_hz, spool) {
+            Ok(stream) => stream,
             Err(error) => {
                 drop(file);
                 remove_created(path);
-                return Err(error);
+                remove_created(&spool_path);
+                return Err(store(path, error));
             }
         };
         host.record_peer_inputs();
@@ -206,8 +268,7 @@ impl Recorder {
             path: path.to_path_buf(),
             spool_path,
             file,
-            stream: ReplayStream::new(tick_hz, spool),
-            hashed: None,
+            stream,
         };
         // Nothing is recorded yet, so this hashes the tick the host stands at
         // and takes nothing else.
@@ -236,12 +297,26 @@ impl Recorder {
     /// ticks of its input record — into the recording, and hashes the tick it
     /// stands at if it moved. Call it after every [`Host::update`].
     ///
+    /// What it took is written to the spool in one write before it returns,
+    /// so a process killed after it loses none of it.
+    ///
     /// # Errors
     ///
     /// [`RecordError::Store`] when the store refused an entry or the spool
-    /// refused a write. What `host` handed over after the refused entry is
-    /// not in the recording; what came before it still is.
+    /// refused the write. What `host` handed over after a refused entry is
+    /// not in the recording, and what came before it still is; a refused
+    /// write loses everything this call took.
     pub fn record(&mut self, host: &mut Host) -> Result<(), RecordError> {
+        let pulled = self.pull(host);
+        let flushed = self
+            .stream
+            .flush()
+            .map_err(|error| store(&self.path, error));
+        pulled.and(flushed)
+    }
+
+    /// Pushes what `host` did since the last pull into the stream.
+    fn pull(&mut self, host: &mut Host) -> Result<(), RecordError> {
         for applied in host.take_sim_record() {
             let set = ConsoleSet {
                 name: applied.set.name().to_owned(),
@@ -257,11 +332,11 @@ impl Recorder {
                 .map_err(|error| store(&self.path, error))?;
         }
         let tick = host.tick_id();
-        if self.hashed.is_none_or(|hashed| tick > hashed) {
+        let hashed = self.stream.hashed_ticks().map(|(_, last)| last);
+        if hashed.is_none_or(|hashed| tick > hashed) {
             self.stream
                 .push_state_hash(tick, hash_world(host.world(), tick))
                 .map_err(|error| store(&self.path, error))?;
-            self.hashed = Some(tick);
         }
         Ok(())
     }
@@ -320,13 +395,19 @@ impl Recorder {
 
 /// The spool beside a recording at `path`.
 fn spool_path(path: &Path) -> PathBuf {
-    let mut spool = path.as_os_str().to_owned();
-    spool.push(SPOOL_SUFFIX);
-    PathBuf::from(spool)
+    beside(path, SPOOL_SUFFIX)
 }
 
-/// Removes the empty file this module created at `path` while starting a
-/// recording that then failed, logging a removal that fails: the start's own
+/// `path` with `suffix` appended: a file this module keeps beside a
+/// recording.
+fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let mut named = path.as_os_str().to_owned();
+    named.push(suffix);
+    PathBuf::from(named)
+}
+
+/// Removes a file this module created at `path` for a recording or a
+/// recovery that then failed, logging a removal that fails: the failure's own
 /// error is the one to report.
 fn remove_created(path: &Path) {
     if let Err(error) = std::fs::remove_file(path) {
@@ -358,28 +439,101 @@ fn store(path: &Path, error: StorageError) -> RecordError {
     }
 }
 
-/// Refuses `path` if something exists there, by name — what a command line
-/// checks while it still has an exit code to refuse with. [`Recorder::start`]
-/// refuses it again when it creates the file, which is the check that holds.
+/// Refuses `path` if a spool is left beside it or something exists there, by
+/// name — what a command line checks while it still has an exit code to
+/// refuse with. [`Recorder::start`] refuses both again when it creates the
+/// files, which is the check that holds.
 ///
 /// # Errors
 ///
-/// [`RecordError::Exists`] when it does.
+/// [`RecordError::StaleSpool`] for a spool, checked first as
+/// [`Recorder::start`] checks it, and [`RecordError::Exists`] for the path.
 pub fn refuse_existing(path: &Path) -> Result<(), RecordError> {
     // `symlink_metadata`, so a dangling link is refused too: creating the
     // file would follow it.
+    let spool = spool_path(path);
+    if std::fs::symlink_metadata(&spool).is_ok() {
+        return Err(RecordError::StaleSpool {
+            path: path.to_path_buf(),
+            spool,
+        });
+    }
     if std::fs::symlink_metadata(path).is_ok() {
         return Err(RecordError::Exists(path.to_path_buf()));
     }
     Ok(())
 }
 
+/// Writes the recording at `path` from `spool`, the spool of a recording that
+/// did not finish ([`recover_spool`]): every record it holds whole, and
+/// nothing after the first that is not. `path` is the empty file the
+/// recording left, or one nothing exists at; the file is written beside it
+/// ([`RECOVERING_SUFFIX`]), synced, and moved over it only once whole, so a
+/// recovery that fails leaves `path` as it was. `spool` is only read, and
+/// left for its owner to remove once the file is checked.
+///
+/// Recover a spool whose recording has stopped: one still being written is
+/// read as far as it had got.
+///
+/// # Errors
+///
+/// [`RecordError::NotEmpty`] when `path` holds something,
+/// [`RecordError::Exists`] when a file is left beside it from a recovery that
+/// did not finish, [`RecordError::Store`] when the spool's header is missing
+/// or damaged, and [`RecordError::Io`] when a file could not be read,
+/// written, moved or removed.
+pub fn recover(spool: &Path, path: &Path) -> Result<SpoolRecovery, RecordError> {
+    refuse_filled(path)?;
+    let reader = File::open(spool).map_err(|error| Recorder::io(spool, error))?;
+    let recovering = beside(path, RECOVERING_SUFFIX);
+    let written = create_new(&recovering, false).and_then(|file| {
+        let mut out = BufWriter::new(file);
+        let recovery = recover_spool(reader, &mut out).map_err(|error| store(path, error))?;
+        let file = out
+            .into_inner()
+            .map_err(|error| Recorder::io(&recovering, error.into_error()))?;
+        file.sync_all()
+            .map_err(|error| Recorder::io(&recovering, error))?;
+        Ok(recovery)
+    });
+    let recovery = match written {
+        Ok(recovery) => recovery,
+        Err(error @ RecordError::Exists(_)) => return Err(error),
+        Err(error) => {
+            remove_created(&recovering);
+            return Err(error);
+        }
+    };
+    // Checked again just before the move, which would replace whatever is
+    // there: a file written since the first check is kept.
+    if let Err(error) = refuse_filled(path) {
+        remove_created(&recovering);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&recovering, path) {
+        remove_created(&recovering);
+        return Err(Recorder::io(path, error));
+    }
+    Ok(recovery)
+}
+
+/// Refuses `path` if it is anything but nothing or an empty file.
+fn refuse_filled(path: &Path) -> Result<(), RecordError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() == 0 => Ok(()),
+        Ok(_) => Err(RecordError::NotEmpty(path.to_path_buf())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Recorder::io(path, error)),
+    }
+}
+
 /// Claims `arg` if it is `--record <FILE>`, taking its value from `rest` into
 /// `record`.
 ///
-/// A second `--record` is [`Consumed::Bad`], and so is a missing value or a
-/// path something already exists at ([`refuse_existing`]). Which session it
-/// records — a host's, never a joiner's — is the sample's to check.
+/// A second `--record` is [`Consumed::Bad`], and so is a missing value, a
+/// path something already exists at, or one a spool is left beside
+/// ([`refuse_existing`]). Which session it records — a host's, never a
+/// joiner's — is the sample's to check.
 pub fn consume<I: Iterator<Item = String>>(
     record: &mut Option<PathBuf>,
     arg: &str,

@@ -15,14 +15,15 @@ a ring. Since 2026-10-03 a file also carries an input section — the applied
 `Flags::SIM` sets, the recorder's state hashes, and the peers' roster and input
 frames — and `Host::resimulate` re-runs a fresh host from it (_What the input
 section carries_, below); a live recorder writes one (_The live recorder_,
-below), which towers and the sandbox run with `--record <FILE>`. What it records
-is the inputs, not the output: a viewer has nothing to play from it yet.
-Keyframes, the seek index, deltas, the output in a live recording, the marker
-and POV tracks, the record toggle, `verify`/`dump`/`diff`/`clip`, the scrub
-debugger, the replay browser and the spectator relay are all unbuilt;
-`docs/backlog.md` tracks them under _Replay: the container is flat, and every
-`crcbl replay` subverb is owed_ and _Replay: nothing records, and the viewing
-and spectating consumers are unbuilt_.
+below), which towers and the sandbox run with `--record <FILE>`, and a recording
+a killed run left unfinished is recovered from its spool with
+`crcbl replay --recover`. What it records is the inputs, not the output: a
+viewer has nothing to play from it yet. Keyframes, the seek index, deltas, the
+output in a live recording, the marker and POV tracks, the record toggle,
+`verify`/`dump`/`diff`/`clip`, the scrub debugger, the replay browser and the
+spectator relay are all unbuilt; `docs/backlog.md` tracks them under _Replay:
+the container is flat, and every `crcbl replay` subverb is owed_ and _Replay:
+nothing records, and the viewing and spectating consumers are unbuilt_.
 
 ## Core insight: record the wire
 
@@ -138,19 +139,43 @@ track lives there once. It is pulled after every update and **drains** the
 host's records (`Host::take_sim_record`, `Host::take_peer_input_record`) rather
 than reading them, so a recorded host holds only what happened since the last
 pull; it hashes the tick the host reached (`hash_world`, once per update, and
-once for the tick it started on), and streams the peer track — the part that
-grows by every peer's frames every tick — to a spool beside the file through
+once for the tick it started on), and holds none of it: every set, hash and tick
+of the peer track goes to a spool beside the file through
 `crcbl_store::replay::ReplayStream`, which checks each entry against the
-reader's rules as it is pushed. The file is written when the recording finishes,
-in the format's order. It never overwrites: an existing path is refused by name,
-at the command line and again when the file is created.
-`crcbl::lan::LanHost::record` runs one on a LAN host, which finishes it when
-stopped or dropped; `--record <FILE>` starts it before the first frame, so the
-file opens on a tick no player was in and a host built like the recorded one
-re-simulates it from there. Off by default; on, the pull cost about 2.3–2.7 µs a
-tick on towers' two-player session in a release build, the hash about 0.5 µs of
-it (`docs/backlog.md` has the run). It writes no output entries, so its files
-are for re-simulation, not for a viewer.
+reader's rules as it is pushed and writes a pull's entries in one write. The
+file is written from the spool when the recording finishes, in the format's
+order. It never overwrites: an existing path is refused by name, at the command
+line and again when the file is created. `crcbl::lan::LanHost::record` runs one
+on a LAN host, which finishes it when stopped or dropped; `--record <FILE>`
+starts it before the first frame, so the file opens on a tick no player was in
+and a host built like the recorded one re-simulates it from there. Off by
+default; on, the pull cost about 2.6–2.8 µs a tick on towers' two-player session
+in a release build, the hash about 0.5 µs of it (`docs/backlog.md` has the
+runs). It writes no output entries, so its files are for re-simulation, not for
+a viewer.
+
+**A recording that does not finish is recoverable (decided 2026-10-03, long
+term).** The spool is self-describing — a header with the tick rate, then one
+record per entry, each its kind, its length, the entry exactly as the file
+encodes it, and a CRC-32 over the three (`crcbl_store::replay::spool` has the
+layout) — and append-only, so a process killed mid-session leaves every record
+it wrote whole, and at most the one it was writing torn. `recover_spool` keeps
+every record from the start that is whole, inside the spool, its CRC matching,
+its entry decoding to exactly its length and holding the reader's rules after
+the ones before it, and stops at the first that is not: a torn last record is
+dropped, and so is a damaged one with everything after it, since nothing past
+damage can be trusted. It reports what it kept and dropped, and the file it
+writes is the one the recording's own finish would have written for the records
+it holds, which `Host::resimulate` re-simulates tick for tick up to its last
+hash. A recovery is the torn-tail-tolerant reader the black-box line under
+_Testing_ asks for, for the input recording; the output stream has none yet,
+since no live recording writes it. `crcbl replay --recover <SPOOL> <FILE>` runs
+it, filling the empty file the recording left or a new path and never one that
+holds something, and leaves the spool. A spool left beside a path refuses a new
+recording to that path by name, with that command: recovering it unasked would
+take the file the new recording asked for, and moving it aside would leave a
+recording's only copy under a name nobody chose. Nothing is synced per tick, so
+the spool survives the process and not the machine.
 
 ### 2. Gameplay replays
 
@@ -213,7 +238,11 @@ are for re-simulation, not for a viewer.
 - Verify-tool self-test: injected nondeterminism (seeded) is caught at the right
   tick.
 - Black-box: crash-during-write leaves a playable file (atomic segment writes,
-  torn tail tolerated by reader).
+  torn tail tolerated by reader). Built for the input recording's spool: a
+  session abandoned unfinished, its spool cut short at every byte of every
+  record and damaged a bit at a time, recovers to a file holding exactly the
+  whole records before the damage, and towers' recovered session re-simulates
+  every tick it holds.
 
 ## Risks
 

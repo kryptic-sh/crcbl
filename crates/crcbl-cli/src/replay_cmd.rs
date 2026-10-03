@@ -9,6 +9,10 @@
 //! frames themselves are counted, not printed: they are a game's own bytes,
 //! and a session holds thousands.
 //!
+//! `crcbl replay --recover <SPOOL> <FILE>` writes FILE instead, from the spool
+//! of a recording that did not finish (`crcbl::replay_record::recover`), and
+//! reports what it kept and what it dropped.
+//!
 //! It does not re-simulate. `crcbl_server::Host::resimulate` does, but it needs
 //! a host built like the recorded one — the game's world, module and registry —
 //! and the CLI has no way to build a game's host without the game's code
@@ -18,7 +22,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crcbl_store::NativeStorage;
-use crcbl_store::replay::{FileTransport, RecordedPeerTick, RosterChangeKind};
+use crcbl_store::replay::{FileTransport, RecordedPeerTick, RosterChangeKind, SpoolEnd};
 
 use crate::args::ReplayArgs;
 use crate::json::Json;
@@ -26,6 +30,9 @@ use crate::report::{Failure, Outcome};
 
 /// Runs `crcbl replay`.
 pub fn run(args: &ReplayArgs) -> Result<Outcome, Failure> {
+    if let Some(spool) = &args.recover {
+        return recover(spool, &args.file);
+    }
     // `NativeStorage` is a sandbox: a key may not escape its root, so an
     // absolute path is not a valid key. A CLI argument names a file anywhere on
     // disk, so the root is the file's own directory and the key is its name.
@@ -106,6 +113,62 @@ pub fn run(args: &ReplayArgs) -> Result<Outcome, Failure> {
         human,
         json: json_fields,
     })
+}
+
+/// Runs `crcbl replay --recover <SPOOL> <FILE>`.
+fn recover(spool: &Path, file: &Path) -> Result<Outcome, Failure> {
+    let recovery = crcbl::replay_record::recover(spool, file)
+        .map_err(|e| Failure::new(format!("cannot recover the replay: {e}")))?;
+    let mut human = format!(
+        "recovered {} from {}: {} state hashes",
+        file.display(),
+        spool.display(),
+        recovery.state_hashes,
+    );
+    if let Some((first, last)) = recovery.hashed_ticks {
+        human.push_str(&format!(" (ticks {} to {})", first.get(), last.get()));
+    }
+    human.push_str(&format!(
+        ", {} sets, {} ticks of peer input\nkept {} bytes of the spool, dropped {}: {}\nthe \
+         spool is left in place; remove it once the file is checked",
+        recovery.sim_sets,
+        recovery.peer_ticks,
+        recovery.kept_bytes,
+        recovery.dropped_bytes,
+        recovery.end,
+    ));
+    let mut json = vec![
+        ("file", Json::string(file.display().to_string())),
+        ("spool", Json::string(spool.display().to_string())),
+        ("tick_rate", Json::Number(i64::from(recovery.tick_rate))),
+        ("sim_set_count", Json::Number(recovery.sim_sets as i64)),
+        (
+            "state_hash_count",
+            Json::Number(recovery.state_hashes as i64),
+        ),
+    ];
+    if let Some((first, last)) = recovery.hashed_ticks {
+        json.push(("first_hashed_tick", Json::Number(first.get() as i64)));
+        json.push(("last_hashed_tick", Json::Number(last.get() as i64)));
+    }
+    json.extend([
+        ("peer_tick_count", Json::Number(recovery.peer_ticks as i64)),
+        ("kept_bytes", Json::Number(recovery.kept_bytes as i64)),
+        ("dropped_bytes", Json::Number(recovery.dropped_bytes as i64)),
+        ("spool_end", Json::string(end_name(&recovery.end))),
+    ]);
+    Ok(Outcome { human, json })
+}
+
+/// Where a spool's records stopped, as `--json` names it.
+fn end_name(end: &SpoolEnd) -> &'static str {
+    match end {
+        SpoolEnd::Whole => "whole",
+        SpoolEnd::CutShort => "cut_short",
+        SpoolEnd::BadChecksum => "bad_checksum",
+        SpoolEnd::UnknownRecord(_) => "unknown_record",
+        SpoolEnd::Refused(_) => "refused",
+    }
 }
 
 /// What a file's peer track says, counted: the ticks with an entry, every
@@ -257,6 +320,7 @@ mod tests {
 
         let args = ReplayArgs {
             file: file_path,
+            recover: None,
             json: false,
         };
         let outcome = run(&args).unwrap();
@@ -266,6 +330,7 @@ mod tests {
 
         let json_args = ReplayArgs {
             file: args.file,
+            recover: None,
             json: true,
         };
         let outcome2 = run(&json_args).unwrap();
@@ -296,6 +361,7 @@ mod tests {
 
         let outcome = run(&ReplayArgs {
             file: file_path,
+            recover: None,
             json: true,
         })
         .unwrap();
@@ -374,6 +440,7 @@ mod tests {
 
         let outcome = run(&ReplayArgs {
             file: file_path,
+            recover: None,
             json: true,
         })
         .unwrap();
@@ -428,8 +495,96 @@ mod tests {
     fn replay_command_rejects_bad_file() {
         let args = ReplayArgs {
             file: PathBuf::from("/nonexistent.crpl"),
+            recover: None,
             json: false,
         };
         assert!(run(&args).is_err());
+    }
+
+    /// **`--recover` writes the file from a spool cut short**, reports what
+    /// it kept and dropped — in the human lines and in `--json` — and the
+    /// file reads back as a replay; a spool that is not one is a failure,
+    /// and nothing is written.
+    #[test]
+    fn replay_recover_writes_the_file_from_a_cut_spool() {
+        use crcbl_store::replay::ReplayStream;
+        use std::io::Cursor;
+
+        let mut stream = ReplayStream::new(60, Cursor::new(Vec::new())).unwrap();
+        for tick in 1..=3 {
+            stream
+                .push_state_hash(TickId::from_raw(tick), tick * 3)
+                .unwrap();
+        }
+        let spool = stream.finish(&mut Vec::new()).unwrap().into_inner();
+        // Every file here is written afresh, so a run left behind by an
+        // earlier one changes nothing.
+        let dir = std::env::temp_dir().join("crcbl-replay-recover-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let spool_path = dir.join("game.crpl.spool");
+        // The last hash's record cut in two: two hashes are whole.
+        std::fs::write(&spool_path, &spool[..spool.len() - 10]).unwrap();
+        let file = dir.join("game.crpl");
+        std::fs::write(&file, b"").unwrap();
+
+        let outcome = run(&ReplayArgs {
+            file: file.clone(),
+            recover: Some(spool_path),
+            json: true,
+        })
+        .unwrap();
+        assert!(
+            outcome
+                .human
+                .contains(": 2 state hashes (ticks 1 to 2), 0 sets, 0 ticks of peer input\nkept "),
+            "{}",
+            outcome.human
+        );
+        assert!(
+            outcome
+                .human
+                .contains(", dropped 15: the last record was cut short\n"),
+            "{}",
+            outcome.human
+        );
+        assert!(
+            outcome
+                .json
+                .contains(&("state_hash_count", Json::Number(2)))
+        );
+        assert!(
+            outcome
+                .json
+                .contains(&("last_hashed_tick", Json::Number(2)))
+        );
+        assert!(outcome.json.contains(&("dropped_bytes", Json::Number(15))));
+        assert!(
+            outcome
+                .json
+                .contains(&("spool_end", Json::string("cut_short")))
+        );
+        let read = run(&ReplayArgs {
+            file,
+            recover: None,
+            json: false,
+        })
+        .unwrap();
+        assert!(read.human.contains("state hashes: 2"), "{}", read.human);
+
+        let garbage = dir.join("garbage.spool");
+        std::fs::write(&garbage, b"not a spool").unwrap();
+        let other = dir.join("other.crpl");
+        let failure = run(&ReplayArgs {
+            file: other.clone(),
+            recover: Some(garbage),
+            json: false,
+        })
+        .unwrap_err();
+        assert!(
+            failure.message.starts_with("cannot recover the replay: "),
+            "{}",
+            failure.message
+        );
+        assert!(!other.exists());
     }
 }

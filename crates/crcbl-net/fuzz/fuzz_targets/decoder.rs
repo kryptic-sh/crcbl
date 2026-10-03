@@ -51,6 +51,10 @@ fuzz_target!(|data: &[u8]| {
     // a file a player may have been sent, read before anything about it is
     // trusted.
     let _ = crcbl_store::replay::FileTransport::decode(data);
+    // A replay spool, as `crcbl replay --recover` reads the one a killed
+    // recording left: its header, then framed records up to the first that
+    // is cut short, damaged or refused, each decoded and checked.
+    let _ = crcbl_store::replay::recover_spool(std::io::Cursor::new(data), &mut std::io::sink());
     let _ = decode_delta(data, Trust::Untrusted);
     let _ = decode_delta(data, Trust::Authenticated);
     // A snapshot's entity blobs, once it has opened and applied: the client

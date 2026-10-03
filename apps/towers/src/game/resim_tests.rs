@@ -3,7 +3,9 @@
 //! wave, recorded by the engine's own `crcbl::replay_record::Recorder`; a
 //! fresh host handed the file (`crcbl::replay_record::resimulate`), its
 //! state hash — the stage's, through [`FieldReplica`](super::FieldReplica) —
-//! compared at the end of every tick.
+//! compared at the end of every tick. The same session abandoned unfinished,
+//! as a killed process leaves it, is recovered from its spool
+//! (`crcbl::replay_record::recover`) and re-simulates every tick it holds.
 
 use std::path::Path;
 use std::time::Duration;
@@ -12,7 +14,7 @@ use crcbl::client::Client;
 use crcbl::core::{FrameClock, TickId};
 use crcbl::ecs::World;
 use crcbl::net::InMemoryTransport;
-use crcbl::replay_record::{Recorder, resimulate, tick_inputs};
+use crcbl::replay_record::{Recorder, SPOOL_SUFFIX, recover, resimulate, tick_inputs};
 use crcbl::server::sim_hash::hash_world;
 use crcbl::server::{Host, HostConfig, PeerEvent, PeerId, ResimError, RosterChange, TickInputs};
 use crcbl::store::NativeStorage;
@@ -83,9 +85,25 @@ struct Session {
     final_hash: u64,
 }
 
+/// How a recorded session's recorder ends.
+#[derive(Clone, Copy, Debug)]
+enum Ending {
+    /// Finished, as a host that stops finishes it.
+    Finished,
+    /// Dropped unfinished, as a killed process leaves it, with this many
+    /// bytes cut off its spool's end — a record the process died writing —
+    /// and the file recovered from the spool.
+    Killed { cut: usize },
+}
+
 /// Plays the session, recorded by a [`Recorder`] pulled after every update
 /// as a LAN host pulls it, and reads the file back.
 fn record() -> Session {
+    record_ending(Ending::Finished)
+}
+
+/// [`record`], with the recorder ended as `ending` says.
+fn record_ending(ending: Ending) -> Session {
     let (mut host, field) = host();
     let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("towers.crpl");
@@ -130,7 +148,20 @@ fn record() -> Session {
         panic!("not two joins: {joined:?}");
     };
     assert_eq!(joined, second, "both joined on one tick");
-    recorder.finish(&mut host).expect("a valid recording");
+    match ending {
+        Ending::Finished => {
+            recorder.finish(&mut host).expect("a valid recording");
+        }
+        Ending::Killed { cut } => {
+            drop(recorder);
+            let mut spool = path.as_os_str().to_owned();
+            spool.push(SPOOL_SUFFIX);
+            let bytes = std::fs::read(&spool).expect("the spool is left");
+            std::fs::write(&spool, &bytes[..bytes.len() - cut]).expect("cut");
+            let recovery = recover(Path::new(&spool), &path).expect("it recovers");
+            assert_eq!(recovery.dropped_bytes > 0, cut > 0, "{recovery:?}");
+        }
+    }
     let storage = NativeStorage::at(dir.path().to_path_buf());
     let last = host.tick_id();
     Session {
@@ -215,4 +246,38 @@ fn the_players_admitted_in_the_other_order_diverge_at_the_first_build() {
     // Each player keeps its own commands; the two builds just apply in the
     // other order, and the stage's towers stand in it.
     assert_eq!(diverges_at(&session, swapped), session.built);
+}
+
+/// **A session killed before its recording finished re-simulates from the
+/// recovered file**, bit for bit, for every tick it holds: all of them from
+/// a whole spool, and up to the last hash before the cut from one cut short.
+#[test]
+fn a_killed_session_recovers_and_resimulates_every_tick_it_holds() {
+    let finished = record();
+    for cut in [0, 3, 40, 700] {
+        let session = record_ending(Ending::Killed { cut });
+        let held = session
+            .file
+            .state_hashes()
+            .last()
+            .expect("hashes held")
+            .tick;
+        if cut == 0 {
+            assert_eq!(hashes(&session.file), hashes(&finished.file));
+            assert_eq!(session.file.peer_ticks(), finished.file.peer_ticks());
+            assert_eq!(held, session.last);
+        } else {
+            assert!(held < session.last, "cut {cut}");
+            assert!(
+                hashes(&finished.file).starts_with(&hashes(&session.file)),
+                "cut {cut}: the hashes kept are the finished file's"
+            );
+        }
+        let (mut replayed, _) = host();
+        assert_eq!(
+            resimulate(&mut replayed, &session.file),
+            Ok(held),
+            "cut {cut}"
+        );
+    }
 }

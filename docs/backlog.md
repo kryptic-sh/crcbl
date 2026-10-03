@@ -13090,15 +13090,56 @@ What it left:
   575,852 bytes for the 6000 ticks. So a hash every tick is cheap for towers and
   the pull's cost is mostly the spool's one write a tick. Not measured: a world
   with many more entities (the hash walks every system's state), the UDP-served
-  session itself, and any machine but this one.
-- **A recording interrupted is unrecoverable.** The file is created empty and
-  written only by `Recorder::finish`, which a `LanHost` runs when stopped or
-  dropped — towers' `--serve` `quit`, a window closing, a panic unwinding
-  through the owner. A kill, Ctrl+C, or a panic under `panic = "abort"` leaves
-  the empty file and its spool (`SPOOL_SUFFIX`), and nothing turns a spool back
-  into a file; the plan's torn-tail-tolerant reader is the long-term answer.
-  Verified by reading: the workspace sets no `panic` profile, so it unwinds; no
-  test panics through a recording host.
+  session itself, and any machine but this one. **Re-measured after the spool
+  became recoverable (2026-10-03, same setup, a throwaway test not kept):**
+  before the change `Recorder::record` was 2.28–2.40 µs a tick; with every entry
+  spooled as its own framed record and one write per record it was 3.86–4.02 µs
+  — the hash's own write every tick; with a pull's records written in one write
+  (`ReplayStream::flush`) it was 2.59–2.78 µs, `Host::update` 7.49–7.71 µs
+  unrecorded on that run, and the file still 575,852 bytes. One intermediate run
+  of the last build read 3.14–3.45 µs while `Host::update` itself read 8.9–10.2
+  µs, which is the machine busy, not the recorder.
+- **Interrupted recordings: what recovery does not cover.** Since 2026-10-03 the
+  spool holds every entry as a length- and CRC-framed record
+  (`crcbl_store::replay::spool`), `recover_spool` and `crcbl replay --recover`
+  turn one into the file, and a stale spool refuses a new recording to its path
+  (`RecordError::StaleSpool`); `docs/plan/22-replay.md` has the decision. Left:
+  - **Durability stops at the process.** Nothing is synced per tick, so a power
+    loss or an OS crash can lose the spool's tail — the framing detects it, but
+    the ticks are gone. A `sync_data` per pull was not measured; it is the
+    option if a machine crash must be survived, with the cost to be measured
+    first.
+  - **A spool still being written can be recovered.** Nothing locks the spool,
+    so `recover` on a live recording reads it as far as it had got; on Windows
+    the move over the recording's open file then fails, elsewhere it succeeds
+    and the live recorder's finish later writes to the replaced inode. The docs
+    say to recover a stopped recording; a lock was not built.
+  - **Bytes left past a failed write.** A flush that fails part-way leaves torn
+    bytes past the last whole record, which the next flush overwrites from its
+    start; if the process is killed before then, or the next flush is shorter, a
+    recovery reads the leftover as a record, which a CRC rejects except by a
+    one-in-2³² collision. Truncating the file on a failed write would close
+    that, and needs the spool to be a `File` rather than any `Write + Seek`.
+  - Considered and declined: **recovering or moving a stale spool at start** —
+    recovering takes the file the new recording asked for, and moving it leaves
+    the only copy under a name nobody chose; **recovering into a file that holds
+    something** — recovery fills only the empty file a recording leaves or a new
+    path; **removing the spool after a recovery** — it is left for its owner,
+    since a recovery that dropped damage leaves bytes someone may want to look
+    at; **a fixed cap on a record's length** — a length is bounded by the bytes
+    the spool actually has after it, which is the bound that matters, and a cap
+    would be one more limit a large peer tick could hit; **holding the sets and
+    hashes in memory while recording**, as the stream did — they must be on disk
+    to be recovered, and holding them too would be two copies to keep equal.
+  - Not covered: the move over `path` failing, and a file appearing at `path`
+    between `recover`'s two checks, are each handled by a path no test drives.
+    The fuzz crate's `decoder` bin cannot link on Windows without the fuzzing
+    runtime, so `cargo test --manifest-path crates/crcbl-net/fuzz/Cargo.toml`
+    does not run here; its new spool test
+    (`named_replay_spool_seeds_reach_their_intended_paths`) was run as a
+    throwaway copy inside `crcbl-store` against the same seed files, and CI's
+    `decoder-fuzz` job is the first real run of it and of the target's new
+    `recover_spool` call.
 - **What a recording leaves out at its edges.** An update that ran several ticks
   to catch up is hashed at its last only. `Host::shutdown`'s `Ended` changes
   land in no tick, since none runs after a `quit`, so the file ends with the
@@ -13144,10 +13185,11 @@ What it left:
   `ResimError::SetRefused`; none can today, since `apply` refuses only a set
   checked against another registry, and `Host::set_sim_registry` builds the
   store from the registry it checks against.
-- **Not covered**: neither replay seed is pinned in
-  `crates/crcbl-net/fuzz/tests/corpus.rs`, whose tests pin delta seeds only (the
-  version 3 seed was checked to decode with one peer tick by a throwaway test,
-  not kept). A recorded `dropped` count is held by a hand-written record
+- **Not covered**: neither `.crpl` seed is pinned in
+  `crates/crcbl-net/fuzz/tests/corpus.rs`, whose tests pin delta seeds and the
+  two replay spool seeds (`replay-spool`, `replay-spool-torn`) only (the version
+  3 seed was checked to decode with one peer tick by a throwaway test, not
+  kept). A recorded `dropped` count is held by a hand-written record
   (`a_recorded_dropped_count_reaches_the_module`), not by a live peer
   overrunning `MAX_CLIENT_INPUTS_PER_TICK`. The roster's `Left` from an expired
   grace period and from `end_unauthenticated_sessions`, and `Ended` from

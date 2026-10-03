@@ -649,25 +649,39 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `FileTransport`, and no output entries. The host's records are drained rather
   than read: the new `Host::take_sim_record` and `Host::take_peer_input_record`
   leave them empty, so a recorded host holds only what happened since the last
-  pull, and the recorder streams the peer track to a spool beside the file (the
-  file's path with `replay_record::SPOOL_SUFFIX` appended) through the new
+  pull, and the recorder holds none of it either: every set, hash and tick of
+  the peer track goes to a spool beside the file (the file's path with
+  `replay_record::SPOOL_SUFFIX` appended) through the new
   `crcbl_store::replay::ReplayStream`, which checks each entry against the
-  reader's rules as it is pushed and writes the bytes `ReplayWriter` would for
-  the same input and no entries. The file stays empty until the recording
-  finishes. `replay_record` also has the conversions between the host's
-  `TickInputs` and the file's `RecordedPeerTick` (`recorded_peer_tick`,
-  `tick_inputs`), `refuse_existing`, and `consume` for the flag.
-  `LanHost::record`, `recording` and `stop_recording` drive one on a LAN host,
-  which finishes its recording when it is dropped — a window closing, or a panic
-  unwinding — and logs what it holds. Towers' `--serve` finishes the file on
-  `quit` and prints what it holds, and a recording that does not finish whole is
-  the run's error; towers' and the sandbox's `--host` finish it when the window
-  closes. `--record` is refused without a session the process hosts, and for a
-  file that exists. A towers session recorded either way re-simulates tick for
-  tick, and so does a sandbox `--host` session: the sandbox's host module now
-  seats and unseats its players from the roster it is handed each tick, rather
-  than the sandbox doing it on the host's session events, and each player's
-  entity holds the peer's number instead of whether its link is up.
+  reader's rules as it is pushed, writes a pull's entries to the spool in one
+  write (`flush`) as length- and CRC-framed records, and finishes into the bytes
+  `ReplayWriter` would write for the same input and no entries. The file stays
+  empty until the recording finishes, and **a recording that never finishes is
+  recoverable**: `crcbl replay --recover <SPOOL> <FILE>` (and
+  `replay_record::recover`, over the new `crcbl_store::replay::recover_spool`)
+  writes the file from the spool a killed or crashed run left, keeping every
+  whole record and dropping one the process died writing, a damaged one and
+  everything after it, and reports what it kept and dropped (`SpoolRecovery`,
+  `SpoolEnd`; a spool whose header is missing or damaged is
+  `StorageError::ReplaySpool`). It fills the empty file the recording left or a
+  new path, never one that holds something (`RecordError::NotEmpty`), and leaves
+  the spool in place. A recording started to a path whose spool is still there
+  is refused by name with that command (`RecordError::StaleSpool`), at the
+  command line and at the start, rather than recovered or moved aside unasked.
+  `replay_record` also has the conversions between the host's `TickInputs` and
+  the file's `RecordedPeerTick` (`recorded_peer_tick`, `tick_inputs`),
+  `refuse_existing`, and `consume` for the flag. `LanHost::record`, `recording`
+  and `stop_recording` drive one on a LAN host, which finishes its recording
+  when it is dropped — a window closing, or a panic unwinding — and logs what it
+  holds. Towers' `--serve` finishes the file on `quit` and prints what it holds,
+  and a recording that does not finish whole is the run's error; towers' and the
+  sandbox's `--host` finish it when the window closes. `--record` is refused
+  without a session the process hosts, and for a file that exists. A towers
+  session recorded either way re-simulates tick for tick, and so does a sandbox
+  `--host` session: the sandbox's host module now seats and unseats its players
+  from the roster it is handed each tick, rather than the sandbox doing it on
+  the host's session events, and each player's entity holds the peer's number
+  instead of whether its link is up.
 - **Simulation variables over the transport: `Flags::SIM`'s half is built.** A
   typed set of a `SIM` variable is checked by the new `Registry::sim_set` and
   handed to the host as a `crcbl_console::SimSet` through

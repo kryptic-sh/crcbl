@@ -9,7 +9,7 @@ use crcbl_net::command::{MAX_CONSOLE_NAME_BYTES, MAX_CONSOLE_VALUE_BYTES};
 mod peers;
 
 pub use peers::{RecordedPeerFrames, RecordedPeerTick, RecordedRosterChange, RosterChangeKind};
-pub(super) use peers::{check_tick, encode_tick};
+pub(super) use peers::{check_tick, decode_tick, encode_tick};
 
 /// The smallest `SimSetEntry`: a tick and two empty texts.
 const MIN_SIM_SET_BYTES: usize = 8 + 2 + 2;
@@ -173,39 +173,15 @@ impl InputSection {
     /// reader would refuse.
     pub(super) fn encode(&self, buf: &mut Vec<u8>) -> Result<(), InputSectionError> {
         self.validate()?;
-        self.encode_sets_and_hashes(buf)?;
-        peers::encode(&self.peer_ticks, buf)
-    }
-
-    /// Append the sets and the hashes to `buf` — the section up to its peer
-    /// track, which a streaming writer appends after them from its spool.
-    /// Their rules are the caller's to have checked.
-    pub(super) fn encode_sets_and_hashes(
-        &self,
-        buf: &mut Vec<u8>,
-    ) -> Result<(), InputSectionError> {
         buf.extend_from_slice(&count(self.sim_sets.len(), "sets")?.to_le_bytes());
         for recorded in &self.sim_sets {
-            buf.extend_from_slice(&recorded.tick.get().to_le_bytes());
-            // `validate` held both texts to limits far below `u16::MAX`, so
-            // this refuses nothing it let through.
-            for (field, text) in [("name", &recorded.set.name), ("value", &recorded.set.value)] {
-                let len =
-                    u16::try_from(text.len()).map_err(|_| InputSectionError::TextTooLong {
-                        field,
-                        len: text.len(),
-                        limit: usize::from(u16::MAX),
-                    })?;
-                buf.extend_from_slice(&len.to_le_bytes());
-                buf.extend_from_slice(text.as_bytes());
-            }
+            encode_sim_set(recorded, buf)?;
         }
         buf.extend_from_slice(&count(self.state_hashes.len(), "state hashes")?.to_le_bytes());
         for recorded in &self.state_hashes {
-            buf.extend_from_slice(&recorded.tick.get().to_le_bytes());
-            buf.extend_from_slice(&recorded.hash.to_le_bytes());
+            encode_state_hash(recorded, buf);
         }
-        Ok(())
+        peers::encode(&self.peer_ticks, buf)
     }
 
     /// Read the section from `bytes`, which must be the rest of the file —
@@ -217,21 +193,13 @@ impl InputSection {
         let set_count = reader.count("sets", MIN_SIM_SET_BYTES)?;
         let mut sim_sets = Vec::with_capacity(set_count);
         for _ in 0..set_count {
-            let tick = TickId::from_raw(reader.u64("a set's tick")?);
-            let name = reader.text("name")?;
-            let value = reader.text("value")?;
-            sim_sets.push(RecordedSimSet {
-                tick,
-                set: ConsoleSet { name, value },
-            });
+            sim_sets.push(decode_sim_set(&mut reader)?);
         }
 
         let hash_count = reader.count("state hashes", STATE_HASH_BYTES)?;
         let mut state_hashes = Vec::with_capacity(hash_count);
         for _ in 0..hash_count {
-            let tick = TickId::from_raw(reader.u64("a state hash's tick")?);
-            let hash = reader.u64("a state hash")?;
-            state_hashes.push(RecordedStateHash { tick, hash });
+            state_hashes.push(decode_state_hash(&mut reader)?);
         }
 
         let peer_ticks = if has_peer_track {
@@ -300,6 +268,56 @@ impl RecordedStateHash {
     }
 }
 
+/// Append one `SimSetEntry` to `buf` — what the section's set count is
+/// followed by, and what a spool's set record holds.
+/// [`RecordedSimSet::check_after`] holds the lengths this converts.
+pub(in crate::replay) fn encode_sim_set(
+    recorded: &RecordedSimSet,
+    buf: &mut Vec<u8>,
+) -> Result<(), InputSectionError> {
+    buf.extend_from_slice(&recorded.tick.get().to_le_bytes());
+    // `check_after` holds both texts to limits far below `u16::MAX`, so this
+    // refuses nothing it let through.
+    for (field, text) in [("name", &recorded.set.name), ("value", &recorded.set.value)] {
+        let len = u16::try_from(text.len()).map_err(|_| InputSectionError::TextTooLong {
+            field,
+            len: text.len(),
+            limit: usize::from(u16::MAX),
+        })?;
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(text.as_bytes());
+    }
+    Ok(())
+}
+
+/// Append one `StateHashEntry` to `buf`.
+pub(in crate::replay) fn encode_state_hash(recorded: &RecordedStateHash, buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&recorded.tick.get().to_le_bytes());
+    buf.extend_from_slice(&recorded.hash.to_le_bytes());
+}
+
+/// Read one `SimSetEntry` from `reader`; its rules are the caller's to check.
+pub(in crate::replay) fn decode_sim_set(
+    reader: &mut Reader<'_>,
+) -> Result<RecordedSimSet, InputSectionError> {
+    let tick = TickId::from_raw(reader.u64("a set's tick")?);
+    let name = reader.text("name")?;
+    let value = reader.text("value")?;
+    Ok(RecordedSimSet {
+        tick,
+        set: ConsoleSet { name, value },
+    })
+}
+
+/// Read one `StateHashEntry` from `reader`.
+pub(in crate::replay) fn decode_state_hash(
+    reader: &mut Reader<'_>,
+) -> Result<RecordedStateHash, InputSectionError> {
+    let tick = TickId::from_raw(reader.u64("a state hash's tick")?);
+    let hash = reader.u64("a state hash")?;
+    Ok(RecordedStateHash { tick, hash })
+}
+
 fn count(len: usize, what: &'static str) -> Result<u32, InputSectionError> {
     u32::try_from(len).map_err(|_| InputSectionError::TooMany { what, count: len })
 }
@@ -315,9 +333,9 @@ fn check_len(field: &'static str, text: &str, limit: usize) -> Result<(), InputS
     Ok(())
 }
 
-/// The unread rest of the section.
-struct Reader<'a> {
-    bytes: &'a [u8],
+/// The unread rest of the section, or of one spool record.
+pub(in crate::replay) struct Reader<'a> {
+    pub(in crate::replay) bytes: &'a [u8],
 }
 
 impl<'a> Reader<'a> {

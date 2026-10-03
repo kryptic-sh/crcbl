@@ -102,6 +102,11 @@ pub enum StorageError {
     #[error(transparent)]
     ReplayInput(#[from] replay::InputSectionError),
 
+    /// A replay spool refused before any of its records was read, or one
+    /// that changed while it was read.
+    #[error(transparent)]
+    ReplaySpool(#[from] replay::SpoolError),
+
     /// A generic application-level error.
     #[error("{0}")]
     Other(String),

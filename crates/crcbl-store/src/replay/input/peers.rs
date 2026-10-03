@@ -148,47 +148,54 @@ pub(super) fn decode(reader: &mut Reader<'_>) -> Result<Vec<RecordedPeerTick>, I
     let tick_count = reader.count("peer ticks", MIN_PEER_TICK_BYTES)?;
     let mut ticks = Vec::with_capacity(tick_count);
     for _ in 0..tick_count {
-        let tick = TickId::from_raw(reader.u64("a peer tick's tick")?);
-
-        let change_count = reader.count("roster changes", ROSTER_ENTRY_BYTES)?;
-        let mut roster = Vec::with_capacity(change_count);
-        for _ in 0..change_count {
-            let [code] = reader.array("a roster change's kind")?;
-            let kind = RosterChangeKind::from_code(code)
-                .ok_or(InputSectionError::UnknownRosterChange(code))?;
-            let peer = reader.u64("a roster change's peer")?;
-            roster.push(RecordedRosterChange { kind, peer });
-        }
-
-        let peer_count = reader.count("peers' frames", MIN_PEER_FRAMES_BYTES)?;
-        let mut peers = Vec::with_capacity(peer_count);
-        for _ in 0..peer_count {
-            let peer = reader.u64("a peer's id")?;
-            let dropped = u32::from_le_bytes(reader.array("a peer's dropped count")?);
-            let frame_count = reader.count("frames", MIN_FRAME_BYTES)?;
-            let mut frames = Vec::with_capacity(frame_count);
-            for _ in 0..frame_count {
-                let frame_tick = TickId::from_raw(reader.u64("a frame's tick")?);
-                let len = u32::from_le_bytes(reader.array("a frame's length")?);
-                // A length past this target's address space cannot fit in the
-                // bytes that follow either.
-                let len =
-                    usize::try_from(len).map_err(|_| InputSectionError::Truncated("a frame"))?;
-                frames.push((frame_tick, reader.take(len, "a frame")?.to_vec()));
-            }
-            peers.push(RecordedPeerFrames {
-                peer,
-                dropped,
-                frames,
-            });
-        }
-        ticks.push(RecordedPeerTick {
-            tick,
-            roster,
-            peers,
-        });
+        ticks.push(decode_tick(reader)?);
     }
     Ok(ticks)
+}
+
+/// Read one `PeerTickEntry` from `reader` — what [`encode_tick`] wrote. Its
+/// rules are the caller's to check ([`check_tick`]).
+pub(in crate::replay) fn decode_tick(
+    reader: &mut Reader<'_>,
+) -> Result<RecordedPeerTick, InputSectionError> {
+    let tick = TickId::from_raw(reader.u64("a peer tick's tick")?);
+
+    let change_count = reader.count("roster changes", ROSTER_ENTRY_BYTES)?;
+    let mut roster = Vec::with_capacity(change_count);
+    for _ in 0..change_count {
+        let [code] = reader.array("a roster change's kind")?;
+        let kind = RosterChangeKind::from_code(code)
+            .ok_or(InputSectionError::UnknownRosterChange(code))?;
+        let peer = reader.u64("a roster change's peer")?;
+        roster.push(RecordedRosterChange { kind, peer });
+    }
+
+    let peer_count = reader.count("peers' frames", MIN_PEER_FRAMES_BYTES)?;
+    let mut peers = Vec::with_capacity(peer_count);
+    for _ in 0..peer_count {
+        let peer = reader.u64("a peer's id")?;
+        let dropped = u32::from_le_bytes(reader.array("a peer's dropped count")?);
+        let frame_count = reader.count("frames", MIN_FRAME_BYTES)?;
+        let mut frames = Vec::with_capacity(frame_count);
+        for _ in 0..frame_count {
+            let frame_tick = TickId::from_raw(reader.u64("a frame's tick")?);
+            let len = u32::from_le_bytes(reader.array("a frame's length")?);
+            // A length past this target's address space cannot fit in the
+            // bytes that follow either.
+            let len = usize::try_from(len).map_err(|_| InputSectionError::Truncated("a frame"))?;
+            frames.push((frame_tick, reader.take(len, "a frame")?.to_vec()));
+        }
+        peers.push(RecordedPeerFrames {
+            peer,
+            dropped,
+            frames,
+        });
+    }
+    Ok(RecordedPeerTick {
+        tick,
+        roster,
+        peers,
+    })
 }
 
 /// The rules both directions hold: ticks in order, one entry a peer a tick,
