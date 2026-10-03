@@ -1,5 +1,6 @@
-//! The save on close, through the running game and headless: each test keeps
-//! its saves in a scratch directory of its own, never a real data directory.
+//! The saves through the running game and headless — the autosave's cadence
+//! and the save on close: each test keeps its saves in a scratch directory of
+//! its own, never a real data directory.
 
 use std::path::{Path, PathBuf};
 
@@ -143,5 +144,73 @@ fn a_close_before_the_first_tick_leaves_the_last_save_untouched() {
         "a close before the first tick wrote over the last save"
     );
     assert_eq!(summary.saves, 0);
+    std::fs::remove_dir_all(&dir).expect("the scratch directory is this test's");
+}
+
+/// How many autosave periods the cadence test plays through: more than one,
+/// so a write that came once and never again is red.
+const PERIODS: u64 = 3;
+
+/// **The autosave writes once a period of ticks, and never before the
+/// first**: a character walking through [`PERIODS`] periods on the headless
+/// run's manual clock leaves nothing on the disk until the first period's
+/// last tick, and after every frame the accepted-write counter is the
+/// periods played — each write landing on the tick that ends its period, and
+/// the file then loading back as the stage on that tick.
+#[test]
+fn the_autosave_writes_once_a_period_and_never_before_the_first() {
+    let dir = scratch("autosave-cadence");
+    let mut engine = saving_in(&dir);
+    let period = crate::save::save_ticks(crate::game::DEFAULT_TICK_HZ);
+    let window = engine.window();
+    engine
+        .shell_mut()
+        .key_press(window, KeyCode::KeyW)
+        .expect("the window is live");
+    let mut written = Vec::new();
+    while engine.game().stats.ticks < PERIODS * period {
+        let saves = engine.game().saves();
+        // The run's frame budget bounds the loop: a clock that stopped
+        // ticking ends the run, which fails here rather than spinning.
+        assert_eq!(
+            engine.frame().expect("a frame"),
+            Flow::Continue,
+            "the run stopped short of {PERIODS} periods"
+        );
+        let ticks = engine.game().stats.ticks;
+        assert_eq!(
+            engine.game().saves(),
+            ticks / period,
+            "{ticks} ticks into a {period}-tick period"
+        );
+        if ticks < period {
+            assert!(files_in(&dir).is_empty(), "a save came at tick {ticks}");
+        }
+        if engine.game().saves() > saves {
+            let snapshot = engine.game().game().snapshot();
+            let loaded = Vault::at(dir.clone()).load();
+            assert_eq!(
+                loaded.as_ref(),
+                Some(&snapshot),
+                "the save written by tick {ticks} is not the stage on it"
+            );
+            written.push(snapshot);
+        }
+    }
+    let ticks: Vec<u64> = written.iter().map(|character| character.tick).collect();
+    let periods: Vec<u64> = (1..=PERIODS).map(|n| n * period).collect();
+    assert_eq!(
+        ticks, periods,
+        "the writes did not land on the periods' ends"
+    );
+    assert_ne!(
+        written[0].centre, written[1].centre,
+        "the walk went nowhere, so a first save left in place would pass for a second"
+    );
+    let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
+    assert_eq!(
+        summary.saves, PERIODS,
+        "the summary lost count of the writes"
+    );
     std::fs::remove_dir_all(&dir).expect("the scratch directory is this test's");
 }

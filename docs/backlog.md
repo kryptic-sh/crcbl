@@ -17265,12 +17265,19 @@ Stated as gaps rather than explained away:
   `a_headless_run_neither_resumes_nor_writes_a_save` pins the headless rule.
   Since 2026-10-03 the save on close is driven through the running loop into a
   real directory: `app::save_tests` hands a headless run a scratch `Vault::at`
-  after start-up and closes it. The cadence itself — `Shard::autosave` firing
-  every `save::save_ticks` — is still covered only by the browser gate; the same
-  injection would drive it natively, and was not written (outside the close's
-  task). **A `--save-dir` flag would close the windowed half** and is what topic
-  14 already asks for under "server deployments: configurable data dir"; it was
-  left out as scope.
+  after start-up and closes it, and the autosave's cadence is driven the same
+  way: `the_autosave_writes_once_a_period_and_never_before_the_first` walks a
+  headless run through several periods on its manual clock and holds the
+  accepted-write counter to the periods played after every frame, each write to
+  its period's last tick and each file to the stage on that tick (shown red by
+  halving the `save_ticks` the loop runs on and by firing a tick early). What
+  stays browser-only is the cadence against a real store — OPFS's queued writes
+  — and on a real frame rate. **Behaviour that is not a bug:**
+  `Shard::autosave`'s `saveable` guard cannot fire, since it runs only after
+  `Game::tick` has raised the counter; removing it turns nothing red, and it is
+  kept because it states the rule the close shares. **A `--save-dir` flag would
+  close the windowed half** and is what topic 14 already asks for under "server
+  deployments: configurable data dir"; it was left out as scope.
 - **The save on a page's close was not run in a browser.** It rests on
   `demo.js`'s `pagehide` running the teardown, and so `exiting`, before its
   storage drain, as towers' does; nothing drove it, and the gate's cleared-store
