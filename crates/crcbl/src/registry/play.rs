@@ -7,8 +7,9 @@
 //!                     │
 //!                     ├── controls_for()  the actions, for a tool to list
 //!                     ├── encode_play()   a chosen action and its arguments,
-//!                     │                   checked against the action, then
-//!                     │                   the game's command bytes
+//!                     │                   checked against the action and the
+//!                     │                   world, then the game's command
+//!                     │                   bytes
 //!                     └── (status)(world), (refusals)(world)
 //!                                         the run's numbers and the commands
 //!                                         it turned down, read off the world
@@ -39,7 +40,7 @@
 
 use std::fmt;
 
-use crcbl_ecs::World;
+use crcbl_ecs::{Entity, World};
 
 use super::Registry;
 
@@ -58,7 +59,9 @@ pub struct PlayControls {
     /// The game's encoder: an action's index and its arguments, already
     /// checked against that action's parameters by
     /// [`Registry::encode_play`], as the bytes the game's own client sends for
-    /// the same command — or why this game cannot spell them.
+    /// the same command — or why this game cannot spell them. Handed the
+    /// world the game's module plays in, where a
+    /// [`PlayArg::PickedRuntime`] entity's row says what the command names.
     pub encode: PlayEncoder,
     /// The run's numbers, labelled, in the order a tool shows them — empty for
     /// a world the game's module is not playing in.
@@ -68,9 +71,10 @@ pub struct PlayControls {
     pub refusals: PlayRefusals,
 }
 
-/// [`PlayControls::encode`]: an action's index and its checked arguments, as
-/// the game's command bytes, or why the game cannot spell them.
-pub type PlayEncoder = fn(usize, &[PlayArg]) -> Result<Vec<u8>, String>;
+/// [`PlayControls::encode`]: an action's index and its checked arguments, read
+/// against the world the game's module plays in, as the game's command bytes,
+/// or why the game cannot spell them.
+pub type PlayEncoder = fn(&mut World, usize, &[PlayArg]) -> Result<Vec<u8>, String>;
 
 /// [`PlayControls::status`]: the run's numbers, read off the world a game's
 /// module plays in, each with its label.
@@ -105,6 +109,13 @@ pub enum ParamKind {
     /// An entity of the scene system it names, picked in the scene — handed
     /// to the encoder as [`PlayArg::Picked`].
     Picked(&'static str),
+    /// An entity the game's module spawned into the
+    /// [runtime](super::Registry::register_runtime) system it names, picked
+    /// where it is drawn — handed to the encoder as
+    /// [`PlayArg::PickedRuntime`]. What a command about something the run
+    /// made, rather than the scene, takes: towers' _Upgrade_ picks a built
+    /// tower.
+    PickedRuntime(&'static str),
     /// One of a fixed list of choices, by label — handed to the encoder as
     /// [`PlayArg::Choice`].
     Choice(&'static [&'static str]),
@@ -122,18 +133,33 @@ pub enum PlayArg {
     /// and an id is nothing to a game that has kept no id: towers' build
     /// plots are numbered in file order, which is what its commands carry.
     Picked(usize),
+    /// For [`ParamKind::PickedRuntime`]: the picked entity itself, in the
+    /// world the game's module plays in.
+    ///
+    /// The entity rather than a place, because a runtime entity has no file
+    /// order — nothing saves it — and the game's own module spawned it, so
+    /// the game can read what it stands for off its row in that world.
+    /// [`Registry::encode_play`] holds it to the named system before the
+    /// encoder sees it.
+    PickedRuntime(Entity),
     /// For [`ParamKind::Choice`]: the index of the chosen label.
     Choice(usize),
 }
 
 impl ParamKind {
     /// Whether `arg` is an argument of this kind: a picked entity for
-    /// [`Picked`](Self::Picked), and for [`Choice`](Self::Choice) an index
-    /// one of its labels has.
+    /// [`Picked`](Self::Picked), a picked runtime entity for
+    /// [`PickedRuntime`](Self::PickedRuntime), and for
+    /// [`Choice`](Self::Choice) an index one of its labels has.
+    ///
+    /// The argument's shape alone: whether a runtime entity is one of the
+    /// named system's is a question about a world, which
+    /// [`Registry::encode_play`] asks.
     #[must_use]
     pub fn accepts(self, arg: PlayArg) -> bool {
         match (self, arg) {
-            (Self::Picked(_), PlayArg::Picked(_)) => true,
+            (Self::Picked(_), PlayArg::Picked(_))
+            | (Self::PickedRuntime(_), PlayArg::PickedRuntime(_)) => true,
             (Self::Choice(labels), PlayArg::Choice(index)) => index < labels.len(),
             _ => false,
         }
@@ -168,7 +194,9 @@ impl Registry {
     /// The command bytes for the action at index `action` of the controls
     /// under `system`, taking `args`: the arguments checked against the
     /// action's parameters — as many, each of its kind, every choice one the
-    /// list has — and then handed to the game's own encoder.
+    /// list has, every runtime entity one its system holds in `world` — and
+    /// then handed to the game's own encoder with `world`, the world the
+    /// game's module plays in.
     ///
     /// The check is the description's, made once here for every game, so an
     /// encoder is never handed an argument its own action did not ask for.
@@ -179,10 +207,11 @@ impl Registry {
     /// # Errors
     ///
     /// No controls under `system`, no action at that index, arguments that
-    /// do not fit its parameters, or the encoder's own refusal — each naming
-    /// what was wrong.
+    /// do not fit its parameters, a runtime entity its system does not hold,
+    /// or the encoder's own refusal — each naming what was wrong.
     pub fn encode_play(
         &self,
+        world: &mut World,
         system: &str,
         action: usize,
         args: &[PlayArg],
@@ -217,19 +246,36 @@ impl Registry {
                 described.name
             ));
         }
-        (controls.encode)(action, args)
+        for (index, (param, arg)) in described.params.iter().zip(args).enumerate() {
+            if let (ParamKind::PickedRuntime(runtime), PlayArg::PickedRuntime(entity)) =
+                (*param, *arg)
+                && !self.runtime_entities_in(world, runtime).contains(&entity)
+            {
+                return Err(format!(
+                    "`{}` takes one of `{runtime}` as argument {index}, and {entity:?}                      is not one",
+                    described.name
+                ));
+            }
+        }
+        (controls.encode)(world, action, args)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crcbl_ecs::{ComponentHash, System};
+
+    use super::super::{OrientedBox, Placement};
     use super::*;
 
     /// The test game's kinds of thing to build.
     const KINDS: &[&str] = &["small", "large"];
 
+    /// The runtime system the test game's module spawns its balls into.
+    const BALLS: &str = "balls";
+
     /// The test game's actions: one taking a picked block and a kind, one
-    /// taking nothing.
+    /// taking nothing, and one taking a ball its module spawned.
     const ACTIONS: &[PlayAction] = &[
         PlayAction {
             name: "Build",
@@ -239,15 +285,52 @@ mod tests {
             name: "Go",
             params: &[],
         },
+        PlayAction {
+            name: "Kick",
+            params: &[ParamKind::PickedRuntime(BALLS)],
+        },
     ];
 
-    /// Spells an action as its index followed by each argument's number, so
-    /// a test reads back exactly what the encoder was handed.
-    fn encode(action: usize, args: &[PlayArg]) -> Result<Vec<u8>, String> {
+    /// [`ACTIONS`]' index of `Kick`.
+    const KICK: usize = 2;
+
+    /// A thing the test game's module spawns: what a `Kick` reads off the
+    /// world to say which ball it kicks.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Ball {
+        number: u8,
+    }
+
+    impl ComponentHash for Ball {
+        fn hash_component(&self, hasher: &mut dyn std::hash::Hasher) {
+            hasher.write_u8(self.number);
+        }
+    }
+
+    impl Placement for Ball {
+        fn placement(&self) -> Option<OrientedBox> {
+            None
+        }
+    }
+
+    /// Spells an action as its index followed by each argument's number — a
+    /// picked ball's number read off its row in `world` — so a test reads
+    /// back exactly what the encoder was handed.
+    fn encode(world: &mut World, action: usize, args: &[PlayArg]) -> Result<Vec<u8>, String> {
         let mut bytes = vec![u8::try_from(action).map_err(|error| error.to_string())?];
         for arg in args {
-            let (PlayArg::Picked(value) | PlayArg::Choice(value)) = *arg;
-            bytes.push(u8::try_from(value).map_err(|error| error.to_string())?);
+            bytes.push(match *arg {
+                PlayArg::Picked(value) | PlayArg::Choice(value) => {
+                    u8::try_from(value).map_err(|error| error.to_string())?
+                }
+                PlayArg::PickedRuntime(entity) => {
+                    world
+                        .system_mut::<System<Ball>>()
+                        .and_then(|balls| balls.get(entity))
+                        .ok_or_else(|| format!("{entity:?} is no ball"))?
+                        .number
+                }
+            });
         }
         Ok(bytes)
     }
@@ -270,6 +353,7 @@ mod tests {
     fn registry() -> Registry {
         let mut registry = Registry::new();
         registry.play_controls("blocks", CONTROLS);
+        registry.register_runtime::<Ball>(BALLS);
         registry
     }
 
@@ -286,11 +370,54 @@ mod tests {
             Some(ACTIONS),
         );
         assert!(registry.controls_for("beacons").is_none());
+        let mut world = World::new();
         assert_eq!(
-            registry.encode_play("blocks", 0, &[PlayArg::Picked(3), PlayArg::Choice(1)]),
+            registry.encode_play(
+                &mut world,
+                "blocks",
+                0,
+                &[PlayArg::Picked(3), PlayArg::Choice(1)]
+            ),
             Ok(vec![0, 3, 1]),
         );
-        assert_eq!(registry.encode_play("blocks", 1, &[]), Ok(vec![1]));
+        assert_eq!(
+            registry.encode_play(&mut world, "blocks", 1, &[]),
+            Ok(vec![1])
+        );
+    }
+
+    /// **A picked runtime entity reaches the encoder only if its system
+    /// holds it**: a ball the module spawned is read off its row, and an
+    /// entity of no ball — or any entity in a world not playing — is refused
+    /// by name before the encoder sees it.
+    #[test]
+    fn a_picked_runtime_entity_must_be_one_its_system_holds() {
+        let registry = registry();
+        let mut world = World::new();
+        let stray = world.spawn();
+        let refused = registry
+            .encode_play(&mut world, "blocks", KICK, &[PlayArg::PickedRuntime(stray)])
+            .expect_err("no balls system in this world");
+        assert!(refused.contains("one of `balls`"), "{refused}");
+
+        world.register_system(Box::new(System::<Ball>::new(BALLS)));
+        let ball = world.spawn();
+        world
+            .system_mut::<System<Ball>>()
+            .expect("registered")
+            .attach(ball, Ball { number: 7 });
+        assert_eq!(
+            registry.encode_play(&mut world, "blocks", KICK, &[PlayArg::PickedRuntime(ball)]),
+            Ok(vec![2, 7]),
+        );
+        let refused = registry
+            .encode_play(&mut world, "blocks", KICK, &[PlayArg::PickedRuntime(stray)])
+            .expect_err("the stray entity is no ball");
+        assert!(refused.contains("is not one"), "{refused}");
+        let refused = registry
+            .encode_play(&mut world, "blocks", KICK, &[PlayArg::Picked(0)])
+            .expect_err("a scene pick where a runtime one is taken");
+        assert!(refused.contains("as argument 0"), "{refused}");
     }
 
     /// **Arguments that do not fit their action never reach the encoder**:
@@ -301,7 +428,7 @@ mod tests {
         let registry = registry();
         let refused = |system: &str, action: usize, args: &[PlayArg]| {
             registry
-                .encode_play(system, action, args)
+                .encode_play(&mut World::new(), system, action, args)
                 .expect_err("refused")
         };
         assert!(refused("blocks", 0, &[PlayArg::Picked(3)]).contains("takes 2 arguments"));

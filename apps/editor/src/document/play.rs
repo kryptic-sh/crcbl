@@ -31,8 +31,8 @@
 //! Everything about the document that is not the world: the undo log, the
 //! saved position, the gesture counter and the origin. The log can survive
 //! because the restored scene **is** the pre-play scene — every entity under
-//! the [`SceneEntityId`](crcbl::scene::scn::SceneEntityId) the save wrote it
-//! with — and because the id map's high-water mark is carried across with
+//! the [`SceneEntityId`] the save wrote it with — and because the id map's
+//! high-water mark is carried across with
 //! [`IdMap::reserve`](crcbl::scene::scn::IdMap::reserve): the files spell the
 //! ids the scene holds, not the ones a deleted entity's undo still names. The
 //! selection survives, less any entity the restored scene does not hold.
@@ -42,9 +42,14 @@
 //! Towers' creeps: entities in a system the module registered, of a component
 //! the vocabulary knows only as
 //! [runtime](crcbl::registry::Registry::register_runtime). The document draws
-//! them ([`Document::spawned`]) and does nothing else with them — they have no
-//! id, so nothing lists, selects, edits or saves them — and stop throws away
-//! the world they were spawned in, so none outlives play.
+//! them ([`Document::spawned`]) — they have no id, so nothing lists, selects,
+//! edits or saves them — and stop throws away the world they were spawned in,
+//! so none outlives play. The one thing more: an entity of a runtime system a
+//! running game's play action picks from ([`ParamKind::PickedRuntime`],
+//! towers' built towers) is given a picking collider after every tick, and a
+//! click on it is the play's **runtime pick**
+//! ([`Document::set_runtime_pick`]) — what that action is handed, as the
+//! selection is what a scene pick is handed.
 //!
 //! # Taking part: a game's play controls
 //!
@@ -58,6 +63,13 @@
 //! [`Document::take_play_refusals`], and the run's numbers through
 //! [`Document::play_status`]. A command is no edit: it changes the played
 //! world, which stop throws away, and nothing of the scene's files or log.
+//!
+//! **A command sent while paused waits for the tick after resume**, as a
+//! server's queue holds a client's frame for the next tick it runs: it is
+//! encoded — and refused by the controls — at once, so a mistake is told
+//! while paused, and the game reads it when its next tick does. Refusing it
+//! instead would make a pause a mode in which the strip does nothing, and
+//! dropping it would lose a command the person was told was sent.
 //!
 //! # Why every edit is refused in between
 //!
@@ -74,10 +86,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use crcbl::core::{FrameClock, TickId};
-use crcbl::ecs::{ClientInputs, GameModule, World};
-use crcbl::registry::{PlayArg, PlayControls};
+use crcbl::ecs::{ClientInputs, Entity, GameModule, World};
+use crcbl::registry::{ParamKind, PlayArg, PlayControls};
+use crcbl::scene::scn::SceneEntityId;
 
-use super::{Document, EditError, load, memory_source, sync_scene_colliders};
+use super::{Document, EditError, load, memory_source, sync_colliders, sync_scene_colliders};
 
 /// Where play mode stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +122,32 @@ pub(super) struct Session {
     played: Duration,
     /// Whether ticking is held.
     paused: bool,
+    /// The runtime pick: the spawned entity a click last landed on, what a
+    /// [`ParamKind::PickedRuntime`] argument is handed — see
+    /// [`Document::set_runtime_pick`]. Here rather than on the document, so
+    /// a stop throws it away with the world it names an entity of.
+    runtime_pick: Option<Entity>,
+}
+
+/// What a ray through the scene hit first — see [`Document::hit`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    /// One of the scene's entities, by its id: what a click selects.
+    Scene(SceneEntityId),
+    /// An entity a playing module spawned into a runtime system a play
+    /// action picks from: what a click makes the runtime pick.
+    Spawned(Entity),
+}
+
+impl Hit {
+    /// The scene entity hit, or [`None`] for a spawned one.
+    #[must_use]
+    pub const fn scene(self) -> Option<SceneEntityId> {
+        match self {
+            Self::Scene(id) => Some(id),
+            Self::Spawned(_) => None,
+        }
+    }
 }
 
 /// One module running the scene, and the command frames waiting for its next
@@ -143,6 +182,7 @@ impl fmt::Debug for Session {
             .field("clock", &self.clock)
             .field("played", &self.played)
             .field("paused", &self.paused)
+            .field("runtime_pick", &self.runtime_pick)
             .finish()
     }
 }
@@ -191,7 +231,8 @@ impl Document {
     /// Encodes the action at index `action` of the play controls under
     /// `system`, taking `args`, into its game's command bytes, and queues
     /// them for that game's module: its next tick is handed them as a
-    /// client's command frame. A paused scene holds them until it resumes.
+    /// client's command frame. A paused scene holds them until it resumes —
+    /// see the module docs.
     ///
     /// # Errors
     ///
@@ -217,7 +258,7 @@ impl Document {
             })?;
         let frame = self
             .registry
-            .encode_play(system, action, args)
+            .encode_play(&mut self.world, system, action, args)
             .map_err(EditError::PlayCommand)?;
         running
             .inputs
@@ -236,6 +277,59 @@ impl Document {
             .entities(&mut self.world, &self.ids, system)
             .iter()
             .position(|&each| each == entity)
+    }
+
+    /// Makes `entity` the runtime pick — what a play action taking a
+    /// [`ParamKind::PickedRuntime`] argument is handed, if its system holds
+    /// it ([`picked_runtime`](Self::picked_runtime)) — or clears it. A click
+    /// that [`hit`](Self::hit) a spawned entity sets it, and one that did not
+    /// clears it. Nothing while editing: there is no run to pick from, and a
+    /// stop throws the pick away.
+    pub fn set_runtime_pick(&mut self, entity: Option<Entity>) {
+        if let Some(session) = &mut self.play {
+            session.runtime_pick = entity;
+        }
+    }
+
+    /// The runtime pick, if the runtime system `system` holds it: the
+    /// [`PlayArg::PickedRuntime`] a play action picking from that system
+    /// takes. [`None`] while editing, with nothing picked, and for a pick the
+    /// run has since despawned or that `system` never held.
+    #[must_use]
+    pub fn picked_runtime(&mut self, system: &str) -> Option<Entity> {
+        let entity = self.play.as_ref()?.runtime_pick?;
+        self.registry
+            .runtime_entities_in(&mut self.world, system)
+            .contains(&entity)
+            .then_some(entity)
+    }
+
+    /// Every runtime system a running game's play action picks from, each
+    /// once: the spawned entities given a picking collider.
+    fn picked_runtime_systems(&self) -> Vec<&'static str> {
+        let mut systems = Vec::new();
+        for (_, controls) in self.play_controls() {
+            for action in controls.actions {
+                for param in action.params {
+                    if let ParamKind::PickedRuntime(system) = *param
+                        && !systems.contains(&system)
+                    {
+                        systems.push(system);
+                    }
+                }
+            }
+        }
+        systems
+    }
+
+    /// Gives every entity of a runtime system a play action picks from the
+    /// collider a click picks it by, where it now stands — what a tick that
+    /// moved, spawned or upgraded one obliges, as an edit obliges the scene's.
+    fn sync_picked_runtime(&mut self) {
+        for system in self.picked_runtime_systems() {
+            let entities = self.registry.runtime_entities_in(&mut self.world, system);
+            sync_colliders(&self.registry, &mut self.world, entities);
+        }
     }
 
     /// The run's numbers, labelled, from every running module's play
@@ -345,7 +439,9 @@ impl Document {
             clock,
             played: Duration::ZERO,
             paused: false,
+            runtime_pick: None,
         });
+        self.sync_picked_runtime();
         Ok(())
     }
 
@@ -399,8 +495,9 @@ impl Document {
     /// [`FrameClock::set_max_catch_up_ticks`]'s spiral-of-death guard: a frame
     /// that stalled does not come back as a burst.
     ///
-    /// The colliders are rebuilt afterwards, so a click picks what a module
-    /// moved where it is drawn.
+    /// The colliders are rebuilt afterwards — the scene's, and those of the
+    /// spawned entities a play action picks from — so a click picks what a
+    /// module moved where it is drawn.
     pub fn advance(&mut self, dt: Duration) -> u32 {
         let Some(session) = self.play.as_mut().filter(|session| !session.paused) else {
             return 0;
@@ -423,6 +520,7 @@ impl Document {
         }
         if ticks > 0 {
             sync_scene_colliders(&self.registry, &mut self.world, &self.scene, &self.ids);
+            self.sync_picked_runtime();
         }
         if self.world.entity_count() != entities {
             // Something entered or left: the outliner and the drawn instances

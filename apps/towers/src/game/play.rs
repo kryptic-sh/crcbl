@@ -33,14 +33,18 @@
 //! ([`crcbl::registry::Registry::register_runtime`]): a tool draws them from
 //! their placements and never lists, edits or saves them.
 //!
-//! - A creep is a [`Walker`] in [`WALKERS`], keyed by the creep's physics body
-//!   so one creep is one entity for as long as it lives — the stage
-//!   swap-removes a creep that dies, so its place in the list is not its own.
-//! - A tower is a [`Turret`] in [`TURRETS`], a bolt a [`Shot`] in [`SHOTS`]
-//!   and a burst a [`Blast`] in [`BLASTS`], each by its **place** in the
-//!   stage's list: towers are only ever added (a restart empties them), and a
-//!   bolt or a burst is gone within a fraction of a second, so an entity that
-//!   stood for one bolt and now stands for the next draws the same picture.
+//! A creep is a [`Walker`] in [`WALKERS`], a tower a [`Turret`] in
+//! [`TURRETS`], a bolt a [`Shot`] in [`SHOTS`] and a burst a [`Blast`] in
+//! [`BLASTS`] — each **keyed by what it is**, so one thing is one entity for
+//! as long as it lives: a creep by its physics body, a tower by its plot (a
+//! plot holds one), a bolt by its [`Bolt::id`](crate::tower::Bolt::id) and
+//! a burst by the id of the bolt that raised it, every key beside the run it
+//! belongs to, since a restart numbers everything again. Not by place: the
+//! stage swap-removes a creep that dies and a bolt that lands, and drops the
+//! oldest burst off the front of its list, so a place stands for a different
+//! thing from tick to tick — a picture that is right every tick and a motion
+//! history that is not. A tool's pick of a turret holds the same tower for
+//! the same reason.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -101,10 +105,15 @@ impl Placement for Walker {
     }
 }
 
-/// One built tower on a played field, as a tool draws it: where its feet are,
-/// and how much bigger than a base tower it stands.
+/// One built tower on a played field, as a tool draws it: the plot it stands
+/// on and where its feet are, and how much bigger than a base tower it
+/// stands.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Turret {
+    /// The plot's place in the plots chunk: what a command naming this tower
+    /// carries, so a tool's pick of the turret becomes the game's
+    /// `UpgradeTower`.
+    plot: usize,
     feet: DVec3,
     /// 1 for a base tower, [`UPGRADED_SCALE`] for a stepped-up one — the
     /// scale the game's own frame draws it at.
@@ -113,6 +122,7 @@ struct Turret {
 
 impl ComponentHash for Turret {
     fn hash_component(&self, hasher: &mut dyn std::hash::Hasher) {
+        hasher.write_usize(self.plot);
         hash_values(hasher, self.feet.to_array().into_iter().chain([self.scale]));
     }
 }
@@ -217,56 +227,77 @@ fn start(
 #[derive(Debug)]
 struct FieldPlay {
     towers: TowersModule,
-    /// Each live creep's body and the entity mirroring it.
-    walkers: Vec<(ColliderId, Entity)>,
-    /// The entity mirroring each of the stage's towers, by its place.
-    turrets: Vec<Entity>,
-    /// …each bolt in the air, by its place.
-    shots: Vec<Entity>,
-    /// …and each burst still drawn, by its place.
-    blasts: Vec<Entity>,
+    /// Each live creep, by its body.
+    walkers: Mirror<ColliderId>,
+    /// …each built tower, by its plot.
+    turrets: Mirror<usize>,
+    /// …each bolt in the air, by its id.
+    shots: Mirror<u64>,
+    /// …and each burst still drawn, by its bolt's id.
+    blasts: Mirror<u64>,
 }
 
-/// What the stage holds this tick, copied out from under its lock so the
-/// world can be written without holding it.
+/// What one mirrored thing is known by from tick to tick: the run it belongs
+/// to — [`Stage`]'s count of them, since a restart numbers everything again —
+/// and its own name within that run.
+type Identity<K> = (u64, K);
+
+/// The entity mirroring each thing of one kind, by its [`Identity`].
+type Mirror<K> = Vec<(Identity<K>, Entity)>;
+
+/// What the stage holds this tick, each row with what it is known by, copied
+/// out from under its lock so the world can be written without holding it.
 struct Mirrored {
-    creeps: Vec<(ColliderId, DVec3)>,
-    turrets: Vec<Turret>,
-    shots: Vec<Shot>,
-    blasts: Vec<Blast>,
+    creeps: Vec<(Identity<ColliderId>, Walker)>,
+    turrets: Vec<(Identity<usize>, Turret)>,
+    shots: Vec<(Identity<u64>, Shot)>,
+    blasts: Vec<(Identity<u64>, Blast)>,
 }
 
 impl Mirrored {
     /// What `stage` holds, as the rows a tool draws.
     fn of(stage: &Stage) -> Self {
+        let run = stage.runs;
         Self {
             creeps: stage
                 .creeps
                 .iter()
-                .map(|creep| (creep.body(), creep.centre()))
+                .map(|creep| {
+                    let walker = Walker {
+                        centre: creep.centre(),
+                    };
+                    ((run, creep.body()), walker)
+                })
                 .collect(),
             turrets: stage
                 .towers
                 .iter()
-                .map(|tower| Turret {
-                    feet: stage.map.plots()[tower.plot()].at(),
-                    scale: match tower.tier() {
-                        Tier::Base => 1.0,
-                        Tier::Upgraded => f64::from(UPGRADED_SCALE),
-                    },
+                .map(|tower| {
+                    let turret = Turret {
+                        plot: tower.plot(),
+                        feet: stage.map.plots()[tower.plot()].at(),
+                        scale: match tower.tier() {
+                            Tier::Base => 1.0,
+                            Tier::Upgraded => f64::from(UPGRADED_SCALE),
+                        },
+                    };
+                    ((run, tower.plot()), turret)
                 })
                 .collect(),
             shots: stage
                 .bolts
                 .iter()
-                .map(|bolt| Shot { centre: bolt.at() })
+                .map(|bolt| ((run, bolt.id()), Shot { centre: bolt.at() }))
                 .collect(),
             blasts: stage
                 .bursts
                 .iter()
-                .map(|burst| Blast {
-                    centre: burst.at,
-                    radius_m: burst.radius_m,
+                .map(|burst| {
+                    let blast = Blast {
+                        centre: burst.at,
+                        radius_m: burst.radius_m,
+                    };
+                    ((run, burst.id), blast)
                 })
                 .collect(),
         }
@@ -293,65 +324,47 @@ impl FieldPlay {
     /// server's does.
     fn mirror(&mut self, world: &mut World) {
         let mirrored = Mirrored::of(&lock(&self.towers.shared));
-        self.mirror_creeps(world, mirrored.creeps);
-        mirror_places(world, &mut self.turrets, mirrored.turrets);
-        mirror_places(world, &mut self.shots, mirrored.shots);
-        mirror_places(world, &mut self.blasts, mirrored.blasts);
-    }
-
-    /// Brings the [`WALKERS`] system into line with the stage's creeps: an
-    /// entity for each creep that arrived, every mirrored creep where it now
-    /// is, and a despawn for each that is gone.
-    fn mirror_creeps(&mut self, world: &mut World, creeps: Vec<(ColliderId, DVec3)>) {
-        self.walkers.retain(|(body, entity)| {
-            let alive = creeps.iter().any(|(live, _)| live == body);
-            if !alive {
-                world.despawn(*entity);
-            }
-            alive
-        });
-        let mut rows = Vec::with_capacity(creeps.len());
-        for (body, centre) in creeps {
-            let known = self
-                .walkers
-                .iter()
-                .find(|(walker, _)| *walker == body)
-                .map(|(_, entity)| *entity);
-            let entity = known.unwrap_or_else(|| {
-                let entity = world.spawn();
-                self.walkers.push((body, entity));
-                entity
-            });
-            rows.push((entity, Walker { centre }));
-        }
-        let system = world
-            .system_mut::<System<Walker>>()
-            .expect("`register` put the walkers in the world before the first tick");
-        for (entity, walker) in rows {
-            system.attach(entity, walker);
-        }
+        mirror(world, &mut self.walkers, mirrored.creeps);
+        mirror(world, &mut self.turrets, mirrored.turrets);
+        mirror(world, &mut self.shots, mirrored.shots);
+        mirror(world, &mut self.blasts, mirrored.blasts);
     }
 }
 
 /// Brings the runtime system of `T` into line with `rows`, one entity per
-/// place in the stage's list: an entity spawned for each place the list grew
-/// by, one despawned for each it shrank by, and every remaining entity given
-/// its place's row.
-fn mirror_places<T>(world: &mut World, entities: &mut Vec<Entity>, rows: Vec<T>)
+/// [`Identity`]: a despawn for each thing that is gone, an entity for each
+/// that arrived, and every mirrored thing given its row as it now is — so an
+/// entity stands for one thing from the tick it arrives to the tick it goes.
+fn mirror<K, T>(world: &mut World, known: &mut Mirror<K>, rows: Vec<(Identity<K>, T)>)
 where
+    K: Copy + PartialEq,
     T: ComponentHash + 'static,
 {
-    for gone in entities.drain(rows.len().min(entities.len())..) {
-        world.despawn(gone);
-    }
-    while entities.len() < rows.len() {
-        entities.push(world.spawn());
+    known.retain(|(identity, entity)| {
+        let alive = rows.iter().any(|(live, _)| live == identity);
+        if !alive {
+            world.despawn(*entity);
+        }
+        alive
+    });
+    let mut placed = Vec::with_capacity(rows.len());
+    for (identity, row) in rows {
+        let entity = known
+            .iter()
+            .find(|(each, _)| *each == identity)
+            .map(|(_, entity)| *entity)
+            .unwrap_or_else(|| {
+                let entity = world.spawn();
+                known.push((identity, entity));
+                entity
+            });
+        placed.push((entity, row));
     }
     let system = world
         .system_mut::<System<T>>()
         .expect("`register` put every mirrored system in the world before the first tick");
-    for (entity, row) in entities.iter().zip(rows) {
-        system.attach(*entity, row);
+    for (entity, row) in placed {
+        system.attach(entity, row);
     }
 }
 
@@ -549,14 +562,26 @@ mod tests {
         world.sweep();
     }
 
-    /// The frame this game's controls encode for `action` taking `args`.
-    fn command(action: &str, args: &[crcbl::registry::PlayArg]) -> Vec<u8> {
+    /// The frame this game's controls encode for `action` taking `args`,
+    /// read against `world`.
+    fn command(world: &mut World, action: &str, args: &[crcbl::registry::PlayArg]) -> Vec<u8> {
         let index = controls::CONTROLS
             .actions
             .iter()
             .position(|each| each.name == action)
             .expect("an action towers offers");
-        (controls::CONTROLS.encode)(index, args).expect("towers spells it")
+        (controls::CONTROLS.encode)(world, index, args).expect("towers spells it")
+    }
+
+    /// One tick with `action` taking `args` arriving from the one player.
+    fn tick_command(
+        module: &mut FieldPlay,
+        world: &mut World,
+        action: &str,
+        args: &[crcbl::registry::PlayArg],
+    ) {
+        let frame = command(world, action, args);
+        tick_with(module, world, frame);
     }
 
     /// Every mirrored row of `T`, by entity.
@@ -570,24 +595,29 @@ mod tests {
     }
 
     /// **A tower a tool's command builds is mirrored where its plot is, at
-    /// its tier's size** — and stepping it up grows the same entity rather
-    /// than adding one.
+    /// its tier's size** — and stepping it up, by picking that entity, grows
+    /// the same entity rather than adding one.
     #[test]
     fn a_built_tower_is_mirrored_on_its_plot_and_grows_when_stepped_up() {
         use crcbl::registry::PlayArg;
 
         let (mut module, mut world) = played();
         let plot = 1;
-        tick_with(
+        tick_command(
             &mut module,
             &mut world,
-            command("Place tower", &[PlayArg::Picked(plot), PlayArg::Choice(0)]),
+            "Place tower",
+            &[PlayArg::Picked(plot), PlayArg::Choice(0)],
         );
         let feet = Map::built_in().plots()[plot].at();
         let built = rows::<Turret>(&mut world);
         assert_eq!(
             built.iter().map(|(_, turret)| *turret).collect::<Vec<_>>(),
-            [Turret { feet, scale: 1.0 }],
+            [Turret {
+                plot,
+                feet,
+                scale: 1.0
+            }],
         );
         let placed = built[0].1.placement().expect("a tower is in space");
         assert!(
@@ -596,10 +626,11 @@ mod tests {
             "a base tower is drawn as {placed:?}",
         );
 
-        tick_with(
+        tick_command(
             &mut module,
             &mut world,
-            command("Upgrade", &[PlayArg::Picked(plot)]),
+            "Upgrade",
+            &[PlayArg::PickedRuntime(built[0].0)],
         );
         let stepped = rows::<Turret>(&mut world);
         assert_eq!(stepped.len(), 1, "an upgrade mirrored a second tower");
@@ -623,13 +654,11 @@ mod tests {
             .iter()
             .position(|kind| *kind == tower::Kind::Splash)
             .expect("towers has a splash tower");
-        tick_with(
+        tick_command(
             &mut module,
             &mut world,
-            command(
-                "Place tower",
-                &[PlayArg::Picked(0), PlayArg::Choice(splash)],
-            ),
+            "Place tower",
+            &[PlayArg::Picked(0), PlayArg::Choice(splash)],
         );
         let (mut shot, mut blasted) = (false, false);
         for _ in 0..ticks_to_the_first_creep() + first_wave_ticks(&module) {
@@ -647,17 +676,19 @@ mod tests {
                 bursts.len(),
                 "the mirror lost or kept a burst"
             );
-            for ((_, mirrored), bolt) in shots.iter().zip(&bolts) {
-                assert_eq!(
-                    mirrored.centre,
-                    bolt.at(),
-                    "a bolt is drawn where it is not"
+            for (_, mirrored) in &shots {
+                assert!(
+                    bolts.iter().any(|bolt| bolt.at() == mirrored.centre),
+                    "a bolt is drawn where none is"
                 );
             }
-            for ((_, mirrored), burst) in blasts.iter().zip(&bursts) {
-                assert_eq!(
-                    (mirrored.centre, mirrored.radius_m),
-                    (burst.at, burst.radius_m)
+            for (_, mirrored) in &blasts {
+                assert!(
+                    bursts
+                        .iter()
+                        .any(|burst| (burst.at, burst.radius_m)
+                            == (mirrored.centre, mirrored.radius_m)),
+                    "a burst is drawn where none is"
                 );
             }
             assert_eq!(
@@ -669,6 +700,135 @@ mod tests {
             blasted |= !bursts.is_empty();
         }
         assert!(shot && blasted, "the splash tower never fired and burst");
+    }
+
+    /// The ids of what one of the stage's lists holds, in the list's order.
+    fn ids<T>(list: &[T], id: impl Fn(&T) -> u64) -> Vec<u64> {
+        list.iter().map(id).collect()
+    }
+
+    /// Whether some place in one of the stage's lists holds another thing
+    /// than it held a tick before — what a mirror by place would draw as one
+    /// entity leaving one thing for the next.
+    fn places_moved(before: &[u64], now: &[u64]) -> bool {
+        before.iter().zip(now).any(|(was, is)| was != is)
+    }
+
+    /// **A bolt or a burst keeps its entity when the stage reorders its
+    /// lists**: three bolts dropped on the first creep from heights that land
+    /// the first of them first, which the stage swap-removes from under the
+    /// other two, and two bursts of which the older expires first, off the
+    /// front of the list. A bolt's entity moves no further in a tick than a
+    /// bolt flies and a burst's never moves, where a mirror by place would
+    /// draw each reordering as a jump.
+    #[test]
+    fn bolts_and_bursts_keep_their_entities_when_the_stage_reorders_its_lists() {
+        use std::collections::HashMap;
+
+        use crate::game::Burst;
+        use crate::tower::{BOLT_SPEED, BURST_S, Bolt, Kind};
+
+        /// How far above the creep each bolt is dropped from, in metres, by
+        /// its id: the first lands first, a tick or two after the tick that
+        /// first mirrors them all.
+        const DROPS_M: [f64; 3] = [4.0, 9.0, 13.0];
+
+        let (mut module, mut world) = played();
+        let start = command(&mut world, "Start wave", &[]);
+        tick_with(&mut module, &mut world, start);
+        for _ in 0..RELEASE_SLACK {
+            tick(&mut module, &mut world);
+        }
+        {
+            let mut stage = lock(&module.towers.shared);
+            let creep = stage
+                .creeps
+                .first()
+                .expect("the sent wave released a creep");
+            let (at, spec) = (creep.centre(), Kind::Bolt.spec(Tier::Base));
+            let bolts: Vec<Bolt> = (0..)
+                .zip(DROPS_M)
+                .map(|(id, height)| Bolt::fire(id, at + DVec3::Y * height, creep, spec))
+                .collect();
+            stage.bolts.extend(bolts);
+            // Two metres apart, the older half spent, so it expires first.
+            let elapsed = stage.elapsed;
+            for (id, raised_at, aside_m) in [(0, elapsed - 0.5 * BURST_S, 0.0), (1, elapsed, 2.0)] {
+                stage.bursts.push(Burst {
+                    id,
+                    at: at + DVec3::X * aside_m,
+                    radius_m: 1.0,
+                    raised_at,
+                });
+            }
+        }
+
+        // One tick to mirror them all, so every reordering after it is
+        // between two mirrored ticks.
+        tick(&mut module, &mut world);
+        let flown = BOLT_SPEED / f64::from(DEFAULT_TICK_HZ);
+        let mut shots_before: HashMap<Entity, Shot> =
+            rows::<Shot>(&mut world).into_iter().collect();
+        let mut blasts_before: HashMap<Entity, Blast> =
+            rows::<Blast>(&mut world).into_iter().collect();
+        assert_eq!(
+            (shots_before.len(), blasts_before.len()),
+            (DROPS_M.len(), 2),
+            "a dropped bolt or a burst was gone before it was mirrored",
+        );
+        let mut before = {
+            let stage = lock(&module.towers.shared);
+            (
+                ids(&stage.bolts, Bolt::id),
+                ids(&stage.bursts, |burst| burst.id),
+            )
+        };
+        let (mut bolts_moved, mut bursts_moved) = (false, false);
+        // A second is far longer than the highest drop's fall or a burst's
+        // life: a run past it is a bolt that never landed.
+        for ticks in 0.. {
+            assert!(
+                ticks < DEFAULT_TICK_HZ,
+                "a bolt or a burst outlived a second"
+            );
+            tick(&mut module, &mut world);
+            let now = {
+                let stage = lock(&module.towers.shared);
+                (
+                    ids(&stage.bolts, Bolt::id),
+                    ids(&stage.bursts, |burst| burst.id),
+                )
+            };
+            let shots: HashMap<Entity, Shot> = rows::<Shot>(&mut world).into_iter().collect();
+            let blasts: HashMap<Entity, Blast> = rows::<Blast>(&mut world).into_iter().collect();
+            for (entity, shot) in &shots {
+                if let Some(was) = shots_before.get(entity) {
+                    let step = (shot.centre - was.centre).length();
+                    assert!(
+                        step <= flown * (1.0 + 1e-9),
+                        "a bolt's entity jumped {step} m in a tick, past the {flown} m a \
+                         bolt flies",
+                    );
+                }
+            }
+            for (entity, blast) in &blasts {
+                if let Some(was) = blasts_before.get(entity) {
+                    assert_eq!(was, blast, "a burst's entity moved to another burst");
+                }
+            }
+            bolts_moved |= places_moved(&before.0, &now.0);
+            bursts_moved |= places_moved(&before.1, &now.1);
+            if now.0.is_empty() && now.1.is_empty() {
+                break;
+            }
+            before = now;
+            (shots_before, blasts_before) = (shots, blasts);
+        }
+        assert!(
+            bolts_moved && bursts_moved,
+            "the stage never reordered its lists (bolts {bolts_moved}, bursts \
+             {bursts_moved}), so nothing here tells a mirror by identity from one by place",
+        );
     }
 
     /// A creep is drawn as the box around its sphere.

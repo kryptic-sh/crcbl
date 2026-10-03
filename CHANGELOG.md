@@ -61,10 +61,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `&[SceneEntityId]` rather than one id, with `duplicate` answering every copy's
   id.
 
-- **The editor's `EditError` gained `NotPlaying` and `PlayCommand`** (see Added:
-  play controls), so an exhaustive match over it must add them. Nothing in the
-  engine's public API breaks with the play controls: `GameModule` is unchanged,
-  and `crcbl::registry` only gains items.
+- **The editor's `EditError` gained `NotPlaying` and `PlayCommand`, and its
+  `keys::Action` gained `PlayAction`** (see Added: play controls — the number
+  keys send the strip's actions), so an exhaustive match over either must add
+  them. Nothing in the engine's public API breaks with the play controls:
+  `GameModule` is unchanged, and `crcbl::registry` only gains items. Towers'
+  `tower::Bolt::fire` takes the shot's id first, so a bolt fired by hand names
+  one.
 
 - **`crcbl::registry::Registry::register` is bounded on `Validate`** (see
   Added), so every registered component needs an impl: `impl Validate for T {}`
@@ -900,14 +903,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   every module with `ClientInputs::empty()` — and the status line says it was
   sent, or names the game's refusal after the tick that read it.
   `Document::play_controls`, `play_status`, `take_play_refusals` and `picked`
-  are the rest of the document's side. **Towers registers controls**: _Place
-  tower_ (a picked plot and a kind), _Start wave_, _Upgrade_ (a picked plot) and
-  _Restart_, encoded through the same `Controls`-to-frame conversion
-  `Game::set_controls` makes, so the bytes are the client's; the status is
-  Lives, Gold, Wave and Outcome, and a refusal is the label a player is shown
-  (`THAT PLOT IS TAKEN`). Towers' play module now also mirrors its towers, bolts
-  and bursts as runtime components (`turrets`, `bolts` and `bursts`), so a tower
-  placed in the editor is drawn on its plot at its tier's size.
+  are the rest of the document's side. **An action can pick something the run
+  made**: `ParamKind::PickedRuntime(system)` names a runtime system and hands
+  the encoder `PlayArg::PickedRuntime(Entity)`; the encoder (`PlayEncoder`) is
+  handed the world the module plays in to read that entity's row, and
+  `Registry::encode_play(world, system, action, args)` refuses an entity the
+  system does not hold (`Registry::runtime_entities_in`). The editor gives the
+  entities of such a system a picking collider after every tick, and a click on
+  one is the play's runtime pick (`Document::hit` answering `Hit::Spawned`,
+  `set_runtime_pick`, `picked_runtime`), selecting nothing and gone on stop.
+  Every refusal of a frame is on the status line, joined in order and each
+  logged; the keys `1` to `9` send the strip's first nine actions, each button
+  labelled with its key, and never while a field is typed into; a command sent
+  while paused is read on the first tick after resume; a choice resets when play
+  stops; two games playing one scene each get a row, in tick order. **Towers
+  registers controls**: _Place tower_ (a picked plot and a kind), _Start wave_,
+  _Upgrade_ (a picked tower, encoded as the plot it stands on) and _Restart_,
+  encoded through the same `Controls`-to-frame conversion `Game::set_controls`
+  makes, so the bytes are the client's; the status is Lives, Gold, Wave and
+  Outcome, and a refusal is the label a player is shown (`THAT PLOT IS TAKEN`).
+  Towers' play module now also mirrors its towers, bolts and bursts as runtime
+  components (`turrets`, `bolts` and `bursts`), so a tower placed in the editor
+  is drawn on its plot at its tier's size. Every creep, tower, bolt and burst is
+  mirrored by what it is — body, plot, or the new `Bolt::id` (the run's shot
+  count when it was fired, which a burst takes from its bolt) — beside the run,
+  so an entity stands for one thing for as long as it lives rather than for a
+  place in a swap-removed list. The ids are not in towers' state hash, which is
+  unchanged, so recorded replays still re-simulate.
 - **Control hints: how an action's binding is shown to the player right now.**
   `crcbl_input::ActionMap::hint(action)` returns a `Hint` — the binding's
   `Device`, the `Binding`, the pad family (`Option<PadKind>`, set for a pad

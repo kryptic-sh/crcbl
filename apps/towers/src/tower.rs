@@ -625,6 +625,10 @@ pub enum BoltOutcome {
 /// One bolt in the air.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bolt {
+    /// Which shot of its run it is, given by whoever fired it: what a tool
+    /// that mirrors the stage keys the bolt by, because its place in the
+    /// stage's list moves as other bolts land. The flight never reads it.
+    id: u64,
     /// Where its centre is, in metres.
     at: DVec3,
     /// The unit direction it is travelling in, kept so a bolt whose target died
@@ -645,16 +649,24 @@ pub struct Bolt {
 }
 
 impl Bolt {
-    /// Fires a bolt from `from` at `target`, with `spec`'s damage and burst.
+    /// Fires shot `id` from `from` at `target`, with `spec`'s damage and
+    /// burst.
     #[must_use]
-    pub fn fire(from: DVec3, target: &Creep, spec: &TowerSpec) -> Self {
+    pub fn fire(id: u64, from: DVec3, target: &Creep, spec: &TowerSpec) -> Self {
         Self {
+            id,
             at: from,
             heading: (target.centre() - from).normalize_or_zero(),
             target: target.body(),
             damage: spec.damage,
             burst_m: spec.burst_m,
         }
+    }
+
+    /// Which shot of its run it is — see [`Bolt::fire`].
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
     }
 
     /// Where it is, for the frame to draw it.
@@ -993,7 +1005,7 @@ mod tests {
         let half_step = 0.5 * BOLT_SPEED * DT;
         let approach = DVec3::new(0.0, 0.0, 1.0);
         let from = creep.centre() + approach * half_step;
-        let mut bolt = Bolt::fire(from, &creep, Kind::Bolt.spec(Tier::Base));
+        let mut bolt = Bolt::fire(0, from, &creep, Kind::Bolt.spec(Tier::Base));
 
         assert!(
             !world
@@ -1164,7 +1176,7 @@ mod tests {
         let (mut world, _) = Map::built_in().world();
         let creep = creep_at(&mut world, 6.0);
         let tower = built("entry", Kind::Bolt);
-        let mut bolt = Bolt::fire(tower.muzzle(), &creep, tower.spec());
+        let mut bolt = Bolt::fire(0, tower.muzzle(), &creep, tower.spec());
         creep.despawn(&mut world);
 
         let mut outcome = BoltOutcome::Flying;
@@ -1218,7 +1230,7 @@ mod tests {
             assert!(walked < 10_000, "the entry plot never had a creep in range");
         }
 
-        let mut bolt = Bolt::fire(muzzle, &creep, tower.spec());
+        let mut bolt = Bolt::fire(0, muzzle, &creep, tower.spec());
         creep.despawn(&mut world);
         let mut ticks = 0_u64;
         while bolt.step(&mut world, &[], DT) == BoltOutcome::Flying {

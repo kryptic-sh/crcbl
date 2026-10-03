@@ -12512,42 +12512,39 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   - **Play controls (2026-10-03): what they leave.** A game registers
     `PlayControls` beside its module and the editor's play strip sends its
     actions as the game's command bytes (`08-editor.md`'s _Play controls_);
-    towers' are built. Deferred or not covered, each with what it takes:
-    - **Only the newest refusal of a frame reaches the status line.** The app
-      takes every refusal off the document after the frame's ticks and shows the
-      last; an earlier one in the same frame is dropped unshown (not logged
-      either). Two commands in one frame need two clicks inside one frame, so it
-      has not mattered; a log line per refusal, or a joined message, would cover
-      it.
+    towers' are built, and the polish of the same day (`08-editor.md`'s
+    _Play-strip polish_) closed what this slice deferred about refusals, picking
+    a tower, mirroring by identity, keys and the untested cases. Deferred or not
+    covered, each with what it takes:
     - **A stage's refusals wait for a tool to take them.** Towers' play module
       leaves refusals on the stage for `PlayControls::refusals`; the editor
       takes them every frame, but a tool that ticks the module without reading
       them would let them pile up, one per refused command.
-    - **Upgrade picks the plot, not the tower.** A tower is a runtime entity,
-      which is drawn and never picked (no id, no collider), so _Upgrade_ takes
-      `ParamKind::Picked("plots")`. Picking a runtime entity would need a
-      picked-argument kind naming a runtime system and colliders for runtime
-      entities, which the 2026-10-01 decision kept off.
-    - **Bolts and bursts are mirrored by their place in the stage's lists**, not
-      by identity: the stage swap-removes a spent bolt, so one entity may stand
-      for a different bolt the next tick. The picture is right every tick; a
-      renderer's motion history over such an entity is not, which only matters
-      if the editor ever draws motion blur or interpolates.
-    - **The strip has no keys.** Every action is a button; a binding per action
-      would go through the editor's `ActionMap` like F5 and F6, and a game's
-      actions would need default bindings in the description.
+    - **The runtime pick is not drawn.** A click on a built tower makes it the
+      pick (`Document::set_runtime_pick`) but nothing outlines it, so the only
+      sign is what _Upgrade_ then does; the selection's outline takes scene ids.
+      Drawing it needs the instances to outline a `Drawn::Spawned` entity the
+      way they outline a selected one.
+    - **Decided 2026-10-03: the number keys are positional.** `1` to `9` send
+      the strip's first nine actions in the order drawn, so a scene playing two
+      games renumbers towers' actions after the first game's. Declined: default
+      bindings in each game's description, which would collide between two games
+      and need a rule for who wins; a tenth action and beyond has a button and
+      no key.
+    - **Behaviour worth knowing**: a Ctrl click on a built tower picks it and
+      keeps the selection, where a plain one clears the selection; a plain click
+      anywhere else clears the pick. A command sent while paused is queued and
+      read on the first tick after resume (decided, and tested). The status line
+      joins every refusal of a frame with no limit, so a burst of refused
+      commands makes one long line — each is logged as well.
     - **The tick a frame is stamped with is not observed.** `send_play` stamps
       the play's tick count; towers ignores a frame's tick, and no test reads
       it.
-    - **Not tested:** two games' controls in one played scene (each is a row of
-      the strip, keyed by its system, but no vocabulary has two), a command sent
-      while paused and read on resume (the queue holds it by construction), and
-      the strip's choice reset across plays (a choice keeps its pick for the
-      editor's run).
-    - **Coverage gaps:** the strip, the placed towers, bolts and bursts have
-      never been looked at on a device — every check is headless. They are drawn
-      in the greybox grey like the creeps, one material for every kind and tier,
-      so a splash tower and a slow one look the same.
+    - **Coverage gaps:** the strip, its key labels, the placed towers, bolts and
+      bursts and a click picking a tower have never been looked at on a device —
+      every check is headless, the click through the null backend's camera. They
+      are drawn in the greybox grey like the creeps, one material for every kind
+      and tier, so a splash tower and a slow one look the same.
   - **An edit-mode schedule, only if something needs one.** Nothing ticks while
     editing, so play needs no schedule to switch from; the selection, gizmo and
     camera systems the plan put in one are plain editor code today (the

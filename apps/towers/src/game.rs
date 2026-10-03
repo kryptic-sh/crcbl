@@ -387,6 +387,10 @@ type Sender = Option<PeerId>;
 /// where they are, because [`Stage::elapsed`] is what they are measured against.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Burst {
+    /// The [`Bolt::id`] of the bolt that raised it — one burst per bolt, so
+    /// it names the burst as well: what a tool mirroring the stage keys it
+    /// by.
+    id: u64,
     /// Where the bolt stopped, in metres.
     at: DVec3,
     /// How far the overlap that wounded reached, in metres.
@@ -512,8 +516,10 @@ impl Stage {
     /// the order the players' commands and the systems put them there, so a
     /// run handed its commands in another order hashes otherwise. The physics
     /// world is left out: every body in it is a creep's sphere, hashed here as
-    /// the creep's centre, or the field's fixed ground and exit. What
-    /// [`FieldReplica`] gives the server's state hash.
+    /// the creep's centre, or the field's fixed ground and exit. So are a
+    /// bolt's and a burst's id: the simulation never reads them, and they are
+    /// numbered from [`Stage::shots`], which is in. What [`FieldReplica`]
+    /// gives the server's state hash.
     fn hash_state(&self, hasher: &mut dyn Hasher) {
         let float = |hasher: &mut dyn Hasher, value: f64| hasher.write_u64(value.to_bits());
         for count in [
@@ -695,6 +701,7 @@ impl Stage {
         }
         let (at, radius_m) = (bolt.at(), bolt.burst_m());
         self.bursts.push(Burst {
+            id: bolt.id(),
             at,
             radius_m,
             raised_at: self.elapsed,
@@ -925,7 +932,9 @@ fn run_team_tick(stage: &mut Stage, intents: &[(Sender, Intent)], dt: f64) {
             tower::acquire(world, creeps, muzzle, spec.range_m, scratch)
         };
         if let Some(creep) = target {
-            let bolt = Bolt::fire(muzzle, &stage.creeps[creep], spec);
+            // Numbered by the shots fired before it this run, which the
+            // state hash already counts: an id that costs no new state.
+            let bolt = Bolt::fire(stage.shots, muzzle, &stage.creeps[creep], spec);
             stage.bolts.push(bolt);
             stage.towers[index].fired(now);
             stage.shots += 1;
@@ -2202,7 +2211,7 @@ mod tests {
             .iter()
             .find(|creep| creep.body() == target)
             .expect("the target is on the field");
-        let bolt = Bolt::fire(tower.muzzle(), aimed, spec);
+        let bolt = Bolt::fire(0, tower.muzzle(), aimed, spec);
         stage.bolts.push(bolt);
         // The health window that makes every reading below legible: one helping
         // of this damage leaves a creep alive with a number to compare, and two
@@ -2267,7 +2276,7 @@ mod tests {
             .iter()
             .find(|creep| creep.body() == target)
             .expect("the target is on the field");
-        stage.bolts.push(Bolt::fire(tower.muzzle(), aimed, spec));
+        stage.bolts.push(Bolt::fire(0, tower.muzzle(), aimed, spec));
 
         let mut seen = 0;
         for _ in 0..30 {

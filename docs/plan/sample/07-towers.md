@@ -246,7 +246,7 @@ not built anywhere yet.
   field `Map::load` refuses does not play, naming the rule.
 - **The editor takes part in a played field (2026-10-03).** Towers registers
   play controls beside its module (`crate::game`'s `play::controls`): _Place
-  tower_ on a picked plot with a kind, _Start wave_, _Upgrade_ on a picked plot
+  tower_ on a picked plot with a kind, _Start wave_, _Upgrade_ on a picked tower
   and _Restart_. The editor lists them in a strip under its toolbar while the
   field plays, and a click is encoded into the four bytes solo's client sends
   for the same command — through the one `Controls`-to-frame conversion
@@ -258,6 +258,18 @@ not built anywhere yet.
   mirrored beside the creeps (`Turret`, `Shot` and `Blast`, runtime components
   drawn as greybox boxes), so a placed tower stands on its plot, at its tier's
   size. Not looked at on a device: every check is headless.
+- **The editor picks a built tower, and every mirrored thing keeps its entity
+  (2026-10-03).** _Upgrade_ takes `ParamKind::PickedRuntime("turrets")`: the
+  editor gives each mirrored tower a picking collider, a click on one is the
+  play's runtime pick, and the encoder reads the plot off the picked `Turret`'s
+  row — the client's `UpgradeTower` names a plot. A bolt carries an id
+  (`Bolt::id`, the run's shot count when it was fired) and a burst its bolt's,
+  so the mirror keys every creep, tower, bolt and burst by what it is (body,
+  plot, id) beside the run, not by its place in the stage's swap-removed lists:
+  an entity stands for one thing from the tick it arrives to the tick it goes.
+  The ids are not in the state hash — the simulation never reads them, and the
+  shot count they come from already is — so the hash, recorded replays and their
+  re-simulation are unchanged.
 - **Milestone 3's co-op over real transport is built; its exit criterion is not
   met.** Since 2026-10-01 `towers --host [PORT]` runs the stage on a
   `crcbl_server::Host` behind `crcbl::lan`'s UDP listener and announcer, and the

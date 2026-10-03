@@ -598,3 +598,104 @@ fn a_command_is_refused_unless_a_running_game_can_encode_it() {
         "a refused command reached the game",
     );
 }
+
+/// The runtime system towers' `Upgrade` picks from, read off its
+/// description.
+fn upgrade_picks_from(document: &Document) -> &'static str {
+    let controls = document.play_controls();
+    let (_, controls) = controls.first().expect("towers offers play controls");
+    let upgrade = &controls.actions[action(document, "Upgrade")];
+    match upgrade.params {
+        [crcbl::registry::ParamKind::PickedRuntime(system)] => system,
+        other => panic!("Upgrade takes {other:?}, not one picked tower"),
+    }
+}
+
+/// **A built tower is what a ray down onto its plot hits, it becomes the
+/// runtime pick, and `Upgrade` steps that tower up** — the picked entity
+/// encoded as the plot it stands on, the purse paying the upgrade's price.
+/// The pick names nothing in another runtime system, and goes with the
+/// world on stop.
+#[test]
+fn a_built_tower_is_hit_picked_and_stepped_up_by_upgrade() {
+    use crate::document::Hit;
+
+    let mut document = field();
+    document.play().expect("plays");
+    let feet = select_plot(&mut document, 0);
+    place(&mut document, Kind::Bolt.index());
+    run(&mut document, 1);
+    let [tower] = standing_on(&mut document, feet)[..] else {
+        panic!("one tower stands on the plot");
+    };
+    let paid = STARTING_GOLD - cost(Kind::Bolt);
+    assert_eq!(status_of(&mut document, "Gold"), paid.to_string());
+
+    let down = Ray::new(widen(feet + Vec3::Y * 10.0), DVec3::NEG_Y);
+    assert_eq!(document.hit(&down), Some(Hit::Spawned(tower)));
+    assert_eq!(
+        document.pick(&down),
+        None,
+        "a tower was taken for a scene pick"
+    );
+    let turrets = upgrade_picks_from(&document);
+    assert_eq!(
+        document.picked_runtime(turrets),
+        None,
+        "a pick before a click"
+    );
+    document.set_runtime_pick(Some(tower));
+    assert_eq!(document.picked_runtime(turrets), Some(tower));
+    assert_eq!(document.picked_runtime("walkers"), None);
+
+    let upgrade = action(&document, "Upgrade");
+    document
+        .send_play(TOWERS_SYSTEM, upgrade, &[PlayArg::PickedRuntime(tower)])
+        .expect("towers encodes the picked tower");
+    let (_, before) = centre_and_half(&mut document, tower);
+    run(&mut document, 1);
+    assert!(document.take_play_refusals().is_empty());
+    let upgraded = Kind::Bolt.spec(Tier::Upgraded).cost;
+    assert_eq!(
+        status_of(&mut document, "Gold"),
+        (paid - upgraded).to_string()
+    );
+    let (_, after) = centre_and_half(&mut document, tower);
+    assert!(after.y > before.y, "the picked tower did not grow");
+
+    assert!(document.stop().expect("restores"));
+    document.play().expect("plays again");
+    assert_eq!(
+        document.picked_runtime(turrets),
+        None,
+        "a pick outlived play"
+    );
+}
+
+/// **A command sent while paused is queued, and read on the first tick after
+/// resume** — not refused, not dropped, and not read while nothing ticks.
+#[test]
+fn a_command_sent_while_paused_is_read_on_the_tick_after_resume() {
+    let mut document = field();
+    document.play().expect("plays");
+    assert!(document.pause());
+    let start = action(&document, "Start wave");
+    document
+        .send_play(TOWERS_SYSTEM, start, &[])
+        .expect("a paused game takes a command");
+    let period = Duration::try_from_secs_f64(document.world.tick_dt()).expect("a period");
+    assert_eq!(document.advance(period), 0, "a paused scene ticked");
+    assert_eq!(
+        status_of(&mut document, "Wave"),
+        format!("0/{}", WAVES.len())
+    );
+
+    document.play().expect("resumes");
+    run(&mut document, 1);
+    assert_eq!(
+        status_of(&mut document, "Wave"),
+        format!("1/{}", WAVES.len()),
+        "the command sent while paused was not read on resume",
+    );
+    assert!(document.take_play_refusals().is_empty());
+}

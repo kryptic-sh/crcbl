@@ -354,7 +354,7 @@ fn towers_creeps_are_drawn_while_the_field_plays_and_gone_after_stop() {
 /// An editor on towers' committed field, opened from its directory the way
 /// `editor <SCENE_DIR>` opens it, whose frames are each `ticks` of towers'
 /// ticks long.
-fn towers_editor(frames: u64, ticks: u32) -> Editor<HeadlessShell> {
+pub(super) fn towers_editor(frames: u64, ticks: u32) -> Editor<HeadlessShell> {
     let field = Path::new(env!("CARGO_MANIFEST_DIR")).join("../towers/assets/scenes/field.scn");
     let mut options = options(frames);
     options.scene = Some(field);
@@ -367,7 +367,7 @@ fn towers_editor(frames: u64, ticks: u32) -> Editor<HeadlessShell> {
 
 /// How many entities the editor's instances draw that a playing module
 /// spawned.
-fn spawned_drawn(editor: &Editor<HeadlessShell>) -> usize {
+pub(super) fn spawned_drawn(editor: &Editor<HeadlessShell>) -> usize {
     use crate::app::instances::Drawn;
 
     editor
@@ -379,7 +379,7 @@ fn spawned_drawn(editor: &Editor<HeadlessShell>) -> usize {
 }
 
 /// The play strip's button the last frame drew reading `label`.
-fn play_button(editor: &Editor<HeadlessShell>, label: &str) -> NodeKey {
+pub(super) fn play_button(editor: &Editor<HeadlessShell>, label: &str) -> NodeKey {
     editor
         .panels
         .play_buttons()
@@ -395,7 +395,7 @@ fn play_button(editor: &Editor<HeadlessShell>, label: &str) -> NodeKey {
 }
 
 /// What the play strip last drew for `label`.
-fn readout(editor: &Editor<HeadlessShell>, label: &str) -> String {
+pub(super) fn readout(editor: &Editor<HeadlessShell>, label: &str) -> String {
     editor
         .panels
         .play_readout()
@@ -406,7 +406,7 @@ fn readout(editor: &Editor<HeadlessShell>, label: &str) -> String {
 }
 
 /// Selects the field's first plot, in file order.
-fn select_first_plot(editor: &mut Editor<HeadlessShell>) {
+pub(super) fn select_first_plot(editor: &mut Editor<HeadlessShell>) {
     let (_, plots) = editor
         .document_mut()
         .outline()
@@ -417,7 +417,7 @@ fn select_first_plot(editor: &mut Editor<HeadlessShell>) {
 }
 
 /// What a base tower of `kind` costs.
-fn tower_cost(kind: crcbl_towers::tower::Kind) -> u32 {
+pub(super) fn tower_cost(kind: crcbl_towers::tower::Kind) -> u32 {
     kind.spec(crcbl_towers::Tier::Base).cost
 }
 
@@ -450,7 +450,7 @@ fn the_play_strip_places_a_tower_and_a_taken_plot_is_refused_on_the_status_line(
     select_first_plot(&mut editor);
     let before = spawned_drawn(&editor);
 
-    let at = centre(&editor, play_button(&editor, "Place tower"));
+    let at = centre(&editor, play_button(&editor, "Place tower (1)"));
     click(&mut editor, at);
     assert_eq!(editor.panels.status(), ("Sent Place tower", Tone::Info));
     assert_eq!(
@@ -492,7 +492,7 @@ fn the_strips_kind_choice_steps_and_the_build_takes_it() {
     click(&mut editor, at);
     play_button(&editor, second);
 
-    let at = centre(&editor, play_button(&editor, "Place tower"));
+    let at = centre(&editor, play_button(&editor, "Place tower (1)"));
     click(&mut editor, at);
     assert_eq!(
         readout(&editor, "Gold"),
@@ -511,12 +511,12 @@ fn the_strip_starts_a_wave_and_a_build_needs_a_plot() {
     let waves = crcbl_towers::WAVES.len();
     assert_eq!(readout(&editor, "Wave"), format!("0/{waves}"));
 
-    let at = centre(&editor, play_button(&editor, "Start wave"));
+    let at = centre(&editor, play_button(&editor, "Start wave (2)"));
     click(&mut editor, at);
     assert_eq!(readout(&editor, "Wave"), format!("1/{waves}"));
 
     editor.document_mut().select(None);
-    let at = centre(&editor, play_button(&editor, "Place tower"));
+    let at = centre(&editor, play_button(&editor, "Place tower (1)"));
     click(&mut editor, at);
     let (text, tone) = editor.panels.status();
     assert_eq!(tone, Tone::Warning, "{text}");
@@ -537,7 +537,7 @@ fn stop_takes_the_strip_and_the_towers_away() {
     let before = editor.document_mut().files().expect("ids");
     tap(&mut editor, KeyCode::F5);
     select_first_plot(&mut editor);
-    let at = centre(&editor, play_button(&editor, "Place tower"));
+    let at = centre(&editor, play_button(&editor, "Place tower (1)"));
     click(&mut editor, at);
     assert!(spawned_drawn(&editor) > 0, "nothing was built");
 

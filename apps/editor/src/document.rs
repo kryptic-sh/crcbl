@@ -62,7 +62,7 @@ mod systems;
 mod validation;
 
 pub use origin::{open_target, save_target};
-pub use play::PlayState;
+pub use play::{Hit, PlayState};
 pub use recovery::{
     IN_USE_SUFFIX, InUse, KEEP_NEWEST, MAX_AGE, Pruned, RECOVERY_DIR, RecoveryCopy, SIDECAR,
     list_copies, mark_in_use, prune_copies, remove_copy,
@@ -663,7 +663,9 @@ impl Document {
         self.membership
     }
 
-    /// The nearest entity `ray` hits, or [`None`] where it hits nothing.
+    /// The nearest entity `ray` hits, or [`None`] where it hits nothing — or
+    /// where the nearest thing it hits is a [`Hit::Spawned`] entity standing
+    /// in front, which [`hit`](Self::hit) tells apart.
     ///
     /// **Only entities with a collider pick**, which is
     /// `docs/plan/08-editor.md`'s missing piece 8 and is why
@@ -671,19 +673,35 @@ impl Document {
     /// that moves something.
     #[must_use]
     pub fn pick(&mut self, ray: &Ray) -> Option<SceneEntityId> {
-        let entity = self.world.system_mut::<PhysicsSystem>()?.cast_ray(ray)?.0;
-        self.ids.id(entity)
+        self.hit(ray)?.scene()
     }
 
-    /// [`pick`](Self::pick), taking the ray a viewport pixel unprojects to.
+    /// The nearest thing `ray` hits: one of the scene's entities, or one a
+    /// playing module spawned into a runtime system a play action picks
+    /// from — the only spawned entities given a collider, see
+    /// [`picked_runtime`](Self::picked_runtime).
+    #[must_use]
+    pub fn hit(&mut self, ray: &Ray) -> Option<Hit> {
+        let entity = self.world.system_mut::<PhysicsSystem>()?.cast_ray(ray)?.0;
+        Some(self.ids.id(entity).map_or(Hit::Spawned(entity), Hit::Scene))
+    }
+
+    /// [`hit`](Self::hit), taking the ray a viewport pixel unprojects to.
     ///
     /// The join between [`crcbl::render::Camera::ray_through`], which answers
     /// in render space's `f32`, and [`PhysicsSystem::cast_ray`], which asks in
     /// simulation space's `f64`. One place, because a widening written twice is
     /// a widening that can disagree with itself.
     #[must_use]
+    pub fn hit_ray(&mut self, ray: &ViewRay) -> Option<Hit> {
+        self.hit(&Ray::new(widen(ray.origin), widen(ray.direction)))
+    }
+
+    /// [`pick`](Self::pick), taking the ray a viewport pixel unprojects to,
+    /// through [`hit_ray`](Self::hit_ray).
+    #[must_use]
     pub fn pick_ray(&mut self, ray: &ViewRay) -> Option<SceneEntityId> {
-        self.pick(&Ray::new(widen(ray.origin), widen(ray.direction)))
+        self.hit_ray(ray)?.scene()
     }
 
     /// Where `id` stands and how far it reaches, in render space — what a
@@ -703,8 +721,11 @@ impl Document {
     /// **Drawn, and nothing else.** They have no [`SceneEntityId`], so the
     /// [`outline`](Self::outline) does not list them, no command can name
     /// them, and a save has no row to write them as; a click does not select
-    /// one, because only the scene's systems are given colliders; and
-    /// [`stop`](Self::stop) throws away the world they are in.
+    /// one — only the scene's systems, and a runtime system a running game's
+    /// play action picks from, are given colliders, and a click on one of the
+    /// latter is a play pick ([`set_runtime_pick`](Self::set_runtime_pick))
+    /// rather than a selection; and [`stop`](Self::stop) throws away the world
+    /// they are in.
     #[must_use]
     pub fn spawned(&mut self) -> Vec<Entity> {
         self.registry.runtime_entities(&mut self.world)

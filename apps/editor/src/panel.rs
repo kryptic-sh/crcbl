@@ -57,7 +57,8 @@
 //!
 //! While a scene plays and its game offers play controls, a second strip
 //! under the toolbar lists them and the run's numbers (`play`'s module docs):
-//! a click there is a command the game's module is sent, not an edit.
+//! a click there, or the number key its button is labelled with, is a
+//! command the game's module is sent, not an edit.
 //!
 //! # Selection, in both directions
 //!
@@ -124,6 +125,7 @@
 use std::collections::BTreeMap;
 
 use crcbl::math::Vec2;
+use crcbl::registry::PlayControls;
 use crcbl::scene::scn::SceneEntityId;
 use crcbl::ui::style::Declaration;
 use crcbl::ui::tree::{
@@ -845,6 +847,33 @@ impl Panels {
         [keys[3], keys[4], keys[5]]
     }
 
+    /// Sends the play strip's action at `index`, counting every row's
+    /// actions in the order drawn — what the number key `index + 1` asks
+    /// for — and says on the status line that it was sent, or why not.
+    /// Nothing at an index the strip has no action at, which is every index
+    /// while no game offers controls.
+    pub(crate) fn send_numbered_play(&mut self, document: &mut Document, index: usize) {
+        let controls = owned_controls(document);
+        let Some(asked) = play::Strip::numbered(&controls, index) else {
+            crcbl::log::info!("editor: the play strip has no action {}", index + 1);
+            return;
+        };
+        let sent = self.strip.send(document, &controls, &asked);
+        self.report_sent(sent);
+    }
+
+    /// Says on the status line what became of an action sent from the play
+    /// strip: that it was sent, or why it was not, as a warning.
+    fn report_sent(&mut self, sent: Result<String, String>) {
+        match sent {
+            Ok(sent) => self.set_status(sent, Tone::Info),
+            Err(unsent) => {
+                crcbl::log::warn!("editor: {unsent}");
+                self.set_status(unsent, Tone::Warning);
+            }
+        }
+    }
+
     /// The play strip, as the last frame laid it out — [`None`] on a frame
     /// that drew none.
     #[cfg(test)]
@@ -1033,14 +1062,7 @@ impl Panels {
         let mut path_input = None;
         let mut answered = None;
         let mut recovered = None;
-        // Owned, so the strip is built while the inspector borrows the
-        // document: the controls are a few pointers and the numbers a few
-        // strings.
-        let controls: Vec<_> = document
-            .play_controls()
-            .into_iter()
-            .map(|(system, controls)| (system.to_owned(), *controls))
-            .collect();
+        let controls = owned_controls(document);
         let play_status = document.play_status();
 
         // Last frame's scrolling blocks, read before the fields are borrowed
@@ -1195,13 +1217,8 @@ impl Panels {
             self.relist_assets(document);
         }
         if let Some(asked) = asked_play {
-            match self.strip.send(document, &controls, &asked) {
-                Ok(sent) => self.set_status(sent, Tone::Info),
-                Err(unsent) => {
-                    crcbl::log::warn!("editor: {unsent}");
-                    self.set_status(unsent, Tone::Warning);
-                }
-            }
+            let sent = self.strip.send(document, &controls, &asked);
+            self.report_sent(sent);
         }
         self.follow_outliner(document, input.select);
         self.follow_rename(document, rename_input);
@@ -1501,6 +1518,17 @@ fn scroll(ui: &mut Ui, scrollers: &[NodeKey], at: Vec2, delta: f32) {
     };
     let offset = ui.scroll_offset_of(key);
     ui.set_scroll_offset_of(key, Vec2::new(offset.x, (offset.y + delta).max(0.0)));
+}
+
+/// The running games' play controls, each with its system, owned — so the
+/// strip is built while the inspector borrows the document: the controls are
+/// a few pointers.
+fn owned_controls(document: &Document) -> Vec<(String, PlayControls)> {
+    document
+        .play_controls()
+        .into_iter()
+        .map(|(system, controls)| (system.to_owned(), *controls))
+        .collect()
 }
 
 /// The toolbar over the panes: play or stop, pause or resume, where play

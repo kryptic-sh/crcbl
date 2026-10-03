@@ -138,6 +138,33 @@ pub const PAUSE: &str = "editor_pause";
 /// renames with. See [`crate::panel::Panels::begin_rename`].
 pub const RENAME: &str = "editor_rename";
 
+/// Send the play strip's actions, in the order drawn: the number keys `1` to
+/// `9`, one action each. See [`Action::PlayAction`].
+pub const PLAY_ACTIONS: [&str; 9] = [
+    "editor_play_action_1",
+    "editor_play_action_2",
+    "editor_play_action_3",
+    "editor_play_action_4",
+    "editor_play_action_5",
+    "editor_play_action_6",
+    "editor_play_action_7",
+    "editor_play_action_8",
+    "editor_play_action_9",
+];
+
+/// The key each of [`PLAY_ACTIONS`] is bound to, in its order.
+const PLAY_ACTION_KEYS: [KeyCode; PLAY_ACTIONS.len()] = [
+    KeyCode::Digit1,
+    KeyCode::Digit2,
+    KeyCode::Digit3,
+    KeyCode::Digit4,
+    KeyCode::Digit5,
+    KeyCode::Digit6,
+    KeyCode::Digit7,
+    KeyCode::Digit8,
+    KeyCode::Digit9,
+];
+
 /// One thing the keyboard asked for this frame.
 ///
 /// Collected out of the map and applied afterwards, because reading the map
@@ -187,6 +214,10 @@ pub enum Action {
     Rename,
     /// Ask for a scene directory to open in place of the one being edited.
     Open,
+    /// Send the play strip's action at this index, counting every row's
+    /// actions in the order drawn — see `crate::panel`'s
+    /// `Panels::send_numbered_play`.
+    PlayAction(usize),
     /// Answer the unsaved bar.
     Unsaved(Unsaved),
 }
@@ -343,6 +374,12 @@ pub fn map() -> ActionMap {
     // F2 too, so a rename starts while the outliner row it renames holds the
     // keyboard — which is where a person who just clicked the row is.
     map.declare(button(RENAME, vec![Binding::Key(KeyCode::F2)]));
+    // The digits, which `ui` does not bind and `text` does: a field being
+    // typed into takes them, as it takes every letter, and the editing rule
+    // in `actions` stops them besides.
+    for (name, key) in PLAY_ACTIONS.into_iter().zip(PLAY_ACTION_KEYS) {
+        map.declare(button(name, vec![Binding::Key(key)]));
+    }
 
     // Holding a nudge key repeats it, which is how a coarse move is made — the
     // schedule the reserved navigation actions carry, so a held arrow moves an
@@ -441,7 +478,10 @@ pub fn release_keys(map: &mut ActionMap) {
         PLAY,
         PAUSE,
         RENAME,
-    ] {
+    ]
+    .into_iter()
+    .chain(PLAY_ACTIONS)
+    {
         for binding in map.bindings(name).unwrap_or_default() {
             binding.visit_keys(|key| keys.push(key));
         }
@@ -547,6 +587,11 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
     }
     if map.just_pressed(RENAME) {
         actions.push(Action::Rename);
+    }
+    for (index, name) in PLAY_ACTIONS.into_iter().enumerate() {
+        if map.just_pressed(name) {
+            actions.push(Action::PlayAction(index));
+        }
     }
     actions
 }
@@ -871,9 +916,38 @@ mod tests {
     #[test]
     fn an_unbound_key_asks_for_nothing() {
         let mut keys = Keyboard::new();
-        for key in [KeyCode::KeyQ, KeyCode::Digit1, KeyCode::Home] {
+        for key in [KeyCode::KeyQ, KeyCode::Digit0, KeyCode::Home] {
             assert_eq!(keys.tap(key, Modifiers::empty()), [], "{key:?}");
         }
+    }
+
+    /// **The number keys send the play strip's actions in order**, `1` the
+    /// first: still with a panel holding the keyboard, and never as a chord
+    /// or while a field is typed into, which takes the digits as text.
+    #[test]
+    fn the_number_keys_ask_for_the_strips_actions_in_order() {
+        let mut keys = Keyboard::new();
+        for (index, key) in PLAY_ACTION_KEYS.into_iter().enumerate() {
+            assert_eq!(
+                keys.tap(key, Modifiers::empty()),
+                [Action::PlayAction(index)],
+                "{key:?}"
+            );
+        }
+        assert_eq!(keys.tap(KeyCode::Digit1, Modifiers::CTRL), []);
+
+        push_ui(&mut keys.map);
+        assert_eq!(
+            keys.tap(KeyCode::Digit2, Modifiers::empty()),
+            [Action::PlayAction(1)],
+            "the `ui` context took a digit"
+        );
+        text::sync(&mut keys.map, true).expect("declared, and `ui` is below");
+        assert_eq!(
+            keys.tap(KeyCode::Digit2, Modifiers::empty()),
+            [],
+            "a digit typed into a field still reached the strip",
+        );
     }
 
     /// **While the `ui` context is pushed the arrows are the panel's**, and

@@ -119,7 +119,7 @@ use crcbl::ui::tree::{DockLayout, SelectMode};
 use crate::args::Options;
 use crate::clipboard::{Paste, PasteTarget};
 use crate::command::EditCommand;
-use crate::document::{Document, EditError, PlayState, RecoveryCopy};
+use crate::document::{Document, EditError, Hit, PlayState, RecoveryCopy};
 use crate::gizmo;
 use crate::keys::Action;
 use crate::layout;
@@ -666,11 +666,15 @@ impl<S: Shell + ?Sized> Editor<S> {
         // any key in it was read, so the frame that starts play does not tick
         // for time spent editing, and the one that pauses ticks what it played.
         self.ticks += u64::from(self.document.advance(dt));
-        // The newest of what the game turned down in those ticks: a command
-        // sent from the play strip is told here, a frame after it was sent.
-        if let Some(refusal) = self.document.take_play_refusals().pop() {
+        // What the game turned down in those ticks: a command sent from the
+        // play strip is told here, a frame after it was sent.
+        let refusals = self.document.take_play_refusals();
+        if !refusals.is_empty() {
+            for refusal in &refusals {
+                crcbl::log::warn!("editor: the game refused a command — {refusal}");
+            }
             self.panels
-                .set_status(format!("{REFUSED}{refusal}"), Tone::Warning);
+                .set_status(refused_status(&refusals), Tone::Warning);
         }
         // Before this frame's actions: a click on a toolbar button is what
         // committed a save-as being typed, and the scene it was typed for is
@@ -1230,18 +1234,32 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// entities does not throw away the ones gathered so far. Called only for
     /// a press inside the viewport pane — see [`Editor::frame`]. The ray is
     /// [`ray_at`](Self::ray_at)'s.
+    ///
+    /// While a scene plays, a click on a spawned entity a play action picks
+    /// from — towers' built towers — makes it the runtime pick
+    /// ([`Document::set_runtime_pick`]) and selects nothing, and a plain
+    /// click on anything else clears that pick: one click, one thing picked.
     fn pick(&mut self, pending: &Pending) {
         let Some(at) = pending.pointer else {
             return;
         };
         let ray = self.ray_at(at);
-        let hit = self.document.pick_ray(&ray);
+        let hit = self.document.hit_ray(&ray);
+        let spawned = match hit {
+            Some(Hit::Spawned(entity)) => Some(entity),
+            _ => None,
+        };
+        let scene = hit.and_then(Hit::scene);
         if self.modifiers.contains(Modifiers::CTRL) {
-            if let Some(id) = hit {
+            if let Some(id) = scene {
                 self.document.toggle_selected(id);
             }
+            if spawned.is_some() {
+                self.document.set_runtime_pick(spawned);
+            }
         } else {
-            self.document.select(hit);
+            self.document.select(scene);
+            self.document.set_runtime_pick(spawned);
         }
     }
 
@@ -1342,6 +1360,10 @@ impl<S: Shell + ?Sized> Editor<S> {
             Action::PlayStop => self.play_or_stop(),
             Action::Pause => {
                 self.pause_or_resume();
+                Ok(())
+            }
+            Action::PlayAction(index) => {
+                self.panels.send_numbered_play(&mut self.document, *index);
                 Ok(())
             }
         };
@@ -1795,6 +1817,17 @@ impl<S: Shell + ?Sized> Editor<S> {
 /// What the status line puts before the reason a playing game turned a
 /// command down.
 const REFUSED: &str = "Refused: ";
+
+/// Between two refusals of one frame on the status line.
+const REFUSAL_SEPARATOR: &str = "; ";
+
+/// What the status line says for the refusals one frame's ticks brought, in
+/// the order the game made them: each reason after [`REFUSED`], so two
+/// commands turned down in one frame are both told rather than the older
+/// dropped.
+fn refused_status(refusals: &[String]) -> String {
+    format!("{REFUSED}{}", refusals.join(REFUSAL_SEPARATOR))
+}
 
 /// What the status line says once play mode has stopped.
 const STOPPED: &str = "Stopped: the scene is back as it was when play began";

@@ -11,7 +11,9 @@
 //! validated by the same `Intent::from_wire` and `Stage::place_tower`. A plot
 //! is the picked plot's place in the plots chunk, which is how
 //! [`Map::load`](crate::map::Map::load) numbers them and so how a command
-//! names one.
+//! names one; an upgrade picks the built tower itself, a [`Turret`] the
+//! module mirrored, and reads the plot off its row — the client's command
+//! names a tower by its plot too.
 //!
 //! # The readout is a system in the world
 //!
@@ -22,9 +24,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use crcbl::ecs::{DebugCtx, Entity, SystemTrait, World};
+use crcbl::ecs::{DebugCtx, Entity, System, SystemTrait, World};
 use crcbl::registry::{ParamKind, PlayAction, PlayArg, PlayControls};
 
+use super::{TURRETS, Turret};
 use crate::game::{Controls, Intent, PLOT_NONE, Stage, lock, stats_of};
 use crate::scene::PLOTS;
 use crate::tower;
@@ -59,9 +62,9 @@ const KIND_LABELS: [&str; tower::KINDS] = {
     labels
 };
 
-/// The four commands this game's client sends, as a tool offers them. An
-/// upgrade picks the plot its tower stands on: a tower is a runtime entity,
-/// which a tool draws and does not pick.
+/// The four commands this game's client sends, as a tool offers them. A
+/// build picks a plot of the scene; an upgrade picks a tower the run built,
+/// where it is drawn.
 const ACTIONS: [PlayAction; 4] = [
     PlayAction {
         name: "Place tower",
@@ -73,7 +76,7 @@ const ACTIONS: [PlayAction; 4] = [
     },
     PlayAction {
         name: "Upgrade",
-        params: &[ParamKind::Picked(PLOTS)],
+        params: &[ParamKind::PickedRuntime(TURRETS)],
     },
     PlayAction {
         name: "Restart",
@@ -81,15 +84,18 @@ const ACTIONS: [PlayAction; 4] = [
     },
 ];
 
-/// The frame solo's client sends for the action at `action` taking `args`.
+/// The frame solo's client sends for the action at `action` taking `args`,
+/// a picked tower's plot read off its [`Turret`] in `world`.
 ///
 /// # Errors
 ///
-/// A plot whose place no command frame can carry, a kind past the table, or
-/// an action this game does not have — none of which arrives through
+/// A plot whose place no command frame can carry, a kind past the table, a
+/// picked entity that is no built tower, or an action this game does not
+/// have — none of which arrives through
 /// [`crcbl::registry::Registry::encode_play`], which checks the arguments
-/// against [`ACTIONS`] first, and each refused here rather than trusted.
-fn encode(action: usize, args: &[PlayArg]) -> Result<Vec<u8>, String> {
+/// against [`ACTIONS`] and the world first, and each refused here rather
+/// than trusted.
+fn encode(world: &mut World, action: usize, args: &[PlayArg]) -> Result<Vec<u8>, String> {
     let controls = match (action, args) {
         (PLACE, &[PlayArg::Picked(plot), PlayArg::Choice(kind)]) => Controls {
             place: Some(plot_byte(plot)?),
@@ -102,8 +108,8 @@ fn encode(action: usize, args: &[PlayArg]) -> Result<Vec<u8>, String> {
             start_wave: true,
             ..Controls::default()
         },
-        (UPGRADE, &[PlayArg::Picked(plot)]) => Controls {
-            upgrade: Some(plot_byte(plot)?),
+        (UPGRADE, &[PlayArg::PickedRuntime(tower)]) => Controls {
+            upgrade: Some(plot_byte(plot_of(world, tower)?)?),
             ..Controls::default()
         },
         (RESTART, []) => Controls {
@@ -123,6 +129,16 @@ fn plot_byte(plot: usize) -> Result<u8, String> {
         .ok()
         .filter(|&byte| byte != PLOT_NONE)
         .ok_or_else(|| format!("plot {plot} is past the plots a command frame can name"))
+}
+
+/// The plot the tower `turret` mirrors stands on, read off its row in
+/// `world`.
+fn plot_of(world: &mut World, turret: Entity) -> Result<usize, String> {
+    world
+        .system_mut::<System<Turret>>()
+        .and_then(|turrets| turrets.get(turret))
+        .map(|row| row.plot)
+        .ok_or_else(|| format!("{turret:?} is not a tower on this field"))
 }
 
 /// The run's numbers, read off the stage the world's [`readout`] holds —
@@ -210,12 +226,33 @@ mod tests {
         game.pending.to_wire()
     }
 
+    /// A world holding one mirrored tower, on `plot`, and that tower.
+    fn with_a_turret(plot: usize) -> (World, Entity) {
+        let mut world = World::new();
+        world.register_system(Box::new(System::<Turret>::new(TURRETS)));
+        let turret = world.spawn();
+        let feet = Map::built_in().plots()[plot].at();
+        world
+            .system_mut::<System<Turret>>()
+            .expect("registered")
+            .attach(
+                turret,
+                Turret {
+                    plot,
+                    feet,
+                    scale: 1.0,
+                },
+            );
+        (world, turret)
+    }
+
     /// **Every action's bytes are the bytes solo's client sends for the same
     /// command**, each kind of tower included — and they decode back to that
     /// command on the server's side of the wire.
     #[test]
     fn every_action_encodes_what_the_client_sends() {
         let plot = 2;
+        let (mut world, turret) = with_a_turret(plot);
         let mut cases = vec![
             (
                 START_WAVE,
@@ -227,7 +264,7 @@ mod tests {
             ),
             (
                 UPGRADE,
-                vec![PlayArg::Picked(plot)],
+                vec![PlayArg::PickedRuntime(turret)],
                 Controls {
                     upgrade: Some(2),
                     ..Controls::default()
@@ -254,7 +291,7 @@ mod tests {
             ));
         }
         for (action, args, controls) in cases {
-            let encoded = encode(action, &args).expect("an action towers has");
+            let encoded = encode(&mut world, action, &args).expect("an action towers has");
             assert_eq!(
                 encoded,
                 client_frame(controls),
@@ -295,11 +332,19 @@ mod tests {
         assert_eq!(KIND_LABELS, tower::ALL.map(tower::Kind::label));
     }
 
-    /// **A plot no frame can name and a kind past the table are refused**,
-    /// not wrapped or clamped into some other command.
+    /// **A plot no frame can name, a kind past the table and an upgrade of
+    /// something that is no tower are refused**, not wrapped or clamped into
+    /// some other command.
     #[test]
     fn what_a_frame_cannot_carry_is_refused() {
-        let place = |plot, kind| encode(PLACE, &[PlayArg::Picked(plot), PlayArg::Choice(kind)]);
+        let (mut world, turret) = with_a_turret(0);
+        let mut place = |plot, kind| {
+            encode(
+                &mut world,
+                PLACE,
+                &[PlayArg::Picked(plot), PlayArg::Choice(kind)],
+            )
+        };
         assert!(place(usize::from(PLOT_NONE) - 1, 0).is_ok());
         assert!(place(usize::from(PLOT_NONE), 0).is_err(), "the sentinel");
         assert!(
@@ -307,8 +352,22 @@ mod tests {
             "a wrap to plot 0"
         );
         assert!(place(0, tower::KINDS).is_err());
-        assert!(encode(ACTIONS.len(), &[]).is_err());
-        assert!(encode(START_WAVE, &[PlayArg::Choice(0)]).is_err());
+        assert!(encode(&mut world, ACTIONS.len(), &[]).is_err());
+        assert!(encode(&mut world, START_WAVE, &[PlayArg::Choice(0)]).is_err());
+        assert!(encode(&mut world, UPGRADE, &[PlayArg::PickedRuntime(turret)]).is_ok());
+        let stray = world.spawn();
+        let refused = encode(&mut world, UPGRADE, &[PlayArg::PickedRuntime(stray)])
+            .expect_err("an entity that is no tower");
+        assert!(refused.contains("not a tower"), "{refused}");
+        assert!(
+            encode(
+                &mut World::new(),
+                UPGRADE,
+                &[PlayArg::PickedRuntime(turret)]
+            )
+            .is_err(),
+            "a world with no field played in it named a tower"
+        );
     }
 
     /// **The readout reads the stage it was handed, and nothing in a world

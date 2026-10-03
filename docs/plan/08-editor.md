@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls, multi-selection, a scene from empty and save-as, open and the unsaved bar, recovery offered back and autosave 2026-10-03, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls and their polish, multi-selection, a scene from empty and save-as, open and the unsaved bar, recovery offered back and autosave 2026-10-03, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -302,11 +302,12 @@ towers' game on it, and creeps visibly walk the lane.
   `walkers` system as a `Walker` (the box around its sphere), keyed by the
   creep's physics body and despawned when it dies or leaks. `Document::spawned`
   and `spawned_bounds` are what the instances draw, under a
-  `Drawn::Spawned(Entity)` key beside the scene's ids; the outline, the id map
-  and the colliders a click picks by are the scene's alone, and stop throws the
-  world away with every creep in it. Declined: drawing every id-less entity that
-  has a placement, which needs the creeps registered as scene components — and
-  then a scene file could list them.
+  `Drawn::Spawned(Entity)` key beside the scene's ids; the outline and the id
+  map are the scene's alone, and so were the colliders a click picks by until
+  the play-strip polish (below) gave them to the runtime systems a play action
+  picks from; stop throws the world away with every creep in it. Declined:
+  drawing every id-less entity that has a placement, which needs the creeps
+  registered as scene components — and then a scene file could list them.
 - **Evidence**: towers' own tests tick the module as play does and hold the
   first creep held back through the build phase and released after it, the
   mirror agreeing with the stage tick by tick while creeps leak and lives drop,
@@ -363,11 +364,12 @@ shows the run's numbers.
   sends them; the status line says it was sent, or why not, and a game's refusal
   arrives on it as a warning after the tick that read the command.
 - **Towers registers controls**: _Place tower_ (a picked plot and a kind),
-  _Start wave_, _Upgrade_ (a picked plot) and _Restart_, encoded through the
-  same conversion `Game::set_controls` makes, and Lives, Gold, Wave and Outcome
-  read off a readout system its module registers in the world. Its towers, bolts
-  and bursts are mirrored as runtime components beside the creeps, so a placed
-  tower is drawn on its plot at its tier's size.
+  _Start wave_, _Upgrade_ (a picked plot, and a picked tower since the
+  play-strip polish below) and _Restart_, encoded through the same conversion
+  `Game::set_controls` makes, and Lives, Gold, Wave and Outcome read off a
+  readout system its module registers in the world. Its towers, bolts and bursts
+  are mirrored as runtime components beside the creeps, so a placed tower is
+  drawn on its plot at its tier's size.
 - **Evidence**: the registry's tests hold arguments that fit reaching the
   encoder and every misfit refused by name, two descriptions under one system
   refused, and keyed modules naming their systems. Towers' tests hold every
@@ -390,6 +392,64 @@ shows the run's numbers.
   what to select, stop taking the strip and the towers away, and a game with no
   controls showing no strip and keeping the viewport. The mutations each turned
   a test red are listed in the commit that landed this.
+
+**Play-strip polish, landed 2026-10-03**: what the play-controls slice left
+deferred, built.
+
+- **A play action can pick something the run made.**
+  `ParamKind::PickedRuntime(system)` names a runtime system and hands the
+  encoder `PlayArg::PickedRuntime(Entity)`. The encoder (`PlayEncoder`) is
+  handed the world the module plays in, so a game reads what the entity stands
+  for off its own row there, and `Registry::encode_play(world, …)` refuses an
+  entity the named system does not hold (`Registry::runtime_entities_in`) before
+  the encoder sees it. The editor gives the entities of every runtime system a
+  running game's action picks from a picking collider after each tick — no other
+  spawned entity gets one, so creeps still pick nothing — and `Document::hit`
+  tells a scene entity (`Hit::Scene`) from such a spawned one (`Hit::Spawned`).
+  A click on a spawned one is the play's **runtime pick**
+  (`Document::set_runtime_pick`, read by `picked_runtime(system)`), selecting
+  nothing; a plain click elsewhere clears it, and it lives in the play session,
+  so stop throws it away. Towers' _Upgrade_ picks a built tower, encoded as the
+  plot on its `Turret` row. Declined: a runtime system pickable whatever the
+  controls say, which would let creeps and bolts take clicks meant for the plots
+  under them.
+- **Every refusal of a frame is told**: the status line joins them in the order
+  the game made them (`Refused: THAT PLOT IS TAKEN; …`), and each is logged.
+  Joined rather than counted, because two in one frame is rare and each names a
+  different mistake.
+- **The number keys are the strip's actions**: `1` to `9` send the first nine
+  actions across every row in the order drawn, and each of those buttons reads
+  its key, as the toolbar's do. They are `keys::PLAY_ACTIONS` in the map's
+  default context: `ui` does not bind digits and `text` does, so a field being
+  typed into keeps them, and the editing rule stops them besides. While editing
+  they ask for nothing that happens.
+- **A command sent while paused waits for the tick after resume** — encoded and
+  refused by the controls at once, read when the game next ticks, as a server's
+  queue holds a frame. Refusing it would make a pause a mode where the strip
+  does nothing; dropping it would lose a command the status line said was sent.
+- **A choice lasts one play**: stop takes the strip and every choice's pick with
+  it.
+- **Two games' controls share the strip**, a row each in tick order, numbered
+  across both; only modules the scene's systems start are running, so another
+  game's controls never show.
+- **Evidence**: the registry's test holds a runtime pick reaching the encoder
+  read off its row and one its system does not hold — or in a world with no such
+  system — refused by name; towers' tests hold _Upgrade_ encoding the picked
+  turret's plot, an entity that is no tower refused, the upgrade growing the
+  picked entity, and every bolt and burst keeping its entity through a
+  swap-remove and an expiry off the front (a bolt's entity never moving further
+  in a tick than a bolt flies, a burst's never moving). The document's tests
+  hold a ray down onto a built tower hitting it as spawned, the pick naming it
+  under `turrets` and nothing under `walkers`, _Upgrade_ paying for that tower,
+  the pick gone after stop, and a command sent while paused read on the tick
+  after resume and not before. The loop's tests hold a click on a built tower
+  picking it without selecting, _Upgrade_ sent and paid for, _Upgrade_ with
+  nothing picked saying what to click, two refusals of one frame both on the
+  status line, `2` sending _Start wave_ while playing and nothing while editing,
+  a second game's row ahead of towers' with `1` reaching it alone and the
+  unlisted game absent, and a stepped choice back on its first label after stop
+  and play. The mutations each turned a test red are listed in the commit that
+  landed this.
 
 **Multi-selection, landed 2026-10-03**, on the decisions of the same day
 (below): several entities selected at once, moved together, and deleted,

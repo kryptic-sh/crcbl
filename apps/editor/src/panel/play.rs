@@ -2,13 +2,26 @@
 //! under the toolbar while a scene plays.
 //!
 //! **Drawn from the description, the same for every game.** Each running
-//! module whose game registered [`PlayControls`] gets a row: a button per
-//! action, and beside it a button per [`ParamKind::Choice`] that shows the
-//! current choice and steps to the next on a click. A
-//! [`ParamKind::Picked`] argument is the selection — an action naming
-//! towers' plots takes the plot selected in the viewport or the outliner —
-//! so a game needs no widget of its own. The run's numbers follow, as
-//! `Label value`.
+//! module whose game registered [`PlayControls`] gets a row, in the order the
+//! modules tick: a button per action, and beside it a button per
+//! [`ParamKind::Choice`] that shows the current choice and steps to the next
+//! on a click. A [`ParamKind::Picked`] argument is the selection — an action
+//! naming towers' plots takes the plot selected in the viewport or the
+//! outliner — and a [`ParamKind::PickedRuntime`] one is the runtime pick, the
+//! spawned entity last clicked in the viewport (towers' _Upgrade_ takes the
+//! tower clicked), so a game needs no widget of its own. The run's numbers
+//! follow, as `Label value`. Only the scene's own games have rows: a game
+//! whose module the scene's systems do not start is not running.
+//!
+//! **The number keys are the actions, in the order drawn**: the first nine
+//! actions across every row are labelled with their key, as the toolbar's
+//! buttons are, and `1` to `9` send them ([`numbered`](Strip::numbered)) —
+//! through [`crate::keys`], so a text field being typed into keeps its
+//! digits.
+//!
+//! **A choice lasts one play.** Stop takes the strip away and every choice's
+//! pick with it, so each play starts on each choice's first label, as the run
+//! it starts is a fresh one.
 //!
 //! **A click is a command, not an edit.** The action's arguments are
 //! gathered here and [`Document::send_play`] encodes and queues them; the
@@ -35,8 +48,8 @@ type ChoiceKey = (String, usize, usize);
 /// the last frame built.
 #[derive(Debug, Default)]
 pub(super) struct Strip {
-    /// Each choice parameter's current index; one never stepped is the first
-    /// label.
+    /// Each choice parameter's current index this play; one never stepped is
+    /// the first label.
     choices: BTreeMap<ChoiceKey, usize>,
     /// The strip, as the last frame laid it out — [`None`] on a frame that
     /// drew none.
@@ -57,8 +70,9 @@ pub(super) struct Asked {
 
 impl Strip {
     /// Builds the strip for `controls` with the run's numbers `status`, or
-    /// nothing at all when `controls` is empty. Returns the action a click
-    /// asked for this frame; a click on a choice steps it here.
+    /// nothing at all when `controls` is empty — which is also where a stop
+    /// throws every choice's pick away. Returns the action a click asked for
+    /// this frame; a click on a choice steps it here.
     pub(super) fn build(
         &mut self,
         ui: &mut Ui,
@@ -69,15 +83,19 @@ impl Strip {
         if controls.is_empty() {
             self.key = None;
             self.shown.clear();
+            self.choices.clear();
             return None;
         }
         let mut asked = None;
+        let mut number = 0;
         let strip = ui.block("#play-controls", &[], |ui| {
             for (system, controls) in controls {
                 ui.block_keyed(system, ".play-game", &[], |ui| {
                     for (action, described) in controls.actions.iter().enumerate() {
-                        let button = ui.button(".play-action", described.name);
-                        self.buttons.push((described.name.to_owned(), button.key));
+                        number += 1;
+                        let label = keyed_label(described.name, number);
+                        let button = ui.button(".play-action", label.as_str());
+                        self.buttons.push((label, button.key));
                         if button.clicked {
                             asked = Some(Asked {
                                 system: system.clone(),
@@ -110,10 +128,26 @@ impl Strip {
         asked
     }
 
+    /// The action the number key for `index` asks for: the action at
+    /// `index` counting every row's actions in the order drawn, or [`None`]
+    /// past the last — and for every index while no game offers controls.
+    pub(super) fn numbered(controls: &[(String, PlayControls)], index: usize) -> Option<Asked> {
+        controls
+            .iter()
+            .flat_map(|(system, controls)| {
+                (0..controls.actions.len()).map(move |action| Asked {
+                    system: system.clone(),
+                    action,
+                })
+            })
+            .nth(index)
+    }
+
     /// The arguments `asked`'s action takes, gathered — each choice's current
-    /// pick, each picked entity off `document`'s selection — and sent through
-    /// [`Document::send_play`]. Returns what the status line says: that it
-    /// was sent, or why it was not, as a warning.
+    /// pick, each picked entity off `document`'s selection, each runtime one
+    /// off its runtime pick — and sent through [`Document::send_play`].
+    /// Returns what the status line says: that it was sent, or why it was
+    /// not, as a warning.
     pub(super) fn send(
         &self,
         document: &mut Document,
@@ -138,6 +172,14 @@ impl Strip {
                     PlayArg::Picked(document.picked(system).ok_or_else(|| {
                         format!(
                             "{}: select one of `{system}` in the scene first",
+                            described.name
+                        )
+                    })?)
+                }
+                ParamKind::PickedRuntime(system) => {
+                    PlayArg::PickedRuntime(document.picked_runtime(system).ok_or_else(|| {
+                        format!(
+                            "{}: click one of `{system}` in the viewport first",
                             described.name
                         )
                     })?)
@@ -172,5 +214,16 @@ impl Strip {
     #[cfg(test)]
     pub(super) fn shown(&self) -> &[(&'static str, String)] {
         &self.shown
+    }
+}
+
+/// `name` as the strip's button reads it: with the number key that sends it
+/// (the `number`th action drawn), for the actions there are keys for — as the
+/// toolbar labels each button with its key.
+fn keyed_label(name: &str, number: usize) -> String {
+    if number <= crate::keys::PLAY_ACTIONS.len() {
+        format!("{name} ({number})")
+    } else {
+        name.to_owned()
     }
 }

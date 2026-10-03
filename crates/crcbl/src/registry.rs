@@ -1017,6 +1017,20 @@ impl Registry {
             .collect()
     }
 
+    /// The entities the [runtime](Self::register_runtime) system called
+    /// `system` holds in `world`, in storage order — what a play action
+    /// picking from that system ([`ParamKind::PickedRuntime`]) may be handed.
+    ///
+    /// Empty for a name no runtime component is registered under, and in a
+    /// world that is not playing.
+    #[must_use]
+    pub fn runtime_entities_in(&self, world: &mut World, system: &str) -> Vec<Entity> {
+        self.runtime
+            .get(system)
+            .map(|entry| (entry.entities)(world, system))
+            .unwrap_or_default()
+    }
+
     /// The entities the system called `system` holds, in the order the chunk file
     /// spells them.
     ///

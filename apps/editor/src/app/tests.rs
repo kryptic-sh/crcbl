@@ -13,6 +13,7 @@ mod exit_criterion;
 mod files;
 mod open;
 mod play;
+mod play_strip;
 mod recovery;
 mod selection;
 mod unsaved;
