@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls and their polish, multi-selection, a scene from empty and save-as, open and the unsaved bar, recovery offered back and autosave 2026-10-03, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls and their polish, multi-selection, a scene from empty and save-as, open and the unsaved bar, recovery offered back and autosave, and the undo property test 2026-10-03, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -114,12 +114,14 @@ full-window draw under a hole in the panels is gone.
   id in use, a system the manifest does not list (a save would drop it), or a
   row that is not the system's component.
 - **Delete and Ctrl+D** act on the selection; the copy is selected.
-- **The property test** plays `entity_tests::HISTORIES` seeded random histories
-  of nudges, duplicates and deletes and walks each back and forward again,
-  comparing the saved scene text at every step. Not `World::hash_state`: it
-  hashes `Entity` bits, which a restored entity changes (the backlog records the
-  decision). Restoring under a new id, skipping the sweep on delete, and
-  skipping the collider on spawn each turned it or its neighbours red.
+- **The property test** (since 2026-10-03 the proptest
+  `document::undo_property_tests`, _The undo property test_ below) played seeded
+  random histories of nudges, duplicates and deletes and walked each back and
+  forward again, comparing the saved scene text at every step. Not
+  `World::hash_state`: it hashes `Entity` bits, which a restored entity changes
+  (the backlog records the decision). Restoring under a new id, skipping the
+  sweep on delete, and skipping the collider on spawn each turned it or its
+  neighbours red.
 - **Entity copy and paste** (feature 8's entity half): Ctrl+C offers the
   selection as `apps/editor/src/clipboard.rs`'s clipping, the system and row per
   entity, under both the engine's RON mime and plain text; Ctrl+V reads the
@@ -1190,6 +1192,79 @@ decisions of the same day (below). The flow is
 - **What it does not cover**: none of it has been seen on a device.
   `docs/backlog.md` lists what is deferred.
 
+**The undo property test, the second exit criterion, landed 2026-10-03.**
+`document::undo_property_tests::random_histories_walk_back_through_every_state`
+is a `proptest` property over random histories of every edit, replacing
+`entity_tests`' hand-seeded loop; its module docs are the specification.
+
+- **Every step goes through the UI's entry point**, so a refusal is played and
+  counted, not skipped: a property set through `Document::apply`, the
+  inspector's write reported to `record_edits`, a field paste, an inspector drag
+  under one gesture, an arrow-key nudge and a translate drag of one or two
+  entities (`apply_in`, one gesture), a turn and a scale as the gizmos' batches,
+  F2's `rename`, delete, duplicate and copy-and-paste of a selection, a garbled
+  paste, a mesh drop, attach and detach, `ListSystem` and `UnlistSystem`, undo
+  and redo. Targets include an id nobody holds and systems that do not hold the
+  entity; values include other kinds, non-finite floats, magnitudes no `f32`
+  holds and texts `check_asset` refuses.
+- **What each history checks**: a refused step changed nothing and recorded
+  nothing; an accepted one recorded exactly one entry, dropping any redo above
+  it; every undo and redo, interleaved anywhere, lands on the state recorded at
+  the position it moved to; the selection names only held entities and the dirty
+  marker follows the position; then the whole log undone to the opening state
+  and redone to the top, every step checked.
+- **What the run checks**, so it cannot pass by doing nothing: every
+  `EditCommand` variant was recorded (`variant` is a match with no wildcard, so
+  a new variant does not compile until it is named, and naming it fails the run
+  until a step records it), every kind of step was accepted, each shape of edit
+  in `MUST_REACH` happened (two-entity edits, a gesture folding writes, listing
+  drops and attaches, an unlisting from the manifest's middle, a name, an edit
+  dropping redo, a refusal with redo above it), something was refused, and at
+  least `LEAST_ACCEPTED_PERCENT` of the edits played were accepted. A run is
+  `CASES` histories of up to `MAX_STEPS` steps.
+- **What "state" is** (`undo_property_tests::state::State`): `Document::files` —
+  the manifest in order, `names.ron`, every listed chunk, byte-identical for
+  equal scenes — plus, per id, every registered system's row (listed or not) and
+  the picking collider's transform and world box, plus a count of live entities
+  filed under no id. Keyed by `SceneEntityId`, not `World::hash_state` or
+  `hash_world`, for the 2026-09-30 decision's reason. **Not compared**: the
+  selection beyond having no holes (undo does not restore it, by design), a
+  mesh's measured box except through its collider, and the gesture and next-id
+  counters.
+- **It found one bug, and fixing it showed two more**: a block turned back to
+  nothing about a negative axis, `(-0, 0, 0, 1)`, came back from a delete's undo
+  as `(+0, 0, 0, 1)`. `Rotation::is_identity` compared with `==`, under which
+  `-0.0 == 0.0`, so the row left the rotation out and the restore read the
+  default. It now compares bits, so such a rotation is written and reads back as
+  itself
+  (`registry::rotation::tests::a_negative_zero_is_written_and_reads_back_as_itself`,
+  `document::rotation_tests::a_negative_zero_turn_survives_a_delete_and_its_undo`).
+  With the identity exact, `panel::tests::rotation`'s drag test saw what `==`
+  had hidden: the rotation row's composed quaternion wrote `-0.0` over a held
+  `+0.0` in `x` and `z`, and `crcbl_ui`'s `FieldRow::set` (and the plain rows'
+  write) compared with `==` and reported nothing — a write in the field that no
+  command recorded and no undo took back. Both now compare floats bit for bit
+  (`tree::widgets::tests::inspector::a_write_that_flips_a_zeros_sign_is_reported`),
+  and the rotation row writes `+0.0` for a zero, since a sign-only edit on the
+  first frame and not the next would split the drag's one entry. The property
+  test's seed is in `apps/editor/proptest-regressions/`, committed as
+  `crcbl-core`'s and `crcbl-water`'s are.
+- **Mutations each turned it red and shrank to a short history**: a rename's
+  inverse renaming to the new name (one rename), a delete's inverse dropping its
+  last system's row (one delete of the entity in two systems), a gesture's fold
+  keeping the newest inverse (one two-frame drag), an unlisting's inverse
+  listing at the end (a listing at the front, then its unlisting), a batch's
+  inverse in forward order (one mesh drop), a delete's inverse dropping the
+  name, and an undo not rebuilding the collider (one nudge). Removing detach
+  from the played steps failed the run's command coverage, and raising the
+  accepted share to ninety percent failed its acceptance check.
+- **Not covered**: play mode (every edit is refused in it, `play_tests`), a save
+  between edits (which seals the entry on top), the inspector's widgets
+  themselves — its steps report edits to `record_edits` directly, so
+  `FieldRow::set`'s reporting is the panel tests' to hold — the rotation row
+  reporting four leaves to one `record_edits`, and a gesture that writes a
+  second leaf part-way. `docs/backlog.md` has them.
+
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
 opens the vocabularies it was compiled with. The shipped build registers its own
@@ -1697,7 +1772,15 @@ rules. It stays open in the backlog.
   drives it through the loop (_A scene from empty and save-as_, above, says what
   it covers and what it does not).
 - Undo/redo correct across all MVP commands (property-based test: random command
-  sequence + full undo → state hash equals initial).
+  sequence + full undo → state hash equals initial). **Met 2026-10-03**:
+  `document::undo_property_tests` plays random histories of every edit command
+  through the UI's entry points, interleaving undo and redo, and checks every
+  state the log stands at, the full undo back to the opening state and the full
+  redo to the top (_The undo property test_, above, says what it covers and what
+  it does not). The "state hash" is a digest keyed by `SceneEntityId` — the
+  saved files, every system's rows and the colliders — not the world hash, for
+  the 2026-09-30 decision's reason. Scene load and save markers are not commands
+  (task 4's list; the backlog says why).
 - Editor never links `crcbl-vk` directly (only through the engine facade) —
   proof the engine API is sufficient to build real tools.
 - MVP COMPLETE at this stage exit: all overview MVP features exist on

@@ -71,6 +71,9 @@ tempfile = "3"
 # builder rather than vendored, on that module's argument: a checked-in binary
 # is a fixture nobody reviewing a change can read.
 crcbl-scene = { workspace = true, features = ["gltf-fixture"] }
+# The undo property test (`src/document/undo_property_tests.rs`): random
+# command sequences generated and shrunk to the shortest one that fails.
+proptest = { workspace = true }
 
 # **`breakout`, `puppet` and `towers` are named through their `[lib]` names**
 # (`crcbl_breakout`, `crcbl_puppet`, `crcbl_towers`) and `cargo machete` matches

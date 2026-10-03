@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0a3d439efe786a97c8434bcc1d6ea0c933af245e567b24735fb940a1022a8732 # shrinks to [Delete { selection: Pair { first: Index(0), second: Some(Index(3689348814741910324)) } }, Rename { target: Index(0), name: Index(0) }, Drop { asset: Index(7378697629483820647), x: 0.0, z: 0.0 }, Duplicate { selection: Pair { first: Index(0), second: None } }, Write { target: Index(3689348814741910324), system: Index(0), leaf: Index(11068046444225730970), value: Draw { kind: None, float: -0.0, whole: 0, flag: false, text: Index(0) }, through: Command }, Write { target: Index(0), system: Index(0), leaf: Index(0), value: Draw { kind: None, float: 0.0, whole: 0, flag: false, text: Index(0) }, through: Command }, Delete { selection: Pair { first: Index(0), second: Some(Index(4611686018427387904)) } }]

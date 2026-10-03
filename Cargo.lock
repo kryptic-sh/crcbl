@@ -911,6 +911,7 @@ dependencies = [
  "breakout",
  "crcbl",
  "crcbl-scene",
+ "proptest",
  "puppet",
  "tempfile",
  "towers",

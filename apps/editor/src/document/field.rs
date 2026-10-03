@@ -94,7 +94,7 @@ impl Document {
 }
 
 /// `value` as ron text — the text of a leaf in a chunk row.
-fn text_of(value: &Value) -> String {
+pub(super) fn text_of(value: &Value) -> String {
     let written = match value {
         Value::Bool(value) => ron::to_string(value),
         Value::Int(value) => ron::to_string(value),

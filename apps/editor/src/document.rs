@@ -1673,6 +1673,9 @@ mod selection_tests;
 mod towers_play_tests;
 
 #[cfg(test)]
+mod undo_property_tests;
+
+#[cfg(test)]
 mod validation_tests;
 
 #[cfg(test)]

@@ -12196,11 +12196,11 @@ says what that cleared and what it did not. The allow-list entry in
   `Detach`; a duplicate is a `Spawn` of every one of the original's rows under
   `IdMap::next_id`, and Delete, Ctrl+D, F2 and the inspector's add and remove
   buttons drive them. The undo property test is
-  `document::entity_tests::random_histories_walk_back_through_every_state`, run
-  on `document::systems_tests::two_systems` with renames, attaches and detaches,
-  mesh drops, listings and unlistings of systems, and attaches to unlisted ones.
-  Names are `crcbl_scene::scn::names`' `names.ron`; `08-editor.md`'s decisions
-  of 2026-10-01 say why a chunk the header declares, and its slice 11 how one
+  `document::undo_property_tests::random_histories_walk_back_through_every_state`
+  (2026-10-03, a proptest over every edit and the editor's second exit
+  criterion; below), run on `document::systems_tests::two_systems`. Names are
+  `crcbl_scene::scn::names`' `names.ron`; `08-editor.md`'s decisions of
+  2026-10-01 say why a chunk the header declares, and its slice 11 how one
   entity spans systems. Still owed:
   - **Scene load and save markers**: the log's position against `saved_at` is
     already the dirty marker, and a load replaces the document and its log, so a
@@ -12211,8 +12211,53 @@ says what that cleared and what it did not. The allow-list entry in
     undone delete files a new `Entity` under the old `SceneEntityId`, so the
     same scene hashes differently. The plan's exit criterion says "state hash";
     the scene text is the state keyed by the id that survives, and it is
-    compared at every step down and back up. Revisit if a hash keyed by
+    compared at every step down and back up — since 2026-10-03 with every
+    registered system's rows and each collider beside it
+    (`undo_property_tests::state::State`). Revisit if a hash keyed by
     `SceneEntityId` is wanted for the server's log.
+- **The undo property test (2026-10-03): what it leaves.** `08-editor.md`'s _The
+  undo property test_ has the design. Not covered, each checked against the tree
+  the day it landed:
+  - **The inspector's widgets are not in the loop.** Its inspector steps write
+    the leaf and report the edit to `Document::record_edits` themselves, so what
+    `crcbl_ui`'s `FieldRow::set` and plain rows report — where the unreported
+    sign-of-zero write hid — is the panel tests' to hold; and the rotation row's
+    four leaves to one `record_edits` is not a step (its turn is the rotate
+    gizmo's batch through `apply`). Driving the real inspector per step needs a
+    `Ui` and a laid-out page per history.
+  - **A gesture whose reported leaves change part-way splits into two entries**
+    (`UndoLog::record_in` folds only the same leaves). The rotation row now
+    writes `+0.0` for a zero so a sign flip does not cause it, but a leaf
+    landing exactly on its old value on one frame of a drag still would: two
+    undos, each exact. Merging leaf sets in the fold would remove it; that
+    reverses `a_new_gesture_leaf_or_seal_starts_a_new_entry`'s rule and is the
+    user's call.
+  - **A gesture that writes a second leaf part-way** (`UndoLog::record_in`
+    starts a new entry for it) is not generated: every drag writes one leaf, or
+    one batch of the same leaves, throughout.
+  - **Play mode and saves between edits** are not steps. Every edit refused in
+    play is `play_tests`' to hold; a save seals the top entry, which
+    `a_drag_carried_past_a_save_is_dirty_again` holds. A save step would need a
+    directory per history.
+  - **Not compared**: the selection beyond naming only held entities (an undo
+    does not restore it, by design), a mesh's measured box except through its
+    collider, and `IdMap::next_id`.
+  - **The seed is random per run**, as proptest's default, so the run-level
+    checks (every command, every step accepted, every `MUST_REACH` shape) are
+    statistical. Measured 2026-10-03 at `CASES` histories: the rarest shape, an
+    unlisting from the manifest's middle, was reached 30 to 44 times a run over
+    several runs, so a run missing it is not a practical risk; raise `CASES`
+    before loosening a check if one ever does.
+  - **A shrunk history keeps large `Index` draws** where a smaller one would
+    pass, so a counterexample can read `Index(3689348814741910324)`; it resolves
+    modulo the candidates at that step.
+  - **Decided 2026-10-03, revisit if it is noisy: a negative-zero identity
+    rotation is written.** The test found `(-0, 0, 0, 1)` restored as
+    `(+0, 0, 0, 1)` by a delete's undo, because `Rotation::is_identity`'s `==`
+    left it out of the row. It now compares bits, so such a row writes
+    `rotation: (-0.0, 0.0, 0.0, 1.0)`. The alternative — canonicalising `-0.0`
+    to `+0.0` when a rotation is written — would make the command write a value
+    other than the one it carries, and its inverse inexact.
 - **The viewport pane (slice 4, 2026-09-30): what it left.** The pane samples
   the scene through `DrawList::texture` and
   `UiRenderer::add_passes_with_textures`; `08-editor.md`'s _Status_ has the
