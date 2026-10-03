@@ -13056,10 +13056,18 @@ nothing before, so every towers run on one tick hashed alike), and
 `apps/towers/src/game/resim_tests.rs` holds a two-player session — two builds
 and a wave over in-process transports — reproducing every per-tick hash from its
 file, diverging at the first build with the frames stripped, and at the first
-build with the two joins swapped. Held also by `host::frames_tests` (the record
-equals what the module read, the replay hands the module the same, a roster that
-cannot happen is refused) and the codec's tests, each turned red by a mutation
-of the rule it names (2026-10-03).
+build with the two joins swapped. The sandbox's hosted sessions re-simulate too:
+its host module seats the players from the roster
+(`apps/sandbox/src/lan/players.rs`), each entity holding its peer's number so
+the hash tells two seats apart, and `apps/sandbox/src/lan/resim_tests.rs`
+records two players joining over in-process transports, one leaving and an
+`sv_spin_rate` set, through the sandbox's own `LanHost` — reproducing every
+tick, and diverging where the player left with its `Left` removed, where they
+joined with the joins swapped, and where the set applied with the set removed.
+Held also by `host::frames_tests` (the record equals what the module read, the
+replay hands the module the same, a roster that cannot happen is refused) and
+the codec's tests, each turned red by a mutation of the rule it names
+(2026-10-03).
 
 What it left:
 
@@ -13098,13 +13106,19 @@ What it left:
   recording its peers' input drops that record (`Recorder::start` takes it), and
   the roster seed `record_peer_inputs` gives does not happen a second time — no
   caller does that today.
-- **The sandbox's recordings do not re-simulate.** Its players system spawns and
-  despawns on `PeerEvent`s in `LanHost::apply`, outside its module, so a
-  re-simulating host's world lacks those entities; the recording is still whole.
-  Making it re-simulate means moving that into the module, which reads the
-  roster through `PeerInputs::iter`. Towers' recordings, `--host` and `--serve`,
-  do re-simulate (`a_hosts_recording_is_finished_when_its_game_is_dropped`,
-  `quit_at_the_console_finishes_a_recording_servers_file`).
+- **A module cannot tell a lost peer from a quiet one.** `PeerInputs::iter`
+  lists a lost peer with nothing, as it lists a connected one that sent nothing,
+  so the sandbox's players system no longer marks a player whose link is down
+  (its `bool` did until 2026-10-03, set from `PeerEvent::Lost` and `Resumed`
+  outside the module, where a re-simulation could not reproduce it). Nothing
+  read that flag — `System<T>` replicates no rows and the system is not
+  reflected — so it was dropped rather than the engine changed. A game that
+  needs it wants `PeerInputs` to say which peers are lost: the live host knows
+  (`Peer::is_connected`) and so does the re-simulation's roster (`Roster` in
+  `host/resim.rs`), and `Host::step` would hand it beside the frames.
+- **The sandbox's recordings carry no frames**: its players send no input, so
+  there is nothing for a stripped-frames run to lose, and its re-simulation test
+  checks the roster and the set instead.
 - **No record toggle.** `--record <FILE>` starts a recording before the first
   frame and nothing else does; the plan's server command, reachable from the
   console, CLI, UI and game code alike, would call `LanHost::record` and

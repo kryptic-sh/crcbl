@@ -11,7 +11,7 @@ use crcbl::ecs::World;
 use crcbl::net::{ConsoleOutcome, ConsoleReply, ConsoleSet, InMemoryTransport};
 use crcbl::server::{Host, HostConfig};
 
-use super::imp::{COMPATIBILITY, serve_spin, world};
+use super::imp::{COMPATIBILITY, serve, world};
 use crate::spin::{hosted_seconds, replicated_seconds, sv_spin_rate};
 
 const TICK_HZ: u32 = 60;
@@ -37,7 +37,7 @@ impl Rig {
                 compatibility: COMPATIBILITY,
             },
         );
-        serve_spin(&mut host);
+        serve(&mut host);
         host.update(Duration::ZERO);
         let (near, far) = InMemoryTransport::pair();
         host.add_host_player(Box::new(far));

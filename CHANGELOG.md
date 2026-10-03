@@ -664,8 +664,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the run's error; towers' and the sandbox's `--host` finish it when the window
   closes. `--record` is refused without a session the process hosts, and for a
   file that exists. A towers session recorded either way re-simulates tick for
-  tick; the sandbox's does not, since its players system changes on session
-  events outside its module.
+  tick, and so does a sandbox `--host` session: the sandbox's host module now
+  seats and unseats its players from the roster it is handed each tick, rather
+  than the sandbox doing it on the host's session events, and each player's
+  entity holds the peer's number instead of whether its link is up.
 - **Simulation variables over the transport: `Flags::SIM`'s half is built.** A
   typed set of a `SIM` variable is checked by the new `Registry::sim_set` and
   handed to the host as a `crcbl_console::SimSet` through

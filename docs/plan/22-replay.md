@@ -123,10 +123,11 @@ cannot drift. `Host::resimulate` checks every set against the host's registry
 and every roster change against the ones before it before a tick runs, then runs
 to the last hash and answers the first tick whose hash it does not reproduce —
 so a recorded hash per tick locates a divergence to its tick. Towers' two-player
-sessions reproduce from their file tick for tick. What a re-simulation still
-cannot see — a game acting on `Host::events` outside its module — is in
-`docs/backlog.md`. Re-simulation is a dev-time check on top of playback, never a
-requirement of it: a viewer still plays the entries.
+sessions and the sandbox's hosted ones — players joining and leaving, a
+`sv_spin_rate` set between — reproduce from their file tick for tick. What a
+re-simulation still cannot see — a game acting on `Host::events` outside its
+module — is in `docs/backlog.md`. Re-simulation is a dev-time check on top of
+playback, never a requirement of it: a viewer still plays the entries.
 
 ### The live recorder (built 2026-10-03)
 

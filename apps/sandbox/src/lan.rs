@@ -9,18 +9,19 @@
 //! started through `Standing` — and what the host's world holds.
 //!
 //! The host's world is the smallest one that replicates something: a
-//! "players" system with an entity per admitted peer, and the cube the host
-//! spins (`crate::spin`). The sandbox has no game, so there is nothing to play
-//! beyond joining, receiving the host's snapshots, seeing the player count
-//! change as others come and go — and setting `sv_spin_rate`, which the host
-//! takes from its own console and refuses from a client.
+//! "players" system with an entity per admitted peer (`players`), and the
+//! cube the host spins (`crate::spin`). The sandbox has no game, so there is
+//! nothing to play beyond joining, receiving the host's snapshots, seeing the
+//! player count change as others come and go — and setting `sv_spin_rate`,
+//! which the host takes from its own console and refuses from a client.
 //!
 //! A host asked to (`--record <FILE>`) records its session through
-//! `crcbl::lan::LanHost::record`, from before its first frame. The file is
-//! whole, and a host built like this one does **not** re-simulate it: the
-//! players system changes on the host's session events, outside its module
-//! (`LanHost::apply`), and nothing replays those — `crcbl::replay_record`'s
-//! module docs say so of any game that does.
+//! `crcbl::lan::LanHost::record`, from before its first frame, and a host
+//! built like this one — `world` and `serve` — re-simulates it tick for
+//! tick: everything that changes the world, the players included, changes
+//! in the host's module, which a re-simulation hands the recorded roster and
+//! sets through the step a live tick takes. Nothing here acts on the host's
+//! session events.
 //!
 //! # One datagram per snapshot
 //!
@@ -42,19 +43,18 @@ pub use imp::{LanMode, SANDBOX, Standing};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
-    use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::path::Path;
     use std::time::Duration;
 
     use crcbl::console::{Fault, SimSet};
-    use crcbl::ecs::{Entity, System, World};
+    use crcbl::ecs::World;
     use crcbl::lan::{LanBind, LanGame};
     pub use crcbl::lan::{LanClient, LanError, LanMode};
     #[cfg(test)]
     use crcbl::net::udp::discovery::Announcement;
     use crcbl::net::{ConsoleSet, ProtocolCompatibility};
-    use crcbl::server::{PeerEvent, PeerId};
+    use crcbl::server::{HostModule, PeerInputs};
     use crcbl::ui::{DebugModule, DebugPanel, DebugSection};
 
     /// The endpoint protocol id the sandbox's links speak — `SBOX`. A
@@ -80,9 +80,6 @@ mod imp {
         compatibility: COMPATIBILITY,
         max_players: MAX_PLAYERS,
     };
-
-    /// The replicated system holding one entity per admitted peer.
-    const PLAYERS: &str = "players";
 
     /// What became of a simulation set handed to [`Lan::route_sim_set`].
     #[derive(Debug)]
@@ -287,12 +284,10 @@ mod imp {
         }
     }
 
-    /// The engine's LAN host, and the "players" system its peers fill.
+    /// The engine's LAN host, serving the sandbox's world.
     #[derive(Debug)]
     pub struct LanHost {
         lan: crcbl::lan::LanHost,
-        /// Each admitted peer's entity in the "players" system.
-        players: HashMap<PeerId, Entity>,
     }
 
     impl LanHost {
@@ -323,14 +318,18 @@ mod imp {
 
         fn open_with(bind: LanBind, tick_hz: u32, record: Option<&Path>) -> Result<Self, LanError> {
             let mut lan = crcbl::lan::LanHost::open(SANDBOX, bind, world(), tick_hz)?;
-            serve_spin(lan.host_mut());
+            serve(lan.host_mut());
             if let Some(path) = record {
                 lan.record(path)?;
             }
-            Ok(Self {
-                lan,
-                players: HashMap::new(),
-            })
+            Ok(Self { lan })
+        }
+
+        /// The engine's host, for a test to record it and add players over
+        /// in-process transports.
+        #[cfg(test)]
+        pub fn lan_mut(&mut self) -> &mut crcbl::lan::LanHost {
+            &mut self.lan
         }
 
         /// The port the listener is bound to.
@@ -357,43 +356,11 @@ mod imp {
             self.lan.announcer_addr()
         }
 
-        /// Serves the session to `now`, and keeps the players system in step
-        /// with who is in.
+        /// Serves the session to `now`. The host's module keeps the players
+        /// system in step with who is in, so the session's events — each
+        /// already logged — change nothing here.
         pub fn frame(&mut self, now: Duration) {
-            for event in self.lan.frame(now) {
-                self.apply(event);
-            }
-        }
-
-        /// One session change, reflected in the players system: an entity
-        /// per admitted peer, marked connected or not.
-        fn apply(&mut self, event: PeerEvent) {
-            let world = self.lan.host_mut().world_mut();
-            match event {
-                PeerEvent::Joined(peer) => {
-                    let entity = world.spawn();
-                    players(world).attach(entity, true);
-                    self.players.insert(peer, entity);
-                }
-                PeerEvent::Lost(peer) | PeerEvent::Resumed(peer) => {
-                    if let Some(connected) = self
-                        .players
-                        .get(&peer)
-                        .and_then(|&entity| players(world).get_mut(entity))
-                    {
-                        *connected = matches!(event, PeerEvent::Resumed(_));
-                    }
-                }
-                PeerEvent::Left(peer) => {
-                    if let Some(entity) = self.players.remove(&peer) {
-                        world.despawn(entity);
-                    }
-                }
-                // The same session on the same link, connected all along: its
-                // entity is already there, and the sandbox sends its players
-                // no event that a restarted key could have lost.
-                PeerEvent::Reaccepted(_) => {}
-            }
+            self.lan.frame(now);
         }
     }
 
@@ -407,31 +374,41 @@ mod imp {
     /// cube the host spins.
     pub(super) fn world() -> World {
         let mut world = World::new();
-        world.register_system(Box::new(System::<bool>::new(PLAYERS)));
+        super::players::install(&mut world);
         crate::spin::HostedSpin::install(&mut world);
         world
     }
 
-    /// Has `host` spin its world's cube, taking `sv_spin_rate` from its own
-    /// console and its own player.
-    pub(super) fn serve_spin(host: &mut crcbl::server::Host) {
-        host.set_module(Box::new(crate::spin::SpinModule));
+    /// Has `host` simulate [`world`]: seat its players and spin its cube,
+    /// taking `sv_spin_rate` from its own console and its own player.
+    pub(super) fn serve(host: &mut crcbl::server::Host) {
+        host.set_module(Box::new(SandboxModule));
         host.set_sim_registry(crate::spin::sim_registry());
     }
 
-    /// The players system, which [`world`] always registers.
-    fn players(world: &mut World) -> &mut System<bool> {
-        world
-            .system_mut::<System<bool>>()
-            .expect("the host's world registers the players system")
+    /// The host's simulation: who is in, then the cube.
+    #[derive(Debug)]
+    struct SandboxModule;
+
+    impl HostModule for SandboxModule {
+        fn tick(&mut self, world: &mut World, inputs: PeerInputs<'_>) {
+            super::players::seat(world, inputs);
+            crate::spin::SpinModule.tick(world, inputs);
+        }
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod players;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod sim_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod resim_tests;
 
 #[cfg(target_arch = "wasm32")]
 mod imp {
