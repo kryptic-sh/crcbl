@@ -111,6 +111,25 @@ fn the_open_line_commits_an_open() {
     assert_eq!(page.panels.opening(), None, "the line stayed open");
 }
 
+/// **What is typed into the open line follows the directory it offers**,
+/// rather than replacing it: the line keeps its caret at the end of the text
+/// it was opened holding.
+#[test]
+fn the_open_line_types_after_the_directory_it_offers() {
+    let mut page = Page::built_in();
+    page.panels
+        .begin_open(&page.document, "levels/".to_owned())
+        .expect("editing");
+    page.idle();
+    type_text(&mut page, "one.scn");
+    let committed = press_nav(&mut page, true);
+    assert_eq!(
+        committed.open.as_deref(),
+        Some("levels/one.scn"),
+        "the typed name replaced the offered directory"
+    );
+}
+
 /// **The open line is refused in play mode**, and opens nothing.
 #[test]
 fn the_open_line_is_refused_in_play_mode() {

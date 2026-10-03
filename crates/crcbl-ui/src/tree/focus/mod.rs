@@ -79,6 +79,14 @@
 //! [`Role::Button`] has no engaged state: accept fires it through the same
 //! [`Response::clicked`] a click does.
 //!
+//! **One exception: a drag-value being typed into takes no tree-order step.**
+//! [`NavInput::next`] and [`NavInput::prev`] — Tab and Shift+Tab — commit it
+//! and move focus in tree order as they would from a node not engaged, and
+//! when focus lands on another drag-value, engage that one, which opens it for
+//! typing (`widgets/number_entry.rs`): a vector row's axes are typed one after
+//! another as a spreadsheet's cells are. Anywhere else the step only moves
+//! focus, so Tab out of the last number of a run leaves it.
+//!
 //! # Tree nodes take left and right
 //!
 //! The one exception to moves going where the layout says: a focused
@@ -585,6 +593,24 @@ impl Ui {
             } else if nav.back {
                 self.focus.engaged = None;
                 events.ended = Some((engaged, Engagement::Cancelled));
+            } else if let Some(forward) = tab(nav.step())
+                && self
+                    .store
+                    .by_key(engaged)
+                    .is_some_and(|node| node.widget.is_typed_number())
+            {
+                self.focus.engaged = None;
+                events.ended = Some((engaged, Engagement::Committed));
+                self.move_in_tree_order(forward, modal);
+                if let Some(next) = self.focus.focused
+                    && next != engaged
+                    && self.store.by_key(next).is_some_and(|node| {
+                        node.behavior.role == Role::Engage && node.widget.is_drag_value()
+                    })
+                {
+                    self.focus.engaged = Some(next);
+                    events.began = Some(next);
+                }
             } else {
                 events.captured = nav.step();
             }
@@ -1086,6 +1112,16 @@ impl Ui {
             }
             Engagement::Idle | Engagement::Engaged => {}
         }
+    }
+}
+
+/// Which way a tree-order step goes: forward for [`NavStep::Next`], back for
+/// [`NavStep::Prev`]; none for any other step.
+const fn tab(step: Option<NavStep>) -> Option<bool> {
+    match step {
+        Some(NavStep::Next) => Some(true),
+        Some(NavStep::Prev) => Some(false),
+        _ => None,
     }
 }
 

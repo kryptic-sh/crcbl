@@ -99,9 +99,13 @@ impl Strip {
         let mut built = None;
         ui.block("#path-line", &[], |ui| {
             ui.span(".path-line-label", purpose.label(), &[]);
+            // The line offers a directory to type after — an open's holds a
+            // separator at its end so that what is typed is the scene's name —
+            // so its text is not selected for the first key to replace.
             let options = TextInputOptions {
                 placeholder: purpose.placeholder(),
-                masked: false,
+                keep_caret: true,
+                ..TextInputOptions::default()
             };
             let input = ui.text_input_with(".path-line-path", &mut asking.text, options);
             built = Some((input.key, input.engagement));

@@ -49,6 +49,13 @@
 //! engaged widget; text it would refuse is dropped there instead, because
 //! focus has gone and there is no field left open to mend it in.
 //!
+//! **Tab and Shift+Tab put the number in and go on**: focus moves to the next
+//! or the previous focusable node in tree order, and when that is another
+//! drag-value it opens for typing with its text selected, as the focus
+//! module's exception to the engaged rule says — so a vector row's `x`, `y`
+//! and `z` are typed in turn, each put in as a change of its own. Text Tab
+//! would refuse is dropped, as for a click elsewhere: focus has gone.
+//!
 //! **Back puts back the value the engagement began with**, bit for bit — the
 //! value before any step taken while engaged, as back does for every engaged
 //! widget, even across a refused accept.

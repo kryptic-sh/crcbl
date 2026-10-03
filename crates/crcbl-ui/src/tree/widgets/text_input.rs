@@ -17,6 +17,18 @@
 //! same frame as whatever text that press committed, and a field that took it
 //! would open with a space typed into it.
 //!
+//! # Where the caret starts
+//!
+//! **An engagement no pointer began selects the whole text**, so what is typed
+//! first replaces it: accept on a focused input, and [`Ui::engage`] — which the
+//! editor's rename begins with — as a browser's Tab into a field and a file
+//! dialog's name box do. **A click places the caret where it lands instead**,
+//! as on every platform, and a double-click selects the word under it, as
+//! Windows, macOS and GTK do. An input built with
+//! [`TextInputOptions::keep_caret`] keeps its caret through every engagement: a
+//! prompt engaged again after each click elsewhere, whose half-typed line the
+//! next key must not replace, or a line offering text to type after.
+//!
 //! # The frame's text input
 //!
 //! [`Ui::set_text_input`] hands the tree one frame's [`TextInput`] between
@@ -136,6 +148,12 @@ pub struct TextInputOptions<'a> {
     /// Draws every character as [`MASK`], and copies and cuts nothing: a
     /// password field.
     pub masked: bool,
+    /// Leaves the caret where it was when an engagement no pointer began
+    /// starts, rather than selecting the whole text: for a prompt engaged
+    /// again after every click elsewhere, whose half-typed line the next key
+    /// must not replace, or a line offering text to type after. See the
+    /// module docs.
+    pub keep_caret: bool,
 }
 
 /// What a text input keeps between frames, beside its store node.
@@ -160,6 +178,11 @@ pub(crate) struct EditState {
     words: bool,
     /// Whether the clipboard refused this input since its last edit.
     refused: bool,
+    /// Whether the input was engaged when it was last built, so the frame an
+    /// engagement starts is told from the ones after it — [`Ui::engage`]'s
+    /// first frame reports [`Engagement::Engaged`], not
+    /// [`Engagement::Began`].
+    engaged: bool,
 }
 
 impl EditState {
@@ -365,6 +388,12 @@ impl Ui {
         state.held = interaction.pressed && self.pointer.down && !disabled;
 
         let engaged = interaction.engagement.is_engaged();
+        // Before this frame's edits, so a key typed in the frame
+        // `Ui::engage` hands over replaces the text rather than joining it.
+        let pointed = interaction.pressed || self.clicked_key().is_some();
+        if engaged && !state.engaged && !pointed && !options.keep_caret {
+            moved |= state.line.select(0..state.line.len());
+        }
         if interaction.engagement == Engagement::Engaged && !disabled {
             for edit in std::mem::take(&mut self.text_frame.edits) {
                 if options.masked && matches!(edit, Edit::Copy | Edit::Cut) {
@@ -462,6 +491,7 @@ impl Ui {
                 ui.block(".text-input-caret", caret_style, |_| {});
             }
         });
+        state.engaged = engaged;
         self.edits.insert(key, state);
         self.set_widget_state(key, widget);
         self.fits.push(fit);

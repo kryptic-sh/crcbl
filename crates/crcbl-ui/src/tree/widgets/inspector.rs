@@ -255,7 +255,7 @@ pub type RowBuilder = Box<dyn Fn(&mut Ui, &mut FieldRow<'_>)>;
 ///         };
 ///         let options = TextInputOptions {
 ///             placeholder: "unnamed",
-///             masked: false,
+///             ..TextInputOptions::default()
 ///         };
 ///         if ui
 ///             .text_input_with(".inspector-field", &mut text, options)

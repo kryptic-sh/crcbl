@@ -3711,10 +3711,30 @@ in `crcbl_input::list`). Decisions, then what is left.
   - **Held at its laid-out width with overflow hidden while typed into**, so an
     inspector row does not reflow as the text grows; the text scrolls to the
     caret as a text input's does.
-- **Not covered by typing into a drag-value**: a vector row's three fields have
-  no Tab-to-next-axis (Tab is `ui_next`, captured and ignored while engaged);
-  there is no expression evaluation (`2*3`) and no unit suffix; and a pre-edit
-  (IME) string is not shown, as for every text input.
+- **Tab between numbers being typed (2026-10-04, the Tab arm of
+  `Ui::resolve_navigation` in `crates/crcbl-ui/src/tree/focus/mod.rs`) —
+  decisions, each with why:**
+  - **The general, focus-order form, not one scoped to a vector row.** Tab
+    (`ui_next`) on a drag-value being typed into commits it and moves focus in
+    tree order, as Tab from a node that is not engaged does; when focus lands on
+    another drag-value, that one opens for typing, all selected. So Tab out of
+    `z` opens the next row's first number when one follows, and only moves focus
+    when anything else does — Blender's Tab between number fields and a
+    spreadsheet's between cells. A row-scoped form would need the tree to know
+    which drag-values make up a row, which it does not; tree order already walks
+    a row's axes in reading order.
+  - **Only a drag-value being typed into gives up Tab.** A text input and a
+    drag-value engaged by a click for stepping still take Tab as a captured step
+    that does nothing, and Tab never opens a text input it lands on. Making a
+    text input commit on Tab would change the debug console's prompt and every
+    form at once, and nothing asked for it; the exception in the LOCKED rule
+    stays as narrow as the request.
+  - **Text Tab would refuse is dropped**, the value left as it was, as a click
+    elsewhere drops it: focus has moved on, so there is no field to mend it in.
+    Accept is still the way to keep a refused field open.
+- **Not covered by typing into a drag-value**: there is no expression evaluation
+  (`2*3`) and no unit suffix; and a pre-edit (IME) string is not shown, as for
+  every text input.
 - **Decisions taken with the 64-bit drag-value (2026-10-03, `DragNumber` in
   `crates/crcbl-ui/src/tree/widgets/value.rs`)**, which still bind. No reflected
   leaf goes through the slider, so it stayed `f32`.
@@ -3958,6 +3978,35 @@ the gaps below.
 - **Word moves follow the macOS and GTK convention** (Right stops at a word's
   end), not Windows' (Ctrl+Right stops at the next word's start) — chosen, not
   per-platform.
+- **Where the caret starts when an input engages (2026-10-04, `line_block` in
+  `crates/crcbl-ui/src/tree/widgets/text_input.rs`) — decisions, each with
+  why:**
+  - **An engagement no pointer began selects the whole text**: accept on a
+    focused input, and `Ui::engage`, which the editor's rename starts with. A
+    browser's Tab into a field and a file dialog's name box do the same, and it
+    is what closed the editor's "Ctrl+A first" friction for a rename. It is told
+    by `EditState`'s `engaged` flag rather than by `Engagement::Began`, because
+    `Ui::engage`'s first frame reports `Engaged`.
+  - **A click places the caret where it lands, and a double-click selects the
+    word under it, not the whole text** — Windows, macOS and GTK all select a
+    word on a double-click and keep select-all for a triple-click, which is not
+    built. So a pointer retype of an inspector text field is a double-click (a
+    one-word label) or Ctrl+A, as on every desktop.
+  - **`TextInputOptions::keep_caret` opts out, and two callers set it.** The
+    debug console's prompt is engaged again by `Ui::engage` after every click
+    elsewhere in the panel, and selecting its half-typed line then would let the
+    next key replace it. The editor's path line offers a directory to type after
+    — an open's ends in a separator so that what is typed is the scene's name
+    (`begin_open` in `apps/editor/src/app/files.rs`) — and a save-as's is the
+    scene's own directory, edited at its end. A file dialog selects only the
+    name part; selecting the last path segment is not built. The rest — the
+    editor's rename, the inspector's text fields, the text-input golden's page
+    and the `crcbl::text_input` sample — either start empty or want the text
+    replaced.
+  - **Focus arriving by navigation engages nothing**, so it selects nothing: the
+    LOCKED rule keeps a focused input inert until accept. Tab out of a number
+    being typed opens the next drag-value, not a text input (see _What UI rung
+    8b shipped without_).
 - **Not tested**: parsed-font caret placement has unit tests and no golden; IME
   commits and the clipboard were driven only through `HeadlessShell`, never on
   X11, Wayland, Win32 or AppKit.
@@ -13280,10 +13329,6 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   - **An override reports its widgets only if it calls `FieldRow::locate`.** The
     vectors override does; one a caller registers without it has fields no
     clipboard key can name.
-  - **A rename's text is not selected when it begins**, so typing into a named
-    row appends; Ctrl+A first replaces it. The input is engaged by `Ui::engage`,
-    which takes no edits; selecting would need the first engaged frame's text
-    input to carry `Edit::SelectAll`.
   - **Coverage gap**: rename and field copy/paste have never been looked at on a
     device — the tests type and click through the headless shell and the null
     backend.
@@ -13319,9 +13364,6 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     inspector scrolls too since its vector rows wrap. A wider side column or a
     collapsible environment section would each change the default layout or add
     state; neither was asked for.
-  - **An inspector text field's text is not selected when it is engaged**, so
-    retyping a duplicated plot's label takes Ctrl+A first — the rename input's
-    note above, for the same reason.
   - **Coverage gaps**: the pass is headless on the null backend, never seen on a
     device; the authored field is played by towers' `Game`, not the editor's
     play mode (which plays the committed field, the same bytes). Towers'

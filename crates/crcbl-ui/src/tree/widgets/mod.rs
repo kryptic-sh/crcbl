@@ -191,6 +191,18 @@ impl WidgetState {
     pub(crate) const fn types(self) -> bool {
         matches!(self, Self::TextInput | Self::TypedNumber(_))
     }
+
+    /// Whether the node is a drag-value being typed into, which Tab and
+    /// Shift+Tab put the number in and leave.
+    pub(crate) const fn is_typed_number(self) -> bool {
+        matches!(self, Self::TypedNumber(_))
+    }
+
+    /// Whether the node is a drag-value, typed into or not: what Tab out of a
+    /// number being typed opens for typing when it lands there.
+    pub(crate) const fn is_drag_value(self) -> bool {
+        matches!(self, Self::Drag { .. } | Self::TypedNumber(_))
+    }
 }
 
 /// `selector` with the widget type `kind` in front, unless it names a type.

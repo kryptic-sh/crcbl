@@ -204,6 +204,27 @@ fn a_queued_edit_waits_for_a_frame_the_field_takes_edits_on() {
     );
 }
 
+/// **A click elsewhere in the panel keeps the half-typed line**: the prompt
+/// is engaged again with its caret where it was rather than its text
+/// selected, so the next key joins the line instead of replacing it.
+#[test]
+fn a_click_elsewhere_keeps_the_half_typed_line() {
+    let extent = (960, 720);
+    let mut panel = panel(&["a line"], "");
+    frame(&mut panel, extent, idle(), typed([insert("he")]));
+    let layout = still(&mut panel, extent);
+    let on_log = (layout.log().0 + layout.log().1) * 0.5;
+    frame(&mut panel, extent, press_at(on_log), quiet());
+    frame(&mut panel, extent, release_at(on_log), quiet());
+    still(&mut panel, extent);
+    frame(&mut panel, extent, idle(), typed([insert("y")]));
+    assert_eq!(
+        panel.line(),
+        "hey",
+        "the click selected the line, so the next key replaced it"
+    );
+}
+
 /// **The field selects, copies and pastes**, which is the whole of what moving
 /// it onto [`Ui::text_input`](crate::tree::Ui::text_input) bought: the console
 /// had none of it.

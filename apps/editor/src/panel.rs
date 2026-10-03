@@ -1896,7 +1896,7 @@ fn build_outliner(
                     Some(edit) if entity_of(row.id) == Some(edit.id) => {
                         let options = TextInputOptions {
                             placeholder: UNNAMED,
-                            masked: false,
+                            ..TextInputOptions::default()
                         };
                         let input = ui.text_input_with(".outliner-rename", &mut edit.text, options);
                         rename = Some((input.key, input.engagement));

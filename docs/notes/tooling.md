@@ -503,7 +503,11 @@ The rules, each with its _why_:
   or step in, close or step out), falling through to spatial navigation where
   that pattern does nothing. Up and down always pass, so arrowing down a list
   never stops on either; engaging first would cost an accept per fader and per
-  expand, which no common menu or tree view asks for.
+  expand, which no common menu or tree view asks for. **One exception on the way
+  out** (decided 2026-10-04): a drag-value being typed into does not take
+  `ui_next` and `ui_prev` — they commit it and move focus in tree order, opening
+  the drag-value focus lands on for typing, so a vector row's axes are typed in
+  turn as a spreadsheet's cells are.
 - **Spatial navigation is beam first, distance second** (revised 2026-09-15).
   Candidates overlapping the band the current rect projects in the move's
   direction beat any outside it, and only then does distance decide. Godot 4.4's

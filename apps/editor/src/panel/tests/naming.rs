@@ -143,6 +143,28 @@ fn a_rename_types_into_the_row_and_commits_or_cancels() {
     assert_eq!(page.document.log().len(), 1);
 }
 
+/// **A rename begins with the name selected**, so what is typed replaces it
+/// rather than joining it — the input is engaged by `Ui::engage`, which no
+/// pointer began.
+#[test]
+fn a_rename_begins_with_the_name_selected() {
+    let id = SceneEntityId(3);
+    let mut document = Document::built_in().expect("the compiled-in scene");
+    document.rename(id, "Spawner").expect("held");
+    let mut page = Page::over(document);
+    page.idle();
+    page.panels.begin_rename(&page.document, id).expect("held");
+    page.idle();
+    type_text(&mut page, "Gate");
+    press_nav(&mut page, true);
+    page.idle();
+    assert_eq!(
+        page.document.entity_name(id).map(EntityName::as_str),
+        Some("Gate"),
+        "the typed name did not replace the old one"
+    );
+}
+
 /// **A rename the document refuses is on the status line**, and changes
 /// nothing: a control character cannot be typed, so the length limit is the
 /// rule a row can break.

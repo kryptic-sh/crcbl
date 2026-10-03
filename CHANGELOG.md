@@ -16,6 +16,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_ui::tree::TextInputOptions` gained `keep_caret`** (see Changed: an
+  engaged text input starts with its text selected). A struct literal must name
+  it — `false` takes the new behaviour — or end in
+  `..TextInputOptions::default()`.
+
 - **`crcbl_net::reliable::EndpointStats` gained `recent`, and
   `crcbl_ui::DebugStyle` gained `graph`** (see Added: the netgraph). A struct
   literal of either must name the new field — `WindowCounts::default()` and any
@@ -662,6 +667,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   before. Every inspector number row takes it, and the editor records a typed
   number as one undo. `Ui::text_editing` is true while a drag-value is typed
   into, so a caller routing keys by it needs no change.
+
+- **Tab and Shift+Tab move between numbers being typed.** While a
+  `crcbl_ui::tree::Ui::drag_value` is typed into, Tab (`ui_next`) puts the
+  number in as one change and moves focus to the next focusable node in tree
+  order, and Shift+Tab (`ui_prev`) to the previous; when that node is another
+  drag-value it opens for typing with its text selected. So a vector row's `x`,
+  `y` and `z` are typed in turn, and the editor records one undo per axis. Tab
+  out of the last number of a run only moves focus, and text it would refuse is
+  dropped, as a click elsewhere drops it. Every other engaged widget still takes
+  Tab as a captured step.
 
 - **The netgraph: a "net" section of the F3 panel showing each link of a LAN
   session.** `crcbl::lan::netgraph::Netgraph`, kept by `LanHost` and `LanClient`
@@ -5439,6 +5454,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **An engaged text input starts with its text selected, unless a pointer
+  engaged it.** Accept on a focused `crcbl_ui::tree::Ui::text_input`, and
+  `Ui::engage`, select the whole text, so the first key typed replaces it — the
+  editor's outliner rename among them, which appended to the old name before. A
+  click still places the caret where it lands and a double-click still selects a
+  word. `TextInputOptions::keep_caret` opts out: the debug console's prompt sets
+  it, because it is engaged again after every click elsewhere in the panel and
+  its half-typed line must survive, and so does the editor's save-as and open
+  line, which offers a directory to type after.
 
 - **The towers demo page says a click or a tap on a plot builds**: the hint
   under the canvas leads with the build menu (see Added: towers has a build

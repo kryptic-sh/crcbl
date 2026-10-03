@@ -273,3 +273,62 @@ fn a_number_typed_into_a_field_is_one_undo() {
     );
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
+
+/// **Tab types a vector row's axes in turn, one undo each**: the camera's `x`
+/// opened by a double-click, each number typed over the selected text and Tab
+/// putting it in and opening the next axis, Enter putting in the last — three
+/// entries in the log, and each Ctrl+Z takes back exactly one axis.
+#[test]
+fn tab_types_a_vector_rows_axes_one_undo_each() {
+    let mut editor = headless(200);
+    editor.frame().expect("a frame");
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyN);
+    let camera = |editor: &Editor<HeadlessShell>| {
+        ["camera.0", "camera.1", "camera.2"]
+            .map(|path| editor.document().read_environment(path).expect("a leaf"))
+    };
+    let was = camera(&editor);
+    let entries = editor.document().log().len();
+    let typed = ["11", "12", "13"].map(|text| Value::Float(text.parse().expect("a number")));
+
+    let at = environment_field(&mut editor, CAMERA_ROW, 0);
+    double_click(&mut editor, at);
+    let window = editor.window;
+    for (axis, text) in ["11", "12", "13"].into_iter().enumerate() {
+        editor.frame().expect("a frame");
+        assert!(
+            editor.panels.text_editing(),
+            "axis {axis} is not open for typing"
+        );
+        editor
+            .shell_mut()
+            .commit_text(window, text)
+            .expect("the headless shell takes text");
+        editor.frame().expect("a frame");
+        let leave = if axis == 2 {
+            KeyCode::Enter
+        } else {
+            KeyCode::Tab
+        };
+        tap(&mut editor, leave);
+    }
+    assert_eq!(camera(&editor), typed, "the typed numbers did not go in");
+    assert!(!editor.panels.text_editing(), "Enter left an axis open");
+    assert_eq!(
+        editor.document().log().len(),
+        entries + 3,
+        "three typed axes are not three entries",
+    );
+
+    for undone in (0..3).rev() {
+        chord(&mut editor, Modifiers::CTRL, KeyCode::KeyZ);
+        let mut want = typed.clone();
+        want[undone..].clone_from_slice(&was[undone..]);
+        assert_eq!(
+            camera(&editor),
+            want,
+            "an undo did not take back axis {undone} alone"
+        );
+    }
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}

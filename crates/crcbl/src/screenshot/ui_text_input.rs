@@ -187,7 +187,7 @@ fn frame(
                 &mut values.empty,
                 TextInputOptions {
                     placeholder: UI_TEXT_INPUT_PLACEHOLDER_TEXT,
-                    masked: false,
+                    ..TextInputOptions::default()
                 },
             )
             .key;
@@ -196,8 +196,8 @@ fn frame(
                 "#secret",
                 &mut values.secret,
                 TextInputOptions {
-                    placeholder: "",
                     masked: true,
+                    ..TextInputOptions::default()
                 },
             )
             .key;

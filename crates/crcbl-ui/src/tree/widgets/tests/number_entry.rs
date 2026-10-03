@@ -361,3 +361,151 @@ fn one_number_put_in_is_one_change() {
     let (changes, _) = lone.enter("123.0");
     assert_eq!(changes, 0, "the same number again changed it");
 }
+
+/// What one frame of [`Axes`] built: each axis, then the button after them.
+struct AxesFrame {
+    axes: [Response; 3],
+    after: Response,
+}
+
+/// A vector row — three drag-values, `#x`, `#y` and `#z` — and a button after
+/// it, carried from frame to frame.
+struct Axes {
+    ui: Ui,
+    values: [f64; 3],
+}
+
+impl Axes {
+    /// The row holding `values`, laid out by one still frame.
+    fn new(values: [f64; 3]) -> Self {
+        let mut axes = Self {
+            ui: Ui::new(),
+            values,
+        };
+        axes.nav(NavInput::default());
+        axes
+    }
+
+    /// One still frame with `nav` and `text`.
+    fn frame(&mut self, nav: NavInput, text: TextInput) -> AxesFrame {
+        let Self { ui, values } = self;
+        frame_with_text(ui, idle(), nav, text, |ui| {
+            let [x, y, z] = values;
+            let range = f64::MIN..=f64::MAX;
+            let axes = [
+                ui.drag_value("#x", x, range.clone(), HAIR, 0.5),
+                ui.drag_value("#y", y, range.clone(), HAIR, 0.5),
+                ui.drag_value("#z", z, range, HAIR, 0.5),
+            ];
+            let after = ui.button("#after", "after");
+            AxesFrame { axes, after }
+        })
+    }
+
+    /// A still frame with `nav`.
+    fn nav(&mut self, nav: NavInput) -> AxesFrame {
+        self.frame(nav, typed([]))
+    }
+
+    /// A frame that types `text` over the selection.
+    fn type_text(&mut self, text: &str) -> AxesFrame {
+        self.frame(NavInput::default(), typed([Edit::Insert(text.to_owned())]))
+    }
+
+    /// Focus landed by the keyboard on `#x`, moved `steps` on in tree order,
+    /// and accept, which opens that axis for typing.
+    fn open(&mut self, steps: usize) {
+        self.nav(NavInput::NAVIGATION);
+        for _ in 0..steps {
+            self.nav(NavInput::NEXT);
+        }
+        self.nav(NavInput::ACCEPT);
+        assert!(self.ui.text_editing(), "accept did not open the axis");
+    }
+}
+
+/// How many of `frame`'s axes reported a change.
+fn changes(frame: &AxesFrame) -> usize {
+    frame.axes.iter().filter(|axis| axis.changed).count()
+}
+
+/// **Tab puts the typed number in and opens the next axis for typing**, its
+/// text all selected so what is typed replaces it: the number goes in as one
+/// change, in the frame Tab is pressed, and the next axis changes nothing.
+#[test]
+fn tab_puts_the_number_in_and_opens_the_next_axis_selected() {
+    let mut axes = Axes::new([1.0, 2.0, 3.0]);
+    axes.open(0);
+    let typed_frame = axes.type_text("10");
+    assert_eq!(changes(&typed_frame), 0, "typing put the number in");
+
+    let tabbed = axes.nav(NavInput::NEXT);
+    let [x, y, _] = &tabbed.axes;
+    assert_eq!(x.engagement, Engagement::Committed, "Tab did not commit x");
+    assert!(x.changed, "x's number went in unreported");
+    assert_eq!(changes(&tabbed), 1, "Tab was not one change");
+    assert_eq!(axes.values, [10.0, 2.0, 3.0]);
+    assert_eq!(y.engagement, Engagement::Began, "Tab did not engage y");
+    assert_eq!(axes.ui.engaged(), Some(y.key));
+    assert!(axes.ui.text_editing(), "y is not open for typing");
+    assert_eq!(
+        axes.ui.text_caret(y.key),
+        Some((1, 0)),
+        "y's text is not all selected"
+    );
+    let y_key = y.key;
+
+    let replaced = axes.type_text("20");
+    assert_eq!(shown(&axes.ui, y_key), "20", "typing did not replace y");
+    assert_eq!(changes(&replaced), 0);
+    assert_eq!(changes(&axes.nav(NavInput::default())), 0);
+}
+
+/// **Shift+Tab puts the number in and opens the previous axis** for typing,
+/// its text all selected.
+#[test]
+fn shift_tab_opens_the_previous_axis() {
+    let mut axes = Axes::new([1.0, 2.0, 3.0]);
+    axes.open(1);
+    axes.type_text("5");
+    let back = axes.nav(NavInput::PREV);
+    let [x, y, _] = &back.axes;
+    assert_eq!(y.engagement, Engagement::Committed, "Shift+Tab kept y open");
+    assert_eq!(axes.values, [1.0, 5.0, 3.0]);
+    assert_eq!(x.engagement, Engagement::Began, "Shift+Tab did not open x");
+    assert!(axes.ui.text_editing());
+    assert_eq!(
+        axes.ui.text_caret(x.key),
+        Some((1, 0)),
+        "x's text is not all selected"
+    );
+}
+
+/// **Tab at the last axis puts the number in and leaves**: focus goes to the
+/// button after the row, as Tab from any node does, and nothing is engaged.
+/// Text it would refuse is dropped, as a click elsewhere drops it.
+#[test]
+fn tab_at_the_last_axis_puts_the_number_in_and_leaves() {
+    let mut axes = Axes::new([1.0, 2.0, 3.0]);
+    axes.open(2);
+    axes.type_text("7");
+    let left = axes.nav(NavInput::NEXT);
+    assert_eq!(left.axes[2].engagement, Engagement::Committed);
+    assert_eq!(axes.values, [1.0, 2.0, 7.0]);
+    assert!(left.after.focused, "Tab did not move focus to the button");
+    assert_eq!(
+        axes.ui.engaged(),
+        None,
+        "Tab engaged something past the row"
+    );
+    assert!(!axes.ui.text_editing());
+
+    axes.nav(NavInput::PREV);
+    axes.nav(NavInput::ACCEPT);
+    axes.type_text("seven");
+    let dropped = axes.nav(NavInput::NEXT);
+    assert_eq!(axes.values, [1.0, 2.0, 7.0], "refused text went in");
+    assert_eq!(changes(&dropped), 0);
+    assert!(dropped.after.focused);
+    assert!(!axes.ui.text_editing(), "refused text kept the axis open");
+}

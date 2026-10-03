@@ -39,7 +39,7 @@ use crate::style::{Declaration, SheetId, Sides};
 use crate::text::FontAtlas;
 use crate::tree::{
     AvailableSpace, Behavior, ClipboardRequest, Length, LengthAuto, NodeKey, Position, TextInput,
-    Ui,
+    TextInputOptions, Ui,
 };
 use crate::widget::{ButtonState, NATURAL_FONT_SIZE, PointerInput, UiState, WidgetId};
 
@@ -717,7 +717,15 @@ fn build(
                                 ui.span(".console-prompt", PROMPT, &[D::Color(style.prompt_color)])
                                     .key,
                             );
-                            input_key = Some(ui.text_input(".console-input", line).key);
+                            // Engaged again after every click elsewhere in
+                            // the panel, so a half-typed line selected then
+                            // would be replaced by the next key.
+                            let options = TextInputOptions {
+                                keep_caret: true,
+                                ..TextInputOptions::default()
+                            };
+                            input_key =
+                                Some(ui.text_input_with(".console-input", line, options).key);
                         })
                         .key,
                     );

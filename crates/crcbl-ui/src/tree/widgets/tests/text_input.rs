@@ -67,6 +67,7 @@ fn page(
                 TextInputOptions {
                     placeholder: "password",
                     masked: true,
+                    ..TextInputOptions::default()
                 },
             ),
         }
@@ -124,8 +125,9 @@ fn engaged_on(name: &str) -> (Ui, [String; 2]) {
 /// **The LOCKED rule on a text input**: focus moves past it, and nothing
 /// typed reaches it while it is only focused; accept engages it without
 /// taking the text the accepting press committed; while engaged it takes the
-/// edits in order, and a navigation step moves neither focus nor the caret;
-/// back cancels to the text it engaged with; accept commits.
+/// edits in order, and a navigation step moves neither focus nor the caret
+/// nor the selection accept made; back cancels to the text it engaged with;
+/// accept commits.
 #[test]
 fn a_text_input_engages_takes_edits_cancels_to_its_snapshot_and_commits() {
     let mut ui = Ui::new();
@@ -169,7 +171,7 @@ fn a_text_input_engages_takes_edits_cancels_to_its_snapshot_and_commits() {
         );
         assert_eq!(
             ui.text_caret(held.name.key),
-            Some((2, 2)),
+            Some((2, 0)),
             "{nav:?} moved the caret"
         );
     }
@@ -177,7 +179,12 @@ fn a_text_input_engages_takes_edits_cancels_to_its_snapshot_and_commits() {
         &mut ui,
         idle(),
         NavInput::NAVIGATION,
-        typed([insert("!"), step(Motion::Left, false), insert("?")]),
+        typed([
+            step(Motion::End, false),
+            insert("!"),
+            step(Motion::Left, false),
+            insert("?"),
+        ]),
         &mut values,
     );
     assert_eq!(values[0], "hi?!", "the edits were not taken in order");
@@ -194,7 +201,7 @@ fn a_text_input_engages_takes_edits_cancels_to_its_snapshot_and_commits() {
         &mut ui,
         idle(),
         NavInput::NAVIGATION,
-        typed([insert("s")]),
+        typed([step(Motion::End, false), insert("s")]),
         &mut values,
     );
     let committed = page(&mut ui, idle(), NavInput::ACCEPT, quiet(), &mut values);
@@ -328,6 +335,110 @@ fn a_click_places_the_caret_a_drag_selects_and_a_double_click_selects_a_word() {
         "a drag-select did not end engaged"
     );
     assert_eq!(fresh.text_caret(key), Some((5, 1)));
+}
+
+/// **An engagement no pointer began selects the whole text, and the first key
+/// typed replaces it**: accept on a focused input, and [`Ui::engage`], whose
+/// first frame is engaged rather than begun and takes that frame's typing.
+#[test]
+fn an_engagement_no_pointer_began_selects_the_whole_text() {
+    let (mut ui, mut values) = engaged_on("hello");
+    let key = page(&mut ui, idle(), NavInput::NAVIGATION, quiet(), &mut values)
+        .name
+        .key;
+    assert_eq!(
+        ui.text_caret(key),
+        Some((5, 0)),
+        "accept did not select the text"
+    );
+    page(
+        &mut ui,
+        idle(),
+        NavInput::NAVIGATION,
+        typed([insert("x")]),
+        &mut values,
+    );
+    assert_eq!(values[0], "x", "the key typed did not replace the text");
+
+    let mut ui = Ui::new();
+    let mut values = [String::from("hello"), String::new()];
+    let laid = page(&mut ui, idle(), NavInput::default(), quiet(), &mut values);
+    ui.engage(laid.name.key);
+    page(
+        &mut ui,
+        idle(),
+        NavInput::default(),
+        typed([insert("y")]),
+        &mut values,
+    );
+    assert_eq!(
+        values[0], "y",
+        "a key typed in the frame engage handed over did not replace the text"
+    );
+}
+
+/// **A click engages with the caret where it lands, and a double-click selects
+/// the word under it** — not the whole text, on an input a keyboard engagement
+/// selected the whole of before.
+#[test]
+fn a_click_engages_with_the_caret_where_it_lands_and_a_double_click_takes_the_word() {
+    let (mut ui, mut values) = engaged_on("hello world");
+    let committed = page(&mut ui, idle(), NavInput::ACCEPT, quiet(), &mut values);
+    assert_eq!(committed.name.engagement, Engagement::Committed);
+    let key = committed.name.key;
+    let span = part(&ui, key, ".text-input-text").expect("the text is a part");
+    let (origin, bottom) = rect(&ui, span);
+    let advance = bitmap_width(&ui, span, "M");
+    let at = Vec2::new(origin.x + 3.4 * advance, (origin.y + bottom.y) * 0.5);
+
+    let clicked = click(&mut ui, at, &mut values);
+    assert_eq!(clicked.name.engagement, Engagement::Began);
+    assert_eq!(
+        ui.text_caret(key),
+        Some((3, 3)),
+        "the click selected rather than placing the caret"
+    );
+    click(&mut ui, at, &mut values);
+    assert_eq!(
+        ui.text_caret(key),
+        Some((5, 0)),
+        "a double-click on `hello` did not select the word"
+    );
+}
+
+/// **An input built with `keep_caret` keeps its caret through an engagement**,
+/// by accept and by [`Ui::engage`] alike, so the next key typed joins the text.
+#[test]
+fn an_input_that_keeps_its_caret_selects_nothing_when_it_engages() {
+    let mut ui = Ui::new();
+    let mut value = String::from("hello");
+    let options = TextInputOptions {
+        keep_caret: true,
+        ..TextInputOptions::default()
+    };
+    let prompt = |ui: &mut Ui, nav, text, value: &mut String| {
+        frame_with_text(ui, idle(), nav, text, |ui| {
+            ui.text_input_with("#prompt", value, options)
+        })
+    };
+    let laid = prompt(&mut ui, NavInput::default(), quiet(), &mut value);
+    ui.engage(laid.key);
+    prompt(
+        &mut ui,
+        NavInput::default(),
+        typed([insert("!")]),
+        &mut value,
+    );
+    assert_eq!(value, "hello!", "engage selected the text");
+
+    prompt(&mut ui, NavInput::ACCEPT, quiet(), &mut value);
+    let began = prompt(&mut ui, NavInput::ACCEPT, quiet(), &mut value);
+    assert_eq!(began.engagement, Engagement::Began);
+    assert_eq!(
+        ui.text_caret(began.key),
+        Some((6, 6)),
+        "accept selected the text"
+    );
 }
 
 /// **The selection highlight spans exactly the selected glyphs, and the caret
@@ -757,14 +868,14 @@ fn the_caret_blinks_on_the_frame_clock() {
     );
 }
 
-/// **A value changed from outside is taken as it stands**, the caret held
-/// inside it, and a disabled input takes no edits.
+/// **A value changed from outside is taken as it stands**, the caret and the
+/// selection's anchor held inside it, and a disabled input takes no edits.
 #[test]
 fn an_outside_change_and_a_disabled_input() {
     let (mut ui, mut values) = engaged_on("abcdef");
     values[0] = "ab".to_owned();
     let shrunk = page(&mut ui, idle(), NavInput::NAVIGATION, quiet(), &mut values);
-    assert_eq!(ui.text_caret(shrunk.name.key), Some((2, 2)));
+    assert_eq!(ui.text_caret(shrunk.name.key), Some((2, 0)));
     assert!(
         !shrunk.name.changed,
         "the caller's own change was reported back"

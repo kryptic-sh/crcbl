@@ -1499,8 +1499,13 @@ exactly what it saves.
   to unlist it; a new entity starts at its component's `Default` rather than
   where the view looks; the scene pane is taller than the default layout's
   inspector, so the environment's rows are scrolled to; and a text field's text
-  is not selected when it is engaged, so retyping a duplicated plot's label
-  takes Ctrl+A first.
+  was not selected when it was engaged, so retyping a duplicated plot's label
+  took Ctrl+A first — **settled since**: an input engaged without a pointer
+  (accept, or `Ui::engage`, as a rename is) starts with its text selected, while
+  a click places the caret and a double-click takes the word, as every desktop
+  does (`crcbl-ui`'s `widgets/text_input.rs`). Typing a vector row's numbers
+  also gained Tab and Shift+Tab, which put the number in as one undo and open
+  the next axis for typing.
 - **What it does not cover**: nothing of it has been seen on a device — every
   step is headless, on the null backend, against laid-out rectangles — and the
   authored field is played by towers' `Game`, not by the editor's play mode
