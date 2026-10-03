@@ -36,13 +36,26 @@
 //! which [`crcbl::registry::Registry::register`] requires of every registered
 //! component — see that method for why the game chooses it rather than this
 //! tool.
+//!
+//! # A new entity in one system
+//!
+//! [`add_entity`](Document::add_entity) puts a new entity in the scene
+//! holding one component, at its type's `Default`, in any registered system —
+//! what the inspector offers while nothing is selected, under the headings
+//! [`addable_groups`](Document::addable_groups) gives. Before it, the only
+//! entity a scene from empty could gain was a mesh dropped from the asset
+//! browser, so a scene of a game's own components — towers' path and plots —
+//! had to start as a mesh, take its components and lose the mesh, and the
+//! emptied `meshes` system stayed in the manifest, with no button to take it
+//! out. It is one [`EditCommand::Spawn`], batched after the listing as a drop
+//! is, so one undo takes the entity and the manifest entry back.
 
 use std::collections::BTreeMap;
 
 use crcbl::scene::scn::{SceneEntityId, SystemChunk};
 
 use super::{Document, EditError, sync_colliders};
-use crate::command::EditCommand;
+use crate::command::{EditCommand, SystemRow};
 
 /// The heading of the systems the scene's manifest lists, first in the add
 /// list.
@@ -115,7 +128,21 @@ impl Document {
             return Vec::new();
         }
         let held = self.systems_of(id);
-        let offered = |system: &str| !held.iter().any(|each| each == system);
+        self.groups(|system| !held.iter().any(|each| each == system))
+    }
+
+    /// Every registered system, under the headings
+    /// [`attachable_groups`](Self::attachable_groups) draws — the systems
+    /// [`add_entity`](Self::add_entity) can put a new entity in, which the
+    /// inspector offers while nothing is selected.
+    #[must_use]
+    pub fn addable_groups(&self) -> Vec<SystemGroup> {
+        self.groups(|_| true)
+    }
+
+    /// The registered systems `offered` keeps, under the headings
+    /// [`attachable_groups`](Self::attachable_groups) describes.
+    fn groups(&self, offered: impl Fn(&str) -> bool) -> Vec<SystemGroup> {
         let listed = self.scene.systems();
         let mut groups = vec![SystemGroup {
             label: IN_SCENE.to_owned(),
@@ -173,6 +200,37 @@ impl Document {
             row,
         };
         self.apply(self.listing_first(system, attach))
+    }
+
+    /// Puts a new entity in the scene holding one component, in `system`, at
+    /// the component type's `Default`, and hands back its id — the next one
+    /// the document hands out. One [`EditCommand::Spawn`], batched after the
+    /// [`EditCommand::ListSystem`] that adds `system` to the manifest when it
+    /// is not there yet, so one undo takes both back. See the module docs.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::Playing`] in play mode, [`EditError::NoSystem`] for a
+    /// system the vocabulary does not register, and [`EditError::Scene`] if
+    /// the default would not serialise. Nothing is spawned, listed or
+    /// recorded when it refuses.
+    pub fn add_entity(&mut self, system: &str) -> Result<SceneEntityId, EditError> {
+        self.refuse_in_play()?;
+        if !self.registry.contains(system) {
+            return Err(EditError::NoSystem(system.to_owned()));
+        }
+        let row = self.registry.default_row(system)?;
+        let id = self.ids.next_id();
+        let spawn = EditCommand::Spawn {
+            entity: id,
+            rows: vec![SystemRow {
+                system: system.to_owned(),
+                row,
+            }],
+            name: None,
+        };
+        self.apply(self.listing_first(system, spawn))?;
+        Ok(id)
     }
 
     /// Takes `id`'s component out of `system`, as one [`EditCommand::Detach`]

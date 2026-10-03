@@ -420,6 +420,10 @@ pub struct PanelFrame {
     /// its key asks for — for the caller to carry out, as a toolbar click is.
     /// See the module docs.
     pub menu: Option<Action>,
+    /// The system an add-an-entity button in the inspector asked for a new
+    /// entity in this frame, for the caller to add and select — see
+    /// `inspector`'s module docs.
+    pub add: Option<String>,
 }
 
 /// The inspector's sections, add buttons and add-list headings, as a frame
@@ -431,6 +435,9 @@ struct Inspected {
     adds: Vec<(String, NodeKey)>,
     /// Each add-list heading and the label it reads, in the order drawn.
     headings: Vec<(String, NodeKey)>,
+    /// Each add-an-entity button and the system it adds in, in the order
+    /// drawn.
+    entity_adds: Vec<(String, NodeKey)>,
 }
 
 /// The editor's panels, and everything they keep between frames.
@@ -968,6 +975,14 @@ impl Panels {
         self.inspector.adds.clone()
     }
 
+    /// The add-an-entity buttons the inspector draws while nothing is
+    /// selected, each with the system it puts a new entity in, as the last
+    /// frame laid them out.
+    #[must_use]
+    pub fn entity_add_buttons(&self) -> Vec<(String, NodeKey)> {
+        self.inspector.entity_adds.clone()
+    }
+
     /// The add list's headings, each with the label it reads, as the last
     /// frame laid them out — one per
     /// [`Document::attachable_groups`](crate::document::Document::attachable_groups)
@@ -1209,12 +1224,15 @@ impl Panels {
             switches,
             field,
             change,
+            entity_adds,
+            add,
         } = built;
         self.props_key = props;
         self.inspector = Inspected {
             sections,
             adds,
             headings,
+            entity_adds,
         };
         self.field = selected
             .zip(field)
@@ -1282,6 +1300,7 @@ impl Panels {
             unsaved: answered,
             recovery: recovered,
             menu: row_menu.picked,
+            add,
         }
     }
 

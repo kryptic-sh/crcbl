@@ -170,6 +170,18 @@ pub(super) fn play(document: &mut Document, op: &Op, reached: &mut Reached) -> O
             document.select(Some(id));
             Outcome::Recorded
         }
+        Op::Add { system } => {
+            let system = registered(document, system);
+            let listed = document.scene.systems().contains(&system);
+            let Ok(id) = document.add_entity(&system) else {
+                return Outcome::Refused;
+            };
+            if !listed {
+                reached.push("an add listing its system");
+            }
+            document.select(Some(id));
+            Outcome::Recorded
+        }
         Op::Attach { target, system } => {
             let target = target_of(document, target);
             let system = registered(document, system);

@@ -86,7 +86,7 @@ struct Tally {
 
 /// The facts [`Tally::reached`] must hold — each a shape of edit whose undo
 /// has its own way to go wrong.
-const MUST_REACH: [&str; 16] = [
+const MUST_REACH: [&str; 17] = [
     "a gesture of several writes",
     "a drag whose leaves change part-way",
     "a gesture that ended where it began",
@@ -97,6 +97,7 @@ const MUST_REACH: [&str; 16] = [
     "a delete of two entities",
     "a duplicate of two entities",
     "a drop listing meshes",
+    "an add listing its system",
     "an attach listing its system",
     "an unlisting from the manifest's middle",
     "a state holding a name",

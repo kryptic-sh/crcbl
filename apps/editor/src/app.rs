@@ -656,6 +656,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         asked.extend(panels.toolbar);
         asked.extend(panels.menu);
         let accepted = panels.spawn;
+        let added = panels.add;
         self.draw_gizmo(pointer.pos);
 
         let requests = self.panels.take_clipboard_requests();
@@ -703,6 +704,9 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.tick_autosave();
         if let Some(asset) = accepted {
             self.place_at_centre(&asset);
+        }
+        if let Some(system) = added {
+            self.add_entity(&system);
         }
         if let Some((target, content)) = self.paste.take() {
             self.paste_content(&target, &content);
@@ -1225,6 +1229,22 @@ impl<S: Shell + ?Sized> Editor<S> {
             None => self
                 .panels
                 .set_status(format!("Placed `{asset}` as #{id}"), Tone::Info),
+        }
+    }
+
+    /// Puts a new entity in `system` at its component's `Default` and selects
+    /// it, saying on the status line what was added — or why nothing was.
+    fn add_entity(&mut self, system: &str) {
+        match self.document.add_entity(system) {
+            Ok(id) => {
+                self.document.select(Some(id));
+                self.panels
+                    .set_status(format!("Added #{id} in `{system}`"), Tone::Info);
+            }
+            Err(error) => {
+                crcbl::log::warn!("editor: {error}");
+                self.panels.set_status(error.to_string(), Tone::Warning);
+            }
         }
     }
 

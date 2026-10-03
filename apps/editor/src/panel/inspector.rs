@@ -21,6 +21,15 @@
 //! through the document, so a refusal reaches the status line like every
 //! other.
 //!
+//! **While nothing is selected the pane is the scene's**: one **add an
+//! entity** button per registered system, under the same headings, each
+//! putting a new entity in the scene holding that system's component at its
+//! `Default` ([`Document::add_entity`]). The click is reported as
+//! [`Built::add`] for [`crate::app`] to carry out and select, as a drop from
+//! the asset browser is: the panels push the outliner's selection back into
+//! the document at the end of the frame, which would drop a selection made
+//! here before it was ever shown.
+//!
 //! **An enum offers its variants** ([`InspectorOptions::variants`]): a body's
 //! `kind` opens on a drop-down whose list holds `Dynamic`, `Static` and
 //! `Kinematic`, and a pick is reported as a switch the document records as one
@@ -82,6 +91,12 @@ pub(super) struct Built {
     pub(super) field: Option<(String, String)>,
     /// What a click asked for this frame.
     pub(super) change: Option<Change>,
+    /// Each add-an-entity button and the system it puts a new entity in, in
+    /// the order drawn — drawn only while nothing is selected.
+    pub(super) entity_adds: Vec<(String, NodeKey)>,
+    /// The system an add-an-entity button asked for a new entity in this
+    /// frame.
+    pub(super) add: Option<String>,
 }
 
 /// The inspector pane for `selected`, labelled `label`.
@@ -95,8 +110,7 @@ pub(super) fn build(
     let mut built = Built::default();
     ui.block(".editor-panel", &[], |ui| {
         let Some(id) = selected else {
-            ui.span(".editor-title", "Properties", &[]);
-            ui.span(".editor-note", "Nothing is selected", &[]);
+            scene(ui, document, &mut built);
             return;
         };
         let systems = document.systems_of(id);
@@ -192,6 +206,34 @@ pub(super) fn build(
         built.field = focused.or(hovered);
     });
     built
+}
+
+/// The pane while nothing is selected — see the module docs: the scene's
+/// title, and one add-an-entity button per registered system under the add
+/// list's headings.
+fn scene(ui: &mut Ui, document: &Document, built: &mut Built) {
+    ui.span(".editor-title", "Scene", &[]);
+    let groups = document.addable_groups();
+    let props = ui.block("#props", &[], |ui| {
+        ui.block(".inspector-add", &[], |ui| {
+            ui.span(".section-title", "Add an entity", &[]);
+            for group in &groups {
+                ui.block_keyed(&group.label, ".add-group", &[], |ui| {
+                    let heading = ui.span(".add-group-label", group.label.as_str(), &[]);
+                    built.headings.push((group.label.clone(), heading.key));
+                    for system in &group.systems {
+                        let text = format!("+ {system}");
+                        let button = ui.button(".section-add", text.as_str());
+                        if button.clicked {
+                            built.add = Some(system.clone());
+                        }
+                        built.entity_adds.push((system.clone(), button.key));
+                    }
+                });
+            }
+        });
+    });
+    built.props = Some(props.key);
 }
 
 /// The order a rotation's three angles are composed in on its row: about X,

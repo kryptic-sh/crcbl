@@ -428,3 +428,66 @@ fn attach_and_detach_are_refused_in_play() {
     assert_eq!(document.systems_of(BLOCK), [BLOCKS]);
     assert_eq!(document.systems_of(BOTH), [BLOCKS, SUN]);
 }
+
+/// **A new entity in one system, from a scene with nothing in it**: the next
+/// id, holding that system's `Default` and nothing else, the system listed in
+/// front of it — one undo takes the entity and the
+/// listing back to the empty scene's files, and a second entity in a listed
+/// system lists nothing. Refused in play and for a system the vocabulary does
+/// not hold, recording nothing.
+#[test]
+fn add_entity_puts_a_default_component_in_one_system_listing_it_first() {
+    /// Towers' path, which no scene from empty lists.
+    const WAYPOINTS: &str = "waypoints";
+
+    let mut document = Document::built_in().expect("the compiled-in scene opens");
+    document.new_scene().expect("editing");
+    let empty = document.files().expect("ids");
+    document.play().expect("a scene of nothing still plays");
+    let error = document.add_entity(WAYPOINTS).expect_err("playing");
+    assert!(matches!(error, EditError::Playing), "{error}");
+    document.stop().expect("stops");
+    assert!(document.log().is_empty(), "a refusal recorded");
+    assert_eq!(document.files().expect("ids"), empty);
+
+    let first = document
+        .add_entity(WAYPOINTS)
+        .expect("towers' path is registered");
+    assert_eq!(first, SceneEntityId(0));
+    assert_eq!(document.systems_of(first), [WAYPOINTS]);
+    assert_eq!(document.scene.systems(), [WAYPOINTS]);
+    assert_eq!(
+        document
+            .component(first, WAYPOINTS)
+            .and_then(|row| row.as_any().downcast_ref::<crcbl_towers::Waypoint>())
+            .copied(),
+        Some(crcbl_towers::Waypoint::default()),
+        "the new waypoint is not its type's default",
+    );
+    assert_eq!(document.log().len(), 1, "an add is one entry");
+    let added = document.files().expect("ids");
+
+    let second = document.add_entity(WAYPOINTS).expect("listed now");
+    assert_eq!(second, SceneEntityId(1));
+    assert!(
+        matches!(
+            document.log().applied().last(),
+            Some(EditCommand::Spawn { .. })
+        ),
+        "an add in a listed system listed it again",
+    );
+
+    assert!(document.undo().expect("applies"));
+    assert_eq!(document.files().expect("ids"), added);
+    assert!(document.undo().expect("applies"));
+    assert_eq!(document.files().expect("ids"), empty, "the listing stayed");
+    assert!(document.redo().expect("applies"));
+    assert_eq!(document.files().expect("ids"), added);
+
+    let error = document
+        .add_entity("no-such-system")
+        .expect_err("not registered");
+    assert!(matches!(error, EditError::NoSystem(_)), "{error}");
+    assert_eq!(document.files().expect("ids"), added);
+    assert_eq!(document.log().position(), 1, "a refusal recorded");
+}

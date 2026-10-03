@@ -616,6 +616,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The editor adds an entity in any system while nothing is selected.** With no
+  selection the inspector is the scene's pane, offering one `+ system` button
+  per registered system under the add list's headings (the scene's own systems,
+  then each game's, then the rest). A click puts a new entity in that system
+  holding its component's `Default`, under the next id, lists the system in the
+  manifest if it was not, and selects it — one undo takes both back
+  (`Document::add_entity`, `Document::addable_groups`). Before this a scene from
+  empty could only gain a mesh dropped from the asset browser, so towers' path
+  and plots had to start as meshes and leave an emptied `meshes` system listed.
+
 - **Slide contacts for a lying body from `crcbl_phys::CharacterController`.**
   `move_lying_into(world, &body, motion, &mut contacts)` makes exactly the move
   `move_lying` makes, to the bit, and writes every sweep of its slide that met

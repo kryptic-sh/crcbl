@@ -94,6 +94,9 @@ pub(super) enum Op {
     Paste { selection: Pair, garbled: bool },
     /// A drop from the asset browser: `Document::spawn_mesh`.
     Drop { asset: Index, x: f64, z: f64 },
+    /// The inspector's add-an-entity button, with nothing selected:
+    /// `Document::add_entity` in any registered system.
+    Add { system: Index },
     /// The inspector's add button: `Document::attach` of any registered
     /// system.
     Attach { target: Index, system: Index },
@@ -238,6 +241,7 @@ pub(super) fn op() -> impl Strategy<Value = Op> {
         )
             .prop_map(|(asset, x, z)| Op::Drop { asset, x, z })
             .boxed(),
+        1 => any::<Index>().prop_map(|system| Op::Add { system }).boxed(),
         2 => (any::<Index>(), any::<Index>())
             .prop_map(|(target, system)| Op::Attach { target, system })
             .boxed(),
@@ -334,6 +338,7 @@ impl Op {
             Self::Duplicate { .. } => "duplicate",
             Self::Paste { .. } => "paste",
             Self::Drop { .. } => "drop",
+            Self::Add { .. } => "add an entity",
             Self::Attach { .. } => "attach",
             Self::Detach { .. } => "detach",
             Self::List { .. } => "list a system",
@@ -346,7 +351,7 @@ impl Op {
 }
 
 /// Every step's [`Op::name`] — what the test asserts some history accepted.
-pub(super) const EVERY_OP: [&str; 22] = [
+pub(super) const EVERY_OP: [&str; 23] = [
     "property set",
     "inspector edit",
     "field paste",
@@ -362,6 +367,7 @@ pub(super) const EVERY_OP: [&str; 22] = [
     "duplicate",
     "paste",
     "drop",
+    "add an entity",
     "attach",
     "detach",
     "list a system",
