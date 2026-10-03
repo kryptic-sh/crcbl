@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 
-use crcbl::store::{NativeStorage, StorageError, StorageSource};
+use crate::store::{NativeStorage, StorageError, StorageSource};
 
 use super::EditError;
 

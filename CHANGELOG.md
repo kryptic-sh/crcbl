@@ -5427,6 +5427,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   presses. The row itself is unchanged, and so is the browser gate that clicks
   it.
 
+- **The editor's document and edit server are `crcbl::scene_edit`**, behind the
+  umbrella's `scene` feature. `Document`, `EditError`, `EditServer` and the rest
+  of `apps/editor`'s `document` and `serve` modules moved into the umbrella so
+  the `crcbl` CLI applies edits through the same implementation;
+  `crcbl_editor::document` and `crcbl_editor::serve` re-export them, and the
+  clipping text (`Clipped`, `encode`, `decode`) is
+  `crcbl::scene_edit::clipboard`, re-exported from `crcbl_editor::clipboard`.
+  `Document::built_in` is now `crcbl_editor::scene::built_in_document`, since
+  the compiled-in greybox scene is the editor's own; `UNTITLED` and the empty
+  scene's source moved with `Document::new_scene` and are
+  `crcbl::scene_edit::{UNTITLED, NEW_SCENE_ENV_RON, empty_source}`. New
+  read-only accessors: `Document::manifest`, `ids`, `world`, `entities_in`,
+  `rows`, and `text_of` for a leaf's text; and `world_mut` for a caller adding a
+  system of its own.
+
 - **The editor's command model is `crcbl_scene::edit`** (reached as
   `crcbl::scene::edit`). `EditCommand`, `SystemRow`, `UndoLog`, `Gesture`,
   `set_property` and `set_variant` moved out of `apps/editor`, beside the scene

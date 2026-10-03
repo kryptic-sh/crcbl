@@ -6,7 +6,7 @@ use super::*;
 
 use crcbl::scene_mesh::MESHES;
 
-use super::systems::IN_SCENE;
+use super::IN_SCENE;
 
 use crate::scene::{BLOCKS, GREYBOX};
 
@@ -440,7 +440,7 @@ fn add_entity_puts_a_default_component_in_one_system_listing_it_first() {
     /// Towers' path, which no scene from empty lists.
     const WAYPOINTS: &str = "waypoints";
 
-    let mut document = Document::built_in().expect("the compiled-in scene opens");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene opens");
     document.new_scene().expect("editing");
     let empty = document.files().expect("ids");
     document.play().expect("a scene of nothing still plays");
@@ -455,7 +455,7 @@ fn add_entity_puts_a_default_component_in_one_system_listing_it_first() {
         .expect("towers' path is registered");
     assert_eq!(first, SceneEntityId(0));
     assert_eq!(document.systems_of(first), [WAYPOINTS]);
-    assert_eq!(document.scene.systems(), [WAYPOINTS]);
+    assert_eq!(document.manifest(), [WAYPOINTS]);
     assert_eq!(
         document
             .component(first, WAYPOINTS)

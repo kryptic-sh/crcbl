@@ -4,7 +4,7 @@
 use super::*;
 
 fn document() -> Document {
-    Document::built_in().expect("the compiled-in scene is a scene")
+    crate::scene::built_in_document().expect("the compiled-in scene is a scene")
 }
 
 /// **A field copies as the text the chunk file spells it with**: the third

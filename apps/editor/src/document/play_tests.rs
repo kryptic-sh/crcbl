@@ -356,18 +356,23 @@ impl SystemTrait for Ticks {
 /// still ticks, at the world's default rate.
 #[test]
 fn a_vocabulary_with_no_modules_plays_and_the_world_still_ticks() {
-    let mut document = Document::built_in().expect("the compiled-in scene is a scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene is a scene");
     let before = document.files().expect("ids");
 
     document.play().expect("a scene no game plays still plays");
     assert!(document.playing_modules().is_empty());
     // Registered once playing: play runs the world its snapshot loads into,
     // which holds what the files and the modules put there and nothing else.
-    document.world.register_system(Box::new(Ticks::default()));
+    document
+        .world_mut()
+        .register_system(Box::new(Ticks::default()));
     let period = Duration::from_secs_f64(World::DEFAULT_TICK_DT);
     assert_eq!(document.advance(period * 3), 3);
     assert_eq!(
-        document.world.system_mut::<Ticks>().map(|ticks| ticks.0),
+        document
+            .world_mut()
+            .system_mut::<Ticks>()
+            .map(|ticks| ticks.0),
         Some(3),
         "the world's schedule did not run",
     );
@@ -411,6 +416,6 @@ fn a_world_with_no_tick_period_does_not_play() {
         "{error}"
     );
     assert_eq!(document.play_state(), PlayState::Editing);
-    assert_eq!(document.world.tick_dt(), World::DEFAULT_TICK_DT);
+    assert_eq!(document.world().tick_dt(), World::DEFAULT_TICK_DT);
     assert_eq!(document.files().expect("ids"), before);
 }

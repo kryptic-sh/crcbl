@@ -7,7 +7,7 @@ use crate::command::Gesture;
 use crate::scene::{GREYBOX, built_in_source};
 
 fn document() -> Document {
-    Document::built_in().expect("the compiled-in scene is a scene")
+    crate::scene::built_in_document().expect("the compiled-in scene is a scene")
 }
 
 /// The compiled-in scene's `env.ron`, as committed — what every test here

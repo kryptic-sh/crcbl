@@ -11,7 +11,7 @@ const BLOCK: SceneEntityId = SceneEntityId(1);
 /// The compiled-in scene and a directory to save it into.
 fn saving() -> (tempfile::TempDir, Document) {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let document = Document::built_in().expect("the compiled-in scene is a scene");
+    let document = crate::scene::built_in_document().expect("the compiled-in scene is a scene");
     (dir, document)
 }
 

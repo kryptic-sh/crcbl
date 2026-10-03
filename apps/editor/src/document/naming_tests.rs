@@ -4,7 +4,7 @@
 use super::*;
 
 fn document() -> Document {
-    Document::built_in().expect("the compiled-in scene is a scene")
+    crate::scene::built_in_document().expect("the compiled-in scene is a scene")
 }
 
 /// The name `id` has in `document`, as text.
@@ -168,7 +168,7 @@ fn a_duplicate_is_unnamed_and_a_paste_keeps_a_name_nothing_else_bears() {
     let pasted = document.paste(&text).expect("a clipping of this scene");
     assert_eq!(name_of(&document, pasted[0]), None, "two entities are Gate");
 
-    let mut other = Document::built_in().expect("the compiled-in scene");
+    let mut other = crate::scene::built_in_document().expect("the compiled-in scene");
     let pasted = other
         .paste(&text)
         .expect("a clipping of the same vocabulary");

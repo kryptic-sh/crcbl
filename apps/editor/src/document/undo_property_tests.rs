@@ -289,7 +289,7 @@ impl History {
         let selection = document.selection().to_vec();
         for (index, id) in selection.iter().enumerate() {
             prop_assert!(
-                document.ids.entity(*id).is_some() && !selection[..index].contains(id),
+                document.ids().entity(*id).is_some() && !selection[..index].contains(id),
                 "{}: the selection {:?} names #{} twice or not at all",
                 at,
                 selection,

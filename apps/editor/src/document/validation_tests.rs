@@ -14,7 +14,7 @@ const STEP: SceneEntityId = SceneEntityId(2);
 /// The compiled-in scene with a new body — one kilogram — attached to
 /// [`STEP`], as the inspector's add button attaches it.
 fn with_body() -> Document {
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     document.attach(STEP, BODIES).expect("the step has no body");
     document
 }
@@ -151,7 +151,7 @@ fn a_write_no_rule_covers_is_taken() {
 /// every edit — and one of zero is taken.
 #[test]
 fn a_blocks_half_extent_below_zero_is_refused() {
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     let saved = document.files().expect("the scene saves");
     let error = document
         .apply(write(BLOCKS, "half_extents.1", -5.0))

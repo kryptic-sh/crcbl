@@ -30,7 +30,7 @@ fn mixed() -> MemorySource {
 
 /// The panels over the greybox scene, its meshes read from `source`.
 fn page_over(source: impl AssetSource + 'static) -> Page {
-    let mut document = Document::built_in().expect("the compiled-in scene is a scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene is a scene");
     document.set_assets(Box::new(source));
     let mut page = Page::over(document);
     page.idle();

@@ -5,12 +5,12 @@
 //!
 //! [`Document::new_scene`] puts an empty scene in place of the one being
 //! edited — no entity, a manifest listing no system, the compiled-in scene's
-//! light and camera ([`crate::scene::empty_source`]) — with a fresh history
+//! light and camera ([`empty_source`]) — with a fresh history
 //! and no [`origin`](Document::origin). It keeps the vocabulary and the asset
 //! source, so the asset browser goes on listing what it listed: a new scene
 //! is started in the game being worked on. Each system is listed as the first
 //! thing of its kind is put in it, through the
-//! [`EditCommand::ListSystem`](crate::command::EditCommand::ListSystem) a mesh
+//! [`EditCommand::ListSystem`](crate::scene::edit::EditCommand::ListSystem) a mesh
 //! drop and an attach already batch in front of themselves.
 //!
 //! # Save-as moves the document (decided 2026-10-03)
@@ -53,14 +53,60 @@
 
 use std::path::{Path, PathBuf};
 
-use crcbl::assets::DirSource;
+use crate::assets::{DirSource, MemorySource};
 
 use super::{Document, EditError, asset_root, load, ownership};
-use crate::command::UndoLog;
-use crate::scene::UNTITLED;
+use crate::scene::edit::UndoLog;
+
+/// The name a new scene's header carries: what Ctrl+N makes, before anything
+/// is put in it — see [`empty_source`].
+pub const UNTITLED: &str = "untitled";
+
+/// A new scene's `scene.ron`, as the writer writes it: [`UNTITLED`], listing
+/// no system. Each system is listed as the first thing of its kind is put in
+/// the scene — a dropped mesh lists `meshes`, an attached body `bodies`.
+const EMPTY_SCENE_RON: &str = r#"Scene(
+    format: 0,
+    name: "untitled",
+    systems: [],
+)"#;
+
+/// A new scene's `env.ron`, as the writer writes it — the light and camera
+/// the editor's compiled-in greybox scene is looked at with too, so a new
+/// scene is looked at from where that one is.
+pub const NEW_SCENE_ENV_RON: &str = r"Env(
+    camera: Camera(
+        position: (0.0, 6.0, 14.0),
+        look_at: (0.0, 1.0, 0.0),
+    ),
+    ambient: (0.05, 0.05, 0.06),
+)";
+
+/// A new, empty scene directory, as a source with no filesystem under it,
+/// keyed at its root: a header named [`UNTITLED`] listing no system,
+/// [`NEW_SCENE_ENV_RON`]'s light and camera, and no chunk — what
+/// [`Document::new_scene`] loads.
+///
+/// Text rather than a [`crate::scene::scn::Scene`] built in code: the new
+/// scene is reviewable as the files it is, and
+/// `a_new_scene_is_what_the_writer_writes` keeps them the writer's own
+/// spelling.
+#[must_use]
+pub fn empty_source() -> MemorySource {
+    let mut source = MemorySource::new();
+    for (key, text) in [
+        ("scene.ron", EMPTY_SCENE_RON),
+        ("env.ron", NEW_SCENE_ENV_RON),
+    ] {
+        source
+            .insert(Path::new(key), text.as_bytes().to_vec())
+            .expect("a scene key is a legal asset key");
+    }
+    source
+}
 
 /// The file that makes a directory a scene: the header
-/// [`Scene::load`](crcbl::scene::scn::Scene::load) reads first.
+/// [`Scene::load`](crate::scene::scn::Scene::load) reads first.
 const HEADER: &str = "scene.ron";
 
 /// Where a document's asset source came from, which decides whether a
@@ -90,11 +136,11 @@ impl Document {
     /// was: what play changed is thrown away by a stop, and a new scene in
     /// between would throw the authored one away with it.
     /// [`EditError::Scene`] if the empty scene will not load into the
-    /// vocabulary, which is a tree whose `crate::scene` tests are red too.
+    /// vocabulary, which is a tree whose `a_new_scene_is_what_the_writer_writes`
+    /// is red too.
     pub fn new_scene(&mut self) -> Result<(), EditError> {
         self.refuse_in_play()?;
-        let (world, scene, ids) =
-            load(&crate::scene::empty_source(), Path::new(""), &self.registry)?;
+        let (world, scene, ids) = load(&empty_source(), Path::new(""), &self.registry)?;
         self.world = world;
         self.scene = scene;
         self.ids = ids;
@@ -247,4 +293,28 @@ fn typed_dir(text: &str, refuse: impl Fn(&str) -> EditError) -> Result<PathBuf, 
         return Err(refuse("it holds a control character"));
     }
     std::path::absolute(text).map_err(|error| refuse(&error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::registry::Registry;
+
+    /// **A new scene is what the writer writes**, byte for byte: a header
+    /// listing nothing and the compiled-in scene's light, and no chunk.
+    #[test]
+    fn a_new_scene_is_what_the_writer_writes() {
+        let mut document = Document::open(&empty_source(), Path::new(""), Registry::new())
+            .expect("the new scene is a scene");
+        let files = document.files().expect("there is nothing to give an id");
+        assert_eq!(
+            files.keys().collect::<Vec<_>>(),
+            ["env.ron", "scene.ron"],
+            "a header and a light and nothing else",
+        );
+        assert_eq!(files["scene.ron"], EMPTY_SCENE_RON);
+        assert_eq!(files["env.ron"], NEW_SCENE_ENV_RON);
+        assert_eq!(document.name(), UNTITLED);
+    }
 }

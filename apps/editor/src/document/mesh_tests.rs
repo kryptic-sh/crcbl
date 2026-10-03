@@ -163,7 +163,7 @@ fn a_mesh_picks_by_its_measured_box() {
 #[test]
 fn a_spawned_mesh_is_measured_and_its_undo_takes_it_back() {
     let mut document = props();
-    let id = document.ids.next_id();
+    let id = document.ids().next_id();
     let row = crcbl::scene::scn::row_text(
         MESHES,
         &crcbl::scene_mesh::Mesh::new(TRIANGLE, [2.0, 0.0, 0.0]),
@@ -240,7 +240,7 @@ fn play_and_stop_keep_the_meshes_measured() {
 /// and the files are what they were; the redo brings both.
 #[test]
 fn a_mesh_spawned_into_a_scene_without_meshes_lists_them_as_one_undo() {
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     document.set_assets(Box::new(assets()));
     let before = document.files().expect("saves");
     assert!(!before["scene.ron"].contains(MESHES));

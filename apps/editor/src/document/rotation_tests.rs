@@ -47,7 +47,7 @@ fn down_onto(x: f64, z: f64) -> Ray {
 /// were.
 #[test]
 fn a_turned_block_saves_its_rotation_and_reopens_turned() {
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     let before = document.files().expect("the scene saves");
     turn_block(&mut document, STEP, eighth_turn());
 
@@ -80,7 +80,7 @@ fn a_turned_block_saves_its_rotation_and_reopens_turned() {
 /// for the ground below.
 #[test]
 fn a_turned_block_picks_by_its_turned_box() {
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     // Outside the unturned footprint (x > 1.2), inside the turned one.
     let swung_in = down_onto(1.7, 0.2);
     // Inside the unturned footprint's corner, outside the turned one.
@@ -109,7 +109,7 @@ fn a_turned_block_picks_by_its_turned_box() {
 /// than its own half extents along the world's X and Z.
 #[test]
 fn a_turned_blocks_bounds_hold_its_corners() {
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     turn_block(&mut document, STEP, eighth_turn());
     let placement = document.placement(STEP).expect("placed");
     assert_eq!(placement.rotation, eighth_turn());
@@ -134,7 +134,7 @@ fn write_behind(document: &mut Document, id: SceneEntityId, leaf: &str, value: f
 /// a write elsewhere in the component are not.
 #[test]
 fn a_single_leaf_write_off_unit_is_refused_and_put_back() {
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     let before = document.files().expect("the scene saves");
     let error = document
         .apply(EditCommand::SetProperty {
@@ -171,7 +171,7 @@ fn a_single_leaf_write_off_unit_is_refused_and_put_back() {
 /// is unit.
 #[test]
 fn a_rotation_off_unit_is_a_problem_by_file_and_line() {
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     assert!(document.problems().expect("the scene saves").is_empty());
     write_behind(&mut document, STEP, "rotation.w", 0.5);
     let problems = document.problems().expect("the scene saves");
@@ -205,7 +205,7 @@ fn a_rotation_off_unit_is_a_problem_by_file_and_line() {
 /// the undo restored `+0.0`. The undo property test found it.
 #[test]
 fn a_negative_zero_turn_survives_a_delete_and_its_undo() {
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     turn_block(&mut document, STEP, DQuat::from_xyzw(-0.0, 0.0, 0.0, 1.0));
     let turned = document.files().expect("the scene saves");
 

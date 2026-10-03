@@ -13,8 +13,9 @@
 //! vocabulary without linking the editor or a renderer: the editor, the server
 //! that applies a client's edits, and the wire form both send ([`EditOp`],
 //! [`encode_op`] and [`decode_op`]), which the decoder fuzz target reads.
-//! `crcbl_editor::command` re-exports it, and the editor's `Document` is still
-//! what applies it.
+//! `crcbl::scene_edit::Document` is what applies it — the document the
+//! editor, the `crcbl` CLI and the edit server share — and
+//! `crcbl_editor::command` re-exports it.
 //!
 //! An inspector is the one thing that arrives the other way round — the widget
 //! writes the field and *reports* what it wrote — and the editor's

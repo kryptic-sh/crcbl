@@ -24,8 +24,8 @@
 //! a wide selection, and not the mean of the centres, which a cluster at one
 //! end drags away from the middle of what is drawn.
 
-use crcbl::math::DVec3;
-use crcbl::scene::scn::SceneEntityId;
+use crate::math::DVec3;
+use crate::scene::scn::SceneEntityId;
 
 use super::Document;
 

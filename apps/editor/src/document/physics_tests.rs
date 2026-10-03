@@ -126,7 +126,7 @@ fn falling_rows() -> String {
 /// Runs `ticks` ticks of play, a tick's time at a time: one call handed it
 /// all would be cut short by the clock's catch-up cap.
 pub(crate) fn play_ticks(document: &mut Document, ticks: u32) {
-    let period = Duration::from_secs_f64(document.world.tick_dt());
+    let period = Duration::from_secs_f64(document.world().tick_dt());
     let mut ran = 0;
     while ran < ticks {
         ran += document.advance(period);
@@ -137,7 +137,7 @@ pub(crate) fn play_ticks(document: &mut Document, ticks: u32) {
 /// The ticks in `seconds` of play at the world's rate.
 pub(crate) fn ticks_in(document: &Document, seconds: f64) -> u32 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let ticks = (seconds / document.world.tick_dt()).round() as u32;
+    let ticks = (seconds / document.world().tick_dt()).round() as u32;
     ticks
 }
 
@@ -300,13 +300,13 @@ fn the_picking_boxes_stay_kinematic_and_apart_from_the_simulation() {
         let entities: Vec<Entity> = (0..=FALLING.0)
             .map(|id| {
                 document
-                    .ids
+                    .ids()
                     .entity(SceneEntityId(id))
                     .expect("in the scene")
             })
             .collect();
         let picking = document
-            .world
+            .world_mut()
             .system_mut::<PhysicsSystem>()
             .expect("the document's picking physics");
         assert_eq!(picking.collider_count(), placed);
@@ -320,20 +320,20 @@ fn the_picking_boxes_stay_kinematic_and_apart_from_the_simulation() {
     };
 
     check(&mut document);
-    assert!(document.world.system_mut::<Simulation>().is_none());
+    assert!(document.world_mut().system_mut::<Simulation>().is_none());
     document.play().expect("plays");
     let quarter = ticks_in(&document, 0.25);
     play_ticks(&mut document, quarter);
     check(&mut document);
     let simulation = document
-        .world
+        .world_mut()
         .system_mut::<Simulation>()
         .expect("the bodies' module registered its simulation");
     assert_eq!(simulation.physics().collider_count(), placed);
     document.stop().expect("stops");
     check(&mut document);
     assert!(
-        document.world.system_mut::<Simulation>().is_none(),
+        document.world_mut().system_mut::<Simulation>().is_none(),
         "the simulation outlived play",
     );
 }

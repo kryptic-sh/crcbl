@@ -1109,7 +1109,8 @@ day (below).
 **Recovery offered back, pruning and autosave, landed 2026-10-03**, on the
 decisions of the same day (below). The flow is
 `apps/editor/src/app/recovery.rs`; the directory's copies are
-`apps/editor/src/document/recovery/copies.rs`.
+`crates/crcbl/src/scene_edit/recovery/copies.rs` (moved with the document on
+2026-10-04).
 
 - **Decided 2026-10-03, for the long term: recovery is offered, never forced.**
   At every start — whether or not a scene was named on the command line, since a

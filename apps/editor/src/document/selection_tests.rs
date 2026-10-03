@@ -5,7 +5,7 @@
 use super::*;
 
 fn document() -> Document {
-    Document::built_in().expect("the compiled-in scene is a scene")
+    crate::scene::built_in_document().expect("the compiled-in scene is a scene")
 }
 
 /// **The selection keeps the order entities joined it, and the last is the

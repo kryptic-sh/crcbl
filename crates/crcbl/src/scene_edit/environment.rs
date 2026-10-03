@@ -14,7 +14,7 @@
 //! fields a panel draws and a command's path names are [`Environment`]'s,
 //! rebuilt from the scene's [`Env`] each time it is read and written back
 //! whole after each write. A write reads the leaf first and hands back the
-//! command that puts it back, as [`crate::command::set_property`] does for a
+//! command that puts it back, as [`crate::scene::edit::set_property`] does for a
 //! component.
 //!
 //! **Flat, where the file nests the camera's two points**: a nested struct is
@@ -31,17 +31,17 @@
 //! applies the command — unlike [`Document::record_edits`], whose panel
 //! writes into the world itself.
 
-use crcbl::reflect::{Reflect, Value, get_path, set_path};
-use crcbl::scene::scn::{Env, EnvCamera};
-use crcbl::ui::tree::FieldEdit;
+use crate::reflect::{Reflect, Value, get_path, set_path};
+use crate::scene::scn::{Env, EnvCamera};
+use crate::ui::tree::FieldEdit;
 
 use super::field::{text_of, value_of};
 use super::{Document, EditError};
-use crate::command::{EditCommand, Gesture};
+use crate::scene::edit::{EditCommand, Gesture};
 
 /// `env.ron`, as the inspector draws it and a command's path names it.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
-#[reflect(crate = "crcbl::reflect")]
+#[reflect(crate = "crate::reflect")]
 pub struct Environment {
     /// Where the scene is viewed from when it opens: the camera's eye, in
     /// world space, in metres.

@@ -260,7 +260,7 @@ fn delete_duplicate_and_nudge_take_the_whole_selection() {
 /// **Every selected entity is outlined, the primary in its own colour.**
 #[test]
 fn every_selected_entity_is_outlined_and_the_primary_distinctly() {
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     document.set_selection([SceneEntityId(1), SceneEntityId(3)]);
     let boxes = selection_boxes(&mut document);
     let colors: Vec<[f32; 4]> = boxes.iter().map(|(_, color)| *color).collect();

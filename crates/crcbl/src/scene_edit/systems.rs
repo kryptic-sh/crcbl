@@ -1,7 +1,7 @@
 //! Which systems an entity is in: read, and changed through
 //! [`EditCommand::Attach`] and [`EditCommand::Detach`].
 //!
-//! A scene may hold one entity in several systems (`crcbl::scene::scn`'s
+//! A scene may hold one entity in several systems (`crate::scene::scn`'s
 //! _One entity, several systems_), each holding one component of it. An
 //! attach gives the entity a component in one more of the scene's systems and
 //! a detach takes one away, each the other's inverse through the same log as
@@ -13,7 +13,7 @@
 //! registers that does not hold the entity, in the groups
 //! [`attachable_groups`](Document::attachable_groups) heads them with: the
 //! manifest's first, in its order, then the rest by the game that registered
-//! them ([`Registry::group`](crcbl::registry::Registry::group)) — so towers'
+//! them ([`Registry::group`](crate::registry::Registry::group)) — so towers'
 //! `waypoints` is offered on a breakout scene under "towers", not unremarked
 //! beside the scene's own. A save writes the manifest's chunks and
 //! no others, so a component attached in a system the manifest does not list
@@ -33,7 +33,7 @@
 //! # A new component's value
 //!
 //! [`attach`](Document::attach) starts the component at its type's `Default`,
-//! which [`crcbl::registry::Registry::register`] requires of every registered
+//! which [`crate::registry::Registry::register`] requires of every registered
 //! component — see that method for why the game chooses it rather than this
 //! tool.
 //!
@@ -52,17 +52,17 @@
 
 use std::collections::BTreeMap;
 
-use crcbl::scene::scn::{SceneEntityId, SystemChunk};
+use crate::scene::scn::{SceneEntityId, SystemChunk};
 
 use super::{Document, EditError, sync_colliders};
-use crate::command::{EditCommand, SystemRow};
+use crate::scene::edit::{EditCommand, SystemRow};
 
 /// The heading of the systems the scene's manifest lists, first in the add
 /// list.
 pub const IN_SCENE: &str = "In this scene";
 
 /// The heading of systems registered outside any
-/// [`Registry::group`](crcbl::registry::Registry::group), last in the add
+/// [`Registry::group`](crate::registry::Registry::group), last in the add
 /// list.
 pub const UNGROUPED: &str = "Other";
 
@@ -96,7 +96,7 @@ impl Document {
 
     /// The system whose component places `id` — what a gizmo or an arrow key
     /// moves, so that what moves is what the picture and the pick read.
-    /// [`crcbl::registry::Registry::placing_system`] says which one that is.
+    /// [`crate::registry::Registry::placing_system`] says which one that is.
     ///
     /// [`None`] for an id this document does not hold, and for an entity none
     /// of whose components is a thing in space.
@@ -397,7 +397,7 @@ impl Document {
     /// What follows `entity` entering or leaving a system: its collider rebuilt
     /// from whatever places it now, and the membership moved so the outline and
     /// the picture are read again.
-    fn joined(&mut self, entity: crcbl::ecs::Entity) {
+    fn joined(&mut self, entity: crate::ecs::Entity) {
         sync_colliders(&self.registry, &mut self.world, [entity]);
         self.membership += 1;
     }

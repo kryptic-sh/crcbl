@@ -2,7 +2,7 @@
 //! half.
 //!
 //! A field is one **leaf** of an entity's component — the value one inspector
-//! widget edits, named by the [`crcbl::reflect`] path an
+//! widget edits, named by the [`crate::reflect`] path an
 //! [`EditCommand::SetProperty`] carries. Copying it gives its value as the
 //! text the scene's chunk file spells it with, and pasting reads text back the
 //! way the scene's loader reads that kind of value — so a number copied from a
@@ -14,15 +14,15 @@
 //! A chunk row is the component's own `serde` derive over ron, and a leaf of
 //! it is one of ron's primitives: a float is `f64`'s ron text, a string is a
 //! quoted ron string, and so on. [`text_of`] writes a leaf through
-//! [`crcbl::ron::to_string`] of the [`Value`]'s own Rust type, and
-//! [`value_of`] reads one through [`crcbl::ron::from_str`] of the type the leaf
+//! [`crate::ron::to_string`] of the [`Value`]'s own Rust type, and
+//! [`value_of`] reads one through [`crate::ron::from_str`] of the type the leaf
 //! currently holds — the `Deserialize` the loader calls for that leaf. A float
 //! prints through Rust's shortest round trip, so a copy pastes back to the same
 //! bits.
 //!
 //! **A paste is validated twice and applied once.** The text must parse as the
 //! leaf's kind, and the component's leaf must then accept the value —
-//! [`crcbl::reflect::Reflect::set`] refuses a number that does not fit a
+//! [`crate::reflect::Reflect::set`] refuses a number that does not fit a
 //! narrower leaf — and only then is it one [`EditCommand::SetProperty`]:
 //! undoable, refused in play mode, and never a half-written field.
 //!
@@ -34,12 +34,12 @@
 //! from the reflected shape would be a second serializer that could disagree
 //! with the first. Each axis copies and pastes on its own.
 
-use crcbl::reflect::Value;
-use crcbl::ron;
-use crcbl::scene::scn::SceneEntityId;
+use crate::reflect::Value;
+use crate::ron;
+use crate::scene::scn::SceneEntityId;
 
 use super::{Document, EditError};
-use crate::command::EditCommand;
+use crate::scene::edit::EditCommand;
 
 impl Document {
     /// The text of the leaf `path` names inside `id`'s component in `system`,
@@ -93,8 +93,10 @@ impl Document {
     }
 }
 
-/// `value` as ron text — the text of a leaf in a chunk row.
-pub(super) fn text_of(value: &Value) -> String {
+/// `value` as ron text — the text of a leaf in a chunk row, and what
+/// [`Document::copy_field`] answers.
+#[must_use]
+pub fn text_of(value: &Value) -> String {
     let written = match value {
         Value::Bool(value) => ron::to_string(value),
         Value::Int(value) => ron::to_string(value),

@@ -1,17 +1,17 @@
 //! What a person calls an entity: the scene's names, read and changed through
 //! [`EditCommand::Rename`].
 //!
-//! A name is the scene's (`crcbl::scene::scn::names`), keyed by the
+//! A name is the scene's (`crate::scene::scn::names`), keyed by the
 //! [`SceneEntityId`] every command already names, so a rename is undone and
 //! redone through the same log as every other edit and refused in play mode by
 //! the same check.
 
 use std::collections::BTreeMap;
 
-use crcbl::scene::scn::{EntityName, SceneEntityId};
+use crate::scene::scn::{EntityName, SceneEntityId};
 
 use super::{Document, EditError};
-use crate::command::EditCommand;
+use crate::scene::edit::EditCommand;
 
 impl Document {
     /// What `id` is called, if it is named.

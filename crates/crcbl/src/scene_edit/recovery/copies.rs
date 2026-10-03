@@ -41,14 +41,14 @@
 //! open, or whose lock state the platform will not say, keeps its copy out
 //! of the listing and every removal, so nothing live is ever deleted.
 //!
-//! [`Document::write_recovery`]: crate::document::Document::write_recovery
+//! [`Document::write_recovery`]: crate::scene_edit::Document::write_recovery
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::document::{EditError, ownership};
+use crate::scene_edit::{EditError, ownership};
 
 /// How old a copy is let get before start-up removes it: two weeks, long
 /// enough to come back to a scene after a holiday, short enough that the
@@ -286,7 +286,7 @@ fn in_use(dir: &Path) -> bool {
 /// A copy's stamp and name, from its directory name — or [`None`] for a
 /// name [`Document::write_recovery`] never makes.
 ///
-/// [`Document::write_recovery`]: crate::document::Document::write_recovery
+/// [`Document::write_recovery`]: crate::scene_edit::Document::write_recovery
 fn parse(dir_name: &str) -> Option<(u128, &str)> {
     let (stamp, name) = dir_name.split_once('-')?;
     let kept = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';

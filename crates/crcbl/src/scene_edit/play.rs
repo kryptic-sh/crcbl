@@ -33,7 +33,7 @@
 //! because the restored scene **is** the pre-play scene — every entity under
 //! the [`SceneEntityId`] the save wrote it with — and because the id map's
 //! high-water mark is carried across with
-//! [`IdMap::reserve`](crcbl::scene::scn::IdMap::reserve): the files spell the
+//! [`IdMap::reserve`](crate::scene::scn::IdMap::reserve): the files spell the
 //! ids the scene holds, not the ones a deleted entity's undo still names. The
 //! selection survives, less any entity the restored scene does not hold.
 //!
@@ -41,7 +41,7 @@
 //!
 //! Towers' creeps: entities in a system the module registered, of a component
 //! the vocabulary knows only as
-//! [runtime](crcbl::registry::Registry::register_runtime). The document draws
+//! [runtime](crate::registry::Registry::register_runtime). The document draws
 //! them ([`Document::spawned`]) — they have no id, so nothing lists, selects,
 //! edits or saves them — and stop throws away the world they were spawned in,
 //! so none outlives play. The one thing more: an entity of a runtime system a
@@ -85,10 +85,10 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use crcbl::core::{FrameClock, TickId};
-use crcbl::ecs::{ClientInputs, Entity, GameModule, World};
-use crcbl::registry::{ParamKind, PlayArg, PlayControls};
-use crcbl::scene::scn::SceneEntityId;
+use crate::core::{FrameClock, TickId};
+use crate::ecs::{ClientInputs, Entity, GameModule, World};
+use crate::registry::{ParamKind, PlayArg, PlayControls};
+use crate::scene::scn::SceneEntityId;
 
 use super::{Document, EditError, load, memory_source, sync_colliders, sync_scene_colliders};
 
@@ -375,7 +375,7 @@ impl Document {
     /// Starting takes the scene's [`files`](Self::files) as the snapshot
     /// [`stop`](Self::stop) restores, builds a fresh instance of every module
     /// the vocabulary registers for the scene's systems from those files
-    /// ([`crcbl::registry::Registry::modules`]), loads the snapshot into a
+    /// ([`crate::registry::Registry::modules`]), loads the snapshot into a
     /// fresh world as stop would — so what plays is the scene's text and not
     /// the order an edit history left its systems in — and calls each
     /// module's [`register`](GameModule::register) on it. Nothing ticks until

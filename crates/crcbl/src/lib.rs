@@ -39,6 +39,7 @@
 //! crcbl::ui_nav    → (this crate)    the `ui` actions as the UI tree's NavInput
 //! crcbl::lan       → (this crate)    LAN host, join and browse (native only)
 //! crcbl::replay_record → (this crate) a host's session to a `.crpl` file (native only)
+//! crcbl::scene_edit → (this crate) a scene edited by command, its history, its server (`scene`)
 //! ```
 //!
 //! # One dependency is the whole point, and it took until S3 to mean it
@@ -403,6 +404,11 @@ pub mod replay_record;
 
 #[cfg(any(feature = "scene", feature = "scn"))]
 pub mod registry;
+
+// `scene` and not `scn` alone: a document measures the glTF assets its meshes
+// name (`scene_mesh::MeshLibrary`), which only the importer's half builds.
+#[cfg(feature = "scene")]
+pub mod scene_edit;
 
 #[cfg(any(feature = "scene", feature = "scn"))]
 pub mod scene_mesh;

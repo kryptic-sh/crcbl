@@ -13,7 +13,7 @@ use crcbl::scene::scn::{MAX_NAME_CHARS, SceneEntityId};
 use crcbl::scene_mesh::MESHES;
 use crcbl::ui::tree::{FieldEdit, VariantEdit};
 
-use super::super::field::text_of;
+use super::super::text_of;
 use super::super::{Document, EditError};
 use super::ops::{Draw, Op, Pair, Switch, TEXTS, Through};
 use crate::command::EditCommand;
@@ -186,7 +186,7 @@ pub(super) fn play(document: &mut Document, op: &Op, reached: &mut Reached) -> O
             Outcome::Recorded
         }
         Op::Drop { asset, x, z } => {
-            let listed = document.scene.systems().iter().any(|each| each == MESHES);
+            let listed = document.manifest().iter().any(|each| each == MESHES);
             let Ok(id) = document.spawn_mesh(asset.get(&TEXTS), DVec3::new(*x, 0.0, *z)) else {
                 return Outcome::Refused;
             };
@@ -198,7 +198,7 @@ pub(super) fn play(document: &mut Document, op: &Op, reached: &mut Reached) -> O
         }
         Op::Add { system } => {
             let system = registered(document, system);
-            let listed = document.scene.systems().contains(&system);
+            let listed = document.manifest().contains(&system);
             let Ok(id) = document.add_entity(&system) else {
                 return Outcome::Refused;
             };
@@ -211,7 +211,7 @@ pub(super) fn play(document: &mut Document, op: &Op, reached: &mut Reached) -> O
         Op::Attach { target, system } => {
             let target = target_of(document, target);
             let system = registered(document, system);
-            let listed = document.scene.systems().contains(&system);
+            let listed = document.manifest().contains(&system);
             let outcome = accepted(document.attach(target, &system));
             if outcome == Outcome::Recorded && !listed {
                 reached.push("an attach listing its system");
@@ -226,7 +226,7 @@ pub(super) fn play(document: &mut Document, op: &Op, reached: &mut Reached) -> O
         }
         Op::List { system, at } => {
             let system = registered(document, system);
-            let at = at.index(document.scene.systems().len() + 2);
+            let at = at.index(document.manifest().len() + 2);
             accepted(document.apply(EditCommand::ListSystem { system, at }))
         }
         Op::Unlist { system, empty } => unlist(document, system, *empty, reached),
@@ -570,16 +570,11 @@ fn placing_or_block(document: &mut Document, target: SceneEntityId) -> String {
 
 /// [`Op::Unlist`].
 fn unlist(document: &mut Document, system: &Index, empty: bool, reached: &mut Reached) -> Outcome {
-    let listed = document.scene.systems().to_vec();
+    let listed = document.manifest().to_vec();
     let system = if empty {
         let empty: Vec<String> = listed
             .into_iter()
-            .filter(|system| {
-                document
-                    .registry
-                    .entities(&mut document.world, &document.ids, system)
-                    .is_empty()
-            })
+            .filter(|system| document.entities_in(system).is_empty())
             .collect();
         if empty.is_empty() {
             return Outcome::Skipped;
@@ -588,7 +583,7 @@ fn unlist(document: &mut Document, system: &Index, empty: bool, reached: &mut Re
     } else {
         in_or_beyond(document, listed, system)
     };
-    let systems = document.scene.systems();
+    let systems = document.manifest();
     let inside = systems
         .iter()
         .position(|each| *each == system)
@@ -653,7 +648,7 @@ fn select(document: &mut Document, pair: &Pair) -> Option<Vec<SceneEntityId>> {
 
 /// The registered system `draw` names, listed or not.
 fn registered(document: &Document, draw: &Index) -> String {
-    let systems: Vec<&str> = document.registry.systems().collect();
+    let systems: Vec<&str> = document.registry().systems().collect();
     (*draw.get(&systems)).to_owned()
 }
 
@@ -661,7 +656,7 @@ fn registered(document: &Document, draw: &Index) -> String {
 /// first registered system not among them.
 fn in_or_beyond(document: &Document, mut systems: Vec<String>, draw: &Index) -> String {
     let beyond = document
-        .registry
+        .registry()
         .systems()
         .find(|each| !systems.iter().any(|system| system == each))
         .map(str::to_owned);

@@ -140,7 +140,7 @@ fn a_headless_run_presents_its_budget_and_stops() {
     assert_eq!(summary.run.exit, ExitReason::FrameBudget);
     assert_eq!(
         summary.entities,
-        Document::built_in()
+        crate::scene::built_in_document()
             .expect("the compiled-in scene is a scene")
             .entity_count(),
         "the run opened a different document from the compiled-in one",

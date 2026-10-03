@@ -2023,7 +2023,7 @@ mod tests {
     impl Page {
         /// The panels over the compiled-in greybox scene.
         fn built_in() -> Self {
-            Self::over(Document::built_in().expect("the compiled-in scene is a scene"))
+            Self::over(crate::scene::built_in_document().expect("the compiled-in scene is a scene"))
         }
 
         fn over(mut document: Document) -> Self {
@@ -2282,7 +2282,8 @@ mod tests {
     /// reading their own empty selection back over it on the first frame.
     #[test]
     fn the_panels_open_on_the_selection_the_document_already_had() {
-        let mut document = Document::built_in().expect("the compiled-in scene is a scene");
+        let mut document =
+            crate::scene::built_in_document().expect("the compiled-in scene is a scene");
         let id = SceneEntityId(2);
         document.select(Some(id));
         let panels = Panels::new(&mut document, default_layout(), EXTENT);

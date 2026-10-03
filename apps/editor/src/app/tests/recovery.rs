@@ -36,7 +36,7 @@ fn recovering(base: &Path, frames: u64) -> Editor<HeadlessShell> {
 /// recovery copy under `base` stamped `stamp` — handing back the copy and
 /// the files it holds.
 fn copy_in(base: &Path, stamp: u128, x: f64) -> (PathBuf, BTreeMap<String, String>) {
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     document
         .apply(EditCommand::SetProperty {
             entity: SceneEntityId(0),
@@ -554,7 +554,7 @@ fn an_open_keeps_the_offer_up() {
     copy_in(base.path(), now_millis(), 1.0);
     let scenes = tempfile::tempdir().expect("a temporary directory");
     let scene = scenes.path().join("kept.scn");
-    Document::built_in()
+    crate::scene::built_in_document()
         .expect("the compiled-in scene")
         .save_to(&scene)
         .expect("a fresh directory");
@@ -635,7 +635,7 @@ fn a_failed_save_as_keeps_the_recovered_copy() {
     let (copy, files) = copy_in(base.path(), now_millis() - 1000, 7.0);
     let scenes = tempfile::tempdir().expect("a temporary directory");
     let occupied = scenes.path().join("occupied.scn");
-    Document::built_in()
+    crate::scene::built_in_document()
         .expect("the compiled-in scene")
         .save_to(&occupied)
         .expect("a fresh directory");
@@ -801,7 +801,7 @@ fn the_recovery_bars_keys_answer_for_the_newest_copy() {
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(
         editor.document().entity_count(),
-        Document::built_in()
+        crate::scene::built_in_document()
             .expect("the compiled-in scene")
             .entity_count(),
         "Ctrl+Delete removed an entity"

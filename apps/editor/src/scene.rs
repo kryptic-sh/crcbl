@@ -5,7 +5,8 @@
 //! `crcbl::registry::Registry` is what a vocabulary is and this module builds
 //! this build's: the editor's own [`Block`], and the components of the three
 //! games whose committed scenes the workspace wants edited. It also holds the
-//! scene the editor opens when the command line names none.
+//! scene the editor opens when the command line names none
+//! ([`built_in_document`]).
 //!
 //! # Why the editor owns a component at all
 //!
@@ -33,6 +34,7 @@ use crcbl::ecs::ComponentHash;
 use crcbl::math::DVec3;
 use crcbl::reflect::Reflect;
 use crcbl::registry::{FieldError, OrientedBox, Placement, Registry, Rotation, Validate};
+use crcbl::scene_edit::{Document, EditError};
 use crcbl::serde::{Deserialize, Serialize};
 
 /// The one system this vocabulary is made of: the manifest entry, the chunk
@@ -55,28 +57,9 @@ const GREYBOX_SCENE_RON: &str = r#"Scene(
     ],
 )"#;
 
-/// The name a new scene's header carries: what Ctrl+N makes, before anything
-/// is put in it — see [`empty_source`].
-pub const UNTITLED: &str = "untitled";
-
-/// A new scene's `scene.ron`, as the writer writes it: [`UNTITLED`], listing
-/// no system. Each system is listed as the first thing of its kind is put in
-/// the scene — a dropped mesh lists `meshes`, an attached body `bodies`.
-const EMPTY_SCENE_RON: &str = r#"Scene(
-    format: 0,
-    name: "untitled",
-    systems: [],
-)"#;
-
-/// `greybox.scn/env.ron`, as the writer writes it — and a new scene's too, so
-/// a new scene is looked at from where the compiled-in one is.
-const GREYBOX_ENV_RON: &str = r"Env(
-    camera: Camera(
-        position: (0.0, 6.0, 14.0),
-        look_at: (0.0, 1.0, 0.0),
-    ),
-    ambient: (0.05, 0.05, 0.06),
-)";
+/// `greybox.scn/env.ron`, as the writer writes it: a new scene's light and
+/// camera, so a new scene is looked at from where the compiled-in one is.
+const GREYBOX_ENV_RON: &str = crcbl::scene_edit::NEW_SCENE_ENV_RON;
 
 /// `greybox.scn/sys/blocks.ron`, as the writer writes it: a ground slab whose top
 /// is `y = 0`, and three steps standing on it.
@@ -254,24 +237,21 @@ pub fn built_in_source() -> MemorySource {
     source
 }
 
-/// A new, empty scene directory, as a source with no filesystem under it,
-/// keyed at its root: a header named [`UNTITLED`] listing no system, the
-/// compiled-in scene's light and camera, and no chunk — what
-/// [`Document::new_scene`](crate::document::Document::new_scene) loads.
+/// This build's compiled-in scene, opened: the document the editor starts on
+/// when it is not given one.
 ///
-/// Text rather than a [`crcbl::scene::scn::Scene`] built in code, for
-/// [`built_in_source`]'s reason: the new scene is reviewable as the files it
-/// is, and `a_new_scene_is_what_the_writer_writes` keeps them the writer's
-/// own spelling.
-#[must_use]
-pub fn empty_source() -> MemorySource {
-    let mut source = MemorySource::new();
-    for (key, text) in [("scene.ron", EMPTY_SCENE_RON), ("env.ron", GREYBOX_ENV_RON)] {
-        source
-            .insert(Path::new(key), text.as_bytes().to_vec())
-            .expect("a scene key is a legal asset key");
-    }
-    source
+/// [`built_in_source`]'s greybox blocks, through [`vocabulary`], out of a
+/// compiled-in source rather than off disk: a tool that had to find its own
+/// default document would be one whose behaviour depended on the directory it
+/// was started from. It has no [`origin`](Document::origin), so saving it
+/// means naming a directory.
+///
+/// # Errors
+///
+/// [`EditError::Scene`] if the compiled-in scene is not readable, which is a
+/// tree in which this module's own tests are red too.
+pub fn built_in_document() -> Result<Document, EditError> {
+    Document::open(&built_in_source(), Path::new(GREYBOX), vocabulary())
 }
 
 // ---------------------------------------------------------------------------
@@ -283,8 +263,6 @@ mod tests {
     use super::*;
 
     use crcbl::reflect::{Kind, Value, get_path};
-
-    use crate::document::Document;
 
     /// **The compiled-in scene is what the writer writes**, byte for byte.
     ///
@@ -311,23 +289,6 @@ mod tests {
         for (key, text) in &files {
             assert!(!text.contains('\r'), "the newline is pinned in {key}");
         }
-    }
-
-    /// **A new scene is what the writer writes**, byte for byte: a header
-    /// listing nothing and the compiled-in scene's light, and no chunk.
-    #[test]
-    fn a_new_scene_is_what_the_writer_writes() {
-        let mut document = Document::open(&empty_source(), Path::new(""), vocabulary())
-            .expect("the new scene is a scene");
-        let files = document.files().expect("there is nothing to give an id");
-        assert_eq!(
-            files.keys().collect::<Vec<_>>(),
-            ["env.ron", "scene.ron"],
-            "a header and a light and nothing else",
-        );
-        assert_eq!(files["scene.ron"], EMPTY_SCENE_RON);
-        assert_eq!(files["env.ron"], GREYBOX_ENV_RON);
-        assert_eq!(document.name(), UNTITLED);
     }
 
     /// **The shipped vocabulary is this build's own component and every game's**,
@@ -493,7 +454,7 @@ mod tests {
     /// the editor's own greybox — is held to no rule of its.
     #[test]
     fn a_scene_without_towers_systems_is_not_held_to_towers_rules() {
-        let mut document = crate::Document::built_in().expect("the compiled-in scene");
+        let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
         assert!(document.problems().expect("it saves").is_empty());
     }
 

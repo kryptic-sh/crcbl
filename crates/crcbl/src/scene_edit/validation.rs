@@ -2,7 +2,7 @@
 //! leave a value the next load refuses, and reported at the save when one
 //! stands anyway.
 //!
-//! A registered component's [`Validate`](crcbl::registry::Validate) rule —
+//! A registered component's [`Validate`](crate::registry::Validate) rule —
 //! a body's mass above zero, a mesh's asset key inside its root, every
 //! rotation unit — is what its chunk is read through, so a value that breaks
 //! it saves and is then refused by the next load. `#[reflect(min, max)]` is
@@ -13,7 +13,7 @@
 //!
 //! # Refused at the edit, and put back
 //!
-//! [`Document::apply`] runs [`Registry::validate`](crcbl::registry::Registry::validate)
+//! [`Document::apply`] runs [`Registry::validate`](crate::registry::Registry::validate)
 //! on the component of every property write a command makes, batches opened,
 //! once all of them are applied — so the rotate handle's four leaves, written
 //! as one batch, are judged together. A write that leaves the component
@@ -42,21 +42,21 @@
 //! reports the write, so a value can stand in the world without a command —
 //! the inspector's rewind puts it back, and another caller need not.
 //! [`Document::problems`] reads the scene's saved text back through the
-//! vocabulary's codecs ([`Registry::problems`](crcbl::registry::Registry::problems)),
+//! vocabulary's codecs ([`Registry::problems`](crate::registry::Registry::problems)),
 //! so such a value is reported by file, line and column — exactly what the
 //! next load would refuse.
 //!
 //! # Not the scene's rules
 //!
 //! A game's rule over the whole scene — towers' path, whose legs must meet at
-//! right angles — is a [`SceneCheck`](crcbl::registry::SceneCheck), reported
+//! right angles — is a [`SceneCheck`](crate::registry::SceneCheck), reported
 //! at the save and never run per edit: authoring passes through layouts the
 //! game would refuse, a corner placed before the leg it bends.
 
-use crcbl::scene::scn::SceneEntityId;
+use crate::scene::scn::SceneEntityId;
 
 use super::{Document, EditError, sync_colliders};
-use crate::command::EditCommand;
+use crate::scene::edit::EditCommand;
 
 /// Every property write in `command` — a leaf set or a variant switch —
 /// batches opened: whose component, in which system.

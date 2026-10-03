@@ -5,14 +5,20 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 use crcbl::client::Client;
-use crcbl::net::{InMemoryTransport, ProtocolCompatibility};
+use crcbl::ecs::World;
+use crcbl::net::{
+    EditNotice, EditOutcome, EditRefusal, EditReply, InMemoryTransport, ProtocolCompatibility,
+};
 use crcbl::reflect::Value;
-use crcbl::scene::edit::{EditCommand, SystemRow, encode_op};
+use crcbl::scene::edit::{EditCommand, EditOp, SystemRow, decode_op, encode_op};
 use crcbl::scene::scn::{EntityName, SceneEntityId};
+use crcbl::server::HostConfig;
 
 use super::*;
+use crate::document::Document;
 use crate::scene::{BLOCKS, vocabulary};
 
 const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
@@ -176,8 +182,8 @@ fn every_command() -> Vec<EditCommand> {
 /// names the next revision.
 #[test]
 fn every_command_kind_applies_exactly_as_the_editors_document_applies_it() {
-    let mut rig = Rig::new(Document::built_in().expect("the compiled-in scene"));
-    let mut reference = Document::built_in().expect("the compiled-in scene");
+    let mut rig = Rig::new(crate::scene::built_in_document().expect("the compiled-in scene"));
+    let mut reference = crate::scene::built_in_document().expect("the compiled-in scene");
     for (index, command) in every_command().into_iter().enumerate() {
         reference
             .apply(command.clone())
@@ -199,8 +205,8 @@ fn every_command_kind_applies_exactly_as_the_editors_document_applies_it() {
 /// is the server's scene.
 #[test]
 fn another_client_mirrors_the_scene_from_the_notices() {
-    let mut rig = Rig::new(Document::built_in().expect("the compiled-in scene"));
-    let mut mirror = Document::built_in().expect("the compiled-in scene");
+    let mut rig = Rig::new(crate::scene::built_in_document().expect("the compiled-in scene"));
+    let mut mirror = crate::scene::built_in_document().expect("the compiled-in scene");
     let author = rig
         .server
         .host()
@@ -238,7 +244,7 @@ fn another_client_mirrors_the_scene_from_the_notices() {
 /// and an undo with nothing left to undo is refused by code.
 #[test]
 fn an_undo_through_the_server_restores_the_scene_and_a_redo_reapplies() {
-    let mut rig = Rig::new(Document::built_in().expect("the compiled-in scene"));
+    let mut rig = Rig::new(crate::scene::built_in_document().expect("the compiled-in scene"));
     let before = files(rig.server.document_mut());
     let edit = every_command().remove(0);
     rig.send(&EditOp::Apply(edit));
@@ -306,7 +312,7 @@ fn refusal(rig: &mut Rig, op: &EditOp) -> EditRefusal {
 /// hears of a refused edit.
 #[test]
 fn each_refusal_carries_its_reason_code_and_changes_nothing() {
-    let mut rig = Rig::new(Document::built_in().expect("the compiled-in scene"));
+    let mut rig = Rig::new(crate::scene::built_in_document().expect("the compiled-in scene"));
     let set = |entity, path: &str, value| {
         EditOp::Apply(EditCommand::SetProperty {
             entity,
@@ -383,7 +389,7 @@ fn each_refusal_carries_its_reason_code_and_changes_nothing() {
 /// own id, since the envelope around them was whole.
 #[test]
 fn bytes_that_are_no_operation_are_refused_by_code() {
-    let mut rig = Rig::new(Document::built_in().expect("the compiled-in scene"));
+    let mut rig = Rig::new(crate::scene::built_in_document().expect("the compiled-in scene"));
     let garbage = [
         Vec::new(),
         vec![crcbl::scene::edit::WIRE_VERSION, 0, 0x7F],
@@ -443,25 +449,11 @@ fn a_playing_scene_refuses_edits_as_not_editable() {
     assert_eq!(rig.send(&rename), EditOutcome::Applied { revision: 1 });
 }
 
-/// A refusal message past what a reply carries is cut on a character
-/// boundary rather than refused itself, so the author still hears why.
-#[test]
-fn a_long_refusal_message_is_cut_to_what_a_reply_carries() {
-    let long = "é".repeat(MAX_EDIT_MESSAGE_BYTES);
-    let EditOutcome::Refused { reason, message } = refused(EditRefusal::FAILED, long) else {
-        panic!("a refusal");
-    };
-    assert_eq!(reason, EditRefusal::FAILED);
-    assert!(message.len() <= MAX_EDIT_MESSAGE_BYTES);
-    assert!(message.len() > MAX_EDIT_MESSAGE_BYTES - 'é'.len_utf8());
-    assert!(message.chars().all(|c| c == 'é'));
-}
-
 /// Each request has its own id, and each reply echoes the id of the request
 /// it answers, in the order they were sent.
 #[test]
 fn a_reply_echoes_the_request_id_it_answers() {
-    let mut rig = Rig::new(Document::built_in().expect("the compiled-in scene"));
+    let mut rig = Rig::new(crate::scene::built_in_document().expect("the compiled-in scene"));
     let first = rig
         .author
         .send_edit(encode_op(&EditOp::Undo).expect("an undo"))
@@ -492,7 +484,7 @@ const IDLE: Duration = Duration::from_secs(15);
 /// as one that never took its session up.
 #[test]
 fn a_client_that_only_listens_stays_in_session() {
-    let mut rig = Rig::new(Document::built_in().expect("the compiled-in scene"));
+    let mut rig = Rig::new(crate::scene::built_in_document().expect("the compiled-in scene"));
     let ticks = IDLE.as_secs() * u64::from(TICK_HZ);
     for _ in 0..ticks {
         rig.step();

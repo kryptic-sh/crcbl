@@ -45,7 +45,7 @@ fn build_phase_ticks() -> u32 {
 /// Hands play `ticks` of the world's tick period, one at a time — so the
 /// clock's catch-up cap never drops one — and asserts each ran.
 fn run(document: &mut Document, ticks: u32) {
-    let period = Duration::try_from_secs_f64(document.world.tick_dt())
+    let period = Duration::try_from_secs_f64(document.world().tick_dt())
         .expect("towers' module set a period play steps at");
     for _ in 0..ticks {
         assert_eq!(document.advance(period), 1, "a tick did not run");
@@ -203,7 +203,7 @@ fn stop_removes_every_creep_and_restores_the_files() {
     assert!(document.stop().expect("the snapshot loads again"));
     assert!(document.spawned().is_empty(), "a creep outlived play");
     assert_eq!(
-        document.world.entity_count(),
+        document.world().entity_count(),
         document.entity_count(),
         "the world holds entities the scene does not",
     );
@@ -243,7 +243,7 @@ fn spawned_creeps_are_not_listed_counted_or_picked() {
         Some(spawn_corner),
         "the creep took the click from the corner it stands on",
     );
-    let corner_entity = document.ids.entity(spawn_corner).expect("in the scene");
+    let corner_entity = document.ids().entity(spawn_corner).expect("in the scene");
     assert_eq!(
         document.spawned_bounds(corner_entity),
         None,
@@ -560,7 +560,7 @@ fn stop_after_a_build_restores_the_files_and_leaves_nothing_spawned() {
 
     assert!(document.stop().expect("the snapshot loads again"));
     assert!(document.spawned().is_empty(), "a tower outlived play");
-    assert_eq!(document.world.entity_count(), document.entity_count());
+    assert_eq!(document.world().entity_count(), document.entity_count());
     assert_eq!(document.files().expect("ids"), before);
     assert!(
         document.play_status().is_empty(),
@@ -683,7 +683,7 @@ fn a_command_sent_while_paused_is_read_on_the_tick_after_resume() {
     document
         .send_play(TOWERS_SYSTEM, start, &[])
         .expect("a paused game takes a command");
-    let period = Duration::try_from_secs_f64(document.world.tick_dt()).expect("a period");
+    let period = Duration::try_from_secs_f64(document.world().tick_dt()).expect("a period");
     assert_eq!(document.advance(period), 0, "a paused scene ticked");
     assert_eq!(
         status_of(&mut document, "Wave"),

@@ -1,7 +1,7 @@
 //! Where a scene's meshes come from: the asset source their keys are read
 //! through, and the boxes measured from it.
 //!
-//! A [`crcbl::scene_mesh::Mesh`] row names a glTF asset by key; its box — what
+//! A [`crate::scene_mesh::Mesh`] row names a glTF asset by key; its box — what
 //! it is drawn, picked and moved by — is the asset's, measured by the
 //! document's [`MeshLibrary`] and written into the row. **Every path that puts
 //! a row in the world resolves after it**: the load [`Document::open`] runs,
@@ -26,20 +26,20 @@
 //! [`Document::set_assets`] names it. A document opened from a directory reads
 //! from [`super::asset_root`] of it; one opened out of a compiled-in source
 //! reads from an empty one, so every mesh in it is the placeholder until a
-//! caller names somewhere or a save-as gives it a directory (`document::origin`). A key is relative to that root, so a scene keeps
+//! caller names somewhere or a save-as gives it a directory (`scene_edit::origin`). A key is relative to that root, so a scene keeps
 //! its meshes when the root it is opened with does.
 
 use std::collections::BTreeSet;
 
-use crcbl::assets::AssetSource;
-use crcbl::math::DVec3;
-use crcbl::phys::{PhysicsSystem, Ray};
-use crcbl::render::ViewRay;
-use crcbl::scene::scn::{SceneEntityId, row_text};
-use crcbl::scene_mesh::{MESHES, Mesh, MeshLibrary, MeshPathError, check_asset, mesh_of};
+use crate::assets::AssetSource;
+use crate::math::DVec3;
+use crate::phys::{PhysicsSystem, Ray};
+use crate::render::ViewRay;
+use crate::scene::scn::{SceneEntityId, row_text};
+use crate::scene_mesh::{MESHES, Mesh, MeshLibrary, MeshPathError, check_asset, mesh_of};
 
 use super::{Document, EditError, sync_colliders, widen};
-use crate::command::{EditCommand, SystemRow};
+use crate::scene::edit::{EditCommand, SystemRow};
 
 impl Document {
     /// Reads every mesh's asset through `assets` from now on, measuring each
@@ -74,12 +74,12 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// [`crcbl::scene_mesh::MeshError`] naming the asset, as a mesh of it would
+    /// [`crate::scene_mesh::MeshError`] naming the asset, as a mesh of it would
     /// report.
     pub fn measure(
         &mut self,
         asset: &str,
-    ) -> Result<(crcbl::math::DVec3, crcbl::math::DVec3), crcbl::scene_mesh::MeshError> {
+    ) -> Result<(crate::math::DVec3, crate::math::DVec3), crate::scene_mesh::MeshError> {
         self.meshes.measure(self.assets.as_ref(), asset)
     }
 
@@ -126,7 +126,7 @@ impl Document {
     }
 
     /// Spawns a mesh of `asset` standing on `point`, as one undoable entry,
-    /// and returns its id — the drop the module docs of `document::meshes`
+    /// and returns its id — the drop the module docs of `scene_edit::meshes`
     /// describe.
     ///
     /// # Errors
@@ -193,7 +193,7 @@ impl Document {
 
     /// Writes every mesh row its asset's box, or leaves it on the placeholder
     /// with a problem, and rebuilds the colliders of those whose box moved —
-    /// see the module docs of `document::meshes`.
+    /// see the module docs of `scene_edit::meshes`.
     pub(super) fn resolve_meshes(&mut self) {
         let resolution = self.meshes.resolve(&mut self.world, self.assets.as_ref());
         if !resolution.moved.is_empty() {

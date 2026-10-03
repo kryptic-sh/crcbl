@@ -7,7 +7,7 @@ use super::*;
 use crate::command::SystemRow;
 
 fn document() -> Document {
-    Document::built_in().expect("the compiled-in scene is a scene")
+    crate::scene::built_in_document().expect("the compiled-in scene is a scene")
 }
 
 /// A ray down `-Z` through the first step, and through nothing else: the

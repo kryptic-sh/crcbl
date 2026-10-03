@@ -18,7 +18,7 @@ use crate::document::origin_tests::{game, tree};
 /// measured once it is opened from there. Hands back the directory.
 fn mesh_scene(game: &Path) -> PathBuf {
     let dir = game.join("levels").join("one.scn");
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     document.new_scene().expect("editing");
     document
         .spawn_mesh(TRIANGLE, DVec3::ZERO)

@@ -47,27 +47,27 @@ impl State {
     /// `document`'s content now.
     pub(super) fn of(document: &mut Document) -> Self {
         let files = document.files().expect("every entity has an id");
-        let entities: Vec<Entity> = document.world.entities().collect();
+        let entities: Vec<Entity> = document.world().entities().collect();
         let mut held = BTreeMap::new();
         let mut unfiled = 0;
         for entity in entities {
-            let Some(id) = document.ids.id(entity) else {
+            let Some(id) = document.ids().id(entity) else {
                 unfiled += 1;
                 continue;
             };
             let mut rows = BTreeMap::new();
-            for system in document.registry.systems_of(&mut document.world, entity) {
-                let row = document
-                    .registry
+            let registry = document.registry().clone();
+            for system in registry.systems_of(document.world_mut(), entity) {
+                let row = registry
                     .codec(&system)
                     .expect("a registered system has a codec")
-                    .row(&mut document.world, entity)
+                    .row(document.world_mut(), entity)
                     .expect("a held component serialises")
                     .expect("the system holds it");
                 rows.insert(system, row);
             }
             let collider = document
-                .world
+                .world_mut()
                 .system_mut::<PhysicsSystem>()
                 .and_then(|physics| {
                     let transform = physics.transform(entity)?;

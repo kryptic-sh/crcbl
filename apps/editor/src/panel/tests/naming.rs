@@ -70,7 +70,7 @@ fn labels(page: &Page) -> Vec<String> {
 #[test]
 fn the_outliner_shows_names_and_follows_a_rename() {
     // Named before the panels exist, so their first frame has to read it.
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     document.rename(SceneEntityId(0), "Ground").expect("held");
     let mut page = Page::over(document);
     page.idle();

@@ -1971,7 +1971,7 @@ fn sun() -> DirectionalLight {
 fn open_document(options: &Options) -> Result<Document, EditorError> {
     let document = match &options.scene {
         Some(path) => Document::open_dir(path.clone(), crate::scene::vocabulary()),
-        None => Document::built_in(),
+        None => crate::scene::built_in_document(),
     };
     let mut document = document.map_err(LoopError::Game)?;
     if let Some(root) = &options.assets {

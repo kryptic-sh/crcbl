@@ -120,7 +120,7 @@ fn a_new_scene_holds_nothing_and_has_no_origin() {
             .collect::<Vec<_>>(),
         ["env.ron", "scene.ron"],
     );
-    assert_eq!(document.name(), crate::scene::UNTITLED);
+    assert_eq!(document.name(), crcbl::scene_edit::UNTITLED);
     assert_eq!(document.origin(), None);
     assert!(!document.is_dirty(), "a new scene opens dirty");
     assert!(document.log().is_empty(), "the old history came along");
@@ -145,7 +145,7 @@ fn a_new_scene_holds_nothing_and_has_no_origin() {
 /// it was.
 #[test]
 fn a_new_scene_is_refused_in_play_mode() {
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     let count = document.entity_count();
     document.play().expect("the greybox scene plays");
     assert!(matches!(document.new_scene(), Err(EditError::Playing)));
@@ -227,7 +227,7 @@ fn save_as_leaves_the_old_directory_untouched() {
 #[test]
 fn save_as_into_an_occupied_directory_is_refused() {
     let occupied = tempfile::tempdir().expect("a temporary directory");
-    Document::built_in()
+    crate::scene::built_in_document()
         .expect("the compiled-in scene")
         .save_to(occupied.path())
         .expect("a fresh directory");
@@ -288,7 +288,7 @@ fn the_asset_root_follows_save_as_unless_it_was_named() {
     let game = game();
     let scene = game.path().join("levels").join("one.scn");
 
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     assert!(
         document.measure(TRIANGLE).is_err(),
         "the fixture is visible already"
@@ -300,7 +300,7 @@ fn the_asset_root_follows_save_as_unless_it_was_named() {
         "the source is not the new directory's game"
     );
 
-    let mut named = Document::built_in().expect("the compiled-in scene");
+    let mut named = crate::scene::built_in_document().expect("the compiled-in scene");
     named.set_assets(Box::new(MemorySource::new()));
     let moved = named
         .save_as(game.path().join("levels").join("two.scn"))
@@ -348,7 +348,7 @@ fn an_open_target_must_be_a_scene_directory() {
     let empty = dir.path().join("empty");
     std::fs::create_dir(&empty).expect("writable");
     let scene = dir.path().join("greybox.scn");
-    Document::built_in()
+    crate::scene::built_in_document()
         .expect("the compiled-in scene")
         .save_to(&scene)
         .expect("a fresh directory");
@@ -384,9 +384,9 @@ fn an_open_target_must_be_a_scene_directory() {
 #[test]
 fn a_new_scene_is_named_after_its_directory_and_a_named_one_is_not() {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     document.new_scene().expect("editing");
-    assert_eq!(document.name(), crate::scene::UNTITLED);
+    assert_eq!(document.name(), crcbl::scene_edit::UNTITLED);
     let first = dir.path().join("first.scn");
     document.save_as(&first).expect("a fresh directory");
     assert_eq!(document.name(), "first");
@@ -395,7 +395,7 @@ fn a_new_scene_is_named_after_its_directory_and_a_named_one_is_not() {
     let reopened = Document::open_dir(&first, crate::scene::vocabulary()).expect("a scene");
     assert_eq!(reopened.name(), "first");
 
-    let mut named = Document::built_in().expect("the compiled-in scene");
+    let mut named = crate::scene::built_in_document().expect("the compiled-in scene");
     let files = named.files().expect("ids");
     let copy = dir.path().join("copy.scn");
     named.save_as(&copy).expect("a fresh directory");
@@ -408,15 +408,15 @@ fn a_new_scene_is_named_after_its_directory_and_a_named_one_is_not() {
 #[test]
 fn a_refused_save_as_keeps_the_new_scene_untitled() {
     let occupied = tempfile::tempdir().expect("a temporary directory");
-    Document::built_in()
+    crate::scene::built_in_document()
         .expect("the compiled-in scene")
         .save_to(occupied.path())
         .expect("a fresh directory");
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     document.new_scene().expect("editing");
     assert!(matches!(
         document.save_as(occupied.path()),
         Err(EditError::Occupied { .. })
     ));
-    assert_eq!(document.name(), crate::scene::UNTITLED);
+    assert_eq!(document.name(), crcbl::scene_edit::UNTITLED);
 }

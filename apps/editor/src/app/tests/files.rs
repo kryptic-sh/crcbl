@@ -188,7 +188,7 @@ fn a_typed_directory_is_saved_into_and_later_saves_follow() {
 #[test]
 fn an_occupied_directory_is_refused_and_asked_again() {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    Document::built_in()
+    crate::scene::built_in_document()
         .expect("the compiled-in scene")
         .save_to(dir.path())
         .expect("a fresh directory");
