@@ -11,6 +11,15 @@
 //! from zero — so the picture a `--headless --frames N` run renders is
 //! bit-identical to before the world owned it.
 //!
+//! # How fast it spins
+//!
+//! [`sv_spin_rate`] scales the step, and offline this world is the simulation
+//! that reads it: a typed set is queued by [`Scene::submit_sim_set`] and
+//! applied at the start of the next [`Scene::tick`], before that tick spins —
+//! the tick boundary a LAN host applies one on (`crate::spin`). The rate
+//! starts at 1, and a step times 1 is the step, so the default picture is
+//! unchanged.
+//!
 //! # Selecting an entity
 //!
 //! [`SELECT_NEXT_KEY`] and [`SELECT_PREVIOUS_KEY`] step through
@@ -26,11 +35,16 @@
 //! the panel's state, and a selection made blind is shown the moment F3 opens
 //! it.
 
+use crcbl::console::{SimSet, SimVars};
+use crcbl::core::TickId;
 use crcbl::core::input::KeyCode;
 use crcbl::ecs::{ComponentHash, Entity, System, World};
+use crcbl::net::{ConsoleOutcome, ConsoleReply};
 use crcbl::reflect::Reflect;
 use crcbl::render::DirectionalLight;
 use crcbl::ui::{DebugModule, DebugPanel, DebugSection, ReflectedSection};
+
+use crate::spin::sv_spin_rate;
 
 /// Selects the entity after the selected one, or the first.
 pub const SELECT_NEXT_KEY: KeyCode = KeyCode::PageDown;
@@ -104,14 +118,22 @@ impl ComponentHash for Sun {
     }
 }
 
-/// The sandbox's world, the two entities in it, and which one the panel has
-/// selected.
+/// The sandbox's world, the two entities in it, which one the panel has
+/// selected, and the simulation variables it spins by.
 #[derive(Debug)]
 pub struct Scene {
     world: World,
     cube: Entity,
     sun: Entity,
     selected: Option<Entity>,
+    /// The values the next tick spins by.
+    sim: SimVars,
+    /// Sets waiting for the next tick's boundary, in the order submitted.
+    pending: Vec<SimSet>,
+    /// Ticks run, which names the tick a set applied at.
+    ticks: u64,
+    /// What became of each set, waiting to be printed.
+    replies: Vec<ConsoleReply>,
 }
 
 impl Scene {
@@ -132,19 +154,58 @@ impl Scene {
             cube,
             sun,
             selected: None,
+            sim: SimVars::new(&crate::spin::sim_registry()),
+            pending: Vec::new(),
+            ticks: 0,
+            replies: Vec::new(),
         }
     }
 
-    /// One fixed step of `dt` seconds: every spin advances, the world sweeps,
+    /// Queue `set` for the start of the next tick, the offline simulation's
+    /// tick boundary. Its answer is read with
+    /// [`take_replies`](Self::take_replies).
+    pub fn submit_sim_set(&mut self, set: SimSet) {
+        self.pending.push(set);
+    }
+
+    /// What became of each set since the last call, oldest first.
+    pub fn take_replies(&mut self) -> Vec<ConsoleReply> {
+        std::mem::take(&mut self.replies)
+    }
+
+    /// The simulation variables the next tick spins by.
+    #[cfg(test)]
+    pub const fn sim_vars(&self) -> &SimVars {
+        &self.sim
+    }
+
+    /// Put the cube where a LAN session's host has it, so the frame draws the
+    /// session's cube rather than this world's own.
+    pub fn set_cube_seconds(&mut self, seconds: f32) {
+        let cube = self.cube;
+        if let Some(spin) = self
+            .world
+            .system_mut::<System<Spin>>()
+            .and_then(|spins| spins.get_mut(cube))
+        {
+            spin.seconds = seconds;
+        }
+    }
+
+    /// One fixed step of `dt` seconds: the sets submitted since the last one
+    /// apply, every spin advances at the rate they leave, the world sweeps,
     /// and a selection whose entity was swept is dropped.
     ///
     /// `World::system_mut` scans the schedule, which its docs keep out of a
     /// tick in general; this schedule is two systems long.
     pub fn tick(&mut self, dt: f64) {
+        self.ticks += 1;
+        self.apply_sim_sets();
         // Narrowed before the add, as `Gpu` did: the same f32 sum from zero
-        // is what keeps the headless picture bit-identical.
+        // is what keeps the headless picture bit-identical. The rate's default
+        // is 1, and a step times 1 is exactly the step.
         #[allow(clippy::cast_possible_truncation)]
-        let step = dt as f32;
+        let step = dt as f32 * self.sim.f32(&sv_spin_rate);
         if let Some(spins) = self.world.system_mut::<System<Spin>>() {
             for spin in spins.iter_mut() {
                 spin.seconds += step;
@@ -152,6 +213,23 @@ impl Scene {
         }
         self.world.tick_with_dt(dt);
         self.forget_swept();
+    }
+
+    /// The tick boundary: every set submitted since the last tick applies,
+    /// in order, and its answer is kept for the console.
+    fn apply_sim_sets(&mut self) {
+        let tick = TickId::from_raw(self.ticks);
+        for set in std::mem::take(&mut self.pending) {
+            let outcome = match self.sim.apply(&set) {
+                Ok(()) => ConsoleOutcome::Applied(tick),
+                Err(fault) => ConsoleOutcome::Refused(fault.message().to_owned()),
+            };
+            self.replies.push(ConsoleReply {
+                name: set.name().to_owned(),
+                value: set.value_text(),
+                outcome,
+            });
+        }
     }
 
     /// The cube's seconds of animation, or `None` once it is gone.

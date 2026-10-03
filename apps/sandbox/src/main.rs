@@ -24,6 +24,7 @@ mod lan;
 mod lobby;
 mod menu;
 mod scene;
+mod spin;
 mod steam;
 
 use std::process::ExitCode;

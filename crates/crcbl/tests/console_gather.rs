@@ -7,10 +7,14 @@
 //! it correctly, pass its own guard, and be reachable from no console in the
 //! workspace.
 //!
-//! So this reads the manifests. Every crate that depends on `crcbl-console`
-//! either **is** that crate or is named in
+//! So this reads the manifests and the sources. Every crate that depends on
+//! `crcbl-console` **and declares an entry** — read by
+//! [`crcbl_console::guard::declared_names`], as each crate's own guard reads it
+//! — either **is** that crate or is named in
 //! [`crcbl::debug_console::engine_tables`], and a new one that is forgotten is a
-//! red test here.
+//! red test here. A dependant that declares nothing is not an owner:
+//! `crcbl-server` uses the console's checks and `SimVars` to apply a
+//! `Flags::SIM` set, and has no table to gather.
 //!
 //! **It matches text, not TOML**, for the reason
 //! `crcbl_console::guard::names_in` does: a dependency line is
@@ -40,15 +44,13 @@ fn workspace_root() -> PathBuf {
 }
 
 /// Every crate under `dir` whose manifest names `crcbl-console` as a
-/// dependency.
-fn dependants(dir: &Path) -> Vec<String> {
+/// dependency and whose `src` declares at least one console entry.
+fn owners_in(dir: &Path) -> Vec<String> {
     let mut found = Vec::new();
     let entries = fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
     for entry in entries {
-        let manifest = entry
-            .expect("a readable directory entry")
-            .path()
-            .join("Cargo.toml");
+        let crate_dir = entry.expect("a readable directory entry").path();
+        let manifest = crate_dir.join("Cargo.toml");
         let Ok(text) = fs::read_to_string(&manifest) else {
             continue;
         };
@@ -56,6 +58,11 @@ fn dependants(dir: &Path) -> Vec<String> {
             line.trim_start()
                 .starts_with(&format!("{REGISTRY_CRATE} ="))
         }) {
+            continue;
+        }
+        let declared = crcbl_console::guard::declared_names(crate_dir.join("src"))
+            .unwrap_or_else(|error| panic!("{}: {error}", crate_dir.display()));
+        if declared.is_empty() {
             continue;
         }
         let name = text
@@ -68,12 +75,12 @@ fn dependants(dir: &Path) -> Vec<String> {
     found
 }
 
-/// **Every crate that depends on `crcbl-console` reaches the engine's gather.**
+/// **Every crate that declares console entries reaches the engine's gather.**
 #[test]
 fn every_crate_that_owns_console_entries_is_gathered_by_the_engine() {
     let root = workspace_root();
-    let mut owners: Vec<String> = dependants(&root.join("crates"));
-    owners.extend(dependants(&root.join("apps")));
+    let mut owners: Vec<String> = owners_in(&root.join("crates"));
+    owners.extend(owners_in(&root.join("apps")));
     owners.retain(|name| name != REGISTRY_CRATE);
     owners.sort();
     owners.dedup();

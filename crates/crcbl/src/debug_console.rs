@@ -51,7 +51,7 @@
 
 use std::any::Any;
 
-use crcbl_console::{Context, Fault, History, Registry, Table};
+use crcbl_console::{Context, Fault, History, Registry, SimSet, Table};
 use crcbl_core::input::{KeyCode, ScrollDelta};
 use crcbl_input::{ActionMap, Binding};
 use crcbl_shell::{ButtonState, ShellEvent};
@@ -142,6 +142,11 @@ pub struct EngineLink {
     /// A queue rather than one slot, unlike [`Self::pause`]: `bind a KeyA; bind
     /// b KeyB` is one line and both halves of it were meant.
     pub(crate) binds: Vec<BindAsk>,
+    /// The `Flags::SIM` sets typed since the loop last looked, in order, for
+    /// it to hand to the game's simulation
+    /// ([`HostedGame::submit_sim_set`](crate::engine::HostedGame::submit_sim_set)).
+    /// A queue for [`Self::binds`]' reason.
+    pub(crate) sim_sets: Vec<SimSet>,
 }
 
 impl EngineLink {
@@ -155,6 +160,7 @@ impl EngineLink {
             fps: 0.0,
             frame_ms: 0.0,
             binds: Vec::new(),
+            sim_sets: Vec::new(),
         }
     }
 
@@ -183,6 +189,11 @@ impl EngineLink {
     /// Every `bind`/`unbind` typed since the loop last looked.
     pub fn take_binds(&mut self) -> Vec<BindAsk> {
         std::mem::take(&mut self.binds)
+    }
+
+    /// Every simulation set typed since the loop last looked, in order.
+    pub fn take_sim_sets(&mut self) -> Vec<SimSet> {
+        std::mem::take(&mut self.sim_sets)
     }
 }
 
@@ -887,13 +898,15 @@ impl Console {
     fn run(&mut self, line: &str) {
         crcbl_core::log::console::print(&format!("{}{line}", crcbl_ui::console::PROMPT));
         self.history.push(line);
-        let (lines, fault, clear) = {
+        let (lines, fault, clear, sim_sets) = {
             let Self { registry, host, .. } = self;
             let mut cx = Context::new(registry, host);
             let outcome = registry.execute(&mut cx, line);
             let clear = cx.clear_requested();
-            (cx.into_lines(), outcome.err(), clear)
+            let sim_sets = cx.take_sim_sets();
+            (cx.into_lines(), outcome.err(), clear, sim_sets)
         };
+        self.host.engine_mut().sim_sets.extend(sim_sets);
         for printed in &lines {
             crcbl_core::log::console::print(printed);
         }
@@ -941,13 +954,15 @@ impl Console {
     /// it asked for: the boot-time half [`run_autoexec`](Self::run_autoexec)
     /// and [`run_exec`](Self::run_exec) share.
     fn run_unechoed<R>(&mut self, run: impl FnOnce(&mut Context<'_>) -> R) -> R {
-        let (did, lines, clear) = {
+        let (did, lines, clear, sim_sets) = {
             let Self { registry, host, .. } = self;
             let mut cx = Context::new(registry, host);
             let did = run(&mut cx);
             let clear = cx.clear_requested();
-            (did, cx.into_lines(), clear)
+            let sim_sets = cx.take_sim_sets();
+            (did, cx.into_lines(), clear, sim_sets)
         };
+        self.host.engine_mut().sim_sets.extend(sim_sets);
         for printed in &lines {
             crcbl_core::log::console::print(printed);
         }

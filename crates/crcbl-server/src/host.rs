@@ -11,19 +11,30 @@
 //! network. A transport the game [`add`](Host::add)s is pending until its
 //! hello admits it as a new peer or re-attaches it to a peer whose link
 //! dropped.
+//!
+//! A `Flags::SIM` console set — from the host's own console or from its own
+//! player — applies at the start of the next tick and is recorded for replay;
+//! `sim`'s module docs say who may make one and in what order they apply.
 
 use std::fmt;
 use std::time::Duration;
 
+use crcbl_console::{Registry, SimVars};
 use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::{ClientInputs, World};
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
-    HandshakeGate, HandshakeResult, Hello, ProtocolCompatibility, RejectReason, ResumeToken,
-    SectorId, SessionConfig, SessionEndReason, SessionId, SessionState, Transport, TransportError,
+    ConsoleReply, ConsoleSet, HandshakeGate, HandshakeResult, Hello, ProtocolCompatibility,
+    RejectReason, ResumeToken, SectorId, SessionConfig, SessionEndReason, SessionId, SessionState,
+    Transport, TransportError,
 };
 
 use crate::peer::{self, Counters, PeerSession, PeerStats, SnapshotTooLarge, UpdateTooLarge};
+
+mod sim;
+
+pub use sim::AppliedSimSet;
+use sim::{Origin, SimConsole};
 
 /// How long a pending transport may go without a hello before it is dropped.
 ///
@@ -133,8 +144,9 @@ impl std::error::Error for EventNotSent {}
 /// Per-tick game logic for a [`Host`].
 pub trait HostModule: Send {
     /// Called every host tick after the ECS schedule has run, with the input
-    /// each peer sent since the previous tick. Whatever the module despawns
-    /// is swept before the tick's snapshot is taken.
+    /// each peer sent since the previous tick and the simulation variables
+    /// as the tick's boundary left them. Whatever the module despawns is
+    /// swept before the tick's snapshot is taken.
     fn tick(&mut self, world: &mut World, inputs: PeerInputs<'_>);
 }
 
@@ -142,6 +154,7 @@ pub trait HostModule: Send {
 #[derive(Clone, Copy)]
 pub struct PeerInputs<'a> {
     peers: &'a [Peer],
+    sim_vars: &'a SimVars,
 }
 
 impl<'a> PeerInputs<'a> {
@@ -154,6 +167,15 @@ impl<'a> PeerInputs<'a> {
                 ClientInputs::new(&peer.link.client_inputs, peer.link.dropped_inputs),
             )
         })
+    }
+
+    /// The host's simulation variables, with every set this tick's boundary
+    /// applied ([`Host::set_sim_registry`]) — a tick input like the frames
+    /// above, which is why it comes with them. Empty for a host given no
+    /// registry.
+    #[must_use]
+    pub const fn sim_vars(self) -> &'a SimVars {
+        self.sim_vars
     }
 }
 
@@ -180,6 +202,9 @@ struct Peer {
     /// When the peer's current session key was adopted, which starts the
     /// [`AUTHENTICATION_DEADLINE`].
     keyed_at: Duration,
+    /// Whether this is the host's own player, whose console sets the host
+    /// takes ([`Host::add_host_player`]).
+    host_player: bool,
 }
 
 impl Peer {
@@ -196,6 +221,8 @@ struct Pending {
     limiter: InboundRateLimiter,
     /// When it was added or last said hello.
     last_heard: Duration,
+    /// Whether it was added as the host's own player.
+    host_player: bool,
 }
 
 /// The multi-session authoritative host. See the [module docs](self).
@@ -214,6 +241,7 @@ pub struct Host {
     next_session_id: u64,
     events: Vec<PeerEvent>,
     module: Option<Box<dyn HostModule>>,
+    sim: SimConsole,
 }
 
 impl Host {
@@ -246,16 +274,30 @@ impl Host {
             next_session_id: 1,
             events: Vec::new(),
             module: None,
+            sim: SimConsole::default(),
         }
     }
 
     /// Hand the host a newly connected transport. Its hello decides whether
     /// it becomes a new peer, resumes a lost one, or is refused.
     pub fn add(&mut self, transport: Box<dyn Transport>) {
+        self.add_pending(transport, false);
+    }
+
+    /// Hand the host its own player's transport — a listen host's in-memory
+    /// pair. Admitted like any other, and the one peer whose console sets of
+    /// simulation variables the host applies; every other peer's are refused.
+    /// A dedicated server adds none, and takes sets from its console alone.
+    pub fn add_host_player(&mut self, transport: Box<dyn Transport>) {
+        self.add_pending(transport, true);
+    }
+
+    fn add_pending(&mut self, transport: Box<dyn Transport>, host_player: bool) {
         self.pending.push(Pending {
             transport,
             limiter: InboundRateLimiter::new(self.rate_limit_config, self.now),
             last_heard: self.now,
+            host_player,
         });
     }
 
@@ -279,9 +321,16 @@ impl Host {
         self.drain_peers();
         self.drain_pending();
         self.update_sessions();
+        self.apply_sim_sets();
         self.world.tick();
         if let Some(module) = self.module.as_mut() {
-            module.tick(&mut self.world, PeerInputs { peers: &self.peers });
+            module.tick(
+                &mut self.world,
+                PeerInputs {
+                    peers: &self.peers,
+                    sim_vars: self.sim.vars(),
+                },
+            );
         }
         // As in `Server::tick`: the module's despawns must be swept before
         // the snapshot, or it replicates entities that are already gone.
@@ -361,6 +410,31 @@ impl Host {
                         }
                     }
                 }
+            }
+            for set in peer.link.console_sets.drain(..) {
+                self.sim.submit(Origin::Peer(peer.id), set);
+            }
+        }
+    }
+
+    /// The tick boundary for simulation variables: every set read since the
+    /// last one applies, or is refused, before the world ticks — and each
+    /// peer that made one is told which.
+    fn apply_sim_sets(&mut self) {
+        let tick = self.clock.tick();
+        let peers = &self.peers;
+        let replies = self.sim.begin_tick(tick, |id| is_host_player(peers, id));
+        for (id, reply) in replies {
+            let Some(peer) = self.peers.iter_mut().find(|peer| peer.id == id) else {
+                // Gone since it asked: there is no one to tell.
+                continue;
+            };
+            if !peer.is_connected() {
+                continue;
+            }
+            if let Some(transport) = peer.transport.as_mut() {
+                peer.link
+                    .send_console_reply(transport.as_mut(), &reply, &mut self.counters);
             }
         }
     }
@@ -505,6 +579,7 @@ impl Host {
             was_connected: false,
             snapshot_due: false,
             keyed_at: self.now,
+            host_player: pending.host_player,
         });
         self.events.push(PeerEvent::Joined(id));
         None
@@ -822,6 +897,58 @@ impl Host {
         self.module = Some(module);
     }
 
+    /// Take console sets of the `Flags::SIM` variables in `registry`, every
+    /// one starting at its declared default; the module reads them through
+    /// [`PeerInputs::sim_vars`]. Until this is called every set is refused.
+    /// Replaces any earlier registry, and the values with it.
+    pub fn set_sim_registry(&mut self, registry: Registry) {
+        self.sim.set_registry(registry);
+    }
+
+    /// Queue a set from the host's own console for the start of the next
+    /// tick. Its answer is read with
+    /// [`take_console_replies`](Self::take_console_replies).
+    pub fn submit_console_set(&mut self, set: ConsoleSet) {
+        self.sim.submit(Origin::Console, set);
+    }
+
+    /// Take the answers to the console's own sets — and to a replayed
+    /// record's entries — since the last call, oldest first.
+    pub fn take_console_replies(&mut self) -> Vec<ConsoleReply> {
+        self.sim.take_console_replies()
+    }
+
+    /// The simulation variables as the latest tick boundary left them.
+    #[must_use]
+    pub const fn sim_vars(&self) -> &SimVars {
+        self.sim.vars()
+    }
+
+    /// Every set this host applied, with its tick, in the order applied —
+    /// the replay stream [`replay_sim_record`](Self::replay_sim_record) takes.
+    #[must_use]
+    pub fn sim_record(&self) -> &[AppliedSimSet] {
+        self.sim.record()
+    }
+
+    /// Replay `record` — another host's [`sim_record`](Self::sim_record):
+    /// each entry applies at the start of the tick it names, ahead of any
+    /// live set of that tick, through the same checks, and is recorded
+    /// again. A host built like the recorded one, with the same world,
+    /// module and registry and fed the same input, reaches the same state.
+    /// An entry whose tick has already passed is refused, through
+    /// [`take_console_replies`](Self::take_console_replies).
+    pub fn replay_sim_record(&mut self, record: impl IntoIterator<Item = AppliedSimSet>) {
+        self.sim.schedule(record);
+    }
+
+    /// Whether `peer` is the host's own player
+    /// ([`add_host_player`](Self::add_host_player)).
+    #[must_use]
+    pub fn is_host_player(&self, peer: PeerId) -> bool {
+        is_host_player(&self.peers, peer)
+    }
+
     /// Messages dropped because a message-rate budget was exhausted.
     #[must_use]
     pub fn rate_limited_message_count(&self) -> u64 {
@@ -923,6 +1050,11 @@ impl Host {
     }
 }
 
+/// Whether `id` is one of `peers` and the host's own player.
+fn is_host_player(peers: &[Peer], id: PeerId) -> bool {
+    peers.iter().any(|peer| peer.id == id && peer.host_player)
+}
+
 /// The answer to a hello on a connected peer's own link: the same session
 /// again, as `Server` answers one, for its own token or for none — and a
 /// refusal for any other token.
@@ -966,6 +1098,9 @@ mod tests;
 
 #[cfg(test)]
 mod rate_tests;
+
+#[cfg(test)]
+mod sim_tests;
 
 // The UDP transport is native only, by the no-web-networking rule.
 #[cfg(all(test, not(target_arch = "wasm32")))]

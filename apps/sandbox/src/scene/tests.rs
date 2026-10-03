@@ -163,3 +163,77 @@ fn the_world_is_what_the_frame_draws() {
         "the same f32 sum the GPU used to keep, bit for bit"
     );
 }
+
+/// A checked `sv_spin_rate` set, as the console hands one over.
+fn spin_rate(value: &str) -> crcbl::console::SimSet {
+    crate::spin::sim_registry()
+        .sim_set("sv_spin_rate", value)
+        .expect("in range")
+}
+
+#[test]
+fn an_offline_set_waits_for_the_next_tick_and_that_tick_spins_at_it() {
+    let mut scene = scene();
+    scene.tick(TICK);
+    scene.submit_sim_set(spin_rate("3"));
+    assert_eq!(
+        scene.sim_vars().f32(&crate::spin::sv_spin_rate),
+        1.0,
+        "submitted, not applied"
+    );
+    assert!(scene.take_replies().is_empty(), "nothing answered yet");
+
+    let before = scene.cube_seconds().expect("a cube");
+    scene.tick(TICK);
+    #[allow(clippy::cast_possible_truncation)]
+    let step = TICK as f32 * 3.0;
+    assert_eq!(
+        scene.cube_seconds().map(f32::to_bits),
+        Some((before + step).to_bits()),
+        "the boundary is the tick's start: this tick already spun at 3"
+    );
+    let replies = scene.take_replies();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(
+        replies[0].to_string(),
+        "sv_spin_rate = 3, applied at tick 2"
+    );
+}
+
+#[test]
+fn two_offline_sets_in_one_tick_apply_in_the_order_submitted() {
+    let mut scene = scene();
+    scene.submit_sim_set(spin_rate("4"));
+    scene.submit_sim_set(spin_rate("0.5"));
+    scene.tick(TICK);
+    assert_eq!(scene.sim_vars().f32(&crate::spin::sv_spin_rate), 0.5);
+    let lines: Vec<String> = scene
+        .take_replies()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "sv_spin_rate = 4, applied at tick 1",
+            "sv_spin_rate = 0.5, applied at tick 1"
+        ]
+    );
+}
+
+#[test]
+fn every_console_entry_this_sample_declares_is_in_its_table() {
+    let declared =
+        crcbl::console::guard::declared_names("src").expect("this sample's src directory");
+    assert!(
+        !declared.is_empty(),
+        "the scan found nothing, so proves nothing"
+    );
+    let table = crate::spin::console_table();
+    for name in &declared {
+        assert!(
+            table.vars().iter().any(|var| var.name() == name),
+            "`{name}` is declared in this sample's source and missing from its table"
+        );
+    }
+}

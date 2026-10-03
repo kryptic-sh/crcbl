@@ -7,7 +7,7 @@ use crate::command::{ConCommand, Context};
 use crate::parse::{Statement, parse_line};
 use crate::table::Table;
 use crate::value::{Fault, Value};
-use crate::var::Var;
+use crate::var::{Flags, Var};
 
 /// One thing the console knows about.
 #[derive(Clone, Copy, Debug)]
@@ -186,9 +186,13 @@ impl Registry {
     /// Run a typed line: every statement its `;` separated, in order.
     ///
     /// A bare variable prints; a variable with a value is coerced through its
-    /// [`Kind`](crate::Kind) and set; a command runs. The first statement to
-    /// fault stops the line, because the ones after it were typed on the
-    /// assumption it worked.
+    /// [`Kind`](crate::Kind) and set; a command runs. A
+    /// [`Flags::SIM`](crate::Flags::SIM) variable with a value is checked by
+    /// [`sim_set`](Self::sim_set) and handed to the host through
+    /// [`Context::request_sim_set`] rather than set, because only the
+    /// simulation's tick boundary writes one. The first statement to fault
+    /// stops the line, because the ones after it were typed on the assumption
+    /// it worked.
     ///
     /// # Errors
     ///
@@ -225,6 +229,15 @@ impl Registry {
                 // value reads the way the plan writes it: `debug_view ambient
                 // occlusion`.
                 let typed = statement.args.join(" ");
+                if var.flags().contains(Flags::SIM) {
+                    let set = self.sim_set(var.name(), &typed)?;
+                    cx.print(format!(
+                        "{set} — sent to the simulation, which applies it at the start of its \
+                         next tick"
+                    ));
+                    cx.request_sim_set(set);
+                    return Ok(());
+                }
                 let value = var.kind().parse(&typed)?;
                 var.set(cx.host_mut(), &value)?;
                 let now = var.get(cx.host());
@@ -238,7 +251,9 @@ impl Registry {
 /// One line describing a variable: its value, its default, its flags, its help.
 ///
 /// Shared by the bare-variable print and by `help`, so the two cannot show a
-/// variable differently.
+/// variable differently. A [`Flags::SIM`] variable is shown without a value:
+/// the simulation holds it, and the declaration's own cell is only ever its
+/// default.
 pub(crate) fn describe(var: Var, value: &Value) -> String {
     let default = match var.default() {
         Some(default) => format!(" (default: {default})"),
@@ -249,6 +264,13 @@ pub(crate) fn describe(var: Var, value: &Value) -> String {
     } else {
         format!(" [{}]", var.flags())
     };
+    if var.flags().contains(Flags::SIM) {
+        return format!(
+            "{}{default}{flags} — {} (the simulation holds its value)",
+            var.name(),
+            var.help()
+        );
+    }
     format!("{} = {value}{default}{flags} — {}", var.name(), var.help())
 }
 

@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **A `Flags::SIM` console variable is set through its simulation, and a
+  `ClientToServer::Command`'s `data` has a format** (see Added: simulation
+  variables over the transport). `ConVar::set` refuses a `SIM` variable, its
+  typed getters (`get_bool`, `get_i64`, `get_f32`, `get_enum`) panic for one —
+  the value lives in the simulation's `crcbl_console::SimVars` — and
+  `Binding::new` refuses the flag; nothing in the workspace declared one before.
+  A server now reads a command's `data` as `crcbl_net::command`'s kind byte and
+  console set, counting one it cannot read as a processing error, where it used
+  to drop every command unread — for EW, a command sent with a payload of its
+  own is now an error on the server side. `Client::dropped_event_count` counts
+  dropped console replies too.
+
 - **The editor's `EditError` gained `Target`, `OpenTarget` and `Recovery`** (see
   Added: a new scene and save-as, and open and the unsaved bar): a typed save-as
   directory or a typed scene to open refused before anything is written or read,
@@ -560,6 +572,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Simulation variables over the transport: `Flags::SIM`'s half is built.** A
+  typed set of a `SIM` variable is checked by the new `Registry::sim_set` and
+  handed to the host as a `crcbl_console::SimSet` through
+  `Context::request_sim_set` (`sim_sets`, `take_sim_sets`); the loop passes it
+  to the new defaulted `HostedGame::submit_sim_set`, which refuses by default,
+  and a file or `--exec` line's sets travel the same way. The simulation keeps
+  the values in a `crcbl_console::SimVars` and applies sets at the start of its
+  next tick. Over the network a set is a sealed `ClientToServer::Command` —
+  `crcbl_net::command`'s `ConsoleSet`, the name and the value as the text the
+  console prints, with `encode_console_set`/`decode_console_set` — answered by a
+  sealed `ConsoleReply` (`CONSOLE_REPLY_TAG`, `ConsoleOutcome`) that prints as
+  the console's line; both decoders are in the fuzz target. `crcbl_server::Host`
+  gains `set_sim_registry`, `submit_console_set` for its own console,
+  `add_host_player` for the listen host's own player — the only peer whose sets
+  it applies; every other is refused with the reason — `take_console_replies`,
+  `sim_vars`, `is_host_player`, and a replay stream: `sim_record` lists every
+  applied set as an `AppliedSimSet` with its tick, and `replay_sim_record`
+  applies a record on a fresh host so the same run reaches the same state hash.
+  `PeerInputs::sim_vars` hands the module the tick's values. `crcbl_client`'s
+  `Client::send_console_set` (`ConsoleSetNotSent`) sends one and
+  `Client::console_replies` reads the answers; the single-peer `Server` refuses
+  every set. `crcbl-server` now depends on `crcbl-console`, which has no
+  dependencies.
+- **The sandbox's spin rate is the first simulation variable**: `sv_spin_rate`
+  (`apps/sandbox/src/spin.rs`) scales how fast the cube turns. Offline the scene
+  applies a set at the start of its next tick; a `--host` world now spins a
+  replicated cube of its own, which takes sets from the host's console and
+  refuses a joined client's, and during a session the drawn cube is the host's.
+  Every answer is printed to the console.
 - **A system can lend a debug overlay an entity's data:
   `SystemTrait::debug_fields(&self, entity) -> Option<&dyn Reflect>`.** A
   **default** method answering `None`, so every existing `SystemTrait` impl —

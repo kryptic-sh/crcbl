@@ -16,6 +16,8 @@
 //! * [`budget`] — fits each snapshot to one message of its transport's
 //!   unreliable channel, holding the least urgent updates back by priority
 //!   rather than sending a snapshot the transport would refuse.
+//! * [`command`] — what a `ClientToServer::Command` carries: a console set of
+//!   a simulation variable, as text, and the server's sealed answer to it.
 //! * [`auth`] — the per-session MAC every post-handshake message carries.
 //!   Nothing else in the protocol proves who sent a packet.
 //! * [`reliable`] — the packet layer the UDP transport runs inside: acks,
@@ -32,6 +34,7 @@
 pub mod auth;
 pub mod budget;
 pub mod codec;
+pub mod command;
 pub mod condition;
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
@@ -56,6 +59,10 @@ pub use codec::{
     Ack, DecodeError, decode_ack, decode_client_to_server, decode_handshake_result, decode_hello,
     decode_server_to_client, decode_session_ended, encode_ack, encode_client_to_server,
     encode_handshake_result, encode_hello, encode_server_to_client, encode_session_ended,
+};
+pub use command::{
+    ConsoleOutcome, ConsoleReply, ConsoleSet, ConsoleTextTooLong, decode_console_reply,
+    decode_console_set, encode_console_reply, encode_console_set,
 };
 pub use condition::{Clock, ConditionSimulator, ManualClock, SimConditions, SystemClock};
 pub use delta::{

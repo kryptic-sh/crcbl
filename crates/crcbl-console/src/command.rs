@@ -4,6 +4,7 @@ use std::any::Any;
 use std::fmt;
 
 use crate::registry::Registry;
+use crate::sim::SimSet;
 use crate::value::Fault;
 
 /// A console command: a name, a line of help, and the function it runs.
@@ -73,6 +74,7 @@ pub struct Context<'a> {
     host: &'a mut dyn Any,
     lines: Vec<String>,
     clear: bool,
+    sim_sets: Vec<SimSet>,
 }
 
 impl<'a> Context<'a> {
@@ -88,6 +90,7 @@ impl<'a> Context<'a> {
             host,
             lines: Vec::new(),
             clear: false,
+            sim_sets: Vec::new(),
         }
     }
 
@@ -144,15 +147,41 @@ impl<'a> Context<'a> {
     pub fn clear_requested(&self) -> bool {
         self.clear
     }
+
+    /// Hand a checked [`Flags::SIM`](crate::Flags::SIM) set to the host, for
+    /// the simulation to apply at the start of its next tick.
+    ///
+    /// A **request**, as [`request_clear`](Self::request_clear) is: this crate
+    /// runs no simulation, so the set is recorded here, in the order the line
+    /// made it, and the host that drains this context carries it to whichever
+    /// simulation it runs — its own, or a server's over the transport.
+    /// [`Registry::execute`] calls this for a typed set of a `SIM` variable.
+    pub fn request_sim_set(&mut self, set: SimSet) {
+        self.sim_sets.push(set);
+    }
+
+    /// The simulation sets requested so far, in order.
+    #[must_use]
+    pub fn sim_sets(&self) -> &[SimSet] {
+        &self.sim_sets
+    }
+
+    /// The simulation sets requested so far, taken — what a host drains
+    /// before [`into_lines`](Self::into_lines) consumes the context.
+    pub fn take_sim_sets(&mut self) -> Vec<SimSet> {
+        std::mem::take(&mut self.sim_sets)
+    }
 }
 
-/// Prints what a reader can act on: the output so far and the clear request.
+/// Prints what a reader can act on: the output so far, the clear request and
+/// the simulation sets.
 /// `host` is `dyn Any`, which has nothing to print.
 impl fmt::Debug for Context<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Context")
             .field("lines", &self.lines)
             .field("clear", &self.clear)
+            .field("sim_sets", &self.sim_sets)
             .finish_non_exhaustive()
     }
 }

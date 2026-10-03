@@ -13,9 +13,9 @@ use crcbl_ecs::{Inspector, World};
 use crcbl_net::auth::{AUTH_OVERHEAD, SessionCrypto};
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
-    Baseline, DEFAULT_RELEVANCE, DeltaCodec, HandshakeResult, Message, OversizedUpdate,
-    RejectReason, ResumeToken, SectorId, SessionConfig, SessionEndReason, SessionId,
-    SessionManager, SessionState, SnapshotWriter, Transport, TransportError, Trust,
+    Baseline, ConsoleReply, ConsoleSet, DEFAULT_RELEVANCE, DeltaCodec, HandshakeResult, Message,
+    OversizedUpdate, RejectReason, ResumeToken, SectorId, SessionConfig, SessionEndReason,
+    SessionId, SessionManager, SessionState, SnapshotWriter, Transport, TransportError, Trust,
     snapshot_budget,
 };
 
@@ -171,6 +171,12 @@ pub(crate) struct PeerSession {
     pub(crate) client_inputs: Vec<(TickId, Vec<u8>)>,
     /// Frames the cap refused during the current tick.
     pub(crate) dropped_inputs: u32,
+    /// The console sets this peer sent, in arrival order, waiting for the
+    /// server that owns the session to take them — [`Host`](crate::Host)
+    /// queues them for its tick boundary, [`Server`](crate::Server) refuses
+    /// them. Each is taken in the tick it arrived, and the inbound budgets
+    /// bound how many one tick can hold.
+    pub(crate) console_sets: Vec<ConsoleSet>,
     /// How often this session is sent a snapshot.
     cadence: SnapshotCadence,
     /// Updates withheld from this session's snapshots as too long for any.
@@ -197,6 +203,7 @@ impl PeerSession {
             last_ack_progress: None,
             client_inputs: Vec::new(),
             dropped_inputs: 0,
+            console_sets: Vec::new(),
             cadence: SnapshotCadence::default(),
             oversized_updates: 0,
         }
@@ -319,14 +326,15 @@ impl PeerSession {
                     // **A command is not this tick's state.** `Input` is a
                     // sample of what the player was doing when the client
                     // sampled it, which is why it is queued and cleared every
-                    // tick; a command ("ready up", a chat line) is a request
-                    // that has to be answered once and stay answered, and
-                    // nothing on this server consumes one yet. Decoding it
-                    // still charges a malformed frame against this session's
-                    // error budget, which is what stops a peer sending rubbish
-                    // cheaply — but a caller must not read this arm as a
-                    // command being acted on.
-                    Ok(crcbl_net::ClientToServer::Command { .. }) => {}
+                    // tick; a command is a request that is answered once. The
+                    // one kind built is a console set, held here for the
+                    // server to check, apply or refuse, and answer.
+                    Ok(crcbl_net::ClientToServer::Command { data }) => {
+                        match crcbl_net::decode_console_set(&data) {
+                            Ok(set) => self.console_sets.push(set),
+                            Err(_) => counters.processing_errors += 1,
+                        }
+                    }
                     Err(_) => counters.processing_errors += 1,
                 }
             }
@@ -507,6 +515,31 @@ impl PeerSession {
             return;
         };
         let Ok(sealed) = crypto.seal(&crcbl_net::encode_session_ended(reason)) else {
+            counters.processing_errors += 1;
+            return;
+        };
+        if transport.send_reliable(Message::reliable(sealed)).is_err() {
+            counters.processing_errors += 1;
+        }
+    }
+
+    /// Answer one of this peer's console sets, sealed and on the reliable
+    /// channel. A failure is counted; the client then hears nothing back.
+    pub(crate) fn send_console_reply<T: Transport + ?Sized>(
+        &mut self,
+        transport: &mut T,
+        reply: &ConsoleReply,
+        counters: &mut Counters,
+    ) {
+        let Some(crypto) = self.session_crypto.as_mut() else {
+            counters.processing_errors += 1;
+            return;
+        };
+        let Ok(payload) = crcbl_net::encode_console_reply(reply) else {
+            counters.processing_errors += 1;
+            return;
+        };
+        let Ok(sealed) = crypto.seal(&payload) else {
             counters.processing_errors += 1;
             return;
         };

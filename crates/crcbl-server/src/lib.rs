@@ -12,7 +12,9 @@ pub mod host;
 mod peer;
 pub mod sim_hash;
 
-pub use host::{EventNotSent, Host, HostConfig, HostModule, PeerEvent, PeerId, PeerInputs};
+pub use host::{
+    AppliedSimSet, EventNotSent, Host, HostConfig, HostModule, PeerEvent, PeerId, PeerInputs,
+};
 pub use peer::{PeerStats, SnapshotTooLarge, UpdateTooLarge};
 
 pub use crcbl_net::rate_limit;
@@ -64,6 +66,10 @@ const KEYFRAME_RECOVERY_SNAPSHOTS: u32 = 32;
 /// into a counter.
 pub const MAX_CLIENT_INPUTS_PER_TICK: usize =
     2 * crcbl_core::time::DEFAULT_MAX_CATCH_UP_TICKS as usize;
+
+/// The refusal a [`Server`] answers every console set with.
+const SERVER_TAKES_NO_SIM_SETS: &str =
+    "this server keeps no simulation variables; a `Host` applies console sets";
 
 // ---------------------------------------------------------------------------
 // Server
@@ -165,6 +171,7 @@ impl<T: Transport> Server<T> {
         let was_connected = self.peer.session.state() == SessionState::Connected;
         self.peer.begin_tick();
         self.drain_inputs();
+        self.refuse_console_sets();
         self.update_session_for_transport();
         self.world.tick();
         if let Some(ref mut module) = self.module {
@@ -189,6 +196,21 @@ impl<T: Transport> Server<T> {
             && self.peer.snapshot_due()
         {
             self.emit_snapshot();
+        }
+    }
+
+    /// Answer every console set the peer sent with a refusal: a `Server`
+    /// keeps no simulation variables — a [`Host`] does — and a client that
+    /// asked is told so rather than left waiting.
+    fn refuse_console_sets(&mut self) {
+        for set in std::mem::take(&mut self.peer.console_sets) {
+            let reply = crcbl_net::ConsoleReply {
+                name: set.name,
+                value: set.value,
+                outcome: crcbl_net::ConsoleOutcome::Refused(SERVER_TAKES_NO_SIM_SETS.to_owned()),
+            };
+            self.peer
+                .send_console_reply(&mut self.transport, &reply, &mut self.counters);
         }
     }
 
@@ -1042,18 +1064,23 @@ mod tests {
         assert_eq!(seen.ticks, vec![Vec::new()]);
     }
 
-    /// A command is decoded and goes no further: it is not per-tick state, and
-    /// queueing one as input would hand the module a frame no client meant as
-    /// one.
+    /// A command is not queued as input: it is not per-tick state, and
+    /// queueing one would hand the module a frame no client meant as one. A
+    /// `Server` keeps no simulation variables, so the console set is answered
+    /// with a refusal rather than left unanswered.
     #[test]
-    fn a_command_is_not_queued_as_input() {
+    fn a_command_is_not_queued_as_input_and_a_console_set_is_refused() {
         let (transport, mut peer) = InMemoryTransport::pair();
         let mut server = server(world_with_one_entity(), transport);
         let mut crypto = connect(&mut server, &mut peer);
         let seen = record_inputs(&mut server);
 
+        let set = crcbl_net::ConsoleSet {
+            name: "sv_spin_rate".to_owned(),
+            value: "2".to_owned(),
+        };
         let command = crcbl_net::encode_client_to_server(&crcbl_net::ClientToServer::Command {
-            data: vec![1, 2, 3],
+            data: crcbl_net::encode_console_set(&set).expect("short enough"),
         });
         send_sealed(&mut peer, &mut crypto, &command);
         assert_eq!(server.update(2 * TICK), 1);
@@ -1061,6 +1088,42 @@ mod tests {
         assert_eq!(server.processing_error_count(), 0);
         let seen = seen.lock().expect("test module is not poisoned");
         assert_eq!(seen.ticks, vec![Vec::new()]);
+
+        let mut replies = Vec::new();
+        while let Some(msg) = peer.recv().unwrap() {
+            if msg.kind != MessageKind::Reliable {
+                continue;
+            }
+            let opened = crypto.open(&msg.payload).expect("sealed by the server");
+            if opened.first() == Some(&crcbl_net::codec::CONSOLE_REPLY_TAG) {
+                replies.push(crcbl_net::decode_console_reply(opened).expect("well formed"));
+            }
+        }
+        assert_eq!(
+            replies,
+            [crcbl_net::ConsoleReply {
+                name: set.name,
+                value: set.value,
+                outcome: crcbl_net::ConsoleOutcome::Refused(SERVER_TAKES_NO_SIM_SETS.to_owned()),
+            }]
+        );
+    }
+
+    /// A command whose data is no console set costs the peer its error
+    /// budget, as a malformed input frame does.
+    #[test]
+    fn a_malformed_command_counts_as_an_error() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+
+        let command = crcbl_net::encode_client_to_server(&crcbl_net::ClientToServer::Command {
+            data: vec![crcbl_net::command::CONSOLE_SET_KIND, 2, b'a'],
+        });
+        send_sealed(&mut peer, &mut crypto, &command);
+        assert_eq!(server.update(2 * TICK), 1);
+
+        assert_eq!(server.processing_error_count(), 1);
     }
 
     // ── Snapshot emission ──────────────────────────────────────────────────

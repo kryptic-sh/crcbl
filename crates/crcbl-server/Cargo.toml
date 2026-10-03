@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The checks and the store behind a `Flags::SIM` console set: the server
+# applies one on its tick boundary, parsed by the console's own kinds so it
+# reads exactly the value a client's console checked. Dependency-free, so it
+# brings nothing else in.
+crcbl-console = { workspace = true }
 crcbl-core = { workspace = true }
 crcbl-ecs = { workspace = true }
 crcbl-net = { workspace = true }

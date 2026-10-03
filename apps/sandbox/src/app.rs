@@ -69,7 +69,7 @@ use crcbl::engine::{
 };
 use crcbl::prelude::*;
 
-use crate::lan::{Lan, LanError};
+use crate::lan::{Lan, LanError, SimRoute};
 use crate::steam::SteamLink;
 use crcbl::render::RenderEffects;
 use crcbl::shell::{DisplayMode, PhysicalSize, ShellBackend as Backend, open, open_backend};
@@ -576,6 +576,22 @@ impl HostedGame for Sandbox {
         menu::menus()
     }
 
+    /// `sv_spin_rate`, the one simulation variable; see [`crate::spin`].
+    fn console_table() -> crcbl::console::Table {
+        crate::spin::console_table()
+    }
+
+    /// To the LAN session's host when there is a session, and otherwise to
+    /// the scene, which applies it at the start of its next tick.
+    fn submit_sim_set(&mut self, set: crcbl::console::SimSet) -> Result<(), crcbl::console::Fault> {
+        match self.lan.route_sim_set(set)? {
+            SimRoute::Offline(set) => self.scene.submit_sim_set(set),
+            #[cfg(not(target_arch = "wasm32"))]
+            SimRoute::Sent => {}
+        }
+        Ok(())
+    }
+
     fn tick(&mut self, gpu: &mut Gpu, tick_dt: f64) {
         // The `--wait-unpresented` probe: one direct wait, on the first tick,
         // for a present id the swapchain was never given. The wayland e2e
@@ -604,6 +620,14 @@ impl HostedGame for Sandbox {
         // it evidence rather than a coincidence. The scene owns the spin and
         // the light; the GPU is handed both.
         self.scene.tick(tick_dt);
+        for reply in self.scene.take_replies() {
+            crcbl::log::console::print(&reply.to_string());
+        }
+        // In a LAN session the cube drawn is the session's — the host's own,
+        // or what it replicated — so a rate the host set is the rate seen.
+        if let Some(seconds) = self.lan.cube_seconds() {
+            self.scene.set_cube_seconds(seconds);
+        }
         if let Some(seconds) = self.scene.cube_seconds() {
             gpu.set_elapsed(seconds);
         }
@@ -1193,6 +1217,30 @@ mod tests {
                 "the loop stopped early",
             );
         }
+    }
+
+    /// **Offline, an `sv_spin_rate` set reaches the scene and the drawn cube
+    /// turns at it** — the route a typed set takes once the loop hands it to
+    /// the game (the loop's half is `crcbl`'s own test).
+    #[test]
+    fn an_offline_spin_rate_set_turns_the_drawn_cube_at_the_new_rate() {
+        let mut engine = scripted(&headless(400));
+        run_frames(&mut engine, 10);
+        let set = crate::spin::sim_registry()
+            .sim_set("sv_spin_rate", "2")
+            .expect("in range");
+        HostedGame::submit_sim_set(engine.game_mut(), set).expect("offline takes it");
+        // One frame lets the set's own tick boundary pass.
+        run_frames(&mut engine, 1);
+        let (ticks, spun) = (engine.ticks(), engine.gpu().elapsed());
+        run_frames(&mut engine, 30);
+        let ran = engine.ticks() - ticks;
+        assert!(ran > 0, "the frames ran no tick");
+        let per_tick = (engine.gpu().elapsed() - spun) / ran as f32;
+        assert!(
+            (per_tick - 2.0 / 60.0).abs() < 1e-5,
+            "the cube turned {per_tick} a tick, not twice a tick's length"
+        );
     }
 
     /// **Losing focus stops the simulation, and the cube stops with it.**

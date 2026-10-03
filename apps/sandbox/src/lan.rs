@@ -9,9 +9,11 @@
 //! started through `Standing` — and what the host's world holds.
 //!
 //! The host's world is the smallest one that replicates something: a
-//! "players" system with an entity per admitted peer. The sandbox has no
-//! game, so there is nothing to play beyond joining, receiving the host's
-//! snapshots, and seeing the player count change as others come and go.
+//! "players" system with an entity per admitted peer, and the cube the host
+//! spins (`crate::spin`). The sandbox has no game, so there is nothing to play
+//! beyond joining, receiving the host's snapshots, seeing the player count
+//! change as others come and go — and setting `sv_spin_rate`, which the host
+//! takes from its own console and refuses from a client.
 //!
 //! # One datagram per snapshot
 //!
@@ -27,7 +29,7 @@
 //! `wasm32` the three flags are not parsed at all and [`Lan`] is inert, as
 //! `crate::steam`'s link is without its feature.
 
-pub use imp::{Lan, LanError};
+pub use imp::{Lan, LanError, SimRoute};
 #[cfg(not(target_arch = "wasm32"))]
 pub use imp::{LanMode, SANDBOX, Standing};
 
@@ -37,12 +39,13 @@ mod imp {
     use std::net::SocketAddr;
     use std::time::Duration;
 
+    use crcbl::console::{Fault, SimSet};
     use crcbl::ecs::{Entity, System, World};
     use crcbl::lan::{LanBind, LanGame};
     pub use crcbl::lan::{LanClient, LanError, LanMode};
-    use crcbl::net::ProtocolCompatibility;
     #[cfg(test)]
     use crcbl::net::udp::discovery::Announcement;
+    use crcbl::net::{ConsoleSet, ProtocolCompatibility};
     use crcbl::server::{PeerEvent, PeerId};
     use crcbl::ui::{DebugModule, DebugPanel, DebugSection};
 
@@ -72,6 +75,15 @@ mod imp {
 
     /// The replicated system holding one entity per admitted peer.
     const PLAYERS: &str = "players";
+
+    /// What became of a simulation set handed to [`Lan::route_sim_set`].
+    #[derive(Debug)]
+    pub enum SimRoute {
+        /// No session: the set is the sandbox's own simulation's to apply.
+        Offline(SimSet),
+        /// Handed to the session's host; its answer is printed when it comes.
+        Sent,
+    }
 
     /// Where a session this sandbox joined stands.
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,13 +196,72 @@ mod imp {
             })
         }
 
-        /// Serves the session for one frame covering `render_dt`.
+        /// Serves the session for one frame covering `render_dt`, and prints
+        /// the answers to this sandbox's simulation sets.
         pub fn frame(&mut self, render_dt: Duration) {
             self.now += render_dt;
             match &mut self.role {
                 Role::Off => {}
-                Role::Host(host) => host.frame(self.now),
-                Role::Client(client) => client.frame(self.now),
+                Role::Host(host) => {
+                    host.frame(self.now);
+                    for reply in host.lan.host_mut().take_console_replies() {
+                        crcbl::log::console::print(&reply.to_string());
+                    }
+                }
+                Role::Client(client) => {
+                    client.frame(self.now);
+                    if let Some(client) = client.client_mut() {
+                        for reply in client.console_replies() {
+                            crcbl::log::console::print(&reply.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Hands `set` to the session's simulation: a host applies it at the
+        /// start of its next tick, and a client sends it to its host, which
+        /// refuses it — only the host sets a simulation variable. With no
+        /// session the set is given back, for the sandbox's own simulation.
+        ///
+        /// # Errors
+        ///
+        /// A [`Fault`] when a client has no session to send it on yet, or the
+        /// send failed — never applied locally, since the simulation the set
+        /// was meant for is the host's.
+        pub fn route_sim_set(&mut self, set: SimSet) -> Result<SimRoute, Fault> {
+            let console_set = ConsoleSet {
+                name: set.name().to_owned(),
+                value: set.value_text(),
+            };
+            match &mut self.role {
+                Role::Off => Ok(SimRoute::Offline(set)),
+                Role::Host(host) => {
+                    host.lan.host_mut().submit_console_set(console_set);
+                    Ok(SimRoute::Sent)
+                }
+                Role::Client(lan) => {
+                    let Some(client) = lan.client_mut() else {
+                        return Err(Fault::new(format!(
+                            "{set}: not in a session with a host yet"
+                        )));
+                    };
+                    client
+                        .send_console_set(&console_set)
+                        .map(|()| SimRoute::Sent)
+                        .map_err(|error| Fault::new(format!("{set}: {error}")))
+                }
+            }
+        }
+
+        /// How far the session's cube has spun — the host's own, or what the
+        /// joined host last replicated — or `None` with no session or before
+        /// a snapshot arrived.
+        pub fn cube_seconds(&mut self) -> Option<f32> {
+            match &mut self.role {
+                Role::Off => None,
+                Role::Host(host) => crate::spin::hosted_seconds(host.lan.host_mut().world_mut()),
+                Role::Client(lan) => lan.client().and_then(crate::spin::replicated_seconds),
             }
         }
 
@@ -239,8 +310,10 @@ mod imp {
         }
 
         fn open_with(bind: LanBind, tick_hz: u32) -> Result<Self, LanError> {
+            let mut lan = crcbl::lan::LanHost::open(SANDBOX, bind, world(), tick_hz)?;
+            serve_spin(lan.host_mut());
             Ok(Self {
-                lan: crcbl::lan::LanHost::open(SANDBOX, bind, world(), tick_hz)?,
+                lan,
                 players: HashMap::new(),
             })
         }
@@ -315,11 +388,20 @@ mod imp {
         }
     }
 
-    /// The host's world: an empty "players" system the peers fill.
-    fn world() -> World {
+    /// The host's world: an empty "players" system the peers fill, and the
+    /// cube the host spins.
+    pub(super) fn world() -> World {
         let mut world = World::new();
         world.register_system(Box::new(System::<bool>::new(PLAYERS)));
+        crate::spin::HostedSpin::install(&mut world);
         world
+    }
+
+    /// Has `host` spin its world's cube, taking `sv_spin_rate` from its own
+    /// console and its own player.
+    pub(super) fn serve_spin(host: &mut crcbl::server::Host) {
+        host.set_module(Box::new(crate::spin::SpinModule));
+        host.set_sim_registry(crate::spin::sim_registry());
     }
 
     /// The players system, which [`world`] always registers.
@@ -333,20 +415,47 @@ mod imp {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod sim_tests;
+
 #[cfg(target_arch = "wasm32")]
 mod imp {
     use std::time::Duration;
 
     use crcbl::ui::DebugPanel;
 
+    use crcbl::console::{Fault, SimSet};
+
     /// No networking in a web build.
     #[derive(Debug)]
     pub struct Lan;
+
+    /// What became of a simulation set handed to [`Lan::route_sim_set`].
+    #[derive(Debug)]
+    pub enum SimRoute {
+        /// No session — a web build has none — so the set is the sandbox's
+        /// own simulation's to apply.
+        Offline(SimSet),
+    }
 
     impl Lan {
         /// No session.
         pub const fn off() -> Self {
             Self
+        }
+
+        /// Gives `set` back: there is no session to hand it to.
+        ///
+        /// # Errors
+        ///
+        /// Never; the signature is the native one's.
+        pub fn route_sim_set(&mut self, set: SimSet) -> Result<SimRoute, Fault> {
+            Ok(SimRoute::Offline(set))
+        }
+
+        /// No session, so no session's cube.
+        pub fn cube_seconds(&mut self) -> Option<f32> {
+            None
         }
 
         /// Nothing to serve.

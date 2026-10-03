@@ -6405,6 +6405,36 @@ pub trait HostedGame: Sized {
         None
     }
 
+    /// Where a typed set of a `Flags::SIM` console variable goes: this game's
+    /// simulation.
+    ///
+    /// Debug-console decision 9 (`docs/notes/tooling.md`): a variable the
+    /// simulation reads changes only on a tick boundary, so the console does
+    /// not write it. It checks the line against the variable's kind and hands
+    /// `set` here, and the game passes it to whichever simulation it runs —
+    /// its own offline world, applying it at the start of its next tick, or a
+    /// server's: from a listen host's own console through
+    /// [`Host::submit_console_set`](crate::server::Host::submit_console_set),
+    /// or over the transport through
+    /// [`Client::send_console_set`](crate::client::Client::send_console_set).
+    /// The game prints the answer when it comes.
+    ///
+    /// **The default refuses**, on [`actions`](Self::actions)' terms: a game
+    /// that declares no simulation variable has nowhere to send one, and the
+    /// loop prints the refusal rather than a set nothing applied.
+    ///
+    /// # Errors
+    ///
+    /// A [`Fault`](crcbl_console::Fault) the loop prints, when the set could
+    /// not be handed on.
+    fn submit_sim_set(&mut self, set: crcbl_console::SimSet) -> Result<(), crcbl_console::Fault> {
+        Err(crcbl_console::Fault::new(format!(
+            "`{}`: this game runs no simulation that takes console variables — \
+             `HostedGame::submit_sim_set` is the seam",
+            set.name()
+        )))
+    }
+
     /// The settings this game edits, for the console to edit the same ones.
     ///
     /// **A run has one settings file, so it has one stack.** A game with a
@@ -7235,6 +7265,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // drain that arrangement is built around.
         self.drain_console();
         self.drain_binds();
+        self.drain_sim_sets();
         self.apply_debug_view();
         if self.console.host_mut().engine_mut().take_quit() {
             return Ok(Flow::Stop(ExitReason::Quit));
@@ -7829,6 +7860,19 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         };
         for ask in &asks {
             crate::debug_console::apply_bind(actions, ask);
+        }
+    }
+
+    /// Hands every typed `Flags::SIM` set to the game's simulation, in the
+    /// order typed, printing a set the game could not take.
+    ///
+    /// [`drain_binds`](Self::drain_binds)' shape and reason: a set reaches the
+    /// console's host as a request, and this is where the game is in hand.
+    fn drain_sim_sets(&mut self) {
+        for set in self.console.host_mut().engine_mut().take_sim_sets() {
+            if let Err(fault) = self.game.submit_sim_set(set) {
+                crcbl_core::log::console::print(&fault.to_string());
+            }
         }
     }
 
@@ -13814,6 +13858,11 @@ mod tests {
         settings: Option<crate::settings::SharedSettings>,
         /// The scale this game draws its HUD at, when a test gives it one.
         ui_scale: Option<f32>,
+        /// Every simulation set the loop handed over, as its line, in order.
+        sim_sets: Vec<String>,
+        /// Whether this game refuses them, so the loop's printing of a
+        /// refusal has a game that gives one.
+        refuses_sim_sets: bool,
     }
 
     /// The fixture's mixer.
@@ -13867,7 +13916,28 @@ mod tests {
             static SERVE: crcbl_console::ConCommand =
                 crcbl_console::ConCommand::new("fake_serve", "Serve, from the game's table.", run);
             static COMMANDS: &[&crcbl_console::ConCommand] = &[&SERVE];
-            crcbl_console::Table::new(&[], &[], COMMANDS)
+            // A simulation variable, so a typed set has a seam to reach.
+            static RATE: crcbl_console::ConVar = crcbl_console::ConVar::new_float(
+                "fake_rate",
+                "A rate the fake simulation reads.",
+                crcbl_console::Flags::SIM,
+                0.0,
+                4.0,
+                1.0,
+            );
+            static VARS: &[&crcbl_console::ConVar] = &[&RATE];
+            crcbl_console::Table::new(VARS, &[], COMMANDS)
+        }
+
+        fn submit_sim_set(
+            &mut self,
+            set: crcbl_console::SimSet,
+        ) -> Result<(), crcbl_console::Fault> {
+            if self.refuses_sim_sets {
+                return Err(crcbl_console::Fault::new("the fake game takes no sets"));
+            }
+            self.sim_sets.push(set.to_string());
+            Ok(())
         }
 
         fn menus() -> crcbl_ui::menu::MenuSet<FakeMenu> {
@@ -18127,6 +18197,40 @@ mod tests {
                 .any(|line| line.contains("no action map") && line.contains("HostedGame::actions")),
             "a game with no map left the line unanswered: {printed:?}"
         );
+    }
+
+    /// **A typed simulation set reaches the game's seam, in the order typed,**
+    /// and is not written anywhere on the way: the console checks it, and the
+    /// loop hands it over on the frame it was typed.
+    #[test]
+    fn a_typed_simulation_set_reaches_the_game_in_order() {
+        let mut engine = with_console_open();
+        run_line(&mut engine, "fake_rate 2; fake_rate 0.5");
+        assert_eq!(engine.game.sim_sets, ["fake_rate 2", "fake_rate 0.5"]);
+        run_line(&mut engine, "fake_rate 9");
+        assert_eq!(
+            engine.game.sim_sets.len(),
+            2,
+            "a value the kind refuses is never handed over"
+        );
+    }
+
+    /// **A set the game refuses is printed**, so the line is not left
+    /// unanswered.
+    #[test]
+    fn a_simulation_set_the_game_refuses_is_printed() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        engine.game.refuses_sim_sets = true;
+        run_line(&mut engine, "fake_rate 2");
+        let printed = console_lines(&logs);
+        assert!(
+            printed
+                .iter()
+                .any(|line| line == "the fake game takes no sets"),
+            "the refusal went nowhere: {printed:?}"
+        );
+        assert!(engine.game.sim_sets.is_empty());
     }
 
     /// **`help` prints every key the catalogue names.**

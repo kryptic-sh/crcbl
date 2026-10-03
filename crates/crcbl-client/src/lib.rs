@@ -20,9 +20,9 @@ use crcbl_ecs::World;
 use crcbl_net::auth::SessionCrypto;
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
-    Baseline, DeltaCodec, HandshakeResult, Hello, Message, MessageKind, ProtocolCompatibility,
-    RejectReason, ResumeToken, SectorId, SessionEndReason, SessionId, Transport, TransportError,
-    Trust, replicated_system_id,
+    AuthError, Baseline, ConsoleReply, ConsoleSet, ConsoleTextTooLong, DeltaCodec, HandshakeResult,
+    Hello, Message, MessageKind, ProtocolCompatibility, RejectReason, ResumeToken, SectorId,
+    SessionEndReason, SessionId, Transport, TransportError, Trust, replicated_system_id,
 };
 use crcbl_phys::{PhysicsSystem, Transform};
 
@@ -46,6 +46,33 @@ const SESSION_PROOF_TIMEOUT: Duration = Duration::from_secs(5);
 /// server sending far more than any game asks of it — and what arrives past it
 /// is dropped and counted rather than held without limit.
 pub const MAX_QUEUED_EVENTS: usize = 64;
+
+/// Why [`Client::send_console_set`] sent nothing.
+#[derive(Debug)]
+pub enum ConsoleSetNotSent {
+    /// No session yet, or it ended: there is no key to seal the set under,
+    /// and a server would refuse anything sent without one.
+    NotInSession,
+    /// The name or the value is longer than a console set carries.
+    TooLong(ConsoleTextTooLong),
+    /// The session's key has sealed all it may.
+    Seal(AuthError),
+    /// The transport refused the message.
+    Transport(TransportError),
+}
+
+impl fmt::Display for ConsoleSetNotSent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotInSession => f.write_str("not in a session with a server yet"),
+            Self::TooLong(error) => write!(f, "{error}"),
+            Self::Seal(error) => write!(f, "the set could not be sealed: {error}"),
+            Self::Transport(error) => write!(f, "the transport refused the set: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ConsoleSetNotSent {}
 
 // ---------------------------------------------------------------------------
 // InterpolatedState
@@ -182,6 +209,11 @@ pub struct Client<T: Transport> {
     /// at most [`MAX_QUEUED_EVENTS`].
     events: Vec<Vec<u8>>,
     dropped_event_count: u64,
+    /// The server's answers to this client's console sets not yet taken by
+    /// [`Client::console_replies`], oldest first, at most
+    /// [`MAX_QUEUED_EVENTS`]; what arrives past that is counted in
+    /// [`Client::dropped_event_count`].
+    console_replies: Vec<ConsoleReply>,
     reliable_rate_limiter: InboundRateLimiter,
     unreliable_rate_limiter: InboundRateLimiter,
     processing_error_count: u64,
@@ -240,6 +272,7 @@ impl<T: Transport> Client<T> {
             session_ended: None,
             events: Vec::new(),
             dropped_event_count: 0,
+            console_replies: Vec::new(),
             reliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             unreliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             processing_error_count: 0,
@@ -525,11 +558,44 @@ impl<T: Transport> Client<T> {
         self.events.drain(..)
     }
 
-    /// Events dropped because [`MAX_QUEUED_EVENTS`] were already waiting to
-    /// be taken.
+    /// Events and console replies dropped because [`MAX_QUEUED_EVENTS`] of
+    /// their kind were already waiting to be taken.
     #[must_use]
     pub fn dropped_event_count(&self) -> u64 {
         self.dropped_event_count
+    }
+
+    /// Send a console set of a simulation variable to the server, sealed and
+    /// on the reliable channel, as a `ClientToServer::Command`. The server
+    /// applies it at the start of its next tick, or refuses it — it takes
+    /// sets only from the host's own player — and answers either way through
+    /// [`Client::console_replies`].
+    ///
+    /// # Errors
+    ///
+    /// [`ConsoleSetNotSent`], naming why nothing was sent: no session, a set
+    /// too long for the wire, or the key or the transport refused it.
+    pub fn send_console_set(&mut self, set: &ConsoleSet) -> Result<(), ConsoleSetNotSent> {
+        if !self.handshake_complete {
+            return Err(ConsoleSetNotSent::NotInSession);
+        }
+        let Some(crypto) = self.session_crypto.as_mut() else {
+            return Err(ConsoleSetNotSent::NotInSession);
+        };
+        let data = crcbl_net::encode_console_set(set).map_err(ConsoleSetNotSent::TooLong)?;
+        let payload =
+            crcbl_net::encode_client_to_server(&crcbl_net::ClientToServer::Command { data });
+        let sealed = crypto.seal(&payload).map_err(ConsoleSetNotSent::Seal)?;
+        self.transport
+            .send_reliable(Message::reliable(sealed))
+            .map_err(ConsoleSetNotSent::Transport)
+    }
+
+    /// Take the server's answers to this client's console sets since the last
+    /// call, oldest first — each says whether the set applied, at which tick,
+    /// or why it was refused, and prints as the line a console shows.
+    pub fn console_replies(&mut self) -> impl Iterator<Item = ConsoleReply> + '_ {
+        self.console_replies.drain(..)
     }
 
     /// Request a fresh handshake or resume the accepted session on a replacement
@@ -875,8 +941,8 @@ impl<T: Transport> Client<T> {
         }
     }
 
-    /// Open a sealed control message: the server ending the session, or an
-    /// event for the game.
+    /// Open a sealed control message: the server ending the session, an
+    /// event for the game, or the answer to a console set.
     fn handle_sealed_control(&mut self, envelope: &[u8]) {
         let Some(crypto) = self.session_crypto.as_mut() else {
             self.auth_failure_count += 1;
@@ -897,6 +963,19 @@ impl<T: Transport> Client<T> {
                 Ok(crcbl_net::ServerToClient::Snapshot { .. }) | Err(_) => {
                     self.processing_error_count += 1;
                 }
+            }
+            return;
+        }
+        if payload.first() == Some(&crcbl_net::codec::CONSOLE_REPLY_TAG) {
+            let reply = crcbl_net::decode_console_reply(payload);
+            self.session_proof_deadline = None;
+            self.unproven_sessions = 0;
+            match reply {
+                Ok(reply) if self.console_replies.len() < MAX_QUEUED_EVENTS => {
+                    self.console_replies.push(reply);
+                }
+                Ok(_) => self.dropped_event_count = self.dropped_event_count.saturating_add(1),
+                Err(_) => self.processing_error_count += 1,
             }
             return;
         }
@@ -1440,6 +1519,70 @@ mod tests {
             "the newest is the one dropped"
         );
         assert_eq!(client.dropped_event_count(), 1);
+    }
+
+    // ── Console sets ───────────────────────────────────────────────────────
+
+    fn spin_set() -> ConsoleSet {
+        ConsoleSet {
+            name: "sv_spin_rate".to_owned(),
+            value: "2".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_console_set_before_the_session_is_refused_and_nothing_is_sent() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        assert!(matches!(
+            client.send_console_set(&spin_set()),
+            Err(ConsoleSetNotSent::NotInSession)
+        ));
+        assert!(peer.recv_reliable().unwrap().is_none(), "nothing went out");
+    }
+
+    #[test]
+    fn a_console_set_goes_sealed_on_the_reliable_channel_as_a_command() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+        client.send_console_set(&spin_set()).expect("in session");
+        let msg = peer.recv_reliable().unwrap().expect("the set went out");
+        assert_eq!(msg.kind, MessageKind::Reliable);
+        let opened = crypto
+            .open(&msg.payload)
+            .expect("sealed with the session key");
+        let crcbl_net::ClientToServer::Command { data } =
+            crcbl_net::decode_client_to_server(opened).expect("a command")
+        else {
+            panic!("a console set travels as a command");
+        };
+        assert_eq!(
+            crcbl_net::decode_console_set(&data).expect("a set"),
+            spin_set()
+        );
+    }
+
+    #[test]
+    fn a_sealed_console_reply_is_taken_once_and_not_handed_to_the_game() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+        let reply = ConsoleReply {
+            name: "sv_spin_rate".to_owned(),
+            value: "2".to_owned(),
+            outcome: crcbl_net::ConsoleOutcome::Applied(TickId::from_raw(9)),
+        };
+        let sealed = crypto
+            .seal(&crcbl_net::encode_console_reply(&reply).expect("short enough"))
+            .expect("counter space available");
+        peer.send_reliable(Message::reliable(sealed)).unwrap();
+        client.update(TICK);
+        assert_eq!(client.console_replies().collect::<Vec<_>>(), [reply]);
+        assert_eq!(client.console_replies().count(), 0, "taken once");
+        assert_eq!(client.events().count(), 0, "a reply is no game event");
+        assert_eq!(client.ended(), None, "nor a session end");
+        assert_eq!(client.processing_error_count(), 0);
     }
 
     // ── Handshake recovery ─────────────────────────────────────────────────

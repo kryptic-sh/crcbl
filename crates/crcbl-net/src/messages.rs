@@ -16,9 +16,11 @@ pub enum ClientToServer {
         /// Serialised input data.
         data: Vec<u8>,
     },
-    /// A command — chat, ready-up, etc.
+    /// A request the server answers once — not a sample of this tick's
+    /// input. The one kind built is a console set of a simulation variable
+    /// ([`crate::command`]); `data`'s first byte says which kind it is.
     Command {
-        /// Serialised command payload.
+        /// The command, kind byte first.
         data: Vec<u8>,
     },
 }

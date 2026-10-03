@@ -10,8 +10,9 @@ use crcbl_net::reliable::{Endpoint, decode_packet};
 use crcbl_net::seal::{KeyPair, Role, agree_channel};
 use crcbl_net::udp::{Challenge, Hello, Reply, TokenKey};
 use crcbl_net::{
-    ManualClock, Trust, decode_ack, decode_client_to_server, decode_delta, decode_handshake_result,
-    decode_hello, decode_server_to_client,
+    ManualClock, Trust, decode_ack, decode_client_to_server, decode_console_reply,
+    decode_console_set, decode_delta, decode_handshake_result, decode_hello,
+    decode_server_to_client,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -42,6 +43,10 @@ fuzz_target!(|data: &[u8]| {
     let _ = decode_ack(data);
     let _ = decode_client_to_server(data);
     let _ = decode_server_to_client(data);
+    // A command's data once its message has opened — what a server reads from
+    // any admitted peer — and the reply a client reads back.
+    let _ = decode_console_set(data);
+    let _ = decode_console_reply(data);
     let _ = decode_delta(data, Trust::Untrusted);
     let _ = decode_delta(data, Trust::Authenticated);
     // A snapshot's entity blobs, once it has opened and applied: the client

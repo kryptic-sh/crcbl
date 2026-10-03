@@ -313,8 +313,14 @@ pub(crate) fn run_text(cx: &mut Context<'_>, name: &str, text: &str) -> Result<(
         let mut inner = Context::new(registry, cx.host_mut());
         let outcome = registry.execute(&mut inner, line);
         let clear = inner.clear_requested();
+        // Carried out with the lines, so a `SIM` set a file makes reaches the
+        // simulation as a typed one does.
+        let sim_sets = inner.take_sim_sets();
         for printed in inner.into_lines() {
             cx.print(printed);
+        }
+        for set in sim_sets {
+            cx.request_sim_set(set);
         }
         if clear {
             cx.request_clear();
@@ -1060,6 +1066,32 @@ mod tests {
         run_exec(&mut cx, &lines);
         let printed = cx.into_lines();
         (host, printed)
+    }
+
+    /// **A simulation set a line of a file or `--exec` makes reaches the
+    /// context the run was handed**, as a typed one does, rather than dying
+    /// with the per-line context it was made in.
+    #[test]
+    fn a_simulation_set_from_an_exec_line_reaches_the_outer_context() {
+        static RATE: crcbl_console::ConVar = crcbl_console::ConVar::new_float(
+            "exec_rate",
+            "A rate a simulation reads.",
+            crcbl_console::Flags::SIM,
+            0.0,
+            4.0,
+            1.0,
+        );
+        static VARS: &[&crcbl_console::ConVar] = &[&RATE];
+        let registry =
+            Registry::gather(&[Table::new(VARS, &[], &[])]).expect("no two entries claim one name");
+        let mut host = ();
+        let mut cx = Context::new(&registry, &mut host);
+        run_exec(
+            &mut cx,
+            &["exec_rate 2".to_owned(), "exec_rate 3".to_owned()],
+        );
+        let sets: Vec<String> = cx.sim_sets().iter().map(ToString::to_string).collect();
+        assert_eq!(sets, ["exec_rate 2", "exec_rate 3"]);
     }
 
     /// **`--exec` lines run in order, land on the host, and a line that faults

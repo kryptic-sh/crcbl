@@ -46,6 +46,9 @@ pub const COMMAND_TAG: u8 = 0x01;
 pub const SNAPSHOT_TAG: u8 = 0x10;
 /// `ServerToClient::Event`.
 pub const EVENT_TAG: u8 = 0x11;
+/// [`ConsoleReply`](crate::command::ConsoleReply) — only ever sealed, and only
+/// on the reliable channel, beside the session end; see [`crate::command`].
+pub const CONSOLE_REPLY_TAG: u8 = 0x12;
 /// [`Hello`].
 pub const HELLO_TAG: u8 = 0x20;
 /// [`HandshakeResult::Accept`].

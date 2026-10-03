@@ -31,13 +31,22 @@ impl Flags {
     /// Prints, and refuses a set — a device fact, or a settings key nothing
     /// reads yet.
     pub const READ_ONLY: Self = Self(1 << 1);
-    /// Reserved: a value the simulation reads.
+    /// A value the simulation reads, set only on a tick boundary.
     ///
-    /// Nothing sets one yet. Debug-console decision 9 is the rule that lands
-    /// with the first one: a `SIM` variable travels as a transport `Command`,
-    /// is applied on a tick boundary and is recorded by the replay stream,
-    /// because a variable that changes what the simulation computes would
-    /// otherwise break same-binary determinism.
+    /// Debug-console decision 9: a variable that changes what the simulation
+    /// computes would break same-binary determinism if a typed line wrote it
+    /// mid-tick, so a `SIM` set is a request, not a write. The console checks
+    /// it, hands it to the host as a [`SimSet`](crate::SimSet) through
+    /// [`Context::request_sim_set`](crate::Context::request_sim_set), and the
+    /// simulation applies it at the start of its next tick into the
+    /// [`SimVars`](crate::SimVars) it owns — over the transport as a
+    /// `ClientToServer::Command` when the simulation is a server's, and
+    /// recorded by that server's replay stream.
+    ///
+    /// **Only a [`ConVar`] may carry it**, and its own cell never moves: the
+    /// value lives once per simulation, not once per process, so
+    /// [`ConVar::set`] refuses the variable and its typed getters panic.
+    /// [`Binding::new`] refuses the flag outright.
     pub const SIM: Self = Self(1 << 2);
 
     /// Every flag with a name, in the order [`Display`](fmt::Display) prints
@@ -298,9 +307,12 @@ impl ConVar {
     /// When the variable is not a [`Kind::Bool`], naming it. A getter of the
     /// wrong type is a programming error in the code that declared the variable,
     /// not something a person typed, so it aborts rather than returning a
-    /// `Result` every call site would `unwrap`.
+    /// `Result` every call site would `unwrap`. Every typed getter also panics
+    /// for a [`Flags::SIM`] variable, whose cell holds only its default: the
+    /// simulation reads it from its [`SimVars`](crate::SimVars).
     #[must_use]
     pub fn get_bool(&self) -> bool {
+        self.refuse_sim_read();
         match &self.cell {
             Cell::Bool(cell) => cell.load(Ordering::Relaxed),
             _ => panic!("console variable `{}` is not a bool", self.name),
@@ -315,6 +327,7 @@ impl ConVar {
     /// terms.
     #[must_use]
     pub fn get_i64(&self) -> i64 {
+        self.refuse_sim_read();
         match &self.cell {
             Cell::Int(cell) => cell.load(Ordering::Relaxed),
             _ => panic!("console variable `{}` is not an int", self.name),
@@ -329,6 +342,7 @@ impl ConVar {
     /// terms.
     #[must_use]
     pub fn get_f32(&self) -> f32 {
+        self.refuse_sim_read();
         match &self.cell {
             Cell::Float(cell) => f32::from_bits(cell.load(Ordering::Relaxed)),
             _ => panic!("console variable `{}` is not a float", self.name),
@@ -343,14 +357,16 @@ impl ConVar {
     /// terms.
     #[must_use]
     pub fn get_enum(&self) -> &'static str {
+        self.refuse_sim_read();
         match (&self.cell, self.kind) {
             (Cell::Enum(cell), Kind::Enum(values)) => values[cell.load(Ordering::Relaxed)],
             _ => panic!("console variable `{}` is not an enum", self.name),
         }
     }
 
-    /// Set it, refusing a kind mismatch, a value outside the range, and a
-    /// [`Flags::READ_ONLY`] variable.
+    /// Set it, refusing a kind mismatch, a value outside the range, a
+    /// [`Flags::READ_ONLY`] variable and a [`Flags::SIM`] one, which only the
+    /// simulation's tick boundary sets.
     ///
     /// # Errors
     ///
@@ -358,6 +374,13 @@ impl ConVar {
     pub fn set(&self, value: &Value) -> Result<(), Fault> {
         if self.flags.contains(Flags::READ_ONLY) {
             return Err(read_only(self.name));
+        }
+        if self.flags.contains(Flags::SIM) {
+            return Err(Fault::new(format!(
+                "`{name}` is a simulation variable: type `{name} <value>` and the simulation \
+                 applies it at the start of its next tick",
+                name = self.name
+            )));
         }
         self.kind.check(self.name, value)?;
         match (&self.cell, value) {
@@ -380,6 +403,16 @@ impl ConVar {
         }
         Ok(())
     }
+
+    /// Panics for a [`Flags::SIM`] variable, whose cell never leaves its
+    /// default — a typed read of it would be a stale value that looks live.
+    fn refuse_sim_read(&self) {
+        assert!(
+            !self.flags.contains(Flags::SIM),
+            "console variable `{}` is SIM: the simulation reads it from its `SimVars`",
+            self.name
+        );
+    }
 }
 
 /// A variable whose storage is somewhere else.
@@ -401,6 +434,13 @@ pub struct Binding {
 
 impl Binding {
     /// A binding over `get`/`set`, which the declaring crate writes.
+    ///
+    /// # Panics
+    ///
+    /// When `flags` holds [`Flags::SIM`] — at compile time for a `static`. A
+    /// simulation variable's value lives once per simulation, from its
+    /// declared default, which a binding does not have; declare it as a
+    /// [`ConVar`].
     #[must_use]
     pub const fn new(
         name: &'static str,
@@ -410,6 +450,10 @@ impl Binding {
         get: fn(&dyn Any) -> Value,
         set: fn(&mut dyn Any, &Value) -> Result<(), Fault>,
     ) -> Self {
+        assert!(
+            !flags.contains(Flags::SIM),
+            "a simulation variable is a `ConVar`, not a `Binding`"
+        );
         Self {
             name,
             help,
@@ -679,6 +723,28 @@ mod tests {
             "`t_locked` is read-only"
         );
         assert!(LOCKED.get_bool());
+    }
+
+    static A_SIM: ConVar = ConVar::new_float("t_sim", "a sim float", Flags::SIM, 0.0, 4.0, 1.0);
+
+    #[test]
+    fn a_sim_variable_refuses_a_direct_set_and_keeps_its_default() {
+        let refused = A_SIM
+            .set(&Value::Float(2.0))
+            .expect_err("only the tick boundary sets a SIM variable");
+        assert!(
+            refused
+                .message()
+                .starts_with("`t_sim` is a simulation variable"),
+            "{refused}"
+        );
+        assert_eq!(A_SIM.get(), Value::Float(1.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "console variable `t_sim` is SIM")]
+    fn a_typed_read_of_a_sim_variable_panics_naming_it() {
+        let _ = A_SIM.get_f32();
     }
 
     #[test]
