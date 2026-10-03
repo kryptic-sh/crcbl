@@ -1002,8 +1002,9 @@ than the rest of this document suggests; each line was checked in the source.
    since 2026-09-30, read into a `Map` the stage plays on, so what the editor
    edits there is the scene the game loads rather than live entities.
 5. **No inspector _in the editor_**: `crcbl_ecs::Inspector::collect` returns a
-   system's name and entity count, and the per-system debug-UI callback is an
-   empty stub. The per-component half is built — `crcbl-reflect`,
+   system's name and entity count, and `SystemTrait::debug_fields` lends an
+   entity's row as `&dyn Reflect`, which the sandbox's debug panel shows
+   read-only (2026-10-03). The per-component half is built — `crcbl-reflect`,
    `Ui::inspector` and `crcbl::registry`, which is what a tool reads a component
    through, all 2026-09-16 — and what is missing is the editor drawing a panel
    with it.

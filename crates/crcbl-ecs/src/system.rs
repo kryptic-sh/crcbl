@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hasher;
 
+use crcbl_reflect::Reflect;
+
 use crate::component_hash::ComponentHash;
 use crate::entity::Entity;
 
@@ -88,6 +90,25 @@ pub trait SystemTrait {
         false
     }
 
+    /// What this system holds for `entity`, for a debug overlay to show.
+    ///
+    /// A selected entity is described by every system that answers `Some`
+    /// here, one section each, with the overlay walking the value's
+    /// [`Reflect::fields`] — so a system describes itself through data, and
+    /// this crate never names a UI. `None` when the system holds nothing for
+    /// `entity`, and always from this default.
+    ///
+    /// **The default is not a check that passes by doing nothing**: nothing is
+    /// verified through this method, and a system that does not override it is
+    /// one the overlay lists no section for — the same complete answer
+    /// [`SystemTrait::replicate`]'s `false` gives the server. The concrete
+    /// [`System<T>`] answers when it was built with [`System::reflected`]; a
+    /// custom system lends whichever of its rows it has a [`Reflect`] value
+    /// for.
+    fn debug_fields(&self, _entity: Entity) -> Option<&dyn Reflect> {
+        None
+    }
+
     /// Downcast support for callers that hold `&mut dyn SystemTrait` (e.g.
     /// through [`Schedule::iter_mut`](crate::Schedule::iter_mut)) and need the
     /// concrete system type.
@@ -128,6 +149,19 @@ pub struct System<T> {
     entity_to_index: HashMap<Entity, usize>,
     index_to_entity: Vec<Entity>,
     debug_draw_fn: Option<DebugDrawFn>,
+    /// How a row is lent to [`SystemTrait::debug_fields`]: set by
+    /// [`System::reflected`], `None` from [`System::new`].
+    reflect: Option<ReflectRow<T>>,
+}
+
+/// A row seen as [`Reflect`]; see [`System::reflected`] for why it is a stored
+/// function rather than a bound.
+type ReflectRow<T> = fn(&T) -> &dyn Reflect;
+
+/// [`ReflectRow`] for a `T` that is [`Reflect`]: the unsizing coercion, named
+/// so it can be stored as a function pointer.
+fn reflect_row<T: Reflect>(row: &T) -> &dyn Reflect {
+    row
 }
 
 impl<T> System<T> {
@@ -140,6 +174,7 @@ impl<T> System<T> {
             entity_to_index: HashMap::new(),
             index_to_entity: Vec::new(),
             debug_draw_fn: None,
+            reflect: None,
         }
     }
 
@@ -232,6 +267,27 @@ impl<T> System<T> {
     }
 }
 
+impl<T: Reflect> System<T> {
+    /// [`System::new`], for a component a debug overlay can read: this
+    /// system's [`SystemTrait::debug_fields`] answers with the entity's row.
+    ///
+    /// **A constructor rather than a bound**, because the bound cannot be
+    /// added: `SystemTrait` is implemented for every `System<T>` whose `T` is
+    /// [`ComponentHash`], tuples and `char` among them, and neither of those is
+    /// [`Reflect`]. Bounding that impl on `Reflect` would stop every such
+    /// system from being registered at all, and stable Rust has no
+    /// specialisation to answer differently for the `T` that is. So the choice
+    /// is made where `T` is known to be `Reflect` — here — and kept as the one
+    /// function pointer that coercion needs.
+    #[must_use]
+    pub fn reflected(name: impl Into<String>) -> Self {
+        Self {
+            reflect: Some(reflect_row::<T>),
+            ..Self::new(name)
+        }
+    }
+}
+
 impl<T: ComponentHash + 'static> SystemTrait for System<T> {
     fn name(&self) -> &str {
         &self.name
@@ -275,6 +331,13 @@ impl<T: ComponentHash + 'static> SystemTrait for System<T> {
 
     fn contributes_to_hash(&self) -> bool {
         true
+    }
+
+    /// The entity's row, when this system was built with
+    /// [`System::reflected`].
+    fn debug_fields(&self, entity: Entity) -> Option<&dyn Reflect> {
+        let reflect = self.reflect?;
+        self.get(entity).map(reflect)
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -501,6 +564,78 @@ mod tests {
     fn a_system_reports_the_name_it_was_built_with() {
         let sys = System::<i32>::new("physics");
         assert_eq!(sys.name(), "physics");
+    }
+
+    /// A component an overlay can read, with a field the reflection is
+    /// checked against by name and by value.
+    #[derive(crcbl_reflect::Reflect, Clone, Copy, Debug, PartialEq)]
+    struct Health {
+        current: i32,
+        #[reflect(name = "Max")]
+        max: i32,
+    }
+
+    impl ComponentHash for Health {
+        fn hash_component(&self, hasher: &mut dyn Hasher) {
+            self.current.hash_component(hasher);
+            self.max.hash_component(hasher);
+        }
+    }
+
+    #[test]
+    fn a_reflected_system_lends_the_entitys_own_row_and_nothing_for_others() {
+        use crcbl_reflect::{Value, get_path};
+
+        let (held, other, absent) = (e(1), e(2), e(3));
+        let mut sys = System::<Health>::reflected("health");
+        sys.attach(other, Health { current: 1, max: 2 });
+        sys.attach(held, Health { current: 7, max: 9 });
+
+        let row = sys
+            .debug_fields(held)
+            .expect("the system holds this entity");
+        assert_eq!(row.type_name(), "Health");
+        assert_eq!(row.fields()[1].label, "Max");
+        assert_eq!(
+            get_path(row, "current"),
+            Ok(Value::Int(7)),
+            "the row is this entity's, not the first one stored"
+        );
+        assert_eq!(get_path(row, "max"), Ok(Value::Int(9)));
+
+        assert!(
+            sys.debug_fields(absent).is_none(),
+            "an entity the system does not hold has no row to lend"
+        );
+    }
+
+    #[test]
+    fn a_system_that_lends_nothing_answers_none() {
+        struct Silent;
+        impl SystemTrait for Silent {
+            fn name(&self) -> &str {
+                "silent"
+            }
+            fn tick(&mut self, _dt: f64) {}
+            fn entity_count(&self) -> usize {
+                1
+            }
+            fn sweep(&mut self, _dead: &[Entity]) {}
+            fn debug_draw(&mut self, _ctx: &DebugCtx) {}
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        assert!(
+            Silent.debug_fields(e(1)).is_none(),
+            "the default lends nothing, whatever the system holds"
+        );
+
+        // `System::new` keeps the rows to itself even for a `T` that is
+        // `Reflect`: only `System::reflected` opts in.
+        let mut plain = System::<Health>::new("plain");
+        plain.attach(e(1), Health { current: 1, max: 1 });
+        assert!(plain.debug_fields(e(1)).is_none());
     }
 
     #[test]

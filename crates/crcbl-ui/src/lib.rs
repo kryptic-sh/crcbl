@@ -78,7 +78,7 @@ pub use console::{
 };
 pub use debug::{
     DEFAULT_FRAME_WINDOW, DebugModule, DebugOverlay, DebugPanel, DebugRow, DebugSection,
-    DebugStyle, FrameStats,
+    DebugStyle, FrameStats, REFLECTED_DECIMALS, ReflectedSection,
 };
 pub use draw_list::{
     Border, ClipRect, ClipUnderflow, CornerRadii, DrawCommand, DrawList, Primitive, TextureRun,

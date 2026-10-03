@@ -15,11 +15,11 @@
 //! ```
 //!
 //! **That loop is [`crcbl::engine::Loop`]'s now**, and this file is what a game
-//! plugs into it: [`Sandbox`], with the pause menu's two settings rows, and the
-//! two empty call sites [`tick`] and [`render`] that everything later grows
-//! around. The sandbox is the honest measure of how much of a frame the engine
-//! owns — a game with nothing in it still runs, pauses, opens a menu, goes
-//! fullscreen and reports a summary.
+//! plugs into it: [`Sandbox`], with the pause menu's two settings rows, the
+//! scene its fixed tick advances ([`crate::scene`]), and the empty call site
+//! [`render`] that everything later grows around. The sandbox is the honest
+//! measure of how much of a frame the engine owns — a game with nothing in it
+//! still runs, pauses, opens a menu, goes fullscreen and reports a summary.
 //!
 //! There is still no `Shell::run(closure)` and there never will be: on wasm the
 //! outer loop is `requestAnimationFrame`, which calls the engine and cannot be
@@ -77,6 +77,7 @@ use crcbl::ui::draw_list::DrawList;
 
 use crate::gpu::Gpu;
 use crate::menu::{self, MenuKind, Menus, SandboxAction};
+use crate::scene::Scene;
 
 /// Which projection the camera uses.
 ///
@@ -291,9 +292,10 @@ pub type SandboxError = crcbl::engine::LoopError<LanError>;
 /// The sandbox, as the engine's loop hosts it.
 ///
 /// **A game with no game in it, and that is the point.** The sandbox exists to
-/// show the engine's frame with nothing of its own in the way: no simulation, no
-/// HUD, no score. What is left is [`tick`] and [`render`], both empty and both
-/// load-bearing — the call sites are what everything later grows around.
+/// show the engine's frame with nothing of its own in the way: no game rules, no
+/// HUD, no score. What is left is the scene the debug panel inspects — a cube
+/// and a light as entities ([`crate::scene`]) — and [`render`], empty and
+/// load-bearing: the call site is what everything later grows around.
 ///
 /// Its only state is the pause menu's two settings rows: the pacing and frame
 /// limit they show, and the copies that have reached the GPU and the clock.
@@ -319,6 +321,9 @@ pub struct Sandbox {
     /// The outcome of the probe, once it has run — `Ok` with the time the
     /// device took, `Err` with the formatted error.
     unpresented: Option<Result<Duration, String>>,
+    /// The cube and the light as entities, and the debug panel's selection
+    /// over them. See [`crate::scene`].
+    scene: Scene,
     /// What the frames are being drawn with, re-read each
     /// [`HostedGame::draw`] off the renderer.
     ///
@@ -344,17 +349,20 @@ pub struct Sandbox {
 
 impl Sandbox {
     /// A sandbox starting from the command line's pacing, frame limit and
-    /// `--wait-unpresented` probe, drawing `effects`.
+    /// `--wait-unpresented` probe, drawing `effects`, with its scene lit as
+    /// `light`.
     ///
     /// `effects` is the resolved set the device and the player's settings left
     /// standing, read off the renderer by the caller — a run that stops before
-    /// its first frame still reports what it would have drawn.
+    /// its first frame still reports what it would have drawn. `light` is the
+    /// renderer's opening light, which the scene's sun starts as and then owns.
     #[must_use]
     pub fn new(
         pacing: Pacing,
         limit: FrameLimit,
         wait_unpresented: bool,
         effects: RenderEffects,
+        light: crcbl::render::DirectionalLight,
     ) -> Self {
         Self {
             pacing,
@@ -364,6 +372,7 @@ impl Sandbox {
             shown: None,
             wait_unpresented,
             unpresented: None,
+            scene: Scene::new(light),
             effects,
             steam: SteamLink::off(),
             lan: Lan::off(),
@@ -502,6 +511,7 @@ pub fn with_shell<S: Shell + ?Sized>(
         options.limit,
         options.wait_unpresented,
         effects,
+        gpu.light,
     );
     // Windowed runs only: a headless run is CI's, and must neither need nor
     // touch a developer's Steam client.
@@ -545,9 +555,9 @@ pub fn with_shell<S: Shell + ?Sized>(
 
 /// The sandbox's half of the frame, which is as little as a game can have.
 ///
-/// Two of the seven do anything at all, and neither does much: [`tick`] and
-/// [`render`] are the empty call sites P1's renderer grows into, and the cube's
-/// spin is on the fixed timestep so a `--headless --frames N` run is a
+/// Two of the seven do anything at all, and neither does much: [`render`] is the
+/// empty call site P1's renderer grows into, and the scene's tick spins the
+/// cube on the fixed timestep so a `--headless --frames N` run is a
 /// bit-reproducible picture on every machine.
 impl HostedGame for Sandbox {
     /// The sandbox has no simulation, so all it can fail at is starting a LAN
@@ -588,13 +598,18 @@ impl HostedGame for Sandbox {
                 }
             });
         }
-        tick(tick_dt);
         // The cube spins on the **fixed** timestep, not on the frame rate. That
         // is what makes `--headless --frames N` render a bit-reproducible
         // picture on every machine, and therefore what makes a golden image of
-        // it evidence rather than a coincidence.
-        #[allow(clippy::cast_possible_truncation)]
-        gpu.advance(tick_dt as f32);
+        // it evidence rather than a coincidence. The scene owns the spin and
+        // the light; the GPU is handed both.
+        self.scene.tick(tick_dt);
+        if let Some(seconds) = self.scene.cube_seconds() {
+            gpu.set_elapsed(seconds);
+        }
+        if let Some(light) = self.scene.light() {
+            gpu.light = light;
+        }
         // The menu's pacing row changes this only while paused; the change
         // lands on the first tick after resume, and only when it differs —
         // re-querying the surface every tick is what `set_pacing` costs.
@@ -608,14 +623,16 @@ impl HostedGame for Sandbox {
         }
     }
 
-    /// The sandbox binds no keys of its own: the three the loop reserves are
-    /// the three it has.
-    /// The Steam lobby keys, when the `steam` feature is live; see
+    /// The debug panel's selection keys (see [`crate::scene`]), then the
+    /// Steam lobby keys, when the `steam` feature is live; see
     /// [`crate::steam`]. While the LAN lobby is up, every key is its own.
     fn key_event(&mut self, key: crcbl::core::input::KeyCode, pressed: bool) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(lobby) = &mut self.lobby {
             lobby.model_mut().key(key, pressed);
+            return;
+        }
+        if self.scene.key(key, pressed) {
             return;
         }
         self.steam.key_event(key, pressed);
@@ -698,9 +715,11 @@ impl HostedGame for Sandbox {
         MenuKind::Paused
     }
 
-    /// The "steam" section, when the `steam` feature is live, and the "lan"
-    /// one during a LAN session.
+    /// The "scene" section and the selected entity's systems' (see
+    /// [`crate::scene`]), the "steam" section, when the `steam` feature is
+    /// live, and the "lan" one during a LAN session.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
+        self.scene.debug_sections(panel);
         self.steam.debug_sections(panel);
         self.lan.debug_sections(panel);
     }
@@ -795,15 +814,6 @@ fn show_lobby(lobby: &mut crate::lobby::Lobby, menus: &mut Menus) -> MenuKind {
         }
     }
     MenuKind::Lobby
-}
-
-/// One fixed simulation step.
-///
-/// Empty on purpose: `crcbl-ecs` and `crcbl-phys` are P2 and P3. What matters
-/// at P0 is that the *call site* exists and is driven by the accumulator rather
-/// than by the frame rate, so nothing later grows around a variable-dt loop.
-fn tick(dt: f64) {
-    let _ = dt;
 }
 
 /// One rendered frame's worth of interpolation.
@@ -943,9 +953,10 @@ mod tests {
         assert_eq!(row_value(&drawn, "fps"), "60.0");
 
         // And the panel is composed of exactly the modules the sandbox has: the
-        // frame's, plus the renderer's when the device has timestamp queries.
-        // There is no connection here at all, so there is no network module —
-        // the stronger version of breakout's and flappy's in-memory one.
+        // frame's, plus the renderer's when the device has timestamp queries,
+        // and the scene's. There is no connection here at all, so there is no
+        // network module — the stronger version of breakout's and flappy's
+        // in-memory one — and nothing is selected, so no system's section.
         let titles: Vec<&str> = engine
             .debug()
             .panel
@@ -954,9 +965,9 @@ mod tests {
             .map(crcbl::ui::DebugSection::title)
             .collect();
         let expected: &[&str] = if engine.gpu().timings().is_some() {
-            &["frame", "gpu", "counters"]
+            &["frame", "gpu", "counters", crate::scene::SCENE_SECTION]
         } else {
-            &["frame", "counters"]
+            &["frame", "counters", crate::scene::SCENE_SECTION]
         };
         assert_eq!(titles, expected, "no module appears that no system offered");
 
@@ -987,6 +998,49 @@ mod tests {
             "F3 again must take it away: {:?}",
             ui_text(engine.gpu().draw_list()),
         );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **Selecting an entity in the panel shows each owning system's fields**,
+    /// through the loop: the key reaches the scene, the selection outlives the
+    /// frame it was made on, and the rows are the live component's.
+    #[test]
+    fn a_selected_entity_shows_its_systems_fields_in_the_panel() {
+        use crate::scene::{SELECT_NEXT_KEY, SPIN, SUN};
+
+        let mut engine = scripted(&Options {
+            debug_overlay: Some(true),
+            ..headless(32)
+        });
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+        let drawn = ui_text(engine.gpu().draw_list());
+        assert_eq!(row_value(&drawn, "selected"), "none", "{drawn:?}");
+        assert!(!drawn.iter().any(|text| text == SPIN), "{drawn:?}");
+
+        engine
+            .shell_mut()
+            .key_press(window, SELECT_NEXT_KEY)
+            .expect("the window is live");
+        run_frames(&mut engine, 1);
+        engine
+            .shell_mut()
+            .key_release(window, SELECT_NEXT_KEY)
+            .expect("the window is live");
+        run_frames(&mut engine, 3);
+
+        let drawn = ui_text(engine.gpu().draw_list());
+        assert!(
+            drawn.iter().any(|text| text == SPIN),
+            "the cube's spin system has a section: {drawn:?}"
+        );
+        assert!(!drawn.iter().any(|text| text == SUN), "{drawn:?}");
+        assert_eq!(
+            row_value(&drawn, "seconds"),
+            format!("{:.3}", engine.gpu().elapsed()),
+            "the row is the seconds the cube was last drawn at",
+        );
+        assert_ne!(row_value(&drawn, "selected"), "none");
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

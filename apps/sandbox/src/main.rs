@@ -23,6 +23,7 @@ mod lan;
 #[cfg(not(target_arch = "wasm32"))]
 mod lobby;
 mod menu;
+mod scene;
 mod steam;
 
 use std::process::ExitCode;

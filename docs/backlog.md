@@ -2975,14 +2975,70 @@ and _The debug draw layer's console switch is one bit, not a category set_.
 
 ### The UI stage's exit criteria are not demonstrated
 
-One of the plan's six exit criteria is open; re-checked 2026-10-03.
+One of the plan's six exit criteria is half open; re-checked 2026-10-03.
 
 - **The debug overlay running in the sandbox over a live scene, with entity
-  selection and console commands against the server.** Selecting an entity
-  should have each system that owns it draw its data through a per-system
-  debug-UI callback, which `SystemTrait` does not have; `Inspector::collect`
-  reports counts only, and tick times are their own entry. Console commands
-  reach the server only through the unbuilt `Flags::SIM` transport half.
+  selection and console commands against the server.** The selection half is met
+  (2026-10-03, below). **The console half is not**: console commands reach the
+  server only through the unbuilt `Flags::SIM` transport half, which stays
+  deferred by decision — _`Flags::SIM` is reserved, and its first variable is
+  the trigger_ lists what building it takes (a `Command` message over the
+  transport, applied on a tick boundary, recorded in the replay stream, refused
+  from a client that is not the host). Nothing was stubbed for it. The sandbox
+  is the place to show it once built: `--host` already gives it a server world
+  (`apps/sandbox/src/lan.rs`'s "players" system), and a server-side command
+  would want the overlay's selection to name an entity in that world rather than
+  in the sandbox's own scene, which the selection does not reach today.
+
+**Entity selection with per-system data is built (2026-10-03).** Decided that
+day, for the long term: **per-system debug data travels as `Reflect`, not as a
+UI callback in the ECS**, so `crcbl-ecs` stays UI-free. `SystemTrait` gained a
+**default** method, `debug_fields(&self, entity) -> Option<&dyn Reflect>`,
+answering `None` — non-breaking for every implementor, EW's included.
+`System<T>` answers with the entity's row when built with
+`System::<T>::reflected(name)` (`T: Reflect`); `System::new` does not, because
+the blanket `SystemTrait` impl covers `ComponentHash` types that are not
+`Reflect` (tuples, `char`) and a bound would refuse them, with no specialisation
+to answer per `T`. `Registry::register_systems` builds reflected systems, so
+scene components show unasked. `crcbl-ecs` now depends on `crcbl-reflect` (glam,
+thiserror, the derive — no UI, no renderer). The panel's half is
+`crcbl_ui::ReflectedSection`, a `DebugModule` writing one `label: value` row per
+leaf of any `&dyn Reflect`. **Not the rung-8 inspector widget**
+(`Ui::inspector`): that one edits a `&mut dyn Reflect` inside a caller's `Ui`
+and emits `FieldEdit`s, while the F3 panel is rows of text built in its own tree
+and this slice is read-only by decision; the rows share the inspector's field
+labels. In the sandbox, `apps/sandbox/src/scene.rs` holds the cube and its light
+as entities in a `World` the fixed tick advances — the world is what the frame
+draws (`Spin::seconds` becomes `Gpu::set_elapsed`, `Sun` becomes the renderer's
+light), with the same f32 sum the GPU kept so the headless picture is unchanged.
+PgDn and PgUp step the selection through `World::entities`, wrapping; it
+survives frames and the first tick after its entity is swept clears it; the
+panel's "scene" section names it and each owning system adds a section of its
+own. The keys act whether or not the panel shows — a hosted game is not told.
+Evidence, each shown red under a mutation: `crcbl-ecs`'s
+`system::tests::a_reflected_system_lends_the_entitys_own_row_and_nothing_for_others`
+(the row read from the first slot instead of the entity's) and
+`a_system_that_lends_nothing_answers_none` (the default answering a static
+`Some(&false)`);
+`world::tests::entities_lists_the_live_ones_and_drops_the_swept` (the first
+entity skipped); `crcbl`'s
+`registry::tests::a_registered_system_lends_the_entitys_row_to_a_debug_overlay`
+(`register_systems` back on `System::new`); `crcbl-ui`'s `debug::reflected`
+tests (floats unformatted, no path separator, a leaf list split into rows, no
+variant row, no section title); `apps/sandbox`'s `scene::tests` (stepping on the
+release, wrapping onto the last, the swept selection kept, no system sections,
+the spin advancing twice as fast) and
+`app::tests::a_selected_entity_shows_its_systems_fields_in_the_panel` (the key
+not routed to the scene, the GPU not handed the spin).
+
+**What the selection does not do yet**, by scope rather than oversight: pick by
+clicking in the world (the sandbox has no picking or physics ray to cast), edit
+a field (read-only by decision; an edit would want the `FieldEdit` command path
+`Ui::inspector` already reports), select in any sample but the sandbox (the
+selection model is `apps/sandbox/src/scene.rs`'s own; a second sample wanting it
+is the trigger to move it into `crcbl`), or reach the `--host` server world
+(above). `Inspector::collect` still reports counts only, and per-system tick
+times are _Inspector stats carry no per-system tick time_.
 
 Met, for the record: the fixture corpus passes
 (`crates/crcbl-ui/tests/taffy_fixtures.rs`), draw-list snapshot tests exist in

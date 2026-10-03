@@ -137,6 +137,14 @@ impl World {
             .find_map(|system| system.as_any_mut().downcast_mut::<T>())
     }
 
+    /// Every live entity, in slot order: what a debug overlay picks one from.
+    ///
+    /// Like [`entity_count`](Self::entity_count), this includes entities
+    /// queued for despawn until the next [`sweep`](Self::sweep).
+    pub fn entities(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.pool.iter().map(|(entity, _)| entity)
+    }
+
     /// Whether `entity` is still alive (in the pool, not yet swept).
     #[must_use]
     pub fn is_alive(&self, entity: Entity) -> bool {
@@ -384,6 +392,17 @@ mod tests {
         // Entity is gone from pool; systems in the schedule have been swept.
         let stats: Vec<_> = world.schedule().stats().collect();
         assert_eq!(stats, vec![("test".into(), 0)]);
+    }
+
+    #[test]
+    fn entities_lists_the_live_ones_and_drops_the_swept() {
+        let mut world = World::new();
+        let (a, b, c) = (world.spawn(), world.spawn(), world.spawn());
+        assert_eq!(world.entities().collect::<Vec<_>>(), vec![a, b, c]);
+
+        world.despawn(b);
+        world.sweep();
+        assert_eq!(world.entities().collect::<Vec<_>>(), vec![a, c]);
     }
 
     #[test]

@@ -285,7 +285,7 @@ section and by debug-tool item. Those resolve here:
 | Rung 7 (7b–7d2)       | Widgets (7b), single-line text input (7c), `Menu` on the tree (7d1), `DebugPanel` and `ConsolePanel` on the tree (7d2) | Built                                                              |
 | Rung 8 (8a, 8b)       | Outliner, tabs and dock (8a); the reflection-driven property inspector (8b)                                            | Built (`Ui::outliner`, `Ui::tabs`, `Ui::dock`, `Ui::inspector`)    |
 | Debug item 1          | Profiler HUD: GPU pass timestamps and CPU frame phases                                                                 | Frame and GPU rows built; the rules are the 40-profiling section's |
-| Debug item 2          | Inspector: per-system entity counts and tick times; select an entity, and each owning system draws its data            | Counts only (`Inspector::collect`)                                 |
+| Debug item 2          | Inspector: per-system entity counts and tick times; select an entity, and each owning system draws its data            | Counts and selection built; no tick times                          |
 | Debug item 3          | Culling and render stats from the delayed-readback ring                                                                | Built (`FrameCounters`, `CullStatsRing`)                           |
 | Debug item 4          | Console: log view, command registry, server commands over the transport                                                | Built but for the transport half (`Flags::SIM`)                    |
 | Debug item 5          | Debug-draw controls, and the immediate-mode buffer they toggle                                                         | Geometry built; one switch rather than categories; world text owed |
@@ -477,8 +477,11 @@ The rules, each with its _why_:
   broken. **Switching it on is one thing**; a sample needing more is a finding
   about the panel, the failure being a per-sample surface written once per game.
 - **The inspector is generic; systems describe themselves.** Selecting an entity
-  should have each system that owns it draw its data through that system's
-  debug-UI callback. Not built: `Inspector::collect` reports counts only.
+  has each system that owns it show its data — as data, not as a debug-UI
+  callback, so `crcbl-ecs` names no UI (decided 2026-10-03):
+  `SystemTrait::debug_fields` lends the entity's row as `&dyn Reflect`, and the
+  panel writes it with `crcbl_ui::ReflectedSection`. Built in the sandbox
+  (`apps/sandbox/src/scene.rs`); `Inspector::collect` still reports counts only.
 - **`crcbl-ui` names no renderer.** It produces draw lists and `crcbl-render`
   owns the pass. Its dependencies are `glam`, `bytemuck`, `crcbl-core`,
   `crcbl-reflect`, `taffy`, `cssparser` and `skrifa`, and `crcbl-reflect` sits

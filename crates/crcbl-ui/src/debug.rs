@@ -76,6 +76,10 @@ use crate::text::FontAtlas;
 use crate::tree::{AvailableSpace, Length, LengthAuto, NodeKey, Ui};
 use crate::widget::{NATURAL_FONT_SIZE, PointerInput};
 
+mod reflected;
+
+pub use reflected::{REFLECTED_DECIMALS, ReflectedSection};
+
 // ---------------------------------------------------------------------------
 // Sections
 // ---------------------------------------------------------------------------

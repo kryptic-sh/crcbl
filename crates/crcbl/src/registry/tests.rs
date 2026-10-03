@@ -574,6 +574,38 @@ fn the_component_accessor_reads_and_writes_the_entity_it_names() {
     );
 }
 
+/// **A registered system lends a debug overlay the entity's row** — every
+/// scene component is reflected, so the systems `register_systems` builds are
+/// the reflected kind and a selected entity shows its scene data unasked.
+#[test]
+fn a_registered_system_lends_the_entitys_row_to_a_debug_overlay() {
+    let registry = registry();
+    let mut world = World::new();
+    registry.register_systems(&mut world);
+    let (_, ids) = Scene::load(
+        &scene_source(),
+        std::path::Path::new(""),
+        &registry.codecs(),
+        &mut world,
+    )
+    .expect("the scene loads");
+    let beacon = ids.entity(SceneEntityId(2)).expect("id 2");
+
+    let lent: Vec<(&str, Value)> = world
+        .schedule()
+        .iter()
+        .filter_map(|system| {
+            let row = system.debug_fields(beacon)?;
+            Some((system.name(), get_path(row, "intensity").ok()?))
+        })
+        .collect();
+    assert_eq!(
+        lent,
+        vec![("beacons", Value::Float(3.0))],
+        "the beacon's own system lends its row, and the blocks hold nothing of it",
+    );
+}
+
 /// A component that is not a thing in space has **no** placement, and that is
 /// different from being unregistered: the accessor still reaches it.
 #[test]

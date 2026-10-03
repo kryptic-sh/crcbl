@@ -148,8 +148,9 @@ pub struct Gpu {
     ui: UiRenderer,
     atlas: FontAtlas,
     draw_list: DrawList,
-    /// Seconds of animation, advanced by the loop rather than read from a clock
-    /// here — a headless run must produce the same picture on every machine.
+    /// Seconds of animation, set from the scene's `Spin` each tick rather than
+    /// read from a clock here — a headless run must produce the same picture on
+    /// every machine.
     elapsed: f32,
     /// Whether the graph dump has been logged since the last shape change.
     dumped: bool,
@@ -361,13 +362,13 @@ impl Gpu {
         self.elapsed
     }
 
-    /// Advances the animation by `dt` seconds.
+    /// Sets the seconds of animation the next frame draws the cube at.
     ///
-    /// Driven by the loop's clock rather than read from one here, so a headless
-    /// run renders the same cube on every machine — which is what makes a
-    /// golden image of it worth anything.
-    pub const fn advance(&mut self, dt: f32) {
-        self.elapsed += dt;
+    /// The scene's `Spin` owns the number and advances it on the loop's fixed
+    /// timestep (`crate::scene`), so a headless run renders the same cube on
+    /// every machine — which is what makes a golden image of it worth anything.
+    pub const fn set_elapsed(&mut self, seconds: f32) {
+        self.elapsed = seconds;
     }
 
     /// Builds this frame's graph, compiles it, executes it, submits and

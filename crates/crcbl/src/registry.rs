@@ -1100,12 +1100,14 @@ where
     }
 }
 
-/// [`Entry::register`] for `T`.
+/// [`Entry::register`] for `T`: reflected, so a debug overlay that selects an
+/// entity reads its scene components through
+/// [`SystemTrait::debug_fields`](crcbl_ecs::SystemTrait::debug_fields).
 fn register_of<T>(world: &mut World, name: &str)
 where
-    T: ComponentHash + 'static,
+    T: ComponentHash + Reflect + 'static,
 {
-    world.register_system(Box::new(System::<T>::new(name)));
+    world.register_system(Box::new(System::<T>::reflected(name)));
 }
 
 /// [`Entry::component_mut`] for `T`.

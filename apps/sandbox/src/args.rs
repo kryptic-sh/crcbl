@@ -69,7 +69,8 @@ OPTIONS:
                           `--host`, `--join` and `--browse` exclude each
                           other, and are native builds only: web builds have
                           no networking.
-        --debug-overlay   Start with the debug panel visible. F3 toggles it.
+        --debug-overlay   Start with the debug panel visible. F3 toggles it;
+                          PgDn and PgUp select an entity to inspect in it.
         --no-debug-overlay
                           Start with it hidden. The default is `visible in a
                           debug build, hidden in a release build`.

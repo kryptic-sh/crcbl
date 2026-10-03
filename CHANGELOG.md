@@ -556,6 +556,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A system can lend a debug overlay an entity's data:
+  `SystemTrait::debug_fields(&self, entity) -> Option<&dyn Reflect>`.** A
+  **default** method answering `None`, so every existing `SystemTrait` impl —
+  EW's included — compiles unchanged and simply shows no section. The concrete
+  `System<T>` answers with the entity's row when it was built with the new
+  `System::<T>::reflected(name)` (`T: crcbl_reflect::Reflect`); `System::new`
+  keeps its rows to itself, because the blanket `SystemTrait` impl covers
+  component types that are not `Reflect` and cannot be bounded on it. Systems
+  that `crcbl::registry::Registry::register_systems` builds are now the
+  reflected kind, so every scene component shows up unasked. `crcbl-ecs` now
+  depends on `crcbl-reflect` (which names no UI). `World::entities()` lists the
+  live entities in slot order, for picking one. `crcbl_ui::ReflectedSection` is
+  the debug panel's half: a `DebugModule` writing one `label: value` row per
+  leaf of any `&dyn Reflect` — paths of field labels, floats to
+  `crcbl_ui::REFLECTED_DECIMALS` places, a list of leaves on one row.
+- **The sandbox's F3 panel selects an entity and shows its data.** The cube and
+  its light are now entities in a `World` the sandbox's fixed tick advances, and
+  that world is what the frame draws — the picture is unchanged. PgDn and PgUp
+  step through the entities; the new "scene" section names the selection, and
+  each system holding it adds a section of its fields. A selection whose entity
+  is despawned clears.
+
 - **`apps/hud`'s vitals, minimap frame and wave banner are styled by a `.css`
   file, restyled live.** The health and mana bars, a new minimap frame and the
   wave banner are a `crcbl_ui::tree` styled by `apps/hud/assets/hud.css`, which
