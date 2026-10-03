@@ -353,3 +353,49 @@ fn solo_keeps_the_run_and_host_hosts() {
     let host = game.lan_host().expect("a host");
     assert_eq!(host.host().peer_count(), 1, "the host's own player is in");
 }
+
+/// The ids of `menu`'s rows, in order.
+fn row_ids(menu: &Menu) -> Vec<crcbl::ui::WidgetId> {
+    menu.items().iter().map(|item| item.id).collect()
+}
+
+/// **The lobby offers *Continue* exactly when there is a saved run**: first,
+/// with the wave it was saved at, when reading the save found one; not at
+/// all when there was none; and as a warning line naming why, not a row, for
+/// a save that is there and refused.
+#[test]
+fn the_lobby_offers_continue_only_when_there_is_a_save() {
+    use crate::menu::CONTINUE_ID;
+
+    let without = lobby_alone().offering(Ok(None)).menu();
+    assert!(
+        !row_ids(&without).contains(&CONTINUE_ID),
+        "continue offered with no save"
+    );
+    assert_eq!(row_ids(&without)[0], SOLO_ID);
+
+    let saved = crate::save::tests::a_first_waves_end();
+    let with = lobby_alone().offering(Ok(Some(saved.clone()))).menu();
+    assert_eq!(
+        row_ids(&with)[..2],
+        [CONTINUE_ID, SOLO_ID],
+        "continue is not the first row"
+    );
+    assert_eq!(
+        with.items()[0].hint,
+        format!("WAVE {}/{}", saved.wave(), crate::wave::WAVES.len())
+    );
+
+    let refused = lobby_alone()
+        .offering(Err(crate::save::SaveError::OtherMap))
+        .menu();
+    assert!(!row_ids(&refused).contains(&CONTINUE_ID));
+    assert!(
+        refused
+            .subtitle
+            .iter()
+            .any(|line| line.tone == CaptionTone::Warning && line.text.contains("another map")),
+        "the refused save was not named: {:?}",
+        refused.subtitle
+    );
+}

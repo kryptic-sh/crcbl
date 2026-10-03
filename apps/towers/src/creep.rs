@@ -223,6 +223,34 @@ impl Creep {
         }
     }
 
+    /// A creep a save kept: `kind`, `along` metres in with `health` left and
+    /// held at `slow` of its speed, with its sphere put back in `world` where
+    /// `along` says — see `crate::save`. The centre and the heading are read
+    /// off the path as [`Creep::advance`] reads them, so a resumed creep is
+    /// where the saved one was to the bit.
+    #[must_use]
+    pub fn restored(
+        world: &mut PhysicsWorld,
+        path: &Path,
+        kind: Kind,
+        along: f64,
+        health: u32,
+        slow: f64,
+    ) -> Self {
+        let centre = centre_at(path, along);
+        let body = world.add_sphere(Sphere::new(centre, CREEP_RADIUS));
+        Self {
+            body,
+            along,
+            centre,
+            facing: path.heading_at(along),
+            kind,
+            health,
+            max_health: kind.spec().health,
+            slow,
+        }
+    }
+
     /// Its sphere, for a query's answer to be matched against.
     #[must_use]
     pub const fn body(&self) -> ColliderId {

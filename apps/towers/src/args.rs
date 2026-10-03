@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! towers [--headless] [--frames N] [--size WxH] [--tick-hz N] [--scene DIR] …
-//!        [--host [PORT] [--record FILE] | --join IP:PORT | --browse]
-//! towers --serve [PORT] [--tick-hz N] [--scene DIR] [--record FILE]
+//!        [--resume] [--host [PORT] [--record FILE] | --join IP:PORT | --browse]
+//! towers --serve [PORT] [--tick-hz N] [--scene DIR] [--record FILE | --resume]
 //! ```
 //!
 //! # What is left here after the engine took the shared half
@@ -20,7 +20,10 @@
 //! something to a window or a frame — see `crate::lan::serve` for why it is
 //! not `--headless --host`. `--record <FILE>` is
 //! `crcbl::replay_record::consume`'s, as the sandbox reads it, and records a
-//! session this process hosts — `--host`'s or `--serve`'s.
+//! session this process hosts — `--host`'s or `--serve`'s. `--resume` is
+//! this sample's too, native only: it opens on the run the last session saved
+//! between waves (`crate::save`) — solo, `--host`'s or `--serve`'s — and
+//! refuses to start without one.
 //! The shape is `apps/breakout/src/args.rs`'s and `apps/puppet/src/args.rs`'s —
 //! the directory is read *here*, while there is still an exit code to refuse the
 //! run with, and [`Options`] carries the parsed map rather than the path.
@@ -46,10 +49,11 @@ towers — co-op tower defense on one map, solo or over a LAN
 USAGE:
     towers [OPTIONS]
 
-    With none of --host, --serve, --join, --browse, --scene, --headless,
-    --frames or --screenshot, towers opens on a lobby: play solo, host, join
-    a host on the local network, or type an IP:PORT to connect to. Any of
-    them skips it. The browser build has no lobby and is single player.
+    With none of --host, --serve, --join, --browse, --scene, --resume,
+    --headless, --frames or --screenshot, towers opens on a lobby: continue
+    the saved run, play solo, host, join a host on the local network, or type
+    an IP:PORT to connect to. Any of them skips it. The browser build has no
+    lobby, is single player, and opens on the run it saved last.
 
 CONTROLS:
     LEFT/RIGHT           Pick a build plot
@@ -58,6 +62,9 @@ CONTROLS:
     N                    Send the next wave now rather than waiting out the
                          build phase. Waves arrive on their own either way.
     R                    Restart the run
+    S                    Save the run. Taken between waves, with the field
+                         clear; refused while a wave is on it. Each wave's end
+                         is saved on its own too.
     ESC                  Pause, F3 the debug panel, F11 fullscreen
 
 OPTIONS:
@@ -104,10 +111,12 @@ OPTIONS:
                          announced to --browse, on the wall clock. With nobody
                          in it the run holds still. Prints a status line as
                          players come and go and every 10 seconds. Reads a
-                         console on stdin: status prints the line now, quit
-                         tells every player and stops; stdin closing does not
-                         stop it. Takes --tick-hz, --scene and --record and no
-                         other option.
+                         console on stdin: status prints the line now, save
+                         saves the run between waves, load puts the saved run
+                         back, quit tells every player and stops; stdin
+                         closing does not stop it. Saves each wave's end on
+                         its own. Takes --tick-hz, --scene, --record and
+                         --resume and no other option.
     --record <FILE>      Record the session --host or --serve runs to a new
                          .crpl file FILE, which `crcbl replay` reads: every
                          tick's state hash and every player's input, enough
@@ -115,6 +124,13 @@ OPTIONS:
                          Written when the session ends — quit at the console,
                          or the window closing. A FILE that exists is refused:
                          a recording never overwrites.
+    --resume             Open on the run the last session saved, solo, with
+                         --host or with --serve (each keeps its own), and
+                         refuse to start without one, or with one played on
+                         another map. Not with --join or --browse, whose run
+                         is their host's; not with --record, whose recording
+                         replays from a fresh run; not with --headless, which
+                         keeps no saves.
     --join <IP:PORT>     Join the co-op session at IP:PORT directly. A joiner
                          plays on the host's map, whatever --scene says.
     --browse             Look for co-op sessions on the local network, print
@@ -152,6 +168,11 @@ pub struct Options {
     /// `crcbl::replay_record`. Native builds only.
     #[cfg(not(target_arch = "wasm32"))]
     pub record: Option<std::path::PathBuf>,
+    /// Open on the run the last session saved — see `crate::save` — and
+    /// refuse to start without one. Native builds only: the browser opens on
+    /// its saved run whenever there is one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub resume: bool,
     /// Open on the lobby rather than on the field — see `crate::lobby`.
     ///
     /// [`parse`] sets it for a command line that chose nothing: no session
@@ -182,6 +203,8 @@ impl Default for Options {
             serve: None,
             #[cfg(not(target_arch = "wasm32"))]
             record: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            resume: false,
             #[cfg(not(target_arch = "wasm32"))]
             lobby: false,
         }
@@ -239,6 +262,8 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 };
                 options.serve = Some(port);
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            "--resume" => options.resume = true,
             "--scene" => match args.next() {
                 // Refused here rather than fallen back on: a run that quietly
                 // kept the committed field when the directory it was pointed at
@@ -273,8 +298,8 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
         };
         if options.common != untouched {
             return Invocation::BadUsage(
-                "--serve takes --tick-hz, --scene and --record and no other option: a \
-                 dedicated server has no window, no renderer and no frames"
+                "--serve takes --tick-hz, --scene, --record and --resume and no other option: \
+                 a dedicated server has no window, no renderer and no frames"
                     .into(),
             );
         }
@@ -291,9 +316,35 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    if options.resume {
+        if matches!(
+            options.lan,
+            crcbl::lan::LanMode::Join(_) | crcbl::lan::LanMode::Browse
+        ) {
+            return Invocation::BadUsage(
+                "--resume resumes a run this process serves: a joiner plays its host's".into(),
+            );
+        }
+        if options.record.is_some() {
+            return Invocation::BadUsage(
+                "--resume and --record exclude each other: a recording re-simulates from a \
+                 fresh run"
+                    .into(),
+            );
+        }
+        if options.common.headless && options.serve.is_none() {
+            return Invocation::BadUsage(
+                "--resume reads the save a windowed run keeps, and a --headless run keeps none"
+                    .into(),
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     {
         options.lobby = options.lan == crcbl::lan::LanMode::Off
             && options.serve.is_none()
+            && !options.resume
             && !scene_given
             && !options.common.headless
             && options.common.frames.is_none();
@@ -548,7 +599,7 @@ mod tests {
             &["--debug-overlay", "--serve"],
         ] {
             assert!(
-                rejected(argv).contains("--serve takes --tick-hz, --scene and --record"),
+                rejected(argv).contains("--serve takes --tick-hz, --scene, --record and --resume"),
                 "{argv:?}: {}",
                 rejected(argv)
             );
@@ -612,6 +663,7 @@ mod tests {
             &["--headless"],
             &["--frames", "10"],
             &["--screenshot", "frame.png"],
+            &["--resume"],
         ] {
             assert!(!parsed(argv).lobby, "{argv:?} opened the lobby");
         }
@@ -619,6 +671,40 @@ mod tests {
             !Options::default().lobby,
             "options built in code open on the lobby"
         );
+    }
+
+    /// **`--resume` reaches the options solo, hosting and serving**, and is
+    /// refused by name beside a join, a recording or a headless run — each a
+    /// run with no save it could resume into, or one a resume would break.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_resume_flag_reaches_a_run_this_process_serves_and_no_other() {
+        assert!(!parsed(&[]).resume);
+        assert!(parsed(&["--resume"]).resume);
+        assert!(parsed(&["--host", "--resume"]).resume);
+        assert!(parsed(&["--resume", "--serve", "27015"]).resume);
+        let new = std::env::temp_dir()
+            .join("crcbl-towers-resume-record.crpl")
+            .display()
+            .to_string();
+        for (argv, why) in [
+            (&["--join", "127.0.0.1:1", "--resume"][..], "a joiner plays"),
+            (&["--resume", "--browse"], "a joiner plays"),
+            (
+                &["--host", "--record", &new, "--resume"],
+                "exclude each other",
+            ),
+            (
+                &["--serve", "--resume", "--record", &new],
+                "exclude each other",
+            ),
+            (&["--resume", "--headless"], "keeps none"),
+            (&["--screenshot", "frame.png", "--resume"], "keeps none"),
+        ] {
+            let refusal = rejected(argv);
+            assert!(refusal.contains(why), "{argv:?}: {refusal}");
+        }
+        assert!(USAGE.contains("--resume"), "USAGE lists --resume");
     }
 
     /// With no `--scene`, the map is the committed one — the browser's only path,

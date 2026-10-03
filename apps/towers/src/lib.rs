@@ -1,8 +1,9 @@
 //! Towers — co-op tower defense, and the ladder's flagship.
 //!
-//! `docs/plan/sample/07-towers.md`, **milestone 1, slices 1, 2 and 3a**: the
-//! solo loop on one map, natively and in a browser, with the combat content
-//! milestone 1 asks for. The map is scene data — [`scene`] reads it out of a
+//! `docs/plan/sample/07-towers.md`, **milestone 1's slices 1, 2 and 3a, and
+//! slice 5**: the solo loop on one map, natively and in a browser, with the
+//! combat content milestone 1 asks for, saved and resumed between waves.
+//! The map is scene data — [`scene`] reads it out of a
 //! `.scn/` directory the editor opens, which is milestone 2's first step. Three kinds of tower and an upgrade tier each,
 //! three kinds of creep, ten scripted waves; creeps walk a path, towers shoot,
 //! burst and hold them, kills pay gold, and the run is won or lost. That
@@ -87,10 +88,13 @@
 //! **Slice 3a is the combat half of milestone 1's remaining content, and not the
 //! presentation half.** No `.crpix` art and so no build menu worth the name
 //! (rule 11 is owed, not exempted); no spatial audio (rule 8 is owed, not
-//! exempted); no world-space health bars; no save or resume; and no dev fly/walk
-//! camera. There is no pointer or touch input **inside the canvas** either, on
-//! the page as well as in the window — [`app`] says why a tap waits for the build
-//! menu, and what a touch player gets on the page instead.
+//! exempted); no world-space health bars; and no dev fly/walk camera. There is
+//! no pointer or touch input **inside the canvas** either, on the page as well
+//! as in the window — [`app`] says why a tap waits for the build menu, and what
+//! a touch player gets on the page instead.
+//!
+//! **A run saves and resumes between waves** — [`save`] has the rule, the
+//! format and where it is kept.
 //! `docs/plan/sample/07-towers.md` carries the list with what each would take.
 //!
 //! # One library, two front ends
@@ -115,6 +119,7 @@ pub mod menu;
 pub mod page;
 pub mod path;
 pub mod replica;
+pub mod save;
 pub mod scene;
 pub mod tower;
 pub mod wave;
@@ -127,11 +132,12 @@ pub use app::serve;
 pub use app::{Loop, PendingLoop, Summary, Towers, TowersError, run, start, with_shell};
 pub use args::{Invocation, Options, USAGE, parse};
 pub use creep::{CREEPS, Creep, CreepSpec, CreepView};
-pub use game::{Controls, DEFAULT_TICK_HZ, Game, GameError, RenderState, Stats};
+pub use game::{Controls, DEFAULT_TICK_HZ, Game, GameError, NotSaved, RenderState, Stats};
 pub use gpu::{Gpu, Paths};
 pub use map::{Map, MapError, MapWireError};
 pub use menu::{MenuAction, MenuKind, Menus};
 pub use page::PageStats;
+pub use save::{Checkpoint, SaveError, Vault};
 pub use scene::{FIELD, Plot, Waypoint, built_in_source, register_components};
 pub use tower::{Bolt, BoltOutcome, BurstView, TOWERS, Tier, Tower, TowerSpec, TowerView};
 pub use wave::{Outcome, Release, WAVES, Wave, Waves};

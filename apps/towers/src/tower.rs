@@ -194,6 +194,17 @@ impl Tier {
         self as usize
     }
 
+    /// The tier `index` names, or `None` for a byte no tier has — what a save
+    /// is read back through.
+    #[must_use]
+    pub const fn from_index(index: u8) -> Option<Self> {
+        match index {
+            0 => Some(Self::Base),
+            1 => Some(Self::Upgraded),
+            _ => None,
+        }
+    }
+
     /// What the overlay and the `[HUD]` line call it.
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -416,10 +427,46 @@ impl Tower {
         }
     }
 
+    /// A tower a save kept: `kind` at `tier` on `plot`, with its reload and
+    /// its last shot where they were — see `crate::save`. The reload is what
+    /// decides the tick it fires on next, so a resumed run that dropped it
+    /// would fire a tick its original did not.
+    #[must_use]
+    pub const fn restored(
+        plot: usize,
+        feet: DVec3,
+        kind: Kind,
+        tier: Tier,
+        ready_at: f64,
+        fired_at: f64,
+    ) -> Self {
+        Self {
+            plot,
+            feet,
+            kind,
+            tier,
+            ready_at,
+            fired_at,
+        }
+    }
+
     /// Which plot it stands on.
     #[must_use]
     pub const fn plot(&self) -> usize {
         self.plot
+    }
+
+    /// When it may fire again, in the stage's elapsed seconds.
+    #[must_use]
+    pub const fn ready_at(&self) -> f64 {
+        self.ready_at
+    }
+
+    /// When it last did something, in the stage's elapsed seconds —
+    /// [`f64::NEG_INFINITY`] for a tower that never has.
+    #[must_use]
+    pub const fn fired_at(&self) -> f64 {
+        self.fired_at
     }
 
     /// Which kind it is.
@@ -528,8 +575,11 @@ pub struct BurstView {
 ///
 /// **The creep nearest the exit**, which is every tower defense's rule: the one
 /// with the least path left is the one about to cost a life.
-/// [`Creep::along`] is that ordering, and it is a total one over the creeps on
-/// the field, so two runs pick the same target.
+/// [`Creep::along`] is that ordering, and two creeps level on it go to the one
+/// earlier in the field's list — the field's order rather than the order the
+/// overlap answers in, which is the physics world's own and differs between a
+/// run and the same run resumed from a save on a fresh world. So two runs of
+/// one stage pick the same target.
 ///
 /// `scratch` is the caller's so the query allocates nothing — this runs once
 /// per tower per tick.
@@ -543,13 +593,14 @@ pub fn acquire(
 ) -> Option<usize> {
     world.overlap_sphere_into(from, range_m, scratch);
     let mut best: Option<(usize, f64)> = None;
-    for id in scratch.iter() {
-        // The ground and the exit volume are in range of every tower, and both
-        // come back from the overlap. See the module docs.
-        let Some(index) = creeps.iter().position(|creep| creep.body() == *id) else {
+    // The ground and the exit volume are in range of every tower, and both
+    // come back from the overlap; walking the creeps is what leaves them out.
+    // See the module docs.
+    for (index, creep) in creeps.iter().enumerate() {
+        if !scratch.contains(&creep.body()) {
             continue;
-        };
-        let along = creeps[index].along();
+        }
+        let along = creep.along();
         if best.is_none_or(|(_, furthest)| along > furthest) {
             best = Some((index, along));
         }
@@ -663,10 +714,43 @@ impl Bolt {
         }
     }
 
+    /// A bolt a save kept, flying from `at` along `heading` at the creep whose
+    /// body is `target` — see `crate::save`.
+    #[must_use]
+    pub const fn restored(
+        id: u64,
+        at: DVec3,
+        heading: DVec3,
+        target: ColliderId,
+        damage: u32,
+        burst_m: f64,
+    ) -> Self {
+        Self {
+            id,
+            at,
+            heading,
+            target,
+            damage,
+            burst_m,
+        }
+    }
+
     /// Which shot of its run it is — see [`Bolt::fire`].
     #[must_use]
     pub const fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The unit direction it is travelling in.
+    #[must_use]
+    pub const fn heading(&self) -> DVec3 {
+        self.heading
+    }
+
+    /// The body it was fired at, which may since have left the field.
+    #[must_use]
+    pub const fn target(&self) -> ColliderId {
+        self.target
     }
 
     /// Where it is, for the frame to draw it.

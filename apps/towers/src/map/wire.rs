@@ -141,6 +141,18 @@ impl Map {
         bytes
     }
 
+    /// This map's identity: a SHA-256 over [`Map::to_wire`], which is every
+    /// corner and every plot, labels included, in their order — what a save
+    /// names the map it was played on by (`crate::save`).
+    ///
+    /// Over the wire layout rather than the scene files, because the layout
+    /// is the map's defined encoding: two scene directories that differ only
+    /// in formatting are one map, and a moved plot is another.
+    #[must_use]
+    pub fn fingerprint(&self) -> [u8; 32] {
+        crcbl::shaders::sha256::sha256(&self.to_wire())
+    }
+
     /// The map `bytes` carry, read as a stranger's — see the module docs.
     ///
     /// # Errors

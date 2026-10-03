@@ -5,6 +5,7 @@
 //!   ┌────────────────────────────────────────┐
 //!   │                 TOWERS                 │
 //!   │  crcbl towers 10.0.0.7:5000 1/4 ANOTHER VERSION  ← heard, not joinable
+//!   │  CONTINUE                    WAVE 3/10 │  ← only with a save
 //!   │  SOLO                                  │
 //!   │  HOST                              LAN │
 //!   │  JOIN crcbl towers                 1/4 │  ← one row per host
@@ -12,7 +13,9 @@
 //!   └────────────────────────────────────────┘
 //! ```
 //!
-//! **Solo**, **host** (what `--host` does, on any free port) and a row per
+//! **Continue**, when there is a saved run to continue (`crate::save`) —
+//! first, because a player coming back is the likeliest pick — then
+//! **solo**, **host** (what `--host` does, on any free port) and a row per
 //! LAN host a [`Browser`] hears that this build can play with — what
 //! `--browse` would have joined, chosen instead of taken first. A host it
 //! cannot play with is not a row: it is a line under the title in the hint
@@ -23,6 +26,10 @@
 //! the address typed into the lobby, which is what `--join` does; the text
 //! arrives through [`crcbl::engine::HostedGame::text_event`], with the layout
 //! applied, and Backspace takes a character off it.
+//!
+//! **A save that is there and will not be resumed is not a row**: it is a
+//! warning line naming why — another map, another version, a corrupt file —
+//! so a player who expected to continue is told rather than shown nothing.
 //!
 //! # What it knows is the engine's, how it looks is towers'
 //!
@@ -82,7 +89,9 @@ pub use crcbl::lan::lobby::Unjoinable;
 use crate::game::Game;
 use crate::lan::{JOIN_TIMEOUT, Joining};
 use crate::map::Map;
-use crate::menu::{CONNECT_ID, FIRST_LISTED_ID, HOST_ID, SOLO_ID};
+use crate::menu::{CONNECT_ID, CONTINUE_ID, FIRST_LISTED_ID, HOST_ID, SOLO_ID};
+use crate::save::{Checkpoint, SaveError};
+use crate::wave::WAVES;
 
 /// The lobby's heading.
 pub const TITLE: &str = "TOWERS";
@@ -94,6 +103,8 @@ pub const JOINING_TITLE: &str = "JOINING";
 /// What a lobby row asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pick {
+    /// Play the saved run on, alone.
+    Continue,
     /// Play alone.
     Solo,
     /// Host a session and play in it.
@@ -109,6 +120,9 @@ pub enum Pick {
 pub(crate) enum Picked {
     /// The solo run already under the lobby.
     Solo,
+    /// The saved run, to be put in place of the solo run under the lobby,
+    /// which has not ticked.
+    Continue(Checkpoint),
     /// A LAN session this player hosts.
     Session(Game),
     /// A join, waiting for the host's map.
@@ -129,6 +143,10 @@ pub struct Lobby {
     /// How long a chosen host has to send its map: [`JOIN_TIMEOUT`], unless a
     /// test asked for less.
     join_timeout: Duration,
+    /// The saved run *Continue* resumes, if there is one.
+    saved: Option<Checkpoint>,
+    /// Why a save that is there will not be resumed, shown under the title.
+    unresumable: Option<String>,
 }
 
 impl Lobby {
@@ -156,7 +174,31 @@ impl Lobby {
             host_bind,
             tick_hz,
             join_timeout: JOIN_TIMEOUT,
+            saved: None,
+            unresumable: None,
         }
+    }
+
+    /// This lobby, offering what reading the saved run answered: a
+    /// *Continue* row for a run, a warning line for a save refused by name,
+    /// and nothing for no save at all.
+    #[must_use]
+    pub fn offering(mut self, saved: Result<Option<Checkpoint>, SaveError>) -> Self {
+        match saved {
+            Ok(saved) => self.saved = saved,
+            Err(error) => {
+                crcbl::log::warn!("save: not offered to continue: {error}");
+                self.unresumable = Some(format!("SAVE NOT RESUMED: {error}"));
+            }
+        }
+        self
+    }
+
+    /// The saved run *Continue* picked would not go in under the lobby: the
+    /// lobby says why, and stops offering it.
+    pub(crate) fn continue_failed(&mut self, error: &SaveError) {
+        self.saved = None;
+        self.model.start_failed(format!("CANNOT CONTINUE: {error}"));
     }
 
     /// This lobby, giving a chosen host `timeout` rather than
@@ -217,10 +259,16 @@ impl Lobby {
     /// The panel: the rows, and under the title the lines and the warning.
     #[must_use]
     pub fn menu(&self) -> Menu {
-        let mut items = vec![
-            MenuItem::new(SOLO_ID, "SOLO", ""),
-            MenuItem::new(HOST_ID, "HOST", "LAN"),
-        ];
+        let mut items = Vec::new();
+        if let Some(saved) = &self.saved {
+            items.push(MenuItem::new(
+                CONTINUE_ID,
+                "CONTINUE",
+                format!("WAVE {}/{}", saved.wave(), WAVES.len()),
+            ));
+        }
+        items.push(MenuItem::new(SOLO_ID, "SOLO", ""));
+        items.push(MenuItem::new(HOST_ID, "HOST", "LAN"));
         for (id, host) in (FIRST_LISTED_ID..).zip(self.model.joinable()) {
             items.push(MenuItem::new(
                 id,
@@ -230,6 +278,9 @@ impl Lobby {
         }
         items.push(MenuItem::new(CONNECT_ID, "CONNECT", self.connect_hint()));
         let mut menu = Menu::new(TITLE, items);
+        if let Some(why) = &self.unresumable {
+            menu.subtitle.push(Caption::warning(why.clone()));
+        }
         match self.model.browser_error() {
             Some(why) => menu.subtitle.push(Caption::warning(why.to_string())),
             None if self.model.joinable().is_empty() && self.model.passed_over().is_empty() => {
@@ -276,6 +327,14 @@ impl Lobby {
     /// host's.
     pub(crate) fn pick(&mut self, pick: Pick, map: &Map) -> Option<Picked> {
         let pick = match pick {
+            Pick::Continue => {
+                self.model.clear_joining();
+                let Some(saved) = self.saved.clone() else {
+                    self.model.start_failed("THERE IS NO SAVED RUN".to_string());
+                    return None;
+                };
+                return Some(Picked::Continue(saved));
+            }
             Pick::Solo => {
                 self.model.clear_joining();
                 return Some(Picked::Solo);

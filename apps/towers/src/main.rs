@@ -1,9 +1,9 @@
 //! Towers — the native front end.
 //!
 //! ```text
-//! towers [--headless] [--frames N] [--size WxH] [--tick-hz N] …
+//! towers [--headless] [--frames N] [--size WxH] [--tick-hz N] … [--resume]
 //!        [--host [PORT] | --join IP:PORT | --browse]
-//! towers --serve [PORT] [--tick-hz N] [--scene DIR]
+//! towers --serve [PORT] [--tick-hz N] [--scene DIR] [--resume]
 //! ```
 //!
 //! Argv in, exit code out, and nothing else: the sample itself is the

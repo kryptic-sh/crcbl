@@ -41,8 +41,23 @@
 //! the loop drains between frames ([`Console::obey`]). `quit` ends every
 //! session with `SessionEndReason::SHUTTING_DOWN` (`Host::shutdown`), so
 //! each player is told before the sockets close, and [`serve`] answers the
-//! last status line; `status` prints the status line now; anything else
-//! prints the commands there are.
+//! last status line; `status` prints the status line now; `save` and
+//! `load` are the run's (below); anything else prints the commands there
+//! are.
+//!
+//! # Saving: `save`, `load` and `--resume`
+//!
+//! The server keeps the run between waves in its own file,
+//! [`SERVER_FILE`](crate::save::SERVER_FILE) in the data directory: an
+//! autosave at each wave's end, `save` at the console between waves, and
+//! `load` to put the saved run back — under the players in it,
+//! who see it in the next snapshot, since a snapshot is the whole field. A
+//! loaded run waits for a player before it moves, and an empty server does
+//! not throw it away as it does a run its last player left. `--serve
+//! --resume` loads it before the first frame and refuses to start without
+//! it. A recorded session refuses `load` and `--resume`: a recording is
+//! re-simulated from a fresh run, so a run swapped in under it would be one
+//! the recording could not reproduce.
 //!
 //! # Recording: `--record <FILE>`
 //!
@@ -72,8 +87,9 @@ use crcbl::net::SessionEndReason;
 use crcbl::replay_record::{RecordError, RecordSummary};
 
 use super::{APP, MAX_PLAYERS, SESSION, event, tell, welcome};
-use crate::game::{Field, GameError, Stats};
+use crate::game::{Autosave, Field, GameError, Stats};
 use crate::map::Map;
+use crate::save::{SaveError, Vault};
 use crate::wave::{Outcome, WAVES};
 
 /// The longest a running server goes without printing its status line. A
@@ -94,9 +110,15 @@ struct Headline {
 pub(crate) struct Server {
     lan: LanHost,
     field: Field,
+    /// The map the run is played on, which a save is read against.
+    map: Map,
     /// The map every player is sent as they join, as its event, encoded
     /// once.
-    map: Vec<u8>,
+    map_event: Vec<u8>,
+    /// Where the run is saved — the data directory outside the tests.
+    vault: Vault,
+    /// Which wave's end was last autosaved.
+    autosave: Autosave,
     /// What the last status line said, and when the next is due regardless.
     printed: Option<Headline>,
     next_status: Duration,
@@ -113,8 +135,8 @@ impl std::fmt::Debug for Server {
 impl Server {
     /// Serves a new run on `map`, bound where `bind` says, ticking at
     /// `tick_hz`, recording it to the new file `record` names, if it names
-    /// one. Every player is sent `map` as they join, and the refusals of
-    /// their commands.
+    /// one, and saving it in `vault`. Every player is sent `map` as they
+    /// join, and the refusals of their commands.
     ///
     /// # Errors
     ///
@@ -125,6 +147,7 @@ impl Server {
         map: &Map,
         tick_hz: u32,
         record: Option<&Path>,
+        vault: Vault,
     ) -> Result<Self, GameError> {
         let (field, world, module) = Field::open(map, tick_hz);
         let mut lan = LanHost::open(SESSION, bind, world, tick_hz).map_err(GameError::Lan)?;
@@ -135,7 +158,10 @@ impl Server {
         Ok(Self {
             lan,
             field,
-            map: event::map(&map.to_wire()),
+            map: map.clone(),
+            map_event: event::map(&map.to_wire()),
+            vault,
+            autosave: Autosave::default(),
             printed: None,
             next_status: Duration::ZERO,
         })
@@ -146,8 +172,18 @@ impl Server {
     /// been quiet for [`STATUS_INTERVAL`].
     pub fn frame(&mut self, now: Duration) -> Option<String> {
         let events = self.lan.frame(now);
-        welcome(self.lan.host_mut(), &events, &self.map, None);
+        welcome(self.lan.host_mut(), &events, &self.map_event, None);
         tell(self.lan.host_mut(), &self.field.take_refusals());
+        if let Some(checkpoint) = self.field.wave_end(&mut self.autosave) {
+            match self.vault.store(&checkpoint) {
+                Ok(()) => crcbl::log::info!(
+                    "serve: autosaved the end of wave {}/{}",
+                    checkpoint.wave(),
+                    WAVES.len()
+                ),
+                Err(error) => crcbl::log::warn!("serve: the autosave failed: {error}"),
+            }
+        }
         let headline = self.headline();
         if self.printed == Some(headline) && now < self.next_status {
             return None;
@@ -200,6 +236,59 @@ impl Server {
         status_line(self.players(), &self.stats())
     }
 
+    /// Saves the run now, if no wave is coming in, and answers
+    /// the line the console prints: what was saved, or why not.
+    pub fn save(&self) -> String {
+        match self.field.checkpoint() {
+            Err(not) => format!("{APP}: not saved: {}", not.label().to_lowercase()),
+            Ok(checkpoint) => match self.vault.store(&checkpoint) {
+                Ok(()) => format!(
+                    "{APP}: saved wave {}/{}, {} lives, {} gold",
+                    checkpoint.wave(),
+                    WAVES.len(),
+                    checkpoint.lives(),
+                    checkpoint.gold(),
+                ),
+                Err(error) => format!("{APP}: not saved: {error}"),
+            },
+        }
+    }
+
+    /// Puts the saved run back in place of the one being played, under
+    /// every player in it.
+    ///
+    /// # Errors
+    ///
+    /// [`SaveError::Recording`] while the session is recorded,
+    /// [`SaveError::NoSave`] when there is none, and whatever the save itself
+    /// is refused for — another map, another version, a corrupt file.
+    pub fn load(&mut self) -> Result<(), SaveError> {
+        if let Some(path) = self.lan.recording() {
+            return Err(SaveError::Recording(path.to_path_buf()));
+        }
+        let checkpoint = self.vault.load(&self.map)?.ok_or(SaveError::NoSave)?;
+        self.field.restore(&checkpoint)?;
+        self.autosave.restored(&checkpoint);
+        Ok(())
+    }
+
+    /// [`Server::load`], as the line the console prints.
+    fn load_line(&mut self) -> String {
+        match self.load() {
+            Ok(()) => {
+                let stats = self.stats();
+                format!(
+                    "{APP}: loaded wave {}/{}, {} lives, {} gold",
+                    stats.wave,
+                    WAVES.len(),
+                    stats.lives,
+                    stats.gold,
+                )
+            }
+            Err(error) => format!("{APP}: not loaded: {error}"),
+        }
+    }
+
     fn headline(&self) -> Headline {
         let stats = self.stats();
         Headline {
@@ -231,7 +320,7 @@ fn status_line(players: usize, stats: &Stats) -> String {
 }
 
 /// What the console's help line names.
-const COMMANDS: &str = "status, quit";
+const COMMANDS: &str = "status, save, load, quit";
 
 /// A line typed at the console, read.
 #[derive(Debug, PartialEq, Eq)]
@@ -240,6 +329,10 @@ enum Command {
     Quit,
     /// Print the status line now.
     Status,
+    /// Save the run, if no wave is coming in.
+    Save,
+    /// Put the saved run back.
+    Load,
     /// Nothing but blanks: nothing to answer.
     Blank,
     /// Anything else, trimmed.
@@ -256,6 +349,10 @@ impl Command {
             Self::Quit
         } else if word.eq_ignore_ascii_case("status") {
             Self::Status
+        } else if word.eq_ignore_ascii_case("save") {
+            Self::Save
+        } else if word.eq_ignore_ascii_case("load") {
+            Self::Load
         } else {
             Self::Unknown(word.to_string())
         }
@@ -319,12 +416,14 @@ impl Console {
     /// Answers every line waiting, printing through `print`, and says
     /// whether to serve on: [`Next::Quit`] at the first `quit`, leaving any
     /// line after it unread.
-    pub(crate) fn obey(&mut self, server: &Server, print: &mut dyn FnMut(&str)) -> Next {
+    pub(crate) fn obey(&mut self, server: &mut Server, print: &mut dyn FnMut(&str)) -> Next {
         loop {
             match self.lines.try_recv() {
                 Ok(line) => match Command::parse(&line) {
                     Command::Quit => return Next::Quit,
                     Command::Status => print(&server.status()),
+                    Command::Save => print(&server.save()),
+                    Command::Load => print(&server.load_line()),
                     Command::Blank => {}
                     Command::Unknown(word) => print(&format!(
                         "{APP}: no command {word:?}; the commands are {COMMANDS}"
@@ -355,20 +454,33 @@ impl std::fmt::Debug for Console {
 
 /// Serves `map` on UDP `port` (0 for any free one), announced on the LAN, at
 /// `tick_hz` on the wall clock, with a console on stdin — until `quit` is
-/// typed at it — recording to the new file `record` names, if it names one.
-/// Answers the last status line.
+/// typed at it — recording to the new file `record` names, if it names one,
+/// and saving in the data directory, from the saved run when `resume` says
+/// so. Answers the last status line.
 ///
 /// # Errors
 ///
 /// [`GameError::Lan`] if the listener would not bind, or the recording would
-/// not start or did not finish whole.
+/// not start or did not finish whole, and [`GameError::Resume`] if `resume`
+/// found no run it would resume.
 pub(crate) fn serve(
     port: u16,
     map: &Map,
     tick_hz: u32,
     record: Option<&Path>,
+    resume: bool,
 ) -> Result<String, GameError> {
-    let mut server = Server::open(LanBind::on_the_lan(port), map, tick_hz, record)?;
+    let mut server = Server::open(
+        LanBind::on_the_lan(port),
+        map,
+        tick_hz,
+        record,
+        Vault::server(),
+    )?;
+    if resume {
+        server.load().map_err(GameError::Resume)?;
+        println!("{}", server.status());
+    }
     println!("{APP}: console: {COMMANDS}");
     let tick = FrameClock::new(tick_hz).tick_dt();
     let started = Instant::now();
@@ -450,10 +562,12 @@ mod tests {
     /// **The console reads a line whatever its case and its blanks**, and
     /// anything else is not a command.
     #[test]
-    fn the_console_reads_its_two_commands_and_nothing_else() {
+    fn the_console_reads_its_commands_and_nothing_else() {
         assert_eq!(Command::parse("quit"), Command::Quit);
         assert_eq!(Command::parse("  QUIT\r"), Command::Quit);
         assert_eq!(Command::parse("Status"), Command::Status);
+        assert_eq!(Command::parse(" save "), Command::Save);
+        assert_eq!(Command::parse("LOAD"), Command::Load);
         assert_eq!(Command::parse(" \t"), Command::Blank);
         assert_eq!(
             Command::parse("quit now"),

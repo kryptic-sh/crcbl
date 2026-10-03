@@ -14108,12 +14108,14 @@ is currently undetectable.
 
 ### The "no second serialization path" claim is not yet true (2026-08-27)
 
-**The container has a consumer; the claim does not.** `apps/shard` is the only
-game using `SaveWriter` / `SaveReader`, and it uses them exactly as the plan
-says an MVP sample should — one `SectorSave` at `SectorId::ZERO`, nothing
-changed in `crcbl-store` on its behalf. But the bytes inside that sector are
-shard's own hand-rolled little-endian payload with its own magic and version,
-**not** the replication encoder's output.
+**The container has two consumers; the claim has none.** `apps/shard` and, since
+2026-10-03, `apps/towers` use `SaveWriter` / `SaveReader` exactly as the plan
+says an MVP sample should — one `SectorSave` at `SectorId::ZERO`. But the bytes
+inside that sector are each game's own hand-rolled little-endian payload with
+its own magic and version, **not** the replication encoder's output. Towers came
+closest: its save is the stage the server's snapshots replicate, but written by
+`crcbl_towers::save`'s own encoder rather than `SnapshotWriter`, because the
+replica is quantized for the wire and a resume is held to bits.
 
 **What it would take:** wiring a game's snapshot systems through
 `SnapshotWriter` for real, which means converting shard rather than finding the
@@ -14146,11 +14148,10 @@ say why: four samples had each written the same platform arms, encode,
 corrupt-file case and headless rule for a high score, and the bodies matched
 line for line while the names agreed about nothing.
 
-**Related and already in `docs/backlog.md`:** `record::Backing::platform`
-answers with the _config_ directory while saves belong in the _data_ directory;
-`apps/shard` writes its own data-dir arm and the backlog marks a second consumer
-of that rule as the moment to hoist it into the engine. There is now one
-consumer.
+**Related:** `record::Backing::platform` answers with the _config_ directory
+while saves belong in the _data_ directory; the data-directory arm is
+`crcbl_store::save::SaveBacking` since 2026-10-03, hoisted out of `apps/shard`
+when `apps/towers` became its second consumer.
 
 **What it blocks:** key binds, unlocks, and anything with more than one field.
 
@@ -14202,12 +14203,15 @@ the OPFS checks in `web/tools/browser-e2e.mjs`:
   a named test of its own.
 - **OPFS roundtrip in the browser job: built**, through options' `settings.toml`
   and shard's save.
-- **Save→load→state-hash property: not built.** The container round-trips its
-  header and sectors
-  (`a_save_reads_back_with_its_header_its_sector_and_a_valid_checksum`) and
-  shard round-trips its own payload, but nothing loads a world from a save and
-  compares `hash_world` at the same tick. It waits on saves going through
-  `SnapshotWriter` (_The "no second serialization path" claim is not yet true_).
+- **Save→load→state-hash property: built for one game, not for the engine.**
+  `apps/towers` saves its stage, writes it, reads it back, restores it and
+  compares the stage's state hash — the one its server world contributes to
+  `hash_world` — at the resume and on every tick through the next wave
+  (`crate::game::checkpoint`'s
+  `a_stage_resumed_between_waves_is_the_same_run_tick_for_tick`). The engine
+  half — any world loaded from a save and compared through `hash_world` — waits
+  on saves going through `SnapshotWriter` (_The "no second serialization path"
+  claim is not yet true_).
 - **Version-skew fixtures: not built.** No save from an older
   `SAVE_FORMAT_VERSION` is checked in; shard's
   `a_payload_from_an_older_version_reads_as_no_save` covers its own payload
@@ -14241,10 +14245,13 @@ did.
 
 **Not built.** The persistence rules make saving a server command
 (`Command::Save`) so the console's `save`, `crcbl save`, a game's UI button and
-the autosave timer take one path. Two triggers exist: a game calling
-`SaveWriter` itself (`apps/shard`'s `Vault::store`) and `AutosaveRing`. There is
-no console command and no CLI verb, so nothing has reached a save from outside
-the game process. It depends on server-side command handling.
+the autosave timer take one path. The triggers that exist are games calling
+`SaveWriter` themselves — `apps/shard`'s `Vault::store`, and `apps/towers`'
+`Vault::store` from its `S` key, its autosave at a wave's end and its dedicated
+server's `save` console line — and `AutosaveRing`. Towers' server console is the
+first `save` typed at a process, but it is the sample's own stdin reader, not
+`Command::Save`, and there is no CLI verb, so nothing reaches a save from
+outside the game process. It depends on server-side command handling.
 
 **Also owed with it:** a storage section in the debug panel showing the storage
 paths, file sizes, the last save's tick and the autosave ring's state.
@@ -15700,11 +15707,13 @@ frame, and the page shows it for `NOTICE_FOR` (in `crate::app`); tested by
   every limit `Map::new` measures and would pass it. Whether a `.scn/` file can
   carry a NaN through `crcbl::scene`'s RON is not checked; if it can, the check
   belongs in `Map::new` as a `MapError` variant.
-- **`Map::from_wire` has no fuzz target.** It reads untrusted bytes, but towers
-  has no fuzz crate; `crates/crcbl-net/fuzz` covers the event's envelope
-  (`decode_server_to_client`) and not towers' payload. Unit tests cover each
-  refusal. Adding it means a fuzz crate for towers, or a shared one that depends
-  on it.
+- **`Map::from_wire` has no fuzz target**, and neither has towers' save decoder
+  (`crcbl_towers::save::decode`). Both read untrusted bytes, but towers has no
+  fuzz crate; `crates/crcbl-net/fuzz` covers the event's envelope
+  (`decode_server_to_client`) and not towers' payloads — nor `crcbl-store`'s
+  `SaveReader` itself. Unit tests cover each refusal, every prefix of a save
+  payload and every byte of one flipped. Adding them means a fuzz crate for
+  towers, or a shared one that depends on it.
 - **`Gpu::set_map` is run only on the null backend.** The app tests rebuild the
   field for the host's map headless and read the pools placed; no windowed run
   on a real device, and the carried-over video settings and debug view are not
@@ -15880,6 +15889,104 @@ is the shape a reviewer cannot check, and that slice is the behaviour change.
 **What it would take:** one commit that only moves — `game/intent.rs`,
 `game/stage.rs`, `game/view.rs` behind the existing `pub use` — with no diff in
 any body.
+
+### towers saves and resumes between waves, and what it left out (2026-10-03)
+
+**Shipped (slice 5):** `crcbl_towers::save` — a run saved in the build phase
+(`S`, or the autosave at each wave's end), refused while a wave is coming in or
+once the run is over, written as a versioned `TWRS` payload in `crcbl-store`'s
+save container, and resumed by the lobby's _Continue_, `--resume` (solo,
+`--host`, `--serve`) or, in a browser, at boot. A dedicated server keeps its own
+file and takes `save` and `load` at its console. Tested headless, each test
+shown red by a mutation of the rule it guards.
+
+**Decisions, recorded so they are not re-argued:**
+
+- **"Between waves" is the build phase, not an empty field.** The table measures
+  the build phase from a wave's last release (`wave::GAP_S`), and on the
+  committed field the next wave is nearly always on its way before the last
+  creep of the one before is gone: with the opening a splash and a bolt tower
+  buy, the field was never empty in the first minute of play (measured while
+  writing the slice). A save that waited for an empty field would almost never
+  be taken, so a save carries the creeps, the bolts in the air and the bursts
+  still drawn, and a resume puts each creep's sphere back in a fresh physics
+  world. **Considered and declined:** starting the build phase when the field
+  clears — a change to every wave's timing, which the whole-table tests and the
+  browser gate's wave timing pin, made for the sake of a save.
+- **A resumed run is the same run, tick for tick, which changed two rules.** A
+  splash burst wounds in the field's list order (`Stage::splash`) and a tower
+  picks between creeps level on the lane by their place in the list
+  (`tower::acquire`), instead of in the order the physics world answers an
+  overlap in — which depends on when its tree was last built and which slots its
+  history freed, and a resumed world's history is not the original's.
+  `a_burst_wounds_in_the_fields_order_whatever_the_worlds_history` and
+  `a_tower_picks_between_creeps_level_on_the_lane_in_the_fields_order` show both
+  go red on the old rule. Every whole-table test held unchanged. **Left:** a
+  bolt's sweep that meets two creeps at exactly the same time of impact still
+  takes the world's answer; that is a tie of measure zero and not canonicalised.
+- **A finished run is not saved.** It plays itself again after `RESTART_S`, so a
+  save of it would resume into a result screen and then a fresh field, and the
+  slot keeps the last between-waves save instead. So the outcome and the end
+  time are not written, nor how much of the last wave went out (all of it), nor
+  a creep's centre and heading (read off the path from its distance).
+- **One slot a player, one a server.** `S` and the autosave both write
+  `towers-run.crb` (solo and a host share it, so a co-op run can be continued
+  solo and the other way round); a dedicated server writes `towers-server.crb`,
+  so a server and a player on one machine never write over each other's run.
+  Both names carry the sample's because every demo shares one OPFS root.
+  **Considered and declined:** `AutosaveRing` or a manual slot beside the
+  autosave — _Continue_ would have to choose between runs, and a save between
+  waves is small enough to take at every wave.
+- **The autosave's cadence is the wave**: the first tick of each build phase
+  after a wave, once per wave (`game::Autosave`), where shard's is simulated
+  time. A restored stage's own wave is not written again.
+- **A map is named by `Map::fingerprint`**, a SHA-256 over its wire encoding,
+  labels included, so a save of another map — or of the same lane with a plot
+  moved or renamed — is refused by name rather than remapped.
+- **Joiners need nothing.** Their run is the host's and a snapshot is the whole
+  field; a joiner's `S` is refused as `ONLY THE HOST SAVES`. The lobby's HOST
+  row starts a fresh run; `--host --resume` hosts the saved one.
+- **A loaded run waits for its players.** `Stage::played` replaced `ticks > 0`
+  as the test for "a run its last player left", so `load` or `--serve --resume`
+  on an empty server is held until someone joins instead of being thrown away on
+  the next empty tick. A fresh stage has it exactly when it has ticked, so
+  nothing else changed and the state hash did not move.
+- **`--resume` is refused with `--join` and `--browse`** (no stage), **with
+  `--record`** (a recording re-simulates from a fresh run) **and with
+  `--headless`** (which keeps its saves nowhere, so no test ever reads or writes
+  a real data directory); a server's `load` is refused while it records, for the
+  recording's reason. `--resume` refuses to start without a save, or with one it
+  refuses, naming why.
+- **The browser opens on its saved run**, as shard's opens on its character: it
+  has no lobby to offer _Continue_ from. A save that is there and refused is
+  logged and the page opens fresh. In the lobby, the same refusal is a warning
+  line, not a row.
+- **The data-directory arm moved into `crcbl-store`** (`save::SaveBacking`), as
+  shard's entry said a second consumer should make it.
+
+**Left, and what each would take:**
+
+- **No save on teardown.** The engine has no `&mut self` hook on the way out
+  (shard's entry has why), so a window or tab closed mid-wave loses the play
+  since the last wave's end or the last `S`.
+- **No migration seam.** A `PAYLOAD_VERSION` bump orphans every save before it,
+  refused by name — _The migration seam_ is the engine's to build.
+- **No in-game load.** A running native game resumes only through the lobby or
+  `--resume`; a pause-menu LOAD row would need the lobby's refusal lines on the
+  pause panel.
+- **No way to hand a player's save to a server** but copying the file to the
+  server's name. A `--save-file` flag, or `load <name>`, if a host ever wants to
+  move a run to a dedicated server.
+- **No save section on the debug panel** (shard has one: resumed or fresh,
+  writes, where).
+
+**Not verified:** the browser save in a browser — no gate row reads it, and
+nothing ran the page; a save loaded under real players on a LAN, or `load` with
+a joiner in the session (the snapshot carrying the restored field is the same
+path every tick takes, not exercised after a load by a test);
+`--serve --resume`'s entry (`serve::serve` binds every interface, as its other
+entries do); the macOS and Linux data directories (only Windows' was used, and
+only by nothing — every test writes a scratch directory).
 
 ## arena (`docs/plan/sample/08-arena.md`)
 
@@ -16545,10 +16652,10 @@ left out:
 - **No engine change on this sample's behalf.** In particular `crcbl-store`'s
   `record::Backing::platform` was **not** extended: it answers with the _config_
   directory, which is where a high score belongs, and it hands out a path rather
-  than the `StorageSource` a `SaveWriter` writes through. `save::Vault` is the
-  data-directory twin of that rule and lives in the sample. **A second consumer
-  of the data-directory rule is the moment to hoist it into `crcbl-store`**, and
-  the shape to hoist is `Vault::open` plus `Vault::source`.
+  than the `StorageSource` a `SaveWriter` writes through. The data-directory
+  twin of that rule was `save::Vault`'s, and moved into `crcbl-store` as
+  `save::SaveBacking` when `apps/towers` became its second consumer
+  (2026-10-03); `Vault` is a wrapper over it.
 - **No migration seam, and it now has a casualty.** `crcbl-store` is still owed
   a `fn migrate(old_ver, bytes)` (_The migration seam_). Shard's version bumps
   to 2 and then 3 orphaned every save written before them: they read as no save,

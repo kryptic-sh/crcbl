@@ -77,6 +77,7 @@ use crcbl::session::Loopback;
 
 use crate::creep::{self, Creep, CreepView};
 use crate::map::{MAX_PLOTS, Map};
+use crate::save::{Checkpoint, SaveError};
 use crate::tower::{self, Bolt, BoltOutcome, BurstView, Tier, Tower, TowerView};
 use crate::wave::{self, MAX_CREEPS, Outcome, STARTING_GOLD, STARTING_LIVES, Waves};
 
@@ -450,6 +451,12 @@ struct Stage {
     /// How many runs this stage has played, restarts included. The one number
     /// that survives a restart.
     runs: u64,
+    /// Whether a player has ticked this run since it started or was restored
+    /// from a save — what lets `run_team_tick` throw away a run its last
+    /// player left and keep one a dedicated server loaded for players still
+    /// to come. A fresh stage has it exactly when it has ticked, so it is
+    /// not in the state hash: the tick count already is.
+    played: bool,
     ticks: u64,
     /// Seconds of **simulated** time, accumulated a tick at a time. What every
     /// clock in here is measured against, so a paused demo's waves stay where
@@ -490,6 +497,7 @@ impl Stage {
             outcome: Outcome::Playing,
             ended_at: 0.0,
             runs: 1,
+            played: false,
             ticks: 0,
             elapsed: 0.0,
             scratch: Vec::new(),
@@ -709,19 +717,31 @@ impl Stage {
         {
             let Stage {
                 world,
+                creeps,
                 burst_scratch,
                 ..
             } = &mut *self;
             tower::burst_into(world, at, radius_m, burst_scratch);
+            // **In the field's order, not the broadphase's.** A kill
+            // swap-removes its creep, so the order the burst wounds in is the
+            // order the list is left in, which the state hash reads — and the
+            // order an overlap answers in is the physics world's own, a fact
+            // about which slots its history left free. A run resumed from a
+            // save has a fresh world, so wounding in the answer's order would
+            // make the same stage play differently on it.
+            burst_scratch.retain(|body| Some(*body) != direct);
+            burst_scratch.sort_by_key(|body| {
+                creeps
+                    .iter()
+                    .position(|creep| creep.body() == *body)
+                    .unwrap_or(usize::MAX)
+            });
         }
         // By index rather than by iterator, because `wound` takes the whole
         // stage: the buffer is read one id at a time and the creep list is
         // swap-removed from underneath.
         for index in 0..self.burst_scratch.len() {
             let body = self.burst_scratch[index];
-            if Some(body) == direct {
-                continue;
-            }
             self.wound(body, bolt.damage());
         }
     }
@@ -792,18 +812,21 @@ fn run_tick(stage: &mut Stage, intent: Intent, dt: f64) {
 /// its grace period, so a run goes on while they reconnect, as it would with
 /// them in it.
 ///
-/// **An emptied run is thrown away, once.** A run that had started and then
-/// lost its last player — every grace period over, so nobody can come back to
-/// it — is reset rather than kept half-played: the next group to join finds a
-/// fresh field, not the lives and gold the last one left behind. A reset stage
-/// has ticked nothing, so the empty ticks after it hold still like any other.
+/// **An emptied run is thrown away, once.** A run that had been played and
+/// then lost its last player — every grace period over, so nobody can come
+/// back to it — is reset rather than kept half-played: the next group to join
+/// finds a fresh field, not the lives and gold the last one left behind. A
+/// reset stage has had no player, so the empty ticks after it hold still like
+/// any other — and so does a run restored from a save, which waits for the
+/// players it was loaded for (`Stage::played`).
 fn run_team_tick(stage: &mut Stage, intents: &[(Sender, Intent)], dt: f64) {
     if intents.is_empty() {
-        if stage.ticks > 0 {
+        if stage.played {
             stage.reset();
         }
         return;
     }
+    stage.played = true;
     if intents.iter().any(|(_, intent)| intent.restart) {
         stage.reset();
         return;
@@ -958,7 +981,11 @@ fn run_team_tick(stage: &mut Stage, intents: &[(Sender, Intent)], dt: f64) {
 // The module
 // ---------------------------------------------------------------------------
 
+mod checkpoint;
 pub(crate) mod play;
+
+pub(crate) use checkpoint::Autosave;
+pub use checkpoint::NotSaved;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod resim_tests;
@@ -1128,6 +1155,25 @@ impl Field {
     pub(crate) fn take_refusals(&self) -> Vec<(Option<PeerId>, Refusal)> {
         std::mem::take(&mut lock(&self.0).refusals)
     }
+
+    /// The stage as a save holds it, or why it cannot be saved now — see
+    /// [`Game::checkpoint`].
+    pub(crate) fn checkpoint(&self) -> Result<Checkpoint, NotSaved> {
+        lock(&self.0).checkpoint()
+    }
+
+    /// Replaces the stage with the one `checkpoint` holds — see
+    /// [`Game::restore`]. Every player in the session sees it in the next
+    /// snapshot.
+    pub(crate) fn restore(&self, checkpoint: &Checkpoint) -> Result<(), SaveError> {
+        lock(&self.0).restore(checkpoint)
+    }
+
+    /// The checkpoint to autosave, when the stage has just come to rest
+    /// after a wave `autosave` has not saved — see [`Game::wave_end`].
+    pub(crate) fn wave_end(&self, autosave: &mut Autosave) -> Option<Checkpoint> {
+        autosave.due(&lock(&self.0))
+    }
 }
 
 /// The shared stage, with a poisoned lock treated as the stage it was left in.
@@ -1295,6 +1341,9 @@ pub enum GameError {
     /// would not begin. Native builds only — see [`crate::lan`].
     #[cfg(not(target_arch = "wasm32"))]
     Lan(crcbl::lan::LanError),
+    /// `--resume` was asked for and there is no saved run it would resume —
+    /// none at all, or one refused by name. See [`crate::save`].
+    Resume(SaveError),
 }
 
 impl std::fmt::Display for GameError {
@@ -1303,6 +1352,7 @@ impl std::fmt::Display for GameError {
             Self::Server(message) => write!(f, "server creation failed: {message}"),
             #[cfg(not(target_arch = "wasm32"))]
             Self::Lan(error) => write!(f, "LAN session failed: {error}"),
+            Self::Resume(error) => write!(f, "cannot resume: {error}"),
         }
     }
 }
@@ -1345,6 +1395,8 @@ pub struct Game {
     /// Solo's refusals, taken off the stage every tick and not yet taken by
     /// [`Game::take_refusals`]. A LAN link holds its own.
     refusals: Vec<Refusal>,
+    /// Which wave's end was last autosaved — see [`Game::wave_end`].
+    autosave: Autosave,
 }
 
 impl std::fmt::Debug for Game {
@@ -1402,6 +1454,7 @@ impl Game {
             ticks_run: 0,
             pending: Intent::default(),
             refusals: Vec::new(),
+            autosave: Autosave::default(),
         })
     }
 
@@ -1448,6 +1501,7 @@ impl Game {
             ticks_run: 0,
             pending: Intent::default(),
             refusals: Vec::new(),
+            autosave: Autosave::default(),
         })
     }
 
@@ -1484,6 +1538,7 @@ impl Game {
             ticks_run: 0,
             pending: Intent::default(),
             refusals: Vec::new(),
+            autosave: Autosave::default(),
         }
     }
 
@@ -1567,6 +1622,45 @@ impl Game {
             #[cfg(not(target_arch = "wasm32"))]
             Link::Remote(remote) => remote.take_refusals(),
         }
+    }
+
+    /// The stage as a save holds it — solo, or the host's stage — or why it
+    /// cannot be saved now: a wave coming in, a finished run, or a joiner,
+    /// whose session only its host saves. See `crate::save`.
+    ///
+    /// # Errors
+    ///
+    /// [`NotSaved`], naming which.
+    pub fn checkpoint(&self) -> Result<Checkpoint, NotSaved> {
+        match &self.shared {
+            Some(shared) => lock(shared).checkpoint(),
+            None => Err(NotSaved::NotTheHost),
+        }
+    }
+
+    /// Replaces the stage — solo's, or the host's, with every joiner seeing
+    /// it in the next snapshot — with the one `checkpoint` holds, and counts
+    /// its wave's end as autosaved, since that is the save it came from.
+    ///
+    /// # Errors
+    ///
+    /// [`SaveError::NoStage`] on a joiner, and [`SaveError::OtherMap`] for a
+    /// checkpoint of a map other than this game's.
+    pub fn restore(&mut self, checkpoint: &Checkpoint) -> Result<(), SaveError> {
+        let Some(shared) = &self.shared else {
+            return Err(SaveError::NoStage);
+        };
+        lock(shared).restore(checkpoint)?;
+        self.autosave.restored(checkpoint);
+        Ok(())
+    }
+
+    /// The checkpoint to autosave, when the stage has just come to rest
+    /// after a wave — the first tick of the build phase after it, and once
+    /// per wave. `None` on every other call, and always on a joiner.
+    pub fn wave_end(&mut self) -> Option<Checkpoint> {
+        let shared = self.shared.as_ref()?;
+        self.autosave.due(&lock(shared))
     }
 
     /// Events from the host this joiner could not read, counted and

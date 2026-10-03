@@ -594,6 +594,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Towers saves and resumes a run between waves**
+  (`docs/plan/sample/07-towers.md` slice 5). A save is taken in the build phase
+  of a run still being played — `S` in the window or the page, and an autosave
+  at each wave's end, the first tick its last creep is out — and refused while a
+  wave is coming in or once the run is over, said on the page
+  (`NOT SAVED: A WAVE IS COMING IN`). It holds the map's fingerprint
+  (`Map::fingerprint`, a SHA-256 over its wire encoding), the run counter, the
+  clock, gold, lives, kills, leaks, shots, the towers with kind, tier, plot and
+  reload, and the creeps, bolts and bursts still on the field, in
+  `crcbl-store`'s save container under a versioned `TWRS` payload
+  (`crcbl_towers::save`: `Checkpoint`, `Vault`, `decode`, `SaveError`), and a
+  resumed stage hashes as the one that saved and plays on alike tick for tick. A
+  native run resumes from the lobby's new _Continue_ row or `--resume` (solo,
+  `--host` or `--serve`, each refusing to start without a save; not with
+  `--join`, `--browse`, `--record` or `--headless`); the browser opens on its
+  saved run in OPFS. A dedicated server keeps its own file and takes `save` and
+  `load` at its console; a loaded run waits for players, and a recorded session
+  refuses `load`. A save of another map or payload version, a corrupt or
+  truncated file, or a value no run between waves could hold is refused by name.
+  `Game` gains `checkpoint`, `restore` and `wave_end`, and `GameError` gains
+  `Resume`. To make a resumed run the same run, a splash burst now wounds in the
+  field's order and a tower picks between creeps level on the lane by their
+  place in it, rather than in the order the physics world answers in.
 - **`crcbl_store::save::SaveBacking`**: where a game's saves live — the data
   directory natively, the installed OPFS store in a browser, or nowhere for a
   headless run — with `platform`, `source` and `label`. `apps/shard` wrote this

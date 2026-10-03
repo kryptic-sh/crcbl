@@ -48,11 +48,15 @@ pub const HOST_ID: WidgetId = FIRST_GAME_ID + 2;
 #[cfg(not(target_arch = "wasm32"))]
 pub const CONNECT_ID: WidgetId = FIRST_GAME_ID + 3;
 
+/// The lobby's continue row, which resumes the saved run.
+#[cfg(not(target_arch = "wasm32"))]
+pub const CONTINUE_ID: WidgetId = FIRST_GAME_ID + 4;
+
 /// The lobby's first listed host; the rest follow it, one id a row, up to the
 /// most hosts a browser lists
 /// ([`DEFAULT_MAX_HOSTS`](crcbl::net::udp::discovery::DEFAULT_MAX_HOSTS)).
 #[cfg(not(target_arch = "wasm32"))]
-pub const FIRST_LISTED_ID: WidgetId = FIRST_GAME_ID + 4;
+pub const FIRST_LISTED_ID: WidgetId = FIRST_GAME_ID + 5;
 
 /// Where `RESTART` sits among [`crcbl::engine::pause_items`]' three rows:
 /// directly under `RESUME`.
@@ -78,6 +82,7 @@ impl MenuAction {
             use crate::lobby::Pick;
 
             let pick = match id {
+                CONTINUE_ID => Some(Pick::Continue),
                 SOLO_ID => Some(Pick::Solo),
                 HOST_ID => Some(Pick::Host),
                 CONNECT_ID => Some(Pick::Connect),

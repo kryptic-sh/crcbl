@@ -30,6 +30,7 @@ use super::serve::{Console, Next, STATUS_INTERVAL, Server, serve_until_quit};
 use super::{JOIN_TIMEOUT, JoinFailure, Joining, MAX_PLAYERS, PROTOCOL_ID, Progress, SESSION};
 use crate::game::{Controls, Game, Refusal, Stats};
 use crate::map::{Map, MapError, MapWireError};
+use crate::save::Vault;
 use crate::tower::{self, Tier};
 
 pub(crate) const TICK_HZ: u32 = crate::game::DEFAULT_TICK_HZ;
@@ -156,8 +157,14 @@ struct Dedicated {
 
 fn dedicated() -> Dedicated {
     Dedicated {
-        server: Server::open(on_loopback(), &Map::built_in(), TICK_HZ, None)
-            .expect("loopback UDP must be available to these tests"),
+        server: Server::open(
+            on_loopback(),
+            &Map::built_in(),
+            TICK_HZ,
+            None,
+            Vault::nowhere(),
+        )
+        .expect("loopback UDP must be available to these tests"),
         now: Duration::ZERO,
         printed: Vec::new(),
     }
@@ -1298,7 +1305,7 @@ fn quit_at_the_console_tells_every_player_the_server_shut_down() {
     assert!(status.starts_with("towers: 2/4 players"), "{status}");
     assert_eq!(
         unknown,
-        "towers: no command \"frobnicate\"; the commands are status, quit"
+        "towers: no command \"frobnicate\"; the commands are status, save, load, quit"
     );
     assert!(last.starts_with("towers: 0/4 players"), "{last}");
     assert_eq!(rig.connected(), 0, "a session outlived the quit");
@@ -1330,8 +1337,14 @@ fn quit_at_the_console_finishes_a_recording_servers_file() {
     let path = dir.path().join("served.crpl");
     let mut rig = Rig {
         host: Dedicated {
-            server: Server::open(on_loopback(), &Map::built_in(), TICK_HZ, Some(&path))
-                .expect("loopback UDP must be available to these tests"),
+            server: Server::open(
+                on_loopback(),
+                &Map::built_in(),
+                TICK_HZ,
+                Some(&path),
+                Vault::nowhere(),
+            )
+            .expect("loopback UDP must be available to these tests"),
             now: Duration::ZERO,
             printed: Vec::new(),
         },
@@ -1460,7 +1473,8 @@ fn a_console_whose_input_ended_is_not_a_quit() {
     let mut printed = Vec::new();
     for _ in 0..3 {
         assert_eq!(
-            console.obey(&rig.host.server, &mut |line| printed.push(line.to_string())),
+            console.obey(&mut rig.host.server, &mut |line| printed
+                .push(line.to_string())),
             Next::Serve
         );
     }
@@ -1497,4 +1511,106 @@ fn a_player_leaving_mid_run_does_not_stop_a_dedicated_server() {
         rig.joiners[0].game().render_state().towers[1].is_some()
             && rig.joiners[0].game().stats().ticks > ticks
     });
+}
+
+/// A dedicated server on loopback saving in the scratch directory `dir`, and
+/// recording to `record` if it names a file.
+fn saving_server(dir: &std::path::Path, record: Option<&std::path::Path>) -> Server {
+    Server::open(
+        on_loopback(),
+        &Map::built_in(),
+        TICK_HZ,
+        record,
+        Vault::at(dir.to_path_buf(), crate::save::SERVER_FILE),
+    )
+    .expect("loopback UDP must be available to these tests")
+}
+
+/// Types `lines` at `server`'s console and answers what it printed.
+fn typed_at(server: &mut Server, lines: &[&str]) -> Vec<String> {
+    let (typed, read) = std::sync::mpsc::channel();
+    for line in lines {
+        typed
+            .send((*line).to_string())
+            .expect("the console is open");
+    }
+    let mut printed = Vec::new();
+    assert_eq!(
+        Console::new(read).obey(server, &mut |line| printed.push(line.to_string())),
+        Next::Serve
+    );
+    printed
+}
+
+/// **`save` and `load` at a dedicated server's console keep the run and put
+/// it back.** `load` with nothing saved says so; `save` writes the run in
+/// the server's own file; a run saved at a wave's end, put in that file, is
+/// what `load` then serves — and an empty server holds it, rather than
+/// throwing it away as it does a run its last player left.
+#[test]
+fn a_dedicated_server_saves_and_loads_its_run_at_the_console() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let mut server = saving_server(dir.path(), None);
+    server.frame(FRAME);
+
+    let printed = typed_at(&mut server, &["load"]);
+    assert_eq!(
+        printed,
+        ["towers: not loaded: there is no save to resume"],
+        "{printed:?}"
+    );
+
+    let printed = typed_at(&mut server, &["save"]);
+    assert!(
+        printed[0].starts_with("towers: saved wave 0/"),
+        "{printed:?}"
+    );
+    let file = dir.path().join(crate::save::SERVER_FILE);
+    assert!(file.is_file(), "the save is not in the server's file");
+
+    let saved = crate::save::tests::a_first_waves_end();
+    Vault::at(dir.path().to_path_buf(), crate::save::SERVER_FILE)
+        .store(&saved)
+        .expect("the scratch directory is writable");
+    let printed = typed_at(&mut server, &["load"]);
+    assert!(
+        printed[0].starts_with(&format!("towers: loaded wave {}/", saved.wave())),
+        "{printed:?}"
+    );
+    let stats = server.stats();
+    assert_eq!(
+        (stats.wave, stats.gold, stats.lives),
+        (saved.wave(), saved.gold(), saved.lives())
+    );
+
+    // Nobody is in it: a run a player left would be reset on the next tick,
+    // and a loaded one waits.
+    for frame in 2..60 {
+        server.frame(FRAME * frame);
+    }
+    assert_eq!(
+        server.stats().wave,
+        saved.wave(),
+        "an empty server threw the loaded run away"
+    );
+}
+
+/// **A recorded session refuses `load`**, by name: the recording is
+/// re-simulated from a fresh run, and could not reproduce one swapped in
+/// under it.
+#[test]
+fn a_recording_server_refuses_to_load() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let record = dir.path().join("served.crpl");
+    let mut server = saving_server(dir.path(), Some(&record));
+    server.frame(FRAME);
+    let printed = typed_at(&mut server, &["save", "load"]);
+    assert!(
+        printed[0].starts_with("towers: saved wave 0/"),
+        "{printed:?}"
+    );
+    assert!(
+        printed[1].starts_with("towers: not loaded: the session is being recorded"),
+        "{printed:?}"
+    );
 }

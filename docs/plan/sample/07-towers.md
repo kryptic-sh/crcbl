@@ -148,14 +148,14 @@ that tells a working touch control from a rendered one. Every price and label it
 writes out is held against this crate's own tables by `apps/towers`'
 `the_browser_gates_game_constants_are_the_ones_this_crate_declares`.
 
-| Slice | What it is                                                                                                                                                                                                                   | Status               |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| 1     | Solo loop on the hardcoded map: the polyline path, one creep archetype, one single-target tower, three scripted waves, shared gold and lives, the three commands over the loopback, a fixed overhead camera, the debug panel | **Built 2026-09-07** |
-| 2     | The browser demo: `src/web.rs`, a `towers` directory under `web/demos/`, the `DEMOS` row, the Pages steps, the feature card and the browser gate                                                                             | **Built 2026-09-07** |
-| 3a    | The combat content: the splash and slow towers, one upgrade tier each behind an `UpgradeTower` command, the tanky and swarm creeps, all ten waves, a material per kind and a burst instance at a splash impact               | **Built 2026-09-10** |
-| 3b    | The presentation content milestone 1 still owes: `.crpix` art and the build menu it makes possible, spatial audio, world-space health bars                                                                                   | Owed                 |
-| 4     | The dev fly/walk camera — `CharacterController` on this map, which is the controller's first real terrain                                                                                                                    | Owed                 |
-| 5     | Save and resume between waves (topic 14)                                                                                                                                                                                     | Owed                 |
+| Slice | What it is                                                                                                                                                                                                                             | Status               |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| 1     | Solo loop on the hardcoded map: the polyline path, one creep archetype, one single-target tower, three scripted waves, shared gold and lives, the three commands over the loopback, a fixed overhead camera, the debug panel           | **Built 2026-09-07** |
+| 2     | The browser demo: `src/web.rs`, a `towers` directory under `web/demos/`, the `DEMOS` row, the Pages steps, the feature card and the browser gate                                                                                       | **Built 2026-09-07** |
+| 3a    | The combat content: the splash and slow towers, one upgrade tier each behind an `UpgradeTower` command, the tanky and swarm creeps, all ten waves, a material per kind and a burst instance at a splash impact                         | **Built 2026-09-10** |
+| 3b    | The presentation content milestone 1 still owes: `.crpix` art and the build menu it makes possible, spatial audio, world-space health bars                                                                                             | Owed                 |
+| 4     | The dev fly/walk camera — `CharacterController` on this map, which is the controller's first real terrain                                                                                                                              | Owed                 |
+| 5     | Save and resume between waves (topic 14): `S` and an autosave at each wave's end, refused mid-wave; the lobby's _Continue_ and `--resume` (solo, host, dedicated server); `save`/`load` at a server's console; the browser's OPFS save | **Built 2026-10-03** |
 
 **What these slices prove is narrower than the "Proves" list above**, and it is
 three `crcbl-phys` L0 queries this document named towers as the forcing function
@@ -262,6 +262,27 @@ not built anywhere yet.
   beside the creeps (`Turret`, `Shot` and `Blast`, runtime components drawn as
   greybox boxes), so a placed tower stands on its plot, at its tier's size. Not
   looked at on a device: every check is headless.
+- **A run saves and resumes between waves (slice 5, 2026-10-03).** A save is
+  taken in the build phase of a run still being played — `S`, or the autosave at
+  each wave's end, the first tick its last creep is out — and refused, on the
+  page, while a wave is coming in or once the run is over. The table measures
+  the build phase from a wave's last release, so on this field the last wave's
+  creeps are usually still walking: a save carries them, the bolts in the air
+  and the bursts still drawn beside the counters, the clock and the towers, and
+  a resumed stage hashes as the one that saved and plays on alike tick for tick
+  — which took the stage reading its physics queries in the field's order, since
+  the resumed physics world is a fresh one. The bytes are a versioned `TWRS`
+  payload in `crcbl-store`'s save container, naming the map by
+  `Map::fingerprint`; a save of another map or version, a corrupt or truncated
+  file, or a value no run between waves holds is refused by name
+  (`crate::save`). Solo and the host keep one slot; the lobby offers it as
+  _Continue_ and `--resume` opens on it, refusing to start without it; a
+  dedicated server keeps its own and takes `save` and `load` at its console, and
+  a run loaded on an empty server waits for its players. Joiners need nothing:
+  their run is the host's, and a snapshot is the whole field. The browser saves
+  to OPFS and opens on its save, having no lobby. **Not looked at:** a save
+  loaded under real players on a LAN, and the browser's save in a browser —
+  every check is headless and native.
 - **The editor picks a built tower, and every mirrored thing keeps its entity
   (2026-10-03).** _Upgrade_ takes `ParamKind::PickedRuntime("turrets")`: the
   editor gives each mirrored tower a picking collider, a click on one is the

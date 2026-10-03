@@ -50,6 +50,16 @@
 //! engine. The pointer and the finger **inside the canvas** are still owed, and
 //! that document records them.
 //!
+//! # Saving is the player's key and the wave's end
+//!
+//! `S` saves the run and each wave's end is saved on its own — both through
+//! [`Game::checkpoint`] into this run's [`Vault`], which is nowhere for a
+//! headless run — and `S` is refused, on the page as a notice, while a wave
+//! is coming in. A joiner's `S` is refused too: the run is its host's.
+//! What is resumed is [`crate::save`]'s: the lobby's *Continue*, `--resume`,
+//! or — in a browser, which has no lobby — the saved run, opened at boot as
+//! `apps/shard` opens its character.
+//!
 //! # `[HUD]` is logged here rather than in `crate::game`
 //!
 //! Every other line on it is the simulation's, and `apps/puppet` logs its
@@ -70,6 +80,7 @@ use crate::game::{Controls, Game, RenderState, Stats};
 use crate::gpu::{Gpu, Paths};
 use crate::menu::{MenuAction, MenuKind, Menus};
 use crate::page::PageStats;
+use crate::save::Vault;
 use crate::tower;
 use crate::wave::Outcome;
 
@@ -92,6 +103,8 @@ const ACTION_UPGRADE: &str = "upgrade";
 const ACTION_WAVE: &str = "send-wave";
 /// Throw the run away. An edge.
 const ACTION_RESTART: &str = "restart";
+/// Save the run, between waves. An edge: one press is one write.
+const ACTION_SAVE: &str = "save";
 
 /// Pick which kind the next build is of: one action per [`crate::tower::Kind`],
 /// in [`crate::tower::ALL`]'s order.
@@ -124,6 +137,7 @@ fn action_map() -> ActionMap {
         (ACTION_UPGRADE, vec![Binding::Key(KeyCode::KeyU)]),
         (ACTION_WAVE, vec![Binding::Key(KeyCode::KeyN)]),
         (ACTION_RESTART, vec![Binding::Key(KeyCode::KeyR)]),
+        (ACTION_SAVE, vec![Binding::Key(KeyCode::KeyS)]),
     ]
     .into_iter()
     .chain(kinds)
@@ -137,9 +151,9 @@ fn action_map() -> ActionMap {
     map
 }
 
-/// How long a refused command's line stays on the page, on the frame's
-/// clock: long enough to read, short enough that it is about the command
-/// just pressed.
+/// How long a refused command's line — or a save's — stays on the page, on
+/// the frame's clock: long enough to read, short enough that it is about the
+/// key just pressed.
 const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(3);
 
 // ---- summary -----------------------------------------------------------------
@@ -217,9 +231,13 @@ pub struct Towers {
     stats: Stats,
     /// What the last frame's overlay drew, from the same frame.
     page: PageStats,
-    /// The line the latest refusal of this player's commands left on the
-    /// page, and how much longer it stays — see [`NOTICE_FOR`].
+    /// The line the latest refusal of this player's commands — or the latest
+    /// save — left on the page, and how much longer it stays — see
+    /// [`NOTICE_FOR`].
     notice: Option<(String, std::time::Duration)>,
+    /// Where this run's saves go: nowhere for a headless run, which is what
+    /// keeps the test suite and CI out of a real data directory.
+    vault: Vault,
     /// Which selectors this device drew through, read off the GPU bundle.
     ///
     /// Kept here rather than reached through `gpu` because
@@ -340,6 +358,45 @@ impl Towers {
         if let Some(refusal) = self.game.take_refusals().pop() {
             crcbl::log::info!("towers: refused: {}", refusal.label());
             self.notice = Some((format!("REFUSED: {}", refusal.label()), NOTICE_FOR));
+        }
+    }
+
+    /// Saves the run now, as `S` asks, and says on the page what became of
+    /// it: saved, or why not — a wave coming in, a finished run, a joiner,
+    /// nowhere to keep it.
+    fn save_now(&mut self) {
+        let line = match self.game.checkpoint() {
+            Err(not) => format!("NOT SAVED: {}", not.label()),
+            Ok(checkpoint) => match self.vault.store(&checkpoint) {
+                Ok(()) => format!(
+                    "SAVED: WAVE {}/{}",
+                    checkpoint.wave(),
+                    crate::wave::WAVES.len()
+                ),
+                Err(error) => format!("NOT SAVED: {error}"),
+            },
+        };
+        crcbl::log::info!("towers: {line}");
+        self.notice = Some((line, NOTICE_FOR));
+    }
+
+    /// Writes the run at a wave's end, the first frame of the build phase
+    /// after it. Quiet on the page — the wave's end is the player's moment,
+    /// not a notice's — and logged, so a run says which waves it kept.
+    fn autosave(&mut self) {
+        let Some(checkpoint) = self.game.wave_end() else {
+            return;
+        };
+        match self.vault.store(&checkpoint) {
+            Ok(()) => crcbl::log::info!(
+                "towers: autosaved the end of wave {}/{} ({})",
+                checkpoint.wave(),
+                crate::wave::WAVES.len(),
+                self.vault.where_it_goes()
+            ),
+            // A run that keeps nothing saves in name only, as shard's does.
+            Err(crate::save::SaveError::Nowhere) => {}
+            Err(error) => crcbl::log::warn!("towers: the autosave failed: {error}"),
         }
     }
 
@@ -561,6 +618,7 @@ pub fn serve(options: &Options) -> Result<String, TowersError> {
         &options.map,
         options.common.tick_hz,
         options.record.as_deref(),
+        options.resume,
     )
     .map_err(TowersError::Game)
 }
@@ -631,8 +689,9 @@ fn assemble<S: Shell + ?Sized>(
 ) -> Result<Loop<S>, TowersError> {
     let booted = crcbl::engine::arm_screenshot(booted, &options.common);
     let paths = booted.gpu.paths();
+    let vault = Vault::player(options.common.headless);
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-    let (game, joining) = open_game(options).map_err(TowersError::Game)?;
+    let (game, joining) = open_game(options, &vault).map_err(TowersError::Game)?;
     Ok(Loop::new(
         booted,
         Towers {
@@ -650,7 +709,9 @@ fn assemble<S: Shell + ?Sized>(
             #[cfg(not(target_arch = "wasm32"))]
             lobby: options.lobby.then(|| {
                 crate::lobby::Lobby::on_the_lan(crate::lan::SESSION, options.common.tick_hz)
+                    .offering(vault.load(&options.map))
             }),
+            vault,
             #[cfg(not(target_arch = "wasm32"))]
             joining,
             #[cfg(not(target_arch = "wasm32"))]
@@ -670,7 +731,9 @@ type CommandLineJoin = Option<crate::lan::Joining>;
 type CommandLineJoin = ();
 
 /// The simulation the command line asked for: solo, or — natively — hosting,
-/// or joining or looking for a co-op session. See `crate::lan`.
+/// or joining or looking for a co-op session. See `crate::lan`. Solo and a
+/// host open on the run saved in `vault` when `--resume` asks for it; a
+/// browser does whenever there is one, having no lobby to offer it from.
 ///
 /// A join has no game until the host's map arrives, so for `--join` and
 /// `--browse` this answers the join, and an idle solo run on this process's
@@ -679,9 +742,12 @@ type CommandLineJoin = ();
 ///
 /// # Errors
 ///
-/// [`crate::game::GameError`] if the server could not be built or the LAN
-/// session could not start.
-fn open_game(options: &Options) -> Result<(Game, CommandLineJoin), crate::game::GameError> {
+/// [`crate::game::GameError`] if the server could not be built, the LAN
+/// session could not start, or `--resume` found no run it would resume.
+fn open_game(
+    options: &Options,
+    vault: &Vault,
+) -> Result<(Game, CommandLineJoin), crate::game::GameError> {
     let tick_hz = options.common.tick_hz;
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -690,14 +756,23 @@ fn open_game(options: &Options) -> Result<(Game, CommandLineJoin), crate::game::
         use crcbl::lan::{LanBind, LanClient, LanMode};
 
         let client = match options.lan {
-            LanMode::Off => return Ok((Game::new(tick_hz, &options.map)?, None)),
+            LanMode::Off => {
+                let mut game = Game::new(tick_hz, &options.map)?;
+                if options.resume {
+                    resume(&mut game, vault)?;
+                }
+                return Ok((game, None));
+            }
             LanMode::Host { port } => {
-                let game = Game::host(
+                let mut game = Game::host(
                     tick_hz,
                     &options.map,
                     LanBind::on_the_lan(port),
                     options.record.as_deref(),
                 )?;
+                if options.resume {
+                    resume(&mut game, vault)?;
+                }
                 return Ok((game, None));
             }
             LanMode::Join(addr) => LanClient::join(SESSION, addr, tick_hz),
@@ -708,7 +783,39 @@ fn open_game(options: &Options) -> Result<(Game, CommandLineJoin), crate::game::
         Ok((Game::new(tick_hz, &options.map)?, Some(joining)))
     }
     #[cfg(target_arch = "wasm32")]
-    Ok((Game::new(tick_hz, &options.map)?, ()))
+    {
+        let mut game = Game::new(tick_hz, &options.map)?;
+        match resume(&mut game, vault) {
+            Ok(()) | Err(crate::game::GameError::Resume(crate::save::SaveError::NoSave)) => {}
+            Err(error) => crcbl::log::warn!("towers: opening on a fresh run: {error}"),
+        }
+        Ok((game, ()))
+    }
+}
+
+/// Puts the run saved in `vault` in place of `game`'s fresh one.
+///
+/// # Errors
+///
+/// [`crate::game::GameError::Resume`] naming why not: no save, or one refused
+/// — another map, another version, a corrupt file.
+fn resume(game: &mut Game, vault: &Vault) -> Result<(), crate::game::GameError> {
+    use crate::game::GameError;
+    use crate::save::SaveError;
+
+    let checkpoint = vault
+        .load(game.map())
+        .map_err(GameError::Resume)?
+        .ok_or(GameError::Resume(SaveError::NoSave))?;
+    game.restore(&checkpoint).map_err(GameError::Resume)?;
+    crcbl::log::info!(
+        "towers: resumed at the end of wave {}/{} with {} lives and {} gold",
+        checkpoint.wave(),
+        crate::wave::WAVES.len(),
+        checkpoint.lives(),
+        checkpoint.gold(),
+    );
+    Ok(())
 }
 
 /// Creates the one window this sample has: its title, its app id, its size.
@@ -791,6 +898,10 @@ impl HostedGame for Towers {
                 || core::mem::take(&mut self.pending_restart),
         });
         self.game.tick();
+        // After the tick, so what is saved is the stage the player sees.
+        if self.actions.just_pressed(ACTION_SAVE) {
+            self.save_now();
+        }
         // Read off the bundle rather than kept from start-up alone, so the
         // heartbeat below and the panel are reporting the device this frame
         // actually has.
@@ -846,6 +957,14 @@ impl HostedGame for Towers {
                 self.joining = None;
                 match lobby.pick(pick, self.game.map()) {
                     Some(crate::lobby::Picked::Solo) => self.lobby = None,
+                    // The solo run under the lobby has not ticked, so the
+                    // saved one takes its place before it does.
+                    Some(crate::lobby::Picked::Continue(checkpoint)) => {
+                        match self.game.restore(&checkpoint) {
+                            Ok(()) => self.lobby = None,
+                            Err(error) => lobby.continue_failed(&error),
+                        }
+                    }
                     Some(crate::lobby::Picked::Session(game)) => drop(self.start(game)),
                     // The lobby stays up, saying where, until the map is in.
                     Some(crate::lobby::Picked::Joining(joining)) => self.joining = Some(joining),
@@ -914,6 +1033,9 @@ impl HostedGame for Towers {
         #[cfg(not(target_arch = "wasm32"))]
         self.drive_join(gpu, frame.render_dt);
         self.game.frame(frame.render_dt);
+        if !self.in_front() {
+            self.autosave();
+        }
         #[cfg(not(target_arch = "wasm32"))]
         self.drive_session_end(gpu);
         self.update_notice(frame.render_dt);
@@ -1022,6 +1144,9 @@ crcbl::impl_pending_loop!(
 // ---- tests -------------------------------------------------------------------
 
 #[cfg(test)]
+mod save_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crcbl::args::Common;
@@ -1029,12 +1154,12 @@ mod tests {
     use crcbl::shell::{HeadlessShell, ShellBackend as Backend};
     use crcbl_sample_test::{headless_common, ui_text};
 
-    fn scripted(options: &Options) -> Loop<HeadlessShell> {
+    pub(super) fn scripted(options: &Options) -> Loop<HeadlessShell> {
         with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
     }
 
     /// A headless run of `frames` frames on the null backend.
-    fn headless(frames: u64) -> Options {
+    pub(super) fn headless(frames: u64) -> Options {
         headless_with(frames, |_| {})
     }
 
@@ -1049,7 +1174,7 @@ mod tests {
     }
 
     /// Runs `count` frames.
-    fn frames(engine: &mut Loop<HeadlessShell>, count: usize) {
+    pub(super) fn frames(engine: &mut Loop<HeadlessShell>, count: usize) {
         for _ in 0..count {
             engine.frame().expect("a frame");
         }
@@ -1060,7 +1185,7 @@ mod tests {
     const KEY_SLOW: KeyCode = KIND_KEYS[2];
 
     /// Presses and releases one key, then runs a frame so the tick sees it.
-    fn tap(engine: &mut Loop<HeadlessShell>, key: KeyCode) {
+    pub(super) fn tap(engine: &mut Loop<HeadlessShell>, key: KeyCode) {
         let window = engine.window();
         engine
             .shell_mut()
@@ -1383,7 +1508,7 @@ mod tests {
     /// hosts on loopback: `Options` built in code never opens one, and the
     /// lobby a parsed command line opens queries the broadcast address.
     #[cfg(not(target_arch = "wasm32"))]
-    fn in_a_lobby(announcer: Option<std::net::SocketAddr>) -> Loop<HeadlessShell> {
+    pub(super) fn in_a_lobby(announcer: Option<std::net::SocketAddr>) -> Loop<HeadlessShell> {
         in_a_lobby_timing_out(announcer, crate::lan::JOIN_TIMEOUT)
     }
 
@@ -1423,7 +1548,7 @@ mod tests {
 
     /// The id of the lobby row the keyboard is on.
     #[cfg(not(target_arch = "wasm32"))]
-    fn lobby_row(engine: &Loop<HeadlessShell>) -> Option<crcbl::ui::WidgetId> {
+    pub(super) fn lobby_row(engine: &Loop<HeadlessShell>) -> Option<crcbl::ui::WidgetId> {
         let menu = engine.menus().current()?;
         if menu.title != crate::lobby::TITLE {
             return None;
@@ -1755,6 +1880,7 @@ mod tests {
             map,
             crate::game::DEFAULT_TICK_HZ,
             None,
+            crate::save::Vault::nowhere(),
         )
         .expect("loopback UDP must be available to these tests");
         let port = server.lan().game_port();

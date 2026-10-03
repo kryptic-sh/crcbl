@@ -365,6 +365,44 @@ impl Waves {
         }
     }
 
+    /// The table between two waves: `started` rows released whole and the
+    /// next due at `due_at`, in the stage's elapsed seconds. What a resumed
+    /// save rebuilds — see `crate::save`. `None` for a count past the table.
+    ///
+    /// How many of the last row went out is not an argument: between waves
+    /// it is always the whole row, which is what [`Waves::step`] leaves when
+    /// it stops releasing, and a second copy of it would be one that could
+    /// disagree.
+    #[must_use]
+    pub const fn between(started: usize, due_at: f64) -> Option<Self> {
+        if started > WAVES.len() {
+            return None;
+        }
+        let released = if started == 0 {
+            0
+        } else {
+            WAVES[started - 1].creeps()
+        };
+        Some(Self {
+            started,
+            released,
+            due_at,
+            releasing: false,
+        })
+    }
+
+    /// When the next wave is due, in the stage's elapsed seconds, or `None`
+    /// while one is releasing — what a save between waves keeps, beside
+    /// [`Waves::started`].
+    #[must_use]
+    pub const fn due_between(&self) -> Option<f64> {
+        if self.releasing {
+            None
+        } else {
+            Some(self.due_at)
+        }
+    }
+
     /// How many waves have been started.
     #[must_use]
     pub const fn started(&self) -> usize {

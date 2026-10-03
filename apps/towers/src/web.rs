@@ -34,10 +34,13 @@
 //! accessor here, because towers has nothing to read out of one: the map is the
 //! committed `.scn/` directory compiled in by [`crate::scene`], the field is
 //! `crcbl::greybox` primitives, and every byte it draws with — the geometry, the
-//! materials, the shaders, the font atlas — is compiled into the module. There is no save either, so nothing reaches
-//! for the OPFS store beyond the `prepare` that installs it: both backends are
-//! installed there because the shared shim's boot sequence drives both ABIs
-//! before it boots the demo and both must answer.
+//! materials, the shaders, the font atlas — is compiled into the module. The
+//! OPFS store the `prepare` installs is the run's save (`crate::save`): `S`
+//! and each wave's end write it, and with no lobby to offer *Continue* from,
+//! the page opens on the saved run whenever there is one, as `apps/shard`'s
+//! opens on its character. Both backends are installed there because the
+//! shared shim's boot sequence drives both ABIs before it boots the demo and
+//! both must answer.
 //!
 //! # The symbols this module exports
 //!
