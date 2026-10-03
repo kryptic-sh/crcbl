@@ -73,6 +73,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   own is now an error on the server side. `Client::dropped_event_count` counts
   dropped console replies too.
 
+- **`crcbl_scene::edit::EditCommand` (the editor's `command` re-exports it)
+  gained `SetEnvironment`, and the editor's `panel::FieldTarget` and
+  `clipboard::PasteTarget::Field` name the environment** (see Added: the scene's
+  environment in the inspector). An exhaustive match over `EditCommand` must add
+  the new arm. `FieldTarget` is now an enum —
+  `Component { entity, system, path }`, the struct it was, or
+  `Environment { path }` — with `FieldTarget::path` for either, and
+  `PasteTarget::Field` holds one rather than the three fields. `PanelFrame`
+  gained the public field `add`, so a struct literal must name it.
+
 - **The editor's `EditError` gained `Target`, `OpenTarget`, `Recovery`,
   `NotACopy`, `CopyInUse` and `RemoveCopy`** (see Added: a new scene and
   save-as, open and the unsaved bar, and recovery copies offered back): a typed
@@ -630,6 +640,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The editor edits the scene's environment in the inspector.** With nothing
+  selected the inspector's scene pane draws `env.ron` under the add buttons: the
+  camera's eye, the point it looks at and the ambient light, three numbers each.
+  Each edit is an undoable `EditCommand::SetEnvironment` — a drag one entry, as
+  a component field's is — and Ctrl+C and Ctrl+V copy and paste one number at a
+  time, as `env.ron` spells it (`Document::environment`,
+  `Document::record_environment`, `Document::copy_environment_field`,
+  `Document::paste_environment_field`). Before this a scene from empty kept the
+  compiled-in scene's camera and light for good.
+
+- **The editor adds an entity in any system while nothing is selected.** With no
+  selection the inspector is the scene's pane, offering one `+ system` button
+  per registered system under the add list's headings (the scene's own systems,
+  then each game's, then the rest). A click puts a new entity in that system
+  holding its component's `Default`, under the next id, lists the system in the
+  manifest if it was not, and selects it — one undo takes both back
+  (`Document::add_entity`, `Document::addable_groups`). Before this a scene from
+  empty could only gain a mesh dropped from the asset browser, so towers' path
+  and plots had to start as meshes and leave an emptied `meshes` system listed.
+
 - **A client can edit the scene a server serves, and every client hears of each
   edit.** `crcbl_client::Client::send_edit(op)` sends an operation —
   `crcbl_scene::edit::encode_op` of an `EditOp`: a command, an undo or a redo —
@@ -649,8 +679,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stable numbers: malformed, unsupported version, not editable (no scene, or the
   scene is playing), unknown entity, unknown system, unknown path, invalid,
   conflict, nothing to undo, nothing to redo and failed. A variant switch does
-  not travel yet (`OpEncodeError::SetVariant`). The decoder fuzz target reads
-  every new message and the operation inside them, with a named seed for each.
+  not travel yet (`OpEncodeError::SetVariant`); an environment write
+  (`EditCommand::SetEnvironment`) does, as command kind `0x0B`. The decoder fuzz
+  target reads every new message and the operation inside them, with a named
+  seed for each.
 
 - **Slide contacts for a lying body from `crcbl_phys::CharacterController`.**
   `move_lying_into(world, &body, motion, &mut contacts)` makes exactly the move
@@ -4735,6 +4767,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   migration — everything here is v0.
 
 ### Fixed
+
+- **The editor's inspector no longer cuts off a vector row's last field.** At
+  the default layout's side-column width a position's three drag-values, with
+  numbers as wide as `-14.00`, ran past the pane's edge: the `z` field was
+  clipped, and a click on it landed in the viewport. A row too wide for its pane
+  now wraps, so every field stays inside it.
 
 - **A dragged 64-bit field keeps every digit.** The drag-value edited an `f32`,
   so an inspector row narrowed its leaf to show it: a dragged `f64` was written

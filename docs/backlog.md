@@ -12805,11 +12805,11 @@ rendered view sampled by a UI rectangle).
 
 **It blocks two sample plans:** `docs/plan/sample/07-towers.md`, whose milestone
 2 _is_ the editor dogfood pass and whose exit criterion is "map authored 100% in
-the editor, zero hand-edited scene text" (`apps/towers` exists; that milestone
-does not); and `docs/plan/sample/08-arena.md`, which wants an editor-built map
-and has no app directory. `08-editor.md` records this, and names the five sample
-plans with no app directory — arena, mirrors, meadow, mane and relief
-(re-verified 2026-09-25).
+the editor, zero hand-edited scene text" (met 2026-10-04 by that pass); and
+`docs/plan/sample/08-arena.md`, which wants an editor-built map and has no app
+directory. `08-editor.md` records this, and names the five sample plans with no
+app directory — arena, mirrors, meadow, mane and relief (re-verified
+2026-09-25).
 
 **Its 2026-08-09 shell corrections were re-verified twice and the conclusion was
 wrong both times; corrected 2026-09-02.** Each cited fact is about the
@@ -13183,15 +13183,54 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   - **Coverage gap**: rename and field copy/paste have never been looked at on a
     device — the tests type and click through the headless shell and the null
     backend.
-- **The dogfood pass**, which is towers' milestone 2. Towers' map is a `.scn/`
-  directory the editor opens since 2026-09-30
-  (`crcbl_towers::register_components` in
-  `apps/editor/src/scene.rs::vocabulary`) and plays since 2026-10-01, so what is
-  left is authoring the field in the editor, playing it there, and committing
-  what it saves. Towers' _simulation_ still lives in `Stage` rather than ECS
-  systems; the 2026-09-16 decision that games keep editable state in ECS systems
-  applies to what an editor should place that moves, and nothing in towers' map
-  does.
+- **The dogfood pass landed 2026-10-04** (`08-editor.md`'s _The dogfood pass_),
+  meeting towers' milestone 2: `app::tests::towers_field` authors the whole
+  field from empty through the editor's entry points, saves it with the editor's
+  save-as, and holds the result byte-identical to
+  `apps/towers/assets/scenes/field.scn/`, which then loads and holds the first
+  wave. **Decided 2026-10-04 by the owner**: a scripted, test-driven authoring
+  counts as "authored in the editor" when every edit goes through the editor's
+  own entry points (panel and keyboard input through the shell, the asset
+  browser and outliner, the inspector rows, the document command path the UI
+  reaches) and the scene files are written by the editor's save; scene text or
+  RON written by hand does not. The reason: reproducible evidence, and a shipped
+  field that stays byte-identical so towers' game cannot move. The pass fixed
+  three gaps (an entity of a game's own component could not be made, the
+  environment could not be edited, a vector row's last field was cut off). What
+  it found and left, each with what it takes:
+  - **A drag-value takes no typed number.** `Ui::drag_value` moves by `speed`
+    per pixel or `step` per engaged arrow, unsnapped, so whether a drag lands on
+    the number a person means depends on the pixel it ends on. The pass entered
+    every number by a field paste (Ctrl+V over the field), which reads text
+    exactly. A typed entry is `crcbl-ui`'s widget work: a text mode on the
+    drag-value (entered on a double-click or accept, committed on accept,
+    cancelled on back) parsing through the leaf's kind.
+  - **An emptied system cannot be unlisted from the UI.**
+    `EditCommand::UnlistSystem` exists and is undoable, but no button reaches
+    it, so a system whose last entity was deleted or detached stays in the
+    manifest and saves an empty chunk. It would take a remove item on a system
+    row's context menu in the outliner (the rows have no menu today), refused
+    while the system holds an entity (`EditError::Populated`).
+  - **A new entity starts at its component's `Default`** — towers' waypoint and
+    plot at the origin — not where the view looks, so every one is moved after
+    it is added. Placing it at the view's ground point needs a way to write a
+    component's placement, which `crcbl::registry::Placement` only reads; one
+    written as `position` by convention would be a guess about every game's
+    field names.
+  - **The scene pane is taller than the default layout's inspector**, so the
+    environment's rows sit under the add list and are scrolled to; a block's
+    inspector scrolls too since its vector rows wrap. A wider side column or a
+    collapsible environment section would each change the default layout or add
+    state; neither was asked for.
+  - **An inspector text field's text is not selected when it is engaged**, so
+    retyping a duplicated plot's label takes Ctrl+A first — the rename input's
+    note above, for the same reason.
+  - **Coverage gaps**: the pass is headless on the null backend, never seen on a
+    device; the authored field is played by towers' `Game`, not the editor's
+    play mode (which plays the committed field, the same bytes). Towers'
+    _simulation_ still lives in `Stage` rather than ECS systems; the 2026-09-16
+    decision that games keep editable state in ECS systems applies to what an
+    editor should place that moves, and nothing in towers' map does.
 - **A new scene and save-as landed 2026-10-03** (`08-editor.md`'s _A scene from
   empty and save-as_), closing the first exit criterion headlessly. What they
   leave, each with what it takes:
@@ -16113,23 +16152,19 @@ arc-length reparameterisation, so `point_at(s)` stays a constant-speed reading.
 **What it blocks:** nothing today; it is a fidelity gap, and every consumer of
 it would be sample code.
 
-**Two links are unchanged and neither is this sample's to clear.**
+**One link is unchanged, and it is not this sample's to clear.** (Milestone 2,
+the map authored in the editor, was met 2026-10-04 by `08-editor.md`'s dogfood
+pass.)
 
-1. **Milestone 2 waits on the dogfood pass.** The map is
-   `apps/towers/assets/scenes/field.scn/` and `apps/editor` opens it
-   (2026-09-30), but the committed field is the milestone 1 table written out by
-   `Scene::save`, not a map authored in the editor — so the exit criterion "map
-   authored 100% in the editor, zero hand-edited scene text" is not met until
-   someone authors it there. `docs/plan/08-editor.md` owns that pass.
-2. **Milestone 3's LAN half is built; its exit criterion is not met.** Towers
-   plays co-op over UDP since 2026-10-01 — see _What towers' LAN co-op shipped
-   without_ below — but the criterion is a 4-player session through all ten
-   waves on a **dedicated headless server** found through a **lobby browser**,
-   recorded, and neither of those two exists. The milestone's "browser client"
-   half is the wasm client into a native server, which the LAN rule in
-   `docs/notes/simulation.md` rules out (a browser cannot reach a LAN server
-   from an HTTPS page); the plan's exit criteria already say all clients are
-   native, and the milestone line has not been reconciled with them.
+- **Milestone 3's LAN half is built; its exit criterion is not met.** Towers
+  plays co-op over UDP since 2026-10-01 — see _What towers' LAN co-op shipped
+  without_ below — but the criterion is a 4-player session through all ten waves
+  on a **dedicated headless server** found through a **lobby browser**,
+  recorded, and neither of those two exists. The milestone's "browser client"
+  half is the wasm client into a native server, which the LAN rule in
+  `docs/notes/simulation.md` rules out (a browser cannot reach a LAN server from
+  an HTTPS page); the plan's exit criteria already say all clients are native,
+  and the milestone line has not been reconciled with them.
 
 **Rules owed rather than exempted, stated so the next slice does not read them
 as decisions:** rule 11 is half met — the build menu's icons are `.crpix`, but

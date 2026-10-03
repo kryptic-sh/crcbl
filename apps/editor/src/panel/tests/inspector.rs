@@ -3,6 +3,8 @@
 
 use super::*;
 
+use crcbl::reflect::Value;
+
 use crate::command::EditCommand;
 use crate::document::systems_tests::{SUN, two_systems};
 use crate::scene::BLOCKS;
@@ -123,23 +125,20 @@ fn a_field_in_a_section_belongs_to_that_sections_system() {
     let widget = ui.child_keys(sun_rows[0])[1];
     let at = page.centre(widget);
     page.frame(PointerInput::hovering(at), 0.0);
-    let target = page
-        .panels
-        .field_target()
-        .expect("a field under the pointer")
-        .clone();
-    assert_eq!(target.system, SUN);
-    assert_eq!(target.entity, BOTH);
+    let Some(FieldTarget::Component {
+        entity,
+        system,
+        path,
+    }) = page.panels.field_target().cloned()
+    else {
+        panic!("no component's field under the pointer");
+    };
+    assert_eq!(system, SUN);
+    assert_eq!(entity, BOTH);
 
-    let before = page
-        .document
-        .read(BOTH, SUN, &target.path)
-        .expect("a sun leaf");
+    let before = page.document.read(BOTH, SUN, &path).expect("a sun leaf");
     page.drag(at, Vec2::new(40.0, 0.0));
-    let after = page
-        .document
-        .read(BOTH, SUN, &target.path)
-        .expect("a sun leaf");
+    let after = page.document.read(BOTH, SUN, &path).expect("a sun leaf");
     assert_ne!(after, before, "the drag did not reach the sun");
     let EditCommand::SetProperty { system, .. } = page
         .document
@@ -199,4 +198,40 @@ fn the_add_list_heads_each_group_with_the_scenes_systems_first() {
         above = lowest;
     }
     assert!(drawn.next().is_none(), "a button under no heading");
+}
+
+/// **Every axis of a vector row lies inside the inspector's pane**, at the
+/// default layout's width and with numbers as wide as towers' field holds,
+/// so each one can be clicked. The third was laid out past the pane's edge,
+/// where a click lands in the viewport, until a row that does not fit wraps.
+#[test]
+fn every_axis_of_a_wide_vector_row_lies_inside_the_inspector() {
+    let mut page = Page::built_in();
+    let id = SceneEntityId(3);
+    for (axis, value) in [(0, -14.0), (1, 32.0), (2, -10.0)] {
+        page.document
+            .apply(EditCommand::SetProperty {
+                entity: id,
+                system: BLOCKS.to_owned(),
+                path: format!("position.{axis}"),
+                value: Value::Float(value),
+            })
+            .expect("a block has a position");
+    }
+    page.document.select(Some(id));
+    page.idle();
+    page.idle();
+    let pane = page.panels.props_key().expect("the inspector was built");
+    let (min, max) = page.panels.ui().rect(pane).expect("laid out");
+    for axis in 0..3 {
+        let (from, to) = page
+            .panels
+            .ui()
+            .rect(page.axis_field(0, axis))
+            .expect("laid out");
+        assert!(
+            from.x >= min.x && to.x <= max.x && from.y >= min.y && to.y <= max.y,
+            "axis {axis}'s field {from}..{to} is outside the inspector {min}..{max}",
+        );
+    }
 }

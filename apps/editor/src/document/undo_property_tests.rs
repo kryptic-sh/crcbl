@@ -86,9 +86,10 @@ struct Tally {
 
 /// The facts [`Tally::reached`] must hold — each a shape of edit whose undo
 /// has its own way to go wrong.
-const MUST_REACH: [&str; 16] = [
+const MUST_REACH: [&str; 18] = [
     "a gesture of several writes",
     "a drag whose leaves change part-way",
+    "an environment drag of several writes",
     "a gesture that ended where it began",
     "a gesture back to its start under redo",
     "a nudge of two entities",
@@ -97,6 +98,7 @@ const MUST_REACH: [&str; 16] = [
     "a delete of two entities",
     "a duplicate of two entities",
     "a drop listing meshes",
+    "an add listing its system",
     "an attach listing its system",
     "an unlisting from the manifest's middle",
     "a state holding a name",
@@ -150,7 +152,10 @@ fn walk(steps: &[Op], tally: &RefCell<Tally>) -> TestCaseResult {
         // stays: its first write held it aside and the entry's going put it
         // back, so the model keeps every state above, which `check` holds to
         // the log's length and the walk up at the end to each state.
-        let gesture = matches!(op, Op::Drag { .. } | Op::FieldDrag { .. });
+        let gesture = matches!(
+            op,
+            Op::Drag { .. } | Op::FieldDrag { .. } | Op::EnvironmentDrag { .. }
+        );
         if gesture && outcome == Outcome::Recorded && document.log().position() == history.position
         {
             outcome = Outcome::Unchanged;
@@ -333,6 +338,7 @@ const fn variant(command: &EditCommand) -> &'static str {
     match command {
         EditCommand::SetProperty { .. } => "SetProperty",
         EditCommand::SetVariant { .. } => "SetVariant",
+        EditCommand::SetEnvironment { .. } => "SetEnvironment",
         EditCommand::Spawn { .. } => "Spawn",
         EditCommand::Delete { .. } => "Delete",
         EditCommand::Attach { .. } => "Attach",
@@ -345,9 +351,10 @@ const fn variant(command: &EditCommand) -> &'static str {
 }
 
 /// Every name [`variant`] answers.
-const EVERY_COMMAND: [&str; 10] = [
+const EVERY_COMMAND: [&str; 11] = [
     "SetProperty",
     "SetVariant",
+    "SetEnvironment",
     "Spawn",
     "Delete",
     "Attach",

@@ -38,6 +38,7 @@
 //!   0x08  unlist system: system text
 //!   0x09  rename: entity u32, name (0 = none, 1 = text)
 //!   0x0A  batch: count u32, then that many commands
+//!   0x0B  set environment: path text, value
 //! value, tag byte first:
 //!   0 = bool (one byte, 0 or 1), 1 = int i64, 2 = uint u64,
 //!   3 = float (f64 bits), 4 = text
@@ -77,6 +78,7 @@ const LIST_SYSTEM: u8 = 0x07;
 const UNLIST_SYSTEM: u8 = 0x08;
 const RENAME: u8 = 0x09;
 const BATCH: u8 = 0x0A;
+const SET_ENVIRONMENT: u8 = 0x0B;
 
 const VALUE_BOOL: u8 = 0;
 const VALUE_INT: u8 = 1;
@@ -257,6 +259,11 @@ fn put_command(
             put_value(out, value)?;
         }
         EditCommand::SetVariant { .. } => return Err(OpEncodeError::SetVariant),
+        EditCommand::SetEnvironment { path, value } => {
+            out.push(SET_ENVIRONMENT);
+            put_text(out, "path", path)?;
+            put_value(out, value)?;
+        }
         EditCommand::Spawn { entity, rows, name } => {
             out.push(SPAWN);
             put_entity(out, *entity);
@@ -516,6 +523,10 @@ impl<'a> Reader<'a> {
             RENAME => EditCommand::Rename {
                 entity: self.entity()?,
                 name: self.name()?,
+            },
+            SET_ENVIRONMENT => EditCommand::SetEnvironment {
+                path: self.text()?,
+                value: self.value()?,
             },
             BATCH => {
                 if depth >= MAX_BATCH_DEPTH {

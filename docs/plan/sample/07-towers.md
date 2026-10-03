@@ -83,7 +83,9 @@ above is a requirement rather than an aspiration.
    plots are `apps/towers/assets/scenes/field.scn/`, which the game reads and
    the editor opens, **and since 2026-10-01 the editor plays it** (F5) — and
    since 2026-10-03 builds towers on it in play, through the game's own
-   commands; authoring the real map in the editor is what is left.
+   commands. **Met 2026-10-04**: the editor's dogfood pass authors the whole
+   field from an empty scene, and what it saves is the committed field byte for
+   byte (`docs/plan/08-editor.md`'s _The dogfood pass_).
 3. Co-op over real transport + browser client (stage 10 exit demo: wasm client
    into native dedicated server). **Its LAN half is built (2026-10-01)**:
    `--host`, `--serve`, `--join` and `--browse` over `crcbl::lan` — see "Where
@@ -226,19 +228,21 @@ anywhere yet.
   `overlap_sphere` are what the sample runs on, and `CharacterController` walks
   the field since slice 4 — the fourth camera to drive it, after
   `apps/puppet`'s, `apps/breach`'s and `apps/shard`'s.
-- **Milestone 2's map is in the editor's vocabulary; authoring it there is what
-  is left.** Since 2026-09-30 the path and the plots are
-  `apps/towers/assets/scenes/field.scn/`, `crcbl_towers::register_components`
-  names their two components, and `apps/editor/src/scene.rs::vocabulary`
-  registers them beside its own block, breakout's and puppet's — so the editor
-  opens the field, and a directory it saves is one `--scene` plays. The
-  committed field is still the milestone 1 table written out by the writer
-  rather than a map authored in the editor, so the exit criterion "map authored
-  100% in the editor" is not met yet: that is the dogfood pass
-  (`docs/plan/08-editor.md`). The simulation itself still lives in a `Stage`
-  with no ECS system, which is fine for a map — the scene is read into a `Map`
-  and the stage plays on that — and would not be for anything the editor should
-  place that moves.
+- **Milestone 2 is met (2026-10-04): the map is authored in the editor.** Since
+  2026-09-30 the path and the plots are `apps/towers/assets/scenes/field.scn/`,
+  `crcbl_towers::register_components` names their two components, and
+  `apps/editor/src/scene.rs::vocabulary` registers them beside its own block,
+  breakout's and puppet's — so the editor opens the field, and a directory it
+  saves is one `--scene` plays. The editor's dogfood pass
+  (`docs/plan/08-editor.md`) authors the whole field from an empty scene through
+  the editor's own entry points and saves it with the editor's save, and the
+  result is the committed field byte for byte — so the files towers ships are
+  the ones the editor writes, and no game number moved. The owner decided that
+  day that this scripted, test-driven authoring is what "authored in the editor"
+  means; `08-editor.md` records the decision and the test. The simulation itself
+  still lives in a `Stage` with no ECS system, which is fine for a map — the
+  scene is read into a `Map` and the stage plays on that — and would not be for
+  anything the editor should place that moves.
 - **A click or a tap on a plot opens a build menu there (slice 3b part A,
   2026-10-04).** `crate::build_menu` picks the plot under the pointer with a ray
   through the pixel against each plot's pad and tower, outlines it, and on a
@@ -432,7 +436,11 @@ anywhere yet.
   `docs/notes/simulation.md`).
 - The **web build ships and is single player**, like every other sample's — same
   game over `InMemoryTransport`, so the wasm target cannot rot.
-- Map authored 100% in the editor, zero hand-edited scene text.
+- Map authored 100% in the editor, zero hand-edited scene text. **Met
+  2026-10-04** by the editor's dogfood pass, under the owner's decision of that
+  day: every edit through the editor's own entry points, the files written by
+  its save, and the result byte-identical to the committed field
+  (`app::tests::towers_field` in `apps/editor`).
 - New tower type addable in one sitting by one dev following the sample's own
   docs — extensibility proof.
 - It's actually fun for a session with friends. Flagship carries the bar the

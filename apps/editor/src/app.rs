@@ -123,7 +123,7 @@ use crate::document::{Document, EditError, Hit, PlayState, RecoveryCopy};
 use crate::gizmo;
 use crate::keys::Action;
 use crate::layout;
-use crate::panel::{PanelInput, Panels, Tone, VIEWPORT_TEXTURE};
+use crate::panel::{FieldTarget, PanelInput, Panels, Tone, VIEWPORT_TEXTURE};
 
 mod files;
 mod instances;
@@ -658,6 +658,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         asked.extend(panels.toolbar);
         asked.extend(panels.menu);
         let accepted = panels.spawn;
+        let added = panels.add;
         self.draw_gizmo(pointer.pos);
 
         let requests = self.panels.take_clipboard_requests();
@@ -705,6 +706,9 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.tick_autosave();
         if let Some(asset) = accepted {
             self.place_at_centre(&asset);
+        }
+        if let Some(system) = added {
+            self.add_entity(&system);
         }
         if let Some((target, content)) = self.paste.take() {
             self.paste_content(&target, &content);
@@ -1239,6 +1243,22 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
     }
 
+    /// Puts a new entity in `system` at its component's `Default` and selects
+    /// it, saying on the status line what was added — or why nothing was.
+    fn add_entity(&mut self, system: &str) {
+        match self.document.add_entity(system) {
+            Ok(id) => {
+                self.document.select(Some(id));
+                self.panels
+                    .set_status(format!("Added #{id} in `{system}`"), Tone::Info);
+            }
+            Err(error) => {
+                crcbl::log::warn!("editor: {error}");
+                self.panels.set_status(error.to_string(), Tone::Warning);
+            }
+        }
+    }
+
     /// Selects whatever the left button landed on, alone — or, with Ctrl
     /// held, adds it to the selection or takes it out.
     ///
@@ -1340,11 +1360,8 @@ impl<S: Shell + ?Sized> Editor<S> {
                 let target = self
                     .panels
                     .field_target()
-                    .map_or(PasteTarget::Entities, |field| PasteTarget::Field {
-                        entity: field.entity,
-                        system: field.system.clone(),
-                        path: field.path.clone(),
-                    });
+                    .cloned()
+                    .map_or(PasteTarget::Entities, PasteTarget::Field);
                 if let Err(error) = self.paste.ask(self.shell.as_mut(), self.window, target) {
                     crcbl::log::warn!("editor: the clipboard refused the paste — {error}");
                 }
@@ -1483,12 +1500,17 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// system that wants a recent input event first.
     fn copy(&mut self) -> Result<(), EditError> {
         if let Some(field) = self.panels.field_target().cloned() {
-            let text = self
-                .document
-                .copy_field(field.entity, &field.system, &field.path)?;
+            let text = match &field {
+                FieldTarget::Component {
+                    entity,
+                    system,
+                    path,
+                } => self.document.copy_field(*entity, system, path)?,
+                FieldTarget::Environment { path } => self.document.copy_environment_field(path)?,
+            };
             self.offer(&[ClipboardOffer::text(&text)]);
             self.panels
-                .set_status(format!("Copied `{}`: {text}", field.path), Tone::Info);
+                .set_status(format!("Copied `{}`: {text}", field.path()), Tone::Info);
             return Ok(());
         }
         let ids = self.document.selection().to_vec();
@@ -1524,11 +1546,14 @@ impl<S: Shell + ?Sized> Editor<S> {
                     self.document.set_selection(pasted);
                 }
             }),
-            PasteTarget::Field {
+            PasteTarget::Field(FieldTarget::Component {
                 entity,
                 system,
                 path,
-            } => self.document.paste_field(*entity, system, path, text),
+            }) => self.document.paste_field(*entity, system, path, text),
+            PasteTarget::Field(FieldTarget::Environment { path }) => {
+                self.document.paste_environment_field(path, text)
+            }
         };
         if let Err(error) = outcome {
             crcbl::log::warn!("editor: {error}");

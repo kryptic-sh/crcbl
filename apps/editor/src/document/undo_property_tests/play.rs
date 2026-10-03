@@ -86,6 +86,32 @@ pub(super) fn play(document: &mut Document, op: &Op, reached: &mut Reached) -> O
             }
             outcome
         }
+        Op::EnvironmentWrite {
+            leaf,
+            value,
+            through,
+        } => {
+            let (path, kind) = environment_leaf(document, leaf);
+            let value = value.of(kind);
+            match through {
+                Through::Command => {
+                    accepted(document.apply(EditCommand::SetEnvironment { path, value }))
+                }
+                Through::Inspector => inspect_environment(document, &path, &[value]),
+                Through::FieldPaste => {
+                    accepted(document.paste_environment_field(&path, &text_of(&value)))
+                }
+            }
+        }
+        Op::EnvironmentDrag { leaf, frames } => {
+            let (path, kind) = environment_leaf(document, leaf);
+            let values: Vec<Value> = frames.iter().map(|frame| frame.of(kind)).collect();
+            let outcome = inspect_environment(document, &path, &values);
+            if outcome == Outcome::Recorded {
+                reached.push("an environment drag of several writes");
+            }
+            outcome
+        }
         Op::Nudge {
             selection,
             axis,
@@ -166,6 +192,18 @@ pub(super) fn play(document: &mut Document, op: &Op, reached: &mut Reached) -> O
             };
             if !listed {
                 reached.push("a drop listing meshes");
+            }
+            document.select(Some(id));
+            Outcome::Recorded
+        }
+        Op::Add { system } => {
+            let system = registered(document, system);
+            let listed = document.scene.systems().contains(&system);
+            let Ok(id) = document.add_entity(&system) else {
+                return Outcome::Refused;
+            };
+            if !listed {
+                reached.push("an add listing its system");
             }
             document.select(Some(id));
             Outcome::Recorded
@@ -714,6 +752,42 @@ fn inspect(
         recorded |= document
             .record_edits(target, system, &[edit], &[], gesture)
             .is_ok();
+    }
+    if recorded {
+        Outcome::Recorded
+    } else {
+        Outcome::Refused
+    }
+}
+
+/// The leaf of the scene's environment `draw` names, with its kind.
+fn environment_leaf(document: &Document, draw: &Index) -> (String, ValueKind) {
+    let mut leaves = Vec::new();
+    leaves_of(&document.environment(), "", &mut leaves);
+    draw.get(&leaves).clone()
+}
+
+/// The inspector's half of an environment write: each value written into a
+/// copy of the environment, read back, and reported to
+/// [`Document::record_environment`] — under one gesture when there are
+/// several, as a drag reports one edit a frame. A value the leaf refuses is
+/// no edit to report.
+fn inspect_environment(document: &mut Document, path: &str, values: &[Value]) -> Outcome {
+    let gesture = (values.len() > 1).then(|| document.begin_gesture());
+    let mut recorded = false;
+    for value in values {
+        let mut environment = document.environment();
+        let before = get_path(&environment, path).expect("a leaf of the environment");
+        if set_path(&mut environment, path, value).is_err() {
+            continue;
+        }
+        let after = get_path(&environment, path).expect("a leaf just written");
+        let edit = FieldEdit {
+            path: path.to_owned(),
+            before,
+            after,
+        };
+        recorded |= document.record_environment(&[edit], gesture).is_ok();
     }
     if recorded {
         Outcome::Recorded

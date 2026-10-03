@@ -48,6 +48,18 @@ pub(super) enum Op {
         leaf: Index,
         frames: Vec<Draw>,
     },
+    /// One leaf of the scene's environment written `value`, `through` one of
+    /// the paths a single write takes — the inspector's rows while nothing is
+    /// selected.
+    EnvironmentWrite {
+        leaf: Index,
+        value: Draw,
+        through: Through,
+    },
+    /// One leaf of the scene's environment dragged in the inspector over
+    /// several frames, one `Document::record_environment` a frame under one
+    /// gesture.
+    EnvironmentDrag { leaf: Index, frames: Vec<Draw> },
     /// An arrow key: every selected entity moved `delta` along `axis` as one
     /// entry, as `App::nudge` builds it.
     Nudge {
@@ -94,6 +106,9 @@ pub(super) enum Op {
     Paste { selection: Pair, garbled: bool },
     /// A drop from the asset browser: `Document::spawn_mesh`.
     Drop { asset: Index, x: f64, z: f64 },
+    /// The inspector's add-an-entity button, with nothing selected:
+    /// `Document::add_entity` in any registered system.
+    Add { system: Index },
     /// The inspector's add button: `Document::attach` of any registered
     /// system.
     Attach { target: Index, system: Index },
@@ -123,12 +138,16 @@ pub(super) enum Op {
 /// How a [`Op::Write`] reaches the document.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Through {
-    /// An `EditCommand::SetProperty` handed to `Document::apply`.
+    /// An `EditCommand::SetProperty` handed to `Document::apply` — or an
+    /// `EditCommand::SetEnvironment`, for the environment.
     Command,
     /// The inspector: the leaf written in place and the edit reported to
-    /// `Document::record_edits`, which rewinds it and applies the command.
+    /// `Document::record_edits`, which rewinds it and applies the command —
+    /// or written into a copy of the environment and reported to
+    /// `Document::record_environment`.
     Inspector,
-    /// A field paste: the value's ron text to `Document::paste_field`.
+    /// A field paste: the value's ron text to `Document::paste_field`, or to
+    /// `Document::paste_environment_field`.
     FieldPaste,
 }
 
@@ -187,6 +206,16 @@ pub(super) fn op() -> impl Strategy<Value = Op> {
                 frames,
             })
             .boxed(),
+        2 => (any::<Index>(), draw(), through())
+            .prop_map(|(leaf, value, through)| Op::EnvironmentWrite {
+                leaf,
+                value,
+                through,
+            })
+            .boxed(),
+        1 => (any::<Index>(), proptest::collection::vec(draw(), 2..=4))
+            .prop_map(|(leaf, frames)| Op::EnvironmentDrag { leaf, frames })
+            .boxed(),
         2 => (pair(), any::<Index>(), -4.0..4.0f64)
             .prop_map(|(selection, axis, delta)| Op::Nudge {
                 selection,
@@ -238,6 +267,7 @@ pub(super) fn op() -> impl Strategy<Value = Op> {
         )
             .prop_map(|(asset, x, z)| Op::Drop { asset, x, z })
             .boxed(),
+        1 => any::<Index>().prop_map(|system| Op::Add { system }).boxed(),
         2 => (any::<Index>(), any::<Index>())
             .prop_map(|(target, system)| Op::Attach { target, system })
             .boxed(),
@@ -319,6 +349,19 @@ impl Op {
                 ..
             } => "field paste",
             Self::FieldDrag { .. } => "inspector drag",
+            Self::EnvironmentWrite {
+                through: Through::Command,
+                ..
+            } => "environment set",
+            Self::EnvironmentWrite {
+                through: Through::Inspector,
+                ..
+            } => "environment inspector edit",
+            Self::EnvironmentWrite {
+                through: Through::FieldPaste,
+                ..
+            } => "environment paste",
+            Self::EnvironmentDrag { .. } => "environment drag",
             Self::Nudge { .. } => "nudge",
             Self::Drag { .. } => "translate drag",
             Self::Turn { .. } => "turn",
@@ -334,6 +377,7 @@ impl Op {
             Self::Duplicate { .. } => "duplicate",
             Self::Paste { .. } => "paste",
             Self::Drop { .. } => "drop",
+            Self::Add { .. } => "add an entity",
             Self::Attach { .. } => "attach",
             Self::Detach { .. } => "detach",
             Self::List { .. } => "list a system",
@@ -346,11 +390,15 @@ impl Op {
 }
 
 /// Every step's [`Op::name`] — what the test asserts some history accepted.
-pub(super) const EVERY_OP: [&str; 22] = [
+pub(super) const EVERY_OP: [&str; 27] = [
     "property set",
     "inspector edit",
     "field paste",
     "inspector drag",
+    "environment set",
+    "environment inspector edit",
+    "environment paste",
+    "environment drag",
     "nudge",
     "translate drag",
     "turn",
@@ -362,6 +410,7 @@ pub(super) const EVERY_OP: [&str; 22] = [
     "duplicate",
     "paste",
     "drop",
+    "add an entity",
     "attach",
     "detach",
     "list a system",

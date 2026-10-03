@@ -16,7 +16,9 @@ mod open;
 mod play;
 mod play_strip;
 mod recovery;
+mod scene_inspector;
 mod selection;
+mod towers_field;
 mod unsaved;
 
 fn options(frames: u64) -> Options {
