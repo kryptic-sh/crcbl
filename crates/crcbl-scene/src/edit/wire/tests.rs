@@ -83,6 +83,14 @@ fn every_command() -> Vec<EditCommand> {
             entity: SceneEntityId(3),
             name: None,
         },
+        EditCommand::SetEnvironment {
+            path: "camera.1".to_owned(),
+            value: Value::Float(32.0),
+        },
+        EditCommand::SetEnvironment {
+            path: String::new(),
+            value: Value::Text(String::new()),
+        },
     ];
     let nested = EditCommand::Batch(vec![
         leaves[7].clone(),
@@ -142,6 +150,20 @@ fn a_delete_is_spelled_as_the_module_docs_say() {
     assert_eq!(bytes, [WIRE_VERSION, OP_APPLY, DELETE, 4, 3, 2, 1]);
     assert_eq!(encoded(&EditOp::Undo), [WIRE_VERSION, OP_UNDO]);
     assert_eq!(encoded(&EditOp::Redo), [WIRE_VERSION, OP_REDO]);
+}
+
+#[test]
+fn an_environment_write_is_spelled_as_the_module_docs_say() {
+    let bytes = encoded(&EditOp::Apply(EditCommand::SetEnvironment {
+        path: "ambient.0".to_owned(),
+        value: Value::Float(0.17),
+    }));
+    let mut spelled = vec![WIRE_VERSION, OP_APPLY, SET_ENVIRONMENT];
+    spelled.extend_from_slice(&9_u32.to_le_bytes());
+    spelled.extend_from_slice(b"ambient.0");
+    spelled.push(VALUE_FLOAT);
+    spelled.extend_from_slice(&0.17_f64.to_bits().to_le_bytes());
+    assert_eq!(bytes, spelled);
 }
 
 #[test]

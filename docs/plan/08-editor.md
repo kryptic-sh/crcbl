@@ -1521,7 +1521,9 @@ log is the sync point); a host serving no scene refuses edits as not editable.
 _Scene edits over the transport_ entry what the slice leaves — the GUI is not
 yet a client of its own server, a variant switch does not travel, a client
 joining late has no way to fetch the scene, and the author is not in the undo
-log.
+log. The dogfood pass's environment write, `EditCommand::SetEnvironment`,
+travels as command kind `0x0B` (a path and a value, as a property's) and the
+server applies it as it applies any command.
 
 Everything else below stands unchanged: there is one schedule per `World`, there
 is no snapshot of a `World` (play restores from the scene's text, slice 8), the

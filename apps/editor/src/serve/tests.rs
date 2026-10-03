@@ -115,7 +115,7 @@ fn row(system: &str) -> String {
 }
 
 /// One command of every kind that travels, in an order each can apply in:
-/// a property, a name, a spawn, a listing, an attach and a detach through
+/// a property, the environment's camera height, a name, a spawn, a listing, an attach and a detach through
 /// it, the unlisting, a delete, and a batch.
 fn every_command() -> Vec<EditCommand> {
     let new = SceneEntityId(10);
@@ -125,6 +125,10 @@ fn every_command() -> Vec<EditCommand> {
             system: BLOCKS.to_owned(),
             path: "position.1".to_owned(),
             value: Value::Float(2.5),
+        },
+        EditCommand::SetEnvironment {
+            path: "camera.1".to_owned(),
+            value: Value::Float(32.0),
         },
         EditCommand::Rename {
             entity: SceneEntityId(2),
@@ -187,7 +191,7 @@ fn every_command_kind_applies_exactly_as_the_editors_document_applies_it() {
             "after {command:?}"
         );
     }
-    assert_eq!(rig.server.revision(), 9);
+    assert_eq!(rig.server.revision(), 10);
 }
 
 /// **Another client sees each change**: the notices reach it in revision
@@ -214,7 +218,7 @@ fn another_client_mirrors_the_scene_from_the_notices() {
             .iter()
             .map(|notice| notice.revision)
             .collect::<Vec<_>>(),
-        (1..=10).collect::<Vec<_>>()
+        (1..=11).collect::<Vec<_>>()
     );
     for notice in &notices {
         assert_eq!(notice.author, author.get());
@@ -297,7 +301,8 @@ fn refusal(rig: &mut Rig, op: &EditOp) -> EditRefusal {
 
 /// **Each refusal carries its code**: a stale entity, a field the component
 /// does not have, a value its rule refuses, a value of the wrong kind, a
-/// system the scene does not list, a spawn over an id in use — and nobody
+/// system the scene does not list, a spawn over an id in use, an environment
+/// path naming no leaf and a number no leaf holds — and nobody
 /// hears of a refused edit.
 #[test]
 fn each_refusal_carries_its_reason_code_and_changes_nothing() {
@@ -345,6 +350,20 @@ fn each_refusal_carries_its_reason_code_and_changes_nothing() {
                 name: None,
             }),
             EditRefusal::CONFLICT,
+        ),
+        (
+            EditOp::Apply(EditCommand::SetEnvironment {
+                path: "fog".to_owned(),
+                value: Value::Float(1.0),
+            }),
+            EditRefusal::UNKNOWN_PATH,
+        ),
+        (
+            EditOp::Apply(EditCommand::SetEnvironment {
+                path: "ambient.0".to_owned(),
+                value: Value::Float(f64::NAN),
+            }),
+            EditRefusal::INVALID,
         ),
     ];
     for (op, code) in cases {

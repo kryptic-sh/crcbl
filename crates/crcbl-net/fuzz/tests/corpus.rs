@@ -184,11 +184,11 @@ fn named_save_seeds_reach_their_intended_paths() {
 
 /// The edit seeds reach each message's decoder, one per message an edit
 /// travels as: a request, both outcomes of a reply, a notice, and the
-/// operation inside them — a whole one, one whose batches nest past the
-/// limit, and a request claiming an operation longer than any. Each whole
-/// seed is also what its encoder writes, so a change to a layout shows up
-/// here as a seed to regenerate rather than as a corpus that stopped being
-/// edits.
+/// operation inside them — a whole one, an environment write, one whose
+/// batches nest past the limit, and a request claiming an operation longer
+/// than any. Each whole seed is also what its encoder writes, so a change to a
+/// layout shows up here as a seed to regenerate rather than as a corpus that
+/// stopped being edits.
 #[test]
 fn named_edit_seeds_reach_their_intended_paths() {
     use crcbl_net::{
@@ -264,6 +264,14 @@ fn named_edit_seeds_reach_their_intended_paths() {
             value: Value::Float(2.5),
         },
     ]));
+    assert_eq!(decode_op(seed).expect("a whole op"), op);
+    assert_eq!(encode_op(&op).expect("it travels"), seed);
+
+    let seed = include_bytes!("../corpus/decoder/edit-op-environment");
+    let op = EditOp::Apply(EditCommand::SetEnvironment {
+        path: "ambient.0".to_owned(),
+        value: Value::Float(0.17),
+    });
     assert_eq!(decode_op(seed).expect("a whole op"), op);
     assert_eq!(encode_op(&op).expect("it travels"), seed);
 

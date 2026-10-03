@@ -673,8 +673,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stable numbers: malformed, unsupported version, not editable (no scene, or the
   scene is playing), unknown entity, unknown system, unknown path, invalid,
   conflict, nothing to undo, nothing to redo and failed. A variant switch does
-  not travel yet (`OpEncodeError::SetVariant`). The decoder fuzz target reads
-  every new message and the operation inside them, with a named seed for each.
+  not travel yet (`OpEncodeError::SetVariant`); an environment write
+  (`EditCommand::SetEnvironment`) does, as command kind `0x0B`. The decoder fuzz
+  target reads every new message and the operation inside them, with a named
+  seed for each.
 
 - **Slide contacts for a lying body from `crcbl_phys::CharacterController`.**
   `move_lying_into(world, &body, motion, &mut contacts)` makes exactly the move
