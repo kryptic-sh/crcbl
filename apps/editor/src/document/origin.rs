@@ -102,6 +102,7 @@ impl Document {
         self.log = UndoLog::new();
         self.saved_at = Some(0);
         self.recovered = None;
+        self.recorded_origin = None;
         self.origin = None;
         self.owned.clear();
         // Moved rather than reset: a view that read the old scene at some
@@ -150,6 +151,7 @@ impl Document {
         }
         let moved = self.follow_asset_root(&dir);
         self.origin = Some(dir);
+        self.recorded_origin = None;
         Ok(moved)
     }
 

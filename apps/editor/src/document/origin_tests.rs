@@ -70,6 +70,27 @@ pub(crate) fn game() -> tempfile::TempDir {
     dir
 }
 
+/// A scene holding a mesh of an asset its game has and one of an asset
+/// it does not ([`props`](crate::document::mesh_tests::props)), saved
+/// into a game's folder and opened from there, so its asset root is the
+/// game's — handed back with the game, which must outlive it, and the
+/// scene's directory.
+pub(crate) fn props_in_a_game() -> (tempfile::TempDir, PathBuf, Document) {
+    let game = game();
+    let scene = game.path().join("levels").join("props.scn");
+    crate::document::mesh_tests::props()
+        .save_to(&scene)
+        .expect("a fresh directory");
+    let document =
+        Document::open_dir(&scene, crate::scene::vocabulary()).expect("what was written");
+    assert_eq!(
+        document.mesh_problems().len(),
+        1,
+        "the game's triangle was not read, so a copy cannot be told to read it"
+    );
+    (game, scene, document)
+}
+
 /// **A new scene holds nothing, lists no system, has no origin and is
 /// clean**, with nothing to undo — from a document that had all of them —
 /// and keeps the asset source it had.

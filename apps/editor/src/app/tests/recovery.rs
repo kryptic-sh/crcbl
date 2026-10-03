@@ -9,9 +9,11 @@ use std::collections::BTreeMap;
 
 use super::files::chord;
 use crate::app::recovery::{AUTOSAVE_KEY, AUTOSAVE_SECONDS, Autosave, OFFERED, now_millis};
-use crate::document::origin_tests::tree;
+use crate::document::origin_tests::{props_in_a_game, tree};
 use crate::document::play_tests::drifting_document;
-use crate::document::{EditError, IN_USE_SUFFIX, KEEP_NEWEST, MAX_AGE, list_copies, remove_copy};
+use crate::document::{
+    EditError, IN_USE_SUFFIX, KEEP_NEWEST, MAX_AGE, SIDECAR, list_copies, remove_copy,
+};
 use crate::scene::BLOCKS;
 
 /// A day, in milliseconds.
@@ -608,6 +610,73 @@ fn a_failed_save_as_keeps_the_recovered_copy() {
     super::files::type_and_enter(&mut editor, &scene.display().to_string());
     assert_eq!(editor.document().origin(), Some(scene.as_path()));
     assert!(!copy.exists(), "the copy outlived the save-as that landed");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A recovered scene offers where it lived**: the copy of a scene from a
+/// game's folder opens with the game's meshes, the status line names the
+/// old directory, and Ctrl+S opens the save-as line holding it — which a
+/// commit is still refused, the directory holding the scene's files.
+#[test]
+fn open_copy_offers_where_the_scene_lived() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (_game, scene, mut document) = props_in_a_game();
+    document
+        .write_recovery(base.path(), now_millis())
+        .expect("a fresh base");
+    let before = tree(&scene);
+    let mut editor = recovering(base.path(), 64);
+    editor.frame().expect("a frame");
+    let (rows, _) = editor.panels.recovery_buttons();
+    click_key(&mut editor, rows[0][0]);
+
+    assert_eq!(
+        editor.document().mesh_problems().len(),
+        1,
+        "the recovered scene's meshes are not the game's"
+    );
+    let (text, tone) = editor.panels.status();
+    assert!(text.contains("where it lived"), "{text}");
+    assert!(text.contains(&scene.display().to_string()), "{text}");
+    assert_eq!(tone, Tone::Info);
+
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyS);
+    let shown = scene.display().to_string();
+    assert_eq!(editor.panels.saving_as(), Some(shown.as_str()));
+    editor.frame().expect("a frame");
+    tap(&mut editor, KeyCode::Enter);
+    assert_eq!(editor.document().origin(), None, "saved over the old scene");
+    let (text, _) = editor.panels.status();
+    assert!(text.contains("does not overwrite"), "{text}");
+    assert_eq!(tree(&scene), before, "the old directory was touched");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A stale record is said, not trusted**: a copy whose sidecar names a
+/// directory gone since opens with nothing offered, and the status line
+/// warns what was passed over.
+#[test]
+fn open_copy_says_what_a_stale_record_held() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (copy, _) = copy_in(base.path(), now_millis(), 1.0);
+    let elsewhere = tempfile::tempdir().expect("a temporary directory");
+    let gone = elsewhere.path().join("gone.scn");
+    std::fs::write(copy.join(SIDECAR), format!("origin={}\n", gone.display())).expect("written");
+    let mut editor = recovering(base.path(), 64);
+    editor.frame().expect("a frame");
+    let (rows, _) = editor.panels.recovery_buttons();
+    click_key(&mut editor, rows[0][0]);
+
+    let (text, tone) = editor.panels.status();
+    assert!(text.contains("passed over"), "{text}");
+    assert_eq!(tone, Tone::Warning);
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyS);
+    assert_eq!(
+        editor.panels.saving_as(),
+        Some(""),
+        "a gone directory offered"
+    );
+    assert!(!gone.exists(), "the gone directory was made");
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 

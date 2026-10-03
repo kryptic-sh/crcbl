@@ -74,7 +74,9 @@ impl<S: Shell + ?Sized> Editor<S> {
     }
 
     /// Opens the path line for a save-as, holding the directory the document
-    /// came from if it came from one.
+    /// came from if it came from one — or, for a recovered scene, the one
+    /// its copy recorded it living in. Into that directory it is refused
+    /// like any other occupied one: the line only offers it.
     pub(super) fn begin_save_as(&mut self) -> Result<(), EditError> {
         let text = self.origin_text();
         self.panels.begin_save_as(&self.document, text)?;
@@ -97,11 +99,13 @@ impl<S: Shell + ?Sized> Editor<S> {
         Ok(())
     }
 
-    /// The directory the document came from, as the path line shows it, or
-    /// nothing for a document that came from none.
+    /// The directory the document came from, or else the one its recovery
+    /// copy recorded, as the path line shows it — or nothing for a document
+    /// with neither.
     fn origin_text(&self) -> String {
         self.document
             .origin()
+            .or_else(|| self.document.recorded_origin())
             .map(|origin| origin.display().to_string())
             .unwrap_or_default()
     }
@@ -158,15 +162,32 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.frame_scene();
         // The panels are new, so the offer is put back up if it stands.
         self.show_offer();
-        let opened = match self.document.origin() {
-            Some(dir) => format!("Opened {}", dir.display()),
+        let notes = self.document.take_recovery_notes();
+        let mut opened = match (self.document.origin(), self.document.recorded_origin()) {
+            (Some(dir), _) => format!("Opened {}", dir.display()),
             // Only a recovery copy is opened with no directory.
-            None => format!(
+            (None, None) => format!(
                 "Opened a recovery copy of `{}`: saving asks for a directory",
                 self.document.name()
             ),
+            (None, Some(lived)) => format!(
+                "Opened a recovery copy of `{}`: saving asks for a directory, starting from \
+                 `{}`, where it lived",
+                self.document.name(),
+                lived.display()
+            ),
         };
-        self.panels.set_status(opened, Tone::Info);
+        for note in &notes {
+            crcbl::log::warn!("editor: {note}");
+            opened.push_str("; ");
+            opened.push_str(note);
+        }
+        let tone = if notes.is_empty() {
+            Tone::Info
+        } else {
+            Tone::Warning
+        };
+        self.panels.set_status(opened, tone);
     }
 
     /// Saves the document into the directory `text` names and makes it the

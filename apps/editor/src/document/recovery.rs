@@ -22,20 +22,32 @@
 //! remove it once a save-as has put the scene somewhere of its own. Listing,
 //! pruning, removing copies and marking a live session's autosave in use is
 //! `copies`' — each by a path it checks is a copy, never by a pattern.
+//!
+//! **A copy remembers where its scene lived**: beside the scene's files it
+//! records the scene's directory and its asset root (`sidecar`'s module docs
+//! say how, and why nothing it names is trusted). Read back, a copy whose
+//! asset root is still a directory reads its meshes from there, and the
+//! scene's old directory is what a save-as offers first
+//! ([`Document::recorded_origin`]); a copy without the record, or with a
+//! stale one, reads its meshes from no asset root until a save-as gives it a
+//! directory, and says why ([`Document::take_recovery_notes`]).
 
 use std::path::{Path, PathBuf};
 
 use crcbl::registry::Registry;
 use crcbl::store::{NativeStorage, StorageSource};
 
+use super::origin::AssetRoot;
 use super::{Document, EditError};
 
 mod copies;
+mod sidecar;
 
 pub use copies::{
     IN_USE_SUFFIX, InUse, KEEP_NEWEST, MAX_AGE, Pruned, RecoveryCopy, list_copies, mark_in_use,
     prune_copies, remove_copy,
 };
+pub use sidecar::SIDECAR;
 
 /// The directory under the recovery base every copy is made in — a name of
 /// its own, so a person who finds it knows what wrote it.
@@ -55,8 +67,9 @@ const UNNAMED: &str = "scene";
 
 impl Document {
     /// Writes the scene as it was authored ([`authored_files`]) into a new
-    /// directory under `base` named `<stamp>-<scene name>`, and hands back
-    /// the directory — see the module docs.
+    /// directory under `base` named `<stamp>-<scene name>`, with [`SIDECAR`]
+    /// beside it recording where the scene lived, and hands back the
+    /// directory — see the module docs.
     ///
     /// `stamp` is the caller's, so the name is the moment the copy was asked
     /// for: milliseconds since the Unix epoch is what the editor passes.
@@ -66,8 +79,9 @@ impl Document {
     /// # Errors
     ///
     /// [`EditError::Recovery`] if `base` or the copy's directory would not be
-    /// made, [`EditError::Write`] naming the key that would not write, or as
-    /// [`authored_files`](Self::authored_files).
+    /// made, [`EditError::Write`] naming the key that would not write — the
+    /// sidecar last, so the scene's files are all there when it fails — or
+    /// as [`authored_files`](Self::authored_files).
     pub fn write_recovery(&mut self, base: &Path, stamp: u128) -> Result<PathBuf, EditError> {
         let files = self.authored_files()?;
         std::fs::create_dir_all(base).map_err(|source| EditError::Recovery {
@@ -84,13 +98,37 @@ impl Document {
                     source,
                 })?;
         }
+        if let Some(text) = sidecar::text(&self.home()) {
+            storage
+                .write(Path::new(SIDECAR), text.as_bytes())
+                .map_err(|source| EditError::Write {
+                    key: SIDECAR.to_owned(),
+                    source,
+                })?;
+        }
         Ok(dir)
+    }
+
+    /// Where this scene lives, as a copy records it: its origin — or, for a
+    /// scene read back from a copy, where that copy said it lived — and the
+    /// asset root it follows. A root named by [`set_assets`](Self::set_assets)
+    /// is a source with no path, and is not recorded.
+    fn home(&self) -> sidecar::Home {
+        sidecar::Home {
+            origin: self.origin.clone().or_else(|| self.recorded_origin.clone()),
+            assets: match &self.asset_root {
+                AssetRoot::Derived(root) => Some(root.clone()),
+                AssetRoot::Unset | AssetRoot::Named => None,
+            },
+        }
     }
 
     /// Opens the recovery copy at `dir` with the components `registry`
     /// knows, **unowned and dirty**, remembering `dir` — see the module docs.
-    /// Its meshes read from no asset root until a save-as gives it a
-    /// directory, whose root it takes then.
+    /// Its meshes read from the asset root the copy recorded, if that is
+    /// still a directory, and otherwise from none until a save-as gives it a
+    /// directory, whose root it takes then. What the record held that was
+    /// passed over is in [`take_recovery_notes`](Self::take_recovery_notes).
     ///
     /// # Errors
     ///
@@ -100,7 +138,33 @@ impl Document {
         let mut document = Self::open(&source, Path::new(""), registry)?;
         document.saved_at = None;
         document.recovered = Some(dir.to_path_buf());
+        let (home, notes) = sidecar::read(dir);
+        if let Some(root) = home.assets {
+            document.replace_assets(Box::new(crcbl::assets::DirSource::at(root.clone())));
+            document.asset_root = AssetRoot::Derived(root);
+        }
+        document.recorded_origin = home.origin;
+        document.recovery_notes = notes;
         Ok(document)
+    }
+
+    /// The directory the recovery copy this document was read from recorded
+    /// as where its scene lived, if that was still a directory when it was
+    /// read — what a save-as offers first. [`None`] for anything else, and
+    /// once a save-as or a new scene has given the document a home of its
+    /// own.
+    #[must_use]
+    pub fn recorded_origin(&self) -> Option<&Path> {
+        self.recorded_origin.as_deref()
+    }
+
+    /// Hands back, once, a note for each thing the recovery copy this
+    /// document was read from recorded and [`open_recovery`] passed over,
+    /// for the caller to say. Empty for anything else.
+    ///
+    /// [`open_recovery`]: Self::open_recovery
+    pub fn take_recovery_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.recovery_notes)
     }
 
     /// Hands back the recovery copy this document was read back from, once:
@@ -166,7 +230,7 @@ fn dir_name(name: &str) -> String {
 mod tests {
     use super::*;
 
-    use crate::document::origin_tests::tree;
+    use crate::document::origin_tests::{props_in_a_game, tree};
     use crate::scene::BLOCKS;
     use crcbl::scene::scn::SceneEntityId;
 
@@ -305,6 +369,109 @@ mod tests {
             Document::open_recovery(&dir, crate::scene::vocabulary()).expect("a copy opens");
         replaced.new_scene().expect("an empty scene");
         assert_eq!(replaced.take_recovered(), None, "a new scene kept the copy");
+    }
+
+    /// **A copy records where its scene lived, and reads its meshes from
+    /// there**: the sidecar names the scene's directory and its game's root,
+    /// the loader passes over it, and the scene read back measures the
+    /// game's triangle and offers its old directory — with nothing to note.
+    #[test]
+    fn a_copy_records_where_its_scene_lived_and_reads_its_meshes_from_there() {
+        let base = tempfile::tempdir().expect("a temporary directory");
+        let (game, scene, mut document) = props_in_a_game();
+        let files = document.files().expect("ids");
+        let dir = document
+            .write_recovery(base.path(), 3)
+            .expect("a fresh base");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(SIDECAR)).expect("a sidecar"),
+            format!(
+                "origin={}\nassets={}\n",
+                scene.display(),
+                game.path().display()
+            )
+        );
+        assert_eq!(tree(&dir).len(), files.len() + 1);
+
+        let mut opened =
+            Document::open_recovery(&dir, crate::scene::vocabulary()).expect("a copy opens");
+        assert_eq!(opened.files().expect("ids"), files, "the sidecar was read");
+        assert_eq!(
+            opened.mesh_problems().len(),
+            1,
+            "the recovered scene's meshes are not the game's: {:?}",
+            opened.mesh_problems()
+        );
+        assert_eq!(opened.recorded_origin(), Some(scene.as_path()));
+        assert_eq!(opened.origin(), None, "the old directory became its home");
+        assert_eq!(opened.take_recovery_notes(), Vec::<String>::new());
+
+        // A copy of the recovered scene still knows where it lived.
+        let again = opened.write_recovery(base.path(), 4).expect("a fresh name");
+        assert_eq!(
+            std::fs::read_to_string(again.join(SIDECAR)).expect("a sidecar"),
+            std::fs::read_to_string(dir.join(SIDECAR)).expect("a sidecar"),
+        );
+    }
+
+    /// **A copy without a sidecar opens as before**: its meshes read from no
+    /// asset root and nothing is offered or noted — and a scene that lived
+    /// nowhere writes none.
+    #[test]
+    fn a_copy_without_a_sidecar_opens_as_before() {
+        let base = tempfile::tempdir().expect("a temporary directory");
+        let (_game, _scene, mut document) = props_in_a_game();
+        let dir = document
+            .write_recovery(base.path(), 3)
+            .expect("a fresh base");
+        std::fs::remove_file(dir.join(SIDECAR)).expect("a sidecar");
+
+        let mut opened =
+            Document::open_recovery(&dir, crate::scene::vocabulary()).expect("a copy opens");
+        assert_eq!(opened.mesh_problems().len(), 2, "a mesh was measured");
+        assert_eq!(opened.recorded_origin(), None);
+        assert_eq!(opened.take_recovery_notes(), Vec::<String>::new());
+
+        let lived_nowhere = Document::built_in()
+            .expect("the compiled-in scene")
+            .write_recovery(base.path(), 5)
+            .expect("a fresh name");
+        assert!(
+            !lived_nowhere.join(SIDECAR).exists(),
+            "a sidecar of nothing"
+        );
+    }
+
+    /// **A stale sidecar is passed over, never trusted**: a scene directory
+    /// gone since and an asset root that is now a file are neither offered
+    /// nor read from, each is noted, and neither is made.
+    #[test]
+    fn a_stale_sidecar_is_passed_over_with_notes() {
+        let base = tempfile::tempdir().expect("a temporary directory");
+        let (_game, _scene, mut document) = props_in_a_game();
+        let dir = document
+            .write_recovery(base.path(), 3)
+            .expect("a fresh base");
+        let elsewhere = tempfile::tempdir().expect("a temporary directory");
+        let gone = elsewhere.path().join("gone.scn");
+        let file = elsewhere.path().join("assets");
+        std::fs::write(&file, "not a directory").expect("written");
+        std::fs::write(
+            dir.join(SIDECAR),
+            format!("origin={}\nassets={}\n", gone.display(), file.display()),
+        )
+        .expect("written");
+
+        let mut opened =
+            Document::open_recovery(&dir, crate::scene::vocabulary()).expect("a copy opens");
+        assert_eq!(opened.recorded_origin(), None, "a gone directory offered");
+        assert_eq!(opened.mesh_problems().len(), 2, "read through a file");
+        let notes = opened.take_recovery_notes();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes.iter().all(|note| note.contains("passed over")));
+        assert!(!gone.exists(), "the gone directory was made");
+        assert!(file.is_file(), "the file was touched");
+        assert_eq!(opened.take_recovery_notes(), Vec::<String>::new(), "twice");
     }
 
     /// **A scene's name is made a directory name**: what a path would read as

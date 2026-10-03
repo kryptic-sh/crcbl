@@ -12691,13 +12691,13 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
 - **Recovery offered back, pruning and autosave landed 2026-10-03**
   (`08-editor.md`'s _Recovery offered back, pruning and autosave_). What they
   leave:
-  - **A recovered scene reads its meshes from no asset root** until a save-as
-    gives it a directory (or `--assets` names one), so its meshes are
-    placeholders until then: a copy does not record where its scene lived.
-    Writing the origin beside the copy's files (a file the scene loader never
-    reads) and reading it back in `Document::open_recovery` would restore the
-    asset root, and could offer the old directory as the save-as line's text.
-    Not asked for; deferred.
+  - **The save-as line offers a recovered scene's old directory, which a save-as
+    then refuses** while it holds the scene's files (`EditError::Occupied`): the
+    line only offers it, and putting the recovered scene back over the old one
+    would need an overwrite the save-as has no path for (it never merges into
+    another scene, by decision). A person names another directory, or empties
+    the old one first. Not asked for; recorded so the refusal is not re-reported
+    as a bug.
   - **The in-use mark is a lock, not a process-id check** (built 2026-10-03,
     `document::mark_in_use`): the decision said "a marker naming its process",
     and the marker does hold the id, but liveness is the exclusive lock the

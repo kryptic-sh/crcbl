@@ -998,10 +998,35 @@ decisions of the same day (below). The flow is
   save-as and a copy is never written back over itself; and **dirty**, so what
   it holds is asked about before it is lost — and puts it in place through
   Open's path, the unsaved bar asking first; refused in play mode; the bar goes,
-  and the rest are offered at the next start. Its meshes read from no asset root
-  until a save-as gives it one (or `--assets` names one). Delete removes that
-  copy's directory by the path listed for it, and the bar lists the rest; Later
-  puts the bar away for the run.
+  and the rest are offered at the next start. Delete removes that copy's
+  directory by the path listed for it, and the bar lists the rest; Later puts
+  the bar away for the run.
+- **A copy remembers where its scene lived** (built 2026-10-03, the follow-up
+  the backlog deferred). `Document::write_recovery` — the autosave included —
+  writes `origin.txt` (`document::SIDECAR`) beside the scene's files: a line
+  `origin=<path>` for the directory the scene was opened from or last saved to
+  (or, for a recovered scene, the one its own copy recorded) and `assets=<path>`
+  for the asset root it followed, each made absolute; a root named by `--assets`
+  is a source with no path and is not recorded, and a copy of a scene that lived
+  nowhere has no sidecar. `Scene::load` reads only the header, the environment,
+  the listed chunks and the names file, so the loader never sees it.
+  `Document::open_recovery` reads it back **untrusted**: a path is kept only
+  when it is absolute and a directory now, and anything else is passed over with
+  a note the status line shows as a warning (`Document::take_recovery_notes`). A
+  kept asset root is what the recovered scene's meshes read from; a kept origin
+  (`Document::recorded_origin`) is the save-as line's text, which a person
+  commits or not through the same checks as anything typed — so a save-as into
+  the old directory is still refused while it holds the scene's files. Nothing
+  is written or removed through either path. A copy without a sidecar reads its
+  meshes from no asset root until a save-as gives it one (or `--assets` names
+  one), as before. Held by the sidecar's own tests (a round trip; a gone
+  directory, a file, a relative path and a foreign line each passed over with a
+  note), the writer's (the record written, the meshes read from it, the record
+  carried into a copy of the recovered scene; a copy without one unchanged; a
+  stale one passed over and nothing made), and the loop's (the status line
+  naming the old directory, the save-as line holding it and a commit there
+  refused with the old directory untouched; a stale record a warning with
+  nothing offered), each shown red by a mutation.
 - **Decided 2026-10-03: a recovered copy is removed once its scene is safely
   saved elsewhere.** The document keeps the path of the copy it was read from
   (`Document::take_recovered`); the first save-as that lands removes that copy

@@ -64,8 +64,8 @@ mod validation;
 pub use origin::{open_target, save_target};
 pub use play::PlayState;
 pub use recovery::{
-    IN_USE_SUFFIX, InUse, KEEP_NEWEST, MAX_AGE, Pruned, RECOVERY_DIR, RecoveryCopy, list_copies,
-    mark_in_use, prune_copies, remove_copy,
+    IN_USE_SUFFIX, InUse, KEEP_NEWEST, MAX_AGE, Pruned, RECOVERY_DIR, RecoveryCopy, SIDECAR,
+    list_copies, mark_in_use, prune_copies, remove_copy,
 };
 pub use systems::{IN_SCENE, SystemGroup, UNGROUPED};
 
@@ -98,6 +98,12 @@ pub struct Document {
     /// takes it to remove once a save-as has put the scene somewhere of its
     /// own — see [`Document::take_recovered`]. [`None`] for anything else.
     recovered: Option<PathBuf>,
+    /// Where the recovery copy this document was read from said its scene
+    /// lived — see [`Document::recorded_origin`]. [`None`] for anything else.
+    recorded_origin: Option<PathBuf>,
+    /// What [`Document::open_recovery`] passed over in the copy's record,
+    /// until the caller takes it — see [`Document::take_recovery_notes`].
+    recovery_notes: Vec<String>,
     /// How many times an entity has entered or left this document — see
     /// [`Document::membership`].
     membership: u64,
@@ -521,6 +527,8 @@ impl Document {
             log: UndoLog::new(),
             saved_at: Some(0),
             recovered: None,
+            recorded_origin: None,
+            recovery_notes: Vec::new(),
             membership: 0,
             naming: 0,
             gestures: 0,
