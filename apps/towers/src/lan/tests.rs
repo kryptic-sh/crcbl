@@ -1614,3 +1614,6 @@ fn a_recording_server_refuses_to_load() {
         "{printed:?}"
     );
 }
+
+/// What a joiner draws and hears of the host's field.
+mod presentation;

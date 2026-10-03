@@ -196,6 +196,12 @@ pub struct Creep {
     /// Rewritten every tick from the towers' own overlaps — see the module docs
     /// for why it is recomputed rather than latched.
     slow: f64,
+    /// Which creep of the run it is: how many were released before it, given
+    /// by the stage through [`Creep::numbered`]. **Presentation only** — the
+    /// simulation never reads it, so it is in no state hash — and what a
+    /// client tells one creep from another by across two snapshots, since a
+    /// creep's place in the field's list moves when another is swap-removed.
+    id: u64,
 }
 
 /// Where a creep with `along` metres of `path` behind it has its centre.
@@ -220,6 +226,7 @@ impl Creep {
             health: kind.spec().health,
             max_health: kind.spec().health,
             slow: 1.0,
+            id: 0,
         }
     }
 
@@ -248,7 +255,22 @@ impl Creep {
             health,
             max_health: kind.spec().health,
             slow,
+            id: 0,
         }
+    }
+
+    /// The same creep, as the run's `id`th — see [`Creep::id`].
+    #[must_use]
+    pub const fn numbered(self, id: u64) -> Self {
+        Self { id, ..self }
+    }
+
+    /// Which creep of the run it is. Zero until [`Creep::numbered`] says
+    /// otherwise, which the stage does for every creep it releases or
+    /// restores.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
     }
 
     /// Its sphere, for a query's answer to be matched against.
@@ -357,6 +379,8 @@ impl Creep {
             },
             hurt: 2 * self.health <= self.max_health,
             slowed: self.is_slowed(),
+            health: self.health as f32 / self.max_health as f32,
+            tag: tag_of(self.id),
         }
     }
 
@@ -387,6 +411,24 @@ pub struct CreepView {
     pub hurt: bool,
     /// Whether a slow tower is holding it this tick.
     pub slowed: bool,
+    /// What it has left, as a fraction of what it started with: one for a
+    /// whole creep, falling towards zero. What its health bar fills to — see
+    /// `crate::bars`.
+    pub health: f32,
+    /// Its [`Creep::id`], wrapped to the width the wire carries — which is
+    /// how a client matches a creep in one snapshot to the same creep in the
+    /// next. See [`tag_of`].
+    pub tag: u16,
+}
+
+/// `id` wrapped to a [`CreepView::tag`].
+///
+/// A wrap rather than a refusal, because a tag only has to tell apart the
+/// creeps on the field at once, and far fewer than `u16::MAX` creeps are
+/// alive at a time — [`crate::wave::MAX_CREEPS`] is the whole table.
+#[must_use]
+pub const fn tag_of(id: u64) -> u16 {
+    (id % (1 << u16::BITS)) as u16
 }
 
 impl Default for CreepView {
@@ -402,6 +444,8 @@ impl Default for CreepView {
             facing: 0.0,
             hurt: false,
             slowed: false,
+            health: 1.0,
+            tag: 0,
         }
     }
 }

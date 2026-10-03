@@ -212,16 +212,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`crcbl_towers::Options` has a `lan` field and `GameError` a `Lan` variant**
   on native builds (see Added: towers plays co-op over a LAN), so a struct
   literal must name the field (`crcbl::lan::LanMode::Off` is solo) and an
-  exhaustive `match` the variant. **Towers' protocol version is 4**: the
-  snapshot carries the field, and a LAN host sends its map to each joiner at
-  join (see Added), so a towers build from before either change and one from
-  after refuse each other by version, both ways round. The map is not part of
-  the schema — an earlier unreleased build folded a `Map::fingerprint` into it;
-  that method is gone. `crcbl_towers::lan::SESSION` is the session, beside
-  `lan::PROTOCOL_ID` and `lan::APP`. There is no `Game::join`: a joiner is a
-  `lan::Joining` until the host's map arrives, and only then a `Game`.
-  `MapError` has a `LabelTooLong` variant — a plot label past
-  `map::MAX_LABEL_BYTES` is refused, so every map a host loads is one its
+  exhaustive `match` the variant. **Towers' protocol version is 5**: the
+  snapshot carries the field, a creep's health and a creep's and a burst's tag
+  among it, and a LAN host sends its map to each joiner at join (see Added), so
+  a towers build from before any of these changes and one from after refuse each
+  other by version, both ways round. `CreepView` has `health` and `tag` fields
+  and `BurstView` a `tag`, so a struct literal of either must name them. The map
+  is not part of the schema — an earlier unreleased build folded a
+  `Map::fingerprint` into it; that method is gone. `crcbl_towers::lan::SESSION`
+  is the session, beside `lan::PROTOCOL_ID` and `lan::APP`. There is no
+  `Game::join`: a joiner is a `lan::Joining` until the host's map arrives, and
+  only then a `Game`. `MapError` has a `LabelTooLong` variant — a plot label
+  past `map::MAX_LABEL_BYTES` is refused, so every map a host loads is one its
   joiners accept. On native builds `Options` has a `lobby` field and `MenuKind`
   `Lobby` and `Joining` variants (see Added: towers opens on a lobby), and
   `MenuAction` a `Lobby(lobby::Pick)` variant.
@@ -784,6 +786,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   run, a splash burst now wounds in the field's order and a tower picks between
   creeps level on the lane by their place in it, rather than in the order the
   physics world answers in.
+- **Towers is heard, and its creeps wear health bars**
+  (`docs/plan/sample/07-towers.md` slice 3b, part B). Every event on the field
+  is a procedural sound played from where it happened through `crcbl-audio`'s
+  spatial grammar (`crcbl_towers::audio`, `crcbl_towers::cue`): each tower kind
+  firing — a slow tower taking hold — a splash burst, a creep hit, killed or
+  leaking, a wave starting, a build, an upgrade, a refused command, and the run
+  won or lost. The ear is the camera the frame is drawn from, at its eye facing
+  what it looks at, so the overhead view hears the field as it shows it; the
+  mixer has a 16-voice budget with the run's end ranked above everything. The
+  cues are read off the replicated field by comparing one snapshot with the next
+  (`cue::Watcher`), so solo, a host and a joiner hear alike and the simulation
+  is never asked anything: its state hash is the same heard or silent. A
+  headless run builds no audio and plays nothing, and `--serve` has none; the
+  browser plays through the page's `AudioWorklet`, started by the first click or
+  key as on every demo. The debug panel gains an `audio` section (cues, voices,
+  dropped, stolen) when the run plays sound, and `[engine.audio]` volumes typed
+  at the console reach the mixer. A bar over every creep (`crcbl_towers::bars`)
+  is filled to the health it has left and tinted while a slow tower holds it,
+  projected through the frame's camera into the UI draw list; it is drawn on the
+  overhead view and the fly camera, not in the walk. `CreepView` gains `health`
+  and `tag`, `BurstView` gains `tag`, and `Creep` gains `numbered` and `id`; the
+  snapshot carries a creep's health and a creep's and a burst's tag (see
+  Breaking).
 - **`HostedGame::exiting`**: a game's last word on the way out. `Loop::finish`
   calls it once, with the run's `ExitReason`, before the summary and before the
   GPU and the window are released — on every way a run ends, a browser page's

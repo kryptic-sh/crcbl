@@ -88,6 +88,8 @@ use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding, GLOBAL_CONTEXT};
 use crcbl::prelude::*;
 use crcbl::shell::DisplayMode;
 
+use crate::audio::Audio;
+use crate::cue::Watcher;
 use crate::dev_camera::{DevCamera, Mode, Steer};
 use crate::game::{Controls, Game, RenderState, Stats};
 use crate::gpu::{Gpu, Paths};
@@ -322,6 +324,15 @@ pub struct Towers {
     /// Where this run's saves go: nowhere for a headless run, which is what
     /// keeps the test suite and CI out of a real data directory.
     vault: Vault,
+    /// The field's sounds and the device they play on — `None` on a headless
+    /// run, which opens no device and plays nothing. See [`crate::audio`].
+    audio: Option<Audio>,
+    /// What reads the field's events off the replicated field for `audio` —
+    /// see [`crate::cue`].
+    watcher: Watcher,
+    /// The simulation's rate, which is what the watcher measures a gap
+    /// between two snapshots against.
+    tick_hz: u32,
     /// Which selectors this device drew through, read off the GPU bundle.
     ///
     /// Kept here rather than reached through `gpu` because
@@ -433,13 +444,22 @@ impl Towers {
     /// this player's commands in its place, if the server made one — the
     /// same line solo, hosting or joined, since [`Game::take_refusals`]
     /// hides which server said no.
+    ///
+    /// Every refusal is heard, each once, at the plot the cursor is on —
+    /// the line only has room for the newest.
     fn update_notice(&mut self, render_dt: std::time::Duration) {
         self.notice = self.notice.take().and_then(|(line, left)| {
             left.checked_sub(render_dt)
                 .filter(|left| !left.is_zero())
                 .map(|left| (line, left))
         });
-        if let Some(refusal) = self.game.take_refusals().pop() {
+        let refusals = self.game.take_refusals();
+        if let Some(audio) = &mut self.audio {
+            for _ in &refusals {
+                audio.play(crate::cue::refused_at(self.game.map(), self.selected));
+            }
+        }
+        if let Some(refusal) = refusals.last() {
             crcbl::log::info!("towers: refused: {}", refusal.label());
             self.notice = Some((format!("REFUSED: {}", refusal.label()), NOTICE_FOR));
         }
@@ -544,6 +564,25 @@ impl Towers {
     /// The dev camera, for this crate's own tests.
     pub const fn dev_camera(&self) -> &DevCamera {
         &self.dev_camera
+    }
+
+    /// The field's sounds, when this run plays any — never on a headless
+    /// run. See [`crate::audio`].
+    pub const fn audio(&self) -> Option<&Audio> {
+        self.audio.as_ref()
+    }
+
+    /// Plays whatever the field did since the last frame that heard it —
+    /// read off the replicated field, so solo, a host and a joiner hear alike
+    /// (see [`crate::cue`]). Nothing at all without [`Towers::audio`].
+    fn listen(&mut self) {
+        let Some(audio) = &mut self.audio else {
+            return;
+        };
+        let field = self.game.replicated();
+        for cue in self.watcher.hear(&field, self.game.map(), self.tick_hz) {
+            audio.play(cue);
+        }
     }
 
     /// Goes to the dev camera's next mode, and pushes its keys' context on
@@ -731,6 +770,8 @@ impl Towers {
         self.pending_restart = false;
         self.stats = Stats::default();
         self.notice = None;
+        // Another game's field: nothing in it was heard happening.
+        self.watcher.forget();
         std::mem::replace(&mut self.game, game)
     }
 }
@@ -871,6 +912,10 @@ fn assemble<S: Shell + ?Sized>(
             page: PageStats::default(),
             notice: None,
             paths,
+            // Headless plays nothing: no device, and no cue to play on one.
+            audio: (!options.common.headless).then(Audio::open),
+            watcher: Watcher::default(),
+            tick_hz: options.common.tick_hz,
             #[cfg(not(target_arch = "wasm32"))]
             lobby: options.lobby.then(|| {
                 crate::lobby::Lobby::on_the_lan(crate::lan::SESSION, options.common.tick_hz)
@@ -1135,7 +1180,11 @@ impl HostedGame for Towers {
                     // saved one takes its place before it does.
                     Some(crate::lobby::Picked::Continue(checkpoint)) => {
                         match self.game.restore(&checkpoint) {
-                            Ok(()) => self.lobby = None,
+                            Ok(()) => {
+                                self.lobby = None;
+                                // A run that was saved, not one that played.
+                                self.watcher.forget();
+                            }
                             Err(error) => lobby.continue_failed(&error),
                         }
                     }
@@ -1212,10 +1261,22 @@ impl HostedGame for Towers {
         }
         #[cfg(not(target_arch = "wasm32"))]
         self.drive_session_end(gpu);
+        let camera = self.dev_camera.camera();
+        // The ear goes where the eye is before anything this frame is heard.
+        if let Some(audio) = &self.audio {
+            audio.hear_from(&camera);
+        }
         self.update_notice(frame.render_dt);
+        self.listen();
         self.render_state = self.game.render_state();
         gpu.set_field(&self.render_state);
-        gpu.set_camera(self.dev_camera.camera());
+        gpu.set_camera(camera);
+        // Under the page, so a panel is never covered by a creep's bar —
+        // and not in the walk; see `crate::bars`.
+        if self.dev_camera.mode() != Mode::Walk {
+            let bars = crate::bars::bars(&self.render_state, &camera, gpu.extent());
+            crate::bars::draw(draw_list, &bars);
+        }
         if let Some((line, _)) = &self.notice {
             crate::page::draw_notice(draw_list, gpu.atlas(), gpu.extent(), line);
         }
@@ -1241,13 +1302,16 @@ impl HostedGame for Towers {
     /// snapshot's size against a datagram on a host, the session and the last
     /// applied tick on a joiner. Solo has no connection to report on, so it
     /// has no section. The netgraph `docs/plan/sample/07-towers.md` wants —
-    /// RTT, jitter, loss — is not built anywhere yet. No audio section either:
-    /// slice 1 plays nothing, and a section that said so would be a module with
-    /// no system behind it.
+    /// RTT, jitter, loss — is not built anywhere yet. The "audio" section is
+    /// there when the run plays sound — never headless, where there is no
+    /// [`Audio`] for it to report on.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.stats);
         panel.add(&self.paths);
         panel.add(&self.dev_camera);
+        if let Some(audio) = &self.audio {
+            panel.add(audio);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(joining) = &self.joining {
             panel.add(joining.lan());
@@ -1258,6 +1322,18 @@ impl HostedGame for Towers {
 
     fn exiting(&mut self, exit: ExitReason) {
         self.save_on_close(exit);
+    }
+
+    /// The mixer the console's `[engine.audio]` keys move — refused, as the
+    /// default refuses, on a headless run, which has none.
+    fn set_bus_gain(
+        &mut self,
+        bus: crcbl::audio::mixer::Bus,
+        gain: f32,
+    ) -> Result<(), crcbl::settings::Unsupported> {
+        let audio = self.audio.as_ref().ok_or(crcbl::settings::Unsupported)?;
+        audio.set_bus_gain(bus, gain);
+        Ok(())
     }
 
     fn summary(&self, run: RunSummary) -> Summary {
@@ -1328,6 +1404,8 @@ crcbl::impl_pending_loop!(
 
 // ---- tests -------------------------------------------------------------------
 
+#[cfg(test)]
+mod audio_tests;
 #[cfg(test)]
 mod dev_camera_tests;
 #[cfg(test)]

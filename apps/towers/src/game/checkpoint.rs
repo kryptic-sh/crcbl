@@ -167,7 +167,8 @@ impl Stage {
         let creeps: Vec<Creep> = checkpoint
             .creeps
             .iter()
-            .map(|saved| {
+            .zip(0..)
+            .map(|(saved, id)| {
                 Creep::restored(
                     &mut stage.world,
                     stage.map.path(),
@@ -176,6 +177,7 @@ impl Stage {
                     saved.health,
                     saved.slow,
                 )
+                .numbered(id)
             })
             .collect();
         let mut bolts = Vec::with_capacity(checkpoint.bolts.len());
@@ -205,6 +207,9 @@ impl Stage {
             ));
         }
         stage.towers = towers;
+        // Numbered from zero, as they were restored: an id only has to tell
+        // apart the creeps on the field, and a save does not keep them.
+        stage.released = creeps.len() as u64;
         stage.creeps = creeps;
         stage.bolts = bolts;
         stage.bursts = checkpoint

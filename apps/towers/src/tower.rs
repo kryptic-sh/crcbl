@@ -568,6 +568,10 @@ pub struct BurstView {
     /// How far the burst reached, in metres — the radius the overlap was run at,
     /// so the picture is the query.
     pub radius_m: f64,
+    /// The [`Bolt::id`] of the bolt that raised it, wrapped as a creep's
+    /// [`crate::creep::CreepView::tag`] is — how a client tells a burst it has
+    /// already heard from a new one.
+    pub tag: u16,
 }
 
 /// Which creep a tower at `from` reaching `range_m` shoots, or `None` for a

@@ -15272,10 +15272,11 @@ read, and `client_server_session`'s convergence to the quantized value.
   order suffers.
 - **Delta granularity** is whole-component-on-change, now over the quantized
   form, and moves to per-field masks only when towers' numbers justify it.
-  **They do not yet** (2026-10-01): four players winning the whole table with
-  every wave brought forward peak at 30 creeps, and the largest snapshot the
-  host sends is 767 of `MAX_UNRELIABLE_PAYLOAD`'s 1158 bytes, with no update
-  held back
+  **They do not yet** (2026-10-01, measured again 2026-10-04 once a creep
+  carried its health and a tag): four players winning the whole table with every
+  wave brought forward peak at 30 creeps, and the largest snapshot the host
+  sends is 857 of `MAX_UNRELIABLE_PAYLOAD`'s 1158 bytes, with no update held
+  back
   (`crcbl_towers::lan::tests::the_towers_snapshot_fits_one_datagram_through_the_table_with_nothing_held_back`,
   which prints both). A creep is a whole-component change every tick anyway — it
   moves — so masks would save little there.
@@ -15434,7 +15435,7 @@ as tests. I read the modules, not the test list.
 
 **Certain:** the bandwidth row does not exist yet, though it now can. Towers
 plays co-op over UDP (2026-10-01), and a 4-player loopback session through the
-whole table is a test that measures its largest snapshot (767 of 1158 bytes; see
+whole table is a test that measures its largest snapshot (857 of 1158 bytes; see
 _Quantization, the priority/budget encoder, and the one-datagram rule_) — a
 size, not a rate. The row wants bytes a second per client, a window over
 `UdpTransport::stats`' byte counters on the host's peers, recorded from that
@@ -16095,9 +16096,10 @@ record of what the rest of milestone 1 costs. **Slice 2 shipped the same day:**
 `/demos/towers/` is on the site, gated by `web/tools/browser-e2e.mjs`'s `towers`
 row. **Slice 3a shipped 2026-09-10:** three tower kinds with one upgrade tier
 each and an `UpgradeTower` command beside `PlaceTower`, three creep kinds, all
-ten waves, a material per kind and a burst instance at a splash impact. What is
-left of slice 3 is **3b**, which is the presentation half: `.crpix` art and the
-build menu it makes possible, spatial audio, and world-space health bars.
+ten waves, a material per kind and a burst instance at a splash impact. **Slice
+3b's part B shipped 2026-10-04**: spatial audio and world-space health bars
+(_towers' spatial audio and health bars_ below). What is left of slice 3 is the
+rest of **3b**: `.crpix` art and the build menu it makes possible.
 
 **The one engine gap the slice found is a spline type.** Nothing in `crcbl-phys`
 or `crcbl-scene` offers a curve a body can be put on — the only splines in the
@@ -16614,6 +16616,80 @@ fly speed are unjudged by eye; the LAN claim (a joiner's walk sends its host
 nothing) rests on the camera writing no `Controls` and on the solo hash test,
 not on a LAN test; the browser keyboard path is the same `keydown` listener but
 no gate presses `C`.
+
+### towers' spatial audio and health bars: decisions, and what they left (2026-10-04)
+
+Slice 3b part B, `crcbl_towers::{audio, cue, bars}`. **Decided, for the long
+term:**
+
+- **Cues are read off the replicated field, not queued by the stage.**
+  `cue::Watcher::hear` compares the client's last reconstructed snapshot with
+  this one: a tower's `working` flag rising is a shot (a slow tower's is it
+  taking hold), a tower appearing on a plot a build, its tier rising an upgrade,
+  a creep's health falling a hit, a creep gone while `kills` or `leaks` rose a
+  kill or a leak, a burst with a new tag a burst, the wave count rising a wave,
+  the outcome leaving `Playing` the run's end. Solo, a host's own player and a
+  joiner all read their own client's reconstruction, so a joiner hears what its
+  snapshots show. **Rejected:** the stage queueing events and the host sending
+  them on the reliable channel — a message per shot, arriving on its own
+  schedule rather than with the snapshot that shows it, and a queue in the
+  simulation for a presentation concern. **What it costs:** two changes between
+  one pair of snapshots are one change, so a joiner whose snapshots skip a tick
+  hears a hit-and-kill as a kill, and a shot whose flash (`FLASH_S`) falls
+  entirely between two snapshots is not heard.
+- **A kill and a leak in the same snapshot pair are told apart by place.** Every
+  leak is heard at the exit; kills are heard at the gone creeps furthest from
+  it, the nearest having leaked. A kill with no gone creep to put it at is not
+  heard.
+- **A field that jumped is a baseline, not a burst of events:** the tick count
+  going back, the run counter changing, or a gap past
+  `cue::LONGEST_HEARD_GAP_S`. The lobby's _Continue_ and every `Towers::start`
+  forget the baseline too. A save loaded at a host's console while joiners play
+  is heard as nothing for that reason.
+- **The snapshot carries a creep's health and a creep's and a burst's tag**
+  (protocol version 5). Health is a fraction in `replica::HEALTH_BITS` steps,
+  fine enough that the smallest hit moves it
+  (`every_hit_moves_a_creeps_health_on_the_wire`). The tag is `Creep::id` (a
+  per-run release count the stage keeps in `Stage::released`) or a burst's bolt
+  id, wrapped to 16 bits. **Neither is in the state hash**, so the hash,
+  recorded replays and their re-simulation are unchanged; a resumed stage
+  numbers the creeps it restores from zero, which the save format does not keep.
+- **The ear is the camera the frame is drawn from** — `Listener::facing` at the
+  eye toward the target — including the dev camera's fly and walk. Breakout's
+  and horde's ear stood off a flat play plane has no meaning for a tilted
+  overhead view.
+- **A 16-voice budget** (`audio::MAX_VOICES`, horde's size and reason), ranked
+  by `audio::priority`: the run's end, then a leak and a wave, then kills,
+  bursts, builds, upgrades and refusals, then shots and hits.
+- **Headless builds no `Audio` at all**, so no device opens and no cue plays;
+  `--serve` is no `Towers` and has none either. That second claim is structural
+  — `crate::lan::serve` never reaches `crate::audio` — and no test runs a
+  dedicated server to look for a cue, because there is nothing there to look at.
+- **Health bars are UI rectangles placed by `Camera::pixel_of`**, the engine's
+  world-space UI path, from `RenderState` — so a joiner's bars are drawn from
+  the host's replicated health. **Rejected:** instance pools of flat slabs in
+  the forward renderer, which the tilted view foreshortens and a walking eye
+  sees edge-on. **Not drawn in the walk**: a UI rectangle has no depth, so it
+  would show through towers and kerbs, and at walking height near creeps' bars
+  would fill the screen. Drawn on the overhead view and the fly camera.
+
+**Deferred:** sound assets (every sound is a `synth` sine or noise burst, not
+designed by anyone); occlusion muffling a lane behind terrain — `crcbl-audio`
+has none and this field has no terrain to be behind — and any off-screen-wave
+cue beyond the grammar's distance and direction, both from the plan's "audio
+grammar in anger" bullet; a held sound for a slow tower's whole hold rather than
+a cue as it takes hold; no audio row on the `[HUD]` line, so the browser gate
+cannot see a cue; the bars do not scale with distance or the window's DPI, and
+do not fade; no golden audio buffer is pinned, because a hash of float output
+would pin the platform's `sin` as well — the test holds the mix to being the
+same twice and to panning with the picture instead.
+
+**Coverage gaps:** **nothing was heard or seen on a device** — every check is
+headless, natively; no ear judged a sound, its level or the budget, and no eye
+judged a bar's size, height or colours. The browser's audio path is the same
+`AudioStream::open` every demo takes and is not exercised by any gate for
+towers. The joiner claims rest on one loopback test
+(`lan::tests::presentation`), one process, one joiner.
 
 ## arena (`docs/plan/sample/08-arena.md`)
 

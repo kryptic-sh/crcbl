@@ -37,6 +37,8 @@ fn field() -> (RenderState, Stats) {
         facing: facing_of(64),
         hurt: true,
         slowed: false,
+        health: health_of(102).expect("a step of a whole creep"),
+        tag: 7,
     };
     render.creeps[1] = CreepView {
         kind: creep::Kind::Swarm,
@@ -44,6 +46,8 @@ fn field() -> (RenderState, Stats) {
         facing: facing_of(200),
         hurt: false,
         slowed: true,
+        health: 1.0,
+        tag: u16::MAX,
     };
     render.creeps_alive = 2;
     render.bolts[0] = DVec3::new(1.5, 1.625, -2.0);
@@ -51,6 +55,7 @@ fn field() -> (RenderState, Stats) {
     render.bursts[0] = BurstView {
         centre: DVec3::new(-3.0, 0.5, 4.0),
         radius_m: 3.5,
+        tag: 480,
     };
     render.bursts_live = 1;
     let stats = Stats {
@@ -201,8 +206,8 @@ fn the_extents_hold_the_field_and_every_reach() {
 }
 
 /// Whether `a` and `b` are the same field to the wire's precision: every
-/// count, flag, kind and number exact, every position and heading within a
-/// step.
+/// count, flag, kind, tag and number exact, every position, heading and
+/// health within a step.
 fn same_field(a: &RenderState, b: &RenderState) -> bool {
     let near = |x: DVec3, y: DVec3| (x - y).abs().max_element() <= 1.0 / 256.0;
     let step = 2.0 * PI / f64::from(FACING_CODES);
@@ -218,8 +223,9 @@ fn same_field(a: &RenderState, b: &RenderState) -> bool {
             .zip(&b.creeps[..b.creeps_alive])
             .all(|(x, y)| {
                 let turn = f64::from(x.facing - y.facing).abs();
-                (x.kind, x.hurt, x.slowed) == (y.kind, y.hurt, y.slowed)
+                (x.kind, x.hurt, x.slowed, x.tag) == (y.kind, y.hurt, y.slowed, y.tag)
                     && near(x.centre, y.centre)
+                    && (x.health - y.health).abs() <= 1.0 / HEALTH_STEPS as f32
                     && (turn <= step || (2.0 * PI - turn) <= step)
             })
         && a.bolts[..a.bolts_flying]
@@ -229,7 +235,48 @@ fn same_field(a: &RenderState, b: &RenderState) -> bool {
         && a.bursts[..a.bursts_live]
             .iter()
             .zip(&b.bursts[..b.bursts_live])
-            .all(|(x, y)| near(x.centre, y.centre) && (x.radius_m - y.radius_m).abs() <= 1.0 / 32.0)
+            .all(|(x, y)| {
+                near(x.centre, y.centre)
+                    && (x.radius_m - y.radius_m).abs() <= 1.0 / 32.0
+                    && x.tag == y.tag
+            })
+}
+
+/// **Every hit moves a creep's health on the wire.** A client hears a creep
+/// hit by its health falling between two snapshots (`crate::cue`), so the
+/// smallest damage any tower does must be at least a whole step of the most
+/// health any creep has — and it rounds to a lower code from every health a
+/// creep can be at.
+#[test]
+fn every_hit_moves_a_creeps_health_on_the_wire() {
+    let damage = TOWERS
+        .iter()
+        .flatten()
+        .filter(|spec| spec.fires())
+        .map(|spec| spec.damage)
+        .min()
+        .expect("a tower that fires");
+    let most = creep::CREEPS
+        .iter()
+        .map(|spec| spec.health)
+        .max()
+        .expect("a creep");
+    assert!(
+        damage as f32 / most as f32 > 1.0 / HEALTH_STEPS as f32,
+        "{damage} damage against {most} health is under a step"
+    );
+    for left in damage..=most {
+        let before = health_code(left as f32 / most as f32);
+        let after = health_code((left - damage) as f32 / most as f32);
+        assert!(
+            after < before,
+            "{left} health, hit for {damage}, kept its code"
+        );
+    }
+    assert_eq!(health_code(1.0), HEALTH_STEPS);
+    assert_eq!(health_code(0.0), 0);
+    assert_eq!(health_of(HEALTH_STEPS), Some(1.0));
+    assert_eq!(health_of(HEALTH_STEPS + 1), None);
 }
 
 /// **Solo's own client reconstructs the field the stage holds**, tick after

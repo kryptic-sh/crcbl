@@ -109,10 +109,17 @@ use crate::wave::{self, MAX_CREEPS, Outcome, STARTING_GOLD, STARTING_LIVES, Wave
 /// computed from its own; the bump makes the two refuse each other by version
 /// instead, which the lobby names.
 ///
+/// **And 5 because a creep and a burst grew on the wire.** A creep carries
+/// what health it has left, for its health bar, and a creep and a burst each
+/// carry a tag, which is how a client hears it hit, killed or raised
+/// (`crate::cue`). A client from before would read every creep and burst
+/// entity as the wrong length and draw an empty field, so the two refuse
+/// each other by version.
+///
 /// Every session hand-shakes on this, solo's included, so there is one rule
 /// for every session rather than one for the LAN.
 pub(crate) const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
-    protocol_version: 4,
+    protocol_version: 5,
     engine_build_id: 0x0043_5243_424C,
     schema_hash: 0x0000_0054_5752,
 };
@@ -427,6 +434,11 @@ struct Stage {
     kills: u64,
     leaks: u64,
     shots: u64,
+    /// How many creeps the table has released this run: the next one's
+    /// [`Creep::id`]. **Not in the state hash**, for the reason a bolt's id is
+    /// not: the simulation never reads it, and a resumed stage numbers the
+    /// creeps it restores from zero.
+    released: u64,
     built: u64,
     /// How many of each [`tower::Kind`] have been built, indexed by
     /// [`tower::Kind::index`]. The `[HUD]` line carries all three, which is what
@@ -489,6 +501,7 @@ impl Stage {
             kills: 0,
             leaks: 0,
             shots: 0,
+            released: 0,
             built: 0,
             built_by_kind: [0; tower::KINDS],
             upgrades: 0,
@@ -867,8 +880,10 @@ fn run_team_tick(stage: &mut Stage, intents: &[(Sender, Intent)], dt: f64) {
     // 1. The table releases, at most one creep a tick — see
     //    `crate::wave::Waves::step`.
     if let Some(release) = stage.waves.step(stage.elapsed) {
-        let creep = Creep::spawn(&mut stage.world, stage.map.path(), release.kind);
+        let creep =
+            Creep::spawn(&mut stage.world, stage.map.path(), release.kind).numbered(stage.released);
         stage.creeps.push(creep);
+        stage.released += 1;
     }
 
     // 2. Every slow tower holds what is inside its reach, before anything walks.
@@ -1810,6 +1825,7 @@ fn render_state_of(stage: &Stage) -> RenderState {
         *slot = BurstView {
             centre: burst.at,
             radius_m: burst.radius_m,
+            tag: creep::tag_of(burst.id),
         };
     }
     let now = stage.elapsed;

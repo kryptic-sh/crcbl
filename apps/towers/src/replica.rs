@@ -69,6 +69,23 @@ pub const NEXT_WAVE_REACH_S: f64 = 16.0;
 /// past the last, which fixed point refuses and a turn folds onto `-π`.
 const FACING_CODES: u32 = 256;
 
+/// How many bits a creep's health takes on the wire: a fraction of what it
+/// started with, in [`HEALTH_STEPS`] steps.
+///
+/// Fine enough that every hit moves it — the smallest damage any tower does
+/// against the most health any creep has is several steps, which
+/// `every_hit_moves_a_creeps_health_on_the_wire` asserts — because a client
+/// hears a creep hit by its health falling between two snapshots.
+const HEALTH_BITS: u32 = 8;
+
+/// The steps a whole creep's health is divided into: the top code is a whole
+/// creep and code zero a dead one, so both ends are exact.
+const HEALTH_STEPS: u32 = (1 << HEALTH_BITS) - 1;
+
+/// How many bits a creep's or a burst's tag takes — see
+/// [`crate::creep::CreepView::tag`].
+const TAG_BITS: u32 = u16::BITS;
+
 /// The entity bits of the numbers: the one entity with no list behind it.
 const HUD: u64 = 0;
 /// What an entity is, in the high half of its bits; where it sits in its
@@ -142,7 +159,12 @@ const HUD_SCHEMA: &[Field] = &[
 const TOWER_SCHEMA: &[Field] = &[whole("kind", 2), flag("upgraded"), flag("working")];
 
 /// A creep: its kind, its two flags, where it is and which way it faces, as
-/// one of [`FACING_CODES`].
+/// one of [`FACING_CODES`], what it has left and its tag.
+///
+/// **The last two are presentation**, and in no state hash: the health is
+/// what its bar fills to and the tag is what a client matches it across
+/// snapshots by, which is how a joiner hears it hit, killed or leaking — see
+/// `crate::cue`.
 const CREEP_SCHEMA: &[Field] = &[
     whole("kind", 2),
     flag("hurt"),
@@ -151,12 +173,15 @@ const CREEP_SCHEMA: &[Field] = &[
     up("y"),
     across("z"),
     whole("facing", FACING_CODES.ilog2()),
+    whole("health", HEALTH_BITS),
+    whole("tag", TAG_BITS),
 ];
 
 /// A bolt: where it is.
 const BOLT_SCHEMA: &[Field] = &[across("x"), up("y"), across("z")];
 
-/// A burst: where it is and how far it reaches, to a 2⁻⁵ m step.
+/// A burst: where it is, how far it reaches, to a 2⁻⁵ m step, and its tag —
+/// what a client tells a new burst from one it has heard by.
 const BURST_SCHEMA: &[Field] = &[
     across("x"),
     up("y"),
@@ -165,6 +190,7 @@ const BURST_SCHEMA: &[Field] = &[
         name: "radius",
         codec: Codec::Fixed(Fixed::new(0.0, BURST_REACH_M, 8)),
     },
+    whole("tag", TAG_BITS),
 ];
 
 /// What [`encode`] wrote.
@@ -207,7 +233,11 @@ pub fn encode(render: &RenderState, stats: &Stats, out: &mut Vec<u8>) -> Encoded
     }
     for (at, burst) in render.bursts[..render.bursts_live].iter().enumerate() {
         let [x, y, z] = position_values(burst.centre);
-        put(BURST | at as u64, BURST_SCHEMA, &[x, y, z, burst.radius_m]);
+        put(
+            BURST | at as u64,
+            BURST_SCHEMA,
+            &[x, y, z, burst.radius_m, f64::from(burst.tag)],
+        );
     }
     encoded
 }
@@ -365,7 +395,7 @@ fn read_tower(data: &[u8]) -> Result<TowerView, QuantizeError> {
     })
 }
 
-fn creep_values(creep: &CreepView) -> [f64; 7] {
+fn creep_values(creep: &CreepView) -> [f64; 9] {
     let [x, y, z] = position_values(creep.centre);
     [
         creep.kind.index() as f64,
@@ -375,11 +405,13 @@ fn creep_values(creep: &CreepView) -> [f64; 7] {
         y,
         z,
         f64::from(facing_code(creep.facing)),
+        f64::from(health_code(creep.health)),
+        f64::from(creep.tag),
     ]
 }
 
 fn read_creep(data: &[u8]) -> Result<CreepView, QuantizeError> {
-    let mut v = [0.0; 7];
+    let mut v = [0.0; 9];
     quantize::decode_values(CREEP_SCHEMA, data, &mut v)?;
     Ok(CreepView {
         kind: *creep::ALL
@@ -389,7 +421,26 @@ fn read_creep(data: &[u8]) -> Result<CreepView, QuantizeError> {
         facing: facing_of(v[6] as u32),
         hurt: v[1] != 0.0,
         slowed: v[2] != 0.0,
+        health: health_of(v[7] as u32).ok_or(QuantizeError::Refused)?,
+        // A whole number of `TAG_BITS` bits, so the cast is exact.
+        tag: v[8] as u16,
     })
+}
+
+/// The step nearest `health`, a fraction of a whole creep. Past either end
+/// is no health a creep can have, and is answered with a code the schema
+/// refuses rather than clamped — see the module docs.
+fn health_code(health: f32) -> u32 {
+    if (0.0..=1.0).contains(&health) {
+        (health * HEALTH_STEPS as f32).round() as u32
+    } else {
+        u32::MAX
+    }
+}
+
+/// The fraction `code` stands for, or `None` for a code past a whole creep.
+fn health_of(code: u32) -> Option<f32> {
+    (code <= HEALTH_STEPS).then(|| code as f32 / HEALTH_STEPS as f32)
 }
 
 /// The code nearest `facing`, in radians, a full turn folding onto zero.
@@ -414,11 +465,13 @@ fn read_position(schema: &[Field], data: &[u8]) -> Result<DVec3, QuantizeError> 
 }
 
 fn read_burst(data: &[u8]) -> Result<BurstView, QuantizeError> {
-    let mut v = [0.0; 4];
+    let mut v = [0.0; 5];
     quantize::decode_values(BURST_SCHEMA, data, &mut v)?;
     Ok(BurstView {
         centre: DVec3::new(v[0], v[1], v[2]),
         radius_m: v[3],
+        // A whole number of `TAG_BITS` bits, so the cast is exact.
+        tag: v[4] as u16,
     })
 }
 

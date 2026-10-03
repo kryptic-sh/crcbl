@@ -148,14 +148,14 @@ that tells a working touch control from a rendered one. Every price and label it
 writes out is held against this crate's own tables by `apps/towers`'
 `the_browser_gates_game_constants_are_the_ones_this_crate_declares`.
 
-| Slice | What it is                                                                                                                                                                                                                             | Status               |
-| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| 1     | Solo loop on the hardcoded map: the polyline path, one creep archetype, one single-target tower, three scripted waves, shared gold and lives, the three commands over the loopback, a fixed overhead camera, the debug panel           | **Built 2026-09-07** |
-| 2     | The browser demo: `src/web.rs`, a `towers` directory under `web/demos/`, the `DEMOS` row, the Pages steps, the feature card and the browser gate                                                                                       | **Built 2026-09-07** |
-| 3a    | The combat content: the splash and slow towers, one upgrade tier each behind an `UpgradeTower` command, the tanky and swarm creeps, all ten waves, a material per kind and a burst instance at a splash impact                         | **Built 2026-09-10** |
-| 3b    | The presentation content milestone 1 still owes: `.crpix` art and the build menu it makes possible, spatial audio, world-space health bars                                                                                             | Owed                 |
-| 4     | The dev fly/walk camera — `CharacterController` on this map, which is the controller's first real terrain                                                                                                                              | **Built 2026-10-03** |
-| 5     | Save and resume between waves (topic 14): `S` and an autosave at each wave's end, refused mid-wave; the lobby's _Continue_ and `--resume` (solo, host, dedicated server); `save`/`load` at a server's console; the browser's OPFS save | **Built 2026-10-03** |
+| Slice | What it is                                                                                                                                                                                                                             | Status                                                                     |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| 1     | Solo loop on the hardcoded map: the polyline path, one creep archetype, one single-target tower, three scripted waves, shared gold and lives, the three commands over the loopback, a fixed overhead camera, the debug panel           | **Built 2026-09-07**                                                       |
+| 2     | The browser demo: `src/web.rs`, a `towers` directory under `web/demos/`, the `DEMOS` row, the Pages steps, the feature card and the browser gate                                                                                       | **Built 2026-09-07**                                                       |
+| 3a    | The combat content: the splash and slow towers, one upgrade tier each behind an `UpgradeTower` command, the tanky and swarm creeps, all ten waves, a material per kind and a burst instance at a splash impact                         | **Built 2026-09-10**                                                       |
+| 3b    | The presentation content milestone 1 still owes: `.crpix` art and the build menu it makes possible, spatial audio, world-space health bars                                                                                             | **Part B built 2026-10-04** (audio, bars); the art and the build menu owed |
+| 4     | The dev fly/walk camera — `CharacterController` on this map, which is the controller's first real terrain                                                                                                                              | **Built 2026-10-03**                                                       |
+| 5     | Save and resume between waves (topic 14): `S` and an autosave at each wave's end, refused mid-wave; the lobby's _Continue_ and `--resume` (solo, host, dedicated server); `save`/`load` at a server's console; the browser's OPFS save | **Built 2026-10-03**                                                       |
 
 **What these slices prove is narrower than the "Proves" list above**, and it is
 three `crcbl-phys` L0 queries this document named towers as the forcing function
@@ -197,22 +197,26 @@ carries it rather than the sample working around it.
 **What the slices do not have, stated as gaps rather than as decisions.** Rule
 11 is **owed, not exempted**: there is no `.crpix` art anywhere, so the tower
 and creep icons, the wave banner and the two build lists are untextured
-rectangles and the built-in font. Rule 8 is **owed, not exempted**: the sample
-ships silent, and the "audio grammar in anger" bullet above has nothing behind
-it yet. Rule 12 is half met — the three selectors are on the debug panel, the
-`[HUD]` line and the summary, but there is no flag to hold a path below what the
-device offers. **There is no pointer or touch input inside the canvas**, in the
-window or on the page: what a tap wants to land on is the build menu slice 3b
-brings with the `.crpix` art, so a hit test against the untextured lists `page`
-draws today would be written to be thrown away. What a phone has instead is a
-row of buttons **outside** the canvas — plot, kind, build and upgrade, in
-`web/demos/towers/main.js` — which synthesise the very `keydown`/`keyup` pair
-the canvas already listens for, so a finger and a keyboard reach the game down
-one path and the row is thrown away with the hint text rather than with engine
-code. The debug panel has a "lan" section during a LAN session — the port, the
-players and the largest snapshot on a host, the session on a joiner — but the
-netgraph the network module was specified for (RTT, jitter, loss, tick-lead) is
-not built anywhere yet.
+rectangles and the built-in font. Rule 8 is **met for the field's events and no
+further** — see the slice 3b bullet below: every event is a cue played from
+where it happened, heard from the camera, but of the "audio grammar in anger"
+bullet above only the panning with the camera is built. Nothing tells an
+off-screen wave apart by ear beyond what the grammar's distance and direction
+already give, and nothing muffles a lane behind terrain — `crcbl-audio` has no
+occlusion, and this field has no terrain to be behind. Rule 12 is half met — the
+three selectors are on the debug panel, the `[HUD]` line and the summary, but
+there is no flag to hold a path below what the device offers. **There is no
+pointer or touch input inside the canvas**, in the window or on the page: what a
+tap wants to land on is the build menu slice 3b brings with the `.crpix` art, so
+a hit test against the untextured lists `page` draws today would be written to
+be thrown away. What a phone has instead is a row of buttons **outside** the
+canvas — plot, kind, build and upgrade, in `web/demos/towers/main.js` — which
+synthesise the very `keydown`/`keyup` pair the canvas already listens for, so a
+finger and a keyboard reach the game down one path and the row is thrown away
+with the hint text rather than with engine code. The debug panel has a "lan"
+section during a LAN session — the port, the players and the largest snapshot on
+a host, the session on a joiner — but the netgraph the network module was
+specified for (RTT, jitter, loss, tick-lead) is not built anywhere yet.
 
 **What it is waiting on, and it is not one thing.**
 
@@ -236,6 +240,26 @@ not built anywhere yet.
   with no ECS system, which is fine for a map — the scene is read into a `Map`
   and the stage plays on that — and would not be for anything the editor should
   place that moves.
+- **The field is heard, and its creeps wear health bars (slice 3b part B,
+  2026-10-04).** Every event is a procedural sound played through
+  `crcbl-audio`'s spatial grammar from where it happened (`crate::audio`,
+  `crate::cue`): each tower kind working, a splash burst, a creep hit, killed or
+  leaking, a wave starting, a build, an upgrade, a refused command and the run's
+  end. The ear is the camera the frame is drawn from, at its eye facing its
+  target, so the overhead view pans the field as it shows it, and the dev camera
+  takes the ear with it; a 16-voice budget ranks the run's end above everything
+  and the routine shots and hits below all. **The cues are read off the
+  replicated field** — one snapshot against the next, a creep followed by a tag
+  the snapshot now carries — so a joiner hears what its snapshots show and solo
+  and a host hear the same way; the stage is asked nothing and hashes the same
+  heard or silent (`hearing_the_field_leaves_the_stage_hash_alone`). A headless
+  run builds no audio, and `--serve` has no window or audio at all; the browser
+  plays through the page's `AudioWorklet`, started by the first click or key.
+  Each creep wears a bar, projected through the frame's camera into the UI draw
+  list, filled to the health it has left — which the snapshot now carries — and
+  tinted while a slow tower holds it; drawn on the overhead view and the fly
+  camera, not in the walk. **Not heard or seen on a device**: every check is
+  headless, and no ear has judged a sound or eye a bar.
 - **A dev fly/walk camera walks the field (slice 4, 2026-10-03).** `C` goes from
   the overhead view to a fly camera that passes through everything, to a walk
   camera on a `CharacterController` capsule dropped from under the fly camera,
@@ -352,7 +376,7 @@ not built anywhere yet.
   pad's d-pad and South drive it, as every menu. The web build has none and
   boots straight into solo. `--browse` still joins the first host of this build
   it hears. Four players winning the whole table fit every snapshot in one
-  datagram with nothing held back (the largest is 767 of 1158 bytes).
+  datagram with nothing held back (the largest is 857 of 1158 bytes).
   **Unverified:** two machines on a real LAN, the broadcast query reaching a
   host at all, whether a Windows firewall prompt blocks the first run, and
   `--serve`'s own wall-clock loop — every test is one process on loopback,
