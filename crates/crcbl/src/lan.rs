@@ -19,7 +19,8 @@
 //! - **[`LanClient`]** connects a [`UdpTransport`] to an address and runs a
 //!   [`Client`] over it — direct connect, first-class — or polls a
 //!   [`Browser`], prints every host it heard, and joins the first one this
-//!   build can play with. A sample that lets the player choose runs a
+//!   build can join — passing over a full host or another build's, as the
+//!   lobby does. A sample that lets the player choose runs a
 //!   [`lobby::Lobby`] instead and joins the address it picks.
 //! - **[`lobby`]** is that choosing, without its look: the hosts a
 //!   [`Browser`] heard sorted into joinable and not (with why), the address
@@ -66,6 +67,8 @@ use crate::net::udp::{ConnectError, UdpListener, UdpTransport};
 use crate::net::{ProtocolCompatibility, SessionEndReason};
 use crate::server::{Host, HostConfig, PeerEvent};
 use crate::ui::{DebugModule, DebugSection};
+
+use self::lobby::Unjoinable;
 
 /// The least time between two logged snapshot refusals, or two withheld
 /// updates: one a second says the world is too big without a line every
@@ -503,13 +506,16 @@ impl LanClient {
     }
 
     /// Looks for hosts of `game` with `browser`, and joins the first this
-    /// build can play with.
+    /// build can join: the first a [`lobby::Lobby`] would make a row, by
+    /// [`Unjoinable::of`]. A host that is full or of another build is
+    /// printed with why and passed over; with none joinable it goes on
+    /// looking.
     pub fn browse(game: LanGame, browser: Browser, tick_hz: u32) -> Self {
         Self::in_phase(game, Phase::Browsing(browser), tick_hz)
     }
 
     /// Looks for hosts of `game` on the LAN — a [`Browser`] querying the
-    /// broadcast address — and joins the first this build can play with.
+    /// broadcast address — and joins the first this build can join.
     ///
     /// # Errors
     ///
@@ -563,7 +569,7 @@ impl LanClient {
                 let hosts = browser.hosts();
                 let Some(chosen) = hosts
                     .iter()
-                    .find(|host| host.compatibility == game.compatibility)
+                    .find(|host| Unjoinable::of(game.compatibility, host).is_none())
                 else {
                     return;
                 };
@@ -575,10 +581,9 @@ impl LanClient {
                         host.addr,
                         host.players,
                         host.max_players,
-                        if host.compatibility == game.compatibility {
-                            ""
-                        } else {
-                            ", another build"
+                        match Unjoinable::of(game.compatibility, host) {
+                            Some(why) => format!(", {}", why.label()),
+                            None => String::new(),
                         },
                     );
                 }

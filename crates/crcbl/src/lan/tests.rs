@@ -1,11 +1,16 @@
 //! The flag parser every LAN sample reads `--host`, `--join` and `--browse`
-//! through, and the throttle on the host's refusal and withheld-update
-//! lines. The sessions themselves are driven end to end by the samples'
-//! own loopback suites — `apps/sandbox/src/lan/tests.rs` and
-//! `apps/towers/src/lan/tests.rs` — which is where a host and its clients
+//! through, the throttle on the host's refusal and withheld-update lines,
+//! and which host a browsing [`LanClient`] picks, against announcers on UDP
+//! loopback with no host behind them. The sessions themselves are driven end
+//! to end by the samples' own loopback suites — `apps/sandbox/src/lan/tests.rs`
+//! and `apps/towers/src/lan/tests.rs` — which is where a host and its clients
 //! have a world to replicate.
 
+use std::thread;
+
 use super::*;
+use crate::net::SystemClock;
+use crate::net::udp::discovery::BrowserConfig;
 
 /// Every argument of `argv` through [`LanMode::consume`], as a sample's
 /// parser offers them: the mode, or the first refusal. An argument it does
@@ -103,4 +108,169 @@ fn a_climbing_count_is_logged_once_an_interval() {
         !log.due(u64::from(FRAMES), later + 10 * REFUSAL_LOG_INTERVAL),
         "a count that has not moved since is not"
     );
+}
+
+/// A session for the browsing tests alone.
+const GAME: LanGame = LanGame {
+    app: "lan-test",
+    host_name: "lan test",
+    protocol_id: u32::from_be_bytes(*b"LANT"),
+    compatibility: ProtocolCompatibility {
+        protocol_version: ProtocolCompatibility::DEFAULT.protocol_version,
+        engine_build_id: 7,
+        schema_hash: 11,
+    },
+    max_players: 4,
+};
+
+const TICK_HZ: u32 = 60;
+
+/// The most polls any wait in the browsing tests runs.
+const MAX_POLLS: usize = 600;
+
+/// The pause after each poll, for loopback to deliver.
+const PAUSE: Duration = Duration::from_millis(1);
+
+/// Loopback, any free port.
+fn loopback() -> SocketAddr {
+    (Ipv4Addr::LOCALHOST, 0).into()
+}
+
+/// What an announcer for `name` announces: a game on `port`, speaking
+/// `compatibility`, with `players` of [`GAME`]'s maximum in.
+fn announcement(
+    name: &str,
+    port: u16,
+    compatibility: ProtocolCompatibility,
+    players: u16,
+) -> Announcement {
+    let mut announcement = Announcement::new(
+        GAME.protocol_id,
+        NonZeroU16::new(port).expect("a game port"),
+        compatibility,
+        name,
+    );
+    announcement.players = players;
+    announcement.max_players = GAME.max_players;
+    announcement
+}
+
+/// An announcer on loopback, broadcasting nowhere: it answers queries.
+fn announcer(announcement: Announcement) -> Announcer {
+    Announcer::bind_with(loopback(), announcement, None, SystemClock::new())
+        .expect("loopback UDP must be available to these tests")
+}
+
+/// Sends a query from `browser` to each of `announcers`, lets them answer,
+/// and polls `browser` for the replies.
+fn ask(browser: &mut Browser, announcers: &mut [Announcer]) {
+    for announcer in announcers.iter() {
+        browser.query(announcer.local_addr().expect("announcer address"));
+    }
+    thread::sleep(PAUSE);
+    for announcer in announcers.iter_mut() {
+        announcer.poll();
+    }
+    thread::sleep(PAUSE);
+    browser.poll();
+}
+
+/// A loopback browser, querying nothing by itself, that has heard every one
+/// of `announcers`, so a [`LanClient`] handed it judges all of them on its
+/// first frame rather than whichever answered first.
+fn hearing(announcers: &mut [Announcer]) -> Browser {
+    let mut browser = Browser::bind_with(
+        loopback(),
+        BrowserConfig::new(GAME.protocol_id),
+        SystemClock::new(),
+    )
+    .expect("loopback UDP must be available to these tests");
+    for _ in 0..MAX_POLLS {
+        if browser.hosts().len() == announcers.len() {
+            return browser;
+        }
+        ask(&mut browser, announcers);
+    }
+    panic!("not every announcer heard within {MAX_POLLS} polls");
+}
+
+/// Where a client joining `announcer`'s host connects: loopback, and the
+/// game port it announces.
+fn game_addr(announcer: &Announcer) -> SocketAddr {
+    (
+        Ipv4Addr::LOCALHOST,
+        announcer.announcement().game_port.get(),
+    )
+        .into()
+}
+
+/// **A browser passes a full host over and joins one with room.** The full
+/// host sorts first, so a pick that judged compatibility alone would take
+/// it — and be refused by it.
+#[test]
+fn a_browser_joins_a_host_with_room_over_a_full_one() {
+    let ours = GAME.compatibility;
+    let mut announcers = [
+        announcer(announcement("a full", 5101, ours, GAME.max_players)),
+        announcer(announcement("b open", 5102, ours, 1)),
+    ];
+    let mut client = LanClient::browse(GAME, hearing(&mut announcers), TICK_HZ);
+    client.frame(Duration::ZERO);
+    assert_eq!(client.host(), Some(game_addr(&announcers[1])));
+}
+
+/// **A browser that hears only a full host stays looking, and joins it once
+/// it has room.** Nothing joinable is no pick at all, as with no host: the
+/// browser goes on asking, and the next announce that has a free slot is
+/// joined.
+#[test]
+fn a_browser_hearing_only_a_full_host_goes_on_looking() {
+    let ours = GAME.compatibility;
+    let mut announcers = [announcer(announcement(
+        "full",
+        5103,
+        ours,
+        GAME.max_players,
+    ))];
+    let mut client = LanClient::browse(GAME, hearing(&mut announcers), TICK_HZ);
+    let mut now = Duration::ZERO;
+    for _ in 0..10 {
+        now += Duration::from_millis(16);
+        let Phase::Browsing(browser) = &mut client.phase else {
+            panic!("stopped looking with only a full host heard");
+        };
+        ask(browser, &mut announcers);
+        assert_eq!(browser.hosts().len(), 1, "the full host is still heard");
+        client.frame(now);
+    }
+    assert_eq!(client.host(), None, "still looking");
+
+    announcers[0].set_announcement(announcement("full", 5103, ours, GAME.max_players - 1));
+    for _ in 0..MAX_POLLS {
+        let Phase::Browsing(browser) = &mut client.phase else {
+            break;
+        };
+        ask(browser, &mut announcers);
+        now += Duration::from_millis(16);
+        client.frame(now);
+    }
+    assert_eq!(client.host(), Some(game_addr(&announcers[0])));
+}
+
+/// **A browser passes over a host of another build.** It sorts first and has
+/// room, so only the compatibility check keeps the pick off it.
+#[test]
+fn a_browser_joins_its_own_build_over_another() {
+    let ours = GAME.compatibility;
+    let other_build = ProtocolCompatibility {
+        engine_build_id: ours.engine_build_id + 1,
+        ..ours
+    };
+    let mut announcers = [
+        announcer(announcement("a elsewhere", 5104, other_build, 1)),
+        announcer(announcement("b open", 5105, ours, 1)),
+    ];
+    let mut client = LanClient::browse(GAME, hearing(&mut announcers), TICK_HZ);
+    client.frame(Duration::ZERO);
+    assert_eq!(client.host(), Some(game_addr(&announcers[1])));
 }

@@ -14382,11 +14382,6 @@ Either is the owner's call.
   that `return` survives every test, because the link is inert without the
   `steam` feature and a live client. Only a `--features steam` run by hand shows
   it.
-- **`LanClient::browse` joins a full host.** Its auto-join compares only
-  `compatibility`, so `--browse` (both games) can pick a host at its
-  `max_players` and be refused by it; the lobby passes a full host over
-  (`Unjoinable::Full`). Using `Unjoinable::of` there is a one-line change left
-  out of the lobby slice as a behaviour change of `--browse`.
 - **Link-local multicast is not sent.** The design wanted it beside broadcast,
   because networks disagree about which they forward. Receiving multicast needs
   the discovery port bound too (`join_multicast_v4` on a bound socket), so it

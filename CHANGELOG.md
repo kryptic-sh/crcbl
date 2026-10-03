@@ -4142,6 +4142,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`--browse` no longer joins a full host.** `LanClient::browse` picked the
+  first host of a compatible build, so towers' and the sandbox's `--browse`
+  could connect to one already at its `max_players` and be refused by it. It now
+  judges each host by `crcbl::lan::lobby::Unjoinable::of`, the lobby's own rule,
+  joining the first with room and printing the rest with the lobby's reason
+  (`FULL`, `ANOTHER BUILD`, ...); with nothing joinable it goes on looking, and
+  joins a full host once it announces a free slot.
 - **`crcbl-vk` reports a lost device instead of a finished frame.** AMD's
   Windows driver answers a lost device's timeline reads and `vkDeviceWaitIdle`
   with `VK_SUCCESS`, the timeline at `u64::MAX`, so `poll_readback` handed back
