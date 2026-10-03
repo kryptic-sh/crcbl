@@ -111,6 +111,7 @@ use crate::keys::Action;
 use crate::layout;
 use crate::panel::{PanelInput, Panels, Tone, VIEWPORT_TEXTURE};
 
+mod files;
 mod instances;
 mod meshes;
 
@@ -587,6 +588,13 @@ impl<S: Shell + ?Sized> Editor<S> {
         if let Some(refusal) = self.document.take_play_refusals().pop() {
             self.panels
                 .set_status(format!("{REFUSED}{refusal}"), Tone::Warning);
+        }
+        // Before this frame's actions: a click on a toolbar button is what
+        // committed a save-as being typed, and the scene it was typed for is
+        // the one to save — not the new scene or the played one the button
+        // asks for.
+        if let Some(text) = panels.save_as {
+            self.save_as(&text)?;
         }
         for action in asked {
             self.act(&action);
@@ -1176,6 +1184,8 @@ impl<S: Shell + ?Sized> Editor<S> {
             Action::Undo => self.document.undo().map(|_| ()),
             Action::Redo => self.document.redo().map(|_| ()),
             Action::Save => self.save(),
+            Action::SaveAs => self.begin_save_as(),
+            Action::NewScene => self.new_scene(),
             Action::Frame => {
                 self.frame_scene();
                 Ok(())
@@ -1288,22 +1298,34 @@ impl<S: Shell + ?Sized> Editor<S> {
     }
 
     /// Saves the document, then says what the games it is made for would
-    /// refuse in it — reported, not refused: see [`Document::problems`].
+    /// refuse in it — reported, not refused: see [`Document::problems`]. A
+    /// document with no directory to save back to asks for one instead, as
+    /// save-as does.
     fn save(&mut self) -> Result<(), EditError> {
-        self.document.save()?;
+        match self.document.save() {
+            Err(EditError::NoOrigin) => self.begin_save_as(),
+            Err(error) => Err(error),
+            Ok(()) => self.report_saved("Saved"),
+        }
+    }
+
+    /// Says on the status line that the document was saved, opening with
+    /// `saved` — and what the games it is made for would refuse in it,
+    /// reported rather than refused: see [`Document::problems`].
+    fn report_saved(&mut self, saved: &str) -> Result<(), EditError> {
         let problems = self.document.problems()?;
         for problem in &problems {
             crcbl::log::warn!("editor: saved, but its game will refuse it: {problem}");
         }
         match problems.as_slice() {
-            [] => self.panels.set_status("Saved", Tone::Info),
+            [] => self.panels.set_status(saved, Tone::Info),
             [only] => self.panels.set_status(
-                format!("Saved, but its game will refuse it: {only}"),
+                format!("{saved}, but its game will refuse it: {only}"),
                 Tone::Warning,
             ),
             [first, rest @ ..] => self.panels.set_status(
                 format!(
-                    "Saved, but its game will refuse it: {first} (and {} more in the log)",
+                    "{saved}, but its game will refuse it: {first} (and {} more in the log)",
                     rest.len()
                 ),
                 Tone::Warning,
@@ -1544,8 +1566,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// Rebuilds the renderer around the shelf it has and every asset the
     /// document's meshes now name, when they name one it lacks — see `meshes`.
     ///
-    /// The device is drained first, because a renderer is destroyed idle; the
-    /// old renderer stays in place if the new one is refused.
+    /// The rebuild is [`rebuild`](Self::rebuild)'s.
     ///
     /// # Errors
     ///
@@ -1562,7 +1583,21 @@ impl<S: Shell + ?Sized> Editor<S> {
             return Ok(());
         }
         let assets = self.shelf.assets().union(&wanted).cloned().collect();
-        let (shelf, scene) = Shelf::build(self.document.assets(), &assets);
+        self.rebuild(&assets)
+    }
+
+    /// Puts a renderer holding `assets`, read through the document's asset
+    /// source, in place of the one drawing now, with every entity of the
+    /// document placed in it.
+    ///
+    /// The device is drained first, because a renderer is destroyed idle; the
+    /// old renderer stays in place if the new one is refused.
+    ///
+    /// # Errors
+    ///
+    /// As [`shelve`](Self::shelve).
+    fn rebuild(&mut self, assets: &std::collections::BTreeSet<String>) -> Result<(), EditorError> {
+        let (shelf, scene) = Shelf::build(self.document.assets(), assets);
         let (renderer, instances) = renderer_for(
             &self.gpu,
             &scene,
@@ -1805,7 +1840,13 @@ fn selection_boxes(document: &mut Document) -> Vec<([Vec3; 8], [f32; 4])> {
     boxes
 }
 
-/// The box around everything in the document, or a unit box for an empty one.
+/// The box around everything in the document, or for an empty one a unit
+/// box standing on the ground at the origin.
+///
+/// Standing on the ground rather than about the origin: the view is framed
+/// level with the box's centre, so a box about the origin would put the eye
+/// on the ground plane itself, where no ray meets the ground in front of it
+/// and a mesh dragged into a new scene would have nowhere to land.
 fn scene_bounds(document: &mut Document) -> Aabb {
     let ids: Vec<SceneEntityId> = document
         .outline()
@@ -1824,8 +1865,8 @@ fn scene_bounds(document: &mut Document) -> Aabb {
         });
     }
     bounds.unwrap_or(Aabb {
-        min: Vec3::splat(-0.5),
-        max: Vec3::splat(0.5),
+        min: Vec3::new(-0.5, 0.0, -0.5),
+        max: Vec3::new(0.5, 1.0, 0.5),
     })
 }
 

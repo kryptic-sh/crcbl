@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls and multi-selection 2026-10-03, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls, multi-selection, a scene from empty and save-as 2026-10-03, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -643,7 +643,8 @@ of the same day (below).
 
 **Slice 13, the asset browser, scene meshes and drag-spawn (task 6), landed
 2026-10-01**, on the decisions of the same day (below). With it every step of
-the exit criterion has a path in the editor except creating a scene from empty.
+the exit criterion has a path in the editor except creating a scene from empty,
+which landed 2026-10-03 (_A scene from empty and save-as_, below).
 
 - **A mesh is a scene component.** `crcbl::scene_mesh` (behind `scn`/`scene`,
   registered by `scene_mesh::register`, which the editor's vocabulary calls)
@@ -823,6 +824,87 @@ of the same day (below).
   centre; the editor's hold a turned block tipping in play, picking where it
   rests and restored by stop, and a turned block picking by its turned box. The
   mutations each turned a test red are listed in the commits that landed this.
+
+**A scene from empty and save-as, landed 2026-10-03**, on the decision of the
+same day (below). With it the first exit criterion is met, headlessly.
+
+- **A new scene** (`Document::new_scene`, Ctrl+N and the toolbar's New) puts
+  `crate::scene::empty_source` in place: a header named `untitled` listing no
+  system, the compiled-in scene's light and camera, no entity, a fresh log, no
+  origin, clean. The vocabulary and the asset source stay, so the browser lists
+  what it listed. Refused in play mode. The editor has no unsaved-changes prompt
+  — closing the window drops edits through `accept_close` — so a new scene drops
+  them too, and says so on the status line, naming the scene. An empty scene is
+  framed as a unit box standing on the ground, not about the origin: the view is
+  level with the box's centre, and a box about the origin put the eye on the
+  ground plane, where a drop meets no ground.
+- **Decided 2026-10-03, for the long term: save-as makes the directory the
+  document's origin.** `Document::save_as` writes the scene and adopts the
+  directory — the next save writes there, and `owned` is the set save-as wrote,
+  so the first save after it removes a chunk the scene stopped naming — which is
+  what the command means in every editor. The copy's safety is kept: a directory
+  already holding a file the scene would write is refused before anything is
+  written (`EditError::Occupied`), and nothing in the old directory is removed
+  or touched; the old files are left a scene of their own. Into the document's
+  own origin it is a plain save. **The asset root follows the origin**
+  (`document::origin::AssetRoot`): a source derived from the old origin, or none
+  at all, becomes `document::asset_root` of the new directory and is measured
+  afresh; one named by `set_assets` — `--assets` — stays. `save_to` is still the
+  copy that adopts nothing.
+- **The directory is typed** on a save-as line under the toolbar
+  (`apps/editor/src/panel/save_as.rs`), the shell having no file dialog: a text
+  input engaged as it opens, Enter commits and Escape cancels as a rename's
+  does. Ctrl+Shift+S and the toolbar's Save as open it; so does Ctrl+S on a
+  document with no origin, which used to refuse with `EditError::NoOrigin`.
+  `document::save_target` checks the text at the boundary — trimmed, made
+  absolute against the working directory, refused (`EditError::Target`) when
+  empty, holding a control character, or naming something other than a
+  directory. A refused save-as is on the status line and the line opens again
+  holding what was typed. A toolbar click that commits a line being typed saves
+  before the click's own action runs, so it is the scene being edited that is
+  saved.
+- **The exit criterion's proof** is
+  `app::tests::exit_criterion::empty_scene_to_play_and_stop_without_a_text_editor`,
+  one test through the real `Editor` loop on the headless shell and the null
+  backend: Ctrl+N; the fixture triangle dragged from its browser row onto the
+  ground; the translate gizmo's X arrow dragged; the inspector's add button for
+  `bodies` clicked and the mass dragged; the toolbar's Save as, a directory
+  under the game's folder typed, Enter; a fresh editor opened on that directory
+  alone; F5 and thirty frames of play; F5. Each step asserts what it changed —
+  the scene empty, the mesh measured from the asset and selected, the move along
+  X alone, both systems listed and the mass raised, the scene the document's own
+  — and that the game's folder is unchanged until the save-as, is the fixture
+  plus the scene's files after it, and is unchanged by the reopen, play and
+  stop. The reopened scene is the saved one, the mesh measured from the game's
+  root, the body falls more than half a metre, and stop restores the files byte
+  for byte.
+- **What it does not cover**: nothing of it has been seen on a device — every
+  step is headless, on the null backend, against laid-out rectangles. The
+  fixture triangle is one flat part; the body falls into nothing (the new scene
+  has no ground and the test builds none), so resting is not shown; the property
+  edited is a drag-value dragged, not a number typed. Reopening is a fresh
+  editor, because the editor has no open command; the saved scene is still
+  called `untitled`. `docs/backlog.md` lists these with what each takes.
+- **Evidence**: the document's tests hold a new scene's state from a document
+  that had a history, names, a selection and an origin, and its refusal in play;
+  save-as adopting the directory (a system unlisted straight after it removed by
+  the next save), leaving the old directory byte for byte, refusing an occupied
+  one with the origin, the marker and both directories unmoved, saving in place,
+  the asset root following a derived source and not a named one, and each typed
+  target refusal. The panels' hold the line typing, committing and cancelling,
+  and refused in play; the keys', Ctrl+N and Ctrl+Shift+S; the loop's, Ctrl+N
+  dropping and saying so, refused in play, the toolbar's two buttons, Ctrl+S
+  with no origin opening the line, a typed directory saved into with Ctrl+S
+  following it, an occupied one refused and asked again, a file refused, and a
+  toolbar click committing the line saving the scene it was typed for. Each of
+  these mutations turned a test red: save-as keeping the old origin, not
+  adopting what it wrote, a copy overwriting an occupied directory, the asset
+  root never following, a named root following anyway, a new scene allowed in
+  play, keeping its origin, or leaving the membership count, Ctrl+S with no
+  origin refusing, Shift ignored on Ctrl+S, Ctrl+N unbound, a file taken as a
+  target, the line committing nothing, a dropped scene unnamed, the empty scene
+  framed about the origin, the save-as carried out after the frame's actions,
+  the empty scene listing a system, and stop not restoring.
 
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
@@ -1326,7 +1408,9 @@ rules. It stays open in the backlog.
 
 - Create scene from empty → place meshes from asset browser → transform with
   gizmos → edit properties → save → reopen → play → stop, all without touching a
-  text editor.
+  text editor. **Met 2026-10-03, headlessly**: `app::tests::exit_criterion`
+  drives it through the loop (_A scene from empty and save-as_, above, says what
+  it covers and what it does not).
 - Undo/redo correct across all MVP commands (property-based test: random command
   sequence + full undo → state hash equals initial).
 - Editor never links `crcbl-vk` directly (only through the engine facade) —

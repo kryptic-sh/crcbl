@@ -32,13 +32,18 @@
 //!
 //! # The toolbar
 //!
-//! A strip over the panes, outside the dock, with play mode's two buttons and
-//! where play stands — so it costs the saved layout nothing: the dock's panes
-//! are the ones [`crate::layout::load`] checks a settings file against, and a
-//! pane a layout does not hold has to be migrated into it, as the asset
-//! browser is (`crate::layout`'s module docs). A click is not acted
-//! on here: [`PanelFrame::toolbar`] hands the [`Action`] its key would have
-//! asked for back to [`crate::app`], which carries both out the same way.
+//! A strip over the panes, outside the dock, with play mode's two buttons,
+//! where play stands, and a new scene and save-as — so it costs the saved
+//! layout nothing: the dock's panes are the ones [`crate::layout::load`]
+//! checks a settings file against, and a pane a layout does not hold has to
+//! be migrated into it, as the asset browser is (`crate::layout`'s module
+//! docs). A click is not acted on here: [`PanelFrame::toolbar`] hands the
+//! [`Action`] its key would have asked for back to [`crate::app`], which
+//! carries both out the same way.
+//!
+//! While a directory is asked for, the save-as line sits under the toolbar
+//! (`save_as`' module docs): a text input whose committed text
+//! [`PanelFrame::save_as`] hands to [`crate::app`] to save into.
 //!
 //! While a scene plays and its game offers play controls, a second strip
 //! under the toolbar lists them and the run's numbers (`play`'s module docs):
@@ -126,6 +131,7 @@ use crate::layout::{self, PANE_MIN};
 mod assets;
 mod inspector;
 mod play;
+mod save_as;
 
 /// The name the viewport pane's picture goes by in the panels' draw list —
 /// see the module docs. The only texture the editor draws, so the first
@@ -177,6 +183,17 @@ const EDITOR_CSS: &str = "
 #toolbar button { margin-right: 4px; }
 
 #play-state { padding: 0 6px; color: #9aa3b2; }
+
+#save-as {
+  flex-shrink: 0;
+  align-items: center;
+  padding: 2px 4px;
+  background: #1b1f27;
+}
+
+.save-as-label, .save-as-hint { padding: 0 6px; color: #9aa3b2; }
+
+.save-as-path { flex-grow: 1; min-width: 0; }
 
 #play-controls {
   flex-shrink: 0;
@@ -325,6 +342,9 @@ pub struct PanelFrame {
     /// The mesh asset accept was pressed on in the asset browser this frame,
     /// for the caller to place at the view's centre.
     pub spawn: Option<String>,
+    /// The directory the save-as line committed this frame, as typed, for the
+    /// caller to check and save into — see `save_as`' module docs.
+    pub save_as: Option<String>,
 }
 
 /// The inspector's sections, add buttons and add-list headings, as a frame
@@ -389,6 +409,8 @@ pub struct Panels {
     browser: assets::Browser,
     /// The play strip's choices and what it last drew — see `play`.
     strip: play::Strip,
+    /// The save-as line, while a directory is asked for — see `save_as`.
+    save_as: save_as::Strip,
 }
 
 /// How the status line reads a message.
@@ -445,6 +467,7 @@ impl Panels {
             toolbar_key: None,
             browser: assets::Browser::new(document.assets()),
             strip: play::Strip::default(),
+            save_as: save_as::Strip::default(),
         };
         // One idle frame, so the first real one has rectangles to hit-test
         // against: the tree resolves a click against the *previous* layout, and
@@ -576,6 +599,28 @@ impl Panels {
         self.renaming.as_ref().map(|renaming| renaming.id)
     }
 
+    /// Opens the save-as line under the toolbar holding `text`, and engages
+    /// its input once it is laid out — the next frame — so what is typed
+    /// after that is the directory. See `save_as`' module docs.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::Playing`] in play mode, which refuses a save; the line is
+    /// not opened.
+    pub fn begin_save_as(&mut self, document: &Document, text: String) -> Result<(), EditError> {
+        if document.play_state() != PlayState::Editing {
+            return Err(EditError::Playing);
+        }
+        self.save_as.begin(text);
+        Ok(())
+    }
+
+    /// What the save-as line's input holds, while the line is open.
+    #[must_use]
+    pub fn saving_as(&self) -> Option<&str> {
+        self.save_as.text()
+    }
+
     /// Puts `text` on the status line under the panes, read as `tone`, until
     /// the next message replaces it.
     pub fn set_status(&mut self, text: impl Into<String>, tone: Tone) {
@@ -646,6 +691,16 @@ impl Panels {
             .ui
             .child_keys(self.toolbar_key.expect("the toolbar is laid out"));
         [keys[0], keys[1]]
+    }
+
+    /// The toolbar's new-scene and save-as buttons, as the last frame laid
+    /// them out: after the play state.
+    #[cfg(test)]
+    pub(crate) fn file_buttons(&self) -> [NodeKey; 2] {
+        let keys = self
+            .ui
+            .child_keys(self.toolbar_key.expect("the toolbar is laid out"));
+        [keys[3], keys[4]]
     }
 
     /// The play strip, as the last frame laid it out — [`None`] on a frame
@@ -832,6 +887,7 @@ impl Panels {
         let mut double_clicked = None;
         let mut relist = false;
         let mut asked_play = None;
+        let mut save_input = None;
         // Owned, so the strip is built while the inspector borrows the
         // document: the controls are a few pointers and the numbers a few
         // strings.
@@ -862,6 +918,7 @@ impl Panels {
             status,
             browser,
             strip,
+            save_as,
             ..
         } = self;
         let options = OutlinerOptions {
@@ -880,6 +937,7 @@ impl Panels {
             ],
             |ui| {
                 (toolbar_key, toolbar) = build_toolbar(ui, play);
+                save_input = save_as.build(ui);
                 asked_play = strip.build(ui, &controls, play_status);
                 ui.dock("#panes", layout, PANE_MIN, |ui, pane| match pane {
                     // Built empty: the scene's picture is pushed over its
@@ -998,6 +1056,7 @@ impl Panels {
         }
         self.follow_outliner(document, input.select);
         self.follow_rename(document, rename_input);
+        let save_as = self.save_as.follow(&mut self.ui, save_input);
         if let Some(id) = double_clicked
             && let Err(error) = self.begin_rename(document, id)
         {
@@ -1008,6 +1067,7 @@ impl Panels {
             commands,
             toolbar,
             spawn,
+            save_as,
         }
     }
 
@@ -1264,11 +1324,12 @@ fn scroll(ui: &mut Ui, scrollers: &[NodeKey], at: Vec2, delta: f32) {
     ui.set_scroll_offset_of(key, Vec2::new(offset.x, (offset.y + delta).max(0.0)));
 }
 
-/// The toolbar over the panes: play or stop, pause or resume, and where play
-/// stands. Returns its key, and what a click on it asked for.
+/// The toolbar over the panes: play or stop, pause or resume, where play
+/// stands, and a new scene and save-as. Returns its key, and what a click on
+/// it asked for.
 ///
 /// Each button is labelled with what it does **now** and the key that does the
-/// same, so the strip is also where a person learns F5 and F6.
+/// same, so the strip is also where a person learns F5, F6 and the chords.
 fn build_toolbar(ui: &mut Ui, play: PlayState) -> (Option<NodeKey>, Option<Action>) {
     let (start, hold, state) = match play {
         PlayState::Editing => ("Play (F5)", "Pause (F6)", "Editing"),
@@ -1284,6 +1345,15 @@ fn build_toolbar(ui: &mut Ui, play: PlayState) -> (Option<NodeKey>, Option<Actio
             asked = Some(Action::Pause);
         }
         ui.span("#play-state", state, &[]);
+        if ui.button("#new-scene", "New (Ctrl+N)").clicked {
+            asked = Some(Action::NewScene);
+        }
+        if ui
+            .button("#save-scene-as", "Save as (Ctrl+Shift+S)")
+            .clicked
+        {
+            asked = Some(Action::SaveAs);
+        }
     });
     (Some(toolbar.key), asked)
 }
@@ -1443,6 +1513,7 @@ mod tests {
     mod inspector;
     mod naming;
     mod rotation;
+    mod save_as;
     mod selection;
 
     /// The framebuffer every page here is laid out over: the size the editor's

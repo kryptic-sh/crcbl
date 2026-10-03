@@ -55,7 +55,21 @@ const GREYBOX_SCENE_RON: &str = r#"Scene(
     ],
 )"#;
 
-/// `greybox.scn/env.ron`, as the writer writes it.
+/// The name a new scene's header carries: what Ctrl+N makes, before anything
+/// is put in it — see [`empty_source`].
+pub const UNTITLED: &str = "untitled";
+
+/// A new scene's `scene.ron`, as the writer writes it: [`UNTITLED`], listing
+/// no system. Each system is listed as the first thing of its kind is put in
+/// the scene — a dropped mesh lists `meshes`, an attached body `bodies`.
+const EMPTY_SCENE_RON: &str = r#"Scene(
+    format: 0,
+    name: "untitled",
+    systems: [],
+)"#;
+
+/// `greybox.scn/env.ron`, as the writer writes it — and a new scene's too, so
+/// a new scene is looked at from where the compiled-in one is.
 const GREYBOX_ENV_RON: &str = r"Env(
     camera: Camera(
         position: (0.0, 6.0, 14.0),
@@ -240,6 +254,26 @@ pub fn built_in_source() -> MemorySource {
     source
 }
 
+/// A new, empty scene directory, as a source with no filesystem under it,
+/// keyed at its root: a header named [`UNTITLED`] listing no system, the
+/// compiled-in scene's light and camera, and no chunk — what
+/// [`Document::new_scene`](crate::document::Document::new_scene) loads.
+///
+/// Text rather than a [`crcbl::scene::scn::Scene`] built in code, for
+/// [`built_in_source`]'s reason: the new scene is reviewable as the files it
+/// is, and `a_new_scene_is_what_the_writer_writes` keeps them the writer's
+/// own spelling.
+#[must_use]
+pub fn empty_source() -> MemorySource {
+    let mut source = MemorySource::new();
+    for (key, text) in [("scene.ron", EMPTY_SCENE_RON), ("env.ron", GREYBOX_ENV_RON)] {
+        source
+            .insert(Path::new(key), text.as_bytes().to_vec())
+            .expect("a scene key is a legal asset key");
+    }
+    source
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -277,6 +311,23 @@ mod tests {
         for (key, text) in &files {
             assert!(!text.contains('\r'), "the newline is pinned in {key}");
         }
+    }
+
+    /// **A new scene is what the writer writes**, byte for byte: a header
+    /// listing nothing and the compiled-in scene's light, and no chunk.
+    #[test]
+    fn a_new_scene_is_what_the_writer_writes() {
+        let mut document = Document::open(&empty_source(), Path::new(""), vocabulary())
+            .expect("the new scene is a scene");
+        let files = document.files().expect("there is nothing to give an id");
+        assert_eq!(
+            files.keys().collect::<Vec<_>>(),
+            ["env.ron", "scene.ron"],
+            "a header and a light and nothing else",
+        );
+        assert_eq!(files["scene.ron"], EMPTY_SCENE_RON);
+        assert_eq!(files["env.ron"], GREYBOX_ENV_RON);
+        assert_eq!(document.name(), UNTITLED);
     }
 
     /// **The shipped vocabulary is this build's own component and every game's**,

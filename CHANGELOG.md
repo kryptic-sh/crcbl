@@ -16,6 +16,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **The editor's `EditError` gained `Target`** (see Added: a new scene and
+  save-as), a typed save-as directory refused before anything is written, so an
+  exhaustive match over it must add it.
+
 - **The editor's selection is a set** (see Added: multi-selection).
   `Document::selected` is gone — `Document::primary` answers the same entity for
   a selection of one — and `Document::delete`, `duplicate` and `copy` take
@@ -563,6 +567,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the first located error under the vitals panel until a good save replaces it.
   The ability row and the damage ticker draw as before; the debug panel's `page`
   section now counts the styled half's commands too.
+
+- **The editor makes a scene from empty and saves it where it is told.** Ctrl+N
+  and the toolbar's New put an empty scene in place (`Document::new_scene`): no
+  entity, a manifest listing nothing — each system is listed as the first thing
+  of its kind is dropped or attached — no directory and nothing to undo, keeping
+  the asset browser's source. Unsaved edits are dropped as closing the window
+  drops them, and the status line names the scene they were in. Ctrl+Shift+S and
+  the toolbar's Save as open a line under the toolbar to type a directory into;
+  Enter saves (`Document::save_as`), Escape cancels, and Ctrl+S on a scene with
+  no directory opens the same line instead of refusing. Save-as **makes the
+  directory the scene's own**: later saves go there and remove only what it
+  wrote, a directory already holding a file the scene would write is refused
+  (`EditError::Occupied`) and asked for again, nothing in the old directory is
+  touched, and the asset root follows to the new directory's game
+  (`document::asset_root`) unless `--assets` named it. A typed directory is
+  checked by `document::save_target` (`EditError::Target`). An empty scene is
+  framed standing on the ground, so a mesh dragged into it has somewhere to
+  land. `app::tests::exit_criterion` drives the whole of the editor's first exit
+  criterion through the loop — new scene, a mesh dragged from the browser, a
+  gizmo move, a body attached and its mass dragged, save-as, reopen, play, stop
+  — and checks the game's folder after every step.
+
 - **`crcbl::lan::lobby`: a LAN lobby's model, without its look** (native
   builds). `lobby::Lobby` polls a `Browser` and sorts what it hears into
   `joinable()` hosts and `passed_over()` ones, each with an `Unjoinable` reason

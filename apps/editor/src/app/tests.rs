@@ -9,6 +9,8 @@ use crcbl::ui::tree::NodeKey;
 
 mod assets;
 mod clipboard;
+mod exit_criterion;
+mod files;
 mod play;
 mod selection;
 
@@ -694,16 +696,20 @@ fn a_copied_entity_pastes_back_through_the_clipboard() {
 }
 
 /// **A refusal reaches the status line, not only the log**: saving the
-/// compiled-in scene, which has nowhere to save to, says so under the panes
-/// as a warning, and the line reads "Ready" until something happens.
+/// compiled-in scene into a file rather than a directory says so under the
+/// panes as a warning, and the line reads "Ready" until something happens.
 #[test]
 fn a_refused_save_is_on_the_status_line() {
-    let mut editor = Editor::start(&options(2)).expect("headless starts");
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let file = dir.path().join("notes.txt");
+    std::fs::write(&file, "plans").expect("writable");
+    let mut editor = headless(16);
     assert_eq!(editor.panels.status(), ("Ready", Tone::Info));
-    editor.act(&Action::Save);
+    editor.act(&Action::SaveAs);
+    files::type_and_enter(&mut editor, &file.display().to_string());
     let (text, tone) = editor.panels.status();
     assert_eq!(tone, Tone::Warning, "{text}");
-    assert!(text.contains("nowhere to save"), "{text}");
+    assert!(text.contains("cannot be saved into"), "{text}");
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 
@@ -739,17 +745,18 @@ fn a_nudge_with_nothing_selected_records_nothing() {
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 
-/// Saving the compiled-in scene says there is nowhere to write rather than
-/// guessing one, and leaves the document dirty.
+/// Saving the compiled-in scene asks where to write rather than guessing
+/// somewhere, and leaves the document dirty until it is told.
 #[test]
-fn saving_the_built_in_scene_is_refused_and_leaves_it_dirty() {
+fn saving_the_built_in_scene_asks_for_a_directory_and_leaves_it_dirty() {
     let mut editor = Editor::start(&options(2)).expect("headless starts");
     editor.document_mut().select(Some(SceneEntityId(0)));
     editor.act(&Action::Nudge { axis: 1, sign: 1.0 });
     editor.act(&Action::Save);
+    assert_eq!(editor.panels.saving_as(), Some(""));
     assert!(
         editor.document().is_dirty(),
-        "a refused save must not clear the marker",
+        "asking for a directory must not clear the marker",
     );
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }

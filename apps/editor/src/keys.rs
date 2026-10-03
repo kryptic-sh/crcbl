@@ -25,7 +25,8 @@
 //! binding this engine can express. Rather than drop the second spelling of
 //! redo, [`actions`] reads the chord's own modifier state — the [`Modifiers`]
 //! the shell stamps on every key event, which the loop already keeps — and
-//! treats an [`UNDO`] that arrived with Shift held as a redo. The *arbitration*
+//! treats an [`UNDO`] that arrived with Shift held as a redo, and a [`SAVE`]
+//! with Shift held as a save-as. The *arbitration*
 //! is still the context stack's: while `text` owns `z`, no chord on it fires at
 //! all, and there is nothing here to decide.
 //!
@@ -67,8 +68,13 @@ pub const UNDO: &str = "editor_undo";
 /// Walk it forward one entry.
 pub const REDO: &str = "editor_redo";
 
-/// Write the scene back over the directory it came from.
+/// Write the scene back over the directory it came from — and, with Shift
+/// held, ask for a directory to save it into instead; see the module docs.
 pub const SAVE: &str = "editor_save";
+
+/// Put a new, empty scene in place of the one being edited: Ctrl+N. See
+/// [`crate::document::Document::new_scene`].
+pub const NEW: &str = "editor_new";
 
 /// Put the whole scene back in view.
 pub const FRAME: &str = "editor_frame";
@@ -123,8 +129,14 @@ pub enum Action {
     Undo,
     /// Walk it forward one entry.
     Redo,
-    /// Write the scene back over the directory it came from.
+    /// Write the scene back over the directory it came from — or, for a
+    /// scene that has none, ask for one as [`SaveAs`](Self::SaveAs) does.
     Save,
+    /// Ask for a directory to save the scene into, and make it the scene's
+    /// own.
+    SaveAs,
+    /// Put a new, empty scene in place of the one being edited.
+    NewScene,
     /// Put the whole scene back in view.
     Frame,
     /// Remove the selection from the scene.
@@ -205,6 +217,13 @@ pub fn map() -> ActionMap {
         vec![Binding::Chord {
             modifier: Modifier::Control,
             key: KeyCode::KeyS,
+        }],
+    ));
+    map.declare(button(
+        NEW,
+        vec![Binding::Chord {
+            modifier: Modifier::Control,
+            key: KeyCode::KeyN,
         }],
     ));
     map.declare(button(FRAME, vec![Binding::Key(KeyCode::KeyF)]));
@@ -318,7 +337,7 @@ pub fn pop_ui(map: &mut ActionMap) {
 pub fn release_keys(map: &mut ActionMap) {
     let mut keys = Vec::new();
     for name in [
-        MOVE, LIFT, UNDO, REDO, SAVE, FRAME, DELETE, DUPLICATE, COPY, PASTE, TRANSLATE, SCALE,
+        MOVE, LIFT, UNDO, REDO, SAVE, NEW, FRAME, DELETE, DUPLICATE, COPY, PASTE, TRANSLATE, SCALE,
         ROTATE, PLAY, PAUSE, RENAME,
     ] {
         for binding in map.bindings(name).unwrap_or_default() {
@@ -358,7 +377,14 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
         actions.push(Action::Redo);
     }
     if map.just_pressed(SAVE) {
-        actions.push(Action::Save);
+        actions.push(if modifiers.contains(Modifiers::SHIFT) {
+            Action::SaveAs
+        } else {
+            Action::Save
+        });
+    }
+    if map.just_pressed(NEW) {
+        actions.push(Action::NewScene);
     }
     if map.just_pressed(DUPLICATE) {
         actions.push(Action::Duplicate);
@@ -579,6 +605,12 @@ mod tests {
         );
         assert_eq!(keys.tap(KeyCode::KeyY, Modifiers::CTRL), [Action::Redo]);
         assert_eq!(keys.tap(KeyCode::KeyS, Modifiers::CTRL), [Action::Save]);
+        assert_eq!(
+            keys.tap(KeyCode::KeyS, Modifiers::CTRL | Modifiers::SHIFT),
+            [Action::SaveAs],
+        );
+        assert_eq!(keys.tap(KeyCode::KeyN, Modifiers::CTRL), [Action::NewScene]);
+        assert_eq!(keys.tap(KeyCode::KeyN, Modifiers::empty()), []);
         assert_eq!(keys.tap(KeyCode::KeyF, Modifiers::empty()), [Action::Frame]);
         assert_eq!(keys.tap(KeyCode::ArrowLeft, Modifiers::CTRL), []);
         assert_eq!(keys.tap(KeyCode::KeyF, Modifiers::CTRL), []);

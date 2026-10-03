@@ -191,7 +191,11 @@ fn f2_starts_a_rename_of_the_selection_and_says_why_when_it_cannot() {
 
 /// The middle of the widget of the `row`th row of the inspector's `section`th
 /// section, a leaf row: a label and then its widget.
-fn leaf_field(editor: &Editor<HeadlessShell>, section: usize, row: usize) -> PhysicalPoint {
+pub(super) fn leaf_field(
+    editor: &Editor<HeadlessShell>,
+    section: usize,
+    row: usize,
+) -> PhysicalPoint {
     let ui = editor.panels.ui();
     let fields = editor
         .panels

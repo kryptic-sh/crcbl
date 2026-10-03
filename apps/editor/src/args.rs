@@ -99,8 +99,8 @@ ARGS:
                          over it. Its systems must be ones this build
                          registers; one it does not is refused by name. Without
                          a directory the editor opens the greybox scene compiled
-                         into it, which has nowhere to save — Ctrl+S on it says
-                         so rather than guessing where to write.
+                         into it, which has nowhere to save — Ctrl+S on it asks
+                         for a directory rather than guessing where to write.
 
 ASSETS:
     --assets <DIR>       The directory a mesh's asset key is read from, and the
@@ -154,7 +154,18 @@ EDITING:
     Ctrl+C / Ctrl+V      Copy the selection to the clipboard as text, and paste
                          the entities a clipboard holds as new ones, selected
     Ctrl+Z / Ctrl+Y     Undo and redo. Ctrl+Shift+Z redoes too
-    Ctrl+S               Save the scene back over the directory it came from
+    Ctrl+S               Save the scene back over the directory it came from;
+                         for a scene that came from none, ask as Ctrl+Shift+S
+    Ctrl+Shift+S         Save as: type a directory under the toolbar and press
+                         Enter (Escape cancels). Relative to the directory the
+                         editor was started in; one already holding a scene is
+                         refused. Later saves go there, and the scene's assets
+                         are read from its game's root unless --assets named
+                         them
+    Ctrl+N               Start a new, empty scene with no directory, keeping
+                         the asset browser. Unsaved changes are dropped, as
+                         closing the window drops them, and the status line
+                         says so
     Drag an asset        From the asset browser into the viewport: place it
                          standing on the surface under the cursor, or on the
                          ground where there is none — one undo a drop

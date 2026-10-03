@@ -17,7 +17,9 @@
 //!   produced.
 //! * [`Document::undo`] / [`Document::redo`] — the log, walked.
 //! * [`Document::files`] — the scene as text, byte-stably, and
-//!   [`Document::save_to`] the same text written to a directory.
+//!   [`Document::save_to`] the same text written to a directory;
+//!   [`Document::save_as`] makes that directory the document's own, and
+//!   [`Document::new_scene`] starts from nothing (`document::origin`).
 //!
 //! And a sixth that is not an edit: [`Document::play`] runs the scene with its
 //! games' modules until [`Document::stop`] puts it back exactly as it was —
@@ -51,12 +53,14 @@ use crate::command::{EditCommand, Gesture, SystemRow, UndoLog, set_property};
 mod field;
 mod meshes;
 mod naming;
+mod origin;
 mod ownership;
 mod play;
 mod selection;
 mod systems;
 mod validation;
 
+pub use origin::save_target;
 pub use play::PlayState;
 pub use systems::{IN_SCENE, SystemGroup, UNGROUPED};
 
@@ -106,6 +110,9 @@ pub struct Document {
     play: Option<play::Session>,
     /// Where a mesh's asset key is read from — see [`Document::set_assets`].
     assets: Box<dyn AssetSource>,
+    /// Where [`assets`](Self::assets) came from, which says whether a save-as
+    /// moves it — see `document::origin`.
+    asset_root: origin::AssetRoot,
     /// Every asset a mesh has been measured from, each imported once.
     meshes: MeshLibrary,
     /// What the last resolve could not measure — see
@@ -255,6 +262,15 @@ pub enum EditError {
         key: String,
     },
 
+    /// A save-as was handed text that names no directory it could write
+    /// into — see [`save_target`].
+    Target {
+        /// What was typed.
+        text: String,
+        /// Why it is not a directory to save into.
+        reason: String,
+    },
+
     /// A save wrote every file, then could not remove one its scene no longer
     /// names.
     ///
@@ -354,6 +370,9 @@ impl fmt::Display for EditError {
                  document's own does not overwrite; name an empty directory",
                 dir.display()
             ),
+            Self::Target { text, reason } => {
+                write!(f, "the scene cannot be saved into `{text}`: {reason}")
+            }
             Self::Remove { key, source } => write!(
                 f,
                 "removing `{key}`, which the scene no longer names: {source}"
@@ -438,6 +457,7 @@ impl Document {
             owned: BTreeSet::new(),
             play: None,
             assets: Box::new(MemorySource::new()),
+            asset_root: origin::AssetRoot::Unset,
             meshes: MeshLibrary::new(),
             mesh_problems: Vec::new(),
             measures: 0,
@@ -465,7 +485,7 @@ impl Document {
         // root is how a caller says where the scene is.
         let source = crcbl::assets::DirSource::at(path.clone());
         let mut document = Self::open(&source, Path::new(""), registry)?;
-        document.set_assets(Box::new(crcbl::assets::DirSource::at(asset_root(&path))));
+        document.follow_asset_root(&path);
         // The files the scene as loaded would write are exactly the files its
         // manifest names, spelled the way the writer spells them.
         document.owned = document.files()?.into_keys().collect();
@@ -1070,8 +1090,13 @@ impl Document {
     /// marker up. [`EditError::Playing`] in play mode, writing nothing: a played
     /// state is not the scene that was authored.
     pub fn save_to(&mut self, dir: impl AsRef<Path>) -> Result<(), EditError> {
+        self.write(dir.as_ref()).map(|_| ())
+    }
+
+    /// [`save_to`](Self::save_to)'s body, handing back the keys it wrote — what
+    /// a save-as adopts as the files it owns in its new directory.
+    fn write(&mut self, dir: &Path) -> Result<BTreeSet<String>, EditError> {
         self.refuse_in_play()?;
-        let dir = dir.as_ref();
         let files = self.files()?;
         let storage = NativeStorage::at(dir.to_path_buf());
         let own = self
@@ -1103,7 +1128,7 @@ impl Document {
         // document is dirty again rather than folding the change into the
         // entry the save stands on.
         self.log.seal();
-        Ok(())
+        Ok(files.into_keys().collect())
     }
 
     /// What the scene as it stands would be refused for, read from its own
@@ -1519,6 +1544,9 @@ pub(crate) mod mesh_tests;
 
 #[cfg(test)]
 mod naming_tests;
+
+#[cfg(test)]
+pub(crate) mod origin_tests;
 
 #[cfg(test)]
 pub(crate) mod physics_tests;

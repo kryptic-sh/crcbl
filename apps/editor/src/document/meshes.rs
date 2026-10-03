@@ -24,9 +24,9 @@
 //! # Which source
 //!
 //! [`Document::set_assets`] names it. A document opened from a directory reads
-//! from the directory holding the scene; one opened out of a compiled-in
-//! source reads from an empty one, so every mesh in it is the placeholder until
-//! a caller names somewhere. A key is relative to that root, so a scene keeps
+//! from [`super::asset_root`] of it; one opened out of a compiled-in source
+//! reads from an empty one, so every mesh in it is the placeholder until a
+//! caller names somewhere or a save-as gives it a directory (`document::origin`). A key is relative to that root, so a scene keeps
 //! its meshes when the root it is opened with does.
 
 use std::collections::BTreeSet;
@@ -44,7 +44,18 @@ use crate::command::{EditCommand, SystemRow};
 impl Document {
     /// Reads every mesh's asset through `assets` from now on, measuring each
     /// afresh: a different root is different files under the same keys.
+    ///
+    /// A source named here is kept by a [`save_as`](Self::save_as) — it was
+    /// chosen, as `--assets` chooses one, rather than derived from where the
+    /// scene is.
     pub fn set_assets(&mut self, assets: Box<dyn AssetSource>) {
+        self.replace_assets(assets);
+        self.asset_root = super::origin::AssetRoot::Named;
+    }
+
+    /// [`set_assets`](Self::set_assets) without saying where the source came
+    /// from: the swap and the measuring both it and a followed root share.
+    pub(super) fn replace_assets(&mut self, assets: Box<dyn AssetSource>) {
         self.assets = assets;
         self.meshes = MeshLibrary::new();
         self.resolve_meshes();

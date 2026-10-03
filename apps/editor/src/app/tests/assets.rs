@@ -22,7 +22,7 @@ fn props_editor() -> Editor<HeadlessShell> {
 }
 
 /// The middle of the browser row of `asset`, as the last frame laid it out.
-fn row_of(editor: &Editor<HeadlessShell>, asset: &str) -> Vec2 {
+pub(super) fn row_of(editor: &Editor<HeadlessShell>, asset: &str) -> Vec2 {
     let key = editor
         .panels
         .asset_rows()
@@ -34,7 +34,7 @@ fn row_of(editor: &Editor<HeadlessShell>, asset: &str) -> Vec2 {
 }
 
 /// The window pixel the camera draws `point` at.
-fn pixel_of(editor: &Editor<HeadlessShell>, point: Vec3) -> Vec2 {
+pub(super) fn pixel_of(editor: &Editor<HeadlessShell>, point: Vec3) -> Vec2 {
     let (corner, _) = editor.panels.viewport_pixels();
     corner
         + editor

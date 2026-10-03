@@ -12061,16 +12061,13 @@ says what that cleared and what it did not. The allow-list entry in
     returns `EditError::Occupied`, writing nothing, if any file it would write
     is already there — a merge would overwrite another scene's `scene.ron` and
     orphan its chunks with no owner to remove them, and a refusal loses nothing.
-    It also does not adopt the new directory as the origin, so a document with
-    no origin (the compiled-in scene) saving to one directory twice is refused
-    the second time; the app has no save-as yet, and a save-as that moves
-    `origin` would also have to decide whether `set_assets` follows it —
-    undecided, revisit with the save-as UI. **Gaps**: `EditError::Remove` (a
-    removal failing after every write landed) has no test — no portable way to
-    make `remove_file` fail headlessly was found, and the code keeps the key
-    owned and the document dirty. A `sys` directory that is itself a link out of
-    the scene directory is followed by the removal exactly as by the writes; not
-    guarded, since a save already writes through it.
+    Save-as (2026-10-03, `Document::save_as`) is the command that adopts a
+    directory: `08-editor.md`'s _A scene from empty and save-as_. **Gaps**:
+    `EditError::Remove` (a removal failing after every write landed) has no test
+    — no portable way to make `remove_file` fail headlessly was found, and the
+    code keeps the key owned and the document dirty. A `sys` directory that is
+    itself a link out of the scene directory is followed by the removal exactly
+    as by the writes; not guarded, since a save already writes through it.
 - **Task 4's commands (2026-09-30, rename and attach/detach 2026-10-01).**
   `EditCommand` has `SetProperty`, `Spawn`, `Delete`, `Rename`, `Attach` and
   `Detach`; a duplicate is a `Spawn` of every one of the original's rows under
@@ -12368,16 +12365,16 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   - **Decided and built 2026-10-01: the asset root defaults to the game's root**
     — `document::asset_root`, the nearest directory above the scene holding a
     `Cargo.toml` (what `crcbl new` writes and every sample has), or the scene's
-    own directory outside any project; `--assets` still overrides. A key then
+    own directory outside any project; `--assets` still overrides. A save-as
+    moves it with the origin unless `--assets` named it (2026-10-03). A key then
     names the same file when a scene moves between the game's folders. Declined:
     keys relative to the scene, which break on every such move, and a root
     recorded in a per-project file, which is a new file format for what the
     manifest already marks. Not covered: a workspace whose game crate sits under
     another `Cargo.toml` takes the nearest one, which is the game's own.
-  - **Not tested:** a body on a mesh in play (the bodies module reads the
-    placement, so it should fall as its measured box), a glTF with several nodes
-    and primitives (the fixture triangle has one part), and a source answering
-    `Pending` (no editor source does).
+  - **Not tested:** a glTF with several nodes and primitives (the fixture
+    triangle has one part), and a source answering `Pending` (no editor source
+    does).
   - **Coverage gaps:** nothing of this has been looked at on a device. The
     meshes' picture, the pane and a drag are held by null-backend and headless
     tests; no Vulkan, Metal, D3D12 or browser image of a drawn mesh in the
@@ -12525,9 +12522,45 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   systems; the 2026-09-16 decision that games keep editable state in ECS systems
   applies to what an editor should place that moves, and nothing in towers' map
   does.
-- **The exit criteria**: empty scene to play and stop without a text editor
-  (owed), and the editor never linking `crcbl-vk` directly (kept so far:
-  `apps/editor/Cargo.toml`'s dependencies name the `crcbl` umbrella and no
+- **A new scene and save-as landed 2026-10-03** (`08-editor.md`'s _A scene from
+  empty and save-as_), closing the first exit criterion headlessly. What they
+  leave, each with what it takes:
+  - **No prompt before unsaved edits are dropped.** Ctrl+N drops them and says
+    so on the status line, naming the scene; closing the window drops them and
+    says nothing (`accept_close` accepts every close). Both want the same
+    answer, so it was not invented for one: a confirm line like the save-as line
+    ("Unsaved edits to X: Save, Discard, Cancel") that both a close request
+    (`reply_close_request` can defer) and Ctrl+N open. Needs the owner's call on
+    whether a close may be held open at all on every backend.
+  - **No open command.** A scene directory is opened only from the command line
+    (`editor <SCENE_DIR>`); the exit-criterion test reopens in a fresh editor
+    for that reason. An open line built like the save-as line, replacing the
+    document through `Document::open_dir` and rebuilding the panels and the
+    renderer as Ctrl+N's path does, would take it.
+  - **A saved new scene is still called `untitled`.** Save-as writes the header
+    name the empty scene carries (`crate::scene::UNTITLED`), and nothing in the
+    editor renames a scene. Either a scene-name field (a header edit, which the
+    command log has no variant for) or naming the scene after the directory's
+    stem at its first save-as; undecided.
+  - **The save-as line is a bare text field.** A path relative to the working
+    directory, no completion, no listing of what is there; a click elsewhere
+    commits it as it commits a rename (a toolbar click that does so saves the
+    scene being edited, before the click's own action). A directory that cannot
+    be created fails at the first write, like any save, and is reported and
+    asked for again.
+  - **Save-as leaves the old directory as an unowned scene.** Nothing removes or
+    marks it; deleting it is the person's.
+  - **A save-as that moves the asset root can leave meshes as placeholders**:
+    keys are read from the new game's root, and one it does not hold is a mesh
+    problem on the status line (`Document::problems`), as on open.
+  - **Coverage gaps:** never looked at on a device — the new scene, the
+    toolbar's file buttons and the save-as line are held by headless tests on
+    the null backend. The exit-criterion test uses the one-part fixture
+    triangle, a body falling into nothing (the new scene has no ground, and the
+    test does not build one), and the mass edited by a drag; a typed number in a
+    drag-value is not something the widget takes.
+- **The exit criteria**: the editor never linking `crcbl-vk` directly (kept so
+  far: `apps/editor/Cargo.toml`'s dependencies name the `crcbl` umbrella and no
   backend crate).
 
 The CLI half, `crcbl edit --serve` and `crcbl scene`, is under _`crcbl scene`
