@@ -10,6 +10,7 @@ use crcbl::ui::tree::NodeKey;
 mod assets;
 mod clipboard;
 mod play;
+mod selection;
 
 fn options(frames: u64) -> Options {
     let mut common = crcbl::args::Common::new(crate::args::DEFAULT_TICK_HZ);
@@ -179,14 +180,14 @@ fn delete_and_duplicate_through_the_loop_change_what_a_frame_draws() {
 
     editor.act(&Action::Delete);
     assert_eq!(editor.document().entity_count(), count - 1);
-    assert_eq!(editor.document().selected(), None);
+    assert_eq!(editor.document().primary(), None);
     assert_eq!(editor.frame().expect("a frame"), Flow::Continue);
 
     editor.act(&Action::Undo);
     editor.document_mut().select(Some(SceneEntityId(2)));
     editor.act(&Action::Duplicate);
     assert_eq!(editor.document().entity_count(), count + 1);
-    let copy = editor.document().selected().expect("the copy is selected");
+    let copy = editor.document().primary().expect("the copy is selected");
     assert_ne!(copy, SceneEntityId(2));
     assert_eq!(editor.frame().expect("a frame"), Flow::Continue);
 
@@ -287,11 +288,7 @@ fn dragging_a_handle_moves_the_selection_along_its_axis_as_one_undo() {
     let (from, to) = handle_at(&mut editor, gizmo::Grip::Move(gizmo::Axis::X));
     drag(&mut editor, (from + to) * 0.5, to + (to - from) * 0.5);
 
-    assert_eq!(
-        editor.document().selected(),
-        Some(id),
-        "the press re-picked"
-    );
+    assert_eq!(editor.document().primary(), Some(id), "the press re-picked");
     let now = leaves(&mut editor, id, gizmo::POSITION);
     assert!(
         now[0] > was[0] + 0.1,
@@ -678,7 +675,7 @@ fn a_copied_entity_pastes_back_through_the_clipboard() {
         assert_eq!(editor.frame().expect("a frame"), Flow::Continue);
     }
     assert_eq!(editor.document().entity_count(), count + 1);
-    let pasted = editor.document().selected().expect("the paste is selected");
+    let pasted = editor.document().primary().expect("the paste is selected");
     assert_ne!(pasted, SceneEntityId(2));
     assert_eq!(
         editor
@@ -735,7 +732,7 @@ fn a_refused_paste_is_on_the_status_line() {
 #[test]
 fn a_nudge_with_nothing_selected_records_nothing() {
     let mut editor = Editor::start(&options(2)).expect("headless starts");
-    assert_eq!(editor.document().selected(), None);
+    assert_eq!(editor.document().primary(), None);
     editor.act(&Action::Nudge { axis: 0, sign: 1.0 });
     assert!(editor.document().log().is_empty());
     assert!(!editor.document().is_dirty());
@@ -805,7 +802,7 @@ fn a_click_in_a_panel_picks_nothing_and_one_in_the_viewport_picks() {
         },
     );
     assert!(
-        editor.document().selected().is_some(),
+        editor.document().primary().is_some(),
         "a click at the middle of the framed scene hit nothing, so the other \
          half of this test would pass vacuously",
     );
@@ -864,7 +861,7 @@ fn a_click_in_a_panel_picks_nothing_and_one_in_the_viewport_picks() {
         },
     );
     assert_eq!(
-        editor.document().selected(),
+        editor.document().primary(),
         None,
         "a click in the outliner's own area picked an entity out of the scene",
     );
@@ -883,10 +880,10 @@ fn a_click_on_an_outliner_row_selects_the_entity_it_names() {
     assert!(rows.len() > 2, "the outliner built {} rows", rows.len());
     let at = centre(&editor, rows[1]);
 
-    assert_eq!(editor.document().selected(), None);
+    assert_eq!(editor.document().primary(), None);
     click(&mut editor, at);
     assert_eq!(
-        editor.document().selected(),
+        editor.document().primary(),
         Some(SceneEntityId(0)),
         "the row for the first entity selected something else",
     );
@@ -970,7 +967,7 @@ fn typing_in_a_field_does_not_nudge_the_selection() {
         "typing into a field recorded a command of its own",
     );
     assert_eq!(
-        editor.document().selected(),
+        editor.document().primary(),
         Some(selected),
         "typing moved the selection",
     );
@@ -1032,7 +1029,7 @@ fn a_click_in_the_offset_pane_picks_through_the_panes_own_camera() {
         },
     );
     assert_eq!(
-        editor.document().selected(),
+        editor.document().primary(),
         expected,
         "a click at {at:?} in a pane at {min:?} picked through some other camera",
     );

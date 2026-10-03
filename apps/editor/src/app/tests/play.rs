@@ -233,7 +233,7 @@ fn a_paste_in_play_mode_is_refused() {
     let mut editor = drifting_editor(8);
     let clipping = editor
         .document_mut()
-        .copy(SceneEntityId(2))
+        .copy(&[SceneEntityId(2)])
         .expect("in the scene");
     let window = editor.window;
     editor

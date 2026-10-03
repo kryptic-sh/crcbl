@@ -173,8 +173,8 @@ fn edits_before_play_survive_it_and_undo_still_reverts_them() {
             value: Value::Float(2.5),
         })
         .expect("a block has a y");
-    let copy = document.duplicate(STEP).expect("in the scene");
-    document.delete(copy).expect("the copy is in the scene");
+    let copy = document.duplicate(&[STEP]).expect("in the scene")[0];
+    document.delete(&[copy]).expect("the copy is in the scene");
     document.select(Some(STEP));
     let edited = document.files().expect("ids");
     assert!(document.is_dirty());
@@ -185,10 +185,10 @@ fn edits_before_play_survive_it_and_undo_still_reverts_them() {
 
     assert_eq!(document.files().expect("ids"), edited, "the edit was lost");
     assert!(document.is_dirty(), "the dirty marker forgot the edit");
-    assert_eq!(document.selected(), Some(STEP), "the selection was dropped");
+    assert_eq!(document.primary(), Some(STEP), "the selection was dropped");
     assert_eq!(document.log().position(), 3, "the log lost entries");
 
-    let next = document.duplicate(STEP).expect("in the scene");
+    let next = document.duplicate(&[STEP]).expect("in the scene")[0];
     assert_ne!(
         next, copy,
         "a deleted copy's id was handed out again after the restore",
@@ -220,7 +220,7 @@ fn every_edit_is_refused_in_play_mode() {
         })
         .expect("a block has a z");
     document.undo().expect("one entry");
-    let clipping = document.copy(STEP).expect("in the scene");
+    let clipping = document.copy(&[STEP]).expect("in the scene");
 
     document.play().expect("plays");
     for paused in [false, true] {
@@ -270,8 +270,8 @@ fn every_edit_is_refused_in_play_mode() {
                     None,
                 )
             }),
-            ("delete", document.delete(STEP)),
-            ("duplicate", document.duplicate(STEP).map(drop)),
+            ("delete", document.delete(&[STEP])),
+            ("duplicate", document.duplicate(&[STEP]).map(drop)),
             ("paste", document.paste(&clipping).map(drop)),
             // Refused for play mode before the text is read, not for the text.
             ("paste of no clipping", document.paste("hello").map(drop)),

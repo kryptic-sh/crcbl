@@ -135,7 +135,7 @@ fn a_delete_takes_the_name_and_its_undo_brings_it_back() {
     document.rename(SceneEntityId(2), "Gate").expect("held");
     let named = document.files().expect("ids");
 
-    document.delete(SceneEntityId(2)).expect("held");
+    document.delete(&[SceneEntityId(2)]).expect("held");
     let files = document
         .files()
         .expect("a scene with a deleted entity saves");
@@ -156,14 +156,14 @@ fn a_duplicate_is_unnamed_and_a_paste_keeps_a_name_nothing_else_bears() {
     let mut document = document();
     document.rename(SceneEntityId(3), "Gate").expect("held");
 
-    let copy = document.duplicate(SceneEntityId(3)).expect("held");
+    let copy = document.duplicate(&[SceneEntityId(3)]).expect("held")[0];
     assert_eq!(
         name_of(&document, copy),
         None,
         "the duplicate took the name"
     );
 
-    let text = document.copy(SceneEntityId(3)).expect("held");
+    let text = document.copy(&[SceneEntityId(3)]).expect("held");
     assert!(text.contains("name: Some(\"Gate\")"), "{text}");
     let pasted = document.paste(&text).expect("a clipping of this scene");
     assert_eq!(name_of(&document, pasted[0]), None, "two entities are Gate");
@@ -192,7 +192,7 @@ fn a_duplicate_is_unnamed_and_a_paste_keeps_a_name_nothing_else_bears() {
 #[test]
 fn a_clipping_whose_name_is_not_a_name_is_refused() {
     let mut document = document();
-    let text = document.copy(SceneEntityId(1)).expect("held");
+    let text = document.copy(&[SceneEntityId(1)]).expect("held");
     let mut entities = crate::clipboard::decode(&text).expect("its own copy");
     entities[0].name = Some("a\nb".to_owned());
     let error = document

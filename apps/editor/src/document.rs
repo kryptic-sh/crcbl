@@ -53,6 +53,7 @@ mod meshes;
 mod naming;
 mod ownership;
 mod play;
+mod selection;
 mod systems;
 mod validation;
 
@@ -72,9 +73,11 @@ pub struct Document {
     /// can be open on different vocabularies. It is a handful of function
     /// pointers per component — see [`crcbl::registry::Registry`].
     registry: Registry,
-    /// Which [`SceneEntityId`] is selected, if any. An id rather than an
-    /// [`Entity`] for [`EditCommand`]'s reason: it is what survives a reload.
-    selected: Option<SceneEntityId>,
+    /// Which [`SceneEntityId`]s are selected, in the order they joined, the
+    /// primary last — see `document::selection`. Ids rather than
+    /// [`Entity`]s for [`EditCommand`]'s reason: they are what survives a
+    /// reload.
+    selection: Vec<SceneEntityId>,
     log: UndoLog,
     /// The log position the document was last written at. `0` for one that has
     /// been loaded and not saved, which is also where a fresh log stands — so a
@@ -425,7 +428,7 @@ impl Document {
             scene,
             ids,
             registry,
-            selected: None,
+            selection: Vec::new(),
             log: UndoLog::new(),
             saved_at: 0,
             membership: 0,
@@ -559,20 +562,6 @@ impl Document {
     #[must_use]
     pub const fn membership(&self) -> u64 {
         self.membership
-    }
-
-    /// What is selected.
-    #[must_use]
-    pub const fn selected(&self) -> Option<SceneEntityId> {
-        self.selected
-    }
-
-    /// Selects `id`, or clears the selection with [`None`].
-    ///
-    /// An id the document does not hold selects nothing, so a stale id from
-    /// before a reload cannot leave a selection pointing at a hole.
-    pub fn select(&mut self, id: Option<SceneEntityId>) {
-        self.selected = id.filter(|id| self.ids.entity(*id).is_some());
     }
 
     /// The nearest entity `ray` hits, or [`None`] where it hits nothing.
@@ -781,19 +770,17 @@ impl Document {
         // After the rewind, so a panel's write into a playing scene is taken
         // back rather than left standing beside the refusal.
         self.refuse_in_play()?;
-        let mut commands: Vec<EditCommand> = edits
-            .iter()
-            .map(|edit| EditCommand::SetProperty {
-                entity: id,
-                system: system.to_owned(),
-                path: edit.path.clone(),
-                value: edit.after.clone(),
-            })
-            .collect();
-        let command = match commands.len() {
-            1 => commands.remove(0),
-            _ => EditCommand::Batch(commands),
-        };
+        let command = EditCommand::one_or_batch(
+            edits
+                .iter()
+                .map(|edit| EditCommand::SetProperty {
+                    entity: id,
+                    system: system.to_owned(),
+                    path: edit.path.clone(),
+                    value: edit.after.clone(),
+                })
+                .collect(),
+        );
         match gesture {
             Some(gesture) => self.apply_in(command, gesture),
             None => self.apply(command),
@@ -844,28 +831,37 @@ impl Document {
         Ok(())
     }
 
-    /// Removes `id` from the scene, as an [`EditCommand::Delete`] — so an undo
-    /// brings it back under the same id, component and all.
+    /// Removes every entity of `ids` from the scene, as one entry of an
+    /// [`EditCommand::Delete`] each — so one undo brings them all back under
+    /// the same ids, components and all. No ids, no entry.
     ///
     /// # Errors
     ///
     /// [`EditError::NoEntity`] for an id this document does not hold, or
-    /// [`EditError::Playing`] in play mode, in which case nothing is recorded.
-    pub fn delete(&mut self, id: SceneEntityId) -> Result<(), EditError> {
-        self.apply(EditCommand::Delete { entity: id })
+    /// [`EditError::Playing`] in play mode, in which case nothing is deleted
+    /// and nothing is recorded.
+    pub fn delete(&mut self, ids: &[SceneEntityId]) -> Result<(), EditError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.apply(EditCommand::one_or_batch(
+            ids.iter()
+                .map(|&entity| EditCommand::Delete { entity })
+                .collect(),
+        ))
     }
 
-    /// Copies `id` into a new entity in the same systems, and returns the new
-    /// entity's id.
+    /// Copies every entity of `ids` into a new entity in the same systems,
+    /// and returns the new entities' ids in the same order. No ids, no entry.
     ///
-    /// An [`EditCommand::Spawn`] of every one of the original's rows under the
-    /// next id the
-    /// document would hand out, so the copy is the original's component to the
-    /// bit and its undo is the spawn's own inverse — there is no duplicate
-    /// variant whose inverse could be wrong on its own. The copy stands where
-    /// the original does, which is what a caller moving it next expects.
+    /// An [`EditCommand::Spawn`] per original, of every one of its rows,
+    /// under the next ids the document would hand out — one entry, so one
+    /// undo takes every copy back. Each copy is its original's component to
+    /// the bit and its undo is the spawn's own inverse: there is no duplicate
+    /// variant whose inverse could be wrong on its own. A copy stands where
+    /// its original does, which is what a caller moving it next expects.
     ///
-    /// **The copy is unnamed.** A name says which entity this is, and two
+    /// **A copy is unnamed.** A name says which entity this is, and two
     /// entities answering to "Gate" is the confusion a name exists to end;
     /// numbering it `Gate (2)` would invent a name nobody chose, which a
     /// person then renames anyway. [`paste`](Self::paste) follows the same
@@ -876,31 +872,43 @@ impl Document {
     /// [`EditError::NoEntity`] for an id this document does not hold, or
     /// [`EditError::Scene`] if the component would not serialise, or
     /// [`EditError::Playing`] in play mode.
-    pub fn duplicate(&mut self, id: SceneEntityId) -> Result<SceneEntityId, EditError> {
-        let rows = self.rows(id)?;
-        let copy = self.ids.next_id();
-        self.apply(EditCommand::Spawn {
-            entity: copy,
-            rows,
-            name: None,
-        })?;
-        Ok(copy)
+    pub fn duplicate(&mut self, ids: &[SceneEntityId]) -> Result<Vec<SceneEntityId>, EditError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let first = self.ids.next_id().0;
+        let mut copies = Vec::with_capacity(ids.len());
+        let mut spawns = Vec::with_capacity(ids.len());
+        for (copy, &id) in (first..).map(SceneEntityId).zip(ids) {
+            copies.push(copy);
+            spawns.push(EditCommand::Spawn {
+                entity: copy,
+                rows: self.rows(id)?,
+                name: None,
+            });
+        }
+        self.apply(EditCommand::one_or_batch(spawns))?;
+        Ok(copies)
     }
 
-    /// The clipboard text for `id`: every system's row and its name, in
-    /// [`crate::clipboard`]'s format.
+    /// The clipboard text for every entity of `ids`, in that order: each
+    /// one's every system's row and its name, in [`crate::clipboard`]'s
+    /// format.
     ///
     /// # Errors
     ///
     /// As [`duplicate`](Self::duplicate).
-    pub fn copy(&mut self, id: SceneEntityId) -> Result<String, EditError> {
-        let rows = self.rows(id)?;
-        let name = self
-            .scene
-            .entity_name(id)
-            .map(|name| name.as_str().to_owned());
-        let clipped = crate::clipboard::Clipped::of(rows, name).ok_or(EditError::NoEntity(id))?;
-        Ok(crate::clipboard::encode(vec![clipped]))
+    pub fn copy(&mut self, ids: &[SceneEntityId]) -> Result<String, EditError> {
+        let mut clipped = Vec::with_capacity(ids.len());
+        for &id in ids {
+            let rows = self.rows(id)?;
+            let name = self
+                .scene
+                .entity_name(id)
+                .map(|name| name.as_str().to_owned());
+            clipped.push(crate::clipboard::Clipped::of(rows, name).ok_or(EditError::NoEntity(id))?);
+        }
+        Ok(crate::clipboard::encode(clipped))
     }
 
     /// Spawns every entity the clipboard text `text` names, under ids this
@@ -1291,9 +1299,7 @@ impl Document {
         self.ids.remove(id);
         let name = self.scene.set_entity_name(id, None);
         self.membership += 1;
-        if self.selected == Some(id) {
-            self.selected = None;
-        }
+        self.prune_selection();
         Ok(EditCommand::Spawn {
             entity: id,
             rows,
@@ -1528,6 +1534,9 @@ mod save_tests;
 
 #[cfg(test)]
 pub(crate) mod systems_tests;
+
+#[cfg(test)]
+mod selection_tests;
 
 #[cfg(test)]
 mod towers_play_tests;
@@ -1996,9 +2005,9 @@ mod tests {
     fn selecting_an_absent_id_selects_nothing() {
         let mut document = document();
         document.select(Some(SceneEntityId(0)));
-        assert_eq!(document.selected(), Some(SceneEntityId(0)));
+        assert_eq!(document.primary(), Some(SceneEntityId(0)));
         document.select(Some(SceneEntityId(9_999)));
-        assert_eq!(document.selected(), None);
+        assert_eq!(document.primary(), None);
     }
 
     /// **The bounds a selection is drawn with come from the component's own

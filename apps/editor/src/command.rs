@@ -225,6 +225,21 @@ pub enum EditCommand {
     Batch(Vec<EditCommand>),
 }
 
+impl EditCommand {
+    /// `commands` as one entry: the command itself when there is one, and a
+    /// [`Batch`](Self::Batch) of them otherwise — so an edit of one entity
+    /// records the same entry whether it came from a selection of one or
+    /// from a path that only ever names one.
+    #[must_use]
+    pub fn one_or_batch(mut commands: Vec<Self>) -> Self {
+        if commands.len() == 1 {
+            commands.remove(0)
+        } else {
+            Self::Batch(commands)
+        }
+    }
+}
+
 /// One system's component of an entity: the system, and the component as one
 /// chunk row's RON text — what a spawn carries per system.
 #[derive(Clone, Debug, PartialEq, Eq)]

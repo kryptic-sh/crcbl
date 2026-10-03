@@ -49,9 +49,17 @@
 //! One witness carries it: the selection the outliner was last told about. At
 //! the top of a frame a document selection that is not that one came from
 //! somewhere else — a ray pick in the viewport — so it is pushed into the
-//! outliner, its system expanded and its row scrolled into view. At the bottom,
-//! whatever the outliner's rows now say is pushed back into the document. So
-//! neither side owns it and neither can drift.
+//! outliner, each entity's system expanded and the primary's row scrolled into
+//! view. At the bottom, whatever the outliner's rows now say is pushed back
+//! into the document. So neither side owns it and neither can drift.
+//!
+//! The document's selection is ordered and the outliner's is a set, so the
+//! push back keeps the document's order for the entities still selected,
+//! appends the ones the click added in row order, and makes the row the click
+//! acted on the primary: a plain or Ctrl click's row, which the outliner keeps
+//! as its anchor, and a Shift click's — the end of the run away from the
+//! anchor. Every selected row is `:checked`, and the primary's label reads in
+//! the amber its box is drawn in.
 //!
 //! **Clicking a row also takes the keyboard**, because the row is a focusable
 //! node: [`crate::app`] pushes the reserved `ui` context while
@@ -212,6 +220,8 @@ const EDITOR_CSS: &str = "
 
 .outliner-rename { flex-grow: 1; min-width: 0; }
 
+.outliner-label.primary { color: #ffb833; }
+
 #props {
   flex-direction: column;
   flex-grow: 1;
@@ -353,7 +363,7 @@ pub struct Panels {
     field: Option<FieldTarget>,
     /// The selection the outliner was last told about: the witness that says
     /// which side changed it. See the module docs.
-    shown: Option<SceneEntityId>,
+    shown: Vec<SceneEntityId>,
     /// A row to put in view once this frame has been laid out.
     reveal: Option<SceneEntityId>,
     /// The viewport pane's rectangle, as the last frame laid it out.
@@ -423,7 +433,7 @@ impl Panels {
             // empty makes the idle frame below *push* whatever is selected into
             // the outliner, so a document handed over with a selection keeps it
             // rather than having it read back off an outliner that has none.
-            shown: None,
+            shown: Vec::new(),
             reveal: None,
             viewport: (Vec2::ZERO, Vec2::ZERO),
             outliner_key: None,
@@ -803,10 +813,14 @@ impl Panels {
         self.follow_document(document);
 
         let extent = Vec2::new(input.extent.0 as f32, input.extent.1 as f32);
-        let selected = document.selected();
+        let selected = document.primary();
         let play = document.play_state();
         let selected_label = selected.map_or_else(String::new, |id| {
-            label_of(&self.outline, &self.names, entity_row(id))
+            let label = label_of(&self.outline, &self.names, entity_row(id));
+            match document.selection().len() {
+                1 => label,
+                count => format!("{label} (primary of {count} selected)"),
+            }
         });
         let mut toolbar = None;
         let mut toolbar_key = None;
@@ -876,6 +890,7 @@ impl Panels {
                             outline,
                             names,
                             renaming: renaming.as_mut(),
+                            primary: selected,
                         };
                         let built = build_outliner(ui, outliner, &options, rows);
                         outliner_key = Some(built.key);
@@ -981,7 +996,7 @@ impl Panels {
                 }
             }
         }
-        self.follow_outliner(document);
+        self.follow_outliner(document, input.select);
         self.follow_rename(document, rename_input);
         if let Some(id) = double_clicked
             && let Err(error) = self.begin_rename(document, id)
@@ -1051,37 +1066,84 @@ impl Panels {
     }
 
     /// Pushes a selection the document gained from somewhere else — a ray pick
-    /// in the viewport — into the outliner, and asks for its row.
+    /// in the viewport, a delete taking an entity out of it — into the
+    /// outliner, and asks for the primary's row.
     fn follow_document(&mut self, document: &Document) {
-        let selected = document.selected();
-        if selected == self.shown {
+        let selection = document.selection();
+        if selection == self.shown.as_slice() {
             return;
         }
-        self.shown = selected;
+        self.shown = selection.to_vec();
         self.outliner.clear_selection();
-        let Some(id) = selected else {
-            return;
-        };
-        // A row inside a collapsed system is not in the flattened model, so
-        // nothing would scroll to it and nothing would show it selected.
-        if let Some(index) = self.outline.iter().position(|(_, ids)| ids.contains(&id)) {
-            self.outliner.set_expanded(system_row(index), true);
+        for &id in selection {
+            // A row inside a collapsed system is not in the flattened model,
+            // so nothing would scroll to it and nothing would show it
+            // selected.
+            if let Some(index) = self.outline.iter().position(|(_, ids)| ids.contains(&id)) {
+                self.outliner.set_expanded(system_row(index), true);
+            }
+            // Toggled on in the document's order, so the last — the primary —
+            // is the anchor a Shift click runs from.
+            self.outliner.select(entity_row(id), SelectMode::Toggle);
         }
-        self.outliner.select(entity_row(id), SelectMode::Replace);
-        self.reveal = Some(id);
+        self.reveal = document.primary();
     }
 
-    /// Pushes what the outliner's rows now say back into the document.
+    /// Pushes what the outliner's rows now say back into the document, after
+    /// a click whose modifier said `mode` — see the module docs for the order
+    /// and the primary.
     ///
-    /// The first selected row that stands for an entity, in row order — a
-    /// system's own row selects nothing, which is what clicking a header
-    /// means.
-    fn follow_outliner(&mut self, document: &mut Document) {
-        let picked = self.outliner.selected().find_map(entity_of);
-        if picked != document.selected() {
-            document.select(picked);
+    /// A system's own row selects nothing, which is what clicking a header
+    /// means. An entity is kept or dropped by the outliner's whole selection,
+    /// not by the rows it shows, so collapsing a system does not deselect what
+    /// is in it.
+    fn follow_outliner(&mut self, document: &mut Document, mode: SelectMode) {
+        let shown: Vec<SceneEntityId> = self.outliner.selected().filter_map(entity_of).collect();
+        let kept: Vec<SceneEntityId> = document
+            .selection()
+            .iter()
+            .copied()
+            .filter(|id| self.outliner.is_selected(entity_row(*id)))
+            .collect();
+        let added: Vec<SceneEntityId> = shown
+            .into_iter()
+            .filter(|id| !document.is_selected(*id))
+            .collect();
+        if added.is_empty() && kept.len() == document.selection().len() {
+            self.shown = document.selection().to_vec();
+            return;
         }
-        self.shown = document.selected();
+        let mut next = kept;
+        next.extend(added);
+        if let Some(acted) = self.acted_on(mode)
+            && let Some(at) = next.iter().position(|id| *id == acted)
+        {
+            let id = next.remove(at);
+            next.push(id);
+        }
+        document.set_selection(next);
+        self.shown = document.selection().to_vec();
+    }
+
+    /// The entity whose row a click with `mode` acted on: the outliner's
+    /// anchor, which a plain or a Ctrl click moves to its row, or for a Shift
+    /// click the end of the selected run away from the anchor, which a range
+    /// leaves where it was. [`None`] when that row is a system's.
+    fn acted_on(&self, mode: SelectMode) -> Option<SceneEntityId> {
+        let anchor = self.outliner.anchor()?;
+        let row = match mode {
+            SelectMode::Replace | SelectMode::Toggle => anchor,
+            SelectMode::Range => {
+                let mut run = self.outliner.selected();
+                let first = run.next()?;
+                if first == anchor {
+                    run.last().unwrap_or(first)
+                } else {
+                    first
+                }
+            }
+        };
+        entity_of(row)
     }
 
     /// Turns this frame's inspector edits into commands on `document`.
@@ -1231,6 +1293,8 @@ struct Rows<'a> {
     outline: &'a [(String, Vec<SceneEntityId>)],
     names: &'a BTreeMap<SceneEntityId, String>,
     renaming: Option<&'a mut Renaming>,
+    /// The primary selected entity, whose label is drawn in its own colour.
+    primary: Option<SceneEntityId>,
 }
 
 /// What [`build_outliner`] built.
@@ -1258,6 +1322,7 @@ fn build_outliner(
         outline,
         names,
         mut renaming,
+        primary,
     } = rows;
     let mut key = None;
     let mut rename = None;
@@ -1288,7 +1353,12 @@ fn build_outliner(
                     }
                     _ => {
                         let label = label_of(outline, names, row.id);
-                        ui.span(".outliner-label", label.as_str(), &[]);
+                        let class = if primary.is_some() && entity_of(row.id) == primary {
+                            ".outliner-label.primary"
+                        } else {
+                            ".outliner-label"
+                        };
+                        ui.span(class, label.as_str(), &[]);
                     }
                 },
             )
@@ -1373,6 +1443,7 @@ mod tests {
     mod inspector;
     mod naming;
     mod rotation;
+    mod selection;
 
     /// The framebuffer every page here is laid out over: the size the editor's
     /// own window opens at.
@@ -1398,6 +1469,17 @@ mod tests {
         /// One frame with the pointer at `pointer` and `scroll` pixels of
         /// wheel.
         fn frame(&mut self, pointer: PointerInput, scroll: f32) -> PanelFrame {
+            self.frame_with(pointer, scroll, SelectMode::Replace)
+        }
+
+        /// [`frame`](Self::frame), with a row click selecting as `select`
+        /// says — the modifier a person holds.
+        fn frame_with(
+            &mut self,
+            pointer: PointerInput,
+            scroll: f32,
+            select: SelectMode,
+        ) -> PanelFrame {
             self.panels.frame(
                 &mut self.document,
                 PanelInput {
@@ -1405,7 +1487,7 @@ mod tests {
                     nav: NavInput::default(),
                     text: TextInput::default(),
                     extent: EXTENT,
-                    select: SelectMode::Replace,
+                    select,
                     scroll,
                 },
             )
@@ -1419,23 +1501,31 @@ mod tests {
         /// A press and a release at `at`, and the frame after them — the tree
         /// resolves a click when the *next* frame begins.
         fn click(&mut self, at: Vec2) {
-            self.frame(
+            self.click_with(at, SelectMode::Replace);
+        }
+
+        /// [`click`](Self::click), with the modifier `select` stands for held
+        /// throughout.
+        fn click_with(&mut self, at: Vec2, select: SelectMode) {
+            self.frame_with(
                 PointerInput {
                     pos: at,
                     down: true,
                     released: false,
                 },
                 0.0,
+                select,
             );
-            self.frame(
+            self.frame_with(
                 PointerInput {
                     pos: at,
                     down: false,
                     released: true,
                 },
                 0.0,
+                select,
             );
-            self.idle();
+            self.frame_with(PointerInput::hovering(Vec2::splat(-1.0)), 0.0, select);
         }
 
         /// Drags a value widget from `at` by `by` pixels, in one move: a press,
@@ -1571,7 +1661,7 @@ mod tests {
             let at = page.centre(row);
             page.click(at);
             assert_eq!(
-                page.document.selected(),
+                page.document.primary(),
                 Some(*id),
                 "row {} named {id} and selected something else",
                 index + 1,
@@ -1581,7 +1671,7 @@ mod tests {
         // And a header selects nothing, which is what clicking a system means.
         let header = page.centre(page.panels.row_keys()[0]);
         page.click(header);
-        assert_eq!(page.document.selected(), None);
+        assert_eq!(page.document.primary(), None);
     }
 
     /// **The rows follow an entity leaving and another arriving**, even when the
@@ -1593,12 +1683,12 @@ mod tests {
         page.idle();
         let count = page.document.entity_count();
         page.document
-            .delete(SceneEntityId(2))
+            .delete(&[SceneEntityId(2)])
             .expect("in the scene");
         let copy = page
             .document
-            .duplicate(SceneEntityId(1))
-            .expect("in the scene");
+            .duplicate(&[SceneEntityId(1)])
+            .expect("in the scene")[0];
         assert_eq!(page.document.entity_count(), count);
         page.idle();
 
@@ -1612,7 +1702,7 @@ mod tests {
         for (index, id) in entities.iter().enumerate() {
             let at = page.centre(page.panels.row_keys()[index + 1]);
             page.click(at);
-            assert_eq!(page.document.selected(), Some(*id), "row {}", index + 1);
+            assert_eq!(page.document.primary(), Some(*id), "row {}", index + 1);
         }
     }
 
@@ -1625,7 +1715,7 @@ mod tests {
         let id = SceneEntityId(2);
         document.select(Some(id));
         let panels = Panels::new(&mut document, default_layout(), EXTENT);
-        assert_eq!(document.selected(), Some(id), "the panels cleared it");
+        assert_eq!(document.primary(), Some(id), "the panels cleared it");
         assert_eq!(panels.selected_rows(), [OutlinerId(u64::from(id.0))]);
     }
 
@@ -1673,7 +1763,7 @@ mod tests {
 
         // And the document keeps the selection the panels were handed: a frame
         // that pushed the outliner's own answer back would clear it.
-        assert_eq!(page.document.selected(), Some(id));
+        assert_eq!(page.document.primary(), Some(id));
     }
 
     /// **A field dragged over many frames is one undo**, back to the value

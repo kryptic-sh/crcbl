@@ -39,7 +39,7 @@ fn unlist_sun(document: &mut Document) {
     document
         .detach(BOTH, SUN)
         .expect("the step keeps its block");
-    document.delete(LONE_SUN).expect("the lone sun is held");
+    document.delete(&[LONE_SUN]).expect("the lone sun is held");
     document
         .apply(EditCommand::UnlistSystem {
             system: SUN.to_owned(),

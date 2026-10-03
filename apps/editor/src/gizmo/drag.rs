@@ -116,6 +116,27 @@ pub struct Turn {
     pub facing: f64,
 }
 
+/// One entity a translate drag moves: whose, through which system's
+/// component, and the `position` it held when the press landed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Member {
+    /// Whose component moves.
+    pub entity: SceneEntityId,
+    /// The system holding the component that places it.
+    pub system: String,
+    /// Its `position` when the press landed.
+    pub start: [f64; 3],
+}
+
+/// What a translate drag moves: every selected entity with a `position`, by
+/// one delta — `docs/plan/08-editor.md`'s shared-pivot translate. See
+/// [`Drag::spread`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Group {
+    /// Each entity it moves, in selection order.
+    pub members: Vec<Member>,
+}
+
 /// What the press took hold of, and where, in whatever terms that grip moves
 /// in — one value, so a grip cannot be paired with another grip's grab.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -137,7 +158,9 @@ enum Hold {
 /// A drag of one handle, from the press that took it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Drag {
-    /// Whose component is changing.
+    /// Whose component a resize or a turn changes: the primary selected
+    /// entity. A translate moves its [`Group`] instead, whose pivot `start`
+    /// and `origin` then are.
     pub entity: SceneEntityId,
     /// The gesture every write of this drag belongs to.
     pub gesture: Gesture,
@@ -273,7 +296,6 @@ impl Drag {
             path: format!("{field}.{}", axis.index()),
             value,
         };
-        let position = |value: f64| snap.map_or(value, |snap| snap.grid(value));
         let half_extent = |value: f64| {
             snap.map_or(value, |snap| snap.scale(value))
                 .max(MIN_HALF_EXTENT)
@@ -282,18 +304,11 @@ impl Drag {
         let ray = &pointer.ray;
 
         Some(match self.hold {
-            Hold::Move { axis, grab } => {
-                let moved = along(ray, self.origin, axis.unit())? - grab;
-                vec![set(axis, position(start(axis) + moved))]
-            }
-            Hold::MovePlane { plane, grab } => {
-                let moved = on_plane(ray, self.origin, plane.normal())? - grab;
-                plane
-                    .axes()
-                    .into_iter()
-                    .map(|axis| set(axis, position(start(axis) + moved.dot(axis.unit()))))
-                    .collect()
-            }
+            Hold::Move { .. } | Hold::MovePlane { .. } => self
+                .translated(pointer, snap)?
+                .into_iter()
+                .map(|(axis, value)| set(axis, value))
+                .collect(),
             Hold::Scale { axis, unit, grab } => {
                 let moved = along(ray, self.origin, unit)? - grab;
                 vec![set(axis, half_extent(start(axis) + moved))]
@@ -311,6 +326,76 @@ impl Drag {
                 self.turned(axis, angle, &from)
             }
         })
+    }
+
+    /// Where an arrow or a plane drag puts the point it moves — the press's
+    /// [`start`](Self::begin) — axis by axis: each axis the grip moves along,
+    /// and the value it lands on, on the absolute grid `snap` describes while
+    /// there is one.
+    ///
+    /// [`None`] for a grip that does not translate, and when the ray runs
+    /// along the axis or plane.
+    #[must_use]
+    pub fn translated(&self, pointer: &Pointer, snap: Option<Snap>) -> Option<Vec<(Axis, f64)>> {
+        let position = |value: f64| snap.map_or(value, |snap| snap.grid(value));
+        let start = |axis: Axis| self.start[axis.index()];
+        let ray = &pointer.ray;
+        match self.hold {
+            Hold::Move { axis, grab } => {
+                let moved = along(ray, self.origin, axis.unit())? - grab;
+                Some(vec![(axis, position(start(axis) + moved))])
+            }
+            Hold::MovePlane { plane, grab } => {
+                let moved = on_plane(ray, self.origin, plane.normal())? - grab;
+                Some(
+                    plane
+                        .axes()
+                        .into_iter()
+                        .map(|axis| (axis, position(start(axis) + moved.dot(axis.unit()))))
+                        .collect(),
+                )
+            }
+            Hold::Scale { .. } | Hold::ScaleAll { .. } | Hold::Rotate { .. } => None,
+        }
+    }
+
+    /// What an arrow or a plane drag of a [`Group`] sets, member by member:
+    /// the point the drag moves is the group's pivot, landing where
+    /// [`translated`](Self::translated) puts it, and every member moves by
+    /// the same delta on each axis the grip moves along.
+    ///
+    /// **A group of one is its own pivot**: its member is set to the landed
+    /// value itself rather than its start plus the delta, which can differ
+    /// from it in the last bit — so a lone entity snapped onto the grid lands
+    /// on it exactly, as it did before groups.
+    ///
+    /// [`None`] where [`translated`](Self::translated) is.
+    #[must_use]
+    pub fn spread<'a>(
+        &self,
+        group: &'a Group,
+        pointer: &Pointer,
+        snap: Option<Snap>,
+    ) -> Option<Vec<(&'a Member, Write)>> {
+        let landed = self.translated(pointer, snap)?;
+        let mut writes = Vec::with_capacity(group.members.len() * landed.len());
+        for member in &group.members {
+            for &(axis, value) in &landed {
+                let index = axis.index();
+                let value = match group.members.as_slice() {
+                    [_] => value,
+                    _ => member.start[index] + (value - self.start[index]),
+                };
+                writes.push((
+                    member,
+                    Write {
+                        path: format!("{POSITION}.{index}"),
+                        value,
+                    },
+                ));
+            }
+        }
+        Some(writes)
     }
 
     /// The leaves that turn the entity `angle` radians about `axis` through

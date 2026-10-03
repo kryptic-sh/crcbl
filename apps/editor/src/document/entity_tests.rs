@@ -41,7 +41,7 @@ fn a_delete_removes_the_entity_everywhere_and_an_undo_restores_it() {
     assert_eq!(document.pick(&ray_at_the_first_step()), Some(first));
 
     document
-        .delete(first)
+        .delete(&[first])
         .expect("the first step is in the scene");
     assert!(!ids(&mut document).contains(&first));
     assert_eq!(document.entity_count(), 3);
@@ -71,8 +71,8 @@ fn a_duplicate_copies_the_row_under_the_next_id() {
     let mut document = document();
     let before = document.files().expect("ids");
     let copy = document
-        .duplicate(SceneEntityId(3))
-        .expect("the third step is in the scene");
+        .duplicate(&[SceneEntityId(3)])
+        .expect("the third step is in the scene")[0];
     assert_eq!(copy, SceneEntityId(4), "one past the file's highest id");
     assert_eq!(document.entity_count(), 5);
     for field in ["position", "half_extents"] {
@@ -118,7 +118,7 @@ fn an_edit_to_a_restored_entity_finds_it_by_its_old_id() {
         })
         .expect("a block has an x");
     document
-        .delete(first)
+        .delete(&[first])
         .expect("the first step is in the scene");
     document.undo().expect("restore it");
     document.undo().expect("and walk the move back");
@@ -136,8 +136,8 @@ fn an_edit_to_a_restored_entity_finds_it_by_its_old_id() {
 fn deleting_the_selection_clears_it() {
     let mut document = document();
     document.select(Some(SceneEntityId(2)));
-    document.delete(SceneEntityId(2)).expect("in the scene");
-    assert_eq!(document.selected(), None);
+    document.delete(&[SceneEntityId(2)]).expect("in the scene");
+    assert_eq!(document.primary(), None);
 }
 
 /// **A spawn that would break the scene is refused, and nothing is recorded or
@@ -192,7 +192,7 @@ fn a_spawn_the_scene_cannot_hold_is_refused_and_leaves_nothing() {
     assert!(matches!(error, EditError::Scene(_)), "{error}");
 
     let error = document
-        .delete(SceneEntityId(9_999))
+        .delete(&[SceneEntityId(9_999)])
         .expect_err("no such entity");
     assert!(matches!(error, EditError::NoEntity(_)), "{error}");
 
@@ -201,16 +201,9 @@ fn a_spawn_the_scene_cannot_hold_is_refused_and_leaves_nothing() {
     assert_eq!(document.files().expect("ids"), before);
 }
 
-/// One clipping holding every entity in `ids`, as a copy of several would.
+/// One clipping holding every entity in `ids`: a copy of them all.
 fn clipping_of(document: &mut Document, ids: &[SceneEntityId]) -> String {
-    let entities = ids
-        .iter()
-        .flat_map(|id| {
-            let text = document.copy(*id).expect("a held entity");
-            crate::clipboard::decode(&text).expect("its own copy")
-        })
-        .collect();
-    crate::clipboard::encode(entities)
+    document.copy(ids).expect("held entities")
 }
 
 /// **A paste spawns every entity the clipping names under fresh ids, and one
@@ -249,7 +242,7 @@ fn a_paste_spawns_every_entity_and_one_undo_takes_them_back() {
 fn a_paste_with_one_bad_entity_spawns_none() {
     let mut document = document();
     let before = document.files().expect("ids");
-    let good = document.copy(SceneEntityId(2)).expect("held");
+    let good = document.copy(&[SceneEntityId(2)]).expect("held");
     let mut entities = crate::clipboard::decode(&good).expect("its own copy");
     let clipped = |system: &str, row: &str| crate::clipboard::Clipped {
         system: system.to_owned(),
@@ -300,8 +293,10 @@ const NAMES: [Option<&str>; 4] = [Some("Gate"), Some("Spawner"), Some("Tower"), 
 /// keyed by the id and prints every float through its shortest round trip, so
 /// two states that differ in any field or any row differ here.
 ///
-/// Each step is one of a nudge by an arbitrary float, a duplicate, a delete, a
-/// paste of two entities as one batch, a rename — to one of a few names, or
+/// Each step is one of a nudge by an arbitrary float, a duplicate and a delete
+/// — of one entity or of a selection of two as one entry — a shared nudge of
+/// two entities by one delta as one batch, a paste of two entities as one
+/// batch, a rename — to one of a few names, or
 /// to none — an attach of a system the entity is not in, a detach of one of
 /// several it is in, a drop of a mesh asset (listing `meshes` in the same
 /// entry when the manifest lacks it), a listing of a registered system at a
@@ -332,6 +327,14 @@ fn random_histories_walk_back_through_every_state() {
             let held = ids(&mut document);
             let len = u64::try_from(held.len()).expect("a handful of entities");
             let target = held[usize::try_from(draw(0) % len).expect("an index into held")];
+            // A selection of two when the draw names another entity, and of
+            // the target alone when it names the target again.
+            let partner = held[usize::try_from(draw(6) % len).expect("an index into held")];
+            let selection: Vec<SceneEntityId> = if partner == target {
+                vec![target]
+            } else {
+                vec![target, partner]
+            };
             let joinable = document.attachable(target);
             let systems = document.systems_of(target);
             let listed = document.scene.systems().to_vec();
@@ -356,9 +359,41 @@ fn random_histories_walk_back_through_every_state() {
                 .filter(|system| unlisted.contains(system))
                 .collect();
             match draw(1) % 12 {
-                0 if held.len() > 1 => document.delete(target).expect("a held entity"),
+                0 if held.len() > selection.len() => {
+                    document.delete(&selection).expect("held entities");
+                    ran.paired += usize::from(selection.len() > 1);
+                }
                 1 => {
-                    document.duplicate(target).expect("a held entity");
+                    document.duplicate(&selection).expect("held entities");
+                    ran.paired += usize::from(selection.len() > 1);
+                }
+                10 if selection.len() > 1 => {
+                    let delta = (hash_unit(seed, step * DRAWS + 7) - 0.5) * 4.0;
+                    let mut nudges = Vec::new();
+                    for &entity in &selection {
+                        let Some(system) = document.placing_system(entity) else {
+                            continue;
+                        };
+                        let path =
+                            format!("position.{}", if draw(2).is_multiple_of(2) { 0 } else { 2 });
+                        let Value::Float(was) =
+                            document.read(entity, &system, &path).expect("a leaf")
+                        else {
+                            panic!("{path} is a float");
+                        };
+                        nudges.push(EditCommand::SetProperty {
+                            entity,
+                            system,
+                            path,
+                            value: Value::Float(was + delta),
+                        });
+                    }
+                    if nudges.len() > 1 {
+                        ran.shared_nudged += 1;
+                    }
+                    document
+                        .apply(EditCommand::one_or_batch(nudges))
+                        .expect("placed entities have a position");
                 }
                 3 => {
                     let name = NAMES[usize::try_from(draw(2) % 4).expect("an index into NAMES")]
@@ -505,6 +540,10 @@ struct Ran {
     /// has to put it back where it was rather than at the end.
     unlisted_inside: usize,
     attached_unlisted: usize,
+    /// Deletes and duplicates of a selection of two.
+    paired: usize,
+    /// Nudges of two placed entities by one delta, as one batch.
+    shared_nudged: usize,
 }
 
 impl Ran {
@@ -523,6 +562,8 @@ impl Ran {
                 self.attached_unlisted,
                 "no history attached to an unlisted system",
             ),
+            (self.paired, "no history deleted or duplicated two at once"),
+            (self.shared_nudged, "no history nudged two entities as one"),
         ] {
             assert!(count > 0, "{what}");
         }

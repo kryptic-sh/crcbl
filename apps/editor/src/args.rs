@@ -112,25 +112,30 @@ ASSETS:
 PANELS:
     The scene's entities are listed on the left, grouped by the system whose
     chunk file they came out of, with the .glb and .gltf assets under the asset
-    root below them and the selected entity's fields under those. Selecting a
-    row and picking in the viewport are the same selection. Drag a divider to
-    move a panel's edge; where they were left is remembered between runs. The
-    rest of the window is the viewport.
+    root below them and the primary selected entity's fields under those — the
+    last one clicked, its row's label in amber. Selecting a row and picking in
+    the viewport are the same selection. Drag a divider to move a panel's
+    edge; where they were left is remembered between runs. The rest of the
+    window is the viewport.
 
 EDITING:
     Left click           In the viewport, pick the entity under the cursor; on
                          an outliner row, select what it names
-    Ctrl / Shift click   Add a row to the selection, or take a run of them
+    Ctrl click           Add an entity or a row to the selection, or take it
+                         out
+    Shift click          On an outliner row, take the run of rows from the
+                         last one clicked
     Drag a field         Edit it, one step a pixel — an undoable command like
                          every other edit
     W                    Show the translate handles (the default): drag an
                          arrow to move the selection along that axis, or a
                          square between two arrows to move it across that
-                         plane — one undo a drag
-    R                    Show the scale handles, on an entity with half
+                         plane — one undo a drag. With several selected the
+                         handles stand at their middle and move them all
+    R                    Show the scale handles, on one entity with half
                          extents: drag a box-tipped line to resize along that
                          axis, or the centre square to resize evenly
-    E                    Show the rotate handles, on an entity with a
+    E                    Show the rotate handles, on one entity with a
                          rotation: drag a ring to turn about its axis — one
                          undo a drag
     Ctrl while dragging  Snap to the absolute grid: a centre to multiples of
@@ -144,9 +149,10 @@ EDITING:
                          keyboard
     Page Up / Page Down  Nudge the selection along Z
     Delete               Remove the selection from the scene
-    Ctrl+D               Duplicate the selection in place, and select the copy
+    Ctrl+D               Duplicate the selection in place, and select the
+                         copies
     Ctrl+C / Ctrl+V      Copy the selection to the clipboard as text, and paste
-                         the entities a clipboard holds as new ones
+                         the entities a clipboard holds as new ones, selected
     Ctrl+Z / Ctrl+Y     Undo and redo. Ctrl+Shift+Z redoes too
     Ctrl+S               Save the scene back over the directory it came from
     Drag an asset        From the asset browser into the viewport: place it

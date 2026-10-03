@@ -469,7 +469,7 @@ fn two_plays_of_one_scene_are_identical_even_after_edits() {
     // Delete the first block of the pile and bring it back: its body is stored
     // last now, and the last one's in its place, where the files spell them
     // in id order.
-    document.delete(FALLING).expect("deletes");
+    document.delete(&[FALLING]).expect("deletes");
     assert!(document.undo().expect("undoes"));
     assert_eq!(
         played_bits(&mut document, &ids, 3.0),

@@ -161,7 +161,7 @@ fn deleted_and_spawned_entities_leave_and_join_the_drawn_instances() {
 
     editor
         .document
-        .delete(SceneEntityId(2))
+        .delete(&[SceneEntityId(2)])
         .expect("in the scene");
     step_any(&mut editor);
     assert_eq!(
@@ -172,7 +172,7 @@ fn deleted_and_spawned_entities_leave_and_join_the_drawn_instances() {
 
     editor
         .document
-        .duplicate(SceneEntityId(1))
+        .duplicate(&[SceneEntityId(1)])
         .expect("in the scene");
     step_any(&mut editor);
     assert_eq!(

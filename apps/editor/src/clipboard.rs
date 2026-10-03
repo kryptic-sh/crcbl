@@ -1,7 +1,7 @@
 //! Entities on the system clipboard: the text a copy offers, and the read a
 //! paste waits for.
 //!
-//! `docs/plan/08-editor.md`'s feature 8. A copy is the selected entity's
+//! `docs/plan/08-editor.md`'s feature 8. A copy is every selected entity's
 //! systems and rows — the same RON [`crate::Document::duplicate`] spawns from —
 //! offered as both [`MimeType::CrcblRon`] and plain text, so it pastes into a
 //! second editor, into a text editor or a chat, and back. A paste spawns every

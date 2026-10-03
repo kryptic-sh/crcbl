@@ -74,10 +74,7 @@ fn a_drop_on_a_surface_stands_the_mesh_on_it_as_one_undo() {
     let release = pixel_of(&editor, Vec3::new(10.5, 5.5, 0.0));
     drag(&mut editor, grab, release);
 
-    let id = editor
-        .document
-        .selected()
-        .expect("the new mesh is selected");
+    let id = editor.document.primary().expect("the new mesh is selected");
     assert_eq!(editor.document.entity_count(), entities + 1);
     assert_eq!(
         editor.document.mesh(id).map(|mesh| mesh.asset.clone()),
@@ -107,17 +104,14 @@ fn a_drop_on_nothing_stands_the_mesh_on_the_ground_plane() {
     let mut editor = props_editor();
     editor
         .document
-        .delete(SceneEntityId(0))
+        .delete(&[SceneEntityId(0)])
         .expect("the ground slab is in the scene");
     editor.frame().expect("a frame");
     let release = pixel_of(&editor, Vec3::new(3.0, 0.0, 3.0));
     let grab = row_of(&editor, TRIANGLE);
     drag(&mut editor, grab, release);
 
-    let id = editor
-        .document
-        .selected()
-        .expect("the new mesh is selected");
+    let id = editor.document.primary().expect("the new mesh is selected");
     let ground = crossing(&editor, release, 1, 0.0);
     let stood = foot(&mut editor, id);
     assert!(
@@ -181,10 +175,7 @@ fn enter_on_a_row_places_the_asset_at_the_views_centre() {
     );
     tap(&mut editor, KeyCode::Enter);
 
-    let id = editor
-        .document
-        .selected()
-        .expect("the new mesh is selected");
+    let id = editor.document.primary().expect("the new mesh is selected");
     assert_eq!(editor.document.entity_count(), entities + 1);
     let (min, max) = editor.panels.viewport_pixels();
     let ground = crossing(&editor, (min + max) * 0.5, 1, 0.0);

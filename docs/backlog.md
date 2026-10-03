@@ -3321,7 +3321,10 @@ and its rungs W2–W6 are separate slices rather than gaps.
 - **The expansion and selection sets never shrink**: `OutlinerState` keeps an
   `OutlinerId` for every item ever expanded or selected, including ones the tree
   no longer holds. A `retain` against the last flatten would need the flatten to
-  report what it saw.
+  report what it saw. The editor's outliner is rebuilt from the document's
+  selection whenever that changes (`Panels::follow_document`), so a deleted
+  entity's row does not stay selected there; the widget's own sets, and the
+  editor's expansion set, still keep every id.
 - **Reusable outliner row reveal is absent.** The editor already routes wheel
   scrolling with `panel::scroll` and reveals a selected scene entity with
   `Panels::reveal_row`, using the tree's scroll-offset API. A shared widget
@@ -12267,11 +12270,33 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     through its codec on each call, beside the scene save it already made; the
     cost on a large scene is unknown.
 
-- **Multi-select transforms**: not MVP by the plan, and not reachable yet — the
-  document holds one selection (`Document::selected`), the outliner's Ctrl and
-  Shift clicks select rows of which the document takes the first, and every
-  gizmo handle acts on that one entity. Shared-pivot translate needs the
-  document to hold a set first.
+- **Multi-selection landed 2026-10-03** (`08-editor.md`'s _Multi-selection_): an
+  ordered set with a primary, shared-pivot translate, and delete, duplicate and
+  copy-and-paste of the whole selection. What it leaves:
+  - **Scale and rotate of several are refused**, R and E saying so on the status
+    line. The open choice: each entity about its own centre (a resize or turn
+    per entity, positions unmoved) or the group about the selection's pivot
+    (positions swung and scaled about it too). The second needs the rotate
+    drag's position swing generalised to members, and a scale of a turned member
+    about a world-axis pivot that a half extent cannot express for every box.
+    Decide before building either.
+  - **The inspector edits the primary alone.** Editing one field across the
+    selection needs a rule for fields the entities do not share and a row that
+    shows "mixed" — `crcbl-ui`'s inspector draws one component.
+  - **A Shift click in the viewport is a plain click**, and there is no box
+    (marquee) select; the outliner's Shift range has no viewport counterpart.
+    Keyboard range selection in the outliner is the UI rung 8a entry's.
+  - **Behaviour worth knowing**: a Ctrl click on a gizmo handle takes the handle
+    (and snaps), not the entity under it; a Ctrl click on nothing keeps the
+    selection. When several are selected but only one has a `position`, that one
+    is the drag's group of one, so its own position snaps — not the pivot, which
+    the handles still stand at.
+  - **Not looked at on a device**: the amber primary label, the pale blue
+    outline of the other selected entities and the handles at the pivot are
+    tested off the draw lists and the null backend only.
+  - **Not tested**: a play action's picked argument with several selected (it
+    takes the primary, `Document::picked`); a selection spanning systems whose
+    rows are collapsed while a Shift click runs.
 - **The gizmo has not been looked at on a device.** Its placement, hit testing
   and drags are tested headless through `Camera::pixel_of` and the null backend;
   no windowed run has shown the plane squares' translucent fill, the scale tips'

@@ -1,5 +1,5 @@
 //! The clipboard keys routed by where the keyboard is — one inspector field,
-//! or the selected entity — and F2 through the loop.
+//! or the selection — and F2 through the loop.
 
 use super::*;
 
@@ -245,5 +245,33 @@ fn a_massless_paste_into_a_body_is_refused_on_the_status_line() {
     );
     assert_eq!(editor.document_mut().files().expect("ids"), before);
     assert_eq!(editor.document().log().len(), 1, "the paste was recorded");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **Copying a selection copies every entity in it, and pasting it is one
+/// undo that selects what it pasted** — the last pasted the primary.
+#[test]
+fn a_copied_selection_pastes_as_one_undo_and_is_selected() {
+    let mut editor = headless(200);
+    let picked = [SceneEntityId(1), SceneEntityId(3)];
+    editor.document_mut().set_selection(picked);
+    editor.frame().expect("a frame");
+    let before = editor.document_mut().files().expect("ids");
+    let count = editor.document().entity_count();
+
+    let middle = viewport_middle(&editor);
+    hover(&mut editor, middle);
+    editor.act(&Action::Copy);
+    editor.act(&Action::Paste);
+    settle(&mut editor);
+    assert_eq!(editor.document().entity_count(), count + 2);
+    let pasted = editor.document().selection().to_vec();
+    assert_eq!(pasted.len(), 2, "the paste is not what is selected");
+    assert!(pasted.iter().all(|id| !picked.contains(id)));
+    assert_eq!(editor.document().primary(), pasted.last().copied());
+    assert_eq!(editor.document().log().len(), 1, "a paste is one entry");
+
+    editor.act(&Action::Undo);
+    assert_eq!(editor.document_mut().files().expect("ids"), before);
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }

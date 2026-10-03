@@ -330,7 +330,7 @@ fn an_attach_or_detach_the_scene_cannot_take_is_refused() {
 fn a_delete_of_an_entity_in_two_systems_is_undone_in_both() {
     let mut document = two_systems();
     let before = document.files().expect("ids");
-    document.delete(BOTH).expect("held");
+    document.delete(&[BOTH]).expect("held");
     let deleted = document.files().expect("ids");
     assert!(!deleted["sys/blocks.ron"].contains("(1, Block("));
     assert!(!deleted["sys/sun.ron"].contains("(1, Sun("));
@@ -345,7 +345,7 @@ fn a_delete_of_an_entity_in_two_systems_is_undone_in_both() {
 #[test]
 fn a_duplicate_and_a_paste_carry_every_systems_row() {
     let mut document = two_systems();
-    let copy = document.duplicate(BOTH).expect("held");
+    let copy = document.duplicate(&[BOTH]).expect("held")[0];
     assert_eq!(document.systems_of(copy), [BLOCKS, SUN]);
     for (system, path) in [(BLOCKS, "position.0"), (SUN, "period")] {
         assert_eq!(
@@ -355,7 +355,7 @@ fn a_duplicate_and_a_paste_carry_every_systems_row() {
         );
     }
 
-    let text = document.copy(BOTH).expect("held");
+    let text = document.copy(&[BOTH]).expect("held");
     let pasted = document.paste(&text).expect("a clipping of this scene");
     assert_eq!(pasted.len(), 1);
     assert_eq!(document.systems_of(pasted[0]), [BLOCKS, SUN]);

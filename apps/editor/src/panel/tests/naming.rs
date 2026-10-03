@@ -90,7 +90,7 @@ fn the_outliner_shows_names_and_follows_a_rename() {
     assert_eq!(labels(&page), ["#0", "#1", "#2", "#3"]);
 
     page.document.redo().expect("again");
-    page.document.delete(SceneEntityId(1)).expect("held");
+    page.document.delete(&[SceneEntityId(1)]).expect("held");
     page.idle();
     assert_eq!(labels(&page), ["#0", "Gate #2", "#3"]);
 }
@@ -174,7 +174,7 @@ fn a_double_click_on_a_row_starts_renaming_it() {
     // Row 0 is the system's header; row 2 is the second entity.
     let at = page.centre(page.panels.row_keys()[2]);
     page.click(at);
-    assert_eq!(page.document.selected(), Some(SceneEntityId(1)));
+    assert_eq!(page.document.primary(), Some(SceneEntityId(1)));
     assert_eq!(page.panels.renaming(), None, "one click started a rename");
     page.click(at);
     assert_eq!(page.panels.renaming(), Some(SceneEntityId(1)));

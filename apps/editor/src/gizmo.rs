@@ -41,12 +41,25 @@
 //! grid and a turn on a multiple of the angle step ([`Snap`]).
 //! Every value is a property set, written through
 //! [`crate::Document::apply_in`] so the whole drag is one undo.
+//!
+//! # Several selected
+//!
+//! Translate moves them all: the handles stand at the selection's pivot
+//! ([`crate::Document::selection_pivot`]), the drag moves the pivot as it
+//! moves a lone entity's centre, and every [`Member`] of the drag's [`Group`]
+//! moves by the same delta ([`Drag::spread`]) — snapped, it is the pivot that
+//! lands on the grid. Scale and rotate show no handles then: whether each
+//! entity resizes and turns about its own centre or the group about its
+//! pivot is a choice `docs/plan/08-editor.md` leaves for later.
 
 mod drag;
 mod ring;
 mod snap;
 
-pub use drag::{Drag, MIN_HALF_EXTENT, Pointer, TURN_DEAD_PX, Turn, Write, along, on_plane, swept};
+pub use drag::{
+    Drag, Group, MIN_HALF_EXTENT, Member, Pointer, TURN_DEAD_PX, Turn, Write, along, on_plane,
+    swept,
+};
 pub use ring::{RING_PX, RING_SEGMENTS, distance_to_ring, ring};
 pub use snap::{ANGLE_DEG, ANGLE_KEY, GRID_KEY, GRID_M, SCALE_KEY, SCALE_M, Snap};
 

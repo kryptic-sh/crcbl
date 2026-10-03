@@ -16,6 +16,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **The editor's selection is a set** (see Added: multi-selection).
+  `Document::selected` is gone — `Document::primary` answers the same entity for
+  a selection of one — and `Document::delete`, `duplicate` and `copy` take
+  `&[SceneEntityId]` rather than one id, with `duplicate` answering every copy's
+  id.
+
 - **The editor's `EditError` gained `NotPlaying` and `PlayCommand`** (see Added:
   play controls), so an exhaustive match over it must add them. Nothing in the
   engine's public API breaks with the play controls: `GameModule` is unchanged,
@@ -580,6 +586,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Paused`, `Lobby`) rather than a `bool`. Web builds have no lobby.
   `crcbl::lan::lobby::listed_row` maps a listed-host row's widget id to its row,
   which both games' menus use.
+
+- **The editor selects several entities at once.** A Ctrl click in the viewport
+  or on an outliner row adds an entity to the selection or takes it out, and a
+  Shift click in the outliner takes the run of rows from the last one clicked;
+  the last entity clicked is the **primary**, which the inspector edits (its
+  title says so, `#3 (primary of 2 selected)`) and F2 renames. Every selected
+  entity is outlined in the viewport and marked in the outliner, the primary in
+  amber. With several selected the translate handles stand at the centre of the
+  box around them all and a drag moves every one by the same delta as one undo —
+  snapped, that centre lands on the grid — and the arrow keys nudge them all;
+  scale and rotate act on one entity, so R and E show no handles then and say
+  why. Delete, Ctrl+D, Ctrl+C and Ctrl+V take the whole selection as one undo
+  each, and a duplicate or a paste selects what it made. In the document:
+  `Document::selection`, `primary`, `is_selected`, `toggle_selected`,
+  `set_selection` and `selection_pivot`; an entity that stops existing drops out
+  of the selection. `EditCommand::one_or_batch` turns a list of commands into
+  one entry.
 
 - **Play controls: a game's actions and status for a tool that plays it.**
   `crcbl::registry::Registry::play_controls(system, PlayControls)` registers,

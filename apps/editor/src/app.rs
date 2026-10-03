@@ -26,11 +26,11 @@
 //! [`crcbl::greybox::GREYBOX_CUBE`] per other entity, scaled to its own
 //! extents, over [`ForwardRenderer::set_ground_grid`]'s screen-space floor. A
 //! renderer holds the geometry it was built with, so a mesh naming an asset it
-//! lacks rebuilds it — `meshes`' module docs say why and how. The
-//! selection is a [`DebugDraw`](crcbl::render::debug_draw::DebugDraw) box, and
-//! the layer is forced on at start-up: `r_debug_draw` is off by default, so an
-//! editor that did not switch it on would draw no selection and report nothing
-//! wrong.
+//! lacks rebuilds it — `meshes`' module docs say why and how. Each selected
+//! entity is a [`DebugDraw`](crcbl::render::debug_draw::DebugDraw) box, the
+//! primary's in a colour of its own, and the layer is forced on at start-up:
+//! `r_debug_draw` is off by default, so an editor that did not switch it on
+//! would draw no selection and report nothing wrong.
 //!
 //! **The picture is drawn into the viewport pane, not the window.** The
 //! renderer's camera draws into a graph transient sized to the pane
@@ -250,14 +250,16 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
 }
 
 /// What a held pointer button is doing: to the camera, or to a gizmo handle.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Drag {
     /// Right button: turn the camera around the pivot.
     Orbit,
     /// Middle button: slide the pivot across the view plane.
     Pan,
-    /// Left button on a gizmo handle: move or resize the selection through it.
-    Gizmo(gizmo::Drag),
+    /// Left button on a gizmo handle: move, resize or turn the selection
+    /// through it — every entity of the group for a translate, which an
+    /// empty group never is, and the drag's own entity otherwise.
+    Gizmo(gizmo::Drag, gizmo::Group),
 }
 
 impl Editor<dyn Shell> {
@@ -536,15 +538,20 @@ impl<S: Shell + ?Sized> Editor<S> {
             }
         }
         self.drag_asset(&pending, in_viewport);
-        if let Some(Drag::Gizmo(drag)) = self.drag {
-            if pending.motion.is_some()
-                && let Some(at) = pending.pointer
-            {
-                self.move_handle(&drag, at);
+        // Taken out while it writes, which borrows the editor whole, and put
+        // back unless the button came up.
+        match self.drag.take() {
+            Some(Drag::Gizmo(drag, group)) => {
+                if pending.motion.is_some()
+                    && let Some(at) = pending.pointer
+                {
+                    self.move_handle(&drag, &group, at);
+                }
+                if !pending.pointer_released {
+                    self.drag = Some(Drag::Gizmo(drag, group));
+                }
             }
-            if pending.pointer_released {
-                self.drag = None;
-            }
+            other => self.drag = other,
         }
 
         let mut asked = crate::keys::actions(&self.actions, self.modifiers, editing);
@@ -632,7 +639,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             }
         }
 
-        if let (Some(drag), Some(motion)) = (self.drag, pending.motion) {
+        if let (Some(drag), Some(motion)) = (&self.drag, pending.motion) {
             match drag {
                 // Negated on both axes: dragging right turns the scene right,
                 // which means swinging the eye left — the grab-and-drag
@@ -649,7 +656,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                 }
                 // Moved by `move_handle`, which reads where the pointer is
                 // rather than how far it went.
-                Drag::Gizmo(_) => {}
+                Drag::Gizmo(..) => {}
             }
         }
 
@@ -668,27 +675,66 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// The selection's gizmo handles in the current mode, in the pane's
     /// pixels — none for nothing selected, and none for an entity without the
     /// field the mode writes: no `position` to move, no `half_extents` to
-    /// resize, or no `rotation` to turn.
+    /// resize, or no `rotation` to turn. With several selected, translate's
+    /// alone, while one of them has a `position` — see the gizmo's module
+    /// docs.
     fn handles(&mut self) -> Vec<gizmo::Handle> {
-        let Some(id) = self.document.selected() else {
-            return Vec::new();
-        };
-        if !self.has_field(id, self.gizmo_mode) {
-            return Vec::new();
-        }
-        let (Some((min, max)), Some(placement)) =
-            (self.document.bounds(id), self.document.placement(id))
-        else {
+        let Some((centre, frame)) = self.gizmo_centre() else {
             return Vec::new();
         };
         gizmo::handles(
             &self.camera.camera(),
             self.panels.viewport_extent(),
-            (min + max) * 0.5,
-            placement.rotation,
+            centre,
+            frame,
             self.panels.scale(),
             self.gizmo_mode,
         )
+    }
+
+    /// Where the handles stand, in render space, and the frame a scale
+    /// handle's axes are turned by — or [`None`] where the current mode shows
+    /// none (see [`handles`](Self::handles)).
+    ///
+    /// A lone entity's handles stand at the centre of its box, turned as it
+    /// is; several selected share theirs at the selection's pivot
+    /// ([`Document::selection_pivot`]), on the world's axes.
+    fn gizmo_centre(&mut self) -> Option<(Vec3, DQuat)> {
+        let id = self.document.primary()?;
+        if self.document.selection().len() > 1 {
+            if self.gizmo_mode != gizmo::Mode::Translate || self.group().members.is_empty() {
+                return None;
+            }
+            let pivot = self.document.selection_pivot()?;
+            return Some((pivot.as_vec3(), DQuat::IDENTITY));
+        }
+        if !self.has_field(id, self.gizmo_mode) {
+            return None;
+        }
+        let (min, max) = self.document.bounds(id)?;
+        let placement = self.document.placement(id)?;
+        Some(((min + max) * 0.5, placement.rotation))
+    }
+
+    /// Every selected entity a translate moves — each one whose placing
+    /// component has a `position` — and where each stands, in selection
+    /// order.
+    fn group(&mut self) -> gizmo::Group {
+        let mut members = Vec::new();
+        for id in self.document.selection().to_vec() {
+            let (Some(system), Some(start)) = (
+                self.document.placing_system(id),
+                self.field_values(id, gizmo::POSITION),
+            ) else {
+                continue;
+            };
+            members.push(gizmo::Member {
+                entity: id,
+                system,
+                start,
+            });
+        }
+        gizmo::Group { members }
     }
 
     /// Whether the component placing `id` has the field `mode`'s handles
@@ -748,7 +794,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// Starts a gizmo drag if the press landed on a handle, and says whether it
     /// did — a press that missed every handle is a pick.
     fn grab_handle(&mut self, pending: &Pending) -> bool {
-        let (Some(at), Some(id)) = (pending.pointer, self.document.selected()) else {
+        let (Some(at), Some(id)) = (pending.pointer, self.document.primary()) else {
             return false;
         };
         let handles = self.handles();
@@ -756,40 +802,68 @@ impl<S: Shell + ?Sized> Editor<S> {
         let Some(grip) = gizmo::hit(&handles, at - corner, self.panels.scale()) else {
             return false;
         };
-        let (Some((min, max)), Some(placement)) =
-            (self.document.bounds(id), self.document.placement(id))
-        else {
+        let Some((centre, frame)) = self.gizmo_centre() else {
             return false;
         };
         let gesture = self.document.begin_gesture();
-        let drag = if let gizmo::Grip::Rotate(axis) = grip {
-            self.begin_turn(id, axis, gesture, (min + max) * 0.5, at - corner)
-        } else {
-            let Some(start) = self.field_values(id, grip.mode().field()) else {
-                return false;
-            };
-            let origin = (min + max) * 0.5;
-            let origin = DVec3::new(
-                f64::from(origin.x),
-                f64::from(origin.y),
-                f64::from(origin.z),
-            );
-            gizmo::Drag::begin(
-                id,
-                grip,
-                gesture,
-                start,
-                origin,
-                placement.rotation,
-                &self.pointer_at(at),
-                self.panels.scale(),
-            )
+        let grabbed = match grip {
+            gizmo::Grip::Rotate(axis) => self
+                .begin_turn(id, axis, gesture, centre, at - corner)
+                .map(|drag| (drag, gizmo::Group::default())),
+            gizmo::Grip::Move(_) | gizmo::Grip::MovePlane(_) => {
+                let group = self.group();
+                // A group of one is its own pivot, as `gizmo::Drag::spread`
+                // says: its position is what the drag moves and snaps.
+                let start = match group.members.as_slice() {
+                    [] => None,
+                    [only] => Some(only.start),
+                    _ => self
+                        .document
+                        .selection_pivot()
+                        .map(|pivot| pivot.to_array()),
+                };
+                start
+                    .and_then(|start| {
+                        self.begin_drag(id, grip, gesture, start, (centre, frame), at)
+                    })
+                    .map(|drag| (drag, group))
+            }
+            gizmo::Grip::Scale(_) | gizmo::Grip::ScaleAll => self
+                .field_values(id, gizmo::HALF_EXTENTS)
+                .and_then(|start| self.begin_drag(id, grip, gesture, start, (centre, frame), at))
+                .map(|drag| (drag, gizmo::Group::default())),
         };
-        let Some(drag) = drag else {
+        let Some((drag, group)) = grabbed else {
             return false;
         };
-        self.drag = Some(Drag::Gizmo(drag));
+        self.drag = Some(Drag::Gizmo(drag, group));
         true
+    }
+
+    /// A drag of an arrow, a plane or a scale handle of `id`, whose field —
+    /// or, for a translate, whose pivot — holds `start`, its handles standing
+    /// at `shown`'s centre and turned by its frame, pressed at `at` in window
+    /// pixels.
+    fn begin_drag(
+        &self,
+        id: SceneEntityId,
+        grip: gizmo::Grip,
+        gesture: crate::command::Gesture,
+        start: [f64; 3],
+        shown: (Vec3, DQuat),
+        at: Vec2,
+    ) -> Option<gizmo::Drag> {
+        let (centre, frame) = shown;
+        gizmo::Drag::begin(
+            id,
+            grip,
+            gesture,
+            start,
+            centre.as_dvec3(),
+            frame,
+            &self.pointer_at(at),
+            self.panels.scale(),
+        )
     }
 
     /// A drag of `id`'s ring about `axis`, pressed at `at` in the pane's
@@ -830,39 +904,51 @@ impl<S: Shell + ?Sized> Editor<S> {
         ))
     }
 
-    /// Moves, resizes or turns the dragged entity to where the pointer at `at`
-    /// puts it, snapped while Ctrl is held — one write of the drag's
-    /// gesture, so the whole drag undoes at once.
+    /// Moves, resizes or turns the dragged entity — or moves every entity of
+    /// `group`, for a translate — to where the pointer at `at` puts it,
+    /// snapped while Ctrl is held: one write of the drag's gesture, so the
+    /// whole drag undoes at once.
     ///
-    /// A handle that sets several leaves at once — a plane, the centre, a ring
-    /// — sets them as one [`EditCommand::Batch`], which the log folds like a
-    /// leaf (`crate::command::UndoLog::record_in`).
-    fn move_handle(&mut self, drag: &gizmo::Drag, at: Vec2) {
+    /// A handle that sets several leaves at once — a plane, the centre, a
+    /// ring, any translate of several entities — sets them as one
+    /// [`EditCommand::Batch`], which the log folds like a leaf
+    /// (`crate::command::UndoLog::record_in`).
+    fn move_handle(&mut self, drag: &gizmo::Drag, group: &gizmo::Group, at: Vec2) {
         let snap = self
             .modifiers
             .contains(Modifiers::CTRL)
             .then_some(self.snap);
-        let Some(writes) = drag.writes(&self.pointer_at(at), snap) else {
-            return;
+        let pointer = self.pointer_at(at);
+        let set = |entity, system: String, write: gizmo::Write| EditCommand::SetProperty {
+            entity,
+            system,
+            path: write.path,
+            value: Value::Float(write.value),
         };
-        // Read each move rather than held by the drag: nothing but the drag
-        // edits the scene while it runs, so the answer cannot move under it.
-        let Some(system) = self.document.placing_system(drag.entity) else {
-            return;
+        let commands: Vec<EditCommand> = if group.members.is_empty() {
+            let Some(writes) = drag.writes(&pointer, snap) else {
+                return;
+            };
+            // Read each move rather than held by the drag: nothing but the
+            // drag edits the scene while it runs, so the answer cannot move
+            // under it.
+            let Some(system) = self.document.placing_system(drag.entity) else {
+                return;
+            };
+            writes
+                .into_iter()
+                .map(|write| set(drag.entity, system.clone(), write))
+                .collect()
+        } else {
+            let Some(writes) = drag.spread(group, &pointer, snap) else {
+                return;
+            };
+            writes
+                .into_iter()
+                .map(|(member, write)| set(member.entity, member.system.clone(), write))
+                .collect()
         };
-        let commands: Vec<EditCommand> = writes
-            .into_iter()
-            .map(|write| EditCommand::SetProperty {
-                entity: drag.entity,
-                system: system.clone(),
-                path: write.path,
-                value: Value::Float(write.value),
-            })
-            .collect();
-        let command = match <[EditCommand; 1]>::try_from(commands) {
-            Ok([one]) => one,
-            Err(several) => EditCommand::Batch(several),
-        };
+        let command = EditCommand::one_or_batch(commands);
         if let Err(error) = self.document.apply_in(command, drag.gesture) {
             crcbl::log::warn!("editor: {error}");
             self.panels.set_status(error.to_string(), Tone::Warning);
@@ -877,8 +963,8 @@ impl<S: Shell + ?Sized> Editor<S> {
             return;
         }
         let (corner, _) = self.panels.viewport_pixels();
-        let hot = match self.drag {
-            Some(Drag::Gizmo(drag)) => Some(drag.grip()),
+        let hot = match &self.drag {
+            Some(Drag::Gizmo(drag, _)) => Some(drag.grip()),
             _ => gizmo::hit(&handles, pointer - corner, self.panels.scale()),
         };
         self.panels
@@ -922,8 +1008,9 @@ impl<S: Shell + ?Sized> Editor<S> {
     }
 
     /// What the status line says when a mode whose handles need a field is
-    /// chosen: `none` with nothing selected, `usage` when the selection has
-    /// the field, and why it shows no handles when it does not — it has
+    /// chosen: `none` with nothing selected, why it shows no handles with
+    /// several selected — it acts on one entity — `usage` when the selection
+    /// has the field, and why it shows no handles when it does not — it has
     /// nothing to `verb`.
     fn field_status(
         &mut self,
@@ -932,9 +1019,24 @@ impl<S: Shell + ?Sized> Editor<S> {
         usage: String,
         verb: &str,
     ) -> (String, Tone) {
-        let Some(id) = self.document.selected() else {
+        let Some(id) = self.document.primary() else {
             return (none.to_owned(), Tone::Info);
         };
+        let label = match mode {
+            gizmo::Mode::Translate => "Translate",
+            gizmo::Mode::Scale => "Scale",
+            gizmo::Mode::Rotate => "Rotate",
+        };
+        let count = self.document.selection().len();
+        if count > 1 {
+            return (
+                format!(
+                    "{label}: {count} entities are selected, and it acts on one at a time; \
+                     select one to {verb} it"
+                ),
+                Tone::Warning,
+            );
+        }
         if self.has_field(id, mode) {
             return (usage, Tone::Info);
         }
@@ -948,11 +1050,6 @@ impl<S: Shell + ?Sized> Editor<S> {
                     .next()
                     .unwrap_or("entity")
             });
-        let label = match mode {
-            gizmo::Mode::Translate => "Translate",
-            gizmo::Mode::Scale => "Scale",
-            gizmo::Mode::Rotate => "Rotate",
-        };
         (
             format!(
                 "{label}: this {kind} has no `{}` field, so it has nothing to {verb}",
@@ -1021,17 +1118,26 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
     }
 
-    /// Selects whatever the left button landed on.
+    /// Selects whatever the left button landed on, alone — or, with Ctrl
+    /// held, adds it to the selection or takes it out.
     ///
-    /// Called only for a press inside the viewport pane — see
-    /// [`Editor::frame`]. The ray is [`ray_at`](Self::ray_at)'s.
+    /// A Ctrl click on nothing keeps the selection, so a slip between two
+    /// entities does not throw away the ones gathered so far. Called only for
+    /// a press inside the viewport pane — see [`Editor::frame`]. The ray is
+    /// [`ray_at`](Self::ray_at)'s.
     fn pick(&mut self, pending: &Pending) {
         let Some(at) = pending.pointer else {
             return;
         };
         let ray = self.ray_at(at);
         let hit = self.document.pick_ray(&ray);
-        self.document.select(hit);
+        if self.modifiers.contains(Modifiers::CTRL) {
+            if let Some(id) = hit {
+                self.document.toggle_selected(id);
+            }
+        } else {
+            self.document.select(hit);
+        }
     }
 
     /// The ray through the scene under `at`, a point in window pixels.
@@ -1074,10 +1180,10 @@ impl<S: Shell + ?Sized> Editor<S> {
                 self.frame_scene();
                 Ok(())
             }
-            Action::Delete => self.on_selection(|document, id| document.delete(id)),
-            Action::Duplicate => self.on_selection(|document, id| {
-                let copy = document.duplicate(id)?;
-                document.select(Some(copy));
+            Action::Delete => self.on_selection(|document, ids| document.delete(ids)),
+            Action::Duplicate => self.on_selection(|document, ids| {
+                let copies = document.duplicate(ids)?;
+                document.set_selection(copies);
                 Ok(())
             }),
             Action::Copy => self.copy(),
@@ -1097,7 +1203,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                 }
                 Ok(())
             }
-            Action::Rename => match self.document.selected() {
+            Action::Rename => match self.document.primary() {
                 Some(id) => self.panels.begin_rename(&self.document, id),
                 None => {
                     self.panels.set_status(RENAME_NOTHING, Tone::Info);
@@ -1207,8 +1313,8 @@ impl<S: Shell + ?Sized> Editor<S> {
     }
 
     /// Offers the inspector field the keyboard means to the clipboard, as
-    /// plain text — or, with no such field, the selection, as the engine's
-    /// RON and as text. See [`Panels::field_target`].
+    /// plain text — or, with no such field, every selected entity, as the
+    /// engine's RON and as text. See [`Panels::field_target`].
     ///
     /// A clipboard that refuses is logged: a backend with none, or a window
     /// system that wants a recent input event first.
@@ -1222,11 +1328,12 @@ impl<S: Shell + ?Sized> Editor<S> {
                 .set_status(format!("Copied `{}`: {text}", field.path), Tone::Info);
             return Ok(());
         }
-        let Some(id) = self.document.selected() else {
+        let ids = self.document.selection().to_vec();
+        if ids.is_empty() {
             crcbl::log::info!("editor: nothing is selected");
             return Ok(());
-        };
-        let text = self.document.copy(id)?;
+        }
+        let text = self.document.copy(&ids)?;
         self.offer(&[ClipboardOffer::ron(&text), ClipboardOffer::text(&text)]);
         Ok(())
     }
@@ -1239,8 +1346,9 @@ impl<S: Shell + ?Sized> Editor<S> {
     }
 
     /// Carries out a paste whose answer arrived: spawns the entities it names
-    /// and selects the first, or writes its value into the field it was asked
-    /// for. A refusal is on the status line, and changes nothing.
+    /// and selects them — the last pasted the primary — or writes its value
+    /// into the field it was asked for. A refusal is on the status line, and
+    /// changes nothing.
     fn paste_content(&mut self, target: &PasteTarget, content: &ClipboardContent) {
         let Some(text) = content.text() else {
             crcbl::log::info!("editor: the clipboard holds no text to paste");
@@ -1248,8 +1356,9 @@ impl<S: Shell + ?Sized> Editor<S> {
         };
         let outcome = match target {
             PasteTarget::Entities => self.document.paste(text).map(|pasted| {
-                if let Some(&first) = pasted.first() {
-                    self.document.select(Some(first));
+                // A paste of nothing leaves the selection where it was.
+                if !pasted.is_empty() {
+                    self.document.set_selection(pasted);
                 }
             }),
             PasteTarget::Field {
@@ -1264,48 +1373,59 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
     }
 
-    /// Runs `edit` on the selected entity, or says nothing is selected.
+    /// Runs `edit` on every selected entity, or says nothing is selected.
     fn on_selection(
         &mut self,
-        edit: impl FnOnce(&mut Document, SceneEntityId) -> Result<(), EditError>,
+        edit: impl FnOnce(&mut Document, &[SceneEntityId]) -> Result<(), EditError>,
     ) -> Result<(), EditError> {
-        let Some(id) = self.document.selected() else {
+        let ids = self.document.selection().to_vec();
+        if ids.is_empty() {
             crcbl::log::info!("editor: nothing is selected");
             return Ok(());
-        };
-        edit(&mut self.document, id)
+        }
+        edit(&mut self.document, &ids)
     }
 
-    /// Builds and applies the [`EditCommand`] one arrow key means.
+    /// Builds and applies the [`EditCommand`] one arrow key means: every
+    /// selected entity moved by `delta` along `axis`, as one entry.
     ///
-    /// **The command is built from what the field currently holds**, read back
-    /// through the same dotted path it will be written through — so a nudge is
-    /// relative without the command being relative, which is what keeps an
-    /// inverse exact. It moves the component placing the entity
-    /// ([`Document::placing_system`]), as the gizmo does.
+    /// **The command is built from what each field currently holds**, read
+    /// back through the same dotted path it will be written through — so a
+    /// nudge is relative without the command being relative, which is what
+    /// keeps an inverse exact. It moves the component placing each entity
+    /// ([`Document::placing_system`]), as the gizmo does, and passes over one
+    /// nothing places.
     fn nudge(&mut self, axis: usize, delta: f64) -> Result<(), EditError> {
-        let Some(entity) = self.document.selected() else {
+        let selection = self.document.selection().to_vec();
+        let Some(&primary) = selection.last() else {
             crcbl::log::info!("editor: nothing is selected");
-            return Ok(());
-        };
-        let Some(system) = self.document.placing_system(entity) else {
-            self.panels.set_status(
-                format!("#{entity} is not a thing in space, so nothing moves it"),
-                Tone::Info,
-            );
             return Ok(());
         };
         let path = format!("position.{axis}");
-        let Value::Float(was) = self.document.read(entity, &system, &path)? else {
-            crcbl::log::warn!("editor: {path} is not a number");
+        let mut commands = Vec::with_capacity(selection.len());
+        for entity in selection {
+            let Some(system) = self.document.placing_system(entity) else {
+                continue;
+            };
+            let Value::Float(was) = self.document.read(entity, &system, &path)? else {
+                crcbl::log::warn!("editor: {path} of #{entity} is not a number");
+                continue;
+            };
+            commands.push(EditCommand::SetProperty {
+                entity,
+                system,
+                path: path.clone(),
+                value: Value::Float(was + delta),
+            });
+        }
+        if commands.is_empty() {
+            self.panels.set_status(
+                format!("#{primary} is not a thing in space, so nothing moves it"),
+                Tone::Info,
+            );
             return Ok(());
-        };
-        self.document.apply(EditCommand::SetProperty {
-            entity,
-            system,
-            path,
-            value: Value::Float(was + delta),
-        })
+        }
+        self.document.apply(EditCommand::one_or_batch(commands))
     }
 
     /// Puts the whole scene back in view of the pane, at the angle the camera
@@ -1339,15 +1459,8 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.instances
             .update(&mut self.renderer, &mut self.document, &self.shelf)
             .map_err(|error| GpuError::pools("the editor's entities", &error))?;
-        if let Some(id) = self.document.selected()
-            && let Some(placement) = self.document.placement(id)
-        {
-            // The box itself, turned as it is drawn — not the world-axis box
-            // around it, which would outline a turned block loosely.
-            let corners = placement.corners().map(|corner| corner.as_vec3());
-            self.renderer
-                .debug_draw()
-                .box_edges(&corners, SELECTION_COLOR);
+        for (corners, color) in selection_boxes(&mut self.document) {
+            self.renderer.debug_draw().box_edges(&corners, color);
         }
 
         // The scene is drawn at the pane's extent — as the panels last laid it
@@ -1553,9 +1666,14 @@ const APP_ID: &str = "sh.kryptic.crcbl.editor";
 /// background, so a gap the dock leaves reads as part of them.
 const BACKGROUND: [f32; 4] = [0.078, 0.09, 0.114, 1.0];
 
-/// The colour the selection's bounds are drawn in: a warm amber, which is
-/// legible against the greybox grey in both the lit and the shadowed half.
-const SELECTION_COLOR: [f32; 4] = [1.0, 0.72, 0.2, 1.0];
+/// The colour the primary selected entity's box is drawn in: a warm amber,
+/// which is legible against the greybox grey in both the lit and the shadowed
+/// half.
+const PRIMARY_COLOR: [f32; 4] = [1.0, 0.72, 0.2, 1.0];
+
+/// The colour every other selected entity's box is drawn in: a pale blue,
+/// legible against the same grey and never mistaken for the primary's amber.
+const SELECTED_COLOR: [f32; 4] = [0.55, 0.78, 1.0, 1.0];
 
 /// The mode this tool asks for. It never asks for anything else.
 pub const DISPLAY_MODE: DisplayMode = DisplayMode::Windowed;
@@ -1662,6 +1780,29 @@ fn wheel_pixels(pending: &Pending) -> f32 {
             ScrollDelta::Pixels { y, .. } => -(y as f32),
         })
         .sum()
+}
+
+/// Every selected entity's box, as its eight corners in render space, and the
+/// colour it is outlined in: [`PRIMARY_COLOR`] for the primary and
+/// [`SELECTED_COLOR`] for the rest. An entity nothing places has no box.
+///
+/// The box itself, turned as it is drawn — not the world-axis box around it,
+/// which would outline a turned block loosely.
+fn selection_boxes(document: &mut Document) -> Vec<([Vec3; 8], [f32; 4])> {
+    let primary = document.primary();
+    let mut boxes = Vec::with_capacity(document.selection().len());
+    for id in document.selection().to_vec() {
+        let Some(placement) = document.placement(id) else {
+            continue;
+        };
+        let color = if Some(id) == primary {
+            PRIMARY_COLOR
+        } else {
+            SELECTED_COLOR
+        };
+        boxes.push((placement.corners().map(|corner| corner.as_vec3()), color));
+    }
+    boxes
 }
 
 /// The box around everything in the document, or a unit box for an empty one.

@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls 2026-10-03, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls and multi-selection 2026-10-03, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -200,6 +200,7 @@ full-window draw under a hole in the panels is gone.
 - **Multi-select is not a question yet**: the document holds one selection
   (`Document::selected`), and the outliner's Ctrl and Shift clicks select rows
   of which the document takes the first. Every handle acts on that one entity.
+  (_Multi-selection_, 2026-10-03, below, replaced this.)
 - **Evidence**: the gizmo's tests hold plane-square placement, the edge-on drop,
   square-over-line priority on a hand-built overlap, plane drags writing exactly
   their two leaves through oblique rays, per-axis and uniform scale, the
@@ -389,6 +390,68 @@ shows the run's numbers.
   what to select, stop taking the strip and the towers away, and a game with no
   controls showing no strip and keeping the viewport. The mutations each turned
   a test red are listed in the commit that landed this.
+
+**Multi-selection, landed 2026-10-03**, on the decisions of the same day
+(below): several entities selected at once, moved together, and deleted,
+duplicated, copied and pasted as one.
+
+- **The document holds an ordered set** (`document::selection`):
+  `Document::selection` in the order entities joined, the last the **primary**
+  (`Document::primary`), with `select` (one, or none), `toggle_selected`,
+  `set_selection` and `is_selected`. It is not in the log; `prune_selection`
+  drops whatever a delete, an undone spawn or play's restore took away.
+  `Document::selected` is gone — its callers read `primary`.
+- **Clicks**: a viewport click selects alone and a Ctrl click adds or takes out
+  (a Ctrl click on nothing keeps the selection). In the outliner a plain click
+  replaces, Ctrl toggles and Shift takes the run from the anchor;
+  `Panels::follow_outliner` keeps the document's order for what stays, appends
+  what the click added in row order, and makes the row the click acted on the
+  primary — the anchor for a plain or Ctrl click, the run's far end for Shift.
+  Collapsing a system no longer deselects what is in it: an entity is kept by
+  the outliner's whole selection, not the rows it shows.
+- **Shared-pivot translate**: with several selected the translate handles stand
+  at `Document::selection_pivot`, the **bounds centre** (the centre of the box
+  around every selected entity's box), on the world's axes. A drag moves the
+  pivot as it moved a lone entity's centre, and `gizmo::Drag::spread` moves
+  every `gizmo::Member` of the drag's `gizmo::Group` — each selected entity
+  whose placing component has a `position` — by the same delta, one
+  `EditCommand::Batch` a frame that the log folds into one entry. Snapped, the
+  pivot lands on the absolute grid. A group of one is its own pivot, so a lone
+  entity snaps its own position to the bit as before. The arrow keys nudge every
+  selected entity, one entry too.
+- **Scale and rotate stay single-entity**: with several selected R and E show no
+  handles and say why on the status line.
+- **Delete, duplicate, copy and paste take the whole selection**, one entry
+  each: `Document::delete`, `duplicate` and `copy` take `&[SceneEntityId]`
+  (`duplicate` answers the copies), built with `EditCommand::one_or_batch`. A
+  duplicate selects its copies and a paste what it pasted, the last the primary.
+- **The inspector edits the primary alone** and its title says so —
+  `#3 (primary of 2 selected)`. Every selected row is `:checked` and the
+  primary's label is amber; in the viewport every selected entity is outlined,
+  the primary amber and the rest pale blue (`app::selection_boxes`).
+- **Evidence**: the document's tests hold the order, the primary passing back on
+  a toggle, absent and repeated ids kept out, deleted and undone entities
+  dropping out while an undo selects nothing, the pivot as the bounds centre
+  rather than the mean of the centres, and a two-entity delete, duplicate and
+  paste one entry each and undone byte for byte; the undo property test now
+  deletes and duplicates selections of two and nudges two entities as one batch.
+  The panels' tests hold plain, Ctrl and Shift clicks (a run downwards, upwards,
+  and of several upwards), the outliner following a delete and keeping an entity
+  whose system is collapsed, the primary's label colour, and an inspector drag
+  editing the primary alone under a title that says so. The loop's tests hold
+  viewport click and Ctrl click, a shared-pivot drag moving both by one delta as
+  one undo, a snapped one landing the pivot on the grid from off it, R and E
+  refused, delete, duplicate, nudge and copy-and-paste of a selection, and the
+  outline colours. Each of these mutations turned a test red: toggling never
+  removing, absent ids admitted, a delete not pruning, the pivot averaging
+  boxes, members taking the pivot's value, several snapping the primary, an
+  entry per member, every mode's handles shown for several, R and E silent,
+  delete or nudge of the primary alone, duplicate or paste selecting one, a
+  duplicate entry per copy, Ctrl ignored in the viewport, a range's primary its
+  last row, the acted row not made primary, the primary's label unmarked, the
+  inspector title silent, one outline colour, the property test's shared nudge
+  never running, the outliner told only the primary, and the outliner's shown
+  rows deciding what stays selected.
 
 **Slice 10, entity names, rename and field copy/paste, landed 2026-10-01**, on
 the decisions of the same day (below).
@@ -1146,6 +1209,30 @@ recorded, as above):
   world is already the seam a tool reads a module through (runtime components).
 - **Towers, bolts and bursts are mirrored as runtime entities**, the `Walker`
   pattern, so what play builds is drawn.
+
+**Decided 2026-10-03, for multi-selection** (taken for the long term and
+recorded, as above):
+
+- **The document holds an ordered selection set with a primary**, the last
+  clicked. A viewport click replaces, Ctrl and a click toggles, and Shift and a
+  click in the outliner takes the range. The selection is editor state and not
+  in the undo log, as it was; entities that stop existing drop out of it.
+- **Shared-pivot translate**: the gizmo sits at the selection's pivot, named the
+  bounds centre — the centre of the union of the selected entities' boxes — and
+  a drag applies one delta to every selected entity's placing position, as one
+  undo entry folded across the drag. Snap applies to the pivot on the absolute
+  grid, and the same delta to all. Declined as the pivot: the primary's centre,
+  which puts the handles at one end of a wide selection, and the mean of the
+  centres, which a cluster drags away from the middle of what is drawn.
+- **Scale and rotate stay single-entity.** With several selected, R and E show a
+  status-line message and no handles: whether each entity resizes and turns
+  about its own centre or the group about its pivot is a design choice left for
+  later, and either is a different drag from the one-entity one.
+- **Delete, duplicate, copy and paste act on the whole selection**, one undo
+  entry each; a paste selects what it pasted. The inspector edits the primary
+  only, and says so in its header.
+- **The outliner and the viewport highlight every selected entity**, the primary
+  distinctly.
 
 **Still the owner's:** a file watcher dependency for hot reload (`notify`),
 because adding a crates.io dependency is the owner's call by the workspace's

@@ -31,7 +31,7 @@ fn the_outliner_lists_an_entity_in_two_systems_once() {
     for row in page.panels.row_keys() {
         let at = page.centre(row);
         page.click(at);
-        selected.extend(page.document.selected());
+        selected.extend(page.document.primary());
     }
     selected.sort();
     selected.dedup();

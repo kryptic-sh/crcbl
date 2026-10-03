@@ -35,7 +35,7 @@
 //! with — and because the id map's high-water mark is carried across with
 //! [`IdMap::reserve`](crcbl::scene::scn::IdMap::reserve): the files spell the
 //! ids the scene holds, not the ones a deleted entity's undo still names. The
-//! selection survives when the entity it names is in the restored scene.
+//! selection survives, less any entity the restored scene does not hold.
 //!
 //! # What a module spawns
 //!
@@ -225,13 +225,13 @@ impl Document {
         Ok(())
     }
 
-    /// The selected entity's place among `system`'s entities in the order its
-    /// chunk file spells them: the [`PlayArg::Picked`] a play action naming
-    /// that system takes. [`None`] with nothing selected, or a selection
-    /// `system` does not hold.
+    /// The primary selected entity's place among `system`'s entities in the
+    /// order its chunk file spells them: the [`PlayArg::Picked`] a play
+    /// action naming that system takes. [`None`] with nothing selected, or a
+    /// primary `system` does not hold.
     #[must_use]
     pub fn picked(&mut self, system: &str) -> Option<usize> {
-        let entity = self.ids.entity(self.selected?)?;
+        let entity = self.ids.entity(self.primary()?)?;
         self.registry
             .entities(&mut self.world, &self.ids, system)
             .iter()
@@ -366,7 +366,7 @@ impl Document {
     /// began. Returns whether there was a play to stop.
     ///
     /// See the module docs for what survives: the log, the saved position and
-    /// the selection when its entity is still there.
+    /// the selection, less any entity no longer there.
     ///
     /// # Errors
     ///
@@ -444,7 +444,7 @@ impl Document {
 
     /// Loads `snapshot` into a fresh world through the vocabulary this document
     /// holds, and puts it in place of the one play ran — keeping the id map's
-    /// high-water mark and the selection, if its entity is still there.
+    /// high-water mark and the selected entities that are still there.
     fn restore(&mut self, snapshot: &BTreeMap<String, String>) -> Result<(), EditError> {
         let source = memory_source(snapshot.clone())?;
         let (world, scene, mut ids) = load(&source, Path::new(""), &self.registry)?;
@@ -454,7 +454,7 @@ impl Document {
         self.ids = ids;
         self.resolve_meshes();
         self.membership += 1;
-        self.select(self.selected);
+        self.prune_selection();
         Ok(())
     }
 }
