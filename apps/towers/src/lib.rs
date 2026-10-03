@@ -1,8 +1,9 @@
 //! Towers — co-op tower defense, and the ladder's flagship.
 //!
 //! `docs/plan/sample/07-towers.md`, **milestone 1's slices 1, 2 and 3a, and
-//! slice 5**: the solo loop on one map, natively and in a browser, with the
-//! combat content milestone 1 asks for, saved and resumed between waves.
+//! slices 4 and 5**: the solo loop on one map, natively and in a browser, with
+//! the combat content milestone 1 asks for, a dev fly/walk camera, saved and
+//! resumed between waves.
 //! The map is scene data — [`scene`] reads it out of a
 //! `.scn/` directory the editor opens, which is milestone 2's first step. Three kinds of tower and an upgrade tier each,
 //! three kinds of creep, ten scripted waves; creeps walk a path, towers shoot,
@@ -88,13 +89,17 @@
 //! **Slice 3a is the combat half of milestone 1's remaining content, and not the
 //! presentation half.** No `.crpix` art and so no build menu worth the name
 //! (rule 11 is owed, not exempted); no spatial audio (rule 8 is owed, not
-//! exempted); no world-space health bars; and no dev fly/walk camera. There is
+//! exempted); and no world-space health bars. There is
 //! no pointer or touch input **inside the canvas** either, on the page as well
 //! as in the window — [`app`] says why a tap waits for the build menu, and what
 //! a touch player gets on the page instead.
 //!
 //! **A run saves and resumes between waves** — [`save`] has the rule, the
 //! format and where it is kept.
+//!
+//! **`C` switches the camera** from the overhead view to a free fly camera and
+//! then to a walk camera on a `CharacterController` capsule, in a physics world
+//! of its own that the simulation never sees — [`dev_camera`].
 //! `docs/plan/sample/07-towers.md` carries the list with what each would take.
 //!
 //! # One library, two front ends
@@ -108,6 +113,7 @@ pub mod app;
 mod args;
 pub mod camera;
 pub mod creep;
+pub mod dev_camera;
 pub mod game;
 mod gpu;
 #[cfg(not(target_arch = "wasm32"))]

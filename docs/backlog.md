@@ -10977,15 +10977,20 @@ to stand on; a sweep that runs out of `MAX_ADVANCES` stops the body where it got
 to, which is the case a 10 km/s test would probe. Evidence: the test constants
 were read, 2026-09-24.
 
-### The character controller has not walked an authored map (2026-09-24)
+### The character controller has not walked an authored map with slopes (2026-09-24)
 
 The physics plan's exit criterion was the controller walking towers' map —
-slopes, steps and plot edges — authored in the editor. `CharacterController`
-walks greybox courses instead: `apps/puppet`'s lane has steps and slopes either
-side of the walkable angle, and `apps/breach`'s firing line is a kerb it
-refuses, so slopes and steps are covered and editor-authored geometry is not.
-Towers has no walkable map, and the controller on a `TriangleMesh` end to end is
-untested (_Contact solver L2/L3_, rung 5's "Not tested").
+slopes, steps and plot edges — authored in the editor. **Since 2026-10-03 it
+walks towers' field** (towers slice 4, `crcbl_towers::dev_camera::walker`): the
+lane and the pads are kerbs it steps onto, built towers are posts it stops at,
+and the field's edge is a wall it slides along. What is still not covered: the
+field is flat, so no slope is walked there (`apps/puppet`'s lane holds those);
+the committed field is the milestone 1 table written out, not a map authored in
+the editor; and the walker's world is boxes and capsules, so the controller on a
+`TriangleMesh` end to end is still untested (_Contact solver L2/L3_, rung 5's
+"Not tested"). The first would need towers' map to grow terrain (a mesh or ramps
+under the lane), which the map's rules (`Map::new`: every plot on `y = 0`)
+refuse today.
 
 ## ECS, server and client (from the deleted 04-ecs-server-client plan, 2026-09-24)
 
@@ -16039,6 +16044,61 @@ path every tick takes, not exercised after a load by a test);
 `--serve --resume`'s entry (`serve::serve` binds every interface, as its other
 entries do); the macOS and Linux data directories (only Windows' was used, and
 only by nothing — every test writes a scratch directory).
+
+### towers' dev fly/walk camera: decisions, and what it left (2026-10-03)
+
+Slice 4, `crcbl_towers::dev_camera`. **Decided, for the long term:**
+
+- **The walker has a physics world of its own, never the stage's.** Every
+  `PhysicsWorld` query takes `&mut self` (the broadphase rebuilds lazily on the
+  first query after a change), the stage's resume-equals-original hash depends
+  on its queries being read in the field's order, and a joiner has no stage.
+  `Walker::new` builds its world from the same `Map` numbers the meshes use
+  (`Map::lane_collider`, `map::pad_collider`, `map::tower_collider`,
+  `map::ground_collider`). Evidence that the stage is untouched:
+  `app::dev_camera_tests::walking_the_dev_camera_leaves_the_stage_hash_alone`
+  (stage hash and collider count, every frame of 1200, through the front end).
+- **Towers built at runtime are solid to the walker**, synced every tick from
+  what the frame draws (`RenderState::towers`), so it works the same solo, on a
+  host and on a joiner; a tower's collider is an upright capsule as wide and as
+  tall as the drawn post at its tier's size. The walker reads last frame's
+  towers, so a tower built under it arrives one frame late and pushes it out by
+  depenetration.
+- **Creeps are not solid to the walker.** They move every tick and the
+  controller reads no collider velocity (its "Moving geometry" non-goal), so a
+  creep walking into it would resolve as a penetration. Mirroring them is a few
+  lines in `Walker::sync_towers`' shape if someone wants it.
+- **The field's edge is an unseen wall** (`walker::EDGE_HEIGHT`), the walker's
+  alone. Falling off and respawning was the alternative; a wall keeps a dev
+  walking the rim without losing their place.
+- **The camera's keys are a non-modal action-map context**
+  (`dev_camera::CONTEXT`) pushed while it moves, and the toggle is in
+  `GLOBAL_CONTEXT`. Non-modal so `B`, `U`, `N` and the digits still play from
+  the walk camera; the cursor's arrows and `S` (save) are the camera's while it
+  moves.
+- **Not the engine's `Flyer`.** Its keys are hardcoded (`S`, the arrows) and
+  bypass the action map, and it exposes no yaw for the walk to take. The camera
+  keeps its own yaw and pitch in `OrbitCamera`'s measure so the walk uses
+  `OrbitCamera::walk_direction`, as puppet and shard do. A `Flyer` driven by
+  axes rather than key codes would let towers, quarry and the rest share it.
+- **No console command.** A game's `concommand!` reaches only engine state or a
+  static, so a command toggling towers' camera would need a process-wide static
+  that every `Towers` in a test process shares. The console's
+  `bind camera <key>` works today, through `HostedGame::actions`.
+
+**Deferred:** no mouse look (towers has no pointer path; it would need pointer
+lock while the camera moves); no jump, crouch or sprint; the walker is not
+drawn, so the fly camera cannot see where it was left; no `[HUD]` field for the
+camera, so the browser gate cannot see it; no touch button on the page for it
+(`web/demos/towers/main.js`'s row); `move_lying` and slopes are not exercised
+here.
+
+**Coverage gaps:** never looked at on a device, natively or in a browser — every
+check is headless, so the near plane (`dev_camera::NEAR`), the turn rate and the
+fly speed are unjudged by eye; the LAN claim (a joiner's walk sends its host
+nothing) rests on the camera writing no `Controls` and on the solo hash test,
+not on a LAN test; the browser keyboard path is the same `keydown` listener but
+no gate presses `C`.
 
 ## arena (`docs/plan/sample/08-arena.md`)
 

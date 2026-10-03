@@ -106,8 +106,8 @@ pub struct Gpu {
     /// `None` on a device without timestamp queries — the report degrades, the
     /// frame does not.
     timers: Option<PassTimers>,
-    /// Where the frame is seen from. Fixed — see [`crate::camera`] — but held
-    /// here because the frame is what reads it.
+    /// Where the frame is seen from: [`crate::camera`]'s overhead view until
+    /// the dev camera moves it — see [`Gpu::set_camera`].
     camera: Camera,
     /// UI compositing — the readout and the debug panel, in one list.
     ui: UiRenderer,
@@ -346,6 +346,13 @@ impl Gpu {
             let burst = (index < state.bursts_live).then(|| state.bursts[index]);
             self.field.set_burst(&mut self.renderer, index, burst);
         }
+    }
+
+    /// Draws the next frame from `camera` — the dev camera's, which is the
+    /// overhead view itself until a player switches it; see
+    /// [`crate::dev_camera`].
+    pub const fn set_camera(&mut self, camera: Camera) {
+        self.camera = camera;
     }
 
     /// Takes this frame's draw list, handing the previous frame's allocation

@@ -50,6 +50,14 @@
 //! engine. The pointer and the finger **inside the canvas** are still owed, and
 //! that document records them.
 //!
+//! # `C` is the dev camera's
+//!
+//! It goes from the overhead view to a fly camera, a walk camera and back —
+//! [`crate::dev_camera`]. While the camera moves, a context of its own takes
+//! WASD, Space, Shift and the arrows from the field, so `S` and the cursor's
+//! arrows are the camera's until the overhead view is back. Nothing the camera
+//! does reaches a [`Controls`] frame.
+//!
 //! # Saving is the player's key and the wave's end
 //!
 //! `S` saves the run and each wave's end is saved on its own — both through
@@ -72,10 +80,11 @@
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{Booted, Clock, FrameInfo, HostedGame, RunSummary, wait_for_configure};
-use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
+use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding, GLOBAL_CONTEXT};
 use crcbl::prelude::*;
 use crcbl::shell::DisplayMode;
 
+use crate::dev_camera::{DevCamera, Mode, Steer};
 use crate::game::{Controls, Game, RenderState, Stats};
 use crate::gpu::{Gpu, Paths};
 use crate::menu::{MenuAction, MenuKind, Menus};
@@ -118,6 +127,72 @@ const ACTION_KINDS: [&str; tower::KINDS] = ["kind-bolt", "kind-splash", "kind-sl
 /// The keys those three actions are bound to, in the same order.
 const KIND_KEYS: [KeyCode; tower::KINDS] = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3];
 
+/// Go to the dev camera's next mode — overhead, fly, walk, overhead. An edge,
+/// in [`GLOBAL_CONTEXT`] so it works whatever else holds the keyboard; see
+/// [`crate::dev_camera`].
+const ACTION_CAMERA: &str = "camera";
+/// The dev camera's walk and strafe, a WASD composite. In
+/// [`crate::dev_camera::CONTEXT`], with the two below.
+const ACTION_CAMERA_MOVE: &str = "camera-move";
+/// Turn and tilt either moving camera, on the arrows.
+const ACTION_CAMERA_LOOK: &str = "camera-look";
+/// Fly up and down.
+const ACTION_CAMERA_RISE: &str = "camera-rise";
+
+/// The key [`ACTION_CAMERA`] is bound to.
+const CAMERA_KEY: KeyCode = KeyCode::KeyC;
+
+/// The dev camera's keys: the toggle, and what its movement context binds.
+fn declare_dev_camera(map: &mut ActionMap) {
+    map.declare_in(
+        GLOBAL_CONTEXT,
+        ActionDecl {
+            name: ACTION_CAMERA.into(),
+            kind: ActionKind::Button,
+            bindings: vec![Binding::Key(CAMERA_KEY)],
+        },
+    );
+    for (name, kind, binding) in [
+        (
+            ACTION_CAMERA_MOVE,
+            ActionKind::Axis2,
+            Binding::Wasd {
+                up: KeyCode::KeyW,
+                down: KeyCode::KeyS,
+                left: KeyCode::KeyA,
+                right: KeyCode::KeyD,
+            },
+        ),
+        (
+            ACTION_CAMERA_LOOK,
+            ActionKind::Axis2,
+            Binding::Wasd {
+                up: KeyCode::ArrowUp,
+                down: KeyCode::ArrowDown,
+                left: KeyCode::ArrowLeft,
+                right: KeyCode::ArrowRight,
+            },
+        ),
+        (
+            ACTION_CAMERA_RISE,
+            ActionKind::Axis1,
+            Binding::KeyAxis {
+                negative: KeyCode::ShiftLeft,
+                positive: KeyCode::Space,
+            },
+        ),
+    ] {
+        map.declare_in(
+            crate::dev_camera::CONTEXT,
+            ActionDecl {
+                name: name.into(),
+                kind,
+                bindings: vec![binding],
+            },
+        );
+    }
+}
+
 /// The keyboard this sample is played with.
 ///
 /// Declared in one place so the bindings and the read-out below cannot name
@@ -148,6 +223,7 @@ fn action_map() -> ActionMap {
             bindings,
         });
     }
+    declare_dev_camera(&mut map);
     map
 }
 
@@ -225,6 +301,10 @@ pub struct Towers {
     /// difference: it travels on **every** command frame rather than only on the
     /// tick a build is asked for — see [`Controls::kind`].
     kind: tower::Kind,
+    /// Which camera the frame is drawn from, and the fly camera and walker
+    /// behind the two that move. **Presentation** in the same sense as the
+    /// cursor, and further: nothing in it reaches a command frame.
+    dev_camera: DevCamera,
     /// Refilled from the simulation every frame.
     render_state: RenderState,
     /// The simulation's numbers, snapshotted in [`Towers::tick`].
@@ -420,6 +500,40 @@ impl Towers {
         &self.page
     }
 
+    /// The dev camera, for this crate's own tests.
+    pub const fn dev_camera(&self) -> &DevCamera {
+        &self.dev_camera
+    }
+
+    /// Goes to the dev camera's next mode, and pushes its keys' context on
+    /// leaving the overhead camera or pops it on coming back.
+    fn cycle_camera(&mut self) {
+        let left = self.dev_camera.mode();
+        let arrived = self.dev_camera.cycle();
+        if left == Mode::Overhead {
+            self.actions
+                .push_context(crate::dev_camera::CONTEXT)
+                .expect("the action map declares the dev camera's context, off the stack");
+        } else if arrived == Mode::Overhead {
+            self.actions
+                .pop_context(crate::dev_camera::CONTEXT)
+                .expect("nothing is pushed over the dev camera's context");
+        }
+    }
+
+    /// What the dev camera's keys ask for this tick.
+    fn steer(&self) -> Steer {
+        let (strafe, ahead) = self.actions.axis2(ACTION_CAMERA_MOVE);
+        let (turn, tilt) = self.actions.axis2(ACTION_CAMERA_LOOK);
+        Steer {
+            ahead,
+            strafe,
+            rise: self.actions.axis1(ACTION_CAMERA_RISE),
+            turn,
+            tilt,
+        }
+    }
+
     /// Whether the lobby is open.
     #[must_use]
     pub const fn in_the_lobby(&self) -> bool {
@@ -564,6 +678,14 @@ impl Towers {
         self.panel_warning = None;
         self.selected = 0;
         self.kind = tower::Kind::default();
+        // Back to the overhead camera over the new game's field, which may be
+        // another map: the walker's world is built from it.
+        if self.dev_camera.mode() != Mode::Overhead {
+            self.actions
+                .pop_context(crate::dev_camera::CONTEXT)
+                .expect("nothing is pushed over the dev camera's context");
+        }
+        self.dev_camera = DevCamera::new(game.map());
         self.pending_keys.clear();
         self.pending_restart = false;
         self.stats = Stats::default();
@@ -692,6 +814,7 @@ fn assemble<S: Shell + ?Sized>(
     let vault = Vault::player(options.common.headless);
     #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
     let (game, joining) = open_game(options, &vault).map_err(TowersError::Game)?;
+    let dev_camera = DevCamera::new(game.map());
     Ok(Loop::new(
         booted,
         Towers {
@@ -701,6 +824,7 @@ fn assemble<S: Shell + ?Sized>(
             pending_restart: false,
             selected: 0,
             kind: tower::Kind::default(),
+            dev_camera,
             render_state: RenderState::default(),
             stats: Stats::default(),
             page: PageStats::default(),
@@ -865,6 +989,15 @@ impl HostedGame for Towers {
         for (key, pressed) in self.pending_keys.drain(..) {
             self.actions.key_event(key, pressed);
         }
+
+        // The camera moves on the tick, as `Flyer` does, so a walk covers the
+        // same ground on every machine. Its towers are the last frame's,
+        // which is what is on screen.
+        if self.actions.just_pressed(ACTION_CAMERA) {
+            self.cycle_camera();
+        }
+        self.dev_camera
+            .step(self.steer(), tick_dt, &self.render_state.towers);
 
         // The cursor moves here rather than on the frame's clock, because it
         // is what a command names and a command belongs to a tick.
@@ -1041,6 +1174,7 @@ impl HostedGame for Towers {
         self.update_notice(frame.render_dt);
         self.render_state = self.game.render_state();
         gpu.set_field(&self.render_state);
+        gpu.set_camera(self.dev_camera.camera());
         if let Some((line, _)) = &self.notice {
             crate::page::draw_notice(draw_list, gpu.atlas(), gpu.extent(), line);
         }
@@ -1055,7 +1189,12 @@ impl HostedGame for Towers {
         );
     }
 
-    /// **Towers' two modules, and a third during a LAN session.**
+    /// **Towers' three modules, and a fourth during a LAN session.**
+    ///
+    /// The stage's numbers, the selectors the frame took, and the "camera"
+    /// section — which camera the frame is drawn from, and while walking what
+    /// the walker stands on and what its last move met; see
+    /// [`crate::dev_camera`].
     ///
     /// The "lan" section is `crcbl::lan`'s: the port, the players and the
     /// snapshot's size against a datagram on a host, the session and the last
@@ -1067,6 +1206,7 @@ impl HostedGame for Towers {
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.stats);
         panel.add(&self.paths);
+        panel.add(&self.dev_camera);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(joining) = &self.joining {
             panel.add(joining.lan());
@@ -1143,6 +1283,8 @@ crcbl::impl_pending_loop!(
 
 // ---- tests -------------------------------------------------------------------
 
+#[cfg(test)]
+mod dev_camera_tests;
 #[cfg(test)]
 mod save_tests;
 
@@ -2113,7 +2255,8 @@ mod tests {
     ///
     /// No network module and no audio one: this sample has neither system, and
     /// a panel that showed a row for either would be the overlay inventing
-    /// state rather than reporting it.
+    /// state rather than reporting it. The camera's is there in every mode,
+    /// saying which camera the frame is drawn from.
     #[test]
     fn the_overlay_is_composed_of_exactly_the_modules_towers_has() {
         let mut engine = scripted(&headless_with(8, |common| {
@@ -2129,9 +2272,9 @@ mod tests {
             .map(crcbl::ui::DebugSection::title)
             .collect();
         let expected: &[&str] = if engine.gpu().timings().is_some() {
-            &["frame", "gpu", "counters", "towers", "paths"]
+            &["frame", "gpu", "counters", "towers", "paths", "camera"]
         } else {
-            &["frame", "counters", "towers", "paths"]
+            &["frame", "counters", "towers", "paths", "camera"]
         };
         assert_eq!(titles, expected, "no module appears that no system offered");
 

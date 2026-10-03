@@ -154,7 +154,7 @@ writes out is held against this crate's own tables by `apps/towers`'
 | 2     | The browser demo: `src/web.rs`, a `towers` directory under `web/demos/`, the `DEMOS` row, the Pages steps, the feature card and the browser gate                                                                                       | **Built 2026-09-07** |
 | 3a    | The combat content: the splash and slow towers, one upgrade tier each behind an `UpgradeTower` command, the tanky and swarm creeps, all ten waves, a material per kind and a burst instance at a splash impact                         | **Built 2026-09-10** |
 | 3b    | The presentation content milestone 1 still owes: `.crpix` art and the build menu it makes possible, spatial audio, world-space health bars                                                                                             | Owed                 |
-| 4     | The dev fly/walk camera — `CharacterController` on this map, which is the controller's first real terrain                                                                                                                              | Owed                 |
+| 4     | The dev fly/walk camera — `CharacterController` on this map, which is the controller's first real terrain                                                                                                                              | **Built 2026-10-03** |
 | 5     | Save and resume between waves (topic 14): `S` and an autosave at each wave's end, refused mid-wave; the lobby's _Continue_ and `--resume` (solo, host, dedicated server); `save`/`load` at a server's console; the browser's OPFS save | **Built 2026-10-03** |
 
 **What these slices prove is narrower than the "Proves" list above**, and it is
@@ -220,9 +220,9 @@ not built anywhere yet.
   the table above is what the rest of it costs. The four ingredients this
   section used to list as present are present and three of them are now
   exercised by code: the per-collider trigger flag, `sweep_sphere` and
-  `overlap_sphere` are what the sample runs on, and `CharacterController` is the
-  one still untouched here — it is slice 4's, and `apps/puppet`, `apps/breach`
-  and `apps/shard` drive it from three different cameras in the meantime.
+  `overlap_sphere` are what the sample runs on, and `CharacterController` walks
+  the field since slice 4 — the fourth camera to drive it, after
+  `apps/puppet`'s, `apps/breach`'s and `apps/shard`'s.
 - **Milestone 2's map is in the editor's vocabulary; authoring it there is what
   is left.** Since 2026-09-30 the path and the plots are
   `apps/towers/assets/scenes/field.scn/`, `crcbl_towers::register_components`
@@ -236,6 +236,25 @@ not built anywhere yet.
   with no ECS system, which is fine for a map — the scene is read into a `Map`
   and the stage plays on that — and would not be for anything the editor should
   place that moves.
+- **A dev fly/walk camera walks the field (slice 4, 2026-10-03).** `C` goes from
+  the overhead view to a fly camera that passes through everything, to a walk
+  camera on a `CharacterController` capsule dropped from under the fly camera,
+  and back to the overhead view exactly (`crate::dev_camera`). The walker moves
+  in a physics world of its own built from the map's numbers — the ground, the
+  lane and the pads it steps onto, every built tower as a capsule at its tier's
+  size, the exit volume as a trigger it walks through, and an unseen wall round
+  the field's edge — so the stage, its physics world and its state hash are
+  untouched tick for tick, which
+  `walking_the_dev_camera_leaves_the_stage_hash_alone` holds through the real
+  front end. Creeps are not solid to it. The camera's movement keys are an
+  action-map context pushed over the field's while it moves, so `S` and the
+  arrows are the camera's and `B`, `U`, `N` and the digits still play; the
+  keyboard path is the browser's too. The debug panel's `camera` section shows
+  the mode, the walker's ground and every contact `move_and_slide_into`
+  recorded. **What it covers of the controller's exit criterion is flat
+  terrain**: kerbs (the lane, the pads), round posts, a wall to slide along and
+  a trigger to ignore — this field has no slope, no stair and no mesh, so those
+  stay `apps/puppet`'s. Not looked at on a device: every check is headless.
 - **The editor plays the field (2026-10-01).** `register_components` also
   registers towers' play module (`crate::game`'s `play`, under `waypoints`): F5
   in the editor builds a `Stage` from the scene through `Map::load` and ticks it

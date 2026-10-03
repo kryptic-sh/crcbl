@@ -606,6 +606,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Towers has a dev fly/walk camera** (`docs/plan/sample/07-towers.md` slice 4,
+  `crcbl_towers::dev_camera`). `C` (the `camera` action, in the action map's
+  global context, so `bind` moves it) goes from the overhead view to a fly
+  camera that passes through everything, then to a walk camera on a
+  `CharacterController` capsule dropped from under the fly camera, then back to
+  the overhead view exactly. While it moves, a `dev-camera` context takes WASD,
+  Space/Shift and the arrows from the field — `S` steps back instead of saving
+  and the arrows turn instead of walking the build cursor — and lets `B`, `U`,
+  `N` and the digits through. The walker moves in a physics world of its own
+  (`dev_camera::walker::Walker`), built from the map's numbers: the ground, the
+  lane and the pads to stand on, every built tower as a capsule at its tier's
+  size, the exit volume as the trigger it is, and an unseen wall round the
+  field's edge; creeps are not in it. The stage, its physics world and its state
+  hash are the same tick for tick whatever the camera does. The debug panel
+  gains a `camera` section: the mode, and in the walk what the walker stands on
+  and every contact `move_and_slide_into` recorded. `Map` gains `lane_collider`,
+  and `crate::map` gains `ground_collider`, `pad_collider`, `tower_collider` and
+  `tower_scale`; `Gpu` gains `set_camera`.
 - **Towers saves and resumes a run between waves**
   (`docs/plan/sample/07-towers.md` slice 5). A save is taken in the build phase
   of a run still being played — `S` in the window or the page, and an autosave

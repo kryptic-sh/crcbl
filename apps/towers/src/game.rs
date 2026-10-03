@@ -1739,6 +1739,19 @@ impl Game {
         }
     }
 
+    /// The stage's state hash, as the server's world reads it, beside how many
+    /// colliders the stage's physics world holds — `None` on a joiner, which
+    /// has no stage. For this crate's tests that hold the stage to a run beside
+    /// it while the client does something the simulation must not see.
+    #[cfg(test)]
+    pub(crate) fn stage_fingerprint(&self) -> Option<(u64, usize)> {
+        let shared = self.shared.as_ref()?;
+        let stage = lock(shared);
+        let mut hasher = std::hash::DefaultHasher::new();
+        stage.hash_state(&mut hasher);
+        Some((hasher.finish(), stage.world.len()))
+    }
+
     /// The stage's numbers for the debug panel and the `[HUD]` line, read as
     /// [`Game::render_state`] is.
     #[must_use]

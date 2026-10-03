@@ -84,7 +84,7 @@ use std::borrow::Cow;
 
 use crcbl::greybox::{GREYBOX_TILE_M, cylinder, grid_material, grid_page, platform, sphere};
 use crcbl::math::{DVec3, Mat4, Quat, Vec3};
-use crcbl::phys::{BoxCollider, ColliderId, PhysicsWorld};
+use crcbl::phys::{BoxCollider, Capsule, ColliderId, PhysicsWorld};
 use crcbl::render::scene::{Capacities, Geometry, InstanceDesc, MeshDesc, ProbeGrid, SceneDesc};
 use crcbl::render::{DirectionalLight, ForwardRenderer, InstanceHandle, InstancePoolError};
 use crcbl::scene::scn::ScnError;
@@ -986,10 +986,7 @@ impl Field {
                     tower_material(view.kind)
                 },
                 self.plots[plot],
-                match view.tier {
-                    crate::tower::Tier::Base => 1.0,
-                    crate::tower::Tier::Upgraded => UPGRADED_SCALE,
-                },
+                tower_scale(view.tier),
             ),
             None => (TOWER_MATERIAL, PARK, 1.0),
         };
@@ -1180,14 +1177,84 @@ impl Map {
     #[must_use]
     pub fn world(&self) -> (PhysicsWorld, ColliderId) {
         let mut world = PhysicsWorld::new();
-        world.add_box(BoxCollider::new(
-            DVec3::new(0.0, -0.5 * SLAB_THICKNESS, 0.0),
-            DVec3::new(HALF_WIDTH, 0.5 * SLAB_THICKNESS, HALF_DEPTH),
-        ));
+        world.add_box(ground_collider());
         let exit = world.add_box(self.exit_collider());
         world.set_trigger(exit, true);
         (world, exit)
     }
+
+    /// Leg `leg` of the lane as a slab standing [`LANE_HEIGHT`] proud of the
+    /// ground, the size [`Map::scene`] draws it.
+    ///
+    /// Not in [`Map::world`]: nothing the simulation sweeps is stopped by the
+    /// lane. The dev camera's walker stands on it — see
+    /// `crate::dev_camera::walker`.
+    ///
+    /// # Panics
+    ///
+    /// If `leg` is not one of the path's legs.
+    #[must_use]
+    pub fn lane_collider(&self, leg: usize) -> BoxCollider {
+        let pair = &self.path.waypoints()[leg..=leg + 1];
+        let middle = 0.5 * (pair[0] + pair[1]);
+        let (width, depth) = self.lane_extent(leg);
+        BoxCollider::new(
+            DVec3::new(middle.x, 0.5 * LANE_HEIGHT, middle.z),
+            DVec3::new(0.5 * width, 0.5 * LANE_HEIGHT, 0.5 * depth),
+        )
+    }
+}
+
+/// The ground slab, as the physics world holds it: its top at `y = 0` and its
+/// footprint the field's.
+#[must_use]
+pub fn ground_collider() -> BoxCollider {
+    BoxCollider::new(
+        DVec3::new(0.0, -0.5 * SLAB_THICKNESS, 0.0),
+        DVec3::new(HALF_WIDTH, 0.5 * SLAB_THICKNESS, HALF_DEPTH),
+    )
+}
+
+/// The build pad under a plot whose feet are at `feet`, the size
+/// [`Map::scene`] draws it. Like [`Map::lane_collider`], only the dev camera's
+/// walker stands on it.
+#[must_use]
+pub fn pad_collider(feet: DVec3) -> BoxCollider {
+    BoxCollider::new(
+        DVec3::new(feet.x, 0.5 * PAD_HEIGHT, feet.z),
+        DVec3::new(0.5 * PAD_EDGE, 0.5 * PAD_HEIGHT, 0.5 * PAD_EDGE),
+    )
+}
+
+/// How many times its base size a tower of `tier` is drawn — [`UPGRADED_SCALE`]
+/// for a stepped-up one. What [`Field::set_tower`] scales the mesh by and
+/// [`tower_collider`] the post.
+#[must_use]
+pub const fn tower_scale(tier: crate::tower::Tier) -> f32 {
+    match tier {
+        crate::tower::Tier::Base => 1.0,
+        crate::tower::Tier::Upgraded => UPGRADED_SCALE,
+    }
+}
+
+/// A tower of `tier` standing on the plot whose feet are at `feet`, as an
+/// upright capsule as wide as the drawn post and as tall: [`TOWER_RADIUS`] and
+/// [`TOWER_HEIGHT`] scaled by [`tower_scale`].
+///
+/// A capsule rather than a box because the post is round, so a walker slides
+/// round it as round it looks; its top is a dome where the mesh has a flat
+/// cap, which nothing walks on. Not in [`Map::world`] — a bolt is fired from a
+/// tower, not at one — and read by the dev camera's walker only.
+#[must_use]
+pub fn tower_collider(feet: DVec3, tier: crate::tower::Tier) -> Capsule {
+    let scale = f64::from(tower_scale(tier));
+    let radius = TOWER_RADIUS * scale;
+    let height = TOWER_HEIGHT * scale;
+    Capsule::new(
+        DVec3::new(feet.x, feet.y + 0.5 * height, feet.z),
+        radius,
+        0.5 * height - radius,
+    )
 }
 
 // ---------------------------------------------------------------------------

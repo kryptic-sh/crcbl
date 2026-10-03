@@ -1,14 +1,14 @@
-//! The one camera: fixed, overhead and looking down the field.
+//! The camera a player plays from: fixed, overhead and looking down the field.
 //!
-//! # Slice 1 has no camera controls, and that is a decision
+//! # It has no controls, and that is a decision
 //!
-//! `docs/plan/sample/07-towers.md` names a dev fly/walk camera on the map as
-//! the character controller's "first real terrain". That is a later slice: what
-//! a tower defense is read from is a view of the whole field at once, and a
-//! sample whose first slice shipped a camera a player has to fly into position
-//! is one where nothing else can be looked at until they have. So this module
-//! is a constant and a projection, `crcbl::phys::CharacterController` is not
-//! linked, and the plan doc records the controller as owed.
+//! What a tower defense is read from is a view of the whole field at once, and
+//! a camera a player had to fly into position would be one where nothing else
+//! can be looked at until they have. So this module is a constant and a
+//! projection, and the run opens on it. The fly and walk cameras
+//! `docs/plan/sample/07-towers.md` asks for are a **dev** camera beside it —
+//! [`crate::dev_camera`] — which `C` switches to and back, landing on this view
+//! exactly.
 //!
 //! The one thing this does have to be is **wide enough**: every corner of
 //! `crate::map`'s field has to be in frame at the default window's aspect, or
