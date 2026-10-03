@@ -22,7 +22,8 @@
 //! ([`Host::replay_sim_record`](super::Host::replay_sim_record)) applies each
 //! entry at the start of the tick it names — before any live set of that
 //! tick — through the same checks, so the same world and module reach the same
-//! state.
+//! state. [`Host::resimulate`](super::Host::resimulate) does that from a
+//! replay file's sets, checked against its state hashes.
 
 use std::collections::VecDeque;
 
@@ -157,15 +158,22 @@ impl SimConsole {
         to_peers
     }
 
+    /// Check `set` against the registry, answering why it is refused.
+    pub(super) fn check(&self, set: &ConsoleSet) -> Result<SimSet, String> {
+        let Some(registry) = &self.registry else {
+            return Err(NO_SIM_VARIABLES.to_owned());
+        };
+        registry
+            .sim_set(&set.name, &set.value)
+            .map_err(|fault| fault.message().to_owned())
+    }
+
     /// Check `set` against the registry and, when it passes, apply and record
     /// it at `tick`.
     fn apply(&mut self, set: ConsoleSet, tick: TickId) -> ConsoleReply {
-        let Some(registry) = &self.registry else {
-            return refusal(set, NO_SIM_VARIABLES.to_owned());
-        };
-        let checked = match registry.sim_set(&set.name, &set.value) {
+        let checked = match self.check(&set) {
             Ok(checked) => checked,
-            Err(fault) => return refusal(set, fault.message().to_owned()),
+            Err(reason) => return refusal(set, reason),
         };
         if let Err(fault) = self.vars.apply(&checked) {
             return refusal(set, fault.message().to_owned());

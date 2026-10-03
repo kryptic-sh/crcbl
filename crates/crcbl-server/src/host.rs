@@ -31,8 +31,10 @@ use crcbl_net::{
 
 use crate::peer::{self, Counters, PeerSession, PeerStats, SnapshotTooLarge, UpdateTooLarge};
 
+mod resim;
 mod sim;
 
+pub use resim::ResimError;
 pub use sim::AppliedSimSet;
 use sim::{Origin, SimConsole};
 

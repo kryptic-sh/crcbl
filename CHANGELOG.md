@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`.crpl` replays are format version 2** (see Added: a replay carries its
+  simulation inputs). `ReplayWriter` and `CrashRing::dump` write version 2, and
+  a build from before this change refuses such a file as an unsupported version
+  — so a replay sent to someone on an older build no longer opens there. This
+  build still reads version 1. Nothing in the workspace records a session yet,
+  so only a file EW or a game wrote with `ReplayWriter` itself is affected.
+  `crcbl replay`'s first human line now ends with `, format version N`.
+
 - **A `Flags::SIM` console variable is set through its simulation, and a
   `ClientToServer::Command`'s `data` has a format** (see Added: simulation
   variables over the transport). `ConVar::set` refuses a `SIM` variable, its
@@ -572,6 +580,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A `.crpl` replay carries its simulation inputs, and a host re-simulates
+  one** (format version 2; see Breaking). The file gains an input section after
+  its entries: the `Flags::SIM` sets the host applied, each with its tick and as
+  the console's own text, and the recorder's state hashes for the ticks it
+  hashed. `crcbl_store::replay::ReplayWriter` gains `push_sim_set` and
+  `push_state_hash`; `FileTransport` gains `decode` (from bytes, which `open`
+  now calls), `format_version`, `sim_sets` and `state_hashes`, over the new
+  `RecordedSimSet` and `RecordedStateHash`. Both directions refuse a section
+  that breaks a rule by name — `InputSectionError`, carried by the new
+  `StorageError::ReplayInput` — for a truncated section, a count past the file,
+  a name or value past a console set's limits, text that is not UTF-8, sets out
+  of tick order, two hashes for one tick, and bytes after the section; the
+  reader is in the fuzz target, with a seed. A version 1 file still reads, with
+  no sets and no hashes. `crcbl_server::Host::resimulate` takes a file's sets
+  and hashes, schedules the sets through `replay_sim_record` after checking
+  every one against its registry, runs to the last hash, and answers the first
+  tick whose state hash it does not reproduce (`ResimError::Diverged`), a set it
+  refuses (`SetRefused`) or a tick it has passed (`TickPassed`). Peers' input
+  frames are not recorded, so a module that reads them does not re-simulate yet.
+  `crcbl replay` reports the format version, every set and the number of hashes
+  (`format_version`, `sim_sets` and `state_hash_count` in `--json`), and does
+  not re-simulate: it cannot build a game's host. `CrashRing::dump` writes
+  through `ReplayWriter`, so a crash dump is version 2 with an empty section.
 - **Simulation variables over the transport: `Flags::SIM`'s half is built.** A
   typed set of a `SIM` variable is checked by the new `Registry::sim_set` and
   handed to the host as a `crcbl_console::SimSet` through

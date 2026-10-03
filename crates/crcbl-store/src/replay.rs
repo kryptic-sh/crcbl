@@ -11,6 +11,7 @@
 //! [18..22)  tick_rate:      u32 little-endian
 //! [22..30)  start_tick:     u64 little-endian
 //! [30..)    entries:        TickEntry[tick_count]
+//! then      input section   (format version 2 on)
 //! ```
 //!
 //! Each `TickEntry`:
@@ -23,25 +24,74 @@
 //! For MVP, each entry stores the full server message bytes. A future format
 //! bump may add delta compression against the previous tick's entry.
 //!
+//! The input section, which ends the file, carries what a re-simulation needs
+//! and the output does not. The entries are what the server sent, and a viewer
+//! plays them back without simulating anything; a re-simulation runs a fresh
+//! host through the same ticks instead, so it needs the tick inputs the output
+//! was computed from and something to compare its own state against:
+//!
+//! ```text
+//! sim_set_count   u32 little-endian
+//! SimSetEntry[sim_set_count]:
+//!   tick          u64 little-endian
+//!   name_len      u16 little-endian, then `name_len` bytes of UTF-8
+//!   value_len     u16 little-endian, then `value_len` bytes of UTF-8
+//! hash_count      u32 little-endian
+//! StateHashEntry[hash_count]:
+//!   tick          u64 little-endian
+//!   hash          u64 little-endian
+//! ```
+//!
+//! A set ([`RecordedSimSet`]) is a `Flags::SIM` console set as the host applied
+//! it — the variable's name and the value as the text the console prints, which
+//! `crcbl_console::Registry::sim_set` parses back to the same value — at the
+//! tick whose start it was applied at, each text within a console set's limits.
+//! Sets are in the order the host applied them, so their ticks never decrease.
+//! A state hash ([`RecordedStateHash`]) is the recorder's state hash at the end
+//! of a tick, at most one a tick and in tick order; a recorder may hash every
+//! tick or only some. Both directions refuse a section that breaks a rule, by
+//! name ([`InputSectionError`]). Peers' input frames are not in it:
+//! `docs/backlog.md` has what recording them takes.
+//!
+//! A version 1 file has no section and reads as one with no sets and no
+//! hashes, so it plays back as it always did; [`ReplayWriter`] writes version
+//! 2.
+//!
 //! [`FileTransport`] reads a `.crpl` file and emits entries as if they were
 //! arriving from a live network transport.
 
 use std::path::Path;
 
 use crcbl_core::TickId;
+use crcbl_net::ConsoleSet;
 use crcbl_net::transport::{Message, MessageKind, Transport, TransportError};
 
 use crate::{StorageError, StorageSource};
+
+mod input;
+
+use input::InputSection;
+pub use input::{InputSectionError, RecordedSimSet, RecordedStateHash};
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
 /// Magic bytes identifying a `.crpl` replay file.
 pub const REPLAY_MAGIC: &[u8; 8] = b"CRBLREPL";
 
-/// Current replay format version.
-pub const REPLAY_FORMAT_VERSION: u16 = 1;
+/// Current replay format version: the one [`ReplayWriter`] writes.
+///
+/// Version 2 added the input section; version 1, without it, still reads.
+pub const REPLAY_FORMAT_VERSION: u16 = 2;
 
-/// Minimum size of a valid replay file: header only (empty replay is valid).
+/// The oldest format version [`FileTransport`] reads.
+const OLDEST_READABLE_VERSION: u16 = 1;
+
+/// The first format version with an input section.
+const INPUT_SECTION_VERSION: u16 = 2;
+
+/// The header's size, which is the smallest a file of any version can be: a
+/// version 1 file with no entries. A version 2 file adds at least its input
+/// section's two counts.
 pub const REPLAY_MIN_SIZE: usize = 30;
 
 /// Smallest possible `TickEntry`: `tick_id` + `msg_len`, with no payload.
@@ -51,7 +101,10 @@ const MIN_ENTRY_SIZE: usize = 12;
 
 /// Records server output messages into a `.crpl` replay buffer.
 ///
-/// Call [`push_tick`](Self::push_tick) for each tick's server message, then
+/// Call [`push_tick`](Self::push_tick) for each tick's server message — and,
+/// for a file a re-simulation can check, [`push_sim_set`](Self::push_sim_set)
+/// for each applied `Flags::SIM` set and
+/// [`push_state_hash`](Self::push_state_hash) for the ticks it hashed — then
 /// [`write`](Self::write) to persist the replay through a [`StorageSource`].
 ///
 /// # Example
@@ -67,6 +120,7 @@ const MIN_ENTRY_SIZE: usize = 12;
 pub struct ReplayWriter {
     tick_rate: u32,
     entries: Vec<(TickId, Vec<u8>)>,
+    input: InputSection,
 }
 
 impl ReplayWriter {
@@ -78,6 +132,7 @@ impl ReplayWriter {
         Self {
             tick_rate,
             entries: Vec::new(),
+            input: InputSection::default(),
         }
     }
 
@@ -94,10 +149,32 @@ impl ReplayWriter {
         self.entries.len()
     }
 
+    /// Record a `Flags::SIM` console set the host applied at the start of
+    /// `tick`, in the order it applied them — `crcbl_server::Host::sim_record`
+    /// as text, the value as the console prints it.
+    ///
+    /// [`write`](Self::write) refuses a set for an earlier tick than the one
+    /// before it, or a name or value longer than a console set carries.
+    pub fn push_sim_set(&mut self, tick: TickId, set: ConsoleSet) {
+        self.input.sim_sets.push(RecordedSimSet { tick, set });
+    }
+
+    /// Record the state hash at the end of `tick`, for a re-simulation to
+    /// compare its own against.
+    ///
+    /// [`write`](Self::write) refuses a hash for a tick not after the one
+    /// before it.
+    pub fn push_state_hash(&mut self, tick: TickId, hash: u64) {
+        self.input
+            .state_hashes
+            .push(RecordedStateHash { tick, hash });
+    }
+
     /// Encode the replay into a byte buffer.
     ///
     /// Fails rather than truncating when an entry's data length does not fit
-    /// the `u32` the format reserves for it.
+    /// the `u32` the format reserves for it, and with an
+    /// [`InputSectionError`] for an input section the reader would refuse.
     fn encode(&self) -> Result<Vec<u8>, StorageError> {
         let total_entries = self.entries.len() as u64;
         let mut buf = Vec::with_capacity(
@@ -125,6 +202,7 @@ impl ReplayWriter {
             buf.extend_from_slice(data);
         }
 
+        self.input.encode(&mut buf)?;
         Ok(buf)
     }
 
@@ -160,17 +238,25 @@ pub struct FileTransport {
     cursor: usize,
     connected: bool,
     tick_rate: u32,
+    format_version: u16,
+    input: InputSection,
 }
 
 impl FileTransport {
     /// Open a `.crpl` replay file from `path` in `storage`.
     ///
-    /// Validates the magic and format version. Returns an error if the file is
-    /// too short, has an invalid magic, or contains an unsupported format
-    /// version.
+    /// See [`decode`](Self::decode) for what it refuses.
     pub fn open(storage: &dyn StorageSource, path: &Path) -> Result<Self, StorageError> {
-        let bytes = storage.read(path)?;
+        Self::decode(&storage.read(path)?)
+    }
 
+    /// Read a `.crpl` replay from its bytes.
+    ///
+    /// Validates the magic and format version. Returns an error if the file is
+    /// too short, has an invalid magic, contains an unsupported format
+    /// version, or — from version 2 — has an input section that breaks one of
+    /// its rules ([`StorageError::ReplayInput`]).
+    pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         if bytes.len() < REPLAY_MIN_SIZE {
             return Err(StorageError::Other(format!(
                 "replay file too short: {} bytes (minimum {REPLAY_MIN_SIZE})",
@@ -183,9 +269,10 @@ impl FileTransport {
         }
 
         let format_version = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
-        if format_version != REPLAY_FORMAT_VERSION {
+        if !(OLDEST_READABLE_VERSION..=REPLAY_FORMAT_VERSION).contains(&format_version) {
             return Err(StorageError::Other(format!(
-                "unsupported replay format version: {format_version} (expected {REPLAY_FORMAT_VERSION})"
+                "unsupported replay format version: {format_version} (this build reads \
+                 {OLDEST_READABLE_VERSION} to {REPLAY_FORMAT_VERSION})"
             )));
         }
 
@@ -238,12 +325,39 @@ impl FileTransport {
             entries.push((tick_id, msg_data));
         }
 
+        // A version 1 file ends at its entries, and its reader never looked
+        // past them, so whatever follows is left unread as it always was.
+        let input = if format_version >= INPUT_SECTION_VERSION {
+            InputSection::decode(&bytes[cursor..])?
+        } else {
+            InputSection::default()
+        };
+
         Ok(Self {
             entries,
             cursor: 0,
             connected: true,
             tick_rate,
+            format_version,
+            input,
         })
+    }
+
+    /// The format version the file was written in.
+    pub fn format_version(&self) -> u16 {
+        self.format_version
+    }
+
+    /// The `Flags::SIM` console sets the recorded host applied, in the order
+    /// it applied them — none for a version 1 file.
+    pub fn sim_sets(&self) -> &[RecordedSimSet] {
+        &self.input.sim_sets
+    }
+
+    /// The recorder's state hashes, in tick order — none for a version 1
+    /// file.
+    pub fn state_hashes(&self) -> &[RecordedStateHash] {
+        &self.input.state_hashes
     }
 
     /// The server tick rate recorded in the replay file.
@@ -496,6 +610,151 @@ mod tests {
             payload: vec![0],
         };
         assert!(transport.send_reliable(msg).is_err());
+    }
+
+    fn spin_rate(value: &str) -> ConsoleSet {
+        ConsoleSet {
+            name: "sv_spin_rate".to_owned(),
+            value: value.to_owned(),
+        }
+    }
+
+    #[test]
+    fn sets_and_state_hashes_read_back_as_written() {
+        let storage = MemoryStorage::new();
+        let mut writer = sample_replay_data();
+        writer.push_sim_set(TickId::from_raw(2), spin_rate("2.5"));
+        writer.push_sim_set(TickId::from_raw(2), spin_rate("0.1"));
+        writer.push_state_hash(TickId::from_raw(1), 0x1111);
+        writer.push_state_hash(TickId::from_raw(3), u64::MAX);
+        let path = Path::new("inputs.crpl");
+        writer.write(&storage, path).unwrap();
+
+        let mut transport = FileTransport::open(&storage, path).unwrap();
+        assert_eq!(transport.format_version(), REPLAY_FORMAT_VERSION);
+        assert_eq!(
+            transport.sim_sets(),
+            [
+                RecordedSimSet {
+                    tick: TickId::from_raw(2),
+                    set: spin_rate("2.5"),
+                },
+                RecordedSimSet {
+                    tick: TickId::from_raw(2),
+                    set: spin_rate("0.1"),
+                },
+            ]
+        );
+        assert_eq!(
+            transport.state_hashes(),
+            [
+                RecordedStateHash {
+                    tick: TickId::from_raw(1),
+                    hash: 0x1111,
+                },
+                RecordedStateHash {
+                    tick: TickId::from_raw(3),
+                    hash: u64::MAX,
+                },
+            ]
+        );
+        // The section follows the entries and leaves them as they were.
+        assert_eq!(transport.len(), 3);
+        assert_eq!(transport.recv().unwrap().unwrap().payload, b"snapshot_1");
+    }
+
+    /// A file as the version 1 writer wrote it: the header and the entries,
+    /// and nothing after them.
+    fn version_1_bytes(tick_rate: u32, entries: &[(u64, &[u8])]) -> Vec<u8> {
+        let mut buf = REPLAY_MAGIC.to_vec();
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&tick_rate.to_le_bytes());
+        buf.extend_from_slice(&entries.first().map_or(0, |(tick, _)| *tick).to_le_bytes());
+        for (tick, data) in entries {
+            buf.extend_from_slice(&tick.to_le_bytes());
+            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(data);
+        }
+        buf
+    }
+
+    #[test]
+    fn a_version_1_file_reads_as_before_with_no_sets_and_no_hashes() {
+        let bytes = version_1_bytes(60, &[(7, b"first"), (8, b"second")]);
+        let mut transport = FileTransport::decode(&bytes).unwrap();
+        assert_eq!(transport.format_version(), 1);
+        assert_eq!(transport.tick_rate(), 60);
+        assert_eq!(transport.len(), 2);
+        assert_eq!(transport.tick_at(1), TickId::from_raw(8));
+        assert!(transport.sim_sets().is_empty());
+        assert!(transport.state_hashes().is_empty());
+        assert_eq!(transport.recv().unwrap().unwrap().payload, b"first");
+        assert_eq!(transport.recv().unwrap().unwrap().payload, b"second");
+        assert!(transport.recv().unwrap().is_none());
+
+        // Its reader never looked past the entries, so a byte there is left
+        // unread rather than taken for a section it cannot have.
+        let mut trailing = version_1_bytes(60, &[(7, b"first")]);
+        trailing.push(0xFF);
+        assert!(FileTransport::decode(&trailing).is_ok());
+    }
+
+    #[test]
+    fn a_version_2_file_without_its_section_is_refused_by_name() {
+        // A version 2 header over a version 1 body: the counts are missing.
+        let mut bytes = version_1_bytes(60, &[(1, b"x")]);
+        bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
+        let err = FileTransport::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StorageError::ReplayInput(InputSectionError::Truncated("sets"))
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_section_is_refused_through_the_file() {
+        let mut writer = ReplayWriter::new(60);
+        writer.push_sim_set(TickId::from_raw(4), spin_rate("1"));
+        writer.push_sim_set(TickId::from_raw(3), spin_rate("2"));
+        let storage = MemoryStorage::new();
+        let err = writer.write(&storage, Path::new("bad.crpl")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StorageError::ReplayInput(InputSectionError::SetOutOfOrder { .. })
+            ),
+            "{err}"
+        );
+        assert!(!storage.exists(Path::new("bad.crpl")), "nothing written");
+
+        let mut bytes = ReplayWriter::new(60).encode().unwrap();
+        bytes.push(0);
+        let err = FileTransport::decode(&bytes).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StorageError::ReplayInput(InputSectionError::TrailingBytes(1))
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_version_newer_than_this_build_is_refused() {
+        let mut bytes = ReplayWriter::new(60).encode().unwrap();
+        bytes[8..10].copy_from_slice(&(REPLAY_FORMAT_VERSION + 1).to_le_bytes());
+        let err = FileTransport::decode(&bytes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported replay format version"),
+            "{err}"
+        );
+        bytes[8..10].copy_from_slice(&0u16.to_le_bytes());
+        assert!(FileTransport::decode(&bytes).is_err(), "nor version 0");
     }
 
     #[test]

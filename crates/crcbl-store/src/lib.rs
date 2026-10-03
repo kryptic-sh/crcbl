@@ -97,6 +97,11 @@ pub enum StorageError {
     #[error("storage limit reached: {0}")]
     LimitExceeded(PathBuf),
 
+    /// A replay's input section refused by the writer or the reader, named so
+    /// a caller can tell which rule it broke.
+    #[error(transparent)]
+    ReplayInput(#[from] replay::InputSectionError),
+
     /// A generic application-level error.
     #[error("{0}")]
     Other(String),

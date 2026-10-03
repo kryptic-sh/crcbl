@@ -655,6 +655,7 @@ dependencies = [
  "crcbl-net",
  "crcbl-phys",
  "crcbl-rand",
+ "crcbl-store",
  "glam",
 ]
 

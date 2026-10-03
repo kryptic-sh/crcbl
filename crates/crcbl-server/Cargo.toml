@@ -26,6 +26,9 @@ crcbl-rand = { workspace = true }
 [dev-dependencies]
 crcbl-client = { workspace = true }
 crcbl-phys = { workspace = true }
+# The `.crpl` file a recorded session is written to and re-simulated from, in
+# `host::sim_tests`.
+crcbl-store = { workspace = true }
 glam = { workspace = true }
 
 [lints]

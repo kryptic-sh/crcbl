@@ -7631,11 +7631,9 @@ with the reply not sent).
 
 What it left, each a decision for when a caller wants it:
 
-- **The record is in memory.** `.crpl` (`crates/crcbl-store/src/replay.rs`)
-  records the server's output — snapshots, which already carry the state a set
-  produced — not its inputs, and `crcbl sim` takes no record. Persisting
-  `Host::sim_record` wants an encoding for it and a place in a file format;
-  nothing reads one from disk today.
+- **The record reaches a file, and nothing writes one yet**: the `.crpl` input
+  section carries it since 2026-10-03, and what that left is under _Replay: the
+  input section carries the simulation sets, and what it left_.
 - **A console prints a `SIM` variable without its value**: a client has no copy
   of the server's `SimVars`, so a bare `sv_spin_rate` shows its default and
   flags. Showing the live value wants the values replicated (or a query
@@ -12969,20 +12967,77 @@ Verified by grep over `crates/` and `apps/` and by reading the `Command` enum.
 
 **Built:** `crcbl_store::replay` (magic `CRBLREPL`, `format_version`,
 `tick_count`, `tick_rate`, `start_tick`, then one full `ServerToClient` message
-per `TickEntry`), `FileTransport`, `crcbl_store::crash_ring::CrashRing`, and
+per `TickEntry`, and from format version 2 an input section of simulation sets
+and state hashes), `FileTransport`, `crcbl_store::crash_ring::CrashRing`, and
 `crcbl replay <FILE> [--json]` reading the metadata
 (`crates/crcbl-cli/src/replay_cmd.rs`).
 
 **Not built:** keyframes, the seek index, deltas (every entry is a full
-message), the input side-track, the marker track, POV metadata. Nothing installs
-the crash ring on a panic hook and no CI job attaches one. `verify`, `dump`,
-`diff` and `clip` are not words the parser knows, and each needs machinery the
-format does not carry — `verify` the input track, `clip` the keyframe index.
+message), peers' input frames in the input section (the next entry), the marker
+track, POV metadata. Nothing installs the crash ring on a panic hook and no CI
+job attaches one. `verify`, `dump`, `diff` and `clip` are not words the parser
+knows, and each needs machinery the format does not carry — `verify` a game's
+host to re-simulate on and the peers' inputs, `clip` the keyframe index.
 
 **Ordering constraint worth keeping:** the 2026-07-27 correction requires the
 client's delta-apply path to accept previous-tick baselines as well as acked
 ones, and says it must exist at P2 rather than being discovered when the first
 replay is written.
+
+### Replay: the input section carries the simulation sets, and what it left (2026-10-03)
+
+**Decided 2026-10-03 for the long term.** A `.crpl` file carries what a
+re-simulation needs in an input section after its entries, and the section is
+versioned so an older file still reads. Built that day, format version 2
+(`crcbl_store::replay`, the section's codec in `replay/input.rs`): the applied
+`Flags::SIM` sets (tick, name, the value as the console prints it —
+`RecordedSimSet`) and the recorder's state hashes, at most one a tick
+(`RecordedStateHash`). Both the writer and the reader refuse a section that
+breaks a rule, by name (`InputSectionError` in `StorageError::ReplayInput`); the
+reader is in `crates/crcbl-net/fuzz`'s target, with the `replay-input-section`
+seed. A version 1 file reads with no sets and no hashes. `Host::resimulate`
+checks every recorded set against the host's registry before a tick runs,
+schedules them through `Host::replay_sim_record`, and runs to the last recorded
+hash, answering the first tick it does not reproduce. Held by
+`host::sim_tests::a_session_resimulated_from_its_file_reproduces_every_recorded_hash`
+(red with the sets not scheduled) and
+`a_file_without_its_sets_diverges_at_the_first_tick_a_set_changed` (red with the
+hashes not compared), and the codec's tests in `replay::tests` and
+`replay::input::tests`, each turned red by a mutation of the rule it names.
+
+What it left:
+
+- **Peers' input frames are not recorded**, so a module that reads
+  `PeerInputs::iter` re-simulates as if every peer sent nothing — towers'
+  `TowersModule` does; the sandbox's `SpinModule` reads only `sim_vars`, and
+  re-simulates. Recording them is another track in the section (and a format
+  bump): per tick, per admitted peer in admission order, its `PeerId`, the
+  frames `ClientInputs` hands the module (`(TickId, Vec<u8>)` each, bounded by
+  `MAX_CLIENT_INPUTS_PER_TICK`) and its `dropped` count; plus the roster — which
+  peer joined, resumed or left at which tick — because `PeerInputs` lists a lost
+  peer with nothing and a game reacts to `Host::events` outside the module.
+  Replaying it needs a `Host` seam that feeds recorded frames and roster changes
+  to the module without transports (today the frames come only from
+  `PeerSession` draining a live link), and a `PeerId` that is the recorded one
+  rather than the next counter value.
+- **No recorder calls it.** Nothing in `crates/` or `apps/` calls
+  `ReplayWriter::push_sim_set` or `push_state_hash` outside tests (and nothing
+  calls `ReplayWriter` at all, per the next entry). A host recording a session
+  would push `Host::sim_record` as text and `sim_hash::hash_world` after each
+  tick; what a per-tick `hash_world` costs on a live host is unpriced, which is
+  why a recorder may hash only some ticks.
+- **`crcbl replay` and `crcbl sim` do not re-simulate.** `crcbl replay` reports
+  the sets and the hash count; `crcbl sim` runs its own seeded harness world,
+  which has no host and no simulation variables. Re-simulating from the CLI
+  needs a game's host — world, module and registry — built without the game's
+  code, the same blocker as _The determinism smoke test has no input script_.
+- **A replayed set that passes the registry and still fails `SimVars::apply`**
+  shows up as a divergence and in `Host::take_console_replies`, not as
+  `ResimError::SetRefused`; none can today, since `apply` refuses only a set
+  checked against another registry, and `Host::set_sim_registry` builds the
+  store from the registry it checks against.
+- **Not covered**: the `replay-input-section` seed is not pinned in
+  `crates/crcbl-net/fuzz/tests/corpus.rs`, whose tests pin delta seeds only.
 
 ### Replay: nothing records, and the viewing and spectating consumers are unbuilt (2026-09-24)
 

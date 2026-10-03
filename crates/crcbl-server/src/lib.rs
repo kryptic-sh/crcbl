@@ -14,6 +14,7 @@ pub mod sim_hash;
 
 pub use host::{
     AppliedSimSet, EventNotSent, Host, HostConfig, HostModule, PeerEvent, PeerId, PeerInputs,
+    ResimError,
 };
 pub use peer::{PeerStats, SnapshotTooLarge, UpdateTooLarge};
 

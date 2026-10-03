@@ -26,7 +26,7 @@ use std::sync::Mutex;
 
 use crcbl_core::TickId;
 
-use crate::replay::{REPLAY_FORMAT_VERSION, REPLAY_MAGIC, REPLAY_MIN_SIZE};
+use crate::replay::ReplayWriter;
 use crate::{StorageError, StorageSource};
 
 /// One recorded tick entry in the ring.
@@ -121,36 +121,21 @@ impl CrashRing {
     /// Writes the current ring contents as a `.crpl` replay file through
     /// `storage` at `path`.
     ///
-    /// Uses the same on-disk format as [`crate::replay::ReplayWriter`] so
-    /// [`crate::replay::FileTransport`] can play it back.
+    /// Written by [`ReplayWriter`] itself, so a format bump cannot leave crash
+    /// dumps emitting a version the reader no longer agrees with, and
+    /// [`crate::replay::FileTransport`] can play it back. The ring holds output
+    /// only, so the dump's input section is empty.
     pub fn dump(
         &self,
         storage: &dyn StorageSource,
         path: &Path,
         tick_rate: u32,
     ) -> Result<(), StorageError> {
-        let entries = self.snapshot();
-        let mut buf = Vec::with_capacity(
-            REPLAY_MIN_SIZE + entries.iter().map(|e| 12 + e.data.len()).sum::<usize>(),
-        );
-
-        // Replay file header — constants from `replay` so a format bump cannot
-        // leave crash dumps silently emitting the previous version.
-        buf.extend_from_slice(REPLAY_MAGIC);
-        buf.extend_from_slice(&REPLAY_FORMAT_VERSION.to_le_bytes());
-        buf.extend_from_slice(&(entries.len() as u64).to_le_bytes());
-        buf.extend_from_slice(&tick_rate.to_le_bytes());
-        let start_tick = entries.first().map(|e| e.tick.get()).unwrap_or(0);
-        buf.extend_from_slice(&start_tick.to_le_bytes());
-
-        for entry in &entries {
-            buf.extend_from_slice(&entry.tick.get().to_le_bytes());
-            let len = entry.data.len() as u32;
-            buf.extend_from_slice(&len.to_le_bytes());
-            buf.extend_from_slice(&entry.data);
+        let mut writer = ReplayWriter::new(tick_rate);
+        for entry in self.snapshot() {
+            writer.push_tick(entry.tick, &entry.data);
         }
-
-        storage.write(path, &buf)
+        writer.write(storage, path)
     }
 }
 

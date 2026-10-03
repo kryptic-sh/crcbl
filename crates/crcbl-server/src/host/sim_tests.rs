@@ -9,6 +9,9 @@ use crcbl_console::{ConVar, Flags, Table};
 use crcbl_ecs::{DebugCtx, Entity, SystemTrait};
 use crcbl_net::{ConsoleOutcome, ConsoleReply, InMemoryTransport};
 
+use crcbl_store::MemoryStorage;
+use crcbl_store::replay::{FileTransport, ReplayWriter};
+
 use super::sim::NOT_THE_HOST;
 use super::tests::{COMPATIBILITY, TICK, TICK_HZ};
 use super::*;
@@ -414,4 +417,159 @@ fn a_record_entry_for_a_tick_already_passed_is_refused() {
         "{replies:?}"
     );
     assert_eq!(late.sim_vars().f32(&T_RATE), 1.0);
+}
+
+/// Records `host`'s run of `ticks` ticks with `sets` into a `.crpl` file the
+/// way a recorder would — a state hash at the end of every tick, then the
+/// applied sets as text — and reads it back.
+fn record_to_file(
+    host: &mut Host,
+    ticks: u32,
+    sets: &[(u32, &str)],
+    keep_sets: bool,
+) -> FileTransport {
+    let mut writer = ReplayWriter::new(TICK_HZ);
+    for step in 1..=ticks {
+        // `run` counts its steps from one, so this step's sets are due at 1.
+        let due: Vec<(u32, &str)> = sets
+            .iter()
+            .filter(|(at, _)| *at == step)
+            .map(|(_, value)| (1, *value))
+            .collect();
+        run(host, 1, &due);
+        writer.push_state_hash(host.tick_id(), hash_world(host.world(), host.tick_id()));
+    }
+    if keep_sets {
+        for applied in host.sim_record() {
+            writer.push_sim_set(
+                applied.tick,
+                ConsoleSet {
+                    name: applied.set.name().to_owned(),
+                    value: applied.set.value_text(),
+                },
+            );
+        }
+    }
+    let storage = MemoryStorage::new();
+    let path = std::path::Path::new("session.crpl");
+    writer.write(&storage, path).expect("a valid recording");
+    FileTransport::open(&storage, path).expect("it reads back")
+}
+
+fn file_sets(file: &FileTransport) -> Vec<(TickId, ConsoleSet)> {
+    file.sim_sets()
+        .iter()
+        .map(|recorded| (recorded.tick, recorded.set.clone()))
+        .collect()
+}
+
+fn file_hashes(file: &FileTransport) -> Vec<(TickId, u64)> {
+    file.state_hashes()
+        .iter()
+        .map(|recorded| (recorded.tick, recorded.hash))
+        .collect()
+}
+
+#[test]
+fn a_session_resimulated_from_its_file_reproduces_every_recorded_hash() {
+    const TICKS: u32 = 90;
+    let mut recorded = host(true);
+    let file = record_to_file(&mut recorded, TICKS, &[(30, "2.5"), (61, "0.1")], true);
+    assert_eq!(file.sim_sets().len(), 2);
+    assert_eq!(file.state_hashes().len(), TICKS as usize);
+    let expected = hash_world(recorded.world(), recorded.tick_id());
+
+    let mut replayed = host(true);
+    assert_eq!(
+        replayed.resimulate(file_sets(&file), file_hashes(&file)),
+        Ok(recorded.tick_id())
+    );
+    assert_eq!(hash_world(replayed.world(), replayed.tick_id()), expected);
+    assert_eq!(
+        seconds(&mut replayed).to_bits(),
+        seconds(&mut recorded).to_bits()
+    );
+}
+
+#[test]
+fn a_file_without_its_sets_diverges_at_the_first_tick_a_set_changed() {
+    let mut recorded = host(true);
+    let file = record_to_file(&mut recorded, 90, &[(30, "2.5"), (61, "0.1")], false);
+    assert!(file.sim_sets().is_empty());
+    let first_set = recorded.sim_record()[0].tick;
+
+    let mut replayed = host(true);
+    let error = replayed
+        .resimulate(file_sets(&file), file_hashes(&file))
+        .expect_err("the sets are what made the run");
+    let ResimError::Diverged {
+        tick,
+        recorded: hash,
+        ..
+    } = error
+    else {
+        panic!("not a divergence: {error}");
+    };
+    assert_eq!(tick, first_set);
+    assert_eq!(hash, file_hashes(&file)[(first_set.get() - 1) as usize].1);
+    assert_eq!(replayed.tick_id(), first_set, "stopped where it diverged");
+}
+
+#[test]
+fn a_recorded_set_this_host_refuses_is_named_before_any_tick_runs() {
+    let at = |tick| TickId::from_raw(tick);
+    let mut refusing = host(true);
+    assert_eq!(
+        refusing.resimulate(
+            [(at(3), set("t_rate", "2")), (at(4), set("t_nope", "1"))],
+            [(at(5), 0)]
+        ),
+        Err(ResimError::SetRefused {
+            tick: at(4),
+            name: "t_nope".to_owned(),
+            reason: "unknown variable `t_nope`".to_owned(),
+        })
+    );
+    assert_eq!(refusing.tick_id(), TickId::ZERO, "no tick ran");
+    run(&mut refusing, 5, &[]);
+    assert_eq!(
+        refusing.sim_vars().f32(&T_RATE),
+        1.0,
+        "nothing was scheduled"
+    );
+
+    let mut bare = host(false);
+    assert!(matches!(
+        bare.resimulate([(at(1), set("t_rate", "2"))], []),
+        Err(ResimError::SetRefused { reason, .. }) if reason == "this host takes no simulation variables"
+    ));
+}
+
+#[test]
+fn a_recorded_tick_this_host_has_passed_is_refused() {
+    let at = |tick| TickId::from_raw(tick);
+    let mut late = host(true);
+    run(&mut late, 5, &[]);
+    // A set applies at its tick's start, and tick 5 has started and ended.
+    assert_eq!(
+        late.resimulate([(at(5), set("t_rate", "2"))], []),
+        Err(ResimError::TickPassed {
+            tick: at(5),
+            host_tick: at(5),
+        })
+    );
+
+    // Hashes out of order: the later one is reached first, and the earlier
+    // one can no longer be compared.
+    let mut recorded = host(true);
+    let file = record_to_file(&mut recorded, 7, &[], false);
+    let hashes = file_hashes(&file);
+    let mut replayed = host(true);
+    assert_eq!(
+        replayed.resimulate([], [hashes[6], hashes[5]]),
+        Err(ResimError::TickPassed {
+            tick: at(6),
+            host_tick: at(7),
+        })
+    );
 }

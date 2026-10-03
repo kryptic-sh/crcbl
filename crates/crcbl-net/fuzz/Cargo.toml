@@ -24,6 +24,12 @@ path = "../../crcbl-ecs"
 [dependencies.crcbl-phys]
 path = "../../crcbl-phys"
 
+# The `.crpl` replay reader, `crcbl_store::replay::FileTransport::decode`: a
+# replay is a file somebody else may have written, and its input section is
+# read field by field from those bytes.
+[dependencies.crcbl-store]
+path = "../../crcbl-store"
+
 [[bin]]
 name = "decoder"
 path = "fuzz_targets/decoder.rs"
