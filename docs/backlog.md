@@ -3073,15 +3073,15 @@ removed, `Styles::replace` accepting an erroring sheet, the refusal not
 recorded, never cleared, or not drawn). `Ui::poll_stylesheets` is deliberately
 not what polls: it reads with `std::fs` behind the asset source's back and
 reports a refused reload only as a log line.
-**`apps/hud/tests/golden/panels.png` is stale until re-blessed**: the minimap
-frame is new pixels, so CI's _Draw hud's panels on lavapipe_ step fails until
-the reference is re-blessed on lavapipe
-(`CRCBL_GPU=vk CRCBL_VK_ICD=<lavapipe ICD> CRCBL_BLESS=1 apps/hud/tests/run-hud-golden.sh`,
-or the `golden-diff-lavapipe` artifact's rendered image). The vitals panel and
-the banner kept their geometry, so the suite's four pixel claims still read the
-fills they were written against. Not blessed here: the machine that built this
-has no lavapipe, and a reference blessed on another driver is the drift
-`docs/notes/process.md` warns about.
+**`apps/hud/tests/golden/panels.png` was re-blessed from CI's own lavapipe
+render (2026-10-03)**: the `golden-diff-lavapipe` artifact of run 37086029897
+(`a2ad1417`), whose expected image was byte-identical to the old reference.
+Reviewed by eye: the new pixels are the minimap frame; the diff also marks the
+banner's fill, the lower halves of the ability cards and two ticker figures,
+which read identical in the two images (a sub-visible colour change, most likely
+the palette's conversion to sRGB and the styled tree drawing before the page;
+inferred, not traced). The vitals panel and banner kept their geometry, so the
+suite's four pixel claims still read the fills they were written against.
 
 ## What UI rung 6 shipped without (2026-09-16)
 
