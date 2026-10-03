@@ -51,6 +51,10 @@
 //! nothing but a click on the bar until it is answered:
 //! [`PanelFrame::unsaved`] hands the answer to [`crate::app`].
 //!
+//! While recovery copies an earlier run left are offered back, the recovery
+//! bar sits under the toolbar too (`recovery`'s module docs), holding nothing:
+//! [`PanelFrame::recovery`] hands a click on it to [`crate::app`].
+//!
 //! While a scene plays and its game offers play controls, a second strip
 //! under the toolbar lists them and the run's numbers (`play`'s module docs):
 //! a click there is a command the game's module is sent, not an edit.
@@ -138,9 +142,11 @@ mod assets;
 mod inspector;
 mod path_line;
 mod play;
+mod recovery;
 mod unsaved;
 
 pub use path_line::Purpose;
+pub use recovery::RecoveryAnswer;
 
 /// The name the viewport pane's picture goes by in the panels' draw list —
 /// see the module docs. The only texture the editor draws, so the first
@@ -214,6 +220,21 @@ const EDITOR_CSS: &str = "
 .unsaved-text { padding: 0 6px; color: #e0b050; flex-grow: 1; min-width: 0; }
 
 #unsaved button { margin-left: 4px; }
+
+#recovery {
+  flex-shrink: 0;
+  flex-direction: column;
+  padding: 2px 4px;
+  background: #1b2420;
+}
+
+.recovery-heading, .recovery-text { padding: 0 6px; color: #9fd0a8; }
+
+.recovery-row { flex-direction: row; align-items: center; }
+
+.recovery-text { flex-grow: 1; min-width: 0; }
+
+#recovery button { margin-left: 4px; }
 
 #play-controls {
   flex-shrink: 0;
@@ -372,6 +393,9 @@ pub struct PanelFrame {
     /// The answer a click on the unsaved bar gave this frame, for the caller
     /// to carry out — see `unsaved`'s module docs.
     pub unsaved: Option<Unsaved>,
+    /// The click on the recovery bar this frame, for the caller to carry out
+    /// — see `recovery`'s module docs.
+    pub recovery: Option<RecoveryAnswer>,
 }
 
 /// The inspector's sections, add buttons and add-list headings, as a frame
@@ -441,6 +465,8 @@ pub struct Panels {
     /// The unsaved bar, while the editor asks about unsaved edits — see
     /// `unsaved`.
     unsaved: unsaved::Bar,
+    /// The recovery bar, while copies are offered back — see `recovery`.
+    recovery: recovery::Bar,
 }
 
 /// How the status line reads a message.
@@ -499,6 +525,7 @@ impl Panels {
             strip: play::Strip::default(),
             path_line: path_line::Strip::default(),
             unsaved: unsaved::Bar::default(),
+            recovery: recovery::Bar::default(),
         };
         // One idle frame, so the first real one has rectangles to hit-test
         // against: the tree resolves a click against the *previous* layout, and
@@ -708,6 +735,32 @@ impl Panels {
     #[cfg(test)]
     pub(crate) fn unsaved_buttons(&self) -> [NodeKey; 3] {
         self.unsaved.buttons().expect("the unsaved bar is laid out")
+    }
+
+    /// Puts the recovery bar up saying `heading` over a line per copy,
+    /// `rows`, each with Open copy and Delete — see `recovery`'s module docs.
+    pub fn begin_recovery(&mut self, heading: String, rows: Vec<String>) {
+        self.recovery.begin(heading, rows);
+    }
+
+    /// Takes the recovery bar down.
+    pub fn end_recovery(&mut self) {
+        self.recovery.close();
+    }
+
+    /// What the recovery bar says, while it is up: its heading and its rows.
+    #[must_use]
+    pub fn recovery(&self) -> Option<(&str, &[String])> {
+        self.recovery.text()
+    }
+
+    /// Each row's Open copy and Delete buttons on the recovery bar, and its
+    /// Later, as the last frame laid them out.
+    #[cfg(test)]
+    pub(crate) fn recovery_buttons(&self) -> (Vec<[NodeKey; 2]>, NodeKey) {
+        self.recovery
+            .buttons()
+            .expect("the recovery bar is laid out")
     }
 
     /// Puts `text` on the status line under the panes, read as `tone`, until
@@ -979,6 +1032,7 @@ impl Panels {
         let mut asked_play = None;
         let mut path_input = None;
         let mut answered = None;
+        let mut recovered = None;
         // Owned, so the strip is built while the inspector borrows the
         // document: the controls are a few pointers and the numbers a few
         // strings.
@@ -1011,6 +1065,7 @@ impl Panels {
             strip,
             path_line,
             unsaved,
+            recovery,
             ..
         } = self;
         let options = OutlinerOptions {
@@ -1030,6 +1085,7 @@ impl Panels {
             |ui| {
                 (toolbar_key, toolbar) = build_toolbar(ui, play);
                 answered = unsaved.build(ui);
+                recovered = recovery.build(ui);
                 path_input = path_line.build(ui);
                 asked_play = strip.build(ui, &controls, play_status);
                 ui.dock("#panes", layout, PANE_MIN, |ui, pane| match pane {
@@ -1167,6 +1223,7 @@ impl Panels {
             save_as,
             open,
             unsaved: answered,
+            recovery: recovered,
         }
     }
 
@@ -1638,6 +1695,7 @@ mod tests {
     mod inspector;
     mod naming;
     mod path_line;
+    mod recovery;
     mod rotation;
     mod selection;
     mod unsaved;

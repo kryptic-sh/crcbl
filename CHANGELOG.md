@@ -36,13 +36,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   own is now an error on the server side. `Client::dropped_event_count` counts
   dropped console replies too.
 
-- **The editor's `EditError` gained `Target`, `OpenTarget` and `Recovery`** (see
-  Added: a new scene and save-as, and open and the unsaved bar): a typed save-as
-  directory or a typed scene to open refused before anything is written or read,
-  and a recovery copy's directory that would not be made — so an exhaustive
-  match over it must add them. The editor's `keys::Action` gained `Open` and
-  `Unsaved`, and `PanelFrame` gained the public fields `open` and `unsaved`, so
-  an exhaustive match or a struct literal must add those too.
+- **The editor's `EditError` gained `Target`, `OpenTarget`, `Recovery`,
+  `NotACopy` and `RemoveCopy`** (see Added: a new scene and save-as, open and
+  the unsaved bar, and recovery copies offered back): a typed save-as directory
+  or a typed scene to open refused before anything is written or read, a
+  recovery directory that would not be made or read, a removal refused for a
+  path that is not a recovery copy, and a copy that would not go — so an
+  exhaustive match over it must add them. The editor's `keys::Action` gained
+  `Open` and `Unsaved`, `PanelFrame` gained the public fields `open`, `unsaved`
+  and `recovery`, and `args::Options` gained `recovery`, so an exhaustive match
+  or a struct literal must add those too.
 
 - **The editor's selection is a set** (see Added: multi-selection).
   `Document::selected` is gone — `Document::primary` answers the same entity for
@@ -713,6 +716,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   as its pause key (`crcbl::engine::PAUSE_KEY`), which the editor's own loop has
   no use for, so before this it backed out of no text field through a real
   window.
+
+- **The editor offers recovery copies back, keeps their directory tidy, and
+  autosaves.** At start-up the recovery directory is pruned — each copy older
+  than `document::MAX_AGE` (two weeks) or past the newest
+  `document::KEEP_NEWEST` (twenty) removed by its own path and logged, never the
+  scene named on the command line — and the newest copies left are listed on a
+  **recovery bar** under the toolbar, each by name and age, with Open copy,
+  Delete and Later. The bar holds nothing: the editor works under it. Open copy
+  reads the copy with the new `Document::open_recovery` — no origin, so Ctrl+S
+  asks for a directory and a copy is never written back over itself, and dirty —
+  and puts it in place through Open's path, the unsaved bar asking first;
+  refused in play mode. Delete removes that copy only: `document::remove_copy`
+  refuses (`EditError::NotACopy`) anything that is not a `<millis>-<name>`
+  directory directly under the recovery directory, and nothing is ever removed
+  by a pattern (`document::list_copies`, `document::prune_copies`). Later puts
+  the bar away until the next start. A dirty scene is **autosaved** into the
+  same directory every `editor.autosave.interval` seconds of `settings.toml`
+  (default 60) — the authored scene, even in play, and not again while it is
+  unchanged — into one slot per document session, a new copy written before the
+  session's previous one is removed; a clean save, an undo back to the saved
+  state, a discard, a new scene, an open or the window closing removes the slot,
+  and a recovery copy written as the window is taken away replaces it. So a
+  crash or a killed process loses at most one interval. The new `--recovery
+  <DIR>` names the directory; a `--headless` run without it keeps none, so a
+  test never prunes or writes into a person's own copies.
 
 - **`crcbl::lan::lobby`: a LAN lobby's model, without its look** (native
   builds). `lobby::Lobby` polls a `Browser` and sorts what it hears into

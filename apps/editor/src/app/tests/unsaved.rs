@@ -293,7 +293,7 @@ fn a_window_taken_away_leaves_a_recovery_copy_of_a_dirty_scene() {
     for dirty_scene in [true, false] {
         let base = tempfile::tempdir().expect("a temporary directory");
         let mut editor = headless(16);
-        editor.recovery = base.path().to_path_buf();
+        editor.recovery = Some(base.path().to_path_buf());
         if dirty_scene {
             dirty(&mut editor);
         }

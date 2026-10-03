@@ -63,7 +63,10 @@ mod validation;
 
 pub use origin::{open_target, save_target};
 pub use play::PlayState;
-pub use recovery::RECOVERY_DIR;
+pub use recovery::{
+    KEEP_NEWEST, MAX_AGE, Pruned, RECOVERY_DIR, RecoveryCopy, list_copies, prune_copies,
+    remove_copy,
+};
 pub use systems::{IN_SCENE, SystemGroup, UNGROUPED};
 
 /// A loaded scene and everything the editor knows about it.
@@ -87,8 +90,10 @@ pub struct Document {
     log: UndoLog,
     /// The log position the document was last written at. `0` for one that has
     /// been loaded and not saved, which is also where a fresh log stands — so a
-    /// document nobody has edited opens clean.
-    saved_at: usize,
+    /// document nobody has edited opens clean. [`None`] for a recovery copy
+    /// read back, whose edits are saved nowhere until it is written somewhere
+    /// ([`Document::open_recovery`]).
+    saved_at: Option<usize>,
     /// How many times an entity has entered or left this document — see
     /// [`Document::membership`].
     membership: u64,
@@ -282,10 +287,24 @@ pub enum EditError {
         reason: String,
     },
 
-    /// A recovery copy's directory would not be made — see
-    /// [`Document::write_recovery`].
+    /// A recovery copy's directory would not be made, or the recovery
+    /// directory would not be read — see [`Document::write_recovery`] and
+    /// [`list_copies`].
     Recovery {
-        /// The directory that was being made.
+        /// The directory that was being made or read.
+        dir: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
+
+    /// A removal was asked for of a path that is not a recovery copy directly
+    /// under the recovery directory — see [`remove_copy`]. Nothing was
+    /// removed.
+    NotACopy(PathBuf),
+
+    /// A recovery copy would not be removed.
+    RemoveCopy {
+        /// The copy's directory.
         dir: PathBuf,
         /// What the filesystem said.
         source: std::io::Error,
@@ -398,7 +417,17 @@ impl fmt::Display for EditError {
             }
             Self::Recovery { dir, source } => write!(
                 f,
-                "making the recovery directory `{}`: {source}",
+                "making or reading the recovery directory `{}`: {source}",
+                dir.display()
+            ),
+            Self::NotACopy(dir) => write!(
+                f,
+                "`{}` is not a recovery copy in the recovery directory, so it was not removed",
+                dir.display()
+            ),
+            Self::RemoveCopy { dir, source } => write!(
+                f,
+                "removing the recovery copy `{}`: {source}",
                 dir.display()
             ),
             Self::Remove { key, source } => write!(
@@ -477,7 +506,7 @@ impl Document {
             registry,
             selection: Vec::new(),
             log: UndoLog::new(),
-            saved_at: 0,
+            saved_at: Some(0),
             membership: 0,
             naming: 0,
             gestures: 0,
@@ -1056,7 +1085,10 @@ impl Document {
     /// back to a saved state is clean, and redoing away from it is dirty again.
     #[must_use]
     pub const fn is_dirty(&self) -> bool {
-        self.log.position() != self.saved_at
+        match self.saved_at {
+            Some(at) => self.log.position() != at,
+            None => true,
+        }
     }
 
     /// The title bar text: the scene's name with a marker while
@@ -1151,7 +1183,7 @@ impl Document {
         if own {
             ownership::remove_unwritten(&storage, &mut self.owned, &files)?;
         }
-        self.saved_at = self.log.position();
+        self.saved_at = Some(self.log.position());
         // A drag carried on past the save writes an entry of its own, so the
         // document is dirty again rather than folding the change into the
         // entry the save stands on.

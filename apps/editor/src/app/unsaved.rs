@@ -47,15 +47,17 @@
 //! whose frame fails leave nothing to ask, so a dirty scene is written to a
 //! recovery copy ([`Document::write_recovery`]) under [`recovery_base`] and the
 //! log says where. A run that ends on its frame budget or limit is a run that
-//! was told when to stop, and writes none.
+//! was told when to stop, and writes none. The next start offers copies back
+//! (`recovery`'s module docs), and an autosave on a timer covers what nothing
+//! reports at all: a crash, or a process killed with its session.
 
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crcbl::engine::{ExitReason, Flow, LoopError, accept_close};
 use crcbl::shell::{CloseReply, Shell};
 
 use super::{Editor, EditorError};
+use crate::args::Options;
 use crate::document::{Document, EditError, PlayState, RECOVERY_DIR};
 use crate::keys::Unsaved;
 use crate::panel::Tone;
@@ -77,14 +79,24 @@ pub(super) enum Guarded {
     Close,
 }
 
-/// Where recovery copies are written: [`RECOVERY_DIR`] under the system's
-/// temporary directory.
+/// Where recovery copies are written: the directory `--recovery` named, or
+/// [`RECOVERY_DIR`] under the system's temporary directory — or nowhere for a
+/// headless run that named none.
 ///
 /// Not beside the scene or in the game's folder: a copy there would be one
 /// more scene in a tree a person commits, and the asset browser would list
-/// it. The log names the copy, so it is found where it is.
-pub(super) fn recovery_base() -> PathBuf {
-    std::env::temp_dir().join(RECOVERY_DIR)
+/// it. The log names the copy, and the next start offers it back.
+///
+/// **A headless run keeps none unless told to**, as it keeps no settings
+/// file (`SettingsSource::for_run`): it is a test or a CI job, and a start-up
+/// that pruned the person's own recovery directory — or an autosave that
+/// wrote into it — would be a test reaching into their work.
+pub(super) fn recovery_base(options: &Options) -> Option<PathBuf> {
+    match (&options.recovery, options.common.headless) {
+        (Some(dir), _) => Some(dir.clone()),
+        (None, true) => None,
+        (None, false) => Some(std::env::temp_dir().join(RECOVERY_DIR)),
+    }
 }
 
 impl<S: Shell + ?Sized> Editor<S> {
@@ -209,8 +221,10 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
     }
 
-    /// Does what `guarded` asked for.
+    /// Does what `guarded` asked for, which ends the document's session: its
+    /// autosave goes — see `recovery`.
     fn proceed(&mut self, guarded: Guarded) -> Result<(), EditError> {
+        self.end_autosave();
         match guarded {
             Guarded::New => self.new_scene(),
             Guarded::Open(document) => {
@@ -270,24 +284,31 @@ impl<S: Shell + ?Sized> Editor<S> {
 
     /// Writes a dirty document to a recovery copy and says in the log where,
     /// for a run ending where nothing could be asked — see the module docs.
-    /// Hands back the copy's directory, if one was written.
+    /// Hands back the copy's directory, if one was written. The copy
+    /// supersedes the session's autosave, which goes.
     pub(super) fn recover_unsaved(&mut self) -> Option<PathBuf> {
         if !self.document.is_dirty() {
             return None;
         }
         let name = self.document.name().to_owned();
-        // A clock set before 1970 names the copy 0: the name is a label, and
-        // `write_recovery` never reuses one that is taken.
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |since| since.as_millis());
-        match self.document.write_recovery(&self.recovery, stamp) {
+        let Some(base) = self.recovery.clone() else {
+            crcbl::log::warn!(
+                "editor: the unsaved edits to `{name}` are lost: this run keeps no recovery \
+                 directory"
+            );
+            return None;
+        };
+        match self
+            .document
+            .write_recovery(&base, super::recovery::now_millis())
+        {
             Ok(dir) => {
                 crcbl::log::warn!(
                     "editor: the editor is going without asking, so the unsaved edits to \
                      `{name}` were written to {}",
                     dir.display()
                 );
+                self.end_autosave();
                 Some(dir)
             }
             Err(error) => {

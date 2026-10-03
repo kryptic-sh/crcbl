@@ -100,7 +100,7 @@ impl Document {
         self.ids = ids;
         self.selection.clear();
         self.log = UndoLog::new();
-        self.saved_at = 0;
+        self.saved_at = Some(0);
         self.origin = None;
         self.owned.clear();
         // Moved rather than reset: a view that read the old scene at some

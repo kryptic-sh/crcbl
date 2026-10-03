@@ -1,5 +1,5 @@
 //! The command line: the shared flags every binary in this workspace takes,
-//! the asset root, and one positional argument.
+//! the asset root, the recovery directory, and one positional argument.
 //!
 //! Modelled on `apps/bare`'s parser, which is the smallest one here, with
 //! `apps/viewer`'s positional shape: a path is a path, not a flag, because
@@ -27,6 +27,10 @@ pub struct Options {
     /// ([`crate::document::asset_root`]) — and for the compiled-in scene, none
     /// at all.
     pub assets: Option<std::path::PathBuf>,
+    /// The directory recovery copies are written to, offered back from and
+    /// pruned in, or [`None`] for the default — `crate::app`'s `unsaved`
+    /// module's `recovery_base`, which is none at all for a headless run.
+    pub recovery: Option<std::path::PathBuf>,
 }
 
 /// What [`parse`] hands back.
@@ -49,6 +53,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
     let mut common = Common::new(DEFAULT_TICK_HZ);
     let mut scene = None;
     let mut assets = None;
+    let mut recovery = None;
     let mut args = args.peekable();
 
     while let Some(arg) = args.next() {
@@ -60,6 +65,12 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 Some(dir) => assets = Some(std::path::PathBuf::from(dir)),
                 None => {
                     return Invocation::BadUsage(format!("{ASSETS_FLAG} needs a directory"));
+                }
+            },
+            Consumed::No if arg == RECOVERY_FLAG => match args.next() {
+                Some(dir) => recovery = Some(std::path::PathBuf::from(dir)),
+                None => {
+                    return Invocation::BadUsage(format!("{RECOVERY_FLAG} needs a directory"));
                 }
             },
             Consumed::No => {
@@ -81,11 +92,15 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
         common,
         scene,
         assets,
+        recovery,
     })
 }
 
 /// The flag naming the asset root: see [`Options::assets`].
 const ASSETS_FLAG: &str = "--assets";
+
+/// The flag naming the recovery directory: see [`Options::recovery`].
+const RECOVERY_FLAG: &str = "--recovery";
 
 /// The `--help` text.
 pub const USAGE: &str = "\
@@ -108,6 +123,18 @@ ASSETS:
                          directory above SCENE_DIR holding a Cargo.toml, else
                          the directory holding it; the compiled-in scene has
                          none
+
+RECOVERY:
+    --recovery <DIR>     The directory recovery copies are kept in. Default:
+                         crcbl-editor-recovery under the system's temporary
+                         directory; a --headless run without this flag keeps
+                         none. A scene with unsaved changes is copied there
+                         every editor.autosave.interval seconds (settings.toml,
+                         default 60), and when the window is taken away or a
+                         frame fails. At start-up the newest copies are
+                         offered back — Open copy opens one with no directory,
+                         so saving it asks for one — and copies older than two
+                         weeks or past the newest twenty are removed
 
 PANELS:
     The scene's entities are listed on the left, grouped by the system whose
@@ -265,6 +292,27 @@ mod tests {
         assert_eq!(options.assets, None);
         assert!(
             matches!(run(&["--assets"]), Invocation::BadUsage(message) if message.contains("--assets")),
+        );
+    }
+
+    /// `--recovery` names the recovery directory, and wants a directory after
+    /// it.
+    #[test]
+    fn the_recovery_flag_names_the_recovery_directory() {
+        let Invocation::Run(options) = run(&["--recovery", "copies"]) else {
+            panic!("that is a run");
+        };
+        assert_eq!(
+            options.recovery.as_deref(),
+            Some(std::path::Path::new("copies"))
+        );
+        assert_eq!(options.scene, None);
+        let Invocation::Run(options) = run(&[]) else {
+            panic!("an empty command line is a run");
+        };
+        assert_eq!(options.recovery, None);
+        assert!(
+            matches!(run(&["--recovery"]), Invocation::BadUsage(message) if message.contains("--recovery")),
         );
     }
 

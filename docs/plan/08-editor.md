@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls, multi-selection, a scene from empty and save-as, open and the unsaved bar 2026-10-03, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls, multi-selection, a scene from empty and save-as, open and the unsaved bar, recovery offered back and autosave 2026-10-03, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -980,6 +980,78 @@ day (below).
 - **What it does not cover**: none of it has been seen on a device, and the
   close hold is the headless shell's — each backend's own holding is its shell
   tests', not this editor's. `docs/backlog.md` lists what is deferred.
+
+**Recovery offered back, pruning and autosave, landed 2026-10-03**, on the
+decisions of the same day (below). The flow is
+`apps/editor/src/app/recovery.rs`; the directory's copies are
+`apps/editor/src/document/recovery/copies.rs`.
+
+- **Decided 2026-10-03, for the long term: recovery is offered, never forced.**
+  At every start — whether or not a scene was named on the command line, since a
+  copy of that scene is the likeliest one wanted — a recovery directory holding
+  copies puts a **recovery bar** under the toolbar
+  (`apps/editor/src/panel/recovery.rs`) listing the newest few
+  (`app::recovery::OFFERED`), each by name and how long ago it was written, with
+  **Open copy**, **Delete** and **Later**. The bar holds nothing: the panels and
+  the viewport work under it. Open copy reads the copy with
+  `Document::open_recovery` — **unowned**, no origin, so a save goes through
+  save-as and a copy is never written back over itself; and **dirty**, so what
+  it holds is asked about before it is lost — and puts it in place through
+  Open's path, the unsaved bar asking first; refused in play mode; the bar goes,
+  and the rest are offered at the next start. Its meshes read from no asset root
+  until a save-as gives it one (or `--assets` names one). Delete removes that
+  copy's directory by the path listed for it, and the bar lists the rest; Later
+  puts the bar away for the run.
+- **Every removal is by a computed path, checked.** A copy is a directory
+  directly under the recovery directory, not a link, named
+  `<millis>-<scene name>` as `Document::write_recovery` makes it;
+  `document::remove_copy` refuses anything else as `EditError::NotACopy`, and
+  nothing is ever removed by a pattern. A file or a directory a person put in
+  the recovery directory is never listed and never removed.
+- **Pruning at start-up**: before anything is listed, `document::prune_copies`
+  removes each copy older than `document::MAX_AGE` (two weeks) and each past the
+  newest `document::KEEP_NEWEST` (twenty), by its own path, and the log names
+  each. The scene named on the command line is never pruned; nothing is pruned
+  later in a run, so a copy opened from the bar is never pruned in that run.
+- **Decided 2026-10-03: autosave.** While the document is dirty, every
+  `editor.autosave.interval` seconds of the editor's clock (`settings.toml`
+  beside the layout and the snap steps; `app::recovery::AUTOSAVE_SECONDS` unset,
+  a minute) the authored scene — never the played state — is written into the
+  recovery directory as a copy like any other, so a crash or a process killed
+  with its session loses at most one interval: the gap the unsaved bar's
+  recovery copy left, closed without an OS hook. The interval restarts whenever
+  the document is clean, so the first autosave comes a whole interval after the
+  first unsaved edit, and an unchanged scene is not written again. **One slot
+  per document session**: a new autosave is a new copy written before the
+  session's previous one is removed, so an interrupted write never leaves the
+  session with nothing, and no other copy is touched. The slot goes once the
+  document is clean (a save, or an undo back to the saved state) and when the
+  session ends (a discard, a new scene, an open, the window closing); a recovery
+  copy written as the window is taken away replaces it. A run ending on its
+  frame budget or limit leaves a dirty session's slot, which the next start
+  offers.
+- **Where**: `--recovery <DIR>` names the directory; unnamed, it is
+  `<temp>/crcbl-editor-recovery/` as before. **A headless run without the flag
+  keeps none** — no offer, no prune, no autosave, no recovery copy — as it keeps
+  no settings file: a test or a CI job must never reach into a person's copies.
+- **Evidence**: the copies' tests hold only copies listed, newest first, a copy
+  removed and every other path refused and left (outside the directory, not a
+  copy's name, nested, the directory itself, a `..`), and a prune removing the
+  old and the excess and keeping the open one and what is not a copy; the
+  recovery writer's a copy opened unowned and dirty, with save refused for no
+  origin and the copy untouched. The panels' each of the bar's buttons naming
+  its row, and a click under the bar still selecting. The loop's start-up
+  offering the newest copies (and nothing with none, or headless), Open copy
+  opening it unowned with Ctrl+S asking for a directory, refused in play, Delete
+  removing only that copy, a Delete of a path outside the directory refused on
+  the status line, Later, an open keeping the offer up, start-up pruning old and
+  excess copies but not the scene opened, an autosave only after the interval
+  and only while dirty, not rewritten unchanged, replacing only its own slot,
+  the authored scene in play, removed by a clean save and by a discard, and
+  replaced by the recovery copy of a window taken away. The mutations each
+  turned a test red are listed in the commit that landed this.
+- **What it does not cover**: none of it has been seen on a device.
+  `docs/backlog.md` lists what is deferred.
 
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor

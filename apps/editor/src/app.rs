@@ -81,6 +81,12 @@
 //! dirty document, and nothing else is done until it is answered; a window
 //! that goes without asking leaves a recovery copy. `unsaved`'s module docs
 //! say which backends hold a close request open and which recover.
+//!
+//! # Recovery copies are offered back
+//!
+//! At start-up the copies an earlier run left are pruned and the newest
+//! offered back on a bar, and a dirty scene is autosaved into the same
+//! directory on a timer; `recovery`'s module docs say how.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -113,7 +119,7 @@ use crcbl::ui::tree::{DockLayout, SelectMode};
 use crate::args::Options;
 use crate::clipboard::{Paste, PasteTarget};
 use crate::command::EditCommand;
-use crate::document::{Document, EditError, PlayState};
+use crate::document::{Document, EditError, PlayState, RecoveryCopy};
 use crate::gizmo;
 use crate::keys::Action;
 use crate::layout;
@@ -122,6 +128,7 @@ use crate::panel::{PanelInput, Panels, Tone, VIEWPORT_TEXTURE};
 mod files;
 mod instances;
 mod meshes;
+mod recovery;
 mod unsaved;
 
 use instances::Placed;
@@ -265,8 +272,13 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// The asset root `--assets` named, which a scene opened in the run reads
     /// its meshes from too.
     assets: Option<PathBuf>,
-    /// Where a recovery copy is written — see `unsaved`.
-    recovery: PathBuf,
+    /// Where recovery copies are written, offered back from and pruned in, or
+    /// [`None`] for a run that keeps none — see `unsaved` and `recovery`.
+    recovery: Option<PathBuf>,
+    /// The copies the recovery bar offers, as it lists them — see `recovery`.
+    offered: Vec<RecoveryCopy>,
+    /// The autosave into [`recovery`](Self::recovery) — see `recovery`.
+    autosave: recovery::Autosave,
     /// Whether the window is to close: set by an answer that lets it, and
     /// carried out before the frame draws.
     closing: bool,
@@ -375,6 +387,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             settings_source,
         )?;
         editor.frame_scene();
+        editor.offer_recovery(options.scene.as_deref());
         Ok(editor)
     }
 
@@ -413,6 +426,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         let panels = Panels::new(&mut document, dock.clone(), gpu.extent());
         let title = document.title();
         let snap = gizmo::Snap::load(&settings);
+        let autosave = recovery::Autosave::load(&settings);
         Ok(Self {
             windowed: !options.common.headless,
             shell,
@@ -451,7 +465,9 @@ impl<S: Shell + ?Sized> Editor<S> {
             unsaved: None,
             after_save: None,
             assets: options.assets.clone(),
-            recovery: unsaved::recovery_base(),
+            recovery: unsaved::recovery_base(options),
+            offered: Vec::new(),
+            autosave,
             closing: false,
             rebuild_due: false,
         })
@@ -655,6 +671,12 @@ impl<S: Shell + ?Sized> Editor<S> {
         if let Some(text) = panels.open {
             self.open(&text);
         }
+        if let Some(answer) = panels.recovery
+            && let Err(error) = self.answer_recovery(answer)
+        {
+            crcbl::log::warn!("editor: {error}");
+            self.panels.set_status(error.to_string(), Tone::Warning);
+        }
         for action in asked {
             self.act(&action);
         }
@@ -662,6 +684,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         if let Some(flow) = self.close_if_asked()? {
             return Ok(flow);
         }
+        self.tick_autosave();
         if let Some(asset) = accepted {
             self.place_at_centre(&asset);
         }

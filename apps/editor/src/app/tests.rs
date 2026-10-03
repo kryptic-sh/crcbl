@@ -13,6 +13,7 @@ mod exit_criterion;
 mod files;
 mod open;
 mod play;
+mod recovery;
 mod selection;
 mod unsaved;
 
@@ -25,6 +26,7 @@ fn options(frames: u64) -> Options {
         common,
         scene: None,
         assets: None,
+        recovery: None,
     }
 }
 

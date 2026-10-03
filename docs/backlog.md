@@ -12669,17 +12669,9 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
 - **Open and the unsaved bar landed 2026-10-03** (`08-editor.md`'s _Open and the
   unsaved bar_), with a new scene named after its directory at save-as. What
   they leave:
-  - **Recovery copies are written, never read back.** A window taken away
-    without a request, or a failed frame, writes a dirty scene under
-    `<temp>/crcbl-editor-recovery/`; nothing offers it at the next start and
-    nothing removes old ones, and the system's temporary-directory cleaning may
-    remove them first. The log line naming the copy is the only pointer. A
-    restore prompt at start-up (list the copies newer than the last clean exit,
-    open one through Open) and an age-based cleanup are the work; deferred.
-  - **A run ending on its frame budget or `--limit` writes no copy**, by
-    decision: it was told when to stop. A session logout that kills the process
-    without a `WindowDestroyed` (or a crash) writes none either; that would need
-    an autosave timer, which is not decided.
+  - **A run ending on its frame budget or `--limit` writes no recovery copy**,
+    by decision: it was told when to stop. Its session's autosave slot, if the
+    scene was dirty, is left and offered at the next start (see the next entry).
   - **A path line or rename being typed when the bar goes up**: the path line is
     closed unsent, and a rename is committed (the bar takes the keyboard as a
     viewport click does). Not asked about; changing it is a line in
@@ -12692,6 +12684,45 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     the headless shell only; each backend's own `reply_close_request` is its
     shell tests', and the editor's flow on Win32, AppKit, X11 and Wayland has
     not been watched.
+- **Recovery offered back, pruning and autosave landed 2026-10-03**
+  (`08-editor.md`'s _Recovery offered back, pruning and autosave_). What they
+  leave:
+  - **A recovered scene reads its meshes from no asset root** until a save-as
+    gives it a directory (or `--assets` names one), so its meshes are
+    placeholders until then: a copy does not record where its scene lived.
+    Writing the origin beside the copy's files (a file the scene loader never
+    reads) and reading it back in `Document::open_recovery` would restore the
+    asset root, and could offer the old directory as the save-as line's text.
+    Not asked for; deferred.
+  - **An opened copy is left on disk after it is saved elsewhere.** It stays
+    until Delete or pruning removes it, and is offered again at the next start.
+    Removing it on the first clean save of the recovered document is the obvious
+    alternative, not taken because a removal nobody clicked is the thing this
+    work keeps out; needs the user's call.
+  - **Two editors running at once share the recovery directory.** The second
+    one's start-up lists the first one's live autosave slot as a copy, and could
+    prune it if more than `document::KEEP_NEWEST` newer copies existed; deleting
+    it from the bar removes a live session's autosave (that session writes a new
+    one at its next interval). A lock file or a per-process marker in the slot
+    would tell them apart; not built.
+  - **The recovery bar is pointer-only.** It binds no key: Escape and Enter are
+    the text fields' and the unsaved bar's. Whether the panels' keyboard
+    navigation reaches its buttons has not been checked.
+  - **Cancelling the unsaved bar an Open copy asked leaves the offer down**: the
+    bar goes when Open copy is clicked, before the unsaved bar asks. The copies
+    are all still on disk and offered at the next start.
+  - **A copy's age is the stamp in its name**, not a file time, so a clock set
+    wrong when it was written makes it look older or younger; one stamped in the
+    future is never old.
+  - **The autosave runs on the editor's frame clock**, so a loop that stops
+    drawing (a hung frame) does not autosave; the copy from before the hang is
+    what a crash then leaves.
+  - **Coverage gaps:** never seen on a device; every test runs headless on the
+    null backend with `--recovery` pointed at a temporary directory. The default
+    `<temp>/crcbl-editor-recovery/` is chosen by a three-line match and not
+    exercised by a test (a test must not touch the person's directory); the
+    system's temporary-directory cleaning may still remove copies before the
+    editor prunes them.
 - **The exit criteria**: the editor never linking `crcbl-vk` directly (kept so
   far: `apps/editor/Cargo.toml`'s dependencies name the `crcbl` umbrella and no
   backend crate).

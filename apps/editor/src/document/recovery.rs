@@ -11,15 +11,28 @@
 //! **It never overwrites.** Each copy is a directory this module makes itself,
 //! named for the moment and the scene, and a name already taken — two copies
 //! in one millisecond, or one a person left — is passed over for the next free
-//! one. Nothing in the copy is ever removed, and the document is not touched:
-//! it is not marked saved and does not adopt the directory, because a
-//! recovery copy is not where the scene lives.
+//! one. The document is not touched: it is not marked saved and does not
+//! adopt the directory, because a recovery copy is not where the scene lives.
+//! The editor's autosave is the same writer on a timer.
+//!
+//! **A copy is read back unowned** ([`Document::open_recovery`]): no origin,
+//! so a save asks for a directory and a copy is never written back over
+//! itself, and dirty, so what it holds is asked about before it is lost.
+//! Listing, pruning and removing copies is `copies`' — each by a path it
+//! checks is a copy, never by a pattern.
 
 use std::path::{Path, PathBuf};
 
+use crcbl::registry::Registry;
 use crcbl::store::{NativeStorage, StorageSource};
 
 use super::{Document, EditError};
+
+mod copies;
+
+pub use copies::{
+    KEEP_NEWEST, MAX_AGE, Pruned, RecoveryCopy, list_copies, prune_copies, remove_copy,
+};
 
 /// The directory under the recovery base every copy is made in — a name of
 /// its own, so a person who finds it knows what wrote it.
@@ -69,6 +82,21 @@ impl Document {
                 })?;
         }
         Ok(dir)
+    }
+
+    /// Opens the recovery copy at `dir` with the components `registry`
+    /// knows, **unowned and dirty** — see the module docs. Its meshes read
+    /// from no asset root until a save-as gives it a directory, whose root it
+    /// takes then.
+    ///
+    /// # Errors
+    ///
+    /// As [`Document::open`].
+    pub fn open_recovery(dir: &Path, registry: Registry) -> Result<Self, EditError> {
+        let source = crcbl::assets::DirSource::at(dir.to_path_buf());
+        let mut document = Self::open(&source, Path::new(""), registry)?;
+        document.saved_at = None;
+        Ok(document)
     }
 }
 
@@ -216,6 +244,32 @@ mod tests {
                 *text
             );
         }
+    }
+
+    /// **A copy is read back unowned and dirty**: the scene it holds, no
+    /// origin, so a save asks for a directory, and the dirty marker up until
+    /// a save elsewhere lands — and the copy left as it was.
+    #[test]
+    fn a_copy_opens_unowned_and_dirty() {
+        let base = tempfile::tempdir().expect("a temporary directory");
+        let mut document = crate::document::play_tests::drifting_document();
+        let files = document.files().expect("ids");
+        let dir = document
+            .write_recovery(base.path(), 5)
+            .expect("a fresh base");
+
+        let mut opened =
+            Document::open_recovery(&dir, crate::scene::vocabulary()).expect("a copy opens");
+        assert_eq!(opened.files().expect("ids"), files);
+        assert_eq!(opened.origin(), None, "the copy became the scene's home");
+        assert!(opened.is_dirty(), "a recovered scene opened clean");
+        assert!(matches!(opened.save(), Err(EditError::NoOrigin)));
+        let saved = tempfile::tempdir().expect("a temporary directory");
+        opened
+            .save_as(saved.path().join("kept.scn"))
+            .expect("an empty directory");
+        assert!(!opened.is_dirty(), "a save-as left it dirty");
+        assert_eq!(tree(&dir).len(), files.len(), "the copy was touched");
     }
 
     /// **A scene's name is made a directory name**: what a path would read as

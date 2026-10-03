@@ -156,9 +156,17 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.grid_extent = super::grid_extent(&scene_bounds(&mut self.document));
         self.rebuild_due = true;
         self.frame_scene();
-        let opened = self.origin_text();
-        self.panels
-            .set_status(format!("Opened {opened}"), Tone::Info);
+        // The panels are new, so the offer is put back up if it stands.
+        self.show_offer();
+        let opened = match self.document.origin() {
+            Some(dir) => format!("Opened {}", dir.display()),
+            // Only a recovery copy is opened with no directory.
+            None => format!(
+                "Opened a recovery copy of `{}`: saving asks for a directory",
+                self.document.name()
+            ),
+        };
+        self.panels.set_status(opened, Tone::Info);
     }
 
     /// Saves the document into the directory `text` names and makes it the
