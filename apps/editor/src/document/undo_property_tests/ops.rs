@@ -75,9 +75,9 @@ pub(super) enum Op {
     /// An enum's variant picked: one of the enums the held entities'
     /// components hold, `target` resolved over all of them, switched to one
     /// of its variants or — for a draw past them — to a name it does not
-    /// have; reported to `Document::record_edits` as the inspector's strip
-    /// does while `inspector`, and as an `EditCommand::SetVariant` handed to
-    /// `Document::apply` otherwise.
+    /// have; reported to `Document::record_edits` as the inspector's
+    /// drop-down does while `inspector`, and as an `EditCommand::SetVariant`
+    /// handed to `Document::apply` otherwise.
     Switch {
         target: Index,
         variant: Index,

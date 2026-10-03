@@ -55,9 +55,17 @@
 //!
 //! [`Ui::button`], [`Ui::checkbox`], [`Ui::slider`], [`Ui::drag_value`],
 //! [`Ui::collapsing`], [`Ui::tree_node`], [`Ui::split`], [`Ui::list`],
-//! [`Ui::text_input`], [`Ui::outliner`], [`Ui::tabs`] and [`Ui::dock`] are
-//! builders over blocks and spans, each styled by `default.css`;
-//! `widgets/mod.rs` has what each builds and the rules it keeps.
+//! [`Ui::text_input`], [`Ui::outliner`], [`Ui::tabs`], [`Ui::select`] and
+//! [`Ui::dock`] are builders over blocks and spans, each styled by
+//! `default.css`; `widgets/mod.rs` has what each builds and the rules it keeps.
+//!
+//! # Pop-ups
+//!
+//! [`Ui::open_popup`] and [`Ui::popup`] hang a block from any node: a root of
+//! its own, drawn over the whole tree in a layer of its own, clipped only by
+//! the viewport, hit-tested first and holding focus until it closes — by
+//! [`Ui::close_popup`], by back, or by a press outside it, which it spends.
+//! `popup.rs` has the rules.
 //!
 //! # Identity
 //!
@@ -96,7 +104,8 @@
 //!
 //! [`Ui::begin_frame`] tests the pointer against the rectangles the previous
 //! [`Ui::layout`] produced, before this frame's tree exists — the classic
-//! immediate-mode trade the plan takes. The topmost node under the pointer and
+//! immediate-mode trade the plan takes. The topmost node under the pointer —
+//! by layer, so an open pop-up's before the tree's, then by paint order — and
 //! every node containing it are hovered; a press latches on the topmost node
 //! — or on the innermost node around it with a [`Role`], so a click on a
 //! button's label clicks the button — through [`UiState`]'s capture, so
@@ -129,7 +138,8 @@
 //! so a later sibling never covers a focus ring: a ring `outline-offset`
 //! outside the border box, one [`DrawList::rect_outline`] — or a
 //! [`DrawList::rounded_rect`], its radii grown by the offset, when the node has
-//! any.
+//! any. Each open pop-up is drawn after all of that, outlines and all, as a
+//! layer of its own.
 //!
 //! # Text measures through Taffy
 //!
@@ -157,6 +167,9 @@ pub mod focus;
 #[cfg(all(test, feature = "parsed-font"))]
 mod font_tests;
 mod layout;
+mod popup;
+#[cfg(test)]
+mod popup_tests;
 mod resolve;
 mod store;
 mod style;
@@ -202,8 +215,8 @@ pub use widgets::{
     AXES, ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, DockLayout,
     DockSide, FieldEdit, FieldRow, INSPECTOR_STEP, Inspection, InspectorOptions, LIST_OVERSCAN,
     MASK, OUTLINER_INDENT, OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId, OutlinerOptions,
-    OutlinerRow, OutlinerState, Overrides, RowBuilder, SPLIT_NAV_STEP, SelectMode, SplitAxis,
-    TextInput, TextInputOptions, VARIANT_LABEL, VariantEdit, WHOLE_STEP,
+    OutlinerRow, OutlinerState, Overrides, RowBuilder, SELECT_CARET, SPLIT_NAV_STEP, SelectMode,
+    SplitAxis, TextInput, TextInputOptions, VARIANT_LABEL, VariantEdit, WHOLE_STEP,
 };
 
 /// How far the pointer must move from where a press began, in pixels, before
@@ -379,6 +392,8 @@ enum KeySource<'a> {
     Id(&'a str),
     Keyed(u64),
     Duplicate(u64, u32),
+    /// A pop-up's root, by its anchor's key.
+    Popup(u64),
 }
 
 fn hash_of(value: impl Hash) -> u64 {
@@ -449,6 +464,14 @@ pub struct Ui {
     /// The tree row [`Ui::tree_item_step`] opened or closed when this frame
     /// began, if it opened or closed one.
     tree_toggled: Option<NodeKey>,
+    /// The anchors of the open pop-ups, the topmost last; see `popup.rs`.
+    popups: Vec<NodeKey>,
+    /// Each pop-up root this frame built, as its index in `nodes` and its
+    /// anchor.
+    popup_roots: Vec<(usize, NodeKey)>,
+    /// The space the last [`Ui::layout`] was given, from its origin; `None`
+    /// before the first.
+    viewport: Option<ClipRect>,
 }
 
 impl Ui {
@@ -487,6 +510,7 @@ impl Ui {
         self.clipboard_requests.clear();
         self.pointer = pointer;
         self.tree_toggled = None;
+        self.popup_roots.clear();
         let clicked = self.resolve_pointer(pointer);
         self.clicked = clicked;
         self.resolve_navigation(nav, clicked, self.dragged);
@@ -498,6 +522,7 @@ impl Ui {
     fn resolve_pointer(&mut self, pointer: PointerInput) -> Option<NodeKey> {
         let held_before = self.capture.active().is_some();
         let over = self.store.hit_chain(pointer.pos);
+        let over = self.press_outside_popups(pointer, over);
         // A press goes to the innermost node with a role around the topmost
         // one, so a button's label does not take its button's click.
         let target = over
@@ -724,6 +749,12 @@ impl Ui {
             .open
             .last()
             .map_or(ROOT_KEY, |&parent| self.nodes[parent].key);
+        Self::key_under(parent, source)
+    }
+
+    /// The key a node built under `parent` from `source` gets, before the
+    /// duplicate rule.
+    fn key_under(parent: NodeKey, source: KeySource<'_>) -> NodeKey {
         NodeKey(hash_of((parent, source)))
     }
 
@@ -965,8 +996,10 @@ impl Ui {
     ///
     /// Every top-level block is a root, laid out in `available` and placed at
     /// `origin`; a page with more than one panel puts them under one root and
-    /// positions them there.
+    /// positions them there. A pop-up is a root too, laid out in `available`
+    /// and placed against its anchor inside that space; see `popup.rs`.
     pub fn layout(&mut self, origin: Vec2, available: AvailableSpace, atlas: &FontAtlas) {
+        self.viewport = Some(popup::viewport_of(origin, available));
         self.flatten_children();
         self.store.prune(self.frame);
         let store = &self.store;
@@ -1062,14 +1095,53 @@ impl Ui {
         }
     }
 
-    /// Resolves every node's screen rectangle and clip into the store, for
-    /// emission and for next frame's hit test.
+    /// Resolves every node's screen rectangle, clip and layer into the store,
+    /// for emission and for next frame's hit test: the tree's roots at
+    /// `origin`, then each open pop-up's against its anchor, lowest first, so
+    /// an anchor is placed before what hangs from it.
     fn place(&mut self, origin: Vec2) {
+        let layers = self.layers();
+        let mut placed = vec![(Vec2::ZERO, ClipRect::NONE, true); self.nodes.len()];
+        self.place_layer(0, &layers, &mut placed, |ui, index| {
+            let location = ui.nodes[index].layout.location;
+            (
+                origin + Vec2::new(location.x, location.y),
+                ClipRect::NONE,
+                false,
+            )
+        });
+        for layer in 1..=self.popups.len() {
+            let anchor = self.popups[layer - 1];
+            let viewport = self.viewport();
+            self.place_layer(layer, &layers, &mut placed, |ui, index| {
+                (ui.popup_origin(index, anchor), viewport, false)
+            });
+        }
+        self.place_layer(popup::CLOSED_LAYER, &layers, &mut placed, |_, _| {
+            (Vec2::ZERO, ClipRect::NONE, true)
+        });
+    }
+
+    /// Places every node of `layer`, in build order: a root where `root` says,
+    /// as its border box's top-left, the clip it is under and whether it is
+    /// hidden, and every other node inside its parent. `placed` holds each
+    /// node's top-left, clip and hiddenness once it is placed.
+    fn place_layer(
+        &mut self,
+        layer: usize,
+        layers: &[usize],
+        placed: &mut [(Vec2, ClipRect, bool)],
+        root: impl Fn(&Self, usize) -> (Vec2, ClipRect, bool),
+    ) {
         // Nodes are in build order, so a parent is always placed before its
-        // children and these three are filled in by the time a child reads them.
-        let mut placed: Vec<(Vec2, ClipRect, bool)> = Vec::with_capacity(self.nodes.len());
-        for (index, node) in self.nodes.iter().enumerate() {
-            let (base, clip, hidden) = match node.parent {
+        // children and its entry in `placed` is filled in by the time a child
+        // reads it.
+        for index in 0..self.nodes.len() {
+            if layers[index] != layer {
+                continue;
+            }
+            let node = &self.nodes[index];
+            let (min, clip, hidden) = match node.parent {
                 Some(parent) => {
                     let (parent_min, parent_clip, parent_hidden) = placed[parent];
                     let parent_node = &self.nodes[parent];
@@ -1080,19 +1152,21 @@ impl Ui {
                     } else {
                         parent_clip
                     };
-                    (parent_min - scroll, clip, parent_hidden)
+                    let location = Vec2::new(node.layout.location.x, node.layout.location.y);
+                    (parent_min - scroll + location, clip, parent_hidden)
                 }
-                None => (origin, ClipRect::NONE, false),
+                None => root(self, index),
             };
-            let min = base + Vec2::new(node.layout.location.x, node.layout.location.y);
+            let node = &self.nodes[index];
             let max = min + Vec2::new(node.layout.size.width, node.layout.size.height);
             let hidden = hidden || node.style.display == Display::None;
-            placed.push((min, clip, hidden));
+            placed[index] = (min, clip, hidden);
 
             let stored = self.store.get_mut(node.slot);
             stored.rect = (min, max);
             stored.clip = clip;
             stored.paint_order = index;
+            stored.layer = layer;
             stored.hittable = !hidden;
         }
     }

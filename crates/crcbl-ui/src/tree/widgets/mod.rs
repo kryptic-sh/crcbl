@@ -18,6 +18,7 @@
 //! | `text_input.rs` | [`Ui::text_input`], [`Ui::text_input_with`] | engaged |
 //! | `outliner.rs` | [`Ui::outliner`], [`Ui::outliner_with`] | each row is instant activation |
 //! | `tabs.rs` | [`Ui::tabs`] | each tab is instant activation |
+//! | `select.rs` | [`Ui::select`] | the button and each option are instant activation |
 //! | `dock.rs` | [`Ui::dock`] | each divider is engaged |
 //! | `inspector.rs` | [`Ui::inspector`], [`Ui::inspector_with`] | each row's own widget |
 //!
@@ -35,11 +36,12 @@
 //!
 //! A widget's `selector` is its `#id.class` part: the widget's type — `button`,
 //! `checkbox`, `slider`, `drag-value`, `collapsing`, `tree-node`, `split`,
-//! `list`, `text-input`, `outliner`, `tabs`, `dock` or `inspector` — is put in
-//! front of it, and that type is what `default.css` styles. A selector that
-//! names a type of its own keeps it, which opts the widget out of every engine
-//! rule for its type. The parts inside a widget have classes
+//! `list`, `text-input`, `outliner`, `tabs`, `select`, `dock` or `inspector` —
+//! is put in front of it, and that type is what `default.css` styles. A
+//! selector that names a type of its own keeps it, which opts the widget out
+//! of every engine rule for its type. The parts inside a widget have classes
 //! named after it (`.slider-fill`, `.tree-row`); each builder's docs name them.
+//! A pop-up's root has the type `popup` (`popup.rs`).
 //!
 //! # State the stylesheet sees
 //!
@@ -78,6 +80,7 @@ mod dock;
 mod inspector;
 mod list;
 mod outliner;
+mod select;
 mod split;
 mod tabs;
 #[cfg(test)]
@@ -105,6 +108,7 @@ pub use outliner::{
     OUTLINER_INDENT, OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId, OutlinerOptions,
     OutlinerRow, OutlinerState, SelectMode,
 };
+pub use select::SELECT_CARET;
 pub use split::{SPLIT_NAV_STEP, SplitAxis};
 pub use text_input::{
     ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, MASK, TextInput,
@@ -155,7 +159,7 @@ pub(crate) enum WidgetState {
 }
 
 /// `selector` with the widget type `kind` in front, unless it names a type.
-fn typed<'s>(kind: &'static str, selector: &'s str) -> Cow<'s, str> {
+pub(super) fn typed<'s>(kind: &'static str, selector: &'s str) -> Cow<'s, str> {
     if selector.is_empty() {
         Cow::Borrowed(kind)
     } else if selector.starts_with(['#', '.']) {

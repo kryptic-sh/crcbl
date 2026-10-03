@@ -1,7 +1,7 @@
 //! The property inspector: the row each [`ValueKind`] gets, the range and step
 //! reaching the drag-value, recursion under a header, an enum's active
 //! variant, a skipped field, an override taking precedence, and the edit a
-//! frame reports — with what undoing one takes — and the variant strip's
+//! frame reports — with what undoing one takes — and the variant drop-down's
 //! switch.
 
 use crcbl_reflect::{Kind, Reflect, Value, get_path, set_path};
@@ -575,12 +575,17 @@ fn switching(ui: &mut Ui, pointer: PointerInput, nav: NavInput, value: &mut Surf
     })
 }
 
-/// The key of the strip's option for `variant`: the parent of the label span
-/// naming it.
+/// The key of the variant row's drop-down: the widget after its label.
+fn variant_select(ui: &Ui) -> NodeKey {
+    field_key(ui, VARIANT_LABEL)
+}
+
+/// The key of the drop-down list's option for `variant`: the parent of the
+/// label span naming it.
 fn variant_key(ui: &Ui, variant: &str) -> NodeKey {
     let index = (0..ui.nodes.len())
         .find(|&index| {
-            selector_of(ui, index).contains("inspector-variant-label")
+            selector_of(ui, index).contains("select-option-label")
                 && matches!(ui.nodes[index].content,
                     Content::Text { start, end } if &ui.text[start..end] == variant)
         })
@@ -606,26 +611,42 @@ fn opened_shape(ui: &mut Ui, value: &mut Surface) {
     switch_click(ui, on, value);
 }
 
+/// [`opened_shape`] with the variant drop-down's list opened by a click.
+fn listed_variants(ui: &mut Ui, value: &mut Surface) {
+    opened_shape(ui, value);
+    open_list(ui, value);
+}
+
+/// Opens the variant drop-down's list with a click.
+fn open_list(ui: &mut Ui, value: &mut Surface) {
+    let on = centre(ui, variant_select(ui));
+    let opened = switch_click(ui, on, value);
+    assert!(opened.switches.is_empty(), "opening the list switched");
+}
+
 /// **A pick is one switch, reported with the whole enum before and after**:
-/// the variant strip lists every variant, the click switches the shape to the
-/// new variant's defaults, the inspection carries exactly one
+/// the drop-down shows the active variant and its list every variant, the
+/// click on another switches the shape to its defaults and closes the list,
+/// the inspection carries exactly one
 /// [`VariantEdit`](crate::tree::VariantEdit) and no field edit — and
 /// restoring its `before` puts back the variant and its radius, bit for bit.
 #[test]
-fn a_pick_in_the_variant_strip_reports_one_switch_with_the_enum_before_and_after() {
+fn a_pick_in_the_variant_drop_down_reports_one_switch_with_the_enum_before_and_after() {
     use crcbl_reflect::{Snapshot, restore_path};
 
     let mut ui = Ui::new();
     let mut value = surface();
     opened_shape(&mut ui, &mut value);
-    assert_eq!(
-        spans(&ui, "inspector-variant-label"),
-        ["Platform", "Dome"],
-        "the strip does not list every variant in order"
-    );
+    assert_eq!(spans(&ui, "select-label"), ["Dome"]);
     assert!(
-        rows(&ui).iter().any(|(label, _)| label == VARIANT_LABEL),
-        "the strip has no labelled row"
+        spans(&ui, "select-option-label").is_empty(),
+        "the list is built before it is opened"
+    );
+    open_list(&mut ui, &mut value);
+    assert_eq!(
+        spans(&ui, "select-option-label"),
+        ["Platform", "Dome"],
+        "the list does not hold every variant in order"
     );
 
     let on = centre(&ui, variant_key(&ui, "Platform"));
@@ -662,6 +683,10 @@ fn a_pick_in_the_variant_strip_reports_one_switch_with_the_enum_before_and_after
             depth: 0.0,
         }
     );
+    assert!(
+        spans(&ui, "select-option-label").is_empty(),
+        "the list stayed open after the pick"
+    );
 
     restore_path(&mut value, &switch.path, &switch.before).expect("its own snapshot");
     assert_eq!(value, surface(), "the undo did not put the dome back");
@@ -675,7 +700,7 @@ fn a_pick_in_the_variant_strip_reports_one_switch_with_the_enum_before_and_after
 fn a_switch_is_made_after_the_frames_rows_and_the_next_frame_draws_the_new_variant() {
     let mut ui = Ui::new();
     let mut value = surface();
-    opened_shape(&mut ui, &mut value);
+    listed_variants(&mut ui, &mut value);
     let on = centre(&ui, variant_key(&ui, "Platform"));
     let picked = switch_click(&mut ui, on, &mut value);
     assert_eq!(picked.switches.len(), 1);
@@ -695,13 +720,14 @@ fn a_switch_is_made_after_the_frames_rows_and_the_next_frame_draws_the_new_varia
 }
 
 /// **The active variant is marked, and picking it again is no switch** — its
-/// fields are kept, as `Reflect::set_variant` keeps them.
+/// fields are kept, as `Reflect::set_variant` keeps them — though it closes
+/// the list.
 #[test]
 fn the_active_variant_is_marked_and_picking_it_switches_nothing() {
     let accent = linear("#3d8bfd");
     let mut ui = Ui::new();
     let mut value = surface();
-    opened_shape(&mut ui, &mut value);
+    listed_variants(&mut ui, &mut value);
     let marked: Vec<&str> = ["Platform", "Dome"]
         .into_iter()
         .filter(|&variant| style_of(&ui, variant_key(&ui, variant)).background == accent)
@@ -715,38 +741,50 @@ fn the_active_variant_is_marked_and_picking_it_switches_nothing() {
         "the active variant was switched to"
     );
     assert_eq!(value, surface());
+    assert!(spans(&ui, "select-option-label").is_empty());
 }
 
-/// **The strip is keyboard reachable**: from the group's header, focus walks
-/// onto the options and accept picks the focused one, with no pointer.
+/// **The drop-down is keyboard reachable**: from the group's header, focus
+/// walks onto it, accept opens the list on the active variant, a move up
+/// reaches the other, and accept picks it, with no pointer.
 #[test]
-fn focus_walks_onto_the_variant_strip_and_accept_picks() {
+fn focus_walks_onto_the_variant_drop_down_and_accept_picks() {
     let mut ui = Ui::new();
     let mut value = surface();
     opened_shape(&mut ui, &mut value);
-    let platform = variant_key(&ui, "Platform");
+    let select = variant_select(&ui);
     let mut steps = 0;
-    while ui.focused() != Some(platform) {
-        assert!(steps < 4, "focus never reached the strip");
+    while ui.focused() != Some(select) {
+        assert!(steps < 4, "focus never reached the drop-down");
         switching(&mut ui, idle(), NavInput::NEXT, &mut value);
         steps += 1;
     }
+    let opened = switching(&mut ui, idle(), NavInput::ACCEPT, &mut value);
+    assert!(opened.switches.is_empty(), "opening the list switched");
+    switching(&mut ui, idle(), NavInput::NAVIGATION, &mut value);
+    assert_eq!(
+        ui.focused(),
+        Some(variant_key(&ui, "Dome")),
+        "the list did not take focus on the active variant"
+    );
+    switching(&mut ui, idle(), UP, &mut value);
+    assert_eq!(ui.focused(), Some(variant_key(&ui, "Platform")));
     let picked = switching(&mut ui, idle(), NavInput::ACCEPT, &mut value);
     assert_eq!(picked.switches.len(), 1, "accept did not pick the variant");
     assert_eq!(value.shape.variant(), Some("Platform"));
 }
 
-/// **Without [`InspectorOptions::variants`] there is no strip**, so a caller
-/// recording only field edits is never handed a switch it cannot undo.
+/// **Without [`InspectorOptions::variants`] there is no drop-down**, so a
+/// caller recording only field edits is never handed a switch it cannot undo.
 #[test]
-fn without_the_option_an_enums_group_has_no_strip() {
+fn without_the_option_an_enums_group_has_no_drop_down() {
     let mut ui = Ui::new();
     let mut value = surface();
     page(&mut ui, idle(), NavInput::default(), &mut value, None);
     open(&mut ui, "Shape: Dome", &mut value, None);
-    assert!(spans(&ui, "inspector-variant-label").is_empty());
+    assert!(spans(&ui, "select-label").is_empty());
     assert!(
         !rows(&ui).iter().any(|(label, _)| label == VARIANT_LABEL),
-        "a strip row was built without the option"
+        "a drop-down row was built without the option"
     );
 }

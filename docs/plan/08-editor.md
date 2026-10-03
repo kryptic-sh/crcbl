@@ -1339,9 +1339,11 @@ slice 12 left (a `kind` shown and edited only in the file).
   a `#[reflect(skip)]` field comes back at its default after a switch away and
   back.
 - **The inspector offers the variants** with `InspectorOptions::variants`: an
-  enum's group opens on a strip of options, the active one `:checked`, each
-  focusable and picked by click or accept — the toolkit's choice widget (the tab
-  strip's shape), since there is no pop-up layer for a drop-down. A pick is a
+  enum's group opens on a drop-down (`Ui::select`) showing the active variant,
+  whose list opens in a pop-up over the rows on a click or accept, the active
+  one `:checked`, and a variant there is picked by click or accept. It began as
+  a strip of options while `crcbl-ui` had no pop-up layer; the layer landed the
+  same day and the strip became the drop-down before either shipped. A pick is a
   `VariantEdit` of the enum's path and its `Snapshot` before and after, in
   `Inspection::switches`; the switch is made after the frame's rows are built,
   so a caller undoes a frame's switches before its field edits.
@@ -1353,16 +1355,16 @@ slice 12 left (a `kind` shown and edited only in the file).
 - **Evidence**: `crcbl-reflect`'s `tests/variants.rs` (listing, defaults, the
   active variant kept, an unknown name refused, the exact inverse through a
   nested enum, a misfit put back, a NaN restored over itself) and the derive's
-  token tests; `crcbl-ui`'s strip tests (one switch with the whole enum before
-  and after, made after the frame's rows, the active option marked and not
-  pickable, reached by focus and accept, absent without the option); the
+  token tests; `crcbl-ui`'s drop-down tests (one switch with the whole enum
+  before and after, made after the frame's rows, the active option marked and
+  not pickable, reached by focus and accept, absent without the option); the
   editor's `document::variant_tests` (one entry undone and redone exactly, saved
   and read back, a static body standing through a second of play, refused by the
   rule and put back, an unknown variant refused) and `panel::tests::variants`
-  (the strip clicked in a body's section). The undo property test gained a
-  switch step through the strip's report and through a command, and `SetVariant`
-  in its command coverage. The mutations each turned a test red are listed in
-  the commit that landed this.
+  (the drop-down opened and a kind picked in a body's section). The undo
+  property test gained a switch step through the drop-down's report and through
+  a command, and `SetVariant` in its command coverage. The mutations each turned
+  a test red are listed in the commit that landed this.
 
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor

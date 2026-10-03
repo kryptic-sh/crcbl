@@ -72,8 +72,13 @@ pub(crate) struct StoredNode {
     pub rect: (Vec2, Vec2),
     /// The clip its ancestors' `overflow: hidden` put it under.
     pub clip: ClipRect,
-    /// Its place in last frame's paint order; a higher one is drawn on top.
+    /// Its place in last frame's build order: within one layer, a higher one
+    /// is drawn on top.
     pub paint_order: usize,
+    /// The layer it was drawn in last frame: 0 for the tree, `n` for the
+    /// `n`th open pop-up, which is drawn over every lower layer whatever the
+    /// paint order says. See `popup.rs`.
+    pub layer: usize,
     /// Whether it had a box last frame: `display: none` here or above is never
     /// hit.
     pub hittable: bool,
@@ -133,6 +138,7 @@ impl StoredNode {
             rect: (Vec2::ZERO, Vec2::ZERO),
             clip: ClipRect::NONE,
             paint_order: 0,
+            layer: 0,
             hittable: false,
             interaction: Interaction::default(),
             behavior: Behavior::NONE,
@@ -158,6 +164,12 @@ impl StoredNode {
             self.rect.0 + Vec2::new(border.left + padding.left, border.top + padding.top),
             self.rect.1 - Vec2::new(border.right + padding.right, border.bottom + padding.bottom),
         )
+    }
+
+    /// Where it was drawn last frame, lowest first: its layer, then its paint
+    /// order within the layer. What every "topmost" is decided by.
+    pub fn stacking(&self) -> (usize, usize) {
+        (self.layer, self.paint_order)
     }
 
     /// Whether `pos` is inside the part of last frame's box its clip let
@@ -263,7 +275,7 @@ impl NodeStore {
         let target = self
             .iter()
             .filter(|node| node.contains(pos))
-            .max_by_key(|node| node.paint_order);
+            .max_by_key(|node| node.stacking());
         self.ancestry(target.map(|node| node.key))
     }
 

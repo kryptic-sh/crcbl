@@ -91,7 +91,8 @@ tree-node > .tree-row:focus,
 split > .split-divider:focus,
 text-input:focus,
 .tab-strip > .tab:focus,
-.inspector-variants > .inspector-variant:focus {
+select:focus,
+.select-list > .select-option:focus {
   outline: 2px #f5c400;
   outline-offset: 1px;
 }
@@ -458,6 +459,69 @@ tabs {
 }
 
 /*
+ * Pop-up: a root of its own drawn over the whole tree (`popup.rs`). What is
+ * here is a panel's frame; what it holds is its opener's to style.
+ */
+popup {
+  flex-direction: column;
+  padding: 1px;
+  border-width: 1px;
+  border-color: #4a5468;
+  background: #171a20;
+  color: #e6e9ef;
+}
+
+/*
+ * Select: a button showing the chosen option, and its list in a pop-up. The
+ * chosen option is `:checked` and drawn in the accent, as the tab showing is;
+ * the button is `:open` while its list is.
+ */
+select {
+  gap: 6px;
+  padding: 1px 6px;
+  align-items: center;
+  border-width: 1px;
+  border-color: #4a5468;
+  background: #2a303c;
+  color: #e6e9ef;
+}
+
+select:hover {
+  background: #353d4c;
+}
+
+select:open {
+  background: #1f242d;
+}
+
+select:disabled {
+  background: #23272f;
+  color: #7a8190;
+}
+
+.select-label {
+  flex-grow: 1;
+}
+
+.select-caret {
+  color: #7a8190;
+}
+
+.select-option {
+  padding: 1px 6px;
+  flex-shrink: 0;
+}
+
+.select-list > .select-option:hover {
+  background: #353d4c;
+}
+
+.select-list > .select-option:checked {
+  background: #3d8bfd;
+  color: #10121a;
+}
+
+/*
  * Dock: nested splits filling their parent, each pane clipping what it holds.
  * A pane's own look is the application's; what is here is only that it fills
  * the split that holds it.
@@ -526,30 +590,6 @@ inspector {
 /* A composite field's header and body fill the panel rather than the row. */
 .inspector-group {
   flex-shrink: 0;
-}
-
-/*
- * An enum's variant strip: one option per variant, the active one `:checked`
- * and drawn in the accent, as the tab showing is.
- */
-.inspector-variants {
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-.inspector-variant {
-  padding: 1px 6px;
-  flex-shrink: 0;
-  background: #2a303c;
-}
-
-.inspector-variants > .inspector-variant:hover {
-  background: #353d4c;
-}
-
-.inspector-variants > .inspector-variant:checked {
-  background: #3d8bfd;
-  color: #10121a;
 }
 
 /*

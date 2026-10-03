@@ -206,8 +206,8 @@ struct Picked {
 /// entities' components hold, switched to the variant `variant` names.
 ///
 /// Through the inspector, the switch is made in place and reported as the
-/// strip reports it — not at all for the variant already active, which the
-/// strip does not offer as a pick. As a command, the new variant's snapshot
+/// drop-down reports it — not at all for the variant already active, which
+/// the drop-down does not report as a pick. As a command, the new variant's snapshot
 /// is read by switching and putting the component back, then applied.
 fn switch(
     document: &mut Document,

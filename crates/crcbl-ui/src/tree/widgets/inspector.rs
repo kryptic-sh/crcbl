@@ -75,13 +75,12 @@
 //! # Switching an enum's variant
 //!
 //! With [`InspectorOptions::variants`], an enum's group opens on a
-//! `.inspector-row` labelled [`VARIANT_LABEL`] holding a
-//! `.inspector-variants` strip: one `.inspector-variant` per
-//! [`Reflect::variants`] entry, each holding a `.inspector-variant-label`
-//! span and `:checked` while it is the active one. They are
-//! [`Behavior::BUTTON`] nodes, so focus walks the strip and accept picks, as
-//! a tab strip's — the toolkit has no pop-up layer for a drop-down to open
-//! in, and a strip is the choice widget it already has.
+//! `.inspector-row` labelled [`VARIANT_LABEL`] holding a [`Ui::select`]
+//! classed `.inspector-field` over the [`Reflect::variants`] entries, showing
+//! the active one: a click or accept opens the list in a pop-up over the
+//! rows, and a click or accept on a variant there picks it. A drop-down
+//! rather than a strip of every variant, because a pop-up costs a row nothing
+//! however many variants an enum has.
 //!
 //! Picking another variant switches it ([`Reflect::set_variant`]: the new
 //! variant's fields at their defaults) and reports a [`VariantEdit`] in
@@ -129,8 +128,7 @@ use crcbl_reflect::{
 };
 
 use super::{Ui, typed};
-use crate::style::PseudoClasses;
-use crate::tree::{Behavior, KeySource, Response, hash_of};
+use crate::tree::Response;
 
 /// The step a [`ValueKind::Float`] field with no `#[reflect(step)]` is dragged
 /// and stepped by: [`InspectorOptions::step`]'s default.
@@ -163,7 +161,7 @@ pub struct FieldEdit {
     pub after: Value,
 }
 
-/// What the variant strip labels its row with; see the module docs.
+/// What the variant drop-down labels its row with; see the module docs.
 pub const VARIANT_LABEL: &str = "Variant";
 
 /// One enum switched to another variant, as a caller records it.
@@ -175,7 +173,7 @@ pub const VARIANT_LABEL: &str = "Variant";
 pub struct VariantEdit {
     /// The dotted path to the enum, from the value the inspector was handed.
     /// Never empty: an enum handed in itself is drawn as its rows, with no
-    /// group to hold a strip.
+    /// group to hold a drop-down.
     pub path: String,
     /// The whole enum before the switch: the variant it was in and every
     /// field under it.
@@ -210,7 +208,7 @@ pub struct Inspection {
 #[derive(Debug, Default)]
 struct Report {
     edits: Vec<FieldEdit>,
-    /// Each enum a strip picked another variant of, by path, and the variant:
+    /// Each enum a drop-down picked another variant of, by path, and the variant:
     /// switched once every row is built.
     picked: Vec<(String, &'static str)>,
     hovered: Option<String>,
@@ -692,7 +690,7 @@ impl Ui {
                     };
                     self.collapsing(".inspector-group", &title, |ui| {
                         if options.variants
-                            && let Some(variant) = ui.variant_strip(&*child)
+                            && let Some(variant) = ui.variant_select(&*child)
                         {
                             report.picked.push((path.clone(), variant));
                         }
@@ -705,39 +703,26 @@ impl Ui {
         path.truncate(base);
     }
 
-    /// The variant strip at the top of an enum's group, as the module docs
+    /// The variant drop-down at the top of an enum's group, as the module docs
     /// describe it: the variant picked this frame, if it is not the active
     /// one. A value with no variants builds nothing.
-    fn variant_strip(&mut self, value: &dyn Reflect) -> Option<&'static str> {
+    fn variant_select(&mut self, value: &dyn Reflect) -> Option<&'static str> {
         let variants = value.variants();
         if variants.is_empty() {
             return None;
         }
+        let names: Vec<&'static str> = variants.iter().map(|variant| variant.name).collect();
         let active = value.variant();
+        let mut chosen = names
+            .iter()
+            .position(|&name| Some(name) == active)
+            .unwrap_or(names.len());
         let mut picked = None;
         self.block(".inspector-row", &[], |ui| {
             ui.span(".inspector-label", VARIANT_LABEL, &[]);
-            ui.block(".inspector-variants", &[], |ui| {
-                for variant in variants {
-                    // Keyed by name, so a variant's focus follows it rather
-                    // than its place in the strip.
-                    let key = ui.key(KeySource::Keyed(hash_of(variant.name)));
-                    let is_active = active == Some(variant.name);
-                    if !is_active && ui.interaction_of(key).clicked && !ui.building_disabled() {
-                        picked = Some(variant.name);
-                    }
-                    let state = if is_active {
-                        PseudoClasses::CHECKED
-                    } else {
-                        PseudoClasses::NONE
-                    };
-                    let parsed = ui.node_selector(".inspector-variant");
-                    let key = ui.unique(key);
-                    ui.open_block(key, parsed, &[], Behavior::BUTTON, state, |ui| {
-                        ui.span(".inspector-variant-label", variant.name, &[]);
-                    });
-                }
-            });
+            if ui.select(".inspector-field", &names, &mut chosen).changed {
+                picked = names.get(chosen).copied();
+            }
         });
         picked
     }

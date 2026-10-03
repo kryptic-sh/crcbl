@@ -3346,6 +3346,82 @@ and its rungs W2–W6 are separate slices rather than gaps.
 - **`DEFAULT_GUST_WAVELENGTH` (32 m) is a starting value, not a measurement**,
   and changes nothing until a caller raises `Weather::gust_amplitude` off zero.
 
+## What the pop-up layer and `Ui::select` left open (2026-10-03)
+
+`crcbl_ui::tree`'s pop-up layer (`tree/popup.rs`: `Ui::open_popup`, `Ui::popup`,
+`Ui::close_popup`, `Ui::is_popup_open`, `Ui::popup_key`) and the drop-down built
+on it (`Ui::select`, `tree/widgets/select.rs`), adopted for the inspector's
+variant picker. Decisions, then what is left.
+
+- **Decided: a press outside every pop-up is spent closing them**, not passed
+  through to what is under it — the long-term rule. A click meant to dismiss a
+  list must not also fire the button the list covered, and a press on the anchor
+  itself must close the list rather than close it and click it open again. The
+  press is captured by a key no node has (`popup.rs`'s `SPENT_PRESS`), so
+  nothing is hovered, pressed or clicked until release. A press inside a lower
+  pop-up closes only the ones above it and is delivered there. **Considered and
+  declined: passing the press through**, which some web menu libraries do; it
+  makes "click away" an action on whatever was under the pointer.
+- **Decided: a pop-up is a root of its own, keyed by its anchor**
+  (`Ui::popup_key`), built outside every open block wherever `Ui::popup` is
+  called, so nothing its anchor is in clips or scrolls it. It is laid out in the
+  tree's space, placed below its anchor (flipped above when there is no room
+  below and more above, then shifted into the viewport), clipped to the
+  viewport, and drawn and hit-tested as a layer above every lower one
+  (`StoredNode::layer`). This is not CSS `z-index`: stacking within the tree is
+  still tree order (_What UI rungs 2 and 3 shipped without_).
+- **Decided: open state is the `Ui`'s, a stack of anchors**, and **an open
+  pop-up a frame does not build is closed at that frame's layout**, as is one
+  whose anchor the frame did not build — the tree's "what a frame does not build
+  it does not keep" applied to a layer. A pop-up opened outside the build
+  (between `layout` and the next `begin_frame`) is open with no layer until a
+  frame builds it, so any press closes it.
+- **Decided: focus rides the existing `Scope::Modal`.** A pop-up's root is a
+  modal and the topmost by layer, so focus moves in the frame after it is built
+  (onto what `Ui::set_focus` asked for — the drop-down asks for the chosen
+  option — else by the landing rule) and no move leaves it. **Every close gives
+  focus back to the anchor**: back at once, the others when the next frame
+  begins. Back is spent closing the topmost pop-up when nothing is engaged, so
+  `Ui::back_requested` does not report it; something engaged inside a pop-up is
+  cancelled first, as back always does.
+- **Decided: the inspector's variant picker is a `Ui::select`** (see the variant
+  decisions under the editor section): one row however many variants an enum
+  has, and the `VariantEdit` report and `InspectorOptions::variants` opt-in
+  unchanged.
+- **Behaviour that is not a bug: a drop-down's list is a frame late to follow a
+  button whose width changed.** Its `min-width` is the button's width as last
+  laid out, the only width there is while the frame is being built.
+- **Behaviour that is not a bug: a pop-up's margin and offsets do not move it.**
+  Placement sets its border box against the anchor, so no gap can be put between
+  the two yet.
+- **Deferred: tooltips on the same layer.** A tooltip is a pop-up that neither
+  traps focus nor is dismissed by a press, opened after a hover delay; it needs
+  a non-modal kind of pop-up (a root that is not `Behavior::MODAL` and that
+  `press_outside_popups` skips) and a hover clock. Add it when the editor wants
+  a tooltip.
+- **Deferred: context menus and submenus.** A context menu needs a secondary
+  button in `PointerInput` (it has one button) and a pop-up anchored at a point
+  rather than a node; a submenu needs placement beside its anchor rather than
+  below it, and opening on hover or a right arrow. The stack already nests (a
+  pop-up opened from inside another goes on top, and a press in the lower one
+  closes only those above it).
+- **Deferred: a list taller than the viewport scrolls.** It is shifted to the
+  viewport's top and the rest is clipped; `max-height` with `overflow: scroll`
+  on `.select-list` would bound it, and focus scrolls an `overflow: scroll`
+  block's focused node into view, but no rule sets it and nothing tests it.
+  Typeahead, Home and End, and wrapping at the list's ends (`nav-wrap` on
+  `.select-list` should do it) are not built or tested either.
+- **Not tested:** the pop-up and the drop-down have never been looked at on a
+  device or in a golden; the inspector golden leaves variants off and did not
+  change. The drop-down's look is `default.css`'s `popup`, `select` and
+  `.select-option` rules, read only through the accent colour in `crcbl-ui`'s
+  inspector test, and the layer is held by draw-list order and clips in
+  `tree::popup_tests`. Also untested: the wheel over a pop-up (`scroll_wheel`
+  walks the layered hit chain), a pop-up nested more than one deep, a pop-up
+  opened from inside a base modal, gamepad input, and the editor's Escape with
+  the unsaved bar up while a drop-down is open (the bar answers Escape through
+  its own binding, outside the tree).
+
 ## What UI rung 8b shipped without (2026-09-16)
 
 `Ui::inspector` landed with the gaps below.
@@ -3892,11 +3968,13 @@ scene menu with the gaps below.
 - **Fixtures outside the corpus**: the four flex fixtures with `<text>` leaves
   and the two unrounded ones.
 - **Not built from the layout subset** (re-checked 2026-09-24): `z-index` and
-  stacking contexts, so paint order is tree order; custom-draw spans, so a span
-  is text or an image and nothing else; and block layout, since `display` takes
-  `flex` or `none` and Taffy's `block_layout` feature stays off until a consumer
-  needs it. The layout subset they belong to is in `docs/notes/tooling.md`
-  (_What the deleted 07-ui-debug plan left behind_).
+  stacking contexts, so paint order is tree order — except that each open pop-up
+  is a layer drawn and hit over the tree (`tree/popup.rs`, 2026-10-03);
+  custom-draw spans, so a span is text or an image and nothing else; and block
+  layout, since `display` takes `flex` or `none` and Taffy's `block_layout`
+  feature stays off until a consumer needs it. The layout subset they belong to
+  is in `docs/notes/tooling.md` (_What the deleted 07-ui-debug plan left
+  behind_).
 - **No sample golden draws a readout panel**: five apps call it and the only one
   with a golden script, shard, has no panel in its frame, so the move is held by
   a unit test that compares the tree's draw list with the old arithmetic float
@@ -12647,9 +12725,9 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
       shipped vocabulary (the offset rule is held by `scene_physics`'s own tests
       on a test component).
   - **Switching an enum's variant (2026-10-03): decisions and what it leaves.**
-    `Reflect::variants`/`set_variant`, `Snapshot`, the inspector's variant strip
-    (`InspectorOptions::variants`) and `EditCommand::SetVariant`; a body's
-    `kind` is switched in its inspector section.
+    `Reflect::variants`/`set_variant`, `Snapshot`, the inspector's variant
+    drop-down (`InspectorOptions::variants`) and `EditCommand::SetVariant`; a
+    body's `kind` is switched in its inspector section.
     - **Decided: a switch makes each field from its type's `Default`**, not from
       a constructor per variant. Every field type in the workspace's derived
       enums already has one, so no attribute is needed; the cost is that
@@ -12671,11 +12749,13 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
       new edit type — `FieldEdit`'s callers are untouched. Both directions of
       `EditCommand::SetVariant` carry a snapshot; it never folds into a
       gesture's entry.
-    - **Decided: a strip of options, not a drop-down.** `crcbl-ui` has no pop-up
-      layer for a list to open over the rows; the strip is the tab strip's shape
-      (`:checked`, focusable, accept picks). A drop-down waits on a pop-up
-      layer, and is worth it when an enum has more variants than a row holds.
-    - **Decided: the strip is opt-in** (`InspectorOptions::variants`, off by
+    - **Decided (revised 2026-10-03): a drop-down, not a strip of options.** The
+      strip (the tab strip's shape) stood in while `crcbl-ui` had no pop-up
+      layer; with one (_What the pop-up layer and `Ui::select` left open_) the
+      picker is a `Ui::select` in the variant row, whose list costs the row
+      nothing however many variants an enum has. Its report and opt-in did not
+      change.
+    - **Decided: the drop-down is opt-in** (`InspectorOptions::variants`, off by
       default), because a caller recording only `Inspection::edits` would be
       handed switches it cannot undo. The editor turns it on; the inspector
       golden (`crates/crcbl/src/screenshot/ui_inspector.rs`) and puppet's panel
@@ -12689,16 +12769,16 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
       the refused write switched away from; `Snapshot::restore` then returns
       that refusal and the leaf keeps its default. Only a mismatched snapshot
       (another type's) reaches the put-back at all; the editor never builds one.
-    - **A variant has no label.** The strip shows each variant's source name;
-      `#[reflect(name = …)]` is read on fields only, and on a variant it is
-      silently accepted and ignored (the helper attribute is declared, and
+    - **A variant has no label.** The drop-down shows each variant's source
+      name; `#[reflect(name = …)]` is read on fields only, and on a variant it
+      is silently accepted and ignored (the helper attribute is declared, and
       `attrs::field` is never called for a variant). A variant label, and
       refusing unknown keys there, go together.
-    - **Not tested:** the strip has never been looked at on a device or in a
-      golden — its look is `default.css`'s `.inspector-variant` rules, read only
-      through the accent colour in `crcbl-ui`'s test. A hand-written `Reflect`
-      enum (none exists) gets the provided `set_variant`, which refuses every
-      name.
+    - **Not tested:** the drop-down has never been looked at on a device or in a
+      golden — its look is `default.css`'s `select` and `.select-option` rules,
+      read only through the accent colour in `crcbl-ui`'s test. A hand-written
+      `Reflect` enum (none exists) gets the provided `set_variant`, which
+      refuses every name.
   - **A module despawning a scene entity** is swept and leaves the outline and
     the picture (both re-read when the world's entity count moves), but its id
     stays in the document's id map until stop, so selecting it shows "no

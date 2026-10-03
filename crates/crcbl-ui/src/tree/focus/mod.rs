@@ -51,7 +51,9 @@
 //! the direction pressed as well, so memory never sends focus backwards. The topmost [`Scope::Modal`] in paint
 //! order traps focus: focus outside it is pulled in, a click outside it
 //! focuses nothing, and no move leaves it. When the modal goes, the landing
-//! rule's history returns focus to what was focused before it opened.
+//! rule's history returns focus to what was focused before it opened. A
+//! pop-up's root is a modal in a layer above the tree, so it is the topmost
+//! while it is open; `popup.rs` has how it hands focus back.
 //!
 //! **An `overflow: scroll` block scrolls the focused node into view**: its
 //! offset moves the least that puts the node's border box inside the block's
@@ -413,7 +415,7 @@ impl Ui {
         self.store
             .iter()
             .filter(|node| node.hittable && node.behavior.scope == Scope::Modal)
-            .max_by_key(|node| node.paint_order)
+            .max_by_key(|node| node.stacking())
             .map(|node| node.key)
     }
 
@@ -456,14 +458,17 @@ impl Ui {
         {
             self.focus.snapshot = None;
         }
-        if self.focus.focused.is_some_and(|key| !self.can_focus(key)) {
-            self.focus.focused = None;
-        }
         if self.focus.engaged.is_some_and(|key| {
             !self.can_focus(key)
                 || self.store.by_key(key).map(|node| node.behavior.role) != Some(Role::Engage)
         }) {
             self.focus.engaged = None;
+        }
+        // Back closes the topmost pop-up before anything reads the modal it
+        // was or the focus it held; see `popup.rs`.
+        let nav = self.back_out_of_popup(nav);
+        if self.focus.focused.is_some_and(|key| !self.can_focus(key)) {
+            self.focus.focused = None;
         }
 
         let modal = self.active_modal();
@@ -606,7 +611,7 @@ impl Ui {
             .store
             .iter()
             .filter(|node| node.interaction.hovered && node.behavior.is_focusable())
-            .max_by_key(|node| node.paint_order)
+            .max_by_key(|node| node.stacking())
             .map(|node| node.key)
             .filter(|&key| usable(self, key));
         let target = from_history

@@ -407,6 +407,17 @@ The rules, each with its _why_:
 - **Widgets are block and span compositions with behaviour, added on demand.**
   Each ships default rules in `default.css` that a game overrides, and a widget
   is added when the editor or a debug tool needs it, never speculatively.
+- **Pop-ups are a layer above the tree** (decided 2026-10-03). Any widget hangs
+  one from a node (`Ui::open_popup`, `Ui::popup`): a root of its own, placed
+  below its anchor — flipped above or shifted to stay in the viewport — clipped
+  to the viewport rather than to anything its anchor is in, drawn after and
+  hit-tested before every lower layer, and a modal focus scope that gives focus
+  back to its anchor when it closes. Back closes the topmost, and **a press
+  outside is spent closing it** rather than reaching what it covered, so
+  dismissing a list never fires the button under it. `Ui::select`, the
+  inspector's variant picker, is its first user; tooltips and context menus are
+  the next, recorded in `docs/backlog.md`. This is not `z-index`: inside the
+  tree paint order is still tree order.
 - **Focus is ordinary interaction state.** One focused element per context, so
   `:focus` styles it and **focus rings are stylesheet-driven**. Interactive
   widgets are focusable by default; containers form scopes — a modal traps

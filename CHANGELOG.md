@@ -606,6 +606,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-ui` has a pop-up layer, and a drop-down built on it.** Any widget
+  hangs a pop-up from a node: `Ui::open_popup` with the node's key, then
+  `Ui::popup` every frame it is open with a closure that builds it (it builds
+  nothing and answers `None` while closed); `Ui::close_popup`,
+  `Ui::is_popup_open` and `Ui::popup_key` round it out. A pop-up is a `popup`
+  block that is a root of its own: placed below its anchor, flipped above it
+  when there is no room below and more above, shifted to stay inside the space
+  `Ui::layout` was given, clipped to that space rather than to anything its
+  anchor is in, and drawn after and hit-tested before the whole tree, each open
+  pop-up a layer over the last. Its root is a modal focus scope, so focus moves
+  into it and stays; back closes the topmost (and `Ui::back_requested` does not
+  report that back), a press outside closes it and is spent there rather than
+  reaching what it covered, and every close gives focus back to the anchor. One
+  the frame does not build closes. `Ui::select(selector, options, &mut chosen)`
+  is a button showing the chosen option that opens the options in a pop-up at
+  least as wide as itself, picked by click or by moves and accept, reporting a
+  pick through `Response::changed`; `default.css` styles `popup`, `select` and
+  its `.select-label`, `.select-caret` (`SELECT_CARET`), `.select-list`,
+  `.select-option` and `.select-option-label` parts, `:open` while the list is.
 - **Towers has a dev fly/walk camera** (`docs/plan/sample/07-towers.md` slice 4,
   `crcbl_towers::dev_camera`). `C` (the `camera` action, in the action map's
   global context, so `bind` moves it) goes from the overhead view to a fly
@@ -672,14 +691,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Snapshot::restore`, `snapshot_path`, `restore_path`), putting the value back
   when a snapshot does not fit; `set_variant_path` switches through a path.
   `crcbl-ui`'s inspector, with `InspectorOptions::variants`, opens an enum's
-  group on a strip of its variants (`.inspector-variants`, one
-  `.inspector-variant` per variant, the active one `:checked`, each focusable
-  and picked by click or accept) and reports a pick as a `VariantEdit` of the
-  enum's path and its `Snapshot` before and after in `Inspection::switches`,
-  made after the frame's field edits. The editor turns on the strip, so a body's
-  `kind` is switched in its inspector section as one undoable
-  `EditCommand::SetVariant`, held to the component's rule like any property
-  write; it saves, reads back and plays as the new kind.
+  group on a `Variant` row holding a drop-down (`Ui::select`, see the pop-up
+  layer below) that shows the active variant and lists every variant in a
+  pop-up, the active one `:checked`, picked by click or accept; it reports a
+  pick as a `VariantEdit` of the enum's path and its `Snapshot` before and after
+  in `Inspection::switches`, made after the frame's field edits. The editor
+  turns on the drop-down, so a body's `kind` is switched in its inspector
+  section as one undoable `EditCommand::SetVariant`, held to the component's
+  rule like any property write; it saves, reads back and plays as the new kind.
 
 - **A `.crpl` replay carries its simulation inputs, and a host re-simulates
   one** (format version 3; see Breaking). The file gains an input section after

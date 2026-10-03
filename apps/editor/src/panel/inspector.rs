@@ -22,8 +22,9 @@
 //! other.
 //!
 //! **An enum offers its variants** ([`InspectorOptions::variants`]): a body's
-//! `kind` opens on a strip of `Dynamic`, `Static` and `Kinematic`, and a pick
-//! is reported as a switch the document records as one undoable command.
+//! `kind` opens on a drop-down whose list holds `Dynamic`, `Static` and
+//! `Kinematic`, and a pick is reported as a switch the document records as one
+//! undoable command.
 //!
 //! **A rotation is drawn as three angles** ([`overrides`]): the quaternion a
 //! `crcbl::registry::Rotation` holds is no row a person can drag, so its row

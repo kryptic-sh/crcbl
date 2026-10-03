@@ -7,6 +7,7 @@ mod dock;
 mod inspector;
 mod list;
 mod outliner;
+mod select;
 mod split;
 mod style;
 mod tabs;

@@ -20,32 +20,54 @@ fn visible(color: [f32; 4]) -> bool {
 
 impl Ui {
     /// Draws the tree [`Ui::layout`] last laid out into `list`: every root in
-    /// build order, each parent before its children.
+    /// build order, each parent before its children, then every node's
+    /// outline; then each open pop-up the same way, lowest first, under the
+    /// viewport's clip (`popup.rs`).
     ///
     /// Clips are pushed and popped in pairs, so `list`'s own clip is what it
     /// was when this returns. The navigation debug overlay follows the tree
     /// when [`Ui::set_nav_debug`] switched it on.
     pub fn emit(&self, list: &mut DrawList) {
+        self.emit_layer(0, list);
+        if !self.popups.is_empty() {
+            let viewport = self.viewport();
+            list.push_clip(viewport.min, viewport.max);
+            for layer in 1..=self.popups.len() {
+                self.emit_layer(layer, list);
+            }
+            list.pop_clip()
+                .expect("the clip pushed above is still on the stack");
+        }
+        self.emit_nav_debug(list);
+    }
+
+    /// Draws the roots of `layer` and their subtrees, then their outlines.
+    fn emit_layer(&self, layer: usize, list: &mut DrawList) {
+        let in_layer = |node: &super::FrameNode| {
+            let stored = self.store.get(node.slot);
+            stored.layer == layer && stored.hittable
+        };
+        // A root that is not hittable is one `display: none` hides, which
+        // draws nothing, or a pop-up's that has closed since layout.
         for (index, node) in self.nodes.iter().enumerate() {
-            if node.parent.is_none() {
+            if node.parent.is_none() && in_layer(node) {
                 self.emit_node(index, list);
             }
         }
-        // Outlines after the whole tree, as a browser paints them in a later
+        // Outlines after the whole layer, as a browser paints them in a later
         // phase: a focus ring a later sibling covered would show focus on
         // nothing. Each is still clipped as its node was.
         for node in &self.nodes {
-            let stored = self.store.get(node.slot);
-            if !stored.hittable || !has_outline(&node.style) {
+            if !in_layer(node) || !has_outline(&node.style) {
                 continue;
             }
+            let stored = self.store.get(node.slot);
             let (min, max) = stored.rect;
             list.push_clip(stored.clip.min, stored.clip.max);
             paint_outline(list, &node.style, min, max);
             list.pop_clip()
                 .expect("the clip pushed above is still on the stack");
         }
-        self.emit_nav_debug(list);
     }
 
     fn emit_node(&self, index: usize, list: &mut DrawList) {

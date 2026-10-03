@@ -1,4 +1,4 @@
-//! A body's kind switched by clicking its variant strip in the inspector: the
+//! A body's kind switched through its variant drop-down in the inspector: the
 //! panel offers the variants, and a pick lands in the log as one command.
 
 use super::*;
@@ -43,11 +43,19 @@ fn kind(page: &mut Page) -> BodyKind {
         .kind
 }
 
-/// **Clicking `Static` in a body's variant strip switches its kind as one
-/// undoable entry**: the group opens on the strip, the click is one command,
-/// the next frame's header names the new kind, and undo and redo walk it.
+/// The node holding `text` in the drop-down list hanging from `select`.
+fn in_list(page: &Page, select: NodeKey, text: &str) -> NodeKey {
+    let ui = page.panels.ui();
+    holder_of(ui, Ui::popup_key(select), text)
+        .unwrap_or_else(|| panic!("the drop-down's list shows no {text:?}"))
+}
+
+/// **Picking `Static` in a body's variant drop-down switches its kind as one
+/// undoable entry**: the group opens on the drop-down showing the kind, a
+/// click opens its list of every kind, the click on one is one command, the
+/// next frame's header names the new kind, and undo and redo walk it.
 #[test]
-fn clicking_a_bodys_kind_in_the_strip_switches_it_as_one_undo() {
+fn picking_a_bodys_kind_in_the_drop_down_switches_it_as_one_undo() {
     let mut page = Page::over(falling());
     page.document.select(Some(FALLING));
     page.idle();
@@ -57,12 +65,18 @@ fn clicking_a_bodys_kind_in_the_strip_switches_it_as_one_undo() {
     let header = in_body_section(&page, "Kind: Dynamic");
     let at = page.centre(header);
     page.click(at);
+    let select = in_body_section(&page, "Dynamic");
+    let at = page.centre(select);
+    page.click(at);
     for variant in ["Dynamic", "Static", "Kinematic"] {
-        in_body_section(&page, variant);
+        in_list(&page, select, variant);
     }
-    assert!(page.document.log().is_empty(), "opening the group edited");
+    assert!(
+        page.document.log().is_empty(),
+        "opening the drop-down edited"
+    );
 
-    let option = in_body_section(&page, "Static");
+    let option = in_list(&page, select, "Static");
     let at = page.centre(option);
     page.click(at);
     assert_eq!(kind(&mut page), BodyKind::Static);
