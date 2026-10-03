@@ -87,13 +87,12 @@ pub struct Document {
     /// [`Entity`]s for [`EditCommand`]'s reason: they are what survives a
     /// reload.
     selection: Vec<SceneEntityId>,
+    /// The history, which also remembers the entry the document was last
+    /// written at ([`UndoLog::mark_saved`]): its empty state for one loaded
+    /// and not saved, so a document nobody has edited opens clean, and nothing
+    /// for a recovery copy read back, whose edits are saved nowhere until it
+    /// is written somewhere ([`Document::open_recovery`]).
     log: UndoLog,
-    /// The log position the document was last written at. `0` for one that has
-    /// been loaded and not saved, which is also where a fresh log stands — so a
-    /// document nobody has edited opens clean. [`None`] for a recovery copy
-    /// read back, whose edits are saved nowhere until it is written somewhere
-    /// ([`Document::open_recovery`]).
-    saved_at: Option<usize>,
     /// The recovery copy this document was read back from, until the caller
     /// takes it to remove once a save-as has put the scene somewhere of its
     /// own — see [`Document::take_recovered`]. [`None`] for anything else.
@@ -525,7 +524,6 @@ impl Document {
             registry,
             selection: Vec::new(),
             log: UndoLog::new(),
-            saved_at: Some(0),
             recovered: None,
             recorded_origin: None,
             recovery_notes: Vec::new(),
@@ -541,6 +539,7 @@ impl Document {
             mesh_problems: Vec::new(),
             measures: 0,
         };
+        document.log.mark_saved();
         document.resolve_meshes();
         Ok(document)
     }
@@ -1134,14 +1133,13 @@ impl Document {
 
     /// Whether there are edits the document has not been saved at.
     ///
-    /// The log's position against the position of the last save — so undoing
-    /// back to a saved state is clean, and redoing away from it is dirty again.
+    /// Whether the log stands off the entry the last save was taken at
+    /// ([`UndoLog::is_saved`]) — so undoing back to a saved state is clean,
+    /// redoing away from it is dirty again, and an edit that drops the saved
+    /// entry is dirty until the next save, wherever the log then stands.
     #[must_use]
-    pub const fn is_dirty(&self) -> bool {
-        match self.saved_at {
-            Some(at) => self.log.position() != at,
-            None => true,
-        }
+    pub fn is_dirty(&self) -> bool {
+        !self.log.is_saved()
     }
 
     /// The title bar text: the scene's name with a marker while
@@ -1236,11 +1234,7 @@ impl Document {
         if own {
             ownership::remove_unwritten(&storage, &mut self.owned, &files)?;
         }
-        self.saved_at = Some(self.log.position());
-        // A drag carried on past the save writes an entry of its own, so the
-        // document is dirty again rather than folding the change into the
-        // entry the save stands on.
-        self.log.seal();
+        self.log.mark_saved();
         Ok(files.into_keys().collect())
     }
 
@@ -1657,6 +1651,9 @@ pub fn asset_root(scene: &Path) -> PathBuf {
         .find(|dir| dir.join(PROJECT_MARKER).is_file())
         .map_or(holding.clone(), Path::to_path_buf)
 }
+
+#[cfg(test)]
+mod dirty_tests;
 
 #[cfg(test)]
 mod entity_tests;

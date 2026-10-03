@@ -111,6 +111,9 @@ pub(super) enum Op {
     /// history — every listing but [`Op::List`]'s fills the system it lists —
     /// so a draw over every system would almost never unlist one.
     Unlist { system: Index, empty: bool },
+    /// A save, into a directory of its own: `Document::save_to`, which marks
+    /// the entry the log stands on as the saved one.
+    Save,
     /// Ctrl+Z.
     Undo,
     /// Ctrl+Y.
@@ -247,6 +250,7 @@ pub(super) fn op() -> impl Strategy<Value = Op> {
         1 => (any::<Index>(), proptest::bool::weighted(0.8))
             .prop_map(|(system, empty)| Op::Unlist { system, empty })
             .boxed(),
+        1 => Just(Op::Save).boxed(),
         3 => Just(Op::Undo).boxed(),
         2 => Just(Op::Redo).boxed(),
     ]
@@ -334,6 +338,7 @@ impl Op {
             Self::Detach { .. } => "detach",
             Self::List { .. } => "list a system",
             Self::Unlist { .. } => "unlist a system",
+            Self::Save => "save",
             Self::Undo => "undo",
             Self::Redo => "redo",
         }
@@ -341,7 +346,7 @@ impl Op {
 }
 
 /// Every step's [`Op::name`] — what the test asserts some history accepted.
-pub(super) const EVERY_OP: [&str; 21] = [
+pub(super) const EVERY_OP: [&str; 22] = [
     "property set",
     "inspector edit",
     "field paste",
@@ -361,6 +366,7 @@ pub(super) const EVERY_OP: [&str; 21] = [
     "detach",
     "list a system",
     "unlist a system",
+    "save",
     "undo",
     "redo",
 ];

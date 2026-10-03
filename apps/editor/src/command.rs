@@ -119,9 +119,10 @@
 //! The plan's task 4 lists about ten commands for the MVP. One waits on
 //! something outside this crate, and an arm nothing could apply would be an
 //! inverse nothing could show was right: **scene load and save markers** — the
-//! log's position against the position of the last save already is the dirty
-//! marker, and a load replaces the document and its log wholesale, so there is
-//! nothing in between for a marker entry to mean yet.
+//! log already remembers which entry the last save was taken at, which is the
+//! dirty marker ([`UndoLog::is_saved`]), and a load replaces the document and
+//! its log wholesale, so there is nothing in between for a marker entry to mean
+//! yet.
 //!
 //! A **transform** command is not a second variant either, and that is not an
 //! omission: a brick's placement *is* `position`, a field its `#[derive(Reflect)]`
@@ -362,9 +363,22 @@ pub fn set_variant(
 /// future. The next entry pushed drops them for good: only the entry on top,
 /// still open to its gesture, can go.
 ///
-/// It is also the whole of the dirty marker: [`crate::Document`] remembers the
-/// position it last saved at, so undoing back to it is clean again. A flag
-/// would say "dirty" forever.
+/// # The saved state is an entry, not a position
+///
+/// The log is also the whole of the dirty marker: [`mark_saved`](Self::mark_saved)
+/// remembers **which entry** the log stood on when the document was written,
+/// and [`is_saved`](Self::is_saved) is whether it stands on that entry now — so
+/// undoing back to it is clean again, where a flag would say "dirty" forever.
+///
+/// **Not the position** (decided 2026-10-03): save at 2, undo to 1 and make
+/// another edit, and the log is at 2 again on an entry the file never held. So
+/// every entry pushed takes an id no other entry of the log has had, and the
+/// save records the id of the entry on top of the applied ones — or the id of
+/// no entry at all, for a save at the bottom of the log. Once a push drops the
+/// entry a save names, nothing can stand on it again and the document reads
+/// dirty until the next save; while a gesture holds it aside (above) it is not
+/// gone, and a gesture that nets to nothing puts it back where a redo reaches
+/// it, clean again.
 ///
 /// # A gesture is one entry
 ///
@@ -389,11 +403,27 @@ pub struct UndoLog {
     /// pushed, put back if that entry nets to nothing — see [`UndoLog`]'s
     /// _Position_. Replaced by every push.
     held: Vec<Entry>,
+    /// How many entries have ever been pushed, which is also the id of the
+    /// newest: ids start past [`ORIGIN`] and are never reused, so an entry
+    /// dropped is one no later entry can be mistaken for.
+    pushed: u64,
+    /// The id of the entry the last save was taken at — [`ORIGIN`] for one
+    /// with no entry applied — or [`None`] for a log no save has marked. See
+    /// [`UndoLog`]'s _The saved state is an entry_.
+    saved: Option<u64>,
 }
+
+/// The id [`UndoLog`] stands on with no entry applied — the state the document
+/// opened in, which no push can drop.
+const ORIGIN: u64 = 0;
 
 /// One applied command and the command that puts it back.
 #[derive(Debug)]
 struct Entry {
+    /// Which push made it — see [`UndoLog`]'s _The saved state is an entry_.
+    /// A gesture folding into the entry keeps it: only a sealed entry can be
+    /// saved at, and nothing folds into one.
+    id: u64,
     done: EditCommand,
     undo: EditCommand,
     /// The gesture this entry is still open to, or [`None`] once nothing more
@@ -410,7 +440,8 @@ struct Entry {
 pub struct Gesture(pub u64);
 
 impl UndoLog {
-    /// An empty log, standing at position 0.
+    /// An empty log, standing at position 0, that no save has marked — so
+    /// [`is_saved`](Self::is_saved) is false until [`mark_saved`](Self::mark_saved).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -465,6 +496,32 @@ impl UndoLog {
         }
     }
 
+    /// Marks the state the log stands at as the one the document was just
+    /// written as, and [seals](Self::seal) the entry it stands on: a drag
+    /// carried on past the save writes an entry of its own, so the document is
+    /// dirty again rather than the change folding into the entry the file
+    /// holds.
+    pub fn mark_saved(&mut self) {
+        self.saved = Some(self.standing());
+        self.seal();
+    }
+
+    /// Whether the log stands on the state [`mark_saved`](Self::mark_saved)
+    /// last marked — false once that entry has been dropped, and for a log
+    /// never marked. See [`UndoLog`]'s _The saved state is an entry_.
+    #[must_use]
+    pub fn is_saved(&self) -> bool {
+        self.saved == Some(self.standing())
+    }
+
+    /// The id of the entry on top of the applied ones, or [`ORIGIN`] with none
+    /// applied.
+    fn standing(&self) -> u64 {
+        self.entries[..self.position]
+            .last()
+            .map_or(ORIGIN, |entry| entry.id)
+    }
+
     fn push(&mut self, done: EditCommand, undo: EditCommand, gesture: Option<Gesture>) {
         let truncated = self.entries.split_off(self.position);
         self.held = if gesture.is_some() {
@@ -472,7 +529,9 @@ impl UndoLog {
         } else {
             Vec::new()
         };
+        self.pushed += 1;
         self.entries.push(Entry {
+            id: self.pushed,
             done,
             undo,
             gesture,

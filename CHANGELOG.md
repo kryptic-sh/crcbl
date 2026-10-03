@@ -3114,17 +3114,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   picks one by ray through `PhysicsSystem::cast_ray`, draws its bounds through
   the debug-draw layer, nudges it with the arrow keys and Page Up/Down, walks
   the history with Ctrl+Z and Ctrl+Y, and writes the scene back with Ctrl+S,
-  with a `*` in the window title while there are unsaved edits. With no argument
-  it opens the greybox scene compiled into the binary.
+  with a `*` in the window title while there are unsaved edits — gone again on
+  an undo or redo back to the state last saved, and kept by an edit that
+  replaces the entry the save was taken at until the next save, however the log
+  is then walked. With no argument it opens the greybox scene compiled into the
+  binary.
 - **`crcbl_editor::EditCommand` and `UndoLog` are the whole edit vocabulary,
   from day one.** A command carries a `SceneEntityId`, a dotted `crcbl::reflect`
   path and the new `Value`; applying one hands back the inverse carrying the
   value it replaced, so an undo restores the bits that were there rather than a
-  value recomputed from a rule. Nothing writes a component field at a call site,
-  which is what the 2026-09-16 decision buys: a transport later gains a carrier,
-  not a vocabulary. `crcbl_editor::Document` holds the scene, the world, the
-  selection, the log and the save with no device, so every claim about them is
-  held headlessly.
+  value recomputed from a rule. `UndoLog::mark_saved` records which entry a save
+  was taken at, by an id no other entry has had, and `UndoLog::is_saved` —
+  whether the log stands on it — is the dirty marker; a gesture that nets to
+  nothing puts a saved entry it held aside back. Nothing writes a component
+  field at a call site, which is what the 2026-09-16 decision buys: a transport
+  later gains a carrier, not a vocabulary. `crcbl_editor::Document` holds the
+  scene, the world, the selection, the log and the save with no device, so every
+  claim about them is held headlessly.
 - **`crcbl::render::Camera::ray_through` and `ViewRay`**: the world-space ray
   through a viewport pixel, and the inverse of `Camera::depth_of`. `(0, 0)` is
   the window's top-left with `y` growing downward, the ray begins on the near

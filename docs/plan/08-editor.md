@@ -242,7 +242,7 @@ of the same day (below).
   (`EditError::TickRate`) and restored first.
 - **Pause** (F6) stops the ticks and banks no time; resume picks up from there.
   **Stop** (F5 again) loads the snapshot back through `Document::open`'s own
-  load into a fresh world. The undo log, the saved position and the gesture
+  load into a fresh world. The undo log, the save it marks and the gesture
   counter are untouched, the selection is kept when its entity is there, and
   `IdMap::reserve` carries the id map's high-water mark across — the files spell
   the ids a scene holds, not the id of a copy the log deleted, which a reloaded
@@ -1232,16 +1232,19 @@ is a `proptest` property over random histories of every edit, replacing
   under one gesture, an arrow-key nudge and a translate drag of one or two
   entities (`apply_in`, one gesture), a turn and a scale as the gizmos' batches,
   F2's `rename`, delete, duplicate and copy-and-paste of a selection, a garbled
-  paste, a mesh drop, attach and detach, `ListSystem` and `UnlistSystem`, undo
-  and redo. Targets include an id nobody holds and systems that do not hold the
+  paste, a mesh drop, attach and detach, `ListSystem` and `UnlistSystem`, a save
+  (into a directory of its own, since the document has no origin), undo and
+  redo. Targets include an id nobody holds and systems that do not hold the
   entity; values include other kinds, non-finite floats, magnitudes no `f32`
   holds and texts `check_asset` refuses.
 - **What each history checks**: a refused step changed nothing and recorded
   nothing; an accepted one recorded exactly one entry, dropping any redo above
   it; every undo and redo, interleaved anywhere, lands on the state recorded at
-  the position it moved to; the selection names only held entities and the dirty
-  marker follows the position; then the whole log undone to the opening state
-  and redone to the top, every step checked.
+  the position it moved to; the selection names only held entities; the document
+  is clean exactly when the log stands on the state the last save was taken at,
+  while the log still holds it, and a clean document holds the state that save
+  wrote; then the whole log undone to the opening state and redone to the top,
+  every step checked.
 - **What the run checks**, so it cannot pass by doing nothing: every
   `EditCommand` variant was recorded (`variant` is a match with no wildcard, so
   a new variant does not compile until it is named, and naming it fails the run
@@ -1250,9 +1253,9 @@ is a `proptest` property over random histories of every edit, replacing
   whose leaves change part-way, a drag that ends where it began — once with redo
   above it, whose depth it must leave alone — listing drops and attaches, an
   unlisting from the manifest's middle, a name, an edit dropping redo, a refusal
-  with redo above it), something was refused, and at least
-  `LEAST_ACCEPTED_PERCENT` of the edits played were accepted. A run is `CASES`
-  histories of up to `MAX_STEPS` steps.
+  with redo above it, an edit dropping the saved state), something was refused,
+  and at least `LEAST_ACCEPTED_PERCENT` of the edits played were accepted. A run
+  is `CASES` histories of up to `MAX_STEPS` steps.
 - **What "state" is** (`undo_property_tests::state::State`): `Document::files` —
   the manifest in order, `names.ron`, every listed chunk, byte-identical for
   equal scenes — plus, per id, every registered system's row (listed or not) and
@@ -1290,10 +1293,11 @@ is a `proptest` property over random histories of every edit, replacing
   from the played steps failed the run's command coverage, and raising the
   accepted share to ninety percent failed its acceptance check.
 - **Not covered**: play mode (every edit is refused in it, `play_tests`), a save
-  between edits (which seals the entry on top), the inspector's widgets
-  themselves — its steps report edits to `record_edits` directly, so
-  `FieldRow::set`'s reporting is the panel tests' to hold — the rotation row
-  reporting four leaves to one `record_edits`. `docs/backlog.md` has them.
+  into the document's own directory (a copy marks the log the same way), the
+  inspector's widgets themselves — its steps report edits to `record_edits`
+  directly, so `FieldRow::set`'s reporting is the panel tests' to hold — the
+  rotation row reporting four leaves to one `record_edits`. `docs/backlog.md`
+  has them.
 - **Decided 2026-10-03, for the long term: one gesture is one undo entry.**
   `UndoLog::record_in` merges a gesture's writes whatever leaves each names,
   keeping per leaf the earliest value from before the gesture wrote it and the
@@ -1322,6 +1326,33 @@ is a `proptest` property over random histories of every edit, replacing
   removing the restore turned the first and the property test red (its shrunk
   case — delete, undo, a drag of offset zero — is committed in
   `proptest-regressions/`), and not truncating at all turned the second.
+- **Decided 2026-10-03, for the long term: the saved state is the entry the save
+  was taken at, not the log's position.** The dirty marker compared positions,
+  so save at 2, undo to 1 and another edit stood at 2 again on an entry the file
+  never held and read clean — the title without its `*`, and no autosave of the
+  change. Now every entry `UndoLog::push` makes takes an id no other entry of
+  the log has had (`pushed`, counting from past `ORIGIN`, the id of the empty
+  state), `UndoLog::mark_saved` records the id of the entry on top of the
+  applied ones, and `Document::is_dirty` is `!UndoLog::is_saved()`, whether the
+  log stands on that id. Once a push drops the saved entry nothing can stand on
+  it again, so the document reads dirty until the next save — every editor's
+  rule; entries a gesture holds aside keep their ids, so a drag back to its
+  start puts the saved entry back where a redo reaches it, clean. Chosen over
+  clearing a saved position when a push truncates past it: an id needs no check
+  at truncation and none in the held-entry path, so no later way of dropping an
+  entry can forget one. A log no save has marked reads dirty, which is a
+  recovery copy read back. The property test gained a save step and a check of
+  the marker against its model: the old position-only check shrank to an
+  inspector drag, a save, an undo and a nudge, read clean at the nudge
+  (committed in `proptest-regressions/`). `document::dirty_tests` holds the
+  reported sequence, a redo onto the saved entry and a drag back to its start
+  keeping it, and
+  `app::tests::recovery::an_undo_to_the_saved_state_removes_the_autosave_and_a_replacing_edit_writes_one`
+  the autosave both ways. The position-only check turned the reported-sequence
+  test, the recovery test and the property test red; re-issuing ids to restored
+  entries the drag test and the property test; forgetting the save on an undo
+  below it the redo test, the drag test and the property test; keeping the
+  autosave when clean the recovery test.
 
 **Switching a body's kind in the inspector landed 2026-10-03**, closing the item
 slice 12 left (a `kind` shown and edited only in the file).

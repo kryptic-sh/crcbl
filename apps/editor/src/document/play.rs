@@ -28,8 +28,8 @@
 //!
 //! # What survives a play
 //!
-//! Everything about the document that is not the world: the undo log, the
-//! saved position, the gesture counter and the origin. The log can survive
+//! Everything about the document that is not the world: the undo log and the
+//! save it marks, the gesture counter and the origin. The log can survive
 //! because the restored scene **is** the pre-play scene — every entity under
 //! the [`SceneEntityId`] the save wrote it with — and because the id map's
 //! high-water mark is carried across with
@@ -470,8 +470,8 @@ impl Document {
     /// Ends play mode, putting the scene back exactly as it stood when play
     /// began. Returns whether there was a play to stop.
     ///
-    /// See the module docs for what survives: the log, the saved position and
-    /// the selection, less any entity no longer there.
+    /// See the module docs for what survives: the log and the save it marks,
+    /// and the selection, less any entity no longer there.
     ///
     /// # Errors
     ///

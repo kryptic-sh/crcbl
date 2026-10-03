@@ -39,6 +39,7 @@ use crcbl::store::{NativeStorage, StorageSource};
 
 use super::origin::AssetRoot;
 use super::{Document, EditError};
+use crate::command::UndoLog;
 
 mod copies;
 mod sidecar;
@@ -136,7 +137,8 @@ impl Document {
     pub fn open_recovery(dir: &Path, registry: Registry) -> Result<Self, EditError> {
         let source = crcbl::assets::DirSource::at(dir.to_path_buf());
         let mut document = Self::open(&source, Path::new(""), registry)?;
-        document.saved_at = None;
+        // A log no save has marked, so the copy reads dirty from the start.
+        document.log = UndoLog::new();
         document.recovered = Some(dir.to_path_buf());
         let (home, notes) = sidecar::read(dir);
         if let Some(root) = home.assets {

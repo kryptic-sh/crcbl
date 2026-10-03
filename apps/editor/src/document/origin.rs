@@ -100,7 +100,7 @@ impl Document {
         self.ids = ids;
         self.selection.clear();
         self.log = UndoLog::new();
-        self.saved_at = Some(0);
+        self.log.mark_saved();
         self.recovered = None;
         self.recorded_origin = None;
         self.origin = None;

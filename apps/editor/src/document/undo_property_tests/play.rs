@@ -44,6 +44,9 @@ pub(super) enum Outcome {
     Walked,
     /// An undo at the bottom of the log, or a redo at the top.
     AtEnd,
+    /// A save: the state the log stands at marked saved, nothing changed or
+    /// recorded.
+    Saved,
 }
 
 /// Facts about the steps played that the test asserts some history reached,
@@ -56,7 +59,9 @@ pub(super) type Reached = Vec<&'static str>;
 /// # Panics
 ///
 /// If an undo or a redo is refused: every entry the log holds was applied
-/// once and walked back in order, so its inverse must apply.
+/// once and walked back in order, so its inverse must apply. If a save is
+/// refused: every entity is filed under an id and each save has an empty
+/// directory of its own, so it must write.
 pub(super) fn play(document: &mut Document, op: &Op, reached: &mut Reached) -> Outcome {
     match op {
         Op::Write {
@@ -187,6 +192,15 @@ pub(super) fn play(document: &mut Document, op: &Op, reached: &mut Reached) -> O
             accepted(document.apply(EditCommand::ListSystem { system, at }))
         }
         Op::Unlist { system, empty } => unlist(document, system, *empty, reached),
+        Op::Save => {
+            // A directory per save: the document has no origin, so a save is a
+            // copy, which refuses a directory already holding the scene.
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            document
+                .save_to(dir.path())
+                .expect("the authored scene saves into an empty directory");
+            Outcome::Saved
+        }
         Op::Undo => walked(document.undo().expect("an entry's inverse applies")),
         Op::Redo => walked(document.redo().expect("an entry applies again")),
     }

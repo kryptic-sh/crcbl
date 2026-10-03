@@ -7,8 +7,9 @@
 //! (`play::play`), so a step the document refuses is refused here too and
 //! counted, not skipped: a history that only ever had its edits refused would
 //! otherwise pass by walking nothing. [`walk`] holds a model of the history
-//! beside the document — every state the log has stood at, and where it
-//! stands — and checks after each step:
+//! beside the document — every state the log has stood at, where it stands,
+//! and which of those states the last save was taken at while the log still
+//! holds it — and checks after each step:
 //!
 //! - a refused step changed nothing and recorded nothing;
 //! - an accepted step recorded exactly one entry, dropping any redo above it —
@@ -17,8 +18,18 @@
 //!   and whose redo above it must still be there, as deep and as exact;
 //! - an undo or a redo landed on exactly the state recorded at the position
 //!   it moved to;
-//! - the selection names only entities the document holds, and the document
-//!   is dirty exactly when the log is off the position it opened at.
+//! - the selection names only entities the document holds;
+//! - the document is clean exactly when the log stands on the state the last
+//!   save was taken at — the one it opened in until the first save — which an
+//!   edit dropping that state's entry makes impossible until the next save,
+//!   and a drag back to its start does not; and a clean document holds
+//!   exactly the state that save wrote.
+//!
+//! That last check is not "dirty exactly when the state differs from the
+//! saved one": an edit and a second one putting it back are two entries the
+//! file never stood on, and read dirty though the state is the saved one —
+//! the decision of 2026-10-03, `docs/plan/08-editor.md`. Clean implies the
+//! saved state, which is what a position-only marker breaks.
 //!
 //! After the last step the whole log is undone, each step down checked, to
 //! the state it opened in; then redone to the top, each step up checked. What
@@ -26,10 +37,9 @@
 //! every registered system and its collider — which says what it covers.
 //!
 //! **Not covered**: play mode (every edit is refused in it, which
-//! `play_tests` holds), a save between edits (which seals the entry on top,
-//! `the_dirty_marker_follows_the_logs_position` and
-//! `a_drag_carried_past_a_save_is_dirty_again` hold), and a mesh's measured
-//! box beyond the collider it builds.
+//! `play_tests` holds), a save into the document's own directory (each save
+//! here is a copy into a directory of its own, which marks the log the same
+//! way), and a mesh's measured box beyond the collider it builds.
 
 mod ops;
 mod play;
@@ -76,7 +86,7 @@ struct Tally {
 
 /// The facts [`Tally::reached`] must hold — each a shape of edit whose undo
 /// has its own way to go wrong.
-const MUST_REACH: [&str; 15] = [
+const MUST_REACH: [&str; 16] = [
     "a gesture of several writes",
     "a drag whose leaves change part-way",
     "a gesture that ended where it began",
@@ -92,6 +102,7 @@ const MUST_REACH: [&str; 15] = [
     "a state holding a name",
     "an edit dropping the redo above it",
     "a refusal with redo above it",
+    "an edit dropping the saved state",
 ];
 
 /// **The exit criterion.** See the module docs for what each history checks;
@@ -121,9 +132,12 @@ fn random_histories_walk_back_through_every_state() {
 fn walk(steps: &[Op], tally: &RefCell<Tally>) -> TestCaseResult {
     let mut document = two_systems();
     document.set_assets(Box::new(assets()));
+    let opened = State::of(&mut document);
     let mut history = History {
-        states: vec![State::of(&mut document)],
+        states: vec![opened.clone()],
         position: 0,
+        saved: Some(0),
+        saved_state: opened,
     };
     for (index, op) in steps.iter().enumerate() {
         let top = history.states.len() - 1;
@@ -167,6 +181,10 @@ fn walk(steps: &[Op], tally: &RefCell<Tally>) -> TestCaseResult {
                 if history.position < top {
                     tally.note("an edit dropping the redo above it");
                 }
+                if history.saved.is_some_and(|at| at > history.position) {
+                    tally.note("an edit dropping the saved state");
+                    history.saved = None;
+                }
                 history.states.truncate(history.position + 1);
                 let now = State::of(&mut document);
                 if now.has_names() {
@@ -195,6 +213,10 @@ fn walk(steps: &[Op], tally: &RefCell<Tally>) -> TestCaseResult {
                     tally.note("a refusal with redo above it");
                 }
             }
+            Outcome::Saved => {
+                history.saved = Some(history.position);
+                history.saved_state = State::of(&mut document);
+            }
             Outcome::Unchanged | Outcome::Skipped => {}
         }
         drop(tally);
@@ -221,10 +243,19 @@ fn walk(steps: &[Op], tally: &RefCell<Tally>) -> TestCaseResult {
 }
 
 /// The model of a document's history: the state at every position the log
-/// holds — the state it opened in first — and the position it stands at.
+/// holds — the state it opened in first — the position it stands at, and the
+/// position of the state the last save was taken at.
 struct History {
     states: Vec<State>,
     position: usize,
+    /// Where in [`states`](Self::states) the last save was taken — `0`, the
+    /// state the document opened in, before any — or [`None`] once an edit
+    /// has dropped that state's entry.
+    saved: Option<usize>,
+    /// What the last save wrote, read when it was taken rather than from
+    /// [`states`](Self::states), so a clean document is held to it whatever
+    /// the model says.
+    saved_state: State,
 }
 
 impl History {
@@ -245,9 +276,10 @@ impl History {
         );
         prop_assert_eq!(
             document.is_dirty(),
-            self.position != 0,
-            "{}: the dirty marker",
-            at
+            self.saved != Some(self.position),
+            "{}: the dirty marker, the last save at {:?}",
+            at,
+            self.saved
         );
         let selection = document.selection().to_vec();
         for (index, id) in selection.iter().enumerate() {
@@ -260,6 +292,12 @@ impl History {
             );
         }
         let now = State::of(document);
+        if !document.is_dirty() && now != self.saved_state {
+            return Err(TestCaseError::fail(format!(
+                "{at}: clean, and the state is not the one last saved:\n{}",
+                now.difference(&self.saved_state),
+            )));
+        }
         let expected = &self.states[self.position];
         if now != *expected {
             return Err(TestCaseError::fail(format!(
@@ -344,7 +382,9 @@ impl Tally {
                 .unwrap_or(0)
         };
         for name in EVERY_OP {
-            let moved = count(name, Outcome::Recorded) + count(name, Outcome::Walked);
+            let moved = count(name, Outcome::Recorded)
+                + count(name, Outcome::Walked)
+                + count(name, Outcome::Saved);
             assert!(moved > 0, "no history had a {name} accepted");
         }
         for fact in MUST_REACH {
@@ -355,14 +395,14 @@ impl Tally {
         }
         let (mut accepted, mut refused, mut played) = (0, 0, 0);
         for (name, outcomes) in &self.outcomes {
-            if matches!(*name, "undo" | "redo") {
+            if matches!(*name, "undo" | "redo" | "save") {
                 continue;
             }
             for (outcome, count) in outcomes {
                 match outcome {
                     Outcome::Recorded | Outcome::Unchanged => accepted += count,
                     Outcome::Refused => refused += count,
-                    Outcome::Skipped | Outcome::Walked | Outcome::AtEnd => {}
+                    Outcome::Skipped | Outcome::Walked | Outcome::AtEnd | Outcome::Saved => {}
                 }
                 played += count;
             }

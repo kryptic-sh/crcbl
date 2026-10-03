@@ -419,6 +419,58 @@ fn a_clean_save_and_a_discard_remove_the_sessions_autosave() {
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 
+/// **An undo back to the saved state removes the session's autosave, and
+/// an edit replacing the saved entry is autosaved** — the second is the
+/// 2026-10-03 regression: the log back at the saved position on an entry
+/// the file never held read clean, so the edit was never autosaved.
+#[test]
+fn an_undo_to_the_saved_state_removes_the_autosave_and_a_replacing_edit_writes_one() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let scenes = tempfile::tempdir().expect("a temporary directory");
+    let mut editor = recovering(base.path(), 256);
+    editor
+        .document_mut()
+        .save_as(scenes.path().join("greybox.scn"))
+        .expect("a fresh directory");
+    on_test_clock(&mut editor);
+
+    edit(&mut editor);
+    frames(&mut editor, interval_frames());
+    let slot = editor.autosave.slot.clone().expect("an autosave");
+    editor.act(&Action::Undo);
+    assert!(
+        !editor.document().is_dirty(),
+        "the undo is not the saved state"
+    );
+    frames(&mut editor, 1);
+    assert!(
+        !slot.exists(),
+        "an undo to the saved state left the autosave"
+    );
+    assert_eq!(editor.autosave.slot, None);
+
+    edit(&mut editor);
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyS);
+    editor.act(&Action::Undo);
+    editor.act(&Action::Nudge { axis: 1, sign: 1.0 });
+    assert!(
+        editor.document().is_dirty(),
+        "an edit replacing the saved entry reads clean"
+    );
+    frames(&mut editor, interval_frames());
+    let slot = editor
+        .autosave
+        .slot
+        .clone()
+        .expect("the edit replacing the saved entry was not autosaved");
+    let edited = editor.document_mut().files().expect("ids");
+    assert_eq!(
+        tree(&slot)["sys/blocks.ron"],
+        edited["sys/blocks.ron"].as_bytes()
+    );
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
 /// **The help text states what the constants hold**, so a change to one is
 /// a change to the other. Its words, read with every run of whitespace as one
 /// space, so a rewrapped paragraph still matches.

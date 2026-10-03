@@ -12324,16 +12324,20 @@ says what that cleared and what it did not. The allow-list entry in
     the redo above it** — the entries its first write truncated are held
     (`UndoLog::held`) and put back when its entry goes; `08-editor.md` has why
     that form and not holding the first write aside.
-  - **An edit that replaces the saved entry reads clean** (found 2026-10-03,
-    confirmed by a scratch test, not fixed): save at position 2, undo to 1,
-    apply any other edit — the log is at 2 again, `Document::is_dirty` compares
-    positions only, and the title loses its `*` while the scene differs from the
-    file. Any truncation past `saved_at` does it, a gesture's first write
-    included. A fix sets `saved_at` to `None` (dirty until saved) when a push
-    truncates the entry it names; `UndoLog` would have to report that, or
-    `Document` compare `saved_at` with the position before recording. The
-    property test has no save step, so it cannot see this. Out of scope for the
-    redo fix that found it; a decision only on where the check lives.
+  - **Decided 2026-10-03, for the long term: the saved state is the entry the
+    save was taken at, not a position.** Every entry `UndoLog::push` makes takes
+    an id never reused (`UndoLog`'s `pushed`, starting past `ORIGIN`, the empty
+    state's id); `UndoLog::mark_saved` records the id the log stands on and
+    `UndoLog::is_saved` compares it, which is all `Document::is_dirty` asks. An
+    edit that drops the saved entry is dirty until the next save however the log
+    is walked; a drag back to its start restores held entries with their ids, so
+    the saved one is reachable again. It replaced a position compare that read
+    clean after save, undo, another edit. `08-editor.md` has the alternative
+    declined. **Behaviour that is not a bug**: an edit and a second edit putting
+    it back read dirty though the scene equals the file — two entries the file
+    never stood on — so the property test asserts "clean exactly on the saved
+    entry, and clean implies the saved state", not "dirty exactly when the state
+    differs".
   - **A drag pressed on the frame straight after another's release ends where it
     began**, observed 2026-10-03 in
     `panel::tests::an_inspector_drag_over_many_frames_is_one_undo`'s headless
@@ -12345,10 +12349,17 @@ says what that cleared and what it did not. The allow-list entry in
   - **A gesture's first write is not netted**: a one-frame drag that writes the
     value already there records an entry that changes nothing, as
     `Document::apply` of the same write does. Only the fold drops leaves.
-  - **Play mode and saves between edits** are not steps. Every edit refused in
-    play is `play_tests`' to hold; a save seals the top entry, which
-    `a_drag_carried_past_a_save_is_dirty_again` holds. A save step would need a
-    directory per history.
+  - **Play mode and a save into the document's own directory** are not steps.
+    Every edit refused in play is `play_tests`' to hold. The save step is
+    `Document::save_to` into a fresh temporary directory per save (the test's
+    document has no origin, and a copy refuses an occupied directory), which
+    marks the log as `Document::save` does but does not exercise ownership.
+  - **A drag back to its start with the saved state above it is rare** in the
+    property test: one to three histories a run at 512 cases, committed
+    regression seeds included, over five runs measured 2026-10-03 (an edit
+    dropping the saved state: 32 to 45). So it is not a `MUST_REACH` fact;
+    `document::dirty_tests::a_drag_back_to_its_start_keeps_the_saved_entry_to_redo`
+    holds it deterministically.
   - **Not compared**: the selection beyond naming only held entities (an undo
     does not restore it, by design), a mesh's measured box except through its
     collider, and `IdMap::next_id`.
