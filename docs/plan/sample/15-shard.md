@@ -201,6 +201,17 @@ is what the find teaches. The overlay carries the level and how far into it the
 character is, the `[HUD]` heartbeat carries the same pair, and the save is at
 payload version 3, holding the experience and deriving the level from it.
 
+**A save is taken on the simulated second and on the close (2026-10-03).** The
+autosave writes every `save::SAVE_PERIOD_S` of play, and closing the window or
+the page, or the debug console's `quit`, writes the character as well, through
+the engine's `HostedGame::exiting`. What a close may write is what the autosave
+may: any tick's state, because every tick ends with a live character a save can
+hold, and nothing before the session's first tick, whose zone is still the save
+it opened from or a fresh one opened over a save this build refused. A frame
+budget's stop or a failed frame writes nothing, a failed write is logged without
+holding the close, and the close's write counts in the `saves` the summary
+reports.
+
 What a level is **not** yet is something to spend: there is no skill, no stat
 point and no equipment. There is no sector streaming and no networking of any
 kind — the plan says milestone 1 ships none, and the loopback here is sample

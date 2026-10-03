@@ -1511,17 +1511,18 @@ Asset import follow-up:
   Price complete writes and their physical reallocations before including these
   missing framing bytes in checked capacity calculations. Preserve exact file
   bytes, SHA-256 coverage, length-overflow refusal, atomic write errors and
-  Shard's tick-driven save cadence and accepted-write counter. These are
-  periodic save/load or tooling paths, not ordinary render preparation.
-  `FileTransport::open` copies entry payloads and `recv` clones each into its
-  owned message; moving consumed payloads could retain entry tick metadata while
-  avoiding the playback copy, but first establish and price a shipping playback
-  consumer. The inspected production CLI reads metadata without calling `recv`;
-  repository search found no sample replay transport consumer. Replay writer
-  ownership and large-session memory remain unpriced for `ReplayWriter`; the
-  live recorder writes through `ReplayStream` instead, which holds only the sets
-  and the hashes and spools the peer track. No save/replay latency or heap
-  profile was run in this follow-up; prioritize the measured frame paths.
+  Shard's tick-driven save cadence, its save on close and its accepted-write
+  counter. These are periodic save/load or tooling paths, not ordinary render
+  preparation. `FileTransport::open` copies entry payloads and `recv` clones
+  each into its owned message; moving consumed payloads could retain entry tick
+  metadata while avoiding the playback copy, but first establish and price a
+  shipping playback consumer. The inspected production CLI reads metadata
+  without calling `recv`; repository search found no sample replay transport
+  consumer. Replay writer ownership and large-session memory remain unpriced for
+  `ReplayWriter`; the live recorder writes through `ReplayStream` instead, which
+  holds only the sets and the hashes and spools the peer track. No save/replay
+  latency or heap profile was run in this follow-up; prioritize the measured
+  frame paths.
 
 Profiling overhead follow-up:
 
@@ -16904,14 +16905,31 @@ left out:
   to 2 and then 3 orphaned every save written before them: they read as no save,
   with a logged reason, and the zone opens fresh. Acceptable for a sample with
   no players; the entry that must close is the persistence one, not this one.
-- **No save on teardown.** The autosave cadence is the whole of when a save
-  happens, so a tab or a window closed between two writes loses up to
-  `save::SAVE_PERIOD_S` of play. The engine hook this waited on exists since
-  2026-10-03 — `crcbl::engine::HostedGame::exiting`, built for towers' save on
-  close — so closing this is an override in `apps/shard/src/app.rs` storing
-  `Game::snapshot` through `Vault::store` for the exit reasons towers acts on
-  (not `Shard::autosave`, which only writes on its period's ticks). Not done:
-  outside that task's scope.
+- **Decided 2026-10-03, for the long term: a close saves the character.**
+  `Shard::save_on_close`, through `crcbl::engine::HostedGame::exiting`, on the
+  reasons towers acts on: a window closed or gone, a page's `pagehide`, or the
+  debug console's `quit`. Saveable is the autosave's own rule,
+  `Shard::saveable`: any tick's state — every tick ends with a live character a
+  save can hold, a down being put back at the spawn inside the tick that caused
+  it, so there is nothing mid-something to refuse — and nothing before the
+  session's first tick, whose stage is still the save it opened from or a fresh
+  zone opened over a save this build refused (writing it would destroy that file
+  for nothing played). Nothing on a frame budget's stop or a failed frame's, as
+  towers. Not skipped when nothing changed since the last write, because the
+  autosave does not skip that either: it writes every period whether or not
+  anything moved. A failed write is logged by `Vault::store` and the close goes
+  on. **The close's write counts in `saves`**, the accepted-write counter: it is
+  a write the vault accepted like any other, and the summary — taken after
+  `exiting` — would otherwise report one fewer than is on the disk; the
+  heartbeat and the panel never show it, since neither runs after the close.
+  Tests: `app::save_tests`, each shown red by a mutation of its rule.
+- **The browser gate's cleared-store control stops the demo first.** With a save
+  on close, the navigation that control reloads with is itself a close, and its
+  `pagehide` would write the paused character back after the wipe — so
+  `web/tools/browser-e2e.mjs` now presses the page's stop button (taking the
+  close's save then), waits for the queue to drain, and only then wipes. The
+  edit was not run: no browser ran in that change (see _Not verified in
+  `apps/shard`_).
 - **The clock is not restored.** `SaveHeader::playtime_secs` accumulates across
   sessions and is read back, but `Stage::ticks` and `Stage::elapsed` start again
   at zero. That is what keeps the torches opening at the start of their flicker
@@ -16921,8 +16939,8 @@ left out:
 - **Autosave only, no manual save.** `apps/shard/src/menu.rs`'s pause panel has
   no SAVE row and there is no key bound to one. The persistence rules want
   console, CLI, UI button and autosave timer to be one path (_One save path:
-  `Command::Save`_); the path exists (`Shard::autosave` → `Vault::store`) but
-  only the timer calls it.
+  `Command::Save`_); the path exists (`Shard::write` → `Vault::store`) but only
+  the timer and the close call it.
 
 ### shard's wasm heap: the ceiling's own figure is stale (2026-09-16)
 
@@ -17039,11 +17057,25 @@ Stated as gaps rather than explained away:
   being refused by the checksum),
   `a_resumed_session_opens_where_the_last_one_stopped_and_a_fresh_one_does_not`
   covers `Stage::restore`/`Stage::snapshot`, and
-  `a_headless_run_neither_resumes_nor_writes_a_save` pins the headless rule. The
-  cadence itself — `Shard::autosave` firing every `save::save_ticks` — is
-  covered only by the browser gate. **A `--save-dir` flag would close it** and
-  is what topic 14 already asks for under "server deployments: configurable data
-  dir"; it was left out as scope.
+  `a_headless_run_neither_resumes_nor_writes_a_save` pins the headless rule.
+  Since 2026-10-03 the save on close is driven through the running loop into a
+  real directory: `app::save_tests` hands a headless run a scratch `Vault::at`
+  after start-up and closes it. The cadence itself — `Shard::autosave` firing
+  every `save::save_ticks` — is still covered only by the browser gate; the same
+  injection would drive it natively, and was not written (outside the close's
+  task). **A `--save-dir` flag would close the windowed half** and is what topic
+  14 already asks for under "server deployments: configurable data dir"; it was
+  left out as scope.
+- **The save on a page's close was not run in a browser.** It rests on
+  `demo.js`'s `pagehide` running the teardown, and so `exiting`, before its
+  storage drain, as towers' does; nothing drove it, and the gate's cleared-store
+  control was changed to stop the demo with its button before the wipe without
+  that edit being run either. The first reload's check still compares the
+  resumed character with the beat that reported a write, though the file it
+  resumes from is now the close's — later, by the length of the navigation —
+  which only an idle character keeps inside the tolerance, as the autosaves
+  after that beat already required. The save on close from a real window was not
+  run either; every close test is the headless shell's.
 - **Only OPFS was exercised in a browser, and only where OPFS exists.** The
   persistence plan named IndexedDB as the fallback and
   `crates/crcbl-store/src/web/mod.rs` records that no shim implements one. A

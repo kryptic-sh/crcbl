@@ -58,7 +58,7 @@
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Booted, Clock, FrameInfo, HostedGame, PointerUpdate, RunSummary, wait_for_configure,
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, PointerUpdate, RunSummary, wait_for_configure,
 };
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::math::{Vec2, Vec3};
@@ -304,7 +304,8 @@ pub struct Shard {
     /// it did not, and a reading that could move is one the browser gate could
     /// not read off a heartbeat it polled late.
     resumed: bool,
-    /// How many times the character has been written out.
+    /// How many times the character has been written out: the autosaves and
+    /// the save on close, each counted only once the vault accepted it.
     saves: u64,
     /// How many ticks apart the autosaves are — [`crate::save::save_ticks`] at
     /// this run's rate.
@@ -466,16 +467,69 @@ impl Shard {
     /// raised `saves` is the beat whose readings were written.
     ///
     /// A refused write costs the session nothing — the state is still in the
-    /// stage and the next period tries again — so this counts writes that were
-    /// accepted rather than attempts. [`crate::save::Vault::store`] is what logs
-    /// the reason for a refusal.
+    /// stage and the next period tries again.
     fn autosave(&mut self) {
-        if self.stats.ticks == 0 || !self.stats.ticks.is_multiple_of(self.save_ticks) {
+        if !self.saveable() || !self.stats.ticks.is_multiple_of(self.save_ticks) {
             return;
         }
-        if self.vault.store(&self.game.snapshot()) {
+        self.write();
+    }
+
+    /// Writes the character as the window closes, so a close between two
+    /// autosaves loses none of the play since the last one.
+    ///
+    /// Only for a stop the player asked for — the window closed or gone, a
+    /// page's `pagehide`, or the debug console's `quit`. A frame budget was
+    /// told when to stop, and a failed frame may not have left the zone it was
+    /// in, so neither writes. Otherwise the rule is the autosave's,
+    /// [`Self::saveable`]: any tick's state, and nothing before this session's
+    /// first. A failed write is logged by [`Vault::store`] and the close goes
+    /// on — the loop has already accepted it.
+    fn save_on_close(&mut self, exit: ExitReason) {
+        let asked = matches!(
+            exit,
+            ExitReason::CloseRequested | ExitReason::WindowDestroyed | ExitReason::Quit
+        );
+        if !asked {
+            return;
+        }
+        if !self.saveable() {
+            crcbl::log::info!("shard: closed before the first tick; the last save stands");
+            return;
+        }
+        if self.write() {
+            crcbl::log::info!(
+                "shard: saved on close at tick {} ({})",
+                self.stats.ticks,
+                self.vault.where_it_goes()
+            );
+        }
+    }
+
+    /// Whether the stage holds anything a save should keep: it has ticked in
+    /// this session.
+    ///
+    /// Every tick ends with a live character standing somewhere a save can
+    /// hold — a down is put back at the spawn inside the tick that caused it
+    /// — so there is no state mid-something to refuse. Before the first tick
+    /// the stage is still the save it opened from, or a fresh zone opened
+    /// over a save this build refused, and writing that would destroy the
+    /// refused file for nothing played.
+    const fn saveable(&self) -> bool {
+        self.stats.ticks > 0
+    }
+
+    /// Writes the character out, answering whether the vault accepted it.
+    ///
+    /// Counts accepted writes rather than attempts, so `saves` is what is on
+    /// the disk's side of the seam. [`Vault::store`] is what logs the reason
+    /// for a refusal, and a run that keeps nothing refuses silently.
+    fn write(&mut self) -> bool {
+        let written = self.vault.store(&self.game.snapshot());
+        if written {
             self.saves += 1;
         }
+        written
     }
 
     /// What the debug panel says about this run's persistence.
@@ -892,6 +946,10 @@ impl HostedGame for Shard {
         panel.add(&self.paths);
     }
 
+    fn exiting(&mut self, exit: ExitReason) {
+        self.save_on_close(exit);
+    }
+
     fn summary(&self, run: RunSummary) -> Summary {
         Summary {
             run,
@@ -985,22 +1043,25 @@ crcbl::impl_pending_loop!(
 
 // ---- tests -------------------------------------------------------------------
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod save_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crcbl::core::input::PointerButton;
-    use crcbl::engine::{ExitReason, PAUSE_KEY};
+    use crcbl::engine::PAUSE_KEY;
     use crcbl::inventory::Cell;
     use crcbl::shell::{
         ButtonState as PointerState, HeadlessShell, PhysicalPoint, ShellBackend as Backend,
     };
     use crcbl_sample_test::{headless_common, ui_text};
 
-    fn scripted(options: &Options) -> Loop<HeadlessShell> {
+    pub(super) fn scripted(options: &Options) -> Loop<HeadlessShell> {
         with_shell(Box::new(HeadlessShell::new()), options).expect("headless always starts")
     }
 
-    fn headless(frames: u64) -> Options {
+    pub(super) fn headless(frames: u64) -> Options {
         Options {
             common: headless_common(crate::game::DEFAULT_TICK_HZ, frames),
             seed: crate::loot::DEFAULT_SEED,
@@ -1008,7 +1069,7 @@ mod tests {
     }
 
     /// Runs `count` frames.
-    fn frames(engine: &mut Loop<HeadlessShell>, count: usize) {
+    pub(super) fn frames(engine: &mut Loop<HeadlessShell>, count: usize) {
         for _ in 0..count {
             engine.frame().expect("a frame");
         }

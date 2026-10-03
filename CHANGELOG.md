@@ -675,7 +675,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   calls it once, with the run's `ExitReason`, before the summary and before the
   GPU and the window are released — on every way a run ends, a browser page's
   `pagehide` included, ahead of the storage drain. The default does nothing;
-  towers saves its run there.
+  towers saves its run there, and shard its character.
 - **`crcbl_store::save::SaveBacking`**: where a game's saves live — the data
   directory natively, the installed OPFS store in a browser, or nowhere for a
   headless run — with `platform`, `source` and `label`. `apps/shard` wrote this
@@ -8078,18 +8078,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   vault at all, so the test suite and CI leave nothing behind.
 
   It autosaves once per second of **simulated** time, so a machine drawing this
-  zone at a fifth of real time saves exactly as often per second of play; the
-  next session resumes from it, and the `[HUD]` heartbeat, the debug panel and
-  the summary line all say whether this one did (`resumed:`) and how many writes
-  it has made (`saves:`). A save this build will not stand behind — wrong
-  length, foreign magic, an unknown payload version, a roster that is not this
-  zone's, a health above an archetype's own ceiling, a position that is not a
-  finite number — reads as _no save_ and the zone opens fresh rather than being
-  clamped into something plausible. `web/tools/browser-e2e.mjs` reads the bytes
-  back out of OPFS in a real browser, reloads the page and requires the
-  character to come back where the save's own heartbeat reported them, then
-  clears the store and requires the same page to come up on the spawn with the
-  zone intact.
+  zone at a fifth of real time saves exactly as often per second of play, and
+  saves again as the window or the page closes or at the debug console's `quit`
+  (through `HostedGame::exiting`) — but never before the session's first tick,
+  which would write an untouched zone over the save it opened from, and never
+  when a frame budget or a failed frame ended the run; a failed write on close
+  is logged and does not hold the close. The next session resumes from it, and
+  the `[HUD]` heartbeat, the debug panel and the summary line all say whether
+  this one did (`resumed:`) and how many writes it has made (`saves:`). A save
+  this build will not stand behind — wrong length, foreign magic, an unknown
+  payload version, a roster that is not this zone's, a health above an
+  archetype's own ceiling, a position that is not a finite number — reads as _no
+  save_ and the zone opens fresh rather than being clamped into something
+  plausible. `web/tools/browser-e2e.mjs` reads the bytes back out of OPFS in a
+  real browser, reloads the page and requires the character to come back where
+  the save's own heartbeat reported them, then stops the demo with its own
+  button, clears the store and requires the same page to come up on the spawn
+  with the zone intact.
 
   **Four verbs of six.** Milestone 1's loop is explore, fight, loot, level,
   save, resume; exploring, fighting, saving and resuming are here. No item, no

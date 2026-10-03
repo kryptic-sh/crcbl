@@ -7411,38 +7411,32 @@ try {
     );
 
     // ---- and the control: the same page with the store cleared ---------------
-    // **Paused first, and that is not tidiness.** This demo autosaves once per
-    // simulated second, so a directory emptied while it is still ticking is one
-    // the next write refills — and the control would then be reading a save
-    // this block created after wiping the one it meant to remove. A blurred
-    // canvas runs no ticks at all, which group E asserts for every demo on this
-    // site, so nothing can be written between the wipe and the navigation.
-    //
-    // **The click comes first, and it is what makes the blur mean anything.**
-    // The navigation above replaced the document, so this canvas has never held
-    // the keyboard — and focusing the stop button blurs nothing, leaves the
-    // demo running, and leaves the wait below to spend the whole timeout
-    // discovering it. Measured: 92 s of a 197 s run, every second of it this
-    // one missing click.
-    await clickAt(await focusPoint());
-    await until(async () =>
-      (await evaluate(page, `document.activeElement?.id ?? ''`)) === 'canvas'
-        ? true
-        : null
-    );
-    await evaluate(page, `document.getElementById('stop').focus()`);
-    await until(async () => {
+    // **Stopped first, with its own button, and that is not tidiness.** This
+    // demo autosaves once per simulated second and saves again as it closes
+    // (`Shard::save_on_close`), so a directory emptied while the demo is still
+    // live is one a later write refills — and the control would then be
+    // reading a save this block created after wiping the one it meant to
+    // remove. Pausing is not enough: the navigation below is itself a close,
+    // and its `pagehide` teardown would write the paused character straight
+    // back. The stop button takes the close's save now, before the wipe, and a
+    // stopped demo writes nothing after it — `pagehide` then finds no loop to
+    // tear down.
+    await evaluate(page, `(document.getElementById('stop').click(), true)`);
+    const stopped = await until(async () => {
       const status = await evaluate(page, `crcbl.status()`);
-      return status === 6 ? status : null;
+      // 4 is STATUS_STOPPED and 5 STATUS_FAILED; both are terminal.
+      return [4, 5].includes(status) ? status : null;
     });
     // …and with the queue drained as well, so nothing the page had already
-    // handed the shim can be written back after the directory is emptied. The
-    // `pagehide` teardown flushes whatever is left, which on this path is the
-    // last chance a record would get to reappear.
-    const settled = await until(async () => {
-      const queue = await evaluate(page, `crcbl.saves()`);
-      return queue.pending === 0 && queue.inFlight === 0 ? queue : null;
-    });
+    // handed the shim — the close's own save included — can be written back
+    // after the directory is emptied.
+    const settled =
+      stopped === 4
+        ? await until(async () => {
+            const queue = await evaluate(page, `crcbl.saves()`);
+            return queue.pending === 0 && queue.inFlight === 0 ? queue : null;
+          })
+        : null;
     const wiped = settled
       ? await evaluate(
           page,
@@ -7489,8 +7483,8 @@ try {
       'and the same page with the store cleared comes up fresh',
       opened,
       !cleared
-        ? `the OPFS root would not empty: removed ` +
-            `${JSON.stringify(wiped?.removed ?? null)}, left ` +
+        ? `with the demo at status ${stopped}, the OPFS root would not ` +
+            `empty: removed ${JSON.stringify(wiped?.removed ?? null)}, left ` +
             `${JSON.stringify(wiped?.left ?? null)}, queued ` +
             `${JSON.stringify(settled)}`
         : freshBeat === null

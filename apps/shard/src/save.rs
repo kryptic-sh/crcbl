@@ -147,7 +147,7 @@ const APP: &str = "shard";
 /// One component and no directory, deliberately: the browser shim reaches OPFS
 /// entries by name off the root — `restoreOpfs` in `web/engine/storage.js` —
 /// so a key with a `/` in it would name a file that restore never delivers.
-const SAVE_FILE: &str = "character.crb";
+pub(crate) const SAVE_FILE: &str = "character.crb";
 
 /// How much **simulated** time passes between autosaves, in seconds.
 ///
@@ -156,9 +156,12 @@ const SAVE_FILE: &str = "character.crb";
 /// as often per second *of play* as one that keeps up, and nothing that waits
 /// for a save is waiting on a frame rate.
 ///
-/// It is also the bound on what a closed tab loses: a browser write returns when
-/// it is *queued*, and the page's `pagehide` drain is the last chance it gets, so
-/// the honest claim this sample can make is "at most one second of play".
+/// It is also the bound on what a close loses when the save on close does not
+/// land — a frame that failed, or a tab whose `pagehide` drain did not finish
+/// the write before the page went: a browser write returns when it is
+/// *queued*, so the honest claim this sample can make is "at most one second of
+/// play". `crate::app`'s `Shard::save_on_close` is the write that closes the
+/// gap when it does land.
 pub const SAVE_PERIOD_S: f64 = 1.0;
 
 /// How many ticks that is at `tick_hz`, and never zero.
@@ -599,6 +602,13 @@ impl Vault {
         self.0.source()
     }
 
+    /// The directory `root` — for the tests, which keep their saves in a
+    /// scratch directory and never in a real data directory.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn at(root: std::path::PathBuf) -> Self {
+        Self(SaveBacking::Native(crcbl::store::NativeStorage::at(root)))
+    }
+
     /// Where this run's saves go, in the words the debug panel uses.
     #[must_use]
     pub const fn where_it_goes(&self) -> &'static str {
@@ -694,11 +704,11 @@ impl crcbl::ui::DebugModule for SaveStats {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A character that is nothing like a fresh zone's.
-    fn walked() -> Character {
+    pub(crate) fn walked() -> Character {
         Character {
             centre: DVec3::new(-2.5, 0.9, -7.25),
             health: 41,
@@ -1111,15 +1121,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("the scratch directory is writable");
 
-        let vault = Vault(SaveBacking::Native(crcbl::store::NativeStorage::at(
-            dir.clone(),
-        )));
+        let vault = Vault::at(dir.clone());
         assert!(vault.load().is_none(), "nothing has been written yet");
         assert!(vault.store(&walked()), "the write was refused");
 
-        let reopened = Vault(SaveBacking::Native(crcbl::store::NativeStorage::at(
-            dir.clone(),
-        )));
+        let reopened = Vault::at(dir.clone());
         assert_eq!(reopened.load(), Some(walked()), "it did not reach the disk");
 
         // …and a file whose bytes were tampered with is refused by the
@@ -1130,11 +1136,7 @@ mod tests {
         bytes[last] ^= 0xFF;
         std::fs::write(&file, &bytes).expect("the scratch directory is writable");
         assert!(
-            Vault(SaveBacking::Native(crcbl::store::NativeStorage::at(
-                dir.clone()
-            )))
-            .load()
-            .is_none(),
+            Vault::at(dir.clone()).load().is_none(),
             "a corrupted save was read as a character",
         );
 
