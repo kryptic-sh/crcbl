@@ -72,6 +72,23 @@ fn only_the_exact_identity_is_the_identity() {
     assert!(!turned.is_identity());
 }
 
+/// **A negative zero is not the identity**, so a row writes it and reads it
+/// back as the same bits — a row that left it out would read back `+0.0`,
+/// which is what an undone delete in the editor once restored.
+#[test]
+fn a_negative_zero_is_written_and_reads_back_as_itself() {
+    let signed = Rotation::try_from([-0.0, 0.0, 0.0, 1.0]).expect("unit");
+    assert_eq!(signed, Rotation::IDENTITY, "`==` cannot tell them apart");
+    assert!(!signed.is_identity());
+    let text = ron::to_string(&signed).expect("four numbers");
+    let back: Rotation = ron::from_str(&text).expect("its own text");
+    assert_eq!(
+        back.to_array().map(f64::to_bits),
+        signed.to_array().map(f64::to_bits),
+        "{text} did not read back as the bits written",
+    );
+}
+
 /// **A value a reflected write left off unit still reads as a rotation**: its
 /// direction, normalised — and all four zero, which has none, as the
 /// identity. `check` reports both, as a load would.

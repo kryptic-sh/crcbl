@@ -524,3 +524,37 @@ fn the_inspection_names_the_hovered_and_focused_leaf_by_its_path() {
     assert_eq!(away.hovered, None);
     assert_eq!(away.focused.as_deref(), Some("visible"));
 }
+
+/// **A write that changes only a zero's sign is an edit**: `-0.0 == 0.0`, so a
+/// row that compared with `==` left `-0.0` in the field unreported, and the
+/// editor's command log — which records only what is reported — could not
+/// take it back. The editor's rotation row writing `-0.0` over a block's
+/// identity rotation is the case.
+#[test]
+fn a_write_that_flips_a_zeros_sign_is_reported() {
+    let mut overrides = Overrides::new();
+    overrides.register::<Motion>(|_, field| {
+        field.set("speed", Value::Float(-0.0));
+    });
+    let mut ui = Ui::new();
+    let mut value = surface();
+    value.motion.speed = 0.0;
+    let inspection = page(
+        &mut ui,
+        idle(),
+        NavInput::default(),
+        &mut value,
+        Some(&overrides),
+    );
+
+    assert_eq!(value.motion.speed.to_bits(), (-0.0f64).to_bits());
+    let [edit] = inspection.edits.as_slice() else {
+        panic!("the write was not one edit: {:?}", inspection.edits);
+    };
+    assert_eq!(edit.path, "motion.speed");
+    let (Value::Float(before), Value::Float(after)) = (&edit.before, &edit.after) else {
+        panic!("a float leaf's edit is of floats: {edit:?}");
+    };
+    assert_eq!(before.to_bits(), 0.0f64.to_bits());
+    assert_eq!(after.to_bits(), (-0.0f64).to_bits());
+}

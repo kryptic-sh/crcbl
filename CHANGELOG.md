@@ -4452,6 +4452,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A rotation of negative zero survives a delete's undo, a copy and a reload.**
+  `crcbl::registry::Rotation::is_identity` compared with `==`, under which
+  `(-0, 0, 0, 1)` — a turn back to nothing about a negative axis — equals the
+  identity, so a row left it out and anything rebuilt from the row (the editor's
+  undone delete, a duplicate, a paste, the next load) read `+0.0` back. It now
+  compares bits: such a rotation is written, `rotation: (-0.0, 0.0, 0.0, 1.0)`,
+  and reads back as itself. A scene holding one saves that line where it saved
+  none. Found by the editor's undo property test.
+- **An inspector write that changes only a zero's sign is reported.**
+  `crcbl_ui`'s `FieldRow::set` and the plain rows compared the leaf before and
+  after with `==`, so writing `-0.0` over `0.0` changed the field and reported
+  no `FieldEdit` — in the editor, a write no command recorded and no undo took
+  back, which the rotation row made on every turn about one axis. Floats are now
+  compared bit for bit, and the editor's rotation row writes `+0.0` for a zero
+  so a drag stays one undo.
 - **`--browse` no longer joins a full host.** `LanClient::browse` picked the
   first host of a compatible build, so towers' and the sandbox's `--browse`
   could connect to one already at its `max_players` and be refused by it. It now

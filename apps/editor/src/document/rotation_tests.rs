@@ -198,3 +198,25 @@ fn a_rotation_off_unit_is_a_problem_by_file_and_line() {
         "{problems:?}"
     );
 }
+
+/// **A block turned back to nothing about a negative axis comes back from a
+/// delete's undo with the same bits** — `(-0, 0, 0, 1)`, whose `-0.0` the row
+/// left out as the identity until `Rotation::is_identity` compared bits, so
+/// the undo restored `+0.0`. The undo property test found it.
+#[test]
+fn a_negative_zero_turn_survives_a_delete_and_its_undo() {
+    let mut document = Document::built_in().expect("the compiled-in scene");
+    turn_block(&mut document, STEP, DQuat::from_xyzw(-0.0, 0.0, 0.0, 1.0));
+    let turned = document.files().expect("the scene saves");
+
+    document.delete(&[STEP]).expect("the step is in the scene");
+    document.undo().expect("the delete undoes");
+    let Value::Float(x) = document
+        .read(STEP, BLOCKS, "rotation.x")
+        .expect("a block has a rotation")
+    else {
+        panic!("rotation.x is a float");
+    };
+    assert_eq!(x.to_bits(), (-0.0f64).to_bits(), "the undo restored {x:?}");
+    assert_eq!(document.files().expect("the scene saves"), turned);
+}

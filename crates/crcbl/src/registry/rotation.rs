@@ -124,9 +124,15 @@ impl Rotation {
     ///
     /// Exactly, not "turns nothing": `(0, 0, 0, -1)` turns nothing too and is
     /// written, so what is omitted is always what [`Default`] reads back.
+    ///
+    /// **Bit for bit**, not `==`: `-0.0 == 0.0`, so `(-0, 0, 0, 1)` — a turn
+    /// back to nothing about a negative axis — compares equal to the identity,
+    /// and leaving it out would read back as `+0.0`. A delete's undo, a copy
+    /// and a reload all rebuild a component from its row, so each would then
+    /// put back bits other than the ones that were there.
     #[must_use]
     pub fn is_identity(&self) -> bool {
-        *self == Self::IDENTITY
+        self.to_array().map(f64::to_bits) == Self::IDENTITY.to_array().map(f64::to_bits)
     }
 
     /// `Ok` for a value a file could hold, or why a load would refuse it.

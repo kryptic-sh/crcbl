@@ -374,7 +374,7 @@ impl FieldRow<'_> {
         let Ok(after) = get_path(self.value, at) else {
             return false;
         };
-        if after == before {
+        if unchanged(&before, &after) {
             return false;
         }
         self.report.edits.push(FieldEdit {
@@ -691,6 +691,17 @@ impl Ui {
     }
 }
 
+/// Whether a leaf that held `before` and now holds `after` is unchanged:
+/// equal, and a float equal **bit for bit**. `-0.0 == 0.0`, so a write of one
+/// over the other would otherwise land in the field unreported — a write no
+/// caller records, and so none an undo takes back.
+fn unchanged(before: &Value, after: &Value) -> bool {
+    match (before, after) {
+        (Value::Float(before), Value::Float(after)) => before.to_bits() == after.to_bits(),
+        _ => before == after,
+    }
+}
+
 /// Writes `new` into `leaf` and records what it replaced.
 ///
 /// Nothing is recorded when the leaf refuses the write, or when the value it
@@ -707,7 +718,7 @@ fn write_leaf(leaf: &mut dyn Reflect, path: &str, new: &Value, edits: &mut Vec<F
     let Some(after) = leaf.get() else {
         return;
     };
-    if after == before {
+    if unchanged(&before, &after) {
         return;
     }
     edits.push(FieldEdit {
