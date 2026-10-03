@@ -1139,11 +1139,12 @@ impl HostedGame for Towers {
             }
         }
 
-        // A pick in the build menu is the key it stands in for. Taken before
-        // the frame is built, so a pick and a key on one tick are one command
-        // and neither latch outlives the tick.
+        // A pick in the build menu is the key it stands in for, and so is the
+        // pause menu's `RESTART`. Taken before the frame is built, so a pick
+        // and a key on one tick are one command and no latch outlives the tick.
         let picked_build = core::mem::take(&mut self.pending_build);
         let picked_upgrade = core::mem::take(&mut self.pending_upgrade);
+        let picked_restart = core::mem::take(&mut self.pending_restart);
         self.game.set_controls(Controls {
             place: (self.actions.just_pressed(ACTION_BUILD) || picked_build)
                 .then_some(self.selected),
@@ -1151,8 +1152,7 @@ impl HostedGame for Towers {
             upgrade: (self.actions.just_pressed(ACTION_UPGRADE) || picked_upgrade)
                 .then_some(self.selected),
             start_wave: self.actions.just_pressed(ACTION_WAVE),
-            restart: self.actions.just_pressed(ACTION_RESTART)
-                || core::mem::take(&mut self.pending_restart),
+            restart: self.actions.just_pressed(ACTION_RESTART) || picked_restart,
         });
         self.game.tick();
         // After the tick, so what is saved is the stage the player sees.
@@ -1789,6 +1789,40 @@ mod tests {
             !ui_text(engine.gpu().draw_list()).contains(&line),
             "the refusal outstayed its time"
         );
+    }
+
+    /// **The pause menu's `RESTART` and an `R` on one tick are one restart.**
+    ///
+    /// Both reach the stage through [`Controls::restart`], and the menu's is
+    /// latched for the next tick. A latch read only when the key was not
+    /// pressed outlived that tick and threw the fresh run away again on the
+    /// one after — so the run counter is the observable: two here, not three.
+    /// The tower built first says the one restart that did happen happened.
+    #[test]
+    fn a_menu_restart_and_an_r_on_one_tick_restart_the_run_once() {
+        let mut engine = scripted(&headless(400));
+        frames(&mut engine, 4);
+        tap(&mut engine, KeyCode::KeyB);
+        assert_eq!(engine.game().game().stats().towers, 1);
+
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::KeyR)
+            .expect("the window is live");
+        engine.game_mut().apply(MenuAction::Restart);
+        frames(&mut engine, 1);
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::KeyR)
+            .expect("the window is live");
+        frames(&mut engine, 8);
+
+        let stats = engine.game().game().stats();
+        assert_eq!(stats.runs, 2, "one tick's restart ran {} runs", stats.runs);
+        assert_eq!(stats.towers, 0, "the tower survived the restart");
+        assert_eq!(stats.gold, crate::wave::STARTING_GOLD);
+        assert_eq!(stats.outcome, Outcome::Playing);
     }
 
     /// **A scripted run builds towers, sends the wave and holds it**, which is

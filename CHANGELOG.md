@@ -3702,11 +3702,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Restart` are two-byte commands the client seals and the server validates over
   `InMemoryTransport` — is the plot free, is there gold, is a wave already
   running — and a refusal is a `refused` row on the debug panel rather than
-  something the client swallows. The exit is a `set_trigger` volume, which is
-  the pair of behaviours that flag exists for: sweeps and rays pass through it
-  and only `overlap_sphere` reports it, so `creep::has_reached_the_exit` asks
-  the physics world rather than measuring a distance. The bolt is where CCD
-  earns its place —
+  something the client swallows. The pause menu's `RESTART` row sends the same
+  `Restart` as the `R` key, and the two on one tick are one restart. The exit is
+  a `set_trigger` volume, which is the pair of behaviours that flag exists for:
+  sweeps and rays pass through it and only `overlap_sphere` reports it, so
+  `creep::has_reached_the_exit` asks the physics world rather than measuring a
+  distance. The bolt is where CCD earns its place —
   `a_bolt_hits_a_creep_that_a_test_at_either_end_of_the_tick_would_miss` takes a
   static overlap at both ends of the tick beside the sweep, and neither finds
   the creep the sweep hit, against a creep that moved earlier in the same tick.

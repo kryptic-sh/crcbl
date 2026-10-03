@@ -16785,12 +16785,7 @@ pointer and no `NavInput`, so the arrows stay the build cursor's; the menu
 following the camera while open; a sell or a tower's stats on the menu; the
 creep icons, the wave banner and `page`'s build lists as `.crpix`; a hover
 outline that is drawn under the field's towers rather than over them (it is a UI
-polyline with no depth). **Found, not fixed:** `Towers::tick`'s
-`restart: just_pressed(ACTION_RESTART) || mem::take(&mut pending_restart)`
-short-circuits, so a pause-menu `RESTART` latched on the same tick as an `R`
-press stays latched and restarts the run again on the next tick — the build
-menu's latches are taken before the `||` for this reason; out of this slice's
-scope.
+polyline with no depth).
 
 **Coverage gaps:** **nothing was seen on a device** — every check is headless,
 natively; no eye has judged the icons, the menu's size or placement, or the
