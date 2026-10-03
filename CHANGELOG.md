@@ -927,25 +927,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   system does not hold (`Registry::runtime_entities_in`). The editor gives the
   entities of such a system a picking collider after every tick, and a click on
   one is the play's runtime pick (`Document::hit` answering `Hit::Spawned`,
-  `set_runtime_pick`, `picked_runtime`), selecting nothing and gone on stop.
-  Every refusal of a frame is on the status line, joined in order and each
-  logged; the keys `1` to `9` send the strip's first nine actions, each button
-  labelled with its key, and never while a field is typed into; a command sent
-  while paused is read on the first tick after resume; a choice resets when play
-  stops; two games playing one scene each get a row, in tick order. **Towers
-  registers controls**: _Place tower_ (a picked plot and a kind), _Start wave_,
-  _Upgrade_ (a picked tower, encoded as the plot it stands on) and _Restart_,
-  encoded through the same `Controls`-to-frame conversion `Game::set_controls`
-  makes, so the bytes are the client's; the status is Lives, Gold, Wave and
-  Outcome, and a refusal is the label a player is shown (`THAT PLOT IS TAKEN`).
-  Towers' play module now also mirrors its towers, bolts and bursts as runtime
-  components (`turrets`, `bolts` and `bursts`), so a tower placed in the editor
-  is drawn on its plot at its tier's size. Every creep, tower, bolt and burst is
-  mirrored by what it is — body, plot, or the new `Bolt::id` (the run's shot
-  count when it was fired, which a burst takes from its bolt) — beside the run,
-  so an entity stands for one thing for as long as it lives rather than for a
-  place in a swap-removed list. The ids are not in towers' state hash, which is
-  unchanged, so recorded replays still re-simulate.
+  `set_runtime_pick`, `picked_runtime`), selecting nothing and gone on stop; the
+  pick is outlined like a selection, in its own green, at the size its tower
+  stands now (`Document::runtime_pick`), and the outline goes with the pick, the
+  despawned tower, or the play. A frame's refusals are on the status line, the
+  first three joined in order and the rest counted
+  (`… (and 4 more in the log)`), and each logged; the keys `1` to `9` send the
+  strip's first nine actions, each button labelled with its key, and never while
+  a field is typed into; a command sent while paused is read on the first tick
+  after resume; a choice resets when play stops; two games playing one scene
+  each get a row, in tick order. **Towers registers controls**: _Place tower_ (a
+  picked plot and a kind), _Start wave_, _Upgrade_ (a picked tower, encoded as
+  the plot it stands on) and _Restart_, encoded through the same
+  `Controls`-to-frame conversion `Game::set_controls` makes, so the bytes are
+  the client's; the status is Lives, Gold, Wave and Outcome, and a refusal is
+  the label a player is shown (`THAT PLOT IS TAKEN`). A tool that ticks towers'
+  play module without taking its refusals finds at most 64 left on the stage,
+  the newest; the next take opens with one line counting the older ones dropped
+  (`5 OLDER REFUSALS WENT UNTOLD`). Solo, a host and a dedicated server take the
+  stage's refusals every tick and are uncapped, and the untold refusals are no
+  part of the state hash. Towers' play module now also mirrors its towers, bolts
+  and bursts as runtime components (`turrets`, `bolts` and `bursts`), so a tower
+  placed in the editor is drawn on its plot at its tier's size. Every creep,
+  tower, bolt and burst is mirrored by what it is — body, plot, or the new
+  `Bolt::id` (the run's shot count when it was fired, which a burst takes from
+  its bolt) — beside the run, so an entity stands for one thing for as long as
+  it lives rather than for a place in a swap-removed list. The ids are not in
+  towers' state hash, which is unchanged, so recorded replays still re-simulate.
 - **Control hints: how an action's binding is shown to the player right now.**
   `crcbl_input::ActionMap::hint(action)` returns a `Hint` — the binding's
   `Device`, the `Binding`, the pad family (`Option<PadKind>`, set for a pad

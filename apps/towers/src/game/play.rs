@@ -387,6 +387,7 @@ impl GameModule for FieldPlay {
 
     fn tick(&mut self, world: &mut World, inputs: ClientInputs<'_>) {
         GameModule::tick(&mut self.towers, world, inputs);
+        controls::bound_untold(world);
         self.mirror(world);
     }
 }

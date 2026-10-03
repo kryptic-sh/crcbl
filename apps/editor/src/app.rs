@@ -1454,8 +1454,8 @@ impl<S: Shell + ?Sized> Editor<S> {
             ),
             [first, rest @ ..] => self.panels.set_status(
                 format!(
-                    "{saved}, but its game will refuse it: {first} (and {} more in the log)",
-                    rest.len()
+                    "{saved}, but its game will refuse it: {first}{}",
+                    more_in_the_log(rest.len())
                 ),
                 Tone::Warning,
             ),
@@ -1821,12 +1821,29 @@ const REFUSED: &str = "Refused: ";
 /// Between two refusals of one frame on the status line.
 const REFUSAL_SEPARATOR: &str = "; ";
 
+/// How many of one frame's refusals the status line names before it counts
+/// the rest: enough that the usual one or two are each told, few enough that
+/// a burst stays one readable line.
+const REFUSALS_SHOWN: usize = 3;
+
 /// What the status line says for the refusals one frame's ticks brought, in
-/// the order the game made them: each reason after [`REFUSED`], so two
-/// commands turned down in one frame are both told rather than the older
-/// dropped.
+/// the order the game made them: the first [`REFUSALS_SHOWN`] reasons after
+/// [`REFUSED`], so two commands turned down in one frame are both told rather
+/// than the older dropped — and past those, how many more the log holds,
+/// since every one is logged.
 fn refused_status(refusals: &[String]) -> String {
-    format!("{REFUSED}{}", refusals.join(REFUSAL_SEPARATOR))
+    let shown = refusals.len().min(REFUSALS_SHOWN);
+    let line = format!("{REFUSED}{}", refusals[..shown].join(REFUSAL_SEPARATOR));
+    match refusals.len() - shown {
+        0 => line,
+        hidden => format!("{line}{}", more_in_the_log(hidden)),
+    }
+}
+
+/// What a status line naming only the first of several things ends with:
+/// how many more `hidden` the log holds.
+fn more_in_the_log(hidden: usize) -> String {
+    format!(" (and {hidden} more in the log)")
 }
 
 /// What the status line says once play mode has stopped.
@@ -1856,6 +1873,11 @@ const PRIMARY_COLOR: [f32; 4] = [1.0, 0.72, 0.2, 1.0];
 /// The colour every other selected entity's box is drawn in: a pale blue,
 /// legible against the same grey and never mistaken for the primary's amber.
 const SELECTED_COLOR: [f32; 4] = [0.55, 0.78, 1.0, 1.0];
+
+/// The colour the play's runtime pick is outlined in: a green, legible
+/// against the same grey and apart from both selection colours, since a pick
+/// can stand beside a selection.
+const PICKED_COLOR: [f32; 4] = [0.45, 0.95, 0.55, 1.0];
 
 /// The mode this tool asks for. It never asks for anything else.
 pub const DISPLAY_MODE: DisplayMode = DisplayMode::Windowed;
@@ -1971,10 +1993,13 @@ fn wheel_pixels(pending: &Pending) -> f32 {
 
 /// Every selected entity's box, as its eight corners in render space, and the
 /// colour it is outlined in: [`PRIMARY_COLOR`] for the primary and
-/// [`SELECTED_COLOR`] for the rest. An entity nothing places has no box.
+/// [`SELECTED_COLOR`] for the rest — then the play's runtime pick
+/// ([`Document::runtime_pick`]) in [`PICKED_COLOR`]. An entity nothing places
+/// has no box, and neither has a pick the run despawned.
 ///
 /// The box itself, turned as it is drawn — not the world-axis box around it,
-/// which would outline a turned block loosely.
+/// which would outline a turned block loosely. Read afresh every frame, so a
+/// picked tower that grows a tier is outlined at its new size.
 fn selection_boxes(document: &mut Document) -> Vec<([Vec3; 8], [f32; 4])> {
     let primary = document.primary();
     let mut boxes = Vec::with_capacity(document.selection().len());
@@ -1988,6 +2013,15 @@ fn selection_boxes(document: &mut Document) -> Vec<([Vec3; 8], [f32; 4])> {
             SELECTED_COLOR
         };
         boxes.push((placement.corners().map(|corner| corner.as_vec3()), color));
+    }
+    if let Some(placement) = document
+        .runtime_pick()
+        .and_then(|entity| document.spawned_placement(entity))
+    {
+        boxes.push((
+            placement.corners().map(|corner| corner.as_vec3()),
+            PICKED_COLOR,
+        ));
     }
     boxes
 }

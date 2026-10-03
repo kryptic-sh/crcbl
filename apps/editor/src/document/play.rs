@@ -291,6 +291,15 @@ impl Document {
         }
     }
 
+    /// The runtime pick as the last click left it, whatever system holds it:
+    /// what the viewport outlines. [`None`] while editing and with nothing
+    /// picked; a pick the run has since despawned is still answered, and has
+    /// no [`spawned_placement`](Self::spawned_placement) to outline.
+    #[must_use]
+    pub fn runtime_pick(&self) -> Option<Entity> {
+        self.play.as_ref()?.runtime_pick
+    }
+
     /// The runtime pick, if the runtime system `system` holds it: the
     /// [`PlayArg::PickedRuntime`] a play action picking from that system
     /// takes. [`None`] while editing, with nothing picked, and for a pick the

@@ -158,15 +158,55 @@ fn status(world: &mut World) -> Vec<(&'static str, String)> {
 
 /// Takes the stage's refusals not yet told, oldest first, each as the label a
 /// player is shown. A tool's commands are the one local player's, so every
-/// refusal is theirs, as solo's are.
+/// refusal is theirs, as solo's are. Refusals [`bound_untold`] dropped since
+/// the last call come first, as one line counting them: they were older.
 fn refusals(world: &mut World) -> Vec<String> {
     let Some(readout) = world.system_mut::<FieldReadout>() else {
         return Vec::new();
     };
-    std::mem::take(&mut lock(&readout.shared).refusals)
+    let dropped = std::mem::take(&mut readout.dropped);
+    let told = std::mem::take(&mut lock(&readout.shared).refusals)
         .into_iter()
-        .map(|(_, refusal)| refusal.label().to_owned())
+        .map(|(_, refusal)| refusal.label().to_owned());
+    (dropped > 0)
+        .then(|| dropped_label(dropped))
+        .into_iter()
+        .chain(told)
         .collect()
+}
+
+/// How many refusals a played field keeps for a tool that has not taken
+/// them. Far more than one tick of one player's commands can be refused, so
+/// a tool taking them every frame — the editor — never loses one; a tool
+/// ticking without taking them holds this many and no more.
+const UNTOLD_KEPT: usize = 64;
+
+/// Drops the oldest of the stage's untold refusals past [`UNTOLD_KEPT`],
+/// counting them on the readout for [`refusals`] to tell. Nothing in a world
+/// this game's module is not playing in.
+///
+/// The played field's own bound, called after every tick: solo, a host and a
+/// dedicated server take the stage's refusals every tick themselves, and
+/// tell each to whoever sent it, so their path keeps no cap. The untold
+/// refusals are no part of [`Stage::hash_state`], so dropping one changes no
+/// hash.
+pub(super) fn bound_untold(world: &mut World) {
+    let Some(readout) = world.system_mut::<FieldReadout>() else {
+        return;
+    };
+    let excess = {
+        let mut stage = lock(&readout.shared);
+        let excess = stage.refusals.len().saturating_sub(UNTOLD_KEPT);
+        stage.refusals.drain(..excess);
+        excess
+    };
+    readout.dropped += excess;
+}
+
+/// The line [`refusals`] tells `dropped` refusals [`bound_untold`] dropped
+/// by, in the labels' own capitals.
+fn dropped_label(dropped: usize) -> String {
+    format!("{dropped} OLDER REFUSALS WENT UNTOLD")
 }
 
 /// The name [`readout`]'s system goes by in the world's schedule.
@@ -177,6 +217,9 @@ const READOUT: &str = "towers-readout";
 /// a tick.
 struct FieldReadout {
     shared: Arc<Mutex<Stage>>,
+    /// How many refusals [`bound_untold`] dropped since [`refusals`] last
+    /// took them.
+    dropped: usize,
 }
 
 impl std::fmt::Debug for FieldReadout {
@@ -188,7 +231,7 @@ impl std::fmt::Debug for FieldReadout {
 /// The system a played field registers so a tool's controls can read
 /// `shared`.
 pub(super) fn readout(shared: Arc<Mutex<Stage>>) -> Box<dyn SystemTrait> {
-    Box::new(FieldReadout { shared })
+    Box::new(FieldReadout { shared, dropped: 0 })
 }
 
 impl SystemTrait for FieldReadout {
@@ -398,5 +441,55 @@ mod tests {
         assert_eq!(refusals(&mut world), [Refusal::PlotTaken.label()]);
         assert!(refusals(&mut world).is_empty(), "a refusal was told twice");
         assert_eq!(world.entity_count(), 0, "the readout spawned something");
+    }
+
+    /// **A tool that never takes the refusals leaves [`UNTOLD_KEPT`] of them
+    /// on the stage and no more**, the newest, every one still counted; the
+    /// take that follows tells how many older ones were dropped, then the
+    /// kept ones, and the count starts again.
+    #[test]
+    fn untold_refusals_stay_bounded_when_nobody_takes_them() {
+        use crcbl::core::TickId;
+        use crcbl::ecs::{ClientInputs, GameModule};
+
+        let mut module = super::super::FieldPlay::new(Map::built_in());
+        let mut world = World::new();
+        module.register(&mut world);
+        // Refused every tick each is sent: a build on a plot the field does
+        // not have, first — the refusals that should be dropped — then an
+        // upgrade on a plot with no tower.
+        let frame = |controls: Controls| [(TickId::from_raw(0), Intent::from(controls).to_wire())];
+        let past_the_plots = u8::try_from(Map::built_in().plots().len()).expect("a plot byte");
+        let oldest = frame(Controls {
+            place: Some(past_the_plots),
+            ..Controls::default()
+        });
+        let newest = frame(Controls {
+            upgrade: Some(0),
+            ..Controls::default()
+        });
+        let dropped = 5;
+        let sent = UNTOLD_KEPT + dropped;
+        for index in 0..sent {
+            let inputs = if index < dropped { &oldest } else { &newest };
+            world.tick();
+            module.tick(&mut world, ClientInputs::new(inputs, 0));
+            world.sweep();
+            let untold = lock(&module.towers.shared).refusals.len();
+            assert!(untold <= UNTOLD_KEPT, "{untold} refusals left untold");
+        }
+        let stage_refused = lock(&module.towers.shared).refused;
+        assert_eq!(stage_refused, u64::try_from(sent).expect("a count"));
+
+        let told = refusals(&mut world);
+        assert_eq!(told.len(), 1 + UNTOLD_KEPT, "{told:?}");
+        assert_eq!(told[0], dropped_label(dropped));
+        assert!(
+            told[1..]
+                .iter()
+                .all(|label| label == Refusal::NoTower.label()),
+            "{told:?}"
+        );
+        assert!(refusals(&mut world).is_empty(), "the drop was told twice");
     }
 }

@@ -415,13 +415,33 @@ deferred, built.
   (`Document::set_runtime_pick`, read by `picked_runtime(system)`), selecting
   nothing; a plain click elsewhere clears it, and it lives in the play session,
   so stop throws it away. Towers' _Upgrade_ picks a built tower, encoded as the
-  plot on its `Turret` row. Declined: a runtime system pickable whatever the
-  controls say, which would let creeps and bolts take clicks meant for the plots
-  under them.
+  plot on its `Turret` row. **The pick is outlined** through the selection's own
+  outline (`app::selection_boxes`, the debug-draw boxes the renderer is handed
+  each frame), in a green of its own (`PICKED_COLOR`) beside the selection's
+  amber and blue: `Document::runtime_pick` names it and its placement is read
+  afresh every frame, so the outline grows with an upgrade and goes when the
+  pick is cleared, play stops, or the tower despawns (a despawned entity has no
+  placement). Declined: a runtime system pickable whatever the controls say,
+  which would let creeps and bolts take clicks meant for the plots under them.
 - **Every refusal of a frame is told**: the status line joins them in the order
   the game made them (`Refused: THAT PLOT IS TAKEN; …`), and each is logged.
   Joined rather than counted, because two in one frame is rare and each names a
-  different mistake.
+  different mistake — up to `REFUSALS_SHOWN`; past it the line counts the rest
+  (`… (and 4 more in the log)`, the wording a save's problems use), so a burst
+  stays one readable line and the log holds every one.
+- **A played field keeps a bounded queue of untold refusals.** Towers' play
+  module leaves refusals on its stage for `PlayControls::refusals`; a tool that
+  ticks it without taking them would let them grow one per refused command. So
+  after every tick the module drops the oldest past `UNTOLD_KEPT` and counts
+  them, and the next take opens with one line saying how many went untold
+  (`5 OLDER REFUSALS WENT UNTOLD`). The cap is far above what one frame can
+  bring, so the editor, which takes them every frame, never loses one. The bound
+  is the play module's alone — solo, a host and a dedicated server take the
+  stage's refusals every tick and tell each to its sender, unchanged — and the
+  untold refusals are in no state hash (`Stage::hash_state` counts refusals,
+  never queues them; the readout system hashes nothing). Declined: clearing them
+  each tick in the module, which would lose all but the last tick's when a frame
+  runs several.
 - **The number keys are the strip's actions**: `1` to `9` send the first nine
   actions across every row in the order drawn, and each of those buttons reads
   its key, as the toolbar's do. They are `keys::PLAY_ACTIONS` in the map's
@@ -447,14 +467,20 @@ deferred, built.
   hold a ray down onto a built tower hitting it as spawned, the pick naming it
   under `turrets` and nothing under `walkers`, _Upgrade_ paying for that tower,
   the pick gone after stop, and a command sent while paused read on the tick
-  after resume and not before. The loop's tests hold a click on a built tower
-  picking it without selecting, _Upgrade_ sent and paid for, _Upgrade_ with
-  nothing picked saying what to click, two refusals of one frame both on the
-  status line, `2` sending _Start wave_ while playing and nothing while editing,
-  a second game's row ahead of towers' with `1` reaching it alone and the
-  unlisted game absent, and a stepped choice back on its first label after stop
-  and play. The mutations each turned a test red are listed in the commit that
-  landed this.
+  after resume and not before. Towers' test holds a tool that never takes the
+  refusals leaving the newest `UNTOLD_KEPT` on the stage, every one still
+  counted, and the next take telling the older ones dropped once. The loop's
+  tests hold a click on a built tower picking it without selecting, the pick
+  outlined at its tower's box, at the grown box after _Upgrade_, and not at all
+  once unpicked, stopped or despawned by _Restart_ (the pick itself still set),
+  a burst of refusals told as the first `REFUSALS_SHOWN` and a count with a
+  warning logged for each, _Upgrade_ sent and paid for, _Upgrade_ with nothing
+  picked saying what to click, two refusals of one frame both on the status
+  line, `2` sending _Start wave_ while playing and nothing while editing, a
+  second game's row ahead of towers' with `1` reaching it alone and the unlisted
+  game absent, and a stepped choice back on its first label after stop and play.
+  The mutations each turned a test red are listed in the commit that landed
+  this.
 
 **Multi-selection, landed 2026-10-03**, on the decisions of the same day
 (below): several entities selected at once, moved together, and deleted,

@@ -254,10 +254,14 @@ not built anywhere yet.
   client inputs, so the stage validates it as it validates any player's. A
   refusal reaches the editor's status line as the label a player is shown, and
   the strip shows Lives, Gold, Wave and Outcome, read off a readout system the
-  module registers in the world it plays in. Towers, bolts and bursts are
-  mirrored beside the creeps (`Turret`, `Shot` and `Blast`, runtime components
-  drawn as greybox boxes), so a placed tower stands on its plot, at its tier's
-  size. Not looked at on a device: every check is headless.
+  module registers in the world it plays in. A tool that ticks the module
+  without taking the refusals finds no more than the newest `UNTOLD_KEPT` left
+  on the stage, and the next take opens with a line counting the older ones
+  dropped; solo, a host and a dedicated server take them every tick, uncapped,
+  and the queue is in no state hash. Towers, bolts and bursts are mirrored
+  beside the creeps (`Turret`, `Shot` and `Blast`, runtime components drawn as
+  greybox boxes), so a placed tower stands on its plot, at its tier's size. Not
+  looked at on a device: every check is headless.
 - **The editor picks a built tower, and every mirrored thing keeps its entity
   (2026-10-03).** _Upgrade_ takes `ParamKind::PickedRuntime("turrets")`: the
   editor gives each mirrored tower a picking collider, a click on one is the

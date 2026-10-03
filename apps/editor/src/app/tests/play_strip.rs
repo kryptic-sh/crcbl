@@ -1,10 +1,11 @@
 //! The play strip on towers' field, through the loop: a built tower picked
-//! by a click and stepped up, every refusal of a frame told, the number keys,
-//! two games' rows at once, and a choice that lasts one play.
+//! by a click, outlined and stepped up, every refusal of a frame told and a
+//! burst of them bounded, the number keys, two games' rows at once, and a
+//! choice that lasts one play.
 
 use super::*;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crcbl::ecs::{ClientInputs, Entity, GameModule, World};
 use crcbl::registry::{ParamKind, PlayAction, PlayArg, PlayControls, Registry};
@@ -99,6 +100,98 @@ fn a_click_on_a_built_tower_picks_it_and_upgrade_steps_it_up() {
     assert_eq!(editor.panels.status(), ("Sent Upgrade", Tone::Info));
     let upgraded = Kind::Bolt.spec(Tier::Upgraded).cost;
     assert_eq!(readout(&editor, "Gold"), (paid - upgraded).to_string());
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// The boxes the viewport outlines in [`PICKED_COLOR`] — the runtime
+/// pick's — as the renderer is handed them.
+fn picked_boxes(editor: &mut Editor<HeadlessShell>) -> Vec<[Vec3; 8]> {
+    selection_boxes(editor.document_mut())
+        .into_iter()
+        .filter(|(_, color)| *color == PICKED_COLOR)
+        .map(|(corners, _)| corners)
+        .collect()
+}
+
+/// The corners of where a spawned entity stands now.
+fn spawned_corners(editor: &mut Editor<HeadlessShell>, entity: Entity) -> [Vec3; 8] {
+    editor
+        .document_mut()
+        .spawned_placement(entity)
+        .expect("a spawned entity in the world")
+        .corners()
+        .map(|corner| corner.as_vec3())
+}
+
+/// **The runtime pick is outlined, and the outline follows its tower until
+/// it goes**: nothing before a click, the tower's own box once clicked, the
+/// grown box after an upgrade, and nothing once the pick is cleared, play
+/// stops, or a restart despawns the tower.
+#[test]
+fn the_runtime_pick_is_outlined_and_follows_its_tower_until_it_goes() {
+    let mut editor = towers_editor(120, 1);
+    let tower = with_a_tower(&mut editor);
+    assert!(
+        picked_boxes(&mut editor).is_empty(),
+        "outlined before a click"
+    );
+    let on_the_tower = spawned_pixel(&mut editor, tower);
+    click(&mut editor, on_the_tower);
+    let base = spawned_corners(&mut editor, tower);
+    assert_eq!(
+        picked_boxes(&mut editor),
+        [base],
+        "the pick is not outlined"
+    );
+
+    let (system, upgrade) = towers_action(&editor, "Upgrade");
+    editor
+        .document_mut()
+        .send_play(&system, upgrade, &[PlayArg::PickedRuntime(tower)])
+        .expect("towers encodes an upgrade");
+    editor.frame().expect("a frame");
+    let grown = spawned_corners(&mut editor, tower);
+    assert_ne!(grown, base, "the upgrade did not grow the tower");
+    assert_eq!(
+        picked_boxes(&mut editor),
+        [grown],
+        "the outline did not follow the tier"
+    );
+
+    editor.document_mut().set_runtime_pick(None);
+    assert!(
+        picked_boxes(&mut editor).is_empty(),
+        "outlined once unpicked"
+    );
+
+    click(&mut editor, on_the_tower);
+    assert_eq!(picked_boxes(&mut editor).len(), 1, "the click did not pick");
+    tap(&mut editor, KeyCode::F5);
+    assert!(picked_boxes(&mut editor).is_empty(), "outlined after stop");
+
+    let tower = with_a_tower(&mut editor);
+    let on_the_tower = spawned_pixel(&mut editor, tower);
+    click(&mut editor, on_the_tower);
+    assert_eq!(picked_boxes(&mut editor).len(), 1, "the click did not pick");
+    let (_, restart) = towers_action(&editor, "Restart");
+    editor
+        .document_mut()
+        .send_play(&system, restart, &[])
+        .expect("towers encodes a restart");
+    editor.frame().expect("a frame");
+    assert!(
+        !editor.document_mut().spawned().contains(&tower),
+        "the restart left the tower standing"
+    );
+    assert_eq!(
+        editor.document().runtime_pick(),
+        Some(tower),
+        "the pick itself was cleared, so the despawn is not what is held"
+    );
+    assert!(
+        picked_boxes(&mut editor).is_empty(),
+        "a despawned pick is outlined"
+    );
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 
@@ -208,6 +301,78 @@ const PING: PlayControls = PlayControls {
     status: no_status,
     refusals: no_refusals,
 };
+
+/// Whether [`burst`] has told its refusals.
+static BURST_TOLD: AtomicBool = AtomicBool::new(false);
+
+/// How many refusals [`burst`] tells at once: more than the status line
+/// names.
+const BURST: usize = REFUSALS_SHOWN + 4;
+
+/// The reason [`burst`] gives for its refusal number `n`.
+fn burst_reason(n: usize) -> String {
+    format!("REFUSAL {n}")
+}
+
+/// [`BURST`] refusals the first time it is read, and none after.
+fn burst(_: &mut World) -> Vec<String> {
+    if BURST_TOLD.swap(true, Ordering::Relaxed) {
+        Vec::new()
+    } else {
+        (1..=BURST).map(burst_reason).collect()
+    }
+}
+
+/// A game whose controls turn down a burst of commands in one frame.
+const BURSTING: PlayControls = PlayControls {
+    actions: &[PlayAction {
+        name: "Ping",
+        params: &[],
+    }],
+    encode: one_byte,
+    status: no_status,
+    refusals: burst,
+};
+
+/// **A burst of refusals in one frame is one bounded line, and every one is
+/// logged**: the first [`REFUSALS_SHOWN`] named in order, the rest counted,
+/// and a warning in the log for each.
+#[test]
+fn a_burst_of_refusals_is_one_bounded_line_and_every_one_logged() {
+    let mut editor = towers_editor(40, 1);
+    let mut registry = Registry::new();
+    registry.module("plots", |_, _, _| Ok(Box::new(Pinger)));
+    registry.play_controls("plots", BURSTING);
+    crcbl_towers::register_components(&mut registry);
+    editor.document = Document::open(
+        &crcbl_towers::built_in_source(),
+        Path::new(crcbl_towers::FIELD),
+        registry,
+    )
+    .expect("towers' vocabulary opens its field");
+
+    let logs = crcbl::log::capture();
+    tap(&mut editor, KeyCode::F5);
+    let shown: Vec<String> = (1..=REFUSALS_SHOWN).map(burst_reason).collect();
+    let line = format!(
+        "{REFUSED}{} (and {} more in the log)",
+        shown.join(REFUSAL_SEPARATOR),
+        BURST - REFUSALS_SHOWN
+    );
+    assert_eq!(editor.panels.status(), (line.as_str(), Tone::Warning));
+    let logged: Vec<String> = logs
+        .records()
+        .into_iter()
+        .filter(|record| record.level == crcbl::log::Level::Warn)
+        .map(|record| record.message)
+        .filter(|message| message.starts_with("editor: the game refused a command"))
+        .collect();
+    let every: Vec<String> = (1..=BURST)
+        .map(|n| format!("editor: the game refused a command — {}", burst_reason(n)))
+        .collect();
+    assert_eq!(logged, every, "a refusal went unlogged");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
 
 /// A third game's controls, under a system towers' field does not list.
 const BELL: PlayControls = PlayControls {
