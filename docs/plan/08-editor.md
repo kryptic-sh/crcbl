@@ -1001,6 +1001,23 @@ decisions of the same day (below). The flow is
   and the rest are offered at the next start. Delete removes that copy's
   directory by the path listed for it, and the bar lists the rest; Later puts
   the bar away for the run.
+- **The bar's keys** (built 2026-10-03): O, Ctrl+Delete and L answer Open copy,
+  Delete and Later for the first row, the newest copy (`keys::recovery`), whose
+  buttons name them. The loop reads them beside the editor's own keys while the
+  bar is up, the unsaved bar is not and no field is typed into — so an `o` typed
+  into the path line opens nothing, and under the unsaved bar they answer
+  nothing. O and L are letters no reserved context binds, so they work whether
+  or not a panel holds the keyboard; Ctrl+O is still Open, and Delete alone
+  still removes the selection — Ctrl+Delete asked for nothing before. **Not
+  Escape for Later**: the first key pressed lands focus in the panels, after
+  which the pushed `ui` context owns Escape. The bar's buttons are ordinary
+  focusable buttons, so from a panel holding the keyboard Tab walks onto them
+  and Enter presses one. Held by the keys' test (each answer read, Ctrl+O,
+  Delete and Escape not answers, nothing while typing) and the loop's (O opens
+  the newest copy, Ctrl+Delete removes it and no other and no entity, L puts the
+  offer away with a panel holding the keyboard; O and L in the path line and
+  under the unsaved bar answering nothing; Tab from an outliner row reaching
+  Open copy and Enter pressing it), each shown red by a mutation.
 - **A copy remembers where its scene lived** (built 2026-10-03, the follow-up
   the backlog deferred). `Document::write_recovery` — the autosave included —
   writes `origin.txt` (`document::SIDECAR`) beside the scene's files: a line

@@ -7,6 +7,12 @@
 //! nothing happens to a copy until a button is clicked. What the rows say and
 //! what a click does are [`crate::app`]'s (its `recovery` module); the bar
 //! only draws the text it was given and hands back which button was clicked.
+//!
+//! **The keyboard answers it too.** O, Ctrl+Delete and L answer for the
+//! first row, the newest copy ([`crate::keys::recovery`]), whose buttons say
+//! so. Every button is an ordinary focusable button, so once a panel holds
+//! the keyboard Tab walks onto the bar like anywhere else and Enter or Space
+//! presses what it lands on.
 
 #[cfg(test)]
 use crcbl::ui::tree::NodeKey;
@@ -84,10 +90,15 @@ impl Bar {
         ui.block("#recovery", &[], |ui| {
             ui.span(".recovery-heading", offer.heading.as_str(), &[]);
             for (index, row) in offer.rows.iter().enumerate() {
+                // The first row is the one the keys answer for, and says so.
+                let (open, delete) = match index {
+                    0 => ("Open copy (O)", "Delete (Ctrl+Del)"),
+                    _ => ("Open copy", "Delete"),
+                };
                 ui.block_keyed(index, ".recovery-row", &[], |ui| {
                     ui.span(".recovery-text", row.as_str(), &[]);
-                    let open = ui.button(".recovery-open", "Open copy");
-                    let delete = ui.button(".recovery-delete", "Delete");
+                    let open = ui.button(".recovery-open", open);
+                    let delete = ui.button(".recovery-delete", delete);
                     if open.clicked {
                         answer = Some(RecoveryAnswer::Open(index));
                     }
@@ -98,7 +109,7 @@ impl Bar {
                     keys.extend([open.key, delete.key]);
                 });
             }
-            let button = ui.button("#recovery-later", "Later");
+            let button = ui.button("#recovery-later", "Later (L)");
             if button.clicked {
                 answer = Some(RecoveryAnswer::Later);
             }

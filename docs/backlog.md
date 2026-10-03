@@ -12715,9 +12715,13 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     shown**: the status line says the save landed, and the copy is offered again
     at the next start. Putting the failure on the status line would displace the
     save's own report (`Editor::report_saved`); not asked for.
-  - **The recovery bar is pointer-only.** It binds no key: Escape and Enter are
-    the text fields' and the unsaved bar's. Whether the panels' keyboard
-    navigation reaches its buttons has not been checked.
+  - **The recovery bar's keys answer for the newest copy only** (O, Ctrl+Delete,
+    L — `keys::recovery`); the other rows are the pointer's, or Tab's and
+    Enter's (any key pressed lands focus in the panels, the tree's landing rule
+    in navigation mode, after which Tab walks onto the bar). **Escape was
+    considered for Later and declined**: once focus has landed, the pushed `ui`
+    context owns Escape, so it would work only until anything was typed, and it
+    is the unsaved bar's Cancel besides.
   - **Cancelling the unsaved bar an Open copy asked leaves the offer down**: the
     bar goes when Open copy is clicked, before the unsaved bar asks. The copies
     are all still on disk and offered at the next start.

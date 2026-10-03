@@ -55,6 +55,8 @@ use crcbl::input::{
     ActionDecl, ActionKind, ActionMap, Binding, Cardinal, Modifier, Repeat, text, ui,
 };
 
+use crate::panel::RecoveryAnswer;
+
 /// Move the selection along X or Y: the arrow keys, repeating while held.
 pub const MOVE: &str = "editor_move";
 
@@ -89,6 +91,16 @@ pub const UNSAVED_DISCARD: &str = "editor_unsaved_discard";
 
 /// Answer the unsaved bar with Cancel: Escape.
 pub const UNSAVED_CANCEL: &str = "editor_unsaved_cancel";
+
+/// Open the newest copy the recovery bar offers — its first row: O. Read
+/// only while that bar is up and nothing else is asking — see [`recovery`].
+pub const RECOVERY_OPEN: &str = "editor_recovery_open";
+
+/// Delete the newest copy the recovery bar offers: Ctrl+Delete.
+pub const RECOVERY_DELETE: &str = "editor_recovery_delete";
+
+/// Put the recovery bar's offer away: L, for Later.
+pub const RECOVERY_LATER: &str = "editor_recovery_later";
 
 /// Put the whole scene back in view.
 pub const FRAME: &str = "editor_frame";
@@ -273,6 +285,27 @@ pub fn map() -> ActionMap {
     map.declare(button(UNSAVED_SAVE, vec![Binding::Key(KeyCode::Enter)]));
     map.declare(button(UNSAVED_DISCARD, vec![Binding::Key(KeyCode::KeyD)]));
     map.declare(button(UNSAVED_CANCEL, vec![Binding::Key(KeyCode::Escape)]));
+    // The recovery bar's answers, for its newest copy. O and L are free in
+    // both reserved contexts — `ui` binds no letter once its WASD is rebound
+    // below, and `text` takes letters only while a field is engaged, when
+    // `recovery` reads nothing — so they reach the bar whether or not a panel
+    // holds the keyboard; Ctrl+O's chord shadows O on its own key. Delete
+    // takes Ctrl because Delete alone removes the selection, and Ctrl+Delete
+    // asked for nothing before: the chord shadows a plain Delete only while
+    // Ctrl is held, when `actions` reads none anyway. **Not Escape for
+    // Later**: the first key pressed lands focus in the panels (the tree's
+    // landing rule, in navigation mode), and from then the pushed `ui` owns
+    // Escape — so Later on Escape would work only until anything was typed,
+    // and it would share a key with the unsaved bar's Cancel besides.
+    map.declare(button(RECOVERY_OPEN, vec![Binding::Key(KeyCode::KeyO)]));
+    map.declare(button(
+        RECOVERY_DELETE,
+        vec![Binding::Chord {
+            modifier: Modifier::Control,
+            key: KeyCode::Delete,
+        }],
+    ));
+    map.declare(button(RECOVERY_LATER, vec![Binding::Key(KeyCode::KeyL)]));
     map.declare(button(FRAME, vec![Binding::Key(KeyCode::KeyF)]));
     map.declare(button(DELETE, vec![Binding::Key(KeyCode::Delete)]));
     map.declare(button(
@@ -394,6 +427,9 @@ pub fn release_keys(map: &mut ActionMap) {
         UNSAVED_SAVE,
         UNSAVED_DISCARD,
         UNSAVED_CANCEL,
+        RECOVERY_OPEN,
+        RECOVERY_DELETE,
+        RECOVERY_LATER,
         FRAME,
         DELETE,
         DUPLICATE,
@@ -534,6 +570,32 @@ pub fn unsaved(map: &ActionMap) -> Option<Unsaved> {
     .map(|(_, answer)| answer)
 }
 
+/// The answer the keyboard gave the recovery bar this frame, if it gave
+/// one — always about its first row, the newest copy; the other rows are
+/// the pointer's, or a focused panel's Tab and Enter.
+///
+/// The loop reads it **beside** [`actions`] while the recovery bar is up and
+/// the unsaved bar is not, and `editing` — as for [`actions`] — is
+/// [`crate::panel::Panels::text_editing`]: nothing is answered while a field
+/// is being typed into, so an `o` typed into the path line opens nothing.
+///
+/// Later before Open before Delete, for a frame that pressed more than one:
+/// the answer that changes least is taken first, as [`unsaved`] takes them.
+#[must_use]
+pub fn recovery(map: &ActionMap, editing: bool) -> Option<RecoveryAnswer> {
+    if editing {
+        return None;
+    }
+    [
+        (RECOVERY_LATER, RecoveryAnswer::Later),
+        (RECOVERY_OPEN, RecoveryAnswer::Open(0)),
+        (RECOVERY_DELETE, RecoveryAnswer::Delete(0)),
+    ]
+    .into_iter()
+    .find(|(name, _)| map.just_pressed(name))
+    .map(|(_, answer)| answer)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -571,6 +633,8 @@ mod tests {
         modifiers: Modifiers,
         /// Every answer [`unsaved`] read off a frame, in order.
         answers: Vec<Unsaved>,
+        /// Every answer [`recovery`] read off a frame, in order.
+        recovered: Vec<RecoveryAnswer>,
     }
 
     impl Keyboard {
@@ -585,6 +649,7 @@ mod tests {
                 map: map(),
                 modifiers: Modifiers::empty(),
                 answers: Vec::new(),
+                recovered: Vec::new(),
             }
         }
 
@@ -607,6 +672,7 @@ mod tests {
                 }
             });
             self.answers.extend(unsaved(&self.map));
+            self.recovered.extend(recovery(&self.map, false));
             actions(&self.map, self.modifiers, false)
         }
 
@@ -762,6 +828,43 @@ mod tests {
             [Action::Duplicate]
         );
         assert_eq!(keys.answers, [], "Ctrl+D discarded");
+    }
+
+    /// **O, Ctrl+Delete and L answer the recovery bar and ask for
+    /// nothing else**: [`recovery`] reads each as its answer about the newest
+    /// copy and [`actions`] never does — while Ctrl+O is still Open and
+    /// Delete still removes the selection, neither an answer, Escape is not
+    /// one; and with `editing` nothing is answered at all.
+    #[test]
+    fn the_recovery_bars_keys_are_read_only_as_its_answers() {
+        let mut keys = Keyboard::new();
+        for (key, modifiers, answer) in [
+            (KeyCode::KeyO, Modifiers::empty(), RecoveryAnswer::Open(0)),
+            (KeyCode::Delete, Modifiers::CTRL, RecoveryAnswer::Delete(0)),
+            (KeyCode::KeyL, Modifiers::empty(), RecoveryAnswer::Later),
+        ] {
+            keys.recovered.clear();
+            assert_eq!(keys.tap(key, modifiers), [], "{key:?}");
+            assert_eq!(keys.recovered, [answer], "{key:?}");
+        }
+        for (key, modifiers, action) in [
+            (KeyCode::KeyO, Modifiers::CTRL, Action::Open),
+            (KeyCode::Delete, Modifiers::empty(), Action::Delete),
+        ] {
+            keys.recovered.clear();
+            assert_eq!(keys.tap(key, modifiers), [action], "{key:?}");
+            assert_eq!(keys.recovered, [], "{key:?} answered the bar");
+        }
+        keys.recovered.clear();
+        assert_eq!(keys.tap(KeyCode::Escape, Modifiers::empty()), []);
+        assert_eq!(keys.recovered, [], "Escape answered the bar");
+
+        keys.shell
+            .key_press(keys.window, KeyCode::KeyO)
+            .expect("live window");
+        keys.frame();
+        assert!(keys.map.just_pressed(RECOVERY_OPEN), "O was not pressed");
+        assert_eq!(recovery(&keys.map, true), None, "typed O opened a copy");
     }
 
     /// A key this editor has no meaning for asks for nothing.

@@ -21,6 +21,10 @@
 //!   lists the rest.
 //! * **Later** puts the bar away for this run.
 //!
+//! O, Ctrl+Delete and L answer Open copy, Delete and Later for the newest
+//! copy from the keyboard ([`crate::keys::recovery`]), while nothing is typed
+//! into and the unsaved bar is not asking.
+//!
 //! **A recovered copy goes once its scene is saved elsewhere** (decided
 //! 2026-10-03). The first save-as that lands for a document opened from a
 //! copy removes that copy, by the path the document kept

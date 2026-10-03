@@ -627,6 +627,13 @@ impl<S: Shell + ?Sized> Editor<S> {
         } else {
             crate::keys::actions(&self.actions, self.modifiers, editing)
         };
+        // The recovery bar's keys only while it is up and nothing asks over
+        // it: under the unsaved bar, Escape is that bar's Cancel.
+        let keyed_recovery = if self.unsaved.is_none() && self.panels.recovery().is_some() {
+            crate::keys::recovery(&self.actions, editing)
+        } else {
+            None
+        };
         let pointer = self.pointer_state.resolve(&pending);
         let input = PanelInput {
             pointer,
@@ -671,7 +678,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         if let Some(text) = panels.open {
             self.open(&text);
         }
-        if let Some(answer) = panels.recovery
+        if let Some(answer) = panels.recovery.or(keyed_recovery)
             && let Err(error) = self.answer_recovery(answer)
         {
             crcbl::log::warn!("editor: {error}");

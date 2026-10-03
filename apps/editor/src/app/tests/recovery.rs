@@ -722,3 +722,124 @@ fn a_live_autosave_is_marked_in_use() {
     );
     after.finish(ExitReason::FrameBudget).expect("teardown");
 }
+
+/// **The keyboard answers the bar for its newest copy**: O opens it,
+/// Ctrl+Delete removes it and no other, and L puts the offer away — with a
+/// panel holding the keyboard, as any key pressed before them leaves one.
+#[test]
+fn the_recovery_bars_keys_answer_for_the_newest_copy() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (older, _) = copy_in(base.path(), now_millis() - 2000, 3.0);
+    let (newer, files) = copy_in(base.path(), now_millis() - 1000, 7.0);
+
+    let mut editor = recovering(base.path(), 64);
+    editor.frame().expect("a frame");
+    tap(&mut editor, KeyCode::KeyO);
+    assert_eq!(editor.document_mut().files().expect("ids"), files);
+    assert!(editor.document().is_dirty(), "O opened nothing");
+    assert_eq!(editor.panels.recovery(), None, "the bar stayed up");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+
+    let mut editor = recovering(base.path(), 64);
+    editor.frame().expect("a frame");
+    chord(&mut editor, Modifiers::CTRL, KeyCode::Delete);
+    assert!(!newer.exists(), "Ctrl+Delete left the newest copy");
+    assert!(older.exists(), "Ctrl+Delete took another copy");
+    let (_, rows) = editor.panels.recovery().expect("the bar went down");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        editor.document().entity_count(),
+        Document::built_in()
+            .expect("the compiled-in scene")
+            .entity_count(),
+        "Ctrl+Delete removed an entity"
+    );
+
+    assert!(
+        editor.panels.holds_keyboard(),
+        "no panel holds the keyboard"
+    );
+    tap(&mut editor, KeyCode::KeyL);
+    assert_eq!(editor.panels.recovery(), None, "L left the offer up");
+    assert!(older.exists(), "L removed a copy");
+    let (text, _) = editor.panels.status();
+    assert!(text.contains("next start"), "{text}");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **The bar's keys wait while something else has the keyboard**: an `o`
+/// and an `l` pressed into the save-as line answer nothing, and under the
+/// unsaved bar O and L answer nothing either — the offer still up after
+/// each.
+#[test]
+fn the_recovery_bars_keys_wait_while_typing_and_under_the_unsaved_bar() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (copy, _) = copy_in(base.path(), now_millis(), 7.0);
+    let mut editor = recovering(base.path(), 128);
+    editor.frame().expect("a frame");
+
+    chord(
+        &mut editor,
+        Modifiers::CTRL | Modifiers::SHIFT,
+        KeyCode::KeyS,
+    );
+    editor.frame().expect("a frame");
+    assert!(
+        editor.panels.text_editing(),
+        "the save-as line is not engaged"
+    );
+    tap(&mut editor, KeyCode::KeyO);
+    assert!(!editor.document().is_dirty(), "a typed O opened the copy");
+    tap(&mut editor, KeyCode::KeyL);
+    assert!(editor.panels.recovery().is_some(), "a typed L was Later");
+    tap(&mut editor, KeyCode::Escape);
+    assert_eq!(editor.panels.saving_as(), None, "Escape left the line up");
+
+    edit(&mut editor);
+    let edited = editor.document_mut().files().expect("ids");
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyN);
+    assert!(editor.panels.unsaved().is_some(), "Ctrl+N asked nothing");
+    tap(&mut editor, KeyCode::KeyO);
+    tap(&mut editor, KeyCode::KeyL);
+    assert!(editor.panels.unsaved().is_some(), "O or L answered the bar");
+    tap(&mut editor, KeyCode::Escape);
+    assert_eq!(editor.panels.unsaved(), None, "Escape was not its Cancel");
+    assert_eq!(
+        editor.document_mut().files().expect("ids"),
+        edited,
+        "the scene under the bar changed"
+    );
+    assert!(
+        editor.panels.recovery().is_some(),
+        "L under the bar was Later"
+    );
+    assert!(copy.exists());
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **Tab reaches the bar from a panel holding the keyboard**: from a
+/// clicked outliner row, Tab walks onto the newest copy's Open copy, and
+/// Enter presses it.
+#[test]
+fn tab_reaches_the_recovery_bar_and_enter_presses_it() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (_, files) = copy_in(base.path(), now_millis(), 7.0);
+    let mut editor = recovering(base.path(), 256);
+    editor.frame().expect("a frame");
+    let row = editor.panels.row_keys()[1];
+    click_key(&mut editor, row);
+    assert!(editor.panels.holds_keyboard(), "the row took no keyboard");
+
+    let (rows, _) = editor.panels.recovery_buttons();
+    let open = rows[0][0];
+    let mut steps = 0;
+    while editor.panels.ui().focused() != Some(open) {
+        assert!(steps < 64, "Tab never reached the recovery bar");
+        tap(&mut editor, KeyCode::Tab);
+        steps += 1;
+    }
+    tap(&mut editor, KeyCode::Enter);
+    assert_eq!(editor.document_mut().files().expect("ids"), files);
+    assert_eq!(editor.panels.recovery(), None, "Enter pressed nothing");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
