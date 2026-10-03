@@ -76,17 +76,12 @@ impl MenuAction {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use crate::lobby::Pick;
-            use crcbl::net::udp::discovery::DEFAULT_MAX_HOSTS;
 
             let pick = match id {
                 SOLO_ID => Some(Pick::Solo),
                 HOST_ID => Some(Pick::Host),
                 CONNECT_ID => Some(Pick::Connect),
-                _ => id
-                    .checked_sub(FIRST_LISTED_ID)
-                    .and_then(|row| usize::try_from(row).ok())
-                    .filter(|&row| row < DEFAULT_MAX_HOSTS)
-                    .map(Pick::Listed),
+                _ => crcbl::lan::lobby::listed_row(id, FIRST_LISTED_ID).map(Pick::Listed),
             };
             if let Some(pick) = pick {
                 return Some(Self::Lobby(pick));

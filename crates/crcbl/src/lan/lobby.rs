@@ -34,7 +34,8 @@ use std::net::{IpAddr, SocketAddr};
 
 use crate::core::input::KeyCode;
 use crate::net::ProtocolCompatibility;
-use crate::net::udp::discovery::{Browser, HostEntry};
+use crate::net::udp::discovery::{Browser, DEFAULT_MAX_HOSTS, HostEntry};
+use crate::ui::WidgetId;
 use crate::ui::edit::LineEdit;
 
 use super::{LanError, LanGame};
@@ -94,6 +95,17 @@ pub enum LobbyPick {
     Listed(usize),
     /// Join the address typed into the lobby.
     Connect,
+}
+
+/// The [`LobbyPick::Listed`] row a menu item's `id` names, when a game's
+/// listed-host rows take ids running up from `first`, one a host — or `None`
+/// for an id outside them. There are as many as a browser lists hosts
+/// ([`DEFAULT_MAX_HOSTS`]).
+#[must_use]
+pub fn listed_row(id: WidgetId, first: WidgetId) -> Option<usize> {
+    id.checked_sub(first)
+        .and_then(|row| usize::try_from(row).ok())
+        .filter(|&row| row < DEFAULT_MAX_HOSTS)
 }
 
 /// What a pick the lobby accepted asks the game to start.

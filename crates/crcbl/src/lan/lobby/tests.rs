@@ -383,3 +383,16 @@ fn an_address_no_host_can_be_at_is_refused_and_the_field_holds_the_longest() {
         "a control character took the room"
     );
 }
+
+/// **A listed row's id is its row counted from the first**, for as many
+/// rows as a browser lists hosts, and no id outside them is one.
+#[test]
+fn a_listed_rows_id_is_its_row_for_as_many_hosts_as_a_browser_lists() {
+    const FIRST: WidgetId = 1000;
+    assert_eq!(listed_row(FIRST, FIRST), Some(0));
+    assert_eq!(listed_row(FIRST + 3, FIRST), Some(3));
+    let last = FIRST + WidgetId::try_from(DEFAULT_MAX_HOSTS).expect("fits") - 1;
+    assert_eq!(listed_row(last, FIRST), Some(DEFAULT_MAX_HOSTS - 1));
+    assert_eq!(listed_row(last + 1, FIRST), None, "one past the last host");
+    assert_eq!(listed_row(FIRST - 1, FIRST), None, "the id before the rows");
+}

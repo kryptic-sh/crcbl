@@ -1,4 +1,4 @@
-//! The sandbox's menu: the pause panel, and nothing else.
+//! The sandbox's menus: the pause panel, and — natively — the lobby.
 //!
 //! **Smaller than breakout's and flappy's on purpose.** The sandbox is a
 //! milestone harness, not a game: there is no run to start, no score to lose and
@@ -14,20 +14,29 @@
 //! sandbox has a debug overlay at all, and it is the same reason it has this: a
 //! sample that cannot show the engine's menu is a finding about the menu.
 //!
-//! # The container is the engine's, keyed by a `bool`
+//! # The lobby is a door to a session, not to a run
+//!
+//! A native sandbox whose command line chose no session opens on a LAN lobby
+//! (`crate::lobby`): offline, host, the hosts it hears, and an address to
+//! connect to. Its rows are built at run time from what the LAN answers, so
+//! [`menus`] holds only the pause panel and `crate::app` puts the lobby in
+//! the set the first frame it is open. Pause wins over it, as everywhere.
+//!
+//! # The container is the engine's, keyed by [`MenuKind`]
 //!
 //! [`crcbl::ui::menu::MenuSet`] holds a game's menus keyed by whatever type
-//! names its states. The other samples key theirs by a `MenuKind` enum because
-//! they have several panels; this one has exactly one, so its key is `bool` and
-//! `false` is the state with no menu in the set — which is what makes every
-//! method on the set a no-op while the sandbox is running.
+//! names its states. [`MenuKind::Running`] is the state with no menu in the
+//! set — which is what makes every method on the set a no-op while the
+//! sandbox is running.
 
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
 
 use crcbl::engine::{FIRST_GAME_ID, FrameLimit, Pacing};
+#[cfg(not(target_arch = "wasm32"))]
+use crcbl::lan::lobby::LobbyPick;
 
-/// The two settings rows the sandbox's pause menu offers — the only actions
-/// this game's menus have.
+/// What only the sandbox's menus do: the pause menu's two settings rows,
+/// and — natively — the lobby's rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SandboxAction {
     /// Cycle the display pacing: Auto → Vsync → Adaptive → Off.
@@ -35,6 +44,12 @@ pub enum SandboxAction {
     /// Cycle the frame limit up the ladder in `crate::app::next_limit`,
     /// wrapping at "unlimited".
     CycleLimit,
+    /// Leave the lobby with no session: the sandbox as it always ran.
+    #[cfg(not(target_arch = "wasm32"))]
+    Offline,
+    /// Start what a lobby row asks for.
+    #[cfg(not(target_arch = "wasm32"))]
+    Lobby(LobbyPick),
 }
 
 /// The id carrying [`SandboxAction::CyclePacing`]. The first id a game may
@@ -44,13 +59,40 @@ pub const PACING_ID: crcbl::ui::WidgetId = FIRST_GAME_ID;
 /// The id carrying [`SandboxAction::CycleLimit`].
 pub const LIMIT_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 1;
 
+/// The lobby's offline row.
+#[cfg(not(target_arch = "wasm32"))]
+pub const OFFLINE_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 2;
+
+/// The lobby's host row.
+#[cfg(not(target_arch = "wasm32"))]
+pub const HOST_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 3;
+
+/// The lobby's connect row, which joins the address typed into it.
+#[cfg(not(target_arch = "wasm32"))]
+pub const CONNECT_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 4;
+
+/// The lobby's first listed host; the rest follow it, one id a row — see
+/// [`crcbl::lan::lobby::listed_row`].
+#[cfg(not(target_arch = "wasm32"))]
+pub const FIRST_LISTED_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 5;
+
 /// The action a widget id names, or `None` for an id this game's menus do
 /// not use.
 #[must_use]
-pub const fn action_for(id: crcbl::ui::WidgetId) -> Option<SandboxAction> {
+pub fn action_for(id: crcbl::ui::WidgetId) -> Option<SandboxAction> {
     match id {
         PACING_ID => Some(SandboxAction::CyclePacing),
         LIMIT_ID => Some(SandboxAction::CycleLimit),
+        #[cfg(not(target_arch = "wasm32"))]
+        OFFLINE_ID => Some(SandboxAction::Offline),
+        #[cfg(not(target_arch = "wasm32"))]
+        HOST_ID => Some(SandboxAction::Lobby(LobbyPick::Host)),
+        #[cfg(not(target_arch = "wasm32"))]
+        CONNECT_ID => Some(SandboxAction::Lobby(LobbyPick::Connect)),
+        #[cfg(not(target_arch = "wasm32"))]
+        _ => crcbl::lan::lobby::listed_row(id, FIRST_LISTED_ID)
+            .map(|row| SandboxAction::Lobby(LobbyPick::Listed(row))),
+        #[cfg(target_arch = "wasm32")]
         _ => None,
     }
 }
@@ -95,18 +137,34 @@ fn limit_label(limit: FrameLimit) -> String {
     }
 }
 
-/// The sandbox's menus, keyed by whether it is paused.
-pub type Menus = MenuSet<bool>;
+/// Which menu a frame shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MenuKind {
+    /// The cube is spinning: no menu at all.
+    #[default]
+    Running,
+    /// The loop has stopped ticking.
+    Paused,
+    /// The lobby: offline, host, the LAN's hosts and a direct connect.
+    #[cfg(not(target_arch = "wasm32"))]
+    Lobby,
+}
+
+/// The sandbox's menus, keyed by [`MenuKind`].
+pub type Menus = MenuSet<MenuKind>;
 
 /// The pause menu, not shown.
 ///
-/// `false` — the running sandbox — has no entry, which is how the set is told
-/// that a running frame draws no menu.
+/// [`MenuKind::Running`] has no entry, which is how the set is told that a
+/// running frame draws no menu.
 #[must_use]
 pub fn menus() -> Menus {
     MenuSet::new(
-        false,
-        vec![(true, pause_menu(Pacing::default(), FrameLimit::default()))],
+        MenuKind::Running,
+        vec![(
+            MenuKind::Paused,
+            pause_menu(Pacing::default(), FrameLimit::default()),
+        )],
     )
 }
 
@@ -152,10 +210,10 @@ mod tests {
         assert!(!menus.is_showing());
         assert_eq!(activate(&mut menus), None, "nothing to fire");
 
-        menus.show(true);
+        menus.show(MenuKind::Paused);
         assert_eq!(menus.current().expect("the pause menu").title, "PAUSED");
 
-        menus.show(false);
+        menus.show(MenuKind::Running);
         assert!(menus.current().is_none());
     }
 
@@ -164,7 +222,7 @@ mod tests {
     #[test]
     fn every_button_names_an_action_the_loop_handles() {
         let mut menus = menus();
-        menus.show(true);
+        menus.show(MenuKind::Paused);
         let menu = menus.current().expect("the pause menu");
         let actions: Vec<MenuAction> = menu
             .items()
@@ -186,12 +244,35 @@ mod tests {
         }
     }
 
+    /// **Each lobby row's id names its action**, a listed host's naming its
+    /// row, and none of them is one the pause menu's rows or the loop own.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn each_lobby_row_names_its_action() {
+        assert_eq!(action_for(OFFLINE_ID), Some(SandboxAction::Offline));
+        assert_eq!(
+            action_for(HOST_ID),
+            Some(SandboxAction::Lobby(LobbyPick::Host))
+        );
+        assert_eq!(
+            action_for(CONNECT_ID),
+            Some(SandboxAction::Lobby(LobbyPick::Connect))
+        );
+        assert_eq!(
+            action_for(FIRST_LISTED_ID + 2),
+            Some(SandboxAction::Lobby(LobbyPick::Listed(2)))
+        );
+        assert_eq!(action_for(PACING_ID), Some(SandboxAction::CyclePacing));
+        assert_eq!(action_for(LIMIT_ID), Some(SandboxAction::CycleLimit));
+        assert_eq!(action_for(crcbl::engine::RESUME_ID), None);
+    }
+
     /// **Keyboard activation works**, and reports the action the selected button
     /// carries.
     #[test]
     fn the_keyboard_selects_and_activates() {
         let mut menus = menus();
-        menus.show(true);
+        menus.show(MenuKind::Paused);
         assert_eq!(activate(&mut menus), Some(MenuAction::Resume));
         menus.select_next();
         assert_eq!(activate(&mut menus), Some(MenuAction::Fullscreen));
@@ -254,7 +335,7 @@ mod tests {
     #[test]
     fn holding_the_commit_key_presses_the_selected_button() {
         let mut menus = menus();
-        menus.show(true);
+        menus.show(MenuKind::Paused);
         menus.select_next();
         menus.press(true);
         let menu = menus.current().expect("the pause menu");
@@ -274,7 +355,7 @@ mod tests {
         let atlas = FontAtlas::built_in();
         let extent = (960, 720);
         let mut menus = menus();
-        menus.show(true);
+        menus.show(MenuKind::Paused);
 
         let layout = menus.current().expect("a menu").layout(extent, &atlas);
         let target = layout.items()[1];
@@ -319,7 +400,7 @@ mod tests {
         let atlas = FontAtlas::built_in();
         let extent = (960, 720);
         let mut menus = menus();
-        menus.show(true);
+        menus.show(MenuKind::Paused);
         let layout = menus.current().expect("a menu").layout(extent, &atlas);
         let over = (layout.items()[0].min + layout.items()[0].max) * 0.5;
         point(
@@ -336,8 +417,8 @@ mod tests {
             ButtonState::Pressed,
         );
 
-        menus.show(false);
-        menus.show(true);
+        menus.show(MenuKind::Running);
+        menus.show(MenuKind::Paused);
         assert_eq!(
             menus.current().expect("a menu").state(0),
             ButtonState::Hovered,

@@ -567,6 +567,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   (the host left, shut down or removed this player, or the link ended), moved
   from towers.
 
+- **The sandbox opens on a LAN lobby** (native builds): offline (the sandbox as
+  it always ran), host (as `--host`, on any free port), a row per sandbox host a
+  `Browser` hears that this build can join, the others as dimmed lines with the
+  reason, and a connect row joining a typed `IP:PORT`, refusing anything else by
+  name. Built on `crcbl::lan::lobby`. A join keeps the lobby up saying `JOINING`
+  and where until the host admits this player; one the host refuses, or whose
+  link ends, leaves the lobby with `JOIN FAILED: …`, and a joined session that
+  ends brings it back with `SESSION ENDED: …`. Any of `--host`, `--join`,
+  `--browse`, `--headless` or `--frames` skips it, so CI and the harness scripts
+  are unaffected. The sandbox's menus are keyed by a `MenuKind` (`Running`,
+  `Paused`, `Lobby`) rather than a `bool`. Web builds have no lobby.
+  `crcbl::lan::lobby::listed_row` maps a listed-host row's widget id to its row,
+  which both games' menus use.
+
 - **Play controls: a game's actions and status for a tool that plays it.**
   `crcbl::registry::Registry::play_controls(system, PlayControls)` registers,
   beside a game's module, a description a tool renders generically: a list of

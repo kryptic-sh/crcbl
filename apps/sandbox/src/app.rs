@@ -76,7 +76,7 @@ use crcbl::shell::{DisplayMode, PhysicalSize, ShellBackend as Backend, open, ope
 use crcbl::ui::draw_list::DrawList;
 
 use crate::gpu::Gpu;
-use crate::menu::{self, Menus, SandboxAction};
+use crate::menu::{self, MenuKind, Menus, SandboxAction};
 
 /// Which projection the camera uses.
 ///
@@ -187,6 +187,15 @@ pub struct Options {
     /// builds only: web builds have no networking.
     #[cfg(not(target_arch = "wasm32"))]
     pub lan: crate::lan::LanMode,
+    /// Open on the LAN lobby — see `crate::lobby`.
+    ///
+    /// [`crate::args::parse`] sets it for a command line that chose no
+    /// session and is not a script (`--headless`, `--frames`), so every CI
+    /// run and harness starts where it always did. **`false` by default**, so
+    /// `Options` built in code opens on the cube. Native builds only: web
+    /// builds have no networking.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub lobby: bool,
 }
 
 impl Default for Options {
@@ -206,6 +215,8 @@ impl Default for Options {
             wait_unpresented: false,
             #[cfg(not(target_arch = "wasm32"))]
             lan: crate::lan::LanMode::Off,
+            #[cfg(not(target_arch = "wasm32"))]
+            lobby: false,
         }
     }
 }
@@ -317,9 +328,18 @@ pub struct Sandbox {
     /// Steam, when the `steam` feature is on and a windowed run started it;
     /// inert otherwise. See [`crate::steam`].
     steam: SteamLink,
-    /// The LAN session `--host`, `--join` or `--browse` started; inert
-    /// otherwise. See [`crate::lan`].
+    /// The LAN session `--host`, `--join` or `--browse` started, or the
+    /// lobby did; inert otherwise. See [`crate::lan`].
     lan: Lan,
+    /// The lobby, while it is on screen — see `crate::lobby`. Every key and
+    /// every character is its own while it is. Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    lobby: Option<crate::lobby::Lobby>,
+    /// The lobby a join was picked from, set aside while the session it
+    /// started runs: when that session ends the player is back in it — see
+    /// `Sandbox::follow_session`. Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    parked: Option<crate::lobby::Lobby>,
 }
 
 impl Sandbox {
@@ -347,6 +367,39 @@ impl Sandbox {
             effects,
             steam: SteamLink::off(),
             lan: Lan::off(),
+            #[cfg(not(target_arch = "wasm32"))]
+            lobby: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            parked: None,
+        }
+    }
+
+    /// Follows the session a lobby join started: once the host admits this
+    /// player the lobby steps aside, set aside until the session ends; a join
+    /// that ends first leaves the lobby saying why, and a session that ends
+    /// later brings it back saying how. A session the command line started
+    /// has no lobby to go back to, and `crcbl::lan` has logged how it ended.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn follow_session(&mut self) {
+        use crate::lan::Standing;
+
+        match self.lan.standing() {
+            None | Some(Standing::Joining) => {}
+            Some(Standing::InSession) => {
+                if let Some(lobby) = self.lobby.take() {
+                    self.parked = Some(lobby);
+                }
+            }
+            Some(Standing::Over(how)) => {
+                if let Some(lobby) = &mut self.lobby {
+                    lobby.model_mut().join_failed(&how);
+                    self.lan = Lan::off();
+                } else if let Some(mut lobby) = self.parked.take() {
+                    lobby.model_mut().session_ended(&how);
+                    self.lan = Lan::off();
+                    self.lobby = Some(lobby);
+                }
+            }
         }
     }
 }
@@ -459,6 +512,9 @@ pub fn with_shell<S: Shell + ?Sized>(
     #[cfg(not(target_arch = "wasm32"))]
     {
         sandbox.lan = Lan::start(options.lan, options.tick_hz).map_err(SandboxError::Game)?;
+        if options.lobby {
+            sandbox.lobby = Some(crate::lobby::Lobby::on_the_lan(options.tick_hz));
+        }
     }
     let steam_pads = sandbox.steam.pad_source();
 
@@ -498,10 +554,9 @@ impl HostedGame for Sandbox {
     /// session; in a web build, which has none, the type is uninhabited.
     type Error = LanError;
     type Gpu = Gpu;
-    /// Paused or not, which is the sandbox's whole state machine.
-    type MenuKind = bool;
-    /// The pause menu's two settings rows, which are the only actions of its
-    /// own.
+    /// Paused, in the lobby, or neither.
+    type MenuKind = MenuKind;
+    /// The pause menu's two settings rows and the lobby's rows.
     type MenuAction = SandboxAction;
     type Summary = Summary;
 
@@ -556,9 +611,22 @@ impl HostedGame for Sandbox {
     /// The sandbox binds no keys of its own: the three the loop reserves are
     /// the three it has.
     /// The Steam lobby keys, when the `steam` feature is live; see
-    /// [`crate::steam`].
+    /// [`crate::steam`]. While the LAN lobby is up, every key is its own.
     fn key_event(&mut self, key: crcbl::core::input::KeyCode, pressed: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(lobby) = &mut self.lobby {
+            lobby.model_mut().key(key, pressed);
+            return;
+        }
         self.steam.key_event(key, pressed);
+    }
+
+    /// The lobby's connect address, typed. Nothing else here takes text.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn text_event(&mut self, text: &str) {
+        if let Some(lobby) = &mut self.lobby {
+            lobby.model_mut().text(text);
+        }
     }
 
     /// The action a widget id of this game's names; the mapping lives in the
@@ -574,11 +642,43 @@ impl HostedGame for Sandbox {
                 self.limit = next_limit(self.limit);
                 self.pending_limit = Some(self.limit);
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            SandboxAction::Offline => {
+                self.lobby = None;
+                self.lan = Lan::off();
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            SandboxAction::Lobby(pick) => {
+                let Some(lobby) = &mut self.lobby else {
+                    return;
+                };
+                // Any pick replaces a join under way, whether or not it
+                // starts anything, as the lobby forgets it too.
+                self.lan = Lan::off();
+                match lobby.pick(pick) {
+                    Some(crate::lobby::Started::Hosting(lan)) => {
+                        self.lan = lan;
+                        self.lobby = None;
+                    }
+                    // The lobby stays up, saying where, until the host
+                    // admits this player.
+                    Some(crate::lobby::Started::Joining(lan)) => self.lan = lan,
+                    // The lobby shows why on the next frame.
+                    None => {}
+                }
+            }
         }
     }
 
-    fn menu_kind(&mut self, menus: &mut Menus, paused: bool) -> bool {
-        if paused && self.shown != Some((self.pacing, self.limit)) {
+    fn menu_kind(&mut self, menus: &mut Menus, paused: bool) -> MenuKind {
+        if !paused {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(lobby) = &mut self.lobby {
+                return show_lobby(lobby, menus);
+            }
+            return MenuKind::Running;
+        }
+        if self.shown != Some((self.pacing, self.limit)) {
             // A row's label changed (or this is the first pause): rebuild the
             // panel with the values in force, restoring the selection so a
             // press on a row does not throw the player back to the top.
@@ -586,7 +686,7 @@ impl HostedGame for Sandbox {
                 .current()
                 .and_then(crcbl::ui::menu::Menu::selected_item)
                 .map(|item| item.id);
-            menus.replace(true, menu::pause_menu(self.pacing, self.limit));
+            menus.replace(MenuKind::Paused, menu::pause_menu(self.pacing, self.limit));
             if let Some(id) = selected {
                 menus
                     .current_mut()
@@ -595,7 +695,7 @@ impl HostedGame for Sandbox {
             }
             self.shown = Some((self.pacing, self.limit));
         }
-        paused
+        MenuKind::Paused
     }
 
     /// The "steam" section, when the `steam` feature is live, and the "lan"
@@ -642,6 +742,8 @@ impl HostedGame for Sandbox {
         // host that stopped reading its peers would time every one of them
         // out.
         self.lan.frame(frame.render_dt);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.follow_session();
         // Re-read rather than kept: the device clamps last, so what the summary
         // reports comes back off the renderer.
         self.effects = gpu.effects();
@@ -666,6 +768,33 @@ impl HostedGame for Sandbox {
             summary.run.exit,
         );
     }
+}
+
+/// Polls `lobby` and puts its panel in `menus`, rebuilt first when what it
+/// lists changed — carrying the selection across by id, onto the first row
+/// if what it was on is gone — and on the connect row once text arrives.
+#[cfg(not(target_arch = "wasm32"))]
+fn show_lobby(lobby: &mut crate::lobby::Lobby, menus: &mut Menus) -> MenuKind {
+    use crate::menu::CONNECT_ID;
+
+    lobby.model_mut().poll();
+    if lobby.model_mut().take_changed() {
+        let selected = menus
+            .get_mut(MenuKind::Lobby)
+            .and_then(|menu| menu.selected_item().map(|item| item.id));
+        let mut panel = lobby.menu();
+        if let Some(id) = selected {
+            panel.select_id(id);
+        }
+        menus.replace(MenuKind::Lobby, panel);
+    }
+    if let Some(panel) = menus.get_mut(MenuKind::Lobby) {
+        panel.set_item_hint(CONNECT_ID, lobby.connect_hint());
+        if lobby.model_mut().take_typed() {
+            panel.select_id(CONNECT_ID);
+        }
+    }
+    MenuKind::Lobby
 }
 
 /// One fixed simulation step.
@@ -757,6 +886,8 @@ mod tests {
             wait_unpresented: false,
             #[cfg(not(target_arch = "wasm32"))]
             lan: crate::lan::LanMode::Off,
+            #[cfg(not(target_arch = "wasm32"))]
+            lobby: false,
         }
     }
 
@@ -1505,6 +1636,255 @@ mod tests {
         run_frames(&mut engine, 6);
         assert_eq!(engine.display_mode(), DisplayMode::Windowed);
         assert!(!engine.is_paused());
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    // ---- the lobby ------------------------------------------------------------
+
+    /// A loop opened on `lobby`: `Options` built in code never opens one,
+    /// and the lobby a parsed command line opens queries the broadcast
+    /// address.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn in_a_lobby(lobby: crate::lobby::Lobby) -> Loop<HeadlessShell> {
+        let mut engine = scripted(&headless(4000));
+        engine.game_mut().lobby = Some(lobby);
+        engine
+    }
+
+    /// A lobby that is not browsing, hosting on loopback.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn lobby_alone() -> crate::lobby::Lobby {
+        use crate::lobby::tests::{TICK_HZ, on_loopback};
+
+        crate::lobby::Lobby::new(
+            crcbl::lan::lobby::Lobby::new(crate::lan::SANDBOX, Err("not looking".to_string())),
+            on_loopback(),
+            TICK_HZ,
+        )
+    }
+
+    /// Runs frames of `engine`, serving `host` between them, until `done`
+    /// holds, failing past the lobby tests' frame bound.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn serve_until(
+        engine: &mut Loop<HeadlessShell>,
+        host: &mut crcbl::lan::LanHost,
+        what: &str,
+        done: impl Fn(&Loop<HeadlessShell>) -> bool,
+    ) {
+        use crate::lobby::tests::{FRAME, MAX_FRAMES, PAUSE};
+
+        let mut now = Duration::ZERO;
+        for _ in 0..MAX_FRAMES {
+            if done(engine) {
+                return;
+            }
+            now += FRAME;
+            host.frame(now);
+            run_frames(engine, 1);
+            std::thread::sleep(PAUSE);
+        }
+        panic!("no {what} within {MAX_FRAMES} frames");
+    }
+
+    /// The lobby's lines under its title, while it is the panel up.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn lobby_lines(engine: &Loop<HeadlessShell>) -> Vec<crcbl::ui::menu::Caption> {
+        engine
+            .menus()
+            .current()
+            .filter(|menu| menu.title == crate::lobby::TITLE)
+            .map(|menu| menu.subtitle.clone())
+            .unwrap_or_default()
+    }
+
+    /// Presses and releases `key`, a frame each.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tap(engine: &mut Loop<HeadlessShell>, key: crcbl::core::input::KeyCode) {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .key_press(window, key)
+            .expect("the window is live");
+        run_frames(engine, 1);
+        engine
+            .shell_mut()
+            .key_release(window, key)
+            .expect("the window is live");
+        run_frames(engine, 1);
+    }
+
+    /// Types `address` into the lobby, which moves onto the connect row, and
+    /// presses Enter.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn connect_to(engine: &mut Loop<HeadlessShell>, address: std::net::SocketAddr) {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .commit_text(window, &address.to_string())
+            .expect("the window is live");
+        run_frames(engine, 2);
+        tap(engine, MENU_ACTIVATE_KEY);
+    }
+
+    /// **The lobby's keys pick a host it heard, and the sandbox joins it.**
+    /// A sandbox host on loopback announces; its row appears under offline
+    /// and host; Down twice and Enter start a join to it, with the lobby up
+    /// saying where; and once the host admits this player the lobby steps
+    /// aside for the session, with no menu left on the frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_lobbys_keys_pick_a_host_it_heard_and_the_sandbox_joins_it() {
+        use crate::lan::{SANDBOX, Standing};
+        use crate::lobby::tests::{address, bare_host, browsing};
+        use crate::menu::FIRST_LISTED_ID;
+
+        let mut host = bare_host(SANDBOX.compatibility);
+        let mut engine = in_a_lobby(browsing(&host));
+        serve_until(&mut engine, &mut host, "listed host", |engine| {
+            engine
+                .menus()
+                .current()
+                .is_some_and(|menu| menu.items().len() == 4)
+        });
+        tap(&mut engine, MENU_DOWN_KEY);
+        tap(&mut engine, MENU_DOWN_KEY);
+        assert_eq!(
+            engine
+                .menus()
+                .current()
+                .and_then(crcbl::ui::menu::Menu::selected_item)
+                .map(|item| item.id),
+            Some(FIRST_LISTED_ID)
+        );
+        tap(&mut engine, MENU_ACTIVATE_KEY);
+        assert_eq!(engine.game().lan.joined(), Some(address(&host)));
+        let waiting = format!("JOINING {}", address(&host));
+        assert!(
+            lobby_lines(&engine).iter().any(|line| line.text == waiting),
+            "{:?}",
+            lobby_lines(&engine)
+        );
+
+        serve_until(&mut engine, &mut host, "the session", |engine| {
+            engine.game().lobby.is_none()
+        });
+        assert_eq!(engine.game().lan.standing(), Some(Standing::InSession));
+        assert!(engine.game().parked.is_some(), "the lobby was dropped");
+        run_frames(&mut engine, 1);
+        assert!(engine.menus().current().is_none(), "a menu is still up");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A join the host refuses leaves the player in the lobby, saying
+    /// why** — here a host of another build, reached by a typed address —
+    /// with no session left behind.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_refused_join_leaves_the_lobby_saying_why() {
+        use crate::lan::SANDBOX;
+        use crate::lobby::tests::{address, bare_host};
+
+        let mut host = bare_host(crcbl::net::ProtocolCompatibility {
+            engine_build_id: SANDBOX.compatibility.engine_build_id + 1,
+            ..SANDBOX.compatibility
+        });
+        let mut engine = in_a_lobby(lobby_alone());
+        run_frames(&mut engine, 1);
+        connect_to(&mut engine, address(&host));
+        assert_eq!(engine.game().lan.joined(), Some(address(&host)));
+        serve_until(&mut engine, &mut host, "a failed join", |engine| {
+            lobby_lines(engine)
+                .iter()
+                .any(|line| line.text.starts_with("JOIN FAILED: "))
+        });
+        let failed = lobby_lines(&engine);
+        let line = failed
+            .iter()
+            .find(|line| line.text.starts_with("JOIN FAILED: "))
+            .expect("the line");
+        assert_eq!(line.tone, crcbl::ui::menu::CaptionTone::Warning);
+        assert!(line.text.contains("refused the join"), "{}", line.text);
+        assert_eq!(engine.game().lan.standing(), None, "the join was kept");
+        assert!(engine.game().lobby.is_some());
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A joined session that ends brings the player back to the lobby,
+    /// saying how**: the host leaves, and the lobby is up again with the
+    /// session gone.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_joined_session_that_ends_returns_to_the_lobby_saying_how() {
+        use crate::lan::SANDBOX;
+        use crate::lobby::tests::{address, bare_host};
+
+        let mut host = bare_host(SANDBOX.compatibility);
+        let mut engine = in_a_lobby(lobby_alone());
+        run_frames(&mut engine, 1);
+        connect_to(&mut engine, address(&host));
+        serve_until(&mut engine, &mut host, "the session", |engine| {
+            engine.game().lobby.is_none()
+        });
+        host.host_mut()
+            .shutdown(crcbl::net::SessionEndReason::HOST_LEFT);
+        serve_until(&mut engine, &mut host, "the lobby again", |engine| {
+            engine.game().lobby.is_some()
+        });
+        run_frames(&mut engine, 1);
+        assert!(
+            lobby_lines(&engine)
+                .iter()
+                .any(|line| line.text == "SESSION ENDED: the host left"),
+            "{:?}",
+            lobby_lines(&engine)
+        );
+        assert_eq!(engine.game().lan.standing(), None);
+        assert!(engine.game().parked.is_none());
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **Backspace in the loop takes a character off the typed address**:
+    /// the lobby has the keys while it is up.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn backspace_in_the_lobby_edits_the_typed_address() {
+        use crate::menu::CONNECT_ID;
+
+        let mut engine = in_a_lobby(lobby_alone());
+        let window = engine.window();
+        run_frames(&mut engine, 1);
+        engine
+            .shell_mut()
+            .commit_text(window, "10.0.0.9:50")
+            .expect("the window is live");
+        run_frames(&mut engine, 1);
+        tap(&mut engine, crcbl::core::input::KeyCode::Backspace);
+        let hint = engine
+            .menus()
+            .current()
+            .and_then(|menu| menu.items().iter().find(|item| item.id == CONNECT_ID))
+            .map(|item| item.hint.clone());
+        assert_eq!(hint.as_deref(), Some("10.0.0.9:5"));
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **Offline leaves the lobby with no session**, and the keys are the
+    /// game's again.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn offline_leaves_the_lobby_with_no_session() {
+        let mut engine = in_a_lobby(lobby_alone());
+        run_frames(&mut engine, 1);
+        assert_eq!(
+            engine.menus().current().map(|menu| menu.title.as_str()),
+            Some(crate::lobby::TITLE)
+        );
+        tap(&mut engine, MENU_ACTIVATE_KEY);
+        assert!(engine.game().lobby.is_none(), "offline kept the lobby");
+        assert_eq!(engine.game().lan.standing(), None);
+        run_frames(&mut engine, 1);
+        assert!(engine.menus().current().is_none());
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 }

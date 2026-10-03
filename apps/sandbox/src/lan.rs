@@ -5,7 +5,8 @@
 //! accept loop feeding a [`crcbl::server::Host`], the client connecting by
 //! address or browsing, the "lan" section of the F3 panel — and what is left
 //! here is what is the sandbox's: which of the three the command line asked
-//! for, and what the host's world holds.
+//! for — or the lobby picked (`crate::lobby`), which watches a join it
+//! started through `Standing` — and what the host's world holds.
 //!
 //! The host's world is the smallest one that replicates something: a
 //! "players" system with an entity per admitted peer. The sandbox has no
@@ -26,14 +27,13 @@
 //! `wasm32` the three flags are not parsed at all and [`Lan`] is inert, as
 //! `crate::steam`'s link is without its feature.
 
-#[cfg(not(target_arch = "wasm32"))]
-pub use imp::LanMode;
 pub use imp::{Lan, LanError};
+#[cfg(not(target_arch = "wasm32"))]
+pub use imp::{LanMode, SANDBOX, Standing};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use std::collections::HashMap;
-    #[cfg(test)]
     use std::net::SocketAddr;
     use std::time::Duration;
 
@@ -73,6 +73,18 @@ mod imp {
     /// The replicated system holding one entity per admitted peer.
     const PLAYERS: &str = "players";
 
+    /// Where a session this sandbox joined stands.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Standing {
+        /// On the way in: connecting or hand-shaking.
+        Joining,
+        /// Admitted: the host's snapshots are arriving.
+        InSession,
+        /// Over, and how, in words: the host refused the join, ended the
+        /// session, or the link ended.
+        Over(String),
+    }
+
     /// The sandbox's side of a LAN session, or none.
     #[derive(Debug)]
     pub struct Lan {
@@ -92,10 +104,7 @@ mod imp {
     impl Lan {
         /// No networking.
         pub const fn off() -> Self {
-            Self {
-                role: Role::Off,
-                now: Duration::ZERO,
-            }
+            Self::in_role(Role::Off)
         }
 
         /// Starts what `mode` asks for, ticking at `tick_hz` — a host and
@@ -107,22 +116,71 @@ mod imp {
         /// [`LanError`] when a socket could not be bound or a connect could
         /// not start.
         pub fn start(mode: LanMode, tick_hz: u32) -> Result<Self, LanError> {
-            let role = match mode {
-                LanMode::Off => Role::Off,
-                LanMode::Host { port } => Role::Host(Box::new(LanHost::open_with(
-                    LanBind::on_the_lan(port),
-                    tick_hz,
-                )?)),
-                LanMode::Join(addr) => {
-                    Role::Client(Box::new(LanClient::join(SANDBOX, addr, tick_hz)?))
-                }
-                LanMode::Browse => {
-                    Role::Client(Box::new(LanClient::browse_the_lan(SANDBOX, tick_hz)?))
-                }
-            };
-            Ok(Self {
+            match mode {
+                LanMode::Off => Ok(Self::off()),
+                LanMode::Host { port } => Self::host(LanBind::on_the_lan(port), tick_hz),
+                LanMode::Join(addr) => Self::join(addr, tick_hz),
+                LanMode::Browse => Ok(Self::in_role(Role::Client(Box::new(
+                    LanClient::browse_the_lan(SANDBOX, tick_hz)?,
+                )))),
+            }
+        }
+
+        /// Hosts a session bound where `bind` says, ticking at `tick_hz`.
+        ///
+        /// # Errors
+        ///
+        /// [`LanError`] when the listener could not be bound.
+        pub fn host(bind: LanBind, tick_hz: u32) -> Result<Self, LanError> {
+            Ok(Self::in_role(Role::Host(Box::new(LanHost::open_with(
+                bind, tick_hz,
+            )?))))
+        }
+
+        /// Joins the sandbox host at `addr`, ticking at `tick_hz`.
+        ///
+        /// # Errors
+        ///
+        /// [`LanError`] when the connect could not start.
+        pub fn join(addr: SocketAddr, tick_hz: u32) -> Result<Self, LanError> {
+            Ok(Self::in_role(Role::Client(Box::new(LanClient::join(
+                SANDBOX, addr, tick_hz,
+            )?))))
+        }
+
+        const fn in_role(role: Role) -> Self {
+            Self {
                 role,
                 now: Duration::ZERO,
+            }
+        }
+
+        /// The host this sandbox joined, once it has chosen one.
+        #[cfg(test)]
+        pub fn joined(&self) -> Option<SocketAddr> {
+            match &self.role {
+                Role::Client(client) => client.host(),
+                Role::Off | Role::Host(_) => None,
+            }
+        }
+
+        /// Where the session this sandbox joined stands, or `None` with no
+        /// session or a hosted one. A browse still looking is joining.
+        pub fn standing(&self) -> Option<Standing> {
+            let Role::Client(lan) = &self.role else {
+                return None;
+            };
+            let (Some(host), Some(client)) = (lan.host(), lan.client()) else {
+                return Some(Standing::Joining);
+            };
+            Some(if let Some(refusal) = client.handshake_refusal() {
+                Standing::Over(format!("{host} refused the join: {}", refusal.msg))
+            } else if let Some(ended) = client.ended() {
+                Standing::Over(crcbl::lan::how_it_ended(ended, client))
+            } else if client.session_id().is_some() {
+                Standing::InSession
+            } else {
+                Standing::Joining
             })
         }
 

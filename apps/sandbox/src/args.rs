@@ -19,6 +19,11 @@ crcbl sandbox — the engine's development playground
 USAGE:
     sandbox [OPTIONS]
 
+    With none of --host, --join, --browse, --headless or --frames, the
+    sandbox opens on a LAN lobby: stay offline, host, join a sandbox host on
+    the local network, or type an IP:PORT to connect to. Any of them skips
+    it. Web builds have no lobby.
+
 OPTIONS:
         --headless        Run against HeadlessShell with a hand-driven clock.
                           Deterministic, needs no display, always terminates.
@@ -188,6 +193,12 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                 return Invocation::BadUsage(format!("unrecognized argument `{other}`"));
             }
         }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        options.lobby = options.lan == crcbl::lan::LanMode::Off
+            && !options.headless
+            && options.frames.is_none();
     }
     Invocation::Run(Box::new(options))
 }
@@ -404,6 +415,30 @@ mod tests {
         for flag in ["--host [PORT]", "--join <IP:PORT>", "--browse"] {
             assert!(USAGE.contains(flag), "USAGE lists {flag}");
         }
+    }
+
+    /// **A command line that chose nothing opens on the lobby, and every
+    /// flag that chose a session or made the run a script skips it.** A
+    /// display flag chooses nothing, so it keeps the lobby.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_command_line_that_chose_nothing_opens_the_lobby_and_every_choice_skips_it() {
+        assert!(options(&[]).lobby, "a bare sandbox opens on the lobby");
+        assert!(options(&["--fullscreen", "--size", "640x480"]).lobby);
+        for argv in [
+            &["--host"][..],
+            &["--join", "127.0.0.1:27015"],
+            &["--browse"],
+            &["--headless"],
+            &["--frames", "10"],
+        ] {
+            assert!(!options(argv).lobby, "{argv:?} opened the lobby");
+        }
+        assert!(
+            !Options::default().lobby,
+            "options built in code open on the lobby"
+        );
+        assert!(USAGE.contains("opens on a LAN lobby"));
     }
 
     /// Two sessions at once, or an address that is not one, is bad usage —

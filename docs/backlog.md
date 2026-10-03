@@ -14328,14 +14328,40 @@ Either is the owner's call.
 
 **Left, and what each would take:**
 
-- **The sandbox has no lobby screen.** `--browse` there
-  (`crcbl::lan::LanClient::browse`) prints every host and joins the first whose
-  `compatibility` matches, with no choosing. Towers has one since 2026-10-01
-  (`crcbl_towers::lobby`, over its own `Browser`, with rows built from `hosts()`
-  and a connect field fed by `HostedGame::text_event`); the sandbox would need
-  the same: a start `MenuKind`, and a session that can be swapped in at run time
-  rather than built from the command line. Host names are drawn as announced;
-  nothing in the menu font path treats them as more than text.
+- **A LAN lobby's model is `crcbl::lan::lobby`, its look the game's — decided
+  2026-10-03, long term.** `lobby::Lobby` owns browser polling, the
+  joinable/passed-over sort (`Unjoinable`, from the announced compatibility and
+  room), the typed address and its refusals (`PickRefused`), the pick's
+  `LobbyChoice`, and the `LobbyNotice` a failed join or ended session leaves.
+  Each game draws its own menu from it in its own words and starts what a choice
+  asks for: towers keeps its solo run, its map and its rows
+  (`crcbl_towers::lobby`); the sandbox's is `apps/sandbox/src/lobby.rs`
+  (offline, host, a row per host, connect). A third game takes the model, not
+  either game's menu. Considered and declined: a shared menu builder in the
+  engine — the two lobbies already differ in rows (solo vs offline) and a shared
+  one would grow a flag per game.
+- **The sandbox's lobby is not run against a real LAN, nor windowed.** A native
+  `sandbox` with no session flag, `--headless` or `--frames` opens on it
+  (2026-10-03). Every test drives it on loopback with the browser's query sent
+  straight to a host's announcer; the real one binds every interface and queries
+  the broadcast address, as towers' does. Manual check: `sandbox` on two
+  machines, one picking HOST and the other its row.
+- **The sandbox's lobby has no join timeout of its own.** A join waits in the
+  lobby until the host admits it, refuses it, or the link ends — the transport's
+  `CONNECT_TIMEOUT` for an address nobody answers (`Ended::Lost` through
+  `Lan::standing`). Towers adds `JOIN_TIMEOUT` because its join also waits for a
+  map; the sandbox has nothing after admission to wait for. Not tested: a host
+  that accepts the link and never finishes the handshake.
+- **The sandbox lobby's Steam key isolation is not observed.** While the lobby
+  is up `Sandbox::key_event` returns before `SteamLink::key_event`; dropping
+  that `return` survives every test, because the link is inert without the
+  `steam` feature and a live client. Only a `--features steam` run by hand shows
+  it.
+- **`LanClient::browse` joins a full host.** Its auto-join compares only
+  `compatibility`, so `--browse` (both games) can pick a host at its
+  `max_players` and be refused by it; the lobby passes a full host over
+  (`Unjoinable::Full`). Using `Unjoinable::of` there is a one-line change left
+  out of the lobby slice as a behaviour change of `--browse`.
 - **Link-local multicast is not sent.** The design wanted it beside broadcast,
   because networks disagree about which they forward. Receiving multicast needs
   the discovery port bound too (`join_multicast_v4` on a bound socket), so it
