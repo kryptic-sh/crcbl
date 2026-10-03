@@ -207,7 +207,7 @@ fn empty_scene_to_play_and_stop_without_a_text_editor() {
     assert_eq!(tree(game.path()), fixture, "4: something was written");
 
     // 5. Saved, into a directory typed on the save-as line.
-    let [_, save_as] = editor.panels.file_buttons();
+    let [_, _, save_as] = editor.panels.file_buttons();
     let at = centre(&editor, save_as);
     click(&mut editor, at);
     type_and_enter(&mut editor, &scene.display().to_string());

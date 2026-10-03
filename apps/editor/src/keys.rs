@@ -76,6 +76,20 @@ pub const SAVE: &str = "editor_save";
 /// [`crate::document::Document::new_scene`].
 pub const NEW: &str = "editor_new";
 
+/// Ask for a scene directory to open in place of the one being edited:
+/// Ctrl+O. See [`crate::document::open_target`].
+pub const OPEN: &str = "editor_open";
+
+/// Answer the unsaved bar with Save: Enter. Read only while the bar is up —
+/// see [`unsaved`].
+pub const UNSAVED_SAVE: &str = "editor_unsaved_save";
+
+/// Answer the unsaved bar with Discard: D.
+pub const UNSAVED_DISCARD: &str = "editor_unsaved_discard";
+
+/// Answer the unsaved bar with Cancel: Escape.
+pub const UNSAVED_CANCEL: &str = "editor_unsaved_cancel";
+
 /// Put the whole scene back in view.
 pub const FRAME: &str = "editor_frame";
 
@@ -159,6 +173,23 @@ pub enum Action {
     Pause,
     /// Rename the selection in its outliner row.
     Rename,
+    /// Ask for a scene directory to open in place of the one being edited.
+    Open,
+    /// Answer the unsaved bar.
+    Unsaved(Unsaved),
+}
+
+/// An answer to the unsaved bar, which asks before unsaved edits are lost to
+/// a new scene, an open or the window closing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unsaved {
+    /// Save the scene — asking for a directory first if it has none — and
+    /// then go on with what was asked.
+    Save,
+    /// Drop the unsaved edits and go on with what was asked.
+    Discard,
+    /// Keep the scene as it is and do nothing of what was asked.
+    Cancel,
 }
 
 /// The editor's map: its own actions in the default context, with the reserved
@@ -226,6 +257,22 @@ pub fn map() -> ActionMap {
             key: KeyCode::KeyN,
         }],
     ));
+    map.declare(button(
+        OPEN,
+        vec![Binding::Chord {
+            modifier: Modifier::Control,
+            key: KeyCode::KeyO,
+        }],
+    ));
+    // The unsaved bar's answers. Enter and Escape are bound by the reserved
+    // `ui` context too, which a panel holding the keyboard pushes — so the bar
+    // takes the keyboard back from the panels while it is up, and these are
+    // what reach it. D is free in both reserved contexts, and Ctrl+D's chord
+    // shadows it on its own key. `unsaved` reads the three only while the bar
+    // is up, and `actions` never does.
+    map.declare(button(UNSAVED_SAVE, vec![Binding::Key(KeyCode::Enter)]));
+    map.declare(button(UNSAVED_DISCARD, vec![Binding::Key(KeyCode::KeyD)]));
+    map.declare(button(UNSAVED_CANCEL, vec![Binding::Key(KeyCode::Escape)]));
     map.declare(button(FRAME, vec![Binding::Key(KeyCode::KeyF)]));
     map.declare(button(DELETE, vec![Binding::Key(KeyCode::Delete)]));
     map.declare(button(
@@ -337,8 +384,27 @@ pub fn pop_ui(map: &mut ActionMap) {
 pub fn release_keys(map: &mut ActionMap) {
     let mut keys = Vec::new();
     for name in [
-        MOVE, LIFT, UNDO, REDO, SAVE, NEW, FRAME, DELETE, DUPLICATE, COPY, PASTE, TRANSLATE, SCALE,
-        ROTATE, PLAY, PAUSE, RENAME,
+        MOVE,
+        LIFT,
+        UNDO,
+        REDO,
+        SAVE,
+        NEW,
+        OPEN,
+        UNSAVED_SAVE,
+        UNSAVED_DISCARD,
+        UNSAVED_CANCEL,
+        FRAME,
+        DELETE,
+        DUPLICATE,
+        COPY,
+        PASTE,
+        TRANSLATE,
+        SCALE,
+        ROTATE,
+        PLAY,
+        PAUSE,
+        RENAME,
     ] {
         for binding in map.bindings(name).unwrap_or_default() {
             binding.visit_keys(|key| keys.push(key));
@@ -385,6 +451,9 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
     }
     if map.just_pressed(NEW) {
         actions.push(Action::NewScene);
+    }
+    if map.just_pressed(OPEN) {
+        actions.push(Action::Open);
     }
     if map.just_pressed(DUPLICATE) {
         actions.push(Action::Duplicate);
@@ -446,6 +515,25 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
     actions
 }
 
+/// The answer the keyboard gave the unsaved bar this frame, if it gave one:
+/// what the loop reads **in place of** [`actions`] while the bar is up, so no
+/// other key does anything until the bar is answered.
+///
+/// Cancel before Save before Discard, for a frame that pressed more than
+/// one: the answer that changes least is taken first, and the one that drops
+/// edits last.
+#[must_use]
+pub fn unsaved(map: &ActionMap) -> Option<Unsaved> {
+    [
+        (UNSAVED_CANCEL, Unsaved::Cancel),
+        (UNSAVED_SAVE, Unsaved::Save),
+        (UNSAVED_DISCARD, Unsaved::Discard),
+    ]
+    .into_iter()
+    .find(|(name, _)| map.just_pressed(name))
+    .map(|(_, answer)| answer)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -481,6 +569,8 @@ mod tests {
         window: WindowId,
         map: ActionMap,
         modifiers: Modifiers,
+        /// Every answer [`unsaved`] read off a frame, in order.
+        answers: Vec<Unsaved>,
     }
 
     impl Keyboard {
@@ -494,6 +584,7 @@ mod tests {
                 window,
                 map: map(),
                 modifiers: Modifiers::empty(),
+                answers: Vec::new(),
             }
         }
 
@@ -515,6 +606,7 @@ mod tests {
                     map.key_event(key, state == ButtonState::Pressed);
                 }
             });
+            self.answers.extend(unsaved(&self.map));
             actions(&self.map, self.modifiers, false)
         }
 
@@ -611,6 +703,8 @@ mod tests {
         );
         assert_eq!(keys.tap(KeyCode::KeyN, Modifiers::CTRL), [Action::NewScene]);
         assert_eq!(keys.tap(KeyCode::KeyN, Modifiers::empty()), []);
+        assert_eq!(keys.tap(KeyCode::KeyO, Modifiers::CTRL), [Action::Open]);
+        assert_eq!(keys.tap(KeyCode::KeyO, Modifiers::empty()), []);
         assert_eq!(keys.tap(KeyCode::KeyF, Modifiers::empty()), [Action::Frame]);
         assert_eq!(keys.tap(KeyCode::ArrowLeft, Modifiers::CTRL), []);
         assert_eq!(keys.tap(KeyCode::KeyF, Modifiers::CTRL), []);
@@ -645,6 +739,29 @@ mod tests {
         assert_eq!(keys.tap(KeyCode::F5, Modifiers::CTRL), []);
         assert_eq!(keys.tap(KeyCode::F2, Modifiers::empty()), [Action::Rename]);
         assert_eq!(keys.tap(KeyCode::F2, Modifiers::CTRL), []);
+    }
+
+    /// **Enter, D and Escape answer the unsaved bar and ask for nothing
+    /// else**: [`unsaved`] reads each as its answer, and [`actions`] never
+    /// does — and Ctrl+D is still a duplicate, not a discard.
+    #[test]
+    fn the_unsaved_bars_keys_are_read_only_as_its_answers() {
+        let mut keys = Keyboard::new();
+        for (key, answer) in [
+            (KeyCode::Enter, Unsaved::Save),
+            (KeyCode::KeyD, Unsaved::Discard),
+            (KeyCode::Escape, Unsaved::Cancel),
+        ] {
+            keys.answers.clear();
+            assert_eq!(keys.tap(key, Modifiers::empty()), [], "{key:?}");
+            assert_eq!(keys.answers, [answer], "{key:?}");
+        }
+        keys.answers.clear();
+        assert_eq!(
+            keys.tap(KeyCode::KeyD, Modifiers::CTRL),
+            [Action::Duplicate]
+        );
+        assert_eq!(keys.answers, [], "Ctrl+D discarded");
     }
 
     /// A key this editor has no meaning for asks for nothing.

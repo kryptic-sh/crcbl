@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls, multi-selection, a scene from empty and save-as 2026-10-03, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 to 15 2026-10-01, play controls, multi-selection, a scene from empty and save-as, open and the unsaved bar 2026-10-03, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -832,9 +832,8 @@ same day (below). With it the first exit criterion is met, headlessly.
   `crate::scene::empty_source` in place: a header named `untitled` listing no
   system, the compiled-in scene's light and camera, no entity, a fresh log, no
   origin, clean. The vocabulary and the asset source stay, so the browser lists
-  what it listed. Refused in play mode. The editor has no unsaved-changes prompt
-  — closing the window drops edits through `accept_close` — so a new scene drops
-  them too, and says so on the status line, naming the scene. An empty scene is
+  what it listed. Refused in play mode. A scene with unsaved edits asks first,
+  through the unsaved bar (_Open and the unsaved bar_, below). An empty scene is
   framed as a unit box standing on the ground, not about the origin: the view is
   level with the box's centre, and a box about the origin put the eye on the
   ground plane, where a drop meets no ground.
@@ -851,18 +850,18 @@ same day (below). With it the first exit criterion is met, headlessly.
   at all, becomes `document::asset_root` of the new directory and is measured
   afresh; one named by `set_assets` — `--assets` — stays. `save_to` is still the
   copy that adopts nothing.
-- **The directory is typed** on a save-as line under the toolbar
-  (`apps/editor/src/panel/save_as.rs`), the shell having no file dialog: a text
-  input engaged as it opens, Enter commits and Escape cancels as a rename's
-  does. Ctrl+Shift+S and the toolbar's Save as open it; so does Ctrl+S on a
-  document with no origin, which used to refuse with `EditError::NoOrigin`.
-  `document::save_target` checks the text at the boundary — trimmed, made
-  absolute against the working directory, refused (`EditError::Target`) when
-  empty, holding a control character, or naming something other than a
-  directory. A refused save-as is on the status line and the line opens again
-  holding what was typed. A toolbar click that commits a line being typed saves
-  before the click's own action runs, so it is the scene being edited that is
-  saved.
+- **The directory is typed** on a path line under the toolbar
+  (`apps/editor/src/panel/path_line.rs`, which Open uses too), the shell having
+  no file dialog: a text input engaged as it opens, Enter commits and Escape
+  cancels as a rename's does. Ctrl+Shift+S and the toolbar's Save as open it; so
+  does Ctrl+S on a document with no origin, which used to refuse with
+  `EditError::NoOrigin`. `document::save_target` checks the text at the boundary
+  — trimmed, made absolute against the working directory, refused
+  (`EditError::Target`) when empty, holding a control character, or naming
+  something other than a directory. A refused save-as is on the status line and
+  the line opens again holding what was typed. A toolbar click that commits a
+  line being typed saves before the click's own action runs, so it is the scene
+  being edited that is saved.
 - **The exit criterion's proof** is
   `app::tests::exit_criterion::empty_scene_to_play_and_stop_without_a_text_editor`,
   one test through the real `Editor` loop on the headless shell and the null
@@ -870,21 +869,20 @@ same day (below). With it the first exit criterion is met, headlessly.
   ground; the translate gizmo's X arrow dragged; the inspector's add button for
   `bodies` clicked and the mass dragged; the toolbar's Save as, a directory
   under the game's folder typed, Enter; a fresh editor opened on that directory
-  alone; F5 and thirty frames of play; F5. Each step asserts what it changed —
-  the scene empty, the mesh measured from the asset and selected, the move along
-  X alone, both systems listed and the mass raised, the scene the document's own
-  — and that the game's folder is unchanged until the save-as, is the fixture
-  plus the scene's files after it, and is unchanged by the reopen, play and
-  stop. The reopened scene is the saved one, the mesh measured from the game's
-  root, the body falls more than half a metre, and stop restores the files byte
-  for byte.
+  alone (a fresh editor rather than Open, which is the stronger reopen); F5 and
+  thirty frames of play; F5. Each step asserts what it changed — the scene
+  empty, the mesh measured from the asset and selected, the move along X alone,
+  both systems listed and the mass raised, the scene the document's own — and
+  that the game's folder is unchanged until the save-as, is the fixture plus the
+  scene's files after it, and is unchanged by the reopen, play and stop. The
+  reopened scene is the saved one, the mesh measured from the game's root, the
+  body falls more than half a metre, and stop restores the files byte for byte.
 - **What it does not cover**: nothing of it has been seen on a device — every
   step is headless, on the null backend, against laid-out rectangles. The
   fixture triangle is one flat part; the body falls into nothing (the new scene
   has no ground and the test builds none), so resting is not shown; the property
-  edited is a drag-value dragged, not a number typed. Reopening is a fresh
-  editor, because the editor has no open command; the saved scene is still
-  called `untitled`. `docs/backlog.md` lists these with what each takes.
+  edited is a drag-value dragged, not a number typed. `docs/backlog.md` lists
+  these with what each takes.
 - **Evidence**: the document's tests hold a new scene's state from a document
   that had a history, names, a selection and an origin, and its refusal in play;
   save-as adopting the directory (a system unlisted straight after it removed by
@@ -905,6 +903,83 @@ same day (below). With it the first exit criterion is met, headlessly.
   target, the line committing nothing, a dropped scene unnamed, the empty scene
   framed about the origin, the save-as carried out after the frame's actions,
   the empty scene listing a system, and stop not restoring.
+
+**Open and the unsaved bar, landed 2026-10-03**, on the decisions of the same
+day (below).
+
+- **Decided 2026-10-03, for the long term: unsaved changes are confirmed inside
+  the editor**, not by an OS dialog: a bar under the toolbar
+  (`apps/editor/src/panel/unsaved.rs`) saying what would be lost — "Unsaved
+  edits to `X` would be lost to a new scene", "by opening `dir`", "when the
+  window closes" — with Save (Enter), Discard (D) and Cancel (Escape). It guards
+  a new scene, an open and the window closing, for a dirty document only; a
+  clean one goes straight on. While it is up nothing else is done: the keyboard
+  answers it and nothing else (`keys::unsaved` is read in place of
+  `keys::actions`), the panels take no navigation, typing or press but the
+  bar's, and the viewport takes no press. Save on a scene with no directory
+  opens the save-as line and goes on once it saves; cancelling that line, or
+  asking for anything else, drops what was waiting. A refused save puts the bar
+  back. A Save while the scene plays — only a close can ask then — stops play
+  first, so the authored scene is saved. The flow is
+  `apps/editor/src/app/unsaved.rs`.
+- **Decided 2026-10-03: the window's close is held open while the bar asks**,
+  wherever the shell lets the app decline one — which is every backend the
+  editor runs on: Win32 intercepts `WM_CLOSE`, AppKit's `windowShouldClose:`
+  answers `NO`, X11's `WM_DELETE_WINDOW` and Wayland's `xdg_toplevel.close` are
+  requests, and the headless shell models them. The request stays outstanding
+  until Save or Discard accepts it or Cancel answers it `CloseReply::Keep`. The
+  browser shell asks too, but the editor has no web build. **What cannot be held
+  is recovered**: a window taken away without a request (`WindowDestroyed`) and
+  a run whose frame fails write a dirty scene to `Document::write_recovery`'s
+  copy — the authored files, even in play — in a new directory
+  `<temp>/crcbl-editor-recovery/<millis>-<scene name>/` that is never
+  overwritten (a taken name is passed over for `-1`, `-2`…), and the log says
+  where. Under the system's temporary directory, not beside the scene, so a copy
+  is never one more scene in a committed tree or in the asset browser. A run
+  ending on its frame budget or limit writes none.
+- **Open** (Ctrl+O and the toolbar's Open) is a typed directory on the path
+  line, which starts at the directory holding the current scene's own, checked
+  by `document::open_target` — refused by name, as `EditError::OpenTarget`,
+  unless a directory holding `scene.ron` is there — and read by
+  `Document::open_dir` with this build's vocabulary **before** the bar asks, so
+  a typing slip never puts the scene being edited at stake; a refusal opens the
+  line again with the text. Refused in play mode. The opened document replaces
+  the old whole: its asset root follows `document::asset_root` unless `--assets`
+  named one, the panels are built over it afresh (the browser relists, the
+  selection is empty), its history is its own, and the renderer is rebuilt from
+  its assets on the next draw.
+- **Decided 2026-10-03: a new scene takes its directory's name.** A save-as of a
+  scene still called `untitled` names it after the directory — its last
+  component less an extension — and writes that name into the header
+  (`crcbl_scene::scn::Scene::set_name`); a refused save-as puts `untitled` back.
+  A scene with a name of its own keeps it wherever it is saved, so committed
+  scenes are written byte for byte as before, and nothing else renames a scene.
+- **Escape reaches the editor.** The engine loop's `Pending::observe` claims it
+  as `PAUSE_KEY`, which the editor's own loop has no pause for; before this
+  Escape backed out of no text field through a real window, only in the panels'
+  tests, which hand the tree a `NavInput` directly.
+- **Evidence**: the document's tests hold `open_target`'s refusals and a scene
+  directory taken, a new scene named after its directory and reopened by that
+  name, a named scene's files unchanged, and a refused save-as keeping
+  `untitled`; the recovery writer writing the scene and leaving the document
+  dirty with no origin, never overwriting a taken name, writing the authored
+  scene in play, and making a directory name of any scene name. The keys' hold
+  Ctrl+O and the bar's three keys read only by `keys::unsaved`; the panels' the
+  bar's three answers, the panels holding still behind it, the bar closing a
+  path line unsent, and the open line committing an open and refused in play.
+  The loop's hold Cancel keeping everything, nothing else done while the bar
+  asks, Save then a new scene, Save with no directory through save-as then on, a
+  cancelled save-as doing nothing, a dirty close held open until answered and a
+  clean one closed at once, Save on a close in play, a recovery copy of a dirty
+  scene and none of a clean one when the window is taken away, and Open: a typed
+  scene in place with its entities, origin, assets, an empty selection and a
+  fresh log, a scene drawn from its own game's files where the old one's held
+  the same key, a named asset root kept, a dirty open asked about, a non-scene
+  refused by name, refused in play, and the toolbar's button. The mutations each
+  turned a test red are listed in the commit that landed this.
+- **What it does not cover**: none of it has been seen on a device, and the
+  close hold is the headless shell's — each backend's own holding is its shell
+  tests', not this editor's. `docs/backlog.md` lists what is deferred.
 
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor

@@ -74,14 +74,22 @@
 //! contexts are pushed from what the panels say about themselves — so the
 //! arrows nudge the selection until an outliner row takes focus, and nothing
 //! here fires while a field is being typed into.
+//!
+//! # Unsaved edits are asked about
+//!
+//! A new scene, an open and the window closing put the unsaved bar up for a
+//! dirty document, and nothing else is done until it is answered; a window
+//! that goes without asking leaves a recovery copy. `unsaved`'s module docs
+//! say which backends hold a close request open and which recover.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crcbl::core::input::{Modifiers, PointerButton, ScrollDelta};
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameBudget, FrameOutcome, GpuContext, GpuContextDesc, GpuError,
-    Handled, LoopError, ModeRequest, Pending, PointerCapture, RunSummary, SettingsSource,
-    accept_close, open_window, wait_for_configure,
+    Handled, LoopError, ModeRequest, PAUSE_KEY, Pending, PointerCapture, RunSummary,
+    SettingsSource, open_window, wait_for_configure,
 };
 use crcbl::hal::{CommandEncoderDesc, ImageUsage};
 use crcbl::input::ActionMap;
@@ -114,6 +122,7 @@ use crate::panel::{PanelInput, Panels, Tone, VIEWPORT_TEXTURE};
 mod files;
 mod instances;
 mod meshes;
+mod unsaved;
 
 use instances::Placed;
 use meshes::Shelf;
@@ -248,6 +257,23 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// pane's, in window pixels, and the size of the target the pane samples.
     drawn_viewport: Option<(u32, u32)>,
     mode: ModeRequest,
+    /// What the unsaved bar is asking about, while it is up — see `unsaved`.
+    unsaved: Option<unsaved::Guarded>,
+    /// What a Save on the bar goes on with once the save-as it asked for
+    /// lands.
+    after_save: Option<unsaved::Guarded>,
+    /// The asset root `--assets` named, which a scene opened in the run reads
+    /// its meshes from too.
+    assets: Option<PathBuf>,
+    /// Where a recovery copy is written — see `unsaved`.
+    recovery: PathBuf,
+    /// Whether the window is to close: set by an answer that lets it, and
+    /// carried out before the frame draws.
+    closing: bool,
+    /// Whether the renderer is to be rebuilt from the document's assets on
+    /// the next draw: a document put in place by an open reads them from
+    /// another root.
+    rebuild_due: bool,
 }
 
 /// What a held pointer button is doing: to the camera, or to a gizmo handle.
@@ -368,7 +394,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         settings_source: SettingsSource<'static>,
     ) -> Result<Self, EditorError> {
         let bounds = scene_bounds(&mut document);
-        let grid_extent = bounds.half_extent().length().max(1.0) * GRID_MARGIN;
+        let grid_extent = grid_extent(&bounds);
         let wanted = document.mesh_assets();
         let (shelf, scene) = Shelf::build(document.assets(), &wanted);
         let (renderer, instances) = renderer_for(&gpu, &scene, grid_extent, &mut document, &shelf)?;
@@ -422,6 +448,12 @@ impl<S: Shell + ?Sized> Editor<S> {
             title,
             drawn_viewport: None,
             mode: ModeRequest::new(),
+            unsaved: None,
+            after_save: None,
+            assets: options.assets.clone(),
+            recovery: unsaved::recovery_base(),
+            closing: false,
+            rebuild_due: false,
         })
     }
 
@@ -489,7 +521,18 @@ impl<S: Shell + ?Sized> Editor<S> {
             ..
         } = self;
         shell.pump(&mut |event| {
-            if pending.observe(&event) == Handled::Game {
+            // Escape is the engine loop's pause key, which `observe` claims
+            // for the hosted loop's pause panel. This loop has none, so the
+            // key is the editor's: what backs out of a text field and
+            // cancels the unsaved bar.
+            let escape = matches!(
+                event,
+                ShellEvent::Key {
+                    key_code: Some(PAUSE_KEY),
+                    ..
+                }
+            );
+            if pending.observe(&event) == Handled::Game || escape {
                 if let ShellEvent::Key {
                     key_code: Some(key),
                     state,
@@ -509,11 +552,14 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.mode.check(&*self.shell, self.window);
 
         if pending.destroyed {
+            // Gone without a request, so nothing could be asked.
+            self.recover_unsaved();
             return Ok(Flow::Stop(ExitReason::WindowDestroyed));
         }
-        if pending.close_requested {
-            accept_close(self.shell.as_mut(), self.window)?;
-            return Ok(Flow::Stop(ExitReason::CloseRequested));
+        if pending.close_requested
+            && let Some(flow) = self.close_requested()?
+        {
+            return Ok(flow);
         }
         if let Some(size) = pending.resized {
             self.gpu.resize((size.width, size.height))?;
@@ -527,10 +573,12 @@ impl<S: Shell + ?Sized> Editor<S> {
         // The pointer and the camera are decided against the rectangles the
         // panels were **last** laid out with, which is the same layout the tree
         // resolves this frame's click against — so exactly one of them claims
-        // a press.
-        let in_viewport = pending
-            .pointer
-            .is_some_and(|at| self.panels.in_viewport(at));
+        // a press. Nothing in the viewport is the pointer's while the unsaved
+        // bar asks.
+        let in_viewport = self.unsaved.is_none()
+            && pending
+                .pointer
+                .is_some_and(|at| self.panels.in_viewport(at));
         self.drive_camera(&pending, in_viewport);
         if pending.pointer_pressed && in_viewport {
             self.panels.release_keyboard();
@@ -555,7 +603,14 @@ impl<S: Shell + ?Sized> Editor<S> {
             other => self.drag = other,
         }
 
-        let mut asked = crate::keys::actions(&self.actions, self.modifiers, editing);
+        let mut asked = if self.unsaved.is_some() {
+            crate::keys::unsaved(&self.actions)
+                .map(Action::Unsaved)
+                .into_iter()
+                .collect()
+        } else {
+            crate::keys::actions(&self.actions, self.modifiers, editing)
+        };
         let pointer = self.pointer_state.resolve(&pending);
         let input = PanelInput {
             pointer,
@@ -570,6 +625,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             },
         };
         let panels = self.panels.frame(&mut self.document, input);
+        asked.extend(panels.unsaved.map(Action::Unsaved));
         asked.extend(panels.toolbar);
         let accepted = panels.spawn;
         self.draw_gizmo(pointer.pos);
@@ -596,8 +652,15 @@ impl<S: Shell + ?Sized> Editor<S> {
         if let Some(text) = panels.save_as {
             self.save_as(&text)?;
         }
+        if let Some(text) = panels.open {
+            self.open(&text);
+        }
         for action in asked {
             self.act(&action);
+        }
+        self.follow_after_save();
+        if let Some(flow) = self.close_if_asked()? {
+            return Ok(flow);
         }
         if let Some(asset) = accepted {
             self.place_at_centre(&asset);
@@ -1178,14 +1241,24 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// A refusal is logged rather than propagated: nudging with nothing
     /// selected, or saving a document with no directory, are things a person
     /// does and then does differently — not conditions that should end the run.
+    ///
+    /// **While the unsaved bar asks, only its answer is carried out** — see
+    /// `unsaved`. The keyboard asks for nothing else then, and the panels take
+    /// no click but the bar's; this is the rule both stand on.
     fn act(&mut self, action: &Action) {
+        if self.unsaved.is_some() && !matches!(action, Action::Unsaved(_)) {
+            crcbl::log::info!("editor: {action:?} waits for the unsaved bar's answer");
+            return;
+        }
         let outcome = match action {
             Action::Nudge { axis, sign } => self.nudge(*axis, sign * NUDGE_M),
             Action::Undo => self.document.undo().map(|_| ()),
             Action::Redo => self.document.redo().map(|_| ()),
             Action::Save => self.save(),
             Action::SaveAs => self.begin_save_as(),
-            Action::NewScene => self.new_scene(),
+            Action::NewScene => self.ask_new_scene(),
+            Action::Open => self.begin_open(),
+            Action::Unsaved(answer) => self.answer(*answer),
             Action::Frame => {
                 self.frame_scene();
                 Ok(())
@@ -1564,7 +1637,9 @@ impl<S: Shell + ?Sized> Editor<S> {
     }
 
     /// Rebuilds the renderer around the shelf it has and every asset the
-    /// document's meshes now name, when they name one it lacks — see `meshes`.
+    /// document's meshes now name, when they name one it lacks — see `meshes`
+    /// — or around those assets alone when a rebuild is due because the
+    /// document was replaced.
     ///
     /// The rebuild is [`rebuild`](Self::rebuild)'s.
     ///
@@ -1574,6 +1649,11 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// renderer, its grid or an instance.
     fn shelve(&mut self) -> Result<(), EditorError> {
         let seen = (self.document.membership(), self.document.measures());
+        if std::mem::take(&mut self.rebuild_due) {
+            self.shelved = seen;
+            let wanted = self.document.mesh_assets();
+            return self.rebuild(&wanted);
+        }
         if seen == self.shelved {
             return Ok(());
         }
@@ -1744,6 +1824,11 @@ fn renderer_for(
     }
 }
 
+/// How far the ground grid reaches around a scene whose box is `bounds`.
+fn grid_extent(bounds: &Aabb) -> f32 {
+    bounds.half_extent().length().max(1.0) * GRID_MARGIN
+}
+
 /// The light the scene is shaded by. The engine's own default: an editor is not
 /// a place to art-direct, and a scene lit from somewhere surprising reads as a
 /// bug in the scene.
@@ -1887,6 +1972,8 @@ pub fn run(options: &Options) -> Result<Summary, EditorError> {
     match outcome {
         Ok(reason) => editor.finish(reason),
         Err(error) => {
+            // A failed frame ends the run with nothing asked.
+            editor.recover_unsaved();
             if let Err(teardown) = editor.finish(ExitReason::Failed) {
                 crcbl::log::error!("teardown after a failed frame also failed: {teardown}");
             }

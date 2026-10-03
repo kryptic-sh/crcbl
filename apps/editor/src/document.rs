@@ -56,12 +56,14 @@ mod naming;
 mod origin;
 mod ownership;
 mod play;
+mod recovery;
 mod selection;
 mod systems;
 mod validation;
 
-pub use origin::save_target;
+pub use origin::{open_target, save_target};
 pub use play::PlayState;
+pub use recovery::RECOVERY_DIR;
 pub use systems::{IN_SCENE, SystemGroup, UNGROUPED};
 
 /// A loaded scene and everything the editor knows about it.
@@ -271,6 +273,24 @@ pub enum EditError {
         reason: String,
     },
 
+    /// An open was handed text that names no scene directory — see
+    /// [`open_target`].
+    OpenTarget {
+        /// What was typed.
+        text: String,
+        /// Why it is not a scene to open.
+        reason: String,
+    },
+
+    /// A recovery copy's directory would not be made — see
+    /// [`Document::write_recovery`].
+    Recovery {
+        /// The directory that was being made.
+        dir: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
+
     /// A save wrote every file, then could not remove one its scene no longer
     /// names.
     ///
@@ -373,6 +393,14 @@ impl fmt::Display for EditError {
             Self::Target { text, reason } => {
                 write!(f, "the scene cannot be saved into `{text}`: {reason}")
             }
+            Self::OpenTarget { text, reason } => {
+                write!(f, "`{text}` cannot be opened: {reason}")
+            }
+            Self::Recovery { dir, source } => write!(
+                f,
+                "making the recovery directory `{}`: {source}",
+                dir.display()
+            ),
             Self::Remove { key, source } => write!(
                 f,
                 "removing `{key}`, which the scene no longer names: {source}"

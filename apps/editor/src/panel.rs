@@ -33,7 +33,7 @@
 //! # The toolbar
 //!
 //! A strip over the panes, outside the dock, with play mode's two buttons,
-//! where play stands, and a new scene and save-as — so it costs the saved
+//! where play stands, and a new scene, open and save-as — so it costs the saved
 //! layout nothing: the dock's panes are the ones [`crate::layout::load`]
 //! checks a settings file against, and a pane a layout does not hold has to
 //! be migrated into it, as the asset browser is (`crate::layout`'s module
@@ -41,9 +41,15 @@
 //! [`Action`] its key would have asked for back to [`crate::app`], which
 //! carries both out the same way.
 //!
-//! While a directory is asked for, the save-as line sits under the toolbar
-//! (`save_as`' module docs): a text input whose committed text
-//! [`PanelFrame::save_as`] hands to [`crate::app`] to save into.
+//! While a directory is asked for, the path line sits under the toolbar
+//! (`path_line`'s module docs): a text input whose committed text
+//! [`PanelFrame::save_as`] or [`PanelFrame::open`] hands to [`crate::app`] to
+//! save into or open.
+//!
+//! While the editor asks what to do about unsaved edits, the unsaved bar sits
+//! under the toolbar above it (`unsaved`'s module docs), and the panels take
+//! nothing but a click on the bar until it is answered:
+//! [`PanelFrame::unsaved`] hands the answer to [`crate::app`].
 //!
 //! While a scene plays and its game offers play controls, a second strip
 //! under the toolbar lists them and the run's numbers (`play`'s module docs):
@@ -125,13 +131,16 @@ use crcbl::ui::{DrawList, FontAtlas, PointerInput, TextureId};
 
 use crate::command::Gesture;
 use crate::document::{Document, EditError, PlayState};
-use crate::keys::Action;
+use crate::keys::{Action, Unsaved};
 use crate::layout::{self, PANE_MIN};
 
 mod assets;
 mod inspector;
+mod path_line;
 mod play;
-mod save_as;
+mod unsaved;
+
+pub use path_line::Purpose;
 
 /// The name the viewport pane's picture goes by in the panels' draw list —
 /// see the module docs. The only texture the editor draws, so the first
@@ -184,16 +193,27 @@ const EDITOR_CSS: &str = "
 
 #play-state { padding: 0 6px; color: #9aa3b2; }
 
-#save-as {
+#path-line {
   flex-shrink: 0;
   align-items: center;
   padding: 2px 4px;
   background: #1b1f27;
 }
 
-.save-as-label, .save-as-hint { padding: 0 6px; color: #9aa3b2; }
+.path-line-label, .path-line-hint { padding: 0 6px; color: #9aa3b2; }
 
-.save-as-path { flex-grow: 1; min-width: 0; }
+.path-line-path { flex-grow: 1; min-width: 0; }
+
+#unsaved {
+  flex-shrink: 0;
+  align-items: center;
+  padding: 2px 4px;
+  background: #2a2418;
+}
+
+.unsaved-text { padding: 0 6px; color: #e0b050; flex-grow: 1; min-width: 0; }
+
+#unsaved button { margin-left: 4px; }
 
 #play-controls {
   flex-shrink: 0;
@@ -342,9 +362,16 @@ pub struct PanelFrame {
     /// The mesh asset accept was pressed on in the asset browser this frame,
     /// for the caller to place at the view's centre.
     pub spawn: Option<String>,
-    /// The directory the save-as line committed this frame, as typed, for the
-    /// caller to check and save into — see `save_as`' module docs.
+    /// The directory the path line committed for a save-as this frame, as
+    /// typed, for the caller to check and save into — see `path_line`'s
+    /// module docs.
     pub save_as: Option<String>,
+    /// The directory the path line committed for an open this frame, as
+    /// typed, for the caller to check and open.
+    pub open: Option<String>,
+    /// The answer a click on the unsaved bar gave this frame, for the caller
+    /// to carry out — see `unsaved`'s module docs.
+    pub unsaved: Option<Unsaved>,
 }
 
 /// The inspector's sections, add buttons and add-list headings, as a frame
@@ -409,8 +436,11 @@ pub struct Panels {
     browser: assets::Browser,
     /// The play strip's choices and what it last drew — see `play`.
     strip: play::Strip,
-    /// The save-as line, while a directory is asked for — see `save_as`.
-    save_as: save_as::Strip,
+    /// The path line, while a directory is asked for — see `path_line`.
+    path_line: path_line::Strip,
+    /// The unsaved bar, while the editor asks about unsaved edits — see
+    /// `unsaved`.
+    unsaved: unsaved::Bar,
 }
 
 /// How the status line reads a message.
@@ -467,7 +497,8 @@ impl Panels {
             toolbar_key: None,
             browser: assets::Browser::new(document.assets()),
             strip: play::Strip::default(),
-            save_as: save_as::Strip::default(),
+            path_line: path_line::Strip::default(),
+            unsaved: unsaved::Bar::default(),
         };
         // One idle frame, so the first real one has rectangles to hit-test
         // against: the tree resolves a click against the *previous* layout, and
@@ -599,26 +630,84 @@ impl Panels {
         self.renaming.as_ref().map(|renaming| renaming.id)
     }
 
-    /// Opens the save-as line under the toolbar holding `text`, and engages
-    /// its input once it is laid out — the next frame — so what is typed
-    /// after that is the directory. See `save_as`' module docs.
+    /// Opens the path line under the toolbar for a save-as, holding `text`,
+    /// and engages its input once it is laid out — the next frame — so what
+    /// is typed after that is the directory. See `path_line`'s module docs.
     ///
     /// # Errors
     ///
     /// [`EditError::Playing`] in play mode, which refuses a save; the line is
     /// not opened.
     pub fn begin_save_as(&mut self, document: &Document, text: String) -> Result<(), EditError> {
+        self.begin_path(document, Purpose::SaveAs, text)
+    }
+
+    /// Opens the path line under the toolbar for an open, holding `text`, as
+    /// [`begin_save_as`](Self::begin_save_as) does for a save-as.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::Playing`] in play mode, which refuses an open: what play
+    /// changed is thrown away by a stop, and an open in between would throw
+    /// the authored scene away with it. The line is not opened.
+    pub fn begin_open(&mut self, document: &Document, text: String) -> Result<(), EditError> {
+        self.begin_path(document, Purpose::Open, text)
+    }
+
+    /// The body [`begin_save_as`](Self::begin_save_as) and
+    /// [`begin_open`](Self::begin_open) share.
+    fn begin_path(
+        &mut self,
+        document: &Document,
+        purpose: Purpose,
+        text: String,
+    ) -> Result<(), EditError> {
         if document.play_state() != PlayState::Editing {
             return Err(EditError::Playing);
         }
-        self.save_as.begin(text);
+        self.path_line.begin(purpose, text);
         Ok(())
     }
 
-    /// What the save-as line's input holds, while the line is open.
+    /// What the path line's input holds, while it is open for a save-as.
     #[must_use]
     pub fn saving_as(&self) -> Option<&str> {
-        self.save_as.text()
+        self.path_line.text(Purpose::SaveAs)
+    }
+
+    /// What the path line's input holds, while it is open for an open.
+    #[must_use]
+    pub fn opening(&self) -> Option<&str> {
+        self.path_line.text(Purpose::Open)
+    }
+
+    /// Puts the unsaved bar up saying `text`, and takes the keyboard back from
+    /// the panels — see `unsaved`'s module docs. A path line being typed is
+    /// closed unsent, so nothing it held is saved or opened behind the
+    /// question; a rename being typed is committed, as a click in the
+    /// viewport commits it.
+    pub fn begin_unsaved(&mut self, text: String) {
+        self.path_line.close();
+        self.release_keyboard();
+        self.unsaved.begin(text);
+    }
+
+    /// Takes the unsaved bar down.
+    pub fn end_unsaved(&mut self) {
+        self.unsaved.close();
+    }
+
+    /// What the unsaved bar says, while it is up.
+    #[must_use]
+    pub fn unsaved(&self) -> Option<&str> {
+        self.unsaved.text()
+    }
+
+    /// The unsaved bar's Save, Discard and Cancel buttons, as the last frame
+    /// laid them out.
+    #[cfg(test)]
+    pub(crate) fn unsaved_buttons(&self) -> [NodeKey; 3] {
+        self.unsaved.buttons().expect("the unsaved bar is laid out")
     }
 
     /// Puts `text` on the status line under the panes, read as `tone`, until
@@ -693,14 +782,14 @@ impl Panels {
         [keys[0], keys[1]]
     }
 
-    /// The toolbar's new-scene and save-as buttons, as the last frame laid
-    /// them out: after the play state.
+    /// The toolbar's new-scene, open and save-as buttons, as the last frame
+    /// laid them out: after the play state.
     #[cfg(test)]
-    pub(crate) fn file_buttons(&self) -> [NodeKey; 2] {
+    pub(crate) fn file_buttons(&self) -> [NodeKey; 3] {
         let keys = self
             .ui
             .child_keys(self.toolbar_key.expect("the toolbar is laid out"));
-        [keys[3], keys[4]]
+        [keys[3], keys[4], keys[5]]
     }
 
     /// The play strip, as the last frame laid it out — [`None`] on a frame
@@ -863,7 +952,8 @@ impl Panels {
     ///
     /// **Once a frame.** The tree resolves this frame's click when the frame
     /// begins, so a second build would latch it twice.
-    pub fn frame(&mut self, document: &mut Document, input: PanelInput) -> PanelFrame {
+    pub fn frame(&mut self, document: &mut Document, mut input: PanelInput) -> PanelFrame {
+        self.hold_for_unsaved(&mut input);
         self.refresh(document);
         self.follow_document(document);
 
@@ -887,7 +977,8 @@ impl Panels {
         let mut double_clicked = None;
         let mut relist = false;
         let mut asked_play = None;
-        let mut save_input = None;
+        let mut path_input = None;
+        let mut answered = None;
         // Owned, so the strip is built while the inspector borrows the
         // document: the controls are a few pointers and the numbers a few
         // strings.
@@ -918,7 +1009,8 @@ impl Panels {
             status,
             browser,
             strip,
-            save_as,
+            path_line,
+            unsaved,
             ..
         } = self;
         let options = OutlinerOptions {
@@ -937,7 +1029,8 @@ impl Panels {
             ],
             |ui| {
                 (toolbar_key, toolbar) = build_toolbar(ui, play);
-                save_input = save_as.build(ui);
+                answered = unsaved.build(ui);
+                path_input = path_line.build(ui);
                 asked_play = strip.build(ui, &controls, play_status);
                 ui.dock("#panes", layout, PANE_MIN, |ui, pane| match pane {
                     // Built empty: the scene's picture is pushed over its
@@ -1056,7 +1149,11 @@ impl Panels {
         }
         self.follow_outliner(document, input.select);
         self.follow_rename(document, rename_input);
-        let save_as = self.save_as.follow(&mut self.ui, save_input);
+        let (save_as, open) = match self.path_line.follow(&mut self.ui, path_input) {
+            Some((Purpose::SaveAs, text)) => (Some(text), None),
+            Some((Purpose::Open, text)) => (None, Some(text)),
+            None => (None, None),
+        };
         if let Some(id) = double_clicked
             && let Err(error) = self.begin_rename(document, id)
         {
@@ -1068,6 +1165,31 @@ impl Panels {
             toolbar,
             spawn,
             save_as,
+            open,
+            unsaved: answered,
+        }
+    }
+
+    /// Takes away what the panels would act on while the unsaved bar is up —
+    /// the keyboard's navigation, the typing, and a press anywhere but the
+    /// bar as the last frame laid it out — leaving the pointer to hover. See
+    /// `unsaved`'s module docs.
+    fn hold_for_unsaved(&self, input: &mut PanelInput) {
+        if self.unsaved.text().is_none() {
+            return;
+        }
+        input.nav = NavInput::default();
+        input.text = TextInput::default();
+        let over_bar = self
+            .unsaved
+            .key()
+            .and_then(|key| self.ui.rect(key))
+            .is_some_and(|(min, max)| {
+                let at = input.pointer.pos;
+                at.x >= min.x && at.x < max.x && at.y >= min.y && at.y < max.y
+            });
+        if !over_bar {
+            input.pointer = PointerInput::hovering(input.pointer.pos);
         }
     }
 
@@ -1325,8 +1447,8 @@ fn scroll(ui: &mut Ui, scrollers: &[NodeKey], at: Vec2, delta: f32) {
 }
 
 /// The toolbar over the panes: play or stop, pause or resume, where play
-/// stands, and a new scene and save-as. Returns its key, and what a click on
-/// it asked for.
+/// stands, and a new scene, open and save-as. Returns its key, and what a
+/// click on it asked for.
 ///
 /// Each button is labelled with what it does **now** and the key that does the
 /// same, so the strip is also where a person learns F5, F6 and the chords.
@@ -1347,6 +1469,9 @@ fn build_toolbar(ui: &mut Ui, play: PlayState) -> (Option<NodeKey>, Option<Actio
         ui.span("#play-state", state, &[]);
         if ui.button("#new-scene", "New (Ctrl+N)").clicked {
             asked = Some(Action::NewScene);
+        }
+        if ui.button("#open-scene", "Open (Ctrl+O)").clicked {
+            asked = Some(Action::Open);
         }
         if ui
             .button("#save-scene-as", "Save as (Ctrl+Shift+S)")
@@ -1512,9 +1637,10 @@ mod tests {
     mod assets;
     mod inspector;
     mod naming;
+    mod path_line;
     mod rotation;
-    mod save_as;
     mod selection;
+    mod unsaved;
 
     /// The framebuffer every page here is laid out over: the size the editor's
     /// own window opens at.

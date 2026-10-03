@@ -1,18 +1,31 @@
-//! The scene as files: a new one from empty, and save-as into a directory
-//! typed on the save-as line — the editor's half of
-//! [`Document::new_scene`](crate::document::Document::new_scene) and
-//! [`Document::save_as`](crate::document::Document::save_as), whose module
-//! docs say what each does to the document.
+//! The scene as files: a new one from empty, a scene directory opened, and
+//! save-as into a directory — the last two typed on the path line. The
+//! editor's half of [`Document::new_scene`], [`Document::open_dir`] and
+//! [`Document::save_as`], whose docs say what each does to the document.
 //!
-//! **Unsaved edits are dropped by a new scene and the status line says so**,
-//! as closing the window drops them: the editor has no prompt for either, and
-//! a second, different rule for one of them would be the surprise.
+//! **A new scene and an open ask before unsaved edits are lost**, through the
+//! unsaved bar — `unsaved`'s module docs — as closing the window does.
+//!
+//! # Open
+//!
+//! Ctrl+O or the toolbar's Open put the path line up for a scene directory;
+//! what is committed is checked ([`open_target`]) and read
+//! ([`Document::open_dir`], with this build's vocabulary) **before** the bar
+//! asks, so a directory that is not a scene is refused by name, the line
+//! opening again holding what was typed, and nothing of the scene being
+//! edited is at stake. The scene read is then put in place whole: its asset
+//! root is [`crate::document::asset_root`] of it unless `--assets` named one,
+//! the panels are built over it afresh — the browser lists its assets, the
+//! selection is empty — the history is its own, and the renderer is rebuilt
+//! from its assets on the next draw. Refused in play mode, as a new scene is.
 
+use crcbl::assets::DirSource;
 use crcbl::shell::Shell;
 
-use super::{Editor, EditorError};
-use crate::document::{EditError, save_target};
-use crate::panel::Tone;
+use super::unsaved::Guarded;
+use super::{Editor, EditorError, scene_bounds};
+use crate::document::{Document, EditError, PlayState, open_target, save_target};
+use crate::panel::{Panels, Tone};
 
 /// What the status line says once a new scene is in place.
 pub(super) const NEW_SCENE: &str =
@@ -21,7 +34,19 @@ pub(super) const NEW_SCENE: &str =
 /// What the status line says while a directory is asked for.
 const ASK_DIRECTORY: &str = "Save as: type a directory for the scene under the toolbar";
 
+/// What the status line says while a scene directory to open is asked for.
+const ASK_SCENE: &str = "Open: type a scene directory under the toolbar";
+
 impl<S: Shell + ?Sized> Editor<S> {
+    /// Puts a new, empty scene in place of the one being edited — asking
+    /// first if it has unsaved edits. Refused in play mode.
+    pub(super) fn ask_new_scene(&mut self) -> Result<(), EditError> {
+        if self.document.play_state() != PlayState::Editing {
+            return Err(EditError::Playing);
+        }
+        self.guard(Guarded::New)
+    }
+
     /// Puts a new, empty scene in place of the one being edited, frames it,
     /// and says so — naming the scene whose unsaved edits went with it, if
     /// any did.
@@ -39,9 +64,8 @@ impl<S: Shell + ?Sized> Editor<S> {
         match dropped {
             None => self.panels.set_status(NEW_SCENE, Tone::Info),
             Some(name) => {
-                crcbl::log::warn!("editor: a new scene dropped the unsaved edits to `{name}`");
                 self.panels.set_status(
-                    format!("{NEW_SCENE}. The unsaved edits to `{name}` were dropped"),
+                    format!("{NEW_SCENE}. The unsaved edits to `{name}` were discarded"),
                     Tone::Warning,
                 );
             }
@@ -49,17 +73,92 @@ impl<S: Shell + ?Sized> Editor<S> {
         Ok(())
     }
 
-    /// Opens the save-as line, holding the directory the document came from
-    /// if it came from one.
+    /// Opens the path line for a save-as, holding the directory the document
+    /// came from if it came from one.
     pub(super) fn begin_save_as(&mut self) -> Result<(), EditError> {
-        let text = self
-            .document
-            .origin()
-            .map(|origin| origin.display().to_string())
-            .unwrap_or_default();
+        let text = self.origin_text();
         self.panels.begin_save_as(&self.document, text)?;
         self.panels.set_status(ASK_DIRECTORY, Tone::Info);
         Ok(())
+    }
+
+    /// Opens the path line for an open, holding the directory the document's
+    /// own directory is in, with a separator after it, if it came from one —
+    /// where the next scene most likely is, so what is typed is its name.
+    pub(super) fn begin_open(&mut self) -> Result<(), EditError> {
+        let text = self
+            .document
+            .origin()
+            .and_then(std::path::Path::parent)
+            .map(|holding| format!("{}{}", holding.display(), std::path::MAIN_SEPARATOR))
+            .unwrap_or_default();
+        self.panels.begin_open(&self.document, text)?;
+        self.panels.set_status(ASK_SCENE, Tone::Info);
+        Ok(())
+    }
+
+    /// The directory the document came from, as the path line shows it, or
+    /// nothing for a document that came from none.
+    fn origin_text(&self) -> String {
+        self.document
+            .origin()
+            .map(|origin| origin.display().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Reads the scene directory `text` names and puts it in place of the
+    /// scene being edited, asking first about unsaved edits — or says why not
+    /// and asks again, holding what was typed. See the module docs.
+    pub(super) fn open(&mut self, text: &str) {
+        let opened = open_target(text).and_then(|dir| {
+            if self.document.play_state() != PlayState::Editing {
+                return Err(EditError::Playing);
+            }
+            Document::open_dir(dir, crate::scene::vocabulary())
+        });
+        let outcome = match opened {
+            Ok(document) => self.guard(Guarded::Open(Box::new(document))),
+            Err(error) => {
+                // Play mode refuses the line as it refused the open; anything
+                // else is a slip to correct rather than retype.
+                if !matches!(error, EditError::Playing)
+                    && let Err(refused) = self.panels.begin_open(&self.document, text.to_owned())
+                {
+                    crcbl::log::warn!("editor: {refused}");
+                }
+                Err(error)
+            }
+        };
+        if let Err(error) = outcome {
+            crcbl::log::warn!("editor: {error}");
+            self.panels.set_status(error.to_string(), Tone::Warning);
+        }
+    }
+
+    /// Puts `document` in place of the scene being edited — see the module
+    /// docs — and says what was opened.
+    pub(super) fn replace_document(&mut self, mut document: Document) {
+        if let Some(root) = &self.assets {
+            document.set_assets(Box::new(DirSource::at(root.clone())));
+        }
+        self.document = document;
+        super::log_outline(&mut self.document);
+        self.panels = Panels::new(
+            &mut self.document,
+            self.panels.layout().clone(),
+            self.gpu.extent(),
+        );
+        // What was held over from the old scene has nothing left to land on:
+        // a drag of its handles or of an asset, and a paste asked for it.
+        self.drag = None;
+        self.dragged = None;
+        self.paste = crate::clipboard::Paste::default();
+        self.grid_extent = super::grid_extent(&scene_bounds(&mut self.document));
+        self.rebuild_due = true;
+        self.frame_scene();
+        let opened = self.origin_text();
+        self.panels
+            .set_status(format!("Opened {opened}"), Tone::Info);
     }
 
     /// Saves the document into the directory `text` names and makes it the
@@ -105,6 +204,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             crcbl::log::warn!("editor: {error}");
             self.panels.set_status(error.to_string(), Tone::Warning);
         }
+        self.after_saved_as();
         Ok(())
     }
 }

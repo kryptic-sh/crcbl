@@ -1,5 +1,5 @@
 //! A new scene and save-as through the loop: Ctrl+N, Ctrl+S and
-//! Ctrl+Shift+S, the toolbar's buttons, and a directory typed on the save-as
+//! Ctrl+Shift+S, the toolbar's buttons, and a directory typed on the path
 //! line as a window system delivers the keys.
 
 use super::*;
@@ -54,11 +54,11 @@ pub(super) fn type_and_enter(editor: &mut Editor<HeadlessShell>, text: &str) {
     tap(editor, KeyCode::Enter);
 }
 
-/// **Ctrl+N puts an empty scene in place, frames it and draws nothing**, and
-/// the status line names the scene whose unsaved edits it dropped — and only
-/// when there were some.
+/// **Ctrl+N puts an empty scene in place, frames it and draws nothing** —
+/// once the unsaved bar is answered with Discard for a scene with unsaved
+/// edits, which the status line names — and at once for a clean one.
 #[test]
-fn ctrl_n_starts_an_empty_scene_and_says_what_it_dropped() {
+fn ctrl_n_starts_an_empty_scene_and_says_what_it_discarded() {
     let mut editor = headless(64);
     editor.document_mut().select(Some(SceneEntityId(2)));
     editor.act(&Action::Nudge { axis: 0, sign: 1.0 });
@@ -66,13 +66,15 @@ fn ctrl_n_starts_an_empty_scene_and_says_what_it_dropped() {
     assert!(!editor.instances.instances.is_empty());
 
     chord(&mut editor, Modifiers::CTRL, KeyCode::KeyN);
+    assert!(editor.panels.unsaved().is_some(), "Ctrl+N asked nothing");
+    tap(&mut editor, KeyCode::KeyD);
     assert_eq!(editor.document().entity_count(), 0);
     assert_eq!(editor.document().origin(), None);
     assert!(editor.document().log().is_empty());
     let (text, tone) = editor.panels.status();
     assert_eq!(tone, Tone::Warning, "{text}");
     assert!(
-        text.contains("unsaved edits to `greybox` were dropped"),
+        text.contains("unsaved edits to `greybox` were discarded"),
         "{text}"
     );
     assert!(
@@ -81,6 +83,11 @@ fn ctrl_n_starts_an_empty_scene_and_says_what_it_dropped() {
     );
 
     chord(&mut editor, Modifiers::CTRL, KeyCode::KeyN);
+    assert_eq!(
+        editor.panels.unsaved(),
+        None,
+        "a clean scene was asked about"
+    );
     assert_eq!(
         editor.panels.status(),
         (crate::app::files::NEW_SCENE, Tone::Info)
@@ -110,7 +117,7 @@ fn a_new_scene_in_play_mode_is_refused() {
 fn the_toolbar_starts_a_new_scene_and_asks_for_a_directory() {
     let mut editor = headless(32);
     editor.frame().expect("a frame");
-    let [new, save_as] = editor.panels.file_buttons();
+    let [new, _, save_as] = editor.panels.file_buttons();
     let at = centre(&editor, new);
     click(&mut editor, at);
     assert_eq!(editor.document().entity_count(), 0, "New made nothing new");
@@ -229,7 +236,7 @@ fn a_toolbar_click_that_commits_a_save_as_saves_the_scene_it_was_typed_for() {
         .commit_text(window, &target.display().to_string())
         .expect("the headless shell takes text");
     editor.frame().expect("a frame");
-    let [new, _] = editor.panels.file_buttons();
+    let [new, _, _] = editor.panels.file_buttons();
     let at = centre(&editor, new);
     click(&mut editor, at);
 

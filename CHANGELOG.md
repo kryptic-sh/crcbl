@@ -16,9 +16,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
-- **The editor's `EditError` gained `Target`** (see Added: a new scene and
-  save-as), a typed save-as directory refused before anything is written, so an
-  exhaustive match over it must add it.
+- **The editor's `EditError` gained `Target`, `OpenTarget` and `Recovery`** (see
+  Added: a new scene and save-as, and open and the unsaved bar): a typed save-as
+  directory or a typed scene to open refused before anything is written or read,
+  and a recovery copy's directory that would not be made — so an exhaustive
+  match over it must add them. The editor's `keys::Action` gained `Open` and
+  `Unsaved`, and `PanelFrame` gained the public fields `open` and `unsaved`, so
+  an exhaustive match or a struct literal must add those too.
 
 - **The editor's selection is a set** (see Added: multi-selection).
   `Document::selected` is gone — `Document::primary` answers the same entity for
@@ -594,22 +598,49 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and the toolbar's New put an empty scene in place (`Document::new_scene`): no
   entity, a manifest listing nothing — each system is listed as the first thing
   of its kind is dropped or attached — no directory and nothing to undo, keeping
-  the asset browser's source. Unsaved edits are dropped as closing the window
-  drops them, and the status line names the scene they were in. Ctrl+Shift+S and
-  the toolbar's Save as open a line under the toolbar to type a directory into;
-  Enter saves (`Document::save_as`), Escape cancels, and Ctrl+S on a scene with
-  no directory opens the same line instead of refusing. Save-as **makes the
-  directory the scene's own**: later saves go there and remove only what it
-  wrote, a directory already holding a file the scene would write is refused
-  (`EditError::Occupied`) and asked for again, nothing in the old directory is
-  touched, and the asset root follows to the new directory's game
-  (`document::asset_root`) unless `--assets` named it. A typed directory is
-  checked by `document::save_target` (`EditError::Target`). An empty scene is
-  framed standing on the ground, so a mesh dragged into it has somewhere to
+  the asset browser's source; a scene with unsaved edits asks first (see the
+  unsaved bar, below). Ctrl+Shift+S and the toolbar's Save as open a line under
+  the toolbar to type a directory into; Enter saves (`Document::save_as`),
+  Escape cancels, and Ctrl+S on a scene with no directory opens the same line
+  instead of refusing. Save-as **makes the directory the scene's own**: later
+  saves go there and remove only what it wrote, a directory already holding a
+  file the scene would write is refused (`EditError::Occupied`) and asked for
+  again, nothing in the old directory is touched, and the asset root follows to
+  the new directory's game (`document::asset_root`) unless `--assets` named it.
+  A typed directory is checked by `document::save_target` (`EditError::Target`).
+  A scene still called `untitled` takes its directory's name at save-as
+  (`levels/first.scn` is `first`), written into the header it saves; a scene
+  with a name of its own keeps it, so committed scenes are written byte for byte
+  as before (`crcbl_scene::scn::Scene::set_name` is new for it). An empty scene
+  is framed standing on the ground, so a mesh dragged into it has somewhere to
   land. `app::tests::exit_criterion` drives the whole of the editor's first exit
   criterion through the loop — new scene, a mesh dragged from the browser, a
   gizmo move, a body attached and its mass dragged, save-as, reopen, play, stop
   — and checks the game's folder after every step.
+
+- **The editor opens a scene directory, and asks before unsaved edits are
+  lost.** Ctrl+O and the toolbar's Open put the same typed-path line up for a
+  scene directory; Enter checks it (`document::open_target`, refusing a
+  directory with no `scene.ron` by name as `EditError::OpenTarget` and asking
+  again with what was typed) and reads it with this build's vocabulary
+  (`Document::open_dir`) before anything else changes. The opened scene replaces
+  the one being edited whole: its asset root is its game's unless `--assets`
+  named one, the browser lists its assets, the selection is empty, the history
+  is its own and the renderer is rebuilt from its assets. Refused in play mode.
+  A new scene, an open and the window closing on a scene with unsaved edits put
+  an **unsaved bar** under the toolbar saying what would be lost, with Save
+  (Enter), Discard (D) and Cancel (Escape); nothing else is done until it is
+  answered. Save on a scene with no directory goes through the save-as line and
+  then on; cancelling that line does nothing. The window's close request is held
+  open while the bar asks — every backend's shell lets the app decline one — and
+  Cancel answers it "keep". A window taken away without a request, or a run
+  whose frame fails, writes a dirty scene to a recovery copy
+  (`Document::write_recovery`) in a new directory under
+  `<temp>/crcbl-editor-recovery/` (`document::RECOVERY_DIR`), never overwriting
+  one, and logs where. Escape now reaches the editor: the engine loop claims it
+  as its pause key (`crcbl::engine::PAUSE_KEY`), which the editor's own loop has
+  no use for, so before this it backed out of no text field through a real
+  window.
 
 - **`crcbl::lan::lobby`: a LAN lobby's model, without its look** (native
   builds). `lobby::Lobby` polls a `Browser` and sorts what it hears into

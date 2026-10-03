@@ -36,6 +36,20 @@
 //! [`asset_root`] of the new directory, measured afresh. A
 //! source named by [`set_assets`](Document::set_assets) — `--assets` on the
 //! command line — stays, because a person chose it for the run.
+//!
+//! **A new scene takes its directory's name** (decided 2026-10-03): a save-as
+//! of a scene still called [`UNTITLED`] names it after the directory — its
+//! last component, less an extension, so `levels/first.scn` is `first` — and
+//! writes that name into the header it saves. A scene with a name of its own
+//! keeps it wherever it is saved, so a committed scene's files are written
+//! byte for byte as they were; and nothing else renames a scene. A refused
+//! save-as puts the old name back.
+//!
+//! # Typed directories
+//!
+//! The shell has no file dialog, so a directory is typed; [`save_target`] and
+//! [`open_target`] check the text at that boundary, before anything is
+//! written or read.
 
 use std::path::{Path, PathBuf};
 
@@ -43,6 +57,11 @@ use crcbl::assets::DirSource;
 
 use super::{Document, EditError, asset_root, load, ownership};
 use crate::command::UndoLog;
+use crate::scene::UNTITLED;
+
+/// The file that makes a directory a scene: the header
+/// [`Scene::load`](crcbl::scene::scn::Scene::load) reads first.
+const HEADER: &str = "scene.ron";
 
 /// Where a document's asset source came from, which decides whether a
 /// [`Document::save_as`] moves it — see the module docs.
@@ -118,10 +137,31 @@ impl Document {
             self.save()?;
             return Ok(false);
         }
-        self.owned = self.write(&dir)?;
+        let was = self.name_after(&dir);
+        match self.write(&dir) {
+            Ok(owned) => self.owned = owned,
+            Err(error) => {
+                if let Some(was) = was {
+                    self.scene.set_name(was);
+                }
+                return Err(error);
+            }
+        }
         let moved = self.follow_asset_root(&dir);
         self.origin = Some(dir);
         Ok(moved)
+    }
+
+    /// Names a scene still called [`UNTITLED`] after the directory `dir` —
+    /// its last component, less an extension — and hands back the name it
+    /// had; or changes nothing, handing back [`None`], for a scene with a
+    /// name of its own or a directory whose name is not text.
+    fn name_after(&mut self, dir: &Path) -> Option<String> {
+        if self.scene.name() != UNTITLED {
+            return None;
+        }
+        let name = dir.file_stem()?.to_str()?;
+        Some(self.scene.set_name(name))
     }
 
     /// Reads assets from [`asset_root`] of the scene at `scene` from now on,
@@ -153,22 +193,55 @@ impl Document {
 ///
 /// [`EditError::Target`] naming the text and why.
 pub fn save_target(text: &str) -> Result<PathBuf, EditError> {
-    let refuse = |reason: String| EditError::Target {
+    let refuse = |reason: &str| EditError::Target {
         text: text.to_owned(),
-        reason,
+        reason: reason.to_owned(),
     };
-    let text = text.trim();
-    if text.is_empty() {
-        return Err(refuse("it names no directory".to_owned()));
-    }
-    if text.chars().any(char::is_control) {
-        return Err(refuse("it holds a control character".to_owned()));
-    }
-    let path = std::path::absolute(text).map_err(|error| refuse(error.to_string()))?;
+    let path = typed_dir(text, refuse)?;
     if path.exists() && !path.is_dir() {
-        return Err(refuse(
-            "something other than a directory is there".to_owned(),
-        ));
+        return Err(refuse("something other than a directory is there"));
     }
     Ok(path)
+}
+
+/// The directory a person typed to open, checked before anything is read: as
+/// [`save_target`] reads the text, and refused unless a directory holding a
+/// `scene.ron` is there — so a directory that is not a scene is refused by
+/// its name rather than by the key the loader missed.
+///
+/// What the scene holds is [`Document::open_dir`]'s to check.
+///
+/// # Errors
+///
+/// [`EditError::OpenTarget`] naming the text and why.
+pub fn open_target(text: &str) -> Result<PathBuf, EditError> {
+    let refuse = |reason: &str| EditError::OpenTarget {
+        text: text.to_owned(),
+        reason: reason.to_owned(),
+    };
+    let path = typed_dir(text, refuse)?;
+    if !path.is_dir() {
+        return Err(refuse("no directory is there"));
+    }
+    if !path.join(HEADER).is_file() {
+        return Err(refuse(&format!(
+            "it holds no `{HEADER}`, so it is not a scene"
+        )));
+    }
+    Ok(path)
+}
+
+/// A typed directory with its surrounding whitespace dropped, made absolute
+/// against the working directory — where `editor <SCENE_DIR>` resolves a
+/// relative path too — or `refuse` of why not: it is empty, or holds a control
+/// character.
+fn typed_dir(text: &str, refuse: impl Fn(&str) -> EditError) -> Result<PathBuf, EditError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(refuse("it names no directory"));
+    }
+    if text.chars().any(char::is_control) {
+        return Err(refuse("it holds a control character"));
+    }
+    std::path::absolute(text).map_err(|error| refuse(&error.to_string()))
 }

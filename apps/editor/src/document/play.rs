@@ -432,6 +432,20 @@ impl Document {
         ticks
     }
 
+    /// The scene as it was authored: [`files`](Self::files) while editing, and
+    /// the text play began from while a scene plays or is paused — never a
+    /// played state, which stop throws away.
+    ///
+    /// # Errors
+    ///
+    /// As [`files`](Self::files), while editing.
+    pub fn authored_files(&mut self) -> Result<BTreeMap<String, String>, EditError> {
+        match &self.play {
+            Some(session) => Ok(session.snapshot.clone()),
+            None => self.files(),
+        }
+    }
+
     /// [`EditError::Playing`] in play mode, paused or not, and nothing while
     /// editing — the one check every public method that writes the scene, the
     /// log or the disk makes before it changes anything. See the module docs.

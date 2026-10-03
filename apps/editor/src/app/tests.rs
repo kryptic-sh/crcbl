@@ -11,8 +11,10 @@ mod assets;
 mod clipboard;
 mod exit_criterion;
 mod files;
+mod open;
 mod play;
 mod selection;
+mod unsaved;
 
 fn options(frames: u64) -> Options {
     let mut common = crcbl::args::Common::new(crate::args::DEFAULT_TICK_HZ);

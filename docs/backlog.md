@@ -12581,29 +12581,17 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
 - **A new scene and save-as landed 2026-10-03** (`08-editor.md`'s _A scene from
   empty and save-as_), closing the first exit criterion headlessly. What they
   leave, each with what it takes:
-  - **No prompt before unsaved edits are dropped.** Ctrl+N drops them and says
-    so on the status line, naming the scene; closing the window drops them and
-    says nothing (`accept_close` accepts every close). Both want the same
-    answer, so it was not invented for one: a confirm line like the save-as line
-    ("Unsaved edits to X: Save, Discard, Cancel") that both a close request
-    (`reply_close_request` can defer) and Ctrl+N open. Needs the owner's call on
-    whether a close may be held open at all on every backend.
-  - **No open command.** A scene directory is opened only from the command line
-    (`editor <SCENE_DIR>`); the exit-criterion test reopens in a fresh editor
-    for that reason. An open line built like the save-as line, replacing the
-    document through `Document::open_dir` and rebuilding the panels and the
-    renderer as Ctrl+N's path does, would take it.
-  - **A saved new scene is still called `untitled`.** Save-as writes the header
-    name the empty scene carries (`crate::scene::UNTITLED`), and nothing in the
-    editor renames a scene. Either a scene-name field (a header edit, which the
-    command log has no variant for) or naming the scene after the directory's
-    stem at its first save-as; undecided.
-  - **The save-as line is a bare text field.** A path relative to the working
-    directory, no completion, no listing of what is there; a click elsewhere
-    commits it as it commits a rename (a toolbar click that does so saves the
-    scene being edited, before the click's own action). A directory that cannot
-    be created fails at the first write, like any save, and is reported and
-    asked for again.
+  - **The path line is a bare text field**, for save-as and open alike. A path
+    relative to the working directory, no completion, no listing of what is
+    there, no recent-files list; a click elsewhere commits it as it commits a
+    rename (a toolbar click that does so saves the scene being edited, before
+    the click's own action). A directory that cannot be created fails at the
+    first write, like any save, and is reported and asked for again. A native
+    file dialog would be a shell seam no backend has (`crcbl-shell` would need
+    one per platform: `IFileOpenDialog`, `NSOpenPanel`, the XDG desktop portal);
+    a recent-files list would be the editor's settings (`crate::layout`'s
+    `SettingsStack`) holding the last few origins, offered as buttons on the
+    line. Neither was asked for; both deferred 2026-10-03.
   - **Save-as leaves the old directory as an unowned scene.** Nothing removes or
     marks it; deleting it is the person's.
   - **A save-as that moves the asset root can leave meshes as placeholders**:
@@ -12615,6 +12603,32 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     triangle, a body falling into nothing (the new scene has no ground, and the
     test does not build one), and the mass edited by a drag; a typed number in a
     drag-value is not something the widget takes.
+- **Open and the unsaved bar landed 2026-10-03** (`08-editor.md`'s _Open and the
+  unsaved bar_), with a new scene named after its directory at save-as. What
+  they leave:
+  - **Recovery copies are written, never read back.** A window taken away
+    without a request, or a failed frame, writes a dirty scene under
+    `<temp>/crcbl-editor-recovery/`; nothing offers it at the next start and
+    nothing removes old ones, and the system's temporary-directory cleaning may
+    remove them first. The log line naming the copy is the only pointer. A
+    restore prompt at start-up (list the copies newer than the last clean exit,
+    open one through Open) and an age-based cleanup are the work; deferred.
+  - **A run ending on its frame budget or `--limit` writes no copy**, by
+    decision: it was told when to stop. A session logout that kills the process
+    without a `WindowDestroyed` (or a crash) writes none either; that would need
+    an autosave timer, which is not decided.
+  - **A path line or rename being typed when the bar goes up**: the path line is
+    closed unsent, and a rename is committed (the bar takes the keyboard as a
+    viewport click does). Not asked about; changing it is a line in
+    `Panels::begin_unsaved`.
+  - **A second guarded request replaces the first**: a close while the bar asks
+    about a new scene asks about the close instead, and the new scene is
+    dropped. Deliberate (the newest request is the one asked about), recorded so
+    it is not re-derived.
+  - **Coverage gaps:** never seen on a device. The close hold is tested through
+    the headless shell only; each backend's own `reply_close_request` is its
+    shell tests', and the editor's flow on Win32, AppKit, X11 and Wayland has
+    not been watched.
 - **The exit criteria**: the editor never linking `crcbl-vk` directly (kept so
   far: `apps/editor/Cargo.toml`'s dependencies name the `crcbl` umbrella and no
   backend crate).

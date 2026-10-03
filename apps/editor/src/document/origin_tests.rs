@@ -314,3 +314,88 @@ fn a_typed_target_is_checked_at_the_boundary() {
     assert!(target.is_absolute(), "{}", target.display());
     assert!(target.ends_with(Path::new("levels").join("one.scn")));
 }
+
+/// **An open target must be a scene directory**: nothing typed, a control
+/// character, a file, a missing directory and a directory with no header are
+/// each refused, naming what was typed; a scene directory is taken.
+#[test]
+fn an_open_target_must_be_a_scene_directory() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let file = dir.path().join("notes.txt");
+    std::fs::write(&file, "plans").expect("writable");
+    let missing = dir.path().join("missing.scn");
+    let empty = dir.path().join("empty");
+    std::fs::create_dir(&empty).expect("writable");
+    let scene = dir.path().join("greybox.scn");
+    Document::built_in()
+        .expect("the compiled-in scene")
+        .save_to(&scene)
+        .expect("a fresh directory");
+    for text in [
+        String::new(),
+        "levels/\u{7}one.scn".to_owned(),
+        file.display().to_string(),
+        missing.display().to_string(),
+        empty.display().to_string(),
+    ] {
+        match open_target(&text) {
+            Err(error @ EditError::OpenTarget { .. }) => {
+                assert!(error.to_string().contains(&text), "{error}");
+            }
+            other => panic!("{text:?} was taken: {other:?}"),
+        }
+    }
+    assert!(
+        open_target(&empty.display().to_string())
+            .expect_err("not a scene")
+            .to_string()
+            .contains("not a scene"),
+    );
+    assert_eq!(
+        open_target(&format!(" {} ", scene.display())).expect("a scene"),
+        scene
+    );
+}
+
+/// **A new scene takes its directory's name when it is saved as**, in the
+/// header it writes — and a scene with a name of its own keeps it, so its
+/// files are written as they were.
+#[test]
+fn a_new_scene_is_named_after_its_directory_and_a_named_one_is_not() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let mut document = Document::built_in().expect("the compiled-in scene");
+    document.new_scene().expect("editing");
+    assert_eq!(document.name(), crate::scene::UNTITLED);
+    let first = dir.path().join("first.scn");
+    document.save_as(&first).expect("a fresh directory");
+    assert_eq!(document.name(), "first");
+    let header = std::fs::read_to_string(first.join("scene.ron")).expect("written");
+    assert!(header.contains("name: \"first\""), "{header}");
+    let reopened = Document::open_dir(&first, crate::scene::vocabulary()).expect("a scene");
+    assert_eq!(reopened.name(), "first");
+
+    let mut named = Document::built_in().expect("the compiled-in scene");
+    let files = named.files().expect("ids");
+    let copy = dir.path().join("copy.scn");
+    named.save_as(&copy).expect("a fresh directory");
+    assert_eq!(named.name(), "greybox");
+    assert_eq!(tree(&copy), as_bytes(&files), "a named scene was renamed");
+}
+
+/// **A refused save-as leaves a new scene untitled**: the name is put back
+/// when nothing was written.
+#[test]
+fn a_refused_save_as_keeps_the_new_scene_untitled() {
+    let occupied = tempfile::tempdir().expect("a temporary directory");
+    Document::built_in()
+        .expect("the compiled-in scene")
+        .save_to(occupied.path())
+        .expect("a fresh directory");
+    let mut document = Document::built_in().expect("the compiled-in scene");
+    document.new_scene().expect("editing");
+    assert!(matches!(
+        document.save_as(occupied.path()),
+        Err(EditError::Occupied { .. })
+    ));
+    assert_eq!(document.name(), crate::scene::UNTITLED);
+}
