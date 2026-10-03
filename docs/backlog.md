@@ -3352,10 +3352,12 @@ and its rungs W2–W6 are separate slices rather than gaps.
 
 - **Rows are keyed by position, not by field name.** `Ui::collapsing` has no
   keyed variant, so a group's open state follows its index among its siblings. A
-  struct's `fields()` is `&'static` and cannot move, and `crcbl-reflect` has no
-  variant switching, so nothing can trip it today — but an enum that could
-  change variant would move open state onto the wrong header. The fix is a
-  `Ui::collapsing_keyed`, or a keyed block per row.
+  struct's `fields()` is `&'static` and cannot move, but **an enum's variant
+  switch (2026-10-03) can now trip it**: a nested group open at one position in
+  the variant left stays open at that position in the variant switched to, under
+  another field's header. No component in the workspace has a variant holding a
+  composite field, so nothing shows it yet. The fix is a `Ui::collapsing_keyed`,
+  or a keyed block per row — and either moves the inspector golden's tree.
 - **Only a `Kind::List` inherits its parent's range and step.** A
   `#[reflect(min, max)]` on a nested struct — a `glam::DVec3` position, say — is
   dropped, because that struct's own fields carry `range: None` and the widget
@@ -3366,9 +3368,9 @@ and its rungs W2–W6 are separate slices rather than gaps.
   field keeps every digit — but a _dragged_ `f64` lands on `f64::from(f32)`
   precision, and a dragged `i64` past 2^24 cannot be moved one at a time. A
   64-bit drag-value fixes both.
-- **No variant switching, no list resize, no reordering, no reset-to-default, no
-  multi-select and no copy/paste of a field** — each needs a mechanism
-  `crcbl-reflect` does not have.
+- **No list resize, no reordering, no reset-to-default, no multi-select and no
+  copy/paste of a field** — each needs a mechanism `crcbl-reflect` does not
+  have. (An enum's variant switch landed 2026-10-03.)
 - **`Overrides` is a linear scan** of `(TypeId, Box<dyn Fn>)`, right for the
   handful an editor registers and wrong for hundreds, and its builders are not
   `Send + Sync`, so an `InspectorOptions` cannot cross a thread.
@@ -3461,10 +3463,11 @@ and its rungs W2–W6 are separate slices rather than gaps.
   this slice. **Why kept apart:** that widening is the whole cost and nothing
   needs one vocabulary yet; merge when an editor wants console bindings over
   reflected fields.
-- **No enum variant switching**, and no `Vec<T>`, `Option<T>` or maps:
-  `Reflect::variant` names the active variant and `fields` describes it, but
-  changing which variant is active needs a constructor and a default per field.
-  All four need the same missing mechanism — changing a value's _shape_.
+- **No `Vec<T>`, `Option<T>` or maps**: each needs a way to change a value's
+  _shape_ — push, clear, take `None` to `Some`. An enum's variant switch
+  (2026-10-03) is the one shape change there is, and it made nothing reusable
+  for these: a switch makes fields from `Default`, which an `Option<T>` field
+  would then demand of every `T`.
 - **`glam::Vec4`, `Quat` and `Vec3A` have no impl** and cannot in this design:
   on every SIMD path glam stores them as one 128-bit register, their components
   are methods, and there is no `&mut f32` to hand back. `DVec4` and `DQuat` are
@@ -12616,10 +12619,6 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
       spherical joints; a scene has no component naming two bodies. It takes a
       joint component whose row names the other entity by `SceneEntityId` (and
       survives a delete and its undo), validated on load like `Body`.
-    - **Switching a body's kind in the inspector.** `crcbl_reflect` describes an
-      enum's active variant and cannot change it, so `kind` is shown and edited
-      only in the file. Needs variant switching in `crcbl-reflect` (a default
-      per variant's fields) and a drop-down in the inspector.
     - **The samples adopting `Body`.** Breakout, puppet and towers keep their
       physics in their own code; a sample moving a scene object onto `Body`
       calls `scene_physics::register` in its vocabulary and adds a `bodies`
@@ -12632,6 +12631,59 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
       body on a placing component whose centre is offset from `position` in the
       shipped vocabulary (the offset rule is held by `scene_physics`'s own tests
       on a test component).
+  - **Switching an enum's variant (2026-10-03): decisions and what it leaves.**
+    `Reflect::variants`/`set_variant`, `Snapshot`, the inspector's variant strip
+    (`InspectorOptions::variants`) and `EditCommand::SetVariant`; a body's
+    `kind` is switched in its inspector section.
+    - **Decided: a switch makes each field from its type's `Default`**, not from
+      a constructor per variant. Every field type in the workspace's derived
+      enums already has one, so no attribute is needed; the cost is that
+      `#[derive(Reflect)]` on an enum now requires `Default` of every variant
+      field (a nested enum field included — `crcbl-reflect`'s test `Shape`
+      derives it for that reason). **Deferred**: a field attribute naming a
+      constructor (`#[reflect(default = "path")]`) for a field type with no
+      `Default` or whose default is a poor start (puppet's `Shape::Platform`
+      switches in at zero size, which its rule allows). Add it when a component
+      needs it.
+    - **Considered and declined: carrying same-named, same-typed fields over a
+      switch.** A field means what its variant means by it, and a switch whose
+      result depended on two variants' spellings would surprise. The exact way
+      back is the `Snapshot` either way.
+    - **Decided: the edit is a whole-enum `Snapshot` before and after**, not a
+      variant name plus leaf edits: the leaf form cannot put back the fields a
+      switch replaced. The inspector reports it in `Inspection::switches` beside
+      `edits`, applied after every edit of the frame, rather than one list of a
+      new edit type — `FieldEdit`'s callers are untouched. Both directions of
+      `EditCommand::SetVariant` carry a snapshot; it never folds into a
+      gesture's entry.
+    - **Decided: a strip of options, not a drop-down.** `crcbl-ui` has no pop-up
+      layer for a list to open over the rows; the strip is the tab strip's shape
+      (`:checked`, focusable, accept picks). A drop-down waits on a pop-up
+      layer, and is worth it when an enum has more variants than a row holds.
+    - **Decided: the strip is opt-in** (`InspectorOptions::variants`, off by
+      default), because a caller recording only `Inspection::edits` would be
+      handed switches it cannot undo. The editor turns it on; the inspector
+      golden (`crates/crcbl/src/screenshot/ui_inspector.rs`) and puppet's panel
+      do not, so neither changed.
+    - **Behaviour that is not a bug: a `#[reflect(skip)]` field is reset by a
+      switch away and back.** A snapshot holds the rows only, so undoing a
+      switch out of a variant with a skipped field brings it back at its
+      default. No switchable component has one.
+    - **Behaviour that is not a bug: a refused restore's put-back can itself be
+      refused** only where the value held a non-finite float inside a variant
+      the refused write switched away from; `Snapshot::restore` then returns
+      that refusal and the leaf keeps its default. Only a mismatched snapshot
+      (another type's) reaches the put-back at all; the editor never builds one.
+    - **A variant has no label.** The strip shows each variant's source name;
+      `#[reflect(name = …)]` is read on fields only, and on a variant it is
+      silently accepted and ignored (the helper attribute is declared, and
+      `attrs::field` is never called for a variant). A variant label, and
+      refusing unknown keys there, go together.
+    - **Not tested:** the strip has never been looked at on a device or in a
+      golden — its look is `default.css`'s `.inspector-variant` rules, read only
+      through the accent colour in `crcbl-ui`'s test. A hand-written `Reflect`
+      enum (none exists) gets the provided `set_variant`, which refuses every
+      name.
   - **A module despawning a scene entity** is swept and leaves the outline and
     the picture (both re-read when the world's entity count moves), but its id
     stays in the document's id map until stop, so selecting it shows "no

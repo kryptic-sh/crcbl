@@ -57,6 +57,7 @@ fn a_bodys_mass_written_through_the_inspector_is_refused_and_put_back() {
                     before: before.clone(),
                     after: Value::Float(refused),
                 }],
+                &[],
                 None,
             )
             .expect_err("no simulation takes that mass");

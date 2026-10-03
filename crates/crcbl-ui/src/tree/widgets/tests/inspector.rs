@@ -1,12 +1,13 @@
 //! The property inspector: the row each [`ValueKind`] gets, the range and step
 //! reaching the drag-value, recursion under a header, an enum's active
 //! variant, a skipped field, an override taking precedence, and the edit a
-//! frame reports — with what undoing one takes.
+//! frame reports — with what undoing one takes — and the variant strip's
+//! switch.
 
 use crcbl_reflect::{Kind, Reflect, Value, get_path, set_path};
 
 use super::*;
-use crate::tree::widgets::inspector::{FieldEdit, Inspection, Overrides};
+use crate::tree::widgets::inspector::{FieldEdit, Inspection, Overrides, VARIANT_LABEL};
 use crate::tree::{Content, NodeKey};
 
 /// A component with one field of every shape a row is drawn for.
@@ -557,4 +558,195 @@ fn a_write_that_flips_a_zeros_sign_is_reported() {
     };
     assert_eq!(before.to_bits(), 0.0f64.to_bits());
     assert_eq!(after.to_bits(), (-0.0f64).to_bits());
+}
+
+// ---------------------------------------------------------------------------
+// Switching an enum's variant
+// ---------------------------------------------------------------------------
+
+/// One frame of an inspector over `value` that offers enums' variants.
+fn switching(ui: &mut Ui, pointer: PointerInput, nav: NavInput, value: &mut Surface) -> Inspection {
+    frame(ui, pointer, nav, |ui| {
+        let options = InspectorOptions {
+            variants: true,
+            ..InspectorOptions::default()
+        };
+        ui.inspector_with("#props", value, &options)
+    })
+}
+
+/// The key of the strip's option for `variant`: the parent of the label span
+/// naming it.
+fn variant_key(ui: &Ui, variant: &str) -> NodeKey {
+    let index = (0..ui.nodes.len())
+        .find(|&index| {
+            selector_of(ui, index).contains("inspector-variant-label")
+                && matches!(ui.nodes[index].content,
+                    Content::Text { start, end } if &ui.text[start..end] == variant)
+        })
+        .unwrap_or_else(|| panic!("no option for {variant:?} was built"));
+    let parent = ui.nodes[index]
+        .parent
+        .expect("a label sits inside its option");
+    ui.nodes[parent].key
+}
+
+/// Clicks `on` in a [`switching`] page and returns the release frame's
+/// inspection — the frame the click lands in.
+fn switch_click(ui: &mut Ui, on: Vec2, value: &mut Surface) -> Inspection {
+    switching(ui, press(on), NavInput::default(), value);
+    switching(ui, release(on), NavInput::default(), value)
+}
+
+/// [`switching`] with the shape's group opened.
+fn opened_shape(ui: &mut Ui, value: &mut Surface) {
+    switching(ui, idle(), NavInput::default(), value);
+    let title = format!("Shape: {}", value.shape.variant().expect("an enum"));
+    let on = centre(ui, header(ui, &title));
+    switch_click(ui, on, value);
+}
+
+/// **A pick is one switch, reported with the whole enum before and after**:
+/// the variant strip lists every variant, the click switches the shape to the
+/// new variant's defaults, the inspection carries exactly one
+/// [`VariantEdit`](crate::tree::VariantEdit) and no field edit — and
+/// restoring its `before` puts back the variant and its radius, bit for bit.
+#[test]
+fn a_pick_in_the_variant_strip_reports_one_switch_with_the_enum_before_and_after() {
+    use crcbl_reflect::{Snapshot, restore_path};
+
+    let mut ui = Ui::new();
+    let mut value = surface();
+    opened_shape(&mut ui, &mut value);
+    assert_eq!(
+        spans(&ui, "inspector-variant-label"),
+        ["Platform", "Dome"],
+        "the strip does not list every variant in order"
+    );
+    assert!(
+        rows(&ui).iter().any(|(label, _)| label == VARIANT_LABEL),
+        "the strip has no labelled row"
+    );
+
+    let on = centre(&ui, variant_key(&ui, "Platform"));
+    let picked = switch_click(&mut ui, on, &mut value);
+    assert!(
+        picked.edits.is_empty(),
+        "a switch was reported as a field edit"
+    );
+    let [switch] = picked.switches.as_slice() else {
+        panic!("the pick was not one switch: {:?}", picked.switches);
+    };
+    assert_eq!(switch.path, "shape");
+    assert_eq!(
+        switch.before,
+        Snapshot::Variant {
+            name: "Dome",
+            fields: vec![Snapshot::Leaf(Value::Float(6.0))],
+        }
+    );
+    assert_eq!(
+        switch.after,
+        Snapshot::Variant {
+            name: "Platform",
+            fields: vec![
+                Snapshot::Leaf(Value::Float(0.0)),
+                Snapshot::Leaf(Value::Float(0.0)),
+            ],
+        }
+    );
+    assert_eq!(
+        value.shape,
+        Shape::Platform {
+            width: 0.0,
+            depth: 0.0,
+        }
+    );
+
+    restore_path(&mut value, &switch.path, &switch.before).expect("its own snapshot");
+    assert_eq!(value, surface(), "the undo did not put the dome back");
+}
+
+/// **The switch is made after the frame's rows are built**, so the rows of the
+/// frame a pick lands in are the variant it was picked from — what lets a
+/// caller undo a frame's switches before its edits — and the next frame's are
+/// the new variant's.
+#[test]
+fn a_switch_is_made_after_the_frames_rows_and_the_next_frame_draws_the_new_variant() {
+    let mut ui = Ui::new();
+    let mut value = surface();
+    opened_shape(&mut ui, &mut value);
+    let on = centre(&ui, variant_key(&ui, "Platform"));
+    let picked = switch_click(&mut ui, on, &mut value);
+    assert_eq!(picked.switches.len(), 1);
+    let labels: Vec<String> = rows(&ui).into_iter().map(|(label, _)| label).collect();
+    assert!(
+        labels.contains(&"Radius".to_owned()) && !labels.contains(&"Width".to_owned()),
+        "the frame the pick landed in drew the new variant: {labels:?}"
+    );
+
+    let next = switching(&mut ui, idle(), NavInput::default(), &mut value);
+    assert!(next.switches.is_empty(), "one pick was reported twice");
+    let labels: Vec<String> = rows(&ui).into_iter().map(|(label, _)| label).collect();
+    assert!(
+        labels.contains(&"Width".to_owned()) && !labels.contains(&"Radius".to_owned()),
+        "the next frame did not draw the new variant: {labels:?}"
+    );
+}
+
+/// **The active variant is marked, and picking it again is no switch** — its
+/// fields are kept, as `Reflect::set_variant` keeps them.
+#[test]
+fn the_active_variant_is_marked_and_picking_it_switches_nothing() {
+    let accent = linear("#3d8bfd");
+    let mut ui = Ui::new();
+    let mut value = surface();
+    opened_shape(&mut ui, &mut value);
+    let marked: Vec<&str> = ["Platform", "Dome"]
+        .into_iter()
+        .filter(|&variant| style_of(&ui, variant_key(&ui, variant)).background == accent)
+        .collect();
+    assert_eq!(marked, ["Dome"], "not exactly the active variant marked");
+
+    let on = centre(&ui, variant_key(&ui, "Dome"));
+    let again = switch_click(&mut ui, on, &mut value);
+    assert!(
+        again.switches.is_empty(),
+        "the active variant was switched to"
+    );
+    assert_eq!(value, surface());
+}
+
+/// **The strip is keyboard reachable**: from the group's header, focus walks
+/// onto the options and accept picks the focused one, with no pointer.
+#[test]
+fn focus_walks_onto_the_variant_strip_and_accept_picks() {
+    let mut ui = Ui::new();
+    let mut value = surface();
+    opened_shape(&mut ui, &mut value);
+    let platform = variant_key(&ui, "Platform");
+    let mut steps = 0;
+    while ui.focused() != Some(platform) {
+        assert!(steps < 4, "focus never reached the strip");
+        switching(&mut ui, idle(), NavInput::NEXT, &mut value);
+        steps += 1;
+    }
+    let picked = switching(&mut ui, idle(), NavInput::ACCEPT, &mut value);
+    assert_eq!(picked.switches.len(), 1, "accept did not pick the variant");
+    assert_eq!(value.shape.variant(), Some("Platform"));
+}
+
+/// **Without [`InspectorOptions::variants`] there is no strip**, so a caller
+/// recording only field edits is never handed a switch it cannot undo.
+#[test]
+fn without_the_option_an_enums_group_has_no_strip() {
+    let mut ui = Ui::new();
+    let mut value = surface();
+    page(&mut ui, idle(), NavInput::default(), &mut value, None);
+    open(&mut ui, "Shape: Dome", &mut value, None);
+    assert!(spans(&ui, "inspector-variant-label").is_empty());
+    assert!(
+        !rows(&ui).iter().any(|(label, _)| label == VARIANT_LABEL),
+        "a strip row was built without the option"
+    );
 }

@@ -4,11 +4,14 @@
 use proptest::sample::Index;
 
 use crcbl::math::DVec3;
-use crcbl::reflect::{Kind, Reflect, Value, ValueKind, get_path, set_path};
+use crcbl::reflect::{
+    Kind, Reflect, Snapshot, Value, ValueKind, get_path, restore_path, set_path, set_variant_path,
+    snapshot_path,
+};
 use crcbl::registry::Rotation;
 use crcbl::scene::scn::{MAX_NAME_CHARS, SceneEntityId};
 use crcbl::scene_mesh::MESHES;
-use crcbl::ui::tree::FieldEdit;
+use crcbl::ui::tree::{FieldEdit, VariantEdit};
 
 use super::super::field::text_of;
 use super::super::{Document, EditError};
@@ -19,6 +22,10 @@ use crate::command::EditCommand;
 /// held entities is this one, so every edit naming an entity is also tried
 /// on one that is gone.
 const ABSENT: SceneEntityId = SceneEntityId(9_999);
+
+/// A variant no enum in the vocabulary has: what a [`Op::Switch`] drawn past
+/// an enum's variants switches to, which the enum refuses.
+const NO_SUCH_VARIANT: &str = "Floating";
 
 /// What a step did to the document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -92,6 +99,11 @@ pub(super) fn play(document: &mut Document, op: &Op, reached: &mut Reached) -> O
             reached,
         ),
         Op::Turn { target, quaternion } => turn(document, target, *quaternion),
+        Op::Switch {
+            target,
+            variant,
+            inspector,
+        } => switch(document, target, variant, *inspector, reached),
         Op::Scale { target, factor } => scale(document, target, *factor),
         Op::Rename { target, name } => {
             let target = target_of(document, target);
@@ -177,6 +189,118 @@ pub(super) fn play(document: &mut Document, op: &Op, reached: &mut Reached) -> O
         Op::Unlist { system, empty } => unlist(document, system, *empty, reached),
         Op::Undo => walked(document.undo().expect("an entry's inverse applies")),
         Op::Redo => walked(document.redo().expect("an entry applies again")),
+    }
+}
+
+/// One enum a [`Op::Switch`] can pick: whose, in which system, at which
+/// path, the variant it is in and every variant it has.
+struct Picked {
+    entity: SceneEntityId,
+    system: String,
+    path: String,
+    active: &'static str,
+    variants: Vec<&'static str>,
+}
+
+/// [`Op::Switch`]: the enum `target` names among every one the held
+/// entities' components hold, switched to the variant `variant` names.
+///
+/// Through the inspector, the switch is made in place and reported as the
+/// strip reports it — not at all for the variant already active, which the
+/// strip does not offer as a pick. As a command, the new variant's snapshot
+/// is read by switching and putting the component back, then applied.
+fn switch(
+    document: &mut Document,
+    target: &Index,
+    variant: &Index,
+    inspector: bool,
+    reached: &mut Reached,
+) -> Outcome {
+    let mut enums = Vec::new();
+    for entity in held(document) {
+        for system in document.systems_of(entity) {
+            let Some(component) = document.component(entity, &system) else {
+                continue;
+            };
+            let mut found = Vec::new();
+            enums_of(component, "", &mut found);
+            for (path, active, variants) in found {
+                enums.push(Picked {
+                    entity,
+                    system: system.clone(),
+                    path,
+                    active,
+                    variants,
+                });
+            }
+        }
+    }
+    if enums.is_empty() {
+        return Outcome::Skipped;
+    }
+    let picked = target.get(&enums);
+    let mut names = picked.variants.clone();
+    names.push(NO_SUCH_VARIANT);
+    let name = *variant.get(&names);
+    let component = document
+        .component(picked.entity, &picked.system)
+        .expect("the enum was found in it");
+    let before = snapshot_path(component, &picked.path).expect("the enum was found there");
+    let after = match set_variant_path(component, &picked.path, name) {
+        Ok(()) => snapshot_path(component, &picked.path).expect("the enum is still there"),
+        Err(_) if inspector => return Outcome::Refused,
+        Err(_) => Snapshot::Variant {
+            name: NO_SUCH_VARIANT,
+            fields: Vec::new(),
+        },
+    };
+    let outcome = if inspector {
+        if name == picked.active {
+            return Outcome::Unchanged;
+        }
+        let switch = VariantEdit {
+            path: picked.path.clone(),
+            before,
+            after,
+        };
+        accepted(document.record_edits(picked.entity, &picked.system, &[], &[switch], None))
+    } else {
+        restore_path(component, &picked.path, &before).expect("its own snapshot fits");
+        accepted(document.apply(EditCommand::SetVariant {
+            entity: picked.entity,
+            system: picked.system.clone(),
+            path: picked.path.clone(),
+            value: after,
+        }))
+    };
+    if outcome == Outcome::Recorded && name != picked.active {
+        reached.push("a switch to another variant");
+    }
+    outcome
+}
+
+/// Every enum under `value` at the dotted path `prefix`: its path, its active
+/// variant and every variant it has.
+fn enums_of(
+    value: &dyn Reflect,
+    prefix: &str,
+    into: &mut Vec<(String, &'static str, Vec<&'static str>)>,
+) {
+    if let Some(active) = value.variant() {
+        let variants = value.variants().iter().map(|each| each.name).collect();
+        into.push((prefix.to_owned(), active, variants));
+    }
+    if matches!(value.kind(), Kind::Struct | Kind::Enum) {
+        for (index, field) in value.fields().iter().enumerate() {
+            if let Some(child) = value.field(index) {
+                let path = if prefix.is_empty() {
+                    field.name.to_owned()
+                } else {
+                    format!("{prefix}.{}", field.name)
+                };
+                enums_of(child, &path, into);
+            }
+        }
     }
 }
 
@@ -574,7 +698,7 @@ fn inspect(
             after,
         };
         recorded |= document
-            .record_edits(target, system, &[edit], gesture)
+            .record_edits(target, system, &[edit], &[], gesture)
             .is_ok();
     }
     if recorded {

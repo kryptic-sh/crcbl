@@ -131,7 +131,7 @@ use crcbl::ui::style::Declaration;
 use crcbl::ui::tree::{
     AvailableSpace, ClipboardRequest, DockLayout, Engagement, FieldEdit, LengthAuto, NavInput,
     NodeKey, OUTLINER_ROW_HEIGHT, OutlinerId, OutlinerOptions, OutlinerState, Overrides,
-    SelectMode, TextInput, TextInputOptions, Ui,
+    SelectMode, TextInput, TextInputOptions, Ui, VariantEdit,
 };
 use crcbl::ui::{DrawList, FontAtlas, PointerInput, TextureId};
 
@@ -1176,6 +1176,7 @@ impl Panels {
             adds,
             headings,
             edits,
+            switches,
             field,
             change,
         } = built;
@@ -1196,7 +1197,7 @@ impl Panels {
             self.reveal_row(key, id);
         }
 
-        let commands = self.apply_edits(document, selected, &edits, input.pointer);
+        let commands = self.apply_edits(document, selected, &edits, &switches, input.pointer);
         if let (Some(id), Some(change)) = (selected, change) {
             let outcome = match &change {
                 inspector::Change::Attach(system) => document.attach(id, system),
@@ -1421,28 +1422,49 @@ impl Panels {
     ///
     /// # One row, one command
     ///
-    /// A frame's consecutive edits to one section are one command
+    /// A frame's edits to one section are one command
     /// ([`Document::record_edits`]): a widget edits one leaf, so several in one
     /// section in one frame are a row that writes several leaves together —
     /// the rotation row writing a quaternion's four — and splitting them would
     /// let an undo take back one leaf of a value whose leaves only mean
-    /// something together. Their gesture is keyed by every path they name.
+    /// something together. A variant switch in the section joins that command,
+    /// after its edits. Their gesture is keyed by every path they name.
     fn apply_edits(
         &mut self,
         document: &mut Document,
         selected: Option<SceneEntityId>,
         edits: &[(String, FieldEdit)],
+        switches: &[(String, VariantEdit)],
         pointer: PointerInput,
     ) -> usize {
         let held = pointer.down || pointer.released;
         let mut applied = 0;
         if let Some(id) = selected {
-            for group in edits.chunk_by(|(a, _), (b, _)| a == b) {
-                let system = &group[0].0;
-                let row: Vec<FieldEdit> = group.iter().map(|(_, edit)| edit.clone()).collect();
+            // Each section's system once, in the order its sections were
+            // drawn: the order the frame's edits and then its switches name
+            // them.
+            let mut systems: Vec<&str> = Vec::new();
+            let named = edits.iter().map(|(system, _)| system);
+            for system in named.chain(switches.iter().map(|(system, _)| system)) {
+                if !systems.contains(&system.as_str()) {
+                    systems.push(system);
+                }
+            }
+            for system in systems {
+                let row: Vec<FieldEdit> = edits
+                    .iter()
+                    .filter(|(each, _)| each == system)
+                    .map(|(_, edit)| edit.clone())
+                    .collect();
+                let picked: Vec<VariantEdit> = switches
+                    .iter()
+                    .filter(|(each, _)| each == system)
+                    .map(|(_, switch)| switch.clone())
+                    .collect();
                 let paths = row
                     .iter()
                     .map(|edit| edit.path.as_str())
+                    .chain(picked.iter().map(|switch| switch.path.as_str()))
                     .collect::<Vec<_>>()
                     .join(",");
                 let gesture = held.then(|| match &self.field_gesture {
@@ -1453,11 +1475,11 @@ impl Panels {
                     }
                     _ => {
                         let gesture = document.begin_gesture();
-                        self.field_gesture = Some((id, system.clone(), paths.clone(), gesture));
+                        self.field_gesture = Some((id, system.to_owned(), paths.clone(), gesture));
                         gesture
                     }
                 });
-                match document.record_edits(id, system, &row, gesture) {
+                match document.record_edits(id, system, &row, &picked, gesture) {
                     Ok(()) => applied += 1,
                     Err(error) => {
                         crcbl::log::warn!("editor: {error}");
@@ -1727,6 +1749,7 @@ mod tests {
     mod rotation;
     mod selection;
     mod unsaved;
+    mod variants;
 
     /// The framebuffer every page here is laid out over: the size the editor's
     /// own window opens at.

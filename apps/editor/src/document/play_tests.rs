@@ -267,6 +267,7 @@ fn every_edit_is_refused_in_play_mode() {
                         before,
                         after: Value::Float(9.0),
                     }],
+                    &[],
                     None,
                 )
             }),

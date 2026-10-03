@@ -49,7 +49,10 @@ pub enum PathError {
 }
 
 /// Walks `path` from `value` and returns what it lands on.
-fn resolve<'a>(value: &'a dyn Reflect, path: &str) -> Result<&'a dyn Reflect, PathError> {
+pub(crate) fn resolve<'a>(
+    value: &'a dyn Reflect,
+    path: &str,
+) -> Result<&'a dyn Reflect, PathError> {
     let mut at = value;
     for segment in segments(path) {
         at = index_of(at, segment)
@@ -69,7 +72,7 @@ fn resolve<'a>(value: &'a dyn Reflect, path: &str) -> Result<&'a dyn Reflect, Pa
 /// mutability or an unsafe reborrow, and both cost more than sixteen lines. The
 /// two bodies are held together by the tests, which assert the same paths
 /// resolve through both.
-fn resolve_mut<'a>(
+pub(crate) fn resolve_mut<'a>(
     value: &'a mut dyn Reflect,
     path: &str,
 ) -> Result<&'a mut dyn Reflect, PathError> {
@@ -159,6 +162,47 @@ pub fn set_path(value: &mut dyn Reflect, path: &str, new: &Value) -> Result<(), 
             type_name: at.type_name(),
         })
     }
+}
+
+/// Switches the enum `path` names inside `value` to `variant`, as
+/// [`Reflect::set_variant`] does: the new variant's fields at their types'
+/// defaults, and the variant already active left as it is.
+///
+/// What the switch replaces is gone afterwards, so an undoable one reads
+/// [`crate::snapshot_path`] first and puts it back with
+/// [`crate::restore_path`].
+///
+/// # Errors
+///
+/// [`PathError::NoField`] if a segment names nothing, or [`PathError::Set`]
+/// carrying [`SetError::NoVariant`] for a variant the enum does not have — and
+/// for every name, where the path names something that is not an enum.
+///
+/// ```
+/// use crcbl_reflect::{Reflect, set_variant_path};
+///
+/// #[derive(Reflect)]
+/// enum Kind {
+///     Dynamic,
+///     Static,
+/// }
+///
+/// #[derive(Reflect)]
+/// struct Body {
+///     kind: Kind,
+/// }
+///
+/// let mut body = Body { kind: Kind::Dynamic };
+/// set_variant_path(&mut body, "kind", "Static").unwrap();
+/// assert_eq!(body.kind.variant(), Some("Static"));
+/// ```
+pub fn set_variant_path(
+    value: &mut dyn Reflect,
+    path: &str,
+    variant: &str,
+) -> Result<(), PathError> {
+    resolve_mut(value, path)?.set_variant(variant)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -14,9 +14,11 @@
 //!   position in: `apps/breakout/src/scene.rs`'s `Brick` and
 //!   `apps/puppet/src/map.rs`'s `Surface` both spell one `[f64; 3]`.
 //!   `Vec<T>`, `Option<T>` and the maps are **not** here: each of them needs a
-//!   way to *change the shape* — push, clear, take `None` to `Some` — which is
-//!   the same missing mechanism enum-variant switching needs, and neither has a
-//!   caller yet.
+//!   way to *change the shape* — push, clear, take `None` to `Some` — and none
+//!   has a caller yet. (`Option<T>` is the nearest to an enum's variant switch,
+//!   but a switch makes the new variant's fields from their types' `Default`,
+//!   and taking `None` to `Some` would need a `T: Default` this impl would
+//!   then demand of every `Option` field.)
 //! * **`glam`'s scalar-layout vectors** — [`glam::Vec2`], [`glam::Vec3`],
 //!   [`glam::DVec2`], [`glam::DVec3`], [`glam::DVec4`] and [`glam::DQuat`],
 //!   each as a [`Kind::Struct`] of its named components.

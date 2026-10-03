@@ -1305,6 +1305,47 @@ is a `proptest` property over random histories of every edit, replacing
   is the regression. Keeping the newest inverse instead of the earliest, and
   dropping a leaf only early frames wrote, each turned both red.
 
+**Switching a body's kind in the inspector landed 2026-10-03**, closing the item
+slice 12 left (a `kind` shown and edited only in the file).
+
+- **Reflection switches an enum's variant.** `crcbl_reflect::Reflect` gained
+  `variants` and `set_variant`, provided (a non-enum has none and refuses every
+  name) and written by `#[derive(Reflect)]` for every enum: a switch makes the
+  new variant with each field at its type's `Default` — decided for the long
+  term over a constructor per variant, since `Default` is what every field type
+  in the workspace already has and a switch then needs no attribute — and a
+  switch to the active variant changes nothing. **No field carries over**, even
+  one of the same name and type: a field means what its variant means by it.
+  `Snapshot` reads a whole value (each enum tagged by its variant) and writes it
+  back, putting the value back when it does not fit; it holds the rows only, so
+  a `#[reflect(skip)]` field comes back at its default after a switch away and
+  back.
+- **The inspector offers the variants** with `InspectorOptions::variants`: an
+  enum's group opens on a strip of options, the active one `:checked`, each
+  focusable and picked by click or accept — the toolkit's choice widget (the tab
+  strip's shape), since there is no pop-up layer for a drop-down. A pick is a
+  `VariantEdit` of the enum's path and its `Snapshot` before and after, in
+  `Inspection::switches`; the switch is made after the frame's rows are built,
+  so a caller undoes a frame's switches before its field edits.
+- **The editor records a switch as one `EditCommand::SetVariant`** carrying the
+  whole enum, whose inverse is the snapshot read as it is applied — bit for bit,
+  as a property's is. `Document::record_edits` rewinds the switches and then the
+  edits and applies them as one command; the component's rule judges it like any
+  property write (`validation::writes`), and it is never folded into a gesture.
+- **Evidence**: `crcbl-reflect`'s `tests/variants.rs` (listing, defaults, the
+  active variant kept, an unknown name refused, the exact inverse through a
+  nested enum, a misfit put back, a NaN restored over itself) and the derive's
+  token tests; `crcbl-ui`'s strip tests (one switch with the whole enum before
+  and after, made after the frame's rows, the active option marked and not
+  pickable, reached by focus and accept, absent without the option); the
+  editor's `document::variant_tests` (one entry undone and redone exactly, saved
+  and read back, a static body standing through a second of play, refused by the
+  rule and put back, an unknown variant refused) and `panel::tests::variants`
+  (the strip clicked in a body's section). The undo property test gained a
+  switch step through the strip's report and through a command, and `SetVariant`
+  in its command coverage. The mutations each turned a test red are listed in
+  the commit that landed this.
+
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
 opens the vocabularies it was compiled with. The shipped build registers its own

@@ -20,6 +20,9 @@
 //! * [`get_path`] and [`set_path`] — one leaf by name, which is the form an
 //!   **undoable** edit takes: a command records the path and the value it
 //!   replaced, and its inverse is the same call with the old value.
+//!   [`snapshot_path`] and [`restore_path`] are the same pair for a whole
+//!   value, which is what undoing an enum's variant switch takes
+//!   ([`Snapshot`]).
 //!
 //! ```
 //! use crcbl_reflect::{Kind, Reflect, Value, get_path, set_path};
@@ -80,10 +83,12 @@
 //! assert_eq!(sun.fields()[0].range, Some(Range { min: -1.0, max: 1.0 }));
 //! ```
 //!
-//! An enum describes its **active** variant, and nothing else:
+//! An enum's rows are its **active** variant's, and it lists every variant it
+//! has — so a panel can offer the others — and switches to one by name, the
+//! new variant's fields at their types' [`Default`]:
 //!
 //! ```
-//! use crcbl_reflect::{Kind, Reflect, Value, get_path};
+//! use crcbl_reflect::{Kind, Reflect, Snapshot, Value, get_path};
 //!
 //! #[derive(Reflect)]
 //! enum Shape {
@@ -91,11 +96,22 @@
 //!     Dome { radius: f64 },
 //! }
 //!
-//! let shape = Shape::Dome { radius: 6.0 };
+//! let mut shape = Shape::Dome { radius: 6.0 };
 //! assert_eq!(shape.kind(), Kind::Enum);
 //! assert_eq!(shape.variant(), Some("Dome"));
 //! assert_eq!(get_path(&shape, "radius"), Ok(Value::Float(6.0)));
 //! assert!(get_path(&shape, "width").is_err(), "that is the other variant's");
+//!
+//! let names: Vec<_> = shape.variants().iter().map(|v| v.name).collect();
+//! assert_eq!(names, ["Platform", "Dome"]);
+//!
+//! // A switch loses the variant it leaves, so an undoable one reads a
+//! // snapshot first: restoring it puts back the variant and its fields.
+//! let before = Snapshot::of(&shape);
+//! shape.set_variant("Platform").unwrap();
+//! assert_eq!(get_path(&shape, "width"), Ok(Value::Float(0.0)));
+//! before.restore(&mut shape).unwrap();
+//! assert_eq!(get_path(&shape, "radius"), Ok(Value::Float(6.0)));
 //! ```
 //!
 //! A field whose type is not [`Reflect`] is refused **where it is written**,
@@ -109,6 +125,22 @@
 //! #[derive(Reflect)]
 //! struct Component {
 //!     opaque: NotReflected,
+//! }
+//! ```
+//!
+//! So is a variant's field whose type has no [`Default`], since a switch to
+//! that variant has to make one:
+//!
+//! ```compile_fail,E0277
+//! use crcbl_reflect::Reflect;
+//!
+//! #[derive(Reflect)]
+//! struct Unmade(f64);
+//!
+//! #[derive(Reflect)]
+//! enum Shape {
+//!     Dome { radius: f64 },
+//!     Odd { inner: Unmade },
 //! }
 //! ```
 //!
@@ -141,25 +173,25 @@
 //!   component has to be able to describe itself without dragging a stylesheet,
 //!   a glyph atlas and a layout engine behind it. (Until 2026-09-16 there was no
 //!   arrow in either direction; rung 8 added the one that exists.)
-//! * **No variant switching.** [`Reflect::variant`] names an enum's active
-//!   variant and [`Reflect::fields`] describes that variant's fields; there is
-//!   no way to *change* which variant is active. Doing so means constructing the
-//!   new variant, which needs a default for every field it has, which is a
-//!   second mechanism nothing has asked for yet.
 //! * **No collections that change shape.** `Vec<T>`, `Option<T>` and the maps
-//!   are absent for the same reason; `crates/crcbl-reflect/src/impls.rs` says
-//!   what is covered and what is not.
+//!   are absent: each needs a way to push, clear or take `None` to `Some`,
+//!   which no caller has asked for; `crates/crcbl-reflect/src/impls.rs` says
+//!   what is covered and what is not. An enum's variant switch is the one
+//!   change of shape there is, and it constructs nothing a type did not say
+//!   how to: the new variant's fields are each their type's [`Default`].
 //! * **No construction.** Every entry point takes a value that already exists.
 
 use core::any::Any;
 
 mod impls;
 mod path;
+mod snapshot;
 mod value;
 
 pub use crcbl_reflect_derive::Reflect;
-pub use path::{PathError, get_path, set_path};
-pub use value::{Field, Kind, Range, SetError, Value, ValueKind};
+pub use path::{PathError, get_path, set_path, set_variant_path};
+pub use snapshot::{Snapshot, restore_path, snapshot_path};
+pub use value::{Field, Kind, Range, SetError, Value, ValueKind, Variant};
 
 /// What an inspector needs from a value: what it is made of, and how to read and
 /// write the leaves inside it.
@@ -229,6 +261,39 @@ pub trait Reflect: Any {
     /// The active variant's name, for a [`Kind::Enum`]; `None` for everything
     /// else.
     fn variant(&self) -> Option<&'static str>;
+
+    /// Every variant a [`Kind::Enum`] has, in declaration order, each with the
+    /// rows it would have; empty for everything else.
+    ///
+    /// Provided as empty, so a hand-written impl that does not answer it is a
+    /// type with nothing to switch to — which is also what
+    /// [`set_variant`](Self::set_variant)'s provided body says.
+    fn variants(&self) -> &'static [Variant] {
+        &[]
+    }
+
+    /// Makes `variant` the active one, every field of it — and every field a
+    /// `#[reflect(skip)]` leaves off the panel — at its type's [`Default`].
+    /// Switching to the variant already active changes nothing, so the fields
+    /// it holds are kept.
+    ///
+    /// No field carries over from the variant being left, even one of the same
+    /// name and type: a field means what its variant means by it, and a switch
+    /// that kept some values and defaulted others would be one whose result
+    /// depended on the spelling of two variants. An exact way back is
+    /// [`Snapshot`], read before the switch.
+    ///
+    /// # Errors
+    ///
+    /// [`SetError::NoVariant`] for a name [`variants`](Self::variants) does not
+    /// list, which leaves the value untouched. The provided body refuses every
+    /// name.
+    fn set_variant(&mut self, variant: &str) -> Result<(), SetError> {
+        Err(SetError::NoVariant {
+            type_name: self.type_name(),
+            variant: variant.to_owned(),
+        })
+    }
 
     /// This value as [`Any`], so a panel can recognise a type it has an override
     /// for.

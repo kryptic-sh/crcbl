@@ -90,7 +90,8 @@ collapsing > .collapsing-header:focus,
 tree-node > .tree-row:focus,
 split > .split-divider:focus,
 text-input:focus,
-.tab-strip > .tab:focus {
+.tab-strip > .tab:focus,
+.inspector-variants > .inspector-variant:focus {
   outline: 2px #f5c400;
   outline-offset: 1px;
 }
@@ -525,6 +526,30 @@ inspector {
 /* A composite field's header and body fill the panel rather than the row. */
 .inspector-group {
   flex-shrink: 0;
+}
+
+/*
+ * An enum's variant strip: one option per variant, the active one `:checked`
+ * and drawn in the accent, as the tab showing is.
+ */
+.inspector-variants {
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.inspector-variant {
+  padding: 1px 6px;
+  flex-shrink: 0;
+  background: #2a303c;
+}
+
+.inspector-variants > .inspector-variant:hover {
+  background: #353d4c;
+}
+
+.inspector-variants > .inspector-variant:checked {
+  background: #3d8bfd;
+  color: #10121a;
 }
 
 /*

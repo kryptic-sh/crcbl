@@ -40,15 +40,15 @@ use crcbl::assets::{AssetSource, MemorySource};
 use crcbl::ecs::{Entity, World};
 use crcbl::math::{DVec3, Vec3};
 use crcbl::phys::{ColliderComponent, PhysicsSystem, Ray, RigidBody, Transform};
-use crcbl::reflect::{PathError, Reflect, Value, get_path, set_path};
+use crcbl::reflect::{PathError, Reflect, Value, get_path, restore_path, set_path};
 use crcbl::registry::{FieldError, OrientedBox, Registry};
 use crcbl::render::ViewRay;
 use crcbl::scene::scn::{EntityName, IdMap, NameError, Scene, SceneEntityId, ScnError};
 use crcbl::scene_mesh::{MeshLibrary, MeshProblem};
 use crcbl::store::{NativeStorage, StorageError, StorageSource};
-use crcbl::ui::tree::FieldEdit;
+use crcbl::ui::tree::{FieldEdit, VariantEdit};
 
-use crate::command::{EditCommand, Gesture, SystemRow, UndoLog, set_property};
+use crate::command::{EditCommand, Gesture, SystemRow, UndoLog, set_property, set_variant};
 
 mod field;
 mod meshes;
@@ -834,7 +834,10 @@ impl Document {
     /// the log like every other edit: a [`EditCommand::SetProperty`] for one
     /// leaf, and an [`EditCommand::Batch`] of them for several — what a row
     /// writing several leaves at once makes, as the rotation row writes all
-    /// four of a quaternion, so one undo puts them all back together.
+    /// four of a quaternion, so one undo puts them all back together. Each of
+    /// `switches` — an enum's variant picked in the same frame, which the
+    /// panel made after every edit — is an [`EditCommand::SetVariant`] after
+    /// them.
     ///
     /// # Why this rewinds first
     ///
@@ -847,9 +850,10 @@ impl Document {
     /// one failure that would pass every test asserting the command was
     /// recorded.
     ///
-    /// So each `before` is written back first, last edit first, putting the
-    /// component where the panel found it, and the command is then applied
-    /// over the top. **This is the
+    /// So each `before` is written back first — the switches newest first,
+    /// then the edits newest first, the reverse of the order the panel made
+    /// them in — putting the component where the panel found it, and the
+    /// command is then applied over the top. **This is the
     /// only field write in the crate**, and it exists to make sure the command
     /// is the thing that does the editing: the value it restores came out of
     /// the same leaf a moment earlier, so nothing is invented and the inverse
@@ -878,29 +882,35 @@ impl Document {
         id: SceneEntityId,
         system: &str,
         edits: &[FieldEdit],
+        switches: &[VariantEdit],
         gesture: Option<Gesture>,
     ) -> Result<(), EditError> {
-        if edits.is_empty() {
+        if edits.is_empty() && switches.is_empty() {
             return Ok(());
         }
         let component = self.component_of(id, system)?;
+        for switch in switches.iter().rev() {
+            restore_path(component, &switch.path, &switch.before)?;
+        }
         for edit in edits.iter().rev() {
             set_path(component, &edit.path, &edit.before)?;
         }
         // After the rewind, so a panel's write into a playing scene is taken
         // back rather than left standing beside the refusal.
         self.refuse_in_play()?;
-        let command = EditCommand::one_or_batch(
-            edits
-                .iter()
-                .map(|edit| EditCommand::SetProperty {
-                    entity: id,
-                    system: system.to_owned(),
-                    path: edit.path.clone(),
-                    value: edit.after.clone(),
-                })
-                .collect(),
-        );
+        let sets = edits.iter().map(|edit| EditCommand::SetProperty {
+            entity: id,
+            system: system.to_owned(),
+            path: edit.path.clone(),
+            value: edit.after.clone(),
+        });
+        let variants = switches.iter().map(|switch| EditCommand::SetVariant {
+            entity: id,
+            system: system.to_owned(),
+            path: switch.path.clone(),
+            value: switch.after.clone(),
+        });
+        let command = EditCommand::one_or_batch(sets.chain(variants).collect());
         match gesture {
             Some(gesture) => self.apply_in(command, gesture),
             None => self.apply(command),
@@ -1322,6 +1332,18 @@ impl Document {
                     value,
                 )?)
             }
+            EditCommand::SetVariant {
+                entity: id,
+                system,
+                path,
+                value,
+            } => Ok(set_variant(
+                self.component_of(*id, system)?,
+                *id,
+                system,
+                path,
+                value,
+            )?),
             EditCommand::Spawn {
                 entity: id,
                 rows,
@@ -1677,6 +1699,9 @@ mod undo_property_tests;
 
 #[cfg(test)]
 mod validation_tests;
+
+#[cfg(test)]
+mod variant_tests;
 
 #[cfg(test)]
 mod tests {

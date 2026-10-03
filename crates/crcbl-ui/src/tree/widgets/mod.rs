@@ -98,7 +98,7 @@ use crate::style::NodeSelector;
 pub use dock::{DockLayout, DockSide};
 pub use inspector::{
     AXES, FieldEdit, FieldRow, INSPECTOR_STEP, Inspection, InspectorOptions, Overrides, RowBuilder,
-    WHOLE_STEP,
+    VARIANT_LABEL, VariantEdit, WHOLE_STEP,
 };
 pub use list::LIST_OVERSCAN;
 pub use outliner::{

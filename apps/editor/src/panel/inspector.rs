@@ -21,6 +21,10 @@
 //! through the document, so a refusal reaches the status line like every
 //! other.
 //!
+//! **An enum offers its variants** ([`InspectorOptions::variants`]): a body's
+//! `kind` opens on a strip of `Dynamic`, `Static` and `Kinematic`, and a pick
+//! is reported as a switch the document records as one undoable command.
+//!
 //! **A rotation is drawn as three angles** ([`overrides`]): the quaternion a
 //! `crcbl::registry::Rotation` holds is no row a person can drag, so its row
 //! shows degrees and writes all four leaves when one angle moves.
@@ -29,7 +33,9 @@ use crcbl::math::{DQuat, EulerRot};
 use crcbl::reflect::Value;
 use crcbl::registry::Rotation;
 use crcbl::scene::scn::SceneEntityId;
-use crcbl::ui::tree::{AXES, FieldEdit, FieldRow, InspectorOptions, NodeKey, Overrides, Ui};
+use crcbl::ui::tree::{
+    AXES, FieldEdit, FieldRow, InspectorOptions, NodeKey, Overrides, Ui, VariantEdit,
+};
 
 use crate::document::Document;
 
@@ -67,6 +73,9 @@ pub(super) struct Built {
     pub(super) headings: Vec<(String, NodeKey)>,
     /// The frame's field edits, each with the system of its section.
     pub(super) edits: Vec<(String, FieldEdit)>,
+    /// The frame's variant switches, each with the system of its section —
+    /// made after every one of [`edits`](Self::edits).
+    pub(super) switches: Vec<(String, VariantEdit)>,
     /// The leaf a clipboard key means — its system and path — if there is one;
     /// see the panel module docs.
     pub(super) field: Option<(String, String)>,
@@ -99,6 +108,7 @@ pub(super) fn build(
         ui.span(".editor-title", label, &[]);
         let options = InspectorOptions {
             overrides: Some(overrides),
+            variants: true,
             ..InspectorOptions::default()
         };
         let removable = systems.len() > 1;
@@ -140,6 +150,12 @@ pub(super) fn build(
                             .edits
                             .into_iter()
                             .map(|edit| (system.clone(), edit)),
+                    );
+                    built.switches.extend(
+                        inspection
+                            .switches
+                            .into_iter()
+                            .map(|switch| (system.clone(), switch)),
                     );
                     if let Some(path) = inspection.focused {
                         focused = Some((system.clone(), path));

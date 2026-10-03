@@ -75,11 +75,12 @@ struct Tally {
 
 /// The facts [`Tally::reached`] must hold — each a shape of edit whose undo
 /// has its own way to go wrong.
-const MUST_REACH: [&str; 13] = [
+const MUST_REACH: [&str; 14] = [
     "a gesture of several writes",
     "a drag whose leaves change part-way",
     "a gesture that ended where it began",
     "a nudge of two entities",
+    "a switch to another variant",
     "a drag of two entities",
     "a delete of two entities",
     "a duplicate of two entities",
@@ -281,6 +282,7 @@ fn count_commands<'a>(
 const fn variant(command: &EditCommand) -> &'static str {
     match command {
         EditCommand::SetProperty { .. } => "SetProperty",
+        EditCommand::SetVariant { .. } => "SetVariant",
         EditCommand::Spawn { .. } => "Spawn",
         EditCommand::Delete { .. } => "Delete",
         EditCommand::Attach { .. } => "Attach",
@@ -293,8 +295,9 @@ const fn variant(command: &EditCommand) -> &'static str {
 }
 
 /// Every name [`variant`] answers.
-const EVERY_COMMAND: [&str; 9] = [
+const EVERY_COMMAND: [&str; 10] = [
     "SetProperty",
+    "SetVariant",
     "Spawn",
     "Delete",
     "Attach",

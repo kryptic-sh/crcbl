@@ -203,7 +203,7 @@ pub use widgets::{
     DockSide, FieldEdit, FieldRow, INSPECTOR_STEP, Inspection, InspectorOptions, LIST_OVERSCAN,
     MASK, OUTLINER_INDENT, OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId, OutlinerOptions,
     OutlinerRow, OutlinerState, Overrides, RowBuilder, SPLIT_NAV_STEP, SelectMode, SplitAxis,
-    TextInput, TextInputOptions, WHOLE_STEP,
+    TextInput, TextInputOptions, VARIANT_LABEL, VariantEdit, WHOLE_STEP,
 };
 
 /// How far the pointer must move from where a press began, in pixels, before

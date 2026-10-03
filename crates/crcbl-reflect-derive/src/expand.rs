@@ -1,7 +1,9 @@
 //! Turning a `#[derive(Reflect)]` input into the `impl`.
 //!
 //! The five interesting methods are built separately and assembled at the end,
-//! because a struct and an enum differ in all five and in nothing else.
+//! because a struct and an enum differ in all five. An enum also lists its
+//! variants and switches between them; a struct takes the trait's provided
+//! bodies for those two, which say it has no variant to switch to.
 
 use proc_macro2::{Literal, TokenStream};
 use quote::{ToTokens, format_ident, quote, quote_spanned};
@@ -18,6 +20,8 @@ struct Body {
     field: TokenStream,
     field_mut: TokenStream,
     variant: TokenStream,
+    /// `variants` and `set_variant`, for an enum; empty for a struct.
+    switching: TokenStream,
     /// The per-field `Reflect` assertions, which name the field in the refusal.
     assertions: TokenStream,
     reads_index: bool,
@@ -44,7 +48,7 @@ pub(crate) fn derive(input: &DeriveInput) -> syn::Result<TokenStream> {
 
     let body = match &input.data {
         Data::Struct(data) => struct_body(&krate, &data.fields)?,
-        Data::Enum(data) => enum_body(&krate, ident, data)?,
+        Data::Enum(data) => enum_body(&krate, ident, &name, data)?,
         Data::Union(data) => {
             return Err(syn::Error::new(
                 data.union_token.span(),
@@ -60,6 +64,7 @@ pub(crate) fn derive(input: &DeriveInput) -> syn::Result<TokenStream> {
         field,
         field_mut,
         variant,
+        switching,
         assertions,
         reads_index,
     } = body;
@@ -120,6 +125,8 @@ pub(crate) fn derive(input: &DeriveInput) -> syn::Result<TokenStream> {
             fn variant(&self) -> ::core::option::Option<&'static str> {
                 #variant
             }
+
+            #switching
 
             fn as_any(&self) -> &dyn ::core::any::Any {
                 self
@@ -301,6 +308,7 @@ fn struct_body(krate: &Path, fields: &Fields) -> syn::Result<Body> {
         field,
         field_mut,
         variant: quote!(::core::option::Option::None),
+        switching: TokenStream::new(),
         assertions,
         reads_index,
     })
@@ -310,7 +318,7 @@ fn struct_body(krate: &Path, fields: &Fields) -> syn::Result<Body> {
 ///
 /// Every one of them is a `match self` first: which rows exist, and what they
 /// are, is a property of the **active variant** rather than of the type.
-fn enum_body(krate: &Path, ident: &Ident, data: &DataEnum) -> syn::Result<Body> {
+fn enum_body(krate: &Path, ident: &Ident, name: &str, data: &DataEnum) -> syn::Result<Body> {
     if data.variants.is_empty() {
         return Err(syn::Error::new(
             ident.span(),
@@ -323,6 +331,8 @@ fn enum_body(krate: &Path, ident: &Ident, data: &DataEnum) -> syn::Result<Body> 
     let mut variant_arms = Vec::new();
     let mut field_arms = Vec::new();
     let mut field_mut_arms = Vec::new();
+    let mut variant_entries = Vec::new();
+    let mut construct_arms = Vec::new();
     let mut groups = Vec::new();
     let mut reads_index = false;
 
@@ -354,10 +364,42 @@ fn enum_body(krate: &Path, ident: &Ident, data: &DataEnum) -> syn::Result<Body> 
         let field_mut = index_match(krate, &rows, true, binding);
         field_arms.push(quote!(#bound => #field));
         field_mut_arms.push(quote!(#bound => #field_mut));
+
+        let literals = rows.iter().map(|row| &row.literal);
+        variant_entries.push(quote! {
+            #krate::Variant { name: #vname, fields: &[#(#literals),*] }
+        });
+        let construct = defaulted(vident, &variant.fields);
+        construct_arms.push(quote!(#vname => #construct));
         groups.push(rows);
     }
 
     let assertions = assertions(krate, &groups);
+    let switching = quote! {
+        fn variants(&self) -> &'static [#krate::Variant] {
+            const VARIANTS: &[#krate::Variant] = &[#(#variant_entries),*];
+            VARIANTS
+        }
+
+        fn set_variant(
+            &mut self,
+            variant: &str,
+        ) -> ::core::result::Result<(), #krate::SetError> {
+            if #krate::Reflect::variant(self) == ::core::option::Option::Some(variant) {
+                return ::core::result::Result::Ok(());
+            }
+            *self = match variant {
+                #(#construct_arms,)*
+                _ => {
+                    return ::core::result::Result::Err(#krate::SetError::NoVariant {
+                        type_name: #name,
+                        variant: ::std::string::String::from(variant),
+                    });
+                }
+            };
+            ::core::result::Result::Ok(())
+        }
+    };
 
     Ok(Body {
         kind: quote!(#krate::Kind::Enum),
@@ -365,9 +407,39 @@ fn enum_body(krate: &Path, ident: &Ident, data: &DataEnum) -> syn::Result<Body> 
         field: quote!(match self { #(#field_arms,)* }),
         field_mut: quote!(match self { #(#field_mut_arms,)* }),
         variant: quote!(match self { #(#variant_arms,)* }),
+        switching,
         assertions,
         reads_index,
     })
+}
+
+/// `Self::V { a: Default::default(), .. }` for every field of the variant —
+/// the skipped ones too, since a value of it has to hold them — or `Self::V`
+/// for a unit variant: what `set_variant` switches to.
+///
+/// Each default is spanned at its field's type, so a field whose type has no
+/// `Default` is refused at that field rather than at `#[derive(Reflect)]`.
+fn defaulted(vident: &Ident, fields: &Fields) -> TokenStream {
+    let default = |ty: &Type| {
+        quote_spanned! { ty.span() =>
+            <#ty as ::core::default::Default>::default()
+        }
+    };
+    match fields {
+        Fields::Unit => quote!(Self::#vident),
+        Fields::Named(named) => {
+            let fields = named.named.iter().map(|field| {
+                let ident = &field.ident;
+                let value = default(&field.ty);
+                quote!(#ident: #value)
+            });
+            quote!(Self::#vident { #(#fields,)* })
+        }
+        Fields::Unnamed(unnamed) => {
+            let values = unnamed.unnamed.iter().map(|field| default(&field.ty));
+            quote!(Self::#vident(#(#values,)*))
+        }
+    }
 }
 
 /// `Self::V { a, .. }` or `Self::V(__field0, _)`, binding exactly the rows.
@@ -538,6 +610,62 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Self :: Dome (__field0 ,)"), "{text}");
+    }
+
+    #[test]
+    fn an_enum_lists_every_variant_and_switches_by_name_to_each_ones_defaults() {
+        let text = expand(parse_quote! {
+            enum Shape {
+                Platform { width: f64, #[reflect(skip)] cache: u8 },
+                Dome(f64),
+                Flat,
+            }
+        });
+        assert!(
+            text.contains(
+                ":: crcbl_reflect :: Variant { name : \"Platform\" , fields : & [:: crcbl_reflect \
+                 :: Field { name : \"width\""
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(":: crcbl_reflect :: Variant { name : \"Flat\" , fields : & [] }"),
+            "{text}"
+        );
+        // Every field is made, the skipped one too: a value has to hold it.
+        assert!(
+            text.contains(
+                "\"Platform\" => Self :: Platform { width : < f64 as :: core :: default :: \
+                 Default > :: default () , cache : < u8 as :: core :: default :: Default > :: \
+                 default () , }"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "\"Dome\" => Self :: Dome (< f64 as :: core :: default :: Default > :: default () ,)"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("\"Flat\" => Self :: Flat"), "{text}");
+        assert!(
+            text.contains(
+                "if :: crcbl_reflect :: Reflect :: variant (self) == :: core :: option :: \
+                 Option :: Some (variant) { return"
+            ),
+            "the active variant is switched to as a no-op: {text}"
+        );
+        assert!(
+            text.contains("SetError :: NoVariant { type_name : \"Shape\""),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_struct_takes_the_provided_bodies_for_switching() {
+        let text = expand(parse_quote! { struct Brick { position: [f64; 3] } });
+        assert!(!text.contains("fn variants"), "{text}");
+        assert!(!text.contains("fn set_variant"), "{text}");
     }
 
     #[test]

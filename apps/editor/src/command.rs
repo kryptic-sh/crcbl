@@ -53,6 +53,17 @@
 //! assert_eq!(brick.position, [1.0, 2.0, 3.0]);
 //! ```
 //!
+//! # Switching an enum's variant
+//!
+//! [`SetVariant`](EditCommand::SetVariant) is the one edit a leaf's value
+//! cannot carry: a switch replaces every field of the variant it leaves, so
+//! its inverse has to hold that variant and everything under it. It carries
+//! a [`Snapshot`] of the whole enum, and applying it reads the snapshot
+//! there first and hands back the switch to that ([`set_variant`]) — so an
+//! undo puts back the variant and its fields bit for bit, as a property's
+//! puts back its leaf. A switch is never folded into a gesture's entry: it
+//! is one click, and one entry.
+//!
 //! # Creating and removing entities
 //!
 //! [`Spawn`](EditCommand::Spawn) and [`Delete`](EditCommand::Delete) are each
@@ -121,7 +132,9 @@
 //!
 //! [`Value`]: crcbl::reflect::Value
 
-use crcbl::reflect::{PathError, Reflect, Value, get_path, set_path};
+use crcbl::reflect::{
+    PathError, Reflect, Snapshot, Value, get_path, restore_path, set_path, snapshot_path,
+};
 use crcbl::scene::scn::{EntityName, SceneEntityId};
 
 /// One undoable edit, as a value that could be sent rather than performed.
@@ -144,6 +157,20 @@ pub enum EditCommand {
         path: String,
         /// What the leaf is being set to.
         value: Value,
+    },
+
+    /// Switch the enum `path` names inside `entity`'s component in `system`
+    /// to the variant `value` holds, its fields as `value` holds them.
+    SetVariant {
+        /// Whose component: the id the scene file spells.
+        entity: SceneEntityId,
+        /// Which of its components: the scene system holding it.
+        system: String,
+        /// The dotted path to the enum, in [`crcbl::reflect`]'s grammar —
+        /// `"kind"` is a body's.
+        path: String,
+        /// The whole enum it is being set to.
+        value: Snapshot,
     },
 
     /// Create `entity` holding a component in each system `rows` names.
@@ -275,6 +302,37 @@ pub fn set_property(
     let replaced = get_path(component, path)?;
     set_path(component, path, value)?;
     Ok(EditCommand::SetProperty {
+        entity,
+        system: system.to_owned(),
+        path: path.to_owned(),
+        value: replaced,
+    })
+}
+
+/// Switches the enum `path` names inside `component` to the variant `value`
+/// holds — `entity`'s component in `system`, which the caller has already
+/// resolved — and hands back the [`EditCommand::SetVariant`] that undoes it.
+///
+/// The inverse carries **the whole enum that was replaced**, read out of the
+/// component immediately before the write, as [`set_property`]'s carries the
+/// leaf.
+///
+/// # Errors
+///
+/// [`PathError`] if the path names nothing in this component, or the enum
+/// refuses the snapshot — a variant it does not have, or fields of another
+/// shape — in which case it is put back as it was
+/// ([`crcbl::reflect::Snapshot::restore`]).
+pub fn set_variant(
+    component: &mut dyn Reflect,
+    entity: SceneEntityId,
+    system: &str,
+    path: &str,
+    value: &Snapshot,
+) -> Result<EditCommand, PathError> {
+    let replaced = snapshot_path(component, path)?;
+    restore_path(component, path, value)?;
+    Ok(EditCommand::SetVariant {
         entity,
         system: system.to_owned(),
         path: path.to_owned(),

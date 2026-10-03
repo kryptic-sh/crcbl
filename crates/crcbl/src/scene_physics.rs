@@ -148,9 +148,9 @@ pub enum BodyKind {
 #[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl_reflect")]
 pub struct Body {
-    /// How it moves. A panel shows it and cannot switch it:
-    /// `crcbl_reflect` describes an enum's active variant and has no way to
-    /// change which one is active.
+    /// How it moves. A panel switches it as an enum's variant
+    /// (`crcbl_reflect::Reflect::set_variant`); every kind holds no field of
+    /// its own, so a switch changes the kind and nothing else.
     #[reflect(name = "Kind")]
     pub kind: BodyKind,
     /// Its mass in kilograms: finite and above zero, for every kind, so that

@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`#[derive(Reflect)]` on an enum needs `Default` for every variant's fields**
+  (see Added: switching an enum's variant). A switch makes the new variant from
+  each field's `Default` — a `#[reflect(skip)]` field's too — so an enum with a
+  field whose type has none no longer compiles, and the error points at that
+  field. A generic enum writes its own `T: Default`, as it writes `T: Reflect`.
+  `crcbl_reflect::SetError` gained `NoVariant` and `Shape`, so an exhaustive
+  match over it must add them. In `crcbl-ui`, `InspectorOptions` gained
+  `variants` and `Inspection` gained `switches`, so a struct literal of either
+  must name them or end in `..Default::default()`. In the editor, `EditCommand`
+  gained `SetVariant` and `Document::record_edits` takes the frame's
+  `VariantEdit`s after its `FieldEdit`s.
+
 - **`.crpl` replays are format version 3** (see Added: a replay carries its
   simulation inputs). `ReplayWriter` and `CrashRing::dump` write version 3, and
   a build from before this change refuses such a file as an unsupported version
@@ -621,6 +633,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   directory natively, the installed OPFS store in a browser, or nowhere for a
   headless run — with `platform`, `source` and `label`. `apps/shard` wrote this
   arm first and its `Vault` is now a wrapper over it; towers is the second user.
+- **Switching an enum's variant, from reflection to the editor's undo log** (see
+  Breaking). `crcbl_reflect::Reflect` gains `variants` — every variant of an
+  enum as a `Variant` of its name and rows — and `set_variant`, which makes the
+  named variant with each field at its type's `Default` and leaves the active
+  one as it is; both are provided, refusing for anything that is not an enum,
+  and `#[derive(Reflect)]` writes them for every enum. No field carries over
+  from the variant being left. `Snapshot` reads a whole value — leaves, fields,
+  and each enum's variant — and writes it back exactly (`Snapshot::of`,
+  `Snapshot::restore`, `snapshot_path`, `restore_path`), putting the value back
+  when a snapshot does not fit; `set_variant_path` switches through a path.
+  `crcbl-ui`'s inspector, with `InspectorOptions::variants`, opens an enum's
+  group on a strip of its variants (`.inspector-variants`, one
+  `.inspector-variant` per variant, the active one `:checked`, each focusable
+  and picked by click or accept) and reports a pick as a `VariantEdit` of the
+  enum's path and its `Snapshot` before and after in `Inspection::switches`,
+  made after the frame's field edits. The editor turns on the strip, so a body's
+  `kind` is switched in its inspector section as one undoable
+  `EditCommand::SetVariant`, held to the component's rule like any property
+  write; it saves, reads back and plays as the new kind.
+
 - **A `.crpl` replay carries its simulation inputs, and a host re-simulates
   one** (format version 3; see Breaking). The file gains an input section after
   its entries: the `Flags::SIM` sets the host applied, each with its tick and as

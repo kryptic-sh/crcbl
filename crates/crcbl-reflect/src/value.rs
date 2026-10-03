@@ -163,6 +163,25 @@ pub enum SetError {
         /// The composite's type.
         type_name: &'static str,
     },
+
+    /// A switch to a variant the type does not have — which is every name,
+    /// for a type that is not an enum.
+    #[error("`{type_name}` has no variant `{variant}`")]
+    NoVariant {
+        /// The type the switch was asked of.
+        type_name: &'static str,
+        /// The variant, as it was asked for.
+        variant: String,
+    },
+
+    /// A [`Snapshot`](crate::Snapshot) whose shape is not this value's: a
+    /// different number of fields, a variant where there is none, or children
+    /// where there is a leaf.
+    #[error("`{type_name}` does not have the shape of the value written into it")]
+    Shape {
+        /// The type the snapshot did not fit.
+        type_name: &'static str,
+    },
 }
 
 /// What a reflected value is made of, which decides how an inspector draws it.
@@ -241,6 +260,23 @@ pub struct Field {
     /// How far one notch of a drag-value moves the field, from
     /// `#[reflect(step = …)]`. Advisory, like [`range`](Self::range).
     pub step: Option<f64>,
+}
+
+/// One variant of an enum, as a panel offers it to switch to: its name and the
+/// rows it would have.
+///
+/// `'static` for the reason [`Field`] is: `#[derive(Reflect)]` writes it into
+/// the expansion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Variant {
+    /// The variant's name in the source, which is what
+    /// [`Reflect::set_variant`](crate::Reflect::set_variant) takes and
+    /// [`Reflect::variant`](crate::Reflect::variant) answers.
+    pub name: &'static str,
+    /// The rows the variant has: what
+    /// [`Reflect::fields`](crate::Reflect::fields) answers while it is the
+    /// active one.
+    pub fields: &'static [Field],
 }
 
 impl Field {
@@ -325,6 +361,24 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "`Brick` has fields rather than a value of its own"
+        );
+    }
+
+    #[test]
+    fn a_switch_to_a_variant_the_type_lacks_names_both() {
+        let error = SetError::NoVariant {
+            type_name: "BodyKind",
+            variant: "Floating".to_owned(),
+        };
+        assert_eq!(error.to_string(), "`BodyKind` has no variant `Floating`");
+    }
+
+    #[test]
+    fn a_snapshot_of_another_shape_is_refused_by_naming_the_type() {
+        let error = SetError::Shape { type_name: "Brick" };
+        assert_eq!(
+            error.to_string(),
+            "`Brick` does not have the shape of the value written into it"
         );
     }
 

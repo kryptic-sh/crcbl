@@ -7,7 +7,9 @@
 //! rotation unit — is what its chunk is read through, so a value that breaks
 //! it saves and is then refused by the next load. `#[reflect(min, max)]` is
 //! advisory, and a [`EditCommand::SetProperty`] can write any leaf alone. This
-//! module moves the failure to where the edit is made.
+//! module moves the failure to where the edit is made. An
+//! [`EditCommand::SetVariant`] is a property write too: a switch whose new
+//! variant's defaults the rule refuses is refused like a leaf it refuses.
 //!
 //! # Refused at the edit, and put back
 //!
@@ -56,11 +58,12 @@ use crcbl::scene::scn::SceneEntityId;
 use super::{Document, EditError, sync_colliders};
 use crate::command::EditCommand;
 
-/// Every property write in `command`, batches opened: whose component, in
-/// which system.
+/// Every property write in `command` — a leaf set or a variant switch —
+/// batches opened: whose component, in which system.
 fn writes(command: &EditCommand) -> Vec<(SceneEntityId, &str)> {
     match command {
-        EditCommand::SetProperty { entity, system, .. } => vec![(*entity, system.as_str())],
+        EditCommand::SetProperty { entity, system, .. }
+        | EditCommand::SetVariant { entity, system, .. } => vec![(*entity, system.as_str())],
         EditCommand::Batch(commands) => commands.iter().flat_map(writes).collect(),
         _ => Vec::new(),
     }

@@ -72,6 +72,17 @@ pub(super) enum Op {
     /// The scale gizmo: the placing component's three half extents as one
     /// batch, each multiplied by `factor`.
     Scale { target: Index, factor: f64 },
+    /// An enum's variant picked: one of the enums the held entities'
+    /// components hold, `target` resolved over all of them, switched to one
+    /// of its variants or — for a draw past them — to a name it does not
+    /// have; reported to `Document::record_edits` as the inspector's strip
+    /// does while `inspector`, and as an `EditCommand::SetVariant` handed to
+    /// `Document::apply` otherwise.
+    Switch {
+        target: Index,
+        variant: Index,
+        inspector: bool,
+    },
     /// F2: `Document::rename` with one of `play::name_text`'s texts.
     Rename { target: Index, name: Index },
     /// Delete on a selection.
@@ -202,6 +213,13 @@ pub(super) fn op() -> impl Strategy<Value = Op> {
         1 => (any::<Index>(), -0.5..3.0f64)
             .prop_map(|(target, factor)| Op::Scale { target, factor })
             .boxed(),
+        2 => (any::<Index>(), any::<Index>(), any::<bool>())
+            .prop_map(|(target, variant, inspector)| Op::Switch {
+                target,
+                variant,
+                inspector,
+            })
+            .boxed(),
         2 => (any::<Index>(), any::<Index>())
             .prop_map(|(target, name)| Op::Rename { target, name })
             .boxed(),
@@ -301,6 +319,12 @@ impl Op {
             Self::Drag { .. } => "translate drag",
             Self::Turn { .. } => "turn",
             Self::Scale { .. } => "scale",
+            Self::Switch {
+                inspector: true, ..
+            } => "inspector switch",
+            Self::Switch {
+                inspector: false, ..
+            } => "variant command",
             Self::Rename { .. } => "rename",
             Self::Delete { .. } => "delete",
             Self::Duplicate { .. } => "duplicate",
@@ -317,7 +341,7 @@ impl Op {
 }
 
 /// Every step's [`Op::name`] — what the test asserts some history accepted.
-pub(super) const EVERY_OP: [&str; 19] = [
+pub(super) const EVERY_OP: [&str; 21] = [
     "property set",
     "inspector edit",
     "field paste",
@@ -326,6 +350,8 @@ pub(super) const EVERY_OP: [&str; 19] = [
     "translate drag",
     "turn",
     "scale",
+    "inspector switch",
+    "variant command",
     "rename",
     "delete",
     "duplicate",

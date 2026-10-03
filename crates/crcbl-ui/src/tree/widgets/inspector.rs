@@ -72,6 +72,30 @@
 //! leaves the field alone and reports nothing, and so does a write that landed
 //! on the value already there.
 //!
+//! # Switching an enum's variant
+//!
+//! With [`InspectorOptions::variants`], an enum's group opens on a
+//! `.inspector-row` labelled [`VARIANT_LABEL`] holding a
+//! `.inspector-variants` strip: one `.inspector-variant` per
+//! [`Reflect::variants`] entry, each holding a `.inspector-variant-label`
+//! span and `:checked` while it is the active one. They are
+//! [`Behavior::BUTTON`] nodes, so focus walks the strip and accept picks, as
+//! a tab strip's — the toolkit has no pop-up layer for a drop-down to open
+//! in, and a strip is the choice widget it already has.
+//!
+//! Picking another variant switches it ([`Reflect::set_variant`]: the new
+//! variant's fields at their defaults) and reports a [`VariantEdit`] in
+//! [`Inspection::switches`]: the enum's path and a [`Snapshot`] of the whole
+//! enum before and after, since a switch replaces every field the variant
+//! held and the leaf form of an edit cannot put them back. **Every switch is
+//! made after every field edit of the frame** — the rows draw over the value
+//! as the frame found it, and the switches are applied as the call returns —
+//! so a caller undoes a frame by putting back its switches newest first and
+//! then its edits newest first, and redoes it in the other order.
+//!
+//! Off by default, because a caller that records only
+//! [`Inspection::edits`] would be handed switches it cannot undo.
+//!
 //! # Which field a person means
 //!
 //! [`Inspection::hovered`] and [`Inspection::focused`] name the leaf whose
@@ -99,10 +123,14 @@
 use std::any::TypeId;
 use std::fmt;
 
-use crcbl_reflect::{Kind, Range, Reflect, Value, ValueKind, get_path, set_path};
+use crcbl_reflect::{
+    Kind, Range, Reflect, Snapshot, Value, ValueKind, get_path, set_path, set_variant_path,
+    snapshot_path,
+};
 
 use super::{Ui, typed};
-use crate::tree::Response;
+use crate::style::PseudoClasses;
+use crate::tree::{Behavior, KeySource, Response, hash_of};
 
 /// The step a [`ValueKind::Float`] field with no `#[reflect(step)]` is dragged
 /// and stepped by: [`InspectorOptions::step`]'s default.
@@ -135,6 +163,28 @@ pub struct FieldEdit {
     pub after: Value,
 }
 
+/// What the variant strip labels its row with; see the module docs.
+pub const VARIANT_LABEL: &str = "Variant";
+
+/// One enum switched to another variant, as a caller records it.
+///
+/// Undoing it is `restore_path(value, &edit.path, &edit.before)`; redoing it
+/// is the same call with [`after`](Self::after) — see
+/// [`crcbl_reflect::restore_path`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct VariantEdit {
+    /// The dotted path to the enum, from the value the inspector was handed.
+    /// Never empty: an enum handed in itself is drawn as its rows, with no
+    /// group to hold a strip.
+    pub path: String,
+    /// The whole enum before the switch: the variant it was in and every
+    /// field under it.
+    pub before: Snapshot,
+    /// The whole enum after it: the new variant, its fields at their
+    /// defaults.
+    pub after: Snapshot,
+}
+
 /// What one [`Ui::inspector`] call built, and what it changed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Inspection {
@@ -143,6 +193,10 @@ pub struct Inspection {
     /// The edits this frame's rows made, in the order they made them; empty
     /// when nothing moved.
     pub edits: Vec<FieldEdit>,
+    /// The variants switched this frame, in the order they were picked, each
+    /// made after every one of [`edits`](Self::edits); empty unless
+    /// [`InspectorOptions::variants`] is set.
+    pub switches: Vec<VariantEdit>,
     /// The path of the leaf whose widget the pointer is over this frame, if
     /// it is over one; see the module docs.
     pub hovered: Option<String>,
@@ -156,6 +210,9 @@ pub struct Inspection {
 #[derive(Debug, Default)]
 struct Report {
     edits: Vec<FieldEdit>,
+    /// Each enum a strip picked another variant of, by path, and the variant:
+    /// switched once every row is built.
+    picked: Vec<(String, &'static str)>,
     hovered: Option<String>,
     focused: Option<String>,
 }
@@ -296,6 +353,10 @@ pub struct InspectorOptions<'a> {
     /// destructor and so cannot be promoted to the `'static` an empty default
     /// would have to borrow.
     pub overrides: Option<&'a Overrides>,
+    /// Whether an enum's group offers its variants to switch to, reporting
+    /// each switch in [`Inspection::switches`]; see the module docs. Off by
+    /// default.
+    pub variants: bool,
 }
 
 impl InspectorOptions<'_> {
@@ -530,9 +591,11 @@ impl Ui {
                 ui.inspect_children(value, root, &mut path, options, &mut report);
             }
         });
+        let switches = switch_picked(value, &report.picked);
         Inspection {
             response,
             edits: report.edits,
+            switches,
             hovered: report.hovered,
             focused: report.focused,
         }
@@ -628,6 +691,11 @@ impl Ui {
                         None => row.label.to_owned(),
                     };
                     self.collapsing(".inspector-group", &title, |ui| {
+                        if options.variants
+                            && let Some(variant) = ui.variant_strip(&*child)
+                        {
+                            report.picked.push((path.clone(), variant));
+                        }
                         ui.inspect_children(child, row, path, options, report);
                     });
                 }
@@ -635,6 +703,43 @@ impl Ui {
         }
 
         path.truncate(base);
+    }
+
+    /// The variant strip at the top of an enum's group, as the module docs
+    /// describe it: the variant picked this frame, if it is not the active
+    /// one. A value with no variants builds nothing.
+    fn variant_strip(&mut self, value: &dyn Reflect) -> Option<&'static str> {
+        let variants = value.variants();
+        if variants.is_empty() {
+            return None;
+        }
+        let active = value.variant();
+        let mut picked = None;
+        self.block(".inspector-row", &[], |ui| {
+            ui.span(".inspector-label", VARIANT_LABEL, &[]);
+            ui.block(".inspector-variants", &[], |ui| {
+                for variant in variants {
+                    // Keyed by name, so a variant's focus follows it rather
+                    // than its place in the strip.
+                    let key = ui.key(KeySource::Keyed(hash_of(variant.name)));
+                    let is_active = active == Some(variant.name);
+                    if !is_active && ui.interaction_of(key).clicked && !ui.building_disabled() {
+                        picked = Some(variant.name);
+                    }
+                    let state = if is_active {
+                        PseudoClasses::CHECKED
+                    } else {
+                        PseudoClasses::NONE
+                    };
+                    let parsed = ui.node_selector(".inspector-variant");
+                    let key = ui.unique(key);
+                    ui.open_block(key, parsed, &[], Behavior::BUTTON, state, |ui| {
+                        ui.span(".inspector-variant-label", variant.name, &[]);
+                    });
+                }
+            });
+        });
+        picked
     }
 
     /// The row for one leaf: its label, then the widget its [`ValueKind`]
@@ -690,6 +795,32 @@ impl Ui {
             }
         });
     }
+}
+
+/// Switches each enum `picked` names inside `value` to the variant picked
+/// for it, in order, and reports each as a [`VariantEdit`].
+///
+/// A switch the enum refuses, or a path that no longer names it, is no edit
+/// and reports nothing — the rule [`write_leaf`] keeps for a leaf.
+fn switch_picked(value: &mut dyn Reflect, picked: &[(String, &'static str)]) -> Vec<VariantEdit> {
+    let mut switches = Vec::with_capacity(picked.len());
+    for (path, variant) in picked {
+        let Ok(before) = snapshot_path(value, path) else {
+            continue;
+        };
+        if set_variant_path(value, path, variant).is_err() {
+            continue;
+        }
+        let Ok(after) = snapshot_path(value, path) else {
+            continue;
+        };
+        switches.push(VariantEdit {
+            path: path.clone(),
+            before,
+            after,
+        });
+    }
+    switches
 }
 
 /// Writes `new` into `leaf` and records what it replaced.

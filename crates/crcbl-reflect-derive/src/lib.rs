@@ -26,6 +26,15 @@ mod expand;
 /// * **Enums**, as a `Kind::Enum` whose rows are the **active variant's**
 ///   fields. Unit, tuple and struct variants all work.
 ///
+/// An enum also lists its variants (`Reflect::variants`) and switches to one
+/// by name (`Reflect::set_variant`), the new variant made with **every field
+/// at its type's `Default`** — a skipped field too, since the value has to
+/// hold it. So every field type of every variant must implement `Default`,
+/// and one that does not is a compile error at that field. No field carries
+/// over from the variant being left; `Reflect::set_variant`'s docs say why.
+/// A generic enum gets no `T: Default` bound added, for the reason it gets no
+/// `T: Reflect` one: write it where the type is declared.
+///
 /// A **union** is refused: which field of one is live cannot be read off the
 /// value, and reading the wrong one is unsafe. An enum with **no variants** is
 /// refused too — no value of it can exist, so there is nothing to show.

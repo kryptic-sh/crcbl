@@ -22,7 +22,7 @@ pub(crate) const FALLING: SceneEntityId = SceneEntityId(4);
 const STEP: SceneEntityId = SceneEntityId(2);
 
 /// Where [`FALLING`]'s centre starts, in metres up.
-const DROP_Y: f64 = 4.0;
+pub(crate) const DROP_Y: f64 = 4.0;
 
 /// [`FALLING`]'s half extent on every axis.
 const HALF: f64 = 0.5;
@@ -142,7 +142,7 @@ pub(crate) fn ticks_in(document: &Document, seconds: f64) -> u32 {
 }
 
 /// `id`'s block's `position`, read the way an inspector reads it.
-fn position(document: &mut Document, id: SceneEntityId) -> [f64; 3] {
+pub(crate) fn position(document: &mut Document, id: SceneEntityId) -> [f64; 3] {
     std::array::from_fn(|axis| {
         match document
             .read(id, BLOCKS, &format!("position.{axis}"))
