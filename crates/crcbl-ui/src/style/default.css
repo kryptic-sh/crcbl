@@ -472,6 +472,19 @@ popup {
 }
 
 /*
+ * Tooltip: a line of text drawn over the whole tree, which the pointer passes
+ * through (`tooltip.rs`). It does not wrap, so it is as wide as its text.
+ */
+tooltip {
+  padding: 2px 6px;
+  border-width: 1px;
+  border-color: #4a5468;
+  background: #23272f;
+  color: #e6e9ef;
+  white-space: nowrap;
+}
+
+/*
  * Select: a button showing the chosen option, and its list in a pop-up. The
  * chosen option is `:checked` and drawn in the accent, as the tab showing is;
  * the button is `:open` while its list is.

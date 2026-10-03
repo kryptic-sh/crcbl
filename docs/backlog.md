@@ -3351,7 +3351,10 @@ and its rungs W2–W6 are separate slices rather than gaps.
 `crcbl_ui::tree`'s pop-up layer (`tree/popup.rs`: `Ui::open_popup`, `Ui::popup`,
 `Ui::close_popup`, `Ui::is_popup_open`, `Ui::popup_key`) and the drop-down built
 on it (`Ui::select`, `tree/widgets/select.rs`), adopted for the inspector's
-variant picker. Decisions, then what is left.
+variant picker; tooltips on the same layer (`tree/tooltip.rs`: `Ui::tooltip`,
+`Ui::tooltip_key`, `Ui::set_tooltip_delay`, `Ui::dismiss_tooltip`,
+`TOOLTIP_DELAY`), adopted for the editor's toolbar and play strip. Decisions,
+then what is left.
 
 - **Decided: a press outside every pop-up is spent closing them**, not passed
   through to what is under it — the long-term rule. A click meant to dismiss a
@@ -3394,11 +3397,66 @@ variant picker. Decisions, then what is left.
 - **Behaviour that is not a bug: a pop-up's margin and offsets do not move it.**
   Placement sets its border box against the anchor, so no gap can be put between
   the two yet.
-- **Deferred: tooltips on the same layer.** A tooltip is a pop-up that neither
-  traps focus nor is dismissed by a press, opened after a hover delay; it needs
-  a non-modal kind of pop-up (a root that is not `Behavior::MODAL` and that
-  `press_outside_popups` skips) and a hover clock. Add it when the editor wants
-  a tooltip.
+- **Decided: a tooltip is a pop-up of its own kind, outside the pop-up stack.**
+  It is built as a root of its own (`Ui::open_root`, which `Ui::popup` shares),
+  placed by the same `hang`, clipped to the viewport, and drawn in
+  `tooltip.rs`'s `TOOLTIP_LAYER`, above every pop-up's layer. Its nodes are
+  `StoredNode::inert`, which `StoredNode::contains` refuses, so it is never in a
+  hit chain: the pointer and every press pass through it to what it covers, and
+  a press only hides it. Its root is `Behavior::NONE` and it holds a span, so
+  nothing in it is focusable or a scope. **Considered and declined: a kind flag
+  on the `popups` stack.** Every stack rule — a press outside closes, back
+  closes the topmost, an unbuilt one closes, focus moves into the topmost modal
+  — would need an exception for it, and one opening on top would make the real
+  pop-ups lower.
+- **Decided: `Ui::tooltip(&Response, text)`, not `Response::tooltip(text)`.** A
+  `Response` is a `Copy` snapshot with no handle on the `Ui`; the call has the
+  shape of `Ui::snapshot(&Response, …)`. It is made every frame after the
+  widget, builds nothing until due, and marks the node (`StoredNode::tooltip`,
+  reset in `Ui::push`) so the next frame's subject can be chosen from the store
+  before anything is built. Text only, styled by `default.css`'s `tooltip` rule
+  (`white-space: nowrap`).
+- **Decided: the subject follows the mixed-input rule.** In `InputMode::Pointer`
+  it is the innermost hovered node that asked last frame; in
+  `InputMode::Navigation` the focused node, if it asked. The delay
+  (`TOOLTIP_DELAY`, Windows' `TTDT_INITIAL`; `Ui::set_tooltip_delay`) counts
+  from the first frame that built the subject's call, on the `Ui`'s `text_clock`
+  — the clock `TextInput::dt` advances, which the caret and double-click already
+  use — never wall time. A press or accept dismisses it, and so does a wheel
+  (`Ui::scroll_wheel`, or `Ui::dismiss_tooltip`); a dismissal lasts until the
+  subject changes, so a clicked button's tooltip does not come back over what
+  the click did.
+- **Decided: the editor's labels keep their keys.** The toolbar's buttons read
+  `Play (F5)` and the play strip's `Place tower (1)`; the tooltips say what the
+  button does and name the key again (`panel::Tool`, `panel::play`'s
+  `action_tip`). A tooltip waits on a delay and a label does not, and the loop
+  tests (`app::tests::play`, `app::tests::play_strip`) find strip buttons by
+  those labels. Towers' browser gate pins the game's own HUD labels, not the
+  editor's, so it does not bear on this.
+- **Behaviour that is not a bug: a frame that hands the tree no text input does
+  not advance a tooltip's delay.** The editor's unsaved bar takes the frame's
+  text input away (`Panels::hold_for_unsaved`), so no tooltip comes up while the
+  bar is.
+- **Behaviour that is not a bug: a tooltip can show for a tree node while a
+  drop-down is open.** Hover is resolved under an open pop-up as anywhere; the
+  press that would reach the node closes the drop-down and dismisses the
+  tooltip.
+- **Behaviour that is not a bug: closing a pop-up hides the tooltip until the
+  next layout.** `close_popups_from` stops every layer above the closed one
+  being hit or drawn, and `TOOLTIP_LAYER` is above them all; the next layout
+  draws it again if it is still due.
+- **Deferred: Windows' reshow and auto-pop delays.** Moving from one toolbar
+  button to the next waits the whole delay again, where Windows' shorter
+  `TTDT_RESHOW` would show the next sooner, and a tooltip stays up for as long
+  as the pointer rests rather than going after `TTDT_AUTOPOP`. Either is a field
+  on `TooltipState` and a rule in `resolve_tooltip`.
+- **Deferred: a description on `PlayAction`.** An action's tooltip is read off
+  its `ParamKind`s (_Send Place tower to the game, for the `plots` selected in
+  the scene (1)_), because the registry carries only a name; a game-written
+  sentence needs a field every registered action would fill.
+- **Deferred: a tooltip wider than the viewport wraps.** It is `nowrap`, shifted
+  to the viewport's left edge and clipped at its right; a `max-width` with
+  wrapping would need the span to wrap inside a content-sized root.
 - **Deferred: context menus and submenus.** A context menu needs a secondary
   button in `PointerInput` (it has one button) and a pop-up anchored at a point
   rather than a node; a submenu needs placement beside its anchor rather than
@@ -3420,7 +3478,14 @@ variant picker. Decisions, then what is left.
   walks the layered hit chain), a pop-up nested more than one deep, a pop-up
   opened from inside a base modal, gamepad input, and the editor's Escape with
   the unsaved bar up while a drop-down is open (the bar answers Escape through
-  its own binding, outside the tree).
+  its own binding, outside the tree). For tooltips (`tree::tooltip_tests`,
+  `editor`'s `panel::tests::tooltips`): an anchor inside a pop-up that closes
+  while the frame is built (the `CLOSED_LAYER` branch in `Ui::layers`), an
+  anchor built `display: none` (the hidden branch in `Ui::place`), nested
+  widgets that both ask (the innermost wins by stacking), accept dismissing, the
+  play strip's tooltips through the loop and a choice's tooltip text, and the
+  `tooltip` rule's look — the tests restyle its background to find it. No golden
+  builds a tooltip.
 
 ## What UI rung 8b shipped without (2026-09-16)
 

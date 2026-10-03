@@ -448,6 +448,17 @@ deferred, built.
   default context: `ui` does not bind digits and `text` does, so a field being
   typed into keeps them, and the editing rule stops them besides. While editing
   they ask for nothing that happens.
+- **Every toolbar and play-strip button has a tooltip** (2026-10-03,
+  `Ui::tooltip`): the toolbar's say what the button does now and its key —
+  `Run the scene's games from the scene as it stands (F5)` — and an action's
+  says what it sends and where each argument comes from, read off its
+  `ParamKind`s because a `PlayAction` carries no description, with its number
+  key; a choice's lists what it steps through. **The labels keep their keys**: a
+  tooltip waits on a delay and a label does not, and the loop tests find the
+  strip's buttons by those labels (`Place tower (1)`). The panels scroll by
+  offset rather than through the tree's wheel, so a wheel turn hides a tooltip
+  through `Ui::dismiss_tooltip`. `panel::tests::tooltips` holds the toolbar's to
+  its key and the wheel; `panel::play`'s test holds an action's text.
 - **A command sent while paused waits for the tick after resume** — encoded and
   refused by the controls at once, read when the game next ticks, as a server's
   queue holds a frame. Refusing it would make a pause a mode where the strip

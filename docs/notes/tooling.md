@@ -415,9 +415,19 @@ The rules, each with its _why_:
   back to its anchor when it closes. Back closes the topmost, and **a press
   outside is spent closing it** rather than reaching what it covered, so
   dismissing a list never fires the button under it. `Ui::select`, the
-  inspector's variant picker, is its first user; tooltips and context menus are
-  the next, recorded in `docs/backlog.md`. This is not `z-index`: inside the
-  tree paint order is still tree order.
+  inspector's variant picker, is its first user; context menus are the next,
+  recorded in `docs/backlog.md`. This is not `z-index`: inside the tree paint
+  order is still tree order.
+- **A tooltip is an inert pop-up** (decided 2026-10-03). `Ui::tooltip` hangs a
+  line of text from a widget, placed as a pop-up is and drawn over every one,
+  but never hit-tested or focused: the pointer passes through it, and a press is
+  delivered to what it covers and only hides it. It is not in the pop-up stack,
+  so none of the stack's rules — a press outside closes, back closes the
+  topmost, focus moves in — reach it. It shows after `TOOLTIP_DELAY` on the
+  widget the mixed-input rule names (the hovered one under a pointer, the
+  focused one under a keyboard or pad), timed on the frame clock `TextInput::dt`
+  advances rather than wall time, and stays hidden after a press, accept or
+  wheel until that widget changes.
 - **Focus is ordinary interaction state.** One focused element per context, so
   `:focus` styles it and **focus rings are stylesheet-driven**. Interactive
   widgets are focusable by default; containers form scopes — a modal traps

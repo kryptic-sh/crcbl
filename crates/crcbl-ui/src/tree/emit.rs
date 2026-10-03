@@ -21,20 +21,21 @@ fn visible(color: [f32; 4]) -> bool {
 impl Ui {
     /// Draws the tree [`Ui::layout`] last laid out into `list`: every root in
     /// build order, each parent before its children, then every node's
-    /// outline; then each open pop-up the same way, lowest first, under the
-    /// viewport's clip (`popup.rs`).
+    /// outline; then each open pop-up the same way, lowest first, and the
+    /// tooltip last, under the viewport's clip (`popup.rs`, `tooltip.rs`).
     ///
     /// Clips are pushed and popped in pairs, so `list`'s own clip is what it
     /// was when this returns. The navigation debug overlay follows the tree
     /// when [`Ui::set_nav_debug`] switched it on.
     pub fn emit(&self, list: &mut DrawList) {
         self.emit_layer(0, list);
-        if !self.popups.is_empty() {
+        if !self.popups.is_empty() || self.tooltip.built.is_some() {
             let viewport = self.viewport();
             list.push_clip(viewport.min, viewport.max);
             for layer in 1..=self.popups.len() {
                 self.emit_layer(layer, list);
             }
+            self.emit_layer(super::tooltip::TOOLTIP_LAYER, list);
             list.pop_clip()
                 .expect("the clip pushed above is still on the stack");
         }

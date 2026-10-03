@@ -82,6 +82,12 @@ pub(crate) struct StoredNode {
     /// Whether it had a box last frame: `display: none` here or above is never
     /// hit.
     pub hittable: bool,
+    /// Whether it was drawn last frame where the pointer passes through it — a
+    /// tooltip's layer — so it is never hit, whatever `hittable` says.
+    pub inert: bool,
+    /// Whether its builder asked for a tooltip on it last frame
+    /// ([`super::Ui::tooltip`]): what makes it a tooltip's subject.
+    pub tooltip: bool,
     pub interaction: Interaction,
     /// How it takes part in focus, as its builder declared it last.
     pub behavior: Behavior,
@@ -140,6 +146,8 @@ impl StoredNode {
             paint_order: 0,
             layer: 0,
             hittable: false,
+            inert: false,
+            tooltip: false,
             interaction: Interaction::default(),
             behavior: Behavior::NONE,
             state: PseudoClasses::NONE,
@@ -180,7 +188,7 @@ impl StoredNode {
             min: self.rect.0,
             max: self.rect.1,
         });
-        self.hittable && pos.cmpge(visible.min).all() && pos.cmplt(visible.max).all()
+        self.hittable && !self.inert && pos.cmpge(visible.min).all() && pos.cmplt(visible.max).all()
     }
 }
 

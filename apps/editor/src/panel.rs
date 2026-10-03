@@ -39,7 +39,9 @@
 //! be migrated into it, as the asset browser is (`crate::layout`'s module
 //! docs). A click is not acted on here: [`PanelFrame::toolbar`] hands the
 //! [`Action`] its key would have asked for back to [`crate::app`], which
-//! carries both out the same way.
+//! carries both out the same way. Each button keeps its key in its label and
+//! has a tooltip ([`Ui::tooltip`]) saying what it does and the key again, as
+//! each play-strip button does.
 //!
 //! While a directory is asked for, the path line sits under the toolbar
 //! (`path_line`'s module docs): a text input whose committed text
@@ -1097,6 +1099,11 @@ impl Panels {
 
         ui.begin_frame_with(input.pointer, input.nav);
         ui.set_text_input(input.text);
+        if input.scroll != 0.0 {
+            // The panels scroll by offset, not through `Ui::scroll_wheel`,
+            // so the wheel's hiding of a tooltip is said here.
+            ui.dismiss_tooltip();
+        }
         scroll(ui, &scrollers, input.pointer.pos, input.scroll);
         ui.block(
             "#editor",
@@ -1558,36 +1565,92 @@ fn owned_controls(document: &Document) -> Vec<(String, PlayControls)> {
 /// click on it asked for.
 ///
 /// Each button is labelled with what it does **now** and the key that does the
-/// same, so the strip is also where a person learns F5, F6 and the chords.
+/// same, so the strip is also where a person learns F5, F6 and the chords —
+/// without waiting on a tooltip, which says what the button does and names
+/// the key again.
 fn build_toolbar(ui: &mut Ui, play: PlayState) -> (Option<NodeKey>, Option<Action>) {
+    const PLAY: Tool = Tool {
+        name: "Play",
+        does: "Run the scene's games from the scene as it stands",
+        key: "F5",
+    };
+    const STOP: Tool = Tool {
+        name: "Stop",
+        does: "End the run and put the scene back as it was before Play",
+        key: "F5",
+    };
+    const PAUSE: Tool = Tool {
+        name: "Pause",
+        does: "Hold the run's ticks, leaving the scene as the run left it",
+        key: "F6",
+    };
+    const RESUME: Tool = Tool {
+        name: "Resume",
+        does: "Carry on ticking the run from where it paused",
+        key: "F6",
+    };
+    const NEW: Tool = Tool {
+        name: "New",
+        does: "Put a new, empty scene in place of this one",
+        key: "Ctrl+N",
+    };
+    const OPEN: Tool = Tool {
+        name: "Open",
+        does: "Open another scene directory in place of this one",
+        key: "Ctrl+O",
+    };
+    const SAVE_AS: Tool = Tool {
+        name: "Save as",
+        does: "Save the scene into a directory you name",
+        key: "Ctrl+Shift+S",
+    };
     let (start, hold, state) = match play {
-        PlayState::Editing => ("Play (F5)", "Pause (F6)", "Editing"),
-        PlayState::Playing => ("Stop (F5)", "Pause (F6)", "Playing"),
-        PlayState::Paused => ("Stop (F5)", "Resume (F6)", "Paused"),
+        PlayState::Editing => (PLAY, PAUSE, "Editing"),
+        PlayState::Playing => (STOP, PAUSE, "Playing"),
+        PlayState::Paused => (STOP, RESUME, "Paused"),
     };
     let mut asked = None;
     let toolbar = ui.block("#toolbar", &[], |ui| {
-        if ui.button("#play", start).clicked {
+        if start.button(ui, "#play") {
             asked = Some(Action::PlayStop);
         }
-        if ui.button("#pause", hold).clicked {
+        if hold.button(ui, "#pause") {
             asked = Some(Action::Pause);
         }
         ui.span("#play-state", state, &[]);
-        if ui.button("#new-scene", "New (Ctrl+N)").clicked {
+        if NEW.button(ui, "#new-scene") {
             asked = Some(Action::NewScene);
         }
-        if ui.button("#open-scene", "Open (Ctrl+O)").clicked {
+        if OPEN.button(ui, "#open-scene") {
             asked = Some(Action::Open);
         }
-        if ui
-            .button("#save-scene-as", "Save as (Ctrl+Shift+S)")
-            .clicked
-        {
+        if SAVE_AS.button(ui, "#save-scene-as") {
             asked = Some(Action::SaveAs);
         }
     });
     (Some(toolbar.key), asked)
+}
+
+/// One toolbar button: what it is called, what it does and the key that does
+/// the same.
+#[derive(Clone, Copy)]
+struct Tool {
+    name: &'static str,
+    does: &'static str,
+    key: &'static str,
+}
+
+impl Tool {
+    /// Builds the button `selector`, labelled with its name and key, with a
+    /// tooltip saying what it does and the key; returns whether it was
+    /// clicked.
+    fn button(self, ui: &mut Ui, selector: &str) -> bool {
+        let label = format!("{} ({})", self.name, self.key);
+        let button = ui.button(selector, label.as_str());
+        let tip = format!("{} ({})", self.does, self.key);
+        ui.tooltip(&button, tip.as_str());
+        button.clicked
+    }
 }
 
 /// What the outliner's rows are built from.
@@ -1748,6 +1811,7 @@ mod tests {
     mod recovery;
     mod rotation;
     mod selection;
+    mod tooltips;
     mod unsaved;
     mod variants;
 

@@ -67,6 +67,12 @@
 //! [`Ui::close_popup`], by back, or by a press outside it, which it spends.
 //! `popup.rs` has the rules.
 //!
+//! [`Ui::tooltip`] hangs a line of text from a widget the same way once the
+//! pointer has rested on it, or navigation has held focus on it, for
+//! [`TOOLTIP_DELAY`]: a pop-up of its own kind, drawn over every other but
+//! inert — the pointer passes through it, and a press only hides it.
+//! `tooltip.rs` has the rules.
+//!
 //! # Identity
 //!
 //! Every node has a [`NodeKey`]: `hash(parent key, id)`, where the id is
@@ -177,6 +183,9 @@ mod style;
 mod style_tests;
 #[cfg(test)]
 mod tests;
+mod tooltip;
+#[cfg(test)]
+mod tooltip_tests;
 pub mod widgets;
 
 use std::collections::{HashMap, HashSet};
@@ -211,6 +220,7 @@ pub use style::{
     Justify, Length, LengthAuto, LineHeight, NavId, NavTarget, NavWrap, NodeStyle, Overflow,
     Position, TextOverflow, WhiteSpace,
 };
+pub use tooltip::TOOLTIP_DELAY;
 pub use widgets::{
     AXES, ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, DockLayout,
     DockSide, FieldEdit, FieldRow, INSPECTOR_STEP, Inspection, InspectorOptions, LIST_OVERSCAN,
@@ -394,6 +404,8 @@ enum KeySource<'a> {
     Duplicate(u64, u32),
     /// A pop-up's root, by its anchor's key.
     Popup(u64),
+    /// A tooltip's root, by its anchor's key.
+    Tooltip(u64),
 }
 
 fn hash_of(value: impl Hash) -> u64 {
@@ -472,6 +484,8 @@ pub struct Ui {
     /// The space the last [`Ui::layout`] was given, from its origin; `None`
     /// before the first.
     viewport: Option<ClipRect>,
+    /// The tooltip's subject and clock; see `tooltip.rs`.
+    tooltip: tooltip::TooltipState,
 }
 
 impl Ui {
@@ -514,6 +528,7 @@ impl Ui {
         let clicked = self.resolve_pointer(pointer);
         self.clicked = clicked;
         self.resolve_navigation(nav, clicked, self.dragged);
+        self.resolve_tooltip(pointer, nav);
     }
 
     /// Hover, press capture and click for every stored node, from last frame's
@@ -801,6 +816,8 @@ impl Ui {
         stored.parent = parent.map(|parent| self.nodes[parent].key);
         stored.behavior = behavior;
         stored.state = state;
+        // Until this frame's `Ui::tooltip` asks again.
+        stored.tooltip = false;
         stored.id = selector.id.map(NavId::new);
 
         let span = !matches!(content, Content::Block);
@@ -1098,7 +1115,7 @@ impl Ui {
     /// Resolves every node's screen rectangle, clip and layer into the store,
     /// for emission and for next frame's hit test: the tree's roots at
     /// `origin`, then each open pop-up's against its anchor, lowest first, so
-    /// an anchor is placed before what hangs from it.
+    /// an anchor is placed before what hangs from it, then the tooltip's.
     fn place(&mut self, origin: Vec2) {
         let layers = self.layers();
         let mut placed = vec![(Vec2::ZERO, ClipRect::NONE, true); self.nodes.len()];
@@ -1115,6 +1132,14 @@ impl Ui {
             let viewport = self.viewport();
             self.place_layer(layer, &layers, &mut placed, |ui, index| {
                 (ui.popup_origin(index, anchor), viewport, false)
+            });
+        }
+        if let Some((_, anchor)) = self.tooltip.built {
+            // Hidden with its anchor, which was placed in a lower layer.
+            let (key, hidden) = (self.nodes[anchor].key, placed[anchor].2);
+            let viewport = self.viewport();
+            self.place_layer(tooltip::TOOLTIP_LAYER, &layers, &mut placed, |ui, index| {
+                (ui.popup_origin(index, key), viewport, hidden)
             });
         }
         self.place_layer(popup::CLOSED_LAYER, &layers, &mut placed, |_, _| {
@@ -1168,6 +1193,7 @@ impl Ui {
             stored.paint_order = index;
             stored.layer = layer;
             stored.hittable = !hidden;
+            stored.inert = layer == tooltip::TOOLTIP_LAYER;
         }
     }
 
@@ -1213,8 +1239,13 @@ impl Ui {
     /// gave it.
     ///
     /// `false` when nothing under the pointer could move — so the caller can
-    /// give the wheel to something else, such as a zoom bound to it.
+    /// give the wheel to something else, such as a zoom bound to it. Any
+    /// movement of the wheel hides the tooltip, as [`Ui::dismiss_tooltip`]
+    /// does.
     pub fn scroll_wheel(&mut self, delta: Vec2) -> bool {
+        if delta != Vec2::ZERO {
+            self.dismiss_tooltip();
+        }
         let chain = self.store.hit_chain(self.pointer.pos);
         let mut moved = false;
         for axis in 0..2 {

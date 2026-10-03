@@ -617,6 +617,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   met, though the body slid along the wall made upright. `LyingMoveOutcome` is
   unchanged.
 
+- **`crcbl-ui` has tooltips, and the editor's toolbar and play strip use them.**
+  `Ui::tooltip(&response, text)`, called after a widget every frame it is built,
+  shows `text` once the pointer has rested on the widget — or, with a keyboard
+  or pad driving, focus has stayed on it — for `TOOLTIP_DELAY`
+  (`Ui::set_tooltip_delay` replaces it), timed on the clock `TextInput::dt`
+  advances. It hides when the pointer leaves or focus moves, when the widget is
+  not built, and on a press, accept or wheel (`Ui::scroll_wheel`, or
+  `Ui::dismiss_tooltip` for a caller that scrolls its own way), staying hidden
+  until the pointer or focus moves to another widget. A tooltip is a `tooltip`
+  block (styled in `default.css`) on the pop-up layer: placed as a pop-up is,
+  below its anchor and flipped above at the bottom of the viewport, drawn over
+  every open pop-up, and **inert** — never hit or focused, so a click on what it
+  covers reaches it. `Ui::tooltip_key` names its root. In the editor every
+  toolbar button's tooltip says what it does and its key, and each play-strip
+  action's says what it sends, what it takes and its number key; the labels keep
+  their keys.
 - **`crcbl-ui` has a pop-up layer, and a drop-down built on it.** Any widget
   hangs a pop-up from a node: `Ui::open_popup` with the node's key, then
   `Ui::popup` every frame it is open with a closure that builds it (it builds

@@ -19,6 +19,11 @@
 //! through [`crate::keys`], so a text field being typed into keeps its
 //! digits.
 //!
+//! **Each button has a tooltip** saying what it sends and what the action
+//! takes — read off its [`ParamKind`]s, since a [`PlayAction`] carries no
+//! description of its own — with the number key again; a choice's says what
+//! it steps through.
+//!
 //! **A choice lasts one play.** Stop takes the strip away and every choice's
 //! pick with it, so each play starts on each choice's first label, as the run
 //! it starts is a fresh one.
@@ -35,7 +40,7 @@
 
 use std::collections::BTreeMap;
 
-use crcbl::registry::{ParamKind, PlayArg, PlayControls};
+use crcbl::registry::{ParamKind, PlayAction, PlayArg, PlayControls};
 use crcbl::ui::tree::{NodeKey, Ui};
 
 use crate::document::{Document, EditError};
@@ -93,8 +98,9 @@ impl Strip {
                 ui.block_keyed(system, ".play-game", &[], |ui| {
                     for (action, described) in controls.actions.iter().enumerate() {
                         number += 1;
-                        let label = keyed_label(described.name, number);
+                        let label = keyed(described.name, number);
                         let button = ui.button(".play-action", label.as_str());
+                        ui.tooltip(&button, action_tip(described, number).as_str());
                         self.buttons.push((label, button.key));
                         if button.clicked {
                             asked = Some(Asked {
@@ -110,6 +116,12 @@ impl Strip {
                             let chosen = self.choices.get(&key).copied().unwrap_or(0);
                             let label = labels.get(chosen).copied().unwrap_or_default();
                             let button = ui.button(".play-choice", label);
+                            let tip = format!(
+                                "{}'s choice: a click steps it on through {}",
+                                described.name,
+                                labels.join(", ")
+                            );
+                            ui.tooltip(&button, tip.as_str());
                             self.buttons.push((label.to_owned(), button.key));
                             if button.clicked && !labels.is_empty() {
                                 self.choices.insert(key, (chosen + 1) % labels.len());
@@ -217,13 +229,73 @@ impl Strip {
     }
 }
 
-/// `name` as the strip's button reads it: with the number key that sends it
-/// (the `number`th action drawn), for the actions there are keys for — as the
+/// `text` — a button's name, or its tooltip — with the number key that sends
+/// the `number`th action drawn, for the actions there are keys for: as the
 /// toolbar labels each button with its key.
-fn keyed_label(name: &str, number: usize) -> String {
+fn keyed(text: &str, number: usize) -> String {
     if number <= crate::keys::PLAY_ACTIONS.len() {
-        format!("{name} ({number})")
+        format!("{text} ({number})")
     } else {
-        name.to_owned()
+        text.to_owned()
+    }
+}
+
+/// What the tooltip of the `number`th action drawn says: that it sends it,
+/// each argument it takes by where it comes from, and its number key.
+fn action_tip(described: &PlayAction, number: usize) -> String {
+    let takes: Vec<String> = described
+        .params
+        .iter()
+        .map(|kind| match *kind {
+            ParamKind::Picked(system) => format!("the `{system}` selected in the scene"),
+            ParamKind::PickedRuntime(system) => {
+                format!("the `{system}` last clicked in the viewport")
+            }
+            ParamKind::Choice(_) => "the choice beside it".to_owned(),
+        })
+        .collect();
+    let sends = if takes.is_empty() {
+        format!("Send {} to the game", described.name)
+    } else {
+        format!(
+            "Send {} to the game, for {}",
+            described.name,
+            takes.join(" and ")
+        )
+    };
+    keyed(&sends, number)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **A play-strip tooltip says what the action takes and names its number
+    /// key**, and an action past the keys has no key to name.
+    #[test]
+    fn an_actions_tooltip_says_what_it_takes_and_names_its_key() {
+        let place = PlayAction {
+            name: "Place tower",
+            params: &[ParamKind::Picked("plots"), ParamKind::Choice(&["Bolt"])],
+        };
+        assert_eq!(
+            action_tip(&place, 1),
+            "Send Place tower to the game, for the `plots` selected in the scene and the \
+             choice beside it (1)"
+        );
+        let upgrade = PlayAction {
+            name: "Upgrade",
+            params: &[ParamKind::PickedRuntime("towers")],
+        };
+        let past = crate::keys::PLAY_ACTIONS.len() + 1;
+        assert_eq!(
+            action_tip(&upgrade, past),
+            "Send Upgrade to the game, for the `towers` last clicked in the viewport"
+        );
+        let start = PlayAction {
+            name: "Start wave",
+            params: &[],
+        };
+        assert_eq!(action_tip(&start, 3), "Send Start wave to the game (3)");
     }
 }

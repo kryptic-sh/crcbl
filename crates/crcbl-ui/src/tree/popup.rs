@@ -64,6 +64,7 @@
 use glam::Vec2;
 
 use super::store::NodeKey;
+use super::tooltip::TOOLTIP_LAYER;
 use super::widgets::typed;
 use super::{Behavior, KeySource, ROOT_KEY, Response, Ui};
 use crate::draw_list::ClipRect;
@@ -129,25 +130,37 @@ impl Ui {
             return None;
         }
         let selector = typed("popup", selector);
-        let parsed = self.node_selector(&selector);
-        // Built outside every open block, so it is a root of its own and
-        // nothing it hangs out of clips or scrolls it; a tree row's children
-        // are not its.
+        let (index, response) = self.open_root(
+            Self::popup_key(anchor),
+            &selector,
+            inline,
+            Behavior::MODAL,
+            build,
+        );
+        self.popup_roots.push((index, anchor));
+        Some(response)
+    }
+
+    /// A block keyed `key` built outside every open block, so it is a root of
+    /// its own and nothing it hangs out of clips or scrolls it — a tree row's
+    /// children are not its either. Returns its index in this frame's nodes
+    /// and its [`Response`]: what a pop-up and a tooltip are built as.
+    pub(super) fn open_root(
+        &mut self,
+        key: NodeKey,
+        selector: &str,
+        inline: &[Declaration],
+        behavior: Behavior,
+        build: impl FnOnce(&mut Self),
+    ) -> (usize, Response) {
+        let parsed = self.node_selector(selector);
         let open = std::mem::take(&mut self.open);
         let rows = std::mem::take(&mut self.tree_rows);
         let index = self.nodes.len();
-        let response = self.open_block(
-            Self::popup_key(anchor),
-            parsed,
-            inline,
-            Behavior::MODAL,
-            PseudoClasses::NONE,
-            build,
-        );
+        let response = self.open_block(key, parsed, inline, behavior, PseudoClasses::NONE, build);
         self.open = open;
         self.tree_rows = rows;
-        self.popup_roots.push((index, anchor));
-        Some(response)
+        (index, response)
     }
 
     /// Closes every pop-up from `depth` up the stack: what last frame drew of
@@ -208,8 +221,9 @@ impl Ui {
 
     /// Closes what the frame did not build — see the module docs — then gives
     /// each of this frame's nodes its layer: 0 for the tree, `n` under the
-    /// `n`th open pop-up, and [`CLOSED_LAYER`] under a pop-up that closed
-    /// while the frame was being built.
+    /// `n`th open pop-up, [`TOOLTIP_LAYER`] under the tooltip, and
+    /// [`CLOSED_LAYER`] under a pop-up that closed while the frame was being
+    /// built and under a tooltip whose anchor is in one.
     pub(super) fn layers(&mut self) -> Vec<usize> {
         let unbuilt = self.popups.iter().position(|&anchor| {
             !self.popup_roots.iter().any(|&(_, built)| built == anchor)
@@ -226,10 +240,20 @@ impl Ui {
                 .position(|&open| open == anchor)
                 .map_or(CLOSED_LAYER, |depth| depth + 1);
         }
-        // A parent is always built before its children.
+        // A parent is always built before its children, and a tooltip after
+        // its anchor.
+        let tooltip = self.tooltip.built;
         for index in 0..self.nodes.len() {
             if let Some(parent) = self.nodes[index].parent {
                 layers[index] = layers[parent];
+            } else if let Some((root, anchor)) = tooltip
+                && root == index
+            {
+                layers[index] = if layers[anchor] == CLOSED_LAYER {
+                    CLOSED_LAYER
+                } else {
+                    TOOLTIP_LAYER
+                };
             }
         }
         layers
