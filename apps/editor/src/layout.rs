@@ -90,10 +90,11 @@ pub const PANES_BEFORE_ASSETS: [&str; 3] = [VIEWPORT, OUTLINER, INSPECTOR];
 
 /// How little a pane may be dragged to, along and across its split, in pixels.
 ///
-/// Wide enough for the inspector's narrowest row — a label and three
-/// drag-values, each with `default.css`'s 32-pixel minimum — and tall enough
-/// for a handful of outliner rows, so a divider dragged to the end leaves a
-/// pane that is still a pane rather than a line.
+/// An inspector row wider than its pane wraps rather than running past the
+/// edge (`crate::panel`'s stylesheet) — a vector row's three drag-values
+/// outgrow even [`SIDE_WIDTH`] — and the height is enough for a handful of
+/// outliner rows, so a divider dragged to the end leaves a pane that is still
+/// a pane rather than a line.
 pub const PANE_MIN: [f32; 2] = [160.0, 64.0];
 
 /// How wide the side column starts, in pixels.

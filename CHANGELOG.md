@@ -4661,6 +4661,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The editor's inspector no longer cuts off a vector row's last field.** At
+  the default layout's side-column width a position's three drag-values, with
+  numbers as wide as `-14.00`, ran past the pane's edge: the `z` field was
+  clipped, and a click on it landed in the viewport. A row too wide for its pane
+  now wraps, so every field stays inside it.
+
 - **A rotation of negative zero survives a delete's undo, a copy and a reload.**
   `crcbl::registry::Rotation::is_identity` compared with `==`, under which
   `(-0, 0, 0, 1)` — a turn back to nothing about a negative axis — equals the

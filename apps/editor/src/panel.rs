@@ -324,6 +324,14 @@ const EDITOR_CSS: &str = "
 .add-group { flex-direction: row; flex-wrap: wrap; align-items: center; min-width: 0; }
 
 .add-group-label { padding: 2px 4px; color: #7a8190; }
+
+/*
+ * A row too wide for its pane wraps rather than running past the pane's edge,
+ * where its last field is clipped and a click on it lands in the viewport: a
+ * vector row's three drag-values outgrow the side column with numbers as wide
+ * as `-14.00`.
+ */
+.inspector-row { flex-wrap: wrap; }
 ";
 
 /// Where a system's row sits in an [`OutlinerId`], above every entity's.
@@ -2505,12 +2513,25 @@ mod tests {
             "the wheel over the outliner did not scroll it, or scrolled both",
         );
 
+        // The inspector moves only as far as its rows reach past its pane —
+        // less than a turn for a block, or nothing for rows that fit — and a
+        // second turn moves it no further.
         let on_props = page.centre(props);
+        page.frame(PointerInput::hovering(on_props), BY);
+        let (outliner_at, reach) = offsets(&page);
+        assert_eq!(
+            outliner_at, BY,
+            "the wheel over the inspector moved the outliner"
+        );
+        assert!(
+            (0.0..BY).contains(&reach),
+            "the inspector scrolled a whole turn, past its rows: {reach}",
+        );
         page.frame(PointerInput::hovering(on_props), BY);
         assert_eq!(
             offsets(&page),
-            (BY, 0.0),
-            "the inspector scrolled although its rows fit",
+            (BY, reach),
+            "the inspector scrolled past its rows",
         );
 
         // Over neither: the viewport's wheel is the camera's, and the caller
@@ -2519,13 +2540,13 @@ mod tests {
         page.frame(PointerInput::hovering(Vec2::new(900.0, 400.0)), BY);
         assert_eq!(
             offsets(&page),
-            (BY, 0.0),
+            (BY, reach),
             "a wheel outside a panel scrolled one"
         );
 
         // And it clamps at the top rather than running negative.
         page.frame(PointerInput::hovering(on_outliner), -4.0 * BY);
-        assert_eq!(offsets(&page), (0.0, 0.0), "the offset ran past the top");
+        assert_eq!(offsets(&page), (0.0, reach), "the offset ran past the top");
     }
 
     /// **The viewport pane's rectangle is the hole in the panels**, and
