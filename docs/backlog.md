@@ -3678,11 +3678,26 @@ in `crcbl_input::list`). Decisions, then what is left.
   dropped, because that struct's own fields carry `range: None` and the widget
   cannot tell "no bound" from "inherit". `Overrides::vectors()` covers the case
   that matters; a general answer needs `Field` to say which.
-- **The drag-value is `f32` and `Value` is 64 bits.** A row narrows to show and
-  writes back only in the frame the widget reports a change, so an untouched
-  field keeps every digit — but a _dragged_ `f64` lands on `f64::from(f32)`
-  precision, and a dragged `i64` past 2^24 cannot be moved one at a time. A
-  64-bit drag-value fixes both.
+- **A 64-bit field can be dragged but not typed.** The 64-bit drag-value
+  (2026-10-03, `DragNumber` in `crates/crcbl-ui/src/tree/widgets/value.rs`)
+  fixed dragging and stepping, but the widget takes no typed number — the
+  click-to-type mode under rung 7's "Drag-value has no snapping" is not built —
+  so a 17-digit `f64` or an `i64` past 2^53 cannot be entered exactly, only
+  reached by steps. When it is built, its text must parse to the field's own
+  kind (`str::parse::<f64>`, `::<i64>`, `::<u64>`, never through `f32`) and show
+  every digit while engaged (`{}` for a float, not the step's decimals). No
+  reflected leaf goes through the slider, so it stayed `f32`. Decisions taken
+  with the 64-bit change:
+  - **No `f32` impl of `DragNumber`.** An `f32` caller widens with `f64::from`
+    and narrows back itself, so the one rounding is at its boundary; the
+    `ui_widgets` scene's `#gain` became an `f64` instead.
+  - **A whole number's notch is the step rounded**, with the unrounded step
+    still the drag's speed per pixel — what the `f32` widget did by rounding the
+    result. A step under one half rounds to a notch of zero, which moves
+    nothing, as before.
+  - **A float shows the step's decimals, as before**, so goldens did not move; a
+    whole number shows every digit, which reads the same for any value an `f32`
+    held exactly.
 - **No list resize, no reordering, no reset-to-default, no multi-select and no
   copy/paste of a field** — each needs a mechanism `crcbl-reflect` does not
   have. (An enum's variant switch landed 2026-10-03.)

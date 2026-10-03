@@ -296,7 +296,7 @@ struct Values {
     mute: bool,
     pitch: f32,
     volume: f32,
-    gain: f32,
+    gain: f64,
 }
 
 impl Parts {

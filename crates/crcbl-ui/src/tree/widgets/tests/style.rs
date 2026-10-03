@@ -6,7 +6,7 @@ use crate::tree::{InputMode, SplitAxis};
 
 /// Every widget of the set on one page, and the key of each node focus can
 /// rest on, in tree order.
-fn every_widget(ui: &mut Ui, nav: NavInput, values: &mut (bool, f32, f32, String)) -> Vec<NodeKey> {
+fn every_widget(ui: &mut Ui, nav: NavInput, values: &mut (bool, f32, f64, String)) -> Vec<NodeKey> {
     frame(ui, idle(), nav, |ui| {
         let mut keys = vec![
             ui.button("#b", "B").key,

@@ -1,10 +1,12 @@
 //! The engage widgets that edit a number: a slider and a drag-value.
 //!
-//! Both engage under the LOCKED rule — see the widgets module docs — and take
-//! their value as `&mut f32`. While engaged, a step right adds `step` and a
-//! step left takes it away; every other step the engaged widget captures
-//! does nothing, so up and down neither adjust nor move focus. Back restores
-//! the value the widget engaged with, through [`Ui::snapshot`]'s contract.
+//! Both engage under the LOCKED rule — see the widgets module docs. A slider
+//! takes its value as `&mut f32`, and a drag-value as `&mut` any
+//! [`DragNumber`] — an `f64`, an `i64` or a `u64`, each moved in its own
+//! arithmetic. While engaged, a step right adds `step` and a step left takes
+//! it away; every other step the engaged widget captures does nothing, so up
+//! and down neither adjust nor move focus. Back restores the value the widget
+//! engaged with, through [`Ui::snapshot`]'s contract.
 //!
 //! The pointer adjusts without engaging. A slider's value follows the pointer
 //! across its content box from the frame the press lands; a drag-value's
@@ -14,6 +16,7 @@
 use std::ops::RangeInclusive;
 use std::panic::Location;
 
+use self::sealed::Sealed;
 use super::{Ui, WidgetState, clamp_to, typed};
 use crate::style::{Declaration, PseudoClasses};
 use crate::tree::{Behavior, Direction, LengthAuto, NavStep, Response};
@@ -24,7 +27,7 @@ const MAX_DECIMALS: usize = 6;
 /// How far a scaled step may sit from a whole number, as a share of it, and
 /// still be that number: what absorbs the binary rounding of a step like
 /// `0.1`, which ten times is not exactly one.
-const DECIMAL_TOLERANCE: f32 = 1e-4;
+const DECIMAL_TOLERANCE: f64 = 1e-4;
 
 /// The sign a captured step adjusts by: `+1` for right, `-1` for left, and
 /// nothing for any other step.
@@ -51,7 +54,7 @@ fn snap(value: f32, min: f32, max: f32, step: f32) -> f32 {
 /// is a whole number other than zero, at most [`MAX_DECIMALS`] times; none for
 /// a step that is zero or not finite. Multiplication and rounding only, so the
 /// count does not depend on a platform's libm.
-pub(super) fn decimals(step: f32) -> usize {
+pub(super) fn decimals(step: f64) -> usize {
     let mut scaled = step.abs();
     if scaled == 0.0 || !scaled.is_finite() {
         return 0;
@@ -66,6 +69,150 @@ pub(super) fn decimals(step: f32) -> usize {
         count += 1;
     }
     count
+}
+
+/// A number [`Ui::drag_value`] edits: an `f64`, an `i64` or a `u64`, the three
+/// a reflected [`Value`](crcbl_reflect::Value) widens to.
+///
+/// Each moves in its own arithmetic, so a drag keeps every digit its type
+/// holds: an `f64` is never rounded through an `f32`, and a whole number moves
+/// by whole numbers — one at a time at any magnitude — and saturates at its
+/// type's ends rather than wrapping. A caller holding an `f32` widens it with
+/// `f64::from` and narrows the result back itself, so the one rounding there
+/// is happens where that caller can see it.
+///
+/// Sealed: the arithmetic is the widget's own, and these three are the kinds
+/// a [`Value`](crcbl_reflect::Value) has.
+pub trait DragNumber: Sealed {}
+
+impl DragNumber for f64 {}
+impl DragNumber for i64 {}
+impl DragNumber for u64 {}
+
+/// What a [`DragNumber`] does inside the widget, out of its callers' reach.
+pub(super) mod sealed {
+    /// A drag-value's value when its press began, in the number's own kind,
+    /// so a whole number past what an `f64` holds exactly is held exactly.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub enum DragAnchor {
+        /// An `f64`'s.
+        Float(f64),
+        /// An `i64`'s.
+        Int(i64),
+        /// A `u64`'s.
+        UInt(u64),
+    }
+
+    /// [`super::DragNumber`]'s arithmetic.
+    pub trait Sealed: Copy + Send + Sync + 'static {
+        /// `self` moved by `by`: a whole number by `by` rounded to the nearest
+        /// whole, saturating at the type's ends.
+        fn offset(self, by: f64) -> Self;
+        /// `self` moved one `step` forward, or back, saturating.
+        fn stepped(self, step: Self, forward: bool) -> Self;
+        /// `self` held inside `min..=max` without panicking: a NaN is `min`,
+        /// and a range whose start is past its end holds every value at its
+        /// end.
+        fn clamped(self, min: Self, max: Self) -> Self;
+        /// `self` as its drag-value shows it: with as many decimals as `step`
+        /// has, and a whole number whole.
+        fn text(self, step: Self) -> String;
+        /// Whether `self` is `other` — bit for bit for a float, so a move from
+        /// `0.0` to `-0.0` is a change.
+        fn same(self, other: Self) -> bool;
+        /// `self` as the anchor a press keeps.
+        fn anchor(self) -> DragAnchor;
+        /// The number `anchor` holds, if it is of this kind.
+        fn from_anchor(anchor: DragAnchor) -> Option<Self>;
+    }
+
+    impl Sealed for f64 {
+        fn offset(self, by: f64) -> Self {
+            self + by
+        }
+
+        fn stepped(self, step: Self, forward: bool) -> Self {
+            if forward { self + step } else { self - step }
+        }
+
+        fn clamped(self, min: Self, max: Self) -> Self {
+            self.max(min).min(max)
+        }
+
+        fn text(self, step: Self) -> String {
+            format!("{:.*}", super::decimals(step), self)
+        }
+
+        fn same(self, other: Self) -> bool {
+            self.to_bits() == other.to_bits()
+        }
+
+        fn anchor(self) -> DragAnchor {
+            DragAnchor::Float(self)
+        }
+
+        fn from_anchor(anchor: DragAnchor) -> Option<Self> {
+            match anchor {
+                DragAnchor::Float(value) => Some(value),
+                _ => None,
+            }
+        }
+    }
+
+    /// [`Sealed`] for a whole number, which adds its rounded offset's
+    /// magnitude with `$add` and takes it away with `$sub` — both saturating,
+    /// and both taking a `u64`, so an offset as wide as the type's whole span
+    /// still lands on its end.
+    macro_rules! whole_number {
+        ($type:ty, $variant:ident, $add:ident, $sub:ident) => {
+            impl Sealed for $type {
+                fn offset(self, by: f64) -> Self {
+                    // A float-to-integer `as` saturates and takes a NaN to
+                    // zero, so no offset can wrap or panic.
+                    let whole = by.round();
+                    if whole >= 0.0 {
+                        self.$add(whole as u64)
+                    } else {
+                        self.$sub((-whole) as u64)
+                    }
+                }
+
+                fn stepped(self, step: Self, forward: bool) -> Self {
+                    if forward {
+                        self.saturating_add(step)
+                    } else {
+                        self.saturating_sub(step)
+                    }
+                }
+
+                fn clamped(self, min: Self, max: Self) -> Self {
+                    self.max(min).min(max)
+                }
+
+                fn text(self, _step: Self) -> String {
+                    self.to_string()
+                }
+
+                fn same(self, other: Self) -> bool {
+                    self == other
+                }
+
+                fn anchor(self) -> DragAnchor {
+                    DragAnchor::$variant(self)
+                }
+
+                fn from_anchor(anchor: DragAnchor) -> Option<Self> {
+                    match anchor {
+                        DragAnchor::$variant(value) => Some(value),
+                        _ => None,
+                    }
+                }
+            }
+        };
+    }
+
+    whole_number!(i64, Int, saturating_add_unsigned, saturating_sub_unsigned);
+    whole_number!(u64, UInt, saturating_add, saturating_sub);
 }
 
 impl Ui {
@@ -128,22 +275,24 @@ impl Ui {
 
     /// A drag-value editing `value` inside `range`: a `drag-value` block
     /// holding its value as a `.drag-value-text` span, shown with as many
-    /// decimals as `step` has. A drag moves it by `speed` per pixel, measured
-    /// from where the press began once it passed
+    /// decimals as `step` has — a whole number with none. A drag moves it by
+    /// `speed` per pixel, measured from where the press began once it passed
     /// [`crate::tree::DRAG_THRESHOLD`], and an engaged step by `step`; it is
-    /// held inside `range` either way, not snapped. [`Response::changed`] is
-    /// the frame the value moved.
+    /// held inside `range` either way, not snapped. A whole number moves by
+    /// the drag's distance rounded to the nearest whole — so by one at any
+    /// magnitude — and saturates at its type's ends; [`DragNumber`] has the
+    /// rest. [`Response::changed`] is the frame the value moved.
     #[track_caller]
-    pub fn drag_value(
+    pub fn drag_value<N: DragNumber>(
         &mut self,
         selector: &str,
-        value: &mut f32,
-        range: RangeInclusive<f32>,
-        speed: f32,
-        step: f32,
+        value: &mut N,
+        range: RangeInclusive<N>,
+        speed: f64,
+        step: N,
     ) -> Response {
         let (min, max) = (*range.start(), *range.end());
-        let before = value.to_bits();
+        let before = *value;
         let selector = typed("drag-value", selector);
         let parsed = self.node_selector(&selector);
         let key = self.widget_key(parsed, Location::caller());
@@ -151,24 +300,24 @@ impl Ui {
         self.snapshot_for(key, interaction.engagement, value);
 
         let held = match self.widget_state(key) {
-            WidgetState::Anchor(anchor) => anchor,
+            WidgetState::Drag(anchor) => anchor.and_then(N::from_anchor),
             _ => None,
         };
         let anchor = if interaction.pressed && !self.building_disabled() {
             let anchor = held.unwrap_or(*value);
             if self.dragged {
-                let moved = self.pointer.pos.x - self.press_origin.x;
-                *value = clamp_to(anchor + moved * speed, min, max);
+                let moved = f64::from(self.pointer.pos.x - self.press_origin.x);
+                *value = anchor.offset(moved * speed).clamped(min, max);
             }
             Some(anchor)
         } else {
             None
         };
         if let Some(sign) = horizontal(interaction.captured) {
-            *value = clamp_to(*value + sign * step, min, max);
+            *value = value.stepped(step, sign > 0.0).clamped(min, max);
         }
 
-        let text = format!("{:.*}", decimals(step), *value);
+        let text = value.text(step);
         let mut response = self.open_block(
             key,
             parsed,
@@ -179,8 +328,8 @@ impl Ui {
                 ui.span(".drag-value-text", text.as_str(), &[]);
             },
         );
-        self.set_widget_state(key, WidgetState::Anchor(anchor));
-        response.changed = value.to_bits() != before;
+        self.set_widget_state(key, WidgetState::Drag(anchor.map(N::anchor)));
+        response.changed = !value.same(before);
         response
     }
 }

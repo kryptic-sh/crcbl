@@ -561,6 +561,120 @@ fn a_write_that_flips_a_zeros_sign_is_reported() {
 }
 
 // ---------------------------------------------------------------------------
+// 64-bit leaves
+// ---------------------------------------------------------------------------
+
+/// A distance far below an `f32`'s resolution at [`FINE`]: the step of
+/// [`Wide::fine`].
+const HAIR: f64 = 1e-12;
+
+/// An `f64` an `f32` cannot hold.
+const FINE: f64 = 0.1 + HAIR;
+
+/// Far past every whole number an `f32` holds exactly.
+const FAR: i64 = 1 << 40;
+
+/// Leaves only 64 bits hold, one of each numeric kind.
+#[derive(Debug, PartialEq, Reflect)]
+struct Wide {
+    #[reflect(name = "Fine", step = 1e-12)]
+    fine: f64,
+    #[reflect(name = "Count")]
+    count: i64,
+    #[reflect(name = "Total")]
+    total: u64,
+}
+
+fn wide() -> Wide {
+    Wide {
+        fine: FINE,
+        count: FAR,
+        total: u64::MAX - 1,
+    }
+}
+
+/// Clicks the row labelled `label` still, which engages its drag-value, and
+/// takes one step right; returns that step's frame.
+fn step_right(label: &str) -> (Inspection, Wide) {
+    let mut ui = Ui::new();
+    let mut value = wide();
+    page(&mut ui, idle(), NavInput::default(), &mut value, None);
+    let on = centre(&ui, field_key(&ui, label));
+    let clicked = click(&mut ui, on, &mut value, None);
+    assert!(clicked.edits.is_empty(), "a still click edited {label}");
+    let stepped = page(&mut ui, idle(), RIGHT, &mut value, None);
+    (stepped, value)
+}
+
+/// **A 64-bit leaf is edited in its own kind**: a still frame writes nothing,
+/// a dragged `f64` lands on the exact sum with no `f32` in between, an `i64`
+/// at 2^40 steps by one, and a `u64` steps onto its maximum and saturates
+/// there — an edit the next step does not make.
+#[test]
+fn a_64_bit_leaf_is_dragged_and_stepped_in_its_own_kind() {
+    let mut ui = Ui::new();
+    let mut value = wide();
+    let still = page(&mut ui, idle(), NavInput::default(), &mut value, None);
+    assert!(still.edits.is_empty(), "a still frame edited something");
+    assert_eq!(value, wide(), "a still frame wrote a 64-bit leaf back");
+    assert_eq!(
+        spans(&ui, "drag-value-text")[1..],
+        [FAR.to_string(), (u64::MAX - 1).to_string()],
+        "a whole number is not shown digit for digit"
+    );
+
+    let on = centre(&ui, field_key(&ui, "Fine"));
+    page(&mut ui, press(on), NavInput::default(), &mut value, None);
+    let moved = on + Vec2::new(8.0, 0.0);
+    let dragged = page(&mut ui, press(moved), NavInput::default(), &mut value, None);
+    let want = FINE + 8.0 * HAIR;
+    assert_eq!(
+        dragged.edits,
+        [FieldEdit {
+            path: "fine".to_owned(),
+            before: Value::Float(FINE),
+            after: Value::Float(want),
+        }],
+        "the drag did not land on the exact f64"
+    );
+    assert_eq!(value.fine.to_bits(), want.to_bits());
+
+    let (stepped, value) = step_right("Count");
+    assert_eq!(
+        stepped.edits,
+        [FieldEdit {
+            path: "count".to_owned(),
+            before: Value::Int(FAR),
+            after: Value::Int(FAR + 1),
+        }],
+        "a step at 2^40 is not one"
+    );
+    assert_eq!(value.count, FAR + 1);
+
+    let (stepped, mut value) = step_right("Total");
+    assert_eq!(
+        stepped.edits,
+        [FieldEdit {
+            path: "total".to_owned(),
+            before: Value::UInt(u64::MAX - 1),
+            after: Value::UInt(u64::MAX),
+        }],
+        "a step onto u64::MAX is not one"
+    );
+    let mut ui = Ui::new();
+    page(&mut ui, idle(), NavInput::default(), &mut value, None);
+    let on = centre(&ui, field_key(&ui, "Total"));
+    click(&mut ui, on, &mut value, None);
+    let saturated = page(&mut ui, idle(), RIGHT, &mut value, None);
+    assert!(
+        saturated.edits.is_empty(),
+        "a step past u64::MAX edited: {:?}",
+        saturated.edits
+    );
+    assert_eq!(value.total, u64::MAX, "a step past u64::MAX wrapped");
+}
+
+// ---------------------------------------------------------------------------
 // Switching an enum's variant
 // ---------------------------------------------------------------------------
 

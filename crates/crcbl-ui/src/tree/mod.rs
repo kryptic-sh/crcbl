@@ -236,7 +236,7 @@ pub use style::{
 pub use tooltip::TOOLTIP_DELAY;
 pub use widgets::{
     AXES, CONTEXT_ARROW, ClipboardAnswer, ClipboardReply, ClipboardRequest, ContextItem,
-    ContextMenuResponse, DOUBLE_CLICK_TIME, DockLayout, DockSide, FieldEdit, FieldRow,
+    ContextMenuResponse, DOUBLE_CLICK_TIME, DockLayout, DockSide, DragNumber, FieldEdit, FieldRow,
     INSPECTOR_STEP, Inspection, InspectorOptions, LIST_OVERSCAN, MASK, OUTLINER_INDENT,
     OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId, OutlinerOptions, OutlinerRow, OutlinerState,
     Overrides, RowBuilder, SELECT_CARET, SPLIT_NAV_STEP, SelectMode, SplitAxis, TextInput,

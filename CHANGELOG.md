@@ -27,6 +27,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   nothing, so its menus leave both keys to the game. `crcbl_input::ui::ACTIONS`
   lists every reserved action.
 
+- **`crcbl_ui::tree::Ui::drag_value` edits a 64-bit number** (see Fixed: a
+  dragged 64-bit field). It is generic over the new sealed
+  `crcbl_ui::tree::DragNumber` — `f64`, `i64` or `u64` — with `value`, `range`
+  and `step` in that type and `speed` an `f64`, where each was an `f32`. A
+  caller holding an `f32` widens it with `f64::from` and narrows the result back
+  itself.
+
 - **`#[derive(Reflect)]` on an enum needs `Default` for every variant's fields**
   (see Added: switching an enum's variant). A switch makes the new variant from
   each field's `Default` — a `#[reflect(skip)]` field's too — so an enum with a
@@ -3189,7 +3196,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Inspection::edits` is a `FieldEdit` per change — the dotted `set_path` path,
   the value the field held and the one it holds now — and undoing one is
   `set_path` with the value it replaced; a field nobody touched is never
-  written, so a 64-bit number keeps every digit the widget cannot show.
+  written, and a number is dragged in its own 64-bit kind.
   `Overrides::register::<T>` takes a row builder matched through
   `Reflect::as_any`, and `Overrides::vectors()` ships one: a three-component
   vector as three drag-values on a row, for `[f64; 3]`, `[f32; 3]`,
@@ -4659,6 +4666,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A dragged 64-bit field keeps every digit.** The drag-value edited an `f32`,
+  so an inspector row narrowed its leaf to show it: a dragged `f64` was written
+  back at `f32` precision, and an `i64` or `u64` past 2^24 could not be moved
+  one at a time — a step of one rounded back onto the same `f32`. The drag-value
+  now moves an `f64`, `i64` or `u64` in its own arithmetic, and a whole number
+  moves by whole numbers and saturates at its type's ends rather than wrapping.
+  Each inspector row drags its leaf's own kind, and the editor's rotation row
+  drags its angles as `f64`s.
 - **A rotation of negative zero survives a delete's undo, a copy and a reload.**
   `crcbl::registry::Rotation::is_identity` compared with `==`, under which
   `(-0, 0, 0, 1)` — a turn back to nothing about a negative axis — equals the
