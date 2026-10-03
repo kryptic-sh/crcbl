@@ -18,6 +18,9 @@
 //!   rather than sending a snapshot the transport would refuse.
 //! * [`command`] — what a `ClientToServer::Command` carries: a console set of
 //!   a simulation variable, as text, and the server's sealed answer to it.
+//! * [`edit`] — the other thing a command carries: a scene edit, its
+//!   reason-coded answer, and the notice every client is sent of an edit
+//!   applied.
 //! * [`auth`] — the per-session MAC every post-handshake message carries.
 //!   Nothing else in the protocol proves who sent a packet.
 //! * [`reliable`] — the packet layer the UDP transport runs inside: acks,
@@ -39,6 +42,7 @@ pub mod condition;
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
 pub mod delta;
+pub mod edit;
 pub mod handshake;
 pub mod messages;
 pub mod rate_limit;
@@ -70,6 +74,11 @@ pub use delta::{
     MAX_AUTHENTICATED_SYSTEMS, MAX_BASELINE_ENCODED_BYTES, MAX_BASELINE_ENTITIES,
     MAX_BASELINE_SYSTEMS, SystemDelta, Trust, decode_delta, encode_delta, encode_entity_entry,
     hash_encoded,
+};
+pub use edit::{
+    EditNotice, EditOutcome, EditRefusal, EditReply, EditRequest, EditTooLong,
+    MAX_EDIT_MESSAGE_BYTES, MAX_EDIT_OP_BYTES, decode_edit_notice, decode_edit_reply,
+    decode_edit_request, encode_edit_notice, encode_edit_reply, encode_edit_request,
 };
 pub use handshake::{HandshakeGate, HandshakeResult, Hello, RejectReason};
 pub use messages::{

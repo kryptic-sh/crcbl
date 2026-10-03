@@ -16,6 +16,15 @@
 //! player — applies at the start of the next tick and is recorded for replay;
 //! `sim`'s module docs say who may make one and in what order they apply.
 //!
+//! A scene edit (`crcbl_net::edit`) is the caller's to apply, not the host's:
+//! a host told to [`serve_edits`](Host::serve_edits) hands each one over with
+//! the peer that sent it ([`Host::take_edit_requests`]), and sends the answer
+//! and the notice of what applied for it ([`Host::send_edit_reply`],
+//! [`Host::broadcast_edit_notice`]). **Any admitted peer may send one**: who
+//! is in the session is the host's, and what an edit means is the caller's,
+//! as with input. A host serving no scene refuses every edit as not editable,
+//! so a game's host answers one rather than leaving it unread.
+//!
 //! What the module is handed of its peers — the roster and each peer's frames
 //! — goes through one step whether it came off the transports or out of a
 //! recording, and is recorded on request ([`Host::record_peer_inputs`]);
@@ -29,9 +38,9 @@ use crcbl_core::{FrameClock, TickId};
 use crcbl_ecs::{ClientInputs, World};
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
-    ConsoleReply, ConsoleSet, HandshakeGate, HandshakeResult, Hello, ProtocolCompatibility,
-    RejectReason, ResumeToken, SectorId, SessionConfig, SessionEndReason, SessionId, SessionState,
-    Transport, TransportError,
+    ConsoleReply, ConsoleSet, EditNotice, EditReply, EditRequest, EditTooLong, HandshakeGate,
+    HandshakeResult, Hello, ProtocolCompatibility, RejectReason, ResumeToken, SectorId,
+    SessionConfig, SessionEndReason, SessionId, SessionState, Transport, TransportError,
 };
 
 use crate::peer::{self, Counters, PeerSession, PeerStats, SnapshotTooLarge, UpdateTooLarge};
@@ -125,7 +134,7 @@ pub enum PeerEvent {
     Left(PeerId),
 }
 
-/// Why [`Host::send_event`] sent nothing.
+/// Why [`Host::send_event`] or [`Host::send_edit_reply`] sent nothing.
 #[derive(Debug)]
 pub enum EventNotSent {
     /// No session of this host has that id: it never had one, or it ended.
@@ -135,9 +144,10 @@ pub enum EventNotSent {
     NotConnected(PeerId),
     /// The event is longer than a client reads one:
     /// [`MAX_FIELD_BYTES`](crcbl_net::codec::MAX_FIELD_BYTES), the wire's
-    /// limit on one opaque field.
+    /// limit on one opaque field. For an edit reply, its refusal message is
+    /// past [`MAX_EDIT_MESSAGE_BYTES`](crcbl_net::MAX_EDIT_MESSAGE_BYTES).
     TooLarge {
-        /// The event's length, in bytes.
+        /// The event's length, or the message's, in bytes.
         size: usize,
         /// The most a client accepts, in bytes.
         limit: usize,
@@ -155,7 +165,7 @@ impl fmt::Display for EventNotSent {
             Self::NotConnected(peer) => write!(f, "{peer:?}'s link is down"),
             Self::TooLarge { size, limit } => write!(
                 f,
-                "the event is {size} bytes, past the {limit} a client reads"
+                "the message is {size} bytes, past the {limit} a client reads"
             ),
             Self::Seal(error) => write!(f, "the event could not be sealed: {error}"),
             Self::Transport(error) => write!(f, "the transport refused the event: {error}"),
@@ -266,6 +276,11 @@ pub struct Host {
     tick_inputs: Vec<PeerFrames>,
     module: Option<Box<dyn HostModule>>,
     sim: SimConsole,
+    /// Whether peers' edits are held for the caller ([`Host::serve_edits`])
+    /// rather than refused.
+    serving_edits: bool,
+    /// The edits held for [`Host::take_edit_requests`], in the order read.
+    edit_requests: Vec<(PeerId, EditRequest)>,
 }
 
 impl Host {
@@ -300,6 +315,8 @@ impl Host {
             tick_inputs: Vec::new(),
             module: None,
             sim: SimConsole::default(),
+            serving_edits: false,
+            edit_requests: Vec::new(),
         }
     }
 
@@ -455,6 +472,15 @@ impl Host {
             }
             for set in peer.link.console_sets.drain(..) {
                 self.sim.submit(Origin::Peer(peer.id), set);
+            }
+            for request in std::mem::take(&mut peer.link.edit_requests) {
+                if self.serving_edits {
+                    self.edit_requests.push((peer.id, request));
+                } else if let Some(transport) = peer.transport.as_mut() {
+                    let reply = peer::not_serving_edits(&request);
+                    peer.link
+                        .send_edit_reply(transport.as_mut(), &reply, &mut self.counters);
+                }
             }
         }
     }
@@ -854,6 +880,87 @@ impl Host {
                 limit,
             });
         }
+        let payload =
+            crcbl_net::encode_server_to_client(&crcbl_net::ServerToClient::Event { data });
+        self.send_sealed(peer, &payload)
+    }
+
+    /// Hold every edit a peer sends for [`take_edit_requests`](Self::take_edit_requests)
+    /// from now on, rather than refusing it as not editable — what a server
+    /// serving a scene for editing says once, before any peer connects. The
+    /// caller applies each, answers it with
+    /// [`send_edit_reply`](Self::send_edit_reply), and announces what applied
+    /// with [`broadcast_edit_notice`](Self::broadcast_edit_notice).
+    pub fn serve_edits(&mut self) {
+        self.serving_edits = true;
+    }
+
+    /// Take the edits peers sent since the last call, each with the peer that
+    /// sent it, in the order the host read them — peers in admission order,
+    /// each peer's in arrival order. Empty for a host serving no scene, which
+    /// has refused them already. Taken after each [`update`](Self::update);
+    /// the inbound budgets bound how many one update can hold.
+    pub fn take_edit_requests(&mut self) -> Vec<(PeerId, EditRequest)> {
+        std::mem::take(&mut self.edit_requests)
+    }
+
+    /// Answer one of `peer`'s edits, sealed with its session's key and on the
+    /// reliable channel, which the client reads with
+    /// `crcbl_client::Client::edit_replies`.
+    ///
+    /// # Errors
+    ///
+    /// [`EventNotSent`], naming why: `peer` is not a session of this host,
+    /// its link is down, the refusal's message is past what a client reads,
+    /// or the key or the transport refused it. Nothing was sent.
+    pub fn send_edit_reply(&mut self, peer: PeerId, reply: &EditReply) -> Result<(), EventNotSent> {
+        let payload =
+            crcbl_net::encode_edit_reply(reply).map_err(|too_long| EventNotSent::TooLarge {
+                size: too_long.len,
+                limit: too_long.limit,
+            })?;
+        self.send_sealed(peer, &payload)
+    }
+
+    /// Tell every connected peer of an edit the caller applied — its author
+    /// included, so every copy of the scene follows the same way — sealed
+    /// and on the reliable channel, which a client reads with
+    /// `crcbl_client::Client::edit_notices`. Returns how many peers it was
+    /// sent to. A peer whose link is down is passed over, and a send that
+    /// fails is counted in [`processing_error_count`](Self::processing_error_count):
+    /// either way that peer's copy misses this edit, which the notice's
+    /// revision lets it see.
+    ///
+    /// # Errors
+    ///
+    /// [`EditTooLong`] for an operation past
+    /// [`MAX_EDIT_OP_BYTES`](crcbl_net::MAX_EDIT_OP_BYTES), sent to nobody —
+    /// which an operation read off a request never is, the two sharing the
+    /// limit.
+    pub fn broadcast_edit_notice(&mut self, notice: &EditNotice) -> Result<usize, EditTooLong> {
+        let payload = crcbl_net::encode_edit_notice(notice)?;
+        let mut sent = 0;
+        for peer in &mut self.peers {
+            if !peer.is_connected() {
+                continue;
+            }
+            let Some(transport) = peer.transport.as_mut() else {
+                continue;
+            };
+            if peer
+                .link
+                .send_edit_notice(transport.as_mut(), &payload, &mut self.counters)
+            {
+                sent += 1;
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Seal `payload` with `peer`'s session key and send it on the reliable
+    /// channel — the body [`send_event`](Self::send_event) and
+    /// [`send_edit_reply`](Self::send_edit_reply) share.
+    fn send_sealed(&mut self, peer: PeerId, payload: &[u8]) -> Result<(), EventNotSent> {
         let Some(target) = self.peers.iter_mut().find(|p| p.id == peer) else {
             return Err(EventNotSent::NoSuchPeer(peer));
         };
@@ -868,9 +975,7 @@ impl Host {
         ) else {
             return Err(EventNotSent::NotConnected(peer));
         };
-        let payload =
-            crcbl_net::encode_server_to_client(&crcbl_net::ServerToClient::Event { data });
-        let sealed = crypto.seal(&payload).map_err(EventNotSent::Seal)?;
+        let sealed = crypto.seal(payload).map_err(EventNotSent::Seal)?;
         transport
             .send_reliable(crcbl_net::Message::reliable(sealed))
             .map_err(EventNotSent::Transport)

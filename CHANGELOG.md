@@ -624,6 +624,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A client can edit the scene a server serves, and every client hears of each
+  edit.** `crcbl_client::Client::send_edit(op)` sends an operation —
+  `crcbl_scene::edit::encode_op` of an `EditOp`: a command, an undo or a redo —
+  sealed on the reliable channel as a `ClientToServer::Command` of kind
+  `crcbl_net::edit::EDIT_KIND`, and returns the request id its reply names;
+  `Client::edit_replies` yields each `EditReply` (applied at a revision, or
+  refused with an `EditRefusal` code and a message) and `Client::edit_notices`
+  every `EditNotice` of an operation the server applied, anyone's, in order. A
+  `crcbl_server::Host` told to `serve_edits` hands each request over with its
+  peer (`take_edit_requests`), and sends `send_edit_reply` and
+  `broadcast_edit_notice` for the caller; a host serving no scene, and every
+  `Server`, refuses an edit as `EditRefusal::NOT_EDITABLE`. The editor's
+  `crcbl_editor::serve::EditServer` serves a `Document` that way: any admitted
+  peer may edit, each operation applies through `Document::apply`, `undo` and
+  `redo` — the editor's own validation, play-mode refusal and one history — and
+  its notice goes to every client before the author's reply. Refusal codes are
+  stable numbers: malformed, unsupported version, not editable (no scene, or the
+  scene is playing), unknown entity, unknown system, unknown path, invalid,
+  conflict, nothing to undo, nothing to redo and failed. A variant switch does
+  not travel yet (`OpEncodeError::SetVariant`). The decoder fuzz target reads
+  every new message and the operation inside them, with a named seed for each.
+
 - **Slide contacts for a lying body from `crcbl_phys::CharacterController`.**
   `move_lying_into(world, &body, motion, &mut contacts)` makes exactly the move
   `move_lying` makes, to the bit, and writes every sweep of its slide that met

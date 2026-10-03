@@ -35,8 +35,9 @@ pub enum ClientToServer {
         data: Vec<u8>,
     },
     /// A request the server answers once — not a sample of this tick's
-    /// input. The one kind built is a console set of a simulation variable
-    /// ([`crate::command`]); `data`'s first byte says which kind it is.
+    /// input. Two kinds are built: a console set of a simulation variable
+    /// ([`crate::command`]) and a scene edit ([`crate::edit`]); `data`'s
+    /// first byte says which kind it is.
     Command {
         /// The command, kind byte first.
         data: Vec<u8>,

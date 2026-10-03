@@ -11,8 +11,8 @@ use crcbl_net::seal::{KeyPair, Role, agree_channel};
 use crcbl_net::udp::{Challenge, Hello, Reply, TokenKey};
 use crcbl_net::{
     ManualClock, Trust, decode_ack, decode_client_to_server, decode_console_reply,
-    decode_console_set, decode_delta, decode_handshake_result, decode_hello,
-    decode_server_to_client,
+    decode_console_set, decode_delta, decode_edit_notice, decode_edit_reply, decode_edit_request,
+    decode_handshake_result, decode_hello, decode_server_to_client,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -47,6 +47,12 @@ fuzz_target!(|data: &[u8]| {
     // any admitted peer — and the reply a client reads back.
     let _ = decode_console_set(data);
     let _ = decode_console_reply(data);
+    // A scene edit's envelope, its operation as the server serving the scene
+    // decodes it, and the reply and the notice a client reads back.
+    let _ = decode_edit_request(data);
+    let _ = crcbl_scene::edit::decode_op(data);
+    let _ = decode_edit_reply(data);
+    let _ = decode_edit_notice(data);
     // A replay file, header, entries and input section with its peer track:
     // a file a player may have been sent, read before anything about it is
     // trusted.

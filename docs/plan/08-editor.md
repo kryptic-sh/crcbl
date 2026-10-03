@@ -1439,12 +1439,29 @@ a build for another game adds a line to `apps/editor/src/scene.rs::vocabulary`.
 Run-time discovery needs a link-time distributed slice (`linkme` or
 `inventory`), which is a new dependency and the user's call.
 
-Everything else below stands unchanged: the server still drops commands, there
-is one schedule per `World`, there is no snapshot of a `World` (play restores
-from the scene's text, slice 8), the samples' state is outside the ECS, and
-there are no `serve`/`scene`/`edit` subcommands. (One entity in several systems
-landed in slice 11.) (Debug draw is still not a gizmo layer; the gizmo does not
-need it to be — slice 6, above. `AssetSource` lists since 2026-09-30.)
+**The server half of the editor protocol landed 2026-10-04.** The command model
+moved to `crcbl_scene::edit` (re-exported as `crcbl_editor::command`), and
+`crcbl_editor::serve::EditServer` serves a `Document` over a
+`crcbl_server::Host`: a client sends an `EditOp` — a command, an undo or a redo
+— with `Client::send_edit`, the server applies it through `Document::apply`,
+`undo` or `redo`, announces it to every client as an `EditNotice` and answers
+the author with an `EditReply`, applied at a revision or refused with an
+`EditRefusal` code. **Decided for the long term**: any admitted peer may edit;
+undo and redo are protocol operations on the one global history; the notices,
+not snapshot replication, are how another client follows the scene (the command
+log is the sync point); a host serving no scene refuses edits as not editable.
+`crcbl_editor::serve`'s module docs hold the reasons, and `docs/backlog.md`'s
+_Scene edits over the transport_ entry what the slice leaves — the GUI is not
+yet a client of its own server, a variant switch does not travel, a client
+joining late has no way to fetch the scene, and the author is not in the undo
+log.
+
+Everything else below stands unchanged: there is one schedule per `World`, there
+is no snapshot of a `World` (play restores from the scene's text, slice 8), the
+samples' state is outside the ECS, and there are no `serve`/`scene`/`edit`
+subcommands. (One entity in several systems landed in slice 11.) (Debug draw is
+still not a gizmo layer; the gizmo does not need it to be — slice 6, above.
+`AssetSource` lists since 2026-09-30.)
 
 Two things sit behind it, in both directions:
 
@@ -1516,7 +1533,10 @@ than the rest of this document suggests; each line was checked in the source.
 1. **Commands are dropped on arrival.** `ClientToServer::Command` is encoded,
    but the server's message handler matches it and does nothing, `Client` has no
    way to send one, and `ServerToClient::Event` has no consumer. A server hosts
-   one session, so a GUI and a CLI client cannot share one.
+   one session, so a GUI and a CLI client cannot share one. _Since closed but
+   for the last sentence_: console sets (2026-10-03) and scene edits
+   (2026-10-04, _Status_) are commands a server answers, and `Client::events`
+   reads events; a host still serves one session.
 2. **One schedule per `World`** and no per-system gating, so there is no
    edit-mode schedule to switch from.
 3. **No snapshot or restore of a `World`**, so play/stop has nothing to restore

@@ -12328,13 +12328,23 @@ _`crcbl save list|dump|diff|restore`_, _Golden audio buffers per sample, and
   being the sync point; `crcbl edit <scene> -e '<cmd>' …` — one-shot edits
   without a session.
 
-**What it waits on**: the editor's server command handling —
-`ClientToServer::Command` is matched and dropped by `crcbl-server`, `Client` has
-no send path and a server hosts one session (`docs/plan/08-editor.md`, missing
-piece 1) — and `EditCommand` has only property, spawn, delete and rename
-variants (the editor entry, _Task 4's commands_, lists what is owed). When the
-CLI reads commands it will have to parse input, which is the moment
-`crates/crcbl-cli/src/json.rs` says to reconsider hand-written JSON.
+**What it waits on: nothing but itself, and it is the next slice** (re-checked
+2026-10-04). The server half exists — `crcbl_editor::serve::EditServer` applies
+a client's `EditOp` through the editor's `Document`, `Client::send_edit` sends
+one and `Client::edit_replies` reads the reason-coded answer; _Scene edits over
+the transport_, below, has the protocol and what it leaves. What the verbs need
+on top:
+
+- **Where the server runs.** `EditServer` lives in `apps/editor`, beside the
+  `Document` it applies through, and `crcbl-cli` depends on no app. Either the
+  `Document`'s non-UI core moves into the umbrella (a large move, through files
+  the editor's panels touch) or `crcbl edit --serve` is the editor binary run
+  headless. Decide before writing the verb.
+- **Reading a command from arguments or stdin** means parsing input, which is
+  the moment `crates/crcbl-cli/src/json.rs` says to reconsider hand-written
+  JSON; the wire form (`crcbl_scene::edit::encode_op`) is what it sends.
+- **A one-shot `-e` without a session** applies through a `Document` directly
+  and saves; no transport is needed for it.
 
 **The exit criteria that hang on it**: a scripted `crcbl new` → `crcbl import` →
 `crcbl scene spawn …` → `crcbl screenshot` → `crcbl sim` session that builds and
@@ -12343,6 +12353,76 @@ the CLI (a tower plot spawned, a spawner moved) opening correctly in the GUI
 editor with its undo history intact. Towers' plots and path corners are scene
 rows since 2026-09-30 (`apps/towers/assets/scenes/field.scn/`, in the editor's
 shipped vocabulary), so the towers half waits on the CLI protocol alone.
+
+### Scene edits over the transport: the server slice and what it leaves (2026-10-04)
+
+**Built**: `crcbl_net::edit` (an `EditRequest` as a command of kind `EDIT_KIND`,
+the sealed `EditReply` and `EditNotice`, and the `EditRefusal` codes),
+`crcbl_scene::edit`'s wire form of an `EditOp` (a command, an undo or a redo),
+`Host::serve_edits` with `take_edit_requests`, `send_edit_reply` and
+`broadcast_edit_notice`, `Client::send_edit` with `edit_replies` and
+`edit_notices`, and `crcbl_editor::serve::EditServer` joining them to a
+`Document`. Its tests run two clients over `InMemoryTransport` and compare the
+served scene's saved text with a `Document` given the same commands.
+
+**Decided, for the long term:**
+
+- **The command model lives in `crcbl_scene::edit`**, not in the umbrella: the
+  decoder fuzz target has to reach the operation's decoder and cannot link the
+  umbrella's renderer, and `crcbl-server` may not reach `crcbl-shaders` at all
+  (`tools/check-no-renderer-deps.sh`). So the server and `crcbl-net` carry the
+  operation as opaque bytes, as a console set carries its value as text, and the
+  crate owning the vocabulary decodes it.
+- **`Document` stays in `apps/editor`.** Moving it would take its play, mesh and
+  UI-facing halves with it, through files the editor's panels edit; the server
+  applies through it from `apps/editor/src/serve.rs` instead, so there is one
+  implementation. The CLI entry above carries what that costs
+  `crcbl edit --serve`.
+- **Any admitted peer may edit**, with no host-player rule as console sets have:
+  a headless server adds no host player, and the plan's correction has a GUI and
+  a CLI editing at once.
+- **Undo and redo are protocol operations** on the server's one history, the
+  most recent entry whoever made it.
+- **Other clients follow through notices, not snapshot replication.** Each
+  applied operation's own bytes go to every client, the author included, with
+  the revision; a copy applying them in order is the server's scene. Snapshots
+  carry replicated components, which a rename or a row's field does not have,
+  and the document's world is not the host's (the host's world is empty).
+- **The notice goes before the author's reply**, so a client reading its
+  `Applied` already holds the change.
+- **Refusal codes are an open set of stable numbers** (`EditRefusal(u8)` with
+  named constants), as `SessionEndReason` is: an unknown code is kept, not
+  refused.
+- **A host serving no scene, and every `Server`, refuses an edit as not
+  editable** rather than leaving it unread; an envelope that will not decode has
+  no id to answer and is counted as a processing error.
+
+**Deferred, each with what it takes:**
+
+- **The GUI is not a client of its own server.** `apps/editor`'s app still
+  applies to its `Document` in process; routing it means starting an
+  `EditServer` (or connecting to one), sending each command, and applying
+  notices to the view's copy. Gestures would need a gesture id on the wire:
+  today each operation is its own history entry, so a drag sent frame by frame
+  would be one undo per frame.
+- **A variant switch does not travel**: `Snapshot::Variant`'s name is a
+  `&'static str`, so a decoded snapshot has no name to hold until it is resolved
+  against the component. Either `Snapshot` holds an owned name, or the decoder
+  resolves names against the registry. `encode_op` refuses one by name.
+- **A client joining late, or resuming after a lost link, cannot fetch the
+  scene**: notices carry changes, not state, and one missed shows only as a
+  revision gap. Wants a "scene files at revision N" message.
+- **The author is not in the undo log**: the plan's correction shows each
+  entry's author, `UndoLog` has no author column, and the notice is the only
+  place the author is said.
+- **Play, stop and save are not protocol operations**; the serving editor drives
+  them through `EditServer::document_mut`.
+- **A host serves one session**, so this is one scene per server.
+
+**Coverage gaps**: never run over UDP or between processes; every test is
+in-memory and in one process. The decoder fuzz target was built
+(`cargo check --bins`) and its seeds replayed by `tests/corpus.rs`; it was not
+run under libFuzzer in this slice.
 
 ## Tooling and infrastructure — what the plans still owe
 
@@ -12751,10 +12831,12 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
 (`EditCommand` has one variant, `SetProperty`) and `crcbl-server`'s peer loop
 (`ClientToServer::Command` is matched and dropped).
 
-- **The client+server pair**: server command handling with a client send path,
-  reason-coded replies, one global undo log showing each entry's author,
+- **The client+server pair**: the server half landed 2026-10-04 — command
+  handling, a client send path, reason-coded replies, one global history,
   validation against current state and last-writer-wins (the plan's 2026-07-27
-  correction); and a server hosting more than one session.
+  correction) — and _Scene edits over the transport_ has what it leaves: the GUI
+  as a client of it, each entry's author in the undo log, and a server hosting
+  more than one session.
 - **An edit-mode schedule** for the selection, gizmo and editor-camera systems;
   a `World` has one `Schedule` and no per-system gating.
 - **Rotation on scene components and the rotate gizmo (landed 2026-10-01): what
@@ -13226,8 +13308,9 @@ its rules say so rather than being silent: bracket's rules in
 `docs/notes/samples.md` record that it opens no `World` and implements no
 `GameModule` today, that rule 2 is owed here rather than exempted, and that the
 missing piece is engine work — a way for a `GameModule` to receive a
-`ClientToServer::Command` and reply to it, which `crcbl-server`'s receive loop
-leaves as an empty arm.
+`ClientToServer::Command` and reply to it. (Re-checked 2026-10-04: the receive
+loop takes two kinds of command now, console sets and scene edits, each answered
+by the server or the caller serving a scene; neither reaches a module.)
 
 **Two browser gaps stated in the doc and worth keeping visible:**
 `WebAssembly.instantiate` has neither NaN canonicalization nor fuel, so the
@@ -16959,9 +17042,10 @@ headless soak. `web/demos/bracket/` is the page.
 as things stand would be worse than not doing it — it would put the matchmaker
 behind a tick-shaped input channel and look like the claim while not being it.
 Queueing, leaving the queue and reporting a result are **commands**:
-`crcbl-server`'s receive loop has an arm for `ClientToServer::Command` whose
-body is empty, with a comment saying that a caller must not read it as a command
-being acted on. So the missing piece is a way for a `GameModule` to receive a
+`crcbl-server`'s receive loop decodes a `ClientToServer::Command` by its kind
+byte — a console set or a scene edit (re-checked 2026-10-04), the one answered
+by the host, the other by the caller serving a scene — and has no kind a
+`GameModule` receives. So the missing piece is a way for a module to receive a
 command and reply to it, and it is engine work. `docs/backlog.md` already
 carries this under "bracket does not yet drive the transport (2026-08-24)"; it
 is re-verified and still accurate.
@@ -18323,10 +18407,10 @@ leaves behind is smaller than it was:
   on every tick there is one, so the handshake tick moved the opening frame.
   Nothing but the golden had pinned that board, and it has its own test now.
 
-- **`ClientToServer::Command` is still not consumed.** It is decoded, charged
-  against the session's error budget if malformed, and dropped, and the code
-  says why: a command is a request that has to be answered once and stay
-  answered, not a per-tick sample, and nothing on this server answers one yet.
+- **`ClientToServer::Command` is consumed for two kinds only** (re-checked
+  2026-10-04): a console set, which a `Host` applies on its tick boundary, and a
+  scene edit, which a host serving a scene hands to its caller (_Scene edits
+  over the transport_). A game's module still receives no command.
 - **The jitter buffer, the client's tick lead and rate correction are still
   absent**, and now they are the next thing rather than blocked behind this.
   Input frames are handed over in arrival order with the `TickId` their client
@@ -28532,13 +28616,12 @@ is pure request/response — no snapshots, no interpolation, no tick", against a
 protocol that "has only ever been driven by tick-shaped traffic".
 
 **What that needs, and it is engine work rather than sample work.**
-`ClientToServer::Command` is decoded and dropped — `crcbl-server/src/peer.rs`'s
-receive loop has an arm for it whose body is empty, and whose comment says so
-plainly ("nothing on this server consumes one yet ... a caller must not read
-this arm as a command being acted on"). Queueing, leaving the queue and
-reporting a result are commands: each is a request that must be answered once
-and stay answered, which is exactly what the `Input` path is not. So the slice
-is a way for a `GameModule` to receive a command and reply to it.
+`ClientToServer::Command` reaches no module — `crcbl-server/src/peer.rs`'s
+receive loop decodes two kinds, a console set and a scene edit (re-checked
+2026-10-04), and neither is a game's. Queueing, leaving the queue and reporting
+a result are commands: each is a request that must be answered once and stay
+answered, which is exactly what the `Input` path is not. So the slice is a way
+for a `GameModule` to receive a command and reply to it.
 
 Routing the demo through `Loopback` **without** that would be worse than what is
 there now — it would put the matchmaker behind a tick-shaped input channel and

@@ -771,3 +771,91 @@ fn a_session_accepted_again_opens_the_clients_restarted_key() {
         "the restarted counter read as a replay"
     );
 }
+
+// ── Scene edits ────────────────────────────────────────────────────────────
+
+/// A host never told to serve edits answers every one as not editable, by
+/// the request's id, and holds nothing for the caller.
+#[test]
+fn a_host_serving_no_scene_refuses_an_edit_as_not_editable() {
+    let mut rig = Rig::with_peers(2, 1);
+    let id = rig.clients[0].send_edit(vec![1, 1]).expect("in session");
+    rig.run(3);
+    assert!(rig.host.take_edit_requests().is_empty());
+    let replies: Vec<_> = rig.clients[0].edit_replies().collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].request_id, id);
+    assert!(matches!(
+        replies[0].outcome,
+        crcbl_net::EditOutcome::Refused {
+            reason: crcbl_net::EditRefusal::NOT_EDITABLE,
+            ..
+        }
+    ));
+}
+
+/// A host serving edits hands each one over with the peer that sent it, in
+/// admission order; a reply reaches only the peer it is sent to, and a notice
+/// every connected peer, its author included.
+#[test]
+fn a_host_serving_edits_hands_them_over_and_sends_replies_and_notices() {
+    let mut rig = Rig::with_peers(3, 2);
+    rig.host.serve_edits();
+    let second = rig.clients[1].send_edit(vec![1, 2]).expect("in session");
+    let first = rig.clients[0].send_edit(vec![1, 1]).expect("in session");
+    rig.run(2);
+    let taken = rig.host.take_edit_requests();
+    assert_eq!(
+        taken,
+        [
+            (
+                rig.ids[0],
+                crcbl_net::EditRequest {
+                    request_id: first,
+                    op: vec![1, 1],
+                }
+            ),
+            (
+                rig.ids[1],
+                crcbl_net::EditRequest {
+                    request_id: second,
+                    op: vec![1, 2],
+                }
+            ),
+        ]
+    );
+    assert!(rig.host.take_edit_requests().is_empty(), "taken once");
+
+    let reply = crcbl_net::EditReply {
+        request_id: first,
+        outcome: crcbl_net::EditOutcome::Applied { revision: 1 },
+    };
+    rig.host
+        .send_edit_reply(rig.ids[0], &reply)
+        .expect("a connected peer");
+    let notice = crcbl_net::EditNotice {
+        revision: 1,
+        author: rig.ids[0].get(),
+        op: vec![1, 1],
+    };
+    assert_eq!(rig.host.broadcast_edit_notice(&notice), Ok(2));
+    rig.run(1);
+    assert_eq!(rig.clients[0].edit_replies().collect::<Vec<_>>(), [reply]);
+    assert_eq!(rig.clients[1].edit_replies().count(), 0, "not its reply");
+    for client in &mut rig.clients {
+        assert_eq!(
+            client.edit_notices().collect::<Vec<_>>(),
+            std::slice::from_ref(&notice)
+        );
+    }
+    assert!(matches!(
+        rig.host.send_edit_reply(
+            PeerId::from_raw(999),
+            &crcbl_net::EditReply {
+                request_id: 1,
+                outcome: crcbl_net::EditOutcome::Applied { revision: 1 },
+            }
+        ),
+        Err(EventNotSent::NoSuchPeer(_))
+    ));
+}

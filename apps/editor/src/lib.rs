@@ -44,10 +44,14 @@
 //! * [`app`] — the window, the device and the loop, which does nothing but call
 //!   [`document`] and [`panel`].
 //! * [`args`] — the command line.
+//! * [`serve`] — the server half: a document served over a host, every
+//!   client's edit applied through [`Document::apply`] and announced to the
+//!   rest.
 //!
 //! # What this slice is not
 //!
-//! No server protocol or transport routing, no game that
+//! No client half of the server protocol — the GUI still edits its own
+//! document in process — no game that
 //! plays yet (play mode runs whatever modules a vocabulary registers, and none
 //! does), no file watcher, no multi-session editing, and no
 //! port of a sample's state into ECS. Each is named in the plan with what it waits on.
@@ -62,6 +66,7 @@ pub mod keys;
 pub mod layout;
 pub mod panel;
 pub mod scene;
+pub mod serve;
 
 pub use app::{Editor, EditorError, Summary, run};
 pub use args::{Invocation, Options, USAGE, parse};

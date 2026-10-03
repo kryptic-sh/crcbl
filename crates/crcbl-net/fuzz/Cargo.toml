@@ -30,6 +30,13 @@ path = "../../crcbl-phys"
 [dependencies.crcbl-store]
 path = "../../crcbl-store"
 
+# The scene edit an edit request carries, `crcbl_scene::edit::decode_op`: a
+# server reads it from any admitted peer, field by field. Without the glTF
+# importer, which an edit never reaches.
+[dependencies.crcbl-scene]
+path = "../../crcbl-scene"
+default-features = false
+
 [[bin]]
 name = "decoder"
 path = "fuzz_targets/decoder.rs"

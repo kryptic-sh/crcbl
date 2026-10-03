@@ -10,7 +10,9 @@
 //!
 //! **It lives here, beside the scene format it edits, rather than in
 //! `apps/editor`**, so that anything carrying a command reaches the one
-//! vocabulary without linking the editor or a renderer.
+//! vocabulary without linking the editor or a renderer: the editor, the server
+//! that applies a client's edits, and the wire form both send ([`EditOp`],
+//! [`encode_op`] and [`decode_op`]), which the decoder fuzz target reads.
 //! `crcbl_editor::command` re-exports it, and the editor's `Document` is still
 //! what applies it.
 //!
@@ -138,9 +140,17 @@
 //!
 //! [`Value`]: crcbl_reflect::Value
 
+use crcbl_reflect::{PathError, Reflect, get_path, restore_path, set_path, snapshot_path};
+// The two payloads a command carries, re-exported so a tool building one —
+// the decoder fuzz target, a CLI — names this module and not the crate under it.
+pub use crcbl_reflect::{Snapshot, Value};
+
 use crate::scn::{EntityName, SceneEntityId};
-use crcbl_reflect::{
-    PathError, Reflect, Snapshot, Value, get_path, restore_path, set_path, snapshot_path,
+
+mod wire;
+
+pub use wire::{
+    EditOp, MAX_BATCH_DEPTH, OpDecodeError, OpEncodeError, WIRE_VERSION, decode_op, encode_op,
 };
 
 /// One undoable edit, as a value that could be sent rather than performed.
