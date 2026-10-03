@@ -21,6 +21,21 @@ on shard on 2026-09-27.
 
 ## EW integration follow-ups
 
+- **Stationary character rounding regression in EW at `1d24972a`.** The game
+  update is saved on EW branch `wip/crcbl-1d249-integration`. Run
+  `cargo test stationary_leg_treatment_keeps_depletion_and_recovery_chronological --bin ew`
+  there on Windows. `src/game_nutrition_tests.rs` first moves the player on a
+  flat box floor, then blocks movement for leg treatment and advances nutrition
+  in coarse and split ticks. Its exact feet assertion changes from
+  `DVec3(0.0, 0.010000000000000009, -3.390000000000001)` before treatment to
+  `DVec3(0.0, 0.010000000000000009, -3.39)` afterward. The test passed with EW's
+  previous `2487f57b` engine pin and fails both alone and in the updated full
+  suite. Investigate the source of the horizontal change in stationary movement;
+  the responsible engine operation has not been isolated. Do not weaken EW's
+  assertion without the requested decision about tolerance versus exact
+  stationarity. The ordered-slide-contact and all-candidate-sweep integrations
+  pass EW's controller tests; this separate regression prevents merging the pin.
+
 **Decided 2026-10-01: both API requests are accepted, in the engine, in this
 order** — the slide contacts first (EW's forecasting repeats whole
 `move_and_slide` previews today, so it is the costlier workaround), then the
