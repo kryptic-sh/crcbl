@@ -2973,22 +2973,29 @@ overlay, and what is left of it_, _Netgraph HUD, LAN discovery_, _Inspector
 stats carry no per-system tick time_, _World-anchored debug text is not built_
 and _The debug draw layer's console switch is one bit, not a category set_.
 
-### The UI stage's exit criteria are not demonstrated
+### The UI stage's debug-overlay exit criterion is met (2026-10-03)
 
-One of the plan's six exit criteria is half open; re-checked 2026-10-03.
+The last half-open one of the plan's six exit criteria, re-checked 2026-10-03.
 
 - **The debug overlay running in the sandbox over a live scene, with entity
-  selection and console commands against the server.** The selection half is met
-  (2026-10-03, below). **The console half is not**: console commands reach the
-  server only through the unbuilt `Flags::SIM` transport half, which stays
-  deferred by decision — _`Flags::SIM` is reserved, and its first variable is
-  the trigger_ lists what building it takes (a `Command` message over the
-  transport, applied on a tick boundary, recorded in the replay stream, refused
-  from a client that is not the host). Nothing was stubbed for it. The sandbox
-  is the place to show it once built: `--host` already gives it a server world
-  (`apps/sandbox/src/lan.rs`'s "players" system), and a server-side command
-  would want the overlay's selection to name an entity in that world rather than
-  in the sandbox's own scene, which the selection does not reach today.
+  selection and console commands against the server.** Both halves are met. The
+  selection half is below. **The console half landed with `Flags::SIM`'s
+  transport half** (_`Flags::SIM` sets apply on a tick boundary_, under the
+  console's section): `sv_spin_rate 2` typed in the sandbox's console reaches
+  the server that runs the cube — `--host`'s own world, which now spins a
+  replicated cube beside its "players" system — and applies at the start of its
+  next tick, while a joined client's set goes over the transport and is refused
+  with the reason printed. During a session the drawn cube is the host's, so the
+  rate set is the rate seen. Evidence, each shown red under a mutation:
+  `apps/sandbox`'s
+  `lan::sim_tests::the_hosts_console_set_applies_on_the_next_tick_and_a_client_sees_the_cube_turn_at_it`
+  (the boundary moved after the module; the module ignoring the rate; the
+  replicated spin written as zero),
+  `the_hosts_own_player_may_set_it_and_another_client_is_refused` and
+  `a_hosting_sandbox_hands_a_set_to_its_host_and_lends_the_hosts_cube` (the set
+  dropped on the way to the host; the host's cube not lent). The overlay's
+  selection still names entities in the sandbox's own scene, not the host's
+  world — see _What the selection does not do yet_ below.
 
 **Entity selection with per-system data is built (2026-10-03).** Decided that
 day, for the long term: **per-system debug data travels as `Reflect`, not as a
@@ -7568,27 +7575,85 @@ delivery slices are in `docs/notes/tooling.md` under _What the deleted
 below were "in `docs/backlog.md`" when they were only in the notes file's limits
 section; they are here now, re-verified against the tree on 2026-09-24.
 
-### `Flags::SIM` is reserved, and its first variable is the trigger
+### `Flags::SIM` sets apply on a tick boundary, and what that left (2026-10-03)
 
-**Deferred on purpose, not outstanding.** `crcbl_console::Flags::SIM` exists and
-prints, and nothing in the workspace declares a variable with it (verified
-2026-09-24: the only uses are in `crates/crcbl-console/src/var.rs`). Console
-commands are host input, like a key press, and are not part of the tick input
-stream, so a variable that changes what the simulation computes would break the
-same-binary determinism that physics, replay and netcode rest on. **Until this
-is built, such a variable must not be a console variable.**
+**Built 2026-10-03; decided that day for the long term, replacing "deferred on
+purpose".** The UI exit criterion was the first caller, and **the first `SIM`
+variable is the sandbox's spin rate**, `sv_spin_rate` in
+`apps/sandbox/src/spin.rs` (an `f32` in `0..=8`, default 1, so the default
+picture is bit-identical). **"The host" is the server's own console and the
+listen host's own player** — the peer added with `Host::add_host_player`; every
+other peer is refused, so a dedicated server, which adds no host player, takes
+sets from its console alone. The mechanics are decision 9 in
+`docs/notes/tooling.md` and the determinism note in `docs/notes/simulation.md`;
+the four requirements, each with the test a mutation turned red:
 
-What building it takes, when the first `SIM` variable is wanted:
+- **A `Command` carries the set**: `crcbl_net::command`'s console set, the
+  variable's name and its value as the text the console prints, sealed on the
+  reliable channel (`Client::send_console_set`); the answer is a sealed
+  `CONSOLE_REPLY_TAG` message read by `Client::console_replies`, not an event,
+  whose bytes are a game's. `crcbl-client`'s
+  `a_console_set_goes_sealed_on_the_reliable_channel_as_a_command` (sent
+  unreliable) and
+  `a_sealed_console_reply_is_taken_once_and_not_handed_to_the_game` (the reply
+  dropped); `crcbl-net`'s `command::tests` (a decoder past its limit). Both
+  decoders are in the fuzz target, with seeds.
+- **Applied at the start of the next tick, in the order read**: `crcbl-server`'s
+  `host::sim_tests::the_host_players_set_applies_at_the_next_tick_boundary_and_not_before`
+  and `two_sets_in_one_tick_apply_in_the_order_they_arrived` (the boundary moved
+  after the module; the queue reversed); offline, `apps/sandbox`'s
+  `scene::tests::an_offline_set_waits_for_the_next_tick_and_that_tick_spins_at_it`
+  and `two_offline_sets_in_one_tick_apply_in_the_order_submitted` (applied on
+  submit; applied after the spin; reversed).
+- **Recorded, and a replay reproduces it**: `Host::sim_record` and
+  `Host::replay_sim_record`;
+  `a_replayed_record_reproduces_the_final_state_hash_bit_for_bit` (the record
+  not kept; the replay ignored) and
+  `a_record_entry_for_a_tick_already_passed_is_refused`.
+- **A client that is not the host is refused, with the reason sent back**:
+  `a_client_that_is_not_the_host_is_refused_and_told_why` (the host check
+  removed) and the host player's own set (the flag lost at admission); a bad
+  value, an unknown name, a command and a non-`SIM` variable are refused by name
+  in `unknown_non_sim_and_bad_values_are_refused_by_name` and the console's
+  `sim::tests::every_refusal_names_what_it_refused` (the `SIM` check removed;
+  the range dropped).
 
-- a `Command` message carrying the set over the transport;
-- the server applying it on a tick boundary, not when the line is typed;
-- the replay stream recording it, so a replay reproduces it;
-- a client that is not the host refusing it.
+The console half — `Registry::sim_set`, `Context::request_sim_set`, the loop's
+drain into `HostedGame::submit_sim_set` — is held by `crcbl-console`'s
+`sim::tests` and `crcbl`'s
+`engine::tests::a_typed_simulation_set_reaches_the_game_in_order`,
+`a_simulation_set_the_game_refuses_is_printed` and
+`console_config::tests::a_simulation_set_from_an_exec_line_reaches_the_outer_context`,
+each red with its drain removed. The single-peer `crcbl_server::Server` keeps no
+simulation variables and refuses every set
+(`tests::a_command_is_not_queued_as_input_and_a_console_set_is_refused`, red
+with the reply not sent).
 
-That is also what debug item 4 of the UI section in `docs/notes/tooling.md`
-(_What the deleted 07-ui-debug plan left behind_) asks of the console: that it
-"works identically over a network connection". Building the transport half
-before a caller exists would be machinery nothing exercises.
+What it left, each a decision for when a caller wants it:
+
+- **The record is in memory.** `.crpl` (`crates/crcbl-store/src/replay.rs`)
+  records the server's output — snapshots, which already carry the state a set
+  produced — not its inputs, and `crcbl sim` takes no record. Persisting
+  `Host::sim_record` wants an encoding for it and a place in a file format;
+  nothing reads one from disk today.
+- **A console prints a `SIM` variable without its value**: a client has no copy
+  of the server's `SimVars`, so a bare `sv_spin_rate` shows its default and
+  flags. Showing the live value wants the values replicated (or a query
+  command). Only the asker is answered; other clients' consoles hear nothing of
+  an applied set.
+- **`toggle` and `reset` refuse a `SIM` variable** (`ConVar::set` refuses it)
+  rather than sending a set; bare `reset` skips it, since its cell never leaves
+  the default.
+- **"Arrival order" is the host's drain order**: sets from its console since the
+  last tick, then each peer's in its own order, peers in admission order — two
+  peers' sets in one tick are not ordered by wall-clock arrival, which no
+  transport reports. There is no per-tick cap on sets beyond each peer's inbound
+  rate limit, which also bounds the replies a refused peer is sent.
+- **Not covered by a test**: the sandbox's `HostedGame::tick` copying the
+  session's cube into its scene (`Lan::cube_seconds` is held; the copy in
+  `apps/sandbox/src/app.rs` is not, because a `--host` engine run would bind
+  every interface), and a dedicated server's console, which no binary has yet
+  (`Host::submit_console_set` is its seam).
 
 ### Web `AltGr` input is built and unverified on a real keyboard (2026-09-25)
 
@@ -15092,7 +15157,7 @@ just this one.
 **Built (2026-10-03):** one stylesheet, `apps/hud/assets/hud.css`, styling the
 vitals panel, the minimap frame and the wave banner as a tree
 (`apps/hud/src/styled.rs`), polled through the asset source and restyled live
-under `--styles` — _The UI stage's exit criteria are not demonstrated_ has the
+under `--styles` — _The UI stage's debug-overlay exit criterion is met_ has the
 detail. **Not built:** the second theme and the switcher, the gallery page, the
 UI inspector in the demo, the ability row's and the damage ticker's port (still
 `DrawList::rect`, `DrawList::rect_outline` and `DrawList::text` in

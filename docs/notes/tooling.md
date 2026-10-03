@@ -287,7 +287,7 @@ section and by debug-tool item. Those resolve here:
 | Debug item 1          | Profiler HUD: GPU pass timestamps and CPU frame phases                                                                 | Frame and GPU rows built; the rules are the 40-profiling section's |
 | Debug item 2          | Inspector: per-system entity counts and tick times; select an entity, and each owning system draws its data            | Counts and selection built; no tick times                          |
 | Debug item 3          | Culling and render stats from the delayed-readback ring                                                                | Built (`FrameCounters`, `CullStatsRing`)                           |
-| Debug item 4          | Console: log view, command registry, server commands over the transport                                                | Built but for the transport half (`Flags::SIM`)                    |
+| Debug item 4          | Console: log view, command registry, server commands over the transport                                                | Built; the transport half is `Flags::SIM`'s (decision 9)           |
 | Debug item 5          | Debug-draw controls, and the immediate-mode buffer they toggle                                                         | Geometry built; one switch rather than categories; world text owed |
 | Reserved `ui_*` table | The navigation actions below                                                                                           | Keyboard half built (`crcbl_input::ui`); no gamepad bindings       |
 
@@ -696,10 +696,25 @@ built plan is deleted: the numbers live here, every citation outside
   own view row _is_ the variable (lantern's `AO VIEW`, quarry's
   `LOD VIEW`/`HEATMAP`, viewer's `N`): a sample that wrote its own view every
   frame undid every console line.
-- **Decision 9 — `Flags::SIM` is reserved, not built.** Console commands are
-  host input and not part of the tick stream, so a variable that changes what
-  the simulation computes must not be a console variable yet. The rule for the
-  first `SIM` variable, and what building it takes, is the backlog entry.
+- **Decision 9 — a `Flags::SIM` variable is a request applied on a tick
+  boundary** (reserved 2026-08-31, built 2026-10-03 with the sandbox's
+  `sv_spin_rate` as the first one). Console commands are host input and not part
+  of the tick stream, so a typed set of a variable the simulation reads is never
+  a write: `Registry::sim_set` checks it, `Context::request_sim_set` hands the
+  `SimSet` to the host, and the loop gives it to `HostedGame::submit_sim_set`,
+  which sends it to the simulation the game runs. That simulation owns the value
+  in a `SimVars` — once per simulation, not per process, so the `ConVar`'s own
+  cell keeps its default, `ConVar::set` refuses the variable and its typed
+  getters panic — and applies sets at the start of its next tick, in the order
+  it read them. Over a network the set is a sealed `ClientToServer::Command`
+  carrying `(name, value)` as the text the console prints, parsed back through
+  the same `Kind`; `crcbl_server::Host` takes it only from its own console and
+  from the listen host's own player (`Host::add_host_player`), refuses every
+  other peer with the reason sent back, and records every applied set with its
+  tick (`Host::sim_record`) for `Host::replay_sim_record`. So the console works
+  the same over a connection as offline: a set applies on the next tick boundary
+  either way, and the answer is printed when it comes. The backlog entry holds
+  what is still owed.
 - **Decision 10 — the cost needs no per-tier pricing.** Closed, one ring push
   per log record on a path that already formats a string; open, a copy of at
   most `CONSOLE_RING_LINES` records and a draw list of the visible lines; no GPU
@@ -739,7 +754,7 @@ built plan is deleted: the numbers live here, every citation outside
 | 8     | Paste, `bind`, `toggle` | 2026-08-31             | Paste (now `TextPump`'s since 2026-09-16), `bind`/`unbind` over `HostedGame::actions` and `Loop::drain_binds`, `toggle` and `reset` as built-ins; asteroids and breach each drive a rebind end to end.                                                 |
 | 9     | `config`                | 2026-08-31, 2026-09-02 | `crcbl::console_config`: `config <name>`, then `AUTOEXEC` run by `Console::run_autoexec` before the first frame.                                                                                                                                       |
 | 10    | Touch                   | 2026-08-31             | `ConsoleButton` and `TouchKeyboard`, gated on a contact; the guard `an_untouched_run_keeps_every_click_the_console_would_have_taken`, and browser group F.                                                                                             |
-| 11    | `Flags::SIM`            | deferred, not built    | Decision 9's reserved flag; the backlog entry says what building it takes.                                                                                                                                                                             |
+| 11    | `Flags::SIM`            | 2026-10-03             | Decision 9: `SimSet`/`SimVars`, the console set as a `ClientToServer::Command`, `Host`'s tick boundary, host rule and replay record, `HostedGame::submit_sim_set`; the sandbox's `sv_spin_rate`.                                                       |
 
 **Considered and declined**, so none is re-proposed:
 
@@ -764,16 +779,17 @@ state before the restore.
 
 ## What the debug console left as limits (2026-08-31)
 
-Every delivery slice in the table above landed except `Flags::SIM`, which is
-deferred by decision 9 rather than outstanding. What follows is what those
-slices left as limits rather than fixed — each stated in the code as well as
-here. The open work they left is in `docs/backlog.md` under _What the deleted
-52-debug-console plan left unbuilt_.
+Every delivery slice in the table above landed, `Flags::SIM` last (2026-10-03).
+What follows is what those slices left as limits rather than fixed — each stated
+in the code as well as here. The open work they left is in `docs/backlog.md`
+under _What the deleted 52-debug-console plan left unbuilt_.
 
 What slice 1 left as limits rather than fixed, each stated in the code:
 
-- **`Flags::SIM` is declared and nothing sets it** — reserved by decision 9,
-  deliberately; its doc comment says what lands with the first one.
+- **A console prints a `SIM` variable without its value** — the simulation holds
+  it, and a client's console has no copy of a server's; the answer to each set
+  is printed instead. `toggle` and `reset` refuse a `SIM` variable rather than
+  sending a set.
 - **`guard::names_in` strips line comments, not block comments**, and splits a
   line at its first `//` — a declaration inside `/* … */` is counted as real,
   and a `//` inside a string literal ends the scan of that line. Line comments

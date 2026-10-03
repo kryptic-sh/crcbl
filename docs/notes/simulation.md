@@ -744,6 +744,26 @@ per-system tick time. The `cargo tree` guard is built:
 - **Stage 4's determinism was same-binary, same-machine**, only as far as the
   1000-tick smoke test needed. The physics plan's cross-target rule, next
   section, supersedes it.
+- **A console variable the simulation reads is a tick input, not a knob**
+  (debug-console decision 9, built 2026-10-03). A console line is host input
+  that arrives mid-frame, so a variable that changed what a tick computes would
+  make the same input stream produce different states depending on when a line
+  was typed. Such a variable carries `crcbl_console::Flags::SIM`: its value
+  lives once per simulation in a `crcbl_console::SimVars`, never in the
+  `ConVar`'s process-wide cell; a typed set is a request applied **at the start
+  of the next tick**, in the order the simulation read the sets, before the
+  schedule and the module run; and `crcbl_server::Host` hands the module the
+  values with the tick's inputs (`PeerInputs::sim_vars`). Every applied set is
+  recorded with its tick (`Host::sim_record`), and a fresh host given that
+  record (`Host::replay_sim_record`) applies each entry at the start of the tick
+  it names, so the same world, module and input reproduce the state hash bit for
+  bit — what
+  `host::sim_tests::a_replayed_record_reproduces_the_final_state_hash_bit_for_bit`
+  holds. The value crosses the wire as the text the console prints, which for an
+  `f32` is the shortest text that parses back to the same bits. A variable
+  without the flag is not a tick input and must not change what the simulation
+  computes. The record is in memory: the `.crpl` replay format carries the
+  server's output, not its inputs (`docs/backlog.md` has the gap).
 
 Other documents cite the plan as "stage 4". Those resolve here:
 
