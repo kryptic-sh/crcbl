@@ -319,6 +319,21 @@ fn a_scene_built_in_code_writes_the_canonical_files() {
     );
 }
 
+/// **A renamed scene writes its new name into the header**, and nothing else
+/// of the scene moves.
+#[test]
+fn a_renamed_scene_writes_the_new_name() {
+    let (mut scene, ids, mut world) = load(HEADER, ENV, MARKS).expect("the canonical scene loads");
+    assert_eq!(scene.set_name("two"), "one");
+    assert_eq!(scene.name(), "two");
+    let files = scene
+        .save(&mut world, &ids, &codecs())
+        .expect("the world matches the manifest");
+    assert_eq!(files["scene.ron"], HEADER.replace("\"one\"", "\"two\""));
+    assert_eq!(files["env.ron"], ENV);
+    assert_eq!(files["sys/marks.ron"], MARKS);
+}
+
 /// The debug form names the system and the component, so a codec list is
 /// readable in a panic message.
 #[test]

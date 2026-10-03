@@ -908,6 +908,16 @@ impl Scene {
         &self.name
     }
 
+    /// Names the scene `name`, which the next [`save`](Self::save) writes
+    /// into the header, and hands back the name it had.
+    ///
+    /// What a tool giving a new scene the name of the directory it is first
+    /// saved into calls. Like [`Scene::new`]'s, the name is not checked: the
+    /// header carries any string.
+    pub fn set_name(&mut self, name: impl Into<String>) -> String {
+        std::mem::replace(&mut self.name, name.into())
+    }
+
     /// The manifest: the systems whose chunk files this scene is made of, in
     /// the order they are read and written.
     #[must_use]
