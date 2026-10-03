@@ -6493,6 +6493,28 @@ pub trait HostedGame: Sized {
         Err(crate::settings::Unsupported)
     }
 
+    /// The run is ending, for `exit`: this game's last chance to act on its
+    /// own state — a save on close is what it is for.
+    ///
+    /// Called once, by [`Loop::finish`], on every way a run ends — a close, a
+    /// budget, a typed `quit`, a failed frame — before
+    /// [`summary`](Self::summary) and before the GPU and the window are
+    /// released, so the window is still the game's while it runs. A page closing
+    /// reaches it through `pagehide`, whose storage drain runs after this
+    /// returns, so a write queued here reaches the disk. Which reasons are worth acting on is
+    /// the game's call: a run stopped by its frame budget was told when to
+    /// stop, and one stopped by a failed frame may not be the run it was.
+    ///
+    /// It cannot hold the close: the loop has already accepted it. A failure
+    /// in here is the game's to log, and teardown goes on regardless.
+    ///
+    /// The empty default carries [`debug_sections`](Self::debug_sections)'
+    /// argument: nothing is verified by this method, and a game that keeps
+    /// nothing between runs has nothing to do on the way out.
+    fn exiting(&mut self, exit: ExitReason) {
+        let _ = exit;
+    }
+
     /// Adds this game's own fields to the run's shared ones.
     fn summary(&self, run: RunSummary) -> Self::Summary;
 
@@ -7926,6 +7948,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     /// are attempted regardless: the window is destroyed even when the GPU
     /// teardown failed, because leaving it mapped is strictly worse.
     pub fn finish(mut self, exit: ExitReason) -> Result<G::Summary, LoopError<G::Error>> {
+        // First, while the GPU and the window are still the game's, and so the
+        // summary below reports the run as the game left it.
+        self.game.exiting(exit);
         // **Distributions, not the last frame.** The timers are frames latent
         // and hand the same report back until a slot resolves, so the newest
         // `FrameTimings` is one arbitrary frame of the run — which is what this
@@ -13863,6 +13888,8 @@ mod tests {
         /// Whether this game refuses them, so the loop's printing of a
         /// refusal has a game that gives one.
         refuses_sim_sets: bool,
+        /// Every reason the loop told this game its run was ending for.
+        exits: Vec<ExitReason>,
     }
 
     /// The fixture's mixer.
@@ -13885,6 +13912,9 @@ mod tests {
         run: RunSummary,
         /// The game's own tally, which must agree with `run.ticks`.
         ticks_the_game_counted: u64,
+        /// What [`HostedGame::exiting`] had been told by the time the summary
+        /// was taken.
+        exits_before_summary: Vec<ExitReason>,
     }
 
     impl HostedGame for FakeGame {
@@ -14116,10 +14146,15 @@ mod tests {
             self.steam_events.push(event.clone());
         }
 
+        fn exiting(&mut self, exit: ExitReason) {
+            self.exits.push(exit);
+        }
+
         fn summary(&self, run: RunSummary) -> FakeSummary {
             FakeSummary {
                 run,
                 ticks_the_game_counted: self.ticks,
+                exits_before_summary: self.exits.clone(),
             }
         }
 
@@ -16615,6 +16650,31 @@ mod tests {
             "the loop and the game disagree about how much simulation ran",
         );
         assert_eq!(summary.run.backend, crcbl_shell::ShellBackend::Headless);
+    }
+
+    /// **A game is told how its run ended, once, before its summary** — a
+    /// close the window system asked for, and a budget that ran out, each with
+    /// its own reason. What a save on close (`apps/towers`) stands on.
+    #[test]
+    fn the_game_hears_how_its_run_ended_once_before_its_summary() {
+        let mut engine = hosted(None);
+        let window = engine.window();
+        engine.frame().expect("the fake never fails");
+        engine
+            .shell_mut()
+            .request_close(window)
+            .expect("the window is live");
+        let flow = engine.frame().expect("the fake never fails");
+        assert_eq!(flow, Flow::Stop(ExitReason::CloseRequested));
+        let summary = engine.finish(ExitReason::CloseRequested).expect("teardown");
+        assert_eq!(
+            summary.exits_before_summary,
+            [ExitReason::CloseRequested],
+            "the game was not told its window closed, or was told twice"
+        );
+
+        let summary = drive(hosted(Some(3))).expect("the fake never fails");
+        assert_eq!(summary.exits_before_summary, [ExitReason::FrameBudget]);
     }
 
     /// **A settings source hands a game the player's bus gains, and

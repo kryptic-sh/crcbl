@@ -284,14 +284,21 @@ not built anywhere yet.
 - **A run saves and resumes between waves (slice 5, 2026-10-03).** A save is
   taken in the build phase of a run still being played — `S`, or the autosave at
   each wave's end, the first tick its last creep is out — and refused, on the
-  page, while a wave is coming in or once the run is over. The table measures
-  the build phase from a wave's last release, so on this field the last wave's
-  creeps are usually still walking: a save carries them, the bolts in the air
-  and the bursts still drawn beside the counters, the clock and the towers, and
-  a resumed stage hashes as the one that saved and plays on alike tick for tick
-  — which took the stage reading its physics queries in the field's order, since
-  the resumed physics world is a fresh one. The bytes are a versioned `TWRS`
-  payload in `crcbl-store`'s save container, naming the map by
+  page, while a wave is coming in or once the run is over. Closing the window or
+  the page, or the debug console's `quit`, saves as well when a save can hold
+  it, and otherwise keeps the last save — never a save mid-wave, never from the
+  lobby, never a joiner's — through the engine's `HostedGame::exiting`, which
+  runs once as the loop tears down; a frame budget's stop writes nothing, and a
+  failed write is logged, not allowed to hold the close. A dedicated server's
+  `quit` does not save: its console's `save` is one word away and answers what
+  became of it, so a quit is the operator's word to keep the last save. The
+  table measures the build phase from a wave's last release, so on this field
+  the last wave's creeps are usually still walking: a save carries them, the
+  bolts in the air and the bursts still drawn beside the counters, the clock and
+  the towers, and a resumed stage hashes as the one that saved and plays on
+  alike tick for tick — which took the stage reading its physics queries in the
+  field's order, since the resumed physics world is a fresh one. The bytes are a
+  versioned `TWRS` payload in `crcbl-store`'s save container, naming the map by
   `Map::fingerprint`; a save of another map or version, a corrupt or truncated
   file, or a value no run between waves holds is refused by name
   (`crate::save`). Solo and the host keep one slot; the lobby offers it as

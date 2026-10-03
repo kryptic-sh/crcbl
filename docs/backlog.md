@@ -16020,12 +16020,39 @@ shown red by a mutation of the rule it guards.
   line, not a row.
 - **The data-directory arm moved into `crcbl-store`** (`save::SaveBacking`), as
   shard's entry said a second consumer should make it.
+- **Decided 2026-10-03, for the long term: a close saves what a save can hold.**
+  `Towers::save_on_close`, through the engine's new `HostedGame::exiting`
+  (called once by `Loop::finish`, before the summary and the GPU's and window's
+  release — the hook shard's entry declined to build for one consumer; towers is
+  the second). On a window closed or gone, a page's `pagehide`, or the debug
+  console's `quit`, a run in the build phase is written, solo or hosting;
+  otherwise the last save stands and the log says why (a wave coming in, a
+  finished run, a joiner). Never a save mid-wave; nothing while the lobby or a
+  joining panel is up (the fresh run under it would write over the one
+  _Continue_ offers); nothing on a frame budget's stop (it was told when to
+  stop, as the editor's run writes no recovery copy then) or a failed frame's
+  (the run may not be the one it was). A failed write is a warning in the log;
+  the close is never held for it — the loop has already accepted it. Tests:
+  `app::save_tests`' `a_close_*`, `a_run_its_budget_stops_saves_nothing` and
+  `a_joiners_close_saves_nothing`, each shown red by a mutation.
+- **Decided 2026-10-03: a dedicated server's `quit` does not save.** Its
+  console's `save` is one word away and answers what became of it, so `quit` is
+  the operator's word to keep the last save (a `load` of an older run to look at
+  it, then `quit`, must not write over the newer one). **Considered and
+  declined:** saving on `quit` as the window close does — a player closing a
+  window is never asked, an operator at a console always can be. A server killed
+  by a signal saves nothing either; no signal handler is installed.
+- **Considered and declined: guarding a close against a run never played.** A
+  _SOLO_ picked from the lobby by mistake and closed in its first build phase
+  writes a fresh run over the saved one, as its first `S` or wave-end autosave
+  would. One slot is the design (above); a run that has started is the run the
+  slot holds.
 
 **Left, and what each would take:**
 
-- **No save on teardown.** The engine has no `&mut self` hook on the way out
-  (shard's entry has why), so a window or tab closed mid-wave loses the play
-  since the last wave's end or the last `S`.
+- **A close mid-wave still loses the wave under way**, by decision (below): the
+  run since the last wave's end or the last `S` is gone, because a save cannot
+  hold a wave releasing.
 - **No migration seam.** A `PAYLOAD_VERSION` bump orphans every save before it,
   refused by name — _The migration seam_ is the engine's to build.
 - **No in-game load.** A running native game resumes only through the lobby or
@@ -16038,12 +16065,15 @@ shown red by a mutation of the rule it guards.
   writes, where).
 
 **Not verified:** the browser save in a browser — no gate row reads it, and
-nothing ran the page; a save loaded under real players on a LAN, or `load` with
-a joiner in the session (the snapshot carrying the restored field is the same
-path every tick takes, not exercised after a load by a test);
-`--serve --resume`'s entry (`serve::serve` binds every interface, as its other
-entries do); the macOS and Linux data directories (only Windows' was used, and
-only by nothing — every test writes a scratch directory).
+nothing ran the page, so neither did the save on a page's close, which leans on
+`demo.js`'s `pagehide` draining the write `exiting` queued; the save on close
+from a real window (every close test is the headless shell's); a save loaded
+under real players on a LAN, or `load` with a joiner in the session (the
+snapshot carrying the restored field is the same path every tick takes, not
+exercised after a load by a test); `--serve --resume`'s entry (`serve::serve`
+binds every interface, as its other entries do); the macOS and Linux data
+directories (only Windows' was used, and only by nothing — every test writes a
+scratch directory).
 
 ### towers' dev fly/walk camera: decisions, and what it left (2026-10-03)
 
@@ -16773,11 +16803,14 @@ left out:
   to 2 and then 3 orphaned every save written before them: they read as no save,
   with a logged reason, and the zone opens fresh. Acceptable for a sample with
   no players; the entry that must close is the persistence one, not this one.
-- **No save on teardown.** `crcbl::engine::HostedGame` has no hook that runs on
-  the way out and takes `&mut self` — `summary` takes `&self` and is a getter —
-  so the autosave cadence is the whole of when a save happens. A tab or a window
-  closed between two writes loses up to `save::SAVE_PERIOD_S` of play. Adding
-  the hook is an engine change with one consumer, so it was not made.
+- **No save on teardown.** The autosave cadence is the whole of when a save
+  happens, so a tab or a window closed between two writes loses up to
+  `save::SAVE_PERIOD_S` of play. The engine hook this waited on exists since
+  2026-10-03 — `crcbl::engine::HostedGame::exiting`, built for towers' save on
+  close — so closing this is an override in `apps/shard/src/app.rs` storing
+  `Game::snapshot` through `Vault::store` for the exit reasons towers acts on
+  (not `Shard::autosave`, which only writes on its period's ticks). Not done:
+  outside that task's scope.
 - **The clock is not restored.** `SaveHeader::playtime_secs` accumulates across
   sessions and is read back, but `Stage::ticks` and `Stage::elapsed` start again
   at zero. That is what keeps the torches opening at the start of their flicker

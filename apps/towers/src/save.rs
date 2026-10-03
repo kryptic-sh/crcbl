@@ -142,12 +142,12 @@ const APP: &str = "towers";
 /// The run a player saves — solo, or the host of a LAN session — and the one
 /// the lobby's *Continue* and `--resume` read.
 ///
-/// One slot, which the autosave at a wave's end and the save key both write:
-/// a second slot would make *Continue* choose between two runs, and a save
-/// between waves is small enough to take at every wave. One component and no
-/// directory, because the browser shim restores OPFS entries by name off the
-/// root (`restoreOpfs` in `web/engine/storage.js`), and named for this sample
-/// because every demo on the site shares that root.
+/// One slot, which the autosave at a wave's end, the save key and a close
+/// all write: a second slot would make *Continue* choose between two runs, and
+/// a save between waves is small enough to take at every wave. One component
+/// and no directory, because the browser shim restores OPFS entries by name
+/// off the root (`restoreOpfs` in `web/engine/storage.js`), and named for this
+/// sample because every demo on the site shares that root.
 pub const PLAYER_FILE: &str = "towers-run.crb";
 
 /// The run a dedicated server saves: its own file, so a server and a player

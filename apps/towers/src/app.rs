@@ -58,12 +58,14 @@
 //! arrows are the camera's until the overhead view is back. Nothing the camera
 //! does reaches a [`Controls`] frame.
 //!
-//! # Saving is the player's key and the wave's end
+//! # Saving is the player's key, the wave's end and the close
 //!
-//! `S` saves the run and each wave's end is saved on its own — both through
-//! [`Game::checkpoint`] into this run's [`Vault`], which is nowhere for a
-//! headless run — and `S` is refused, on the page as a notice, while a wave
-//! is coming in. A joiner's `S` is refused too: the run is its host's.
+//! `S` saves the run, each wave's end is saved on its own, and so is the run
+//! as its window closes — all through [`Game::checkpoint`] into this run's
+//! [`Vault`], which is nowhere for a headless run — and `S` is refused, on the
+//! page as a notice, while a wave is coming in. A joiner's `S` is refused too:
+//! the run is its host's. A close mid-wave keeps the last save rather than
+//! write one a save cannot hold; see `Towers::save_on_close`.
 //! What is resumed is [`crate::save`]'s: the lobby's *Continue*, `--resume`,
 //! or — in a browser, which has no lobby — the saved run, opened at boot as
 //! `apps/shard` opens its character.
@@ -79,7 +81,9 @@
 //! do the same, and for the same reason.
 
 use crcbl::core::input::KeyCode;
-use crcbl::engine::{Booted, Clock, FrameInfo, HostedGame, RunSummary, wait_for_configure};
+use crcbl::engine::{
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, RunSummary, wait_for_configure,
+};
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding, GLOBAL_CONTEXT};
 use crcbl::prelude::*;
 use crcbl::shell::DisplayMode;
@@ -477,6 +481,43 @@ impl Towers {
             // A run that keeps nothing saves in name only, as shard's does.
             Err(crate::save::SaveError::Nowhere) => {}
             Err(error) => crcbl::log::warn!("towers: the autosave failed: {error}"),
+        }
+    }
+
+    /// Writes the run as its window closes, when a save can hold it — the
+    /// build phase of a run being played, solo or hosting — and otherwise
+    /// keeps the last save and logs why: a wave coming in, a finished run, a
+    /// joiner. Only for a stop the player asked for — the window closed or
+    /// gone, or the debug console's `quit`; a frame budget was told when to
+    /// stop, and a failed frame may not have left the run it was in. Nothing is
+    /// written while the lobby or a joining panel is up, because the game
+    /// under it never ticked and would write a fresh run over the saved one.
+    /// A failed write is logged and the close goes on: the loop has already
+    /// accepted it.
+    fn save_on_close(&mut self, exit: ExitReason) {
+        let asked = matches!(
+            exit,
+            ExitReason::CloseRequested | ExitReason::WindowDestroyed | ExitReason::Quit
+        );
+        if !asked || self.in_front() {
+            return;
+        }
+        match self.game.checkpoint() {
+            Err(not) => crcbl::log::info!(
+                "towers: closed without saving ({}); the last save stands",
+                not.label()
+            ),
+            Ok(checkpoint) => match self.vault.store(&checkpoint) {
+                Ok(()) => crcbl::log::info!(
+                    "towers: saved wave {}/{} on close ({})",
+                    checkpoint.wave(),
+                    crate::wave::WAVES.len(),
+                    self.vault.where_it_goes()
+                ),
+                // A run that keeps nothing saves in name only, as the autosave.
+                Err(crate::save::SaveError::Nowhere) => {}
+                Err(error) => crcbl::log::warn!("towers: the save on close failed: {error}"),
+            },
         }
     }
 
@@ -1215,6 +1256,10 @@ impl HostedGame for Towers {
         }
     }
 
+    fn exiting(&mut self, exit: ExitReason) {
+        self.save_on_close(exit);
+    }
+
     fn summary(&self, run: RunSummary) -> Summary {
         Summary {
             run,
@@ -1701,7 +1746,7 @@ mod tests {
     /// A LAN host on loopback with a player of its own, and where a joiner
     /// reaches it.
     #[cfg(not(target_arch = "wasm32"))]
-    fn loopback_host() -> (Game, std::net::SocketAddr) {
+    pub(super) fn loopback_host() -> (Game, std::net::SocketAddr) {
         loopback_host_on(&crate::map::Map::built_in())
     }
 
@@ -1721,7 +1766,7 @@ mod tests {
 
     /// Where `engine`'s game is a client of, if it is one.
     #[cfg(not(target_arch = "wasm32"))]
-    fn joined(engine: &Loop<HeadlessShell>) -> Option<std::net::SocketAddr> {
+    pub(super) fn joined(engine: &Loop<HeadlessShell>) -> Option<std::net::SocketAddr> {
         engine
             .game()
             .game()

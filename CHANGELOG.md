@@ -629,24 +629,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   of a run still being played — `S` in the window or the page, and an autosave
   at each wave's end, the first tick its last creep is out — and refused while a
   wave is coming in or once the run is over, said on the page
-  (`NOT SAVED: A WAVE IS COMING IN`). It holds the map's fingerprint
-  (`Map::fingerprint`, a SHA-256 over its wire encoding), the run counter, the
-  clock, gold, lives, kills, leaks, shots, the towers with kind, tier, plot and
-  reload, and the creeps, bolts and bursts still on the field, in
-  `crcbl-store`'s save container under a versioned `TWRS` payload
-  (`crcbl_towers::save`: `Checkpoint`, `Vault`, `decode`, `SaveError`), and a
-  resumed stage hashes as the one that saved and plays on alike tick for tick. A
-  native run resumes from the lobby's new _Continue_ row or `--resume` (solo,
-  `--host` or `--serve`, each refusing to start without a save; not with
-  `--join`, `--browse`, `--record` or `--headless`); the browser opens on its
-  saved run in OPFS. A dedicated server keeps its own file and takes `save` and
-  `load` at its console; a loaded run waits for players, and a recorded session
-  refuses `load`. A save of another map or payload version, a corrupt or
-  truncated file, or a value no run between waves could hold is refused by name.
-  `Game` gains `checkpoint`, `restore` and `wave_end`, and `GameError` gains
-  `Resume`. To make a resumed run the same run, a splash burst now wounds in the
-  field's order and a tower picks between creeps level on the lane by their
-  place in it, rather than in the order the physics world answers in.
+  (`NOT SAVED: A WAVE IS COMING IN`). Closing the window or the page, or the
+  debug console's `quit`, saves the run too when a save can hold it, solo or
+  hosting (a dedicated server's `quit` does not: its `save` is one word away); a
+  close mid-wave, in the lobby or as a joiner keeps the last save and logs why,
+  a run stopped by its frame budget writes nothing, and a failed write is logged
+  without holding the close. It holds the map's fingerprint (`Map::fingerprint`,
+  a SHA-256 over its wire encoding), the run counter, the clock, gold, lives,
+  kills, leaks, shots, the towers with kind, tier, plot and reload, and the
+  creeps, bolts and bursts still on the field, in `crcbl-store`'s save container
+  under a versioned `TWRS` payload (`crcbl_towers::save`: `Checkpoint`, `Vault`,
+  `decode`, `SaveError`), and a resumed stage hashes as the one that saved and
+  plays on alike tick for tick. A native run resumes from the lobby's new
+  _Continue_ row or `--resume` (solo, `--host` or `--serve`, each refusing to
+  start without a save; not with `--join`, `--browse`, `--record` or
+  `--headless`); the browser opens on its saved run in OPFS. A dedicated server
+  keeps its own file and takes `save` and `load` at its console; a loaded run
+  waits for players, and a recorded session refuses `load`. A save of another
+  map or payload version, a corrupt or truncated file, or a value no run between
+  waves could hold is refused by name. `Game` gains `checkpoint`, `restore` and
+  `wave_end`, and `GameError` gains `Resume`. To make a resumed run the same
+  run, a splash burst now wounds in the field's order and a tower picks between
+  creeps level on the lane by their place in it, rather than in the order the
+  physics world answers in.
+- **`HostedGame::exiting`**: a game's last word on the way out. `Loop::finish`
+  calls it once, with the run's `ExitReason`, before the summary and before the
+  GPU and the window are released — on every way a run ends, a browser page's
+  `pagehide` included, ahead of the storage drain. The default does nothing;
+  towers saves its run there.
 - **`crcbl_store::save::SaveBacking`**: where a game's saves live — the data
   directory natively, the installed OPFS store in a browser, or nowhere for a
   headless run — with `platform`, `source` and `label`. `apps/shard` wrote this
