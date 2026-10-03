@@ -4732,7 +4732,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   changes:** an oblique approach now stops a skin off the surface it meets
   instead of a skin back along the move, so `SlideContact::applied` for one is
   `direction * (along - skin_width / closing)` as its docs now give; a head-on
-  approach is unchanged.
+  approach is unchanged. A back-off too short to count as a move is not made: a
+  character resting a skin off something it keeps walking into — another
+  character's capsule, whose sweep time is not exact either — met it about 1e-15
+  nearer than the skin each tick and was moved an ulp along the normal, so a
+  game holding a key into another character saw its feet change while it stood
+  still. It now stays exactly where it is, and `SlideContact::applied` is zero
+  for that contact.
 
 - Sphere and capsule sweeps against boxes retain contact times for tiny nonzero
   motion instead of treating it as stationary. Stationary sphere/box overlap

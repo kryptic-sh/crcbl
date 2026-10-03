@@ -21,20 +21,24 @@ on shard on 2026-09-27.
 
 ## EW integration follow-ups
 
-- **Stationary character rounding regression in EW at `1d24972a`.** The game
-  update is saved on EW branch `wip/crcbl-1d249-integration`. Run
-  `cargo test stationary_leg_treatment_keeps_depletion_and_recovery_chronological --bin ew`
-  there on Windows. `src/game_nutrition_tests.rs` first moves the player on a
-  flat box floor, then blocks movement for leg treatment and advances nutrition
-  in coarse and split ticks. Its exact feet assertion changes from
-  `DVec3(0.0, 0.010000000000000009, -3.390000000000001)` before treatment to
-  `DVec3(0.0, 0.010000000000000009, -3.39)` afterward. The test passed with EW's
-  previous `2487f57b` engine pin and fails both alone and in the updated full
-  suite. Investigate the source of the horizontal change in stationary movement;
-  the responsible engine operation has not been isolated. Do not weaken EW's
-  assertion without the requested decision about tolerance versus exact
-  stationarity. The ordered-slide-contact and all-candidate-sweep integrations
-  pass EW's controller tests; this separate regression prevents merging the pin.
+- **Decided 2026-10-03: exact stationarity, not a tolerance**, for EW's
+  stationary-drift report against `1d24972a`
+  (`stationary_leg_treatment_keeps_depletion_and_recovery_chronological`). A
+  character asked to go where it cannot stays bit for bit where it is, so EW's
+  exact feet assertion stands and the engine changed. The cause, isolated by
+  running EW's test against the engine with the slide instrumented: the game
+  still asks for `(0, 0, -6)` during treatment, into another character's capsule
+  standing at `z = -4`; the capsule-against-capsule sweep's time is not exact,
+  so each tick met it about 1e-15 nearer than the skin width, and the back-off
+  every hit nearer than the skin now gets
+  (`fix(phys): back off every slide hit nearer than the skin`) moved the capsule
+  that 1e-15 — an ulp — along the normal. The slide now skips a back-off too
+  short to count as a move (`MIN_MOVE`); the turned-box hover it was added for
+  backs off by nearly a skin width and is unchanged. Held by
+  `character::rest_tests` (EW's geometry: red with the guard removed, at exactly
+  EW's `-3.390000000000001` to `-3.39`); EW's test passes against the fix. EW
+  also has to add `secondary_pressed: false` to its `PointerInput` literals at
+  the next pin (context menus).
 
 **Decided 2026-10-01: both API requests are accepted, in the engine, in this
 order** — the slide contacts first (EW's forecasting repeats whole

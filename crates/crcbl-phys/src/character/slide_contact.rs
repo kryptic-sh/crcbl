@@ -58,7 +58,10 @@ use crate::world::ColliderId;
 /// normal: `applied = direction * (along - skin_width / closing)`. One that
 /// touched from no further — [`started_inside`](Self::started_inside), or
 /// already that near — backs off along the normal instead:
-/// `applied = normal * (skin_width - max(along * closing, 0))`. A grounded
+/// `applied = normal * (skin_width - max(along * closing, 0))`, or not at all
+/// (`applied` zero) when that back-off is too short to count as a move, so a
+/// capsule already a skin width off the surface, to within rounding, stays
+/// exactly where it is. A grounded
 /// lying body measures both against a wall's normal made level, the plane its
 /// slide clips against, rather than the leaning one recorded here. The next
 /// contact's `requested` is this one's `remaining`, exactly.

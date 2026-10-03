@@ -820,11 +820,18 @@ impl CharacterController {
                 // mid-air on it. A capsule set down exactly on the floor
                 // arrives here too, started inside, and must still be able to
                 // walk. Back off along the normal to the gap every other
-                // sweep keeps.
+                // sweep keeps — unless the gap already is that, to within
+                // rounding: a character resting a skin off a wall it keeps
+                // walking into meets it here every tick, and a back-off of
+                // rounding size moved it an ulp along the normal each time
+                // it was asked to stand still.
                 let approach = (along * -direction.dot(plane)).max(0.0);
-                let back_off = plane * (self.config.skin_width - approach);
-                self.position += back_off;
-                contact.applied = back_off;
+                let short = self.config.skin_width - approach;
+                if short > MIN_MOVE {
+                    let back_off = plane * short;
+                    self.position += back_off;
+                    contact.applied = back_off;
+                }
             }
 
             if self.is_ceiling(hit.normal) {
@@ -1992,3 +1999,7 @@ mod slide_contact_tests;
 #[cfg(test)]
 #[path = "character/crease_tests.rs"]
 mod crease_tests;
+
+#[cfg(test)]
+#[path = "character/rest_tests.rs"]
+mod rest_tests;
