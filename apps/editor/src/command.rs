@@ -355,6 +355,13 @@ pub fn set_variant(
 /// arrives, which truncates the entries above it — the ordinary editor rule,
 /// and the reason a redo survives an undo but not an edit.
 ///
+/// **A gesture's first write holds the entries it truncates aside** rather
+/// than dropping them (decided 2026-10-03), and puts them back if the
+/// gesture's entry goes because it nets to nothing: a drag back to where it
+/// began changed nothing, so the redo it would have replaced is still the
+/// future. The next entry pushed drops them for good: only the entry on top,
+/// still open to its gesture, can go.
+///
 /// It is also the whole of the dirty marker: [`crate::Document`] remembers the
 /// position it last saved at, so undoing back to it is clean again. A flag
 /// would say "dirty" forever.
@@ -370,13 +377,18 @@ pub fn set_variant(
 /// — the earliest inverse — and the value its newest write left, so its undo
 /// puts back every leaf the gesture touched and its redo applies where each
 /// ended. A leaf that ends bit for bit where it began drops out, and an entry
-/// left with no leaf goes, so a drag back to its start records nothing.
+/// left with no leaf goes, so a drag back to its start records nothing and
+/// keeps the redo above it.
 /// [`seal`](Self::seal) closes the entry on top to further folding, which a
 /// save does so that a drag carried on past it is dirty again.
 #[derive(Debug, Default)]
 pub struct UndoLog {
     entries: Vec<Entry>,
     position: usize,
+    /// The entries the open gesture entry on top truncated when it was
+    /// pushed, put back if that entry nets to nothing — see [`UndoLog`]'s
+    /// _Position_. Replaced by every push.
+    held: Vec<Entry>,
 }
 
 /// One applied command and the command that puts it back.
@@ -434,6 +446,7 @@ impl UndoLog {
                 None => {
                     self.entries.pop();
                     self.position = self.entries.len();
+                    self.entries.append(&mut self.held);
                 }
             }
             return;
@@ -453,7 +466,12 @@ impl UndoLog {
     }
 
     fn push(&mut self, done: EditCommand, undo: EditCommand, gesture: Option<Gesture>) {
-        self.entries.truncate(self.position);
+        let truncated = self.entries.split_off(self.position);
+        self.held = if gesture.is_some() {
+            truncated
+        } else {
+            Vec::new()
+        };
         self.entries.push(Entry {
             done,
             undo,
@@ -995,6 +1013,81 @@ mod tests {
         write(&mut log, "position.1", brick().position[1]);
         assert!(log.is_empty(), "a gesture back at its start left an entry");
         assert_eq!(log.position(), 0);
+    }
+
+    /// Three entries, each a write to `position.0`, and two of them undone:
+    /// the brick at the first write's 1.0 with the 2.0 and the 3.0 to redo.
+    fn two_to_redo(value: &mut Brick) -> UndoLog {
+        let mut log = UndoLog::new();
+        for to in [1.0, 2.0, 3.0] {
+            let command = set("position.0", Value::Float(to));
+            let undo = command.apply(value).expect("a brick has an x");
+            log.record(command, undo);
+        }
+        for _ in 0..2 {
+            log.undo()
+                .expect("three entries")
+                .apply(value)
+                .expect("a brick has an x");
+        }
+        assert_eq!((log.position(), log.len()), (1, 3));
+        log
+    }
+
+    /// **A gesture back to its start keeps the redo above it, exact** —
+    /// decided 2026-10-03. The drag goes to 7.0 and two leaves move before
+    /// both come back to the bits they began at; the log stands where it did,
+    /// and both redos are still there and land on 2.0 and then 3.0.
+    #[test]
+    fn a_gesture_back_to_its_start_keeps_the_redo_above_it() {
+        let mut value = brick();
+        let mut log = two_to_redo(&mut value);
+        let before = value.position;
+        for (path, to) in [
+            ("position.0", 7.0),
+            ("position.1", 9.0),
+            ("position.0", before[0]),
+            ("position.1", before[1]),
+        ] {
+            let command = set(path, Value::Float(to));
+            let undo = command.apply(&mut value).expect("a brick has that leaf");
+            log.record_in(command, undo, Gesture(4));
+        }
+        assert_eq!(
+            (log.position(), log.len()),
+            (1, 3),
+            "the drag back to its start moved the log or lost the redo"
+        );
+        for expected in [2.0_f64, 3.0] {
+            log.redo()
+                .expect("a redo the drag kept")
+                .apply(&mut value)
+                .expect("a brick has an x");
+            assert_eq!(value.position[0].to_bits(), expected.to_bits());
+        }
+        assert!(log.redo().is_none());
+    }
+
+    /// **A gesture that changes something still drops the redo**, even one
+    /// that came back to its start part-way and then moved on: what it
+    /// replaced is the old future, and the log ends on the drag.
+    #[test]
+    fn a_gesture_that_changes_something_still_drops_the_redo() {
+        let mut value = brick();
+        let mut log = two_to_redo(&mut value);
+        let start = value.position[0];
+        for to in [7.0, start, 8.0] {
+            let command = set("position.0", Value::Float(to));
+            let undo = command.apply(&mut value).expect("a brick has an x");
+            log.record_in(command, undo, Gesture(4));
+        }
+        assert_eq!((log.position(), log.len()), (2, 2));
+        assert!(log.redo().is_none(), "a redo outlived the drag");
+        log.undo()
+            .expect("the drag")
+            .apply(&mut value)
+            .expect("a brick has an x");
+        assert_eq!(value.position[0].to_bits(), start.to_bits());
     }
 
     /// **A gesture's writes to one path of two systems' components are two

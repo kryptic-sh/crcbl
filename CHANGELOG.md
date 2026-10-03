@@ -5133,8 +5133,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   different leaves — the inspector skipping a leaf left unchanged for a frame, a
   handle writing another axis part-way — used to split into several undos; it is
   now one that puts every leaf back. A drag that ends where it began records
-  nothing. "Bit for bit" is the new `crcbl::reflect::Value::identical`, which
-  `crcbl_ui`'s inspector now uses to decide whether a write changed a leaf.
+  nothing and keeps the redo above it: its first write holds the entries it
+  would replace aside, and puts them back when its entry nets to nothing. "Bit
+  for bit" is the new `crcbl::reflect::Value::identical`, which `crcbl_ui`'s
+  inspector now uses to decide whether a write changed a leaf.
 
 - **A turned body's sphere and capsule offsets, and its capsule itself, turn
   with it in `crcbl_phys::PhysicsSystem`'s query world**, as its box already did

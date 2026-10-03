@@ -13,7 +13,8 @@
 //! - a refused step changed nothing and recorded nothing;
 //! - an accepted step recorded exactly one entry, dropping any redo above it —
 //!   a drag included, whatever leaves its frames named, or none for a drag
-//!   that ended where it began, whose state must then be the one before it;
+//!   that ended where it began, whose state must then be the one before it
+//!   and whose redo above it must still be there, as deep and as exact;
 //! - an undo or a redo landed on exactly the state recorded at the position
 //!   it moved to;
 //! - the selection names only entities the document holds, and the document
@@ -50,7 +51,7 @@ use play::{Outcome, Reached};
 use state::State;
 
 /// How many histories a run plays, each a fresh document.
-const CASES: u32 = 256;
+const CASES: u32 = 512;
 
 /// The longest history generated, undos and redos included.
 const MAX_STEPS: usize = 40;
@@ -75,10 +76,11 @@ struct Tally {
 
 /// The facts [`Tally::reached`] must hold — each a shape of edit whose undo
 /// has its own way to go wrong.
-const MUST_REACH: [&str; 14] = [
+const MUST_REACH: [&str; 15] = [
     "a gesture of several writes",
     "a drag whose leaves change part-way",
     "a gesture that ended where it began",
+    "a gesture back to its start under redo",
     "a nudge of two entities",
     "a switch to another variant",
     "a drag of two entities",
@@ -130,14 +132,24 @@ fn walk(steps: &[Op], tally: &RefCell<Tally>) -> TestCaseResult {
         // A gesture's leaves that end where they began drop out of its entry,
         // and an entry left with none goes (`UndoLog::record_in`), so a drag
         // back to its start is accepted and records nothing — which `check`
-        // then holds to the state it started from. Its first write dropped
-        // any redo above the log, as every recorded edit does.
+        // then holds to the state it started from. The redo above the log
+        // stays: its first write held it aside and the entry's going put it
+        // back, so the model keeps every state above, which `check` holds to
+        // the log's length and the walk up at the end to each state.
         let gesture = matches!(op, Op::Drag { .. } | Op::FieldDrag { .. });
         if gesture && outcome == Outcome::Recorded && document.log().position() == history.position
         {
             outcome = Outcome::Unchanged;
             reached.push("a gesture that ended where it began");
-            history.states.truncate(history.position + 1);
+            if history.position < top {
+                reached.push("a gesture back to its start under redo");
+            }
+            prop_assert_eq!(
+                document.log().len() - document.log().position(),
+                top - history.position,
+                "step {}: a drag back to its start changed the redo's depth",
+                index
+            );
         }
         let mut tally = tally.borrow_mut();
         *tally

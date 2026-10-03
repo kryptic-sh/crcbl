@@ -1247,11 +1247,12 @@ is a `proptest` property over random histories of every edit, replacing
   a new variant does not compile until it is named, and naming it fails the run
   until a step records it), every kind of step was accepted, each shape of edit
   in `MUST_REACH` happened (two-entity edits, a gesture folding writes, a drag
-  whose leaves change part-way, a drag that ends where it began, listing drops
-  and attaches, an unlisting from the manifest's middle, a name, an edit
-  dropping redo, a refusal with redo above it), something was refused, and at
-  least `LEAST_ACCEPTED_PERCENT` of the edits played were accepted. A run is
-  `CASES` histories of up to `MAX_STEPS` steps.
+  whose leaves change part-way, a drag that ends where it began — once with redo
+  above it, whose depth it must leave alone — listing drops and attaches, an
+  unlisting from the manifest's middle, a name, an edit dropping redo, a refusal
+  with redo above it), something was refused, and at least
+  `LEAST_ACCEPTED_PERCENT` of the edits played were accepted. A run is `CASES`
+  histories of up to `MAX_STEPS` steps.
 - **What "state" is** (`undo_property_tests::state::State`): `Document::files` —
   the manifest in order, `names.ron`, every listed chunk, byte-identical for
   equal scenes — plus, per id, every registered system's row (listed or not) and
@@ -1304,6 +1305,23 @@ is a `proptest` property over random histories of every edit, replacing
   `command::tests::a_drag_whose_frames_report_different_leaves_is_one_undo_restoring_all`
   is the regression. Keeping the newest inverse instead of the earliest, and
   dropping a leaf only early frames wrote, each turned both red.
+- **Decided 2026-10-03, for the long term: a drag back to its start keeps the
+  redo above it.** `UndoLog::push` holds the entries a gesture's first write
+  truncates (`UndoLog::held`) instead of dropping them, and `record_in` appends
+  them again when the gesture's entry goes for netting to nothing; the next push
+  replaces them, since only the open entry on top can go. Chosen over holding
+  the gesture's first write aside until it ends — the log has no gesture-end
+  event, and the entry on top would be missing while the drag runs. The property
+  test asserts a net-nothing drag leaves the redo's depth alone and keeps every
+  state above in its model, which the walk up at the end holds exactly;
+  `MUST_REACH` gained "a gesture back to its start under redo", and `CASES` went
+  from 256 to 512 so that shape is reached 14 to 18 times a run (5 to 12 at 256,
+  measured over five runs each).
+  `command::tests::a_gesture_back_to_its_start_keeps_the_redo_above_it` and
+  `a_gesture_that_changes_something_still_drops_the_redo` are the unit tests;
+  removing the restore turned the first and the property test red (its shrunk
+  case — delete, undo, a drag of offset zero — is committed in
+  `proptest-regressions/`), and not truncating at all turned the second.
 
 **Switching a body's kind in the inspector landed 2026-10-03**, closing the item
 slice 12 left (a `kind` shown and edited only in the file).

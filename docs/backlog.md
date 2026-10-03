@@ -12242,12 +12242,20 @@ says what that cleared and what it did not. The allow-list entry in
     a frame, an inspector row skipping an unchanged leaf — split into several
     undos, each exact but none the gesture. The property test's drag step now
     writes a second leaf part-way, with or without the first, and offsets that
-    end the drag where it began.
-  - **A drag back to where it began still drops the redo above the log.** Its
-    first write is recorded like any edit, truncating the redo; the entry goes
-    once its leaves net to nothing, but the truncated redo does not come back.
-    Keeping it would need the log to hold a gesture's first write aside until
-    the gesture ends. Not built; the property test models it as it is.
+    end the drag where it began. **Decided 2026-10-03, too: such a drag keeps
+    the redo above it** — the entries its first write truncated are held
+    (`UndoLog::held`) and put back when its entry goes; `08-editor.md` has why
+    that form and not holding the first write aside.
+  - **An edit that replaces the saved entry reads clean** (found 2026-10-03,
+    confirmed by a scratch test, not fixed): save at position 2, undo to 1,
+    apply any other edit — the log is at 2 again, `Document::is_dirty` compares
+    positions only, and the title loses its `*` while the scene differs from the
+    file. Any truncation past `saved_at` does it, a gesture's first write
+    included. A fix sets `saved_at` to `None` (dirty until saved) when a push
+    truncates the entry it names; `UndoLog` would have to report that, or
+    `Document` compare `saved_at` with the position before recording. The
+    property test has no save step, so it cannot see this. Out of scope for the
+    redo fix that found it; a decision only on where the check lives.
   - **A drag pressed on the frame straight after another's release ends where it
     began**, observed 2026-10-03 in
     `panel::tests::an_inspector_drag_over_many_frames_is_one_undo`'s headless
@@ -12268,10 +12276,12 @@ says what that cleared and what it did not. The allow-list entry in
     collider, and `IdMap::next_id`.
   - **The seed is random per run**, as proptest's default, so the run-level
     checks (every command, every step accepted, every `MUST_REACH` shape) are
-    statistical. Measured 2026-10-03 at `CASES` histories: the rarest shape, an
-    unlisting from the manifest's middle, was reached 30 to 44 times a run over
-    several runs, so a run missing it is not a practical risk; raise `CASES`
-    before loosening a check if one ever does.
+    statistical. Measured 2026-10-03 at 256 histories: an unlisting from the
+    manifest's middle was reached 30 to 44 times a run. Since the redo fix the
+    rarest shape is a gesture back to its start under redo: 5 to 12 times a run
+    at 256, so `CASES` went to 512, where five runs reached it 14 to 18 times
+    (and the unlisting 53 to 65) — a run missing it is not a practical risk.
+    Raise `CASES` again before loosening a check if one ever does.
   - **A shrunk history keeps large `Index` draws** where a smaller one would
     pass, so a counterexample can read `Index(3689348814741910324)`; it resolves
     modulo the candidates at that step.
