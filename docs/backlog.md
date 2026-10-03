@@ -12694,17 +12694,17 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     reads) and reading it back in `Document::open_recovery` would restore the
     asset root, and could offer the old directory as the save-as line's text.
     Not asked for; deferred.
-  - **An opened copy is left on disk after it is saved elsewhere.** It stays
-    until Delete or pruning removes it, and is offered again at the next start.
-    Removing it on the first clean save of the recovered document is the obvious
-    alternative, not taken because a removal nobody clicked is the thing this
-    work keeps out; needs the user's call.
-  - **Two editors running at once share the recovery directory.** The second
-    one's start-up lists the first one's live autosave slot as a copy, and could
-    prune it if more than `document::KEEP_NEWEST` newer copies existed; deleting
-    it from the bar removes a live session's autosave (that session writes a new
-    one at its next interval). A lock file or a per-process marker in the slot
-    would tell them apart; not built.
+  - **Decided 2026-10-03: a recovered copy is removed once its scene is safely
+    saved elsewhere.** On the first successful save-as of a document opened from
+    a copy, that copy's directory is removed by its computed path (the same
+    `document::remove_copy` the bar's Delete uses), because the work it held now
+    lives in the scene's own directory and offering it again would only invite a
+    stale restore. A failed save-as leaves it. Not built yet.
+  - **Decided 2026-10-03: a live session's autosave is marked as in use.** Each
+    editor writes a marker naming its process beside its autosave slot, and
+    another editor's listing, Delete and pruning skip a slot whose marker names
+    a running process; a marker whose process is gone is treated as an ordinary
+    copy, so a crashed session's autosave is still offered. Not built yet.
   - **The recovery bar is pointer-only.** It binds no key: Escape and Enter are
     the text fields' and the unsaved bar's. Whether the panels' keyboard
     navigation reaches its buttons has not been checked.
