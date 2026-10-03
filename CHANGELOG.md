@@ -5259,6 +5259,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The editor's command model is `crcbl_scene::edit`** (reached as
+  `crcbl::scene::edit`). `EditCommand`, `SystemRow`, `UndoLog`, `Gesture`,
+  `set_property` and `set_variant` moved out of `apps/editor`, beside the scene
+  format they edit, so a tool or a server reaches them without linking the
+  editor; `crcbl_editor::command` re-exports them unchanged. `crcbl-scene` now
+  depends on `crcbl-reflect`, for the `Value` and `Snapshot` a command carries.
+
 - **One drag in the editor is one undo, whatever leaves its frames write.**
   `UndoLog::record_in` merges a gesture's writes: each leaf keeps the value from
   before the gesture first wrote it and the last value written, and a leaf that

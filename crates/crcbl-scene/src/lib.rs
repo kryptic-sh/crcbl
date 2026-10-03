@@ -6,7 +6,8 @@
 //! source format for meshes, skins and animations (`import_gltf`, behind the
 //! default `gltf` feature); and [`scn`], the `.scn/` directory of RON chunk
 //! files, which is the one format the engine owns because it owns the
-//! semantics.
+//! semantics. [`edit`] is that format's edit vocabulary: every change a tool
+//! makes to a scene, as a value, and the log that walks them back.
 //!
 //! # The two halves are separable, and the feature is where
 //!
@@ -60,6 +61,7 @@
 //! the second half of step 3 and belong to the crate that owns the pools.
 
 pub mod cluster_dag;
+pub mod edit;
 #[cfg(feature = "gltf")]
 pub mod gltf_check;
 // Fixtures, not engine surface: `pub` only so a gate in another crate can
