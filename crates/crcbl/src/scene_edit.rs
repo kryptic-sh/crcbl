@@ -68,6 +68,7 @@ mod environment;
 mod field;
 pub mod follow;
 mod history;
+mod lock;
 mod meshes;
 mod naming;
 mod origin;
@@ -83,6 +84,7 @@ pub use environment::Environment;
 pub use field::text_of;
 pub use follow::SceneFollower;
 pub use history::{HISTORY, HistoryError, MAX_HISTORY_BYTES, MAX_HISTORY_ENTRIES};
+pub use lock::{SCENE_LOCK, SceneLock, lock_scene};
 pub use origin::{NEW_SCENE_ENV_RON, UNTITLED, empty_source, open_target, save_target};
 pub use play::{Hit, PlayState};
 pub use recovery::{
@@ -148,6 +150,15 @@ pub struct Document {
     /// may remove. Empty for a document with no origin. See
     /// `scene_edit::ownership`.
     owned: BTreeSet<String>,
+    /// The lock this document holds on [`origin`](Self::origin), while a
+    /// program editing it took one — see `scene_edit::lock`. Only ever on
+    /// the document's own directory: whatever moves the origin lets it go.
+    lock: Option<SceneLock>,
+    /// What [`owned`](Self::owned) held in [`origin`](Self::origin) when the
+    /// document last read or wrote it, as the history's scene digest — what
+    /// a save there checks the directory against. [`None`] for a document
+    /// with no origin. See `scene_edit::lock`.
+    on_disk: Option<[u8; history::DIGEST_BYTES]>,
     /// The scene as it stood when play began, and what is running it — or
     /// [`None`] while editing. See [`Document::play`].
     play: Option<play::Session>,
@@ -398,6 +409,32 @@ pub enum EditError {
     /// written — see [`Document::open_with_history`] and
     /// [`Document::save_with_history`]. Nothing was replayed from it.
     History(HistoryError),
+
+    /// The scene's directory is locked by another program editing it — see
+    /// [`lock_scene`]. Nothing was read or written.
+    Locked {
+        /// The scene directory.
+        dir: PathBuf,
+        /// The holder's line in the lock file — its program and process id —
+        /// where the platform lets a locked file be read.
+        holder: Option<String>,
+    },
+
+    /// The scene's lock would not be taken: the directory is no scene, or
+    /// its lock file would not be made, locked or written — see
+    /// [`lock_scene`].
+    Lock {
+        /// The scene directory.
+        dir: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
+
+    /// A save into the document's own directory found the files it owns
+    /// there changed since it last read or wrote them — by a program that
+    /// took no lock, or a checkout — and wrote nothing. See
+    /// [`Document::accept_changes_on_disk`].
+    ChangedOnDisk(PathBuf),
 }
 
 impl fmt::Display for EditError {
@@ -508,6 +545,26 @@ impl fmt::Display for EditError {
                 "the edit history `{HISTORY}` beside the scene is refused: {error}; remove it to \
                  start a new one"
             ),
+            Self::Locked { dir, holder } => write!(
+                f,
+                "`{}` is being edited by {}, which holds its lock `{SCENE_LOCK}`; close the \
+                 scene there and try again",
+                dir.display(),
+                holder.as_deref().unwrap_or("another program")
+            ),
+            Self::Lock { dir, source } => {
+                write!(
+                    f,
+                    "locking `{}` with `{SCENE_LOCK}`: {source}",
+                    dir.display()
+                )
+            }
+            Self::ChangedOnDisk(dir) => write!(
+                f,
+                "the scene's files in `{}` changed since they were opened or last saved — \
+                 another program or a checkout wrote them — so the save did not overwrite them",
+                dir.display()
+            ),
         }
     }
 }
@@ -571,6 +628,8 @@ impl Document {
             gestures: 0,
             origin: None,
             owned: BTreeSet::new(),
+            lock: None,
+            on_disk: None,
             play: None,
             assets: Box::new(MemorySource::new()),
             asset_root: origin::AssetRoot::Unset,
@@ -607,6 +666,7 @@ impl Document {
         // manifest names, spelled the way the writer spells them.
         document.owned = document.files()?.into_keys().collect();
         document.origin = Some(path);
+        document.record_disk();
         Ok(document)
     }
 
@@ -1276,10 +1336,33 @@ impl Document {
             .origin
             .as_deref()
             .is_some_and(|origin| ownership::same_dir(origin, dir));
-        if !own {
+        if own {
+            self.refuse_changed_on_disk(dir)?;
+        } else {
             ownership::refuse_occupied(&storage, &files)?;
         }
-        for (key, text) in &files {
+        let written = self.write_files(&storage, &files, own);
+        if own {
+            // Whether or not every file landed: what is there now is this
+            // document's writing, and the next save must not take it for
+            // another program's.
+            self.record_disk();
+        }
+        written?;
+        self.log.mark_saved();
+        Ok(files.into_keys().collect())
+    }
+
+    /// Writes `files` through `storage`, and into the document's own
+    /// directory (`own`) takes each as owned and removes the owned files it
+    /// no longer writes — [`write`](Self::write)'s writing half.
+    fn write_files(
+        &mut self,
+        storage: &NativeStorage,
+        files: &BTreeMap<String, String>,
+        own: bool,
+    ) -> Result<(), EditError> {
+        for (key, text) in files {
             storage
                 .write(Path::new(key), text.as_bytes())
                 .map_err(|source| EditError::Write {
@@ -1294,10 +1377,9 @@ impl Document {
             }
         }
         if own {
-            ownership::remove_unwritten(&storage, &mut self.owned, &files)?;
+            ownership::remove_unwritten(storage, &mut self.owned, files)?;
         }
-        self.log.mark_saved();
-        Ok(files.into_keys().collect())
+        Ok(())
     }
 
     /// What the scene as it stands would be refused for, read from its own
@@ -1721,3 +1803,6 @@ mod tests;
 
 #[cfg(test)]
 mod history_tests;
+
+#[cfg(test)]
+mod lock_tests;

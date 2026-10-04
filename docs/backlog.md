@@ -12554,6 +12554,72 @@ module docs of `crcbl::scene_edit::history` carry the reasons.
   build wrote reads the same and an earlier build refuses a switch by its kind.
   The fuzz corpus has a seed for it (`edit-op-variant`).
 
+**Built 2026-10-04: the scene lock, and a scene changed on disk.**
+`crcbl::scene_edit::lock` (`crates/crcbl/src/scene_edit/lock.rs`): `lock_scene`,
+`SceneLock`, `SCENE_LOCK`, the document holding a lock on its own directory
+(`Document::open_locked`, `lock_origin`, `holds_lock_on`, `hand_lock_to`), and a
+save refusing to overwrite its files changed on disk
+(`EditError::ChangedOnDisk`, `Document::accept_changes_on_disk`). The CLI locks
+each edit run (`scene_cmd.rs`'s `lock`, exit `EXIT_LOCKED`); the editor locks
+from open (`app/files.rs`'s module docs) and asks on a changed scene
+(`app/unsaved.rs`'s module docs, `Guarded::Reload`, the bar's
+`Asking::ChangedOnDisk`). Held by `scene_edit::lock`'s and `lock_tests`' own
+tests, `apps/editor/src/app/tests/lock.rs` and the binary's
+`crates/crcbl-cli/tests/scene.rs`.
+
+**Decided, for the long term** (the module docs carry the reasons):
+
+- **A lock file in the scene's own directory, `.crcbl-lock`**, git-ignored, held
+  under an exclusive `File::try_lock` — the recovery autosave's in-use marker's
+  mechanism, so a crashed holder's file is unlocked by the operating system and
+  blocks nobody. Never removed on release (removal races the next locker); never
+  read by the loader or removed by a save.
+- **Refused, never waited on**: the CLI exits 4 (`EXIT_LOCKED`), changing
+  nothing. Waiting would hang a terminal for as long as an editor has the scene
+  open.
+- **The holder is named where the platform reads a held file**: the file holds
+  the holder's program and process id, read on Linux and macOS and put in the
+  refusal (`EditError::Locked`'s `holder`, the CLI's `--json` `"holder"`);
+  Windows refuses a read of a locked file, so there it says "another program".
+  No second, unlocked file to carry the name: not worth a second file.
+- **A second editor is refused, not given a read-only view**: Ctrl+O says so on
+  the status line and keeps the scene being edited; `editor <SCENE_DIR>` does
+  not start. A read-only mode would need every edit path gated and would go
+  stale as the holder saved.
+- **The editor holds the lock from open until it lets the scene go**: a new
+  scene, another scene or recovery copy opened, a save-as moving the document
+  (which then locks the new directory), closing. A document holds a lock only on
+  its own origin, so whatever moves the origin lets the old lock go. Opening the
+  scene the editor already holds reads it again under its own lock and hands the
+  lock to the scene read (`hand_lock_to`).
+- **`list` and `query` take no lock**: they write nothing, and an open editor
+  must not stop a terminal looking at its scene.
+- **Only a scene directory is locked**: one with no `scene.ron` is refused
+  before a file is made, so a mistyped path leaves nothing behind.
+- **A save checks the disk, and the editor asks**: a document records the
+  history's scene digest over its own files as it last read or wrote them, and a
+  save into its directory refuses, writing nothing, once they differ. The
+  editor's Ctrl+S then asks through the unsaved bar — Overwrite (Enter), Reload
+  (D), Cancel (Escape) — whether or not the scene is dirty. Asked rather than
+  refused outright, since a refusal alone leaves no way to keep one's edits in
+  place but a save-as and a copy back.
+- **Recovery copies and the autosave take no lock and meet none**:
+  `write_recovery` writes a directory of its own, so the autosave runs while the
+  editor holds its scene.
+
+**Changed with it**: the umbrella's ownership tests in
+`apps/editor/src/document/save_tests.rs` that change the document's own files by
+hand (an obstacle where a chunk goes, a chunk deleted) now call
+`accept_changes_on_disk` first, since such a hand edit is a change on disk; the
+editor's play tests open a copy of towers' field (`app::tests::towers_field`)
+rather than the committed directory, which an editor now locks.
+
+**Considered and declined**: waiting on a held lock (hangs a terminal); removing
+the lock file on release (races the next locker); a process id checked for
+liveness instead of a lock (the standard library cannot ask, and an id is reused
+after a crash); a read-only second editor (above); the CLI's reads taking the
+lock (above); a status-line refusal alone on a changed scene (above).
+
 **Considered and declined**: the editor refusing to open a scene over a refused
 history (it would refuse the scene over a sidecar); deleting or renaming a
 refused history on open (loses a newer build's file for nothing); a save-as
@@ -12581,18 +12647,16 @@ scene's files alone, and the next Save writes it anyway).
   `crcbl scene spawn` → `crcbl screenshot` → `crcbl sim`) still waits on
   `import --out` writing a scene and on `screenshot`/`sim` taking a scene
   directory.
-- **Two runs at once on one scene are not locked against each other**: each
-  reads, applies and saves, so the later save can drop the earlier run's edit,
-  or leave a history bound to the other run's bytes, which the next run then
-  refuses. Neither replays a stale inverse — the binding sees to that — but an
-  edit can be lost. A lock file beside the history would serialise them. **The
-  editor is a third party to that**: it reads the scene and its history once,
-  when it opens them, and does not see a CLI run made while it is open — its
-  next Save writes its own scene and history over the CLI's edit. Nothing stale
-  is replayed (the CLI's run after that reads the editor's history, bound to the
-  editor's bytes), but the CLI's edit is lost. It would take the editor watching
-  the directory (per-chunk hot reload, under _Asset hot reload_) or the same
-  lock.
+- **The editor noticing a change on disk as it happens**: it notices at Save
+  time only. A scene changed behind it (by a program that took no lock, or a
+  checkout) shows the editor's old copy until Ctrl+S asks. Watching would take
+  per-chunk hot reload (_Asset hot reload: two polled watches, and no engine
+  reload path_) and a decision on what a watched change does to unsaved edits.
+- **A save-as onto the scene's own directory over a changed scene** is refused
+  on the status line (`EditError::ChangedOnDisk`, the path line reopened), where
+  Ctrl+S asks; and the unsaved bar's Save meeting the same refusal puts its own
+  question back with the refusal on the status line. Each could ask as Ctrl+S
+  does; neither was asked for.
 
 **Coverage gaps**: run on Windows only in this slice; the verbs were never run
 against breakout's or puppet's scenes, only towers' field and the umbrella's
@@ -12603,7 +12667,14 @@ the binary (the CLI depends on the editor, so the editor's tests cannot run it);
 the unsaved bar's Save writes the history through the same `save_in_place` as
 Ctrl+S but has no test of its own; a variant switch through the history is held
 at the document level (`variant_tests`), not through the inspector's drop-down
-and a CLI run.
+and a CLI run. The lock: run on Windows only (the macOS `flock` side is
+clippy-checked for `aarch64-apple-darwin`, not run; the
+`x86_64-unknown-linux-gnu` clippy does not build here, since `alsa-sys` wants a
+Linux sysroot for pkg-config), so the holder being named is verified only as
+absent; the CLI's half runs the binary against a lock taken in the test process,
+and the editor's against the same call, never two editor processes; a crashed
+holder is simulated by an unlocked file, as the recovery tests simulate one, not
+by killing a process.
 
 ### Scene edits over the transport: the server slice and what it leaves (2026-10-04)
 

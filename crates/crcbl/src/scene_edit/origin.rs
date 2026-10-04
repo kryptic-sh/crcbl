@@ -152,6 +152,8 @@ impl Document {
         self.recorded_origin = None;
         self.origin = None;
         self.owned.clear();
+        self.lock = None;
+        self.on_disk = None;
         // Moved rather than reset: a view that read the old scene at some
         // count must see this one as a change, whatever that count was.
         self.membership += 1;
@@ -205,6 +207,10 @@ impl Document {
         let moved = self.follow_asset_root(&dir);
         self.origin = Some(dir);
         self.recorded_origin = None;
+        // The old directory is no longer the document's, so neither is its
+        // lock; a caller that locks takes the new one (`lock_origin`).
+        self.lock = None;
+        self.record_disk();
         Ok(moved)
     }
 

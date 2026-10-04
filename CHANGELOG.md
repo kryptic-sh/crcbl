@@ -727,6 +727,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
     sample under a section's rows (`DebugGraph`, `GRAPH_HEIGHT`,
     `GRAPH_BAR_WIDTH`, `MIN_BAR_HEIGHT`), in `DebugStyle::graph`'s colour.
 
+- **The editor and `crcbl scene` lock a scene directory while they edit it.**
+  The editor holds a lock file beside the scene, `DIR/.crcbl-lock`
+  (`crcbl::scene_edit::SCENE_LOCK`, git-ignored), from opening the scene until
+  it lets it go — a new scene, another scene opened, a save-as (which locks the
+  new directory) or closing — and every `crcbl scene` edit and `crcbl edit` run
+  holds it for the run. A scene another program holds is refused rather than
+  waited on: the CLI exits 4 and changes nothing, naming the holder's program
+  and process where the system lets a held lock file be read (Linux, macOS; not
+  Windows); a second editor's Ctrl+O is refused on the status line, and
+  `editor <SCENE_DIR>` on a held scene does not start. `crcbl scene list` and
+  `query` take no lock. A crashed holder's lock is released by the operating
+  system, so the file it leaves blocks nobody. Before this, a CLI edit made
+  while the editor had the scene open was lost under the editor's next save. New
+  for it: `crcbl::scene_edit::lock_scene`, `SceneLock`, `Document::open_locked`,
+  `Document::lock_origin`, `Document::holds_lock_on`, `Document::hand_lock_to`,
+  and `EditError::Locked` and `EditError::Lock`.
+
+- **The editor's Save asks before overwriting a scene changed on disk.** A
+  document remembers what its own files in its directory held when it last read
+  or wrote them, and a save there refuses, writing nothing, once they differ —
+  an older build, a text editor or a checkout wrote them without the lock
+  (`EditError::ChangedOnDisk`). Ctrl+S then puts the unsaved bar up with
+  Overwrite (Enter), Reload (D) and Cancel (Escape): Overwrite writes the
+  editor's scene over them (`Document::accept_changes_on_disk`), Reload reads
+  the scene back from disk and drops the edits. A `crcbl scene` run meets the
+  same refusal and exits 1.
+
 - **The editor shares the CLI's undo history.** Opening a scene directory —
   `editor <SCENE_DIR>` or Ctrl+O — reads the `.crcbl-history` beside it, so
   Ctrl+Z walks back what `crcbl scene` did, and Save (Ctrl+S, or the unsaved

@@ -56,11 +56,21 @@ THE HISTORY:
     refused (exit 3) rather than replayed, and removing the file starts a new
     one. It keeps the newest 64 entries.
 
+THE LOCK:
+    An edit locks the scene for the length of the run, through a file beside
+    it, `DIR/.crcbl-lock`, as the editor does for as long as it has the scene
+    open. A scene another program holds is refused (exit 4), naming the holder
+    where the system lets its lock file be read, and nothing is changed: close
+    the scene there and run again. A crashed holder's lock is released by the
+    system, so the file left behind blocks nobody. `list` and `query` change
+    nothing and take no lock, so they read a scene an editor has open.
+
 EXIT CODES:
     0   done
     1   the scene would not open or save
     2   the invocation was malformed
     3   the history beside the scene is damaged or was written for other files
+    4   another program, the editor or another run, holds the scene's lock
     13  the scene is not editable now
     14  no such entity              15  no such system
     16  no such field               17  a value its field refuses
@@ -84,6 +94,8 @@ JSON:
              \"history\": {\"position\", \"length\"}
     refused  \"ok\":false, \"verb\", \"error\": the sentence, \"refusal\": the
              protocol's code and \"reason\": its name
+    locked   \"ok\":false, \"verb\", \"error\", \"dir\", and \"holder\": the
+             lock file's line where it could be read
 
 OPTIONS:
         --json    Emit one JSON object instead of human output.
@@ -109,6 +121,10 @@ does.
 Every command is its own entry in the scene's history. The scene is saved once,
 after the last; if one is refused nothing is saved, and the exit code is that
 refusal's — `crcbl scene --help` lists them.
+
+The scene is locked for the whole run, so a scene the editor or another run
+holds is refused with exit 4 before anything is applied; `crcbl scene --help`
+says how under THE LOCK.
 
 JSON:
     \"applied\": how many edits, and \"history\": {\"position\", \"length\"}; refused,
@@ -586,8 +602,9 @@ mod tests {
         assert!(refused(edit(&["-e", "undo"])).contains("scene directory"));
     }
 
-    /// **The help's numbers are the code's**: the history's bound, and the
-    /// exit code of every refusal the edit protocol names.
+    /// **The help's numbers are the code's**: the history's bound, the lock
+    /// file's name, and the exit code of every refusal the edit protocol
+    /// names and of a history refused and a scene locked.
     #[test]
     fn the_help_states_the_codes_and_the_bound_the_code_uses() {
         let bound = crcbl::scene_edit::MAX_HISTORY_ENTRIES;
@@ -607,6 +624,15 @@ mod tests {
                 "the help does not list exit {exit} for {reason}"
             );
         }
-        assert!(SCENE_USAGE.contains(&format!("    {}   ", crate::report::EXIT_HISTORY)));
+        for exit in [crate::report::EXIT_HISTORY, crate::report::EXIT_LOCKED] {
+            assert!(
+                SCENE_USAGE.contains(&format!("    {exit}   ")),
+                "the help does not list exit {exit}"
+            );
+        }
+        assert!(
+            SCENE_USAGE.contains(&format!("`DIR/{}`", crcbl::scene_edit::SCENE_LOCK)),
+            "the help names another lock file"
+        );
     }
 }

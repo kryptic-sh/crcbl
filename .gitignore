@@ -24,6 +24,10 @@
 # working copy, and meaningless to anyone else's.
 .crcbl-history
 
+# The lock a program editing a scene holds on it (`crcbl::scene_edit::lock`):
+# the holder's process id, meaningless once that process ends.
+.crcbl-lock
+
 # Steamworks (`crates/crcbl-steam`; rules in `docs/notes/backends.md`). The SDK's
 # licence
 # forbids publishing it, so an unzipped SDK dropped into the checkout must not

@@ -127,6 +127,10 @@ fn a_directory_where_an_owned_chunk_was_is_left_alone() {
     std::fs::write(&inside, "mine").expect("a writable directory");
 
     unlist_sun(&mut document);
+    // A hand edit of the document's own files is a change on disk, which a
+    // save refuses to overwrite until it is accepted; what is held here is
+    // what the save that does overwrite does.
+    document.accept_changes_on_disk();
     document.save().expect("its own directory is writable");
     assert_eq!(
         std::fs::read_to_string(&inside).expect("the directory survives"),
@@ -155,6 +159,10 @@ fn a_failed_save_keeps_the_old_chunks_and_the_next_save_removes_them() {
     let obstacle = blocks.join("obstacle.txt");
     std::fs::write(&obstacle, "in the way").expect("a writable directory");
 
+    // A hand edit of the document's own files is a change on disk, which a
+    // save refuses to overwrite until it is accepted; what is held here is
+    // what the save that does overwrite does.
+    document.accept_changes_on_disk();
     let error = document.save().expect_err("a directory is in the way");
     assert!(
         matches!(&error, EditError::Write { key, .. } if key == "sys/blocks.ron"),
@@ -187,6 +195,10 @@ fn a_chunk_a_failed_save_wrote_is_still_owned() {
     std::fs::create_dir(&sun).expect("a writable directory");
     let obstacle = sun.join("obstacle.txt");
     std::fs::write(&obstacle, "in the way").expect("a writable directory");
+    // A hand edit of the document's own files is a change on disk, which a
+    // save refuses to overwrite until it is accepted; what is held here is
+    // what the save that does overwrite does.
+    document.accept_changes_on_disk();
     let error = document.save().expect_err("a directory is in the way");
     assert!(
         matches!(&error, EditError::Write { key, .. } if key == SUN_CHUNK),
@@ -211,6 +223,10 @@ fn a_chunk_already_gone_does_not_fail_the_save() {
     let (dir, mut document) = on_disk();
     unlist_sun(&mut document);
     std::fs::remove_file(dir.path().join(SUN_CHUNK)).expect("the save wrote it");
+    // A hand edit of the document's own files is a change on disk, which a
+    // save refuses to overwrite until it is accepted; what is held here is
+    // what the save that does overwrite does.
+    document.accept_changes_on_disk();
     document.save().expect("nothing is left to remove");
     assert!(!document.is_dirty());
 }

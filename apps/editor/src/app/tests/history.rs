@@ -11,7 +11,6 @@
 use super::*;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use crate::document::origin_tests::tree;
 use crate::document::{HISTORY, HistoryError};
@@ -26,18 +25,6 @@ const PLOTS: &str = "plots";
 
 /// Where `crcbl scene move` puts the plot here, as typed on its command line.
 const MOVED_TO: [&str; 3] = ["11.5", "0.0", "-2.25"];
-
-/// A copy of towers' committed field in a fresh directory under `base`.
-fn towers_field(base: &Path) -> PathBuf {
-    let committed = Path::new(env!("CARGO_MANIFEST_DIR")).join("../towers/assets/scenes/field.scn");
-    let dir = base.join("field.scn");
-    for (key, bytes) in tree(&committed) {
-        let path = dir.join(&key);
-        std::fs::create_dir_all(path.parent().expect("under the copy")).expect("writable");
-        std::fs::write(path, bytes).expect("writable");
-    }
-    dir
-}
 
 /// The scene's own files in `dir`, byte for byte — every file but the
 /// history.

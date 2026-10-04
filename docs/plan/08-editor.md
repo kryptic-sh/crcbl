@@ -1611,9 +1611,21 @@ what is deferred.
   variant switch is in the history too: the wire carries it now. The CLI's half
   runs the binary; the GUI's cannot (the CLI depends on the editor), so it
   drives the shared `Document` calls instead.
+- **The editor and the CLI share a scene directory safely (2026-10-04).** A
+  program editing a scene holds a lock file beside it, `DIR/.crcbl-lock`, under
+  the recovery autosave's `File::lock` mechanism: the editor from open until it
+  lets the scene go, an edit run of `crcbl scene` for the run. A held scene is
+  refused, not waited on — the CLI exits 4 and changes nothing, a second
+  editor's Ctrl+O is refused on the status line and `editor <SCENE_DIR>` does
+  not start — and a crashed holder's file blocks nobody. A Save over files
+  something wrote without the lock asks through the unsaved bar: Overwrite,
+  Reload or Cancel. `crcbl::scene_edit::lock`'s module docs hold the decisions;
+  `apps/editor/src/app/tests/lock.rs` and `crates/crcbl-cli/tests/scene.rs` hold
+  them through the loop and the binary.
 - **What it does not cover**: `crcbl edit --serve`, stdin batches,
   `scene paste -`, and the verbs beyond the eight; a scene of a game this build
-  does not register; two runs at once on one scene.
+  does not register; an open editor seeing a change on disk before its next Save
+  (it notices at save time, not as it happens).
 
 ## Where the tree stands against this design (surveyed 2026-09-15)
 

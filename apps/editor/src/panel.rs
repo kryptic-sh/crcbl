@@ -167,6 +167,7 @@ mod unsaved;
 
 pub use path_line::Purpose;
 pub use recovery::RecoveryAnswer;
+pub use unsaved::Asking;
 
 /// The name the viewport pane's picture goes by in the panels' draw list —
 /// see the module docs. The only texture the editor draws, so the first
@@ -796,9 +797,22 @@ impl Panels {
     /// question; a rename being typed is committed, as a click in the
     /// viewport commits it.
     pub fn begin_unsaved(&mut self, text: String) {
+        self.ask(text, Asking::Unsaved);
+    }
+
+    /// Puts the unsaved bar up saying `text` about a scene changed on disk,
+    /// its buttons Overwrite, Reload and Cancel — otherwise as
+    /// [`begin_unsaved`](Self::begin_unsaved).
+    pub fn begin_changed_on_disk(&mut self, text: String) {
+        self.ask(text, Asking::ChangedOnDisk);
+    }
+
+    /// The body [`begin_unsaved`](Self::begin_unsaved) and
+    /// [`begin_changed_on_disk`](Self::begin_changed_on_disk) share.
+    fn ask(&mut self, text: String, asking: Asking) {
         self.path_line.close();
         self.release_keyboard();
-        self.unsaved.begin(text);
+        self.unsaved.begin(text, asking);
     }
 
     /// Takes the unsaved bar down.
@@ -810,6 +824,12 @@ impl Panels {
     #[must_use]
     pub fn unsaved(&self) -> Option<&str> {
         self.unsaved.text()
+    }
+
+    /// What the unsaved bar asks about, while it is up.
+    #[must_use]
+    pub fn unsaved_asking(&self) -> Option<Asking> {
+        self.unsaved.asking()
     }
 
     /// The unsaved bar's Save, Discard and Cancel buttons, as the last frame

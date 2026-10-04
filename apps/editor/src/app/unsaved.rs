@@ -21,6 +21,29 @@
 //!                                           refused ──▶ the bar again
 //! ```
 //!
+//! # A scene changed on disk (decided 2026-10-04)
+//!
+//! A Save that finds the scene's files changed since the editor read or
+//! wrote them — by a program that took no lock, an older build, a checkout —
+//! does not overwrite them: the document refuses
+//! ([`EditError::ChangedOnDisk`]) and the bar asks, with its buttons named
+//! for this question ([`Guarded::Reload`]):
+//!
+//! ```text
+//!     Save ──changed on disk──▶ the bar ──Overwrite──▶ save over them
+//!                                       ──Reload─────▶ read them back, the
+//!                                                      edits here dropped
+//!                                       ──Cancel─────▶ nothing
+//! ```
+//!
+//! Asked rather than refused with a status line: a refusal alone would leave
+//! the person no way to keep their own edits in place but a save-as
+//! elsewhere and a copy back, and overwriting is often what they mean after
+//! a checkout they know about. Asked whether or not the scene has unsaved
+//! edits, since a clean scene's Save overwrites just the same. A Save on the
+//! unsaved bar meeting the same refusal puts that bar back with the refusal
+//! on the status line, as any refused save does; Ctrl+S then asks.
+//!
 //! An open asks once the directory typed has been read as a scene, so a
 //! directory that is not one is refused before anything is asked, and the
 //! scene being edited is never at stake for a typing slip. A Save while the
@@ -65,6 +88,10 @@ use crate::panel::Tone;
 /// What the status line says while the bar asks.
 const ASK: &str = "Unsaved edits: Enter saves, D discards, Escape cancels";
 
+/// What the status line says while the bar asks about a scene changed on
+/// disk.
+const ASK_CHANGED: &str = "Changed on disk: Enter overwrites, D reloads, Escape cancels";
+
 /// What the status line says once the bar is cancelled.
 const KEPT: &str = "Cancelled: the scene and its unsaved edits are as they were";
 
@@ -77,6 +104,11 @@ pub(super) enum Guarded {
     Open(Box<Document>),
     /// The window closing.
     Close,
+    /// The scene read again from its directory, whose files changed on disk
+    /// since the editor read or wrote them — what the bar's Reload does,
+    /// asked about by a Save that found the change; its Overwrite saves over
+    /// them instead. See the module docs.
+    Reload,
 }
 
 /// Where recovery copies are written: the directory `--recovery` named, or
@@ -122,9 +154,35 @@ impl<S: Shell + ?Sized> Editor<S> {
         Ok(())
     }
 
+    /// Puts the bar up asking whether to overwrite the scene's files, changed
+    /// on disk since the editor read or wrote them, or to read them back —
+    /// see the module docs. Whatever a Save on the bar was waiting on is
+    /// dropped, as [`guard`](Self::guard) drops it.
+    pub(super) fn ask_changed_on_disk(&mut self) {
+        self.after_save = None;
+        self.drag = None;
+        self.dragged = None;
+        let question = self.question(&Guarded::Reload);
+        self.panels.begin_changed_on_disk(question);
+        self.panels.set_status(ASK_CHANGED, Tone::Warning);
+        self.unsaved = Some(Guarded::Reload);
+    }
+
     /// What the bar says about `guarded`: whose edits, and what loses them.
     fn question(&self, guarded: &Guarded) -> String {
         let what = match guarded {
+            Guarded::Reload => {
+                let dir = self
+                    .document
+                    .origin()
+                    .map_or_else(String::new, |dir| format!(" in `{}`", dir.display()));
+                return format!(
+                    "The files of `{}`{dir} changed on disk since this editor read or saved \
+                     them: Overwrite writes this scene over them, Reload reads them back and \
+                     drops the edits here",
+                    self.document.name()
+                );
+            }
             Guarded::New => "to a new scene".to_owned(),
             Guarded::Open(opened) => match opened.origin() {
                 Some(dir) => format!("by opening `{}`", dir.display()),
@@ -161,8 +219,18 @@ impl<S: Shell + ?Sized> Editor<S> {
                 );
                 self.proceed(guarded)
             }
-            Unsaved::Save => self.save_then(guarded),
+            Unsaved::Save => match guarded {
+                Guarded::Reload => self.overwrite(),
+                guarded => self.save_then(guarded),
+            },
         }
+    }
+
+    /// Saves over the scene's files changed on disk, the bar's Overwrite —
+    /// see the module docs.
+    fn overwrite(&mut self) -> Result<(), EditError> {
+        self.document.accept_changes_on_disk();
+        self.save()
     }
 
     /// Saves the document and goes on with `guarded`; or, for a document with
@@ -240,6 +308,17 @@ impl<S: Shell + ?Sized> Editor<S> {
             }
             Guarded::Close => {
                 self.closing = true;
+                Ok(())
+            }
+            Guarded::Reload => {
+                let dir = self
+                    .document
+                    .origin()
+                    .ok_or(EditError::NoOrigin)?
+                    .to_path_buf();
+                let document =
+                    Document::open_with_history_or_fresh(dir, crate::scene::vocabulary())?;
+                self.replace_document(document);
                 Ok(())
             }
         }

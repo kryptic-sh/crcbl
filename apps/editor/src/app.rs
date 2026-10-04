@@ -119,7 +119,9 @@ use crcbl::ui::tree::{DockLayout, SelectMode};
 use crate::args::Options;
 use crate::clipboard::{Paste, PasteTarget};
 use crate::command::EditCommand;
-use crate::document::{Document, EditError, HISTORY, HistoryError, Hit, PlayState, RecoveryCopy};
+use crate::document::{
+    Document, EditError, HISTORY, HistoryError, Hit, PlayState, RecoveryCopy, lock_scene,
+};
 use crate::gizmo;
 use crate::keys::Action;
 use crate::layout;
@@ -1469,10 +1471,15 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// Saves the document with its history beside it, then says what the
     /// games it is made for would refuse in it — reported, not refused: see
     /// [`Document::problems`]. A document with no directory to save back to
-    /// asks for one instead, as save-as does.
+    /// asks for one instead, as save-as does, and one whose files changed on
+    /// disk asks whether to overwrite them (`unsaved`'s module docs).
     fn save(&mut self) -> Result<(), EditError> {
         match self.save_in_place() {
             Err(EditError::NoOrigin) => self.begin_save_as(),
+            Err(EditError::ChangedOnDisk(_)) => {
+                self.ask_changed_on_disk();
+                Ok(())
+            }
             Err(error) => Err(error),
             Ok(unwritten) => self.report_saved("Saved", unwritten.as_ref()),
         }
@@ -2004,19 +2011,20 @@ fn sun() -> DirectionalLight {
     DirectionalLight::default()
 }
 
-/// Opens what the command line named, with the history beside it, or the
-/// compiled-in scene, reading its meshes from the asset root the command line
-/// named, if it named one. A history that is refused is the document's to hand
-/// back ([`history_refusal`]); the scene opens either way.
+/// Opens what the command line named, locked and with the history beside it,
+/// or the compiled-in scene, reading its meshes from the asset root the
+/// command line named, if it named one. A history that is refused is the
+/// document's to hand back ([`history_refusal`]); the scene opens either way.
+/// A scene another program holds is refused, and the editor does not start:
+/// `files`' module docs say why it is not opened read-only.
 ///
 /// Both through [`crate::scene::vocabulary`], which is the components **this**
 /// build knows: a directory whose manifest names a system it does not is refused
 /// by that system's name rather than opened with the chunk missing.
 fn open_document(options: &Options) -> Result<Document, EditorError> {
     let document = match &options.scene {
-        Some(path) => {
-            Document::open_with_history_or_fresh(path.clone(), crate::scene::vocabulary())
-        }
+        Some(path) => lock_scene(path.clone())
+            .and_then(|lock| Document::open_locked(lock, crate::scene::vocabulary())),
         None => crate::scene::built_in_document(),
     };
     let mut document = document.map_err(LoopError::Game)?;

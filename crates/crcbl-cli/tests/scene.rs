@@ -17,7 +17,7 @@ use std::process::{Command, Output};
 use crcbl::reflect::Value;
 use crcbl::scene::edit::EditCommand;
 use crcbl::scene::scn::{EntityName, SceneEntityId};
-use crcbl::scene_edit::{Document, HISTORY};
+use crcbl::scene_edit::{Document, EditError, HISTORY, SCENE_LOCK, lock_scene};
 
 /// Plot 4, `entry`, in towers' field.
 const ENTRY: SceneEntityId = SceneEntityId(4);
@@ -31,6 +31,8 @@ const NOTHING_TO_UNDO: i32 = 19;
 const NOTHING_TO_REDO: i32 = 20;
 /// A history refused.
 const HISTORY_REFUSED: i32 = 3;
+/// A scene another program holds the lock on.
+const LOCKED: i32 = 4;
 
 /// The engine checkout these tests run inside.
 fn engine_root() -> PathBuf {
@@ -89,11 +91,20 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// Every file under `dir` but the history, keyed by its path relative to it.
+/// Every file under `dir` but the history and the lock, keyed by its path
+/// relative to it.
 fn scene_files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut files = every_file(dir);
+    files.remove(HISTORY);
+    files
+}
+
+/// Every file under `dir` but the lock — the scene and its history — keyed
+/// by its path relative to it. The lock file holds a process id, which no
+/// two runs share, and Windows refuses a read of it while it is held.
+fn every_file(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut files = BTreeMap::new();
     collect(dir, dir, &mut files);
-    files.remove(HISTORY);
     files
 }
 
@@ -102,7 +113,7 @@ fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
         let path = entry.expect("a directory entry").path();
         if path.is_dir() {
             collect(root, &path, files);
-        } else {
+        } else if path.file_name() != Some(std::ffi::OsStr::new(SCENE_LOCK)) {
             let key = path
                 .strip_prefix(root)
                 .expect("under the root")
@@ -514,4 +525,95 @@ fn edit_applies_each_command_as_an_entry_and_a_refusal_saves_nothing() {
 
     ok(&crcbl(&["edit", dir_text, "-e", "undo", "-e", "undo"]));
     assert_eq!(scene_files(&dir), before);
+}
+
+/// The scene at `dir` opened as the editor opens it: locked first, then read
+/// with its history, the document holding the lock until it is dropped.
+fn editor_holding(dir: &Path) -> Document {
+    let lock = lock_scene(dir).expect("nobody else holds the scene");
+    Document::open_locked(lock, crcbl_editor::scene::vocabulary()).expect("the field opens")
+}
+
+/// **An edit while the editor holds the scene exits locked and changes
+/// nothing** — not the scene, not its history — under `crcbl scene` and
+/// `crcbl edit` alike, and `--json` says so; a read takes no lock and goes
+/// on. Once the editor lets the scene go, the same edit lands.
+#[test]
+fn an_edit_while_the_editor_holds_the_scene_is_refused_until_it_closes() {
+    let temp = TempDir::new("locked");
+    let dir = field_copy(&temp, "field.scn");
+    ok(&scene("move", &dir, &["4", "1.5", "0", "-2.25"]));
+    let before = every_file(&dir);
+
+    let editor = editor_holding(&dir);
+    let output = scene("move", &dir, &["4", "3", "0", "1"]);
+    assert_eq!(code(&output), LOCKED, "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(SCENE_LOCK),
+        "the refusal does not name the lock: {output:?}"
+    );
+    let dir_text = dir.to_str().expect("a temporary path is text");
+    let output = crcbl(&["edit", dir_text, "-e", "undo"]);
+    assert_eq!(code(&output), LOCKED, "{output:?}");
+    let output = scene("undo", &dir, &["--json"]);
+    assert_eq!(code(&output), LOCKED, "{output:?}");
+    assert!(stdout(&output).contains("\"ok\":false"), "{output:?}");
+    assert_eq!(every_file(&dir), before, "a refused run changed the scene");
+    ok(&scene("list", &dir, &[]));
+
+    drop(editor);
+    ok(&scene("move", &dir, &["4", "3", "0", "1"]));
+    assert_ne!(
+        scene_files(&dir),
+        scene_files_of(&before),
+        "the move did not land"
+    );
+}
+
+/// [`scene_files`] of a set [`every_file`] took.
+fn scene_files_of(files: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>> {
+    let mut files = files.clone();
+    files.remove(HISTORY);
+    files
+}
+
+/// **A lock file a crashed holder left blocks nobody**: a file the operating
+/// system released, as it releases one when its process ends, is taken over
+/// by the next run, which edits and saves.
+#[test]
+fn a_lock_file_left_by_a_dead_process_does_not_block() {
+    let temp = TempDir::new("stale");
+    let dir = field_copy(&temp, "field.scn");
+    std::fs::write(
+        dir.join(SCENE_LOCK),
+        "editor (process 4242)
+",
+    )
+    .expect("written");
+    let before = scene_files(&dir);
+
+    ok(&scene("move", &dir, &["4", "1.5", "0", "-2.25"]));
+    assert_ne!(scene_files(&dir), before, "the move did not land");
+    assert!(
+        lock_scene(&dir).is_ok(),
+        "the run kept the lock past its end"
+    );
+}
+
+/// **The editor cannot take a scene a run holds**: while one holds it, the
+/// editor's open is refused, which is the other half of the same lock. Held
+/// here by an edit run's own call, as `crcbl scene` makes it.
+#[test]
+fn the_editor_cannot_open_a_scene_another_holder_has() {
+    let temp = TempDir::new("held");
+    let dir = field_copy(&temp, "field.scn");
+    let run = lock_scene(&dir).expect("free");
+    match lock_scene(&dir)
+        .and_then(|lock| Document::open_locked(lock, crcbl_editor::scene::vocabulary()))
+    {
+        Err(EditError::Locked { dir: held, .. }) => assert_eq!(held, dir),
+        other => panic!("the editor opened a held scene: {other:?}"),
+    }
+    drop(run);
+    editor_holding(&dir);
 }

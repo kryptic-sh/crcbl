@@ -26,22 +26,34 @@
 //! run made. `crcbl::scene_edit::history`'s module docs hold the decisions:
 //! where it lives, what binds it to the scene, and its bounds.
 //!
+//! # An edit run holds the scene's lock
+//!
+//! Every edit run locks the scene ([`lock_scene`]) before it reads it and
+//! lets the lock go when the process ends, so two runs, or a run and an
+//! editor with the scene open, never interleave a read and a save and lose
+//! an edit. A scene another program holds is refused, [`EXIT_LOCKED`],
+//! rather than waited on: an editor holds its scene for as long as it has it
+//! open. `list` and `query` take no lock — they write nothing, and an open
+//! editor must not stop a terminal looking at its scene.
+//! `crcbl::scene_edit::lock`'s module docs hold the lock's decisions.
+//!
 //! # Exit codes
 //!
 //! A refused edit exits `REFUSED_BASE` plus the edit protocol's own refusal
 //! code ([`refusal_of`]), the code the edit server answers a client with, so a
 //! script reads one set of reasons from both. A scene that will not open or
-//! save is [`EXIT_FAILED`], and a history that is refused is [`EXIT_HISTORY`].
+//! save is [`EXIT_FAILED`], a history that is refused is [`EXIT_HISTORY`],
+//! and a scene another program holds is [`EXIT_LOCKED`].
 //! `crate::scene_args::SCENE_USAGE` lists them where a user reads them.
 
 use std::path::Path;
 
 use crcbl::net::EditRefusal;
 use crcbl::scene::scn::SceneEntityId;
-use crcbl::scene_edit::{Document, EditError, refusal_of};
+use crcbl::scene_edit::{Document, EditError, SceneLock, lock_scene, refusal_of};
 
 use crate::json::Json;
-use crate::report::{EXIT_FAILED, EXIT_HISTORY, Failure, Outcome, REFUSED_BASE};
+use crate::report::{EXIT_FAILED, EXIT_HISTORY, EXIT_LOCKED, Failure, Outcome, REFUSED_BASE};
 use crate::scene_args::{EditArgs, SceneArgs, SceneEdit, SceneVerb};
 
 /// The field a move writes: [`crcbl::registry::POSITION`], the one the
@@ -72,6 +84,7 @@ pub fn run(args: &SceneArgs) -> Result<Outcome, Failure> {
         }
         SceneVerb::Edit(edit) => edit,
     };
+    let _lock = lock(&args.dir, verb)?;
     let mut document = Document::open_with_history(&args.dir, vocabulary)
         .map_err(|error| opening(&args.dir, verb, &error))?;
     let mut outcome = apply(&mut document, edit).map_err(|refused| refused.failure(verb))?;
@@ -88,6 +101,7 @@ pub fn run(args: &SceneArgs) -> Result<Outcome, Failure> {
 ///
 /// As [`run`]: the first refused edit stops the run, saving nothing.
 pub fn run_edit(args: &EditArgs) -> Result<Outcome, Failure> {
+    let _lock = lock(&args.dir, "edit")?;
     let mut document = Document::open_with_history(&args.dir, crcbl_editor::scene::vocabulary())
         .map_err(|error| opening(&args.dir, "edit", &error))?;
     let mut lines = Vec::with_capacity(args.edits.len());
@@ -165,12 +179,28 @@ fn count(index: usize) -> i64 {
     i64::try_from(index).unwrap_or(i64::MAX)
 }
 
-/// The failure a scene that would not open is reported as.
+/// The lock on the scene at `dir`, held until the run ends, or the failure
+/// that says who holds it — see the module docs.
+fn lock(dir: &Path, verb: &'static str) -> Result<SceneLock, Failure> {
+    lock_scene(dir).map_err(|error| {
+        let mut failure = opening(dir, verb, &error);
+        if let EditError::Locked {
+            holder: Some(holder),
+            ..
+        } = &error
+        {
+            failure = failure.with("holder", Json::string(holder.clone()));
+        }
+        failure
+    })
+}
+
+/// The failure a scene that would not open or lock is reported as.
 fn opening(dir: &Path, verb: &'static str, error: &EditError) -> Failure {
-    let code = if matches!(error, EditError::History(_)) {
-        EXIT_HISTORY
-    } else {
-        EXIT_FAILED
+    let code = match error {
+        EditError::History(_) => EXIT_HISTORY,
+        EditError::Locked { .. } => EXIT_LOCKED,
+        _ => EXIT_FAILED,
     };
     let mut failure = Failure::new(format!("`{}`: {error}", dir.display()))
         .with("verb", Json::string(verb))

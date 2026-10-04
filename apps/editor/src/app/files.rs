@@ -25,13 +25,33 @@
 //! editor's. A history that is refused is said on the status line, opens as
 //! an empty log, and is replaced at the next save — see
 //! `crcbl::scene_edit::history`'s module docs for why each.
+//!
+//! # The scene is locked while it is open (decided 2026-10-04)
+//!
+//! A scene directory is opened locked ([`lock_scene`], then
+//! [`Document::open_locked`]) and the document holds the lock until it lets
+//! the scene go: a new scene, another scene or a recovery copy put in its
+//! place, a save-as moving it — which then locks the new directory — or the
+//! editor closing. So a `crcbl scene` edit run made while the scene is open is
+//! refused rather than lost under the editor's next save.
+//! `crcbl::scene_edit::lock`'s module docs hold the lock's own decisions.
+//!
+//! **A scene another program holds is refused, not opened read-only**: by
+//! Ctrl+O with the status line naming the holder where it can be read and the
+//! scene being edited kept, and by `editor <SCENE_DIR>`, which does not start.
+//! A read-only view would need every edit path gated, and would go stale as
+//! the holder saves, since the editor reads a scene only when it opens it —
+//! a view showing another program's scene as it was is the confusion the
+//! lock exists to prevent. Opening the scene this editor already holds reads
+//! it again under the lock it has, which the scene read is handed when it is
+//! put in place ([`Document::hand_lock_to`]).
 
 use crcbl::assets::DirSource;
 use crcbl::shell::Shell;
 
 use super::unsaved::Guarded;
 use super::{Editor, EditorError, scene_bounds};
-use crate::document::{Document, EditError, PlayState, open_target, save_target};
+use crate::document::{Document, EditError, PlayState, lock_scene, open_target, save_target};
 use crate::panel::{Panels, Tone};
 
 /// What the status line says once a new scene is in place.
@@ -125,7 +145,14 @@ impl<S: Shell + ?Sized> Editor<S> {
             if self.document.play_state() != PlayState::Editing {
                 return Err(EditError::Playing);
             }
-            Document::open_with_history_or_fresh(dir, crate::scene::vocabulary())
+            if self.document.holds_lock_on(&dir) {
+                // The scene this editor holds: read again under its own
+                // lock, which a second lock would refuse, and handed it
+                // when it is put in place.
+                Document::open_with_history_or_fresh(dir, crate::scene::vocabulary())
+            } else {
+                Document::open_locked(lock_scene(dir)?, crate::scene::vocabulary())
+            }
         });
         let outcome = match opened {
             Ok(document) => self.guard(Guarded::Open(Box::new(document))),
@@ -152,6 +179,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         if let Some(root) = &self.assets {
             document.set_assets(Box::new(DirSource::at(root.clone())));
         }
+        self.document.hand_lock_to(&mut document);
         self.document = document;
         super::log_outline(&mut self.document);
         self.panels = Panels::new(
@@ -246,6 +274,15 @@ impl<S: Shell + ?Sized> Editor<S> {
         if let Err(error) = self.report_saved(&saved, unwritten.as_ref()) {
             crcbl::log::warn!("editor: {error}");
             self.panels.set_status(error.to_string(), Tone::Warning);
+        }
+        // After the save, which needs a scene there to lock: the directory
+        // the document now lives in is the one it holds.
+        if let Err(error) = self.document.lock_origin() {
+            crcbl::log::warn!("editor: saved, but the scene is not locked: {error}");
+            self.panels.set_status(
+                format!("{saved}, but it is not locked against other programs: {error}"),
+                Tone::Warning,
+            );
         }
         self.after_saved_as();
         Ok(())

@@ -25,10 +25,14 @@ pub const EXIT_USAGE: u8 = 2;
 /// scene` and `crcbl edit` only; see `crate::scene_args::SCENE_USAGE`.
 pub const EXIT_HISTORY: u8 = 3;
 
+/// Exit code for "another program holds the scene's lock" — `crcbl scene`'s
+/// edits and `crcbl edit` only; see `crate::scene_args::SCENE_USAGE`.
+pub const EXIT_LOCKED: u8 = 4;
+
 /// What `crcbl scene` and `crcbl edit` add to the edit protocol's refusal
 /// code (`crcbl::net::EditRefusal`) to exit with it, so a refused edit's
 /// reason is its exit code: the codes start at 1, so the lowest a refusal
-/// exits with sits clear of the three above.
+/// exits with sits clear of the four above.
 pub const REFUSED_BASE: u8 = 10;
 
 /// A command that worked.
@@ -122,9 +126,10 @@ mod tests {
     }
 
     /// The scene verbs' codes are documented numbers, clear of the two
-    /// above: a history refused at 3, and refusals from 10 plus their code.
+    /// above: a history refused at 3, a scene locked at 4, and refusals from
+    /// 10 plus their code.
     #[test]
     fn the_scene_codes_sit_clear_of_the_contract() {
-        assert_eq!((EXIT_HISTORY, REFUSED_BASE), (3, 10));
+        assert_eq!((EXIT_HISTORY, EXIT_LOCKED, REFUSED_BASE), (3, 4, 10));
     }
 }

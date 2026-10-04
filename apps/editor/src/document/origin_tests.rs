@@ -18,9 +18,11 @@ const BOTH: SceneEntityId = SceneEntityId(1);
 /// A sun alone in [`two_systems`].
 const LONE_SUN: SceneEntityId = SceneEntityId(5);
 
-/// Every file under `dir`, keyed by its path from `dir` with `/` between
-/// the parts, and its bytes — what a test compares a directory by to say
-/// nothing in it changed. Empty for a directory that is not there.
+/// Every file under `dir` but a scene's lock, keyed by its path from `dir`
+/// with `/` between the parts, and its bytes — what a test compares a
+/// directory by to say nothing in it changed. Empty for a directory that is
+/// not there. The lock ([`SCENE_LOCK`]) holds a process id, which no two runs
+/// share, and Windows refuses a read of it while an editor holds it.
 pub(crate) fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     fn walk(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -30,6 +32,9 @@ pub(crate) fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
             let path = entry.expect("a readable directory entry").path();
             if path.is_dir() {
                 walk(root, &path, files);
+                continue;
+            }
+            if path.file_name() == Some(std::ffi::OsStr::new(SCENE_LOCK)) {
                 continue;
             }
             let key = path

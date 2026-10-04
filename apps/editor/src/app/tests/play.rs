@@ -310,7 +310,7 @@ fn towers_creeps_are_drawn_while_the_field_plays_and_gone_after_stop() {
     /// frames.
     const TICKS_PER_FRAME: u32 = 4;
 
-    let mut editor = towers_editor(400, TICKS_PER_FRAME);
+    let (_field, mut editor) = towers_editor(400, TICKS_PER_FRAME);
     let spawned = spawned_drawn;
     let live = |editor: &Editor<HeadlessShell>| {
         editor
@@ -351,18 +351,19 @@ fn towers_creeps_are_drawn_while_the_field_plays_and_gone_after_stop() {
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 
-/// An editor on towers' committed field, opened from its directory the way
-/// `editor <SCENE_DIR>` opens it, whose frames are each `ticks` of towers'
-/// ticks long.
-pub(super) fn towers_editor(frames: u64, ticks: u32) -> Editor<HeadlessShell> {
-    let field = Path::new(env!("CARGO_MANIFEST_DIR")).join("../towers/assets/scenes/field.scn");
+/// An editor on a copy of towers' committed field ([`towers_field`]),
+/// opened from its directory the way `editor <SCENE_DIR>` opens it, whose
+/// frames are each `ticks` of towers' ticks long — and the temporary
+/// directory holding the copy, which the editor needs kept.
+pub(super) fn towers_editor(frames: u64, ticks: u32) -> (tempfile::TempDir, Editor<HeadlessShell>) {
+    let base = tempfile::tempdir().expect("a temporary directory");
     let mut options = options(frames);
-    options.scene = Some(field);
+    options.scene = Some(towers_field(base.path()));
     let mut editor = Editor::with_shell(Box::new(HeadlessShell::new()), &options)
         .expect("the null backend opens towers' field");
     let period = Duration::from_secs_f64(1.0 / f64::from(crcbl_towers::DEFAULT_TICK_HZ));
     editor.clock_source = Clock::manual(period * ticks);
-    editor
+    (base, editor)
 }
 
 /// How many entities the editor's instances draw that a playing module
@@ -430,7 +431,7 @@ pub(super) fn tower_cost(kind: crcbl_towers::tower::Kind) -> u32 {
 fn the_play_strip_places_a_tower_and_a_taken_plot_is_refused_on_the_status_line() {
     use crcbl_towers::tower::Kind;
 
-    let mut editor = towers_editor(60, 1);
+    let (_field, mut editor) = towers_editor(60, 1);
     editor.frame().expect("a frame");
     assert!(
         editor.panels.play_strip().is_none(),
@@ -484,7 +485,7 @@ fn the_play_strip_places_a_tower_and_a_taken_plot_is_refused_on_the_status_line(
 fn the_strips_kind_choice_steps_and_the_build_takes_it() {
     use crcbl_towers::tower::{ALL, Kind};
 
-    let mut editor = towers_editor(40, 1);
+    let (_field, mut editor) = towers_editor(40, 1);
     tap(&mut editor, KeyCode::F5);
     select_first_plot(&mut editor);
     let [first, second] = [ALL[0], ALL[1]].map(Kind::label);
@@ -506,7 +507,7 @@ fn the_strips_kind_choice_steps_and_the_build_takes_it() {
 /// anything.
 #[test]
 fn the_strip_starts_a_wave_and_a_build_needs_a_plot() {
-    let mut editor = towers_editor(40, 1);
+    let (_field, mut editor) = towers_editor(40, 1);
     tap(&mut editor, KeyCode::F5);
     let waves = crcbl_towers::WAVES.len();
     assert_eq!(readout(&editor, "Wave"), format!("0/{waves}"));
@@ -532,7 +533,7 @@ fn the_strip_starts_a_wave_and_a_build_needs_a_plot() {
 /// are the ones play began with.**
 #[test]
 fn stop_takes_the_strip_and_the_towers_away() {
-    let mut editor = towers_editor(40, 1);
+    let (_field, mut editor) = towers_editor(40, 1);
     editor.frame().expect("a frame");
     let before = editor.document_mut().files().expect("ids");
     tap(&mut editor, KeyCode::F5);

@@ -111,7 +111,7 @@ const MAGIC: &[u8; 8] = b"CRCBLHIS";
 const HISTORY_VERSION: u16 = 0;
 
 /// The size of a SHA-256 digest.
-const DIGEST_BYTES: usize = 32;
+pub(super) const DIGEST_BYTES: usize = 32;
 
 /// The magic, the version, the scene's digest, the position and the count.
 const HEADER_BYTES: usize = MAGIC.len() + 2 + DIGEST_BYTES + 4 + 4;
@@ -253,7 +253,7 @@ impl Document {
             return Ok(());
         };
         let history = decode(&bytes).map_err(EditError::History)?;
-        if history.scene != scene_digest(&self.files()?) {
+        if history.scene != text_digest(&self.files()?) {
             return Err(EditError::History(HistoryError::SceneChanged));
         }
         let count = history.entries.len();
@@ -283,7 +283,7 @@ impl Document {
     pub fn save_with_history(&mut self) -> Result<(), EditError> {
         self.save()?;
         let dir = self.origin.clone().ok_or(EditError::NoOrigin)?;
-        let scene = scene_digest(&self.files()?);
+        let scene = text_digest(&self.files()?);
         let bytes = encode(&scene, &self.log).map_err(EditError::History)?;
         NativeStorage::at(dir)
             .write(Path::new(HISTORY), &bytes)
@@ -299,18 +299,31 @@ struct Recorded {
     entries: Vec<(EditCommand, EditCommand)>,
 }
 
-/// The SHA-256 the history binds itself to: each file's key and text, in key
-/// order, each as its length in eight little-endian bytes and then its bytes —
-/// so no two different sets of files run together into the same bytes.
-fn scene_digest(files: &BTreeMap<String, String>) -> [u8; DIGEST_BYTES] {
+/// The SHA-256 the history binds itself to: each file's key and bytes, in
+/// the order handed — key order, from a map or a set — each as its length in
+/// eight little-endian bytes and then its bytes, so no two different sets of
+/// files run together into the same bytes. The scene lock's check of the
+/// files on disk is the same digest (`scene_edit::lock`).
+pub(super) fn scene_digest<'a>(
+    files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> [u8; DIGEST_BYTES] {
     let mut bytes = Vec::new();
     for (key, text) in files {
-        for part in [key.as_bytes(), text.as_bytes()] {
+        for part in [key.as_bytes(), text] {
             bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
             bytes.extend_from_slice(part);
         }
     }
     sha256(&bytes)
+}
+
+/// [`scene_digest`] of the scene as the writer spells it.
+fn text_digest(files: &BTreeMap<String, String>) -> [u8; DIGEST_BYTES] {
+    scene_digest(
+        files
+            .iter()
+            .map(|(key, text)| (key.as_str(), text.as_bytes())),
+    )
 }
 
 /// The file at `path`, or [`None`] where there is none — read no further than

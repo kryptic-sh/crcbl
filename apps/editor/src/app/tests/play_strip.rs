@@ -72,7 +72,7 @@ fn towers_action(editor: &Editor<HeadlessShell>, name: &str) -> (String, usize) 
 /// upgrade is sent and paid for.
 #[test]
 fn a_click_on_a_built_tower_picks_it_and_upgrade_steps_it_up() {
-    let mut editor = towers_editor(80, 1);
+    let (_field, mut editor) = towers_editor(80, 1);
     let tower = with_a_tower(&mut editor);
     let paid = crcbl_towers::wave::STARTING_GOLD - tower_cost(Kind::Bolt);
     assert_eq!(readout(&editor, "Gold"), paid.to_string());
@@ -129,7 +129,7 @@ fn spawned_corners(editor: &mut Editor<HeadlessShell>, entity: Entity) -> [Vec3;
 /// stops, or a restart despawns the tower.
 #[test]
 fn the_runtime_pick_is_outlined_and_follows_its_tower_until_it_goes() {
-    let mut editor = towers_editor(120, 1);
+    let (_field, mut editor) = towers_editor(120, 1);
     let tower = with_a_tower(&mut editor);
     assert!(
         picked_boxes(&mut editor).is_empty(),
@@ -200,7 +200,7 @@ fn the_runtime_pick_is_outlined_and_follows_its_tower_until_it_goes() {
 /// already at the top tier, sent together, are both told.
 #[test]
 fn every_refusal_of_a_frame_reaches_the_status_line() {
-    let mut editor = towers_editor(80, 1);
+    let (_field, mut editor) = towers_editor(80, 1);
     let tower = with_a_tower(&mut editor);
     let (system, upgrade) = towers_action(&editor, "Upgrade");
     let (_, place) = towers_action(&editor, "Place tower");
@@ -238,7 +238,7 @@ fn every_refusal_of_a_frame_reaches_the_status_line() {
 /// wave it sends is counted.
 #[test]
 fn the_number_keys_send_the_strips_actions() {
-    let mut editor = towers_editor(40, 1);
+    let (_field, mut editor) = towers_editor(40, 1);
     editor.frame().expect("a frame");
     let before = editor.panels.status().0.to_owned();
     tap(&mut editor, KeyCode::Digit2);
@@ -341,7 +341,7 @@ const BURSTING: PlayControls = PlayControls {
 /// and a warning in the log for each.
 #[test]
 fn a_burst_of_refusals_is_one_bounded_line_and_every_one_logged() {
-    let mut editor = towers_editor(40, 1);
+    let (_field, mut editor) = towers_editor(40, 1);
     let mut registry = Registry::new();
     registry.module("plots", |_, _, _| Ok(Box::new(Pinger)));
     registry.play_controls("plots", BURSTING);
@@ -394,7 +394,7 @@ const BELL: PlayControls = PlayControls {
 /// reaches the second game alone while `3` is towers' `Start wave`.
 #[test]
 fn two_games_controls_share_the_strip_and_the_scenes_games_alone_show() {
-    let mut editor = towers_editor(40, 1);
+    let (_field, mut editor) = towers_editor(40, 1);
     let mut registry = Registry::new();
     registry.module("plots", |_, _, _| Ok(Box::new(Pinger)));
     registry.play_controls("plots", PING);
@@ -452,7 +452,7 @@ fn two_games_controls_share_the_strip_and_the_scenes_games_alone_show() {
 /// play reads the first again once play is stopped and started.
 #[test]
 fn a_choice_is_reset_when_play_stops() {
-    let mut editor = towers_editor(40, 1);
+    let (_field, mut editor) = towers_editor(40, 1);
     let [first, second] = [ALL[0], ALL[1]].map(Kind::label);
     tap(&mut editor, KeyCode::F5);
     let at = centre(&editor, play_button(&editor, first));

@@ -13,6 +13,7 @@ mod context_menu;
 mod exit_criterion;
 mod files;
 mod history;
+mod lock;
 mod open;
 mod play;
 mod play_strip;
@@ -441,6 +442,20 @@ fn a_drag_with_ctrl_held_lands_on_the_absolute_grid() {
         "{now} is not on the {step} m grid"
     );
     editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// A copy of towers' committed field in a fresh directory under `base` —
+/// what a test opens rather than the committed directory, which an editor
+/// would lock and a parallel test then could not open.
+pub(super) fn towers_field(base: &Path) -> std::path::PathBuf {
+    let committed = Path::new(env!("CARGO_MANIFEST_DIR")).join("../towers/assets/scenes/field.scn");
+    let dir = base.join("field.scn");
+    for (key, bytes) in crate::document::origin_tests::tree(&committed) {
+        let path = dir.join(&key);
+        std::fs::create_dir_all(path.parent().expect("under the copy")).expect("writable");
+        std::fs::write(path, bytes).expect("writable");
+    }
+    dir
 }
 
 /// `apps/puppet`'s blockout, saved into a temporary directory and opened
