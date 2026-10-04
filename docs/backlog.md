@@ -21,6 +21,33 @@ on shard on 2026-09-27.
 
 ## EW integration follow-ups
 
+- **EW controller rebinding needs explicit cross-context chord routing.** EW's
+  Controls page can reassign its existing LB+Select and LB+Start gameplay
+  chords, originally free look and backpack drop, to another gameplay action.
+  Those originals live in `GLOBAL_CONTEXT` so their chords shadow the global
+  plain Select/Start map/inventory bindings. Rebinding either chord to Reload
+  leaves Reload in `GAMEPLAY_CONTEXT`; `ActionMap::apply_overrides` changes
+  bindings without changing context, and the global plain button wins. The
+  failing game regression is
+  `reassigned_menu_button_chords_dispatch_the_selected_gameplay_action` in
+  `src/game_actions_pad_tests.rs`, preserved on
+  [EW's reproduction branch](https://gitlab.com/exfilgames/ew/-/tree/wip/controller-menu-chord-dispatch)
+  at `cb15f742`. Run `cargo test reassigned_menu_button_chords` there; it fails
+  at the Select chord's Reload assertion against engine `80ece794`. Provide an
+  explicit routing mechanism for this use case without silently changing
+  ordinary context precedence. Acceptance: the rebound chord presses and
+  releases the selected gameplay action without opening the plain menu; a fresh
+  unmodified Select/Start still opens its menu; inventory/map modal contexts
+  still block gameplay; layer-first release, focus loss, unplugging and
+  neutral-before-resume do not leak actions; keyboard menu bindings remain
+  usable independently. Preserve user-facing bindings and override round trips,
+  including restoring defaults. EW has not changed engine implementation. After
+  a supported API/design lands, integrate it in the game, turn the saved
+  regression green, and cover modal suppression and held-input transitions
+  through the actual game loop. Moving every gameplay action into the global
+  context or disabling whole menu actions while a pad chord is held would weaken
+  modal isolation or unrelated keyboard input and was not adopted.
+
 - **Decided 2026-10-03: exact stationarity, not a tolerance**, for EW's
   stationary-drift report against `1d24972a`
   (`stationary_leg_treatment_keeps_depletion_and_recovery_chronological`). A
