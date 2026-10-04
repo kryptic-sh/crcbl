@@ -28,6 +28,13 @@
 //!   can take is the one the server took, and one it cannot — reaching back
 //!   past the fetch, where the copy holds no history — is a notice it cannot
 //!   apply, and a refetch.
+//! * **A drag folds as the server's did** (decided 2026-10-05): a notice
+//!   naming a gesture ([`EditNotice::gesture`]) is recorded in that gesture
+//!   ([`Document::apply_in`]), so consecutive notices of one gesture are one
+//!   entry of the copy's history exactly when they are one of the server's,
+//!   and an undo of the drag walks all of it back on both. The server seals
+//!   a gesture when it answers a fetch, so a copy never holds the end of a
+//!   drag whose beginning only the server's history has.
 //! * **A stalled fetch is abandoned**: one that brings no byte for
 //!   [`FETCH_STALL_TIMEOUT`] — its parts went with a dropped link, or the
 //!   server never answered — is fetched again; and a refused or malformed
@@ -41,7 +48,7 @@ use std::time::Duration;
 use crate::client::Client;
 use crate::net::{EditNotice, FetchedScene, Transport};
 use crate::registry::Registry;
-use crate::scene::edit::{EditOp, decode_op};
+use crate::scene::edit::{EditOp, Gesture, decode_op};
 
 use super::{Document, memory_source};
 
@@ -241,7 +248,7 @@ impl SceneFollower {
             return;
         }
         let applied = if notice.revision == *revision + 1 {
-            apply(document, &notice.op)
+            apply(document, &notice.op, notice.gesture)
         } else {
             Err(format!(
                 "missed the notices from revision {} to {}",
@@ -303,15 +310,27 @@ impl SceneFollower {
     }
 }
 
-/// Applies one notice's operation to `document`, or says why it did not
-/// take: bytes that are no operation, a command the copy refuses, or a step
-/// of the history with nothing to step over — an undo reaching back past the
-/// fetch.
-fn apply(document: &mut Document, op: &[u8]) -> Result<(), String> {
-    let stepped = match decode_op(op).map_err(|error| error.to_string())? {
-        EditOp::Apply(command) => return document.apply(command).map_err(|e| e.to_string()),
-        EditOp::Undo => document.undo(),
-        EditOp::Redo => document.redo(),
+/// Applies one notice's operation to `document`, in the server's `gesture`
+/// when it names one, or says why it did not take: bytes that are no
+/// operation, a command the copy refuses, a step of the history with nothing
+/// to step over — an undo reaching back past the fetch — or a step named part
+/// of a gesture, which no server sends.
+fn apply(document: &mut Document, op: &[u8], gesture: Option<u64>) -> Result<(), String> {
+    let decoded = decode_op(op).map_err(|error| error.to_string())?;
+    let stepped = match (decoded, gesture) {
+        (EditOp::Apply(command), None) => {
+            return document.apply(command).map_err(|e| e.to_string());
+        }
+        (EditOp::Apply(command), Some(gesture)) => {
+            return document
+                .apply_in(command, Gesture(gesture))
+                .map_err(|e| e.to_string());
+        }
+        (EditOp::Undo | EditOp::Redo, Some(_)) => {
+            return Err("a notice put a step of the history in a gesture".to_owned());
+        }
+        (EditOp::Undo, None) => document.undo(),
+        (EditOp::Redo, None) => document.redo(),
     };
     match stepped {
         Ok(true) => Ok(()),

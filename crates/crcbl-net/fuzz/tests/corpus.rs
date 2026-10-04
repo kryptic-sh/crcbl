@@ -183,16 +183,17 @@ fn named_save_seeds_reach_their_intended_paths() {
 }
 
 /// The edit seeds reach each message's decoder, one per message an edit
-/// travels as: a request, both outcomes of a reply, a notice, and the
-/// operation inside them — a whole one, an environment write, a variant
-/// switch, one whose batches nest past the limit, and a request claiming an
-/// operation longer than any. Each whole seed is also what its encoder writes, so a change to a
-/// layout shows up here as a seed to regenerate rather than as a corpus that
-/// stopped being edits.
+/// travels as: a request and a notice, each with and without a gesture, both
+/// outcomes of a reply, and the operation inside them — a whole one, an
+/// environment write, a variant switch, one whose batches nest past the
+/// limit, and a request claiming an operation longer than any. Each whole
+/// seed is also what its encoder writes, so a change to a layout shows up
+/// here as a seed to regenerate rather than as a corpus that stopped being
+/// edits.
 #[test]
 fn named_edit_seeds_reach_their_intended_paths() {
     use crcbl_net::{
-        DecodeError, EditNotice, EditOutcome, EditRefusal, EditReply, EditRequest,
+        DecodeError, EditGesture, EditNotice, EditOutcome, EditRefusal, EditReply, EditRequest,
         decode_edit_notice, decode_edit_reply, decode_edit_request, encode_edit_notice,
         encode_edit_reply, encode_edit_request,
     };
@@ -206,13 +207,27 @@ fn named_edit_seeds_reach_their_intended_paths() {
     }))
     .expect("a delete travels");
 
-    let seed = include_bytes!("../corpus/decoder/edit-request");
-    let request = EditRequest {
-        request_id: 7,
-        op: delete.clone(),
-    };
-    assert_eq!(decode_edit_request(seed).expect("a whole request"), request);
-    assert_eq!(encode_edit_request(&request).expect("short enough"), seed);
+    for (seed, request) in [
+        (
+            &include_bytes!("../corpus/decoder/edit-request")[..],
+            EditRequest {
+                request_id: 7,
+                gesture: None,
+                op: delete.clone(),
+            },
+        ),
+        (
+            &include_bytes!("../corpus/decoder/edit-request-gesture")[..],
+            EditRequest {
+                request_id: 8,
+                gesture: Some(EditGesture { id: 3, last: true }),
+                op: delete.clone(),
+            },
+        ),
+    ] {
+        assert_eq!(decode_edit_request(seed).expect("a whole request"), request);
+        assert_eq!(encode_edit_request(&request).expect("short enough"), seed);
+    }
 
     assert!(matches!(
         decode_edit_request(include_bytes!(
@@ -244,14 +259,29 @@ fn named_edit_seeds_reach_their_intended_paths() {
         assert_eq!(encode_edit_reply(&reply).expect("short enough"), seed);
     }
 
-    let seed = include_bytes!("../corpus/decoder/edit-notice");
-    let notice = EditNotice {
-        revision: 1,
-        author: 1,
-        op: delete,
-    };
-    assert_eq!(decode_edit_notice(seed).expect("a whole notice"), notice);
-    assert_eq!(encode_edit_notice(&notice).expect("short enough"), seed);
+    for (seed, notice) in [
+        (
+            &include_bytes!("../corpus/decoder/edit-notice")[..],
+            EditNotice {
+                revision: 1,
+                author: 1,
+                gesture: None,
+                op: delete.clone(),
+            },
+        ),
+        (
+            &include_bytes!("../corpus/decoder/edit-notice-gesture")[..],
+            EditNotice {
+                revision: 2,
+                author: 1,
+                gesture: Some(5),
+                op: delete.clone(),
+            },
+        ),
+    ] {
+        assert_eq!(decode_edit_notice(seed).expect("a whole notice"), notice);
+        assert_eq!(encode_edit_notice(&notice).expect("short enough"), seed);
+    }
 
     let seed = include_bytes!("../corpus/decoder/edit-op-batch");
     let op = EditOp::Apply(EditCommand::Batch(vec![

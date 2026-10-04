@@ -16,6 +16,18 @@
 //! notice of its own edit before the reply that accepts it is the order a
 //! server serving edits sends them in.
 //!
+//! **A drag is one gesture** (decided 2026-10-05). A request may say it is
+//! part of one ([`EditGesture`]): the client's own number for the gesture,
+//! and whether this edit ends it. The server folds a gesture's edits into one
+//! entry of its history, and each notice says which gesture, in the server's
+//! own numbering, the edit it carries was recorded in — so a copy of the
+//! scene folds the same edits into the same entries, and one undo walks the
+//! whole drag back on the server and on every copy alike. The two numberings
+//! differ because they answer different questions: the client's says which
+//! of its own edits belong together; the server's, distinct across every
+//! client and never reused, says which entry an edit went into, which only
+//! the server decides.
+//!
 //! A client that joins late, or resumes, fetches the whole scene first —
 //! [`fetch`], a command of kind [`SCENE_FETCH_KIND`] answered by the scene's
 //! saved text at a revision — and follows the notices after it.
@@ -24,6 +36,8 @@
 //! edit request (a Command's data):
 //!   [0]       kind = EDIT_KIND
 //!   [1..9]    request_id: u64 LE, the client's own numbering
+//!   [9]       gesture: 0 = none, 1 = part of one, 2 = the last edit of one
+//!             gesture id: u32 LE, the client's own numbering, unless none
 //!             op_len: u32 LE, then op: the operation's bytes
 //! edit reply (a whole message):
 //!   [0]       tag = EDIT_REPLY_TAG
@@ -35,6 +49,8 @@
 //!   [0]       tag = EDIT_NOTICE_TAG
 //!   [1..9]    revision: u64 LE
 //!   [9..17]   author: u64 LE, the server's number for the peer that sent it
+//!   [17]      gesture: 0 = none, 1 = recorded in one
+//!             gesture: u64 LE, the server's number for it, unless none
 //!             op_len: u32 LE, then op: the operation's bytes
 //! ```
 
@@ -47,8 +63,8 @@ use crate::codec::{ByteReader, DecodeError, EDIT_NOTICE_TAG, EDIT_REPLY_TAG, MAX
 pub const EDIT_KIND: u8 = 0x02;
 
 /// The longest operation a request or a notice carries, in bytes: what is
-/// left of one command's [`MAX_FIELD_BYTES`] once the kind, the request id and
-/// the operation's length are written.
+/// left of one command's [`MAX_FIELD_BYTES`] once the kind, the request id, a
+/// gesture and the operation's length are written.
 pub const MAX_EDIT_OP_BYTES: usize = MAX_FIELD_BYTES - REQUEST_HEADER_BYTES;
 
 /// The longest refusal message a reply carries, in bytes.
@@ -57,8 +73,20 @@ pub const MAX_EDIT_OP_BYTES: usize = MAX_FIELD_BYTES - REQUEST_HEADER_BYTES;
 /// why, which is a sentence; this leaves room for long names in it.
 pub const MAX_EDIT_MESSAGE_BYTES: usize = 1024;
 
-/// The kind byte, the request id and the operation's length.
-const REQUEST_HEADER_BYTES: usize = 1 + 8 + 4;
+/// The kind byte, the request id, a gesture at its longest and the
+/// operation's length.
+const REQUEST_HEADER_BYTES: usize = 1 + 8 + GESTURE_BYTES + 4;
+
+/// A request's gesture at its longest: its marker and the client's id.
+const GESTURE_BYTES: usize = 1 + 4;
+
+/// No gesture: an edit that is an entry of the history on its own.
+const GESTURE_NONE: u8 = 0;
+/// A request's edit part of a gesture the client carries on; a notice's
+/// edit recorded in one.
+const GESTURE_PART: u8 = 1;
+/// A request's edit that ends its gesture.
+const GESTURE_LAST: u8 = 2;
 
 const OUTCOME_APPLIED: u8 = 0;
 const OUTCOME_REFUSED: u8 = 1;
@@ -69,8 +97,25 @@ pub struct EditRequest {
     /// The client's number for it, echoed in the reply so the client can tell
     /// which of its requests an answer is about.
     pub request_id: u64,
+    /// The gesture it is part of, or [`None`] for an edit that is an entry of
+    /// the server's history on its own.
+    pub gesture: Option<EditGesture>,
     /// The operation, in the wire form of the crate that owns the vocabulary.
     pub op: Vec<u8>,
+}
+
+/// The gesture a request's edit is part of — a drag, from press to release —
+/// as the client sending it numbers its gestures. See the
+/// [module docs](self).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EditGesture {
+    /// The client's number for the gesture, the same on each of its edits.
+    /// A server compares it only with the same client's, so two clients may
+    /// number theirs alike.
+    pub id: u32,
+    /// Whether this is the gesture's last edit — the one its release sends —
+    /// after which nothing more folds into its entry.
+    pub last: bool,
 }
 
 /// Prints the operation's length rather than its bytes.
@@ -78,6 +123,7 @@ impl fmt::Debug for EditRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EditRequest")
             .field("request_id", &self.request_id)
+            .field("gesture", &self.gesture)
             .field("op_bytes", &self.op.len())
             .finish()
     }
@@ -205,6 +251,12 @@ pub struct EditNotice {
     pub revision: u64,
     /// Which peer sent it, as the server numbers its peers.
     pub author: u64,
+    /// The gesture the server recorded it in, as the server numbers gestures
+    /// — distinct across its clients and never reused while it serves — or
+    /// [`None`] for an operation that is an entry on its own. A copy of the
+    /// scene records it in that gesture too, so its history folds as the
+    /// server's did.
+    pub gesture: Option<u64>,
     /// The operation, as the request carried it.
     pub op: Vec<u8>,
 }
@@ -215,6 +267,7 @@ impl fmt::Debug for EditNotice {
         f.debug_struct("EditNotice")
             .field("revision", &self.revision)
             .field("author", &self.author)
+            .field("gesture", &self.gesture)
             .field("op_bytes", &self.op.len())
             .finish()
     }
@@ -254,6 +307,13 @@ pub fn encode_edit_request(request: &EditRequest) -> Result<Vec<u8>, EditTooLong
     let mut buf = Vec::with_capacity(REQUEST_HEADER_BYTES + request.op.len());
     buf.push(EDIT_KIND);
     buf.extend_from_slice(&request.request_id.to_le_bytes());
+    match request.gesture {
+        None => buf.push(GESTURE_NONE),
+        Some(EditGesture { id, last }) => {
+            buf.push(if last { GESTURE_LAST } else { GESTURE_PART });
+            buf.extend_from_slice(&id.to_le_bytes());
+        }
+    }
     buf.extend_from_slice(&op_len.to_le_bytes());
     buf.extend_from_slice(&request.op);
     Ok(buf)
@@ -263,9 +323,9 @@ pub fn encode_edit_request(request: &EditRequest) -> Result<Vec<u8>, EditTooLong
 ///
 /// # Errors
 ///
-/// [`DecodeError`] for another kind byte, an operation length past
-/// [`MAX_EDIT_OP_BYTES`] or past the bytes there are, a short buffer or
-/// trailing bytes.
+/// [`DecodeError`] for another kind byte or gesture marker, an operation
+/// length past [`MAX_EDIT_OP_BYTES`] or past the bytes there are, a short
+/// buffer or trailing bytes.
 pub fn decode_edit_request(data: &[u8]) -> Result<EditRequest, DecodeError> {
     let mut r = ByteReader::new(data);
     let kind = r.read_u8()?;
@@ -273,9 +333,21 @@ pub fn decode_edit_request(data: &[u8]) -> Result<EditRequest, DecodeError> {
         return Err(DecodeError::UnknownTag { tag: kind });
     }
     let request_id = r.read_u64()?;
+    let gesture = match r.read_u8()? {
+        GESTURE_NONE => None,
+        marker @ (GESTURE_PART | GESTURE_LAST) => Some(EditGesture {
+            id: r.read_u32()?,
+            last: marker == GESTURE_LAST,
+        }),
+        other => return Err(DecodeError::UnknownTag { tag: other }),
+    };
     let op = read_op(&mut r)?;
     r.assert_empty()?;
-    Ok(EditRequest { request_id, op })
+    Ok(EditRequest {
+        request_id,
+        gesture,
+        op,
+    })
 }
 
 /// The whole message carrying `reply`, ready to seal.
@@ -337,10 +409,17 @@ pub fn decode_edit_reply(payload: &[u8]) -> Result<EditReply, DecodeError> {
 /// [`EditTooLong`] for an operation past [`MAX_EDIT_OP_BYTES`].
 pub fn encode_edit_notice(notice: &EditNotice) -> Result<Vec<u8>, EditTooLong> {
     let op_len = checked_op_len(&notice.op)?;
-    let mut buf = Vec::with_capacity(1 + 8 + 8 + 4 + notice.op.len());
+    let mut buf = Vec::with_capacity(1 + 8 + 8 + 1 + 8 + 4 + notice.op.len());
     buf.push(EDIT_NOTICE_TAG);
     buf.extend_from_slice(&notice.revision.to_le_bytes());
     buf.extend_from_slice(&notice.author.to_le_bytes());
+    match notice.gesture {
+        None => buf.push(GESTURE_NONE),
+        Some(gesture) => {
+            buf.push(GESTURE_PART);
+            buf.extend_from_slice(&gesture.to_le_bytes());
+        }
+    }
     buf.extend_from_slice(&op_len.to_le_bytes());
     buf.extend_from_slice(&notice.op);
     Ok(buf)
@@ -350,8 +429,8 @@ pub fn encode_edit_notice(notice: &EditNotice) -> Result<Vec<u8>, EditTooLong> {
 ///
 /// # Errors
 ///
-/// [`DecodeError`] for another tag, and on [`decode_edit_request`]'s terms
-/// for the operation.
+/// [`DecodeError`] for another tag or gesture marker, and on
+/// [`decode_edit_request`]'s terms for the operation.
 pub fn decode_edit_notice(payload: &[u8]) -> Result<EditNotice, DecodeError> {
     let mut r = ByteReader::new(payload);
     let tag = r.read_u8()?;
@@ -360,11 +439,17 @@ pub fn decode_edit_notice(payload: &[u8]) -> Result<EditNotice, DecodeError> {
     }
     let revision = r.read_u64()?;
     let author = r.read_u64()?;
+    let gesture = match r.read_u8()? {
+        GESTURE_NONE => None,
+        GESTURE_PART => Some(r.read_u64()?),
+        other => return Err(DecodeError::UnknownTag { tag: other }),
+    };
     let op = read_op(&mut r)?;
     r.assert_empty()?;
     Ok(EditNotice {
         revision,
         author,
+        gesture,
         op,
     })
 }

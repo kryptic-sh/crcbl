@@ -656,11 +656,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   its history, and serves it over UDP through `crcbl::scene_edit::EditServer`:
   clients fetch it, follow every edit as a `SceneFollower`, and send edits,
   undos and redos, each applied through the document and its one history. The
-  scene and its history are saved after every update that applied an edit, and
-  the scene stays locked from start to `quit`, so `crcbl scene` edits on it exit
-  4 while it is served. It listens on 127.0.0.1 unless `--lan` is given, is not
-  announced on the LAN, prints a status line (revision, history, clients, saved,
-  and malformed messages refused), and reads `status`, `save` and `quit` at its
+  scene and its history are saved after every update that applied an edit —
+  except while a client's drag is open, so a drag lands on disk as one entry
+  when it ends and one `crcbl scene undo` takes it back — and the scene stays
+  locked from start to `quit`, so `crcbl scene` edits on it exit 4 while it is
+  served. It listens on 127.0.0.1 unless `--lan` is given, is not announced on
+  the LAN, prints a status line (revision, history, clients, saved, and
+  malformed messages refused), and reads `status`, `save` and `quit` at its
   standard input; a `quit` whose save fails says why and serves on. `--serve`
   takes no `-e` and no `--json`. New for it:
   `crcbl::scene_edit::serve::{EDIT_PROTOCOL_ID, EDIT_TICK_HZ, edit_compatibility}`,
@@ -670,6 +672,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `crcbl::lan::console::{ConsoleLines, stdin_lines, until_next_tick}`, the stdin
   console and tick sleep towers' `--serve` used, moved into the umbrella so both
   servers share them.
+
+- **A drag sent to a scene server is one undo entry, as a drag in the editor
+  is.** `crcbl_client::Client::send_edit_in(op, gesture)` sends an edit as part
+  of a `crcbl_net::EditGesture` — the client's own id for the drag and whether
+  this frame is its last — and `EditRequest::gesture` carries it. The
+  `EditServer` records a gesture's frames through `Document::apply_in` in one
+  gesture of the document's, so the drag is one entry of its history, and
+  `EditNotice::gesture` names that gesture, so each `SceneFollower` folds the
+  same frames into the same entry and one undo over the protocol walks the whole
+  drag back on the server and every copy. A gesture's entry stops taking frames
+  at its last frame, at anything else applied for anyone — another client's
+  frame included — when its client's link goes down, when a fetch is answered,
+  and when a save seals the entry; a later frame is an entry of its own. An undo
+  or a redo sent in a gesture is refused as malformed. New for it:
+  `UndoLog::open_gesture`, the gesture a write would fold into, and
+  `EditServer::gesture_open`. The request carries the gesture after its id (a
+  marker byte, then the id) and the notice after its author (a marker byte, then
+  the server's number), which `MAX_EDIT_OP_BYTES` makes room for; the operation
+  and `crcbl_scene::edit::WIRE_VERSION` are unchanged, so the edit history
+  beside a scene reads as before. The decoder fuzz target has a named seed for a
+  request and a notice in a gesture.
 
 - **A pad chord can outrank a plain binding of its button in a context above.**
   `crcbl_input::ActionMap::set_pad_chords_outrank` marks an action so that,

@@ -12698,7 +12698,9 @@ binary, its stdin console and a fetch from another process).
   field (four files, about 1.5 KB) a `crcbl scene set` runs 30 to 45 ms longer
   than a `crcbl scene list`, which bounds one save with its lock check and
   history; at the rate people edit that is nothing, and operations read in one
-  update share one save.
+  update share one save. **Except while a client's drag is open** (2026-10-05,
+  _Scene edits over the transport: gestures_ below): a save seals the entry on
+  top, so the update that ends the drag saves it, as one entry.
 - **A failed save keeps the edits and serves on**: the status line says
   `NOT SAVED` and why, the next applied operation or `save` tries again, and a
   `quit` that cannot save says why and keeps serving rather than exit with edits
@@ -12743,10 +12745,13 @@ is one of them); a `quit` that exits over a failed save (loses edits silently).
   hold a `Client` and a `SceneFollower` with the editor's vocabulary, draw the
   follower's copy, and send each command with `Client::send_edit` rather than
   applying it in process; its undo and redo become `EditOp::Undo` and
-  `EditOp::Redo`. A gesture needs a gesture id on the wire first (_Scene edits
-  over the transport_, below: a drag sent frame by frame would be one undo per
-  frame), and the copy is read-only between notices, so a refused edit must put
-  the view back.
+  `EditOp::Redo`. A drag sends each frame with `Client::send_edit_in` and an
+  `EditGesture` of the editor's own numbering, its release frame marked last
+  (_Scene edits over the transport: gestures_, below) — the panel's and the
+  gizmo's `Document::begin_gesture` would become a client-side id. The copy is
+  read-only between notices, so a refused edit must put the view back, and a
+  drag's frames show only once their notices come back, a round trip behind the
+  pointer, which may want the copy to show the frame sent ahead of its notice.
 - **A CLI client**, `crcbl scene <verb> --remote <addr>`: the verbs resolve
   names and read values against a document, so the client would fetch a copy (a
   `SceneFollower`), resolve against it, send the command and wait for its reply,
@@ -12862,9 +12867,7 @@ served scene's saved text with a `Document` given the same commands.
 - **The GUI is not a client of its own server.** `apps/editor`'s app still
   applies to its `Document` in process; routing it means starting an
   `EditServer` (or connecting to one), sending each command, and applying
-  notices to the view's copy. Gestures would need a gesture id on the wire:
-  today each operation is its own history entry, so a drag sent frame by frame
-  would be one undo per frame.
+  notices to the view's copy.
 - **The author is not in the undo log**: the plan's correction shows each
   entry's author, `UndoLog` has no author column, and the notice is the only
   place the author is said.
@@ -12965,6 +12968,99 @@ are untested end to end (the reconnect half is tested on the client alone);
 never run over UDP, where `MAX_RELIABLE_BYTES_IN_FLIGHT` meets the pace; the
 fuzz target's new calls were built and their seeds replayed, not run under
 libFuzzer.
+
+### Scene edits over the transport: gestures (2026-10-05)
+
+**Built**: `crcbl_net::EditGesture` (a client's id for a drag and whether this
+frame is its last) on `EditRequest::gesture`, the server's number for the
+gesture on `EditNotice::gesture`, `Client::send_edit_in`, `EditServer` recording
+a gesture's frames through `Document::apply_in` and `EditServer::gesture_open`,
+`SceneFollower` recording a notice's frames in the notice's gesture,
+`UndoLog::open_gesture`, and `crcbl edit --serve` holding its save while a drag
+is open. Held by `scene_edit::follow`'s `tests::gestures` (a server, two editing
+clients and a follower over `InMemoryTransport`: one drag one entry and one undo
+on both, the last frame, ungestured edits, two clients interleaving, an undo and
+redo between frames, a lost link, a fetch and a save mid-drag, an undo in a
+gesture refused, and a notice of one making the copy stale) and `serve_cmd`'s
+`a_remote_drag_is_saved_as_one_entry_that_one_cli_undo_takes_back` (UDP
+loopback, the history on disk, then `crcbl scene undo`). Every one of those
+tests was seen red under a mutation of the rule it holds.
+
+**Decided, for the long term:**
+
+- **The gesture travels in the request and the notice, not in the operation.**
+  The operation is the vocabulary, and the history file stores operations; a
+  gesture is how an operation is recorded, which only the server decides. So
+  `crcbl_scene::edit::WIRE_VERSION` and the history's layout are unchanged, and
+  a history written before reads the same. The request and the notice layouts
+  changed in place, without a version: the edit protocol has not been released.
+- **Two numberings.** The request carries the client's own `u32` id, compared
+  only with that client's, so clients never collide; the notice carries the
+  document's `Gesture` the frame was recorded in (`Document::begin_gesture`,
+  never reused while serving). A follower records each frame in the notice's
+  gesture, so its history folds exactly as the server's, through the same
+  `UndoLog::record_in`. A seal needs no message of its own: the next frame names
+  another number, and the copy pushes where the server pushed.
+- **What seals a gesture**: its last frame (applied or refused); anything else
+  applied for anyone — an edit outside it, another gesture, an undo or a redo,
+  the same client's or another's (**interleaving seals**: the history is one
+  list and only the entry on top folds, so two people dragging at once are an
+  entry per frame in arrival order, as two people's edits are); its client's
+  session found not connected at an update; a fetch answered (the copy it opens
+  holds none of the drag's entry, so carrying on into it would make the server's
+  undo the whole drag and the copy's only its end); and the document's own log
+  sealing the entry (a save through `document_mut`), which the server sees
+  through `UndoLog::open_gesture` before it carries a gesture on.
+- **A refused frame seals nothing** but its own gesture, when it is the last: it
+  changed nothing, so the frames after it fold as if it had not been sent.
+- **An undo or a redo in a gesture is refused as `MALFORMED`**: a gesture is a
+  drag's writes, and a step of the history is none of them.
+- **`crcbl edit --serve` saves when the drag ends**, not between its frames: a
+  save seals, so saving each update would put a drag on disk in pieces that
+  `crcbl scene undo` takes back one at a time. The frames before the end are
+  acknowledged and not yet on disk, as a drag in the editor is not until the
+  button comes up; the status line says `a drag under way, saved when it ends`.
+  Console `save` and `quit` save at once, and the drag carries on as an entry of
+  its own.
+
+**Considered and declined:**
+
+- **The gesture inside the operation** (an op kind for "apply in a gesture"):
+  the notice must carry the server's resolution, not the client's id, and the
+  history would have had to strip it again.
+- **The client's id passed through as the server's**: two clients' ids collide,
+  and a seal the server makes (a save, a fetch, interleaving) would be invisible
+  to a follower still folding by that id.
+- **Folding a client's frames past another client's edit**, an entry per client:
+  the log is one linear history; only its top can fold.
+- **A save that does not seal** (a fold into the saved entry giving it a new
+  id): it would keep a drag one entry across a console `save`, but it changes
+  the 2026-10-03 rule for the editor's own log and the history's statement that
+  a save drops the entries a gesture holds aside.
+- **Sealing an idle gesture on a timer**: nothing needs it yet; see below.
+
+**Behaviour that is not a bug:**
+
+- **A client holding a gesture open without its last frame keeps
+  `crcbl edit --serve` from saving** until something seals it — another edit,
+  its link going, a fetch, or `save`/`quit` at the console.
+- **A link lost and resumed inside one host update is not seen as lost**: the
+  server polls the session's state each update, and a resumed session carries
+  its gesture on.
+- **A follower joining mid-drag splits the drag** into the entry before the
+  fetch and the one after, on every copy and the server alike.
+
+**Deferred, each with what it takes:**
+
+- **The GUI editor joining a served scene** (_`crcbl scene` and `crcbl edit`_,
+  above) is the main caller still to come; the wire is ready for its drags.
+- **The author in the undo log**: still only on the notice.
+
+**Coverage gaps**: run on Windows only; in process, over `InMemoryTransport` and
+UDP loopback, never over a lossy link or between processes with a drag; the lost
+link is a dropped in-memory transport, not a timed-out UDP peer, and the
+resume-within-one-update case is untested; the fuzz target's new seeds were
+replayed by `tests/corpus.rs`, not run under libFuzzer.
 
 ## Tooling and infrastructure — what the plans still owe
 

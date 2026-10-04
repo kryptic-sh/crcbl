@@ -37,6 +37,16 @@
 //!   read in one update shares it. Saving on an interval, or only at
 //!   `quit`, would bound that cost under a script sending edits in a loop,
 //!   at the price of losing what was acknowledged since.
+//! * **Not while a client's drag is open** (decided 2026-10-05): a save
+//!   seals the history's entry on top, so saving between a drag's frames
+//!   would leave one entry a save, and the history on disk a drag in pieces
+//!   that `crcbl scene undo` walks back a piece at a time. The update that
+//!   ends the gesture saves it as one entry — its last frame, any other
+//!   operation, its client's link going down
+//!   ([`EditServer::gesture_open`]). A drag's frames before then are
+//!   acknowledged and not yet on disk, as they are not in the editor until
+//!   the button comes up; `save` and `quit` at the console save at once,
+//!   and the drag carries on as an entry of its own.
 //! * **A save that fails keeps the edits and serves on.** The status line
 //!   says the scene is not saved and why, the next applied operation or
 //!   `save` tries again, and a `quit` that cannot save says why and serves
@@ -237,6 +247,7 @@ impl Server {
             crcbl::log::info!("{APP}: {event:?}");
         }
         if self.edit.revision() != self.saved_revision
+            && !self.edit.gesture_open()
             && let Err(why) = self.save_now()
         {
             crcbl::log::warn!("{APP}: the scene was not saved: {why}");
@@ -321,6 +332,9 @@ impl Server {
         let saved = match &self.unsaved {
             Some(why) if self.edit.revision() != self.saved_revision => {
                 format!("NOT SAVED: {why}")
+            }
+            _ if self.edit.revision() != self.saved_revision => {
+                "a drag under way, saved when it ends".to_owned()
             }
             _ => "saved".to_owned(),
         };

@@ -1,7 +1,8 @@
 //! A follower over a real [`EditServer`] and real clients on
 //! `InMemoryTransport`: a late join, a scene larger than one message, notices
 //! arriving during the fetch, an undo reaching past it, and a notice lost on
-//! the way — each compared with the server's scene as saved text.
+//! the way — each compared with the server's scene as saved text. A drag
+//! sent as one gesture, from one client or two, is in [`gestures`].
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -30,11 +31,13 @@ const TICK_HZ: u32 = 60;
 const PATIENCE: u32 = 60 * TICK_HZ;
 
 /// A server, a client that edits, and — once [`join`](Self::join)ed — a
-/// client that follows, stepped together a tick at a time.
+/// client that follows, stepped together a tick at a time; and any more
+/// clients that edit, once [`add_editor`](Self::add_editor)ed.
 struct Rig {
     server: EditServer,
     author: Client<InMemoryTransport>,
     reader: Option<(Client<InMemoryTransport>, SceneFollower)>,
+    others: Vec<Client<InMemoryTransport>>,
     now: Duration,
 }
 
@@ -53,6 +56,7 @@ impl Rig {
             server,
             author,
             reader: None,
+            others: Vec::new(),
             now: Duration::ZERO,
         };
         rig.until(|rig| rig.author.session_id().is_some());
@@ -69,6 +73,9 @@ impl Rig {
         self.now += Duration::from_secs(1) / TICK_HZ;
         self.server.update(self.now);
         self.author.update(self.now);
+        for other in &mut self.others {
+            other.update(self.now);
+        }
         if let Some((client, follower)) = self.reader.as_mut() {
             client.update(self.now);
             follower.update(client, self.now);
@@ -327,6 +334,7 @@ fn notice(revision: u64, op: &EditOp) -> EditNotice {
     EditNotice {
         revision,
         author: 1,
+        gesture: None,
         op: encode_op(op).expect("travels"),
     }
 }
@@ -398,3 +406,5 @@ fn a_refused_fetch_waits_before_the_next() {
     let (served, copy) = rig.both_files();
     assert_eq!(copy, served);
 }
+
+mod gestures;

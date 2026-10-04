@@ -1549,6 +1549,21 @@ again on a gap, an undo reaching back past the fetch, or a notice the client
 dropped. `crcbl::scene_edit::follow`'s module docs and the backlog's _the
 late-join fetch_ entry hold the decisions.
 
+**A drag sent over the protocol is one undo entry, since 2026-10-05.** A client
+sends each frame with `Client::send_edit_in` and an `EditGesture` — its own id
+for the drag and whether this frame is the last. The server records the frames
+through `Document::apply_in` in one `Gesture` of the document's, the fold a drag
+in the editor takes, and each `EditNotice` names that gesture, so every
+`SceneFollower` folds the frames into the same entry and one undo over the
+protocol walks the whole drag back on the server and on every copy. **Decided
+for the long term**: the gesture travels in the request and the notice, not in
+the operation, so the history file and `crcbl_scene::edit::WIRE_VERSION` are
+unchanged; the client's ids are scoped to that client and the notice carries the
+server's own number; a gesture is sealed by its last frame, by anything else
+applied for anyone (interleaving seals, since only the entry on top can fold),
+by its client's link going down, by a fetch being answered, and by a save.
+`crcbl::scene_edit::serve`'s module docs hold the reasons.
+
 Everything else below stands unchanged: there is one schedule per `World`, there
 is no snapshot of a `World` (play restores from the scene's text, slice 8), the
 samples' state is outside the ECS. (The `scene` and `edit` subcommands landed
@@ -1631,18 +1646,19 @@ what is deferred.
   `quit`, and serves it over UDP through `EditServer`: a client fetches the
   scene, follows it as a `SceneFollower`, and sends edits, undos and redos, each
   applied through the one document and history, the scene and its history saved
-  after every update that applied one. While it is served a `crcbl scene` edit
-  exits 4, so remote edits are the only way in. It listens on loopback unless
-  `--lan` is given, is not announced on the LAN, prints a status line, and reads
-  `status`, `save` and `quit` at its standard input, as towers' dedicated server
-  does. A client and the server hand-shake on
-  `crcbl::scene_edit::serve::edit_compatibility`, whose schema identifier is a
-  digest of the vocabulary. `crates/crcbl-cli/src/serve_cmd.rs`'s module docs
-  hold the decisions, and its tests drive two clients through a fetch, an edit,
-  an undo and `quit` on loopback; `crates/crcbl-cli/tests/scene.rs` fetches from
-  the binary in another process. The GUI does not join a served scene yet:
-  `docs/backlog.md`'s _`crcbl scene` and `crcbl edit`_ entry says what that
-  takes.
+  after every update that applied one — except while a client's drag is open, so
+  a drag is saved as one entry when it ends and one `crcbl scene undo` takes it
+  back (2026-10-05). While it is served a `crcbl scene` edit exits 4, so remote
+  edits are the only way in. It listens on loopback unless `--lan` is given, is
+  not announced on the LAN, prints a status line, and reads `status`, `save` and
+  `quit` at its standard input, as towers' dedicated server does. A client and
+  the server hand-shake on `crcbl::scene_edit::serve::edit_compatibility`, whose
+  schema identifier is a digest of the vocabulary.
+  `crates/crcbl-cli/src/serve_cmd.rs`'s module docs hold the decisions, and its
+  tests drive two clients through a fetch, an edit, an undo and `quit` on
+  loopback; `crates/crcbl-cli/tests/scene.rs` fetches from the binary in another
+  process. The GUI does not join a served scene yet: `docs/backlog.md`'s
+  _`crcbl scene` and `crcbl edit`_ entry says what that takes.
 - **What it does not cover**: stdin batches, `scene paste -`, and the verbs
   beyond the eight; a scene of a game this build does not register; an open
   editor seeing a change on disk before its next Save (it notices at save time,

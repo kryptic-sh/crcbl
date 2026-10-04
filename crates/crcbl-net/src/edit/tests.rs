@@ -3,8 +3,20 @@ use super::*;
 fn request() -> EditRequest {
     EditRequest {
         request_id: 0x0102_0304_0506_0708,
+        gesture: None,
         op: vec![1, 0, 4, 7, 0, 0, 0],
     }
+}
+
+/// [`request`] as part of a gesture, and as the gesture's last edit.
+fn gestured_requests() -> [EditRequest; 2] {
+    [false, true].map(|last| EditRequest {
+        gesture: Some(EditGesture {
+            id: 0x0A0B_0C0D,
+            last,
+        }),
+        ..request()
+    })
 }
 
 fn replies() -> [EditReply; 2] {
@@ -27,7 +39,16 @@ fn notice() -> EditNotice {
     EditNotice {
         revision: 42,
         author: 3,
+        gesture: None,
         op: vec![1, 2],
+    }
+}
+
+/// [`notice`] as recorded in a gesture.
+fn gestured_notice() -> EditNotice {
+    EditNotice {
+        gesture: Some(0x1112_1314_1516_1718),
+        ..notice()
     }
 }
 
@@ -36,7 +57,11 @@ fn every_message() -> Vec<Vec<u8>> {
     let mut all = vec![
         encode_edit_request(&request()).expect("short enough"),
         encode_edit_notice(&notice()).expect("short enough"),
+        encode_edit_notice(&gestured_notice()).expect("short enough"),
     ];
+    for request in gestured_requests() {
+        all.push(encode_edit_request(&request).expect("short enough"));
+    }
     for reply in replies() {
         all.push(encode_edit_reply(&reply).expect("short enough"));
     }
@@ -55,6 +80,7 @@ fn a_request_is_the_kind_byte_then_the_id_then_the_operation() {
     let encoded = encode_edit_request(&request()).expect("short enough");
     let mut expected = vec![EDIT_KIND];
     expected.extend_from_slice(&0x0102_0304_0506_0708_u64.to_le_bytes());
+    expected.push(0);
     expected.extend_from_slice(&7_u32.to_le_bytes());
     expected.extend_from_slice(&[1, 0, 4, 7, 0, 0, 0]);
     assert_eq!(encoded, expected);
@@ -64,6 +90,71 @@ fn a_request_is_the_kind_byte_then_the_id_then_the_operation() {
     );
 }
 
+/// **A gesture travels as its marker and the client's id**: 1 for an edit
+/// the gesture carries on past, 2 for its last, each followed by the id —
+/// and each round-trips, so a server reads the end of a drag as the client
+/// meant it.
+#[test]
+fn a_requests_gesture_is_its_marker_then_the_clients_id() {
+    for (request, marker) in gestured_requests().into_iter().zip([1, 2]) {
+        let encoded = encode_edit_request(&request).expect("short enough");
+        let mut expected = vec![EDIT_KIND];
+        expected.extend_from_slice(&0x0102_0304_0506_0708_u64.to_le_bytes());
+        expected.push(marker);
+        expected.extend_from_slice(&0x0A0B_0C0D_u32.to_le_bytes());
+        expected.extend_from_slice(&7_u32.to_le_bytes());
+        expected.extend_from_slice(&[1, 0, 4, 7, 0, 0, 0]);
+        assert_eq!(encoded, expected, "{request:?}");
+        assert_eq!(decode_edit_request(&encoded).expect("well formed"), request);
+    }
+}
+
+/// A notice's gesture is a marker and the server's number for it, after the
+/// author.
+#[test]
+fn a_notices_gesture_is_its_marker_then_the_servers_number() {
+    let encoded = encode_edit_notice(&gestured_notice()).expect("short enough");
+    let mut expected = vec![EDIT_NOTICE_TAG];
+    expected.extend_from_slice(&42_u64.to_le_bytes());
+    expected.extend_from_slice(&3_u64.to_le_bytes());
+    expected.push(1);
+    expected.extend_from_slice(&0x1112_1314_1516_1718_u64.to_le_bytes());
+    expected.extend_from_slice(&2_u32.to_le_bytes());
+    expected.extend_from_slice(&[1, 2]);
+    assert_eq!(encoded, expected);
+}
+
+/// **A gesture marker this layout does not have is refused**, on a request
+/// and on a notice alike — a notice has no last edit to mark, so the
+/// request's 2 is one of them.
+#[test]
+fn an_unknown_gesture_marker_is_refused() {
+    let marker_at = 1 + 8;
+    for marker in [3, 0xFF] {
+        let mut request = encode_edit_request(&request()).expect("short enough");
+        request[marker_at] = marker;
+        assert!(
+            matches!(
+                decode_edit_request(&request),
+                Err(DecodeError::UnknownTag { tag }) if tag == marker
+            ),
+            "request marker {marker}"
+        );
+    }
+    let marker_at = 1 + 8 + 8;
+    for marker in [2, 3, 0xFF] {
+        let mut notice = encode_edit_notice(&notice()).expect("short enough");
+        notice[marker_at] = marker;
+        assert!(
+            matches!(
+                decode_edit_notice(&notice),
+                Err(DecodeError::UnknownTag { tag }) if tag == marker
+            ),
+            "notice marker {marker}"
+        );
+    }
+}
+
 #[test]
 fn both_outcomes_of_a_reply_and_a_notice_round_trip() {
     for reply in replies() {
@@ -71,9 +162,11 @@ fn both_outcomes_of_a_reply_and_a_notice_round_trip() {
         assert_eq!(encoded[0], EDIT_REPLY_TAG);
         assert_eq!(decode_edit_reply(&encoded).expect("well formed"), reply);
     }
-    let encoded = encode_edit_notice(&notice()).expect("short enough");
-    assert_eq!(encoded[0], EDIT_NOTICE_TAG);
-    assert_eq!(decode_edit_notice(&encoded).expect("well formed"), notice());
+    for notice in [notice(), gestured_notice()] {
+        let encoded = encode_edit_notice(&notice).expect("short enough");
+        assert_eq!(encoded[0], EDIT_NOTICE_TAG);
+        assert_eq!(decode_edit_notice(&encoded).expect("well formed"), notice);
+    }
 }
 
 #[test]
@@ -126,6 +219,7 @@ fn the_refusal_codes_keep_their_numbers_and_names() {
 fn an_encoder_refuses_what_its_decoder_would_and_carries_the_limits() {
     let long_op = EditRequest {
         request_id: 1,
+        gesture: None,
         op: vec![0; MAX_EDIT_OP_BYTES + 1],
     };
     assert_eq!(
@@ -160,10 +254,11 @@ fn an_encoder_refuses_what_its_decoder_would_and_carries_the_limits() {
         "message"
     );
 
-    // At the limits, each round-trips — and a request at the op limit is
-    // exactly as long as a command's data may be.
+    // At the limits, each round-trips — and a request of a gesture at the op
+    // limit is exactly as long as a command's data may be.
     let at_limit = EditRequest {
         request_id: 1,
+        gesture: Some(EditGesture { id: 1, last: true }),
         op: vec![0xA5; MAX_EDIT_OP_BYTES],
     };
     let encoded = encode_edit_request(&at_limit).expect("at the limit");
@@ -171,6 +266,16 @@ fn an_encoder_refuses_what_its_decoder_would_and_carries_the_limits() {
     assert_eq!(
         decode_edit_request(&encoded).expect("at the limit"),
         at_limit
+    );
+    let notice_at_limit = EditNotice {
+        gesture: Some(u64::MAX),
+        op: at_limit.op,
+        ..notice()
+    };
+    let encoded = encode_edit_notice(&notice_at_limit).expect("at the limit");
+    assert_eq!(
+        decode_edit_notice(&encoded).expect("at the limit"),
+        notice_at_limit
     );
     let at_limit = EditReply {
         request_id: 1,
@@ -224,6 +329,7 @@ fn a_length_past_its_limit_is_refused_before_anything_is_read_for_it() {
     // An op claimed past the limit, with no op bytes behind the claim.
     let mut huge = vec![EDIT_KIND];
     huge.extend_from_slice(&1_u64.to_le_bytes());
+    huge.push(GESTURE_NONE);
     huge.extend_from_slice(&u32::MAX.to_le_bytes());
     assert!(matches!(
         decode_edit_request(&huge),
@@ -231,6 +337,7 @@ fn a_length_past_its_limit_is_refused_before_anything_is_read_for_it() {
     ));
     let mut notice = vec![EDIT_NOTICE_TAG];
     notice.extend_from_slice(&[0; 16]);
+    notice.push(GESTURE_NONE);
     notice.extend_from_slice(&(u32::try_from(MAX_EDIT_OP_BYTES).unwrap() + 1).to_le_bytes());
     assert!(matches!(
         decode_edit_notice(&notice),

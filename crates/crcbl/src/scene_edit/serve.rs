@@ -40,6 +40,42 @@
 //!   while the scene plays, as an edit is: the played world is not the scene
 //!   that was authored, and no notice follows it.
 //!
+//! # A client's drag is one entry (decided 2026-10-05)
+//!
+//! A client sends a drag as one edit a frame, each naming the same
+//! [`EditGesture`] of its own numbering, and the server records them through
+//! [`Document::apply_in`] in one [`Gesture`] of the document's — the fold a
+//! drag in the editor takes, not a second one — so the drag is one entry of
+//! the history and one undo walks all of it back.
+//!
+//! * **A gesture's edits fold only while nothing comes between them.** The
+//!   entry stops taking them — the gesture is _sealed_ — at its last edit
+//!   ([`EditGesture::last`], applied or refused), at any other operation
+//!   applied for anyone (an edit outside the gesture, another gesture, an
+//!   undo or a redo, the same client's or another's), when its client's link
+//!   is found down, when a fetch is answered, and when the document's own
+//!   log seals the entry (a save through
+//!   [`document_mut`](EditServer::document_mut)). An edit of the gesture
+//!   after that starts an entry of its own. Interleaving seals because the
+//!   history is one list and only the entry on top can fold: two clients'
+//!   drags at once are entries in the order their frames came, as two
+//!   people's edits are.
+//! * **A refused edit seals nothing but its own gesture's last**: it changed
+//!   nothing, so what comes after it folds as if it had not been sent.
+//! * **The notice names the document's gesture, not the client's**
+//!   ([`EditNotice::gesture`](crate::net::EditNotice::gesture)), so a copy
+//!   records each edit in the same gesture the server did and its history
+//!   folds exactly as the server's: the same entries, so an undo over the
+//!   protocol walks back the same drag on the server and on every copy. A
+//!   seal needs no notice of its own — the gesture's next edit simply names
+//!   another number, and the copy pushes where the server pushed.
+//! * **Answering a fetch seals**: the copy it opens holds no history, so a
+//!   drag carried on into the entry it began before the fetch would be the
+//!   whole drag on the server and only its end on the copy, and their undos
+//!   would differ.
+//! * **An undo or a redo in a gesture is refused as malformed**: a gesture
+//!   is the writes of one drag, and a step of the history is none of them.
+//!
 //! # What a client and its server agree on (decided 2026-10-05)
 //!
 //! A client of a served scene connects with [`EDIT_PROTOCOL_ID`], ticks at
@@ -52,13 +88,13 @@
 use std::time::Duration;
 
 use crate::ecs::World;
-use crate::net::ProtocolCompatibility;
 use crate::net::{
-    EditNotice, EditOutcome, EditRefusal, EditReply, MAX_EDIT_MESSAGE_BYTES, encode_scene_files,
+    EditGesture, EditNotice, EditOutcome, EditRefusal, EditReply, MAX_EDIT_MESSAGE_BYTES,
+    ProtocolCompatibility, SessionState, encode_scene_files,
 };
 use crate::reflect::PathError;
 use crate::registry::Registry;
-use crate::scene::edit::{EditOp, OpDecodeError, decode_op};
+use crate::scene::edit::{EditOp, Gesture, OpDecodeError, decode_op};
 use crate::scene::scn::ScnError;
 use crate::server::{EventNotSent, Host, HostConfig, PeerId};
 use crate::shaders::sha256::sha256;
@@ -116,6 +152,18 @@ pub struct EditServer {
     /// Replies, and answers to scene fetches, whose peer could not be sent
     /// one: gone, or its link down.
     unsent_replies: u64,
+    /// The client's gesture the entry on top was recorded in, until it is
+    /// sealed — see the module docs.
+    open: Option<OpenGesture>,
+}
+
+/// A client's gesture whose entry may still fold: whose it is, the client's
+/// number for it, and the document's gesture its edits are recorded in.
+#[derive(Clone, Copy, Debug)]
+struct OpenGesture {
+    peer: PeerId,
+    id: u32,
+    gesture: Gesture,
 }
 
 impl EditServer {
@@ -139,6 +187,7 @@ impl EditServer {
             document,
             revision: 0,
             unsent_replies: 0,
+            open: None,
         }
     }
 
@@ -149,8 +198,15 @@ impl EditServer {
     /// ticks ran.
     pub fn update(&mut self, now: Duration) -> u32 {
         let ticks = self.host.update(now);
+        // A link that went down took whatever frames of the drag it still
+        // held; what follows from that client, resumed, is a drag of its own.
+        if let Some(open) = self.open
+            && self.host.peer_state(open.peer) != Some(SessionState::Connected)
+        {
+            self.open = None;
+        }
         for (peer, request) in self.host.take_edit_requests() {
-            let outcome = self.perform(peer, &request.op);
+            let outcome = self.perform(peer, request.gesture, &request.op);
             let reply = EditReply {
                 request_id: request.request_id,
                 outcome,
@@ -174,7 +230,13 @@ impl EditServer {
         let refusal = if self.document.play_state() == PlayState::Editing {
             match self.document.files() {
                 Ok(files) => match encode_scene_files(&files) {
-                    Ok(scene) => return self.host.send_scene(peer, fetch_id, self.revision, scene),
+                    Ok(scene) => {
+                        self.host.send_scene(peer, fetch_id, self.revision, scene)?;
+                        // The copy opened from it holds no history: see the
+                        // module docs.
+                        self.open = None;
+                        return Ok(());
+                    }
                     Err(too_large) => (EditRefusal::TOO_LARGE, too_large.to_string()),
                 },
                 Err(error) => (EditRefusal::FAILED, error.to_string()),
@@ -190,18 +252,51 @@ impl EditServer {
             .refuse_scene_fetch(peer, fetch_id, reason, cut_to_a_reply(message))
     }
 
-    /// Applies one operation for `peer` and says what became of it,
-    /// announcing it to every client when it applied.
-    fn perform(&mut self, peer: PeerId, op: &[u8]) -> EditOutcome {
+    /// Applies one operation for `peer`, in `gesture` when it is part of one,
+    /// and says what became of it, announcing it to every client when it
+    /// applied.
+    fn perform(&mut self, peer: PeerId, gesture: Option<EditGesture>, op: &[u8]) -> EditOutcome {
         let decoded = match decode_op(op) {
             Ok(decoded) => decoded,
             Err(error) => return refused(refusal_of_decode(&error), error.to_string()),
         };
+        let recorded = match (&decoded, gesture) {
+            (EditOp::Apply(_), Some(wire)) => Some(
+                self.carried_on(peer, wire.id)
+                    .unwrap_or_else(|| self.document.begin_gesture()),
+            ),
+            (EditOp::Undo | EditOp::Redo, Some(_)) => {
+                return refused(
+                    EditRefusal::MALFORMED,
+                    "an undo or a redo is no part of a gesture".to_owned(),
+                );
+            }
+            (_, None) => None,
+        };
         let stepped = match &decoded {
-            EditOp::Apply(command) => self.document.apply(command.clone()).map(|()| true),
+            EditOp::Apply(command) => match recorded {
+                Some(recorded) => self.document.apply_in(command.clone(), recorded),
+                None => self.document.apply(command.clone()),
+            }
+            .map(|()| true),
             EditOp::Undo => self.document.undo(),
             EditOp::Redo => self.document.redo(),
         };
+        if matches!(stepped, Ok(true)) {
+            self.open =
+                gesture
+                    .zip(recorded)
+                    .filter(|(wire, _)| !wire.last)
+                    .map(|(wire, gesture)| OpenGesture {
+                        peer,
+                        id: wire.id,
+                        gesture,
+                    });
+        } else if let Some(wire) = gesture.filter(|wire| wire.last)
+            && self.carried_on(peer, wire.id).is_some()
+        {
+            self.open = None;
+        }
         match stepped {
             Ok(true) => {
                 self.revision += 1;
@@ -209,6 +304,7 @@ impl EditServer {
                     .broadcast_edit_notice(&EditNotice {
                         revision: self.revision,
                         author: peer.get(),
+                        gesture: recorded.map(|recorded| recorded.0),
                         op: op.to_vec(),
                     })
                     .expect("an op read off a request fits a notice: the two share a limit");
@@ -227,6 +323,28 @@ impl EditServer {
             ),
             Err(error) => refused(refusal_of(&error), error.to_string()),
         }
+    }
+
+    /// The document's gesture `peer`'s gesture `id` is recorded in, while its
+    /// entry may still fold: on top of the history and unsealed.
+    fn carried_on(&self, peer: PeerId, id: u32) -> Option<Gesture> {
+        self.open
+            .filter(|open| {
+                open.peer == peer
+                    && open.id == id
+                    && self.document.log().open_gesture() == Some(open.gesture)
+            })
+            .map(|open| open.gesture)
+    }
+
+    /// Whether a client's gesture is open: its edits so far one entry of the
+    /// history that its next edit may still fold into — see the module docs.
+    /// A save of the document seals that entry, so a caller saving after
+    /// every edit waits while this holds, or a drag is one entry per save.
+    #[must_use]
+    pub fn gesture_open(&self) -> bool {
+        self.open
+            .is_some_and(|open| self.document.log().open_gesture() == Some(open.gesture))
     }
 
     /// The document being served.

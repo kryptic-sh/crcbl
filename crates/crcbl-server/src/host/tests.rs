@@ -801,7 +801,10 @@ fn a_host_serving_no_scene_refuses_an_edit_as_not_editable() {
 fn a_host_serving_edits_hands_them_over_and_sends_replies_and_notices() {
     let mut rig = Rig::with_peers(3, 2);
     rig.host.serve_edits();
-    let second = rig.clients[1].send_edit(vec![1, 2]).expect("in session");
+    let drag = crcbl_net::EditGesture { id: 5, last: false };
+    let second = rig.clients[1]
+        .send_edit_in(vec![1, 2], drag)
+        .expect("in session");
     let first = rig.clients[0].send_edit(vec![1, 1]).expect("in session");
     rig.run(2);
     let taken = rig.host.take_edit_requests();
@@ -812,6 +815,7 @@ fn a_host_serving_edits_hands_them_over_and_sends_replies_and_notices() {
                 rig.ids[0],
                 crcbl_net::EditRequest {
                     request_id: first,
+                    gesture: None,
                     op: vec![1, 1],
                 }
             ),
@@ -819,6 +823,7 @@ fn a_host_serving_edits_hands_them_over_and_sends_replies_and_notices() {
                 rig.ids[1],
                 crcbl_net::EditRequest {
                     request_id: second,
+                    gesture: Some(drag),
                     op: vec![1, 2],
                 }
             ),
@@ -836,6 +841,7 @@ fn a_host_serving_edits_hands_them_over_and_sends_replies_and_notices() {
     let notice = crcbl_net::EditNotice {
         revision: 1,
         author: rig.ids[0].get(),
+        gesture: Some(3),
         op: vec![1, 1],
     };
     assert_eq!(rig.host.broadcast_edit_notice(&notice), Ok(2));

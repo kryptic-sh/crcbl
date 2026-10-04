@@ -521,6 +521,23 @@ impl UndoLog {
         self.push(done, undo, Some(gesture));
     }
 
+    /// The gesture the entry on top is still open to — the one a write passed
+    /// to [`record_in`](Self::record_in) would fold into it — or [`None`]
+    /// when that entry is sealed, the log stands below its top, or it is
+    /// empty.
+    ///
+    /// What a server recording other programs' gestures asks before it
+    /// carries one on: a save in between [seals](Self::seal) the entry, and a
+    /// copy of the log that was not told so would fold where this one
+    /// pushes.
+    #[must_use]
+    pub fn open_gesture(&self) -> Option<Gesture> {
+        if self.position != self.entries.len() {
+            return None;
+        }
+        self.entries.last()?.gesture
+    }
+
     /// Closes the entry the log stands on to further folding.
     pub fn seal(&mut self) {
         if let Some(last) = self
@@ -1252,6 +1269,36 @@ mod tests {
             panic!("two leaves' inverse is a batch");
         };
         assert_eq!(undo.len(), 2, "one system's inverse was lost: {undo:?}");
+    }
+
+    /// **The open gesture is the one the next write would fold into**: the
+    /// gesture's own while its entry is on top, and none once the entry is
+    /// sealed, undone, or under an entry of its own.
+    #[test]
+    fn the_open_gesture_is_the_one_a_write_would_fold_into() {
+        let mut value = brick();
+        let mut log = UndoLog::new();
+        assert_eq!(log.open_gesture(), None, "an empty log");
+        let mut write = |log: &mut UndoLog, gesture: Option<Gesture>| {
+            let command = set("position.0", Value::Float(5.0));
+            let undo = command.apply(&mut value).expect("a brick has an x");
+            match gesture {
+                Some(gesture) => log.record_in(command, undo, gesture),
+                None => log.record(command, undo),
+            }
+        };
+        write(&mut log, Some(Gesture(1)));
+        assert_eq!(log.open_gesture(), Some(Gesture(1)));
+        log.seal();
+        assert_eq!(log.open_gesture(), None, "a sealed entry");
+
+        write(&mut log, Some(Gesture(2)));
+        log.undo();
+        assert_eq!(log.open_gesture(), None, "the log stands below it");
+        log.redo();
+        assert_eq!(log.open_gesture(), Some(Gesture(2)), "redone, on top");
+        write(&mut log, None);
+        assert_eq!(log.open_gesture(), None, "under an entry of its own");
     }
 
     /// An empty log has nothing to walk in either direction.

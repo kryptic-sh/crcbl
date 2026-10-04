@@ -1138,6 +1138,7 @@ mod tests {
             |data| crcbl_net::encode_client_to_server(&crcbl_net::ClientToServer::Command { data });
         let request = crcbl_net::EditRequest {
             request_id: 41,
+            gesture: None,
             op: vec![1, 1],
         };
         send_sealed(

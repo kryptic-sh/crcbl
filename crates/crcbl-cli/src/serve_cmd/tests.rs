@@ -19,7 +19,7 @@ use std::sync::mpsc;
 use crcbl::client::{Client, Ended};
 use crcbl::ecs::World;
 use crcbl::net::udp::UdpTransport;
-use crcbl::net::{EditOutcome, EditRefusal, InMemoryTransport, Message, Transport};
+use crcbl::net::{EditGesture, EditOutcome, EditRefusal, InMemoryTransport, Message, Transport};
 use crcbl::reflect::Value;
 use crcbl::scene::edit::{EditCommand, EditOp, encode_op};
 use crcbl::scene::scn::SceneEntityId;
@@ -221,13 +221,31 @@ impl Rig {
     /// Sends `bytes` as an operation from client `index`, and steps until
     /// its reply comes.
     fn send_bytes(&mut self, index: usize, bytes: Vec<u8>) -> EditOutcome {
+        self.send_request(index, bytes, None)
+    }
+
+    /// Sends `op` from client `index` as one edit of `gesture`, and steps
+    /// until its reply comes.
+    fn send_in(&mut self, index: usize, op: &EditOp, gesture: EditGesture) -> EditOutcome {
+        let bytes = encode_op(op).expect("every op here travels");
+        self.send_request(index, bytes, Some(gesture))
+    }
+
+    fn send_request(
+        &mut self,
+        index: usize,
+        bytes: Vec<u8>,
+        gesture: Option<EditGesture>,
+    ) -> EditOutcome {
         self.until("the client in session", |rig| {
             rig.clients[index].client.session_id().is_some()
         });
-        let id = self.clients[index]
-            .client
-            .send_edit(bytes)
-            .expect("in session");
+        let client = &mut self.clients[index].client;
+        let id = match gesture {
+            Some(gesture) => client.send_edit_in(bytes, gesture),
+            None => client.send_edit(bytes),
+        }
+        .expect("in session");
         self.until("the reply", |rig| {
             rig.clients[index]
                 .replies
@@ -355,6 +373,75 @@ fn clients_edit_and_follow_a_served_scene_saved_after_each_edit() {
         (reopened.log().position(), reopened.log().len()),
         (0, 1),
         "the history beside the scene is not the move, undone"
+    );
+}
+
+/// **A drag sent over the protocol is saved as one entry of the history**,
+/// decided 2026-10-05: the server saves nothing while the drag's gesture is
+/// open — the scene on disk is the committed one until its last frame — and
+/// the update that ends it saves the scene and a history of one entry, so
+/// after `quit` one `crcbl scene undo` puts back every file the drag moved.
+#[test]
+fn a_remote_drag_is_saved_as_one_entry_that_one_cli_undo_takes_back() {
+    let temp = TempDir::new("drag");
+    let dir = field_copy(&temp, "field.scn");
+    let expected_dir = field_copy(&temp, "expected.scn");
+    let before = scene_files(&dir);
+    let mut rig = Rig::serving(&dir);
+    let author = rig.join();
+    rig.caught_up();
+
+    let xs = [0.5, 1.0, 1.5, 2.0, 2.5];
+    for (index, x) in xs.into_iter().enumerate() {
+        let last = index + 1 == xs.len();
+        let drag = EditGesture { id: 1, last };
+        assert!(matches!(
+            rig.send_in(author, &EditOp::Apply(move_entry(x)), drag),
+            EditOutcome::Applied { .. }
+        ));
+        if !last {
+            assert_eq!(
+                scene_files(&dir),
+                before,
+                "frame {index} was saved mid-drag"
+            );
+            let status = rig.server.status();
+            assert!(status.contains("a drag under way"), "{status}");
+        }
+    }
+    let mut expected =
+        Document::open_dir(&expected_dir, crcbl_editor::scene::vocabulary()).expect("the field");
+    expected.apply(move_entry(2.5)).expect("a plot moves");
+    expected.save().expect("the copy saves");
+    assert_eq!(
+        scene_files(&dir),
+        scene_files(&expected_dir),
+        "the drag's end was not saved"
+    );
+    rig.caught_up();
+    for copy in rig.copies() {
+        assert_eq!(copy, scene_files(&expected_dir));
+    }
+
+    rig.server.quit().expect("saved");
+    let reopened = Document::open_with_history(&dir, crcbl_editor::scene::vocabulary())
+        .expect("the history is the scene's");
+    assert_eq!(
+        (reopened.log().position(), reopened.log().len()),
+        (1, 1),
+        "the drag is not one entry on disk"
+    );
+    drop(reopened);
+    let undo = SceneArgs {
+        dir: dir.clone(),
+        verb: SceneVerb::Edit(SceneEdit::Undo),
+        json: false,
+    };
+    scene_cmd::run(&undo).expect("the drag undoes");
+    assert_eq!(
+        scene_files(&dir),
+        before,
+        "one undo did not take the drag back"
     );
 }
 

@@ -20,8 +20,8 @@ use crcbl_ecs::World;
 use crcbl_net::auth::SessionCrypto;
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
-    AuthError, Baseline, ConsoleReply, ConsoleSet, ConsoleTextTooLong, DeltaCodec, EditNotice,
-    EditReply, EditRequest, EditTooLong, HandshakeResult, Hello, Message, MessageKind,
+    AuthError, Baseline, ConsoleReply, ConsoleSet, ConsoleTextTooLong, DeltaCodec, EditGesture,
+    EditNotice, EditReply, EditRequest, EditTooLong, HandshakeResult, Hello, Message, MessageKind,
     ProtocolCompatibility, RejectReason, ResumeToken, SceneAssembly, SectorId, SessionEndReason,
     SessionId, Transport, TransportError, Trust, replicated_system_id,
 };
@@ -697,6 +697,32 @@ impl<T: Transport> Client<T> {
     /// too long for the wire, or the key or the transport refused it. No id is
     /// spent on a request that was not sent.
     pub fn send_edit(&mut self, op: Vec<u8>) -> Result<u64, EditNotSent> {
+        self.send_edit_request(op, None)
+    }
+
+    /// [`send_edit`](Self::send_edit), as one edit of `gesture` — a drag's
+    /// frame. The server folds a gesture's edits into one entry of its
+    /// history, so one undo walks the whole drag back; the edit marked
+    /// [`last`](EditGesture::last) ends it, and so does any other edit this
+    /// client or another sends, and this client's link going down. Each of
+    /// the gesture's notices names the gesture the server recorded it in
+    /// ([`EditNotice::gesture`](crcbl_net::EditNotice::gesture)).
+    ///
+    /// The id is this client's own: a fresh one for each gesture, which the
+    /// server compares only with this client's.
+    ///
+    /// # Errors
+    ///
+    /// As [`send_edit`](Self::send_edit).
+    pub fn send_edit_in(&mut self, op: Vec<u8>, gesture: EditGesture) -> Result<u64, EditNotSent> {
+        self.send_edit_request(op, Some(gesture))
+    }
+
+    fn send_edit_request(
+        &mut self,
+        op: Vec<u8>,
+        gesture: Option<EditGesture>,
+    ) -> Result<u64, EditNotSent> {
         if !self.handshake_complete {
             return Err(EditNotSent::NotInSession);
         }
@@ -704,8 +730,12 @@ impl<T: Transport> Client<T> {
             return Err(EditNotSent::NotInSession);
         };
         let request_id = self.next_edit_request;
-        let data = crcbl_net::encode_edit_request(&EditRequest { request_id, op })
-            .map_err(EditNotSent::TooLong)?;
+        let data = crcbl_net::encode_edit_request(&EditRequest {
+            request_id,
+            gesture,
+            op,
+        })
+        .map_err(EditNotSent::TooLong)?;
         let payload =
             crcbl_net::encode_client_to_server(&crcbl_net::ClientToServer::Command { data });
         let sealed = crypto.seal(&payload).map_err(EditNotSent::Seal)?;
@@ -1795,8 +1825,17 @@ mod tests {
         let (client_transport, mut peer) = InMemoryTransport::pair();
         let mut client = client(client_transport);
         let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
-        for (op, expected_id) in [(vec![1, 1], 1), (vec![1, 2], 2)] {
-            let id = client.send_edit(op.clone()).expect("in session");
+        let drag = EditGesture { id: 4, last: true };
+        for (op, gesture, expected_id) in [
+            (vec![1, 1], None, 1),
+            (vec![1, 2], Some(drag), 2),
+            (vec![1, 3], None, 3),
+        ] {
+            let id = match gesture {
+                None => client.send_edit(op.clone()),
+                Some(gesture) => client.send_edit_in(op.clone(), gesture),
+            }
+            .expect("in session");
             assert_eq!(id, expected_id, "each request numbered in turn");
             let msg = peer.recv_reliable().unwrap().expect("the edit went out");
             assert_eq!(msg.kind, MessageKind::Reliable);
@@ -1810,7 +1849,11 @@ mod tests {
             };
             assert_eq!(
                 crcbl_net::decode_edit_request(&data).expect("an edit"),
-                EditRequest { request_id: id, op }
+                EditRequest {
+                    request_id: id,
+                    gesture,
+                    op
+                }
             );
         }
         let too_long = vec![0; crcbl_net::MAX_EDIT_OP_BYTES + 1];
@@ -1832,6 +1875,7 @@ mod tests {
         let notice = EditNotice {
             revision: 5,
             author: 2,
+            gesture: Some(9),
             op: vec![1, 1],
         };
         for payload in [
@@ -1861,6 +1905,7 @@ mod tests {
             let notice = EditNotice {
                 revision,
                 author: 1,
+                gesture: None,
                 op: Vec::new(),
             };
             let payload = crcbl_net::encode_edit_notice(&notice).expect("short enough");
