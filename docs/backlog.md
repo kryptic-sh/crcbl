@@ -21,6 +21,64 @@ on shard on 2026-09-27.
 
 ## EW integration follow-ups
 
+- **Expose the next fixed-rate sample without advancing the schedule.** EW's
+  `src/game_ai_grenade_schedule.rs::ai_grenade_decision_event_seconds` stops
+  simulation at perception samples so an autonomous grenade opportunity can
+  begin before the end of a long update. `FixedRateSchedule` in
+  `crates/crcbl-core/src/schedule.rs` already computes
+  `next_sample_time_seconds`, but the method is private. The game currently
+  copies the schedule, reconciles skipped time with `skip_elapsed`, and calls
+  `advance` to discover the earliest sample offset. That preview visits every
+  sample in the requested interval even though only the first is needed, and
+  subsequent game boundaries repeat the preview. Expose a read-only absolute
+  next-sample timestamp using the existing index/phase calculation; callers can
+  subtract `simulation_time_seconds` after reconciling skipped time. Preserve
+  phase-zero behavior, staggered phases, exact endpoint sampling and skip
+  semantics. Verify the query matches the first subsequently emitted sample
+  before and after advancement/skipping, without consuming it. Once available,
+  update EW's engine pin and replace its copied-schedule replay with the query.
+  EW's `autonomous_grenade_selection_` regressions cover initial memory,
+  future-dated memory, cooldown expiry and newly sampled visual evidence. EW's
+  warmed instrumented debug profile now measures this: with 16 stationary
+  grenade carriers and 10 simulated seconds, one long update visits 1,282,400
+  preview samples in 51,216 calls; frame-sized updates visit 4,446 samples in
+  55,872 calls. Preview time is a small part of total simulation time in both
+  cases, so do not present the query as an established end-to-end performance
+  fix. The fixtures verify live actors, retained grenades and absent target
+  memory, and disabling the sample counter fails its nonzero-work check. Full
+  results and the temporary diagnostic patch use
+  `ai-grenade-lookahead-supported-profile` under
+  `%TEMP%/ew-crcbl-update-review/`; the driver is
+  `profile-ai-grenade-lookahead-supported.py`. Optimized-build profiling and
+  active gameplay remain unverified.
+
+- **EW controller rebinding needs explicit cross-context chord routing.** EW's
+  Controls page can reassign its existing LB+Select and LB+Start gameplay
+  chords, originally free look and backpack drop, to another gameplay action.
+  Those originals live in `GLOBAL_CONTEXT` so their chords shadow the global
+  plain Select/Start map/inventory bindings. Rebinding either chord to Reload
+  leaves Reload in `GAMEPLAY_CONTEXT`; `ActionMap::apply_overrides` changes
+  bindings without changing context, and the global plain button wins. The
+  failing game regression is
+  `reassigned_menu_button_chords_dispatch_the_selected_gameplay_action` in
+  `src/game_actions_pad_tests.rs`, preserved on
+  [EW's reproduction branch](https://gitlab.com/exfilgames/ew/-/tree/wip/controller-menu-chord-dispatch)
+  at `cb15f742`. Run `cargo test reassigned_menu_button_chords` there; it fails
+  at the Select chord's Reload assertion against engine `80ece794`. Provide an
+  explicit routing mechanism for this use case without silently changing
+  ordinary context precedence. Acceptance: the rebound chord presses and
+  releases the selected gameplay action without opening the plain menu; a fresh
+  unmodified Select/Start still opens its menu; inventory/map modal contexts
+  still block gameplay; layer-first release, focus loss, unplugging and
+  neutral-before-resume do not leak actions; keyboard menu bindings remain
+  usable independently. Preserve user-facing bindings and override round trips,
+  including restoring defaults. EW has not changed engine implementation. After
+  a supported API/design lands, integrate it in the game, turn the saved
+  regression green, and cover modal suppression and held-input transitions
+  through the actual game loop. Moving every gameplay action into the global
+  context or disabling whole menu actions while a pad chord is held would weaken
+  modal isolation or unrelated keyboard input and was not adopted.
+
 - **Decided 2026-10-03: exact stationarity, not a tolerance**, for EW's
   stationary-drift report against `1d24972a`
   (`stationary_leg_treatment_keeps_depletion_and_recovery_chronological`). A
