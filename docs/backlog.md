@@ -21,6 +21,27 @@ on shard on 2026-09-27.
 
 ## EW integration follow-ups
 
+- **Expose the next fixed-rate sample without advancing the schedule.** EW's
+  `src/game_ai_grenade_schedule.rs::ai_grenade_decision_event_seconds` stops
+  simulation at perception samples so an autonomous grenade opportunity can
+  begin before the end of a long update. `FixedRateSchedule` in
+  `crates/crcbl-core/src/schedule.rs` already computes
+  `next_sample_time_seconds`, but the method is private. The game currently
+  copies the schedule, reconciles skipped time with `skip_elapsed`, and calls
+  `advance` to discover the earliest sample offset. That preview visits every
+  sample in the requested interval even though only the first is needed, and
+  subsequent game boundaries repeat the preview. Expose a read-only absolute
+  next-sample timestamp using the existing index/phase calculation; callers can
+  subtract `simulation_time_seconds` after reconciling skipped time. Preserve
+  phase-zero behavior, staggered phases, exact endpoint sampling and skip
+  semantics. Verify the query matches the first subsequently emitted sample
+  before and after advancement/skipping, without consuming it. Once available,
+  update EW's engine pin and replace its copied-schedule replay with the query.
+  EW's `autonomous_grenade_selection_` regressions cover initial memory,
+  future-dated memory, cooldown expiry and newly sampled visual evidence.
+  Profiling of very long updates and large grenade-carrying groups remains open;
+  no performance figure is claimed.
+
 - **EW controller rebinding needs explicit cross-context chord routing.** EW's
   Controls page can reassign its existing LB+Select and LB+Start gameplay
   chords, originally free look and backpack drop, to another gameplay action.
