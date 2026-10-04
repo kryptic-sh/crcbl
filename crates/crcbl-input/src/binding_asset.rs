@@ -34,6 +34,9 @@
 //!   hold and one double tap, timed in whole milliseconds. Each **emits** the
 //!   named action when it fires (`emit.rs`), and that action must be a
 //!   `Button` declared in the same file.
+//! - `pad_chords_outrank` — `true` lets the action's pad chords take their
+//!   button from the contexts above it ([`ActionMap::set_pad_chords_outrank`]);
+//!   left out, it is `false`.
 //!
 //! Every field but `action` and `kind` may be left out.
 //!
@@ -184,6 +187,7 @@ impl ActionMap {
             gamepad: Vec::new(),
             touch: Vec::new(),
             patterns: Vec::new(),
+            pad_chords_outrank: slot.pad_chords_outrank,
         };
         for binding in &slot.defaults {
             file.list_mut(binding.device()).push(binding.to_string());
@@ -274,6 +278,8 @@ struct ActionFile {
     touch: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     patterns: Vec<PatternFile>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pad_chords_outrank: bool,
 }
 
 impl ActionFile {
@@ -302,6 +308,10 @@ fn gameplay() -> String {
 
 fn is_gameplay(context: &str) -> bool {
     context == GAMEPLAY_CONTEXT
+}
+
+fn is_false(flag: &bool) -> bool {
+    !flag
 }
 
 /// The first pass's view of a record: what a pattern needs to know about the
@@ -506,6 +516,10 @@ impl Records<'_> {
                     bindings,
                 },
             )
+            .and_then(|()| {
+                self.map
+                    .set_pad_chords_outrank(&action, record.pad_chords_outrank)
+            })
             .map_err(AssetRefusal::Declare)?;
         Ok(timed)
     }

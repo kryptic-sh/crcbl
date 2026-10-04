@@ -511,14 +511,28 @@ impl ActionMap {
         self.pads.iter().map(|(&id, snapshot)| (id, snapshot))
     }
 
-    /// Recompute what the pads hold between them, lift the withholding of any
-    /// button no pad holds any more and of any stick or trigger back at rest,
-    /// and re-resolve every pad binding.
+    /// Recompute what the pads hold between them, withhold a held button an
+    /// outranking chord's modifier handed to another context, lift the
+    /// withholding of any button no pad holds any more and of any stick or
+    /// trigger back at rest, and re-resolve every pad binding.
     fn repad(&mut self) {
+        let before = self.held_pad_buttons;
         self.held_pad_buttons = self
             .pads
             .values()
             .fold(PadButtons::EMPTY, |held, pad| held.union(pad.buttons));
+        // The modifier of an outranking chord changes which context reads a
+        // button held through it — `context.rs`'s change of owner — and the
+        // new reader does not see it go down.
+        let held = self.held_pad_buttons;
+        for button in PadButton::ALL {
+            if before.contains(button)
+                && held.contains(button)
+                && self.routes.pad_reader(button, before) != self.routes.pad_reader(button, held)
+            {
+                self.suppressed.pad_buttons.insert(button);
+            }
+        }
         self.suppressed.pad_buttons = self
             .suppressed
             .pad_buttons

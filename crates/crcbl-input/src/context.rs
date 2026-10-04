@@ -33,6 +33,28 @@
 //! and triggers — every pad's South is one input, as every pad drives every
 //! pad binding.
 //!
+//! # A pad chord that outranks a context above
+//!
+//! A chord takes its button only in the context that owns the button, so a
+//! [`Binding::PadChord`] beneath a context binding its button plainly reads
+//! nothing: LB+Select rebound to a gameplay reload under a global map on
+//! Select still opens the map. **An action marked with
+//! [`ActionMap::set_pad_chords_outrank`] lifts that for its own pad chords**:
+//! while a chord's modifier is held, the chord takes its button from every
+//! context above it, and the plain bindings there read the button as up — the
+//! chord's rule within one context, stretched across the contexts between.
+//! Nothing else changes. A context that binds the same chord itself keeps it,
+//! a chord beneath a modal context stays blocked as every other input does,
+//! the button without the modifier still goes to its owner, and an action not
+//! marked keeps the ordinary precedence.
+//!
+//! The modifier hands a held button between two contexts, so the handover is
+//! a change of owner (below): **pressing or letting go of the modifier while
+//! the button is held withholds the button from its new reader until it is
+//! released.** Letting go of LB before Select releases the reload without
+//! opening the map, and LB pressed over a held Select releases the map
+//! without reloading.
+//!
 //! # A key held while the stack changes
 //!
 //! **A held input whose owner a push or a pop changes is withheld from its new
@@ -119,6 +141,10 @@ pub(crate) struct Routes {
     /// For each pad button, the modifiers of the pad chords its **owner**
     /// binds on it — [`Self::chords`] for the pad.
     pad_chords: HashMap<PadButton, Vec<PadButton>>,
+    /// For each pad button, the outranking pad chords on it from contexts
+    /// beneath its owner, as `(modifier, context)`, topmost context first —
+    /// see [`ActionMap::set_pad_chords_outrank`].
+    outranking_pad_chords: HashMap<PadButton, Vec<(PadButton, usize)>>,
     /// For each pointer button, the modifiers of the button chords its
     /// **owner** binds on it — [`Self::chords`] for the mouse.
     button_chords: HashMap<PointerButton, Vec<Modifier>>,
@@ -300,11 +326,12 @@ impl View<'_> {
         self.routes.pointer == Some(self.context)
     }
 
-    /// The pad button is held, this context owns it, and it is not withheld.
+    /// The pad button is held, this context reads it with the modifiers held
+    /// now ([`Routes::pad_reader`]), and it is not withheld.
     fn owns_held_pad_button(&self, button: PadButton) -> bool {
         self.held_pad_buttons.contains(button)
             && !self.suppressed.pad_buttons.contains(button)
-            && self.routes.pad_buttons.get(&button) == Some(&self.context)
+            && self.routes.pad_reader(button, self.held_pad_buttons) == Some(self.context)
     }
 
     /// A plain pad binding's read of `button`: down unless a pad chord on it
@@ -323,8 +350,12 @@ impl View<'_> {
     }
 
     /// A [`Binding::PadChord`]'s read: its button, and its modifier read raw.
+    /// Beneath the button's owner, only an outranking chord reads it.
     pub(crate) fn pad_chord(&self, modifier: PadButton, button: PadButton) -> bool {
-        self.owns_held_pad_button(button) && self.held_pad_buttons.contains(modifier)
+        self.owns_held_pad_button(button)
+            && self.held_pad_buttons.contains(modifier)
+            && (self.routes.pad_buttons.get(&button) == Some(&self.context)
+                || self.routes.outranks(button, modifier, self.context))
     }
 
     /// A stick is a level: a stack change never withholds it, and only a
@@ -348,6 +379,31 @@ impl Routes {
         self.scroll_chords.contains(&key)
     }
 
+    /// The context that reads `button` while `held` is down: the topmost one
+    /// with an outranking chord on it whose modifier is held, or else its
+    /// owner. What a change of owner compares for a pad button, so the
+    /// modifier of an outranking chord hands a held button over the way a
+    /// push does.
+    pub(crate) fn pad_reader(&self, button: PadButton, held: PadButtons) -> Option<usize> {
+        self.outranking_pad_chords
+            .get(&button)
+            .and_then(|chords| {
+                chords
+                    .iter()
+                    .find(|&&(modifier, _)| held.contains(modifier))
+            })
+            .map(|&(_, context)| context)
+            .or_else(|| self.pad_buttons.get(&button).copied())
+    }
+
+    /// Whether `context` has an outranking chord on `button` held by
+    /// `modifier`.
+    fn outranks(&self, button: PadButton, modifier: PadButton, context: usize) -> bool {
+        self.outranking_pad_chords
+            .get(&button)
+            .is_some_and(|chords| chords.contains(&(modifier, context)))
+    }
+
     /// Owners for the stack as it stands: each context from the top down
     /// claims what nothing above it already has.
     fn build(map: &ActionMap) -> Self {
@@ -355,6 +411,9 @@ impl Routes {
         // Below a modal context only the pointer's position and motion still
         // route: a screen reads the cursor, and nothing else passes it.
         let mut below_modal = false;
+        // Every pad chord a context above binds, outranking or not: a context
+        // that binds a chord itself keeps it from an outranking one beneath.
+        let mut pad_chords_above = HashSet::new();
         let order = std::iter::once(GLOBAL_INDEX).chain(map.stack.iter().rev().copied());
         for context in order {
             let bindings = || {
@@ -422,7 +481,9 @@ impl Routes {
             // After this context's keys and wheel are claimed, so a chord
             // registers only where its context is the one reading the key, and
             // a scroll chord only where its context is the one reading the
-            // wheel.
+            // wheel. An outranking pad chord whose button a context above owns
+            // registers beneath that owner instead, unless a context above
+            // binds the same chord.
             //
             // A scroll chord competes for the wheel only while its action is
             // enabled: a newer key whose action cannot use the wheel right now
@@ -447,6 +508,16 @@ impl Routes {
                         {
                             add_chord(&mut routes.pad_chords, *button, *modifier);
                         }
+                        Binding::PadChord { modifier, button }
+                            if slot.pad_chords_outrank
+                                && !pad_chords_above.contains(&(*modifier, *button)) =>
+                        {
+                            add_chord(
+                                &mut routes.outranking_pad_chords,
+                                *button,
+                                (*modifier, context),
+                            );
+                        }
                         Binding::ScrollChord { held }
                             if slot.enabled
                                 && routes.scroll == Some(context)
@@ -458,6 +529,11 @@ impl Routes {
                     }
                 }
             }
+            for binding in bindings() {
+                if let Binding::PadChord { modifier, button } = binding {
+                    pad_chords_above.insert((*modifier, *button));
+                }
+            }
             below_modal = map.modal.contains(&context);
         }
         routes
@@ -467,6 +543,8 @@ impl Routes {
 /// Record that `input`'s owner binds a chord on it held by `modifier`, once
 /// per modifier: the table [`View`] reads to shadow that owner's plain
 /// bindings on the input, for a key, a mouse button and a pad button alike.
+/// [`Routes::outranking_pad_chords`] keeps each chord's context beside its
+/// modifier, so a chord is recorded once per modifier and context there.
 fn add_chord<I: Eq + std::hash::Hash, M: PartialEq>(
     chords: &mut HashMap<I, Vec<M>>,
     input: I,
@@ -572,6 +650,47 @@ impl ActionMap {
     pub fn context_of(&self, name: &str) -> Option<&str> {
         let &idx = self.name_to_idx.get(name)?;
         Some(self.contexts[self.slots[idx].context].as_str())
+    }
+
+    /// Let an action's [`Binding::PadChord`]s take their button from the
+    /// contexts above it while their modifier is held, or put them back under
+    /// the ordinary precedence — see the module docs.
+    ///
+    /// For a pad chord a player can give a gameplay action when the plain
+    /// button is a global one: LB+Select rebound from a global free look to a
+    /// gameplay reload reloads, and Select alone still opens the global map.
+    /// The mark is the action's, not a binding's, so it holds whatever the
+    /// action is rebound to — [`ActionMap::rebind`] and
+    /// [`ActionMap::apply_overrides`] leave it alone, restoring the defaults
+    /// included — and a binding asset declares it with
+    /// `pad_chords_outrank: true` (`binding_asset.rs`). Off for every action
+    /// until set.
+    ///
+    /// Every action re-resolves, as after a rebind, and nothing is withheld.
+    ///
+    /// # Errors
+    /// [`ActionMapError::UnknownAction`] if nothing with that name is declared.
+    pub fn set_pad_chords_outrank(
+        &mut self,
+        name: &str,
+        outrank: bool,
+    ) -> Result<(), ActionMapError> {
+        let Some(&idx) = self.name_to_idx.get(name) else {
+            return Err(ActionMapError::UnknownAction(name.to_owned()));
+        };
+        if self.slots[idx].pad_chords_outrank != outrank {
+            self.slots[idx].pad_chords_outrank = outrank;
+            self.reroute();
+        }
+        Ok(())
+    }
+
+    /// Whether an action's pad chords outrank the contexts above it — see
+    /// [`ActionMap::set_pad_chords_outrank`]. `None` if it is not declared.
+    #[must_use]
+    pub fn pad_chords_outrank(&self, name: &str) -> Option<bool> {
+        let &idx = self.name_to_idx.get(name)?;
+        Some(self.slots[idx].pad_chords_outrank)
     }
 
     fn context_index(&self, context: &str) -> Result<usize, ActionMapError> {
@@ -749,9 +868,9 @@ impl ActionMap {
                 self.suppressed.controls.insert(control.clone());
             }
         }
+        let held = self.held_pad_buttons;
         for button in PadButton::ALL {
-            if self.held_pad_buttons.contains(button)
-                && old.pad_buttons.get(&button) != new.pad_buttons.get(&button)
+            if held.contains(button) && old.pad_reader(button, held) != new.pad_reader(button, held)
             {
                 self.suppressed.pad_buttons.insert(button);
             }
@@ -771,6 +890,9 @@ impl ActionMap {
         }
     }
 }
+
+#[cfg(test)]
+mod outrank_tests;
 
 #[cfg(test)]
 mod tests {

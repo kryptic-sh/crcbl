@@ -498,7 +498,10 @@ pub enum Binding {
     /// [`Binding::PadDpad`] reading it), in the context that owns the button,
     /// reads it as up — so a jump on South and a vault on LB+South never both
     /// fire. Holding South and then pressing LB releases the one and presses
-    /// the other.
+    /// the other. A chord in a context beneath the owner reads nothing,
+    /// unless its action is marked with [`ActionMap::set_pad_chords_outrank`]:
+    /// then it takes the button from the contexts above while `modifier` is
+    /// held (`context.rs`).
     ///
     /// **The modifier is read, not consumed**: a pad chord owns its `button`
     /// and nothing else, so `modifier` can still carry a plain binding of its
@@ -674,6 +677,9 @@ struct ActionSlot {
     /// was hashed once per slot per raw event, and `set_enabled` on a name that
     /// was never declared grew it forever.
     enabled: bool,
+    /// Whether its pad chords take their button from a context above — see
+    /// [`ActionMap::set_pad_chords_outrank`].
+    pad_chords_outrank: bool,
 }
 
 impl ActionSlot {
@@ -694,6 +700,7 @@ impl ActionSlot {
             active: false,
             hold_start: None,
             enabled: true,
+            pad_chords_outrank: false,
         }
     }
 

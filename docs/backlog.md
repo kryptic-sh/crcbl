@@ -33,32 +33,62 @@ on shard on 2026-09-27.
   `ai_grenade_decision_event_seconds`'s copied-schedule replay with the query.
   As EW's own profile said, this is not an established end-to-end speedup.
 
-- **EW controller rebinding needs explicit cross-context chord routing.** EW's
-  Controls page can reassign its existing LB+Select and LB+Start gameplay
-  chords, originally free look and backpack drop, to another gameplay action.
-  Those originals live in `GLOBAL_CONTEXT` so their chords shadow the global
-  plain Select/Start map/inventory bindings. Rebinding either chord to Reload
-  leaves Reload in `GAMEPLAY_CONTEXT`; `ActionMap::apply_overrides` changes
-  bindings without changing context, and the global plain button wins. The
-  failing game regression is
-  `reassigned_menu_button_chords_dispatch_the_selected_gameplay_action` in
-  `src/game_actions_pad_tests.rs`, preserved on
-  [EW's reproduction branch](https://gitlab.com/exfilgames/ew/-/tree/wip/controller-menu-chord-dispatch)
-  at `cb15f742`. Run `cargo test reassigned_menu_button_chords` there; it fails
-  at the Select chord's Reload assertion against engine `80ece794`. Provide an
-  explicit routing mechanism for this use case without silently changing
-  ordinary context precedence. Acceptance: the rebound chord presses and
-  releases the selected gameplay action without opening the plain menu; a fresh
-  unmodified Select/Start still opens its menu; inventory/map modal contexts
-  still block gameplay; layer-first release, focus loss, unplugging and
-  neutral-before-resume do not leak actions; keyboard menu bindings remain
-  usable independently. Preserve user-facing bindings and override round trips,
-  including restoring defaults. EW has not changed engine implementation. After
-  a supported API/design lands, integrate it in the game, turn the saved
-  regression green, and cover modal suppression and held-input transitions
-  through the actual game loop. Moving every gameplay action into the global
-  context or disabling whole menu actions while a pad chord is held would weaken
-  modal isolation or unrelated keyboard input and was not adopted.
+- **Cross-context pad chord routing is built (2026-10-05); EW migrates.**
+  `ActionMap::set_pad_chords_outrank(name, true)` marks an action whose
+  `Binding::PadChord`s take their button from the contexts above while the
+  modifier is held (module docs of `crates/crcbl-input/src/context.rs`).
+  `ActionMap::pad_chords_outrank` reads the mark, and a binding asset spells it
+  `pad_chords_outrank: true`. `context::outrank_tests` reproduces EW's controls
+  (global map and inventory on Select and Start and global free look and
+  backpack drop on LB with each, reload in gameplay, a modal screen) and covers
+  every acceptance point. Each test went red under a mutation of its rule. EW's
+  own regression (`wip/controller-menu-chord-dispatch` at `cb15f742`) was run
+  against this change from a scratch clone. Unchanged, it still fails at the
+  Select chord's Reload assertion, as expected, since nothing in EW marks
+  reload. With the first step below applied in the clone only (two lines, never
+  committed), it passes, and so do EW's other `game::actions` tests. EW's full
+  suite was not run. What EW has to do at its next engine pin:
+  - In `GameActions::new`, call `set_pad_chords_outrank(name, true)` for every
+    rebindable action declared in `GAMEPLAY_CONTEXT`, the ones a player can give
+    a pad chord on Controls. Nothing else in the rebind or override path
+    changes: the mark is the action's, so `set_overrides`, the saved text and
+    restoring the defaults keep it.
+  - Optionally, move `FREE_LOOK` and `DROP_BACKPACK` back into
+    `GAMEPLAY_CONTEXT` with the mark. They live in `GLOBAL_CONTEXT` only so
+    their chords claim the button. Marked in gameplay, their chords still beat
+    the global Select/Start, and a modal screen blocks them, so the game-side
+    gate that keeps them off behind screens could go. Not verified in EW.
+  - Then turn
+    `reassigned_menu_button_chords_dispatch_the_selected_gameplay_action` green
+    and cover modal suppression and held-input transitions through the game
+    loop, as EW planned.
+
+  **Decision.** The routing is a per-action mark, not a per-binding one.
+  Overrides replace an action's bindings and EW's Controls page builds plain
+  `Binding::PadChord` values, so a mark on the binding would have to survive
+  every rebind and be added at capture time, and would need a new text form. The
+  action's mark survives all of that unchanged. The read stays the chord rule
+  that already applies within one context: a held modifier shadows the plain
+  binding, stretched across the contexts between, with no parallel system. A
+  held button whose reader the modifier changes is withheld until released,
+  which is the existing change-of-owner rule (`Routes::pad_reader` is what both
+  a push and a pad snapshot compare). That rule is what keeps layer-first
+  release, a modifier pressed over a held button, unplugging one of two pads and
+  focus loss from leaking. Declined: moving every gameplay action into the
+  global context, or disabling whole menu actions while a pad chord is held,
+  because both weaken modal isolation or unrelated keyboard input (EW's own
+  reasoning, held by `keyboard_menu_bindings_work_while_the_chord_is_held` and
+  the modal test). A map-wide or per-context switch was also declined: it is
+  coarser than any game needs, and it would change precedence for actions nobody
+  marked. A chord that always outranks without a mark was declined because it
+  silently changes ordinary context precedence.
+
+  **Not built.** Key chords (`Binding::Chord`) and mouse button chords
+  (`Binding::ButtonChord`) have no outranking mark. Nobody has asked for one,
+  and the handover withholding would need the same per-input tracking for keys
+  and mouse buttons. Add it the same way if a game needs it. A marked action
+  that is disabled still claims its chord's button, as a disabled action keeps
+  its keys (the context module's "binds is by binding" rule).
 
 - **Decided 2026-10-03: exact stationarity, not a tolerance**, for EW's
   stationary-drift report against `1d24972a`

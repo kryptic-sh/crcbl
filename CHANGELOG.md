@@ -651,6 +651,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A pad chord can outrank a plain binding of its button in a context above.**
+  `crcbl_input::ActionMap::set_pad_chords_outrank` marks an action so that,
+  while one of its `Binding::PadChord`s has its modifier held, the chord takes
+  its button from every context above it, and the plain bindings there read the
+  button as up — so LB+Select rebound from a global free look to a gameplay
+  reload reloads, and Select alone still opens the global map. Ordinary context
+  precedence is unchanged for every action not marked: a context above that
+  binds the same chord keeps it, a modal context still blocks the chord, and
+  keyboard and mouse bindings are untouched. Pressing or letting go of the
+  modifier while the button is held hands the button between contexts, and the
+  new reader waits for its release, as after a context push: LB let go before
+  Select releases the reload without opening the map. The mark belongs to the
+  action, so rebinds, `apply_overrides` and restoring the defaults keep it;
+  `ActionMap::pad_chords_outrank` reads it, and a binding asset writes and reads
+  it as `pad_chords_outrank: true`.
+
 - **A drag-value can be typed into.** A double-click on a
   `crcbl_ui::tree::Ui::drag_value`, or accept (Enter, Space, the pad's accept)
   while it is focused, opens it as a text input holding every digit of its value
