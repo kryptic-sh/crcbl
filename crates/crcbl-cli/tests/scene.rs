@@ -617,3 +617,101 @@ fn the_editor_cannot_open_a_scene_another_holder_has() {
     drop(run);
     editor_holding(&dir);
 }
+
+/// **A served scene is another process's to fetch, and locked until
+/// `quit`.** `crcbl edit --serve` says where it serves — loopback, by
+/// default — and a client of the edit protocol in this process fetches the
+/// scene from it, byte for byte the files on disk; meanwhile a `crcbl scene`
+/// edit exits locked. `quit` typed at its standard input ends it with exit
+/// 0, and the same edit then lands.
+#[test]
+fn a_served_scene_is_fetched_from_another_process_and_locked_until_quit() {
+    use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+    use std::net::SocketAddr;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    use crcbl::scene_edit::SceneFollower;
+    use crcbl::scene_edit::serve::{EDIT_PROTOCOL_ID, EDIT_TICK_HZ, edit_compatibility};
+
+    /// Long past a fetch of towers' field over loopback.
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    let temp = TempDir::new("served");
+    let dir = field_copy(&temp, "field.scn");
+    let before = scene_files(&dir);
+    let dir_text = dir.to_str().expect("a temporary path is text");
+    let mut server = Command::new(env!("CARGO_BIN_EXE_crcbl"))
+        .args(["edit", dir_text, "--serve"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the crcbl binary runs");
+    let mut said = BufReader::new(server.stdout.take().expect("piped"));
+    let mut serving = String::new();
+    said.read_line(&mut serving).expect("a line");
+    let addr: SocketAddr = serving
+        .strip_prefix(&format!("edit: serving `{dir_text}` on UDP "))
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|addr| addr.parse().ok())
+        .unwrap_or_else(|| panic!("not where it serves: {serving}"));
+    assert!(
+        addr.ip().is_loopback(),
+        "served beyond this machine: {addr}"
+    );
+
+    let vocabulary = crcbl_editor::scene::vocabulary();
+    let transport =
+        crcbl::net::udp::UdpTransport::connect(addr, EDIT_PROTOCOL_ID).expect("a socket");
+    let mut client = crcbl::client::Client::new_with_compatibility(
+        crcbl::ecs::World::new(),
+        transport,
+        EDIT_TICK_HZ,
+        edit_compatibility(&vocabulary),
+    );
+    let mut follower = SceneFollower::new(vocabulary);
+    let started = Instant::now();
+    while follower.revision().is_none() {
+        assert!(started.elapsed() < PATIENCE, "the scene never came");
+        client.update(started.elapsed());
+        follower.update(&mut client, started.elapsed());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let fetched: BTreeMap<String, Vec<u8>> = follower
+        .document_mut()
+        .expect("a copy")
+        .files()
+        .expect("a copy saves")
+        .into_iter()
+        .map(|(key, text)| (key, text.into_bytes()))
+        .collect();
+    assert_eq!(fetched, before, "the fetched scene is not the files");
+
+    let label = ["4", "label", "\"gate\""];
+    assert_eq!(code(&scene("set", &dir, &label)), LOCKED);
+    server
+        .stdin
+        .take()
+        .expect("piped")
+        .write_all(b"quit\n")
+        .expect("the console reads");
+    let ended = Instant::now();
+    let status = loop {
+        if let Some(status) = server.try_wait().expect("a child to wait on") {
+            break status;
+        }
+        if ended.elapsed() > PATIENCE {
+            server.kill().expect("a running child");
+            panic!("`quit` did not end the server");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "the quit failed: {status}");
+    let mut rest = String::new();
+    said.read_to_string(&mut rest)
+        .expect("the rest of what it said");
+    assert!(rest.contains("0/8 clients, saved"), "{rest}");
+    assert_eq!(scene_files(&dir), before, "serving with no edit wrote");
+    ok(&scene("set", &dir, &label));
+}

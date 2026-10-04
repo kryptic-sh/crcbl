@@ -29,6 +29,9 @@
 //! - **[`LanMode`]** is what `--host [PORT]`, `--join <IP:PORT>` and
 //!   `--browse` ask for, parsed by [`LanMode::consume`] so every sample reads
 //!   the three flags alike.
+//! - **[`console`]** is a dedicated server's stdin console and the sleep to
+//!   its next tick, for every headless server that serves on the wall clock
+//!   until it is told to stop.
 //!
 //! Both sides add a "lan" section to the F3 panel saying where they stand,
 //! and keep a [`netgraph::Netgraph`] — a "net" section with each link's round
@@ -814,6 +817,7 @@ pub fn how_it_ended(ended: Ended, client: &Client<UdpTransport>) -> String {
     }
 }
 
+pub mod console;
 pub mod lobby;
 pub mod netgraph;
 

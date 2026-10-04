@@ -651,6 +651,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl edit <DIR> --serve [PORT]` serves a scene to clients of the edit
+  protocol.** The CLI keeps the scene open through the editor's document, with
+  its history, and serves it over UDP through `crcbl::scene_edit::EditServer`:
+  clients fetch it, follow every edit as a `SceneFollower`, and send edits,
+  undos and redos, each applied through the document and its one history. The
+  scene and its history are saved after every update that applied an edit, and
+  the scene stays locked from start to `quit`, so `crcbl scene` edits on it exit
+  4 while it is served. It listens on 127.0.0.1 unless `--lan` is given, is not
+  announced on the LAN, prints a status line (revision, history, clients, saved,
+  and malformed messages refused), and reads `status`, `save` and `quit` at its
+  standard input; a `quit` whose save fails says why and serves on. `--serve`
+  takes no `-e` and no `--json`. New for it:
+  `crcbl::scene_edit::serve::{EDIT_PROTOCOL_ID, EDIT_TICK_HZ, edit_compatibility}`,
+  the identity a client and an edit server hand-shake on — its schema identifier
+  a digest of the vocabulary, so a client built with other components is refused
+  by the handshake — and
+  `crcbl::lan::console::{ConsoleLines, stdin_lines, until_next_tick}`, the stdin
+  console and tick sleep towers' `--serve` used, moved into the umbrella so both
+  servers share them.
+
 - **A pad chord can outrank a plain binding of its button in a context above.**
   `crcbl_input::ActionMap::set_pad_chords_outrank` marks an action so that,
   while one of its `Binding::PadChord`s has its modifier held, the chord takes

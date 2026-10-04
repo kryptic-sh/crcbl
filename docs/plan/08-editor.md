@@ -1551,10 +1551,10 @@ late-join fetch_ entry hold the decisions.
 
 Everything else below stands unchanged: there is one schedule per `World`, there
 is no snapshot of a `World` (play restores from the scene's text, slice 8), the
-samples' state is outside the ECS, and there are no `serve`/`scene`/`edit`
-subcommands. (One entity in several systems landed in slice 11.) (Debug draw is
-still not a gizmo layer; the gizmo does not need it to be — slice 6, above.
-`AssetSource` lists since 2026-09-30.)
+samples' state is outside the ECS. (The `scene` and `edit` subcommands landed
+2026-10-04 and `edit --serve` 2026-10-05, below.) (One entity in several systems
+landed in slice 11.) (Debug draw is still not a gizmo layer; the gizmo does not
+need it to be — slice 6, above. `AssetSource` lists since 2026-09-30.)
 
 Two things sit behind it, in both directions:
 
@@ -1626,10 +1626,27 @@ what is deferred.
   hold that flow. `crcbl::scene_edit::lock`'s module docs hold the decisions;
   `apps/editor/src/app/tests/lock.rs` and `crates/crcbl-cli/tests/scene.rs` hold
   them through the loop and the binary.
-- **What it does not cover**: `crcbl edit --serve`, stdin batches,
-  `scene paste -`, and the verbs beyond the eight; a scene of a game this build
-  does not register; an open editor seeing a change on disk before its next Save
-  (it notices at save time, not as it happens).
+- **`crcbl edit <DIR> --serve [PORT]` serves the scene (2026-10-05).** The CLI
+  holds the scene's lock and its document, with its history, from start to
+  `quit`, and serves it over UDP through `EditServer`: a client fetches the
+  scene, follows it as a `SceneFollower`, and sends edits, undos and redos, each
+  applied through the one document and history, the scene and its history saved
+  after every update that applied one. While it is served a `crcbl scene` edit
+  exits 4, so remote edits are the only way in. It listens on loopback unless
+  `--lan` is given, is not announced on the LAN, prints a status line, and reads
+  `status`, `save` and `quit` at its standard input, as towers' dedicated server
+  does. A client and the server hand-shake on
+  `crcbl::scene_edit::serve::edit_compatibility`, whose schema identifier is a
+  digest of the vocabulary. `crates/crcbl-cli/src/serve_cmd.rs`'s module docs
+  hold the decisions, and its tests drive two clients through a fetch, an edit,
+  an undo and `quit` on loopback; `crates/crcbl-cli/tests/scene.rs` fetches from
+  the binary in another process. The GUI does not join a served scene yet:
+  `docs/backlog.md`'s _`crcbl scene` and `crcbl edit`_ entry says what that
+  takes.
+- **What it does not cover**: stdin batches, `scene paste -`, and the verbs
+  beyond the eight; a scene of a game this build does not register; an open
+  editor seeing a change on disk before its next Save (it notices at save time,
+  not as it happens).
 
 ## Where the tree stands against this design (surveyed 2026-09-15)
 
@@ -1711,8 +1728,8 @@ than the rest of this document suggests; each line was checked in the source.
     ASCII bitmap font, and a DPI scale passed as `1.0` everywhere — the rungs of
     topic 7, all built since.
 12. **No `serve`, `scene` or `edit` CLI subcommands**, and no native file
-    dialogs or menus. _Since closed for `scene` and `edit -e` (2026-10-04)_;
-    `edit --serve` and the file dialogs still hold.
+    dialogs or menus. _Since closed for `scene` and `edit -e` (2026-10-04) and
+    `edit --serve` (2026-10-05)_; the file dialogs still hold.
 13. **Two statements in the 2026-08-09 corrections below are now out of date**:
     X11 does have drag-drop (through XDND), and Win32 OS drops work; only the
     Win32 clipboard file-list half (`CF_HDROP`) stands.

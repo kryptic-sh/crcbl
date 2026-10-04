@@ -36,15 +36,14 @@
 //!
 //! # Stopping: a console on stdin
 //!
-//! The server reads its stdin as a console — the dedicated-server norm, and
-//! `std` alone, so it behaves the same on every OS. A read blocks, so a
-//! thread of its own reads the lines and hands them over a channel, which
-//! the loop drains between frames ([`Console::obey`]). `quit` ends every
-//! session with `SessionEndReason::SHUTTING_DOWN` (`Host::shutdown`), so
-//! each player is told before the sockets close, and [`serve`] answers the
-//! last status line; `status` prints the status line now; `save` and
-//! `load` are the run's (below); anything else prints the commands there
-//! are.
+//! The server reads its stdin as a console — the dedicated-server norm —
+//! through [`crcbl::lan::console`], whose thread reads the lines and hands
+//! them over a channel the loop drains between frames ([`Console::obey`]).
+//! `quit` ends every session with `SessionEndReason::SHUTTING_DOWN`
+//! (`Host::shutdown`), so each player is told before the sockets close, and
+//! [`serve`] answers the last status line; `status` prints the status line
+//! now; `save` and `load` are the run's (below); anything else prints the
+//! commands there are.
 //!
 //! # The status line, and each player's link
 //!
@@ -87,14 +86,14 @@
 //! the goodbye, and the players see their links time out: the workspace has
 //! no signal hook, and the console is what was chosen instead of one.
 
-use std::io::{self, BufRead};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use std::path::Path;
 
 use crcbl::core::FrameClock;
+use crcbl::lan::console::{ConsoleLines, stdin_lines, until_next_tick};
 use crcbl::lan::netgraph::Link;
 use crcbl::lan::{LanBind, LanError, LanHost};
 use crcbl::net::SessionEndReason;
@@ -400,85 +399,41 @@ pub(crate) enum Next {
 
 /// The console's lines as the serve loop reads them: whatever sends them —
 /// stdin's reader thread, or a test.
+#[derive(Debug)]
 pub(crate) struct Console {
-    lines: Receiver<String>,
-    /// Whether the sender is gone — stdin at its end — which is logged once.
-    closed: bool,
+    lines: ConsoleLines,
 }
 
 impl Console {
     /// A console reading `lines`.
     pub(crate) const fn new(lines: Receiver<String>) -> Self {
         Self {
-            lines,
-            closed: false,
+            lines: ConsoleLines::new(lines),
         }
     }
 
-    /// A console on this process's stdin: a thread reads it a line at a
-    /// time into the channel, and ends when stdin does or a read fails —
-    /// either logged, neither a quit.
+    /// A console on this process's stdin — see [`stdin_lines`].
     fn on_stdin() -> Self {
-        let (sender, lines) = mpsc::channel();
-        let reader = thread::Builder::new()
-            .name("towers-console".into())
-            .spawn(move || {
-                for line in io::stdin().lock().lines() {
-                    match line {
-                        Ok(line) => {
-                            if sender.send(line).is_err() {
-                                return;
-                            }
-                        }
-                        Err(error) => {
-                            crcbl::log::warn!("serve: the console's input failed: {error}");
-                            return;
-                        }
-                    }
-                }
-            });
-        if let Err(error) = reader {
-            crcbl::log::warn!("serve: no console, the reader thread did not start: {error}");
-        }
-        Self::new(lines)
+        Self::new(stdin_lines("towers-console"))
     }
 
     /// Answers every line waiting, printing through `print`, and says
     /// whether to serve on: [`Next::Quit`] at the first `quit`, leaving any
     /// line after it unread.
     pub(crate) fn obey(&mut self, server: &mut Server, print: &mut dyn FnMut(&str)) -> Next {
-        loop {
-            match self.lines.try_recv() {
-                Ok(line) => match Command::parse(&line) {
-                    Command::Quit => return Next::Quit,
-                    Command::Status => print(&server.status()),
-                    Command::Save => print(&server.save()),
-                    Command::Load => print(&server.load_line()),
-                    Command::Blank => {}
-                    Command::Unknown(word) => print(&format!(
-                        "{APP}: no command {word:?}; the commands are {COMMANDS}"
-                    )),
-                },
-                Err(TryRecvError::Empty) => return Next::Serve,
-                Err(TryRecvError::Disconnected) => {
-                    if !self.closed {
-                        self.closed = true;
-                        crcbl::log::info!(
-                            "serve: the console's input ended; serving on, with no console"
-                        );
-                    }
-                    return Next::Serve;
-                }
+        while let Some(line) = self.lines.next_line() {
+            match Command::parse(&line) {
+                Command::Quit => return Next::Quit,
+                Command::Status => print(&server.status()),
+                Command::Save => print(&server.save()),
+                Command::Load => print(&server.load_line()),
+                Command::Blank => {}
+                Command::Unknown(word) => print(&format!(
+                    "{APP}: no command {word:?}; the commands are {COMMANDS}"
+                )),
             }
         }
-    }
-}
-
-impl std::fmt::Debug for Console {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Console")
-            .field("closed", &self.closed)
-            .finish_non_exhaustive()
+        Next::Serve
     }
 }
 
@@ -555,39 +510,9 @@ pub(crate) fn serve_until_quit(
     }
 }
 
-/// How long from `elapsed` to the next whole `tick`: sleeping to the boundary
-/// rather than for a whole tick keeps the ticks on the wall clock's grid
-/// however long a frame's work took. A frame that overran a tick is caught up
-/// by the host's own clock, which runs every tick that came due.
-fn until_next_tick(elapsed: Duration, tick: Duration) -> Duration {
-    let tick_ns = tick.as_nanos();
-    let into_tick = elapsed.as_nanos() % tick_ns;
-    Duration::from_nanos(
-        u64::try_from(tick_ns - into_tick).expect("a tick at a positive rate is under a second"),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// **The sleep lands on the next tick boundary**, from anywhere inside a
-    /// tick — including exactly on one, which waits a whole tick rather than
-    /// none and spinning.
-    #[test]
-    fn the_sleep_lands_on_the_next_tick_boundary() {
-        let tick = Duration::from_millis(16);
-        assert_eq!(until_next_tick(Duration::ZERO, tick), tick);
-        assert_eq!(
-            until_next_tick(Duration::from_millis(5), tick),
-            Duration::from_millis(11)
-        );
-        assert_eq!(
-            until_next_tick(Duration::from_millis(16 * 7 + 15), tick),
-            Duration::from_millis(1)
-        );
-        assert_eq!(until_next_tick(Duration::from_millis(32), tick), tick);
-    }
 
     /// **The console reads a line whatever its case and its blanks**, and
     /// anything else is not a command.

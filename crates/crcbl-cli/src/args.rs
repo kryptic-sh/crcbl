@@ -58,7 +58,7 @@ use std::path::PathBuf;
 
 use crcbl_sprite::{NineSlice, SampleMode};
 
-use crate::scene_args::{EditArgs, SceneArgs, parse_edit, parse_scene};
+use crate::scene_args::{EditArgs, SceneArgs, ServeArgs, parse_edit, parse_scene};
 
 /// Top-level `--help`.
 pub const USAGE: &str = "\
@@ -80,7 +80,7 @@ COMMANDS:
     sim           Run the determinism harness and print its state hash.
     settings      Read or write a game's settings.toml.
     scene         List, query or edit a scene directory, with undo.
-    edit          Apply several edits to a scene directory in one run.
+    edit          Apply several edits to a scene directory, or serve it.
 
 OPTIONS (every command):
         --json    Emit one JSON object instead of human output.
@@ -563,6 +563,8 @@ pub enum Command {
     Scene(SceneArgs),
     /// A scene directory, edited by several `-e` commands in one run.
     Edit(EditArgs),
+    /// A scene directory, served to edit clients until `quit`.
+    Serve(ServeArgs),
 }
 
 impl Command {
@@ -588,7 +590,8 @@ impl Command {
             Self::Settings(_) => "settings",
             // The verb is a field of its own, for the reason above.
             Self::Scene(_) => "scene",
-            Self::Edit(_) => "edit",
+            // `edit --serve`: one subcommand, whichever way it runs.
+            Self::Edit(_) | Self::Serve(_) => "edit",
         }
     }
 
@@ -608,6 +611,8 @@ impl Command {
             Self::Settings(args) => args.json,
             Self::Scene(args) => args.json,
             Self::Edit(args) => args.json,
+            // Refused beside `--serve`: its output is a running log.
+            Self::Serve(_) => false,
         }
     }
 }

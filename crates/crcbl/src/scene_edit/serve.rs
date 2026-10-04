@@ -39,19 +39,71 @@
 //!   ([`SceneFollower`](super::SceneFollower)). It is refused as not editable
 //!   while the scene plays, as an edit is: the played world is not the scene
 //!   that was authored, and no notice follows it.
+//!
+//! # What a client and its server agree on (decided 2026-10-05)
+//!
+//! A client of a served scene connects with [`EDIT_PROTOCOL_ID`], ticks at
+//! [`EDIT_TICK_HZ`] and hand-shakes with [`edit_compatibility`] of its own
+//! vocabulary. The schema identifier is a digest of that vocabulary — every
+//! system's name and its component's type — so a client built with another
+//! set of components is refused by the handshake, before it fetches a scene
+//! it could not open or sends a command naming a system the server lacks.
 
 use std::time::Duration;
 
 use crate::ecs::World;
+use crate::net::ProtocolCompatibility;
 use crate::net::{
     EditNotice, EditOutcome, EditRefusal, EditReply, MAX_EDIT_MESSAGE_BYTES, encode_scene_files,
 };
 use crate::reflect::PathError;
+use crate::registry::Registry;
 use crate::scene::edit::{EditOp, OpDecodeError, decode_op};
 use crate::scene::scn::ScnError;
 use crate::server::{EventNotSent, Host, HostConfig, PeerId};
+use crate::shaders::sha256::sha256;
 
 use crate::scene_edit::{Document, EditError, PlayState};
+
+/// The endpoint protocol id an edit server's links speak: it spells `CRED`.
+/// A listener or a client of another — a game's — answers nothing.
+pub const EDIT_PROTOCOL_ID: u32 = u32::from_be_bytes(*b"CRED");
+
+/// The rate an edit server's host ticks at, and its clients with it. Its
+/// world is empty, so a tick carries only the links' own traffic; the rate
+/// sets how soon an edit or a fetch's next part goes out after it is read.
+pub const EDIT_TICK_HZ: u32 = 60;
+
+/// The build identifier an edit session hand-shakes on: it spells `CRCBL`,
+/// as the samples' sessions do. What can differ between two builds of the
+/// edit protocol is the vocabulary, which [`edit_compatibility`] digests.
+const EDIT_BUILD_ID: u64 = 0x0043_5243_424C;
+
+/// The identifiers a client and the edit server serving it must share: the
+/// engine's wire version, `EDIT_BUILD_ID`, and a digest of `vocabulary` —
+/// each system's name and its component's type, in name order, each part
+/// as its length in eight little-endian bytes and then its bytes, so no two
+/// vocabularies run together into the same bytes. See the module docs.
+#[must_use]
+pub fn edit_compatibility(vocabulary: &Registry) -> ProtocolCompatibility {
+    let mut bytes = Vec::new();
+    for system in vocabulary.systems() {
+        let component = vocabulary.component_type(system).unwrap_or_default();
+        for part in [system, component] {
+            bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(part.as_bytes());
+        }
+    }
+    let digest = sha256(&bytes);
+    let mut first = [0; 8];
+    first.copy_from_slice(&digest[..8]);
+    ProtocolCompatibility {
+        protocol_version: ProtocolCompatibility::DEFAULT.protocol_version,
+        engine_build_id: EDIT_BUILD_ID,
+        // The handshake refuses a zero identifier, which a digest can be.
+        schema_hash: u64::from_le_bytes(first).max(1),
+    }
+}
 
 /// A document, and the host its clients edit it through.
 #[derive(Debug)]
@@ -277,6 +329,33 @@ fn cut_to_a_reply(mut message: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The schema identifier is the vocabulary's**: the same components
+    /// give the same identifier, and one more system, the same component
+    /// under another name, or another component under the same name, each
+    /// give another.
+    #[test]
+    fn the_handshake_identifies_the_vocabulary() {
+        use super::super::tests::{BLOCKS, vocabulary};
+        use crate::scene_physics::Body;
+
+        let same = edit_compatibility(&vocabulary());
+        assert_eq!(edit_compatibility(&vocabulary()), same);
+        same.assert_explicit();
+
+        let mut more = vocabulary();
+        crate::scene_physics::register(&mut more);
+        let mut renamed = Registry::new();
+        renamed.register::<Body>(crate::scene_physics::BODIES);
+        let mut retyped = Registry::new();
+        retyped.register::<Body>(BLOCKS);
+        let mut moved = Registry::new();
+        moved.register::<Body>("blocks2");
+        for other in [more, retyped, Registry::new()] {
+            assert_ne!(edit_compatibility(&other), same);
+        }
+        assert_ne!(edit_compatibility(&renamed), edit_compatibility(&moved));
+    }
 
     /// A refusal message past what a reply carries is cut on a character
     /// boundary rather than refused itself, so the author still hears why.

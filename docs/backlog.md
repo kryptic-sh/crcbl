@@ -12676,12 +12676,100 @@ refused history on open (loses a newer build's file for nothing); a save-as
 writing the history into the new directory (the copy would stop being the
 scene's files alone, and the next Save writes it anyway).
 
+**Built 2026-10-05: `crcbl edit <DIR> --serve [PORT] [--lan]`.**
+`crates/crcbl-cli/src/serve_cmd.rs`: the scene locked (`scene_cmd`'s `lock`,
+exit 4), opened with its history (`Document::open_with_history`, exit 3 on a
+refused one), and served through `EditServer` on a `UdpListener` until `quit` at
+the console. Clients connect with `crcbl::scene_edit::serve`'s
+`EDIT_PROTOCOL_ID` and `EDIT_TICK_HZ` and hand-shake on
+`edit_compatibility(&vocabulary)`. The stdin console and the sleep to the next
+tick moved out of towers' `lan/serve.rs` into `crcbl::lan::console`
+(`ConsoleLines`, `stdin_lines`, `until_next_tick`), which both servers call.
+Held by `serve_cmd`'s tests (two `Client`s with a `SceneFollower` each, on UDP
+loopback, in process) and `tests/scene.rs`'s
+`a_served_scene_is_fetched_from_another_process_and_locked_until_quit` (the
+binary, its stdin console and a fetch from another process).
+
+**Decided, for the long term** (`serve_cmd.rs`'s module docs carry the reasons):
+
+- **Saved after every update that applied an operation**, the scene and its
+  history, so a client told `Applied` can trust the edit outlives a crash, as a
+  one-shot verb's edit does. Measured on Windows in a debug build: on towers'
+  field (four files, about 1.5 KB) a `crcbl scene set` runs 30 to 45 ms longer
+  than a `crcbl scene list`, which bounds one save with its lock check and
+  history; at the rate people edit that is nothing, and operations read in one
+  update share one save.
+- **A failed save keeps the edits and serves on**: the status line says
+  `NOT SAVED` and why, the next applied operation or `save` tries again, and a
+  `quit` that cannot save says why and keeps serving rather than exit with edits
+  only the process holds. A scene changed behind the lock (a program that took
+  none) is the case that makes a save refuse; the server has no console command
+  to overwrite it (`Document::accept_changes_on_disk`), so ending the process is
+  the way out, dropping the edits.
+- **Loopback by default, `--lan` for every interface**: any admitted peer may
+  edit and admission checks only the build, so a server on every interface lets
+  anyone who reaches the port rewrite the scene; binding every interface is also
+  what can raise the Windows firewall question. No `--listen <addr>`: the two
+  cases are this machine and the network.
+- **Not announced on the LAN**: the samples' `Announcer` holds the one shared
+  `DISCOVERY_PORT` a machine has, and no client browses for an edit server; a
+  client connects to the address the first line prints.
+- **The handshake identifies the vocabulary**: `edit_compatibility`'s schema
+  identifier is a SHA-256 over every system's name and component type, so a
+  client built with other components is refused before it fetches a scene it
+  could not open. The engine build identifier is a constant (`EDIT_BUILD_ID`);
+  the operation's own wire version is checked per operation by `decode_op`.
+- **No `--json` and no `-e` beside `--serve`**: its output is a running log of
+  status lines, not one object, and a served scene is edited by its clients.
+- **Malformed input is counted where it was read and summed on the status line**
+  (`Server::malformed_count`: the host's processing errors and authentication
+  failures, the listener's malformed hellos and datagrams from no peer), never
+  fatal; an operation that will not decode is refused to its author as
+  `MALFORMED`.
+- **At most `MAX_CLIENTS` clients**, and the server's revision starts at 0 each
+  run while the history carries on: the revision numbers a session's notices,
+  the history position the document's state.
+
+**Considered and declined**: saving on an interval or only at `quit` (loses what
+was acknowledged); a `--listen <addr>` beside `--lan` (above); announcing on the
+discovery port (above); serving a scene whose history is refused with a fresh
+history, as the GUI opens one (the CLI's verbs refuse it, exit 3, and the server
+is one of them); a `quit` that exits over a failed save (loses edits silently).
+
 **Deferred, each with what it takes:**
 
-- **`crcbl edit --serve [--listen <addr>]`**: refused by name. `EditServer` is
-  in the umbrella now, so the verb is a loop around it over a transport; what it
-  waits on is _Scene edits over the transport_'s list below — the GUI as a
-  client, gestures on the wire.
+- **The GUI editor joining a served scene as a follower** — `SceneFollower`'s
+  main future caller. The editor would open an address instead of a directory,
+  hold a `Client` and a `SceneFollower` with the editor's vocabulary, draw the
+  follower's copy, and send each command with `Client::send_edit` rather than
+  applying it in process; its undo and redo become `EditOp::Undo` and
+  `EditOp::Redo`. A gesture needs a gesture id on the wire first (_Scene edits
+  over the transport_, below: a drag sent frame by frame would be one undo per
+  frame), and the copy is read-only between notices, so a refused edit must put
+  the view back.
+- **A CLI client**, `crcbl scene <verb> --remote <addr>`: the verbs resolve
+  names and read values against a document, so the client would fetch a copy (a
+  `SceneFollower`), resolve against it, send the command and wait for its reply,
+  exiting with the refusal's code as a one-shot verb does. Not asked for yet; a
+  script can edit the files while no server holds them.
+- **A console command to overwrite a scene changed on disk**
+  (`Document::accept_changes_on_disk`, then `save`), for the failed-save case
+  above.
+- **A JSON status stream** (one object a line) for a script driving the server.
+- **Ctrl+C ends the server without telling its clients or saving past the last
+  update**, as towers' does (no signal hook, decided 2026-10-01); every applied
+  edit is already saved, so only the goodbye is lost.
+
+**Coverage gaps**: run on Windows only, over UDP loopback; `--lan` (every
+interface) is run by no test and was not run by hand, so the firewall prompt and
+a client on another machine are unverified; the default bind being loopback is
+held by the binary test's address check, which no mutation was run against,
+since the mutation would bind every interface. Two server processes on one
+machine, a client's link dropping mid-fetch and its resume, and a scene near
+`MAX_SCENE_BYTES` over UDP are untested.
+
+**Deferred, each with what it takes:**
+
 - **Reading commands from stdin** (`crcbl scene <DIR> -` newline-delimited) and
   **`crcbl scene paste -`** (a clipping from the editor): `Document::paste`
   exists, so paste is a verb reading stdin; neither was asked for this slice.
@@ -12784,10 +12872,11 @@ served scene's saved text with a `Document` given the same commands.
   them through `EditServer::document_mut`.
 - **A host serves one session**, so this is one scene per server.
 
-**Coverage gaps**: never run over UDP or between processes; every test is
-in-memory and in one process. The decoder fuzz target was built
-(`cargo check --bins`) and its seeds replayed by `tests/corpus.rs`; it was not
-run under libFuzzer in this slice.
+**Coverage gaps**: the server's own tests are in-memory and in one process;
+`crcbl edit --serve` (2026-10-05, _`crcbl scene` and `crcbl edit`_ above) runs
+it over UDP loopback and between two processes, on Windows only. The decoder
+fuzz target was built (`cargo check --bins`) and its seeds replayed by
+`tests/corpus.rs`; it was not run under libFuzzer in this slice.
 
 ### Scene edits over the transport: the late-join fetch (2026-10-04)
 
@@ -12860,9 +12949,10 @@ server's.
 
 **Deferred, each with what it takes:**
 
-- **Nothing uses `SceneFollower` yet**: the GUI as a client of its server (the
-  server slice's entry above, first deferred item) and `crcbl edit --serve` are
-  its callers.
+- **No program follows a scene yet**: `crcbl edit --serve` (2026-10-05) serves
+  one, and its tests are `SceneFollower`'s only callers outside this module; the
+  GUI joining a served scene is its main future caller (_`crcbl scene` and
+  `crcbl edit`_ above, its deferred items).
 - **An edit through `EditServer::document_mut` reaches no follower** — the
   revision does not move, so no copy can tell; the server slice's _Play, stop
   and save are not protocol operations_ holds it.

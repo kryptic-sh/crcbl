@@ -107,6 +107,7 @@ crcbl edit — apply several edits to a scene directory in one run
 
 USAGE:
     crcbl edit <DIR> -e <COMMAND> [-e <COMMAND>]...
+    crcbl edit <DIR> --serve [PORT] [--lan]
 
 Each COMMAND is a `crcbl scene` edit without its directory, applied in order:
 
@@ -131,12 +132,47 @@ JSON:
     \"failed\": the index of the refused `-e` from 0, beside the refusal's fields
     that `crcbl scene --help` lists.
 
-`--serve`, an editor server the GUI and scripts share, is not built yet.
+SERVING:
+    `--serve` keeps the scene open and serves it over UDP to clients of the
+    edit protocol, which fetch it, follow every edit to it, and send edits,
+    undos and redos of their own. Each is applied through the same document
+    and the same history as the edits above, and the scene and its history
+    are saved after every update that applied one, so a crash loses nothing
+    a client was told applied.
+
+    The scene is locked from start to `quit`: a scene another program holds
+    exits 4 before anything is served, and while it is served `crcbl scene`'s
+    edits on it exit 4 — remote edits are the only way in. A history the
+    scene refuses exits 3, as above.
+
+    PORT is the UDP port, any free one when it is left out or 0; the line
+    the server starts with names it. The server listens on 127.0.0.1 only,
+    so only this machine reaches it; `--lan` listens on every interface
+    instead, where anyone who reaches the port can edit the scene, and the
+    system may ask whether to let the network in.
+
+    It reads commands at its standard input:
+        status   print the status line now
+        save     save now, after a save that failed
+        quit     save, end every client's session, release the lock, exit 0
+    A `quit` whose save fails says why and serves on, so no edit is lost:
+    put right what stopped the save, or end the process to drop the edits.
+    Its standard input ending is not a quit.
+
+    The status line names the revision, the history's position, the clients
+    in, whether the scene is saved, and how many messages were refused as
+    malformed; it prints when any but the last changes, and every 10 seconds.
+
+    `--serve` takes no `-e` and no `--json`: its output is a running log,
+    not one object.
 
 OPTIONS:
-    -e <COMMAND>  One edit. At least one.
-        --json    Emit one JSON object instead of human output.
-    -h, --help    Print this text.";
+    -e <COMMAND>    One edit. At least one, unless serving.
+        --serve [PORT]
+                    Serve the scene to edit clients, until `quit`.
+        --lan       With `--serve`: listen on every interface.
+        --json      Emit one JSON object instead of human output.
+    -h, --help      Print this text.";
 
 /// One verb of `crcbl scene`, with its arguments as they were typed.
 ///
@@ -241,6 +277,17 @@ pub struct EditArgs {
     pub json: bool,
 }
 
+/// `crcbl edit --serve`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServeArgs {
+    /// The scene directory.
+    pub dir: PathBuf,
+    /// The UDP port, 0 for any free one.
+    pub port: u16,
+    /// Whether to listen on every interface rather than on loopback alone.
+    pub lan: bool,
+}
+
 /// Parses `crcbl scene`'s arguments, which follow the word `scene`.
 pub fn parse_scene(args: impl Iterator<Item = OsString>) -> Invocation {
     let mut json = false;
@@ -281,16 +328,30 @@ pub fn parse_scene(args: impl Iterator<Item = OsString>) -> Invocation {
 }
 
 /// Parses `crcbl edit`'s arguments, which follow the word `edit`.
-pub fn parse_edit(mut args: impl Iterator<Item = OsString>) -> Invocation {
+pub fn parse_edit(args: impl Iterator<Item = OsString>) -> Invocation {
+    let mut args = args.peekable();
     let mut json = false;
     let mut dir = None;
     let mut edits = Vec::new();
+    let mut serve = None;
+    let mut lan = false;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("-h" | "--help") => return Invocation::Help(EDIT_USAGE),
             Some("--json") => json = true,
+            Some("--lan") => lan = true,
             Some("--serve") => {
-                return bad("`edit --serve` is not built yet; `-e` applies edits without a server");
+                // The port is optional, so the next argument is taken only
+                // when it reads as one — `LanMode::consume`'s rule for
+                // `--host [PORT]`.
+                let port = args
+                    .peek()
+                    .and_then(|next| next.to_str())
+                    .and_then(|next| next.parse::<u16>().ok());
+                if port.is_some() {
+                    args.next();
+                }
+                serve = Some(port.unwrap_or(0));
             }
             Some("-e") => {
                 let Some(command) = args.next() else {
@@ -319,8 +380,20 @@ pub fn parse_edit(mut args: impl Iterator<Item = OsString>) -> Invocation {
     let Some(dir) = dir else {
         return bad("`edit` needs a scene directory");
     };
+    if let Some(port) = serve {
+        if !edits.is_empty() {
+            return bad("`--serve` takes no `-e`: a served scene is edited by its clients");
+        }
+        if json {
+            return bad("`--serve` prints a running log, not one JSON object; drop `--json`");
+        }
+        return Invocation::Command(Command::Serve(ServeArgs { dir, port, lan }));
+    }
+    if lan {
+        return bad("`--lan` says where `--serve` listens, and goes with it");
+    }
     if edits.is_empty() {
-        return bad("`edit` needs at least one `-e <COMMAND>`");
+        return bad("`edit` needs at least one `-e <COMMAND>` (or `--serve`)");
     }
     Invocation::Command(Command::Edit(EditArgs { dir, edits, json }))
 }
@@ -598,8 +671,42 @@ mod tests {
         );
         assert!(refused(edit(&["d", "-e", "list"])).contains("-e takes edits"));
         assert!(refused(edit(&["d"])).contains("at least one"));
-        assert!(refused(edit(&["d", "--serve"])).contains("not built"));
         assert!(refused(edit(&["-e", "undo"])).contains("scene directory"));
+    }
+
+    /// **`--serve` takes an optional port and `--lan`**, and refuses `-e`,
+    /// `--json`, and `--lan` without it.
+    #[test]
+    fn serve_takes_an_optional_port_and_lan() {
+        let serve = |args: &[&str]| match edit(args) {
+            Invocation::Command(Command::Serve(parsed)) => parsed,
+            other => panic!("{args:?} did not parse: {other:?}"),
+        };
+        assert_eq!(
+            serve(&["d", "--serve"]),
+            ServeArgs {
+                dir: PathBuf::from("d"),
+                port: 0,
+                lan: false,
+            }
+        );
+        assert_eq!(
+            serve(&["--serve", "7777", "d", "--lan"]),
+            ServeArgs {
+                dir: PathBuf::from("d"),
+                port: 7777,
+                lan: true,
+            }
+        );
+        // A word that is not a port is the directory, not a value.
+        assert_eq!(
+            serve(&["--serve", "field.scn"]).dir,
+            PathBuf::from("field.scn")
+        );
+        assert!(refused(edit(&["d", "--serve", "-e", "undo"])).contains("no `-e`"));
+        assert!(refused(edit(&["d", "--serve", "--json"])).contains("drop `--json`"));
+        assert!(refused(edit(&["d", "--lan", "-e", "undo"])).contains("goes with it"));
+        assert!(refused(edit(&["--serve", "7777"])).contains("scene directory"));
     }
 
     /// **The help's numbers are the code's**: the history's bound, the lock

@@ -43,6 +43,7 @@ mod report;
 mod scene_args;
 mod scene_cmd;
 mod screenshot;
+mod serve_cmd;
 mod settings_cmd;
 mod sim_cmd;
 
@@ -83,6 +84,7 @@ fn main() -> ExitCode {
                 Command::Settings(args) => settings_cmd::run(args),
                 Command::Scene(args) => scene_cmd::run(args),
                 Command::Edit(args) => scene_cmd::run_edit(args),
+                Command::Serve(args) => serve_cmd::run(args),
             };
             report::emit(name, json, result)
         }

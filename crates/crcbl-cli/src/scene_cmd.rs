@@ -34,8 +34,10 @@
 //! an edit. A scene another program holds is refused, [`EXIT_LOCKED`],
 //! rather than waited on: an editor holds its scene for as long as it has it
 //! open. `list` and `query` take no lock — they write nothing, and an open
-//! editor must not stop a terminal looking at its scene.
-//! `crcbl::scene_edit::lock`'s module docs hold the lock's decisions.
+//! editor must not stop a terminal looking at its scene. `crcbl edit
+//! --serve` (`crate::serve_cmd`) takes the same lock, with the same refusal,
+//! and holds it until `quit`. `crcbl::scene_edit::lock`'s module docs hold
+//! the lock's decisions.
 //!
 //! # Exit codes
 //!
@@ -181,7 +183,7 @@ fn count(index: usize) -> i64 {
 
 /// The lock on the scene at `dir`, held until the run ends, or the failure
 /// that says who holds it — see the module docs.
-fn lock(dir: &Path, verb: &'static str) -> Result<SceneLock, Failure> {
+pub(crate) fn lock(dir: &Path, verb: &'static str) -> Result<SceneLock, Failure> {
     lock_scene(dir).map_err(|error| {
         let mut failure = opening(dir, verb, &error);
         if let EditError::Locked {
@@ -196,7 +198,7 @@ fn lock(dir: &Path, verb: &'static str) -> Result<SceneLock, Failure> {
 }
 
 /// The failure a scene that would not open or lock is reported as.
-fn opening(dir: &Path, verb: &'static str, error: &EditError) -> Failure {
+pub(crate) fn opening(dir: &Path, verb: &'static str, error: &EditError) -> Failure {
     let code = match error {
         EditError::History(_) => EXIT_HISTORY,
         EditError::Locked { .. } => EXIT_LOCKED,
