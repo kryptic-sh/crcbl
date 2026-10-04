@@ -38,9 +38,19 @@ on shard on 2026-09-27.
   before and after advancement/skipping, without consuming it. Once available,
   update EW's engine pin and replace its copied-schedule replay with the query.
   EW's `autonomous_grenade_selection_` regressions cover initial memory,
-  future-dated memory, cooldown expiry and newly sampled visual evidence.
-  Profiling of very long updates and large grenade-carrying groups remains open;
-  no performance figure is claimed.
+  future-dated memory, cooldown expiry and newly sampled visual evidence. EW's
+  warmed instrumented debug profile now measures this: with 16 stationary
+  grenade carriers and 10 simulated seconds, one long update visits 1,282,400
+  preview samples in 51,216 calls; frame-sized updates visit 4,446 samples in
+  55,872 calls. Preview time is a small part of total simulation time in both
+  cases, so do not present the query as an established end-to-end performance
+  fix. The fixtures verify live actors, retained grenades and absent target
+  memory, and disabling the sample counter fails its nonzero-work check. Full
+  results and the temporary diagnostic patch use
+  `ai-grenade-lookahead-supported-profile` under
+  `%TEMP%/ew-crcbl-update-review/`; the driver is
+  `profile-ai-grenade-lookahead-supported.py`. Optimized-build profiling and
+  active gameplay remain unverified.
 
 - **EW controller rebinding needs explicit cross-context chord routing.** EW's
   Controls page can reassign its existing LB+Select and LB+Start gameplay
