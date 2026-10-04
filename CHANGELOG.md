@@ -2321,6 +2321,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `scheduled_simulation_time_seconds`, `offset_within_update_seconds` and
   `elapsed_since_previous_sample_seconds`, in increasing time; `skip_elapsed`
   moves past time an agent was not running without emitting, keeping the phase.
+  `next_sample_time_seconds` reads when the next sample falls without consuming
+  it — the time the next `advance` reaching it emits first, always past
+  `simulation_time_seconds` — so a caller deciding how far to step before an
+  agent samples asks it rather than advancing a copy through the whole interval.
   A bad interval or phase is a `FixedRateScheduleConfigError`, a bad elapsed
   time a `FixedRateScheduleAdvanceError`, and a rejected call changes nothing.
   EW's `PerceptionSchedule`, `PerceptionScheduleConfig`,

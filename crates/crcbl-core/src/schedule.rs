@@ -398,8 +398,20 @@ impl FixedRateSchedule {
         Ok(())
     }
 
-    /// When the next sample not yet emitted or skipped is scheduled.
-    fn next_sample_time_seconds(&self) -> f64 {
+    /// When the next sample not yet emitted or skipped is scheduled, on the
+    /// schedule's own clock — the `scheduled_simulation_time_seconds` the next
+    /// [`advance`](Self::advance) that reaches it will emit first.
+    ///
+    /// A read: nothing is consumed, so a caller deciding how far to step before
+    /// an agent next samples asks this rather than advancing a copy of the
+    /// schedule through every sample of the interval. It is always after
+    /// [`simulation_time_seconds`](Self::simulation_time_seconds) by more than
+    /// the boundary tolerance — `advance` stops only once the next sample is
+    /// that far past its end, and [`skip_elapsed`](Self::skip_elapsed) refuses
+    /// a skip that would leave one due — so subtracting the two is how far
+    /// ahead the next sample falls.
+    #[must_use]
+    pub fn next_sample_time_seconds(&self) -> f64 {
         self.sample_time_seconds(self.next_sample_index)
     }
 
@@ -867,5 +879,59 @@ mod tests {
                 .to_string()
                 .contains("elapsed")
         );
+    }
+
+    /// The first sample the next `advance` emits, or `None` if a step that
+    /// long emits none.
+    fn first_emitted(schedule: &FixedRateSchedule, step: f64) -> Option<f64> {
+        let mut copy = *schedule;
+        let mut first = None;
+        copy.advance(step, |event| {
+            first.get_or_insert(event.scheduled_simulation_time_seconds);
+        })
+        .unwrap();
+        first
+    }
+
+    /// **The next sample's time is a read of the sample the schedule emits
+    /// next**, bit for bit, whatever the phase, the steps and the skips before
+    /// it — and asking does not consume it. EW finds an agent's next sample by
+    /// advancing a copy through the whole interval; this is that answer without
+    /// the walk.
+    #[test]
+    fn the_next_sample_time_is_the_sample_emitted_next_and_reading_it_takes_nothing() {
+        let config = FixedRateScheduleConfig::default();
+        // A step long enough to reach any next sample.
+        let reach = config.interval_seconds * 2.0;
+        for phase in [0.0, 0.025, 0.099] {
+            let mut schedule = FixedRateSchedule::new(config, phase).expect("phase within");
+            let first = schedule.next_sample_time_seconds();
+            if phase == 0.0 {
+                // A zero phase first samples one interval in, not at zero.
+                assert_eq!(first.to_bits(), config.interval_seconds.to_bits());
+            } else {
+                assert_eq!(first.to_bits(), phase.to_bits());
+            }
+
+            for (round, step) in [0.013, 0.05, 0.0, 0.31, 0.1, 0.007].into_iter().enumerate() {
+                let next = schedule.next_sample_time_seconds();
+                assert_eq!(
+                    next.to_bits(),
+                    schedule.next_sample_time_seconds().to_bits(),
+                    "phase {phase}, round {round}: reading it twice moved it"
+                );
+                assert!(next > schedule.simulation_time_seconds());
+                assert_eq!(
+                    Some(next.to_bits()),
+                    first_emitted(&schedule, reach).map(f64::to_bits),
+                    "phase {phase}, round {round}: not the sample emitted next"
+                );
+                if round % 2 == 0 {
+                    schedule.advance(step, |_| {}).unwrap();
+                } else {
+                    schedule.skip_elapsed(step).unwrap();
+                }
+            }
+        }
     }
 }

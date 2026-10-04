@@ -21,36 +21,17 @@ on shard on 2026-09-27.
 
 ## EW integration follow-ups
 
-- **Expose the next fixed-rate sample without advancing the schedule.** EW's
-  `src/game_ai_grenade_schedule.rs::ai_grenade_decision_event_seconds` stops
-  simulation at perception samples so an autonomous grenade opportunity can
-  begin before the end of a long update. `FixedRateSchedule` in
-  `crates/crcbl-core/src/schedule.rs` already computes
-  `next_sample_time_seconds`, but the method is private. The game currently
-  copies the schedule, reconciles skipped time with `skip_elapsed`, and calls
-  `advance` to discover the earliest sample offset. That preview visits every
-  sample in the requested interval even though only the first is needed, and
-  subsequent game boundaries repeat the preview. Expose a read-only absolute
-  next-sample timestamp using the existing index/phase calculation; callers can
-  subtract `simulation_time_seconds` after reconciling skipped time. Preserve
-  phase-zero behavior, staggered phases, exact endpoint sampling and skip
-  semantics. Verify the query matches the first subsequently emitted sample
-  before and after advancement/skipping, without consuming it. Once available,
-  update EW's engine pin and replace its copied-schedule replay with the query.
-  EW's `autonomous_grenade_selection_` regressions cover initial memory,
-  future-dated memory, cooldown expiry and newly sampled visual evidence. EW's
-  warmed instrumented debug profile now measures this: with 16 stationary
-  grenade carriers and 10 simulated seconds, one long update visits 1,282,400
-  preview samples in 51,216 calls; frame-sized updates visit 4,446 samples in
-  55,872 calls. Preview time is a small part of total simulation time in both
-  cases, so do not present the query as an established end-to-end performance
-  fix. The fixtures verify live actors, retained grenades and absent target
-  memory, and disabling the sample counter fails its nonzero-work check. Full
-  results and the temporary diagnostic patch use
-  `ai-grenade-lookahead-supported-profile` under
-  `%TEMP%/ew-crcbl-update-review/`; the driver is
-  `profile-ai-grenade-lookahead-supported.py`. Optimized-build profiling and
-  active gameplay remain unverified.
+- **The next fixed-rate sample is a read (built 2026-10-05); EW migrates.**
+  `FixedRateSchedule::next_sample_time_seconds` is public: the absolute time of
+  the next sample not yet emitted or skipped, the first the next `advance`
+  reaching it emits, always past `simulation_time_seconds`, and reading it
+  consumes nothing
+  (`schedule::tests::the_next_sample_time_is_the_sample_emitted_next_and_reading_it_takes_nothing`
+  holds it to the emitted sample bit for bit across phases, advances and skips;
+  the index formula itself is held by the pinned-time tests, which go red when
+  it moves). What is left is EW's: update its engine pin and replace
+  `ai_grenade_decision_event_seconds`'s copied-schedule replay with the query.
+  As EW's own profile said, this is not an established end-to-end speedup.
 
 - **EW controller rebinding needs explicit cross-context chord routing.** EW's
   Controls page can reassign its existing LB+Select and LB+Start gameplay
