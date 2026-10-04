@@ -149,7 +149,7 @@ fn a_rename_types_into_the_row_and_commits_or_cancels() {
 #[test]
 fn a_rename_begins_with_the_name_selected() {
     let id = SceneEntityId(3);
-    let mut document = Document::built_in().expect("the compiled-in scene");
+    let mut document = crate::scene::built_in_document().expect("the compiled-in scene");
     document.rename(id, "Spawner").expect("held");
     let mut page = Page::over(document);
     page.idle();
