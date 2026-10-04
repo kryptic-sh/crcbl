@@ -25,6 +25,12 @@
 //! as with input. A host serving no scene refuses every edit as not editable,
 //! so a game's host answers one rather than leaving it unread.
 //!
+//! A scene fetch is the caller's to answer too ([`Host::take_scene_fetches`]),
+//! with the scene's files it writes ([`Host::send_scene`]) or a refusal
+//! ([`Host::refuse_scene_fetch`]); the host paces the parts out and holds one
+//! fetch a peer in flight, refusing another as busy — `scene_stream`'s module
+//! docs have why.
+//!
 //! What the module is handed of its peers — the roster and each peer's frames
 //! — goes through one step whether it came off the transports or out of a
 //! recording, and is recorded on request ([`Host::record_peer_inputs`]);
@@ -39,20 +45,26 @@ use crcbl_ecs::{ClientInputs, World};
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::reliable::EndpointStats;
 use crcbl_net::{
-    ConsoleReply, ConsoleSet, EditNotice, EditReply, EditRequest, EditTooLong, HandshakeGate,
-    HandshakeResult, Hello, ProtocolCompatibility, RejectReason, ResumeToken, SectorId,
-    SessionConfig, SessionEndReason, SessionId, SessionState, Transport, TransportError,
+    ConsoleReply, ConsoleSet, EditNotice, EditRefusal, EditReply, EditRequest, EditTooLong,
+    HandshakeGate, HandshakeResult, Hello, ProtocolCompatibility, RejectReason, ResumeToken,
+    SceneOutcome, SceneReply, SectorId, SessionConfig, SessionEndReason, SessionId, SessionState,
+    Transport, TransportError,
 };
 
-use crate::peer::{self, Counters, PeerSession, PeerStats, SnapshotTooLarge, UpdateTooLarge};
+use crate::peer::{
+    self, Counters, PartSent, PeerSession, PeerStats, SnapshotTooLarge, UpdateTooLarge,
+};
 
 mod record;
 mod resim;
+mod scene_stream;
 mod sim;
 
 use record::PeerLog;
 pub use record::{PeerFrames, RosterChange, TickInputs};
 pub use resim::{FramesFault, ResimError, RosterFault};
+pub use scene_stream::SCENE_FETCH_BYTES_PER_SECOND;
+use scene_stream::SceneStream;
 pub use sim::AppliedSimSet;
 use sim::{Origin, SimConsole};
 
@@ -135,7 +147,8 @@ pub enum PeerEvent {
     Left(PeerId),
 }
 
-/// Why [`Host::send_event`] or [`Host::send_edit_reply`] sent nothing.
+/// Why [`Host::send_event`], [`Host::send_edit_reply`],
+/// [`Host::send_scene`] or [`Host::refuse_scene_fetch`] sent nothing.
 #[derive(Debug)]
 pub enum EventNotSent {
     /// No session of this host has that id: it never had one, or it ended.
@@ -145,8 +158,11 @@ pub enum EventNotSent {
     NotConnected(PeerId),
     /// The event is longer than a client reads one:
     /// [`MAX_FIELD_BYTES`](crcbl_net::codec::MAX_FIELD_BYTES), the wire's
-    /// limit on one opaque field. For an edit reply, its refusal message is
-    /// past [`MAX_EDIT_MESSAGE_BYTES`](crcbl_net::MAX_EDIT_MESSAGE_BYTES).
+    /// limit on one opaque field. For an edit reply or a scene refusal, its
+    /// message is past
+    /// [`MAX_EDIT_MESSAGE_BYTES`](crcbl_net::MAX_EDIT_MESSAGE_BYTES); for a
+    /// scene, its files are empty or past
+    /// [`MAX_SCENE_BYTES`](crcbl_net::MAX_SCENE_BYTES).
     TooLarge {
         /// The event's length, or the message's, in bytes.
         size: usize,
@@ -237,11 +253,55 @@ struct Peer {
     /// Whether this is the host's own player, whose console sets the host
     /// takes ([`Host::add_host_player`]).
     host_player: bool,
+    /// Whether one of this peer's scene fetches was handed to the caller
+    /// ([`Host::take_scene_fetches`]) and not answered yet.
+    fetch_waiting: bool,
+    /// The scene being sent to this peer, part by part; dropped with the
+    /// link, since the parts sent on it went with it.
+    scene_stream: Option<SceneStream>,
 }
 
 impl Peer {
     fn is_connected(&self) -> bool {
         self.transport.is_some() && self.link.session.state() == SessionState::Connected
+    }
+
+    /// Whether a fetch of this peer's is waiting to be answered or being
+    /// sent: the one a peer may have in flight.
+    const fn fetch_in_flight(&self) -> bool {
+        self.fetch_waiting || self.scene_stream.is_some()
+    }
+
+    /// Send every part of this peer's scene stream that is due at `now`, and
+    /// drop the stream once its last part went or a part could not go.
+    fn pump_scene_stream(&mut self, now: Duration, counters: &mut Counters) {
+        let (Some(stream), Some(transport)) = (self.scene_stream.as_mut(), self.transport.as_mut())
+        else {
+            return;
+        };
+        while let Some(part) = stream.due(now) {
+            let len = part.bytes().len();
+            let reply = SceneReply {
+                fetch_id: stream.fetch_id(),
+                outcome: SceneOutcome::Part(part),
+            };
+            let payload = crcbl_net::encode_scene_reply(&reply)
+                .expect("a part has no message to be too long");
+            match self
+                .link
+                .send_scene_part(transport.as_mut(), &payload, counters)
+            {
+                PartSent::Sent => stream.sent(len, now),
+                PartSent::Later => return,
+                PartSent::Failed => {
+                    self.scene_stream = None;
+                    return;
+                }
+            }
+        }
+        if stream.is_done() {
+            self.scene_stream = None;
+        }
     }
 }
 
@@ -282,6 +342,9 @@ pub struct Host {
     serving_edits: bool,
     /// The edits held for [`Host::take_edit_requests`], in the order read.
     edit_requests: Vec<(PeerId, EditRequest)>,
+    /// The scene fetches held for [`Host::take_scene_fetches`], in the order
+    /// read.
+    scene_fetches: Vec<(PeerId, u64)>,
 }
 
 impl Host {
@@ -318,6 +381,7 @@ impl Host {
             sim: SimConsole::default(),
             serving_edits: false,
             edit_requests: Vec::new(),
+            scene_fetches: Vec::new(),
         }
     }
 
@@ -352,6 +416,9 @@ impl Host {
         while self.clock.consume_tick() {
             self.tick();
             ticks += 1;
+        }
+        for peer in &mut self.peers {
+            peer.pump_scene_stream(now, &mut self.counters);
         }
         ticks
     }
@@ -481,6 +548,21 @@ impl Host {
                     let reply = peer::not_serving_edits(&request);
                     peer.link
                         .send_edit_reply(transport.as_mut(), &reply, &mut self.counters);
+                }
+            }
+            for fetch_id in std::mem::take(&mut peer.link.scene_fetches) {
+                let refusal = if !self.serving_edits {
+                    peer::not_serving_scene(fetch_id)
+                } else if peer.fetch_in_flight() {
+                    busy(fetch_id)
+                } else {
+                    peer.fetch_waiting = true;
+                    self.scene_fetches.push((peer.id, fetch_id));
+                    continue;
+                };
+                if let Some(transport) = peer.transport.as_mut() {
+                    peer.link
+                        .send_scene_refusal(transport.as_mut(), &refusal, &mut self.counters);
                 }
             }
         }
@@ -649,6 +731,8 @@ impl Host {
             snapshot_due: false,
             keyed_at: self.now,
             host_player: pending.host_player,
+            fetch_waiting: false,
+            scene_stream: None,
         });
         self.events.push(PeerEvent::Joined(id));
         None
@@ -735,6 +819,7 @@ impl Host {
                 .is_some_and(|transport| !transport.is_connected())
             {
                 peer.transport = None;
+                peer.scene_stream = None;
                 if peer.link.session.state() == SessionState::Connected {
                     peer.link
                         .session
@@ -958,9 +1043,98 @@ impl Host {
         Ok(sent)
     }
 
+    /// Take the scene fetches peers sent since the last call, each with the
+    /// peer that sent it and the id it numbered it with, in the order the
+    /// host read them. Each is answered with [`send_scene`](Self::send_scene)
+    /// or [`refuse_scene_fetch`](Self::refuse_scene_fetch); until it is, a
+    /// further fetch from that peer is refused as busy, as one is while its
+    /// scene is being sent. Empty for a host serving no scene, which has
+    /// refused them already.
+    pub fn take_scene_fetches(&mut self) -> Vec<(PeerId, u64)> {
+        std::mem::take(&mut self.scene_fetches)
+    }
+
+    /// Answer `peer`'s fetch `fetch_id` with `scene` — the scene's files as
+    /// [`encode_scene_files`](crcbl_net::encode_scene_files) wrote them, at
+    /// `revision` — sent a part at a time, sealed and on the reliable
+    /// channel, which the client reads with
+    /// `crcbl_client::Client::scene_fetches`. The parts go from the next
+    /// [`update`](Self::update) on, at [`SCENE_FETCH_BYTES_PER_SECOND`]; a
+    /// part the key or the transport refuses ends the stream and is counted
+    /// in [`processing_error_count`](Self::processing_error_count), and the
+    /// stream is dropped if the peer's link drops. Either way the client's
+    /// fetch never completes, and it fetches again.
+    ///
+    /// # Errors
+    ///
+    /// [`EventNotSent`], naming why nothing will be sent: `peer` is not a
+    /// session of this host, its link is down, or `scene` is empty or past
+    /// [`MAX_SCENE_BYTES`](crcbl_net::MAX_SCENE_BYTES). The fetch is answered
+    /// either way: the peer may fetch again.
+    pub fn send_scene(
+        &mut self,
+        peer: PeerId,
+        fetch_id: u64,
+        revision: u64,
+        scene: Vec<u8>,
+    ) -> Result<(), EventNotSent> {
+        let now = self.now;
+        let target = self.answer_fetch(peer)?;
+        if crcbl_net::scene_part(revision, &scene, 0).is_none() {
+            return Err(EventNotSent::TooLarge {
+                size: scene.len(),
+                limit: crcbl_net::MAX_SCENE_BYTES,
+            });
+        }
+        target.scene_stream = Some(SceneStream::new(fetch_id, revision, scene, now));
+        Ok(())
+    }
+
+    /// Answer `peer`'s fetch `fetch_id` with a refusal, sealed and on the
+    /// reliable channel.
+    ///
+    /// # Errors
+    ///
+    /// [`EventNotSent`], naming why: `peer` is not a session of this host,
+    /// its link is down, `message` is past what a client reads, or the key or
+    /// the transport refused it. The fetch is answered either way.
+    pub fn refuse_scene_fetch(
+        &mut self,
+        peer: PeerId,
+        fetch_id: u64,
+        reason: EditRefusal,
+        message: String,
+    ) -> Result<(), EventNotSent> {
+        self.answer_fetch(peer)?;
+        let reply = SceneReply {
+            fetch_id,
+            outcome: SceneOutcome::Refused { reason, message },
+        };
+        let payload =
+            crcbl_net::encode_scene_reply(&reply).map_err(|too_long| EventNotSent::TooLarge {
+                size: too_long.len,
+                limit: too_long.limit,
+            })?;
+        self.send_sealed(peer, &payload)
+    }
+
+    /// `peer`, its waiting fetch answered, if it is connected — what both
+    /// answers to a fetch start with.
+    fn answer_fetch(&mut self, peer: PeerId) -> Result<&mut Peer, EventNotSent> {
+        let Some(target) = self.peers.iter_mut().find(|p| p.id == peer) else {
+            return Err(EventNotSent::NoSuchPeer(peer));
+        };
+        target.fetch_waiting = false;
+        if !target.is_connected() {
+            return Err(EventNotSent::NotConnected(peer));
+        }
+        Ok(target)
+    }
+
     /// Seal `payload` with `peer`'s session key and send it on the reliable
-    /// channel — the body [`send_event`](Self::send_event) and
-    /// [`send_edit_reply`](Self::send_edit_reply) share.
+    /// channel — the body [`send_event`](Self::send_event),
+    /// [`send_edit_reply`](Self::send_edit_reply) and
+    /// [`refuse_scene_fetch`](Self::refuse_scene_fetch) share.
     fn send_sealed(&mut self, peer: PeerId, payload: &[u8]) -> Result<(), EventNotSent> {
         let Some(target) = self.peers.iter_mut().find(|p| p.id == peer) else {
             return Err(EventNotSent::NoSuchPeer(peer));
@@ -1273,6 +1447,19 @@ fn take_queued_inputs(peers: &mut [Peer], inputs: &mut Vec<PeerFrames>) {
 }
 
 /// Whether `id` is one of `peers` and the host's own player.
+/// The refusal of a fetch from a peer that has one in flight already.
+fn busy(fetch_id: u64) -> SceneReply {
+    SceneReply {
+        fetch_id,
+        outcome: SceneOutcome::Refused {
+            reason: EditRefusal::BUSY,
+            message: "a scene fetch of this client's is already being answered; \
+                      fetch again once it arrives"
+                .to_owned(),
+        },
+    }
+}
+
 fn is_host_player(peers: &[Peer], id: PeerId) -> bool {
     peers.iter().any(|peer| peer.id == id && peer.host_player)
 }
@@ -1326,6 +1513,9 @@ mod sim_tests;
 
 #[cfg(test)]
 mod frames_tests;
+
+#[cfg(test)]
+mod fetch_tests;
 
 // The UDP transport is native only, by the no-web-networking rule.
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -12565,7 +12565,7 @@ scene's files alone, and the next Save writes it anyway).
 - **`crcbl edit --serve [--listen <addr>]`**: refused by name. `EditServer` is
   in the umbrella now, so the verb is a loop around it over a transport; what it
   waits on is _Scene edits over the transport_'s list below — the GUI as a
-  client, a late joiner fetching the scene, gestures on the wire.
+  client, gestures on the wire.
 - **Reading commands from stdin** (`crcbl scene <DIR> -` newline-delimited) and
   **`crcbl scene paste -`** (a clipping from the editor): `Document::paste`
   exists, so paste is a verb reading stdin; neither was asked for this slice.
@@ -12657,9 +12657,6 @@ served scene's saved text with a `Document` given the same commands.
   notices to the view's copy. Gestures would need a gesture id on the wire:
   today each operation is its own history entry, so a drag sent frame by frame
   would be one undo per frame.
-- **A client joining late, or resuming after a lost link, cannot fetch the
-  scene**: notices carry changes, not state, and one missed shows only as a
-  revision gap. Wants a "scene files at revision N" message.
 - **The author is not in the undo log**: the plan's correction shows each
   entry's author, `UndoLog` has no author column, and the notice is the only
   place the author is said.
@@ -12671,6 +12668,93 @@ served scene's saved text with a `Document` given the same commands.
 in-memory and in one process. The decoder fuzz target was built
 (`cargo check --bins`) and its seeds replayed by `tests/corpus.rs`; it was not
 run under libFuzzer in this slice.
+
+### Scene edits over the transport: the late-join fetch (2026-10-04)
+
+**Built**: `crcbl_net::edit::fetch` (a fetch as a command of kind
+`SCENE_FETCH_KIND`, the `SceneReply` parts, the scene's files as one buffer, and
+`SceneAssembly`), `Host::take_scene_fetches` with `send_scene` and
+`refuse_scene_fetch` (`crcbl_server`'s `host::scene_stream` paces the parts),
+`Client::fetch_scene` with `scene_fetches` and `scene_fetch_progress`,
+`EditServer` answering from its document, and `crcbl::scene_edit::follow`'s
+`SceneFollower` holding a client's copy. Its tests join a follower to a real
+`EditServer` over `InMemoryTransport` and compare the copy's saved text with the
+server's.
+
+**Decided, for the long term:**
+
+- **The scene travels as its saved text** — `Document::files`, the bytes a save
+  writes, keyed relative to the scene directory — not as a world: that text is
+  byte-identical for equal scenes, and the copy opens it through
+  `Document::open` with the server's vocabulary, so there is no second wire form
+  of a scene to keep in step.
+- **In numbered parts of `MAX_SCENE_PART_BYTES`, at most `MAX_SCENE_BYTES` in
+  all** (`crcbl_net::edit::fetch`). The reliable channel fragments, but beneath
+  the transport seam, whose own ceiling (`MAX_IN_MEMORY_MESSAGE_BYTES`) is one
+  message; a part carries the revision and the whole length, every part but the
+  last is full, so a decoder checks a part's length against its index and the
+  whole before it reads it, and the assembly takes parts strictly in order
+  because the channel delivers them so.
+- **The host paces a fetch at `SCENE_FETCH_BYTES_PER_SECOND`**, half of
+  `InboundRateLimitConfig`'s default byte budget: a client charges every
+  reliable message against that budget and drops what is past it, so a burst
+  would lose a part and the fetch with it. A part the transport has no room for
+  waits for the next update.
+- **One fetch a peer in flight**, waiting for the caller or being sent; another
+  is refused by the host as `EditRefusal::BUSY` before the caller is asked to
+  write the scene again. Writing it is the expensive half, and a client asking
+  in a loop would otherwise choose how often the server does it. The stream is
+  dropped with the link, and the client stops waiting on a reconnect.
+- **A fetch is refused while the scene plays** (`NOT_EDITABLE`), as an edit is:
+  the played world is not the authored scene, and no notice follows it.
+- **The follower refetches rather than diverge**: on a revision gap, on a notice
+  its copy cannot apply, and on any rise in `Client::dropped_event_count` — a
+  dropped notice would otherwise show only when the next notice came, which may
+  be never. Notices arriving during a fetch are held (at most
+  `MAX_BUFFERED_NOTICES`; past it the copy refetches once the fetch lands) and
+  those past the fetch's revision applied in order.
+- **An undo is the copy's own history stepped.** The copy's history is the
+  server's since the fetch, so a step the copy can take is the one the server
+  took; one reaching back past the fetch is a notice the copy cannot apply, and
+  a refetch.
+- **A fetch is abandoned when it stalls** — no byte for `FETCH_STALL_TIMEOUT` —
+  not after a total time, since a scene at the limit takes a minute at the pace;
+  a refused or malformed one waits `FETCH_RETRY_DELAY` before the next.
+
+**Considered and declined:**
+
+- **Notices carrying the command an undo resolved to**, so a copy needs no
+  history: it changes what a notice means for every client, and an undo's
+  inverse — a delete's, carrying every row it removed — can be longer than
+  `MAX_EDIT_OP_BYTES`, which the operation it undoes was not.
+- **A second fetch cancelling the first** rather than being refused: the same
+  one-in-flight bound, but each request would make the server write the scene
+  again.
+
+**Behaviour that is not a bug:**
+
+- **Any drop by the client refetches**, an event's or a reply's included: the
+  count does not say what was dropped, and a spurious fetch costs one scene.
+- **A follower of a playing scene asks again every `FETCH_RETRY_DELAY`** until
+  play stops, each answered `NOT_EDITABLE`.
+
+**Deferred, each with what it takes:**
+
+- **Nothing uses `SceneFollower` yet**: the GUI as a client of its server (the
+  server slice's entry above, first deferred item) and `crcbl edit --serve` are
+  its callers.
+- **An edit through `EditServer::document_mut` reaches no follower** — the
+  revision does not move, so no copy can tell; the server slice's _Play, stop
+  and save are not protocol operations_ holds it.
+- **A host holds each stream's scene whole**, up to `MAX_SCENE_BYTES` a peer; a
+  scene shared between streams at one revision would bound it by scenes rather
+  than peers.
+
+**Coverage gaps**: the stream dropped with a lost link and the client's resume
+are untested end to end (the reconnect half is tested on the client alone);
+never run over UDP, where `MAX_RELIABLE_BYTES_IN_FLIGHT` meets the pace; the
+fuzz target's new calls were built and their seeds replayed, not run under
+libFuzzer.
 
 ## Tooling and infrastructure — what the plans still owe
 

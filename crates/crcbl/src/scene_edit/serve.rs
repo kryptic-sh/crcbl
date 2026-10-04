@@ -33,17 +33,25 @@
 //! * **A refusal is reason-coded** ([`EditRefusal`]) with the document's own
 //!   message beside it, so a script branches on the code and a person reads
 //!   the sentence.
+//! * **A scene fetch is answered from the document as it stands** — its saved
+//!   text, at the current revision, after the edits of the same update — so
+//!   a client joining late follows the notices after it
+//!   ([`SceneFollower`](super::SceneFollower)). It is refused as not editable
+//!   while the scene plays, as an edit is: the played world is not the scene
+//!   that was authored, and no notice follows it.
 
 use std::time::Duration;
 
 use crate::ecs::World;
-use crate::net::{EditNotice, EditOutcome, EditRefusal, EditReply, MAX_EDIT_MESSAGE_BYTES};
+use crate::net::{
+    EditNotice, EditOutcome, EditRefusal, EditReply, MAX_EDIT_MESSAGE_BYTES, encode_scene_files,
+};
 use crate::reflect::PathError;
 use crate::scene::edit::{EditOp, OpDecodeError, decode_op};
 use crate::scene::scn::ScnError;
-use crate::server::{Host, HostConfig, PeerId};
+use crate::server::{EventNotSent, Host, HostConfig, PeerId};
 
-use crate::scene_edit::{Document, EditError};
+use crate::scene_edit::{Document, EditError, PlayState};
 
 /// A document, and the host its clients edit it through.
 #[derive(Debug)]
@@ -53,7 +61,8 @@ pub struct EditServer {
     /// How many operations have applied since serving began — the revision
     /// each reply and notice names.
     revision: u64,
-    /// Replies whose author could not be sent one: gone, or its link down.
+    /// Replies, and answers to scene fetches, whose peer could not be sent
+    /// one: gone, or its link down.
     unsent_replies: u64,
 }
 
@@ -83,7 +92,9 @@ impl EditServer {
 
     /// Feeds the host the current time, then answers every edit its peers
     /// sent: each applied or refused, in the order the host read them, and
-    /// each applied one announced to every client. Returns how many ticks ran.
+    /// each applied one announced to every client. Then it answers every
+    /// scene fetch with the scene as those edits left it. Returns how many
+    /// ticks ran.
     pub fn update(&mut self, now: Duration) -> u32 {
         let ticks = self.host.update(now);
         for (peer, request) in self.host.take_edit_requests() {
@@ -96,7 +107,35 @@ impl EditServer {
                 self.unsent_replies += 1;
             }
         }
+        for (peer, fetch_id) in self.host.take_scene_fetches() {
+            if self.answer_fetch(peer, fetch_id).is_err() {
+                self.unsent_replies += 1;
+            }
+        }
         ticks
+    }
+
+    /// Sends `peer` the scene as it stands, at the current revision, or
+    /// refuses its fetch: while the scene plays, and for a scene that will
+    /// not save or is past what a fetch carries.
+    fn answer_fetch(&mut self, peer: PeerId, fetch_id: u64) -> Result<(), EventNotSent> {
+        let refusal = if self.document.play_state() == PlayState::Editing {
+            match self.document.files() {
+                Ok(files) => match encode_scene_files(&files) {
+                    Ok(scene) => return self.host.send_scene(peer, fetch_id, self.revision, scene),
+                    Err(too_large) => (EditRefusal::TOO_LARGE, too_large.to_string()),
+                },
+                Err(error) => (EditRefusal::FAILED, error.to_string()),
+            }
+        } else {
+            (
+                EditRefusal::NOT_EDITABLE,
+                "the scene is playing; fetch it again once play stops".to_owned(),
+            )
+        };
+        let (reason, message) = refusal;
+        self.host
+            .refuse_scene_fetch(peer, fetch_id, reason, cut_to_a_reply(message))
     }
 
     /// Applies one operation for `peer` and says what became of it,
@@ -168,8 +207,9 @@ impl EditServer {
         self.revision
     }
 
-    /// Replies that could not be sent because their author had gone or its
-    /// link was down. The operation applied, or was refused, all the same.
+    /// Replies, and answers to scene fetches, that could not be sent because
+    /// their peer had gone or its link was down. The operation applied, or
+    /// was refused, all the same.
     #[must_use]
     pub const fn unsent_reply_count(&self) -> u64 {
         self.unsent_replies
@@ -214,9 +254,16 @@ fn refusal_of_decode(error: &OpDecodeError) -> EditRefusal {
     }
 }
 
-/// A refusal carrying `message`, cut to what a reply carries on a character
-/// boundary.
-fn refused(reason: EditRefusal, mut message: String) -> EditOutcome {
+/// A refusal carrying `message`, cut to what a reply carries.
+fn refused(reason: EditRefusal, message: String) -> EditOutcome {
+    EditOutcome::Refused {
+        reason,
+        message: cut_to_a_reply(message),
+    }
+}
+
+/// `message` cut to what a reply carries, on a character boundary.
+fn cut_to_a_reply(mut message: String) -> String {
     if message.len() > MAX_EDIT_MESSAGE_BYTES {
         let cut = (0..=MAX_EDIT_MESSAGE_BYTES)
             .rev()
@@ -224,7 +271,7 @@ fn refused(reason: EditRefusal, mut message: String) -> EditOutcome {
             .unwrap_or(0);
         message.truncate(cut);
     }
-    EditOutcome::Refused { reason, message }
+    message
 }
 
 #[cfg(test)]

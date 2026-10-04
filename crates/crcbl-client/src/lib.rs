@@ -22,15 +22,17 @@ use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
     AuthError, Baseline, ConsoleReply, ConsoleSet, ConsoleTextTooLong, DeltaCodec, EditNotice,
     EditReply, EditRequest, EditTooLong, HandshakeResult, Hello, Message, MessageKind,
-    ProtocolCompatibility, RejectReason, ResumeToken, SectorId, SessionEndReason, SessionId,
-    Transport, TransportError, Trust, replicated_system_id,
+    ProtocolCompatibility, RejectReason, ResumeToken, SceneAssembly, SectorId, SessionEndReason,
+    SessionId, Transport, TransportError, Trust, replicated_system_id,
 };
 use crcbl_phys::{PhysicsSystem, Transform};
 
 pub mod playout;
+mod scene_fetch;
 
 use playout::Playout;
 pub use playout::PlayoutStats;
+pub use scene_fetch::{SceneFetch, SceneFetchFailed};
 
 /// How long the client waits for a handshake reply before assuming the hello
 /// (or its answer) was lost and trying again.
@@ -263,6 +265,13 @@ pub struct Client<T: Transport> {
     /// The edits the server applied, anyone's, not yet taken by
     /// [`Client::edit_notices`], oldest first, held as the replies are.
     edit_notices: Vec<EditNotice>,
+    /// The id the next [`Client::fetch_scene`] numbers its fetch with.
+    next_scene_fetch: u64,
+    /// The parts of the one fetch in flight, joined as they arrive.
+    scene_assembly: Option<SceneAssembly>,
+    /// The fetches finished and not yet taken by [`Client::scene_fetches`],
+    /// oldest first, held as the replies are.
+    scene_fetches: Vec<SceneFetch>,
     reliable_rate_limiter: InboundRateLimiter,
     unreliable_rate_limiter: InboundRateLimiter,
     processing_error_count: u64,
@@ -327,6 +336,9 @@ impl<T: Transport> Client<T> {
             next_edit_request: 1,
             edit_replies: Vec::new(),
             edit_notices: Vec::new(),
+            next_scene_fetch: 1,
+            scene_assembly: None,
+            scene_fetches: Vec::new(),
             reliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             unreliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             processing_error_count: 0,
@@ -628,8 +640,9 @@ impl<T: Transport> Client<T> {
         self.events.drain(..)
     }
 
-    /// Events, console replies, edit replies and edit notices dropped because
-    /// [`MAX_QUEUED_EVENTS`] of their kind were already waiting to be taken.
+    /// Events, console replies, edit replies, edit notices and finished scene
+    /// fetches dropped because [`MAX_QUEUED_EVENTS`] of their kind were
+    /// already waiting to be taken.
     #[must_use]
     pub fn dropped_event_count(&self) -> u64 {
         self.dropped_event_count
@@ -734,6 +747,9 @@ impl<T: Transport> Client<T> {
         self.session_crypto = None;
         self.session_proof_deadline = None;
         self.unproven_sessions = 0;
+        // The parts of a fetch went with the old link, and a server drops the
+        // stream with it.
+        self.scene_assembly = None;
     }
 
     /// Number of unrecoverable transport, encoding, or decoding errors.
@@ -1072,8 +1088,8 @@ impl<T: Transport> Client<T> {
     }
 
     /// Open a sealed control message: the server ending the session, an
-    /// event for the game, the answer to a console set or an edit, or the
-    /// notice of an edit applied.
+    /// event for the game, the answer to a console set or an edit, the
+    /// notice of an edit applied, or a part of a scene fetch.
     fn handle_sealed_control(&mut self, envelope: &[u8]) {
         let Some(crypto) = self.session_crypto.as_mut() else {
             self.auth_failure_count += 1;
@@ -1104,6 +1120,9 @@ impl<T: Transport> Client<T> {
                 .map(|reply| hold(&mut self.edit_replies, reply)),
             Some(crcbl_net::codec::EDIT_NOTICE_TAG) => crcbl_net::decode_edit_notice(payload)
                 .map(|notice| hold(&mut self.edit_notices, notice)),
+            Some(crcbl_net::codec::SCENE_REPLY_TAG) => {
+                crcbl_net::decode_scene_reply(payload).map(|reply| self.take_scene_reply(reply))
+            }
             _ => {
                 self.handle_session_end(payload);
                 return;

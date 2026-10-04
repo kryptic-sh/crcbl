@@ -1533,12 +1533,21 @@ not snapshot replication, are how another client follows the scene (the command
 log is the sync point); a host serving no scene refuses edits as not editable.
 `crcbl_editor::serve`'s module docs hold the reasons, and `docs/backlog.md`'s
 _Scene edits over the transport_ entry what the slice leaves — the GUI is not
-yet a client of its own server, a client joining late has no way to fetch the
-scene, and the author is not in the undo log. A variant switch travels since
-2026-10-04, as command kind `0x02` carrying its snapshot. The dogfood pass's
-environment write, `EditCommand::SetEnvironment`, travels as command kind `0x0B`
-(a path and a value, as a property's) and the server applies it as it applies
-any command.
+yet a client of its own server, and the author is not in the undo log. A variant
+switch travels since 2026-10-04, as command kind `0x02` carrying its snapshot.
+The dogfood pass's environment write, `EditCommand::SetEnvironment`, travels as
+command kind `0x0B` (a path and a value, as a property's) and the server applies
+it as it applies any command.
+
+**A client joining late fetches the scene, since 2026-10-04.**
+`Client::fetch_scene` asks for it; the server answers with the scene's saved
+text — the bytes a save writes — at its revision, in numbered parts paced under
+a client's inbound budget, one fetch a client in flight; and
+`crcbl::scene_edit::SceneFollower` holds the client's copy, applying the notices
+after that revision (those that came during the fetch held for it) and fetching
+again on a gap, an undo reaching back past the fetch, or a notice the client
+dropped. `crcbl::scene_edit::follow`'s module docs and the backlog's _the
+late-join fetch_ entry hold the decisions.
 
 Everything else below stands unchanged: there is one schedule per `World`, there
 is no snapshot of a `World` (play restores from the scene's text, slice 8), the

@@ -804,6 +804,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   target reads every new message and the operation inside them, with a named
   seed for each.
 
+- **A client joining a scene server late, or coming back after a lost link,
+  fetches the whole scene and follows it from there.**
+  `crcbl_client::Client::fetch_scene` sends a command of kind
+  `crcbl_net::edit::SCENE_FETCH_KIND`; `Client::scene_fetches` yields each
+  finished `SceneFetch` — the scene's saved text, every file the same bytes a
+  save writes, at the server's revision, or why there is none — and
+  `Client::scene_fetch_progress` the bytes in so far. The scene travels as
+  numbered `SceneReply` parts of `MAX_SCENE_PART_BYTES`, at most
+  `MAX_SCENE_BYTES` in all, each length checked before anything is read for it
+  and the parts joined strictly in order by `crcbl_net::SceneAssembly`. A
+  `crcbl_server::Host` serving edits hands each fetch over
+  (`take_scene_fetches`) and answers with `send_scene` or `refuse_scene_fetch`;
+  it paces the parts at `SCENE_FETCH_BYTES_PER_SECOND`, half a client's default
+  inbound budget, and holds one fetch a peer in flight, refusing another with
+  the new `EditRefusal::BUSY`. `EditServer` answers from its document as it
+  stands, and refuses while the scene plays as `NOT_EDITABLE` and a scene past
+  the limit as the new `EditRefusal::TOO_LARGE`; a host serving no scene, and
+  every `Server`, refuses a fetch as not editable.
+  `crcbl::scene_edit::SceneFollower` keeps a client's copy: it fetches, holds
+  the notices that arrive meanwhile (up to `MAX_BUFFERED_NOTICES`) and applies
+  those past the fetch's revision, and fetches again on a revision gap, a notice
+  the copy cannot apply — an undo reaching back past the fetch among them — or a
+  drop by the client, rather than diverge. The decoder fuzz target reads the new
+  messages, with a named seed for each.
+
 - **Slide contacts for a lying body from `crcbl_phys::CharacterController`.**
   `move_lying_into(world, &body, motion, &mut contacts)` makes exactly the move
   `move_lying` makes, to the bit, and writes every sweep of its slide that met

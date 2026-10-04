@@ -14,7 +14,8 @@ pub mod sim_hash;
 
 pub use host::{
     AppliedSimSet, EventNotSent, FramesFault, Host, HostConfig, HostModule, PeerEvent, PeerFrames,
-    PeerId, PeerInputs, ResimError, RosterChange, RosterFault, TickInputs,
+    PeerId, PeerInputs, ResimError, RosterChange, RosterFault, SCENE_FETCH_BYTES_PER_SECOND,
+    TickInputs,
 };
 pub use peer::{PeerStats, SnapshotTooLarge, UpdateTooLarge};
 
@@ -203,14 +204,19 @@ impl<T: Transport> Server<T> {
         }
     }
 
-    /// Answer every edit the peer sent with a refusal: a `Server` serves no
-    /// scene for editing — a [`Host`] told to does — and a client that asked
-    /// is told so, by code, rather than left waiting.
+    /// Answer every edit and scene fetch the peer sent with a refusal: a
+    /// `Server` serves no scene for editing — a [`Host`] told to does — and a
+    /// client that asked is told so, by code, rather than left waiting.
     fn refuse_edits(&mut self) {
         for request in std::mem::take(&mut self.peer.edit_requests) {
             let reply = peer::not_serving_edits(&request);
             self.peer
                 .send_edit_reply(&mut self.transport, &reply, &mut self.counters);
+        }
+        for fetch_id in std::mem::take(&mut self.peer.scene_fetches) {
+            let reply = peer::not_serving_scene(fetch_id);
+            self.peer
+                .send_scene_refusal(&mut self.transport, &reply, &mut self.counters);
         }
     }
 
@@ -1168,6 +1174,41 @@ mod tests {
         );
         assert_eq!(server.update(3 * TICK), 1);
         assert_eq!(server.processing_error_count(), 1);
+    }
+
+    /// **A `Server` refuses a scene fetch as not editable**, by the fetch's
+    /// own id, as it refuses an edit: there is no scene to fetch.
+    #[test]
+    fn a_scene_fetch_is_refused_as_not_editable() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+
+        let fetch = crcbl_net::encode_client_to_server(&crcbl_net::ClientToServer::Command {
+            data: crcbl_net::encode_scene_fetch(52),
+        });
+        send_sealed(&mut peer, &mut crypto, &fetch);
+        assert_eq!(server.update(2 * TICK), 1);
+        assert_eq!(server.processing_error_count(), 0);
+
+        let mut replies = Vec::new();
+        while let Some(msg) = peer.recv().unwrap() {
+            if msg.kind != MessageKind::Reliable {
+                continue;
+            }
+            let opened = crypto.open(&msg.payload).expect("sealed by the server");
+            if opened.first() == Some(&crcbl_net::codec::SCENE_REPLY_TAG) {
+                replies.push(crcbl_net::decode_scene_reply(opened).expect("well formed"));
+            }
+        }
+        assert_eq!(replies, [peer::not_serving_scene(52)]);
+        assert!(matches!(
+            replies[0].outcome,
+            crcbl_net::SceneOutcome::Refused {
+                reason: crcbl_net::EditRefusal::NOT_EDITABLE,
+                ..
+            }
+        ));
     }
 
     /// A command whose data is no console set costs the peer its error

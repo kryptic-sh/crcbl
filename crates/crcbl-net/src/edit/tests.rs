@@ -113,6 +113,8 @@ fn the_refusal_codes_keep_their_numbers_and_names() {
         (EditRefusal::NOTHING_TO_UNDO, 0x09, "nothing to undo"),
         (EditRefusal::NOTHING_TO_REDO, 0x0A, "nothing to redo"),
         (EditRefusal::FAILED, 0x0B, "failed"),
+        (EditRefusal::BUSY, 0x0C, "busy"),
+        (EditRefusal::TOO_LARGE, 0x0D, "too large"),
     ];
     for (code, number, name) in codes {
         assert_eq!(code.0, number);

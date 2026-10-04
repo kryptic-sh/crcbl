@@ -15,8 +15,8 @@ use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
     Baseline, ConsoleReply, ConsoleSet, DEFAULT_RELEVANCE, DeltaCodec, EditOutcome, EditRefusal,
     EditReply, EditRequest, HandshakeResult, Message, OversizedUpdate, RejectReason, ResumeToken,
-    SectorId, SessionConfig, SessionEndReason, SessionId, SessionManager, SessionState,
-    SnapshotWriter, Transport, TransportError, Trust, snapshot_budget,
+    SceneOutcome, SceneReply, SectorId, SessionConfig, SessionEndReason, SessionId, SessionManager,
+    SessionState, SnapshotWriter, Transport, TransportError, Trust, snapshot_budget,
 };
 
 use crate::cadence::SnapshotCadence;
@@ -37,6 +37,31 @@ pub(crate) fn not_serving_edits(request: &EditRequest) -> EditReply {
             message: NOT_SERVING_EDITS.to_owned(),
         },
     }
+}
+
+/// The answer to a scene fetch a server serving no scene was sent: the edit's
+/// refusal, since there is no scene to fetch for the same reason there is
+/// none to edit.
+pub(crate) fn not_serving_scene(fetch_id: u64) -> SceneReply {
+    SceneReply {
+        fetch_id,
+        outcome: SceneOutcome::Refused {
+            reason: EditRefusal::NOT_EDITABLE,
+            message: NOT_SERVING_EDITS.to_owned(),
+        },
+    }
+}
+
+/// How a scene part went, where a backpressured transport is not a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PartSent {
+    /// Sealed and taken by the transport.
+    Sent,
+    /// The transport's queue is full: nothing was sent, and the part is due
+    /// again on a later update.
+    Later,
+    /// Not sent, and counted as a processing error: the fetch cannot finish.
+    Failed,
 }
 
 /// The failure counters a server reports, shared by every session it runs.
@@ -210,6 +235,9 @@ pub(crate) struct PeerSession {
     /// tick they arrived, and bounded by the inbound budgets as console sets
     /// are.
     pub(crate) edit_requests: Vec<EditRequest>,
+    /// The scene fetches this peer sent, by the id it numbered each with,
+    /// waiting as its edits do.
+    pub(crate) scene_fetches: Vec<u64>,
     /// How often this session is sent a snapshot.
     cadence: SnapshotCadence,
     /// Updates withheld from this session's snapshots as too long for any.
@@ -240,6 +268,7 @@ impl PeerSession {
             dropped_inputs: 0,
             console_sets: Vec::new(),
             edit_requests: Vec::new(),
+            scene_fetches: Vec::new(),
             cadence: SnapshotCadence::default(),
             oversized_updates: 0,
             last_snapshot_bytes: 0,
@@ -379,6 +408,12 @@ impl PeerSession {
                             Some(crcbl_net::edit::EDIT_KIND) => {
                                 match crcbl_net::decode_edit_request(&data) {
                                     Ok(request) => self.edit_requests.push(request),
+                                    Err(_) => counters.processing_errors += 1,
+                                }
+                            }
+                            Some(crcbl_net::edit::SCENE_FETCH_KIND) => {
+                                match crcbl_net::decode_scene_fetch(&data) {
+                                    Ok(fetch_id) => self.scene_fetches.push(fetch_id),
                                     Err(_) => counters.processing_errors += 1,
                                 }
                             }
@@ -603,6 +638,51 @@ impl PeerSession {
                 self.send_sealed(transport, &payload, counters);
             }
             Err(_) => counters.processing_errors += 1,
+        }
+    }
+
+    /// Answer one of this peer's scene fetches with its refusal, sealed and on
+    /// the reliable channel. A failure is counted; the client then hears
+    /// nothing back.
+    pub(crate) fn send_scene_refusal<T: Transport + ?Sized>(
+        &mut self,
+        transport: &mut T,
+        reply: &SceneReply,
+        counters: &mut Counters,
+    ) {
+        match crcbl_net::encode_scene_reply(reply) {
+            Ok(payload) => {
+                self.send_sealed(transport, &payload, counters);
+            }
+            Err(_) => counters.processing_errors += 1,
+        }
+    }
+
+    /// Send one part of a scene fetch, sealed and on the reliable channel:
+    /// `payload` is the encoded [`SceneReply`]. Backpressure is handed back
+    /// rather than counted, since a fetch is paced and its part goes again
+    /// later; any other failure is counted.
+    pub(crate) fn send_scene_part<T: Transport + ?Sized>(
+        &mut self,
+        transport: &mut T,
+        payload: &[u8],
+        counters: &mut Counters,
+    ) -> PartSent {
+        let Some(crypto) = self.session_crypto.as_mut() else {
+            counters.processing_errors += 1;
+            return PartSent::Failed;
+        };
+        let Ok(sealed) = crypto.seal(payload) else {
+            counters.processing_errors += 1;
+            return PartSent::Failed;
+        };
+        match transport.send_reliable(Message::reliable(sealed)) {
+            Ok(()) => PartSent::Sent,
+            Err(TransportError::Backpressure) => PartSent::Later,
+            Err(_) => {
+                counters.processing_errors += 1;
+                PartSent::Failed
+            }
         }
     }
 

@@ -55,6 +55,9 @@ pub const EDIT_REPLY_TAG: u8 = 0x13;
 /// [`EditNotice`](crate::edit::EditNotice) — only ever sealed, and only on
 /// the reliable channel; see [`crate::edit`].
 pub const EDIT_NOTICE_TAG: u8 = 0x14;
+/// [`SceneReply`](crate::edit::SceneReply) — only ever sealed, and only on
+/// the reliable channel; see [`crate::edit::fetch`].
+pub const SCENE_REPLY_TAG: u8 = 0x15;
 /// [`Hello`].
 pub const HELLO_TAG: u8 = 0x20;
 /// [`HandshakeResult::Accept`].

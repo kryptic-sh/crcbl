@@ -1,6 +1,6 @@
 //! Named seeds from the fuzzer's corpus, replayed through the delta decoder,
-//! the replay spool's recovery, the save container's reader and the scene
-//! edit's messages.
+//! the replay spool's recovery, the save container's reader, the scene
+//! edit's messages and the scene fetch's.
 //!
 //! `fuzz_targets/decoder.rs` runs the decoders against bytes libFuzzer invents.
 //! This target runs three of them against bytes somebody named, and the two are
@@ -297,4 +297,72 @@ fn named_edit_seeds_reach_their_intended_paths() {
         decode_op(include_bytes!("../corpus/decoder/edit-op-too-deep")),
         Err(OpDecodeError::TooDeep)
     );
+}
+
+/// The scene fetch's seeds reach each of its decoders, one per message a
+/// fetch travels as: the fetch, both outcomes of a reply, the files a reply's
+/// parts join into, and a part claiming a length its index does not make.
+/// Each whole seed is also what its encoder writes, and the part's seed
+/// assembles into the files' seed.
+#[test]
+fn named_scene_fetch_seeds_reach_their_intended_paths() {
+    use std::collections::BTreeMap;
+
+    use crcbl_net::edit::decode_scene_files;
+    use crcbl_net::{
+        DecodeError, EditRefusal, SceneAssembly, SceneOutcome, SceneReply, decode_scene_fetch,
+        decode_scene_reply, encode_scene_fetch, encode_scene_files, encode_scene_reply, scene_part,
+    };
+
+    let seed = include_bytes!("../corpus/decoder/scene-fetch");
+    assert_eq!(decode_scene_fetch(seed).expect("a whole fetch"), 7);
+    assert_eq!(encode_scene_fetch(7), seed);
+
+    let seed = include_bytes!("../corpus/decoder/scene-files");
+    let files = BTreeMap::from([
+        ("scene.ron".to_owned(), "Scene()".to_owned()),
+        ("sys/blocks.ron".to_owned(), "Chunk()".to_owned()),
+    ]);
+    assert_eq!(decode_scene_files(seed).expect("whole files"), files);
+    assert_eq!(encode_scene_files(&files).expect("small"), seed);
+
+    let seed = include_bytes!("../corpus/decoder/scene-reply-part");
+    let reply = SceneReply {
+        fetch_id: 7,
+        outcome: SceneOutcome::Part(
+            scene_part(3, &encode_scene_files(&files).expect("small"), 0).expect("one part"),
+        ),
+    };
+    let decoded = decode_scene_reply(seed).expect("a whole part");
+    assert_eq!(decoded, reply);
+    assert_eq!(
+        encode_scene_reply(&reply).expect("a part always encodes"),
+        seed
+    );
+    let SceneOutcome::Part(part) = decoded.outcome else {
+        panic!("a part");
+    };
+    let scene = SceneAssembly::new(7)
+        .push(part)
+        .expect("in order")
+        .expect("the one part is the whole");
+    assert_eq!((scene.revision, scene.files), (3, files));
+
+    let seed = include_bytes!("../corpus/decoder/scene-reply-refused");
+    let reply = SceneReply {
+        fetch_id: 8,
+        outcome: SceneOutcome::Refused {
+            reason: EditRefusal::BUSY,
+            message: "a scene fetch is already in flight".to_owned(),
+        },
+    };
+    assert_eq!(decode_scene_reply(seed).expect("a whole refusal"), reply);
+    assert_eq!(encode_scene_reply(&reply).expect("short enough"), seed);
+
+    assert!(matches!(
+        decode_scene_reply(include_bytes!(
+            "../corpus/decoder/scene-reply-hostile-part-length"
+        )),
+        Err(DecodeError::InvalidLength(u32::MAX))
+    ));
 }

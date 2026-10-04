@@ -1,6 +1,7 @@
 //! The thing being edited: a scene, the world it was loaded into, what is
 //! selected, and the history of what has been done to it — and the server
-//! that lets several clients edit one ([`EditServer`]).
+//! that lets several clients edit one ([`EditServer`]), and a client's copy
+//! of what it serves ([`SceneFollower`]).
 //!
 //! Everything in this module runs **without a device and without a window**,
 //! which is `docs/plan/08-editor.md`'s "nothing editor-side may be implemented
@@ -65,6 +66,7 @@ use crate::scene::edit::{EditCommand, Gesture, SystemRow, UndoLog, set_property,
 pub mod clipboard;
 mod environment;
 mod field;
+pub mod follow;
 mod history;
 mod meshes;
 mod naming;
@@ -79,6 +81,7 @@ mod validation;
 
 pub use environment::Environment;
 pub use field::text_of;
+pub use follow::SceneFollower;
 pub use history::{HISTORY, HistoryError, MAX_HISTORY_BYTES, MAX_HISTORY_ENTRIES};
 pub use origin::{NEW_SCENE_ENV_RON, UNTITLED, empty_source, open_target, save_target};
 pub use play::{Hit, PlayState};

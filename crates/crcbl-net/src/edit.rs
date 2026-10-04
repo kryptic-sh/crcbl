@@ -16,6 +16,10 @@
 //! notice of its own edit before the reply that accepts it is the order a
 //! server serving edits sends them in.
 //!
+//! A client that joins late, or resumes, fetches the whole scene first —
+//! [`fetch`], a command of kind [`SCENE_FETCH_KIND`] answered by the scene's
+//! saved text at a revision — and follows the notices after it.
+//!
 //! ```text
 //! edit request (a Command's data):
 //!   [0]       kind = EDIT_KIND
@@ -123,6 +127,12 @@ impl EditRefusal {
     /// The edit was understood and could not be made for a reason none of the
     /// others name; the message says which.
     pub const FAILED: Self = Self(0x0B);
+    /// A scene fetch from a client already being sent one, or with one
+    /// waiting to be answered: one fetch is in flight per client at a time.
+    pub const BUSY: Self = Self(0x0C);
+    /// A scene fetch for a scene past
+    /// [`MAX_SCENE_BYTES`] as files.
+    pub const TOO_LARGE: Self = Self(0x0D);
 
     /// The code's name as a person reads it, or [`None`] for one this build
     /// does not know.
@@ -140,6 +150,8 @@ impl EditRefusal {
             Self::NOTHING_TO_UNDO => "nothing to undo",
             Self::NOTHING_TO_REDO => "nothing to redo",
             Self::FAILED => "failed",
+            Self::BUSY => "busy",
+            Self::TOO_LARGE => "too large",
             _ => return None,
         })
     }
@@ -281,19 +293,8 @@ pub fn encode_edit_reply(reply: &EditReply) -> Result<Vec<u8>, EditTooLong> {
             buf.extend_from_slice(&revision.to_le_bytes());
         }
         EditOutcome::Refused { reason, message } => {
-            let too_long = EditTooLong {
-                field: "message",
-                len: message.len(),
-                limit: MAX_EDIT_MESSAGE_BYTES,
-            };
-            if message.len() > MAX_EDIT_MESSAGE_BYTES {
-                return Err(too_long);
-            }
-            let len = u16::try_from(message.len()).map_err(|_| too_long)?;
             buf.push(OUTCOME_REFUSED);
-            buf.push(reason.0);
-            buf.extend_from_slice(&len.to_le_bytes());
-            buf.extend_from_slice(message.as_bytes());
+            write_refusal(&mut buf, *reason, message)?;
         }
     }
     Ok(buf)
@@ -317,13 +318,7 @@ pub fn decode_edit_reply(payload: &[u8]) -> Result<EditReply, DecodeError> {
             revision: r.read_u64()?,
         },
         OUTCOME_REFUSED => {
-            let reason = EditRefusal(r.read_u8()?);
-            let len = usize::from(r.read_u16()?);
-            if len > MAX_EDIT_MESSAGE_BYTES {
-                return Err(invalid_length(len));
-            }
-            let message =
-                String::from_utf8(r.read_bytes(len)?.to_vec()).map_err(|_| invalid_length(len))?;
+            let (reason, message) = read_refusal(&mut r)?;
             EditOutcome::Refused { reason, message }
         }
         other => return Err(DecodeError::UnknownTag { tag: other }),
@@ -399,9 +394,50 @@ fn read_op(r: &mut ByteReader<'_>) -> Result<Vec<u8>, DecodeError> {
     Ok(r.read_bytes(len)?.to_vec())
 }
 
+/// A refusal's code and its message, the message refused past
+/// [`MAX_EDIT_MESSAGE_BYTES`] — what an edit reply and a scene reply both
+/// write for a refusal.
+fn write_refusal(buf: &mut Vec<u8>, reason: EditRefusal, message: &str) -> Result<(), EditTooLong> {
+    let too_long = EditTooLong {
+        field: "message",
+        len: message.len(),
+        limit: MAX_EDIT_MESSAGE_BYTES,
+    };
+    if message.len() > MAX_EDIT_MESSAGE_BYTES {
+        return Err(too_long);
+    }
+    let len = u16::try_from(message.len()).map_err(|_| too_long)?;
+    buf.push(reason.0);
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(message.as_bytes());
+    Ok(())
+}
+
+/// What [`write_refusal`] wrote, the message's length checked against
+/// [`MAX_EDIT_MESSAGE_BYTES`] before anything is read for it.
+fn read_refusal(r: &mut ByteReader<'_>) -> Result<(EditRefusal, String), DecodeError> {
+    let reason = EditRefusal(r.read_u8()?);
+    let len = usize::from(r.read_u16()?);
+    if len > MAX_EDIT_MESSAGE_BYTES {
+        return Err(invalid_length(len));
+    }
+    let message =
+        String::from_utf8(r.read_bytes(len)?.to_vec()).map_err(|_| invalid_length(len))?;
+    Ok((reason, message))
+}
+
 fn invalid_length(len: usize) -> DecodeError {
     DecodeError::InvalidLength(u32::try_from(len).unwrap_or(u32::MAX))
 }
+
+pub mod fetch;
+
+pub use fetch::{
+    FetchedScene, MAX_SCENE_BYTES, MAX_SCENE_FILES, MAX_SCENE_PART_BYTES, MAX_SCENE_PARTS,
+    MAX_SCENE_PATH_BYTES, SCENE_FETCH_KIND, SceneAssembly, SceneAssemblyError, SceneFilesError,
+    SceneOutcome, ScenePart, SceneReply, SceneTooLarge, decode_scene_fetch, decode_scene_files,
+    decode_scene_reply, encode_scene_fetch, encode_scene_files, encode_scene_reply, scene_part,
+};
 
 #[cfg(test)]
 mod tests;

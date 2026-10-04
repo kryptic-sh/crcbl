@@ -76,9 +76,12 @@ pub use delta::{
     hash_encoded,
 };
 pub use edit::{
-    EditNotice, EditOutcome, EditRefusal, EditReply, EditRequest, EditTooLong,
-    MAX_EDIT_MESSAGE_BYTES, MAX_EDIT_OP_BYTES, decode_edit_notice, decode_edit_reply,
-    decode_edit_request, encode_edit_notice, encode_edit_reply, encode_edit_request,
+    EditNotice, EditOutcome, EditRefusal, EditReply, EditRequest, EditTooLong, FetchedScene,
+    MAX_EDIT_MESSAGE_BYTES, MAX_EDIT_OP_BYTES, MAX_SCENE_BYTES, MAX_SCENE_PART_BYTES,
+    SceneAssembly, SceneAssemblyError, SceneOutcome, ScenePart, SceneReply, SceneTooLarge,
+    decode_edit_notice, decode_edit_reply, decode_edit_request, decode_scene_fetch,
+    decode_scene_reply, encode_edit_notice, encode_edit_reply, encode_edit_request,
+    encode_scene_fetch, encode_scene_files, encode_scene_reply, scene_part,
 };
 pub use handshake::{HandshakeGate, HandshakeResult, Hello, RejectReason};
 pub use messages::{
