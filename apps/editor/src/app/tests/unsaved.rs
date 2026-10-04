@@ -30,7 +30,7 @@ fn dirty_with_origin(dir: &Path) -> Editor<HeadlessShell> {
 
 /// Asks the window to close, as its title-bar button would, and runs the
 /// frame that reads it.
-fn request_close(editor: &mut Editor<HeadlessShell>) -> Flow {
+pub(super) fn request_close(editor: &mut Editor<HeadlessShell>) -> Flow {
     let window = editor.window;
     editor.shell_mut().request_close(window).expect("live");
     editor.frame().expect("a frame")
@@ -38,14 +38,14 @@ fn request_close(editor: &mut Editor<HeadlessShell>) -> Flow {
 
 /// Presses `key` and runs the frame that reads it, handing back its flow —
 /// the frame that may close the window, after which no other frame runs.
-fn press(editor: &mut Editor<HeadlessShell>, key: KeyCode) -> Flow {
+pub(super) fn press(editor: &mut Editor<HeadlessShell>, key: KeyCode) -> Flow {
     let window = editor.window;
     editor.shell_mut().key_press(window, key).expect("live");
     editor.frame().expect("a frame")
 }
 
 /// Whether the window's close request is still outstanding.
-fn close_pending(editor: &mut Editor<HeadlessShell>) -> bool {
+pub(super) fn close_pending(editor: &mut Editor<HeadlessShell>) -> bool {
     let window = editor.window;
     editor
         .shell_mut()

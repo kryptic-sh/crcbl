@@ -751,8 +751,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   (`EditError::ChangedOnDisk`). Ctrl+S then puts the unsaved bar up with
   Overwrite (Enter), Reload (D) and Cancel (Escape): Overwrite writes the
   editor's scene over them (`Document::accept_changes_on_disk`), Reload reads
-  the scene back from disk and drops the edits. A `crcbl scene` run meets the
-  same refusal and exits 1.
+  the scene back from disk and drops the edits. A save-as typed onto the
+  directory the scene lives in asks the same question, and so does the unsaved
+  bar's own Save when closing the window, opening a scene or starting a new one
+  with unsaved edits: Overwrite saves and goes on with the close or open, Reload
+  drops the edits and goes on, and Cancel keeps the edits and the window,
+  answering the close request "keep". A `crcbl scene` run meets the same refusal
+  and exits 1.
 
 - **The editor shares the CLI's undo history.** Opening a scene directory —
   `editor <SCENE_DIR>` or Ctrl+O — reads the `.crcbl-history` beside it, so

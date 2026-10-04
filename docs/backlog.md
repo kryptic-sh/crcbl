@@ -12603,6 +12603,26 @@ tests, `apps/editor/src/app/tests/lock.rs` and the binary's
   (D), Cancel (Escape) — whether or not the scene is dirty. Asked rather than
   refused outright, since a refusal alone leaves no way to keep one's edits in
   place but a save-as and a copy back.
+- **Every save into the scene's own directory asks the same question**
+  (2026-10-05): Ctrl+S, a save-as committed onto that directory, and the unsaved
+  bar's own Save. One helper maps the refusal to the question
+  (`Editor::refused_save` in `apps/editor/src/app/unsaved.rs`), told which save
+  it was (`Saving::InPlace`, `Saving::As` holding the typed text, `Saving::Then`
+  holding the close, open or new scene); the bar's question is
+  `Guarded::Reload(Saving)`. Overwrite makes that same save again over the
+  files: the save-as says "Saved as" and keeps its lock; the bar's Save goes on
+  with what it was asked for.
+- **After the unsaved bar's Save, the second question decides the first**:
+  Overwrite saves and goes on with the close, open or new scene; Reload reads
+  the disk's scene back, dropping the edits (logged as discarded), and goes on,
+  since the person asked to go and chose the disk over their edits, so nothing
+  is left to lose and stopping would make them ask twice; Cancel keeps the edits
+  and abandons the close or open, answering a close request "keep". A reload
+  that is refused (the changed files no longer read as a scene) keeps the edits
+  and abandons it as Cancel does, so a close is always carried out or answered
+  and never left held. A repeated close request while the second question is up
+  leaves it asking (`Guarded::closes`). Cancel on a save-as's question does not
+  reopen the path line: the person said stop.
 - **Recovery copies and the autosave take no lock and meet none**:
   `write_recovery` writes a directory of its own, so the autosave runs while the
   editor holds its scene.
@@ -12652,11 +12672,6 @@ scene's files alone, and the next Save writes it anyway).
   checkout) shows the editor's old copy until Ctrl+S asks. Watching would take
   per-chunk hot reload (_Asset hot reload: two polled watches, and no engine
   reload path_) and a decision on what a watched change does to unsaved edits.
-- **A save-as onto the scene's own directory over a changed scene** is refused
-  on the status line (`EditError::ChangedOnDisk`, the path line reopened), where
-  Ctrl+S asks; and the unsaved bar's Save meeting the same refusal puts its own
-  question back with the refusal on the status line. Each could ask as Ctrl+S
-  does; neither was asked for.
 
 **Coverage gaps**: run on Windows only in this slice; the verbs were never run
 against breakout's or puppet's scenes, only towers' field and the umbrella's
@@ -12674,7 +12689,11 @@ Linux sysroot for pkg-config), so the holder being named is verified only as
 absent; the CLI's half runs the binary against a lock taken in the test process,
 and the editor's against the same call, never two editor processes; a crashed
 holder is simulated by an unlocked file, as the recovery tests simulate one, not
-by killing a process.
+by killing a process. The changed-on-disk question after the unsaved bar's Save
+is held through a close and an open (`app/tests/lock.rs`), not a new scene,
+which takes the same `Saving::Then` path; `Editor::overwrite_as`'s branch for a
+save-as that moved the asset source cannot be reached (onto the scene's own
+directory `Document::save_as` moves nothing) and has no test.
 
 ### Scene edits over the transport: the server slice and what it leaves (2026-10-04)
 

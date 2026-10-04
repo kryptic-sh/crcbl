@@ -23,26 +23,50 @@
 //!
 //! # A scene changed on disk (decided 2026-10-04)
 //!
-//! A Save that finds the scene's files changed since the editor read or
+//! A save that finds the scene's files changed since the editor read or
 //! wrote them — by a program that took no lock, an older build, a checkout —
 //! does not overwrite them: the document refuses
 //! ([`EditError::ChangedOnDisk`]) and the bar asks, with its buttons named
 //! for this question ([`Guarded::Reload`]):
 //!
 //! ```text
-//!     Save ──changed on disk──▶ the bar ──Overwrite──▶ save over them
-//!                                       ──Reload─────▶ read them back, the
-//!                                                      edits here dropped
-//!                                       ──Cancel─────▶ nothing
+//!     a save ──changed on disk──▶ the bar ──Overwrite──▶ that save again,
+//!                                                        over them
+//!                                         ──Reload─────▶ read them back, the
+//!                                                        edits here dropped
+//!                                         ──Cancel─────▶ nothing
 //! ```
 //!
 //! Asked rather than refused with a status line: a refusal alone would leave
 //! the person no way to keep their own edits in place but a save-as
 //! elsewhere and a copy back, and overwriting is often what they mean after
 //! a checkout they know about. Asked whether or not the scene has unsaved
-//! edits, since a clean scene's Save overwrites just the same. A Save on the
-//! unsaved bar meeting the same refusal puts that bar back with the refusal
-//! on the status line, as any refused save does; Ctrl+S then asks.
+//! edits, since a clean scene's Save overwrites just the same.
+//!
+//! **Every save into the scene's own directory asks the same question**
+//! (decided 2026-10-05), through one helper ([`Editor::refused_save`]) told
+//! which save it was ([`Saving`]): Ctrl+S, a save-as committed onto the
+//! directory the scene lives in, and the bar's own Save. Overwrite carries
+//! on as that save would have: Ctrl+S says it saved, the save-as says it
+//! saved as, and the bar's Save goes on with the close, open or new scene it
+//! was asked for. Reload and Cancel differ only for the bar's Save, whose
+//! question was asked first and is answered by the second:
+//!
+//! ```text
+//!     close / open / new ──dirty──▶ the bar ──Save──▶ changed on disk ──▶ the bar
+//!         ──Overwrite──▶ saved over them, then the close / open / new
+//!         ──Reload─────▶ read back, the edits dropped, then the close / open / new
+//!         ──Cancel─────▶ nothing: the edits kept, a close kept open
+//! ```
+//!
+//! Reload goes on because the person asked for the close or open and then
+//! chose the disk's scene over their edits: nothing is left to lose, and
+//! stopping would make them ask twice. A reload refused — the changed files
+//! no longer read as a scene — leaves the edits in place and goes on with
+//! nothing, as Cancel does; so whichever branch ends the question, a close
+//! is either carried out or answered "keep", and the window never holds a
+//! request nobody will answer. Cancel never reopens the save-as line: the
+//! person said stop.
 //!
 //! An open asks once the directory typed has been read as a scene, so a
 //! directory that is not one is refused before anything is asked, and the
@@ -106,9 +130,34 @@ pub(super) enum Guarded {
     Close,
     /// The scene read again from its directory, whose files changed on disk
     /// since the editor read or wrote them — what the bar's Reload does,
-    /// asked about by a Save that found the change; its Overwrite saves over
-    /// them instead. See the module docs.
-    Reload,
+    /// asked about by the save that found the change; its Overwrite makes
+    /// that save again over them instead. See the module docs.
+    Reload(Saving),
+}
+
+impl Guarded {
+    /// Whether this ends with the window closing, so a question about it
+    /// that ends otherwise answers the close request "keep".
+    fn closes(&self) -> bool {
+        match self {
+            Self::Close => true,
+            Self::Reload(Saving::Then(pending)) => pending.closes(),
+            Self::New | Self::Open(_) | Self::Reload(_) => false,
+        }
+    }
+}
+
+/// Which save into the scene's own directory was made, so one that found the
+/// scene changed on disk is asked about once and carried on as itself — see
+/// the module docs.
+#[derive(Debug)]
+pub(super) enum Saving {
+    /// Ctrl+S, or the toolbar's Save.
+    InPlace,
+    /// A save-as committed on the path line, holding what was typed.
+    As(String),
+    /// The unsaved bar's Save, and what it goes on with once saved.
+    Then(Box<Guarded>),
 }
 
 /// Where recovery copies are written: the directory `--recovery` named, or
@@ -154,24 +203,66 @@ impl<S: Shell + ?Sized> Editor<S> {
         Ok(())
     }
 
+    /// What follows a save `refused`, the one `saving` says was made: for
+    /// files changed on disk, the bar asking whether to overwrite them or read
+    /// them back — see the module docs — and `Ok`; for anything else, that
+    /// save offered again and the refusal handed back for the status line. A
+    /// save-as reopens its line holding what was typed, and the bar's Save
+    /// puts the bar back up.
+    ///
+    /// # Errors
+    ///
+    /// `refused`, unless it was [`EditError::ChangedOnDisk`].
+    pub(super) fn refused_save(
+        &mut self,
+        refused: EditError,
+        saving: Saving,
+    ) -> Result<(), EditError> {
+        if matches!(refused, EditError::ChangedOnDisk(_)) {
+            self.ask_changed_on_disk(saving);
+            return Ok(());
+        }
+        match saving {
+            Saving::InPlace => {}
+            Saving::As(text) => {
+                // Play mode refuses the line as it refused the save; a typing
+                // slip made while play began is refused the line the same
+                // way, and logged.
+                if !matches!(refused, EditError::Playing)
+                    && let Err(line) = self.panels.begin_save_as(&self.document, text)
+                {
+                    crcbl::log::warn!("editor: {line}");
+                }
+            }
+            Saving::Then(guarded) => {
+                let question = self.question(&guarded);
+                self.panels.begin_unsaved(question);
+                self.unsaved = Some(*guarded);
+            }
+        }
+        Err(refused)
+    }
+
     /// Puts the bar up asking whether to overwrite the scene's files, changed
-    /// on disk since the editor read or wrote them, or to read them back —
-    /// see the module docs. Whatever a Save on the bar was waiting on is
-    /// dropped, as [`guard`](Self::guard) drops it.
-    pub(super) fn ask_changed_on_disk(&mut self) {
+    /// on disk since the editor read or wrote them, or to read them back,
+    /// holding the save that found them changed — see the module docs.
+    /// Whatever a Save on the bar was waiting on is dropped, as
+    /// [`guard`](Self::guard) drops it.
+    fn ask_changed_on_disk(&mut self, saving: Saving) {
         self.after_save = None;
         self.drag = None;
         self.dragged = None;
-        let question = self.question(&Guarded::Reload);
+        let guarded = Guarded::Reload(saving);
+        let question = self.question(&guarded);
         self.panels.begin_changed_on_disk(question);
         self.panels.set_status(ASK_CHANGED, Tone::Warning);
-        self.unsaved = Some(Guarded::Reload);
+        self.unsaved = Some(guarded);
     }
 
     /// What the bar says about `guarded`: whose edits, and what loses them.
     fn question(&self, guarded: &Guarded) -> String {
         let what = match guarded {
-            Guarded::Reload => {
+            Guarded::Reload(_) => {
                 let dir = self
                     .document
                     .origin()
@@ -220,22 +311,29 @@ impl<S: Shell + ?Sized> Editor<S> {
                 self.proceed(guarded)
             }
             Unsaved::Save => match guarded {
-                Guarded::Reload => self.overwrite(),
+                Guarded::Reload(saving) => self.overwrite(saving),
                 guarded => self.save_then(guarded),
             },
         }
     }
 
-    /// Saves over the scene's files changed on disk, the bar's Overwrite —
-    /// see the module docs.
-    fn overwrite(&mut self) -> Result<(), EditError> {
+    /// Makes `saving` again over the scene's files changed on disk, the bar's
+    /// Overwrite — see the module docs.
+    fn overwrite(&mut self, saving: Saving) -> Result<(), EditError> {
         self.document.accept_changes_on_disk();
-        self.save()
+        match saving {
+            Saving::InPlace => self.save(),
+            Saving::As(text) => {
+                self.overwrite_as(&text);
+                Ok(())
+            }
+            Saving::Then(pending) => self.save_then(*pending),
+        }
     }
 
     /// Saves the document and goes on with `guarded`; or, for a document with
-    /// no directory, asks for one and goes on once the save-as lands; or puts
-    /// the bar back up when the save is refused.
+    /// no directory, asks for one and goes on once the save-as lands; or, for
+    /// a refused save, what [`refused_save`](Self::refused_save) does.
     fn save_then(&mut self, guarded: Guarded) -> Result<(), EditError> {
         if self.document.play_state() != PlayState::Editing {
             self.document.stop()?;
@@ -251,12 +349,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                 self.after_save = Some(guarded);
                 Ok(())
             }
-            Err(error) => {
-                let question = self.question(&guarded);
-                self.panels.begin_unsaved(question);
-                self.unsaved = Some(guarded);
-                Err(error)
-            }
+            Err(error) => self.refused_save(error, Saving::Then(Box::new(guarded))),
         }
     }
 
@@ -287,7 +380,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// `guarded` not done: a close is kept open, an offer an Open copy took
     /// down comes back (see `recovery`), and the status line says so.
     fn kept(&mut self, guarded: &Guarded) {
-        if matches!(guarded, Guarded::Close) {
+        if guarded.closes() {
             self.keep_open();
         }
         self.restore_offer();
@@ -310,18 +403,33 @@ impl<S: Shell + ?Sized> Editor<S> {
                 self.closing = true;
                 Ok(())
             }
-            Guarded::Reload => {
-                let dir = self
-                    .document
-                    .origin()
-                    .ok_or(EditError::NoOrigin)?
-                    .to_path_buf();
-                let document =
-                    Document::open_with_history_or_fresh(dir, crate::scene::vocabulary())?;
-                self.replace_document(document);
-                Ok(())
+            Guarded::Reload(saving) => {
+                let reloaded = self.reload();
+                match saving {
+                    Saving::Then(pending) => match reloaded {
+                        Ok(()) => self.proceed(*pending),
+                        Err(error) => {
+                            self.kept(&pending);
+                            Err(error)
+                        }
+                    },
+                    Saving::InPlace | Saving::As(_) => reloaded,
+                }
             }
         }
+    }
+
+    /// Reads the scene back from its own directory and puts it in place of
+    /// the one being edited, under the lock the editor holds on it.
+    fn reload(&mut self) -> Result<(), EditError> {
+        let dir = self
+            .document
+            .origin()
+            .ok_or(EditError::NoOrigin)?
+            .to_path_buf();
+        let document = Document::open_with_history_or_fresh(dir, crate::scene::vocabulary())?;
+        self.replace_document(document);
+        Ok(())
     }
 
     /// Answers a close request: at once for a clean document, and otherwise
@@ -332,7 +440,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     ///
     /// [`EditorError`] if the shell refused the close.
     pub(super) fn close_requested(&mut self) -> Result<Option<Flow>, EditorError> {
-        if matches!(self.unsaved, Some(Guarded::Close)) {
+        if self.unsaved.as_ref().is_some_and(Guarded::closes) {
             return Ok(None);
         }
         self.guard(Guarded::Close).map_err(LoopError::Game)?;

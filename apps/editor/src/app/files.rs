@@ -49,7 +49,7 @@
 use crcbl::assets::DirSource;
 use crcbl::shell::Shell;
 
-use super::unsaved::Guarded;
+use super::unsaved::{Guarded, Saving};
 use super::{Editor, EditorError, scene_bounds};
 use crate::document::{Document, EditError, PlayState, lock_scene, open_target, save_target};
 use crate::panel::{Panels, Tone};
@@ -228,7 +228,10 @@ impl<S: Shell + ?Sized> Editor<S> {
 
     /// Saves the document into the directory `text` names and makes it the
     /// document's own, saying so — or says why not and asks again, holding
-    /// what was typed so a slip is corrected rather than retyped.
+    /// what was typed so a slip is corrected rather than retyped. Onto the
+    /// scene's own directory, changed on disk since the editor read or wrote
+    /// it, the unsaved bar asks whether to overwrite it, as Ctrl+S does
+    /// (`unsaved`'s module docs).
     ///
     /// When the asset source moved with the document, the browser lists the
     /// new one and the renderer is rebuilt from it: the same keys name other
@@ -239,6 +242,42 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// [`EditorError`] only when the device refused the rebuilt renderer; a
     /// refused save is on the status line.
     pub(super) fn save_as(&mut self, text: &str) -> Result<(), EditorError> {
+        let Some(moved) = self.write_as(text) else {
+            return Ok(());
+        };
+        if moved {
+            self.panels.relist_assets(&self.document);
+            let wanted = self.document.mesh_assets();
+            self.rebuild(&wanted)?;
+        }
+        self.after_saved_as();
+        Ok(())
+    }
+
+    /// The unsaved bar's Overwrite for a save-as committed onto the scene's
+    /// own directory, which found its files changed on disk: the save-as
+    /// made again as `text` was typed, over them, and carried on as
+    /// [`save_as`](Self::save_as) carries on — see `unsaved`'s module docs.
+    pub(super) fn overwrite_as(&mut self, text: &str) {
+        let Some(moved) = self.write_as(text) else {
+            return;
+        };
+        // Onto the scene's own directory nothing moves (`Document::save_as`);
+        // one that did is rebuilt at the next draw, as an opened scene is,
+        // since the bar's answer has no device refusal to hand back.
+        if moved {
+            self.panels.relist_assets(&self.document);
+            self.rebuild_due = true;
+        }
+        self.after_saved_as();
+    }
+
+    /// A save-as's write: the document saved into the directory `text` names
+    /// and made the document's own and locked, saying so — handing back
+    /// whether the asset source moved with it — or, refused, what
+    /// [`refused_save`](Self::refused_save) does, said on the status line,
+    /// and [`None`].
+    fn write_as(&mut self, text: &str) -> Option<bool> {
         let saved = save_target(text).and_then(|dir| match self.document.save_as(&dir) {
             Ok(moved) => Ok((dir, moved, None)),
             // Only a save-as into the scene's own directory writes the
@@ -249,27 +288,16 @@ impl<S: Shell + ?Sized> Editor<S> {
         let (dir, moved, unwritten) = match saved {
             Ok(saved) => saved,
             Err(error) => {
-                crcbl::log::warn!("editor: {error}");
-                self.panels.set_status(error.to_string(), Tone::Warning);
-                // Play mode refuses the line as it refused the save, and the
-                // status line already says so; a typing slip made while play
-                // began is refused the line the same way, and logged.
-                if !matches!(error, EditError::Playing)
-                    && let Err(refused) = self.panels.begin_save_as(&self.document, text.to_owned())
-                {
-                    crcbl::log::warn!("editor: {refused}");
+                if let Err(error) = self.refused_save(error, Saving::As(text.to_owned())) {
+                    crcbl::log::warn!("editor: {error}");
+                    self.panels.set_status(error.to_string(), Tone::Warning);
                 }
-                return Ok(());
+                return None;
             }
         };
         // Before anything that could put another document in place, which
         // would take the copy's path with it.
         self.remove_recovered();
-        if moved {
-            self.panels.relist_assets(&self.document);
-            let wanted = self.document.mesh_assets();
-            self.rebuild(&wanted)?;
-        }
         let saved = format!("Saved as {}", dir.display());
         if let Err(error) = self.report_saved(&saved, unwritten.as_ref()) {
             crcbl::log::warn!("editor: {error}");
@@ -284,7 +312,6 @@ impl<S: Shell + ?Sized> Editor<S> {
                 Tone::Warning,
             );
         }
-        self.after_saved_as();
-        Ok(())
+        Some(moved)
     }
 }

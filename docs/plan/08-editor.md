@@ -1617,9 +1617,13 @@ what is deferred.
   lets the scene go, an edit run of `crcbl scene` for the run. A held scene is
   refused, not waited on — the CLI exits 4 and changes nothing, a second
   editor's Ctrl+O is refused on the status line and `editor <SCENE_DIR>` does
-  not start — and a crashed holder's file blocks nobody. A Save over files
+  not start — and a crashed holder's file blocks nobody. A save over files
   something wrote without the lock asks through the unsaved bar: Overwrite,
-  Reload or Cancel. `crcbl::scene_edit::lock`'s module docs hold the decisions;
+  Reload or Cancel — Ctrl+S, a save-as onto the scene's own directory, and the
+  bar's own Save alike (2026-10-05). After the bar's Save, asked while closing
+  or opening with unsaved edits, Overwrite and Reload go on with the close or
+  open and Cancel abandons it; `apps/editor/src/app/unsaved.rs`'s module docs
+  hold that flow. `crcbl::scene_edit::lock`'s module docs hold the decisions;
   `apps/editor/src/app/tests/lock.rs` and `crates/crcbl-cli/tests/scene.rs` hold
   them through the loop and the binary.
 - **What it does not cover**: `crcbl edit --serve`, stdin batches,

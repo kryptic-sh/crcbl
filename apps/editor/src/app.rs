@@ -1476,11 +1476,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     fn save(&mut self) -> Result<(), EditError> {
         match self.save_in_place() {
             Err(EditError::NoOrigin) => self.begin_save_as(),
-            Err(EditError::ChangedOnDisk(_)) => {
-                self.ask_changed_on_disk();
-                Ok(())
-            }
-            Err(error) => Err(error),
+            Err(error) => self.refused_save(error, unsaved::Saving::InPlace),
             Ok(unwritten) => self.report_saved("Saved", unwritten.as_ref()),
         }
     }
