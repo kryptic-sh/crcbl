@@ -849,6 +849,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the saves that did not land. `crcbl_store::save::SaveBacking::root` names the
   directory for it.
 
+- **`crcbl bench --scenario ecs` times one `crcbl_ecs` schedule a tick at a
+  time.** Eight systems over `--entities` rows each (default 10000), every one
+  stepping the same damped spring, with mixed declarations: one writes `wind`
+  and two read it, two write `score` and one reads it, and three touch nothing
+  shared — five conflicts. It reports the per-tick p50, p95, p99 and max beside
+  the schedule's shape, and the world's `hash_world` as the checksum, failing a
+  run whose ticks left the hash unchanged. It is the baseline a parallel
+  schedule is measured against.
+
 - **Overlap hits: how deep, which way out and where.** `crcbl_phys::OverlapHit`
   carries the point on the collider's surface the sphere is pushed out from, the
   unit normal out of the collider, the penetration depth (always positive) and

@@ -1895,6 +1895,65 @@ fn bench_phys_reports_three_distributions_and_the_answers_beside_them() {
     );
 }
 
+/// `crcbl bench --scenario ecs` end to end: one per-tick distribution, the
+/// schedule's shape beside it, and the world's hash as the checksum.
+///
+/// Nothing below asserts a duration: what is pinned is that a full percentile
+/// set came out, that the schedule had the conflicts its declarations make,
+/// and that the checksum is the hex string `crcbl sim` prints a hash as.
+#[test]
+fn bench_ecs_reports_a_per_tick_distribution_and_the_schedule_beside_it() {
+    let temporary = TempDir::new("bench-ecs");
+    let output = crcbl(
+        temporary.path(),
+        &[
+            "bench",
+            "--scenario",
+            "ecs",
+            "--entities",
+            "200",
+            "--iterations",
+            "20",
+            "--warmup",
+            "2",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = stdout(&output);
+    assert_eq!(json.lines().count(), 1, "exactly one line: {json}");
+    assert!(
+        json.starts_with(r#"{"ok":true,"command":"bench","scenario":"ecs""#),
+        "{json}"
+    );
+    assert!(json.contains(r#""environment":{"arch":"#), "{json}");
+    assert_eq!(numbers(&json, "entities"), vec![200]);
+    assert_eq!(numbers(&json, "systems"), vec![8]);
+    assert_eq!(numbers(&json, "conflicts"), vec![5]);
+
+    let ladder: Vec<usize> = ["p50", "p95", "p99", "max"]
+        .iter()
+        .map(|key| numbers(&json, key)[0])
+        .collect();
+    assert!(
+        ladder.windows(2).all(|pair| pair[0] <= pair[1]),
+        "out of order: {ladder:?} in {json}"
+    );
+    assert!(!json.contains("mean"), "{json}");
+
+    let checksum = field_values(&json, "checksum").next().expect("a checksum");
+    let hex = checksum.trim_matches('"');
+    assert!(
+        checksum.starts_with('"') && hex.len() == 16 && u64::from_str_radix(hex, 16).is_ok(),
+        "the checksum is not a sixteen-digit hex string: {checksum}"
+    );
+}
+
 /// **The same crowd in a smaller arena answers more per query**, which is the
 /// fact `docs/backlog.md` says a scale number is meaningless without.
 ///

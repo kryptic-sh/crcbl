@@ -353,11 +353,16 @@ SCENARIOS:
             worth, and then N sphere overlaps, one per body. The three phases
             are timed and reported separately. `--ticks` repeats the movement
             so the queries run against a tree the crowd has walked away from.
+    ecs     One `crcbl_ecs` schedule ticked over a fixed world, timed per tick:
+            systems over N entities each, some touching nothing shared, some
+            reading a shared resource and some writing one, so the conflict
+            graph has independent systems between ordered writers.
 
-OPTIONS (both scenarios):
+OPTIONS (every scenario):
         --scenario <NAME>    Which scenario to run. Required.
         --iterations <N>     Timed iterations — a `par_for` call for `jobs`, one
-                             build, refit and query pass for `phys`.
+                             build, refit and query pass for `phys`, one tick
+                             for `ecs`.
                              Default: 200. Below 20 the run reports its maximum
                              and no percentile.
         --warmup <N>         Untimed iterations first, excluded from the
@@ -394,7 +399,11 @@ OPTIONS (phys):
                              the crowd also spreads as it walks, so read the
                              query line against the neighbour count beside it.
 
-A flag that belongs to one scenario is refused on the other rather than
+OPTIONS (ecs):
+        --entities <N>       Rows every system owns and steps each tick.
+                             Default: 10000.
+
+A flag that belongs to one scenario is refused on the others rather than
 ignored.";
 
 /// `crcbl sim --help`.
@@ -831,6 +840,14 @@ pub enum BenchScenario {
     /// `crate::bench::phys` for what the fixture is and why density is a
     /// parameter of it rather than a detail.
     Phys,
+    /// One `crcbl_ecs` schedule of systems with mixed access declarations,
+    /// ticked over a fixed world.
+    ///
+    /// The third one because `docs/backlog.md`'s 2026-09-06 decision puts an
+    /// ECS bench ahead of any parallel schedule: a tick of a realistic
+    /// schedule is the number such a runner has to improve on. See
+    /// `crate::bench::ecs`.
+    Ecs,
 }
 
 impl BenchScenario {
@@ -844,12 +861,13 @@ impl BenchScenario {
         match self {
             Self::Jobs => "jobs",
             Self::Phys => "phys",
+            Self::Ecs => "ecs",
         }
     }
 }
 
 /// Every scenario, for the name lookup and the rejection message.
-const SCENARIOS: &[BenchScenario] = &[BenchScenario::Jobs, BenchScenario::Phys];
+const SCENARIOS: &[BenchScenario] = &[BenchScenario::Jobs, BenchScenario::Phys, BenchScenario::Ecs];
 
 /// Which scenario each of `bench`'s per-scenario flags belongs to.
 ///
@@ -864,6 +882,7 @@ const SCENARIO_FLAGS: &[(&str, BenchScenario)] = &[
     ("--bodies", BenchScenario::Phys),
     ("--extent", BenchScenario::Phys),
     ("--ticks", BenchScenario::Phys),
+    ("--entities", BenchScenario::Ecs),
 ];
 
 /// The scenario `name` selects, or `None` if no scenario answers to it.
@@ -939,6 +958,14 @@ pub const DEFAULT_BENCH_EXTENT: usize = 48;
 /// only has an answer above it.
 pub const DEFAULT_BENCH_TICKS: usize = 1;
 
+/// Rows each of the `ecs` scenario's systems owns when `--entities` is not
+/// given.
+///
+/// [`DEFAULT_BENCH_ITEMS`]' crowd, the size `apps/horde`'s plan set as its exit
+/// criterion, so the default run is a schedule over a world of the size the
+/// engine is asked to carry.
+pub const DEFAULT_BENCH_ENTITIES: usize = 10_000;
+
 /// `crcbl bench`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BenchArgs {
@@ -963,6 +990,9 @@ pub struct BenchArgs {
     /// querying it. Never zero, which would leave the refit phase timing a
     /// crowd that had not moved.
     pub ticks: usize,
+    /// Rows each of the `ecs` scenario's systems owns. Never zero: a system
+    /// over no rows has nothing to step, and its mean is undefined.
+    pub entities: usize,
     /// Timed calls. Never zero, for the same reason.
     pub iterations: usize,
     /// Untimed calls first, excluded from everything reported.
@@ -1791,6 +1821,7 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
         bodies: DEFAULT_BENCH_BODIES,
         extent: DEFAULT_BENCH_EXTENT,
         ticks: DEFAULT_BENCH_TICKS,
+        entities: DEFAULT_BENCH_ENTITIES,
         iterations: DEFAULT_BENCH_ITERATIONS,
         warmup: DEFAULT_BENCH_WARMUP,
         json: false,
@@ -1864,6 +1895,13 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
                 Ok(value) => {
                     parsed.ticks = value;
                     given.push("--ticks");
+                }
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some("--entities") => match count(&mut args, "--entities") {
+                Ok(value) => {
+                    parsed.entities = value;
+                    given.push("--entities");
                 }
                 Err(message) => return Invocation::BadUsage(message),
             },
@@ -1946,6 +1984,11 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
             "--ticks",
             "a crowd that never moves gives the refit phase nothing to refit, so its \
              timing would be the cost of setting every body back where it already was",
+        ),
+        (
+            parsed.entities,
+            "--entities",
+            "a system over no rows has nothing to step and no mean to write",
         ),
     ] {
         if value == 0 {
@@ -3214,6 +3257,52 @@ mod tests {
         }
     }
 
+    /// The `ecs` default, pinned for
+    /// `bench_defaults_to_the_pass_it_stands_in_for`'s reason, and the help
+    /// quoting it pinned to the constant for
+    /// `bench_phys_defaults_to_a_crowd_at_a_stated_density`'s.
+    #[test]
+    fn bench_ecs_defaults_to_a_world_of_the_stated_size() {
+        let Command::Bench(args) = command(&["bench", "--scenario", "ecs"]) else {
+            panic!("expected bench");
+        };
+        assert_eq!(args.scenario, BenchScenario::Ecs);
+        assert_eq!(args.entities, DEFAULT_BENCH_ENTITIES);
+        assert_eq!(args.iterations, DEFAULT_BENCH_ITERATIONS);
+        assert_eq!(args.warmup, DEFAULT_BENCH_WARMUP);
+
+        let Command::Bench(args) = command(&["bench", "--scenario", "ecs", "--entities", "300"])
+        else {
+            panic!("expected bench");
+        };
+        assert_eq!(args.entities, 300);
+
+        let ecs_options = BENCH_USAGE
+            .split_once("OPTIONS (ecs):")
+            .expect("the help has an ecs section")
+            .1;
+        assert!(
+            ecs_options.contains(&format!("Default: {DEFAULT_BENCH_ENTITIES}.")),
+            "`bench --help` does not name the default:\n{ecs_options}"
+        );
+        assert!(matches!(
+            parse_args(&["bench", "--scenario", "ecs", "--entities"]),
+            Invocation::BadUsage(_)
+        ));
+        // Refused where it is not read. Asserted by name here because
+        // `a_bench_flag_is_refused_on_the_scenario_that_does_not_read_it` walks
+        // `SCENARIO_FLAGS`, and so cannot see a flag the table forgot.
+        for other in ["jobs", "phys"] {
+            assert!(
+                matches!(
+                    parse_args(&["bench", "--scenario", other, "--entities", "5"]),
+                    Invocation::BadUsage(_)
+                ),
+                "`--entities` was accepted on `{other}`"
+            );
+        }
+    }
+
     /// **A flag that belongs to one scenario is refused on the other, by name,
     /// and pointed at the scenario that reads it.**
     ///
@@ -3258,6 +3347,8 @@ mod tests {
             ("phys", "--extent"),
             ("phys", "--ticks"),
             ("phys", "--iterations"),
+            ("ecs", "--entities"),
+            ("ecs", "--iterations"),
         ] {
             let Invocation::BadUsage(message) =
                 parse_args(&["bench", "--scenario", scenario, flag, "0"])

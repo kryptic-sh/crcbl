@@ -3,10 +3,12 @@
 //!
 //! Topic 40 schedules "`crcbl bench` with fixed scenarios,
 //! warm-up, percentiles, JSON output" and notes against it that "the job system
-//! is the first thing that needs proving". This is the subcommand and its two
-//! scenarios: `jobs`, which times [`crcbl::jobs::Pool`] in isolation — see
-//! [`jobs`] — and `phys`, which times `crcbl-phys`'s broadphase on one
-//! thread — see [`phys`]. Both are headless and neither opens a device.
+//! is the first thing that needs proving". This is the subcommand and its
+//! three scenarios: `jobs`, which times [`crcbl::jobs::Pool`] in isolation —
+//! see [`jobs`] — `phys`, which times `crcbl-phys`'s broadphase on one
+//! thread — see [`phys`] — and `ecs`, which times one `crcbl-ecs` schedule a
+//! tick at a time — see [`ecs`]. All three are headless and none opens a
+//! device.
 //!
 //! # Human output by default, `--json` on request
 //!
@@ -38,7 +40,7 @@
 //! reports for all of them: the machine's architecture and OS, and the build
 //! profile. A scenario appends what only it must report — `jobs` adds the
 //! parallelism the spawner offered and the worker count the pool actually got;
-//! `phys` has neither, because it opens no pool.
+//! `phys` and `ecs` have neither, because neither opens a pool.
 //!
 //! **There is no adapter, backend or driver version**, because nothing here
 //! opens a device; inventing those fields so the block resembles the plan's
@@ -71,6 +73,7 @@ use crate::args::{BenchArgs, BenchScenario};
 use crate::json::Json;
 use crate::report::{Failure, Outcome};
 
+mod ecs;
 mod jobs;
 mod phys;
 
@@ -79,12 +82,13 @@ mod phys;
 /// # Errors
 ///
 /// [`Failure`] if the pool cannot be built, if a phase did not run the chunks or
-/// the queries it was asked for, or if the workload did not compute what a
-/// serial pass over the same seeds computes.
+/// the queries it was asked for, if the workload did not compute what a serial
+/// pass over the same seeds computes, or if a schedule's ticks changed nothing.
 pub fn run(args: &BenchArgs) -> Result<Outcome, Failure> {
     match args.scenario {
         BenchScenario::Jobs => Ok(jobs::report(args, &jobs::measure(args)?)),
         BenchScenario::Phys => Ok(phys::report(args, &phys::measure(args)?)),
+        BenchScenario::Ecs => Ok(ecs::report(args, &ecs::measure(args)?)),
     }
 }
 
