@@ -98,7 +98,10 @@ pub enum Sound {
 
 impl Sound {
     /// Every sound, in [`Sound::index`] order.
-    pub const ALL: [Self; 13] = [
+    ///
+    /// As long as the last index says, so a new tower kind — which moves every
+    /// index after its shot — does not build until its shot is listed here.
+    pub const ALL: [Self; Sound::Lost.index() + 1] = [
         Self::Fire(tower::Kind::Bolt),
         Self::Fire(tower::Kind::Splash),
         Self::Fire(tower::Kind::Slow),

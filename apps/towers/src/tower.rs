@@ -24,9 +24,10 @@
 //! A kind at a tier is a **row of a table** rather than a match arm in each of
 //! a dozen methods: [`TOWERS`] is indexed by [`Kind::index`] and
 //! [`Tier::index`], and [`Kind::spec`] is the only way anything in this crate
-//! reads a tower's reach, damage, reload or price. A new kind is a row and a
-//! variant, which is the extensibility `docs/plan/sample/07-towers.md`'s exit
-//! criteria ask for.
+//! reads a tower's reach, damage, reload or price. A new kind's numbers are a
+//! row and a variant; what else is keyed by kind — its key, icon, colour,
+//! sound and its count on the wire — is listed under _Adding a tower kind_
+//! below.
 //!
 //! **A kind either fires or holds, never both**, and the table says which:
 //! [`TowerSpec::fires`] is a damage above zero and [`TowerSpec::slows`] is a
@@ -89,6 +90,49 @@
 //! both are an impact and the burst is what the kind is for. `crate::game`'s
 //! `Stage::splash` is the caller, and it is what keeps the directly struck creep
 //! from being wounded twice.
+//!
+//! # Adding a tower kind
+//!
+//! `docs/plan/sample/07-towers.md`'s exit criteria ask that one developer can
+//! add a tower kind in one sitting from this sample's own docs, so here is
+//! every place a kind is keyed, in the order to fill them.
+//! `crate::app::kind_tests`' `every_tower_kind_has_every_row` walks [`ALL`]
+//! through each of them and names the one a kind is missing; most of them do
+//! not build until the kind is in them, and that test asks the rest.
+//!
+//! 1. **[`Kind`]**: the variant, last, and its arm in [`Kind::label`] — one
+//!    lowercase word, because it is the icon's frame name, the action's suffix
+//!    and the kind's key on the `[HUD]` line. Raise [`KINDS`] and add the
+//!    variant to [`ALL`] in declaration order.
+//! 2. **[`TOWERS`]**: its row, one [`TowerSpec`] per [`Tier`] — reach, damage
+//!    or slow factor, reload, burst, and the price in `cost`. A row fires or
+//!    holds, never both, and the upgrade is dearer and better than the base;
+//!    this module's tests hold both. A shorter reach than any kind has moves
+//!    [`SHORTEST_RANGE_M`], which every plot of every map is held to.
+//! 3. **`crate::app`'s `ACTION_KINDS` and `KIND_KEYS`**: its action,
+//!    `kind-<label>`, and the next digit key.
+//! 4. **`apps/towers/assets/icons.crpix`**: a frame named after its label —
+//!    the build menu's icon (`crate::art`).
+//! 5. **`crate::map`'s `tower_tint`**: the colour its post is painted;
+//!    [`crate::map::tower_material`] gives it a palette row from that. The
+//!    palette has to fit the materials `crate::map`'s `CAPACITIES` reserves,
+//!    which a fifth kind outgrows.
+//! 6. **[`crate::cue::Sound::ALL`]**: `Sound::Fire` of it, after the other
+//!    kinds' shots, and its arm in `crate::audio`'s `waveform`.
+//! 7. **`crate::replica`'s `HUD_SCHEMA`**: a `built <label>` field after the
+//!    other kinds', with `hud_values` writing it and `read_hud` reading it at
+//!    that place. A tower's kind field widens with [`KINDS`] on its own.
+//! 8. **`crate::game`'s `COMPATIBILITY`**: raise `protocol_version` and say
+//!    why there — the snapshot's numbers grew a field, and two builds with
+//!    different tables must refuse each other.
+//!
+//! **Nothing else needs it.** The save writes [`KINDS`] ahead of its counts
+//! and refuses a file with another, by name, so its payload version stays. The
+//! command frame carries [`Kind::index`] as a byte, and the `[HUD]` line, the
+//! run's summary, the build menu, the kind panel and a tool's play controls
+//! all walk [`ALL`]. The balance tests in `crate::wave` and `crate::game` are
+//! about the kinds there are, and say nothing about a new one until it is
+//! played.
 
 use crcbl::math::DVec3;
 use crcbl::phys::{ColliderId, PhysicsWorld, Segment};

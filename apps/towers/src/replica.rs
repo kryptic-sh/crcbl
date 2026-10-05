@@ -155,8 +155,16 @@ const HUD_SCHEMA: &[Field] = &[
     },
 ];
 
+/// How many bits a tower's kind takes: enough for every [`tower::Kind::index`],
+/// so a new kind widens it rather than being refused off the wire.
+const TOWER_KIND_BITS: u32 = (tower::KINDS as u32).next_power_of_two().ilog2();
+
 /// A tower: its kind, its tier, and whether it is working this instant.
-const TOWER_SCHEMA: &[Field] = &[whole("kind", 2), flag("upgraded"), flag("working")];
+const TOWER_SCHEMA: &[Field] = &[
+    whole("kind", TOWER_KIND_BITS),
+    flag("upgraded"),
+    flag("working"),
+];
 
 /// A creep: its kind, its two flags, where it is and which way it faces, as
 /// one of [`FACING_CODES`], what it has left and its tag.

@@ -17242,6 +17242,40 @@ pass.)
   an HTTPS page); the plan's exit criteria already say all clients are native,
   and the milestone line has not been reconciled with them.
 
+**The extensibility exit criterion has a checklist and a test (2026-10-05);
+nobody has followed them yet.** `apps/towers/src/tower.rs`'s module docs,
+_Adding a tower kind_, list every place a kind is keyed, in order, and
+`crcbl_towers::app::kind_tests::every_tower_kind_has_every_row` walks
+`tower::ALL` through each: label, price at every tier, action and key, icon
+frame, palette row, shot sound, and a build of the kind crossing the command
+frame for its price, the snapshot (tower and count) and the save. Each was shown
+red by taking one kind out of one table. Decisions taken with it:
+
+- **Where the compiler can hold a table, it does.** `Sound::ALL`'s length is
+  `Sound::Lost.index() + 1`, and the tower palette is `map::tower_tint`, a
+  `match` with no wildcard, so a kind missing from either does not build, as
+  `Kind::label`, `audio::waveform`, `TOWERS`, `ACTION_KINDS` and `KIND_KEYS`
+  already did not. `replica`'s tower kind field is `TOWER_KIND_BITS` wide, from
+  `tower::KINDS`, where it was a fixed two bits that a fifth kind would have
+  overflowed. The `[HUD]` line and the run's summary walk `tower::ALL` rather
+  than naming each kind, spelled exactly as before
+  (`the_counts_are_spelled_as_the_line_always_spelled_them`), since the browser
+  gate reads `splash:` off the line.
+- **Left as data, and asked by the test instead:** `replica::HUD_SCHEMA`'s
+  `built <label>` fields (a schema is a fixed list of named fields, and
+  generating names from labels needs a `const` string join the language does not
+  have) and `assets/icons.crpix`.
+- **The how-to is the module doc, not the plan.** The exit criterion says "the
+  sample's own docs", and in `tower.rs` rustdoc checks the public names it
+  links; the private ones are in backticks. The plan's criterion points at it.
+- **Not raised ahead of need:** `map::CAPACITIES.materials` is 16 and the
+  palette 15 rows, so a fifth kind must raise it;
+  `the_map_fits_the_pools_it_reserves` and the kind test both fail until it is.
+- **Not mutated:** the save's half of the test was not shown red by breaking
+  `crate::save`, which another task owned at the time; the save is generic over
+  `tower::KINDS`, and `Kind::from_index` refusing the last kind turned the test
+  red.
+
 **Rules owed rather than exempted, stated so the next slice does not read them
 as decisions:** rule 11 is half met — the build menu's icons are `.crpix`, but
 they are placeholder art, and the creep icons, the wave banner and `page`'s two

@@ -232,6 +232,27 @@ fn action_map() -> ActionMap {
     map
 }
 
+/// Each kind's count as the `[HUD]` line spells it — `bolt: 2  splash: 0  slow:
+/// 1`, in [`tower::ALL`]'s order — so a new kind is on the line, under the key
+/// the browser gate matches it by, without the line being edited.
+fn built_on_the_hud_line(built_by_kind: &[u64; tower::KINDS]) -> String {
+    let counts: Vec<String> = tower::ALL
+        .iter()
+        .map(|kind| format!("{}: {}", kind.label(), built_by_kind[kind.index()]))
+        .collect();
+    counts.join("  ")
+}
+
+/// The same counts as the run's summary spells them: `2 bolt, 0 splash, 1
+/// slow`.
+fn built_in_the_summary(built_by_kind: &[u64; tower::KINDS]) -> String {
+    let counts: Vec<String> = tower::ALL
+        .iter()
+        .map(|kind| format!("{} {}", built_by_kind[kind.index()], kind.label()))
+        .collect();
+    counts.join(", ")
+}
+
 /// How long a refused command's line — or a save's — stays on the page, on
 /// the frame's clock: long enough to read, short enough that it is about the
 /// key just pressed.
@@ -416,7 +437,7 @@ impl Towers {
         };
         crcbl::log::info!(
             "[HUD] tick: {}  gold: {}  lives: {}  wave: {}  next: {}  creeps: {}  towers: {}  \
-             bolt: {}  splash: {}  slow: {}  upgrades: {}  bolts: {}  kills: {}  leaks: {}  \
+             {}  upgrades: {}  bolts: {}  kills: {}  leaks: {}  \
              shots: {}  built: {}  refused: {}  outcome: {}  runs: {}  plot: {}  kind: {}  \
              geometry: {:?}  binding: {:?}  lighting: {:?}",
             stats.ticks,
@@ -426,9 +447,7 @@ impl Towers {
             next,
             stats.creeps,
             stats.towers,
-            stats.built_of(tower::Kind::Bolt),
-            stats.built_of(tower::Kind::Splash),
-            stats.built_of(tower::Kind::Slow),
+            built_on_the_hud_line(&stats.built_by_kind),
             stats.upgrades,
             stats.bolts,
             stats.kills,
@@ -1428,7 +1447,7 @@ impl HostedGame for Towers {
     fn log_summary(summary: &Summary) {
         crcbl::log::info!(
             "towers: {} frames, {} ticks, run {} left {} gold and {} lives at wave {}, \
-             {} kill(s) and {} leak(s), {} tower(s) built ({} bolt, {} splash, {} slow) with \
+             {} kill(s) and {} leak(s), {} tower(s) built ({}) with \
              {} upgrade(s) and {} command(s) refused, {}, \
              {} overlay commands, geometry {:?}, binding {:?}, lighting {:?} ({:?})",
             summary.run.frames,
@@ -1440,9 +1459,7 @@ impl HostedGame for Towers {
             summary.kills,
             summary.leaks,
             summary.built,
-            summary.built_by_kind[tower::Kind::Bolt.index()],
-            summary.built_by_kind[tower::Kind::Splash.index()],
-            summary.built_by_kind[tower::Kind::Slow.index()],
+            built_in_the_summary(&summary.built_by_kind),
             summary.upgrades,
             summary.refused,
             summary.outcome.label(),
@@ -1480,6 +1497,8 @@ mod audio_tests;
 mod build_menu_tests;
 #[cfg(test)]
 mod dev_camera_tests;
+#[cfg(test)]
+mod kind_tests;
 #[cfg(test)]
 mod save_tests;
 

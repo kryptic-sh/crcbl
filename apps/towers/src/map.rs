@@ -730,6 +730,21 @@ pub const fn tower_material(kind: crate::tower::Kind) -> usize {
     TOWER_MATERIAL + kind.index()
 }
 
+/// What a tower of `kind` is painted: the bolt's grey post, the splash's rust,
+/// the slow tower's cold blue — the same hue its hold tints a creep.
+///
+/// A `match` with no wildcard, so a new kind does not build until it has a
+/// colour of its own; [`Map::scene`] lays these out in [`tower_material`]'s
+/// rows.
+const fn tower_tint(kind: crate::tower::Kind) -> [f32; 3] {
+    use crate::tower::Kind;
+    match kind {
+        Kind::Bolt => [0.58, 0.62, 0.70],
+        Kind::Splash => [0.74, 0.44, 0.34],
+        Kind::Slow => [0.34, 0.52, 0.66],
+    }
+}
+
 /// How many latitude bands and longitude columns a creep is drawn with, and how
 /// many facets a tower's cylinder has.
 ///
@@ -850,37 +865,38 @@ impl Map {
         ));
         meshes.push(mesh("burst", sphere(1.0, BURST_RINGS, BURST_SEGMENTS)));
 
+        // In the constants' own order — `the_palette_is_the_one_the_constants_index`
+        // asserts it, because a row out of place is a creep kind drawn as a tower
+        // and a picture nobody would think to disbelieve.
+        let mut materials = vec![
+            // The field.
+            painted([0.26, 0.31, 0.24]),
+            painted([0.46, 0.42, 0.32]),
+            painted([0.30, 0.38, 0.46]),
+            painted([0.72, 0.30, 0.28]),
+            // One per creep kind: fast is the green the single archetype always
+            // was, tanky a heavier slate, swarm a pale wash — light things read
+            // as light ones from overhead.
+            painted([0.55, 0.72, 0.40]),
+            painted([0.36, 0.40, 0.52]),
+            painted([0.82, 0.86, 0.62]),
+            // …and the two states over them: hurt, then held.
+            painted([0.86, 0.52, 0.24]),
+            painted([0.40, 0.72, 0.88]),
+        ];
+        // One per tower kind.
+        materials.extend(crate::tower::ALL.map(|kind| painted(tower_tint(kind))));
+        materials.extend([
+            // A tower of any kind that worked this tick.
+            painted([0.95, 0.88, 0.45]),
+            // The bolt, and the burst it leaves.
+            painted([0.98, 0.94, 0.60]),
+            painted([1.0, 0.72, 0.36]),
+        ]);
+
         SceneDesc {
             meshes,
-            // In the constants' own order — `the_palette_is_the_one_the_constants_index`
-            // asserts it, because a row out of place is a creep kind drawn as a tower
-            // and a picture nobody would think to disbelieve.
-            materials: vec![
-                // The field.
-                painted([0.26, 0.31, 0.24]),
-                painted([0.46, 0.42, 0.32]),
-                painted([0.30, 0.38, 0.46]),
-                painted([0.72, 0.30, 0.28]),
-                // One per creep kind: fast is the green the single archetype always
-                // was, tanky a heavier slate, swarm a pale wash — light things read
-                // as light ones from overhead.
-                painted([0.55, 0.72, 0.40]),
-                painted([0.36, 0.40, 0.52]),
-                painted([0.82, 0.86, 0.62]),
-                // …and the two states over them: hurt, then held.
-                painted([0.86, 0.52, 0.24]),
-                painted([0.40, 0.72, 0.88]),
-                // One per tower kind: the bolt's grey post, the splash's rust, the
-                // slow tower's cold blue — the same hue its hold tints a creep.
-                painted([0.58, 0.62, 0.70]),
-                painted([0.74, 0.44, 0.34]),
-                painted([0.34, 0.52, 0.66]),
-                // …and a tower of any kind that worked this tick.
-                painted([0.95, 0.88, 0.45]),
-                // The bolt, and the burst it leaves.
-                painted([0.98, 0.94, 0.60]),
-                painted([1.0, 0.72, 0.36]),
-            ],
+            materials,
             page: grid_page(),
             probes: ProbeGrid::default(),
             capacities: CAPACITIES,

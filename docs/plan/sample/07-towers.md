@@ -449,6 +449,9 @@ the two clocks' start difference until something steers the client's tick
   its save, and the result byte-identical to the committed field
   (`app::tests::towers_field` in `apps/editor`).
 - New tower type addable in one sitting by one dev following the sample's own
-  docs — extensibility proof.
+  docs — extensibility proof. The docs are `apps/towers/src/tower.rs`'s module
+  docs, _Adding a tower kind_ (every place a kind is keyed, in order), and
+  `crate::app::kind_tests`' `every_tower_kind_has_every_row` names any place a
+  new kind is missing from; nobody has added a kind with them yet.
 - It's actually fun for a session with friends. Flagship carries the bar the
   benchmarks don't.
