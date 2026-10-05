@@ -1954,6 +1954,35 @@ fn bench_ecs_reports_a_per_tick_distribution_and_the_schedule_beside_it() {
     );
 }
 
+/// `crcbl bench --scenario ecs --workers N` ticks the schedule on a pool and
+/// prints the checksum the serial run prints, with the workers it got.
+#[test]
+fn bench_ecs_on_a_pool_prints_the_serial_checksum() {
+    let temporary = TempDir::new("bench-ecs-workers");
+    let run = |extra: &[&str]| {
+        let mut args = vec![
+            "bench",
+            "--scenario",
+            "ecs",
+            "--entities",
+            "100",
+            "--iterations",
+            "20",
+            "--json",
+        ];
+        args.extend_from_slice(extra);
+        let output = crcbl(temporary.path(), &args);
+        assert_eq!(code(&output), 0, "{extra:?}");
+        stdout(&output)
+    };
+    let serial = run(&[]);
+    let pooled = run(&["--workers", "3"]);
+    let checksum = |json: &str| field_values(json, "checksum").next().map(str::to_owned);
+    assert_eq!(checksum(&pooled), checksum(&serial));
+    assert_eq!(numbers(&pooled, "workers"), vec![3]);
+    assert!(serial.contains(r#""workers":null"#), "{serial}");
+}
+
 /// **The same crowd in a smaller arena answers more per query**, which is the
 /// fact `docs/backlog.md` says a scale number is meaningless without.
 ///

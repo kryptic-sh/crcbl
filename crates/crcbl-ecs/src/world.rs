@@ -113,6 +113,16 @@ impl World {
         self.schedule.add_system(system);
     }
 
+    /// Ticks each stage of the schedule across `pool`'s threads from the next
+    /// tick, or every system on the calling thread with `None`, handing back
+    /// the pool the world had. See [`Schedule::set_pool`].
+    ///
+    /// No world has a pool until it is given one: who sizes a pool is the
+    /// host's decision, made against everything else it runs.
+    pub fn set_pool(&mut self, pool: Option<crcbl_jobs::Pool>) -> Option<crcbl_jobs::Pool> {
+        self.schedule.set_pool(pool)
+    }
+
     /// Runs one tick at [`World::tick_dt`]: calls every system's `tick`, then
     /// sweeps dead entities.
     pub fn tick(&mut self) {

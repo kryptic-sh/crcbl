@@ -2980,25 +2980,25 @@ mod tests {
     /// body nothing else can reach leaves no trace in the counts or the hash.
     #[test]
     fn a_step_with_no_bodies_applies_no_force_and_creates_nothing() {
-        use std::cell::Cell;
         use std::collections::hash_map::DefaultHasher;
         use std::hash::Hasher as _;
-        use std::rc::Rc;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         #[derive(Debug)]
-        struct CountingGravity(Rc<Cell<usize>>);
+        struct CountingGravity(Arc<AtomicUsize>);
 
         impl ForceProvider for CountingGravity {
             fn apply(&self, body: &mut RigidBody, transform: &Transform, dt: f64) {
-                self.0.set(self.0.get() + 1);
+                self.0.fetch_add(1, Ordering::SeqCst);
                 GravityForce::EARTH.apply(body, transform, dt);
             }
         }
 
-        let applications = Rc::new(Cell::new(0));
+        let applications = Arc::new(AtomicUsize::new(0));
 
         let mut phys = PhysicsSystem::new();
-        phys.add_force_provider(Box::new(CountingGravity(Rc::clone(&applications))));
+        phys.add_force_provider(Box::new(CountingGravity(Arc::clone(&applications))));
 
         let mut before = DefaultHasher::new();
         SystemTrait::hash_state(&phys, &mut before);
@@ -3006,7 +3006,7 @@ mod tests {
         phys.step(1.0 / 60.0);
 
         assert_eq!(
-            applications.get(),
+            applications.load(Ordering::SeqCst),
             0,
             "there is no body for a force provider to be applied to"
         );

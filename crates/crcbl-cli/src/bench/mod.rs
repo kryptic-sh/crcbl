@@ -39,8 +39,9 @@
 //! count, integer arithmetic throughout. What none of them can, this module
 //! reports for all of them: the machine's architecture and OS, and the build
 //! profile. A scenario appends what only it must report — `jobs` adds the
-//! parallelism the spawner offered and the worker count the pool actually got;
-//! `phys` and `ecs` have neither, because neither opens a pool.
+//! parallelism the spawner offered and the worker count the pool actually got,
+//! and so does `ecs` when `--workers` hands its schedule a pool (`null` for
+//! both without one); `phys` has neither, because it opens no pool.
 //!
 //! **There is no adapter, backend or driver version**, because nothing here
 //! opens a device; inventing those fields so the block resembles the plan's

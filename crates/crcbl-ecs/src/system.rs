@@ -20,8 +20,9 @@ pub struct DebugCtx;
 /// Callback type for per-system debug drawing.
 ///
 /// Set via [`System::set_debug_draw`]; called once per tick with a
-/// [`&DebugCtx`](DebugCtx).
-pub type DebugDrawFn = Box<dyn FnMut(&DebugCtx)>;
+/// [`&DebugCtx`](DebugCtx). `Send` because the [`System`] holding it is a
+/// [`SystemTrait`], which a schedule may tick on another thread.
+pub type DebugDrawFn = Box<dyn FnMut(&DebugCtx) + Send>;
 
 // ---------------------------------------------------------------------------
 // Object-safe trait
@@ -32,7 +33,13 @@ pub type DebugDrawFn = Box<dyn FnMut(&DebugCtx)>;
 ///
 /// The concrete [`System<T>`] implements this automatically; custom systems
 /// (e.g. systems that tick multiple arrays at once) implement it directly.
-pub trait SystemTrait {
+///
+/// **`Send`**, because a [`Schedule`](crate::Schedule) given a pool ticks the
+/// systems of one stage on the pool's threads
+/// ([`Schedule::set_pool`](crate::Schedule::set_pool)). A system holding an
+/// `Rc` or a `RefCell` handle shares it with something on another thread, and
+/// the bound is what makes that a compile error rather than a race.
+pub trait SystemTrait: Send {
     /// Human-readable name for the inspector / debug overlay.
     fn name(&self) -> &str;
 
@@ -305,7 +312,7 @@ impl<T: Reflect> System<T> {
     }
 }
 
-impl<T: ComponentHash + 'static> SystemTrait for System<T> {
+impl<T: ComponentHash + Send + 'static> SystemTrait for System<T> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -382,6 +389,9 @@ impl<T> fmt::Debug for System<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
 
     fn e(idx: u32) -> Entity {
@@ -517,13 +527,13 @@ mod tests {
     #[test]
     fn debug_draw_callback_is_called() {
         let mut sys = System::<i32>::new("test");
-        let called = std::rc::Rc::new(std::cell::RefCell::new(false));
-        let called2 = called.clone();
+        let called = Arc::new(AtomicBool::new(false));
+        let called2 = Arc::clone(&called);
         sys.set_debug_draw(Some(Box::new(move |_ctx| {
-            *called2.borrow_mut() = true;
+            called2.store(true, Ordering::SeqCst);
         })));
         sys.debug_draw(&DebugCtx);
-        assert!(*called.borrow());
+        assert!(called.load(Ordering::SeqCst));
     }
 
     /// The neighbour above proves the hook is called when one is set; this is
@@ -532,16 +542,16 @@ mod tests {
     #[test]
     fn debug_draw_without_a_callback_calls_nothing() {
         let mut sys = System::<i32>::new("test");
-        let called = std::rc::Rc::new(std::cell::RefCell::new(false));
-        let called2 = called.clone();
+        let called = Arc::new(AtomicBool::new(false));
+        let called2 = Arc::clone(&called);
         sys.set_debug_draw(Some(Box::new(move |_ctx| {
-            *called2.borrow_mut() = true;
+            called2.store(true, Ordering::SeqCst);
         })));
         sys.set_debug_draw(None);
 
         sys.debug_draw(&DebugCtx);
         assert!(
-            !*called.borrow(),
+            !called.load(Ordering::SeqCst),
             "a callback that has been taken away must not still run"
         );
     }

@@ -16,11 +16,15 @@ use crcbl_ecs::{
 struct Probe {
     name: &'static str,
     access: Access,
-    on_tick: Box<dyn FnMut()>,
+    on_tick: Box<dyn FnMut() + Send>,
 }
 
 impl Probe {
-    fn new(name: &'static str, access: Access, on_tick: impl FnMut() + 'static) -> Box<Self> {
+    fn new(
+        name: &'static str,
+        access: Access,
+        on_tick: impl FnMut() + Send + 'static,
+    ) -> Box<Self> {
         Box::new(Self {
             name,
             access,
@@ -184,7 +188,7 @@ fn a_second_resource_of_one_name_is_refused() {
 /// A world sharing `wind`, holding `0`, and one system, `sneak`, declaring
 /// `access` and running on each tick what `on_tick` builds from its own handle
 /// to `wind`.
-fn world_with<F: FnMut() + 'static>(
+fn world_with<F: FnMut() + Send + 'static>(
     access: Access,
     on_tick: impl FnOnce(Shared<u32>) -> F,
 ) -> (World, Shared<u32>) {

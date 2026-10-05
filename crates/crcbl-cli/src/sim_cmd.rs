@@ -32,12 +32,15 @@
 //! # `--threads`, and what it proves
 //!
 //! `docs/plan/21-jobs.md`'s killer test is the same input at `--threads 1`,
-//! `2` and `N` giving the same state hash. So the world holds work that really
-//! runs on a [`Pool`] of `--threads - 1` workers: [`Swarm`] steps its rows in
-//! fixed blocks with [`Pool::par_for`] and folds the blocks' sums in block
-//! order into the [`CROWD`] resource, which [`Herd`] reads — a real
-//! [`Shared`] conflict, and a reduction whose rounding would show any split
-//! that moved with the thread count.
+//! `2` and `N` giving the same state hash. So the world is handed a [`Pool`]
+//! of `--threads - 1` workers ([`World::set_pool`]) and its schedule ticks each
+//! stage across it. The world gives that something to get wrong: [`Swarm`]
+//! writes its rows' mean to the [`CROWD`] resource and [`Herd`] reads it — a
+//! real [`Shared`] conflict, which puts the two in different stages — while the
+//! systems before [`Herd`] touch nothing in common and share a stage. A
+//! schedule that let [`Herd`] tick beside [`Swarm`] would read the mean before
+//! or after it was written, depending on the threads, and the hash would show
+//! it.
 
 use std::hash::Hasher;
 use std::time::Duration;
@@ -65,7 +68,8 @@ pub fn run(args: &SimArgs) -> Result<Outcome, Failure> {
     // the pool it is handed.
     let pool = pool(args.threads)?;
     let workers = pool.workers();
-    let mut world = build_world(args.seed, pool);
+    let mut world = build_world(args.seed);
+    world.set_pool(Some(pool));
     // The parser holds `tick_rate` to `1..=MAX_TICK_RATE`, so this division
     // neither divides by zero nor truncates to a zero period.
     let period = Duration::from_nanos(1_000_000_000u64 / u64::from(args.tick_rate));
@@ -144,7 +148,7 @@ pub fn run(args: &SimArgs) -> Result<Outcome, Failure> {
 }
 
 /// A pool giving the world `threads` threads, the calling one included: the
-/// thread that drives a `par_for` runs chunks too, so it is `threads - 1`
+/// thread that runs the schedule ticks systems too, so it is `threads - 1`
 /// workers.
 fn pool(threads: usize) -> Result<Pool, Failure> {
     let workers = threads.saturating_sub(1);
@@ -160,8 +164,8 @@ fn pool(threads: usize) -> Result<Pool, Failure> {
 /// One system ([`CounterSystem`]) has real per-tick behaviour — it increments
 /// each entity's f32 component by 1.0 every tick, so the state hash genuinely
 /// depends on tick count, not just on `(seed, ticks)`. [`Swarm`] and [`Herd`]
-/// are the parallel half, over `pool`; see the module docs.
-fn build_world(seed: u64, pool: Pool) -> World {
+/// are the conflict a parallel schedule has to respect; see the module docs.
+fn build_world(seed: u64) -> World {
     let mut world = World::new();
 
     // Simple LCG for repeatable entity count variation.
@@ -201,19 +205,10 @@ fn build_world(seed: u64, pool: Pool) -> World {
         .share(&crowd)
         .expect("the harness registers one resource");
     let swarm_seed = salt(seed, SWARM_SALT);
-    let rows: Vec<Row> = (0..SWARM_ROWS)
-        .map(|index| Row::seeded(swarm_seed, index))
-        .collect();
-    let blocks = rows
-        .chunks(SWARM_BLOCK)
-        .map(|rows| Block {
-            rows: rows.to_vec(),
-            sum: 0.0,
-        })
-        .collect();
     world.register_system(Box::new(Swarm {
-        pool,
-        blocks,
+        rows: (0..SWARM_ROWS)
+            .map(|index| Row::seeded(swarm_seed, index))
+            .collect(),
         crowd: crowd.clone(),
         written: 0.0,
     }));
@@ -229,7 +224,7 @@ fn build_world(seed: u64, pool: Pool) -> World {
 }
 
 // ---------------------------------------------------------------------------
-// Swarm and Herd — work on the pool, and a conflict over a shared resource
+// Swarm and Herd — a conflict over a shared resource
 // ---------------------------------------------------------------------------
 
 /// The resource [`Swarm`] writes its rows' mean to and [`Herd`] reads.
@@ -237,13 +232,6 @@ const CROWD: &str = "crowd";
 
 /// Rows [`Swarm`] steps each tick.
 const SWARM_ROWS: usize = 4096;
-
-/// Rows per [`Block`]: one `par_for` chunk, and one partial sum of the mean.
-///
-/// A constant and never a function of `--threads`: the mean is folded from the
-/// block sums, and floating-point addition is not associative, so a split that
-/// moved with the thread count would move the hash with it.
-const SWARM_BLOCK: usize = 64;
 
 /// Rows [`Herd`] steps each tick.
 const HERD_ROWS: usize = 256;
@@ -294,18 +282,9 @@ impl Row {
     }
 }
 
-/// [`SWARM_BLOCK`] rows and their positions' sum after the last step.
-#[derive(Debug)]
-struct Block {
-    rows: Vec<Row>,
-    sum: f64,
-}
-
-/// Steps its rows on the pool a block at a time, then writes their mean to
-/// [`CROWD`].
+/// Steps its rows, then writes their mean to [`CROWD`].
 struct Swarm {
-    pool: Pool,
-    blocks: Vec<Block>,
+    rows: Vec<Row>,
     crowd: Shared<f64>,
     /// The mean last written, hashed here because a resource belongs to no
     /// system and nothing else would hash it.
@@ -322,18 +301,10 @@ impl SystemTrait for Swarm {
     }
 
     fn tick(&mut self, dt: f64) {
-        self.pool.par_for(&mut self.blocks, 1, |_, blocks| {
-            for block in blocks {
-                block.sum = 0.0;
-                for row in &mut block.rows {
-                    row.step(0.0, dt);
-                    block.sum += row.position;
-                }
-            }
-        });
-        // Folded in block order on this thread, whichever thread stepped
-        // which block.
-        let mean = self.blocks.iter().map(|block| block.sum).sum::<f64>() / SWARM_ROWS as f64;
+        for row in &mut self.rows {
+            row.step(0.0, dt);
+        }
+        let mean = self.rows.iter().map(|row| row.position).sum::<f64>() / SWARM_ROWS as f64;
         *self.crowd.write() = mean;
         self.written = mean;
     }
@@ -347,10 +318,8 @@ impl SystemTrait for Swarm {
     fn debug_draw(&mut self, _ctx: &DebugCtx) {}
 
     fn hash_state(&self, hasher: &mut dyn Hasher) {
-        for block in &self.blocks {
-            for row in &block.rows {
-                row.hash(hasher);
-            }
+        for row in &self.rows {
+            row.hash(hasher);
         }
         hasher.write_u64(self.written.to_bits());
     }
@@ -496,7 +465,8 @@ mod tests {
 
     /// The world's hash after each of `ticks` ticks, on `threads` threads.
     fn tick_hashes(seed: u64, ticks: u64, threads: usize) -> Vec<u64> {
-        let mut world = build_world(seed, pool(threads).expect("a pool"));
+        let mut world = build_world(seed);
+        world.set_pool(Some(pool(threads).expect("a pool")));
         (1..=ticks)
             .map(|tick| {
                 world.tick();
@@ -507,8 +477,8 @@ mod tests {
 
     /// **The killer test**: one seed at one, two and eight threads gives the
     /// same state hash after every tick — `docs/plan/21-jobs.md`'s
-    /// determinism rule, over a world whose [`Swarm`] really splits its work
-    /// across the pool.
+    /// determinism rule, over a world whose schedule runs a stage of several
+    /// systems across the pool and keeps [`Herd`] after [`Swarm`].
     #[test]
     fn the_hash_after_every_tick_is_the_same_at_any_thread_count() {
         const TICKS: u64 = 120;
@@ -526,6 +496,37 @@ mod tests {
         }
         // And the multi-threaded runs had a pool with workers in it.
         assert!(pool(8).expect("a pool").workers() > 0);
+    }
+
+    /// The harness world gives a parallel schedule both things to get right:
+    /// a stage of several systems to run at once, and [`Herd`] in a stage of
+    /// its own after [`Swarm`]'s.
+    #[test]
+    fn the_harness_world_has_a_shared_stage_and_a_conflict_between_stages() {
+        let world = build_world(11);
+        let schedule = world.schedule();
+        let names: Vec<&str> = schedule.iter().map(SystemTrait::name).collect();
+        let stage_of = |name: &str| {
+            let index = names
+                .iter()
+                .position(|each| *each == name)
+                .expect("the harness registers it");
+            schedule
+                .stages()
+                .iter()
+                .position(|stage| stage.contains(&index))
+                .expect("every system is in a stage")
+        };
+        assert!(
+            stage_of("swarm") < stage_of("herd"),
+            "{:?}",
+            schedule.stages()
+        );
+        assert!(
+            schedule.stages().iter().any(|stage| stage.len() > 1),
+            "{:?}",
+            schedule.stages()
+        );
     }
 
     /// `run` at eight threads reports the hash the serial run does, and the
@@ -550,7 +551,7 @@ mod tests {
     /// world that moves.
     #[test]
     fn every_system_in_the_harness_world_contributes_to_the_hash() {
-        let world = build_world(7, pool(1).expect("a pool"));
+        let world = build_world(7);
         assert_eq!(world.non_contributing_systems(), Vec::<String>::new());
     }
 

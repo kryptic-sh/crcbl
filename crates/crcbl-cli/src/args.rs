@@ -402,6 +402,12 @@ OPTIONS (phys):
 OPTIONS (ecs):
         --entities <N>       Rows every system owns and steps each tick.
                              Default: 10000.
+        --workers <N>        Tick each stage of the schedule on a pool of N
+                             worker threads and the calling one. Not given, the
+                             schedule has no pool and ticks every system in
+                             order on the calling thread: the serial baseline.
+                             0 is a pool with no workers, which costs the stage
+                             loop and nothing else.
 
 A flag that belongs to one scenario is refused on the others rather than
 ignored.";
@@ -874,21 +880,30 @@ impl BenchScenario {
 /// Every scenario, for the name lookup and the rejection message.
 const SCENARIOS: &[BenchScenario] = &[BenchScenario::Jobs, BenchScenario::Phys, BenchScenario::Ecs];
 
-/// Which scenario each of `bench`'s per-scenario flags belongs to.
+/// Which scenarios each of `bench`'s per-scenario flags belongs to.
 ///
 /// A table rather than a `match` in the parser so the refusal message can name
-/// the owner, and so the two halves of the help text have one list behind them.
-/// `--iterations`, `--warmup` and `--json` are absent because every scenario
-/// reads them.
-const SCENARIO_FLAGS: &[(&str, BenchScenario)] = &[
-    ("--workers", BenchScenario::Jobs),
-    ("--items", BenchScenario::Jobs),
-    ("--chunk", BenchScenario::Jobs),
-    ("--bodies", BenchScenario::Phys),
-    ("--extent", BenchScenario::Phys),
-    ("--ticks", BenchScenario::Phys),
-    ("--entities", BenchScenario::Ecs),
+/// the owners, and so the two halves of the help text have one list behind
+/// them. `--iterations`, `--warmup` and `--json` are absent because every
+/// scenario reads them.
+const SCENARIO_FLAGS: &[(&str, &[BenchScenario])] = &[
+    ("--workers", &[BenchScenario::Jobs, BenchScenario::Ecs]),
+    ("--items", &[BenchScenario::Jobs]),
+    ("--chunk", &[BenchScenario::Jobs]),
+    ("--bodies", &[BenchScenario::Phys]),
+    ("--extent", &[BenchScenario::Phys]),
+    ("--ticks", &[BenchScenario::Phys]),
+    ("--entities", &[BenchScenario::Ecs]),
 ];
+
+/// The scenarios in `owners`, by name, as a refusal names them.
+fn owner_names(owners: &[BenchScenario]) -> String {
+    owners
+        .iter()
+        .map(|&owner| format!("`{}`", owner.name()))
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
 
 /// The scenario `name` selects, or `None` if no scenario answers to it.
 fn scenario_from_name(name: &str) -> Option<BenchScenario> {
@@ -976,7 +991,8 @@ pub const DEFAULT_BENCH_ENTITIES: usize = 10_000;
 pub struct BenchArgs {
     /// Which workload to run.
     pub scenario: BenchScenario,
-    /// Pool workers, or `None` for the count `Pool::new` would pick.
+    /// Pool workers. `None` is the count `Pool::new` would pick for `jobs`, and
+    /// no pool at all for `ecs`.
     ///
     /// `Some(0)` is legal and is the serial baseline: every chunk runs on the
     /// calling thread.
@@ -1951,11 +1967,11 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
     // name and pointed at the one that reads it. Driven from `SCENARIO_FLAGS`
     // rather than from `given`, so a flag the table forgot is a flag no arm
     // above can have pushed.
-    for &(flag, owner) in SCENARIO_FLAGS {
-        if owner != scenario && given.contains(&flag) {
+    for &(flag, owners) in SCENARIO_FLAGS {
+        if !owners.contains(&scenario) && given.contains(&flag) {
             return Invocation::BadUsage(format!(
-                "`{flag}` is a `{}` option and this run is `--scenario {}`",
-                owner.name(),
+                "`{flag}` is a {} option and this run is `--scenario {}`",
+                owner_names(owners),
                 scenario.name()
             ));
         }
@@ -3341,13 +3357,13 @@ mod tests {
     /// arm to accept it fails here too.
     #[test]
     fn a_bench_flag_is_refused_on_the_scenario_that_does_not_read_it() {
-        for &(flag, owner) in SCENARIO_FLAGS {
+        for &(flag, owners) in SCENARIO_FLAGS {
             for &scenario in SCENARIOS {
                 let argv = vec!["bench", "--scenario", scenario.name(), flag, "1"];
-                if scenario == owner {
+                if owners.contains(&scenario) {
                     assert!(
                         matches!(parse_args(&argv), Invocation::Command(_)),
-                        "{argv:?} is the scenario that owns {flag}"
+                        "{argv:?} is a scenario that owns {flag}"
                     );
                     continue;
                 }
@@ -3355,7 +3371,9 @@ mod tests {
                     panic!("{argv:?} should be a bad invocation");
                 };
                 assert!(message.contains(flag), "{message}");
-                assert!(message.contains(owner.name()), "{message}");
+                for owner in owners {
+                    assert!(message.contains(owner.name()), "{message}");
+                }
                 assert!(message.contains(scenario.name()), "{message}");
             }
         }

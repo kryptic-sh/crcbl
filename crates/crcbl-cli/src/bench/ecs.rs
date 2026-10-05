@@ -6,8 +6,10 @@
 //! `docs/backlog.md` records the 2026-09-06 decision that put an ECS bench
 //! ahead of any parallel schedule: a runner that overlaps systems is only worth
 //! its complexity if a tick of a realistic schedule gets cheaper, and nothing
-//! had ever timed one. This is that baseline, and the number a parallel runner
-//! is compared against.
+//! had ever timed one. Without `--workers` this is that baseline, every system
+//! in order on one thread; with it, the schedule ticks each of its stages on a
+//! pool of that many workers ([`World::set_pool`]), and the checksum must be
+//! the baseline's.
 //!
 //! # The schedule, and why its declarations are mixed
 //!
@@ -48,6 +50,7 @@ use std::time::Instant;
 use crcbl::core::TickId;
 use crcbl::core::rand::{hash_unit, salt};
 use crcbl::ecs::{Access, DebugCtx, Entity, Shared, SystemTrait, World};
+use crcbl::jobs::{Pool, default_spawner};
 use crcbl::server::sim_hash::hash_world;
 
 use crate::args::BenchArgs;
@@ -291,20 +294,39 @@ fn build(entities: usize) -> World {
 pub(super) struct EcsRun {
     /// Conflicts the schedule derived from [`LANES`]' declarations.
     conflicts: usize,
+    /// Stages the schedule grouped [`LANES`] into.
+    stages: usize,
+    /// The pool the schedule ticked on: what the spawner said the machine
+    /// has, and the workers the pool actually got. `None` without
+    /// `--workers`, when the schedule had no pool at all.
+    pool: Option<(usize, usize)>,
     /// Nanoseconds per timed tick, ascending.
     sorted: Vec<u64>,
     /// [`hash_world`] once every tick, warm-up included, had run.
     checksum: u64,
 }
 
-/// Times [`World::tick`] over the [`build`] world.
+/// Times [`World::tick`] over the [`build`] world, on a pool of `--workers`
+/// when one is asked for.
 ///
 /// # Errors
 ///
-/// [`Failure`] if the ticks left the world's hash where they found it.
+/// [`Failure`] if the pool cannot be built, or if the ticks left the world's
+/// hash where they found it.
 pub(super) fn measure(args: &BenchArgs) -> Result<EcsRun, Failure> {
     let mut world = build(args.entities);
     let untouched = hash_world(&world, TickId::from_raw(0));
+    let pool = match args.workers {
+        None => None,
+        Some(requested) => {
+            let spawner = default_spawner();
+            let pool = Pool::with_workers(spawner.as_ref(), requested)
+                .map_err(|error| Failure::new(format!("could not build the pool: {error}")))?;
+            let shape = (spawner.parallelism().get(), pool.workers());
+            world.set_pool(Some(pool));
+            Some(shape)
+        }
+    };
 
     for _ in 0..args.warmup {
         world.tick();
@@ -324,6 +346,8 @@ pub(super) fn measure(args: &BenchArgs) -> Result<EcsRun, Failure> {
     sorted.sort_unstable();
     Ok(EcsRun {
         conflicts: world.schedule().conflicts().len(),
+        stages: world.schedule().stages().len(),
+        pool,
         sorted,
         checksum,
     })
@@ -359,16 +383,22 @@ fn schedule_line() -> String {
 /// The two renderings of one finished run.
 pub(super) fn report(args: &BenchArgs, run: &EcsRun) -> Outcome {
     let (timing_line, timing_fields) = timing("per tick", &run.sorted);
+    let pool_line = match run.pool {
+        None => "no pool, every system in order on this thread".to_owned(),
+        Some((parallelism, workers)) => format!("parallelism {parallelism}, workers {workers}"),
+    };
     let human = format!(
-        "{}: {} systems over {} entities each, {} conflicts, {} timed ticks, {} warm-up\n\
+        "{}: {} systems over {} entities each, {} conflicts, {} stages, {} timed ticks, \
+         {} warm-up\n\
          schedule: {}\n\
-         {}\n\
+         {}, {pool_line}\n\
          {timing_line}\n\
          checksum: {:016x}",
         args.scenario.name(),
         LANES.len(),
         args.entities,
         run.conflicts,
+        run.stages,
         args.iterations,
         args.warmup,
         schedule_line(),
@@ -376,17 +406,30 @@ pub(super) fn report(args: &BenchArgs, run: &EcsRun) -> Outcome {
         run.checksum,
     );
 
+    let mut environment = base_environment();
+    let (parallelism, workers) = match run.pool {
+        // `null` rather than absent, so every run's block has the same keys.
+        None => (Json::Null, Json::Null),
+        Some((parallelism, workers)) => (
+            Json::Number(parallelism as i64),
+            Json::Number(workers as i64),
+        ),
+    };
+    environment.push(("parallelism", parallelism));
+    environment.push(("workers", workers));
+
     Outcome {
         human,
         json: vec![
             ("scenario", Json::string(args.scenario.name())),
-            ("environment", Json::Object(base_environment())),
+            ("environment", Json::Object(environment)),
             (
                 "parameters",
                 Json::Object(vec![
                     ("entities", Json::Number(args.entities as i64)),
                     ("systems", Json::Number(LANES.len() as i64)),
                     ("conflicts", Json::Number(run.conflicts as i64)),
+                    ("stages", Json::Number(run.stages as i64)),
                     ("row_passes", Json::Number(ROW_PASSES as i64)),
                     ("iterations", Json::Number(args.iterations as i64)),
                     ("warmup", Json::Number(args.warmup as i64)),
@@ -504,6 +547,25 @@ mod tests {
         // The warm-up's ticks are ticks: one more of them is a different world.
         let longer = measure(&args(20, 3)).expect("a run");
         assert_ne!(first.checksum, longer.checksum);
+    }
+
+    /// **A run on a pool reaches the serial run's checksum**, at every worker
+    /// count, and reports the stages it ran: the eight systems in the four
+    /// stages their conflicts allow.
+    #[test]
+    fn a_run_on_a_pool_reaches_the_serial_checksum_and_reports_its_stages() {
+        let serial = measure(&args(20, 2)).expect("a serial run");
+        assert_eq!(serial.stages, 4);
+        assert_eq!(serial.pool, None);
+        for workers in [0, 1, 7] {
+            let pooled = measure(&BenchArgs {
+                workers: Some(workers),
+                ..args(20, 2)
+            })
+            .expect("a pooled run");
+            assert_eq!(pooled.checksum, serial.checksum, "{workers} workers");
+            assert_eq!(pooled.pool.map(|(_, got)| got), Some(workers));
+        }
     }
 
     /// **A run whose ticks changed nothing is refused**, by that name, and a
