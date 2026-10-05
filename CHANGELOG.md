@@ -697,6 +697,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   panel gains a "systems" section: a row per system, in schedule order, reading
   `last ms, avg mean ms`.
 
+- **`crcbl save list|dump|diff` inspects a game's saves from outside the game.**
+  Every file is opened through `SaveReader::open`, the call a game makes, so an
+  older container version is migrated in memory (and the file left as it is) and
+  a damaged, truncated or newer file is refused with the `FormatError` text the
+  game shows. `save list [--app NAME | --dir DIR]` prints one line per file in a
+  game's data directory — size, tick, playtime, format version and engine
+  version — and lists a file that does not open with its reason instead of
+  skipping it; it creates no directory. `save dump FILE` prints the header
+  (format version, saying when it was migrated and from which, tick, playtime,
+  engine version, scene reference) and the sector table, each sector by its
+  coordinates, length and SHA-256; `--hex` previews each sector's first 64
+  bytes. Payloads are never decoded. `save diff A B` reports the header fields
+  that differ, the sectors only one file has, and each sector whose bytes differ
+  with its first differing offset and both lengths, and exits with `cmp`'s
+  codes: 0 the same, 1 different, 2 trouble. Every branch takes `--json`. New
+  for it: `crcbl_store::NativeStorage::data_root`, the data directory a game's
+  saves live in, without creating it. `restore` is not built.
+
 - **Saves record the engine and the scene, and older saves migrate.** The save
   container's header now carries the engine version that wrote it
   (`crcbl_store::save::ENGINE_VERSION`, the workspace's package version) and an

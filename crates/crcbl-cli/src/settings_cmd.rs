@@ -89,7 +89,7 @@ use crate::report::{Failure, Outcome};
 /// `preset` cannot be written, if `get` finds a value it does not render, or if
 /// `preset` is given a word that is not a quality tier.
 pub fn run(args: &SettingsArgs) -> Result<Outcome, Failure> {
-    let app = app_name(args)?;
+    let app = app_name(args.app.as_deref(), "settings")?;
     let root = config_root(args, &app)?;
     let path = root.join(SETTINGS_FILE);
     let storage = NativeStorage::at(root);
@@ -597,19 +597,20 @@ impl Value {
 
 // ── Where the file is ───────────────────────────────────────────────────────
 
-/// The game whose settings these are.
+/// The game whose `kind` — its settings, its saves — these are.
 ///
-/// `--app` when it was given, and otherwise the package name of the project
-/// `crcbl run` and `crcbl build` would act on — [`crate::cargo::locate_manifest`]
-/// is that search, and it is called rather than repeated.
-fn app_name(args: &SettingsArgs) -> Result<String, Failure> {
-    if let Some(app) = &args.app {
-        return Ok(app.clone());
+/// `app` (the `--app` flag) when it was given, and otherwise the package name
+/// of the project `crcbl run` and `crcbl build` would act on —
+/// [`crate::cargo::locate_manifest`] is that search, and it is called rather
+/// than repeated. `crcbl save list` names its game the same way.
+pub(crate) fn app_name(app: Option<&str>, kind: &str) -> Result<String, Failure> {
+    if let Some(app) = app {
+        return Ok(app.to_owned());
     }
 
     let manifest = crate::cargo::locate_manifest().map_err(|failure| {
         Failure::new(format!(
-            "{}\nhint: settings belong to a game, and this one takes its name from the \
+            "{}\nhint: {kind} belong to a game, and this one takes its name from the \
              project here. `--app <NAME>` names it directly.",
             failure.message
         ))
@@ -638,7 +639,7 @@ fn app_name(args: &SettingsArgs) -> Result<String, Failure> {
 
     let Some(name) = stack.get::<String>("package.name") else {
         return Err(Failure::new(format!(
-            "{} declares no [package] name, so there is no game to read settings for\n\
+            "{} declares no [package] name, so there is no game to read {kind} for\n\
              hint: a virtual workspace root is one of these. `--app <NAME>` names the \
              game directly.",
             manifest.display()
@@ -646,7 +647,7 @@ fn app_name(args: &SettingsArgs) -> Result<String, Failure> {
     };
     crate::args::check_app_name(&name).map_err(|why| {
         Failure::new(format!(
-            "the package name `{name}` in {} cannot be a config directory: {why}\n\
+            "the package name `{name}` in {} cannot name a directory: {why}\n\
              hint: `--app <NAME>` names the game directly.",
             manifest.display()
         ))

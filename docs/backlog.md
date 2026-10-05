@@ -15172,10 +15172,9 @@ and the deterministic writer the scene format needs came with it rather than
 being the part that was not free. The TOML half of the format rule was already
 built (`crcbl-store`'s `settings.rs` through the `toml` crate).
 
-**What still has no RON file**, which is what is left of this entry — three
-features across three documents, each with its own entry here:
+**What still has no RON file**, which is what is left of this entry — two
+features across two documents, each with its own entry here:
 
-- `crcbl save dump` / `save diff` (topic 14),
 - `crcbl audio render`'s script input (`crcbl sim --input script.ron`, topic
   13),
 - topic 20's RON effect assets.
@@ -15187,7 +15186,12 @@ graph rather than a struct — the order is the manifest for files, struct order
 for fields, and `SceneEntityId` order for rows, all three of them properties of
 the file rather than of the run that wrote it.
 
-None of the remaining three is blocked on a reader or on a writer. What each
+`crcbl save dump` and `save diff` came off it on 2026-10-05 without a RON file:
+they print the save container as text and `--json`, and a sector's payload is
+its game's own binary encoding, which nothing decodes
+(_`crcbl save list|dump|diff|restore`_).
+
+Neither of the remaining two is blocked on a reader or on a writer. What each
 still needs is its own schema.
 
 ### arena and mirrors do not exist, and towers' co-op exit criteria still cannot be met (2026-09-07)
@@ -15481,6 +15485,7 @@ and a 32-byte content hash), container format version 3. **Still owed:**
   detectable only by a game's own payload.
 - **Nothing reads the engine version back** to warn or refuse. A save from
   another engine version of the same container format opens as any other.
+  `crcbl save list` and `dump` show it (2026-10-05), and that is all.
 
 **Also absent from the format:** on-rails elements (orbital parameters for
 anything not live-simulated) and per-system extension blocks, both named by the
@@ -15592,19 +15597,61 @@ when `apps/towers` became its second consumer.
 
 **What it blocks:** key binds, unlocks, and anything with more than one field.
 
-### `crcbl save list|dump|diff|restore` (2026-08-27)
+### `crcbl save list|dump|diff|restore` (2026-08-27, partly built 2026-10-05)
 
-**Not built, and no longer blocked.** The verb is not parsed and `crcbl-cli` has
-no module for it. `dump` is specified to render a snapshot as RON; the RON half
-is no longer the blocker — `ron` is a workspace dependency and
-`crcbl_render::stack` reads and writes it — so what is owed is the verb itself
-and the snapshot shape it would render.
+**Built 2026-10-05: `list`, `dump` and `diff`**
+(`crates/crcbl-cli/src/save_cmd.rs`, `crates/crcbl-cli/src/save_cmd/diff.rs` and
+`crates/crcbl-cli/src/save_args.rs`; tests in `crates/crcbl-cli/tests/save.rs`).
+Each opens a file through `SaveReader::open`, the game's own call, so a
+version-2 save is migrated in memory and a damaged or newer one is refused with
+the `FormatError` text a game shows. What binds:
 
-**Knock-on the document states as an exit criterion:** "Same game code path for
-autosave, manual save, console `save`, CLI save" — only two of those four
-triggers exist (a game calling `SaveWriter`, and `AutosaveRing`). Nothing has
-yet tried to reach a save from outside the game process, so the shared-path
-claim is untested rather than kept.
+- **Decided by the owner (2026-10-05): the payload decoder hook is deferred.**
+  `dump` shows the container — the header and each sector's coordinates, length
+  and SHA-256 — and `--hex` previews `HEX_PREVIEW_BYTES` of each sector; nothing
+  decodes a payload. A game-registered decoder would need a seam keyed by
+  payload magic that no binary but the game links, which is the shared payload
+  seam _The save container's migration chain_ declined for the same reason: no
+  caller yet. So the plan's "`dump` renders a save as RON" is not what was
+  built, and RON is no longer part of this verb.
+- **Decided 2026-10-05: no `restore`.** The owner allowed it only if it fell out
+  as "copy an autosave ring slot over the main slot through `write_atomic`", and
+  it does not: no game keeps an `AutosaveRing` (towers' autosave and shard's
+  save each write named files through their own `Vault`), so there is no ring
+  slot to restore from, and the CLI has no way to know which file is a game's
+  "main slot". The parser refuses `save restore` by name (exit 2). Revisit when
+  a game ships a ring; the copy is then `SaveReader::open` on the slot (so a
+  damaged slot is refused) and `NativeStorage::write` of its bytes, with the
+  game closed.
+- **`diff` takes `cmp`'s exit codes** — 0 the same, 1 different, 2 trouble —
+  because no other verb compares two things and that is the convention a script
+  expects of one. So a file that does not open exits 2 here where it exits 1
+  from `dump`, and `--json` says `"ok":true` over two saves that differ;
+  `report::emit_as` carries the success code. Sectors are matched by coordinates
+  (the n-th sector at one place to the other file's n-th), so sector order is
+  not compared.
+- **`list` reads every regular file** in the directory rather than a `.crb`
+  pattern: the container mandates no extension, and a stranded
+  `.<stem>.<hex>.<ext>.tmp` from a killed write is a whole save worth seeing.
+  Without `--app` or `--dir` it names the game as `crcbl settings` does
+  (`settings_cmd::app_name`), and it creates nothing
+  (`NativeStorage::data_root`).
+- **Coverage gap: no test reads a platform data directory.** The tests use
+  `--dir`, so `--app`, the project-derived name and `NativeStorage::data_root`
+  are exercised by hand only: on Windows (2026-10-05)
+  `save list --app nosuchgame-xyz` named `%APPDATA%\nosuchgame-xyz`, reported no
+  directory and created none. Linux and macOS have no verdict.
+
+**The exit criterion "Same game code path for autosave, manual save, console
+`save`, CLI save" is still not met, and `crcbl save` does not change that.** The
+verb reads saves; it does not take one, so "CLI save" as a trigger does not
+exist. What exists: games calling `SaveWriter` through their own `Vault`
+(towers' `S` key, its autosave at a wave's end and its dedicated server's `save`
+line; shard's store), and `AutosaveRing`, which no game uses. What the CLI does
+cover is the read half: a save is now reached from outside the game process,
+through the reader the game uses, so a file the game would refuse is refused
+here by the same text. Taking a save from outside a running game waits on _One
+save path: `Command::Save`_.
 
 ### Browser persistence: atomicity, IndexedDB fallback, quota (2026-08-27)
 
@@ -15724,8 +15771,9 @@ the autosave timer take one path. The triggers that exist are games calling
 `Vault::store` from its `S` key, its autosave at a wave's end and its dedicated
 server's `save` console line — and `AutosaveRing`. Towers' server console is the
 first `save` typed at a process, but it is the sample's own stdin reader, not
-`Command::Save`, and there is no CLI verb, so nothing reaches a save from
-outside the game process. It depends on server-side command handling.
+`Command::Save`. `crcbl save` (2026-10-05) reads saves from outside the game
+process but takes none, so nothing outside a game can make it save. It depends
+on server-side command handling.
 
 **Also owed with it:** a storage section in the debug panel showing the storage
 paths, file sizes, the last save's tick and the autosave ring's state.
@@ -19636,12 +19684,6 @@ leaves behind is smaller than it was:
 
 **What each corrected row leaves owed**, in the order a reader would meet them:
 
-- **`crcbl save` is an unbuilt verb, and blocked.** `crcbl-store`'s `save.rs`
-  has no CLI reaching it and the persistence plan's exit criteria assumed
-  `save list|dump|diff|restore`; `dump` is specified to render RON, which
-  stopped being a blocker when `ron` became a workspace dependency (2026-09-06).
-  `sim` and `settings` were the other two of these and both shipped on
-  2026-08-23.
 - **Profile rebind storage and glyph hints, and the order they have to land
   in.** `ActionMap::rebind` mutates in memory and nothing serialises it;
   `crcbl-store` has no profile or binding type at all, and its only
@@ -19753,11 +19795,12 @@ Closing it is two separate decisions, not one task:
   `set k [1, 2]` and `set k "[1, 2]"` cannot both mean the array.
 
 Also owed, and smaller: the persistence plan's exit criterion
-("`crcbl save dump/diff` works on any save; settings scriptable via CLI") is now
-half met, and the `save` half is blocked on the RON reader decision recorded
-elsewhere in this file. And the default config path on Windows and macOS has no
-local verdict — `--config-dir` makes the suite hermetic everywhere, so only CI
-exercises `NativeStorage::config_root` on those two.
+("`crcbl save dump/diff` works on any save; settings scriptable via CLI") is met
+for the container since 2026-10-05 — `dump` and `diff` open any save the game's
+reader opens and refuse the rest by name — and not for payloads, which nothing
+decodes (_`crcbl save list|dump|diff|restore`_). And the default config path on
+Windows and macOS has no local verdict — `--config-dir` makes the suite hermetic
+everywhere, so only CI exercises `NativeStorage::config_root` on those two.
 
 ### What P8 actually still owes, measured
 

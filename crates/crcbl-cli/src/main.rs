@@ -18,7 +18,7 @@
 //! | Stable JSON schemas | `json`, and each command's field list |
 //!
 //! `screenshot`, `replay`, `crpix`, `lod`, `bench`, `sim`, `settings`,
-//! `import`, `scene` and `edit` have landed since; `save` and `phys` have not.
+//! `import`, `scene`, `edit` and `save` have landed since; `phys` has not.
 //! The argument parser is written so adding one is a `match` arm.
 //!
 //! # This binary depends on the engine for GPU subcommands
@@ -40,6 +40,8 @@ mod lod_cmd;
 mod new;
 mod replay_cmd;
 mod report;
+mod save_args;
+mod save_cmd;
 mod scene_args;
 mod scene_cmd;
 mod screenshot;
@@ -82,6 +84,11 @@ fn main() -> ExitCode {
                 Command::Bench(args) => bench::run(args),
                 Command::Sim(args) => sim_cmd::run(args),
                 Command::Settings(args) => settings_cmd::run(args),
+                // The one verb whose success has more than one exit code.
+                Command::Save(args) => {
+                    let (result, success) = save_cmd::run(args);
+                    return report::emit_as(name, json, result, success);
+                }
                 Command::Scene(args) => scene_cmd::run(args),
                 Command::Edit(args) => scene_cmd::run_edit(args),
                 Command::Serve(args) => serve_cmd::run(args),

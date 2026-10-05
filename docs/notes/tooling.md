@@ -182,11 +182,12 @@ Record; topic 11 made the `crcbl` binary a first-class pillar: everything the
 engine and the editor can do is reachable without a window, from a terminal, a
 script, a CI job or an agent. Built from it, in `crates/crcbl-cli`: `new`,
 `run`, `build` (`--target wasm` refused), `screenshot`, `import` (the report),
-`sim` (over a seeded world) and `settings`, beside verbs other topics added —
-`replay`, `crpix`, `lod` and `bench`. Every verb accepts `--json`, which
-`args.rs`'s own tests hold, and CI's golden images and determinism hashes run
-through `crcbl screenshot` and `crcbl sim`. (`crcbl edit --serve`, which landed
-2026-10-05, refuses `--json`: its output is a running log, not one object.)
+`sim` (over a seeded world), `settings` and `save list|dump|diff` (2026-10-05),
+beside verbs other topics added — `replay`, `crpix`, `lod` and `bench`. Every
+verb accepts `--json`, which `args.rs`'s own tests hold, and CI's golden images
+and determinism hashes run through `crcbl screenshot` and `crcbl sim`.
+(`crcbl edit --serve`, which landed 2026-10-05, refuses `--json`: its output is
+a running log, not one object.)
 
 What it left unbuilt is in `docs/backlog.md`: the rest of the scene verbs under
 _`crcbl scene` and `crcbl edit`_, whose one-shot verbs landed 2026-10-04 and
@@ -194,9 +195,10 @@ whose server, `edit --serve`, 2026-10-05; `crcbl phys --check` under
 _`crcbl phys stack --check` and the solver's profiler rows_; `sim`'s scene
 argument and input script under _The determinism smoke test has no input
 script_; `import --out` under _`crcbl bake`, `PackSource`, the cooked mesh and
-`import --out`_; `crcbl save` under _`crcbl save list|dump|diff|restore`_; and
-the device bench scenarios under _Profiling: five of the eight gaps are still
-open_.
+`import --out`_; `crcbl save restore` and payload decoding under
+_`crcbl save list|dump|diff|restore`_, whose other three verbs landed
+2026-10-05; and the device bench scenarios under _Profiling: five of the eight
+gaps are still open_.
 
 Code cites the plan as "topic 11", by its invariant and by its design rules.
 Those resolve here:

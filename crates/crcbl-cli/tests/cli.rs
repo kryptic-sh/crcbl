@@ -142,6 +142,7 @@ fn help_and_version_exit_zero() {
         "bench",
         "sim",
         "settings",
+        "save",
     ] {
         let output = crcbl(temporary.path(), &[command, "--help"]);
         assert_eq!(code(&output), 0, "{command} --help");

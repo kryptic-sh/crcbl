@@ -58,6 +58,7 @@ use std::path::PathBuf;
 
 use crcbl_sprite::{NineSlice, SampleMode};
 
+use crate::save_args::{SaveArgs, parse_save};
 use crate::scene_args::{EditArgs, SceneArgs, ServeArgs, parse_edit, parse_scene};
 
 /// Top-level `--help`.
@@ -79,6 +80,7 @@ COMMANDS:
     bench         Run a fixed benchmark scenario and report its distribution.
     sim           Run the determinism harness and print its state hash.
     settings      Read or write a game's settings.toml.
+    save          List, dump or compare a game's save files.
     scene         List, query or edit a scene directory, with undo.
     edit          Apply several edits to a scene directory, or serve it.
 
@@ -90,6 +92,7 @@ OPTIONS (every command):
 EXIT CODES:
     0  ok        1  the command failed        2  bad invocation
     `scene` and `edit` add their own codes for a refused edit; see their help.
+    `save diff` takes `cmp`'s: 0 the same, 1 different, 2 trouble.
 
 Run `crcbl <COMMAND> --help` for a command's own options.";
 
@@ -559,6 +562,8 @@ pub enum Command {
     Sim(SimArgs),
     /// A game's `settings.toml`, read or written.
     Settings(SettingsArgs),
+    /// A game's save files, listed, dumped or compared.
+    Save(SaveArgs),
     /// A scene directory, read or edited one verb at a time.
     Scene(SceneArgs),
     /// A scene directory, edited by several `-e` commands in one run.
@@ -588,6 +593,8 @@ impl Command {
             Self::Sim(_) => "sim",
             // The branch is a field of its own, for the reason above.
             Self::Settings(_) => "settings",
+            // The branch is a field of its own, for the reason above.
+            Self::Save(_) => "save",
             // The verb is a field of its own, for the reason above.
             Self::Scene(_) => "scene",
             // `edit --serve`: one subcommand, whichever way it runs.
@@ -609,6 +616,7 @@ impl Command {
             Self::Bench(args) => args.json,
             Self::Sim(args) => args.json,
             Self::Settings(args) => args.json,
+            Self::Save(args) => args.json,
             Self::Scene(args) => args.json,
             Self::Edit(args) => args.json,
             // Refused beside `--serve`: its output is a running log.
@@ -1119,6 +1127,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Invocation {
         Some("bench") => parse_bench(args),
         Some("sim") => parse_sim(args),
         Some("settings") => parse_settings(args),
+        Some("save") => parse_save(args),
         Some("scene") => parse_scene(args),
         Some("edit") => parse_edit(args),
         Some(other) if other.starts_with('-') => {
@@ -2457,6 +2466,9 @@ mod tests {
             vec!["settings", "--app", "g", "list", "--json"],
             vec!["settings", "--app", "g", "get", "a.b", "--json"],
             vec!["settings", "--app", "g", "set", "a.b", "c", "--json"],
+            vec!["save", "list", "--json"],
+            vec!["save", "dump", "a.crb", "--json"],
+            vec!["save", "diff", "a.crb", "b.crb", "--json"],
         ] {
             assert!(command(&args).json(), "{args:?} should have set --json");
         }

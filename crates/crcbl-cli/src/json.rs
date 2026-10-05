@@ -31,6 +31,10 @@ pub enum Json {
     Bool(bool),
     /// A JSON number, always an integer here.
     Number(i64),
+    /// A JSON integer that came in as a `u64` — a tick or a size read from a
+    /// file — which [`Number`](Self::Number) cannot hold past `i64::MAX`.
+    /// JSON's grammar has no width, so the whole value is written.
+    Unsigned(u64),
     /// A JSON number with a fraction — a geometric error, a ratio.
     ///
     /// **A non-finite value is written `null`.** JSON has no infinity and no
@@ -76,6 +80,7 @@ impl Display for Json {
             Self::Null => f.write_str("null"),
             Self::Bool(value) => write!(f, "{value}"),
             Self::Number(value) => write!(f, "{value}"),
+            Self::Unsigned(value) => write!(f, "{value}"),
             Self::Float(value) => write_float(f, value.is_finite(), value),
             Self::Double(value) => write_float(f, value.is_finite(), value),
             Self::String(value) => write_escaped(f, value),
@@ -176,6 +181,13 @@ mod tests {
             r#"{"files":["Cargo.toml","src/main.rs"]}"#
         );
         assert_eq!(Json::Array(vec![]).to_string(), "[]");
+    }
+
+    /// An unsigned value keeps every digit, past where a signed one ends.
+    #[test]
+    fn an_unsigned_number_is_written_whole() {
+        assert_eq!(Json::Unsigned(u64::MAX).to_string(), "18446744073709551615");
+        assert_eq!(Json::Unsigned(0).to_string(), "0");
     }
 
     #[test]

@@ -206,6 +206,19 @@ impl NativeStorage {
         Some(dirs::config_dir()?.join(app_name))
     }
 
+    /// Where `app_name`'s data directory — its saves — **would** be, creating
+    /// nothing: [`data`](Self::data) without the `mkdir`, for
+    /// [`config_root`](Self::config_root)'s reason. `crcbl save list` reads a
+    /// game's saves and must not leave a directory behind for a game that has
+    /// never saved.
+    ///
+    /// `None` where the platform will not name a data directory, which includes
+    /// `wasm32`.
+    #[must_use]
+    pub fn data_root(app_name: &str) -> Option<PathBuf> {
+        Some(dirs::data_dir()?.join(app_name))
+    }
+
     /// Where `app_name`'s log files belong, creating nothing.
     ///
     /// Each platform's own place for logs, which is not its data directory:
@@ -254,9 +267,8 @@ impl NativeStorage {
     /// Create a storage root under a platform-standard data directory
     /// (preferred for saves and large data).
     pub fn data(app_name: &str) -> Result<Self, StorageError> {
-        let base = dirs::data_dir()
+        let root = Self::data_root(app_name)
             .ok_or_else(|| StorageError::Other("no data directory found".into()))?;
-        let root = base.join(app_name);
         std::fs::create_dir_all(&root).map_err(|e| StorageError::from_io(&root, e))?;
         Ok(Self { root })
     }

@@ -555,14 +555,15 @@ migration chain and its engine-version and scene-reference header fields, with
 `SettingsStack` and its layers; `crcbl::settings`, with hot-apply
 (`crcbl::settings::apply`, `Applied`) and the catalogue in code
 (`crcbl::settings::catalogue`, `KeyStatus`);
-`crcbl settings get|set|list|preset`; `apps/options`, the settings screen; and
-`apps/shard`, whose save loads natively and in a browser.
+`crcbl settings get|set|list|preset`; `crcbl save list|dump|diff`, which read
+saves from outside the game through `SaveReader`; `apps/options`, the settings
+screen; and `apps/shard`, whose save loads natively and in a browser.
 
 What it left unbuilt is in `docs/backlog.md` under _Persistence (from the
 deleted 14-persistence plan, 2026-09-24)_: the header's per-system versions and
 thumbnail, saves over `SnapshotWriter`, the game-defaults and CLI layers,
-profiles, `crcbl save`, `Command::Save`, apply-on-confirm, browser fallbacks and
-quota, accessibility settings, and the test matrix.
+profiles, `crcbl save restore`, `Command::Save`, apply-on-confirm, browser
+fallbacks and quota, accessibility settings, and the test matrix.
 
 Code cites the plan as "topic 14". Those resolve here:
 
@@ -588,7 +589,8 @@ The rules, each with its _why_:
   client. Profiles are per-player local data (high scores, unlocks, key binds)
   in RON, local to the client. Saves are runtime state, so they take the compact
   replication encoding rather than text; `crcbl save dump` was to render any
-  save as RON for inspection.
+  save as RON for inspection, and as built shows the container — header and
+  sector table — and decodes no payload.
 - **A save is a snapshot.** Editor play-mode restore, a save game and a
   join-in-progress snapshot are **one mechanism with three triggers**, and
   keeping them one is what prevents save-game rot. Loading is the scene-load

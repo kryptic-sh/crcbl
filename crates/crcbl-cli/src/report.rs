@@ -15,6 +15,9 @@ use std::process::ExitCode;
 
 use crate::json::Json;
 
+/// Exit code for "the command worked".
+pub const EXIT_OK: u8 = 0;
+
 /// Exit code for "the command failed".
 pub const EXIT_FAILED: u8 = 1;
 
@@ -28,6 +31,17 @@ pub const EXIT_HISTORY: u8 = 3;
 /// Exit code for "another program holds the scene's lock" — `crcbl scene`'s
 /// edits and `crcbl edit` only; see `crate::scene_args::SCENE_USAGE`.
 pub const EXIT_LOCKED: u8 = 4;
+
+/// Exit code for "the two saves differ" — `crcbl save diff` only, which takes
+/// `cmp`'s convention (0 the same, 1 different, 2 trouble); see
+/// `crate::save_args::SAVE_USAGE`. The same number as [`EXIT_FAILED`], and a
+/// different meaning: the comparison worked, and `--json` says `"ok":true`.
+pub const EXIT_DIFFERENT: u8 = 1;
+
+/// Exit code for "the saves could not be compared" — `crcbl save diff` only,
+/// `cmp`'s "trouble", which lands on [`EXIT_USAGE`]'s number: under that
+/// convention a malformed invocation is trouble too.
+pub const EXIT_TROUBLE: u8 = 2;
 
 /// What `crcbl scene` and `crcbl edit` add to the edit protocol's refusal
 /// code (`crcbl::net::EditRefusal`) to exit with it, so a refused edit's
@@ -79,6 +93,19 @@ impl Failure {
 
 /// Prints a result in whichever form was asked for and returns the exit code.
 pub fn emit(command: &'static str, json: bool, result: Result<Outcome, Failure>) -> ExitCode {
+    emit_as(command, json, result, EXIT_OK)
+}
+
+/// [`emit`], for a command whose answer is its exit code even when it worked:
+/// `success` is the code an [`Outcome`] exits with. `crcbl save diff` is the
+/// one caller, exiting [`EXIT_DIFFERENT`] over two saves it compared and
+/// found different.
+pub fn emit_as(
+    command: &'static str,
+    json: bool,
+    result: Result<Outcome, Failure>,
+    success: u8,
+) -> ExitCode {
     match result {
         Ok(outcome) => {
             if json {
@@ -88,7 +115,7 @@ pub fn emit(command: &'static str, json: bool, result: Result<Outcome, Failure>)
             } else {
                 println!("{}", outcome.human);
             }
-            ExitCode::SUCCESS
+            ExitCode::from(success)
         }
         Err(failure) => {
             if json {
@@ -123,6 +150,12 @@ mod tests {
     #[test]
     fn the_exit_contract_is_two_numbers() {
         assert_eq!((EXIT_FAILED, EXIT_USAGE), (1, 2));
+    }
+
+    /// `save diff`'s codes are `cmp`'s: different at 1, trouble at 2.
+    #[test]
+    fn the_diff_codes_are_cmps() {
+        assert_eq!((EXIT_DIFFERENT, EXIT_TROUBLE), (1, 2));
     }
 
     /// The scene verbs' codes are documented numbers, clear of the two
