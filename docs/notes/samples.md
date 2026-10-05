@@ -684,10 +684,13 @@ seam past its band (`SEAM_BLEED`'s doc carries the sweep).
   is the only browser backend (`crates/crcbl-store/src/lib.rs` records the
   IndexedDB fallback as still to come); a settings screen that silently forgets
   is the worst version of this bug.
-- **Non-goals:** input rebinding (its own screen, owed in `docs/backlog.md`
-  under _Input: no rebind screen, no input inspector, no `crcbl input` CLI_),
-  accessibility settings beyond the catalogue, a migration format beyond topic
-  14's, and per-monitor or per-adapter profiles, which topic 15 refuses.
+- **A `CONTROLS` page rebinds a small gameplay action set** by pressing the
+  input, asks `SWAP` or `CANCEL` on a clash, and keeps the binds in the player's
+  profile (`apps/options/src/controls.rs`). It is a sample's page; the engine's
+  own rebind screen is still P10's.
+- **Non-goals:** accessibility settings beyond the catalogue, a migration format
+  beyond topic 14's, and per-monitor or per-adapter profiles, which topic 15
+  refuses.
 - **Exempt from rules 2, 10 and 11** — the settings are the content.
 
 ## What the deleted sample plans 13, 16 and 24 left behind (2026-09-25)

@@ -27,6 +27,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Result<usize, StorageError>` instead of `Result<(), StorageError>`, the bytes
   written checksum included. A caller matching `Ok(())` matches `Ok(_)`.
 
+- **`crcbl::engine::Pending` gained `pause_key_is_games`** (see Added: key binds
+  kept in a player profile). A struct literal must name it — `false` keeps
+  Escape the loop's pause key.
+
 - **`crcbl::settings::CatalogueKey` gained `confirm`** (see Added: display
   settings apply on confirm). A struct literal must name it — `false` for every
   key but the two that can blank the screen.
@@ -716,6 +720,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   trigger, each file this run wrote and its size, where the autosave goes, and
   the saves that did not land. `crcbl_store::save::SaveBacking::root` names the
   directory for it.
+
+- **Key binds kept in a player profile, with a rebind page that reads them.**
+  `crcbl_store::profile` keeps a versioned `profile.toml` (`PROFILE_FILE`,
+  `PROFILE_VERSION`) beside the settings file, through the same backing rules as
+  `record::Record`: the config directory natively, OPFS in a browser, nowhere
+  when headless. `ProfileStore::load` refuses a damaged or newer file by name
+  and `load_or_default` warns and falls back to the defaults. Binds are stored
+  as a diff over the game's defaults in the binding text form, so an action a
+  game adds later still reaches every player; `Profile::set_binds` keeps entries
+  for actions the running build does not declare. `ActionMap::override_text` and
+  `ActionMap::apply_override_text` move overrides through that text, skipping an
+  unknown action and refusing an unreadable binding by name (`OverrideRefusal`),
+  and `ActionMap::bound_elsewhere` names the action in the same context that
+  already has a binding. `HostedGame::captures_input` lets a game take every
+  input — Escape, the menu's keys, every pad button and the primary click —
+  while it listens for a rebind. `apps/options` has a `CONTROLS` page: choose an
+  action, press the new key, mouse button or pad button (Escape cancels), and a
+  clash with another action asks `SWAP` or `CANCEL`; the profile is written
+  whenever the binds change, the console's `bind` included.
 
 - **Display settings apply on confirm, and revert unless kept.**
   `[engine.video] display_mode` and `present_mode` now have readers and are

@@ -1,8 +1,10 @@
-//! The one screen this sample has, and the taper its faders use.
+//! The settings screen, the pages behind it, and the taper its faders use.
 //!
 //! ```text
-//!   every frame ──▶ Settings
+//!   every frame ──▶ Settings ── CONTROLS ──▶ Controls ── a clash ──▶ Conflict
 //! ```
+//!
+//! The `CONTROLS` page and its clash panel are [`crate::controls`]'.
 //!
 //! # The panel is never dismissed
 //!
@@ -420,14 +422,32 @@ pub enum Action {
     /// means: every bus at unity, no frame ceiling and the engine's own
     /// anisotropy.
     Reset,
+    /// Open the `CONTROLS` page.
+    Controls,
+    /// Go back from the `CONTROLS` page to the settings.
+    Back,
+    /// Listen for the input to bind to the given entry of
+    /// [`crate::controls::ACTIONS`].
+    Rebind(usize),
+    /// Put every action back on its default bindings.
+    ResetControls,
+    /// Take the clashing input from the other action — see
+    /// [`crate::controls`].
+    Swap,
+    /// Leave both clashing actions as they were.
+    Cancel,
 }
 
-/// Which menu a frame shows. There is only one, and it is always on.
+/// Which menu a frame shows. One of them is always on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MenuKind {
     /// The settings screen.
     #[default]
     Settings,
+    /// The `CONTROLS` page.
+    Controls,
+    /// The clash panel the `CONTROLS` page asks over.
+    Conflict,
 }
 
 /// This sample's menus, keyed by the state each belongs to.
@@ -620,9 +640,18 @@ pub fn menus(gains: &[(Bus, f32); Bus::ALL.len()]) -> Menus {
     }));
     items.push(MenuItem::new(SAVE_ID, "SAVE", ""));
     items.push(MenuItem::new(RESET_ID, "RESET", ""));
+    // Last, below the buttons that write the settings file: the page it opens
+    // writes the profile, not that file, and every row above keeps its place
+    // for `web/tools/browser-e2e.mjs`, which walks down to them by count.
+    items.push(MenuItem::new(crate::controls::CONTROLS_ID, "CONTROLS", ""));
+    let (controls, conflict) = crate::controls::menus();
     MenuSet::new(
         MenuKind::Settings,
-        vec![(MenuKind::Settings, Menu::new("SETTINGS", items))],
+        vec![
+            (MenuKind::Settings, Menu::new("SETTINGS", items)),
+            (MenuKind::Controls, controls),
+            (MenuKind::Conflict, conflict),
+        ],
     )
 }
 

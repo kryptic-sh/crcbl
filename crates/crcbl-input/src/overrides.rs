@@ -8,8 +8,20 @@
 //! [`ActionMap::apply_overrides`] is the inverse. Where the list is stored,
 //! and in what file, is the game's business; each binding's text form is the
 //! [`Binding`] `Display`/`FromStr` pair.
+//!
+//! # As text
+//!
+//! [`ActionMap::override_text`] and [`ActionMap::apply_override_text`] are the
+//! same pair over that text form, for a store that keeps strings and knows
+//! nothing of bindings — `crcbl_store::profile` is one. Reading text is where
+//! a file written by another build meets this one, so each entry that cannot
+//! apply is refused on its own and named ([`OverrideRefusal`]): an action this
+//! build does not declare is skipped, and a binding text this build cannot
+//! read leaves its action on the defaults rather than on part of a list.
 
-use crate::{ActionMap, ActionMapError, Binding};
+use core::fmt;
+
+use crate::{ActionMap, ActionMapError, Binding, BindingParseError};
 
 /// One action whose bindings differ from its declaration.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,6 +31,43 @@ pub struct ActionOverride {
     /// The bindings the player chose, in place of the declared ones.
     pub bindings: Vec<Binding>,
 }
+
+/// Why one entry of a saved list of rebinds was not applied — see
+/// [`ActionMap::apply_override_text`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum OverrideRefusal {
+    /// The list names an action this map does not declare. The entry is
+    /// skipped and the rest apply.
+    UnknownAction(String),
+    /// One of an action's binding texts does not parse. The whole entry is
+    /// refused, so the action keeps its declared bindings rather than the
+    /// part of the player's list that did read.
+    BadBinding {
+        /// The action the entry was for.
+        action: String,
+        /// The text that did not parse, and why.
+        error: BindingParseError,
+    },
+    /// The map refused the bindings — a dead zone or threshold outside
+    /// `0.0..1.0` — and the action keeps its declared ones.
+    Refused(ActionMapError),
+}
+
+impl fmt::Display for OverrideRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownAction(action) => {
+                write!(f, "no action called `{action}`; its binds were skipped")
+            }
+            Self::BadBinding { action, error } => {
+                write!(f, "`{action}` keeps its defaults: {error}")
+            }
+            Self::Refused(error) => write!(f, "{error}; that action keeps its defaults"),
+        }
+    }
+}
+
+impl std::error::Error for OverrideRefusal {}
 
 impl ActionMap {
     /// Every action whose bindings differ from the ones it was declared with,
@@ -74,6 +123,80 @@ impl ActionMap {
             }
         }
         errors
+    }
+
+    /// [`ActionMap::overrides`] in the bindings' text form: each rebound
+    /// action's name and its bindings' texts, in declaration order.
+    #[must_use]
+    pub fn override_text(&self) -> Vec<(String, Vec<String>)> {
+        self.overrides()
+            .into_iter()
+            .map(|entry| {
+                let texts = entry.bindings.iter().map(ToString::to_string).collect();
+                (entry.action, texts)
+            })
+            .collect()
+    }
+
+    /// [`ActionMap::apply_overrides`] over a list in the bindings' text form,
+    /// with every entry that could not apply refused by name: an action this
+    /// map does not declare is skipped, and an entry with a binding text that
+    /// does not parse is refused whole — see [`OverrideRefusal`].
+    ///
+    /// Like `apply_overrides`, every action not listed goes back to its
+    /// declaration, and so does every action whose entry was refused.
+    #[must_use = "an entry that did not apply is reported only here"]
+    pub fn apply_override_text<'a>(
+        &mut self,
+        entries: impl IntoIterator<Item = (&'a str, &'a [String])>,
+    ) -> Vec<OverrideRefusal> {
+        let mut refusals = Vec::new();
+        let mut parsed = Vec::new();
+        for (action, texts) in entries {
+            match texts
+                .iter()
+                .map(|text| text.parse::<Binding>())
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(bindings) => parsed.push(ActionOverride {
+                    action: action.to_owned(),
+                    bindings,
+                }),
+                Err(error) => refusals.push(OverrideRefusal::BadBinding {
+                    action: action.to_owned(),
+                    error,
+                }),
+            }
+        }
+        refusals.extend(
+            self.apply_overrides(&parsed)
+                .into_iter()
+                .map(|error| match error {
+                    ActionMapError::UnknownAction(action) => OverrideRefusal::UnknownAction(action),
+                    other => OverrideRefusal::Refused(other),
+                }),
+        );
+        refusals
+    }
+
+    /// The action other than `action`, in the same context, that `binding` is
+    /// already one of the bindings of — what a rebind screen shows as a
+    /// conflict before it takes the input away from that action.
+    ///
+    /// Exact bindings only: a chord that shares a key with `binding` is not a
+    /// conflict here, because the chord rule already lets the two coexist.
+    /// Actions in other contexts are not conflicts either; the context stack
+    /// is what decides between them.
+    #[must_use]
+    pub fn bound_elsewhere(&self, action: &str, binding: &Binding) -> Option<&str> {
+        let context = self.context_of(action)?;
+        self.action_names().find(|other| {
+            *other != action
+                && self.context_of(other) == Some(context)
+                && self
+                    .bindings(other)
+                    .is_some_and(|bindings| bindings.contains(binding))
+        })
     }
 }
 
@@ -302,5 +425,157 @@ mod tests {
         fresh.mouse_button(PointerButton::Right, true);
         assert!(fresh.button_held("use"));
         assert!(!fresh.button_held("aim"), "the loaded chord did not shadow");
+    }
+
+    fn texts(entries: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+        entries
+            .iter()
+            .map(|(action, texts)| {
+                (
+                    (*action).to_owned(),
+                    texts.iter().map(|text| (*text).to_owned()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn apply_text(map: &mut ActionMap, entries: &[(String, Vec<String>)]) -> Vec<OverrideRefusal> {
+        map.apply_override_text(
+            entries
+                .iter()
+                .map(|(action, texts)| (action.as_str(), texts.as_slice())),
+        )
+    }
+
+    /// **The text form round-trips**: a map's rebinds as text, applied to a
+    /// fresh map, reproduce it, an action left with nothing included.
+    #[test]
+    fn override_text_round_trips_through_a_fresh_map() {
+        let mut played = map();
+        played
+            .rebind(
+                "use",
+                vec![
+                    Binding::Key(KeyCode::KeyF),
+                    Binding::PadButton(crate::PadButton::West),
+                ],
+            )
+            .unwrap();
+        played.rebind("crouch", Vec::new()).unwrap();
+        let saved = played.override_text();
+        assert_eq!(
+            saved,
+            texts(&[("crouch", &[]), ("use", &["KeyF", "Pad:West"])])
+        );
+
+        let mut fresh = map();
+        assert_eq!(apply_text(&mut fresh, &saved), []);
+        assert_eq!(fresh.overrides(), played.overrides());
+    }
+
+    /// **An action this build does not declare is skipped and named**, and
+    /// the entries beside it still apply.
+    #[test]
+    fn an_unknown_action_in_the_text_is_skipped_by_name() {
+        let mut map = map();
+        let refusals = apply_text(
+            &mut map,
+            &texts(&[("glide", &["KeyG"]), ("jump", &["KeyJ"])]),
+        );
+        assert_eq!(
+            refusals,
+            [OverrideRefusal::UnknownAction("glide".to_owned())]
+        );
+        assert!(refusals[0].to_string().contains("glide"));
+        assert_eq!(
+            map.bindings("jump"),
+            Some(&[Binding::Key(KeyCode::KeyJ)][..])
+        );
+    }
+
+    /// **A binding text naming no key is refused by name**, and its action
+    /// keeps its defaults whole rather than the half of the list that read.
+    #[test]
+    fn a_bad_key_name_is_refused_by_name_and_its_action_keeps_its_defaults() {
+        let mut map = map();
+        let refusals = apply_text(
+            &mut map,
+            &texts(&[("jump", &["KeyJ", "KeyQwerty"]), ("use", &["KeyF"])]),
+        );
+        let [OverrideRefusal::BadBinding { action, error }] = refusals.as_slice() else {
+            panic!("expected one bad binding, got {refusals:?}");
+        };
+        assert_eq!(action, "jump");
+        assert_eq!(error.text, "KeyQwerty");
+        assert!(
+            refusals[0].to_string().contains("KeyQwerty"),
+            "the refusal does not name the text: {}",
+            refusals[0]
+        );
+        assert_eq!(
+            map.bindings("jump"),
+            Some(&[Binding::Key(KeyCode::Space)][..]),
+            "half a list was applied"
+        );
+        assert_eq!(
+            map.bindings("use"),
+            Some(&[Binding::Key(KeyCode::KeyF)][..])
+        );
+    }
+
+    /// **Rebinds saved by one build reach the next one, which added an
+    /// action**: the new action comes up on its declared default, because the
+    /// saved text is a diff and says nothing about it.
+    #[test]
+    fn saved_rebinds_survive_a_new_default_action() {
+        let mut old = map();
+        old.rebind("jump", vec![Binding::Key(KeyCode::KeyJ)])
+            .unwrap();
+        let saved = old.override_text();
+
+        let mut updated = map();
+        updated.declare(ActionDecl {
+            name: "dash".to_owned(),
+            kind: ActionKind::Button,
+            bindings: vec![Binding::Key(KeyCode::ShiftLeft)],
+        });
+        assert_eq!(apply_text(&mut updated, &saved), []);
+        assert_eq!(
+            updated.bindings("dash"),
+            Some(&[Binding::Key(KeyCode::ShiftLeft)][..]),
+            "the new action did not come up on its default"
+        );
+        assert_eq!(
+            updated.bindings("jump"),
+            Some(&[Binding::Key(KeyCode::KeyJ)][..])
+        );
+        assert_eq!(updated.override_text(), saved);
+    }
+
+    /// **A binding is a conflict only with another action in the same
+    /// context**: not with the action itself, and not across contexts.
+    #[test]
+    fn a_binding_is_bound_elsewhere_only_in_the_same_context() {
+        let mut map = map();
+        map.declare_in(
+            "vehicle",
+            ActionDecl {
+                name: "horn".to_owned(),
+                kind: ActionKind::Button,
+                bindings: vec![Binding::Key(KeyCode::KeyH)],
+            },
+        );
+        let space = Binding::Key(KeyCode::Space);
+        assert_eq!(map.bound_elsewhere("use", &space), Some("jump"));
+        assert_eq!(map.bound_elsewhere("jump", &space), None, "itself");
+        assert_eq!(map.bound_elsewhere("horn", &space), None, "another context");
+        assert_eq!(
+            map.bound_elsewhere("use", &Binding::Key(KeyCode::KeyH)),
+            None
+        );
+        assert_eq!(
+            map.bound_elsewhere("use", &Binding::Key(KeyCode::KeyQ)),
+            None
+        );
     }
 }

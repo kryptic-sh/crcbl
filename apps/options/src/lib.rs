@@ -39,6 +39,10 @@
 //! `docs/backlog.md` carries, along with why each of the remaining video keys
 //! is harder than these.
 //!
+//! Behind the `CONTROLS` row is a page of key binds ([`controls`]): choose an
+//! action, press the input, and the rebind is kept in the player's profile
+//! rather than the settings file.
+//!
 //! # It steps no simulation and loads no art
 //!
 //! **Exempt from sample rules 2 and 10** — no game state, no `World`, no
@@ -58,6 +62,7 @@
 pub mod app;
 mod args;
 pub mod audio;
+pub mod controls;
 pub mod gpu;
 pub mod menu;
 pub mod view;

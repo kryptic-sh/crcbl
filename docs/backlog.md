@@ -14371,13 +14371,11 @@ The input plan scheduled three tools on top of the action layer, and none
 exists:
 
 - **A listen-for-input rebind flow** provided by the engine, for the P10
-  settings screen to host: the player picks an action, presses the input, and
-  the result is written as a diff over the game's defaults. The only interactive
-  rebind in the tree is the debug console's `bind` and `unbind`
-  (`crates/crcbl/src/debug_console.rs`, calling `ActionMap::rebind`), a
-  developer tool: a `bind` line in a game's `autoexec.cfg` replays at start-up,
-  but nothing writes one. Depends on the binding schema and the persistence fork
-  in the entry above.
+  settings screen to host. `apps/options`' `CONTROLS` page is a sample's flow
+  (pick an action, press the input, ask on a clash, kept in the profile as a
+  diff over the defaults); the engine has the `HostedGame::captures_input` seam
+  it runs on, and the screen itself is still P10's. See _Profiles: key binds
+  built_.
 - **An input inspector panel**: live devices, raw values, resolved action
   states, the active context stack, the last-active device, and each input's
   full resolution path — which context consumed it and through which binding.
@@ -15579,24 +15577,83 @@ mean something different depending on what happened after start-up.
   the game, and the CLI is not that binary. A key the file holds with a value
   its reader cannot use is listed as the file spells it, under `user`, although
   the game reads the default.
-- **Profiles and persisted key binds** are unchanged: see the next entry.
+- **Profiles** hold key binds and nothing else: see the next entry.
 
-### Profiles: no `Profile`, no persisted key binds (2026-08-27)
+### Profiles: key binds built (2026-10-05); unlocks and the engine's screen are not
 
-**Not built.** No `Profile` type in `crcbl-store`, no RON, and a rebind does not
-survive the process. What shipped under the profile heading is
-`crcbl_store::record::Record` — one number kept between sessions, config
-directory natively or OPFS in a browser, in-memory when headless. Its own docs
-say why: four samples had each written the same platform arms, encode,
-corrupt-file case and headless rule for a high score, and the bodies matched
-line for line while the names agreed about nothing.
+**Built 2026-10-05**, with the rebind UI that reads it, as one slice:
+`crcbl_store::profile` (`Profile`, `ProfileStore`, `PROFILE_FILE`,
+`PROFILE_VERSION`), the text-form layer `ActionMap::override_text` and
+`ActionMap::apply_override_text` with `OverrideRefusal` and
+`ActionMap::bound_elsewhere` in `crates/crcbl-input/src/overrides.rs`, the
+loop's `HostedGame::captures_input` seam, and `apps/options`' `CONTROLS` page
+(`apps/options/src/controls.rs`). The profile shares `record::Backing` with
+`Record`; `Backing::read` and `Backing::write` are the platform arms both use.
 
-**Related:** `record::Backing::platform` answers with the _config_ directory
-while saves belong in the _data_ directory; the data-directory arm is
-`crcbl_store::save::SaveBacking` since 2026-10-03, hoisted out of `apps/shard`
-when `apps/towers` became its second consumer.
+**Why now, against the two earlier refusals.** Persistence was declined on
+2026-08-23 and 2026-09-06 because nothing would read it. The owner asked for the
+best long-term option, so the slice built the reader too: a player-facing page
+that rebinds by pressing the input, whose rebinds are what the profile holds.
+That answers the objection rather than overriding it.
 
-**What it blocks:** key binds, unlocks, and anything with more than one field.
+Decisions, each with its reason:
+
+- **TOML, not RON.** Topic 14 named RON; the settings file is TOML, so a player
+  sees one format, and `crcbl-store` already depends on `toml` and not on `ron`.
+  `docs/notes/simulation.md` is updated.
+- **The binds are a diff over the defaults, as binding text.** `crcbl-store`
+  keeps strings and never parses a binding; `crcbl-input` owns the text form and
+  refuses by name. No new dependency edge between the two.
+- **A file that cannot be read is refused by name and the defaults are used.**
+  `ProfileStore::load` returns the refusal; `load_or_default` logs it. Opening
+  never rewrites the file.
+- **An entry for an action this build does not declare is kept on save**
+  (`Profile::set_binds`), so an older build does not erase a newer build's
+  binds. An entry for a declared action whose binding text does not parse is
+  refused on load and **is** dropped by the next save, because that action's
+  entry is then the map's current overrides. Revisit if a build ever ships key
+  names an older build cannot read.
+- **The console's `bind` writes through.** `apps/options` hands its map to the
+  loop (`HostedGame::actions`) and writes the profile whenever the map's
+  overrides change (`Controls::persist`), whoever changed them. So one rule
+  covers the page, `RESET CONTROLS` and the console. Surprising, but not a bug:
+  a `bind` line in `autoexec.cfg` reaches the profile on the first frame and
+  stays there after the line is removed.
+- **A clash asks.** A captured input already bound to another action in the same
+  context opens an `ALREADY BOUND` panel with `SWAP` (the other action gets this
+  one's old binding on that device) and `CANCEL`. Declined: a silent swap, which
+  moves a binding the player never looked at, and a refusal, which makes every
+  reshuffle two steps through an unbound action.
+- **A capture replaces the bindings on the captured input's device only**, so
+  rebinding a key keeps the pad button.
+- **Escape cancels listening and cannot be bound.** F3, F11 and the console key
+  stay the loop's while a game captures.
+
+**Not built:**
+
+- **Unlocks**, or any field but binds. The file is versioned
+  (`PROFILE_VERSION`), so a field is added with a version bump and a refusal of
+  the older layout's absence, not a migration format.
+- **The engine-provided rebind flow for the P10 settings screen.** The page is
+  the options sample's. Its state machine (`apps/options/src/controls.rs`) is
+  what that screen would lift; the engine half that exists is
+  `HostedGame::captures_input` and the `crcbl-input` text layer.
+- **What a capture can take**: a key, a mouse button, or a pad button going
+  down. Not a pad stick or trigger, not a chord, not a touch control. While
+  listening, a touch still reaches the menu, because the loop routes contacts to
+  the panel before the game and the seam does not change that.
+- **No way to cancel listening from a pad.** Every pad button is bindable, so a
+  pad player who opened listening by mistake binds the next button, then can
+  rebind it back or use `RESET CONTROLS`. A hold-to-cancel or a timeout would
+  fix it; neither was asked for.
+- **Glyph hints are deferred.** Rows show `DefaultLabels` text (`Space`, `A`,
+  `LB`); button artwork is a game's art direction
+  (`crates/crcbl-input/src/hint.rs` says why), and nothing here draws an icon
+  atlas.
+- **Coverage gap: no browser run.** The profile's OPFS arm is the shared
+  `Backing::Browser` path that `Record` already uses, but no browser gate
+  rebinds a key and reloads the page. The windowed page was not run either;
+  every check is headless.
 
 ### `crcbl save list|dump|diff|restore` (2026-08-27, partly built 2026-10-05)
 
@@ -19848,25 +19905,10 @@ leaves behind is smaller than it was:
 
 **What each corrected row leaves owed**, in the order a reader would meet them:
 
-- **Profile rebind storage and glyph hints, and the order they have to land
-  in.** `ActionMap::rebind` mutates in memory and nothing serialises it;
-  `crcbl-store` has no profile or binding type at all, and its only
-  cross-session helper is the samples' high-score number. `crcbl-input` contains
-  no glyph anything.
-
-  **Persistence is not the slice to start with**, checked 2026-08-23 and
-  re-checked 2026-09-06: storing what `ActionMap::rebind` produces would be a
-  format, a layer and a merge rule with almost nothing to read them — the same
-  objection that keeps the Fetch `AssetSource` unshipped. The 2026-08-23 reading
-  that `rebind` had no caller outside its own crate is wrong today:
-  `crates/crcbl/src/debug_console.rs:336` calls it for the console's `bind`. The
-  rebind UI is still P10's, and persistence lands with it, driven by what it
-  actually needs to write. Worth knowing before then: the input plan put rebinds
-  in "the profile (topic 14, RON) as diffs over game defaults", while the
-  settings stack already in the tree would carry an `[input.bindings]` table
-  today, with `crcbl settings get|set` working on it for free. That is a fork
-  worth taking deliberately rather than by default, because it moves a file
-  topic 14 owns.
+- **Glyph hints for rebinds.** Persistence landed with the options sample's
+  `CONTROLS` page on 2026-10-05 (see _Profiles: key binds built_). Rows show
+  `DefaultLabels` text; glyph artwork stays a game's, per
+  `crates/crcbl-input/src/hint.rs`.
 
 - **Client tick alignment.** No lead, no EWMA server-time estimate, no rate
   correction. `crcbl-client` advances playback at a constant rate, which is an

@@ -3419,6 +3419,12 @@ pub struct Pending {
     pub toggle_debug_overlay: bool,
     /// [`PAUSE_KEY`] was pressed.
     pub toggle_pause: bool,
+    /// [`PAUSE_KEY`] is the game's for this batch rather than the loop's: set
+    /// before the pump while the game is capturing input
+    /// ([`HostedGame::captures_input`]), so [`observe`](Self::observe) hands
+    /// Escape on as a key instead of folding it into
+    /// [`toggle_pause`](Self::toggle_pause).
+    pub pause_key_is_games: bool,
     /// [`FULLSCREEN_KEY`] was pressed.
     pub toggle_fullscreen: bool,
     /// [`CONSOLE_KEY`] was pressed without `Ctrl` or `Meta` held.
@@ -3587,7 +3593,7 @@ impl Pending {
                 let edge = matches!(state, crcbl_shell::ButtonState::Pressed) && !repeat;
                 match *code {
                     DEBUG_OVERLAY_KEY => self.toggle_debug_overlay |= edge,
-                    PAUSE_KEY => self.toggle_pause |= edge,
+                    PAUSE_KEY if !self.pause_key_is_games => self.toggle_pause |= edge,
                     FULLSCREEN_KEY => self.toggle_fullscreen |= edge,
                     // Left for the page when a devtools modifier is held — see
                     // [`CONSOLE_KEY`]. Claimed either way once it is the
@@ -3608,6 +3614,13 @@ impl Pending {
         }
         Handled::Loop
     }
+}
+
+/// Whether `game` is capturing input this frame: its own answer, unless the
+/// debug console is open, which is drawn over the game and keeps the keyboard
+/// — see [`HostedGame::captures_input`].
+fn game_captures<G: HostedGame>(game: &G, console_open: bool) -> bool {
+    !console_open && game.captures_input()
 }
 
 /// Shows and hides the engine's debug overlay.
@@ -6296,6 +6309,33 @@ pub trait HostedGame: Sized {
         let _ = event;
     }
 
+    /// Whether the game is waiting for the player's next input as data — a
+    /// rebind screen listening for the key to put on an action.
+    ///
+    /// **While it answers `true`, the menu and the pause take nothing.** Every
+    /// key goes to [`key_event`](Self::key_event), [`PAUSE_KEY`] and the menu's
+    /// own keys included; every pad event goes to
+    /// [`gamepad_event`](Self::gamepad_event) with no button withheld, and
+    /// [`PAUSE_BUTTON`] does not pause; and a primary press reaches
+    /// [`pointer_event`](Self::pointer_event) instead of the panel under it. A
+    /// player rebinding an action can only choose an input the screen can
+    /// hear, and a screen that could not hear Enter, the arrows or the pad's
+    /// face buttons would be offering a short list. Escape is what such a
+    /// screen reads as "cancel", which is why it is handed over rather than
+    /// pausing.
+    ///
+    /// What stays the loop's: [`DEBUG_OVERLAY_KEY`], [`FULLSCREEN_KEY`] and
+    /// [`CONSOLE_KEY`], and every key while the debug console is open, which
+    /// is drawn over the game and takes the keyboard first.
+    ///
+    /// Asked once a frame **before** the pump, so the answer is last frame's,
+    /// the same rule the menu's own claim follows: the input the player is
+    /// pressing was pressed at the screen that was showing. The `false`
+    /// default is every game without a rebind screen.
+    fn captures_input(&self) -> bool {
+        false
+    }
+
     /// Where the pointer should be allowed to go, as of this frame.
     ///
     /// **Polled, and reconciled by the loop.** This is asked once a frame and
@@ -7168,6 +7208,13 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // is the panel the input goes to.
         let prompting = self.confirm.is_showing();
         let showing = self.menus.current().is_some() || prompting;
+        // Last frame's answer, for `showing`'s reason. While the game captures,
+        // a panel can be on screen and still take no input — see
+        // `HostedGame::captures_input` — so the input half of every check
+        // below reads `menu_input` rather than `showing`.
+        let capturing = game_captures(&*game, self.console.is_open());
+        let menu_input = showing && !capturing;
+        pending.pause_key_is_games = capturing;
         // **Last frame's console, for `showing`'s reason.** The panel the player
         // is typing at is the one that was on screen when they typed, and the
         // toggle this batch carries is applied below rather than mid-pump.
@@ -7183,7 +7230,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         let since_last_pump = self.frame_clock.render_dt_secs();
         // The pad's half of what the menu claims, read before the pump
         // borrows the map.
-        let panel_has_input = showing || console_showing;
+        let panel_has_input = menu_input || console_showing;
         let menu_pad_buttons = menu::menu_pad_buttons(&self.menu_actions);
         let pad_claims = &mut self.pad_claims;
         let mut menu = MenuPump::over_prompt(
@@ -7191,7 +7238,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             prompting.then(|| self.confirm.menus_mut()),
             &mut self.held_keys,
             &mut self.menu_actions,
-            showing && !console_showing,
+            menu_input && !console_showing,
             console_showing,
             since_last_pump,
         );
@@ -7273,7 +7320,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // The pad's pause is the key's, so it closes an open console first
         // below; and East on a paused panel resumes, which is what Escape does
         // there.
-        pending.toggle_pause |= menu.pause || (menu.back && self.paused);
+        pending.toggle_pause |= !capturing && (menu.pause || (menu.back && self.paused));
         let from_keyboard = menu.activated;
         self.events += pending.count;
         // Hit-tested against **this** frame's layout, which is why the pointer
@@ -7305,7 +7352,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // The rule is the mirror of the one three lines down, where a press
         // over a panel does not reach the game: whoever the press was made on
         // keeps it until it is released.
-        if pending.pointer_pressed && showing {
+        if pending.pointer_pressed && menu_input {
             self.menu_owns_press = true;
         }
         // **The console is over everything, so it gets the pointer first.** It
@@ -7461,7 +7508,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             ..PointerUpdate::default()
         });
         let pressed =
-            pending.pointer_pressed && !showing && !console_took_pointer && !console_button_took;
+            pending.pointer_pressed && !menu_input && !console_took_pointer && !console_button_took;
         // `|| pressed` because a tap faster than a frame is one batch, and its
         // release has to go out with the press it answers — which on a phone is
         // every tap. Without it the game keeps the button down, and the *next*
@@ -14386,6 +14433,9 @@ mod tests {
         save_failure: Option<crate::save::SaveFailure>,
         /// Every reason the loop told this game its run was ending for.
         exits: Vec<ExitReason>,
+        /// What [`HostedGame::captures_input`] answers, so a test can stand
+        /// in for a rebind screen listening for its input.
+        captures: bool,
     }
 
     /// The fixture's mixer.
@@ -14570,6 +14620,10 @@ mod tests {
 
         fn pointer_mode(&self) -> PointerMode {
             self.wanted_pointer
+        }
+
+        fn captures_input(&self) -> bool {
+            self.captures
         }
 
         fn cursor(&self) -> Option<CursorIcon> {
@@ -16691,6 +16745,61 @@ mod tests {
                 .expect("the window is live");
         }
         engine.frame().expect("the fake never fails");
+    }
+
+    /// **While the game captures input, the menu and the pause take
+    /// nothing**: ENTER, Escape, the pad's Start and South and a click on
+    /// `PLAY` all reach the game as input and none of them presses, pauses or
+    /// is withheld. The control at the end is the same ENTER with the capture
+    /// over, which does press `PLAY` — so the first half is not passing on a
+    /// menu that never had the key.
+    #[test]
+    fn a_capturing_game_hears_every_input_and_the_menu_none() {
+        use crate::input::{GamepadEvent, PadButton};
+        let mut engine = with_a_menu();
+        let pads = scripted_pads(&mut engine);
+        let play = menu_button(&engine);
+        engine.game_mut().captures = true;
+
+        tap(&mut engine, MENU_ACTIVATE_KEY);
+        tap(&mut engine, PAUSE_KEY);
+        engine.frame().expect("the fake never fails");
+        let held = |engine: &Hosted, key| engine.game().keys.contains(&(key, true));
+        assert!(
+            held(&engine, MENU_ACTIVATE_KEY),
+            "ENTER did not reach the game"
+        );
+        assert!(held(&engine, PAUSE_KEY), "Escape did not reach the game");
+        assert!(!engine.is_paused(), "Escape paused under a capture");
+
+        let start = pad_holding(&[PAUSE_BUTTON, PadButton::South]);
+        pads.send(start);
+        engine.frame().expect("the fake never fails");
+        pads.send(pad_holding(&[]));
+        engine.frame().expect("the fake never fails");
+        assert!(!engine.is_paused(), "Start paused under a capture");
+        assert!(
+            engine.game().pads.contains(&start),
+            "a button was withheld from the game: {:?}",
+            engine.game().pads,
+        );
+        assert!(matches!(engine.game().pads[0], GamepadEvent::State { .. }));
+
+        click(&mut engine, play);
+        assert!(
+            !engine.game().served,
+            "the menu pressed PLAY under a capture"
+        );
+        assert!(
+            engine.game().pointers.iter().any(|update| update.pressed),
+            "the click did not reach the game",
+        );
+
+        engine.game_mut().captures = false;
+        engine.frame().expect("the fake never fails");
+        tap(&mut engine, MENU_ACTIVATE_KEY);
+        engine.frame().expect("the fake never fails");
+        assert!(engine.game().served, "ENTER does not press PLAY at all");
     }
 
     /// **A second finger presses a menu button while the first holds a

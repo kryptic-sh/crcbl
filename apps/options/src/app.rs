@@ -62,9 +62,11 @@ use crcbl::render::{Antialiasing, DEFAULT_ANISOTROPY, RenderEffects};
 use crcbl::settings::SharedSettings;
 use crcbl::settings::presets::QualityPreset;
 use crcbl::shell::{DisplayMode, WindowId};
+use crcbl::store::profile::ProfileStore;
 use crcbl::store::settings::SettingsStack;
 
 use crate::audio::Audio;
+use crate::controls::Controls;
 use crate::gpu::Gpu;
 use crate::menu::{Action, MenuKind, Menus};
 
@@ -307,6 +309,13 @@ pub struct Screen {
     /// disagreed with the kept value would otherwise read as a press and ask
     /// for the change all over again.
     display_rungs: [usize; 2],
+    /// The `CONTROLS` page: the player's key binds and the profile they are
+    /// kept in.
+    controls: Controls,
+    /// Which page the player is on — the settings or `CONTROLS`. The clash
+    /// panel is not a page: it is shown over `CONTROLS` while
+    /// [`Controls::capture`] has a clash in it.
+    page: MenuKind,
 }
 
 /// The loop options runs in.
@@ -469,7 +478,25 @@ impl Screen {
             pending_change: None,
             // Where `menu::menus` puts both rows when the set is born.
             display_rungs: [0; 2],
+            // The profile follows the settings file's rule: the player's own
+            // natively and in a browser, nowhere from a headless run.
+            controls: Controls::open(ProfileStore::for_app(APP_NAME, store.headless())),
+            page: MenuKind::Settings,
         }
+    }
+
+    /// The same screen with its key binds kept in `profile` instead — what a
+    /// test uses, so a restart can be two screens over one temp directory.
+    #[must_use]
+    pub fn with_profile(mut self, profile: ProfileStore) -> Self {
+        self.controls = Controls::open(profile);
+        self
+    }
+
+    /// The `CONTROLS` page's state.
+    #[must_use]
+    pub const fn controls(&self) -> &Controls {
+        &self.controls
     }
 
     /// `bus`'s gain as this screen currently holds it.
@@ -853,6 +880,31 @@ impl Screen {
         }
     }
 
+    /// The `CONTROLS` page's half of the frame: the profile written if the
+    /// binds moved, every row and both panels' captions refreshed, and the
+    /// menu this frame shows.
+    ///
+    /// The write comes first so the caption under the title reports the
+    /// write this frame's change caused, not the one before it.
+    fn reconcile_controls(&mut self, menus: &mut Menus) -> MenuKind {
+        self.controls.persist();
+        if let Some(menu) = menus.get_mut(MenuKind::Controls) {
+            for index in 0..crate::controls::ACTIONS.len() {
+                menu.set_item_hint(crate::controls::action_id(index), self.controls.hint(index));
+            }
+            menu.subtitle = self.controls.subtitle();
+        }
+        if let Some(menu) = menus.get_mut(MenuKind::Conflict) {
+            menu.subtitle = self.controls.conflict_subtitle();
+        }
+        match self.controls.capture() {
+            crate::controls::Capture::Conflict { .. } => MenuKind::Conflict,
+            crate::controls::Capture::Idle | crate::controls::Capture::Listening { .. } => {
+                self.page
+            }
+        }
+    }
+
     /// Writes the edited settings back to wherever they were read from.
     fn save(&mut self) {
         let source = self.store.source();
@@ -941,16 +993,56 @@ impl HostedGame for Screen {
     /// stops it, which is what a player pressing `ESC` is asking for.
     fn tick(&mut self, _gpu: &mut Gpu, tick_dt: f64) {
         self.ticks += 1;
+        // The tick is the map's clock for an edge, as it is a game's.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a tick is a fraction of a second, well inside f32"
+        )]
+        self.controls.actions_mut().begin_tick(tick_dt as f32);
         self.audio.advance(tick_dt);
         self.log_heartbeat();
     }
 
-    /// Every key this screen answers to is the loop's or the menu's.
-    ///
-    /// `ESC` pauses, `F3` toggles the panel, `F11` goes fullscreen, and the
-    /// arrows and the commit key drive the menu. There is nothing left for a
-    /// binding of this sample's own to do.
-    fn key_event(&mut self, _key: KeyCode, _pressed: bool) {}
+    /// The keys the loop and the menu leave, for the `CONTROLS` page's map —
+    /// and, while that page listens, every key, Escape and the menu's own
+    /// included. See [`crate::controls`].
+    fn key_event(&mut self, key: KeyCode, pressed: bool) {
+        self.controls.key(key, pressed);
+    }
+
+    /// Every button but the primary one, for the `CONTROLS` page.
+    fn button_event(&mut self, button: crcbl::core::input::PointerButton, pressed: bool) {
+        self.controls.button(button, pressed);
+    }
+
+    /// The primary button, which the loop reports as part of the pointer: a
+    /// press over no panel, or any press while the `CONTROLS` page listens.
+    fn pointer_event(&mut self, pointer: crcbl::engine::PointerUpdate) {
+        let primary = crcbl::core::input::PointerButton::Left;
+        if pointer.pressed {
+            self.controls.button(primary, true);
+        }
+        if pointer.released {
+            self.controls.button(primary, false);
+        }
+    }
+
+    /// The pads, for the `CONTROLS` page.
+    fn gamepad_event(&mut self, event: &crcbl::input::GamepadEvent) {
+        self.controls.pad(event);
+    }
+
+    /// While the `CONTROLS` page listens for the input to bind.
+    fn captures_input(&self) -> bool {
+        self.controls.listening()
+    }
+
+    /// The `CONTROLS` page's map, so the console's `bind` rebinds the actions
+    /// this screen lists — and the profile follows, by
+    /// [`Controls::persist`]'s rule.
+    fn actions(&mut self) -> Option<&mut crcbl::input::ActionMap> {
+        Some(self.controls.actions_mut())
+    }
 
     /// The settings the console edits: this screen's own, so the two are one
     /// file.
@@ -989,6 +1081,12 @@ impl HostedGame for Screen {
         match id {
             crate::menu::SAVE_ID => Some(Action::Save),
             crate::menu::RESET_ID => Some(Action::Reset),
+            crate::controls::CONTROLS_ID => Some(Action::Controls),
+            crate::controls::BACK_ID => Some(Action::Back),
+            crate::controls::RESET_CONTROLS_ID => Some(Action::ResetControls),
+            crate::controls::SWAP_ID => Some(Action::Swap),
+            crate::controls::CANCEL_ID => Some(Action::Cancel),
+            id if let Some(index) = crate::controls::action_of(id) => Some(Action::Rebind(index)),
             // A groove, a cycler or a switch. None of them fires — a value row
             // reports nothing from either device — so the `None` here is
             // unreachable through the loop; it is there because the ids exist
@@ -1005,6 +1103,15 @@ impl HostedGame for Screen {
         match action {
             Action::Save => self.save(),
             Action::Reset => self.reset(),
+            Action::Controls => self.page = MenuKind::Controls,
+            Action::Back => {
+                self.controls.cancel();
+                self.page = MenuKind::Settings;
+            }
+            Action::Rebind(index) => self.controls.listen(index),
+            Action::ResetControls => self.controls.reset(),
+            Action::Swap => self.controls.swap(),
+            Action::Cancel => self.controls.cancel(),
         }
     }
 
@@ -1240,7 +1347,7 @@ impl HostedGame for Screen {
             menu.set_item_hint(crate::menu::SAVE_ID, self.saved.hint());
             self.placed = true;
         }
-        MenuKind::Settings
+        self.reconcile_controls(menus)
     }
 
     fn take_pending_frame_limit(&mut self) -> Option<FrameLimit> {
@@ -2885,5 +2992,304 @@ mod tests {
             screen.cap(),
             "the row moved a ceiling it never wrote",
         );
+    }
+
+    // ---- the CONTROLS page ---------------------------------------------------
+
+    use crate::controls::{ACTIONS, Capture};
+    use crcbl::input::{Binding, GamepadEvent, GamepadId, GamepadSnapshot, PadButton, PadKind};
+    use crcbl::store::profile::PROFILE_FILE;
+    use crcbl::store::record::Backing;
+
+    /// A directory of this test's own under the system temp directory, empty.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("crcbl-options-{name}"));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("a scratch dir of this test's own");
+        }
+        std::fs::create_dir_all(&dir).expect("the temp dir is writable");
+        dir
+    }
+
+    /// A screen whose key binds are kept in `dir`, standing in for the
+    /// player's config directory — what a "restart" opens twice.
+    fn screen_over_profile(dir: &std::path::Path) -> (Screen, Menus) {
+        let (screen, menus) = screen("");
+        let profile = ProfileStore::open(Backing::Native(dir.to_path_buf()), PROFILE_FILE);
+        (screen.with_profile(profile), menus)
+    }
+
+    /// The entry of [`ACTIONS`] called `name`.
+    fn entry(name: &str) -> usize {
+        ACTIONS
+            .iter()
+            .position(|action| action.name == name)
+            .unwrap_or_else(|| panic!("no action {name}"))
+    }
+
+    fn bindings(screen: &Screen, name: &str) -> Vec<Binding> {
+        screen
+            .controls()
+            .actions()
+            .bindings(name)
+            .expect("a declared action")
+            .to_vec()
+    }
+
+    /// One key, pressed and let go, as the loop hands it over.
+    fn key_tap(screen: &mut Screen, key: KeyCode) {
+        screen.key_event(key, true);
+        screen.key_event(key, false);
+    }
+
+    /// Opens `CONTROLS` and starts listening for `name`, as ENTER on its row
+    /// does.
+    fn listen_for(screen: &mut Screen, menus: &mut Menus, name: &str) {
+        screen.apply(Action::Controls);
+        assert_eq!(screen.menu_kind(menus, false), MenuKind::Controls);
+        let id = crate::controls::action_id(entry(name));
+        let action = Screen::menu_action(id).expect("an action row fires");
+        screen.apply(action);
+        assert!(screen.captures_input(), "the row did not start listening");
+    }
+
+    /// **A rebind made on the page is there after a restart**: listening on
+    /// `JUMP`, a press of `J` replaces jump's key and keeps its pad button,
+    /// the profile is written, and a second screen over the same directory
+    /// opens with it.
+    #[test]
+    fn a_rebind_on_the_page_survives_a_restart() {
+        let dir = scratch("rebind-restart");
+        let (mut screen, mut menus) = screen_over_profile(&dir);
+        listen_for(&mut screen, &mut menus, "jump");
+        reconcile_controls_only(&mut screen, &mut menus);
+        let row = menus
+            .get_mut(MenuKind::Controls)
+            .expect("the page")
+            .items()
+            .iter()
+            .find(|item| item.id == crate::controls::action_id(entry("jump")))
+            .expect("jump's row")
+            .hint
+            .clone();
+        assert_eq!(row, crate::controls::LISTENING_HINT);
+        key_tap(&mut screen, KeyCode::KeyJ);
+        assert!(!screen.captures_input(), "a captured key left it listening");
+        assert_eq!(screen.menu_kind(&mut menus, false), MenuKind::Controls);
+        let rebound = vec![
+            Binding::Key(KeyCode::KeyJ),
+            Binding::PadButton(PadButton::South),
+        ];
+        assert_eq!(bindings(&screen, "jump"), rebound);
+        assert_eq!(screen.controls().saved(), &SaveState::Saved);
+
+        let (restarted, _) = screen_over_profile(&dir);
+        assert_eq!(bindings(&restarted, "jump"), rebound, "the restart lost it");
+        assert_eq!(
+            bindings(&restarted, "interact"),
+            [
+                Binding::Key(KeyCode::KeyE),
+                Binding::PadButton(PadButton::West)
+            ],
+            "an action nobody rebound moved",
+        );
+        std::fs::remove_dir_all(&dir).expect("a scratch dir of this test's own");
+    }
+
+    /// **Escape cancels listening** and changes nothing, and nothing is
+    /// written.
+    #[test]
+    fn escape_cancels_listening_and_changes_nothing() {
+        let dir = scratch("escape-cancels");
+        let (mut screen, mut menus) = screen_over_profile(&dir);
+        listen_for(&mut screen, &mut menus, "jump");
+        let before = bindings(&screen, "jump");
+
+        key_tap(&mut screen, crcbl::engine::PAUSE_KEY);
+        assert!(!screen.captures_input(), "Escape left the page listening");
+        assert_eq!(screen.menu_kind(&mut menus, false), MenuKind::Controls);
+        assert_eq!(bindings(&screen, "jump"), before, "Escape was bound");
+        assert_eq!(screen.controls().saved(), &SaveState::Untouched);
+        assert!(
+            !dir.join(PROFILE_FILE).exists(),
+            "a cancelled capture wrote the profile"
+        );
+        std::fs::remove_dir_all(&dir).expect("a scratch dir of this test's own");
+    }
+
+    /// **A clash is shown and the player chooses**: `E` is interact's, so a
+    /// press of it for jump opens the clash panel naming both, and `CANCEL`
+    /// leaves both as they were.
+    #[test]
+    fn a_clash_is_shown_and_cancel_leaves_both_actions_alone() {
+        let (mut screen, mut menus) = screen("");
+        listen_for(&mut screen, &mut menus, "jump");
+        key_tap(&mut screen, KeyCode::KeyE);
+        assert!(matches!(
+            screen.controls().capture(),
+            Capture::Conflict { .. }
+        ));
+        assert_eq!(screen.menu_kind(&mut menus, false), MenuKind::Conflict);
+        let conflict = menus.get_mut(MenuKind::Conflict).expect("the clash panel");
+        let said: Vec<&str> = conflict
+            .subtitle
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect();
+        assert!(
+            said.iter().any(|line| line.contains("E IS ON INTERACT")),
+            "the clash is not named: {said:?}"
+        );
+        assert!(!screen.captures_input(), "the clash panel takes no input");
+
+        screen.apply(Screen::menu_action(crate::controls::CANCEL_ID).expect("CANCEL fires"));
+        assert_eq!(screen.menu_kind(&mut menus, false), MenuKind::Controls);
+        assert_eq!(
+            bindings(&screen, "jump"),
+            [
+                Binding::Key(KeyCode::Space),
+                Binding::PadButton(PadButton::South)
+            ]
+        );
+        assert_eq!(
+            bindings(&screen, "interact"),
+            [
+                Binding::Key(KeyCode::KeyE),
+                Binding::PadButton(PadButton::West)
+            ]
+        );
+    }
+
+    /// **`SWAP` trades the two keys**: jump takes `E`, interact takes jump's
+    /// old `Space`, and neither pad button moves.
+    #[test]
+    fn swap_trades_the_clashing_inputs_on_one_device() {
+        let (mut screen, mut menus) = screen("");
+        listen_for(&mut screen, &mut menus, "jump");
+        key_tap(&mut screen, KeyCode::KeyE);
+        assert_eq!(screen.menu_kind(&mut menus, false), MenuKind::Conflict);
+
+        screen.apply(Screen::menu_action(crate::controls::SWAP_ID).expect("SWAP fires"));
+        assert_eq!(screen.menu_kind(&mut menus, false), MenuKind::Controls);
+        assert_eq!(
+            bindings(&screen, "jump"),
+            [
+                Binding::Key(KeyCode::KeyE),
+                Binding::PadButton(PadButton::South)
+            ]
+        );
+        assert_eq!(
+            bindings(&screen, "interact"),
+            [
+                Binding::Key(KeyCode::Space),
+                Binding::PadButton(PadButton::West)
+            ]
+        );
+    }
+
+    /// **A pad button is captured on its way down**, and one already held
+    /// when listening began is not: the press that chose the row is not the
+    /// player's answer.
+    #[test]
+    fn a_pad_button_is_captured_only_on_its_way_down() {
+        let (mut screen, mut menus) = screen("");
+        let pad = GamepadId(1);
+        let holding = |buttons: &[PadButton]| GamepadEvent::State {
+            id: pad,
+            snapshot: GamepadSnapshot {
+                buttons: buttons.iter().copied().collect(),
+                ..GamepadSnapshot::neutral(PadKind::Xbox)
+            },
+        };
+        screen.gamepad_event(&holding(&[PadButton::RightShoulder]));
+        listen_for(&mut screen, &mut menus, "interact");
+        screen.gamepad_event(&holding(&[PadButton::RightShoulder]));
+        assert!(screen.captures_input(), "a held button was read as a press");
+
+        screen.gamepad_event(&holding(&[
+            PadButton::RightShoulder,
+            PadButton::LeftShoulder,
+        ]));
+        assert!(!screen.captures_input());
+        assert_eq!(
+            bindings(&screen, "interact"),
+            [
+                Binding::Key(KeyCode::KeyE),
+                Binding::PadButton(PadButton::LeftShoulder)
+            ]
+        );
+    }
+
+    /// **The console's `bind` reaches the profile too**: the map the loop
+    /// hands it is the page's, and the profile follows the map whoever moved
+    /// it.
+    #[test]
+    fn a_console_bind_is_written_through_to_the_profile() {
+        let dir = scratch("console-bind");
+        let (mut screen, mut menus) = screen_over_profile(&dir);
+        HostedGame::actions(&mut screen)
+            .expect("the page's map is handed over")
+            .rebind("reload", vec![Binding::Key(KeyCode::KeyT)])
+            .expect("a declared action");
+        reconcile_controls_only(&mut screen, &mut menus);
+        assert_eq!(screen.controls().saved(), &SaveState::Saved);
+        let (restarted, _) = screen_over_profile(&dir);
+        assert_eq!(
+            bindings(&restarted, "reload"),
+            [Binding::Key(KeyCode::KeyT)]
+        );
+        std::fs::remove_dir_all(&dir).expect("a scratch dir of this test's own");
+    }
+
+    /// One frame of the screen, on whichever page it is on.
+    fn reconcile_controls_only(screen: &mut Screen, menus: &mut Menus) {
+        let _ = screen.menu_kind(menus, false);
+    }
+
+    /// **A headless run writes no profile**: the rebind holds for the run,
+    /// and the page says there was nowhere to keep it.
+    #[test]
+    fn a_headless_rebind_holds_for_the_run_and_writes_nowhere() {
+        let (mut screen, mut menus) = screen("");
+        listen_for(&mut screen, &mut menus, "sprint");
+        key_tap(&mut screen, KeyCode::KeyV);
+        reconcile_controls_only(&mut screen, &mut menus);
+        assert_eq!(screen.controls().saved(), &SaveState::Nowhere);
+        assert_eq!(
+            bindings(&screen, "sprint")[0],
+            Binding::Key(KeyCode::KeyV),
+            "the rebind did not hold for the run"
+        );
+        let said: Vec<String> = menus
+            .get_mut(MenuKind::Controls)
+            .expect("the page")
+            .subtitle
+            .iter()
+            .map(|line| line.text.clone())
+            .collect();
+        assert!(
+            said.contains(&SaveState::Nowhere.hint()),
+            "the page does not say: {said:?}"
+        );
+    }
+
+    /// **`RESET CONTROLS` puts every action back**, and the profile follows
+    /// with nothing in it.
+    #[test]
+    fn reset_controls_puts_every_action_back_on_its_defaults() {
+        let dir = scratch("reset-controls");
+        let (mut screen, mut menus) = screen_over_profile(&dir);
+        listen_for(&mut screen, &mut menus, "crouch");
+        key_tap(&mut screen, KeyCode::KeyC);
+        reconcile_controls_only(&mut screen, &mut menus);
+        assert_eq!(bindings(&screen, "crouch")[0], Binding::Key(KeyCode::KeyC));
+
+        screen
+            .apply(Screen::menu_action(crate::controls::RESET_CONTROLS_ID).expect("the row fires"));
+        reconcile_controls_only(&mut screen, &mut menus);
+        assert_eq!(screen.controls().actions().overrides(), []);
+        let (restarted, _) = screen_over_profile(&dir);
+        assert_eq!(restarted.controls().actions().overrides(), []);
+        std::fs::remove_dir_all(&dir).expect("a scratch dir of this test's own");
     }
 }

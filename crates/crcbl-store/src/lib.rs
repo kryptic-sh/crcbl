@@ -11,6 +11,7 @@
 //! - Settings (TOML layers, typed access) — module `settings`
 //! - Saves (binary save/load container) — module `save`
 //! - A file kept in a cloud, conflicts surfaced to the game — module [`synced`]
+//! - A player's key binds, kept beside the settings — module [`profile`]
 //! - [`crc32`] — the workspace's one CRC-32
 //! - Browser storage ([`FetchSource`](web::FetchSource) for assets,
 //!   [`OpfsStorage`](web::OpfsStorage) for saves) — module [`web`]
@@ -31,6 +32,7 @@ pub mod crash_ring;
 pub mod crc32;
 #[cfg(test)]
 mod kill_during_write;
+pub mod profile;
 pub mod record;
 pub mod replay;
 pub mod save;

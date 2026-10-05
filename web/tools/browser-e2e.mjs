@@ -2170,10 +2170,11 @@ const EXPECTATIONS = {
       // `menus` lays the panel out as QUALITY, FULLSCREEN, DISPLAY MODE,
       // PRESENT MODE, DEBUG PANEL, FRAME CAP, ANISOTROPY, ANTIALIASING, RENDER
       // SCALE, a switch per `crcbl::settings::VIDEO_KEYS`, a fader per
-      // `Bus::ALL` in that order, then SAVE and RESET. **A row added or
-      // removed anywhere above MUSIC moves `toFader`**, and the gate would then
-      // walk a groove nobody asked it to — the `smaa` key did exactly that on
-      // 2026-08-30, and the gate read MASTER moving while it waited on MUSIC.
+      // `Bus::ALL` in that order, then SAVE, RESET and CONTROLS. **A row
+      // added or removed anywhere above MUSIC moves `toFader`**, and the gate
+      // would then walk a groove nobody asked it to — the `smaa` key did
+      // exactly that on 2026-08-30, and the gate read MASTER moving while it
+      // waited on MUSIC.
       // The same day's eighth decision folded that key and `antialiasing` into
       // the one ANTIALIASING row, which is two switches gone for one cycler;
       // the QUALITY row that writes a whole tier into the rows under it

@@ -100,7 +100,7 @@ pub use gamepad::{
     PadButtons, PadKind, Stick, Trigger,
 };
 pub use hint::{DefaultLabels, Hint, HintLabels};
-pub use overrides::ActionOverride;
+pub use overrides::{ActionOverride, OverrideRefusal};
 pub use patterns::{DOUBLE_TAP_WINDOW, DoubleTap, HOLD_TIME, Hold, TAP_TIME, Tap};
 pub use repeat::{Cardinal, REPEAT_DELAY, REPEAT_INTERVAL, Repeat};
 

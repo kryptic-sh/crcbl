@@ -587,10 +587,12 @@ The rules, each with its _why_:
   in a versioned binary container over the snapshot encoding, owned by the
   server. Settings are engine and game options in layered TOML, local to the
   client. Profiles are per-player local data (high scores, unlocks, key binds)
-  in RON, local to the client. Saves are runtime state, so they take the compact
-  replication encoding rather than text; `crcbl save dump` was to render any
-  save as RON for inspection, and as built shows the container — header and
-  sector table — and decodes no payload.
+  in TOML, local to the client — the plan said RON, and the profile took the
+  settings file's format so a player meets one grammar (`crcbl_store::profile`).
+  Saves are runtime state, so they take the compact replication encoding rather
+  than text; `crcbl save dump` was to render any save as RON for inspection, and
+  as built shows the container — header and sector table — and decodes no
+  payload.
 - **A save is a snapshot.** Editor play-mode restore, a save game and a
   join-in-progress snapshot are **one mechanism with three triggers**, and
   keeping them one is what prevents save-game rot. Loading is the scene-load
@@ -655,7 +657,11 @@ The rules, each with its _why_:
   `CatalogueKey::confirm`, and the engine loop draws the prompt. Resolution has
   no live seam, so it has neither.
 - **Key binds live in the profile, not in `settings.toml`.** They are structured
-  per-player data (action to chord maps), and games extend the action set.
+  per-player data (action to chord maps), and games extend the action set. As
+  built, `profile.toml` holds each rebound action's bindings in their text form,
+  as a diff over the game's defaults; an entry for an action the running build
+  does not declare is skipped on load and kept on save, and a file that cannot
+  be read is refused by name and the defaults used.
 - **Catalogue rule 2: a key gets its name and value domain before anything reads
   it.** A key is a compatibility surface the moment a player's file contains it,
   and the settings screen's row identity and the file on disk are what churn if

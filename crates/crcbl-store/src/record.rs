@@ -39,6 +39,7 @@
 #[cfg(target_arch = "wasm32")]
 use std::path::Path;
 
+use crate::StorageError;
 #[cfg(target_arch = "wasm32")]
 use crate::StorageSource;
 
@@ -76,7 +77,7 @@ impl Backing {
         match crate::NativeStorage::config(app_name) {
             Ok(store) => Self::Native(store.root().to_path_buf()),
             Err(error) => {
-                crcbl_core::log::warn!("record: no config dir ({error}); values will not persist");
+                crcbl_core::log::warn!("store: no config dir ({error}); values will not persist");
                 Self::None
             }
         }
@@ -107,11 +108,66 @@ impl Backing {
                 Some(store) => Self::Browser(store),
                 None => {
                     crcbl_core::log::warn!(
-                        "record: no OPFS store installed; values will not persist"
+                        "store: no OPFS store installed; values will not persist"
                     );
                     Self::None
                 }
             }
+        }
+    }
+
+    /// The bytes of `file` under this backing, or `None` when there are none
+    /// to read: no file yet, which is the ordinary first run, or
+    /// [`Backing::None`], which never holds anything.
+    ///
+    /// Shared by every kind of value kept here — a [`Record`]'s number and a
+    /// [`Profile`](crate::profile::Profile)'s file — so the platform arms are
+    /// written once and the two cannot come to disagree about what absence is.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend reports for a read that is neither a hit nor a
+    /// missing file.
+    pub(crate) fn read(&self, file: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        match self {
+            Self::None => Ok(None),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Native(root) => {
+                let path = root.join(file);
+                match std::fs::read(&path) {
+                    Ok(data) => Ok(Some(data)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(error) => Err(StorageError::from_io(&path, error)),
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(store) => match store.read(Path::new(file)) {
+                Ok(data) => Ok(Some(data)),
+                Err(StorageError::NotFound(_)) => Ok(None),
+                Err(error) => Err(error),
+            },
+        }
+    }
+
+    /// Writes `bytes` to `file` under this backing: through [`crate::write_atomic`]
+    /// natively, into the store in a browser, and nowhere for
+    /// [`Backing::None`]. Answers whether anything was written.
+    ///
+    /// The browser arm returns as soon as the write is *queued*: OPFS has no
+    /// synchronous path to the disk, and the shim performs it later on
+    /// `visibilitychange` and `beforeunload`, so a player who closes the tab
+    /// straight after still keeps it.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the backend reports for a write it refused.
+    pub(crate) fn write(&self, file: &str, bytes: &[u8]) -> Result<bool, StorageError> {
+        match self {
+            Self::None => Ok(false),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Native(root) => crate::write_atomic(&root.join(file), bytes).map(|()| true),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(store) => store.write(Path::new(file), bytes).map(|()| true),
         }
     }
 }
@@ -145,25 +201,13 @@ impl Record {
     }
 
     fn read(backing: &Backing, file: &str) -> Option<u32> {
-        let data = match backing {
-            Backing::None => return None,
-            #[cfg(not(target_arch = "wasm32"))]
-            Backing::Native(root) => match std::fs::read(root.join(file)) {
-                Ok(data) => data,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-                Err(error) => {
-                    crcbl_core::log::warn!("record: read error ({error})");
-                    return None;
-                }
-            },
-            #[cfg(target_arch = "wasm32")]
-            Backing::Browser(store) => match store.read(Path::new(file)) {
-                Ok(data) => data,
-                Err(error) => {
-                    crcbl_core::log::info!("record: no previous value ({error})");
-                    return None;
-                }
-            },
+        let data = match backing.read(file) {
+            Ok(Some(data)) => data,
+            Ok(None) => return None,
+            Err(error) => {
+                crcbl_core::log::warn!("record: read error ({error})");
+                return None;
+            }
         };
 
         match <[u8; 4]>::try_from(data.as_slice()) {
@@ -233,21 +277,8 @@ impl Record {
     /// `visibilitychange` and `beforeunload`, so a player who closes the tab on
     /// a new record still keeps it.
     fn save(&self) {
-        let bytes = self.value.to_le_bytes();
-        match &self.backing {
-            Backing::None => {}
-            #[cfg(not(target_arch = "wasm32"))]
-            Backing::Native(root) => {
-                if let Err(error) = crate::write_atomic(&root.join(&self.file), &bytes) {
-                    crcbl_core::log::warn!("record: save failed ({error})");
-                }
-            }
-            #[cfg(target_arch = "wasm32")]
-            Backing::Browser(store) => {
-                if let Err(error) = store.write(Path::new(&self.file), &bytes) {
-                    crcbl_core::log::warn!("record: save failed ({error})");
-                }
-            }
+        if let Err(error) = self.backing.write(&self.file, &self.value.to_le_bytes()) {
+            crcbl_core::log::warn!("record: save failed ({error})");
         }
     }
 }
