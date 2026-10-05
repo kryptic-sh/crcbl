@@ -1741,6 +1741,44 @@ mod tests {
         ));
     }
 
+    /// **A corner or a plot with a coordinate that is not finite is refused
+    /// as [`MapError::NotFinite`], naming the point, the axis and the value**
+    /// — `NaN` and both infinities, on every axis.
+    ///
+    /// Each axis is a different rule a non-finite value would otherwise meet
+    /// first, which is why the check has to come before them: a `NaN` `x` or
+    /// `z` compares false against the field's edge and the lane's clearance and
+    /// would pass both, and a `NaN` `y` is not `0.0` and would be refused as
+    /// [`MapError::OffTheGround`] — for the wrong reason.
+    #[test]
+    fn a_coordinate_that_is_not_finite_is_refused_by_the_point() {
+        let (waypoints, plots) = layout();
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for axis in 0..3 {
+                let named = |error: MapError, point: &str| match error {
+                    MapError::NotFinite {
+                        what,
+                        axis: at,
+                        value,
+                    } => {
+                        assert_eq!(what, point, "{bad} on axis {axis}");
+                        assert_eq!(at, axis, "{point}: {bad} on axis {axis}");
+                        assert_eq!(value.to_bits(), bad.to_bits(), "{point}: axis {axis}");
+                    }
+                    other => panic!("{point}: {bad} on axis {axis} was refused as {other}"),
+                };
+
+                let mut corners = waypoints.clone();
+                corners[1][axis] = bad;
+                named(refused(corners, plots.clone()), "waypoint 1");
+
+                let mut pads = plots.clone();
+                pads[4].position[axis] = bad;
+                named(refused(waypoints.clone(), pads), "plot \"gate\"");
+            }
+        }
+    }
+
     /// The field a per-row refusal of [`Map::new`]'s is about, as the row's
     /// own rule names it — or [`None`] for a map it builds, and for one it
     /// refuses by a rule that needs another row.

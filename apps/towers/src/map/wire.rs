@@ -32,11 +32,11 @@
 //! A joiner reads what arrived on a socket, so [`Map::from_wire`] trusts
 //! nothing in it: every count and length is held to its cap —
 //! [`MAX_WAYPOINTS`], [`MAX_PLOTS`], [`MAX_LABEL_BYTES`] — before anything is
-//! allocated for it, every read is bounds-checked, a coordinate that is not
-//! finite is refused (the rules below compare, and a NaN compares false
-//! against every limit), and what is left is held to every rule a scene file
-//! is, by [`Map::new`]. Each refusal is a [`MapWireError`] naming what was
-//! wrong.
+//! allocated for it, every read is bounds-checked, and what is left is held
+//! to every rule a scene file is, by [`Map::new`] — a coordinate that is not
+//! finite among them, refused there as [`MapError::NotFinite`] before any rule
+//! that compares it, so the wire and a scene share one copy of that rule.
+//! Each refusal is a [`MapWireError`] naming what was wrong.
 //!
 //! # How big it gets
 //!
@@ -79,11 +79,6 @@ pub enum MapWireError {
         /// Which plot, counted from the first.
         plot: usize,
     },
-    /// A coordinate is infinite or not a number.
-    NotFinite {
-        /// Which point: `waypoint 2`, `plot 0`.
-        what: String,
-    },
     /// Bytes follow the last plot.
     TrailingBytes {
         /// How many.
@@ -103,7 +98,6 @@ impl std::fmt::Display for MapWireError {
                 "the map stops at byte {offset}, where {needed} more were needed"
             ),
             Self::LabelNotUtf8 { plot } => write!(f, "plot {plot}'s label is not UTF-8"),
-            Self::NotFinite { what } => write!(f, "{what} has a coordinate that is not finite"),
             Self::TrailingBytes { count } => {
                 write!(f, "{count} byte(s) follow the map's last plot")
             }
@@ -169,8 +163,8 @@ impl Map {
             return Err(MapWireError::Map(MapError::TooManyWaypoints { found }));
         }
         let mut waypoints = Vec::with_capacity(found);
-        for index in 0..found {
-            waypoints.push(reader.point(|| format!("waypoint {index}"))?);
+        for _ in 0..found {
+            waypoints.push(reader.point()?);
         }
 
         let found = reader.count()?;
@@ -189,7 +183,7 @@ impl Map {
             let label = std::str::from_utf8(reader.take(length)?)
                 .map_err(|_| MapWireError::LabelNotUtf8 { plot: index })?
                 .to_string();
-            let at = reader.point(|| format!("plot {index}"))?;
+            let at = reader.point()?;
             plots.push(Plot {
                 label,
                 position: at.to_array(),
@@ -248,17 +242,14 @@ impl<'a> Reader<'a> {
         Ok(usize::try_from(u32::from_le_bytes(raw)).unwrap_or(usize::MAX))
     }
 
-    /// The next point, refused if any coordinate is not finite. `what` names
-    /// it for the refusal.
-    fn point(&mut self, what: impl Fn() -> String) -> Result<DVec3, MapWireError> {
+    /// The next point, exactly as its bits arrived: whether each coordinate
+    /// is a number the field can hold is [`Map::new`]'s to say.
+    fn point(&mut self) -> Result<DVec3, MapWireError> {
         let mut coordinates = [0.0; 3];
         for coordinate in &mut coordinates {
             let mut raw = [0; COORDINATE_BYTES];
             raw.copy_from_slice(self.take(COORDINATE_BYTES)?);
             *coordinate = f64::from_bits(u64::from_le_bytes(raw));
-            if !coordinate.is_finite() {
-                return Err(MapWireError::NotFinite { what: what() });
-            }
         }
         Ok(DVec3::from_array(coordinates))
     }
@@ -449,20 +440,32 @@ mod tests {
         ));
     }
 
-    /// **A coordinate that is not finite is refused**, naming the point: a
-    /// NaN compares false against every limit [`Map::new`] measures, so the
-    /// rules alone would let one through.
+    /// **A coordinate that is not finite is refused by [`Map::new`]'s rule**,
+    /// naming the point and the axis — a corner's and a plot's, `NaN` and both
+    /// infinities. The wire reads the bits as they came and has no check of
+    /// its own, so this is what shows the one rule reaches it.
     #[test]
     fn a_coordinate_that_is_not_finite_is_refused() {
         let waypoint_x = WIRE_TAG.len() + COUNT_BYTES + POINT_BYTES;
-        for bad in [f64::NAN, f64::INFINITY] {
-            assert!(matches!(
-                Map::from_wire(&edited(|bytes| {
-                    bytes[waypoint_x..waypoint_x + COORDINATE_BYTES]
-                        .copy_from_slice(&bad.to_bits().to_le_bytes());
-                })),
-                Err(MapWireError::NotFinite { what }) if what == "waypoint 1"
-            ));
+        let label = Map::built_in().plots()[0].label.clone();
+        let plot_z = first_plot_at() + COUNT_BYTES + label.len() + 2 * COORDINATE_BYTES;
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for (at, point, axis) in [
+                (waypoint_x, "waypoint 1".to_owned(), 0),
+                (plot_z, format!("plot {label:?}"), 2),
+            ] {
+                let refusal = Map::from_wire(&edited(|bytes| {
+                    bytes[at..at + COORDINATE_BYTES].copy_from_slice(&bad.to_bits().to_le_bytes());
+                }));
+                assert!(
+                    matches!(
+                        &refusal,
+                        Err(MapWireError::Map(MapError::NotFinite { what, axis: which, .. }))
+                            if *what == point && *which == axis
+                    ),
+                    "{point}: {bad} was read as {refusal:?}",
+                );
+            }
         }
     }
 

@@ -2149,27 +2149,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   (the waypoints in order and the plots, label and position, through a defined
   little-endian layout) with `crcbl_server::Host::send_event`, and the joiner —
   a `lan::Joining` until then — reads it back with `Map::from_wire`, which holds
-  every count and label to its cap before allocating, refuses a coordinate that
-  is not finite and then every rule `Map::new` has, naming what was wrong
-  (`MapWireError`). Only then is the joiner's `Game` built, on that map, and the
-  GPU's field rebuilt for it (`Gpu::set_map`) — and sent again when the host
-  accepts a joiner again on its link (`PeerEvent::Reaccepted`), whose restarted
-  key the first copy no longer opens under — so any joiner plays any host
-  whatever its own `--scene`, and never draws on a map that is not the host's. A
-  join that ends without a map — refused, the link ended, a map this build
-  refuses, or nothing within `lan::JOIN_TIMEOUT` — ends as a `lan::JoinFailure`
-  naming which; `--join` and `--browse` wait under a `JOINING` panel and show
-  and log the failure there. **A refused command is told to the player who sent
-  it**: the stage records each refusal against its sender, and the host sends
-  that peer a refusal event naming the rule (`game::Refusal`: the run is over,
-  no such plot, the plot is taken, not enough gold, no tower to upgrade, already
-  upgraded, no wave to send), which `Game::take_refusals` hands the front end —
-  solo, the host's own player and a joiner alike — and the page shows as a
-  `REFUSED: …` line above the control hint for a few seconds
-  (`page::draw_notice`). The map and the refusals share one versioned envelope
-  (`lan::event`: a version byte and a tag ahead of the payload, `Map::from_wire`
-  still reading the map's); an event a player cannot read is counted
-  (`Game::ignored_events`) and passed over.
+  every count and label to its cap before allocating and then to every rule
+  `Map::new` has — a coordinate that is not finite among them, as
+  `MapError::NotFinite` — naming what was wrong (`MapWireError`). Only then is
+  the joiner's `Game` built, on that map, and the GPU's field rebuilt for it
+  (`Gpu::set_map`) — and sent again when the host accepts a joiner again on its
+  link (`PeerEvent::Reaccepted`), whose restarted key the first copy no longer
+  opens under — so any joiner plays any host whatever its own `--scene`, and
+  never draws on a map that is not the host's. A join that ends without a map —
+  refused, the link ended, a map this build refuses, or nothing within
+  `lan::JOIN_TIMEOUT` — ends as a `lan::JoinFailure` naming which; `--join` and
+  `--browse` wait under a `JOINING` panel and show and log the failure there.
+  **A refused command is told to the player who sent it**: the stage records
+  each refusal against its sender, and the host sends that peer a refusal event
+  naming the rule (`game::Refusal`: the run is over, no such plot, the plot is
+  taken, not enough gold, no tower to upgrade, already upgraded, no wave to
+  send), which `Game::take_refusals` hands the front end — solo, the host's own
+  player and a joiner alike — and the page shows as a `REFUSED: …` line above
+  the control hint for a few seconds (`page::draw_notice`). The map and the
+  refusals share one versioned envelope (`lan::event`: a version byte and a tag
+  ahead of the payload, `Map::from_wire` still reading the map's); an event a
+  player cannot read is counted (`Game::ignored_events`) and passed over.
 
 - **Towers opens on a lobby** (native builds): solo, host (as `--host`, on any
   free port), a row per LAN host a `Browser` hears that this build can join —

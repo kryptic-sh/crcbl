@@ -703,7 +703,9 @@ mod tests {
     /// the whole field is in. A coordinate that is not a number is one of
     /// them: every comparison `Map::new` makes is false for a `NaN`, so before
     /// the row rule one passed the ground and field-edge rules and was refused,
-    /// if at all, as a plot out of reach of the lane.
+    /// if at all, as a plot out of reach of the lane. The file can carry one:
+    /// RON spells `NaN`, `inf` and `-inf` as floats and reads them as those
+    /// values, so the row rule is the only thing between such a file and a map.
     #[test]
     fn a_row_that_breaks_its_own_rule_is_refused_on_load_by_line_and_field() {
         let long = "m".repeat(crate::map::MAX_LABEL_BYTES + 1);
@@ -739,6 +741,13 @@ mod tests {
                 "position.0",
             ),
             (
+                "inf-plot",
+                committed.clone(),
+                plot("entry", "(-6.0, 0.0, inf)"),
+                "sys/plots.ron",
+                "position.2",
+            ),
+            (
                 "long-label",
                 committed,
                 plot(&long, "(-6.0, 0.0, 3.0)"),
@@ -758,6 +767,13 @@ mod tests {
                 FIELD_PLOTS_RON.to_owned(),
                 "sys/waypoints.ron",
                 "position.0",
+            ),
+            (
+                "neg-inf-waypoint",
+                waypoints("(-14.0, -inf, 8.0)"),
+                FIELD_PLOTS_RON.to_owned(),
+                "sys/waypoints.ron",
+                "position.1",
             ),
         ] {
             let dir = scene_dir(name, &waypoints, &plots);

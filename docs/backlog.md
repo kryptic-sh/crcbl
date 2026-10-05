@@ -17312,11 +17312,6 @@ frame, and the page shows it for `NOTICE_FOR` (in `crate::app`); tested by
   `crcbl::render::UiRenderer` cannot draw alone (it only loads its target). A
   `--join`/`--browse` that fails stays on that panel, with the reason, until the
   window closes; the exit code is still 0, as before the map was sent.
-- **`Map::new` does not refuse a coordinate that is not finite**; the wire
-  decoder does (`MapWireError::NotFinite`), because a NaN compares false against
-  every limit `Map::new` measures and would pass it. Whether a `.scn/` file can
-  carry a NaN through `crcbl::scene`'s RON is not checked; if it can, the check
-  belongs in `Map::new` as a `MapError` variant.
 - **`Map::from_wire` and towers' save decoder (`crcbl_towers::save::decode`)
   have no fuzz target — deferred on purpose (2026-10-03), with exhaustive unit
   sweeps in its place.** Both read untrusted bytes. `crcbl-store`'s
@@ -17421,10 +17416,11 @@ frame, and the page shows it for `NOTICE_FOR` (in `crate::app`); tested by
 read by `crcbl_towers::scene` into a `map::Map`, with `--scene <DIR>` for
 another directory; the editor's shipped vocabulary registers `Waypoint` and
 `Plot`. `Map::new` refuses, by name (`map::MapError`): fewer than two corners or
-more than `MAX_WAYPOINTS`, a corner or plot off the ground or off the field, a
-leg that is diagonal or no longer than the lane is wide, no plots or more than
-`MAX_PLOTS`, a plot within `PLOT_CLEARANCE` of the lane, a plot out of
-`SHORTEST_RANGE_M` of it; the loader also refuses two corners with one `order`.
+more than `MAX_WAYPOINTS`, a corner or plot with a coordinate that is not
+finite, off the ground or off the field, a leg that is diagonal or no longer
+than the lane is wide, no plots or more than `MAX_PLOTS`, a plot within
+`PLOT_CLEARANCE` of the lane, a plot out of `SHORTEST_RANGE_M` of it; the loader
+also refuses two corners with one `order`.
 
 **Not checked, deliberately left for when a map that needs it exists** (each
 would be a new `MapError` variant and a test; none is reachable from the
@@ -17450,6 +17446,21 @@ committed field):
 - **`game::RenderState`'s per-plot arrays are `MAX_PLOTS` wide** rather than the
   map's width, because it is a `Copy` snapshot taken each draw; the GPU pools
   and `Stats::plots` are the map's own width.
+- **A coordinate that is not finite has one rule, `map::footing`, and the wire
+  defers to it (decided 2026-10-05).** RON spells `NaN`, `inf`, `+inf` and
+  `-inf` as floats and ron 0.12 reads each as that value, so a `.scn/` file can
+  carry one; the row rule (`Waypoint`'s and `Plot`'s `Validate`, which call
+  `footing`) refuses it as the chunk is read, by key, line and field, and
+  `Map::new` and `Path::new` call the same `footing` first in each row, as
+  `MapError::NotFinite` naming the point, so no comparison sees a `NaN`.
+  `Map::from_wire` had its own check, `MapWireError::NotFinite`; it is gone, and
+  a non-finite coordinate on the wire is
+  `MapWireError::Map(MapError::NotFinite)` — the wire reads nothing off a
+  coordinate before `Map::new`, so the second copy guarded nothing and could
+  only drift. Tests:
+  `map::tests::a_coordinate_that_is_not_finite_is_refused_by_the_point`,
+  `map::wire::tests::a_coordinate_that_is_not_finite_is_refused` and
+  `scene::tests::a_row_that_breaks_its_own_rule_is_refused_on_load_by_line_and_field`.
 - **A creep caches its centre and heading** (`Creep::spawn` and `Creep::advance`
   take the path), so towers and the frame ask a creep where it is without the
   path. The values are identical to the old per-call reading: both are the same
