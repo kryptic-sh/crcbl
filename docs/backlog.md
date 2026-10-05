@@ -12150,6 +12150,13 @@ ms ± 15 ms: no late input in a 16 s run; the test's bound is 1%) and
 
 ### ECS access declarations and the parallel schedule (2026-08-27)
 
+**The next slice was started and stopped (2026-10-05):** branch
+`feat/ecs-parallel` (commit `9c734ab4`, on origin) has a draft
+`crcbl bench --scenario ecs` and the start of `crcbl sim --threads`, neither
+through the check chain, and no parallel runner. The plan for it is the deferred
+list below: the bench and `sim --threads` first, then a staged runner on
+`crcbl-jobs` only if `hash_state` is identical across thread counts.
+
 **Built (2026-10-05): the declaration, the conflict graph and the debug assert,
 designed together. Execution is still serial.** `crcbl_ecs::SystemTrait::access`
 (required) answers an `Access` of the `Shared` resources a system's tick reads
@@ -17128,7 +17135,11 @@ all name it. The decisions, each recorded so it is not re-argued:
   live would read nothing on a re-simulation until the recording carries it, so
   it goes into the record and the module's view in the same change, with a
   recording-format bump. Today game code reaches a peer's player outside the
-  tick, through `Host::player`.
+  tick, through `Host::player`. **A draft was started and stopped
+  (2026-10-05):** branch `feat/replay-players` (commit `53eecce2`, on origin)
+  has recordings and `ClientInputs` partly carrying the player and the
+  re-simulation tests partly updated. It has not compiled through the check
+  chain; read it as a starting point, not as work to merge.
 - **The server-side stash keyed by `PlayerId` (`34-inventory.md`): unblocked,
   not built.** The key exists; the per-server store and its transactions do not.
 - **Per-player voice mute (`32-voip.md`): unblocked, not built.** No voice
