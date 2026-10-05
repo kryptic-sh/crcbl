@@ -384,10 +384,12 @@ impl SaveWriter {
         crcbl_shaders::sha256::sha256(data)
     }
 
-    /// Write the save file atomically through `storage` at `path`.
+    /// Write the save file atomically through `storage` at `path`, answering
+    /// how many bytes the file holds, checksum included — what a storage
+    /// readout shows without reading the file back.
     ///
     /// Uses the project's atomic write pattern (temp + fsync + rename).
-    pub fn write(&self, storage: &dyn StorageSource, path: &Path) -> Result<(), StorageError> {
+    pub fn write(&self, storage: &dyn StorageSource, path: &Path) -> Result<usize, StorageError> {
         let body = self.encode_body()?;
 
         // Checksum covers everything before it.
@@ -396,7 +398,8 @@ impl SaveWriter {
         let mut file_data = body;
         file_data.extend_from_slice(&checksum);
 
-        storage.write(path, &file_data)
+        storage.write(path, &file_data)?;
+        Ok(file_data.len())
     }
 }
 
@@ -799,6 +802,20 @@ impl SaveBacking {
         }
     }
 
+    /// The directory saves go in, for a backing that has one — a debug panel
+    /// names it beside [`label`](Self::label). `None` for saves kept nowhere
+    /// and in a browser, whose store is the origin's and has no path.
+    #[must_use]
+    pub fn root(&self) -> Option<&Path> {
+        match self {
+            Self::None => None,
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Native(store) => Some(store.root()),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(_) => None,
+        }
+    }
+
     /// Where saves go, in the words a debug panel uses.
     #[must_use]
     pub const fn label(&self) -> &'static str {
@@ -847,6 +864,16 @@ mod tests {
         assert_eq!(data.sectors[0].sector_id, SectorId::ZERO);
         assert_eq!(data.sectors[0].snapshot_data, vec![1, 2, 3, 4]);
         assert!(data.checksum_valid);
+    }
+
+    /// **The count `write` answers is the file's length**, checksum and all,
+    /// so a storage readout can show a save's size without reading it back.
+    #[test]
+    fn a_write_answers_the_length_of_the_file_it_wrote() {
+        let storage = MemoryStorage::new();
+        let path = Path::new("sized.crb");
+        let written = make_sample_save().write(&storage, path).unwrap();
+        assert_eq!(written, storage.read(path).unwrap().len());
     }
 
     #[test]

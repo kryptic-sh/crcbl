@@ -7,7 +7,11 @@ use crcbl::core::input::KeyCode;
 use crcbl::engine::{ExitReason, Flow};
 use crcbl::shell::HeadlessShell;
 
-use super::tests::{frames, headless, in_a_lobby, joined, lobby_row, loopback_host, scripted, tap};
+use crcbl::save::SaveTrigger;
+
+use super::tests::{
+    frames, headless, headless_with, in_a_lobby, joined, lobby_row, loopback_host, scripted, tap,
+};
 use super::{Loop, Options, resume};
 use crate::game::GameError;
 use crate::map::Map;
@@ -43,6 +47,11 @@ fn s_saves_between_waves_and_is_refused_while_a_wave_comes_in() {
         "the build phase did not save"
     );
     assert!(file.is_file(), "the save is not in the file");
+    assert_eq!(
+        engine.game().desk().last_trigger(),
+        Some(SaveTrigger::Input),
+        "the key's save did not go through the one save path"
+    );
     std::fs::remove_file(&file).expect("the save this test wrote");
 
     tap(&mut engine, KeyCode::KeyN);
@@ -82,6 +91,38 @@ fn a_waves_end_is_autosaved_by_the_running_game() {
         .expect("the autosave this run wrote")
         .expect("a save is there");
     assert_eq!(saved.wave(), 1, "the autosave is not the first wave's end");
+    assert_eq!(
+        engine.game().desk().last_trigger(),
+        Some(SaveTrigger::Autosave),
+        "the autosave did not go through the one save path"
+    );
+}
+
+/// **The debug console's `save` reaches the one save path, slot and all**: a
+/// `save slot2` run at boot writes the slot's file beside the player's — and
+/// not the player's — the save resumes, and the desk records the console as
+/// what asked.
+#[test]
+fn the_consoles_save_writes_the_named_slot_through_the_one_path() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let mut engine = scripted(&headless_with(4000, |common| {
+        common.exec = vec!["save slot2".to_owned()];
+    }));
+    engine.game_mut().vault = Vault::at(dir.path().to_path_buf(), PLAYER_FILE);
+    frames(&mut engine, 1);
+
+    assert!(
+        !dir.path().join(PLAYER_FILE).exists(),
+        "the slot's save went to the player's own file"
+    );
+    let slot = Vault::at(dir.path().to_path_buf(), "towers-run-slot2.crb")
+        .load(&Map::built_in())
+        .expect("the slot's save reads back");
+    assert_eq!(slot.map(|saved| saved.wave()), Some(0));
+    assert_eq!(
+        engine.game().desk().last_trigger(),
+        Some(SaveTrigger::Console)
+    );
 }
 
 /// **`--resume` opens on the saved run, and refuses to start without one** —

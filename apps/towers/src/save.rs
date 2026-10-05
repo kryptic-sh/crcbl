@@ -56,6 +56,17 @@
 //! [`SaveHeader::tick`] and [`SaveHeader::playtime_secs`] exactly, so the
 //! payload does not carry them a second time.
 //!
+//! # Every trigger, one writer
+//!
+//! [`write_run`] is the one place a run is written, and every trigger
+//! reaches it through the engine's [`SaveDesk`] (`crcbl::save`): `S`, the
+//! debug console's `save`, the autosave at a wave's end and the close in a
+//! window, and `save` and the autosave on a dedicated server's console. A
+//! named slot — `save slot2` — is a file beside the game's own,
+//! `towers-run-slot2.crb` for a player and `towers-server-slot2.crb` for a
+//! server. **Nothing reads a named slot back yet**: *Continue*, `--resume`
+//! and the server's `load` read the game's own file.
+//!
 //! # The payload's bytes
 //!
 //! Little-endian throughout, each float as its `f64` bits, each count a
@@ -118,6 +129,7 @@ use std::path::Path;
 
 use crcbl::core::TickId;
 use crcbl::net::types::SectorId;
+use crcbl::save::{SaveDesk, SaveFailure, SaveRequest, Saved};
 use crcbl::store::save::{SaveBacking, SaveHeader, SaveReader, SaveWriter, SectorSave};
 use crcbl::store::{StorageError, StorageSource};
 
@@ -247,19 +259,66 @@ impl Vault {
     /// [`SaveError::Nowhere`] for saves kept nowhere, and
     /// [`SaveError::Unwritten`] for a write the backend refused.
     pub fn store(&self, checkpoint: &Checkpoint) -> Result<(), SaveError> {
+        self.store_as(self.file, checkpoint).map(drop)
+    }
+
+    /// [`Vault::store`] into `file` in the same place, answering how long
+    /// the file is.
+    fn store_as(&self, file: &str, checkpoint: &Checkpoint) -> Result<usize, SaveError> {
         let Some(source) = self.backing.source() else {
             return Err(SaveError::Nowhere);
         };
-        write(source, Path::new(self.file), checkpoint)
+        write(source, Path::new(file), checkpoint)
+    }
+
+    /// The desk this vault's saves go through, naming where they go.
+    #[must_use]
+    pub fn desk(&self) -> SaveDesk {
+        SaveDesk::over(&self.backing)
     }
 }
 
-/// Writes `checkpoint` to `path` in `source`, in the container.
+/// **Towers' one save writer**: the run `checkpoint` holds, written into
+/// `vault` where `request` names — its own file, or the named slot's beside
+/// it. Every trigger reaches it through a [`SaveDesk`]: the player's key, the
+/// console's `save`, the autosave at a wave's end and the close
+/// (`crate::app`), and a dedicated server's console and autosave
+/// (`crate::lan::serve`).
+///
+/// # Errors
+///
+/// [`SaveFailure::Refused`] with the player's words for a stage that cannot
+/// be saved now ([`NotSaved::label`]), [`SaveFailure::Nowhere`] for saves
+/// kept nowhere, and [`SaveFailure::Failed`] for a write the backend refused.
+pub fn write_run(
+    vault: &Vault,
+    checkpoint: Result<Checkpoint, NotSaved>,
+    request: &SaveRequest,
+) -> Result<Saved, SaveFailure> {
+    let checkpoint = checkpoint.map_err(|not| SaveFailure::Refused(not.label().to_owned()))?;
+    let file = request.file_name(vault.file);
+    let bytes = vault
+        .store_as(&file, &checkpoint)
+        .map_err(|error| match error {
+            SaveError::Nowhere => SaveFailure::Nowhere,
+            error => SaveFailure::Failed(error.to_string()),
+        })?;
+    Ok(Saved {
+        file,
+        tick: TickId::from_raw(checkpoint.ticks),
+        playtime_secs: checkpoint.elapsed,
+        bytes,
+        summary: format!("wave {}/{}", checkpoint.wave, crate::wave::WAVES.len()),
+    })
+}
+
+/// Writes `checkpoint` to `path` in `source`, in the container, answering
+/// how long the file is.
 fn write(
     source: &dyn StorageSource,
     path: &Path,
     checkpoint: &Checkpoint,
-) -> Result<(), SaveError> {
+) -> Result<usize, SaveError> {
     let mut writer = SaveWriter::new(SaveHeader::new(
         TickId::from_raw(checkpoint.ticks),
         checkpoint.elapsed,

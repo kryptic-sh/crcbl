@@ -56,11 +56,12 @@
 //! arrows are the camera's until the overhead view is back. Nothing the camera
 //! does reaches a [`Controls`] frame.
 //!
-//! # Saving is the player's key, the wave's end and the close
+//! # Saving is the player's key, the console, the wave's end and the close
 //!
-//! `S` saves the run, each wave's end is saved on its own, and so is the run
-//! as its window closes — all through [`Game::checkpoint`] into this run's
-//! [`Vault`], which is nowhere for a headless run — and `S` is refused, on the
+//! `S` saves the run, so does the debug console's `save`, each wave's end is
+//! saved on its own, and so is the run as its window closes — all through the
+//! one save path, [`HostedGame::save`], into this run's [`Vault`], which is
+//! nowhere for a headless run — and `S` is refused, on the
 //! page as a notice, while a wave is coming in. A joiner's `S` is refused too:
 //! the run is its host's. A close mid-wave keeps the last save rather than
 //! write one a save cannot hold; see `Towers::save_on_close`.
@@ -97,6 +98,7 @@ use crate::page::PageStats;
 use crate::save::Vault;
 use crate::tower;
 use crate::wave::Outcome;
+use crcbl::save::{SaveDesk, SaveFailure, SaveRequest, SaveTrigger, Saved};
 
 pub use crate::args::Options;
 
@@ -258,6 +260,10 @@ fn built_in_the_summary(built_by_kind: &[u64; tower::KINDS]) -> String {
 /// key just pressed.
 const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Why a save is refused while the lobby or a joining panel is up, in the
+/// words [`crate::game::NotSaved`] uses for the stage's own refusals.
+const NOTHING_PLAYED: &str = "NO RUN IS BEING PLAYED";
+
 // ---- summary -----------------------------------------------------------------
 
 /// What a finished run reports.
@@ -351,6 +357,9 @@ pub struct Towers {
     /// Where this run's saves go: nowhere for a headless run, which is what
     /// keeps the test suite and CI out of a real data directory.
     vault: Vault,
+    /// What every save this run took went through — see
+    /// [`HostedGame::save`] — and the F3 panel's "storage" section.
+    desk: SaveDesk,
     /// The field's sounds and the device they play on — `None` on a headless
     /// run, which opens no device and plays nothing. See [`crate::audio`].
     audio: Option<Audio>,
@@ -494,16 +503,9 @@ impl Towers {
     /// it: saved, or why not — a wave coming in, a finished run, a joiner,
     /// nowhere to keep it.
     fn save_now(&mut self) {
-        let line = match self.game.checkpoint() {
-            Err(not) => format!("NOT SAVED: {}", not.label()),
-            Ok(checkpoint) => match self.vault.store(&checkpoint) {
-                Ok(()) => format!(
-                    "SAVED: WAVE {}/{}",
-                    checkpoint.wave(),
-                    crate::wave::WAVES.len()
-                ),
-                Err(error) => format!("NOT SAVED: {error}"),
-            },
+        let line = match self.save(SaveRequest::new(SaveTrigger::Input)) {
+            Ok(saved) => format!("SAVED: {}", saved.summary.to_uppercase()),
+            Err(failure) => format!("NOT SAVED: {failure}"),
         };
         crcbl::log::info!("towers: {line}");
         self.notice = Some((line, NOTICE_FOR));
@@ -513,19 +515,18 @@ impl Towers {
     /// after it. Quiet on the page — the wave's end is the player's moment,
     /// not a notice's — and logged, so a run says which waves it kept.
     fn autosave(&mut self) {
-        let Some(checkpoint) = self.game.wave_end() else {
+        if self.game.wave_end().is_none() {
             return;
-        };
-        match self.vault.store(&checkpoint) {
-            Ok(()) => crcbl::log::info!(
-                "towers: autosaved the end of wave {}/{} ({})",
-                checkpoint.wave(),
-                crate::wave::WAVES.len(),
+        }
+        match self.save(SaveRequest::new(SaveTrigger::Autosave)) {
+            Ok(saved) => crcbl::log::info!(
+                "towers: autosaved the end of {} ({})",
+                saved.summary,
                 self.vault.where_it_goes()
             ),
             // A run that keeps nothing saves in name only, as shard's does.
-            Err(crate::save::SaveError::Nowhere) => {}
-            Err(error) => crcbl::log::warn!("towers: the autosave failed: {error}"),
+            Err(SaveFailure::Nowhere) => {}
+            Err(failure) => crcbl::log::warn!("towers: the autosave failed: {failure}"),
         }
     }
 
@@ -547,23 +548,25 @@ impl Towers {
         if !asked || self.in_front() {
             return;
         }
-        match self.game.checkpoint() {
-            Err(not) => crcbl::log::info!(
-                "towers: closed without saving ({}); the last save stands",
-                not.label()
+        match self.save(SaveRequest::new(SaveTrigger::Close)) {
+            Err(SaveFailure::Refused(why)) => {
+                crcbl::log::info!("towers: closed without saving ({why}); the last save stands");
+            }
+            Ok(saved) => crcbl::log::info!(
+                "towers: saved {} on close ({})",
+                saved.summary,
+                self.vault.where_it_goes()
             ),
-            Ok(checkpoint) => match self.vault.store(&checkpoint) {
-                Ok(()) => crcbl::log::info!(
-                    "towers: saved wave {}/{} on close ({})",
-                    checkpoint.wave(),
-                    crate::wave::WAVES.len(),
-                    self.vault.where_it_goes()
-                ),
-                // A run that keeps nothing saves in name only, as the autosave.
-                Err(crate::save::SaveError::Nowhere) => {}
-                Err(error) => crcbl::log::warn!("towers: the save on close failed: {error}"),
-            },
+            // A run that keeps nothing saves in name only, as the autosave.
+            Err(SaveFailure::Nowhere) => {}
+            Err(failure) => crcbl::log::warn!("towers: the save on close failed: {failure}"),
         }
+    }
+
+    /// What the console's storage section and this crate's tests read: the
+    /// desk every save went through.
+    pub const fn desk(&self) -> &SaveDesk {
+        &self.desk
     }
 
     /// The simulation, for scripted tests and for an embedder that drives it.
@@ -977,6 +980,7 @@ fn assemble<S: Shell + ?Sized>(
                 crate::lobby::Lobby::on_the_lan(crate::lan::SESSION, options.common.tick_hz)
                     .offering(vault.load(&options.map))
             }),
+            desk: vault.desk(),
             vault,
             #[cfg(not(target_arch = "wasm32"))]
             joining,
@@ -1391,6 +1395,7 @@ impl HostedGame for Towers {
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.stats);
         panel.add(&self.paths);
+        panel.add(&self.desk);
         panel.add(&self.dev_camera);
         if let Some(audio) = &self.audio {
             panel.add(audio);
@@ -1411,6 +1416,21 @@ impl HostedGame for Towers {
 
     fn exiting(&mut self, exit: ExitReason) {
         self.save_on_close(exit);
+    }
+
+    /// **Towers' one save path**: the run, between waves, into this run's
+    /// vault through [`crate::save::write_run`] — for `S`, the console's
+    /// `save`, the autosave at a wave's end and the close alike. Refused
+    /// while the lobby or a joining panel is up, because the game under it
+    /// never ticked and would write a fresh run over the saved one.
+    fn save(&mut self, request: SaveRequest) -> Result<Saved, SaveFailure> {
+        if self.in_front() {
+            return Err(SaveFailure::Refused(NOTHING_PLAYED.to_owned()));
+        }
+        let checkpoint = self.game.checkpoint();
+        self.desk.take(request, |request| {
+            crate::save::write_run(&self.vault, checkpoint, request)
+        })
     }
 
     /// The mixer the console's `[engine.audio]` keys move — refused, as the
@@ -1520,7 +1540,7 @@ mod tests {
     }
 
     /// …with one knob turned.
-    fn headless_with(frames: u64, tweak: impl FnOnce(&mut Common)) -> Options {
+    pub(super) fn headless_with(frames: u64, tweak: impl FnOnce(&mut Common)) -> Options {
         let mut common = headless_common(crate::game::DEFAULT_TICK_HZ, frames);
         tweak(&mut common);
         Options {
@@ -2568,7 +2588,8 @@ mod tests {
     /// No network module and no audio one: this sample has neither system, and
     /// a panel that showed a row for either would be the overlay inventing
     /// state rather than reporting it. The camera's is there in every mode,
-    /// saying which camera the frame is drawn from.
+    /// saying which camera the frame is drawn from, and so is the save path's
+    /// storage section.
     #[test]
     fn the_overlay_is_composed_of_exactly_the_modules_towers_has() {
         let mut engine = scripted(&headless_with(8, |common| {
@@ -2584,9 +2605,11 @@ mod tests {
             .map(crcbl::ui::DebugSection::title)
             .collect();
         let expected: &[&str] = if engine.gpu().timings().is_some() {
-            &["frame", "gpu", "counters", "towers", "paths", "camera"]
+            &[
+                "frame", "gpu", "counters", "towers", "paths", "storage", "camera",
+            ]
         } else {
-            &["frame", "counters", "towers", "paths", "camera"]
+            &["frame", "counters", "towers", "paths", "storage", "camera"]
         };
         assert_eq!(titles, expected, "no module appears that no system offered");
 

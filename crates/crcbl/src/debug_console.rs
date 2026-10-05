@@ -61,6 +61,7 @@ use crcbl_ui::tree::{ClipboardRequest, TextInput};
 use crcbl_ui::{FontAtlas, PointerInput, UiState, draw_list::DrawList};
 
 use crate::engine::SettingsSource;
+use crate::save::{SaveRequest, SaveTrigger};
 use crate::settings::{ConsoleHost, SharedSettings};
 
 /// Cycles the panel's own level filter, while the console is open.
@@ -147,6 +148,11 @@ pub struct EngineLink {
     /// ([`HostedGame::submit_sim_set`](crate::engine::HostedGame::submit_sim_set)).
     /// A queue for [`Self::binds`]' reason.
     pub(crate) sim_sets: Vec<SimSet>,
+    /// The saves `save` asked for since the loop last looked, in order, for
+    /// it to hand to the game's one save path
+    /// ([`HostedGame::save`](crate::engine::HostedGame::save)). A queue for
+    /// [`Self::binds`]' reason: `save; save slot2` is two saves.
+    pub(crate) saves: Vec<SaveRequest>,
 }
 
 impl EngineLink {
@@ -161,10 +167,12 @@ impl EngineLink {
             frame_ms: 0.0,
             binds: Vec::new(),
             sim_sets: Vec::new(),
+            saves: Vec::new(),
         }
     }
 
-    /// The name `save` writes the settings file under, if this run has one.
+    /// The name `writeconfig` writes the settings file under, if this run has
+    /// one.
     #[must_use]
     pub fn app_name(&self) -> Option<&str> {
         self.app_name.as_deref()
@@ -194,6 +202,11 @@ impl EngineLink {
     /// Every simulation set typed since the loop last looked, in order.
     pub fn take_sim_sets(&mut self) -> Vec<SimSet> {
         std::mem::take(&mut self.sim_sets)
+    }
+
+    /// Every save typed since the loop last looked, in order.
+    pub fn take_saves(&mut self) -> Vec<SaveRequest> {
+        std::mem::take(&mut self.saves)
     }
 }
 
@@ -251,6 +264,31 @@ crcbl_console::concommand! {
         Ok(())
     }
 }
+
+crcbl_console::concommand! {
+    /// Save the game, in its own slot or in the one named: `save`, `save slot2`.
+    pub fn save(cx, args) {
+        let request = SaveRequest::from_args(SaveTrigger::Console, args).map_err(Fault::new)?;
+        link(cx.host_mut()).saves.push(request);
+        Ok(())
+    }
+}
+
+/// The settings file's `save`, under the name Source gives it,
+/// `writeconfig` — so that `save` is the game's.
+///
+/// **Listed under a name its declaration does not carry**: the command is
+/// declared as `crate::settings::save`, and `concommand!` names a command after
+/// its ident. Renaming that ident is the clean form; it waits on the settings
+/// module's open work landing (`docs/backlog.md`, _One save path_), and until
+/// then this is the same help and the same body under the console name.
+#[allow(non_upper_case_globals, reason = "the ident is the console name")]
+pub static writeconfig: crcbl_console::ConCommand = {
+    fn run(cx: &mut Context<'_>, args: &[&str]) -> Result<(), Fault> {
+        crate::settings::save.run(cx, args)
+    }
+    crcbl_console::ConCommand::new("writeconfig", crate::settings::save.help(), run)
+};
 
 crcbl_console::concommand! {
     /// Print the last frame's rate and wall time.
@@ -530,7 +568,7 @@ impl Console {
     /// that runs its own loop.
     ///
     /// **One boot, so a host outside `Loop` cannot drift from it.** Which
-    /// settings a console edits, whether `save` may write them, which tables it
+    /// settings a console edits, whether `writeconfig` may write them, which tables it
     /// gathers and the order the boot lines run in are each a policy `Loop`
     /// settles, and a game with its own runner would otherwise re-derive every
     /// one of them:
@@ -540,7 +578,7 @@ impl Console {
     ///   two copies of it, and otherwise the file `source` opens, writable so
     ///   that a console on a run with no file is not read-only.
     /// - It saves as `app_name` unless `source` is [`SettingsSource::None`]: a
-    ///   run with nothing to read has nowhere to save, and `save` says so
+    ///   run with nothing to read has nowhere to save, and `writeconfig` says so
     ///   rather than writing into whichever home directory a golden run
     ///   executes in.
     /// - `autoexec.cfg` runs before `exec`, so what was typed for this run wins
@@ -1238,7 +1276,7 @@ mod tests {
             SettingsSource::None,
             None,
             [Table::new(&[], &[], COMMANDS)],
-            &["boot_ping".to_owned(), "save".to_owned()],
+            &["boot_ping".to_owned(), "writeconfig".to_owned()],
         );
 
         let printed: Vec<String> = logs

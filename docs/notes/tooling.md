@@ -705,8 +705,8 @@ built plan is deleted: the numbers live here, every citation outside
   so a host with no renderer says so rather than passing. `Stage` is its own
   trait because `GameGpu` is `Sized` (it takes `self` in `destroy`) and has no
   `dyn`, and because a key reaches more than a renderer. **Settings are not
-  saved on exit**: `save` writes the file, so a debug session that flips twenty
-  variables never silently becomes the player's file — the same call
+  saved on exit**: `writeconfig` writes the file, so a debug session that flips
+  twenty variables never silently becomes the player's file — the same call
   `apps/options` made. **The console's writes are deferred**: a `Binding`
   reaches its host as `&mut dyn Any`, which cannot hold a borrow of the renderer
   or the mixer, so `ConsoleHost` records into `settings::Deferred` and
@@ -743,14 +743,15 @@ built plan is deleted: the numbers live here, every citation outside
   contact has arrived, `PauseControl`'s rule.
 - **Decision 7 — the commands, each declared by the crate that owns it.** The
   built-ins are `help`, `find`, `echo`, `clear`, `toggle` and `reset`
-  (`crcbl-console`'s `builtin.rs`); `pause`, `quit`, `fps`, `save`, `dump`,
-  `config`, `bind`/`unbind`, `debug_view` and `quality` are in `crcbl`, and
-  `log` in `crcbl-core`. A set is `name value` or `name = value`. **An enum
-  value may hold a space** (`debug_view ambient occlusion`), so a set joins
-  everything after the name and completion treats the rest of the line as one
-  token; a per-token "simplification" breaks it. **A bare `reset` skips every
-  `ARCHIVE` variable**, so a debug session cannot empty the player's settings
-  file. A `Fault` prints and leaves state alone.
+  (`crcbl-console`'s `builtin.rs`); `pause`, `quit`, `fps`, `save`,
+  `writeconfig`, `dump`, `config`, `bind`/`unbind`, `debug_view` and `quality`
+  are in `crcbl`, and `log` in `crcbl-core`. A set is `name value` or
+  `name = value`. **An enum value may hold a space**
+  (`debug_view ambient occlusion`), so a set joins everything after the name and
+  completion treats the rest of the line as one token; a per-token
+  "simplification" breaks it. **A bare `reset` skips every `ARCHIVE` variable**,
+  so a debug session cannot empty the player's settings file. A `Fault` prints
+  and leaves state alone.
 - **Decision 8 — one debug-view variable, declared in `crcbl`, and the loop is
   the only writer of a renderer's view.** `crcbl::debug_view`'s `r_debug_view`
   lives beside `GameGpu::set_debug_view`, the only seam that can apply it, not
@@ -1005,14 +1006,21 @@ limits rather than fixed:
   `FrameClock::render_dt_secs` once a frame, so the number is the wall time
   between frames; the per-pass GPU timings the debug overlay shows are not in
   it.
-- **`save` writes nothing in a headless run, and says so; the browser path is
-  unexercised.** `ConsoleHost::saving_as` is set for every arm but
-  `SettingsSource::None`, and `save` goes through
+- **`save` is the game's and `writeconfig` writes the settings file**
+  (2026-10-05). `save [SLOT]` hands a `crcbl::save::SaveRequest` to the game's
+  one save path (`HostedGame::save`) and prints where it landed or why not; the
+  settings command took Source's name so the shorter word could be the game's.
+  It is `crate::settings::save` listed under that name, until its ident is
+  renamed (`docs/backlog.md`, _One save path: `crcbl::save`_).
+- **`writeconfig` writes nothing in a headless run, and says so; the browser
+  path is unexercised.** `ConsoleHost::saving_as` is set for every arm but
+  `SettingsSource::None`, and `writeconfig` goes through
   `SettingsStack::save_platform`. A headless run gets a stack over
   `crcbl_store::MemoryStorage` — `SettingsSource::open_editable`, writable, so
-  every variable is still settable — and no name, so `save` faults with "nowhere
-  to save to". A browser run _is_ `Platform`, so it saves through whatever OPFS
-  store the page installed, and that path has not been exercised by any gate.
+  every variable is still settable — and no name, so `writeconfig` faults with
+  "nowhere to save to". A browser run _is_ `Platform`, so it saves through
+  whatever OPFS store the page installed, and that path has not been exercised
+  by any gate.
 - **Nothing stops a game handing the loop a second stack after start-up.**
   `HostedGame::settings` is asked once, by `Loop::new`, and a game that replaced
   its own `SharedSettings` afterwards would be back to two writers with nothing

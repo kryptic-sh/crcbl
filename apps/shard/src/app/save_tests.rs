@@ -207,10 +207,44 @@ fn the_autosave_writes_once_a_period_and_never_before_the_first() {
         written[0].centre, written[1].centre,
         "the walk went nowhere, so a first save left in place would pass for a second"
     );
+    assert_eq!(
+        engine.game().desk.last_trigger(),
+        Some(crcbl::save::SaveTrigger::Autosave),
+        "the autosave did not go through the one save path"
+    );
     let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
     assert_eq!(
         summary.saves, PERIODS,
         "the summary lost count of the writes"
     );
+    std::fs::remove_dir_all(&dir).expect("the scratch directory is this test's");
+}
+
+/// **A save the game refuses reaches the console that asked**: a `save`
+/// run at boot, before this session's first tick, is refused by shard's one
+/// save path, the console prints why, and nothing is written or counted.
+#[test]
+fn a_console_save_the_game_refuses_is_printed_and_writes_nothing() {
+    let dir = scratch("console-refused");
+    let mut options = headless(4_000);
+    options.common.exec = vec!["save".to_owned()];
+    let logs = crcbl::core::log::capture();
+    let mut engine = scripted(&options);
+    engine.game_mut().vault = Vault::at(dir.clone());
+    frames(&mut engine, 1);
+
+    let printed: Vec<String> = logs
+        .records()
+        .into_iter()
+        .map(|record| record.message)
+        .collect();
+    assert!(
+        printed
+            .iter()
+            .any(|line| line == "not saved: nothing has been played this session yet"),
+        "the refusal never reached the console: {printed:?}"
+    );
+    assert!(files_in(&dir).is_empty(), "a refused save wrote a file");
+    assert_eq!(engine.game().saves(), 0, "a refused save was counted");
     std::fs::remove_dir_all(&dir).expect("the scratch directory is this test's");
 }

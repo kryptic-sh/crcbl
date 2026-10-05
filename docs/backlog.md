@@ -15643,15 +15643,15 @@ the `FormatError` text a game shows. What binds:
   directory and created none. Linux and macOS have no verdict.
 
 **The exit criterion "Same game code path for autosave, manual save, console
-`save`, CLI save" is still not met, and `crcbl save` does not change that.** The
-verb reads saves; it does not take one, so "CLI save" as a trigger does not
-exist. What exists: games calling `SaveWriter` through their own `Vault`
-(towers' `S` key, its autosave at a wave's end and its dedicated server's `save`
-line; shard's store), and `AutosaveRing`, which no game uses. What the CLI does
-cover is the read half: a save is now reached from outside the game process,
-through the reader the game uses, so a file the game would refuse is refused
-here by the same text. Taking a save from outside a running game waits on _One
-save path: `Command::Save`_.
+`save`, CLI save" is met for three of its four triggers (2026-10-05).**
+Autosave, the manual save (towers' `S`) and the console's `save` — the debug
+console's and towers' dedicated server's — reach one writer per game through
+`crcbl::save::SaveDesk` (_One save path: `crcbl::save`_). **CLI save is not
+met**: the verb reads saves and takes none, and a save of a running process from
+the CLI is deferred there with what it would take. What the CLI does cover is
+the read half: a save is reached from outside the game process, through the
+reader the game uses, so a file the game would refuse is refused here by the
+same text.
 
 ### Browser persistence: atomicity, IndexedDB fallback, quota (2026-08-27)
 
@@ -15762,21 +15762,79 @@ the decision _The settings catalogue's named keys have no reader_ records.
 same reason: no seam re-modes a live window and reports what the window system
 did.
 
-### One save path: `Command::Save` (2026-09-24)
+### One save path: `crcbl::save` (2026-09-24, built 2026-10-05 but for the CLI)
 
-**Not built.** The persistence rules make saving a server command
-(`Command::Save`) so the console's `save`, `crcbl save`, a game's UI button and
-the autosave timer take one path. The triggers that exist are games calling
-`SaveWriter` themselves — `apps/shard`'s `Vault::store`, and `apps/towers`'
-`Vault::store` from its `S` key, its autosave at a wave's end and its dedicated
-server's `save` console line — and `AutosaveRing`. Towers' server console is the
-first `save` typed at a process, but it is the sample's own stdin reader, not
-`Command::Save`. `crcbl save` (2026-10-05) reads saves from outside the game
-process but takes none, so nothing outside a game can make it save. It depends
-on server-side command handling.
+**Built 2026-10-05.** Every in-process trigger reaches one writer per game:
+`crcbl::save::SaveDesk::take` runs the game's writer (`apps/towers`'
+`save::write_run`, `apps/shard`'s `save::write_character`) and records the
+outcome, and `crcbl::engine::HostedGame::save` is the method a windowed game
+routes through. The decisions, so they are not re-argued:
 
-**Also owed with it:** a storage section in the debug panel showing the storage
-paths, file sizes, the last save's tick and the autosave ring's state.
+- **No `Command::Save` enum; a `HostedGame` method and a desk instead.** There
+  is no server command queue to put it on — `crcbl-server` has no command enum,
+  and the only client-to-server command kind is `CONSOLE_SET_KIND` — and the
+  games' saves are not the server world's (towers' stage sits behind a lock,
+  shard runs no server at all). The method has a default that refuses
+  (`SaveFailure::Unsupported`), as `submit_sim_set` does, so the other samples
+  are unchanged.
+- **The console's `save` is queued; a game's own triggers call the method where
+  they arise.** `save [SLOT]` records a `SaveRequest` on `EngineLink` and
+  `Loop::drain_saves` hands it over before the frame's ticks, printing
+  `crcbl::save::console_line`. The key, the autosave and the close call
+  `HostedGame::save` themselves, because a queued autosave would write a later
+  tick than the one it came due on: shard writes the state its `[HUD]` line
+  reports on the same tick, and the browser gate compares the two.
+- **The settings file's console command is `writeconfig` (Source's name), so
+  `save` is the game's.** It is the same `crate::settings::save` listed under
+  another name by `crcbl::debug_console::writeconfig`, because `concommand!`
+  names a command after its ident and `crates/crcbl/src/settings*` belonged to
+  another branch's open work (apply-on-confirm) when this landed. **Owed:**
+  rename that ident to `writeconfig` in `crates/crcbl/src/settings/console.rs`,
+  drop the wrapper, and reword that file's docs, which still say `save`.
+- **A slot is a bare name and a file beside the game's own** —
+  `Slot::file_name`, `towers-run.crb` → `towers-run-slot2.crb` — held to the
+  console `config` rule (`console_config::is_bare_name`) because it is typed and
+  becomes a file name. **Not built: reading a named slot back.** _Continue_,
+  `--resume`, shard's start-up and the towers server's `load` read the game's
+  own file only; `load SLOT` and a slot picker are the follow-up.
+- **Autosave writes the game's own slot; no game keeps an `AutosaveRing`.**
+  Towers declined a ring for its own reasons (_One slot a player, one a server_
+  in the towers notes); shard's every-second autosave over one file is the "at
+  most one second of play" bound its docs promise, and a ring of those would
+  hold seconds-apart copies. A game that keeps a ring maps the `Autosave`
+  trigger to `AutosaveRing::write` in its writer; the storage section then needs
+  a ring row (slot and capacity), which is not built because nothing would fill
+  it.
+- **Towers' dedicated server keeps its own stdin console** — `quit` there ends
+  every session with `SHUTTING_DOWN` and `load` swaps a run under the players,
+  neither of which the engine's `crcbl_console::Registry` (whose host is a
+  windowed `Loop`'s `ConsoleHost`) has a place for — but its `save` is read by
+  the engine's grammar (`SaveRequest::from_args`) and goes through
+  `Server::save`, a `SaveDesk` over the player's writer. Running a dedicated
+  server's console through a `Registry` is a separate change that would cover
+  `crcbl edit --serve`'s console too, whose `save` is the scene's and not a game
+  save.
+- **The storage section is the desk's** (`impl DebugModule for SaveDesk`, titled
+  "storage", in towers' and shard's F3 panels): where saves go, the last save's
+  tick, playtime and trigger, each file this run wrote with its length (from
+  `SaveWriter::write`, which now answers it, so no file is read a frame), where
+  the autosave went, and the saves that did not land. Files from earlier runs
+  are not listed; `crcbl save list` reads the directory.
+
+**Deferred: a CLI-triggered save of a running process (`crcbl save` as a
+trigger).** No channel reaches a running game from another process:
+`crcbl-net`'s only command kind is the in-session console set, which needs a
+joined peer's sealed session, and there is no admin socket or RCON. **What it
+would take:** a `SAVE_KIND` command beside `CONSOLE_SET_KIND` with a reply that
+carries the file and tick, a server that routes it to its save path, and a CLI
+that joins as a peer with a connection token — or a local-only admin endpoint
+with its own authentication. Either is a new remote-control surface, and no
+caller needs it yet; a dedicated server's operator types `save` at its console.
+
+**Coverage gaps:** the towers server's autosave goes through `Server::save` but
+no test drives a server to a wave's end (the player's autosave test does);
+shard's console save that lands is not tested (the refusal before the first tick
+is); the browser build's storage section has not been seen.
 
 ### Accessibility settings have no owner (2026-09-24)
 
@@ -17629,7 +17687,8 @@ shown red by a mutation of the rule it guards.
   Both names carry the sample's because every demo shares one OPFS root.
   **Considered and declined:** `AutosaveRing` or a manual slot beside the
   autosave — _Continue_ would have to choose between runs, and a save between
-  waves is small enough to take at every wave.
+  waves is small enough to take at every wave. The console's `save SLOT`
+  (2026-10-05) writes a named slot beside the run, and nothing offers it back.
 - **The autosave's cadence is the wave**: the first tick of each build phase
   after a wave, once per wave (`game::Autosave`), where shard's is simulated
   time. A restored stage's own wave is not written again.
@@ -18628,11 +18687,12 @@ left out:
   and the `[HUD]` heartbeat opening at `tick: 15` — which several browser checks
   read — and it means the demo cannot say "you have played for X" from the
   heartbeat, only from the debug panel's `playtime` row.
-- **Autosave only, no manual save.** `apps/shard/src/menu.rs`'s pause panel has
-  no SAVE row and there is no key bound to one. The persistence rules want
-  console, CLI, UI button and autosave timer to be one path (_One save path:
-  `Command::Save`_); the path exists (`Shard::write` → `Vault::store`) but only
-  the timer and the close call it.
+- **No save key or button.** `apps/shard/src/menu.rs`'s pause panel has no SAVE
+  row and there is no key bound to one. The autosave, the close and the debug
+  console's `save` all go through the one save path (`Shard::save`, _One save
+  path: `crcbl::save`_), so a row or a key is a `SaveRequest` with
+  `SaveTrigger::Input` away; none was added because the one-second autosave
+  leaves a manual save little to do.
 
 ### shard's wasm heap: the ceiling's own figure is stale (2026-09-16)
 

@@ -562,7 +562,7 @@ screen; and `apps/shard`, whose save loads natively and in a browser.
 What it left unbuilt is in `docs/backlog.md` under _Persistence (from the
 deleted 14-persistence plan, 2026-09-24)_: the header's per-system versions and
 thumbnail, saves over `SnapshotWriter`, the game-defaults and CLI layers,
-profiles, `crcbl save restore`, `Command::Save`, apply-on-confirm, browser
+profiles, `crcbl save restore`, a CLI-triggered save, apply-on-confirm, browser
 fallbacks and quota, accessibility settings, and the test matrix.
 
 Code cites the plan as "topic 14". Those resolve here:
@@ -600,7 +600,13 @@ The rules, each with its _why_:
 - **A save is the server's.** Saves capture authoritative state, triggered by a
   server command, so the console, the CLI, a game's button and the autosave
   timer take one path. Single player saves locally; a dedicated server keeps
-  world saves and players hold profiles, not world state.
+  world saves and players hold profiles, not world state. As built
+  (`crcbl::save`), the path is a method rather than a command enum —
+  `HostedGame::save`, through a `SaveDesk` over one writer per game — and every
+  trigger but the CLI takes it: the debug console's `save [SLOT]`, a game's key,
+  the autosave, the close and a dedicated server's console. A game's own
+  triggers call it on the tick they arise, so an autosave writes the tick it
+  came due on.
 - **A save follows the galaxy wire model** (2026-07-27). "Full world state" is
   incoherent past one sector, so a save is a header (versions, scene ref and
   hash, tick, playtime), the sector set it covers, per-sector snapshots from the

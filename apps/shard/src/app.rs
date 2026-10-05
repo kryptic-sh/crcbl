@@ -73,6 +73,7 @@ use crate::menu::{MenuKind, Menus};
 use crate::page::PageStats;
 use crate::panel::{PanelState, PanelStats};
 use crate::save::{SaveStats, Vault};
+use crcbl::save::{SaveDesk, SaveFailure, SaveRequest, SaveTrigger, Saved};
 
 pub use crate::args::Options;
 
@@ -128,6 +129,21 @@ const PANEL_KEY: KeyCode = KeyCode::KeyI;
 /// so it is read off the raw key event on the frame's side of the seam rather
 /// than resolved into a tick's [`Controls`].
 const TORCH_KEY: KeyCode = KeyCode::KeyL;
+
+/// Why a save is refused before this session's first tick — see
+/// `Shard::saveable`.
+const NOTHING_PLAYED: &str = "nothing has been played this session yet";
+
+/// Logs a save that did not land, as the autosave and the close each leave
+/// one: a run that keeps nothing says nothing, and anything else is a
+/// warning, because the state is still in the stage and the next period
+/// tries again.
+fn log_unsaved(failure: &SaveFailure) {
+    match failure {
+        SaveFailure::Nowhere => {}
+        failure => crcbl::log::warn!("save: {failure}"),
+    }
+}
 
 /// The keyboard this sample is played with.
 ///
@@ -298,14 +314,18 @@ pub struct Shard {
     /// Where this run's saves go: nowhere for a headless run, which is
     /// what keeps the test suite and CI out of a real data directory.
     vault: Vault,
+    /// What every save this run took went through — see
+    /// [`HostedGame::save`] — and the F3 panel's "storage" section.
+    desk: SaveDesk,
     /// Whether this run opened from a save.
     ///
     /// Fixed at start-up and never changed after it: a session either resumed or
     /// it did not, and a reading that could move is one the browser gate could
     /// not read off a heartbeat it polled late.
     resumed: bool,
-    /// How many times the character has been written out: the autosaves and
-    /// the save on close, each counted only once the vault accepted it.
+    /// How many times the character has been written out — the autosaves,
+    /// the save on close and the console's `save` — each counted only once
+    /// the vault accepted it.
     saves: u64,
     /// How many ticks apart the autosaves are — [`crate::save::save_ticks`] at
     /// this run's rate.
@@ -472,7 +492,9 @@ impl Shard {
         if !self.saveable() || !self.stats.ticks.is_multiple_of(self.save_ticks) {
             return;
         }
-        self.write();
+        if let Err(failure) = self.save(SaveRequest::new(SaveTrigger::Autosave)) {
+            log_unsaved(&failure);
+        }
     }
 
     /// Writes the character as the window closes, so a close between two
@@ -483,8 +505,8 @@ impl Shard {
     /// told when to stop, and a failed frame may not have left the zone it was
     /// in, so neither writes. Otherwise the rule is the autosave's,
     /// [`Self::saveable`]: any tick's state, and nothing before this session's
-    /// first. A failed write is logged by [`Vault::store`] and the close goes
-    /// on — the loop has already accepted it.
+    /// first. A failed write is logged and the close goes on — the loop has
+    /// already accepted it.
     fn save_on_close(&mut self, exit: ExitReason) {
         let asked = matches!(
             exit,
@@ -493,16 +515,16 @@ impl Shard {
         if !asked {
             return;
         }
-        if !self.saveable() {
-            crcbl::log::info!("shard: closed before the first tick; the last save stands");
-            return;
-        }
-        if self.write() {
-            crcbl::log::info!(
+        match self.save(SaveRequest::new(SaveTrigger::Close)) {
+            Ok(_) => crcbl::log::info!(
                 "shard: saved on close at tick {} ({})",
                 self.stats.ticks,
                 self.vault.where_it_goes()
-            );
+            ),
+            Err(SaveFailure::Refused(_)) => {
+                crcbl::log::info!("shard: closed before the first tick; the last save stands");
+            }
+            Err(failure) => log_unsaved(&failure),
         }
     }
 
@@ -517,19 +539,6 @@ impl Shard {
     /// refused file for nothing played.
     const fn saveable(&self) -> bool {
         self.stats.ticks > 0
-    }
-
-    /// Writes the character out, answering whether the vault accepted it.
-    ///
-    /// Counts accepted writes rather than attempts, so `saves` is what is on
-    /// the disk's side of the seam. [`Vault::store`] is what logs the reason
-    /// for a refusal, and a run that keeps nothing refuses silently.
-    fn write(&mut self) -> bool {
-        let written = self.vault.store(&self.game.snapshot());
-        if written {
-            self.saves += 1;
-        }
-        written
     }
 
     /// What the debug panel says about this run's persistence.
@@ -708,6 +717,7 @@ fn assemble<S: Shell + ?Sized>(
             pointer_down: false,
             pointer_released: false,
             panel: PanelStats::default(),
+            desk: vault.desk(),
             vault,
             resumed,
             saves: 0,
@@ -944,11 +954,31 @@ impl HostedGame for Shard {
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.stats);
         panel.add(&self.save_stats());
+        panel.add(&self.desk);
         panel.add(&self.paths);
     }
 
     fn exiting(&mut self, exit: ExitReason) {
         self.save_on_close(exit);
+    }
+
+    /// **Shard's one save path**: the character, into this run's vault
+    /// through [`crate::save::write_character`] — for the autosave, the close
+    /// and the console's `save` alike — refused before this session's first
+    /// tick (`Shard::saveable`).
+    ///
+    /// Counts accepted writes rather than attempts, so `saves` is what is on
+    /// the disk's side of the seam.
+    fn save(&mut self, request: SaveRequest) -> Result<Saved, SaveFailure> {
+        if !self.saveable() {
+            return Err(SaveFailure::Refused(NOTHING_PLAYED.to_owned()));
+        }
+        let character = self.game.snapshot();
+        let saved = self.desk.take(request, |request| {
+            crate::save::write_character(&self.vault, &character, request)
+        })?;
+        self.saves += 1;
+        Ok(saved)
     }
 
     fn summary(&self, run: RunSummary) -> Summary {
@@ -1324,8 +1354,8 @@ mod tests {
 
     /// **The panel renders with no network module, and it names the paths.** The
     /// sections shard has are the frame's, the GPU's where the device has
-    /// timestamp queries, this sample's own, and rule 12's. Nothing else, and no
-    /// configuration decided that.
+    /// timestamp queries, this sample's own, the save path's, and rule 12's.
+    /// Nothing else, and no configuration decided that.
     #[test]
     fn the_overlay_is_composed_of_exactly_the_modules_shard_has() {
         let mut options = headless(8);
@@ -1341,9 +1371,11 @@ mod tests {
             .map(crcbl::ui::DebugSection::title)
             .collect();
         let expected: &[&str] = if engine.gpu().timings().is_some() {
-            &["frame", "gpu", "counters", "shard", "save", "paths"]
+            &[
+                "frame", "gpu", "counters", "shard", "save", "storage", "paths",
+            ]
         } else {
-            &["frame", "counters", "shard", "save", "paths"]
+            &["frame", "counters", "shard", "save", "storage", "paths"]
         };
         assert_eq!(titles, expected, "no module appears that no system offered");
 

@@ -1307,7 +1307,7 @@ fn quit_at_the_console_tells_every_player_the_server_shut_down() {
     assert!(status.starts_with("towers: 2/4 players"), "{status}");
     assert_eq!(
         unknown,
-        "towers: no command \"frobnicate\"; the commands are status, save, load, quit"
+        "towers: no command \"frobnicate\"; the commands are status, save [SLOT], load, quit"
     );
     assert!(last.starts_with("towers: 0/4 players"), "{last}");
     assert_eq!(last.lines().count(), 1, "a link listed with nobody in");
@@ -1637,6 +1637,41 @@ fn a_dedicated_server_saves_and_loads_its_run_at_the_console() {
         server.stats().wave,
         saved.wave(),
         "an empty server threw the loaded run away"
+    );
+}
+
+/// **`save slot2` at a dedicated server's console goes through the server's
+/// one save path into the slot's own file**, beside the server's file and
+/// never over it, and the save resumes; the desk records the server's console
+/// as what asked.
+#[test]
+fn a_dedicated_servers_save_takes_a_slot_through_its_one_path() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let mut server = saving_server(dir.path(), None);
+    server.frame(FRAME);
+
+    let printed = typed_at(&mut server, &["save slot2"]);
+    assert!(
+        printed[0].starts_with("towers: saved wave 0/"),
+        "{printed:?}"
+    );
+    assert!(
+        !dir.path().join(crate::save::SERVER_FILE).exists(),
+        "the slot's save went to the server's own file"
+    );
+    let slot = Vault::at(dir.path().to_path_buf(), "towers-server-slot2.crb")
+        .load(&Map::built_in())
+        .expect("the slot's save reads back");
+    assert_eq!(slot.map(|saved| saved.wave()), Some(0));
+    assert_eq!(
+        server.desk().last_trigger(),
+        Some(crcbl::save::SaveTrigger::ServerConsole)
+    );
+
+    let printed = typed_at(&mut server, &["save ../elsewhere"]);
+    assert!(
+        printed[0].starts_with("towers: `../elsewhere` is not a slot name"),
+        "{printed:?}"
     );
 }
 

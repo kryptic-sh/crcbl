@@ -6467,6 +6467,35 @@ pub trait HostedGame: Sized {
         )))
     }
 
+    /// This game's one save path: builds its payload and writes it where
+    /// `request` names, through a [`SaveDesk`](crate::save::SaveDesk) — see
+    /// [`crate::save`].
+    ///
+    /// **Every trigger lands here.** The loop calls it for the console's
+    /// `save`, printing what it answers; the game calls it itself for its own
+    /// key or button, its autosave and its close, where each arises, so a
+    /// save asked for on a tick writes that tick's state. A game with a
+    /// dedicated server points the server's console at the same writer.
+    ///
+    /// **The default refuses** with
+    /// [`SaveFailure::Unsupported`](crate::save::SaveFailure::Unsupported), on
+    /// [`submit_sim_set`](Self::submit_sim_set)'s terms: a game that keeps no
+    /// save has nothing to write, and the console says so rather than
+    /// reporting a save nothing took.
+    ///
+    /// # Errors
+    ///
+    /// A [`SaveFailure`](crate::save::SaveFailure) naming why nothing was
+    /// written: this game takes no saves, keeps them nowhere, will not save
+    /// now, or the write failed.
+    fn save(
+        &mut self,
+        request: crate::save::SaveRequest,
+    ) -> Result<crate::save::Saved, crate::save::SaveFailure> {
+        let _ = request;
+        Err(crate::save::SaveFailure::Unsupported)
+    }
+
     /// The settings this game edits, for the console to edit the same ones.
     ///
     /// **A run has one settings file, so it has one stack.** A game with a
@@ -7320,6 +7349,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         self.drain_console();
         self.drain_binds();
         self.drain_sim_sets();
+        self.drain_saves();
         self.apply_debug_view();
         if self.console.host_mut().engine_mut().take_quit() {
             return Ok(Flow::Stop(ExitReason::Quit));
@@ -7929,6 +7959,18 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             if let Err(fault) = self.game.submit_sim_set(set) {
                 crcbl_core::log::console::print(&fault.to_string());
             }
+        }
+    }
+
+    /// Hands every typed `save` to the game's one save path, in the order
+    /// typed, and prints what each came to — the file and tick, or why not.
+    ///
+    /// [`drain_binds`](Self::drain_binds)' shape and reason. Before the
+    /// frame's ticks, so the save is of the state the line was typed over.
+    fn drain_saves(&mut self) {
+        for request in self.console.host_mut().engine_mut().take_saves() {
+            let outcome = self.game.save(request);
+            crcbl_core::log::console::print(&crate::save::console_line(&outcome));
         }
     }
 
@@ -13956,6 +13998,11 @@ mod tests {
         /// Whether this game refuses them, so the loop's printing of a
         /// refusal has a game that gives one.
         refuses_sim_sets: bool,
+        /// Every save the loop handed this game's save path, in order.
+        saves: Vec<crate::save::SaveRequest>,
+        /// What the save path answers instead of a save that landed, when a
+        /// test gives it a failure to surface.
+        save_failure: Option<crate::save::SaveFailure>,
         /// Every reason the loop told this game its run was ending for.
         exits: Vec<ExitReason>,
     }
@@ -14036,6 +14083,27 @@ mod tests {
             }
             self.sim_sets.push(set.to_string());
             Ok(())
+        }
+
+        /// Records the request, and answers a save of `fake.crb` — or of the
+        /// named slot's file beside it — at this game's tick, unless a test
+        /// gave it a failure.
+        fn save(
+            &mut self,
+            request: crate::save::SaveRequest,
+        ) -> Result<crate::save::Saved, crate::save::SaveFailure> {
+            let file = request.file_name("fake.crb");
+            self.saves.push(request);
+            match &self.save_failure {
+                Some(failure) => Err(failure.clone()),
+                None => Ok(crate::save::Saved {
+                    file,
+                    tick: crcbl_core::TickId::from_raw(self.ticks),
+                    playtime_secs: 0.0,
+                    bytes: 1,
+                    summary: "the fake run".to_owned(),
+                }),
+            }
         }
 
         fn menus() -> crcbl_ui::menu::MenuSet<FakeMenu> {
@@ -18442,6 +18510,71 @@ mod tests {
         assert!(engine.game.sim_sets.is_empty());
     }
 
+    /// **A typed `save` reaches the game's one save path, slot and all**, in
+    /// the order typed, and the console prints the file each landed in.
+    #[test]
+    fn a_typed_save_reaches_the_games_save_path_with_its_slot() {
+        use crate::save::{SaveRequest, SaveTrigger, Slot};
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        run_line(&mut engine, "save; save slot2");
+        assert_eq!(
+            engine.game.saves,
+            [
+                SaveRequest::new(SaveTrigger::Console),
+                SaveRequest::new(SaveTrigger::Console)
+                    .in_slot(Slot::new("slot2").expect("a bare name")),
+            ]
+        );
+        let printed = console_lines(&logs);
+        for file in ["fake.crb", "fake-slot2.crb"] {
+            assert!(
+                printed
+                    .iter()
+                    .any(|line| line.starts_with(&format!("saved {file} at tick "))),
+                "no line for {file}: {printed:?}"
+            );
+        }
+    }
+
+    /// **A save the game's path refuses is printed**, its reason and all, so
+    /// the line is not left unanswered and nothing claims a save.
+    #[test]
+    fn a_save_the_game_could_not_take_is_printed() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        engine.game.save_failure = Some(crate::save::SaveFailure::Failed(
+            "the fake disk is full".to_owned(),
+        ));
+        run_line(&mut engine, "save");
+        let printed = console_lines(&logs);
+        assert!(
+            printed
+                .iter()
+                .any(|line| line == "not saved: the fake disk is full"),
+            "the failure went nowhere: {printed:?}"
+        );
+        assert!(
+            !printed.iter().any(|line| line.starts_with("saved ")),
+            "{printed:?}"
+        );
+    }
+
+    /// **A slot that is a path is refused at the console** and never reaches
+    /// the game.
+    #[test]
+    fn a_slot_that_is_a_path_never_reaches_the_game() {
+        let logs = crcbl_core::log::capture();
+        let mut engine = with_console_open();
+        run_line(&mut engine, "save ../elsewhere");
+        assert!(engine.game.saves.is_empty(), "{:?}", engine.game.saves);
+        let printed = console_lines(&logs);
+        assert!(
+            printed.iter().any(|line| line.contains("not a slot name")),
+            "{printed:?}"
+        );
+    }
+
     /// **`help` prints every key the catalogue names.**
     ///
     /// Counted against [`crate::settings::catalogue`] itself rather than against
@@ -19100,7 +19233,7 @@ mod tests {
         let logs = crcbl_core::log::capture();
         let mut engine = with_console_open();
         run_line(&mut engine, "render_scale 0.5");
-        run_line(&mut engine, "save");
+        run_line(&mut engine, "writeconfig");
 
         let printed = console_lines(&logs);
         assert!(
@@ -19111,7 +19244,7 @@ mod tests {
         );
         assert!(
             printed.iter().any(|line| line.contains("nowhere to save")),
-            "`save` reported something other than having nowhere to write: {printed:?}"
+            "`writeconfig` reported something other than having nowhere to write: {printed:?}"
         );
     }
 }

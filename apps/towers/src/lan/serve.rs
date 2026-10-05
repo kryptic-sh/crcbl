@@ -42,8 +42,8 @@
 //! `quit` ends every session with `SessionEndReason::SHUTTING_DOWN`
 //! (`Host::shutdown`), so each player is told before the sockets close, and
 //! [`serve`] answers the last status line; `status` prints the status line
-//! now; `save` and `load` are the run's (below); anything else prints the
-//! commands there are.
+//! now; `save [SLOT]` and `load` are the run's (below); anything else prints
+//! the commands there are.
 //!
 //! # The status line, and each player's link
 //!
@@ -61,8 +61,10 @@
 //!
 //! The server keeps the run between waves in its own file,
 //! [`SERVER_FILE`](crate::save::SERVER_FILE) in the data directory: an
-//! autosave at each wave's end, `save` at the console between waves, and
-//! `load` to put the saved run back — under the players in it,
+//! autosave at each wave's end, `save` at the console between waves — both
+//! through [`Server::save`], the one save path, which writes with the
+//! player's own writer, and `save slot2` into a named slot's file beside it —
+//! and `load` to put the saved run back — under the players in it,
 //! who see it in the next snapshot, since a snapshot is the whole field. A
 //! loaded run waits for a player before it moves, and an empty server does
 //! not throw it away as it does a run its last player left. `--serve
@@ -104,6 +106,7 @@ use crate::game::{Autosave, Field, GameError, Stats};
 use crate::map::Map;
 use crate::save::{SaveError, Vault};
 use crate::wave::{Outcome, WAVES};
+use crcbl::save::{SaveDesk, SaveFailure, SaveRequest, SaveTrigger, Saved};
 
 /// The longest a running server goes without printing its status line. A
 /// change of players, wave or outcome prints one at once.
@@ -130,6 +133,8 @@ pub(crate) struct Server {
     map_event: Vec<u8>,
     /// Where the run is saved — the data directory outside the tests.
     vault: Vault,
+    /// What every save went through: the console's and the autosave's.
+    desk: SaveDesk,
     /// Which wave's end was last autosaved.
     autosave: Autosave,
     /// What the last status line said, and when the next is due regardless.
@@ -173,6 +178,7 @@ impl Server {
             field,
             map: map.clone(),
             map_event: event::map(&map.to_wire()),
+            desk: vault.desk(),
             vault,
             autosave: Autosave::default(),
             printed: None,
@@ -187,14 +193,10 @@ impl Server {
         let events = self.lan.frame(now);
         welcome(self.lan.host_mut(), &events, &self.map_event, None);
         tell(self.lan.host_mut(), &self.field.take_refusals());
-        if let Some(checkpoint) = self.field.wave_end(&mut self.autosave) {
-            match self.vault.store(&checkpoint) {
-                Ok(()) => crcbl::log::info!(
-                    "serve: autosaved the end of wave {}/{}",
-                    checkpoint.wave(),
-                    WAVES.len()
-                ),
-                Err(error) => crcbl::log::warn!("serve: the autosave failed: {error}"),
+        if self.field.wave_end(&mut self.autosave).is_some() {
+            match self.save(SaveRequest::new(SaveTrigger::Autosave)) {
+                Ok(saved) => crcbl::log::info!("serve: autosaved the end of {}", saved.summary),
+                Err(failure) => crcbl::log::warn!("serve: the autosave failed: {failure}"),
             }
         }
         let headline = self.headline();
@@ -259,22 +261,43 @@ impl Server {
         status
     }
 
-    /// Saves the run now, if no wave is coming in, and answers
-    /// the line the console prints: what was saved, or why not.
-    pub fn save(&self) -> String {
-        match self.field.checkpoint() {
-            Err(not) => format!("{APP}: not saved: {}", not.label().to_lowercase()),
-            Ok(checkpoint) => match self.vault.store(&checkpoint) {
-                Ok(()) => format!(
-                    "{APP}: saved wave {}/{}, {} lives, {} gold",
-                    checkpoint.wave(),
-                    WAVES.len(),
-                    checkpoint.lives(),
-                    checkpoint.gold(),
-                ),
-                Err(error) => format!("{APP}: not saved: {error}"),
-            },
+    /// **The server's one save path**: the run, if no wave is coming in,
+    /// through [`crate::save::write_run`] — the writer a player's game uses —
+    /// into the server's own file or the slot `request` names. The console's
+    /// `save` and the autosave at a wave's end both come here.
+    ///
+    /// # Errors
+    ///
+    /// A [`SaveFailure`] naming why nothing was written: a wave coming in, a
+    /// finished run, or a write the backend refused.
+    pub fn save(&mut self, request: SaveRequest) -> Result<Saved, SaveFailure> {
+        let checkpoint = self.field.checkpoint();
+        self.desk.take(request, |request| {
+            crate::save::write_run(&self.vault, checkpoint, request)
+        })
+    }
+
+    /// [`Server::save`], as the line the console prints: what was saved, or
+    /// why not.
+    fn save_line(&mut self, request: SaveRequest) -> String {
+        match self.save(request) {
+            Ok(saved) => {
+                let stats = self.stats();
+                format!(
+                    "{APP}: saved {}, {} lives, {} gold",
+                    saved.summary, stats.lives, stats.gold
+                )
+            }
+            Err(SaveFailure::Refused(why)) => format!("{APP}: not saved: {}", why.to_lowercase()),
+            Err(failure) => format!("{APP}: not saved: {failure}"),
         }
+    }
+
+    /// The desk every save went through, for the tests that read what it
+    /// recorded.
+    #[cfg(test)]
+    pub const fn desk(&self) -> &SaveDesk {
+        &self.desk
     }
 
     /// Puts the saved run back in place of the one being played, under
@@ -349,7 +372,7 @@ fn link_line(link: &Link) -> String {
 }
 
 /// What the console's help line names.
-const COMMANDS: &str = "status, save, load, quit";
+const COMMANDS: &str = "status, save [SLOT], load, quit";
 
 /// A line typed at the console, read.
 #[derive(Debug, PartialEq, Eq)]
@@ -358,8 +381,11 @@ enum Command {
     Quit,
     /// Print the status line now.
     Status,
-    /// Save the run, if no wave is coming in.
-    Save,
+    /// Save the run, if no wave is coming in, into the server's own file or
+    /// the slot named.
+    Save(SaveRequest),
+    /// A command whose arguments it refused, and the line saying why.
+    Refused(String),
     /// Put the saved run back.
     Load,
     /// Nothing but blanks: nothing to answer.
@@ -369,17 +395,29 @@ enum Command {
 }
 
 impl Command {
-    /// The command `line` is, ignoring the blanks around it and the case.
+    /// The command `line` is, ignoring the blanks around it and the case of
+    /// the command's word. `save` takes a slot after it, read by the engine's
+    /// own grammar ([`SaveRequest::from_args`]) so the debug console's `save`
+    /// and this one mean the same thing; every other command is one word.
     fn parse(line: &str) -> Self {
         let word = line.trim();
+        let mut words = word.split_whitespace();
+        if words
+            .next()
+            .is_some_and(|first| first.eq_ignore_ascii_case("save"))
+        {
+            let args: Vec<&str> = words.collect();
+            return match SaveRequest::from_args(SaveTrigger::ServerConsole, &args) {
+                Ok(request) => Self::Save(request),
+                Err(why) => Self::Refused(why),
+            };
+        }
         if word.is_empty() {
             Self::Blank
         } else if word.eq_ignore_ascii_case("quit") {
             Self::Quit
         } else if word.eq_ignore_ascii_case("status") {
             Self::Status
-        } else if word.eq_ignore_ascii_case("save") {
-            Self::Save
         } else if word.eq_ignore_ascii_case("load") {
             Self::Load
         } else {
@@ -425,7 +463,8 @@ impl Console {
             match Command::parse(&line) {
                 Command::Quit => return Next::Quit,
                 Command::Status => print(&server.status()),
-                Command::Save => print(&server.save()),
+                Command::Save(request) => print(&server.save_line(request)),
+                Command::Refused(why) => print(&format!("{APP}: {why}")),
                 Command::Load => print(&server.load_line()),
                 Command::Blank => {}
                 Command::Unknown(word) => print(&format!(
@@ -521,7 +560,21 @@ mod tests {
         assert_eq!(Command::parse("quit"), Command::Quit);
         assert_eq!(Command::parse("  QUIT\r"), Command::Quit);
         assert_eq!(Command::parse("Status"), Command::Status);
-        assert_eq!(Command::parse(" save "), Command::Save);
+        assert_eq!(
+            Command::parse(" save "),
+            Command::Save(SaveRequest::new(SaveTrigger::ServerConsole))
+        );
+        assert_eq!(
+            Command::parse("SAVE  slot2"),
+            Command::Save(
+                SaveRequest::new(SaveTrigger::ServerConsole)
+                    .in_slot(crcbl::save::Slot::new("slot2").expect("a bare name"))
+            )
+        );
+        assert!(
+            matches!(Command::parse("save ../x"), Command::Refused(why) if why.contains("slot")),
+            "a slot that is a path is refused"
+        );
         assert_eq!(Command::parse("LOAD"), Command::Load);
         assert_eq!(Command::parse(" \t"), Command::Blank);
         assert_eq!(

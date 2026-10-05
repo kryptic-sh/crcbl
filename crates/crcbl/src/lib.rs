@@ -416,6 +416,8 @@ pub mod scene_mesh;
 #[cfg(any(feature = "scene", feature = "scn"))]
 pub mod scene_physics;
 
+pub mod save;
+
 pub mod session;
 
 pub mod settings;
@@ -438,6 +440,11 @@ pub mod ui_scale;
 /// twice. `tests/console_table.rs` is what keeps the declared half in step with
 /// what the source actually declares.
 ///
+/// **`save` is the game's save** ([`debug_console::save`], the one save path in
+/// [`save`]) and the settings file is written by `writeconfig`, Source's name
+/// for it — [`debug_console::writeconfig`] says why it is listed under a name
+/// its declaration does not carry.
+///
 /// **The bindings are a slice rather than a `table!` entry**, because they are
 /// generated one per catalogue key by a macro in `settings` and
 /// [`crcbl_console::table!`] takes named paths; [`crcbl_console::Table::new`] is
@@ -451,11 +458,12 @@ pub fn console_table() -> crcbl_console::Table {
         &debug_console::fps,
         &debug_console::pause,
         &debug_console::quit,
+        &debug_console::save,
         &debug_console::unbind,
+        &debug_console::writeconfig,
         &debug_view::debug_view,
         &settings::dump,
         &settings::presets::quality,
-        &settings::save,
     ];
     crcbl_console::Table::new(VARS, settings::console_bindings(), COMMANDS)
 }

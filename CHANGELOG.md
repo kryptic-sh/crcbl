@@ -16,6 +16,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **The debug console's `save` saves the game; the settings file is written by
+  `writeconfig`.** `save [SLOT]` is now the game's save (see Added: one save
+  path), and the command that wrote `settings.toml` takes Source's name for it,
+  `writeconfig`, with the same help, the same refusal on a run that reads no
+  settings file and the same write. An `autoexec.cfg` or `--exec` line that
+  wrote settings with `save` must say `writeconfig`.
+
+- **`crcbl_store::save::SaveWriter::write` answers the file's length**:
+  `Result<usize, StorageError>` instead of `Result<(), StorageError>`, the bytes
+  written checksum included. A caller matching `Ok(())` matches `Ok(_)`.
+
 - **`crcbl_ecs::SystemStats` gained `tick_time`** (see Added: per-system tick
   times). A struct literal must name it — `None` for a system that was not
   timed.
@@ -683,6 +694,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **One save path: `crcbl::save` and `HostedGame::save`.** Every trigger a game
+  has — the debug console's `save`, a key or button, the autosave, the close and
+  a dedicated server's console — reaches one writer per game through a
+  `SaveDesk`, which records each outcome. The console's `save [SLOT]` is queued
+  and the loop hands it to `HostedGame::save`, printing the file and tick it
+  landed in or why not (`save: this game takes no saves` for a game left at the
+  default); a game calls the same method for its own triggers where they arise,
+  so an autosave still writes the tick it came due on. A slot is a bare name and
+  becomes a file beside the game's own (`towers-run-slot2.crb`). `apps/towers`'
+  `S`, autosave and close and `apps/shard`'s autosave and close now go through
+  it with their wording unchanged, and both take the console's `save`; towers'
+  dedicated server reads `save [SLOT]` with the same grammar and writes with the
+  player's writer. Nothing reads a named slot back yet. The F3 panel gains a
+  "storage" section in both: where saves go, the last save's tick, playtime and
+  trigger, each file this run wrote and its size, where the autosave goes, and
+  the saves that did not land. `crcbl_store::save::SaveBacking::root` names the
+  directory for it.
 
 - **Per-system tick times in the ECS inspector and the sandbox's debug panel.**
   `crcbl_ecs::Schedule::set_clock` takes any `crcbl_core::time::TimeSource` —

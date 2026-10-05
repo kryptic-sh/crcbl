@@ -124,6 +124,7 @@ use crcbl::core::TickId;
 use crcbl::inventory::{Catalog, Cell, Grid, Rotation, Stack, StackId};
 use crcbl::math::DVec3;
 use crcbl::net::types::SectorId;
+use crcbl::save::{SaveDesk, SaveFailure, SaveRequest, Saved};
 use crcbl::store::StorageSource;
 use crcbl::store::save::{SaveBacking, SaveData, SaveHeader, SaveReader, SaveWriter, SectorSave};
 
@@ -643,9 +644,21 @@ impl Vault {
     /// it on the disk yet". `crcbl-store`'s `web` module carries the whole of
     /// which half of the atomic-write guarantee survives a browser.
     pub fn store(&self, character: &Character) -> bool {
-        let Some(source) = self.source() else {
-            return false;
-        };
+        match self.store_as(SAVE_FILE, character) {
+            Ok(_) => true,
+            Err(SaveFailure::Nowhere) => false,
+            Err(failure) => {
+                crcbl::log::warn!("save: {failure}");
+                false
+            }
+        }
+    }
+
+    /// Writes `character` into `file` in the same place, answering how long
+    /// the file is — [`Vault::store`] without the log line, for
+    /// [`write_character`], whose triggers each say what became of a save.
+    fn store_as(&self, file: &str, character: &Character) -> Result<usize, SaveFailure> {
+        let source = self.source().ok_or(SaveFailure::Nowhere)?;
         let mut writer = SaveWriter::new(SaveHeader::new(
             TickId::from_raw(character.tick),
             character.playtime_secs,
@@ -654,14 +667,44 @@ impl Vault {
             sector_id: SectorId::ZERO,
             snapshot_data: encode(character),
         });
-        match writer.write(source, Path::new(SAVE_FILE)) {
-            Ok(()) => true,
-            Err(error) => {
-                crcbl::log::warn!("save: could not write the character ({error})");
-                false
-            }
-        }
+        writer.write(source, Path::new(file)).map_err(|error| {
+            SaveFailure::Failed(format!("could not write the character ({error})"))
+        })
     }
+
+    /// The desk this vault's saves go through, naming where they go.
+    #[must_use]
+    pub fn desk(&self) -> SaveDesk {
+        SaveDesk::over(&self.0)
+    }
+}
+
+/// **Shard's one save writer**: `character` written into `vault` where
+/// `request` names — `SAVE_FILE`, or the named slot's file beside it.
+/// Every trigger reaches it through a [`SaveDesk`]: the autosave, the close
+/// and the debug console's `save` (`crate::app`'s `HostedGame::save`).
+///
+/// # Errors
+///
+/// [`SaveFailure::Nowhere`] for a run that keeps nothing, and
+/// [`SaveFailure::Failed`] for a write the backend refused.
+pub fn write_character(
+    vault: &Vault,
+    character: &Character,
+    request: &SaveRequest,
+) -> Result<Saved, SaveFailure> {
+    let file = request.file_name(SAVE_FILE);
+    let bytes = vault.store_as(&file, character)?;
+    Ok(Saved {
+        file,
+        tick: TickId::from_raw(character.tick),
+        playtime_secs: character.playtime_secs,
+        bytes,
+        summary: format!(
+            "{} health, {} experience, {} down(s)",
+            character.health, character.experience, character.downs
+        ),
+    })
 }
 
 /// What the debug panel says about this run's persistence.

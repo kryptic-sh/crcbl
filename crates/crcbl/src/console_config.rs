@@ -14,7 +14,7 @@
 //! `crcbl-console` depends on nothing and names no engine type — debug-console
 //! decision 1 — and this command has to reach a **file**, which on `wasm32` is
 //! not a filesystem at all. Both halves of that are already answered in this
-//! crate: [`crate::settings`]'s `save` writes through
+//! crate: `writeconfig` ([`crate::settings`]' `save`) writes through
 //! [`SettingsStack::with_platform_storage`], which is a config directory
 //! natively and the page's Origin Private File System store in a browser. So
 //! `config` reads through the same seam, out of the same directory the
@@ -150,7 +150,7 @@ crcbl_console::concommand! {
             .app_name()
             .map(str::to_owned);
         let Some(app_name) = app_name else {
-            // The same refusal `save` makes, for the same reason: a golden run
+            // The same refusal `writeconfig` makes, for the same reason: a golden run
             // or a headless harness reads no settings file, so it has no
             // directory of its own and must not read one out of whichever home
             // directory it happens to execute in.
@@ -176,11 +176,7 @@ crcbl_console::concommand! {
 /// for anything.
 fn file_named(arg: &str) -> Result<String, Fault> {
     let stem = arg.strip_suffix(CONFIG_SUFFIX).unwrap_or(arg);
-    let bare = !stem.is_empty()
-        && stem
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
-    if !bare {
+    if !is_bare_name(stem) {
         return Err(Fault::new(format!(
             "`{arg}` is not a config name — a name is ASCII letters, digits, `-` and `_`, \
              with `{CONFIG_SUFFIX}` optional, and names one file in this game's settings \
@@ -188,6 +184,17 @@ fn file_named(arg: &str) -> Result<String, Fault> {
         )));
     }
     Ok(format!("{stem}{CONFIG_SUFFIX}"))
+}
+
+/// Whether `name` is a bare name a person may type for a file: ASCII letters,
+/// digits, `-` and `_`, and not empty — so no separator, no `.`, no drive
+/// letter, nothing a path is made of. A config name's stem is held to it, and
+/// so is a save slot's ([`crate::save::Slot`]).
+pub(crate) fn is_bare_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 /// Why a config file's text is not in hand.
@@ -245,7 +252,7 @@ impl NotRead {
 
 /// The text of `file`, out of the directory this run's settings live in.
 ///
-/// [`SettingsStack::with_platform_storage`] is the same seam `save` writes
+/// [`SettingsStack::with_platform_storage`] is the same seam `writeconfig` writes
 /// through, which is what makes "the settings directory" one answer rather than
 /// two: natively the platform config directory, in a browser the store the page
 /// installed.
@@ -384,7 +391,7 @@ pub enum Autoexec {
 /// `SettingsStack::with_platform_storage` would answer `Some` on a native
 /// headless run and hand back `~/.config/<game>/autoexec.cfg`, so "this platform
 /// has a config directory" is not a gate at all. It is the same refusal `config`
-/// and `save` make, worded as silence because nobody asked for this file.
+/// and `writeconfig` make, worded as silence because nobody asked for this file.
 pub(crate) fn run_autoexec(cx: &mut Context<'_>) -> Autoexec {
     let app_name = cx
         .host()
@@ -900,7 +907,7 @@ mod tests {
         assert!(cx.clear_requested());
     }
 
-    /// **A run with no settings file refuses to read one**, the way `save`
+    /// **A run with no settings file refuses to read one**, the way `writeconfig`
     /// refuses to write one: a golden run or a headless harness has no
     /// directory of its own, and reading out of whoever's home directory it
     /// executes in is exactly what it must not do.
