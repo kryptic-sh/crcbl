@@ -118,6 +118,15 @@
 //! tier a file is on is derived from the readers above rather than stored —
 //! that module's header says why, and why `custom` is what a file that is on no
 //! tier reads as.
+//!
+//! # And two keys can blank the screen, so they wait to be kept
+//!
+//! [`display_mode`] and [`present_mode`] are the window's and the swapchain's,
+//! and a change to either can leave a player looking at nothing. The catalogue
+//! marks them [`CatalogueKey::confirm`], and [`confirm::change`] applies them
+//! live, holds what was there before and reverts after
+//! [`confirm::REVERT_AFTER`] of frame time unless the player keeps them. Every
+//! other key is [`apply`]'s, written at once.
 
 #[cfg(doc)]
 use crcbl_render::{Antialiasing, DEFAULT_ANISOTROPY, RenderEffects};
@@ -125,8 +134,10 @@ use crcbl_render::{Antialiasing, DEFAULT_ANISOTROPY, RenderEffects};
 #[cfg(doc)]
 use crate::engine::FrameLimit;
 
+pub mod confirm;
 mod console;
 mod engine_audio;
+mod engine_display;
 mod engine_video;
 mod key_catalogue;
 pub mod launch;
@@ -136,6 +147,10 @@ mod stage;
 
 pub use console::{ConsoleHost, SharedSettings, catalogue_value, console_bindings, dump, save};
 pub use engine_audio::{AUDIO_NAMESPACE, audio_gains, set_audio_gain};
+pub use engine_display::{
+    DISPLAY_MODE_KEY, DISPLAY_MODE_NAMES, PRESENT_MODE_KEY, PRESENT_MODE_NAMES, display_mode,
+    display_mode_from_name, display_mode_name, present_mode, set_display_mode, set_present_mode,
+};
 pub use engine_video::{
     ANISOTROPIC_FILTERING_KEY, ANTIALIASING_KEY, ANTIALIASING_NAMES, FRAME_LIMIT_CEILING,
     FRAME_LIMIT_KEY, MAX_ANISOTROPIC_FILTERING, MAX_UI_SCALE, MIN_UI_SCALE, RENDER_SCALE_KEY,
@@ -152,7 +167,7 @@ pub(crate) use renderer::apply_process_video;
 #[cfg(test)]
 pub(crate) use renderer::process_video_test_guard;
 pub use renderer::{apply_video_to, debug_view_switches, set_debug_view_on};
-pub use stage::{Applied, Deferred, GpuStage, Stage, Unsupported, apply};
+pub use stage::{Applied, Deferred, GpuStage, Landed, Stage, Unsupported, apply};
 
 // Re-imported for `presets`, which reads the same tier fallback the console's
 // row reads.

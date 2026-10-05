@@ -537,10 +537,11 @@ impl Gpu {
 
 /// The frame's half of this bundle, for [`crcbl::engine::Loop`].
 ///
-/// One-line forwards. Every one but the last two already existed for the loop
+/// One-line forwards. Every one but the last three already existed for the loop
 /// that used to call them from `app.rs`; the trait is what lets the engine call
-/// them instead. The pair at the end is debug-console decision 3's
-/// (`docs/notes/tooling.md`), written out here rather than through
+/// them instead. The pair before the last is debug-console decision 3's
+/// (`docs/notes/tooling.md`), and the last is the live seam of
+/// `[engine.video] present_mode`, written out here rather than through
 /// `crcbl::impl_game_gpu!(Gpu, with_renderer)` because this bundle writes its
 /// whole block by hand.
 impl crcbl::engine::GameGpu for Gpu {
@@ -596,6 +597,16 @@ impl crcbl::engine::GameGpu for Gpu {
     ) -> Result<(), crcbl::settings::Unsupported> {
         crcbl::settings::set_debug_view_on(&mut self.renderer, view);
         Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// None: this bundle holds the context the swapchain is on.
+    fn set_pacing(
+        &mut self,
+        pacing: crcbl::engine::Pacing,
+    ) -> Result<crcbl::settings::Landed<crcbl::engine::Pacing>, crcbl::settings::Unsupported> {
+        Ok(self.ctx.switch_pacing(pacing))
     }
 }
 

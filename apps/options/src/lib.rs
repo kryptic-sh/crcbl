@@ -28,8 +28,11 @@
 //! on a `FRAME CAP` row that steps a ladder of ceilings; `anisotropic_filtering`,
 //! on an `ANISOTROPY` row that steps the powers of two; `antialiasing`, on an
 //! `ANTIALIASING` row that steps the resolve slot's one ladder; `render_scale`,
-//! on a `RENDER SCALE` groove over the range the renderer draws; and the effect
-//! switches of `crcbl::settings::VIDEO_KEYS`, one row each. Under `F3`, the
+//! on a `RENDER SCALE` groove over the range the renderer draws; the effect
+//! switches of `crcbl::settings::VIDEO_KEYS`, one row each; and `display_mode`
+//! and `present_mode`, on `DISPLAY MODE` and `PRESENT MODE` rows that hand each
+//! step to the loop, which applies it live and asks the player to keep it on
+//! the engine's confirm prompt. Under `F3`, the
 //! debug panel shows the settings file as it stands — every key in it, owned by
 //! a row here or not ([`view`]). What is **not**
 //! here is the rest of the video half and the graphics tiers — which

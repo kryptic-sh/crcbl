@@ -124,6 +124,7 @@ use crate::settings::VideoSettings;
 use crate::adapter::ADAPTER_ENV_VAR;
 use crate::backend::GpuBackend;
 
+pub mod confirm;
 pub mod console_button;
 pub mod menu;
 mod pad_claims;
@@ -490,6 +491,21 @@ pub enum Pacing {
 }
 
 impl Pacing {
+    /// Every pacing, in the order a settings row steps through them.
+    pub const ALL: [Self; 4] = [Self::Auto, Self::Vsync, Self::Adaptive, Self::Off];
+
+    /// The word [`from_name`](Self::from_name) reads back as this pacing: the
+    /// one `--pacing` takes and `[engine.video] present_mode` holds.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Vsync => "vsync",
+            Self::Adaptive => "adaptive",
+            Self::Off => "off",
+        }
+    }
+
     /// The value a command line spells `name`, or `None` for a word this is not
     /// one of.
     ///
@@ -915,6 +931,24 @@ impl SettingsSource<'_> {
             .map_or_else(VideoSettings::unrestricted, crate::settings::video);
         crate::settings::apply_process_video(&video);
         video
+    }
+
+    /// The pacing a context opens on: `asked`, unless it is [`Pacing::Auto`]
+    /// and the player's `[engine.video] present_mode` names one.
+    ///
+    /// **Only `Auto` is replaced**, for the rule [`Pacing`] already states: a
+    /// caller that names a pacing — a `--pacing vsync` on the command line —
+    /// meant it, and the player's file refines "follow the display" the way the
+    /// display's own answer does. `--pacing auto` and no flag are the same
+    /// request, so both take the file's.
+    fn pacing(self, app_name: &str, asked: Pacing) -> Pacing {
+        if asked != Pacing::Auto {
+            return asked;
+        }
+        self.open(app_name)
+            .as_ref()
+            .and_then(crate::settings::present_mode)
+            .unwrap_or(asked)
     }
 
     /// The bus gains the player has set, read now.
@@ -1430,7 +1464,7 @@ impl GpuContext {
             label: desc.label.to_string(),
             required_features: desc.required_features,
             optional_features: desc.optional_features,
-            pacing: desc.pacing,
+            pacing: desc.settings.pacing(desc.label, desc.pacing),
             video: desc.settings.video(desc.label),
             adapter_pin: crate::adapter::pin(),
         };
@@ -1491,7 +1525,7 @@ impl GpuContext {
             label: desc.label.to_string(),
             required_features: desc.required_features,
             optional_features: desc.optional_features,
-            pacing: desc.pacing,
+            pacing: desc.settings.pacing(desc.label, desc.pacing),
             video: desc.settings.video(desc.label),
             adapter_pin: crate::adapter::pin(),
         })
@@ -1965,6 +1999,29 @@ impl GpuContext {
             (self.pacing, self.effective_pacing) = previous;
         }
         result
+    }
+
+    /// [`set_pacing`](Self::set_pacing), answering the pacing asked before
+    /// and the pacing in force after — the old one again where the rebuild
+    /// failed.
+    ///
+    /// What a settings screen holds a present-mode change with: it cannot keep
+    /// a mode the swapchain refused, so it is told which one it got. The
+    /// failure is logged here rather than returned because it is already
+    /// answered — the rollback is the landed value, and a screen shows it.
+    pub fn switch_pacing(&mut self, pacing: Pacing) -> crate::settings::Landed<Pacing> {
+        let previous = self.pacing;
+        if let Err(error) = self.set_pacing(pacing) {
+            log::warn!(
+                "gpu: could not present with {} pacing ({error}); still on {}",
+                pacing.name(),
+                previous.name(),
+            );
+        }
+        crate::settings::Landed {
+            previous,
+            landed: self.pacing,
+        }
     }
 
     /// Which present the frame about to start should wait for, or `None` if
@@ -4385,6 +4442,10 @@ impl<G> MenuAction<G> {
 #[derive(Debug)]
 pub struct MenuPump<'a, K> {
     menus: &'a mut crcbl_ui::menu::MenuSet<K>,
+    /// The confirm prompt, when one is waiting: drawn over the game's menu, so
+    /// it takes the navigation the game's menu would have had. See
+    /// [`confirm`].
+    prompt: Option<&'a mut crcbl_ui::menu::MenuSet<confirm::Shown>>,
     held: &'a mut Vec<crcbl_core::input::KeyCode>,
     actions: &'a mut crate::input::ActionMap,
     showing: bool,
@@ -4434,6 +4495,25 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
         console: bool,
         dt: f32,
     ) -> Self {
+        Self::over_prompt(menus, None, held, actions, showing, console, dt)
+    }
+
+    /// [`new`](Self::new), with the loop's confirm prompt over the game's
+    /// menu when `prompt` is `Some`.
+    ///
+    /// The prompt takes every step, accept and commit the game's menu would
+    /// have had — it is drawn on top, and a key that walked the panel under it
+    /// would move a selection the player cannot see. `showing` is the caller's
+    /// to set for either panel.
+    fn over_prompt(
+        menus: &'a mut crcbl_ui::menu::MenuSet<K>,
+        prompt: Option<&'a mut crcbl_ui::menu::MenuSet<confirm::Shown>>,
+        held: &'a mut Vec<crcbl_core::input::KeyCode>,
+        actions: &'a mut crate::input::ActionMap,
+        showing: bool,
+        console: bool,
+        dt: f32,
+    ) -> Self {
         let wants = showing || console;
         let pushed = actions.is_context_active(crate::input::ui::CONTEXT);
         let restacked = if wants && !pushed {
@@ -4447,6 +4527,7 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
         actions.begin_tick(dt);
         let mut pump = Self {
             menus,
+            prompt,
             held,
             actions,
             showing,
@@ -4516,12 +4597,14 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
         // The console is drawn over the menu and claims the lot: a game that
         // saw the letters being typed into the field would be played by the
         // console. Everything below still runs, so the map hears the key.
+        let value_row = match &self.prompt {
+            Some(prompt) => prompt.slider_highlighted() || prompt.cycler_highlighted(),
+            None => self.menus.slider_highlighted() || self.menus.cycler_highlighted(),
+        };
         let claimed = self.console
             || (self.showing
                 && menu::menu_binds(self.actions, code)
-                && (!menu::moves_sideways(self.actions, code)
-                    || self.menus.slider_highlighted()
-                    || self.menus.cycler_highlighted()));
+                && (!menu::moves_sideways(self.actions, code) || value_row));
 
         // Fed whether or not the menu claims it, so the map knows every key
         // that is down when the context is next pushed — which is what
@@ -4570,32 +4653,50 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
             return;
         }
         let nav = crate::ui_nav::nav_input(self.actions);
-        match nav.direction {
-            Some(crcbl_ui::tree::Direction::Up) => self.menus.select_previous(),
-            Some(crcbl_ui::tree::Direction::Down) => self.menus.select_next(),
-            // The return value is "a handle moved", which is a fact about the
-            // end of the groove rather than about the key: the key is claimed
-            // either way, or a player holding Right at the top of a slider
-            // would start driving the game behind the panel. One of the two
-            // nudges is always a no-op, since a row is one kind.
-            Some(crcbl_ui::tree::Direction::Left) => {
-                self.menus.nudge_slider(false);
-                self.menus.nudge_cycler(false);
-            }
-            Some(crcbl_ui::tree::Direction::Right) => {
-                self.menus.nudge_slider(true);
-                self.menus.nudge_cycler(true);
-            }
-            None => {}
-        }
-        if nav.accept {
-            self.menus.press(true);
-        }
+        let commit = self.actions.just_released(crate::input::ui::ACCEPT);
+        let activated = match self.prompt.as_deref_mut() {
+            Some(prompt) => steer(prompt, &nav, commit),
+            None => steer(self.menus, &nav, commit),
+        };
         self.back |= nav.back;
-        if self.actions.just_released(crate::input::ui::ACCEPT) {
-            self.activated = self.menus.activate();
+        if commit {
+            self.activated = activated;
         }
     }
+}
+
+/// One batch's navigation, applied to `menus`: the step, the press and — when
+/// `commit` — the activation, whose id is the answer.
+///
+/// Generic so the game's menu and the loop's confirm prompt take the same
+/// moves from the same keys.
+fn steer<K: Copy + Eq>(
+    menus: &mut crcbl_ui::menu::MenuSet<K>,
+    nav: &crcbl_ui::tree::NavInput,
+    commit: bool,
+) -> Option<crcbl_ui::WidgetId> {
+    match nav.direction {
+        Some(crcbl_ui::tree::Direction::Up) => menus.select_previous(),
+        Some(crcbl_ui::tree::Direction::Down) => menus.select_next(),
+        // The return value is "a handle moved", which is a fact about the
+        // end of the groove rather than about the key: the key is claimed
+        // either way, or a player holding Right at the top of a slider
+        // would start driving the game behind the panel. One of the two
+        // nudges is always a no-op, since a row is one kind.
+        Some(crcbl_ui::tree::Direction::Left) => {
+            menus.nudge_slider(false);
+            menus.nudge_cycler(false);
+        }
+        Some(crcbl_ui::tree::Direction::Right) => {
+            menus.nudge_slider(true);
+            menus.nudge_cycler(true);
+        }
+        None => {}
+    }
+    if nav.accept {
+        menus.press(true);
+    }
+    if commit { menus.activate() } else { None }
 }
 
 /// Why a loop stopped.
@@ -5233,6 +5334,31 @@ pub trait GameGpu: GpuSurface + Sized {
         Err(crate::settings::Unsupported)
     }
 
+    /// Rebuild this bundle's swapchain on `pacing`, **now**, answering the
+    /// pacing it presented with and the one it presents with after.
+    ///
+    /// The live seam of `[engine.video] present_mode`, which a settings screen
+    /// holds for the player to keep — see [`crate::settings::confirm`].
+    /// [`impl_game_gpu!`](crate::impl_game_gpu) forwards it to
+    /// [`GpuContext::switch_pacing`] for every bundle that holds a context, so
+    /// no sample writes it.
+    ///
+    /// **The default answers [`Unsupported`](crate::settings::Unsupported)**,
+    /// on [`apply_video`](Self::apply_video)'s terms: the loop's own test
+    /// doubles hold no swapchain, and a bundle that cannot reach one says so.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`](crate::settings::Unsupported) where this bundle holds no
+    /// context.
+    fn set_pacing(
+        &mut self,
+        pacing: Pacing,
+    ) -> Result<crate::settings::Landed<Pacing>, crate::settings::Unsupported> {
+        let _ = pacing;
+        Err(crate::settings::Unsupported)
+    }
+
     /// Records, submits and presents one frame.
     ///
     /// # Errors
@@ -5519,6 +5645,19 @@ macro_rules! __impl_game_gpu {
 
             fn destroy(self) -> ::core::result::Result<(), $crate::engine::GpuError> {
                 Self::destroy(self)
+            }
+
+            // Every bundle this macro serves holds a context — the guard above
+            // insists on `context_mut` — so the swapchain is reachable from
+            // here and no sample writes this forward.
+            fn set_pacing(
+                &mut self,
+                pacing: $crate::engine::Pacing,
+            ) -> ::core::result::Result<
+                $crate::settings::Landed<$crate::engine::Pacing>,
+                $crate::settings::Unsupported,
+            > {
+                ::core::result::Result::Ok(Self::context_mut(self).switch_pacing(pacing))
             }
 
             $($extra)*
@@ -6315,6 +6454,27 @@ pub trait HostedGame: Sized {
         None
     }
 
+    /// A settings key this game's screen asked the loop to change since it
+    /// last looked — a dotted key and the value — or `None` on a frame that
+    /// asked for nothing.
+    ///
+    /// **For the keys the catalogue marks
+    /// [`confirm`](crate::settings::CatalogueKey::confirm)**: a game holds no
+    /// window and no swapchain, so a display-mode or present-mode row cannot
+    /// apply its own key. The loop applies it through
+    /// [`settings::confirm::change`](crate::settings::confirm::change), draws
+    /// the prompt, and writes the key to the stack and the file only when the
+    /// player keeps it — so a row reads the kept value back off the stack it
+    /// shares through [`settings`](Self::settings). A key that is not a
+    /// confirm key is written at once, as [`crate::settings::apply`] writes
+    /// it, which a game's own write already does better.
+    ///
+    /// Taken like [`take_pending_frame_limit`](Self::take_pending_frame_limit),
+    /// and the empty default is the answer for every game with no such row.
+    fn take_pending_change(&mut self) -> Option<(String, crcbl_console::Value)> {
+        None
+    }
+
     /// Whether an on-screen control asked the loop to toggle the pause since it
     /// last looked.
     ///
@@ -6809,6 +6969,13 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// sent; a run starts focused. Pads are not delivered while it is false.
     focused: bool,
     mode: ModeRequest,
+    /// The display change waiting on the player, and the prompt that asks
+    /// about it — see [`confirm`].
+    confirm: confirm::ConfirmPrompt,
+    /// Where a kept change is written: the run's own settings file, or
+    /// nowhere on a headless run — [`SettingsSource::for_run`]'s rule, which
+    /// is the console's too.
+    settings_source: SettingsSource<'static>,
     budget: FrameBudget,
     ticks: u64,
     events: u64,
@@ -6871,8 +7038,27 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             &config.exec,
         );
         let ui_multiplier = crate::settings::ui_scale(&console.host_mut().stack());
+        // **The player's display mode, put into force before the first
+        // frame.** The window was opened the game's way — windowed, unless the
+        // command line said `--fullscreen` — and a file that says borderless
+        // replaces the first of those and not the second: the person starting
+        // the run outranks the file, as `--set` does. A file that says
+        // windowed therefore changes nothing here. See
+        // `crate::settings::display_mode` for why this key replaces rather
+        // than clamps.
+        let mut shell = booted.shell;
+        let opened_in = ModeRequest::mode(shell.as_ref(), booted.window);
+        if let Some(wanted) = crate::settings::display_mode(&console.host_mut().stack())
+            && wanted.is_borderless()
+            && opened_in.is_some_and(|mode| !mode.is_borderless())
+        {
+            match shell.set_mode(booted.window, wanted) {
+                Ok(()) => log::info!("shell: asked for {wanted}, as the settings file says"),
+                Err(error) => log::warn!("shell: the settings file asked for {wanted}: {error}"),
+            }
+        }
         Self {
-            shell: booted.shell,
+            shell,
             window: booted.window,
             gpu: booted.gpu,
             game,
@@ -6905,6 +7091,8 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             pad_claims: pad_claims::PadClaims::default(),
             focused: true,
             mode: ModeRequest::new(),
+            confirm: confirm::ConfirmPrompt::new(),
+            settings_source: source,
             budget: FrameBudget::new(config.frames),
             ticks: 0,
             events: booted.events,
@@ -6975,8 +7163,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         let game = &mut self.game;
         // **Last frame's menu, deliberately.** The pump runs before this
         // frame's state is known, and the menu the player is pressing keys at
-        // is the one that was on screen when they pressed them.
-        let showing = self.menus.current().is_some();
+        // is the one that was on screen when they pressed them. The confirm
+        // prompt is a panel too, drawn over the game's, and while it is up it
+        // is the panel the input goes to.
+        let prompting = self.confirm.is_showing();
+        let showing = self.menus.current().is_some() || prompting;
         // **Last frame's console, for `showing`'s reason.** The panel the player
         // is typing at is the one that was on screen when they typed, and the
         // toggle this batch carries is applied below rather than mid-pump.
@@ -6995,8 +7186,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         let panel_has_input = showing || console_showing;
         let menu_pad_buttons = menu::menu_pad_buttons(&self.menu_actions);
         let pad_claims = &mut self.pad_claims;
-        let mut menu = MenuPump::new(
+        let mut menu = MenuPump::over_prompt(
             &mut self.menus,
+            prompting.then(|| self.confirm.menus_mut()),
             &mut self.held_keys,
             &mut self.menu_actions,
             showing && !console_showing,
@@ -7128,20 +7320,26 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // is the top `CONSOLE_HEIGHT_FRACTION` of the frame whichever frame you
         // ask on — a resize is the one case this is a frame behind.
         let console_took_pointer = self.console.covers(ui_pointer.pos);
-        let from_pointer = self.menus.point(
-            self.ui_extent(),
-            self.gpu.atlas(),
-            crcbl_ui::PointerInput {
-                down: ui_pointer.down && self.menu_owns_press && !console_took_pointer,
-                released: ui_pointer.released && self.menu_owns_press && !console_took_pointer,
-                ..ui_pointer
-            },
-        );
+        let panel_pointer = crcbl_ui::PointerInput {
+            down: ui_pointer.down && self.menu_owns_press && !console_took_pointer,
+            released: ui_pointer.released && self.menu_owns_press && !console_took_pointer,
+            ..ui_pointer
+        };
+        let extent = self.ui_extent();
+        let from_pointer = if prompting {
+            self.confirm
+                .menus_mut()
+                .point(extent, self.gpu.atlas(), panel_pointer)
+        } else {
+            self.menus.point(extent, self.gpu.atlas(), panel_pointer)
+        };
         if pending.pointer_released {
             self.menu_owns_press = false;
         }
         for id in [from_keyboard, from_pointer].into_iter().flatten() {
-            if let Some(action) = MenuAction::from_id(id, G::menu_action) {
+            if prompting {
+                self.answer_prompt(id);
+            } else if let Some(action) = MenuAction::from_id(id, G::menu_action) {
                 self.apply(action)?;
             }
         }
@@ -7291,6 +7489,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // one the new cap paces.
         if let Some(limit) = self.game.take_pending_frame_limit() {
             self.clock_source.set_limit(limit);
+        }
+        // A display row fired: applied live and held for the player, here
+        // where the window and the swapchain are in hand.
+        if let Some((key, value)) = self.game.take_pending_change() {
+            self.propose(&key, &value);
         }
 
         // **The console's takeover, and the held-key repair beside it.** A game
@@ -7446,7 +7649,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // stack refuses an out-of-order pop rather than hiding it. So the pop
         // stays where it was — `MenuPump::new`, at the top of the next frame,
         // by which time `text` has come off below.
-        if (self.menus.current().is_some() || self.console.is_open())
+        if (self.menus.current().is_some() || self.confirm.is_showing() || self.console.is_open())
             && !self
                 .menu_actions
                 .is_context_active(crate::input::ui::CONTEXT)
@@ -7458,7 +7661,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         crate::input::text::sync(&mut self.menu_actions, self.console.is_editing())
             .expect("the loop's map declares the text context and nothing pushes over it");
         if pending.toggle_fullscreen {
-            ModeRequest::toggle(self.shell.as_mut(), self.window)?;
+            self.toggle_display_mode();
         }
         // Once per transition, not once per frame: a backend that cannot do
         // fullscreen at all would otherwise print a line every frame forever.
@@ -7483,6 +7686,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         let now = self.clock_source.advance();
         drop(pace);
         self.frame_clock.update(now);
+        // On the frame time just measured, which is what makes a countdown a
+        // test can step and a held-back loop holds.
+        self.tick_confirm();
         // Recorded whether or not the panel is visible — a window that only
         // fills while you are looking at it shows two seconds of nothing every
         // time you press F3.
@@ -7726,8 +7932,14 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                 // `press_captured` as well as `menu_contact`: the press already
                 // latched may be the pointer's, and a second finger arriving on
                 // top of one is not the menu's either. First come, first served,
-                // which is the rule every control here follows.
-                if self.menu_contact.is_some() || self.menus.press_captured() {
+                // which is the rule every control here follows. A confirm
+                // prompt over the panel takes no second finger at all — the
+                // panel under it is not the one on top, and the emulated
+                // pointer is what answers the prompt.
+                if self.confirm.is_showing()
+                    || self.menu_contact.is_some()
+                    || self.menus.press_captured()
+                {
                     return None;
                 }
                 let fired = self.point_contact(touch.at, true, false);
@@ -7805,11 +8017,150 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                     log::info!("game resumed");
                 }
             }
-            MenuAction::Fullscreen => ModeRequest::toggle(self.shell.as_mut(), self.window)?,
+            MenuAction::Fullscreen => self.toggle_display_mode(),
             MenuAction::DebugOverlay => self.debug.toggle(),
             MenuAction::Game(action) => self.game.apply(action),
         }
         Ok(())
+    }
+
+    /// The fullscreen key's and the pause menu's `FULLSCREEN`: the opposite of
+    /// the mode the window is in, through the same confirm flow as a settings
+    /// row.
+    ///
+    /// **Through the flow, not instant**, decided 2026-10-05: a toggle can
+    /// blank a screen as surely as a row can, and the mode a toggle landed on
+    /// is only known once the window system has answered — which the player's
+    /// KEEP is the moment of. So the toggle is remembered as `display_mode`
+    /// when kept, and a second press while it waits goes back to where the
+    /// player started and leaves nothing waiting; see
+    /// [`PendingChange::superseded_by`](crate::settings::confirm::PendingChange::superseded_by).
+    /// Read back rather than remembered, for [`ModeRequest::toggle`]'s reason.
+    fn toggle_display_mode(&mut self) {
+        let target = if ModeRequest::mode(self.shell.as_ref(), self.window)
+            .is_some_and(DisplayMode::is_borderless)
+        {
+            DisplayMode::Windowed
+        } else {
+            DisplayMode::Borderless { monitor: None }
+        };
+        self.propose(
+            &format!(
+                "{}.{}",
+                crate::settings::VIDEO_NAMESPACE,
+                crate::settings::DISPLAY_MODE_KEY
+            ),
+            &crcbl_console::Value::Enum(crate::settings::display_mode_name(target)),
+        );
+    }
+
+    /// Applies `value` to `key` through
+    /// [`settings::confirm::change`](crate::settings::confirm::change), on
+    /// the window and the swapchain, and holds what comes back for the player.
+    ///
+    /// One change waits at a time. A change to another key while one waits
+    /// reverts the first — the player moved on without keeping it — and a
+    /// change to the same key keeps the first one's starting point.
+    fn propose(&mut self, key: &str, value: &crcbl_console::Value) {
+        if let Some(other) = self.confirm.pending().filter(|held| held.key() != key) {
+            log::info!(
+                "settings: `{}` was not kept before `{key}` moved",
+                other.key()
+            );
+            self.resolve_confirm(false);
+        }
+        let outcome = {
+            let mut stage = confirm::WindowStage {
+                shell: self.shell.as_mut(),
+                window: self.window,
+                gpu: &mut self.gpu,
+            };
+            let mut stack = self.console.host_mut().stack_mut();
+            crate::settings::confirm::change(&mut stack, key, value, &mut stage)
+        };
+        match outcome {
+            Ok(crate::settings::confirm::Change::Pending(next)) => {
+                let held = match self.confirm.take() {
+                    Some(waiting) => waiting.superseded_by(next),
+                    None => Some(next),
+                };
+                if let Some(held) = held {
+                    self.confirm.hold(held);
+                }
+            }
+            Ok(crate::settings::confirm::Change::Applied(applied)) => {
+                log::info!("settings: `{key}` = {value} ({applied:?})");
+            }
+            Err(fault) => crcbl_core::log::console::print(&fault.to_string()),
+        }
+    }
+
+    /// A press on the confirm prompt: KEEP keeps, REVERT reverts, and any
+    /// other id is not the prompt's.
+    fn answer_prompt(&mut self, id: crcbl_ui::WidgetId) {
+        match id {
+            confirm::KEEP_ID => self.resolve_confirm(true),
+            confirm::REVERT_ID => self.resolve_confirm(false),
+            _ => {}
+        }
+    }
+
+    /// Reads what the waiting change landed on and spends this frame's time
+    /// on its countdown, reverting it when the time is up.
+    fn tick_confirm(&mut self) {
+        let frame_time = self.frame_clock.render_dt();
+        let Some(held) = self.confirm.pending_mut() else {
+            return;
+        };
+        let stage = confirm::WindowStage {
+            shell: self.shell.as_mut(),
+            window: self.window,
+            gpu: &mut self.gpu,
+        };
+        held.observe(&stage);
+        if held.tick(frame_time) {
+            log::info!(
+                "settings: `{}` was not kept in time, so it reverts",
+                held.key()
+            );
+            self.resolve_confirm(false);
+        } else {
+            self.confirm.sync();
+        }
+    }
+
+    /// Takes the waiting change off the prompt and keeps it — the stack and
+    /// the run's settings file — or reverts it on the window and swapchain.
+    fn resolve_confirm(&mut self, keep: bool) {
+        let Some(held) = self.confirm.take() else {
+            return;
+        };
+        let key = held.key().to_owned();
+        if keep {
+            let kept = {
+                let mut stack = self.console.host_mut().stack_mut();
+                held.keep(&mut stack, self.settings_source, G::NAME)
+            };
+            match kept {
+                Ok(true) => log::info!("settings: kept `{key}`, and saved it"),
+                Ok(false) => {
+                    log::info!(
+                        "settings: kept `{key}`; this run has no settings file to save it to"
+                    );
+                }
+                Err(fault) => crcbl_core::log::console::print(&fault.to_string()),
+            }
+            return;
+        }
+        let mut stage = confirm::WindowStage {
+            shell: self.shell.as_mut(),
+            window: self.window,
+            gpu: &mut self.gpu,
+        };
+        match held.revert(&mut stage) {
+            Ok(()) => log::info!("settings: `{key}` put back"),
+            Err(error) => log::warn!("settings: `{key}` could not be put back: {error}"),
+        }
     }
 
     /// Picks this frame's menu, lays it out, and draws it into the draw list.
@@ -7841,6 +8192,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         if let Some(layout) = &layout {
             let menu = self.menus.current().expect("a layout implies a menu");
             menu.render(&mut self.draw_list, layout, self.gpu.menu_skin());
+        }
+        // The confirm prompt, over the game's panel and in its skin.
+        if let Some(prompt) = self.confirm.menus().current() {
+            let layout = prompt.layout(self.ui_extent(), self.gpu.atlas());
+            prompt.render(&mut self.draw_list, &layout, self.gpu.menu_skin());
         }
     }
 
@@ -8372,7 +8728,11 @@ impl<S: Shell + ?Sized, G: HostedGame> GameLoop for Loop<S, G> {
 mod tests {
     use super::*;
 
+    // The confirm flow's checks, on the same fixture.
+    mod confirm_flow;
+
     // The Steam limb's checks, which run on this module's fixture.
+
     #[cfg(all(
         feature = "steam",
         target_pointer_width = "64",
@@ -8817,6 +9177,11 @@ mod tests {
         /// **on the frame it moved and on no other**, and a fake that kept only
         /// the newest could not tell that from one written every frame.
         applied_views: Vec<crcbl_render::DebugView>,
+        /// The pacing this fake's swapchain presents with.
+        pacing: Pacing,
+        /// Every pacing [`GameGpu::set_pacing`] was asked for, in order, so a
+        /// revert can be seen to reach the swapchain.
+        pacings_asked: Vec<Pacing>,
     }
 
     impl FakeGpu {
@@ -8835,6 +9200,8 @@ mod tests {
                 refuse_views: false,
                 applied_video: Vec::new(),
                 applied_views: Vec::new(),
+                pacing: Pacing::Auto,
+                pacings_asked: Vec::new(),
             }
         }
 
@@ -8946,6 +9313,18 @@ mod tests {
             }
             self.applied_views.push(view);
             Ok(())
+        }
+
+        fn set_pacing(
+            &mut self,
+            pacing: Pacing,
+        ) -> Result<crate::settings::Landed<Pacing>, crate::settings::Unsupported> {
+            self.pacings_asked.push(pacing);
+            let previous = std::mem::replace(&mut self.pacing, pacing);
+            Ok(crate::settings::Landed {
+                previous,
+                landed: pacing,
+            })
         }
 
         fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
@@ -13950,6 +14329,8 @@ mod tests {
         served: bool,
         /// A frame limit a settings screen asked for, taken by the loop.
         pending_limit: Option<FrameLimit>,
+        /// A confirm key a settings row asked for, taken by the loop.
+        pending_change: Option<(String, crcbl_console::Value)>,
         /// A pause an on-screen control asked for, taken by the loop.
         pending_pause: bool,
         /// A focus loss only the game could see, taken by the loop.
@@ -14252,6 +14633,10 @@ mod tests {
 
         fn take_pending_frame_limit(&mut self) -> Option<FrameLimit> {
             self.pending_limit.take()
+        }
+
+        fn take_pending_change(&mut self) -> Option<(String, crcbl_console::Value)> {
+            self.pending_change.take()
         }
 
         fn take_pending_pause(&mut self) -> bool {

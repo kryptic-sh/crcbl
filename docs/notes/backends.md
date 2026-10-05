@@ -107,12 +107,16 @@ The rules, each with its _why_:
     frame cheaper without touching the window. A menu that conflates them
     resizes a struggling player's window. In borderless, `resolution` is
     ignored, since borderless covers the monitor.
-  - **Under rule 1 (keys only clamp downward), `display_mode = "borderless"` is
-    a ceiling**, not a command: a game that opened windowed stays windowed. The
-    keys with a genuine downward reading are `render_scale`, `resolution` and
-    `frame_limit`, whose zero means unlimited and so sits at the top of the
-    order (`FrameLimit::clamped_to`). `monitor`, `fov` and `ui_scale` have no
-    order.
+  - **`display_mode` and `present_mode` replace; they do not clamp** (decided
+    2026-10-05, superseding the reading of `display_mode = "borderless"` as a
+    ceiling under rule 1). Windowed and borderless are two places for one frame
+    rather than a less and a more, and a ceiling left the remembered fullscreen
+    toggle inexpressible. Both replace the game's opening choice; `--fullscreen`
+    and a named `--pacing` outrank the file. Both apply on confirm with a timed
+    revert (`crcbl::settings::confirm`). The keys with a genuine downward
+    reading are `render_scale`, `resolution` and `frame_limit`, whose zero means
+    unlimited and so sits at the top of the order (`FrameLimit::clamped_to`).
+    `monitor`, `fov` and `ui_scale` have no order.
   - **Refresh rate is read, never written.** The engine never modesets, so
     refresh is an observation (`MonitorInfo::refresh_millihertz`), in the same
     family as `crcbl_hal::DisplayTiming`; writing one would be exclusive

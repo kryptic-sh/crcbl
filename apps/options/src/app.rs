@@ -29,10 +29,12 @@
 //! which a `ForwardRenderer` takes and this sample has none to hand them to.
 //! Above all of those sits the quality row, which writes a whole column of
 //! topic 39's tier table into the rows below it — see
-//! `Screen::set_quality`. The rest of
-//! the sample's video half — display mode, resolution,
-//! present mode — is not here yet, and `docs/backlog.md` says what each of
-//! them is waiting on.
+//! `Screen::set_quality`. Display mode and present mode have rows too, and
+//! they are the two that do not write their keys: a step hands the key to the
+//! loop, which applies it live and holds it on the engine's confirm prompt,
+//! and the key reaches the file only when the player keeps it — see
+//! [`crcbl::settings::confirm`]. Resolution is not here, and
+//! `docs/backlog.md` says why.
 //!
 //! **Only the frame ceiling applies as it moves.** Menu reconciliation queues
 //! its pending value during `draw_menu`, after that frame's pending-limit drain;
@@ -289,6 +291,22 @@ pub struct Screen {
     /// moved one of the rows below is on no tier, and the next press starts
     /// from whichever tier the file does hold.
     quality: Option<QualityPreset>,
+    /// A display-mode or present-mode step the loop has not taken yet: the
+    /// dotted key and the word the row moved to.
+    ///
+    /// **Handed over, not written.** The two keys can blank the screen, so the
+    /// loop applies them through `crcbl::settings::confirm` and writes the
+    /// stack — the one this screen shares — only when the player keeps the
+    /// change. The rows read the kept value back off that stack.
+    pending_change: Option<(String, Value)>,
+    /// The rung each display row was left on last frame — display mode, then
+    /// present mode.
+    ///
+    /// **What a step is measured from**, rather than the kept value's rung: a
+    /// KEEP writes the stack behind the widget's back, and a widget that
+    /// disagreed with the kept value would otherwise read as a press and ask
+    /// for the change all over again.
+    display_rungs: [usize; 2],
 }
 
 /// The loop options runs in.
@@ -448,6 +466,9 @@ impl Screen {
             antialiasing,
             opened_antialiasing: antialiasing,
             quality,
+            pending_change: None,
+            // Where `menu::menus` puts both rows when the set is born.
+            display_rungs: [0; 2],
         }
     }
 
@@ -1175,6 +1196,47 @@ impl HostedGame for Screen {
             );
             menu.set_item_hint(crate::menu::QUALITY_ID, self.quality_hint());
 
+            // **The two display rows, which ask rather than write.** Each sits
+            // on the word the stack holds — the value the player kept, or what
+            // an absent key means — and a step is handed to the loop as an ask;
+            // the cycler goes back on the kept word at once, and moves to the
+            // new one only if the player keeps it on the engine's prompt. Not
+            // an edit: there is nothing for `SAVE` to write, since a kept
+            // change is written by the loop.
+            let (kept_mode, kept_pacing) = {
+                let stack = self.stack.stack();
+                (
+                    crcbl::settings::display_mode(&stack).unwrap_or_default(),
+                    crcbl::settings::present_mode(&stack).unwrap_or_default(),
+                )
+            };
+            for (slot, (id, key, words, kept)) in [
+                (
+                    crate::menu::DISPLAY_MODE_ID,
+                    crcbl::settings::DISPLAY_MODE_KEY,
+                    crcbl::settings::DISPLAY_MODE_NAMES.as_slice(),
+                    crate::menu::display_mode_rung(kept_mode),
+                ),
+                (
+                    crate::menu::PRESENT_MODE_ID,
+                    crcbl::settings::PRESENT_MODE_KEY,
+                    crcbl::settings::PRESENT_MODE_NAMES.as_slice(),
+                    crate::menu::present_mode_rung(kept_pacing),
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if let Some(chosen) = menu.cycler(id)
+                    && chosen != self.display_rungs[slot]
+                {
+                    self.pending_change = Some((Self::video_key(key), Value::Enum(words[chosen])));
+                }
+                menu.set_cycler(id, kept);
+                menu.set_item_hint(id, words[kept]);
+                self.display_rungs[slot] = kept;
+            }
+
             menu.set_item_hint(crate::menu::SAVE_ID, self.saved.hint());
             self.placed = true;
         }
@@ -1183,6 +1245,10 @@ impl HostedGame for Screen {
 
     fn take_pending_frame_limit(&mut self) -> Option<FrameLimit> {
         self.pending_limit.take()
+    }
+
+    fn take_pending_change(&mut self) -> Option<(String, Value)> {
+        self.pending_change.take()
     }
 
     /// The screen is a menu, so there is nothing for this sample to put in the
@@ -1559,6 +1625,90 @@ mod tests {
             assert_eq!(Screen::menu_action(crate::menu::fader_id(bus)), None);
         }
         assert_eq!(Screen::menu_action(crate::menu::RENDER_SCALE_ID), None);
+    }
+
+    /// **A display row asks the loop and writes nothing**: the step comes out
+    /// of `take_pending_change` once, the stack does not hold the key, the
+    /// row stays on the kept word, and it is not an edit for `SAVE`.
+    #[test]
+    fn a_display_row_asks_the_loop_to_confirm_rather_than_writing() {
+        let (mut screen, mut menus) = screen("");
+        reconcile(&mut screen, &mut menus);
+        let key = format!(
+            "{}.{}",
+            crcbl::settings::VIDEO_NAMESPACE,
+            crcbl::settings::DISPLAY_MODE_KEY
+        );
+
+        assert!(step(&mut menus, crate::menu::DISPLAY_MODE_ID, true));
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            HostedGame::take_pending_change(&mut screen),
+            Some((key.clone(), Value::Enum("borderless"))),
+            "the step was not handed to the loop",
+        );
+        assert_eq!(
+            HostedGame::take_pending_change(&mut screen),
+            None,
+            "one step was handed over twice",
+        );
+        assert!(
+            !screen.stack().contains(&key),
+            "the row wrote a key the player has not kept",
+        );
+        assert_eq!(screen.edits(), 0, "an ask is not an edit for SAVE");
+        assert_eq!(
+            rung(&mut menus, crate::menu::DISPLAY_MODE_ID),
+            0,
+            "the row moved off the kept word before the player kept anything",
+        );
+        assert_eq!(hint(&mut menus, crate::menu::DISPLAY_MODE_ID), "windowed");
+    }
+
+    /// **The rows show what the player kept**: once the loop has written a
+    /// kept change into the stack this screen shares, both rows sit on it —
+    /// and a present-mode step asks for the word under the rung.
+    #[test]
+    fn the_display_rows_show_the_kept_value() {
+        let (mut screen, mut menus) = screen("");
+        reconcile(&mut screen, &mut menus);
+        // What the loop's KEEP does to the shared stack.
+        for (key, word) in [
+            (crcbl::settings::DISPLAY_MODE_KEY, "borderless"),
+            (crcbl::settings::PRESENT_MODE_KEY, "vsync"),
+        ] {
+            let mut stack = screen.stack.stack_mut();
+            crcbl::settings::apply(
+                &mut stack,
+                &format!("{}.{key}", crcbl::settings::VIDEO_NAMESPACE),
+                &Value::Enum(word),
+                &mut crcbl::settings::Deferred::new(),
+            )
+            .expect("a word in the key's domain");
+        }
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(hint(&mut menus, crate::menu::DISPLAY_MODE_ID), "borderless");
+        assert_eq!(rung(&mut menus, crate::menu::DISPLAY_MODE_ID), 1);
+        assert_eq!(hint(&mut menus, crate::menu::PRESENT_MODE_ID), "vsync");
+        assert_eq!(
+            HostedGame::take_pending_change(&mut screen),
+            None,
+            "placing a row on a kept value asked for a change",
+        );
+
+        assert!(step(&mut menus, crate::menu::PRESENT_MODE_ID, true));
+        reconcile(&mut screen, &mut menus);
+        assert_eq!(
+            HostedGame::take_pending_change(&mut screen),
+            Some((
+                format!(
+                    "{}.{}",
+                    crcbl::settings::VIDEO_NAMESPACE,
+                    crcbl::settings::PRESENT_MODE_KEY
+                ),
+                Value::Enum("adaptive"),
+            )),
+        );
     }
 
     /// **A switch round trips through the file, and flips only its own key.**

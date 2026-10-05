@@ -650,7 +650,10 @@ The rules, each with its _why_:
 - **Hot-apply what can be, confirm what can blank a screen.** Volume and
   sensitivity apply at once; vsync, resolution and display mode apply on confirm
   with a timed revert provided by the engine. The first half is
-  `crcbl::settings::apply`; the second is unbuilt.
+  `crcbl::settings::apply`; the second is `crcbl::settings::confirm`, for
+  display mode and present mode — the catalogue marks a key that needs it with
+  `CatalogueKey::confirm`, and the engine loop draws the prompt. Resolution has
+  no live seam, so it has neither.
 - **Key binds live in the profile, not in `settings.toml`.** They are structured
   per-player data (action to chord maps), and games extend the action set.
 - **Catalogue rule 2: a key gets its name and value domain before anything reads

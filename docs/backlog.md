@@ -10489,9 +10489,11 @@ true, re-measured 2026-09-02.** `crates/crcbl/src/settings/engine_video.rs`'s
 render-scale, anisotropy and frame-limit keys and the six `[engine.audio]` bus
 gains, so most of what it names is read.
 
-What is still owed is the `Named` half — `NAMED_VIDEO_KEYS`: display mode,
-monitor, resolution, present mode, brightness, HDR output, UI scale and field of
-view. Each has a defined home in the TOML convention and nothing that reads it.
+What is still owed is the `Named` half — `NAMED_VIDEO_KEYS`: monitor,
+resolution, brightness, HDR output and field of view (re-read 2026-10-05; UI
+scale grew a reader earlier, and display mode and present mode on 2026-10-05 —
+see _Settings apply-on-confirm: decisions, and what they left_). Each has a
+defined home in the TOML convention and nothing that reads it.
 
 **The writer half is no longer the gap, as of 2026-08-28.**
 `SettingsStack::with_platform_storage` lends the storage `platform` used to
@@ -10532,13 +10534,12 @@ the six `[engine.audio]` bus gains and saves them through
 2026-08-29 — every key with a reader now has a row. What is still owed is the
 eight `Named` keys, which face the ceiling question below.
 
-The keys still `Named` face a design question that `render_scale` and
-`frame_limit` did not: rule 1 says `[engine.video]` may only clamp downward, and
-the windowing rules (`docs/notes/backends.md`, _What the deleted 15-windowing
-plan left behind_) read `display_mode = "borderless"` as a **ceiling** that does
-not force a game into borderless. That makes the obvious round trip — persist
-the F11 toggle every sample already has — not obviously expressible in this
-namespace, and it is a decision rather than an implementation.
+**The rule-1 question about `display_mode` is decided (2026-10-05): the key
+replaces the game's opening mode rather than clamping it**, so the F11 toggle's
+round trip is expressible and is built. `docs/notes/backends.md`'s display
+catalogue records the change, and _Settings apply-on-confirm: decisions, and
+what they left_ the reasoning. `monitor`, `fov` and the rest still have no
+reader to ask the question of.
 
 **Neither platform arm of `with_platform_storage` is covered by a test.** The
 round trips are through `MemoryStorage`, which is what `SettingsSource::Source`
@@ -15742,25 +15743,83 @@ the OPFS checks in `web/tools/browser-e2e.mjs`:
     handle. What no test can show is that the flush reaches the platter — that
     is the power-cut gap above.
 
-### Settings apply-on-confirm with timed revert (2026-09-24)
+### Settings apply-on-confirm: decisions, and what they left (2026-10-05)
 
-**Not built.** Settings that can leave a player unable to see the screen —
-resolution, display mode, present mode — were to apply on confirm, with an
-engine-provided timer that reverts if the player does not confirm. Volume and
-sensitivity apply at once. `crcbl::settings::apply` answers `Applied::Live` or
-`Applied::NextStart`, and nothing in `crcbl::settings` confirms or reverts
-(verified 2026-09-24 by grepping `crates/crcbl/src/settings.rs`). The live
-mechanisms exist — `GpuContext::set_pacing` reconfigures a running swapchain and
-`crcbl::engine::ModeRequest::toggle` switches display mode — so what is owed is
-the flow around them.
+**Built** for `display_mode` and `present_mode`. `crcbl::settings::confirm`
+holds the flow (`change`, `PendingChange`, `REVERT_AFTER`), the catalogue marks
+the two keys with `CatalogueKey::confirm`, `crates/crcbl/src/engine/confirm.rs`
+holds the prompt and the window-and-swapchain `Stage`, and `Loop` applies,
+ticks, keeps and reverts. Tests: `settings::confirm::tests`,
+`engine::confirm::tests`, `engine::tests::confirm_flow` and options'
+`a_display_row_asks_the_loop_to_confirm_rather_than_writing` and
+`the_display_rows_show_the_kept_value`; each was shown red under a mutation of
+the rule it guards. The decisions, so they are not re-argued:
 
-**Related:** the engine pause menu's `MenuAction::Fullscreen` is a live
-`Shell::set_mode` whose result is forgotten at exit, so `display_mode` is never
-written; and `display_mode = "borderless"` is a ceiling under rule 1, which is
-the decision _The settings catalogue's named keys have no reader_ records.
-`apps/options` has no rows for display mode, resolution or present mode for the
-same reason: no seam re-modes a live window and reports what the window system
-did.
+- **The stack is not written until the player keeps a change.** A trial is held
+  in the `PendingChange` and the live seam only, so a console `save` or a
+  screen's SAVE during the countdown cannot put a mode that blanks the screen
+  into the file, and a revert has nothing to undo but the live value.
+- **KEEP writes this key alone to the file.** `PendingChange::keep` reads the
+  file fresh, sets the key and saves, then sets it in the run's stack — so a
+  settings screen's unsaved edits stay unsaved. A run on `SettingsSource::None`
+  keeps the key in its stack and writes no file.
+- **What is kept is what landed.** The seams answer `settings::Landed` (previous
+  and landed); the display mode is re-read every frame
+  (`PendingChange::observe`) because a window system answers a mode request on a
+  later frame; a present mode lands, or rolls back, inside
+  `GpuContext::switch_pacing`. The prompt shows the landed value.
+- **The countdown is frame time**, `FrameClock::render_dt` handed to
+  `PendingChange::tick` after the clock advances — paused frames included, since
+  a paused game's display can blank too.
+- **The fullscreen key and the pause menu's FULLSCREEN go through the same
+  flow** rather than toggling instantly and being remembered. Considered and
+  declined: an instant, remembered toggle. A toggle can blank a screen as surely
+  as a row, and the mode it landed on is only known once the window system has
+  answered — a refusal sends nothing that says "refused", so there is no moment
+  to persist it except the player's KEEP. A second press while one waits returns
+  to the start and leaves nothing waiting (`PendingChange::superseded_by`).
+- **Both keys replace the game's opening choice; neither is a ceiling.** This
+  settles the rule-1 question _The settings catalogue's named keys have no
+  reader_ left open: "windowed" and "borderless" are two places for one frame,
+  not a less and a more, and a ceiling reading made the remembered toggle
+  inexpressible. `--fullscreen` and a named `--pacing` still outrank the file.
+  `Loop::new` asks for borderless when the file says so and the window opened
+  windowed; `GpuContext` opens on the file's `present_mode` when asked for
+  `Pacing::Auto`.
+- **One change waits at a time.** A change to another key while one waits
+  reverts the first; a change to the same key keeps the first one's starting
+  point.
+- **The console and `crcbl settings set` write these keys outright** and answer
+  "next start": a console host has no window or swapchain, so there is nothing
+  live to hold or revert.
+- **No resolution row: there is no live seam.** `crcbl_shell::Shell` has no call
+  that resizes a window after `create_window` — `WindowDesc::size` is read once
+  and `set_constraints` bounds a resize the user makes — so `resolution` stays
+  `KeyStatus::Named`. A `Shell::set_size` (and its answer through a configure)
+  on every backend is what it would take, and the confirm flow would then take
+  it as a third `Stage` seam.
+
+**Behaviour that surprises and is not a bug:** KEEP pressed before the window
+system has answered keeps the mode the window was still in, and the prompt says
+so — it shows the landed value. A run that ends while a change waits writes
+nothing, so the next start opens on what the file held, which is a revert.
+
+**Not built:**
+
+- **Escape does not revert.** Escape keeps its pause meaning while the prompt is
+  up; REVERT or the timeout are the ways back. Making Escape revert needs the
+  pause toggle in `Loop::frame_body` to yield to the prompt the way it yields to
+  an open console.
+- **A second finger cannot press the prompt.** `route_contact_to_menu` refuses
+  every contact while it is up, so only the emulated pointer (the first finger)
+  answers it.
+- **The options rows show the file's word, not the live one.** A run started
+  with `--fullscreen` or `--pacing vsync` reads "windowed" or "auto" on the rows
+  until a change is kept; the game holds no window to read.
+- **Coverage gap:** no windowed run and no real swapchain has shown the prompt
+  or a kept change — every check is headless, on the fixture and the null
+  backend. The browser gate's `toFader` moved from 14 to 16 for the two new
+  options rows and was not run here.
 
 ### One save path: `crcbl::save` (2026-09-24, built 2026-10-05 but for the CLI)
 
@@ -29897,12 +29956,11 @@ faders — and the mixer — from the player's own file. `menu::menus`,
   `web/demos/breach/main.js` reads `?map=`, since the gate already navigates
   with one to boot a second configuration.
 
-- **Display mode, resolution and present mode still have no settings rows.**
-  Unlike frame cap, anisotropy, render scale and effect keys, those three must
-  be applied to a live window. The sample has no seam a screen can call to
-  re-mode or resize its window, nor one that reports what the window system
-  actually did with the request. Adding rows before both exist would make the
-  controls claim a live result they cannot produce or observe.
+- **Resolution still has no settings row.** Display mode and present mode have
+  rows since 2026-10-05, applied through the engine's confirm prompt — see
+  _Settings apply-on-confirm: decisions, and what they left_ — but no shell can
+  resize a live window, so a resolution row would claim a result it cannot
+  produce.
 
 - **Coverage gap: nothing restarts.** The round trip is covered by the tests in
   `apps/options/src/app.rs` over `MemoryStorage`, which is what
@@ -29912,12 +29970,12 @@ faders — and the mixer — from the player's own file. `menu::menus`,
   human running `cargo run -p options` twice is currently the only check that
   the native path writes where it reads.
 
-- **The eight catalogue keys nothing reads have no row, and the plan's exit
-  criterion wants them on the screen, labelled (2026-09-24).**
-  `crcbl::settings::catalogue` marks `NAMED_VIDEO_KEYS` — display mode, monitor,
-  resolution, present mode, brightness, HDR output, UI scale and field of view —
-  as `KeyStatus::Named`, and `apps/options` lays out no row for any of them
-  (verified 2026-09-24 against `NAMED_VIDEO_KEYS` in
+- **The five catalogue keys nothing reads have no row, and the plan's exit
+  criterion wants them on the screen, labelled (2026-09-24, re-read
+  2026-10-05).** `crcbl::settings::catalogue` marks `NAMED_VIDEO_KEYS` —
+  monitor, resolution, brightness, HDR output and field of view — as
+  `KeyStatus::Named`, and `apps/options` lays out no row for any of them
+  (verified 2026-10-05 against `NAMED_VIDEO_KEYS` in
   `crates/crcbl/src/settings/key_catalogue.rs` and `menu::menus`). The criterion
   reads "every key in the settings catalogue appears on the screen, and any key
   with no reader is labelled as such". **Decided 2026-09-25: hold each key back
@@ -29929,7 +29987,7 @@ faders — and the mixer — from the player's own file. `menu::menus`,
   honest, but puts controls on the screen that do nothing — or holding each key
   back until its reader lands, which is what the screen does today and what the
   rule against rows that cannot be applied and observed argues for. The
-  display-mode bullet above is three of the eight either way.
+  resolution bullet above is one of the five either way.
 
 - **"Every key" is not enumerated end to end by a headless run.** The criterion
   asks that a headless run can set every key and dump the resulting file.

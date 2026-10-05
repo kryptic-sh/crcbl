@@ -11,6 +11,10 @@ use crcbl_render::MIN_RENDER_SCALE;
 use crcbl_store::settings::SettingsStack;
 
 use super::engine_audio::{AUDIO_NAMESPACE, audio_gains};
+use super::engine_display::{
+    DISPLAY_MODE_KEY, DISPLAY_MODE_NAMES, PRESENT_MODE_KEY, PRESENT_MODE_NAMES, display_mode,
+    display_mode_name, present_mode,
+};
 use super::engine_video::{
     ANISOTROPIC_FILTERING_KEY, ANTIALIASING_KEY, ANTIALIASING_NAMES, FRAME_LIMIT_CEILING,
     FRAME_LIMIT_KEY, MAX_ANISOTROPIC_FILTERING, MAX_UI_SCALE, MIN_UI_SCALE, RENDER_SCALE_KEY,
@@ -21,9 +25,10 @@ use super::engine_video::{
     ssao_bent_normals, ssao_blur_passes, ssao_slices, ui_scale, video_effects,
 };
 use super::key_catalogue::{
-    ANISOTROPIC_FILTERING_HELP, ANTIALIASING_HELP, EFFECT_HELP, FRAME_LIMIT_HELP, GAIN_HELP,
-    GAIN_KIND, NAMED_FLAGS, NAMED_HELP, NAMED_VIDEO_KEYS, RENDER_SCALE_HELP, SHADOW_FILTER_HELP,
-    SSAO_BENT_NORMALS_HELP, SSAO_BLUR_PASSES_HELP, SSAO_SLICES_HELP, UI_SCALE_HELP,
+    ANISOTROPIC_FILTERING_HELP, ANTIALIASING_HELP, DISPLAY_MODE_HELP, EFFECT_HELP,
+    FRAME_LIMIT_HELP, GAIN_HELP, GAIN_KIND, NAMED_FLAGS, NAMED_HELP, NAMED_VIDEO_KEYS,
+    PRESENT_MODE_HELP, RENDER_SCALE_HELP, SHADOW_FILTER_HELP, SSAO_BENT_NORMALS_HELP,
+    SSAO_BLUR_PASSES_HELP, SSAO_SLICES_HELP, UI_SCALE_HELP,
 };
 use super::stage::{Deferred, apply};
 
@@ -312,6 +317,11 @@ fn read_stack(stack: &SettingsStack, namespace: &str, name: &str, kind: Kind) ->
         RENDER_SCALE_KEY => Value::Float(render_scale(stack)),
         ANISOTROPIC_FILTERING_KEY => Value::Float(anisotropic_filtering(stack)),
         UI_SCALE_KEY => Value::Float(ui_scale(stack)),
+        // An absent key reads back as the word for what a run opens on when
+        // the player has said nothing — windowed, and `auto` pacing — which is
+        // the game's own choice in every sample here.
+        DISPLAY_MODE_KEY => Value::Enum(display_mode_name(display_mode(stack).unwrap_or_default())),
+        PRESENT_MODE_KEY => Value::Enum(present_mode(stack).unwrap_or_default().name()),
         _ => match effect_keys().find(|(candidate, _)| *candidate == name) {
             Some((_, effect)) => Value::Bool(video_effects(stack).contains(effect)),
             // A `Named` key: nothing reads it, so there is nothing to read it
@@ -431,20 +441,24 @@ settings_bindings! {
     UI_SCALE: VIDEO_NAMESPACE, UI_SCALE_KEY,
         Kind::Float { min: MIN_UI_SCALE, max: MAX_UI_SCALE }, Flags::ARCHIVE, UI_SCALE_HELP;
 
-    DISPLAY_MODE: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[0].0, NAMED_VIDEO_KEYS[0].1,
+    // Written outright from here, never held for a confirm: the console is a
+    // developer's, and `apply` answers it "next start" because a console host
+    // has no window or swapchain to put either into force on.
+    DISPLAY_MODE: VIDEO_NAMESPACE, DISPLAY_MODE_KEY, Kind::Enum(&DISPLAY_MODE_NAMES),
+        Flags::ARCHIVE, DISPLAY_MODE_HELP;
+    PRESENT_MODE: VIDEO_NAMESPACE, PRESENT_MODE_KEY, Kind::Enum(&PRESENT_MODE_NAMES),
+        Flags::ARCHIVE, PRESENT_MODE_HELP;
+
+    MONITOR: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[0].0, NAMED_VIDEO_KEYS[0].1,
         NAMED_FLAGS, NAMED_HELP[0];
-    MONITOR: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[1].0, NAMED_VIDEO_KEYS[1].1,
+    RESOLUTION: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[1].0, NAMED_VIDEO_KEYS[1].1,
         NAMED_FLAGS, NAMED_HELP[1];
-    RESOLUTION: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[2].0, NAMED_VIDEO_KEYS[2].1,
+    BRIGHTNESS: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[2].0, NAMED_VIDEO_KEYS[2].1,
         NAMED_FLAGS, NAMED_HELP[2];
-    PRESENT_MODE: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[3].0, NAMED_VIDEO_KEYS[3].1,
+    HDR_OUTPUT: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[3].0, NAMED_VIDEO_KEYS[3].1,
         NAMED_FLAGS, NAMED_HELP[3];
-    BRIGHTNESS: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[4].0, NAMED_VIDEO_KEYS[4].1,
+    FOV: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[4].0, NAMED_VIDEO_KEYS[4].1,
         NAMED_FLAGS, NAMED_HELP[4];
-    HDR_OUTPUT: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[5].0, NAMED_VIDEO_KEYS[5].1,
-        NAMED_FLAGS, NAMED_HELP[5];
-    FOV: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[6].0, NAMED_VIDEO_KEYS[6].1,
-        NAMED_FLAGS, NAMED_HELP[6];
 
     MASTER_VOLUME: AUDIO_NAMESPACE, Bus::ALL[0].settings_key(), GAIN_KIND,
         Flags::ARCHIVE, GAIN_HELP;
@@ -575,9 +589,9 @@ mod tests {
                 checked += 1;
             }
         }
-        // Seven switches, nine video rows and six gains, two ends each bar the
-        // antialiasing tier's three rungs.
-        assert_eq!(checked, 46, "the sweep did not cover the read catalogue");
+        // Seven switches, eleven video rows and six gains: two ends of each
+        // numeric or boolean row, and every word of each enum row.
+        assert_eq!(checked, 52, "the sweep did not cover the read catalogue");
     }
 
     /// **A key nothing reads refuses a set, and says why.**

@@ -8,6 +8,9 @@ use crcbl_store::StorageError;
 use crcbl_store::settings::SettingsStack;
 
 use super::engine_audio::{AUDIO_NAMESPACE, set_audio_gain};
+use super::engine_display::{
+    DISPLAY_MODE_KEY, PRESENT_MODE_KEY, display_mode_from_name, set_display_mode, set_present_mode,
+};
 use super::engine_video::{
     ANISOTROPIC_FILTERING_KEY, ANTIALIASING_KEY, FRAME_LIMIT_KEY, RENDER_SCALE_KEY,
     SHADOW_FILTER_KEY, SSAO_BENT_NORMALS_KEY, SSAO_BLUR_PASSES_KEY, SSAO_SLICES_KEY, UI_SCALE_KEY,
@@ -16,7 +19,8 @@ use super::engine_video::{
     set_ssao_slices, set_ui_scale, set_video_effects, ui_scale, video, video_effects,
 };
 use super::key_catalogue::{KeyStatus, catalogued};
-use crate::engine::FrameLimit;
+use crate::engine::{FrameLimit, Pacing};
+use crcbl_shell::DisplayMode;
 
 #[cfg(doc)]
 use crcbl_console::{Binding, Kind};
@@ -49,6 +53,31 @@ impl std::fmt::Display for Unsupported {
 }
 
 impl std::error::Error for Unsupported {}
+
+/// What a live seam was showing before a write, and what it shows after.
+///
+/// The answer the two seams that can blank a screen give, because neither can
+/// promise the value it was asked for: a window system may refuse a borderless
+/// window, and a swapchain that cannot be rebuilt keeps the mode it had. A
+/// [`PendingChange`](super::confirm::PendingChange) holds both halves — the
+/// first to go back to, the second to show the player and to keep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Landed<T> {
+    /// What was in force before the write.
+    pub previous: T,
+    /// What is in force after it, which need not be what was asked for.
+    pub landed: T,
+}
+
+impl<T> Landed<T> {
+    /// Both halves, through `f`.
+    pub fn map<U>(self, f: impl Fn(T) -> U) -> Landed<U> {
+        Landed {
+            previous: f(self.previous),
+            landed: f(self.landed),
+        }
+    }
+}
 
 /// What a settings write reaches once the stack holds it.
 ///
@@ -114,6 +143,45 @@ pub trait Stage {
     /// it to the loop's own menus, console and overlay.
     fn set_ui_scale(&mut self, scale: f32) -> Result<(), Unsupported> {
         let _ = scale;
+        Err(Unsupported)
+    }
+
+    /// The mode the window system has the window in **now** — not the one last
+    /// asked for.
+    ///
+    /// A [`PendingChange`](super::confirm::PendingChange) asks this every
+    /// frame, because a window system answers a mode request on a later frame
+    /// than the one that made it, and what the player is asked to keep is what
+    /// they can see.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`] where this host has no window — every host but the
+    /// loop's own.
+    fn display_mode(&self) -> Result<DisplayMode, Unsupported> {
+        Err(Unsupported)
+    }
+
+    /// Ask the window system for `mode`, answering the mode the window was in
+    /// and the one it is in once asked.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`] where this host has no window.
+    fn set_display_mode(&mut self, mode: DisplayMode) -> Result<Landed<DisplayMode>, Unsupported> {
+        let _ = mode;
+        Err(Unsupported)
+    }
+
+    /// Rebuild the swapchain on `pacing`, answering the pacing it presented
+    /// with and the one it presents with now — the old one again, where the
+    /// rebuild failed.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`] where this host has no swapchain it can reach.
+    fn set_present_mode(&mut self, pacing: Pacing) -> Result<Landed<Pacing>, Unsupported> {
+        let _ = pacing;
         Err(Unsupported)
     }
 }
@@ -352,6 +420,28 @@ pub fn apply(
             };
             set_anisotropic_filtering(stack, anisotropy).map_err(storage)?;
             Ok(reached(stage.apply_video(&video(stack))))
+        }
+        // The window's two. Written outright here — `apply` is the path that
+        // does not hold a change for a confirm; `confirm::change` is the one
+        // that does, and it calls this only once the player has kept one, or
+        // for a host with no live seam to hold it on.
+        DISPLAY_MODE_KEY => {
+            let Value::Enum(name) = *value else {
+                unreachable!("the display mode is an enum kind, which `check` has held it to")
+            };
+            let mode = display_mode_from_name(name)
+                .expect("`check` has already held the value to `DISPLAY_MODE_NAMES`");
+            set_display_mode(stack, mode).map_err(storage)?;
+            Ok(reached(stage.set_display_mode(mode).map(drop)))
+        }
+        PRESENT_MODE_KEY => {
+            let Value::Enum(name) = *value else {
+                unreachable!("the present mode is an enum kind, which `check` has held it to")
+            };
+            let pacing = Pacing::from_name(name)
+                .expect("`check` has already held the value to `PRESENT_MODE_NAMES`");
+            set_present_mode(stack, pacing).map_err(storage)?;
+            Ok(reached(stage.set_present_mode(pacing).map(drop)))
         }
         // Not the renderer's: the host that draws a UI at a scale is told,
         // with the multiplier the file now reads back.

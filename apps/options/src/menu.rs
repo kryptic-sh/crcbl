@@ -30,10 +30,11 @@
 //! loud" a player is reaching for. [`handle_at`] is the same map backwards.
 
 use crcbl::audio::mixer::Bus;
-use crcbl::engine::{DEBUG_OVERLAY_ID, FIRST_GAME_ID, FULLSCREEN_ID, FrameLimit};
+use crcbl::engine::{DEBUG_OVERLAY_ID, FIRST_GAME_ID, FULLSCREEN_ID, FrameLimit, Pacing};
 use crcbl::render::{Antialiasing, DEFAULT_ANISOTROPY, MIN_RENDER_SCALE, RenderEffects};
-use crcbl::settings::VIDEO_KEYS;
 use crcbl::settings::presets::{CUSTOM, QualityPreset};
+use crcbl::settings::{DISPLAY_MODE_NAMES, PRESENT_MODE_NAMES, VIDEO_KEYS, display_mode_name};
+use crcbl::shell::DisplayMode;
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet, Slider};
 
 /// The id of `bus`'s fader, numbered in [`Bus::ALL`]'s order from the first id
@@ -381,6 +382,35 @@ pub fn quality_stepped(chosen: usize) -> QualityPreset {
         .unwrap_or(QualityPreset::ALL[0])
 }
 
+/// The id of the row that steps `[engine.video] display_mode`.
+///
+/// Numbered past [`QUALITY_ID`] for that row's reason: every id below it stays
+/// where it was, whatever [`menus`] does with the order.
+pub const DISPLAY_MODE_ID: crcbl::ui::WidgetId = QUALITY_ID + 1;
+
+/// The id of the row that steps `[engine.video] present_mode`.
+pub const PRESENT_MODE_ID: crcbl::ui::WidgetId = DISPLAY_MODE_ID + 1;
+
+/// The rung the display-mode row sits on for `mode`: its word's place in
+/// [`DISPLAY_MODE_NAMES`].
+#[must_use]
+pub fn display_mode_rung(mode: DisplayMode) -> usize {
+    DISPLAY_MODE_NAMES
+        .iter()
+        .position(|name| *name == display_mode_name(mode))
+        .unwrap_or(0)
+}
+
+/// The rung the present-mode row sits on for `pacing`: its place in
+/// [`Pacing::ALL`], which is [`PRESENT_MODE_NAMES`]' order.
+#[must_use]
+pub fn present_mode_rung(pacing: Pacing) -> usize {
+    Pacing::ALL
+        .iter()
+        .position(|rung| *rung == pacing)
+        .unwrap_or(0)
+}
+
 /// What this sample's own rows do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -508,6 +538,26 @@ pub fn menus(gains: &[(Bus, f32); Bus::ALL.len()]) -> Menus {
             quality_rung(None),
         ),
         MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+        // The two keys that can blank the screen, beside the button that
+        // toggles the first of them. **Neither writes its key**: a step asks
+        // the loop to apply it live and hold it on the engine's confirm
+        // prompt, and the key reaches the file only when the player keeps it
+        // — see `Screen::menu_kind`. Born on what an absent key means and
+        // placed on the file's word by the first frame, like every row here.
+        MenuItem::cycler(
+            DISPLAY_MODE_ID,
+            "DISPLAY MODE",
+            display_mode_name(DisplayMode::Windowed),
+            DISPLAY_MODE_NAMES.len(),
+            display_mode_rung(DisplayMode::Windowed),
+        ),
+        MenuItem::cycler(
+            PRESENT_MODE_ID,
+            "PRESENT MODE",
+            Pacing::Auto.name(),
+            PRESENT_MODE_NAMES.len(),
+            present_mode_rung(Pacing::Auto),
+        ),
         MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
         // Beside `FULLSCREEN`, because both are `[engine.video]` and a player
         // looking for one is looking for the other. Born on no ceiling — what
@@ -1009,8 +1059,29 @@ mod tests {
         }
     }
 
+    /// **The two display rows step every word their keys take, in the keys'
+    /// own order**, so a rung and a word cannot disagree about which mode a
+    /// press asks for.
+    #[test]
+    fn the_display_rows_step_every_word_their_keys_take() {
+        for (index, name) in DISPLAY_MODE_NAMES.iter().enumerate() {
+            let mode = crcbl::settings::display_mode_from_name(name).expect("its own word");
+            assert_eq!(display_mode_rung(mode), index, "{name}");
+        }
+        for (index, pacing) in Pacing::ALL.into_iter().enumerate() {
+            assert_eq!(present_mode_rung(pacing), index, "{pacing:?}");
+            assert_eq!(PRESENT_MODE_NAMES[index], pacing.name());
+        }
+        let mut menus = menus(&Bus::ALL.map(|bus| (bus, 1.0)));
+        menus.show(MenuKind::Settings);
+        let menu = menus.current().expect("the screen is always showing");
+        assert_eq!(menu.cycler(DISPLAY_MODE_ID), Some(0));
+        assert_eq!(menu.cycler(PRESENT_MODE_ID), Some(0));
+    }
+
     /// A value the groove cannot reach lands at an end of it rather than off
     /// it, and a `NaN` lands at the left end like a fader's does.
+
     #[test]
     fn a_scale_off_the_groove_lands_at_an_end_of_it() {
         assert_eq!(scale_handle_at(2.0), 1.0);

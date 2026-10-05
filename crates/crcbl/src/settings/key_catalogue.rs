@@ -6,6 +6,9 @@ use crcbl_console::{Flags, Kind};
 use crcbl_render::MIN_RENDER_SCALE;
 
 use super::engine_audio::AUDIO_NAMESPACE;
+use super::engine_display::{
+    DISPLAY_MODE_KEY, DISPLAY_MODE_NAMES, PRESENT_MODE_KEY, PRESENT_MODE_NAMES,
+};
 use super::engine_video::{
     ANISOTROPIC_FILTERING_KEY, ANTIALIASING_KEY, ANTIALIASING_NAMES, FRAME_LIMIT_CEILING,
     FRAME_LIMIT_KEY, MAX_ANISOTROPIC_FILTERING, MAX_UI_SCALE, MIN_UI_SCALE, RENDER_SCALE_KEY,
@@ -72,6 +75,15 @@ pub struct CatalogueKey {
     pub help: &'static str,
     /// Whether a reader answers it; see [`KeyStatus`].
     pub status: KeyStatus,
+    /// Whether a change to it can leave a player unable to see the screen, so
+    /// a settings screen applies it through
+    /// [`confirm::change`](super::confirm::change) — live, held, and reverted
+    /// unless the player keeps it — rather than writing it outright.
+    ///
+    /// **A property of the key, not a list in a screen**, so every screen and
+    /// the pause menu's fullscreen button ask the one question of the one
+    /// table, and a key that grows the risk later grows it here.
+    pub confirm: bool,
 }
 
 /// The help line every [`VIDEO_KEYS`] switch wears.
@@ -96,6 +108,14 @@ pub(super) const SSAO_BENT_NORMALS_HELP: &str =
 
 /// [`RENDER_SCALE_KEY`]'s help line, for [`catalogue`] and its [`Binding`].
 pub(super) const RENDER_SCALE_HELP: &str = "fraction of the surface extent the frame is drawn at";
+
+/// [`DISPLAY_MODE_KEY`]'s help line, for [`catalogue`] and its [`Binding`].
+pub(super) const DISPLAY_MODE_HELP: &str =
+    "how the window sits on the desktop; absent opens it the game's way";
+
+/// [`PRESENT_MODE_KEY`]'s help line, for [`catalogue`] and its [`Binding`].
+pub(super) const PRESENT_MODE_HELP: &str =
+    "how the swapchain paces presentation; absent paces it the game's way";
 
 /// [`ANISOTROPIC_FILTERING_KEY`]'s help line, for [`catalogue`] and its
 /// [`Binding`].
@@ -135,11 +155,9 @@ pub(super) const NAMED_FLAGS: Flags = Flags::ARCHIVE.union(Flags::READ_ONLY);
 /// words debug-console decision 3 (`docs/notes/tooling.md`) asks the console to
 /// print, because that is the fact a person reading `help` needs before the
 /// rest of the line is worth anything.
-pub(super) const NAMED_HELP: [&str; 7] = [
-    "nothing reads this yet — how the window sits on the desktop",
+pub(super) const NAMED_HELP: [&str; 5] = [
     "nothing reads this yet — monitor name; absent means wherever the window is",
     "nothing reads this yet — [width, height] in device pixels, as a TOML array",
-    "nothing reads this yet — how the swapchain paces presentation",
     "nothing reads this yet — a scalar multiplier applied in the tonemap pass",
     "nothing reads this yet — whether the swapchain asks for an HDR format",
     "nothing reads this yet — the vertical field of view in degrees",
@@ -163,32 +181,22 @@ pub(super) const NAMED_HELP: [&str; 7] = [
 /// `resolution` is [`Kind::Text`] rather than a pair, because it is a TOML array
 /// and the console's domain type spells no array; `monitor` is text because a
 /// monitor name is text.
-pub(super) const NAMED_VIDEO_KEYS: [(&str, Kind, &str); 7] = [
-    (
-        "display_mode",
-        Kind::Enum(&["windowed", "borderless"]),
-        NAMED_HELP[0],
-    ),
-    ("monitor", Kind::Text, NAMED_HELP[1]),
-    ("resolution", Kind::Text, NAMED_HELP[2]),
-    (
-        "present_mode",
-        Kind::Enum(&["auto", "vsync", "adaptive", "off"]),
-        NAMED_HELP[3],
-    ),
+pub(super) const NAMED_VIDEO_KEYS: [(&str, Kind, &str); 5] = [
+    ("monitor", Kind::Text, NAMED_HELP[0]),
+    ("resolution", Kind::Text, NAMED_HELP[1]),
     (
         "brightness",
         Kind::Float { min: 0.0, max: 2.0 },
-        NAMED_HELP[4],
+        NAMED_HELP[2],
     ),
-    ("hdr_output", Kind::Bool, NAMED_HELP[5]),
+    ("hdr_output", Kind::Bool, NAMED_HELP[3]),
     (
         "fov",
         Kind::Float {
             min: 1.0,
             max: 179.0,
         },
-        NAMED_HELP[6],
+        NAMED_HELP[4],
     ),
 ];
 
@@ -198,7 +206,8 @@ pub(super) const NAMED_VIDEO_KEYS: [(&str, Kind, &str); 7] = [
 /// appear here under one spelling and be read under another: the effect rows
 /// come from [`VIDEO_KEYS`], the antialiasing row from [`ANTIALIASING_KEY`], the
 /// scale rows from [`RENDER_SCALE_KEY`] and [`UI_SCALE_KEY`], the anisotropy row from
-/// [`ANISOTROPIC_FILTERING_KEY`], and the volume rows from
+/// [`ANISOTROPIC_FILTERING_KEY`], the window's two rows from
+/// [`DISPLAY_MODE_KEY`] and [`PRESENT_MODE_KEY`], and the volume rows from
 /// [`Bus::settings_key`]. Only the rows with no reader are
 /// written out, because there is nothing to derive them from.
 ///
@@ -222,6 +231,7 @@ pub fn catalogue() -> Vec<CatalogueKey> {
         kind,
         help,
         status: KeyStatus::Read,
+        confirm: false,
     };
     let mut keys: Vec<CatalogueKey> = effect_keys()
         .map(|(key, _)| read(VIDEO_NAMESPACE, key, Kind::Bool, EFFECT_HELP))
@@ -292,12 +302,32 @@ pub fn catalogue() -> Vec<CatalogueKey> {
         },
         FRAME_LIMIT_HELP,
     ));
+    // The two keys a change to can blank the screen: read like the rest, and
+    // marked so a screen confirms them.
+    for (name, kind, help) in [
+        (
+            DISPLAY_MODE_KEY,
+            Kind::Enum(&DISPLAY_MODE_NAMES),
+            DISPLAY_MODE_HELP,
+        ),
+        (
+            PRESENT_MODE_KEY,
+            Kind::Enum(&PRESENT_MODE_NAMES),
+            PRESENT_MODE_HELP,
+        ),
+    ] {
+        keys.push(CatalogueKey {
+            confirm: true,
+            ..read(VIDEO_NAMESPACE, name, kind, help)
+        });
+    }
     keys.extend(NAMED_VIDEO_KEYS.map(|(key, kind, help)| CatalogueKey {
         key: format!("{VIDEO_NAMESPACE}.{key}"),
         name: key,
         kind,
         help,
         status: KeyStatus::Named,
+        confirm: false,
     }));
     keys.extend(
         Bus::ALL.map(|bus| read(AUDIO_NAMESPACE, bus.settings_key(), GAIN_KIND, GAIN_HELP)),
@@ -353,6 +383,8 @@ mod tests {
         wanted.push(format!("{VIDEO_NAMESPACE}.{ANISOTROPIC_FILTERING_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{UI_SCALE_KEY}"));
+        wanted.push(format!("{VIDEO_NAMESPACE}.{DISPLAY_MODE_KEY}"));
+        wanted.push(format!("{VIDEO_NAMESPACE}.{PRESENT_MODE_KEY}"));
         wanted.extend(Bus::ALL.map(|bus| format!("{AUDIO_NAMESPACE}.{}", bus.settings_key())));
 
         for key in &wanted {
@@ -427,11 +459,44 @@ mod tests {
             KeyStatus::Read,
         );
         assert_eq!(
-            catalogued(&format!("{VIDEO_NAMESPACE}.display_mode"))
-                .expect("the display mode is catalogued")
+            catalogued(&format!("{VIDEO_NAMESPACE}.monitor"))
+                .expect("the monitor is catalogued")
                 .status,
             KeyStatus::Named,
             "a key with no reader must not claim to have one",
+        );
+    }
+
+    /// **The keys that can blank the screen are exactly the window's two**,
+    /// and each is a key with a reader: a confirm flow over a key nothing
+    /// reads would hold a value no frame shows.
+    ///
+    /// Written as the expected set rather than derived, for the reason
+    /// `every_key_with_a_reader_is_catalogued_as_read` asserts against the
+    /// reader tables: deriving it would agree with whatever the catalogue did.
+    #[test]
+    fn only_the_display_and_present_modes_ask_to_be_confirmed() {
+        let confirmed: Vec<String> = catalogue()
+            .into_iter()
+            .filter(|entry| entry.confirm)
+            .map(|entry| {
+                assert_eq!(entry.status, KeyStatus::Read, "`{}`", entry.key);
+                entry.key
+            })
+            .collect();
+        assert_eq!(
+            confirmed,
+            [
+                format!("{VIDEO_NAMESPACE}.{DISPLAY_MODE_KEY}"),
+                format!("{VIDEO_NAMESPACE}.{PRESENT_MODE_KEY}"),
+            ],
+        );
+        let volume = format!("{AUDIO_NAMESPACE}.{}", Bus::Music.settings_key());
+        assert!(
+            !catalogued(&volume)
+                .expect("the music bus is catalogued")
+                .confirm,
+            "a volume applies at once and is never held for a confirm",
         );
     }
 

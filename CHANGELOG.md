@@ -27,6 +27,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Result<usize, StorageError>` instead of `Result<(), StorageError>`, the bytes
   written checksum included. A caller matching `Ok(())` matches `Ok(_)`.
 
+- **`crcbl::settings::CatalogueKey` gained `confirm`** (see Added: display
+  settings apply on confirm). A struct literal must name it — `false` for every
+  key but the two that can blank the screen.
+
 - **`crcbl_ecs::SystemStats` gained `tick_time`** (see Added: per-system tick
   times). A struct literal must name it — `None` for a system that was not
   timed.
@@ -712,6 +716,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   trigger, each file this run wrote and its size, where the autosave goes, and
   the saves that did not land. `crcbl_store::save::SaveBacking::root` names the
   directory for it.
+
+- **Display settings apply on confirm, and revert unless kept.**
+  `[engine.video] display_mode` and `present_mode` now have readers and are
+  marked `CatalogueKey::confirm`; `crcbl::settings::confirm::change` applies
+  such a key live, holds the value it replaced and counts down
+  `confirm::REVERT_AFTER` (15 s) of frame time, and `PendingChange::keep` writes
+  what actually landed — the mode the window system really gave, not the one
+  asked for — to the stack and that key alone to the settings file, while a
+  revert or a timeout puts the old value back and writes nothing. Every other
+  key is still written at once through `apply`. The engine loop draws the prompt
+  ("Keep these display settings?", the landed value, "Reverting in N s", KEEP
+  and REVERT) over any game's panel, and it takes the keyboard, pointer and pad
+  navigation while it is up. A game's settings row hands such a key to the loop
+  through the new `HostedGame::take_pending_change`, and `apps/options` gains
+  DISPLAY MODE and PRESENT MODE rows that do. New seams for it:
+  `settings::Stage::display_mode`, `set_display_mode` and `set_present_mode`
+  (answering a `settings::Landed` pair), `GameGpu::set_pacing`, which
+  `impl_game_gpu!` forwards to the new `GpuContext::switch_pacing` for every
+  sample, and `Pacing::ALL` and `Pacing::name`. Both keys are read at start-up
+  too: a file's `display_mode = "borderless"` opens the window borderless, and
+  its `present_mode` is the pacing a context opens on when the caller asked for
+  `auto`. `--fullscreen` and a named `--pacing` still win.
 
 - **Per-system tick times in the ECS inspector and the sandbox's debug panel.**
   `crcbl_ecs::Schedule::set_clock` takes any `crcbl_core::time::TimeSource` —
@@ -5791,6 +5817,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **The fullscreen key and the pause menu's FULLSCREEN go through the confirm
+  prompt, and a kept toggle is remembered.** Each applies the opposite mode at
+  once, as before, and then asks to keep it: KEEP writes `display_mode` to the
+  settings file, and leaving it alone for 15 s of frame time puts the window
+  back. A second press while it waits returns to the starting mode and leaves
+  nothing waiting. A shell that refuses the request outright is logged rather
+  than ending the frame with an error. `display_mode` now **replaces** the
+  game's opening mode instead of being read as a ceiling, and the console can
+  set it and `present_mode` (answering "next start", as it has no window to
+  apply them to) where both were read-only.
 
 - **The save container refuses its header and sectors by name.**
   `crcbl_store::save::FormatError` names every refusal — too short, bad magic, a
