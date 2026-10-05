@@ -11555,15 +11555,15 @@ The shape-level measurements are `query::sphere_overlap_vs_*`, in
 
 Left, and why:
 
-- **The public `sphere_overlaps_*` predicates still count a touch**, so at the
-  boundary they disagree with the overlap queries. They are public shape tests
-  with their own callers and tests, and changing them is a separate breaking
-  change nobody asked for. A caller using one as an oracle for an overlap query
-  has to use `sphere_overlap_vs_*(..).is_some()` instead — `crcbl bench`'s
-  `serial_answers` and
-  `world::tests::the_shared_view_finds_exactly_what_a_scan_would` were moved to
-  it. Needs a decision if the two should agree: change the predicates to strict
-  (breaking, every caller re-checked) or leave them.
+- **Decided 2026-10-05: the `sphere_overlaps_*` predicates are strict, and
+  answered by `sphere_overlap_vs_*(..).is_some()`.** They counted a touch, which
+  put two rules on one question that would drift; one rule in one place cannot.
+  Every caller was in `crcbl-phys`'s own tests, so the break reaches no
+  workspace code, and none of them sits on a hot path (horde's steering uses the
+  ids-only form) — so the predicates gave up their cheaper inline arithmetic for
+  the shared measurement. Held by
+  `query::tests::the_yes_or_no_checks_do_not_count_a_touch`, which goes red for
+  each shape with its old `<=` comparison put back.
 - **"On the core" is as the arithmetic has it.** A centre on a capsule's core in
   exact numbers can land a rounding off it in `f64` (at `y = 0.3` on a core from
   `-1` to `1` the nearest core point rounds a hair above), and then leaves along
@@ -30427,11 +30427,12 @@ already carries.
   `CompoundShape::from_aabbs`) use them, per EW's report of 2026-09-24. Found
   while porting, read from the code and not run, and left alone because each
   changes behaviour: `query::ray_vs_aabb` with a zero direction from inside a
-  box yields a `NaN` point (`t = +inf`); `query::sphere_overlaps_aabb` panics on
-  a `NaN` box corner (`f64::clamp` asserts), which rebuilding it on
-  `Aabb::closest_point` would turn into "no overlap". `AabbCompound` has no
-  sweeps or shape overlaps, which EW did not ask for; a compound in the query
-  world (`PhysicsWorld::add_compound`) has both, part by part.
+  box yields a `NaN` point (`t = +inf`); `query::sphere_overlaps_aabb` panicked
+  on a `NaN` box corner (`f64::clamp` asserts) — it is answered by
+  `sphere_overlap_vs_aabb` since 2026-10-05, and what that does with a `NaN`
+  corner has not been re-checked. `AabbCompound` has no sweeps or shape
+  overlaps, which EW did not ask for; a compound in the query world
+  (`PhysicsWorld::add_compound`) has both, part by part.
 - **Two-bone IK shipped; EW's migration is parked on EW's side.**
   `crcbl_anim::{rotate_joint, solve_two_bone}` landed 2026-09-23 with EW's
   argument order, returning `IkError` (the validation choices are in the `ik`

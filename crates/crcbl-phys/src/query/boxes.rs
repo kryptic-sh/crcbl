@@ -28,22 +28,19 @@ use glam::{DQuat, DVec3};
 use super::capsules::advance_upright_capsule;
 use super::{
     OverlapHit, Penetration, ShapeHit, capsule_penetration_vs_aabb, ray_vs_aabb,
-    sphere_overlap_vs_aabb, sphere_overlaps_aabb, swept_capsule_vs_aabb, swept_sphere_vs_aabb,
+    sphere_overlap_vs_aabb, swept_capsule_vs_aabb, swept_sphere_vs_aabb,
 };
 use crate::broadphase::{Ray, Segment};
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
 use crate::contact::manifold::{closest_on_segment_to_box, gap};
 use crate::contact::shape::ContactShape;
 
-/// Test whether a sphere overlaps a box collider, turned or not (touching
-/// counts as overlapping).
+/// Test whether a sphere overlaps a box collider, turned or not; touching does
+/// not count. The yes-or-no form of [`sphere_overlap_vs_box`], and answered by
+/// it.
 #[must_use]
 pub fn sphere_overlaps_box(sphere: &Sphere, target: &BoxCollider) -> bool {
-    if !target.is_turned() {
-        return sphere_overlaps_aabb(sphere, &target.aabb());
-    }
-    let local = Sphere::new(target.local_point(sphere.centre), sphere.radius);
-    sphere_overlaps_aabb(&local, &target.local_aabb())
+    sphere_overlap_vs_box(sphere, target).is_some()
 }
 
 /// How a sphere overlaps a box collider, turned or not, or `None` if they are

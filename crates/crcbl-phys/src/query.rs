@@ -34,38 +34,29 @@ pub use self::sphere_overlap::{
 // Overlap queries
 // ---------------------------------------------------------------------------
 
-/// Test whether two spheres overlap (touching counts as overlapping).
-#[inline]
+/// Test whether two spheres overlap — the sphere is inside the other by more
+/// than nothing, so touching does not count.
+///
+/// The yes-or-no form of [`sphere_overlap_vs_sphere`], and answered by it, so
+/// the two can never disagree at the boundary.
 #[must_use]
 pub fn sphere_overlaps_sphere(a: &Sphere, b: &Sphere) -> bool {
-    let combined = a.radius + b.radius;
-    (a.centre - b.centre).length_squared() <= combined * combined
+    sphere_overlap_vs_sphere(a, b).is_some()
 }
 
-/// Test whether a sphere overlaps an AABB.
-#[inline]
+/// Test whether a sphere overlaps an AABB; touching does not count. The
+/// yes-or-no form of [`sphere_overlap_vs_aabb`], and answered by it.
 #[must_use]
 pub fn sphere_overlaps_aabb(sphere: &Sphere, aabb: &Aabb) -> bool {
-    // An inverted box (e.g. `Aabb::EMPTY`) overlaps nothing; clamping against
-    // it would assert on `min > max`.
-    if aabb.is_empty() {
-        return false;
-    }
-    let closest = DVec3::new(
-        sphere.centre.x.clamp(aabb.min.x, aabb.max.x),
-        sphere.centre.y.clamp(aabb.min.y, aabb.max.y),
-        sphere.centre.z.clamp(aabb.min.z, aabb.max.z),
-    );
-    (sphere.centre - closest).length_squared() <= sphere.radius * sphere.radius
+    sphere_overlap_vs_aabb(sphere, aabb).is_some()
 }
 
-/// Test whether a sphere overlaps a Y-aligned capsule.
-#[inline]
+/// Test whether a sphere overlaps a Y-aligned capsule; touching does not
+/// count. The yes-or-no form of [`sphere_overlap_vs_capsule`], and answered by
+/// it.
 #[must_use]
 pub fn sphere_overlaps_capsule(sphere: &Sphere, capsule: &Capsule) -> bool {
-    let closest = closest_point_on_capsule_axis(capsule, sphere.centre);
-    let combined = sphere.radius + capsule.radius;
-    (sphere.centre - closest).length_squared() <= combined * combined
+    sphere_overlap_vs_capsule(sphere, capsule).is_some()
 }
 
 /// The point on a capsule's axis segment (bottom cap centre → top cap centre)
@@ -1079,6 +1070,27 @@ mod tests {
         let a = Sphere::new(DVec3::ZERO, 1.0);
         let b = Sphere::new(DVec3::new(1.5, 0.0, 0.0), 1.0);
         assert!(sphere_overlaps_sphere(&a, &b));
+    }
+
+    /// **Touching is not overlapping, for every yes-or-no check** — the rule
+    /// the hit-answering queries keep, so the two forms agree at the boundary.
+    #[test]
+    fn the_yes_or_no_checks_do_not_count_a_touch() {
+        let unit = Sphere::new(DVec3::ZERO, 1.0);
+        assert!(!sphere_overlaps_sphere(
+            &unit,
+            &Sphere::new(DVec3::new(2.0, 0.0, 0.0), 1.0)
+        ));
+        let cube = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
+        assert!(!sphere_overlaps_aabb(
+            &Sphere::new(DVec3::new(2.0, 0.0, 0.0), 1.0),
+            &cube
+        ));
+        let capsule = Capsule::new(DVec3::ZERO, 0.5, 2.0);
+        assert!(!sphere_overlaps_capsule(
+            &Sphere::new(DVec3::new(1.5, 1.0, 0.0), 1.0),
+            &capsule
+        ));
     }
 
     #[test]

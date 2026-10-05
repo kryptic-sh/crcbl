@@ -65,8 +65,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   wants the new ids-only forms instead. The boundary moved with the hit: a
   collider is reported only when the sphere is inside it by a positive depth, so
   one exactly touching the query — reported before — is not. The crate-private
-  `sphere_overlaps_turned_capsule` is gone; the public `sphere_overlaps_*`
-  predicates are unchanged and still count a touch.
+  `sphere_overlaps_turned_capsule` is gone. The public `sphere_overlaps_*`
+  predicates follow the same rule — touching is no longer overlapping — and are
+  answered by `sphere_overlap_vs_*(..).is_some()`, so the yes-or-no and the hit
+  forms cannot disagree at the boundary.
 
 - **`crcbl::engine::Pending` gained `pause_key_is_games`** (see Added: key binds
   kept in a player profile). A struct literal must name it — `false` keeps
