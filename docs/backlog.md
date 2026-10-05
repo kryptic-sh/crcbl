@@ -5121,7 +5121,7 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   against `VK_EXT_memory_budget` where the device has it. Every VRAM item below
   is verified against it.
 - **No render CPU benchmark.** The only CPU span over recording is `DRAW_SPAN`
-  (`crates/crcbl/src/perf.rs`); `crcbl bench` has `jobs` and `phys` only. Add
+  (`crates/crcbl/src/perf.rs`); `crcbl bench` has `jobs`, `phys` and `ecs`. Add
   spans around graph build, compile, execute and submit, a counting allocator
   over a null-device frame, and `crcbl bench` scenarios for a rendered frame,
   `phys-step`, `net-snapshot`, `client-interpolate`, `audio-mix` and an idle
@@ -12150,12 +12150,57 @@ ms ± 15 ms: no late input in a 16 s run; the test's bound is 1%) and
 
 ### ECS access declarations and the parallel schedule (2026-08-27)
 
-**The next slice was started and stopped (2026-10-05):** branch
-`feat/ecs-parallel` (commit `9c734ab4`, on origin) has a draft
-`crcbl bench --scenario ecs` and the start of `crcbl sim --threads`, neither
-through the check chain, and no parallel runner. The plan for it is the deferred
-list below: the bench and `sim --threads` first, then a staged runner on
-`crcbl-jobs` only if `hash_state` is identical across thread counts.
+**Built (2026-10-06): the parallel schedule, opt-in.** `Schedule::stages` groups
+the systems at registration into runs of consecutive systems no two of which
+conflict — a system starts a new stage when it conflicts with one in the stage
+before, and joins it otherwise. `Schedule::set_pool` / `World::set_pool` hand
+the schedule a `crcbl_jobs::Pool`; `run` then ticks each stage with
+`Pool::par_for`, one system a chunk, and the end of `par_for` is the barrier
+before the next stage. Without a pool `run` is the serial loop it was. Built
+with it: `SystemTrait: Send` (and `DebugDrawFn`, `System<T>`'s `T`,
+`crcbl_phys::ForceProvider`, `crcbl::registry::Registry::register`'s `T`),
+`set_clock` taking `crcbl_ecs::ScheduleClock` (`TimeSource + Send + Sync`),
+`crcbl bench --scenario ecs [--workers N]` and `crcbl sim --threads N`.
+
+Decided 2026-10-06:
+
+- **Off by default.** No world has a pool until a host hands it one. Who sizes a
+  pool is the topology's call (`21-jobs.md`: cores minus pinned threads), the
+  gain is capped by the stage shape, and small worlds lose (numbers below).
+  Turning it on for a host is one `set_pool` call; no host does yet.
+- **Greedy consecutive stages, not a DAG scheduler.** Stages keep registration
+  order by construction and give `par_for` a contiguous slice; a system that
+  could have run beside a non-adjacent earlier one waits instead. Simple and
+  deterministic; a DAG runner is the upgrade if a schedule's shape ever wastes
+  enough to measure.
+- **Only `tick` runs on the pool.** `sweep`, `debug_draw`, `hash_state`,
+  `iter`/`replicate` and every game or host module stay on the calling thread in
+  schedule order, so the assert's scope (ticks) already covers everything the
+  runner runs concurrently.
+- **Under a pool, a tick that panics lets the rest of its stage run**, and the
+  lowest-placed panic is re-raised after it (`par_for`'s rule); a tick that logs
+  logs in completion order. Neither touches state; both are in `Schedule`'s
+  docs.
+- **Each system's tick time is read on the thread that ran it**, so the
+  inspector still shows each system's own cost, never its stage's.
+
+**The bench, measured 2026-10-06** on a Ryzen 9 9950X3D under Windows, release,
+`crcbl bench --scenario ecs` (eight systems, five conflicts, four stages, 200
+timed ticks, 20 warm-up), per-tick p50 / p95, pasted from the tool. Every run
+printed the serial checksum (`5330902cbb2daaa9`, `9491d54379cfe843`,
+`50a99d1f0c06f96e` for 10000, 1000 and 100 entities):
+
+| `--entities` | no pool          | `--workers 0`    | 1                | 3                | 7                | 15               |
+| ------------ | ---------------- | ---------------- | ---------------- | ---------------- | ---------------- | ---------------- |
+| 10000        | 513.8 / 532.2 µs | 514.5 / 550.1 µs | 389.2 / 446.5 µs | 327.4 / 348.0 µs | 273.2 / 278.0 µs | 274.5 / 284.8 µs |
+| 1000         | 51.6 / 51.8 µs   | 51.5 / 73.2 µs   | 40.3 / 42.6 µs   | 36.3 / 41.4 µs   | 35.4 / 36.4 µs   | 40.6 / 42.2 µs   |
+| 100          | 5.2 / 5.3 µs     | 5.3 / 5.4 µs     | 4.4 / 6.7 µs     | 4.7 / 6.8 µs     | 7.5 / 9.0 µs     | 15.8 / 19.3 µs   |
+
+The serial baseline taken before the runner existed, same machine:
+`per tick: p50 520.600 µs, p95 528.200 µs` (10000),
+`p50 52.100 µs, p95 52.200 µs` (1000), `p50 5.300 µs, p95 5.400 µs` (100). The
+10000 row stops at about half the serial tick because three of its four stages
+hold one system each: that is the stage shape's ceiling, not the pool's.
 
 **Built (2026-10-05): the declaration, the conflict graph and the debug assert,
 designed together. Execution is still serial.** `crcbl_ecs::SystemTrait::access`
@@ -12240,21 +12285,50 @@ Decided 2026-10-05, for the long term:
   documented "might panic or deadlock". Behaviour of the standard lock, not of
   the declaration.
 
-**Deferred: running non-conflicting systems concurrently.** Not trivially safe,
-so not built. What it needs:
+**Still open after the parallel schedule:**
 
-- `SystemTrait: Send`, and `DebugDrawFn` and `System<T>`'s `T` with it — a
-  breaking change to every impl.
-- A runner over the conflict graph on `crcbl_jobs::Pool`: a new `crcbl-ecs` →
-  `crcbl-jobs` edge (rerun the fuzz lock's `--locked` check), with anything
-  systems emit reduced in a fixed order.
-- The determinism proof: `hash_state` per tick identical across worker counts,
-  which needs `crcbl sim --threads` (_The killer test is not runnable_, below)
-  and a harness world with real `Shared` conflicts in it.
-- An ECS bench scenario to show it helped — the 2026-09-06 decision put one
-  ahead of the parallel step, and `crcbl bench` still has only `phys` and
-  `jobs`.
-- The assert's scope widened to whatever the runner calls concurrently.
+- **No host turns it on.** `crcbl-server`'s `Host`, the samples and the editor
+  all run without a pool; adopting it is a per-host decision against that host's
+  thread budget, with the bench above as the price list.
+- **The bench's world is synthetic.** No sample's real schedule has been timed
+  with a pool; the samples' server worlds are mostly one or two systems
+  (`apps/towers`' is one, `FieldReplica`, whose tick is empty), which a pool
+  cannot speed up.
+- **Release builds are not tested**, as for the assert: the runner's tests run
+  in the debug suite only.
+- **The killer test is a test, not a CI job of its own.**
+  `sim_cmd::tests::the_hash_after_every_tick_is_the_same_at_any_thread_count`
+  (1, 2 and 8 threads, every tick) runs in the workspace suite on every push,
+  over the harness world only; `21-jobs.md`'s input-script version waits on _The
+  determinism smoke test has no input script_.
+
+**Coverage gaps of the parallel slice:**
+
+- **`apps/towers`' `parallel_tests` cannot go red under any runner mutation**:
+  its world's one system has an empty tick, so a runner that skipped, doubled or
+  reordered ticks leaves the hash alone. It pins only that handing the towers
+  host a pool perturbs nothing. The tests with teeth are below.
+- **A stage-grouping bug is caught by a race**, so the hash tests' red under
+  "conflicting systems in one stage" is probabilistic in principle; it went red
+  three runs out of three each time it was tried. The structural tests
+  (`conflicting_systems_never_share_a_stage`) are the deterministic guard.
+
+Evidence for the parallel slice, each shown red under a mutation: `crcbl-ecs`'s
+`schedule::tests::conflicting_systems_never_share_a_stage` and
+`a_schedule_on_a_pool_hashes_as_it_does_serially_after_every_tick` (the conflict
+check skipped, so every system joins the last stage), the latter alone (the
+stages run last-first), `the_stages_cover_the_schedule_in_registration_order` (a
+stage's end not extended, dropping a system),
+`a_pool_ticks_the_systems_of_one_stage_at_once` (the pool held but every stage
+ticked on the calling thread),
+`a_timed_schedule_on_a_pool_records_every_systems_tick` (pooled ticks run
+without the clock); `crcbl-server`'s
+`host::parallel_tests::a_host_on_a_pool_hashes_as_it_does_serially_after_every_tick`
+and `crcbl-cli`'s `sim_cmd::tests` hash tests (the conflict check skipped: red
+three runs of three); `sim_cmd::tests` before the runner (the swarm's blocks
+split by worker count; its block sums folded in completion order: red three of
+three); `bench::ecs::tests` (no sample recorded; the moved-hash guard always
+passing; the writers not writing; a writer declared a reader).
 
 **Considered and declined:** declarations over other systems' data or the entity
 allocator (no tick can reach either); a default `access` (above); a `Result`
@@ -12290,18 +12364,6 @@ depends on `crcbl-jobs` (checked each `Cargo.toml`). What exists is adoption
 over results a batch query filled, and `crcbl-phys`'s allocation-free `*_into`
 query forms (`overlap_sphere_into` and friends) exist so that it can. That is
 the shape a crate-side adoption would build on, and it is not the same thing.
-
-### The killer test is not runnable (2026-08-27)
-
-`21-jobs.md`'s determinism killer test is "same input script at `--threads 1`,
-`2`, `N` → identical state hash per tick". `crcbl sim` takes `--ticks`,
-`--tick-rate` and `--seed` and **no worker count**
-(`crates/crcbl-cli/src/args.rs`). So the one CI gate this whole topic leans on
-cannot be run at all today.
-
-**What it would take:** a `--threads` flag on `crcbl sim` that actually drives
-the pool, and a harness world with parallel work in it. Cheap, and it is the
-precondition for trusting any parallel change.
 
 ### Cross-origin isolation on Pages, and no demo page runs workers (2026-08-27)
 
@@ -14941,7 +15003,7 @@ eight missing pieces that code cites ("the seventh missing piece") are in
 Pieces 1, 6, 7 and 8 are closed (`crcbl_core::trace`, `Pool::stats`,
 `crcbl_render::counters`, `crcbl_render::cull_stats`), and piece 2, the
 benchmark harness, is closed for the headless scenarios:
-`crcbl bench --scenario jobs|phys` (`crates/crcbl-cli/src/bench/`) pins the
+`crcbl bench --scenario jobs|phys|ecs` (`crates/crcbl-cli/src/bench/`) pins the
 scenario, warms up, reports p50/p95/p99 and max with no mean, refuses
 percentiles below `MIN_PERCENTILE_SAMPLES`, and emits JSON beside an environment
 block. Re-verified 2026-09-24: `crates/crcbl-cli/src/args.rs` parses no
@@ -20429,41 +20491,13 @@ work anybody can start.
   promised in P8 what the physics topic scheduled later; the physics topic was
   the one to believe.
 
-- **The ECS parallel schedule is the real remaining P8 work**, and it is blocked
-  on a decision rather than on effort — see the entry above.
+- **The ECS parallel schedule is built (2026-10-06)**, opt-in per world — see
+  _ECS access declarations and the parallel schedule_.
 
 So P8 as written looks like a large slice and is mostly already answered. What
-it leaves is: pick an option for the ECS schedule, and give the `phys` bench
-something to compare a parallel adoption against — today it measures one thread,
-which is the right baseline and not yet a comparison.
-
-### P8's ECS access declarations were never reserved, and P2 says they were
-
-The record behind this — the argument, the options and the measurements — is in
-`docs/notes/simulation.md` under this heading.
-
-**Step 1 of the decision below is built (2026-10-05)**: the declarations, the
-conflict graph and the debug assert, with captured state made visible by moving
-it onto `Shared` — _ECS access declarations and the parallel schedule_ records
-the decisions. What this entry measured on 2026-08-23 — no declaration, no
-assert, a `Schedule` doc claiming one — is no longer true.
-
-**What the parallel schedule still costs, so P8 is not planned against the wrong
-number:**
-
-- `SystemTrait` must become `Send`, and so must `DebugDrawFn` (today
-  `Box<dyn FnMut(&DebugCtx)>`, with no bound). That is a breaking change to the
-  trait, to `System<T>`'s `T`, and to every impl in the workspace.
-- Determinism has to survive it. `hash_state` and the sim-hash harness are what
-  `crcbl-server` compares across machines, and a schedule whose completion order
-  varies must still feed that hash in a fixed order.
-
-**DECIDED 2026-09-06 —** 3 → 1 → 2, in that order: the broadphase bench first,
-then `SystemTrait::access()` read and write sets with debug conflict asserts,
-then opt-in parallel systems. Bevy's `SystemParam` access sets and Unity DOTS'
-`[ReadOnly]` are the shape, and both gate parallelism on declared access rather
-than the other way round. It schedules an ECS bench scenario ahead of the
-schedule work.
+it leaves is giving the `phys` bench something to compare a parallel adoption
+against — today it measures one thread, which is the right baseline and not yet
+a comparison.
 
 ### DECIDED — a refit-only tree degrades, and the number is now known
 
@@ -28779,7 +28813,7 @@ the same heading. What they leave owed:
   `report()`, a human summary, and no Chrome Trace Event emitter. Text, no
   dependency, and `crcbl-cli` already has JSON machinery.
 - **`crcbl bench` has no `--compare <baseline>` and no `--trace <path>`.**
-  `crates/crcbl-cli/src/bench/` landed with its `jobs` and `phys` scenarios,
+  `crates/crcbl-cli/src/bench/` has its `jobs`, `phys` and `ecs` scenarios,
   warm-up, p50/p95/p99/max, `MIN_PERCENTILE_SAMPLES`, `--json` and a mandatory
   environment block; that module's own header records those two as the rows it
   did not start. Until they land, two runs are compared by a person reading two

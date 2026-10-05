@@ -275,10 +275,15 @@ no CPU's. Worth knowing before anyone puts a particle count in a tick hash.
 
 ### P8's ECS access declarations were never reserved, and P2 says they were
 
-Decision record; the decision is in `docs/backlog.md`. **Option 1 is built
-(2026-10-05)** — declarations, the derived conflicts and the debug check, with
-`run` still sequential; `docs/backlog.md`'s _ECS access declarations and the
-parallel schedule_ records its decisions and what option 2 still needs.
+Decision record. **All three are built, in the order recommended below**: the
+`phys` bench, then option 1 (2026-10-05) — declarations, the derived conflicts
+and the debug check — then a parallel run (2026-10-06), after
+`crcbl bench --scenario ecs` gave it a baseline. The run is not option 2 as
+written: nothing is opt-in per system and nothing rests on an unchecked promise.
+The schedule groups systems into stages by their checked declarations and ticks
+a stage across a job pool the host hands it, opt-in per world.
+`docs/backlog.md`'s _ECS access declarations and the parallel schedule_ records
+the decisions and the numbers.
 
 **DECISION NEEDED — which of these P8 does.** They are not the same slice:
 
@@ -735,9 +740,11 @@ The `cargo tree` guard is built: `tools/check-no-renderer-deps.sh`, run by
   and writes (`SystemTrait::access`, required), the schedule derives the
   conflicts between those declarations when each system is registered
   (`Schedule::conflicts`), and in debug builds a tick touching a resource its
-  system did not declare panics. Execution is still serial; the graph is what a
-  concurrent schedule would be built on (_P8's ECS access declarations were
-  never reserved_, above, for how this came to be).
+  system did not declare panics. The schedule also groups the systems into
+  stages no two systems of which conflict, and a world handed a job pool
+  (`World::set_pool`) ticks each stage across it, with the serial result; no
+  world has one by default (_P8's ECS access declarations were never reserved_,
+  above, for how this came to be).
 - **Destruction is deferred to the end of the tick**, with a removal sweep per
   system; generational ids make a stale reference safe to hold.
 - **Every system reports to the inspector and has a debug-draw slot.** The plan
