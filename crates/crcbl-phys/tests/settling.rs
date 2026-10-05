@@ -459,7 +459,8 @@ fn each_wake_rule_wakes_and_a_query_does_not() {
     );
     assert!(
         phys.overlap_sphere(DVec3::new(0.0, 1.25, 0.0), 0.1)
-            .contains(&e)
+            .iter()
+            .any(|&(entity, _)| entity == e)
     );
     assert!(phys.is_sleeping(e), "a query woke the box");
     phys.step(DT);

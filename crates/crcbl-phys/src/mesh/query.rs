@@ -17,7 +17,7 @@ use super::geometry::{
 use crate::broadphase::{BvhHit, Ray, Segment};
 use crate::collider::{Aabb, Capsule, Sphere};
 use crate::components::Transform;
-use crate::query::{Penetration, ShapeHit};
+use crate::query::{OverlapHit, Penetration, ShapeHit};
 
 /// A query's nearest hit on a [`TriangleMesh`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -377,11 +377,17 @@ impl PlacedMesh {
         Some(self.hit_to_world(hit.hit))
     }
 
-    pub(crate) fn overlaps_sphere(&self, sphere: &Sphere, scratch: &mut MeshScratch) -> bool {
-        self.mesh.overlaps_sphere_with(
-            &Sphere::new(self.to_local(sphere.centre), sphere.radius),
-            scratch,
-        )
+    /// How `sphere` overlaps the mesh — the capsule push-out for a capsule of
+    /// no height, against the triangle it is deepest in — or `None` if it is
+    /// inside none.
+    pub(crate) fn sphere_overlap(
+        &self,
+        sphere: &Sphere,
+        scratch: &mut MeshScratch,
+    ) -> Option<OverlapHit> {
+        let penetration =
+            self.turned_capsule_penetration(sphere.centre, DVec3::ZERO, sphere.radius, scratch)?;
+        Some(OverlapHit::from_penetration(sphere, penetration))
     }
 
     pub(crate) fn overlaps_aabb(&self, aabb: &Aabb, scratch: &mut MeshScratch) -> bool {

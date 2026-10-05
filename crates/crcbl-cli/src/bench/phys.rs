@@ -45,8 +45,9 @@
 //!   the **last** of them; see below.
 //! * **query** — `bodies` sphere overlaps, one per body, at its own position:
 //!   the shape `apps/horde`'s separation pass runs, through
-//!   `OverlapQueries::overlap_sphere_into` with a [`QueryScratch`], which is
-//!   the form P8's parallel adoption will use.
+//!   `OverlapQueries::overlap_sphere_ids_into` with a [`QueryScratch`], which
+//!   is the ids-only form that pass's entity view runs on: it measures each
+//!   overlap to decide it and builds no hit, since the pass reads none.
 //!
 //! **There is no threading here and that is deliberate**: a pool in the middle
 //! of the pass would measure the pool. `jobs` is the scenario that measures the
@@ -97,8 +98,8 @@
 //!
 //! [`serial_answers`] runs the same pass with no tree in it at all — every body
 //! against every body, `O(bodies²)`, through the same
-//! [`sphere_overlaps_sphere`] predicate the broadphase's exact test calls. That
-//! is the answer everything else is held to.
+//! [`sphere_overlap_vs_sphere`] measurement the broadphase's exact test calls.
+//! That is the answer everything else is held to.
 //!
 //! [`full_answers`] then runs one untimed pass through the broadphase and folds
 //! **which** bodies answered which query, and the run fails unless it reproduces
@@ -117,7 +118,8 @@
 //! Placement and movement come from [`hash_unit`], whose value is the top 53
 //! bits of [`hash_u64`] over a power-of-two divisor and therefore exact. Every
 //! operation after it is a multiply, an add or a compare, and
-//! [`sphere_overlaps_sphere`] is the same — **nothing here calls a
+//! [`sphere_overlap_vs_sphere`] adds only a square root and a divide, which IEEE
+//! 754 rounds correctly and so identically everywhere — **nothing here calls a
 //! transcendental**, whose results differ between glibc, Apple's libm and MSVC.
 //! So two runs with the same arguments place the same crowd and fold the same
 //! checksum on every target, not just twice on this one. A heading angle would
@@ -133,7 +135,7 @@ use std::time::Instant;
 use crcbl::core::rand::{hash_u64, hash_unit, salt};
 use crcbl::math::DVec3;
 use crcbl::phys::{
-    BroadphaseStats, ColliderId, PhysicsWorld, QueryScratch, Sphere, sphere_overlaps_sphere,
+    BroadphaseStats, ColliderId, PhysicsWorld, QueryScratch, Sphere, sphere_overlap_vs_sphere,
 };
 
 use crate::args::BenchArgs;
@@ -304,10 +306,10 @@ fn mark(index: u64) -> u64 {
 ///
 /// `O(bodies²)` and deliberately dumb — it is what the broadphase is checked
 /// against, so it must not share the broadphase's structure. It calls
-/// [`sphere_overlaps_sphere`], which is the same predicate
-/// `overlap_sphere_into`'s exact test calls, so the two agree at the
-/// boundary by construction rather than by a transcription that has to be
-/// right.
+/// [`sphere_overlap_vs_sphere`], which is the same measurement
+/// `overlap_sphere_ids_into`'s exact test calls, so the two agree at the
+/// boundary — a body that only touches the query is in neither — by
+/// construction rather than by a transcription that has to be right.
 ///
 /// A body overlaps itself, so a correct pass answers at least one result per
 /// query and `results` is never below `centres.len()`.
@@ -318,7 +320,7 @@ fn serial_answers(centres: &[DVec3]) -> Tally {
         let mut results = 0u64;
         let mut neighbours = 0u64;
         for (index, &other) in centres.iter().enumerate() {
-            if sphere_overlaps_sphere(&query, &Sphere::new(other, BODY_RADIUS)) {
+            if sphere_overlap_vs_sphere(&query, &Sphere::new(other, BODY_RADIUS)).is_some() {
                 results += 1;
                 neighbours = neighbours.wrapping_add(mark(index as u64));
             }
@@ -375,7 +377,7 @@ fn full_answers(
 
     let queries = world.overlap_queries();
     for &centre in centres {
-        queries.overlap_sphere_into(centre, QUERY_RADIUS, &mut scratch, &mut out);
+        queries.overlap_sphere_ids_into(centre, QUERY_RADIUS, &mut scratch, &mut out);
         let mut neighbours = 0u64;
         for id in &out {
             let Some(&mark) = marks.get(id.index() as usize) else {
@@ -537,7 +539,7 @@ pub(super) fn measure(args: &BenchArgs) -> Result<Run, Failure> {
         {
             let queries = world.overlap_queries();
             for &centre in &moved {
-                queries.overlap_sphere_into(centre, QUERY_RADIUS, &mut scratch, &mut out);
+                queries.overlap_sphere_ids_into(centre, QUERY_RADIUS, &mut scratch, &mut out);
                 let mut neighbours = 0u64;
                 for id in &out {
                     neighbours = neighbours.wrapping_add(marks[id.index() as usize]);

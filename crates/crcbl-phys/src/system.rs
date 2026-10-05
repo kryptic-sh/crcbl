@@ -64,7 +64,7 @@ use crate::contact::{
 use crate::forces::ForceProvider;
 use crate::integrator::{Integrator as _, SemiImplicitEuler};
 use crate::material::SurfaceMaterial;
-use crate::query::ShapeHit;
+use crate::query::{OverlapHit, ShapeHit};
 use crate::world::{
     ALL_LAYERS, ColliderId, OverlapQueries, PhysicsWorld, QueryFilter, QueryScratch,
 };
@@ -271,7 +271,7 @@ impl EntityOverlapQueries<'_> {
         centre: DVec3,
         radius: f64,
         scratch: &mut QueryScratch,
-        out: &mut Vec<Entity>,
+        out: &mut Vec<(Entity, OverlapHit)>,
     ) {
         self.overlap_sphere_filtered_into(centre, radius, QueryFilter::ALL, scratch, out);
     }
@@ -284,19 +284,40 @@ impl EntityOverlapQueries<'_> {
         radius: f64,
         filter: QueryFilter,
         scratch: &mut QueryScratch,
+        out: &mut Vec<(Entity, OverlapHit)>,
+    ) {
+        out.clear();
+        let mut hits = std::mem::take(&mut scratch.hits);
+        self.queries
+            .overlap_sphere_filtered_into(centre, radius, filter, scratch, &mut hits);
+        for &(id, hit) in hits.iter() {
+            let Some(entity) = self.entity_for(id) else {
+                continue;
+            };
+            out.push((entity, hit));
+        }
+        // Back where it came from, keeping the capacity for the next call.
+        scratch.hits = hits;
+    }
+
+    /// [`overlap_sphere_into`](Self::overlap_sphere_into) naming the entities
+    /// and dropping their hits: the same entities in the same order.
+    ///
+    /// The fast path for a crowd pass that never reads a hit —
+    /// [`OverlapQueries::overlap_sphere_ids_into`] says what it saves and how
+    /// that was measured.
+    pub fn overlap_sphere_entities_into(
+        &self,
+        centre: DVec3,
+        radius: f64,
+        scratch: &mut QueryScratch,
         out: &mut Vec<Entity>,
     ) {
         out.clear();
         let mut ids = std::mem::take(&mut scratch.ids);
         self.queries
-            .overlap_sphere_filtered_into(centre, radius, filter, scratch, &mut ids);
-        for id in ids.iter() {
-            let Some(entity) = self.entity_for(*id) else {
-                continue;
-            };
-            out.push(entity);
-        }
-        // Back where it came from, keeping the capacity for the next call.
+            .overlap_sphere_ids_into(centre, radius, scratch, &mut ids);
+        out.extend(ids.iter().filter_map(|&id| self.entity_for(id)));
         scratch.ids = ids;
     }
 
@@ -1338,24 +1359,26 @@ impl PhysicsSystem {
         Some((self.entity_for(id)?, hit))
     }
 
-    /// Overlap query: return all entities whose collider overlaps the sphere.
+    /// Overlap query: every entity whose collider the sphere is inside, each
+    /// with how deep, which way out and where ([`OverlapHit`]).
     ///
-    /// # An overlap has no hit, so none is returned
+    /// # An overlap's hit is a push-out, not an impact
     ///
-    /// This used to answer `(Entity, ShapeHit)` and fill the hit in with
-    /// `t: 0.0`, `normal: DVec3::Y` and `started_inside: true` for every result
-    /// — an answer that was the same whatever the geometry, and wrong for any
-    /// caller that read it. Nothing did: every call site in this workspace
-    /// named it `_hit`.
+    /// This once answered `(Entity, ShapeHit)` with the hit filled in as
+    /// `t: 0.0`, `normal: DVec3::Y` and `started_inside: true` whatever the
+    /// geometry, and then bare entities, on the argument that an overlap has no
+    /// impact time, point or single normal. The first half of that holds, and
+    /// is why the hit is not a [`ShapeHit`]. The second does not: the shortest
+    /// move that takes the sphere out of a shape is one direction and one
+    /// depth, which is what Unity's `Physics.ComputePenetration` and PhysX's
+    /// `PxGeometryQuery::computePenetration` answer, and the point it is
+    /// pushed out from is one point. Of a compound, the deepest part answers.
+    /// A collider the sphere only touches is not inside it and is not returned.
     ///
-    /// It is not a gap to fill in later either. An overlap asks *which shapes
-    /// are inside this volume*, and that question has no impact time, no impact
-    /// point and no single surface normal — two shapes overlapping along a face
-    /// have a whole contact patch. This matches what the field does: PhysX's
-    /// overlap results carry an actor and a shape and nothing else, and a caller
-    /// wanting depth and a normal is expected to ask a *collide* query instead.
-    /// [`cast_ray`](Self::cast_ray) and [`sweep_sphere`](Self::sweep_sphere)
-    /// are the queries here that genuinely have a hit, and they compute one.
+    /// A caller that wants only the entities maps the pairs, unless it is a
+    /// crowd pass running one query per body per tick: that wants
+    /// [`EntityOverlapQueries::overlap_sphere_entities_into`], which answers
+    /// the same entities without building the hits.
     ///
     /// # The query is shape-aware, and `radius` is expanded by each collider
     ///
@@ -1369,7 +1392,7 @@ impl PhysicsSystem {
     /// it; the boundary is pinned by `world::tests`'
     /// `a_sphere_overlap_is_expanded_by_the_colliders_own_radius`.
     #[must_use]
-    pub fn overlap_sphere(&mut self, centre: DVec3, radius: f64) -> Vec<Entity> {
+    pub fn overlap_sphere(&mut self, centre: DVec3, radius: f64) -> Vec<(Entity, OverlapHit)> {
         let mut out = Vec::new();
         self.overlap_sphere_into(centre, radius, &mut out);
         out
@@ -1383,12 +1406,17 @@ impl PhysicsSystem {
     /// `radius + r_b` of `centre`.
     ///
     /// `out` is cleared and then filled, so the buffer is hoisted out of the
-    /// loop and reused. Nothing below this allocates either: the collider ids
+    /// loop and reused. Nothing below this allocates either: the world's hits
     /// land in a scratch buffer of this system's, and the BVH's descent stack
     /// and candidate list are the world's own. A crowd of ten thousand
     /// therefore steers without a single allocation, where the owned form is
     /// three per agent per tick.
-    pub fn overlap_sphere_into(&mut self, centre: DVec3, radius: f64, out: &mut Vec<Entity>) {
+    pub fn overlap_sphere_into(
+        &mut self,
+        centre: DVec3,
+        radius: f64,
+        out: &mut Vec<(Entity, OverlapHit)>,
+    ) {
         self.overlap_sphere_filtered_into(centre, radius, QueryFilter::ALL, out);
     }
 
@@ -1400,7 +1428,7 @@ impl PhysicsSystem {
         centre: DVec3,
         radius: f64,
         filter: QueryFilter,
-    ) -> Vec<Entity> {
+    ) -> Vec<(Entity, OverlapHit)> {
         let mut out = Vec::new();
         self.overlap_sphere_filtered_into(centre, radius, filter, &mut out);
         out
@@ -1413,7 +1441,7 @@ impl PhysicsSystem {
         centre: DVec3,
         radius: f64,
         filter: QueryFilter,
-        out: &mut Vec<Entity>,
+        out: &mut Vec<(Entity, OverlapHit)>,
     ) {
         // Lent to the view and put straight back — see
         // [`PhysicsWorld::overlap_sphere_into`], which does the same thing for
@@ -1964,7 +1992,7 @@ mod tests {
                 .iter()
                 .map(|centre| {
                     queries.overlap_sphere_into(*centre, REACH, &mut scratch, &mut out);
-                    let mut hits = out.clone();
+                    let mut hits: Vec<Entity> = out.iter().map(|&(entity, _)| entity).collect();
                     hits.sort_unstable_by_key(|entity| entity.to_bits());
                     hits
                 })
@@ -2681,7 +2709,7 @@ mod tests {
 
         // A buffer arriving with something in it comes back with only the
         // answer in it.
-        out.push(test_entity(99));
+        out.push((test_entity(99), owned[0].1));
         phys.overlap_sphere_into(DVec3::ZERO, 2.0, &mut out);
         assert_eq!(
             out, owned,
@@ -2697,6 +2725,24 @@ mod tests {
             capacity,
             "the buffer grew on a repeat query, so the loop still allocates",
         );
+
+        // The shared view's forms refill theirs too, and the entities-only one
+        // names what the hit form does, in its order.
+        let mut scratch = crate::world::QueryScratch::new();
+        let view = phys.overlap_queries();
+        out.push((test_entity(99), owned[0].1));
+        view.overlap_sphere_filtered_into(
+            DVec3::ZERO,
+            2.0,
+            QueryFilter::ALL,
+            &mut scratch,
+            &mut out,
+        );
+        assert_eq!(out, owned, "the view's buffer was appended to");
+        let mut entities = vec![test_entity(99)];
+        view.overlap_sphere_entities_into(DVec3::ZERO, 2.0, &mut scratch, &mut entities);
+        let named: Vec<Entity> = owned.iter().map(|&(entity, _)| entity).collect();
+        assert_eq!(entities, named, "the entities-only form disagrees");
     }
 
     // ── Dynamics tests ──────────────────────────────────────────────────

@@ -63,7 +63,7 @@
 //! and `crate::game`'s own slow tests are it end to end.
 
 use crcbl::math::DVec3;
-use crcbl::phys::{ColliderId, PhysicsWorld, Sphere};
+use crcbl::phys::{ColliderId, OverlapHit, PhysicsWorld, Sphere};
 
 use crate::map::CREEP_RADIUS;
 use crate::path::Path;
@@ -460,10 +460,10 @@ pub fn has_reached_the_exit(
     world: &mut PhysicsWorld,
     creep: &Creep,
     exit: ColliderId,
-    scratch: &mut Vec<ColliderId>,
+    scratch: &mut Vec<(ColliderId, OverlapHit)>,
 ) -> bool {
     world.overlap_sphere_into(creep.centre(), CREEP_RADIUS, scratch);
-    scratch.contains(&exit)
+    scratch.iter().any(|&(id, _)| id == exit)
 }
 
 #[cfg(test)]
@@ -561,11 +561,15 @@ mod tests {
             assert!(
                 world
                     .overlap_sphere(creep.centre(), 0.01)
-                    .contains(&creep.body()),
+                    .iter()
+                    .any(|&(id, _)| id == creep.body()),
                 "the collider was left behind at the spawn",
             );
             assert!(
-                !world.overlap_sphere(start, 0.01).contains(&creep.body()),
+                !world
+                    .overlap_sphere(start, 0.01)
+                    .iter()
+                    .any(|&(id, _)| id == creep.body()),
                 "the collider is in two places, so `set_sphere` added rather than moved",
             );
         }
@@ -730,12 +734,15 @@ mod tests {
         let (mut world, _) = map.world();
         let creep = Creep::spawn(&mut world, map.path(), Kind::Fast);
         let (body, centre) = (creep.body(), creep.centre());
-        assert!(world.overlap_sphere(centre, 0.01).contains(&body));
+        let reported = |world: &mut PhysicsWorld| {
+            world
+                .overlap_sphere(centre, 0.01)
+                .iter()
+                .any(|&(id, _)| id == body)
+        };
+        assert!(reported(&mut world));
 
         creep.despawn(&mut world);
-        assert!(
-            !world.overlap_sphere(centre, 0.01).contains(&body),
-            "the collider outlived the creep",
-        );
+        assert!(!reported(&mut world), "the collider outlived the creep",);
     }
 }

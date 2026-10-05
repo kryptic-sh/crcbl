@@ -4,6 +4,7 @@ use glam::DVec3;
 use crate::collider::{Aabb, Sphere};
 use crate::components::{ColliderComponent, RigidBody, Transform};
 use crate::compound_shape::CompoundShape;
+use crate::query::OverlapHit;
 use crate::world::{ALL_LAYERS, QueryFilter, QueryScratch};
 use crate::{Ray, Segment};
 
@@ -57,6 +58,7 @@ fn the_system_queries_skip_a_masked_out_entity_and_find_it_when_masked_in() {
     let path = Segment::new(DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0));
     let id = |hit: Option<(Entity, _)>| hit.map(|(e, _)| e);
     let (no_items, items) = (QueryFilter::masked(!ITEMS), QueryFilter::masked(ITEMS));
+    let entities = |hits: &[(Entity, OverlapHit)]| hits.iter().map(|&(e, _)| e).collect::<Vec<_>>();
 
     assert_eq!(id(phys.cast_ray(&ray())), Some(item));
     assert_eq!(id(phys.cast_ray_filtered(&ray(), no_items)), Some(wall));
@@ -74,12 +76,12 @@ fn the_system_queries_skip_a_masked_out_entity_and_find_it_when_masked_in() {
     let (centre, radius) = (DVec3::new(3.5, 0.0, 0.0), 2.5);
     assert_eq!(phys.overlap_sphere(centre, radius).len(), 2);
     assert_eq!(
-        phys.overlap_sphere_filtered(centre, radius, no_items),
+        entities(&phys.overlap_sphere_filtered(centre, radius, no_items)),
         vec![wall]
     );
     let mut out = Vec::new();
     phys.overlap_sphere_filtered_into(centre, radius, items, &mut out);
-    assert_eq!(out, vec![item]);
+    assert_eq!(entities(&out), vec![item]);
     let bounds = Aabb::new(DVec3::new(0.0, -1.0, -1.0), DVec3::new(10.0, 1.0, 1.0));
     assert_eq!(phys.overlap_aabb(&bounds).len(), 2);
     assert_eq!(phys.overlap_aabb_filtered(&bounds, no_items), vec![wall]);
@@ -104,13 +106,14 @@ fn the_system_queries_skip_a_masked_out_entity_and_find_it_when_masked_in() {
         Some(item)
     );
     view.overlap_sphere_filtered_into(centre, radius, no_items, &mut scratch, &mut out);
-    assert_eq!(out, vec![wall]);
+    assert_eq!(entities(&out), vec![wall]);
     view.overlap_sphere_filtered_into(centre, radius, items, &mut scratch, &mut out);
-    assert_eq!(out, vec![item]);
-    view.overlap_aabb_filtered_into(&bounds, no_items, &mut scratch, &mut out);
-    assert_eq!(out, vec![wall]);
-    view.overlap_aabb_filtered_into(&bounds, items, &mut scratch, &mut out);
-    assert_eq!(out, vec![item]);
+    assert_eq!(entities(&out), vec![item]);
+    let mut boxed = Vec::new();
+    view.overlap_aabb_filtered_into(&bounds, no_items, &mut scratch, &mut boxed);
+    assert_eq!(boxed, vec![wall]);
+    view.overlap_aabb_filtered_into(&bounds, items, &mut scratch, &mut boxed);
+    assert_eq!(boxed, vec![item]);
 }
 
 /// A body swept along its own path leaves itself out whatever the mask, and

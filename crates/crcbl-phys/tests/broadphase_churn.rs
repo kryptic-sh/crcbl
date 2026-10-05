@@ -386,16 +386,18 @@ fn world_overlap_sphere_matches_brute_force_under_churn() {
         let got: HashSet<_> = world
             .overlap_sphere(query_centre, query_radius)
             .into_iter()
+            .map(|(id, _)| id)
             .collect();
         let expected: HashSet<_> = live
             .iter()
             .filter(|(_, sphere)| {
                 // Exact sphere-vs-sphere, the same predicate the narrow phase
                 // applies — written out here so the test does not check the
-                // code against itself.
+                // code against itself. Strict, because a sphere that only
+                // touches the query is not inside it.
                 let delta = sphere.centre - query.centre;
                 let reach = sphere.radius + query.radius;
-                delta.length_squared() <= reach * reach
+                delta.length_squared() < reach * reach
             })
             .map(|(id, _)| *id)
             .collect();

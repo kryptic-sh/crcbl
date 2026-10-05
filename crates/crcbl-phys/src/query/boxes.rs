@@ -27,8 +27,8 @@ use glam::{DQuat, DVec3};
 
 use super::capsules::advance_upright_capsule;
 use super::{
-    Penetration, ShapeHit, capsule_penetration_vs_aabb, ray_vs_aabb, sphere_overlaps_aabb,
-    swept_capsule_vs_aabb, swept_sphere_vs_aabb,
+    OverlapHit, Penetration, ShapeHit, capsule_penetration_vs_aabb, ray_vs_aabb,
+    sphere_overlap_vs_aabb, sphere_overlaps_aabb, swept_capsule_vs_aabb, swept_sphere_vs_aabb,
 };
 use crate::broadphase::{Ray, Segment};
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
@@ -44,6 +44,27 @@ pub fn sphere_overlaps_box(sphere: &Sphere, target: &BoxCollider) -> bool {
     }
     let local = Sphere::new(target.local_point(sphere.centre), sphere.radius);
     sphere_overlaps_aabb(&local, &target.local_aabb())
+}
+
+/// How a sphere overlaps a box collider, turned or not, or `None` if they are
+/// apart or only touch.
+///
+/// An unturned box is [`sphere_overlap_vs_aabb`] against
+/// [`BoxCollider::aabb`]; a turned one is the same in its own frame, the
+/// point and the normal turned back out. A centre inside leaves through the
+/// nearest face of the box's own.
+#[must_use]
+pub fn sphere_overlap_vs_box(sphere: &Sphere, target: &BoxCollider) -> Option<OverlapHit> {
+    if !target.is_turned() {
+        return sphere_overlap_vs_aabb(sphere, &target.aabb());
+    }
+    let local = Sphere::new(target.local_point(sphere.centre), sphere.radius);
+    let hit = sphere_overlap_vs_aabb(&local, &target.local_aabb())?;
+    Some(OverlapHit {
+        point: target.world_point(hit.point),
+        normal: target.rotation * hit.normal,
+        ..hit
+    })
 }
 
 /// Test whether an axis-aligned box overlaps a box collider, turned or not

@@ -3,6 +3,7 @@ use glam::DVec3;
 use crate::broadphase::{Ray, Segment};
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
 
+use super::tests::ids_of;
 use super::{ALL_LAYERS, ColliderId, PhysicsWorld, QueryFilter, QueryScratch};
 
 /// The layer the fixtures put their item on.
@@ -167,15 +168,15 @@ fn a_sphere_overlap_skips_a_masked_out_layer_and_reports_it_when_masked_in() {
     // Reaches both boxes: the item's face at x = 1.5, the wall's at x = 5.5.
     let (centre, radius) = (DVec3::new(3.5, 0.0, 0.0), 2.5);
 
-    let mut all = world.overlap_sphere(centre, radius);
+    let mut all = ids_of(&world.overlap_sphere(centre, radius));
     all.sort_by_key(|id| id.index());
     assert_eq!(all, vec![item, wall], "default reports both");
     assert_eq!(
-        world.overlap_sphere_filtered(centre, radius, QueryFilter::masked(!ITEMS)),
+        ids_of(&world.overlap_sphere_filtered(centre, radius, QueryFilter::masked(!ITEMS))),
         vec![wall]
     );
     world.overlap_sphere_filtered_into(centre, radius, QueryFilter::masked(ITEMS), &mut out);
-    assert_eq!(out, vec![item]);
+    assert_eq!(ids_of(&out), vec![item]);
     let view = world.overlap_queries();
     view.overlap_sphere_filtered_into(
         centre,
@@ -184,7 +185,7 @@ fn a_sphere_overlap_skips_a_masked_out_layer_and_reports_it_when_masked_in() {
         &mut scratch,
         &mut out,
     );
-    assert_eq!(out, vec![wall]);
+    assert_eq!(ids_of(&out), vec![wall]);
     view.overlap_sphere_filtered_into(
         centre,
         radius,
@@ -192,7 +193,7 @@ fn a_sphere_overlap_skips_a_masked_out_layer_and_reports_it_when_masked_in() {
         &mut scratch,
         &mut out,
     );
-    assert_eq!(out, vec![item]);
+    assert_eq!(ids_of(&out), vec![item]);
 }
 
 #[test]
@@ -347,7 +348,7 @@ fn triggers_stay_non_solid_under_a_filter_and_overlaps_still_mask_them() {
 
     let at_trigger = (DVec3::new(1.0, 0.0, 0.0), 0.1);
     assert_eq!(
-        world.overlap_sphere_filtered(at_trigger.0, at_trigger.1, items),
+        ids_of(&world.overlap_sphere_filtered(at_trigger.0, at_trigger.1, items)),
         vec![trigger],
         "an overlap still reports a trigger its mask admits"
     );

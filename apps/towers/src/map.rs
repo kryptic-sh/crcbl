@@ -1506,7 +1506,10 @@ mod tests {
 
         let centre = map.exit_centre();
         assert!(
-            world.overlap_sphere(centre, CREEP_RADIUS).contains(&exit),
+            world
+                .overlap_sphere(centre, CREEP_RADIUS)
+                .iter()
+                .any(|&(id, _)| id == exit),
             "a creep standing in the exit is not reported by the overlap",
         );
 

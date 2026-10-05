@@ -54,6 +54,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Result<usize, StorageError>` instead of `Result<(), StorageError>`, the bytes
   written checksum included. A caller matching `Ok(())` matches `Ok(_)`.
 
+- **The sphere overlaps answer hits, and a sphere that only touches a collider
+  is no longer reported** (see Added: overlap hits).
+  `PhysicsWorld::overlap_sphere`, `_into`, `_filtered` and `_filtered_into`, and
+  `OverlapQueries::overlap_sphere_into` and `_filtered_into`, now answer
+  `(ColliderId, OverlapHit)` pairs where they answered `ColliderId`s; the same
+  forms on `PhysicsSystem` and `EntityOverlapQueries` answer
+  `(Entity, OverlapHit)` where they answered `Entity`s. A caller that wants the
+  ids maps the pairs (`.map(|(id, _)| id)`); a crowd pass that never reads a hit
+  wants the new ids-only forms instead. The boundary moved with the hit: a
+  collider is reported only when the sphere is inside it by a positive depth, so
+  one exactly touching the query — reported before — is not. The crate-private
+  `sphere_overlaps_turned_capsule` is gone; the public `sphere_overlaps_*`
+  predicates are unchanged and still count a touch.
+
 - **`crcbl::engine::Pending` gained `pause_key_is_games`** (see Added: key binds
   kept in a player profile). A struct literal must name it — `false` keeps
   Escape the loop's pause key.
@@ -770,6 +784,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   trigger, each file this run wrote and its size, where the autosave goes, and
   the saves that did not land. `crcbl_store::save::SaveBacking::root` names the
   directory for it.
+
+- **Overlap hits: how deep, which way out and where.** `crcbl_phys::OverlapHit`
+  carries the point on the collider's surface the sphere is pushed out from, the
+  unit normal out of the collider, the penetration depth (always positive) and
+  the compound part, and every sphere overlap answers one per collider (see
+  Breaking). A compound answers with its deepest part, the lower of two equally
+  deep. The shape-level measurements are public: `sphere_overlap_vs_sphere`,
+  `sphere_overlap_vs_aabb`, `sphere_overlap_vs_box` (turned or not) and
+  `sphere_overlap_vs_capsule`; a turned capsule and a mesh are measured through
+  the world. Degenerate centres have fixed answers: coincident with a sphere's
+  centre or on a capsule's core, out along `+Y` (the capsule's own, turned);
+  inside a box, the nearest face, ties in the order `-X`, `+X`, `-Y`, `+Y`,
+  `-Z`, `+Z` of the box's own axes; on a mesh triangle, the triangle's normal.
+  `OverlapQueries::overlap_sphere_ids_into` and
+  `EntityOverlapQueries::overlap_sphere_entities_into` answer the same colliders
+  in the same order without building the hits, for a crowd pass that reads none;
+  `apps/horde`'s steering and `crcbl bench --scenario phys` use them.
 
 - **Key binds kept in a player profile, with a rebind page that reads them.**
   `crcbl_store::profile` keeps a versioned `profile.toml` (`PROFILE_FILE`,

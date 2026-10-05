@@ -135,7 +135,7 @@
 //! played.
 
 use crcbl::math::DVec3;
-use crcbl::phys::{ColliderId, PhysicsWorld, Segment};
+use crcbl::phys::{ColliderId, OverlapHit, PhysicsWorld, Segment};
 
 use crate::creep::Creep;
 use crate::map::{BOLT_RADIUS, MUZZLE_Y};
@@ -637,7 +637,7 @@ pub fn acquire(
     creeps: &[Creep],
     from: DVec3,
     range_m: f64,
-    scratch: &mut Vec<ColliderId>,
+    scratch: &mut Vec<(ColliderId, OverlapHit)>,
 ) -> Option<usize> {
     world.overlap_sphere_into(from, range_m, scratch);
     let mut best: Option<(usize, f64)> = None;
@@ -645,7 +645,7 @@ pub fn acquire(
     // come back from the overlap; walking the creeps is what leaves them out.
     // See the module docs.
     for (index, creep) in creeps.iter().enumerate() {
-        if !scratch.contains(&creep.body()) {
+        if !scratch.iter().any(|&(id, _)| id == creep.body()) {
             continue;
         }
         let along = creep.along();
@@ -673,14 +673,14 @@ pub fn hold(
     from: DVec3,
     range_m: f64,
     factor: f64,
-    scratch: &mut Vec<ColliderId>,
+    scratch: &mut Vec<(ColliderId, OverlapHit)>,
 ) -> usize {
     world.overlap_sphere_into(from, range_m, scratch);
     let mut held = 0;
-    for id in scratch.iter() {
+    for &(id, _) in scratch.iter() {
         // The same filter every query in this file needs: the slab and the exit
         // volume are in reach of every plot.
-        let Some(creep) = creeps.iter_mut().find(|creep| creep.body() == *id) else {
+        let Some(creep) = creeps.iter_mut().find(|creep| creep.body() == id) else {
             continue;
         };
         creep.slow_to(factor);
@@ -699,7 +699,7 @@ pub fn burst_into(
     world: &mut PhysicsWorld,
     at: DVec3,
     radius_m: f64,
-    scratch: &mut Vec<ColliderId>,
+    scratch: &mut Vec<(ColliderId, OverlapHit)>,
 ) {
     world.overlap_sphere_into(at, radius_m, scratch);
 }
@@ -1142,7 +1142,8 @@ mod tests {
         assert!(
             !world
                 .overlap_sphere(from, BOLT_RADIUS)
-                .contains(&creep.body()),
+                .iter()
+                .any(|&(id, _)| id == creep.body()),
             "the bolt starts the tick already inside the creep, so this proves nothing",
         );
 
@@ -1158,7 +1159,8 @@ mod tests {
         assert!(
             !world
                 .overlap_sphere(tick_end, BOLT_RADIUS)
-                .contains(&creeps[0].body()),
+                .iter()
+                .any(|&(id, _)| id == creeps[0].body()),
             "the tick ends with the bolt inside the creep, so a static test would have caught it",
         );
 
@@ -1183,7 +1185,11 @@ mod tests {
         let tower = built("gate", Kind::Bolt);
         let muzzle = tower.muzzle();
 
-        let in_range = world.overlap_sphere(muzzle, tower.spec().range_m);
+        let in_range: Vec<ColliderId> = world
+            .overlap_sphere(muzzle, tower.spec().range_m)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         assert!(
             in_range.contains(&exit),
             "the gate tower does not have the exit volume in range, so this proves nothing",

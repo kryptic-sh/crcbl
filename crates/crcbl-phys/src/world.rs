@@ -15,7 +15,7 @@ use crate::contact::manifold::gap;
 use crate::contact::shape::ContactShape;
 use crate::contact::sweep::time_of_contact;
 use crate::mesh::{MeshScratch, PlacedMesh, TriangleMesh};
-use crate::query::{self, Penetration, ShapeHit, TurnedCapsule};
+use crate::query::{self, OverlapHit, Penetration, ShapeHit, TurnedCapsule};
 
 mod candidate_sweeps;
 mod entry;
@@ -369,6 +369,9 @@ pub struct QueryScratch {
     /// to entities, which is why this is reachable from that module and from
     /// nowhere outside the crate.
     pub(crate) ids: Vec<ColliderId>,
+    /// The sphere overlaps' hits, kept for the same caller and the same
+    /// reason as `ids`.
+    pub(crate) hits: Vec<(ColliderId, OverlapHit)>,
     /// The buffers a mesh's own tree is descended in, while the world's
     /// candidates are still being walked.
     mesh: MeshScratch,
@@ -417,7 +420,7 @@ impl OverlapQueries<'_> {
         centre: DVec3,
         radius: f64,
         scratch: &mut QueryScratch,
-        out: &mut Vec<ColliderId>,
+        out: &mut Vec<(ColliderId, OverlapHit)>,
     ) {
         self.overlap_sphere_filtered_into(centre, radius, QueryFilter::ALL, scratch, out);
     }
@@ -430,8 +433,9 @@ impl OverlapQueries<'_> {
         radius: f64,
         filter: QueryFilter,
         scratch: &mut QueryScratch,
-        out: &mut Vec<ColliderId>,
+        out: &mut Vec<(ColliderId, OverlapHit)>,
     ) {
+        out.clear();
         overlap_sphere_core(
             self.bvh,
             self.colliders,
@@ -439,7 +443,38 @@ impl OverlapQueries<'_> {
             &Sphere::new(centre, radius),
             filter,
             scratch,
-            out,
+            |id, hit| out.push((id, hit)),
+        );
+    }
+
+    /// [`overlap_sphere_into`](Self::overlap_sphere_into) naming the colliders
+    /// and dropping their hits: the same colliders in the same order, because
+    /// it is the same traversal and the same measurement, written into ids.
+    ///
+    /// **The fast path for a caller that never reads a hit**, and it exists
+    /// because one measured it: on 2026-10-05 `crcbl bench --scenario phys`,
+    /// which stands in for `apps/horde`'s steering pass, ran its query phase
+    /// about a fifth slower answering hits at a crowd of twenty-eight
+    /// neighbours a query, and this form gave back most of that — the record
+    /// is in `docs/backlog.md`.
+    /// The depth is still worked out, because a positive depth is what decides
+    /// a hit; the normal, the point and the bigger buffer are what it saves.
+    pub fn overlap_sphere_ids_into(
+        &self,
+        centre: DVec3,
+        radius: f64,
+        scratch: &mut QueryScratch,
+        out: &mut Vec<ColliderId>,
+    ) {
+        out.clear();
+        overlap_sphere_core(
+            self.bvh,
+            self.colliders,
+            self.generations,
+            &Sphere::new(centre, radius),
+            QueryFilter::ALL,
+            scratch,
+            |id, _| out.push(id),
         );
     }
 
@@ -686,22 +721,32 @@ impl OverlapQueries<'_> {
     }
 }
 
-/// The one implementation of "which colliders overlap this sphere".
+/// The one implementation of "which colliders overlap this sphere, and how".
 ///
 /// Both the `&mut self` form and [`OverlapQueries`] come through here, so there
 /// is no second copy of the traversal for the two to disagree in — which
 /// matters more than usual, because a caller mixing the two in one pass is
-/// exactly what a `par_for` adoption looks like mid-migration.
+/// exactly what a `par_for` adoption looks like mid-migration. Each hit is
+/// handed to `keep`, in order, so the ids-only form
+/// ([`OverlapQueries::overlap_sphere_ids_into`]) is this one too, keeping less.
 ///
 /// # Shape-aware: `radius` is expanded by each collider's own shape
 ///
-/// The query sphere is tested against every collider's *shape* (see
-/// `query::sphere_overlaps_*`), not against its centre. A sphere collider of
+/// The query sphere is measured against every collider's *shape* (see
+/// `query::sphere_overlap_vs_*`), not against its centre. A sphere collider of
 /// radius `r_b` is therefore returned iff its centre is within
 /// `radius + r_b` of `centre`, which is what makes `apps/horde`'s
 /// `separation_query_radius` correct without adding the neighbour's radius to
 /// the query. `tests::a_sphere_overlap_is_expanded_by_the_colliders_own_radius`
 /// pins the boundary.
+///
+/// # One hit per collider, the deepest
+///
+/// A hit is a positive depth: a collider the sphere only touches is not
+/// returned (see [`OverlapHit`]). A compound is one entry, its deepest part's
+/// hit; of two parts equally deep, the lower — the rule
+/// [`capsule_penetrations_core`] keeps. Triggers are reported, and the order
+/// is the tree's traversal order, which is a pure function of the world.
 ///
 /// The query is one [`Sphere`] argument rather than a centre and a radius, as
 /// the capsule sweep's is one [`Capsule`].
@@ -712,30 +757,37 @@ fn overlap_sphere_core(
     query_sphere: &Sphere,
     filter: QueryFilter,
     scratch: &mut QueryScratch,
-    out: &mut Vec<ColliderId>,
+    mut keep: impl FnMut(ColliderId, OverlapHit),
 ) {
-    out.clear();
     let filter = ResolvedFilter::overlap(colliders, generations, filter);
     let query_aabb = Aabb::from_centre_half(query_sphere.centre, DVec3::splat(query_sphere.radius));
 
     bvh.traverse_aabb_into(&query_aabb, &mut scratch.stack, &mut scratch.candidates);
 
-    for &idx in scratch.candidates.iter() {
-        let slot = idx as usize;
-        let hit = colliders
-            .get(slot)
-            .and_then(|s| s.as_ref())
-            .filter(|data| filter.admits(slot, data))
-            .is_some_and(|data| {
-                data.entry.primitives().any(|(_, shape)| match shape {
-                    Primitive::Sphere(s) => query::sphere_overlaps_sphere(query_sphere, s),
-                    Primitive::Box(b) => query::sphere_overlaps_box(query_sphere, b),
-                    Primitive::Capsule(c) => query::sphere_overlaps_turned_capsule(query_sphere, c),
-                    Primitive::Mesh(m) => m.overlaps_sphere(query_sphere, &mut scratch.mesh),
-                })
-            });
-        if hit {
-            out.push(ColliderId::new(idx, generations[slot]));
+    for &element in scratch.candidates.iter() {
+        let idx = element as usize;
+        let Some(Some(slot)) = colliders.get(idx) else {
+            continue;
+        };
+        if !filter.admits(idx, slot) {
+            continue;
+        }
+        let mut deepest: Option<OverlapHit> = None;
+        for (part, shape) in slot.entry.primitives() {
+            let hit = match shape {
+                Primitive::Sphere(s) => query::sphere_overlap_vs_sphere(query_sphere, s),
+                Primitive::Box(b) => query::sphere_overlap_vs_box(query_sphere, b),
+                Primitive::Capsule(c) => query::sphere_overlap_vs_turned_capsule(query_sphere, c),
+                Primitive::Mesh(m) => m.sphere_overlap(query_sphere, &mut scratch.mesh),
+            };
+            if let Some(hit) = hit
+                && deepest.is_none_or(|deepest| hit.depth > deepest.depth)
+            {
+                deepest = Some(OverlapHit { part, ..hit });
+            }
+        }
+        if let Some(hit) = deepest {
+            keep(id_for_slot_in(generations, element), hit);
         }
     }
 }
@@ -1603,13 +1655,17 @@ impl PhysicsWorld {
 
     // ── Queries ────────────────────────────────────────────────────────
 
-    /// Return all collider ids whose shape overlaps the query sphere.
+    /// Every collider whose shape the query sphere is inside, each with how
+    /// deep, which way out and where ([`OverlapHit`]).
     ///
-    /// Uses the BVH for broadphase culling, then tests exact shape overlap
-    /// (sphere-vs-sphere, sphere-vs-AABB, sphere-vs-capsule). Triggers are
-    /// included — overlap is the query they exist for.
+    /// Uses the BVH for broadphase culling, then measures the exact overlap
+    /// against each shape — sphere, box, capsule, mesh, and each part of a
+    /// compound, whose deepest part answers for it. A collider the sphere only
+    /// touches is not inside it and is not returned. Triggers are included —
+    /// overlap is the query they exist for. A caller that wants only the ids
+    /// maps the pairs.
     #[must_use]
-    pub fn overlap_sphere(&mut self, centre: DVec3, radius: f64) -> Vec<ColliderId> {
+    pub fn overlap_sphere(&mut self, centre: DVec3, radius: f64) -> Vec<(ColliderId, OverlapHit)> {
         let mut out = Vec::new();
         self.overlap_sphere_into(centre, radius, &mut out);
         out
@@ -1622,7 +1678,12 @@ impl PhysicsWorld {
     /// descent stack and its candidate list — are the world's own and are
     /// reused between calls, so a caller that hoists one `out` out of its loop
     /// runs the whole pass without allocating.
-    pub fn overlap_sphere_into(&mut self, centre: DVec3, radius: f64, out: &mut Vec<ColliderId>) {
+    pub fn overlap_sphere_into(
+        &mut self,
+        centre: DVec3,
+        radius: f64,
+        out: &mut Vec<(ColliderId, OverlapHit)>,
+    ) {
         self.overlap_sphere_filtered_into(centre, radius, QueryFilter::ALL, out);
     }
 
@@ -1634,7 +1695,7 @@ impl PhysicsWorld {
         centre: DVec3,
         radius: f64,
         filter: QueryFilter,
-    ) -> Vec<ColliderId> {
+    ) -> Vec<(ColliderId, OverlapHit)> {
         let mut out = Vec::new();
         self.overlap_sphere_filtered_into(centre, radius, filter, &mut out);
         out
@@ -1647,7 +1708,7 @@ impl PhysicsWorld {
         centre: DVec3,
         radius: f64,
         filter: QueryFilter,
-        out: &mut Vec<ColliderId>,
+        out: &mut Vec<(ColliderId, OverlapHit)>,
     ) {
         // Lent to the view and put straight back, which is what lets one
         // implementation serve both borrow shapes: the view cannot reach a
@@ -2171,6 +2232,11 @@ impl std::fmt::Debug for PhysicsWorld {
 mod tests {
     use super::*;
 
+    /// The colliders an overlap answered, in its order, without their hits.
+    pub(super) fn ids_of(hits: &[(ColliderId, OverlapHit)]) -> Vec<ColliderId> {
+        hits.iter().map(|&(id, _)| id).collect()
+    }
+
     #[test]
     fn empty_world_is_empty() {
         let world = PhysicsWorld::new();
@@ -2293,7 +2359,7 @@ mod tests {
         );
 
         assert_eq!(
-            world.overlap_sphere(DVec3::new(0.0, 900.0, 0.0), 0.1),
+            ids_of(&world.overlap_sphere(DVec3::new(0.0, 900.0, 0.0), 0.1)),
             vec![ids[7]],
             "the refit tree must answer at the new place"
         );
@@ -2348,7 +2414,7 @@ mod tests {
         );
 
         assert_eq!(
-            world.overlap_sphere(DVec3::new(3.0, 40.0, 0.0), 0.1),
+            ids_of(&world.overlap_sphere(DVec3::new(3.0, 40.0, 0.0), 0.1)),
             vec![ids[3]],
             "the rebuilt tree must answer at the new place"
         );
@@ -2439,18 +2505,17 @@ mod tests {
                 let probe = Sphere::new(centre, radius);
                 // The oracle: every collider, tested directly, with no tree and
                 // no traversal between the shapes and the answer.
-                let mut scanned: Vec<ColliderId> = expected
+                let mut scanned: Vec<(ColliderId, OverlapHit)> = expected
                     .iter()
-                    .filter(|(_, s)| query::sphere_overlaps_sphere(&probe, s))
-                    .map(|(id, _)| *id)
+                    .filter_map(|(id, s)| Some((*id, query::sphere_overlap_vs_sphere(&probe, s)?)))
                     .collect();
-                if query::sphere_overlaps_capsule(&probe, &capsule) {
-                    scanned.push(capsule_id);
+                if let Some(hit) = query::sphere_overlap_vs_capsule(&probe, &capsule) {
+                    scanned.push((capsule_id, hit));
                 }
-                if query::sphere_overlaps_aabb(&probe, &boxed.aabb()) {
-                    scanned.push(box_id);
+                if let Some(hit) = query::sphere_overlap_vs_aabb(&probe, &boxed.aabb()) {
+                    scanned.push((box_id, hit));
                 }
-                scanned.sort_unstable_by_key(|id| id.index());
+                scanned.sort_unstable_by_key(|(id, _)| id.index());
 
                 let mut shared = Vec::new();
                 world.overlap_queries().overlap_sphere_into(
@@ -2459,7 +2524,7 @@ mod tests {
                     &mut scratch,
                     &mut shared,
                 );
-                shared.sort_unstable_by_key(|id| id.index());
+                shared.sort_unstable_by_key(|(id, _)| id.index());
 
                 assert_eq!(scanned, shared, "at {centre} r{radius}");
                 biggest = biggest.max(shared.len());
@@ -2888,7 +2953,7 @@ mod tests {
             &mut out,
         );
         assert_eq!(
-            out,
+            ids_of(&out),
             vec![body],
             "a body whose centre is inside R + r_b is returned"
         );
@@ -2913,7 +2978,7 @@ mod tests {
             &mut out,
         );
         assert_eq!(
-            out,
+            ids_of(&out),
             vec![body],
             "the query radius is expanded by the collider's own radius, not used raw"
         );
@@ -2929,7 +2994,7 @@ mod tests {
             &mut out,
         );
         assert_eq!(
-            out,
+            ids_of(&out),
             vec![body],
             "a body within the circle of radius R + r_b is returned even off-axis"
         );
@@ -3200,7 +3265,7 @@ mod tests {
         // would re-read the correct shape and paper over the mistake.
         assert!(world.set_sphere(reused, Sphere::new(DVec3::new(3.0, 0.0, 0.0), 1.0)));
         assert_eq!(
-            world.overlap_sphere(DVec3::new(3.0, 0.0, 0.0), 0.5),
+            ids_of(&world.overlap_sphere(DVec3::new(3.0, 0.0, 0.0), 0.5)),
             vec![reused],
             "the refit did not move the collider that was asked to move"
         );
@@ -3364,7 +3429,7 @@ mod tests {
         // Now overlap should find it.
         let results = world.overlap_sphere(DVec3::ZERO, 3.0);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0], id);
+        assert_eq!(results[0].0, id);
     }
 
     #[test]
@@ -3487,7 +3552,10 @@ mod tests {
         let trigger = world.add_sphere(Sphere::new(DVec3::new(2.0, 0.0, 0.0), 1.0));
         assert!(world.set_trigger(trigger, true));
 
-        assert_eq!(world.overlap_sphere(DVec3::ZERO, 4.0), vec![trigger]);
+        assert_eq!(
+            ids_of(&world.overlap_sphere(DVec3::ZERO, 4.0)),
+            vec![trigger]
+        );
         let query = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(4.0));
         assert_eq!(world.overlap_aabb(&query), vec![trigger]);
     }
@@ -3600,6 +3668,10 @@ mod ray_exclusion_tests;
 #[cfg(test)]
 #[path = "world/query_filter_tests.rs"]
 mod query_filter_tests;
+
+#[cfg(test)]
+#[path = "world/overlap_hit_tests.rs"]
+mod overlap_hit_tests;
 
 #[cfg(test)]
 #[path = "world/lying_capsule_tests.rs"]

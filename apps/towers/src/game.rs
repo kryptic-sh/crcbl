@@ -71,7 +71,7 @@ use std::time::Duration;
 use crcbl::ecs::{ClientInputs, DebugCtx, Entity, GameModule, SystemTrait, World};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
-use crcbl::phys::{ColliderId, PhysicsWorld};
+use crcbl::phys::{ColliderId, OverlapHit, PhysicsWorld};
 use crcbl::server::{HostModule, PeerId, PeerInputs};
 use crcbl::session::Loopback;
 
@@ -476,11 +476,11 @@ struct Stage {
     elapsed: f64,
     /// The overlap queries' output buffer, hoisted so a tick that asks one
     /// question per creep and one per tower allocates nothing.
-    scratch: Vec<ColliderId>,
+    scratch: Vec<(ColliderId, OverlapHit)>,
     /// …and the splash burst's own, because [`Stage::splash`] reads its answers
     /// back **while** it wounds and removes creeps, which is the one place a
     /// buffer and the rest of the stage are borrowed in the same breath.
-    burst_scratch: Vec<ColliderId>,
+    burst_scratch: Vec<(ColliderId, OverlapHit)>,
 }
 
 impl Stage {
@@ -742,11 +742,11 @@ impl Stage {
             // about which slots its history left free. A run resumed from a
             // save has a fresh world, so wounding in the answer's order would
             // make the same stage play differently on it.
-            burst_scratch.retain(|body| Some(*body) != direct);
-            burst_scratch.sort_by_key(|body| {
+            burst_scratch.retain(|&(body, _)| Some(body) != direct);
+            burst_scratch.sort_by_key(|&(body, _)| {
                 creeps
                     .iter()
-                    .position(|creep| creep.body() == *body)
+                    .position(|creep| creep.body() == body)
                     .unwrap_or(usize::MAX)
             });
         }
@@ -754,7 +754,7 @@ impl Stage {
         // stage: the buffer is read one id at a time and the creep list is
         // swap-removed from underneath.
         for index in 0..self.burst_scratch.len() {
-            let body = self.burst_scratch[index];
+            let (body, _) = self.burst_scratch[index];
             self.wound(body, bolt.damage());
         }
     }

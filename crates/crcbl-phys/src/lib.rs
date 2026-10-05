@@ -120,12 +120,13 @@ pub use material::{CombineRule, ContactMaterial, SurfaceMaterial};
 pub use mesh::{MeshError, MeshHit, TriangleMesh};
 pub use orbit::{Orbit, propagate};
 pub use query::{
-    Penetration, ShapeHit, aabb_overlaps_box, capsule_penetration_vs_aabb,
+    OverlapHit, Penetration, ShapeHit, aabb_overlaps_box, capsule_penetration_vs_aabb,
     capsule_penetration_vs_box, capsule_penetration_vs_capsule, capsule_penetration_vs_sphere,
-    ray_vs_aabb, ray_vs_box, ray_vs_capsule, ray_vs_sphere, sphere_overlaps_aabb,
-    sphere_overlaps_box, sphere_overlaps_capsule, sphere_overlaps_sphere, swept_capsule_vs_aabb,
-    swept_capsule_vs_box, swept_capsule_vs_capsule, swept_capsule_vs_sphere, swept_sphere_vs_aabb,
-    swept_sphere_vs_box, swept_sphere_vs_capsule, swept_sphere_vs_sphere,
+    ray_vs_aabb, ray_vs_box, ray_vs_capsule, ray_vs_sphere, sphere_overlap_vs_aabb,
+    sphere_overlap_vs_box, sphere_overlap_vs_capsule, sphere_overlap_vs_sphere,
+    sphere_overlaps_aabb, sphere_overlaps_box, sphere_overlaps_capsule, sphere_overlaps_sphere,
+    swept_capsule_vs_aabb, swept_capsule_vs_box, swept_capsule_vs_capsule, swept_capsule_vs_sphere,
+    swept_sphere_vs_aabb, swept_sphere_vs_box, swept_sphere_vs_capsule, swept_sphere_vs_sphere,
 };
 pub use system::{EntityOverlapQueries, PhysicsSystem};
 pub use wind::WindQuery;

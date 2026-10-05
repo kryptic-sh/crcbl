@@ -28,8 +28,8 @@
 use glam::{DQuat, DVec3};
 
 use super::{
-    Penetration, ShapeHit, capsule_penetration_vs_capsule, ray_vs_capsule, sphere_overlaps_capsule,
-    swept_capsule_vs_capsule, swept_sphere_vs_capsule,
+    OverlapHit, Penetration, ShapeHit, capsule_penetration_vs_capsule, ray_vs_capsule,
+    sphere_overlap_vs_capsule, swept_capsule_vs_capsule, swept_sphere_vs_capsule,
 };
 use crate::broadphase::{Ray, Segment};
 use crate::collider::{Aabb, Capsule, Sphere};
@@ -111,14 +111,24 @@ impl TurnedCapsule {
     }
 }
 
-/// Test whether a sphere overlaps a capsule, standing or turned (touching
-/// counts as overlapping).
-pub(crate) fn sphere_overlaps_turned_capsule(sphere: &Sphere, target: &TurnedCapsule) -> bool {
+/// How a sphere overlaps a capsule, standing or turned, or `None` if they are
+/// apart or only touch: [`sphere_overlap_vs_capsule`], whose answers a turned
+/// capsule gives in its own frame. A centre on a turned capsule's core leaves
+/// along the core, the capsule's own `+Y`.
+pub(crate) fn sphere_overlap_vs_turned_capsule(
+    sphere: &Sphere,
+    target: &TurnedCapsule,
+) -> Option<OverlapHit> {
     if target.stands() {
-        return sphere_overlaps_capsule(sphere, &target.capsule);
+        return sphere_overlap_vs_capsule(sphere, &target.capsule);
     }
     let local = Sphere::new(target.local_point(sphere.centre), sphere.radius);
-    sphere_overlaps_capsule(&local, &target.capsule)
+    let hit = sphere_overlap_vs_capsule(&local, &target.capsule)?;
+    Some(OverlapHit {
+        point: target.world_point(hit.point),
+        normal: target.rotation * hit.normal,
+        ..hit
+    })
 }
 
 /// Intersect a ray with a capsule, standing or turned: [`ray_vs_capsule`],

@@ -11490,18 +11490,100 @@ Today each sample that needs a client-side query builds its own; `apps/breach`
 casts its pistol ray on the **server** side instead, which sidesteps the problem
 rather than solving it.
 
-### `overlap_sphere` returns entities, not shape hits (2026-09-24)
+### Sphere overlaps answer hits: decisions, and what they left (2026-10-05)
 
-**Not built.** The asteroids slice left `PhysicsSystem::overlap_sphere` (and
-`overlap_sphere_into`, `overlap_sphere_filtered`, `_filtered_into`) returning
-bare `Entity` lists, and `PhysicsWorld`'s the same over `ColliderId`s; the
-physics plan owed a real shape hit from them. `crcbl_phys::query::ShapeHit`
-exists — the sweeps and the character controller return it — but it is a ray
-parameter, point and normal, with no penetration depth, so an overlap answer
-needs either a depth on it or a sibling type. `capsule_penetrations_into`
-already computes depth for capsules and is the model. Every `_filtered` variant
-changes in step. Evidence: `crates/crcbl-phys/src/system.rs` and `world.rs`
-read, 2026-09-24.
+**Built.** Every sphere overlap — `PhysicsWorld::overlap_sphere`, `_into`,
+`_filtered`, `_filtered_into`, the same on `OverlapQueries`, and the entity
+forms on `PhysicsSystem` and `EntityOverlapQueries` — answers one
+`crcbl_phys::OverlapHit` per collider: the surface point the sphere is pushed
+out from, the unit normal out of the collider, the depth and the compound part.
+The shape-level measurements are `query::sphere_overlap_vs_*`, in
+`crates/crcbl-phys/src/query/sphere_overlap.rs` and beside their siblings in
+`query/boxes.rs` and `query/capsules.rs`. Decided, and why:
+
+- **A sibling type, not a depth on `ShapeHit`.** `ShapeHit::t` is a ray or sweep
+  parameter and `started_inside` a sweep flag; an overlap has neither, so adding
+  `depth` there would hand every overlap two fields that mean nothing, and hand
+  every ray a depth that means nothing. `Penetration` was the other candidate:
+  it has no point and no part, and it is the character controller's type, so it
+  stayed as it is and `OverlapHit::from_penetration` builds on it.
+- **Pairs, `(ColliderId, OverlapHit)` and `(Entity, OverlapHit)`, not an id
+  inside the hit**, because the sweeps answer `(ColliderId, ShapeHit)` and the
+  push-outs `(ColliderId, Penetration)`: one shape for every query family, and
+  the same hit type at both levels.
+- **Every measurement is the existing capsule push-out asked for a capsule of no
+  height**, which is a sphere — `capsule_penetration_vs_sphere`, `_vs_capsule`,
+  `_vs_aabb` and the mesh's `capsule_penetration_with` — not a new algorithm. A
+  turned box and a turned capsule are measured in their own frames, as
+  `sphere_overlaps_box` already tested one, rather than through the contact
+  pipeline's `gap`, whose turned-box distance is a golden-section search and
+  only approximately exact.
+- **A hit is a strictly positive depth, with no tolerance**, the rule
+  `Penetration` already kept. So the boundary moved: a collider the query only
+  touches was reported before and is not now. Nothing in the workspace depended
+  on the touch — `apps/horde`'s `separation_push` weighs a neighbour at exactly
+  the query distance at zero — and `crcbl-phys`'s
+  `every_answer_on_unturned_scenes_is_where_it_was` pin, which digests the ids
+  every overlap finds over random scenes, did not move.
+- **Degenerate centres have fixed answers**: on a sphere's centre or a capsule's
+  core, `+Y` (the capsule's own, turned); inside a box, the nearest face, ties
+  in the order `-X`, `+X`, `-Y`, `+Y`, `-Z`, `+Z` of the box's axes
+  (`aabb_escape`'s order); on a mesh triangle, its own normal. These are the
+  fallbacks the sweeps and push-outs already took.
+- **One hit per collider: a compound's deepest part, the lower of two equally
+  deep** — `capsule_penetrations_core`'s rule. The point is one point, though
+  two shapes meeting along a face share a patch; it is where the shortest
+  push-out lands, which is the point Unity's `ComputePenetration` and PhysX's
+  `computePenetration` answer around.
+- **An ids-only fast path, on the shared views only, because the steering pass
+  measured it.** `crcbl bench --scenario phys` (which stands in for
+  `apps/horde`'s steering), release, this machine, 2026-10-05, query phase p50
+  over three runs each: the boolean overlap before this change 575.9, 574.7 and
+  570.8 µs at the default arena (5.96 results a query) and 1436.7, 1420.1 and
+  1450.3 µs at `--extent 20` (28.18 a query); answering hits 634.2, 625.6 and
+  630.1 µs, and 1744.6, 1770.7 and 1762.7 µs; the ids-only form 614.3, 623.0 and
+  613.8 µs, and 1550.6, 1559.8 and 1554.2 µs. So hits cost the pass about a
+  fifth at a dense crowd, and `OverlapQueries::overlap_sphere_ids_into` /
+  `EntityOverlapQueries::overlap_sphere_entities_into` give back about two
+  thirds of that; what remains is the square root a positive depth needs to be
+  decided. `#[inline]` on the measurement chain was tried and moved nothing. The
+  ids form shares the hit form's core (`overlap_sphere_core` hands each hit to a
+  closure), so the two cannot disagree on which colliders they find —
+  `the_ids_form_names_what_the_hit_form_does_in_its_order` holds it. Not added,
+  for want of a caller: filtered ids-only forms, and an ids-only form on the
+  `&mut self` world and system.
+
+Left, and why:
+
+- **The public `sphere_overlaps_*` predicates still count a touch**, so at the
+  boundary they disagree with the overlap queries. They are public shape tests
+  with their own callers and tests, and changing them is a separate breaking
+  change nobody asked for. A caller using one as an oracle for an overlap query
+  has to use `sphere_overlap_vs_*(..).is_some()` instead — `crcbl bench`'s
+  `serial_answers` and
+  `world::tests::the_shared_view_finds_exactly_what_a_scan_would` were moved to
+  it. Needs a decision if the two should agree: change the predicates to strict
+  (breaking, every caller re-checked) or leave them.
+- **"On the core" is as the arithmetic has it.** A centre on a capsule's core in
+  exact numbers can land a rounding off it in `f64` (at `y = 0.3` on a core from
+  `-1` to `1` the nearest core point rounds a hair above), and then leaves along
+  that rounding — deterministic, not meaningful. Not a bug; the same is true of
+  the capsule push-out the controller uses.
+- **No sphere–hull or sphere–heightfield pair**, because the collider set has
+  neither (hulls: _Contact solver L2/L3_'s rung 2; heightfields: _Static trimesh
+  / heightfield colliders with a BVH midphase_). When hulls land,
+  `overlap_sphere_core` owes a hull arm, which the rung 2 plan gives to GJK on
+  the core shape with a SAT fallback when deep.
+- **`apps/horde`'s steering could read the hit instead of recomputing the
+  push.** `separation_push` works the direction and distance out from the two
+  positions, which is the hit's normal and `combined − depth`; using the hit
+  would drop horde's own square root and position lookup. Not done: it would
+  change the steering's bits and the replay hashes built on them, and the fast
+  path is what that pass uses now.
+- **Not tested**: a sphere deep behind a mesh triangle (the mesh push-out's own
+  "behind" rule, untouched here), and a compound of turned parts through the
+  world (the turned-box measurement is tested at shape level, and the compound
+  rule with unturned parts).
 
 ### Bullet-through-paper at design speeds (2026-09-24)
 

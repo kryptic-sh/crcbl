@@ -757,8 +757,10 @@ pub const SEPARATION_STRENGTH: f64 = 6.0;
 /// **`r_self + slack`, and the omission of the neighbour's radius is the whole
 /// trick.** [`crcbl::phys::PhysicsWorld::overlap_sphere`] tests the query sphere
 /// against each collider's *shape*, so this returns every `b` with
-/// `d <= r_self + slack + r_b` — which is exactly the neighbourhood
-/// `separation_push` wants, with nothing over-fetched and nothing filtered.
+/// `d < r_self + slack + r_b` — which is exactly the neighbourhood
+/// `separation_push` wants, with nothing over-fetched and nothing filtered. A
+/// neighbour at exactly that distance only touches the query and is not
+/// returned, and `separation_push` would weigh it at zero anyway.
 /// A query of `r_self + max_enemy_radius() + slack` would be the conservative
 /// version, and at a brute's 0.85 it would nearly triple the area a grunt
 /// searches.
@@ -2206,10 +2208,9 @@ fn drive_player(logic: &mut GameLogic, world: &mut World, intent: Intent) {
 /// arena. One [`PhysicsSystem::overlap_sphere`] at [`WEAPON_RANGE`] hands back
 /// only what is in that circle.
 ///
-/// The [`crcbl::phys::ShapeHit`] each result carries is **discarded**: it is
-/// fabricated (`t: 0.0`, normal `+Y`, `started_inside: true` for every result,
-/// recorded in `docs/backlog.md`), and all this query is asked is *what* is
-/// there.
+/// The [`crcbl::phys::OverlapHit`] each result carries is not read: all this
+/// query is asked is *what* is there, and the aim is at the enemy's centre, not
+/// at the point the range circle reaches it.
 ///
 /// Ties are broken by entity id, not left to the order the broadphase happens to
 /// return: two enemies at exactly the same distance are common in this game —
@@ -2232,6 +2233,7 @@ fn fire(logic: &mut GameLogic, world: &mut World, dt: f64) {
     let target = with_physics(world, |phys| {
         phys.overlap_sphere(origin, range)
             .into_iter()
+            .map(|(entity, _)| entity)
             .filter(|entity| by_entity.contains_key(entity))
             .filter_map(|entity| {
                 let position = phys.transform(entity)?.position;
@@ -2298,9 +2300,10 @@ fn fire(logic: &mut GameLogic, world: &mut World, dt: f64) {
 ///
 /// [`crcbl::phys::PhysicsWorld::overlap_sphere`] tests the query sphere against
 /// each collider's *shape*, so a query of [`PLAYER_RADIUS`] returns exactly the
-/// enemies whose centres are within `PLAYER_RADIUS + r_enemy` — which is the
-/// definition of touching. There is no second distance test here because there
-/// is nothing left to reject.
+/// enemies whose centres are closer than `PLAYER_RADIUS + r_enemy` — which is
+/// the definition of contact; one exactly that far only touches and is not
+/// returned. There is no second distance test here because there is nothing
+/// left to reject.
 ///
 /// # The player is not in the broadphase, and this is why
 ///
@@ -2322,7 +2325,7 @@ fn contact_damage(logic: &mut GameLogic, world: &mut World, dt: f64) {
     let dps = with_physics(world, |phys| {
         phys.overlap_sphere(centre, PLAYER_RADIUS)
             .into_iter()
-            .filter_map(|entity| by_entity.get(&entity).copied())
+            .filter_map(|(entity, _)| by_entity.get(&entity).copied())
             .filter_map(|index| enemies.get(index))
             .map(|enemy| enemy.kind.contact_dps())
             .sum::<f64>()
@@ -2545,7 +2548,7 @@ fn collect_pickups(logic: &mut GameLogic, world: &mut World) {
     let mut taken = std::mem::take(&mut logic.scratch_entities);
     taken.clear();
     with_physics(world, |phys| {
-        for entity in phys.overlap_sphere(centre, radius) {
+        for (entity, _) in phys.overlap_sphere(centre, radius) {
             if pickup_by_entity.contains_key(&entity) {
                 taken.push(entity);
             }
@@ -2704,10 +2707,11 @@ fn thaw_field(logic: &mut GameLogic, world: &mut World) {
 ///   which [`SEPARATION_SLACK`] is the tuning knob for, and which is bounded by
 ///   how densely bodies of a given radius can be packed rather than by `N`;
 /// * and **no allocations at all**, once the one `neighbours` buffer below has
-///   grown. `PhysicsSystem::overlap_sphere_into` clears and refills a buffer
-///   the caller owns, the collider ids land in a scratch buffer of the
-///   system's, and the BVH's descent stack and candidate list are the world's
-///   own. The owned `overlap_sphere` this used to call cost three `Vec`s per
+///   grown. `EntityOverlapQueries::overlap_sphere_entities_into` clears and
+///   refills a buffer the caller owns, the collider ids land in the thread's
+///   scratch, and so do the BVH's descent stack and candidate list. It builds
+///   no [`crcbl::phys::OverlapHit`] either — the push below is worked from the
+///   positions, so a hit would be measured and thrown away. The owned `overlap_sphere` this used to call cost three `Vec`s per
 ///   enemy per tick — 1.8 million a second at the plan's ten thousand, every
 ///   one of them dropped immediately.
 /// * plus `N` hash **lookups** to write the velocities, through
@@ -2808,7 +2812,7 @@ fn steer_enemies(logic: &mut GameLogic, world: &mut World, pool: &mut Pool) {
                     for (offset, velocity) in out.iter_mut().enumerate() {
                         let me = &crowd[start + offset];
                         let mut push = DVec3::ZERO;
-                        queries.overlap_sphere_into(
+                        queries.overlap_sphere_entities_into(
                             me.position,
                             separation_query_radius(me.kind),
                             scratch,
@@ -4115,6 +4119,9 @@ impl Game {
         };
         let mut found = with_physics(self.session.server_mut().world_mut(), |phys| {
             phys.overlap_sphere(position, separation_query_radius(kind))
+                .into_iter()
+                .map(|(entity, _)| entity)
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
         found.sort_unstable_by_key(|entity| entity.to_bits());

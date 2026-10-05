@@ -10,6 +10,7 @@
 
 mod boxes;
 mod capsules;
+mod sphere_overlap;
 
 use crate::broadphase::Ray;
 use crate::collider::{Aabb, Capsule, Sphere};
@@ -17,13 +18,16 @@ use glam::DVec3;
 
 pub(crate) use self::boxes::contact_box;
 pub use self::boxes::{
-    aabb_overlaps_box, capsule_penetration_vs_box, ray_vs_box, sphere_overlaps_box,
-    swept_capsule_vs_box, swept_sphere_vs_box,
+    aabb_overlaps_box, capsule_penetration_vs_box, ray_vs_box, sphere_overlap_vs_box,
+    sphere_overlaps_box, swept_capsule_vs_box, swept_sphere_vs_box,
 };
 pub(crate) use self::capsules::{
     TurnedCapsule, capsule_penetration_vs_turned_capsule, ray_vs_turned_capsule,
-    sphere_overlaps_turned_capsule, swept_capsule_vs_turned_capsule,
+    sphere_overlap_vs_turned_capsule, swept_capsule_vs_turned_capsule,
     swept_sphere_vs_turned_capsule,
+};
+pub use self::sphere_overlap::{
+    OverlapHit, sphere_overlap_vs_aabb, sphere_overlap_vs_capsule, sphere_overlap_vs_sphere,
 };
 
 // ---------------------------------------------------------------------------

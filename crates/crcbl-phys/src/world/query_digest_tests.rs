@@ -18,13 +18,16 @@ use crate::collider::{Aabb, BoxCollider, Capsule, LyingCapsule, Sphere};
 use crate::components::{ColliderComponent, RigidBody, Transform};
 use crate::integrator::rotation_from_scaled_axis;
 use crate::mesh::TriangleMesh;
-use crate::query::ShapeHit;
+use crate::query::{OverlapHit, ShapeHit};
 use crate::system::PhysicsSystem;
 
 use super::{ColliderId, PhysicsWorld, QueryFilter};
 
 /// What [`every_answer_on_unturned_scenes_is_where_it_was`] digests to.
 const PINNED: u64 = 0x7cfef22959e2066a;
+
+/// What [`every_overlap_hit_on_unturned_scenes_is_pinned`] digests to.
+const PINNED_OVERLAP_HITS: u64 = 0x7fcb3f4621c891b0;
 
 /// FNV-1a over 64-bit words: a fixed function, so the pin means the same on
 /// every platform and toolchain, as a `std` hasher's need not.
@@ -74,6 +77,15 @@ impl Digest {
         self.vec(hit.point);
         self.vec(hit.normal);
         self.word(u64::from(hit.started_inside));
+    }
+
+    fn overlap(&mut self, id: ColliderId, hit: OverlapHit) {
+        self.met += 1;
+        self.id(id);
+        self.vec(hit.point);
+        self.vec(hit.normal);
+        self.word(hit.depth.to_bits());
+        self.word(hit.part as u64);
     }
 }
 
@@ -163,7 +175,9 @@ fn digest_scene(seed: u64, world: &mut PhysicsWorld, digest: &mut Digest) {
 
         world.overlap_sphere_into(start, radius, &mut ids);
         digest.word(ids.len() as u64);
-        ids.iter().for_each(|&id| digest.id(id));
+        // The ids alone, as before the overlaps answered hits: what they find
+        // must not have moved. The hits are pinned on their own, below.
+        ids.iter().for_each(|&(id, _)| digest.id(id));
         let aabb = Aabb::new(start.min(end), start.max(end));
         let boxed = world.overlap_aabb(&aabb);
         digest.word(boxed.len() as u64);
@@ -248,4 +262,29 @@ fn every_answer_on_unturned_scenes_is_where_it_was() {
     }
     assert!(digest.met > 1_000, "only {} hits were digested", digest.met);
     assert_eq!(digest.state, PINNED, "{:#018x}", digest.state);
+}
+
+/// **Every sphere overlap's hits on the same scenes, to the bit, in order,
+/// pinned**: the points, normals, depths and parts, as bits, so a change to
+/// any one of them or to the order they come in moves the pin, on whatever
+/// target runs it.
+#[test]
+fn every_overlap_hit_on_unturned_scenes_is_pinned() {
+    let mut digest = Digest::new();
+    let mut hits = Vec::new();
+    for seed in 0..12_u64 {
+        let mut world = unturned_scene(seed, 16);
+        let mut index = 30_000;
+        for _ in 0..48 {
+            let centre = point(seed, &mut index, 5.0);
+            let radius = draw(seed, &mut index, 0.1, 2.5);
+            world.overlap_sphere_into(centre, radius, &mut hits);
+            digest.word(hits.len() as u64);
+            for &(id, hit) in &hits {
+                digest.overlap(id, hit);
+            }
+        }
+    }
+    assert!(digest.met > 300, "only {} hits were digested", digest.met);
+    assert_eq!(digest.state, PINNED_OVERLAP_HITS, "{:#018x}", digest.state);
 }

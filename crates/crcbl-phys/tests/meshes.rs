@@ -612,7 +612,10 @@ fn the_query_world_hits_the_mesh_exactly_and_respects_layers() {
             .is_empty()
     );
     assert_eq!(
-        phys.overlap_sphere(DVec3::new(0.25, 1.05, 0.0), 0.1),
+        phys.overlap_sphere(DVec3::new(0.25, 1.05, 0.0), 0.1)
+            .into_iter()
+            .map(|(entity, _)| entity)
+            .collect::<Vec<_>>(),
         [stairs]
     );
 

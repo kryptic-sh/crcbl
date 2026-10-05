@@ -834,13 +834,15 @@ Other documents cite the plan as "stage 4". Those resolve here:
 
 Record; stage 5 designed `crcbl-phys`, the from-scratch physics pillar, for
 galaxy-scale worlds, simulator-grade dynamics and continuous collision. Built
-from it: L0's queries (`cast_ray`, sweeps, `overlap_sphere` and `QueryFilter`),
-trigger volumes and `CharacterController`; L1's force providers (`forces.rs`,
-`AtmosphericDrag` in `atmosphere.rs`), `SemiImplicitEuler`, the analytic Kepler
-`propagate` (`orbit.rs`) and the `Frames` hierarchy with sphere-of-influence
-crossings; continuous collision for spheres and capsules, and the bullet flag;
-`WorldPos` in `crcbl-core`; the `WindQuery` seam (`wind.rs`); rotation with an
-inertia tensor (`mass.rs`); the static `TriangleMesh` with its BVH midphase; and
+from it: L0's queries (`cast_ray`, sweeps, `overlap_sphere` and `QueryFilter`;
+the overlaps answer `OverlapHit`s — depth, normal, point and part — since
+2026-10-05, decisions in `docs/backlog.md`), trigger volumes and
+`CharacterController`; L1's force providers (`forces.rs`, `AtmosphericDrag` in
+`atmosphere.rs`), `SemiImplicitEuler`, the analytic Kepler `propagate`
+(`orbit.rs`) and the `Frames` hierarchy with sphere-of-influence crossings;
+continuous collision for spheres and capsules, and the bullet flag; `WorldPos`
+in `crcbl-core`; the `WindQuery` seam (`wind.rs`); rotation with an inertia
+tensor (`mass.rs`); the static `TriangleMesh` with its BVH midphase; and
 `crcbl_core::trig` with `crates/crcbl-phys/clippy.toml`'s deny. The contact
 solver section below built L2 and L3 through its rung 5. `apps/orbit` flies the
 L1 row, `apps/towers` the trigger and swept-bolt slice, and `apps/puppet` and
@@ -849,10 +851,10 @@ L1 row, `apps/towers` the trigger and swept-bolt slice, and `apps/puppet` and
 What it left unbuilt is in `docs/backlog.md` under _Physics (from the deleted
 05-physics plan, 2026-09-24)_: bubbles and the per-sector broadphase,
 heightfields, buoyancy and wind forces, the debug suite, the camera-relative
-upload, the rest of the constructed maths, the client-side query world, shape
-hits from `overlap_sphere`, design-speed bullet tests, and the tick substeps and
-`crcbl sim` gaps under _Physics and tessellation_. Orbit's moon transfer and 3D
-view, which the stage's acceptance test needs, are under _orbit_.
+upload, the rest of the constructed maths, the client-side query world,
+design-speed bullet tests, and the tick substeps and `crcbl sim` gaps under
+_Physics and tessellation_. Orbit's moon transfer and 3D view, which the stage's
+acceptance test needs, are under _orbit_.
 
 - **The layer table is the contract.** L0/L1/CCD gate the MVP; L2 was a stretch
   and L3 post-MVP, and solver work never blocks the sample ladder. Each layer is
