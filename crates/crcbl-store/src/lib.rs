@@ -29,6 +29,8 @@
 
 pub mod crash_ring;
 pub mod crc32;
+#[cfg(test)]
+mod kill_during_write;
 pub mod record;
 pub mod replay;
 pub mod save;
@@ -450,10 +452,19 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StorageError> {
         parent_fd.sync_all().ok();
     }
 
+    // Where the unit tests kill a child mid-save to prove the target is never
+    // torn. Compiled into this crate's test binary only, and a no-op there
+    // unless the test's child process was told to stop at this point.
+    #[cfg(test)]
+    kill_during_write::reached(kill_during_write::KillPoint::BeforeRename);
+
     if let Err(e) = std::fs::rename(&tmp_name, path) {
         std::fs::remove_file(&tmp_name).ok();
         return Err(StorageError::from_io(path, e));
     }
+
+    #[cfg(test)]
+    kill_during_write::reached(kill_during_write::KillPoint::AfterRename);
 
     // fsync again after rename so the directory entry is durable on systems
     // that require it.

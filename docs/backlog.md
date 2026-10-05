@@ -15601,10 +15601,42 @@ the OPFS checks in `web/tools/browser-e2e.mjs`:
   (`a_character_saved_by_the_version_2_container_still_resumes`), and the fuzz
   corpus keeps a `save-v2` seed. Payload skew is each game's: shard's
   `a_payload_from_an_older_version_reads_as_no_save` covers its own.
-- **Kill-during-write: not built.** `write_atomic`'s tests cover the temp file
-  and a failed rename (`atomic_write_removes_temp_file_when_rename_fails`), not
-  a process killed mid-write leaving the previous save intact. A child process
-  killed between `write_all` and the rename is the shape.
+- **Kill-during-write: built (2026-10-05).** `crcbl_store::kill_during_write`
+  re-runs each test in a child copy of the crate's test binary, which writes a
+  multi-megabyte save over an existing one through `SaveWriter` and
+  `NativeStorage` and stops at a point inside `write_atomic`; the parent waits
+  for its "reached" line, kills it and reads the file. Two points: **before the
+  rename** (temp file written, synced and closed — the previous save is byte for
+  byte intact, opens and checks its checksum, and the stranded temp file holds
+  the whole new save) and **after the rename, before the second directory sync**
+  (the new save, whole, and nothing stranded). The seam is
+  `kill_during_write::reached`, called under `#[cfg(test)]`, so no build a game
+  links carries it; that is why these are unit tests and not `tests/`
+  integration tests, whose copy of the crate has no `cfg(test)`. Mutation
+  checked: `write_atomic` writing the target in place with the stop half-way
+  turned the before-rename test red ("truncated in sector data"). Run on Windows
+  locally; Linux and macOS through CI's nextest jobs.
+  - **Gap: a kill is not a power cut.** The killed process's writes outlive it
+    in the OS cache, so these tests prove the ordering, not the `sync_all`
+    calls. Nothing tests durability at return.
+  - **Behaviour, not a bug: a kill before the rename strands a full-size
+    `.<stem>.<hex>.<ext>.tmp`** beside the save, and nothing in the store ever
+    removes it. The next write and read work beside it (the test holds both). A
+    game killed repeatedly mid-save accumulates them; a sweep of stale `.tmp`
+    siblings at the next write is the fix if that matters, and is not built.
+  - **Finding, needs a decision: `write_atomic` never syncs the directory on
+    Windows.** Both directory syncs are `std::fs::File::open(parent)` under
+    `if let Ok`, and on Windows opening a directory that way fails with "Access
+    is denied" (checked 2026-10-05 with a scratch program on this machine,
+    toolchain 1.98.1), so both are skipped silently. The file's own `sync_all`
+    still runs before the rename, so a power cut should leave the old or the new
+    save, not a torn one (inferred from the order, not tested); what is lost is
+    durability of the rename at return, which the doc comment ("fsync both the
+    file and its parent directory") claims. Options: open the directory with
+    `FILE_FLAG_BACKUP_SEMANTICS` through `std::os::windows::fs::OpenOptionsExt`
+    and flush it (Windows-only code whose effect no test short of a power cut
+    can observe), or correct the doc comment to say the directory sync is
+    POSIX-only.
 
 ### Settings apply-on-confirm with timed revert (2026-09-24)
 
