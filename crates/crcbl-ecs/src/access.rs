@@ -218,6 +218,9 @@ impl std::error::Error for AccessError {}
 /// at registration.
 #[derive(Debug)]
 pub(crate) struct Declared {
+    /// The name the debug-build check reports; only that check reads it, so a
+    /// build without it does not keep it.
+    #[cfg(debug_assertions)]
     pub(crate) system: String,
     pub(crate) access: Access,
 }

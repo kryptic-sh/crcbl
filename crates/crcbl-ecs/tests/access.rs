@@ -3,6 +3,7 @@
 //! refuses, and — in debug builds — the panic on a tick touching a resource
 //! its system did not declare.
 
+#[cfg(debug_assertions)]
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crcbl_ecs::{

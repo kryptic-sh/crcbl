@@ -141,6 +141,7 @@ impl Schedule {
             conflicts_between(before, &earlier.access, after, &access, &mut self.conflicts);
         }
         self.declared.push(Arc::new(Declared {
+            #[cfg(debug_assertions)]
             system: system.name().to_owned(),
             access,
         }));
