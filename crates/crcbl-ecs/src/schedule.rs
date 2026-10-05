@@ -1,8 +1,11 @@
 use std::fmt;
 use std::hash::Hasher;
 
+use crcbl_core::time::TimeSource;
+
 use crate::entity::Entity;
 use crate::system::{DebugCtx, SystemTrait};
+use crate::tick_time::{TickTime, TickWindow};
 
 /// A [`Hasher`] that keeps the bytes instead of mixing them.
 ///
@@ -36,29 +39,79 @@ impl Hasher for ByteSink {
 /// not shown — a channel or a handle one of them captured — which is exactly
 /// the access a declaration would have to make visible before a parallel
 /// schedule could be built on it. `docs/backlog.md` records what that costs.
+///
+/// # Tick times
+///
+/// Given a clock ([`Schedule::set_clock`]), `run` reads it either side of every
+/// system's tick and keeps a [`TickTime`] per system, which
+/// [`Inspector::collect`](crate::Inspector::collect) reports. Without one —
+/// the default — nothing is measured and no clock is read. The times are
+/// never part of [`Schedule::hash_state`]; [`TickTime`]'s docs say why that
+/// is the whole of their licence to exist.
 pub struct Schedule {
     systems: Vec<Box<dyn SystemTrait>>,
+    /// Each system's tick times, index for index with `systems`.
+    times: Vec<TickWindow>,
+    clock: Option<Box<dyn TimeSource>>,
 }
 
 impl Schedule {
-    /// Creates an empty schedule.
+    /// Creates an empty schedule with no clock.
     #[must_use]
     pub fn new() -> Self {
         Self {
             systems: Vec::new(),
+            times: Vec::new(),
+            clock: None,
         }
     }
 
     /// Appends a system to the end of the schedule.
     pub fn add_system(&mut self, system: Box<dyn SystemTrait>) {
         self.systems.push(system);
+        self.times.push(TickWindow::default());
+    }
+
+    /// Times every system's tick on `clock` from the next [`run`](Self::run),
+    /// or stops timing them with `None`. Either way the times measured so far
+    /// are dropped, since they were taken on a clock that is no longer this
+    /// schedule's.
+    ///
+    /// Natively the clock is a
+    /// [`MonotonicTime`](crcbl_core::time::MonotonicTime); a test hands a
+    /// clock it advances itself. **A browser build has no clock to hand**:
+    /// `MonotonicTime` reads [`std::time::Instant`], which panics on
+    /// `wasm32-unknown-unknown`, and the page's only clock is the
+    /// `performance.now()` its shim passes in once a frame, which cannot
+    /// time anything inside one. Such a schedule stays untimed and its
+    /// systems report no [`TickTime`] rather than a zero.
+    pub fn set_clock(&mut self, clock: Option<Box<dyn TimeSource>>) {
+        self.clock = clock;
+        for window in &mut self.times {
+            window.clear();
+        }
+    }
+
+    /// Whether [`run`](Self::run) times the systems it ticks.
+    #[must_use]
+    pub fn is_timed(&self) -> bool {
+        self.clock.is_some()
     }
 
     /// Runs every system's [`SystemTrait::tick`] in order, passing the
-    /// schedule's fixed timestep `dt` (seconds) through to each.
+    /// schedule's fixed timestep `dt` (seconds) through to each, and with a
+    /// clock, timing each one.
     pub fn run(&mut self, dt: f64) {
-        for system in &mut self.systems {
+        let Some(clock) = &self.clock else {
+            for system in &mut self.systems {
+                system.tick(dt);
+            }
+            return;
+        };
+        for (system, window) in self.systems.iter_mut().zip(&mut self.times) {
+            let started = clock.elapsed();
             system.tick(dt);
+            window.record(clock.elapsed().saturating_sub(started));
         }
     }
 
@@ -95,6 +148,12 @@ impl Schedule {
         self.systems
             .iter()
             .map(|s| (s.name().to_string(), s.entity_count()))
+    }
+
+    /// Every system's [`TickTime`], in schedule order: `None` for a system
+    /// not timed since the clock was set, and for all of them without one.
+    pub(crate) fn tick_times(&self) -> impl Iterator<Item = Option<TickTime>> + '_ {
+        self.times.iter().map(TickWindow::read)
     }
 
     /// Hash every system's state (name + component data) into `hasher`,
@@ -161,6 +220,7 @@ impl fmt::Debug for Schedule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Schedule")
             .field("system_count", &self.systems.len())
+            .field("timed", &self.is_timed())
             .finish()
     }
 }

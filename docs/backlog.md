@@ -3059,9 +3059,9 @@ The plan's rules and a table resolving its rung, section and debug-item numbers
 are in `docs/notes/tooling.md` (_What the deleted 07-ui-debug plan left
 behind_). Every rung is built; what each left is in the _What UI rung N shipped
 without_ sections below, and the debug tools' remainder is under _The debug
-overlay, and what is left of it_, _Netgraph HUD, LAN discovery_, _Inspector
-stats carry no per-system tick time_, _World-anchored debug text is not built_
-and _The debug draw layer's console switch is one bit, not a category set_.
+overlay, and what is left of it_, _Netgraph HUD, LAN discovery_, _World-anchored
+debug text is not built_ and _The debug draw layer's console switch is one bit,
+not a category set_.
 
 ### The UI stage's debug-overlay exit criterion is met (2026-10-03)
 
@@ -3134,8 +3134,66 @@ a field (read-only by decision; an edit would want the `FieldEdit` command path
 `Ui::inspector` already reports), select in any sample but the sandbox (the
 selection model is `apps/sandbox/src/scene.rs`'s own; a second sample wanting it
 is the trigger to move it into `crcbl`), or reach the `--host` server world
-(above). `Inspector::collect` still reports counts only, and per-system tick
-times are _Inspector stats carry no per-system tick time_.
+(above). Per-system tick times are below.
+
+**Per-system tick times are built (2026-10-05).** `crcbl_ecs::Schedule` takes an
+injected clock, `set_clock(Option<Box<dyn TimeSource>>)`, and with one reads it
+either side of every `SystemTrait::tick`, keeping a rolling window per system;
+`Inspector::collect` reports `SystemStats::tick_time`, a `TickTime` of the last
+tick and the window's mean. Decided that day, for the long term:
+
+- **The clock is `crcbl_core::time::TimeSource`**, the trait the frame clock is
+  already fed through, not a new one: `MonotonicTime` natively, a test's own
+  clock in tests. **A browser build stays untimed**, and the panel says
+  `untimed` rather than drawing zeros: `MonotonicTime` reads `Instant`, which
+  panics on `wasm32-unknown-unknown`, and the page's only clock is the
+  `performance.now()` the shim passes to `App::frame` once a frame — no reading
+  inside a frame without a JS import, which `web/tools/check-exports.mjs`
+  refuses. A browser sample wanting tick times needs that import, and that is
+  its own decision.
+- **The window is a rolling mean over `TICK_TIME_WINDOW` ticks** (a second at
+  `World::DEFAULT_TICK_DT`, const-asserted), the shape `FrameStats` already has,
+  rather than an EMA: a window's mean is exact and says what it covers. Changing
+  the clock, or removing it, drops every window.
+- **Off by default, and on for the life of a host that shows the panel** rather
+  than toggled with the overlay. `World::new` cannot default to a real clock
+  (the browser, and determinism tests that must read none), so a schedule is
+  untimed until given one. The sandbox gives its world `MonotonicTime` at
+  construction and keeps it, for the reason `FrameStats` records while hidden:
+  the mean is warm when F3 opens. Measured with a throwaway release-mode probe
+  on 2026-10-05 (Ryzen 9 9950X3D, Windows): one `MonotonicTime::elapsed` read
+  24.8 ns; sixteen no-op systems 19 ns a tick untimed against 814–831 ns timed,
+  +49.7 to +50.7 ns a system a tick over three rounds; sixteen systems over 1000
+  entities each 4531–4599 ns against 5207–5238 ns, +38.9 to +44.1 ns a system a
+  tick. Sixteen systems at 60 Hz is about 50 µs of a second, well under a
+  thousandth of a core, which is the case for leaving it on.
+- **Times never reach the hash.** They live beside the systems in the schedule
+  and are read only through `Inspector::collect`; `Schedule::hash_state` walks
+  the systems alone, and nothing serialises a schedule into a snapshot or a
+  save.
+- **The panel lists systems in schedule order**, not sorted by cost: times that
+  wobble by microseconds would reorder the rows every frame. The section is
+  `apps/sandbox/src/scene.rs`'s `SystemTimes` — the one sample whose panel shows
+  a `World` — rather than a module in `crcbl`, because nothing else would call
+  it; a second sample with an ECS world in its panel is the trigger to move it
+  into `crcbl`, which names both `crcbl-ecs` and `crcbl-ui`. Server worlds
+  (`crcbl-server`'s `Host`, `--host`'s world) stay untimed: no panel reads them.
+
+Evidence, each shown red under a mutation: `crcbl-ecs`'s
+`inspector::tests::each_systems_tick_time_is_what_the_clock_says_it_took` (the
+start reading not subtracted; the mean divided by the window's capacity),
+`the_mean_covers_every_tick_until_the_window_fills_and_the_window_after` (the
+oldest sample never evicted) and
+`a_schedule_without_a_clock_reports_no_tick_time` (a new clock keeping the old
+windows; the untimed path recording zeros); `crcbl-server`'s
+`sim_hash::tests::timing_the_schedule_leaves_the_state_hash_alone` and
+`host::frames_tests::a_resimulation_reproduces_every_hash_with_the_schedule_timed`
+(the tick times folded into `Schedule::hash_state`); `apps/sandbox`'s
+`scene::tests::the_systems_section_has_a_row_per_system_with_its_tick_time` (one
+row only; last and mean swapped; `pending` and `untimed` swapped; the section
+not added), `a_scene_given_no_clock_says_its_systems_are_untimed` and
+`app::tests::f3_toggles_the_debug_overlay_in_the_sandbox` (the sample handing
+its scene no clock).
 
 Met, for the record: the fixture corpus passes
 (`crates/crcbl-ui/tests/taffy_fixtures.rs`), draw-list snapshot tests exist in
@@ -11668,17 +11726,6 @@ covered.
 
 **Blocks:** replay-driven regression testing, and the rollback-idempotence
 property `26-prediction.md` wants.
-
-### Inspector stats carry no per-system tick time (2026-09-24)
-
-**Not built.** The stage 4 plan had every system report
-`(name, entity_count, tick_time)` to the inspector registry.
-`crcbl_ecs::SystemStats` has only `name` and `entity_count`, and `Schedule` runs
-systems without timing them. Finishing it means timing each `SystemTrait::tick`
-in `Schedule` through an injectable clock rather than `Instant` (which panics on
-wasm32, and would put wall time in reach of determinism tests), and showing the
-number as a `DebugModule` row. Evidence: `crates/crcbl-ecs/src/inspector.rs`
-read, 2026-09-24.
 
 ## Animation (from the deleted 17-animation plan, 2026-09-24)
 

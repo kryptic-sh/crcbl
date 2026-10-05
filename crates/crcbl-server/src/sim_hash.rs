@@ -26,9 +26,74 @@ pub fn hash_world(world: &World, tick: TickId) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use core::cell::Cell;
+    use core::time::Duration;
+
     use super::*;
-    use crcbl_ecs::System;
+    use crcbl_core::time::TimeSource;
+    use crcbl_ecs::{Inspector, System};
+
+    /// A clock that moves on by [`StepClock::STEP`] every time it is read, so
+    /// a schedule timed on it measures every tick as taking exactly that
+    /// long — a time that is never zero, which is what a hash that wrongly
+    /// folded it in would show.
+    #[derive(Debug, Default)]
+    pub(crate) struct StepClock(Cell<Duration>);
+
+    impl StepClock {
+        pub(crate) const STEP: Duration = Duration::from_micros(250);
+    }
+
+    impl TimeSource for StepClock {
+        fn elapsed(&self) -> Duration {
+            let now = self.0.get();
+            self.0.set(now + Self::STEP);
+            now
+        }
+    }
+
+    /// The tick times a world's systems report: `Some` for every system
+    /// once its schedule is timed and has ticked.
+    pub(crate) fn tick_times(world: &World) -> Vec<Option<Duration>> {
+        Inspector::collect(world)
+            .into_iter()
+            .map(|stats| stats.tick_time.map(|time| time.last))
+            .collect()
+    }
+
+    #[test]
+    fn timing_the_schedule_leaves_the_state_hash_alone() {
+        fn world() -> World {
+            let mut world = World::new();
+            let e = world.spawn();
+            let mut pos = System::<f32>::new("pos");
+            pos.attach(e, 1.5);
+            let mut vel = System::<u32>::new("vel");
+            vel.attach(e, 7);
+            world.register_system(Box::new(pos));
+            world.register_system(Box::new(vel));
+            world
+        }
+
+        let mut untimed = world();
+        let mut timed = world();
+        timed
+            .schedule_mut()
+            .set_clock(Some(Box::new(StepClock::default())));
+        for tick in 1..=3 {
+            untimed.tick();
+            timed.tick();
+            let tick = TickId::from_raw(tick);
+            assert_eq!(hash_world(&timed, tick), hash_world(&untimed, tick));
+        }
+        assert_eq!(
+            tick_times(&timed),
+            [Some(StepClock::STEP), Some(StepClock::STEP)],
+            "the timed world really was timed"
+        );
+        assert_eq!(tick_times(&untimed), [None, None]);
+    }
 
     #[test]
     fn hashing_an_empty_world_twice_gives_the_same_value() {

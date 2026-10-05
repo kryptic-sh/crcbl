@@ -378,7 +378,14 @@ impl Sandbox {
             shown: None,
             wait_unpresented,
             unpresented: None,
-            scene: Scene::new(light),
+            // Timed on the real clock always, not only while the panel shows:
+            // two clock reads a system a tick, and the mean is warm when F3
+            // opens it. This sample has no browser build (`web/demos` holds
+            // none), so `MonotonicTime`'s `Instant` is a clock it has.
+            scene: Scene::new(
+                light,
+                Some(Box::new(crcbl::core::time::MonotonicTime::new())),
+            ),
             effects,
             steam: SteamLink::off(),
             lan: Lan::off(),
@@ -998,11 +1005,32 @@ mod tests {
             .map(crcbl::ui::DebugSection::title)
             .collect();
         let expected: &[&str] = if engine.gpu().timings().is_some() {
-            &["frame", "gpu", "counters", crate::scene::SCENE_SECTION]
+            &[
+                "frame",
+                "gpu",
+                "counters",
+                crate::scene::SCENE_SECTION,
+                crate::scene::SYSTEMS_SECTION,
+            ]
         } else {
-            &["frame", "counters", crate::scene::SCENE_SECTION]
+            &[
+                "frame",
+                "counters",
+                crate::scene::SCENE_SECTION,
+                crate::scene::SYSTEMS_SECTION,
+            ]
         };
         assert_eq!(titles, expected, "no module appears that no system offered");
+
+        // Each system's row is timed on the real clock the sample hands its
+        // scene, so it carries a time rather than `UNTIMED` or `PENDING`.
+        for system in [crate::scene::SPIN, crate::scene::SUN] {
+            let time = row_value(&drawn, system);
+            assert!(
+                time.ends_with(" ms") && time.contains(", avg "),
+                "{system}: {time:?}"
+            );
+        }
 
         // **And it reaches the GPU, in the half that draws over a menu.**
         // `UiRenderer::add_passes` declares nothing for an empty half, so which
@@ -1046,10 +1074,21 @@ mod tests {
             ..headless(32)
         });
         let window = engine.window();
+        // By section title, not by drawn text: the systems section has a row
+        // labelled with each system's name too.
+        let titles = |engine: &Loop<HeadlessShell>| -> Vec<String> {
+            engine
+                .debug()
+                .panel
+                .sections()
+                .iter()
+                .map(|section| section.title().to_owned())
+                .collect()
+        };
         run_frames(&mut engine, 2);
         let drawn = ui_text(engine.gpu().draw_list());
         assert_eq!(row_value(&drawn, "selected"), "none", "{drawn:?}");
-        assert!(!drawn.iter().any(|text| text == SPIN), "{drawn:?}");
+        assert!(!titles(&engine).iter().any(|title| title == SPIN));
 
         engine
             .shell_mut()
@@ -1064,10 +1103,11 @@ mod tests {
 
         let drawn = ui_text(engine.gpu().draw_list());
         assert!(
-            drawn.iter().any(|text| text == SPIN),
-            "the cube's spin system has a section: {drawn:?}"
+            titles(&engine).iter().any(|title| title == SPIN),
+            "the cube's spin system has a section: {:?}",
+            titles(&engine)
         );
-        assert!(!drawn.iter().any(|text| text == SUN), "{drawn:?}");
+        assert!(!titles(&engine).iter().any(|title| title == SUN));
         assert_eq!(
             row_value(&drawn, "seconds"),
             format!("{:.3}", engine.gpu().elapsed()),

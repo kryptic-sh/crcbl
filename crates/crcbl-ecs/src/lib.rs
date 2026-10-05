@@ -52,6 +52,7 @@ mod inspector;
 pub mod quantize;
 mod schedule;
 mod system;
+mod tick_time;
 mod world;
 
 pub use component_hash::ComponentHash;
@@ -60,6 +61,7 @@ pub use game_module::{ClientInputs, GameModule};
 pub use inspector::{Inspector, SystemStats};
 pub use schedule::Schedule;
 pub use system::{DebugCtx, DebugDrawFn, System, SystemTrait};
+pub use tick_time::{TICK_TIME_WINDOW, TickTime};
 pub use world::World;
 
 /// Builds an [`Entity`] from raw index and generation for use in tests.

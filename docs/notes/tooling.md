@@ -267,9 +267,9 @@ deleted, and `crcbl_ui::hud` keeps only `Anchor`.
 What it left unbuilt is in `docs/backlog.md`: the per-rung sections _What UI
 rung 1 shipped without_ through _What UI rung 8b shipped without_, _What the
 deleted 07-ui-debug plan left unbuilt_ (the exit criteria), _The debug overlay,
-and what is left of it_, _Netgraph HUD, LAN discovery_, _Inspector stats carry
-no per-system tick time_, _World-anchored debug text is not built_ and _The
-debug draw layer's console switch is one bit, not a category set_.
+and what is left of it_, _Netgraph HUD, LAN discovery_, _World-anchored debug
+text is not built_ and _The debug draw layer's console switch is one bit, not a
+category set_.
 
 Code cites the plan as "stage 7" or "topic 7", and by rung, by architecture
 section and by debug-tool item. Those resolve here:
@@ -287,7 +287,7 @@ section and by debug-tool item. Those resolve here:
 | Rung 7 (7b–7d2)       | Widgets (7b), single-line text input (7c), `Menu` on the tree (7d1), `DebugPanel` and `ConsolePanel` on the tree (7d2) | Built                                                              |
 | Rung 8 (8a, 8b)       | Outliner, tabs and dock (8a); the reflection-driven property inspector (8b)                                            | Built (`Ui::outliner`, `Ui::tabs`, `Ui::dock`, `Ui::inspector`)    |
 | Debug item 1          | Profiler HUD: GPU pass timestamps and CPU frame phases                                                                 | Frame and GPU rows built; the rules are the 40-profiling section's |
-| Debug item 2          | Inspector: per-system entity counts and tick times; select an entity, and each owning system draws its data            | Counts and selection built; no tick times                          |
+| Debug item 2          | Inspector: per-system entity counts and tick times; select an entity, and each owning system draws its data            | Built; tick times in the sandbox's "systems" section               |
 | Debug item 3          | Culling and render stats from the delayed-readback ring                                                                | Built (`FrameCounters`, `CullStatsRing`)                           |
 | Debug item 4          | Console: log view, command registry, server commands over the transport                                                | Built; the transport half is `Flags::SIM`'s (decision 9)           |
 | Debug item 5          | Debug-draw controls, and the immediate-mode buffer they toggle                                                         | Geometry built; one switch rather than categories; world text owed |

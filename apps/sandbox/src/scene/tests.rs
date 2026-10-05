@@ -6,7 +6,7 @@ use super::*;
 const TICK: f64 = 1.0 / 60.0;
 
 fn scene() -> Scene {
-    Scene::new(DirectionalLight::default())
+    Scene::new(DirectionalLight::default(), None)
 }
 
 fn press(scene: &mut Scene, key: KeyCode) {
@@ -102,7 +102,7 @@ fn a_selected_entity_lists_each_owning_systems_fields() {
     let mut scene = scene();
     assert_eq!(
         titles(&panel_of(&scene)),
-        [SCENE_SECTION],
+        [SCENE_SECTION, SYSTEMS_SECTION],
         "no selection, no system sections"
     );
     assert_eq!(value(&panel_of(&scene), SCENE_SECTION, "selected"), "none");
@@ -114,7 +114,7 @@ fn a_selected_entity_lists_each_owning_systems_fields() {
     let panel = panel_of(&scene);
     assert_eq!(
         titles(&panel),
-        [SCENE_SECTION, SPIN],
+        [SCENE_SECTION, SYSTEMS_SECTION, SPIN],
         "the cube is in the spin system only"
     );
     let cube = scene.cube();
@@ -130,7 +130,7 @@ fn a_selected_entity_lists_each_owning_systems_fields() {
 
     press(&mut scene, SELECT_NEXT_KEY);
     let panel = panel_of(&scene);
-    assert_eq!(titles(&panel), [SCENE_SECTION, SUN]);
+    assert_eq!(titles(&panel), [SCENE_SECTION, SYSTEMS_SECTION, SUN]);
     let light = DirectionalLight::default();
     assert_eq!(
         value(&panel, SUN, "direction"),
@@ -141,13 +141,81 @@ fn a_selected_entity_lists_each_owning_systems_fields() {
     );
 }
 
+/// A clock that answers each read with the next of a scripted list of
+/// readings — which is how long every system's tick took, two reads a tick.
+#[derive(Debug)]
+struct Readings(std::cell::RefCell<std::collections::VecDeque<u64>>);
+
+impl Readings {
+    fn millis(readings: &[u64]) -> Self {
+        Self(std::cell::RefCell::new(readings.iter().copied().collect()))
+    }
+}
+
+impl TimeSource for Readings {
+    fn elapsed(&self) -> core::time::Duration {
+        let reading = self
+            .0
+            .borrow_mut()
+            .pop_front()
+            .expect("the test scripted every read the schedule takes");
+        core::time::Duration::from_millis(reading)
+    }
+}
+
+/// The rows of the section titled `title`, as `(label, value)` pairs.
+fn rows<'p>(panel: &'p DebugPanel, title: &str) -> Vec<(&'p str, &'p str)> {
+    panel
+        .sections()
+        .iter()
+        .find(|section| section.title() == title)
+        .unwrap_or_else(|| panic!("no {title} section: {:?}", titles(panel)))
+        .rows()
+        .iter()
+        .map(|row| (row.label.as_str(), row.value.as_str()))
+        .collect()
+}
+
+#[test]
+fn the_systems_section_has_a_row_per_system_with_its_tick_time() {
+    // Two ticks of two systems: spin takes 2 then 4 ms, the sun 3 then 1.
+    let clock = Readings::millis(&[0, 2, 2, 5, 10, 14, 14, 15]);
+    let mut scene = Scene::new(DirectionalLight::default(), Some(Box::new(clock)));
+    assert_eq!(
+        rows(&panel_of(&scene), SYSTEMS_SECTION),
+        [(SPIN, PENDING), (SUN, PENDING)],
+        "timed, but not ticked yet"
+    );
+
+    scene.tick(TICK);
+    scene.tick(TICK);
+    assert_eq!(
+        rows(&panel_of(&scene), SYSTEMS_SECTION),
+        [
+            (SPIN, "4.000 ms, avg 3.000 ms"),
+            (SUN, "1.000 ms, avg 2.000 ms")
+        ],
+        "in schedule order, each the clock's own measure"
+    );
+}
+
+#[test]
+fn a_scene_given_no_clock_says_its_systems_are_untimed() {
+    let mut scene = scene();
+    scene.tick(TICK);
+    assert_eq!(
+        rows(&panel_of(&scene), SYSTEMS_SECTION),
+        [(SPIN, UNTIMED), (SUN, UNTIMED)]
+    );
+}
+
 #[test]
 fn the_world_is_what_the_frame_draws() {
     let light = DirectionalLight {
         ambient: crcbl::math::Vec3::new(0.1, 0.2, 0.3),
         ..DirectionalLight::default()
     };
-    let mut scene = Scene::new(light);
+    let mut scene = Scene::new(light, None);
     assert_eq!(scene.light(), Some(light), "the sun round-trips exactly");
 
     let mut expected = 0.0f32;

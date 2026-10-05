@@ -680,10 +680,10 @@ the netcode section below records; `crcbl-client`'s interpolation and
 
 What it left unbuilt is in `docs/backlog.md` under _ECS, server and client (from
 the deleted 04-ecs-server-client plan, 2026-09-24)_: a client id for
-`replicate`, the headless binary, the input script for the determinism test, and
-per-system tick time. The `cargo tree` guard is built:
-`tools/check-no-renderer-deps.sh`, run by `.github/workflows/ci.yml`'s
-`cargo-deny` job.
+`replicate`, the headless binary and the input script for the determinism test.
+Per-system tick time is built (`Schedule::set_clock`, `SystemStats::tick_time`).
+The `cargo tree` guard is built: `tools/check-no-renderer-deps.sh`, run by
+`.github/workflows/ci.yml`'s `cargo-deny` job.
 
 - **Systems own arrays; an entity is only an id.** `Entity` is a generational id
   from `crcbl-core`'s `Pool` with no storage of its own. A system owns
@@ -702,7 +702,9 @@ per-system tick time. The `cargo tree` guard is built:
 - **Destruction is deferred to the end of the tick**, with a removal sweep per
   system; generational ids make a stale reference safe to hold.
 - **Every system reports to the inspector and has a debug-draw slot.** The plan
-  asked for name, entity count and tick time; the tick time is unbuilt.
+  asked for name, entity count and tick time, and `Inspector::collect` reports
+  all three — the tick time only for a schedule given a clock
+  (`Schedule::set_clock`), and never into the state hash.
 - **The server/client split is enforced by crate boundaries, not discipline.**
   `crcbl-server` is simulation and authoritative state, `crcbl-client` is
   presentation (interpolation, prediction hooks, the render feed), `crcbl-net`
@@ -776,7 +778,7 @@ Other documents cite the plan as "stage 4". Those resolve here:
 
 | Citation                                  | What it specified                                                               |
 | ----------------------------------------- | ------------------------------------------------------------------------------- |
-| The stage 4 system registry, inspector    | `Inspector::collect`: name and entity count per system (tick time owed)         |
+| The stage 4 system registry, inspector    | `Inspector::collect`: name, entity count and tick time per system               |
 | The stage 4 snapshot machinery            | Per-system `replicate`, ack-baseline deltas, full state on join                 |
 | The stage 4 determinism harness           | `crcbl sim` and `hash_world` over 1000 ticks, same input, same hash             |
 | The stage 4 exit criterion: no render dep | `crcbl-server` names no renderer; `tools/check-no-renderer-deps.sh` enforces it |

@@ -34,11 +34,24 @@
 //! The keys work whether or not the panel is showing: a hosted game is not told
 //! the panel's state, and a selection made blind is shown the moment F3 opens
 //! it.
+//!
+//! # What each system's tick costs
+//!
+//! The world's schedule times every system's tick on the clock [`Scene::new`]
+//! is handed, and the panel's [`SYSTEMS_SECTION`] lists them: a row per
+//! system, **in schedule order** — the order they run in and the order
+//! [`Inspector::collect`] reports — with its last tick and the mean over
+//! [`TICK_TIME_WINDOW`](crcbl::ecs::TICK_TIME_WINDOW) ticks. Not sorted by cost:
+//! times that wobble by microseconds would reorder the rows every frame, and a
+//! row that will not stay put cannot be read. The timing runs whether or not
+//! the panel shows, as the frame section's window does, so opening it shows a
+//! warm mean rather than a filling one.
 
 use crcbl::console::{SimSet, SimVars};
 use crcbl::core::TickId;
 use crcbl::core::input::KeyCode;
-use crcbl::ecs::{ComponentHash, Entity, System, World};
+use crcbl::core::time::TimeSource;
+use crcbl::ecs::{ComponentHash, Entity, Inspector, System, World};
 use crcbl::net::{ConsoleOutcome, ConsoleReply};
 use crcbl::reflect::Reflect;
 use crcbl::render::DirectionalLight;
@@ -60,6 +73,15 @@ pub const SUN: &str = "sun";
 
 /// The scene section's title.
 pub const SCENE_SECTION: &str = "scene";
+
+/// The title of the section listing each system's tick time.
+pub const SYSTEMS_SECTION: &str = "systems";
+
+/// What a system's row says while its schedule has no clock.
+pub const UNTIMED: &str = "untimed";
+
+/// What a system's row says between a clock arriving and its first tick.
+pub const PENDING: &str = "pending";
 
 /// How far the cube has spun, as the seconds of animation
 /// `ForwardRenderer::spin` turns into its rotation.
@@ -137,10 +159,12 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// A cube that has not spun yet and a sun shining as `light` does.
+    /// A cube that has not spun yet and a sun shining as `light` does, its
+    /// systems' ticks timed on `clock` — or, with `None`, not timed.
     #[must_use]
-    pub fn new(light: DirectionalLight) -> Self {
+    pub fn new(light: DirectionalLight, clock: Option<Box<dyn TimeSource>>) -> Self {
         let mut world = World::new();
+        world.schedule_mut().set_clock(clock);
         let cube = world.spawn();
         let sun = world.spawn();
         let mut spins = System::<Spin>::reflected(SPIN);
@@ -299,10 +323,11 @@ impl Scene {
         }
     }
 
-    /// The "scene" section, then one section per system that lends the
-    /// selected entity's data.
+    /// The "scene" section, the systems' tick times, then one section per
+    /// system that lends the selected entity's data.
     pub fn debug_sections(&self, panel: &mut DebugPanel) {
         panel.add(self);
+        panel.add(&SystemTimes(&self.world));
         let Some(entity) = self.selected else {
             return;
         };
@@ -349,6 +374,43 @@ impl DebugModule for Scene {
         }
         out.row_str("select", "PgUp / PgDn");
     }
+}
+
+/// The systems section: one row per system, in schedule order, with its last
+/// tick and the window's mean.
+///
+/// Reads the world only when the panel asks — a hidden panel never calls
+/// [`DebugModule::debug_section`], so the strings
+/// [`Inspector::collect`] builds are never built for nothing.
+struct SystemTimes<'w>(&'w World);
+
+impl DebugModule for SystemTimes<'_> {
+    fn debug_section(&self, out: &mut DebugSection) {
+        out.set_title(SYSTEMS_SECTION);
+        let untimed = if self.0.schedule().is_timed() {
+            PENDING
+        } else {
+            UNTIMED
+        };
+        for stats in Inspector::collect(self.0) {
+            match stats.tick_time {
+                Some(time) => out.row(
+                    &stats.name,
+                    format_args!(
+                        "{:.3} ms, avg {:.3} ms",
+                        millis(time.last),
+                        millis(time.mean)
+                    ),
+                ),
+                None => out.row_str(&stats.name, untimed),
+            }
+        }
+    }
+}
+
+/// Milliseconds, for display.
+fn millis(duration: core::time::Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
 }
 
 #[cfg(test)]

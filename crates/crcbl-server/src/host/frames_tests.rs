@@ -14,6 +14,7 @@ use crcbl_net::InMemoryTransport;
 use super::tests::{COMPATIBILITY, TICK, TICK_HZ};
 use super::*;
 use crate::sim_hash::hash_world;
+use crate::sim_hash::tests::{StepClock, tick_times};
 
 /// Every tick's `PeerInputs`, as the module read them, one entry a module
 /// call.
@@ -322,6 +323,31 @@ fn a_resimulated_host_hands_its_module_what_the_live_one_read() {
         replayed.peer_input_record(),
         record,
         "the replay recorded the same"
+    );
+}
+
+/// **A host timing its systems re-simulates an untimed host's recording**:
+/// the tick times a debug panel reads are wall time, and no tick's state hash
+/// may see them.
+#[test]
+fn a_resimulation_reproduces_every_hash_with_the_schedule_timed() {
+    let live = session();
+    assert!(!live.host.world().schedule().is_timed());
+    let record = live.host.peer_input_record().to_vec();
+
+    let (mut replayed, _) = host();
+    replayed
+        .world_mut()
+        .schedule_mut()
+        .set_clock(Some(Box::new(StepClock::default())));
+    assert_eq!(
+        replayed.resimulate([], live.hashes.clone(), record),
+        Ok(live.host.tick_id())
+    );
+    assert_eq!(
+        tick_times(replayed.world()),
+        [Some(StepClock::STEP)],
+        "the replayed host really was timed"
     );
 }
 

@@ -16,6 +16,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_ecs::SystemStats` gained `tick_time`** (see Added: per-system tick
+  times). A struct literal must name it — `None` for a system that was not
+  timed.
+
 - **`crcbl_ui::tree::TextInputOptions` gained `keep_caret`** (see Changed: an
   engaged text input starts with its text selected). A struct literal must name
   it — `false` takes the new behaviour — or end in
@@ -650,6 +654,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **Per-system tick times in the ECS inspector and the sandbox's debug panel.**
+  `crcbl_ecs::Schedule::set_clock` takes any `crcbl_core::time::TimeSource` —
+  `MonotonicTime` natively, a hand-driven one in a test — and from then on reads
+  it either side of every system's tick; `Inspector::collect` reports each
+  system's `TickTime` (its last tick and the mean over `TICK_TIME_WINDOW` ticks)
+  in `SystemStats::tick_time`. A schedule has no clock by default and then reads
+  none, which is also all a browser build can do: `MonotonicTime` panics on
+  `wasm32`, and the page's only clock ticks once a frame. The times never enter
+  `Schedule::hash_state`, so `hash_world` and a replay's re-simulation are
+  unchanged by them. The sandbox times its world on the real clock and its F3
+  panel gains a "systems" section: a row per system, in schedule order, reading
+  `last ms, avg mean ms`.
 
 - **`crcbl edit <DIR> --serve [PORT]` serves a scene to clients of the edit
   protocol.** The CLI keeps the scene open through the editor's document, with
