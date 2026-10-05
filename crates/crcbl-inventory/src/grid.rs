@@ -383,24 +383,13 @@ impl Grid {
             .slot(into)
             .ok_or(InventoryError::NoSuchSlot(into))?
             .stack;
-        if from == into || source.item != target.item {
+        if from == into {
             return Err(InventoryError::NotMergeable {
                 a: source.item,
                 b: target.item,
             });
         }
-        let max = catalog
-            .get(target.item)
-            .ok_or(InventoryError::NoSuchItem(target.item))?
-            .stack_max();
-        if target.count >= max {
-            return Err(InventoryError::StackOverflow {
-                max,
-                count: target.count,
-            });
-        }
-
-        let moved = source.count.min(max - target.count);
+        let moved = poured(catalog, source, target)?;
         self.stack_mut(into).count += moved;
         let left = source.count - moved;
         if left == 0 {
@@ -458,6 +447,26 @@ impl Grid {
     #[must_use]
     pub fn slot(&self, slot: SlotId) -> Option<Placement> {
         self.placements.get(usize::from(slot.0)).copied().flatten()
+    }
+
+    /// Which slot holds the stack known as `stack`, if this grid holds it.
+    ///
+    /// How a command names a stack: by its identity rather than by its slot,
+    /// because a slot id is reused once its placement leaves, and a command
+    /// that arrives after another player emptied the slot must miss rather
+    /// than land on whatever was placed there next. A linear scan, for the
+    /// reason the crate docs give for every lookup here. Allocates nothing.
+    #[must_use]
+    pub fn find(&self, stack: StackId) -> Option<SlotId> {
+        self.slots()
+            .find(|(_, placement)| placement.stack.id == stack)
+            .map(|(slot, _)| slot)
+    }
+
+    /// Sets the count of the stack at `slot`, which the caller has already
+    /// found: the half of a merge that lands in another grid than its source.
+    pub(crate) fn recount(&mut self, slot: SlotId, count: u16) {
+        self.stack_mut(slot).count = count;
     }
 
     /// Every placement, by ascending slot id. Allocates nothing.
@@ -582,63 +591,50 @@ impl Grid {
     }
 }
 
+/// How many of `source` pour into `target`: the stacking rule, wherever the
+/// two stacks sit.
+///
+/// [`Grid::merge`] asks it for two stacks in one grid and
+/// [`Inventory::apply`](crate::Inventory::apply) for two in different ones, so
+/// a merge across containers cannot drift from a merge within one.
+///
+/// # Errors
+///
+/// [`NotMergeable`](InventoryError::NotMergeable) for two different items,
+/// [`NoSuchItem`](InventoryError::NoSuchItem) for an item the catalogue does
+/// not hold, and [`StackOverflow`](InventoryError::StackOverflow) if `target`
+/// is already at its definition's maximum.
+pub(crate) fn poured(
+    catalog: &Catalog,
+    source: Stack,
+    target: Stack,
+) -> Result<u16, InventoryError> {
+    if source.item != target.item {
+        return Err(InventoryError::NotMergeable {
+            a: source.item,
+            b: target.item,
+        });
+    }
+    let max = catalog
+        .get(target.item)
+        .ok_or(InventoryError::NoSuchItem(target.item))?
+        .stack_max();
+    if target.count >= max {
+        return Err(InventoryError::StackOverflow {
+            max,
+            count: target.count,
+        });
+    }
+    Ok(source.count.min(max - target.count))
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
 
     use super::*;
     use crate::shape::Shape;
-
-    /// Four items covering the shapes the grid rules turn on: a `1×1` that
-    /// stacks, the `1×2` the plan's pocket is sized for, a filtered `2×2`, and
-    /// an L, which is the only footprint that can tell a quarter turn from
-    /// three of them.
-    const ITEMS: &str = r###"Catalog(
-    items: [
-        Item(
-            name: "bandage",
-            shape: ["#"],
-            stack_max: 20,
-            weight_g: 30,
-            letter: 'b',
-            colour: (0.9, 0.2, 0.2, 1.0),
-        ),
-        Item(
-            name: "mag",
-            shape: ["#", "#"],
-            stack_max: 1,
-            weight_g: 250,
-            letter: 'm',
-            colour: (0.5, 0.5, 0.5, 1.0),
-        ),
-        Item(
-            name: "helmet",
-            shape: ["##", "##"],
-            tags: ["helmet"],
-            stack_max: 1,
-            weight_g: 1200,
-            letter: 'h',
-            colour: (0.3, 0.4, 0.5, 1.0),
-        ),
-        Item(
-            name: "brace",
-            shape: ["#.", "#.", "##"],
-            stack_max: 1,
-            weight_g: 400,
-            letter: 'l',
-            colour: (0.7, 0.6, 0.2, 1.0),
-        ),
-    ],
-)"###;
-
-    fn items() -> Catalog {
-        Catalog::from_ron(ITEMS).expect("the test catalogue parses")
-    }
-
-    /// The id of `name`, which every test in here knows is in [`ITEMS`].
-    fn id(catalog: &Catalog, name: &str) -> ItemId {
-        catalog.id_of(name).expect("the test catalogue has it")
-    }
+    use crate::test_items::{id, items};
 
     /// `count` of `name`, with `id` as its identity.
     fn stack(catalog: &Catalog, name: &str, identity: u32, count: u16) -> Stack {

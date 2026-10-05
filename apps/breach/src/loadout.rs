@@ -33,6 +33,16 @@
 //! tag, so before this sample the vocabulary in a catalogue was a field nothing
 //! asked about.
 //!
+//! # A drag is the kit's `Move` command
+//!
+//! The rig is the one container of an [`Inventory`], and a drag that
+//! rearranges it is [`drag`]: a [`Command::Move`] applied as the kit's single
+//! transaction, the same call a server makes when a client's move arrives —
+//! rather than this sample reaching into the grid with a move of its own. It
+//! still does not cross the wire (`crate::game`'s `Game::drag` says why), so
+//! the command is applied on behalf of [`owner`], the one player a milestone-0
+//! run has, and no reach check refuses it: the rig is on the player's back.
+//!
 //! # The table is a data file
 //!
 //! `data/items.ron` is `include_str!`-ed rather than read through an
@@ -49,7 +59,11 @@
 //! the same ids however the session went. `StackId(0)` is never one this sample
 //! mints, so a zeroed byte range cannot read as a stack.
 
-use crcbl::inventory::{Catalog, Grid, Stack, StackId};
+use crcbl::core::PlayerId;
+use crcbl::inventory::{
+    Access, Applied, Catalog, Cell, Command, ContainerId, Grid, Held, Inventory, Refusal, SlotId,
+    Stack, StackId,
+};
 
 /// The item table, compiled in. See the module docs for why it is not an asset.
 const ITEMS_RON: &str = include_str!("../data/items.ron");
@@ -130,6 +144,77 @@ pub fn packed() -> Grid {
     grid
 }
 
+/// The rig's local id in the [`Inventory`] [`carried`] builds.
+const RIG_ID: u32 = 0;
+
+/// The rig's place in the [`Inventory`] [`carried`] builds — its only
+/// container.
+pub const RIG: ContainerId = ContainerId::Local(RIG_ID);
+
+/// The seed of [`owner`]'s id.
+const OWNER_SEED: u64 = 0;
+
+/// Who the rig belongs to: the one player a milestone-0 run has, under the
+/// fixed id [`PlayerId::from_seed`] gives in-process sessions — the same every
+/// run, because nothing this sample keeps is keyed by it.
+#[must_use]
+pub fn owner() -> PlayerId {
+    PlayerId::from_seed(OWNER_SEED)
+}
+
+/// The inventory a run starts with: [`packed`] as its one container, [`RIG`],
+/// [`owner`]'s alone.
+///
+/// # Panics
+///
+/// Never: an empty inventory takes any one container, and [`KIT`]'s ids are
+/// distinct by [`stack_id`]'s construction.
+#[must_use]
+pub fn carried() -> Inventory {
+    let mut inventory = Inventory::new();
+    inventory
+        .add(RIG_ID, Access::Player(owner()), packed())
+        .expect("an empty inventory takes the rig");
+    inventory
+}
+
+/// The rig in `inventory`, which [`carried`] put there.
+///
+/// # Panics
+///
+/// If `inventory` is not one [`carried`] built: nothing removes a container
+/// from an [`Inventory`], so one that ever held the rig holds it still.
+#[must_use]
+pub fn rig(inventory: &Inventory) -> &Grid {
+    inventory
+        .grid(RIG)
+        .expect("the inventory carried() built holds the rig")
+}
+
+/// Moves the stack at `slot` of the rig so its origin is `at`, as the kit's
+/// [`Command::Move`], keeping its rotation.
+///
+/// # Errors
+///
+/// [`Refusal::Grid`] with [`NoSuchSlot`](crcbl::inventory::InventoryError::NoSuchSlot)
+/// for an empty slot, or whatever the move is refused for — in which case the
+/// rig is exactly as it was, down to the slot id the panel is holding.
+pub fn drag(inventory: &mut Inventory, slot: SlotId, at: Cell) -> Result<Applied, Refusal> {
+    let placement = rig(inventory)
+        .slot(slot)
+        .ok_or(crcbl::inventory::InventoryError::NoSuchSlot(slot))?;
+    let command = Command::Move {
+        stack: Held {
+            container: RIG,
+            stack: placement.stack().id(),
+        },
+        to: RIG,
+        at,
+        rotation: placement.rotation(),
+    };
+    inventory.apply(catalog(), owner(), command, |_, _| true)
+}
+
 /// The identity of [`KIT`]'s `index`th entry: **one-based**, so `StackId(0)` is
 /// never one this sample minted.
 #[must_use]
@@ -178,7 +263,6 @@ pub fn summary(items: usize, grams: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl::inventory::Cell;
 
     /// **The shipped table is one the kit accepts, and it names the tag the
     /// trigger reads.** [`catalog`] panics on a file that is not a catalogue,

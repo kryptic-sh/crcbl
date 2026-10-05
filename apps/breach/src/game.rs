@@ -81,7 +81,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crcbl::ecs::{ClientInputs, GameModule, World};
-use crcbl::inventory::{Cell, Grid, SlotId};
+use crcbl::inventory::{Cell, Grid, Inventory, SlotId};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{
@@ -456,13 +456,14 @@ struct Stage {
     /// Whichever of the two maps this run opened on.
     arena: Arena,
     player: CharacterController,
-    /// What the player is carrying, as the grid-inventory kit's one container.
+    /// What the player is carrying: an [`Inventory`] whose one container is
+    /// the rig ([`loadout::RIG`]).
     ///
     /// **Server state, like everything else on this struct.** It is what the
     /// trigger is gated on — see [`Stage::armed`] — so a client that predicted
     /// a shot has to predict the same rig, and the drag that rearranges it goes
     /// through the same lock a snapshot does. `crate::loadout` is the content.
-    loadout: Grid,
+    loadout: Inventory,
     /// How fast the player is falling, in metres a second, negative downward.
     /// Zeroed the moment they are grounded.
     fall_speed: f64,
@@ -539,7 +540,7 @@ impl Stage {
             world,
             arena,
             player: CharacterController::new(config, spawn + lift),
-            loadout: loadout::packed(),
+            loadout: loadout::carried(),
             fall_speed: 0.0,
             ticks: 0,
             elapsed: 0.0,
@@ -580,7 +581,7 @@ impl Stage {
     /// `a_trigger_pulled_with_an_empty_rig_is_not_a_shot` is what says the
     /// question is really being asked.
     fn armed(&self) -> bool {
-        loadout::is_armed(&self.loadout)
+        loadout::is_armed(loadout::rig(&self.loadout))
     }
 
     /// What a ray's answer means: a plate, a bot, or the room.
@@ -1445,8 +1446,8 @@ impl Game {
             arena: arena_stats(&stage),
             warming_up: stage.warming_up(),
             aim: stage.aim,
-            carried: stage.loadout.len(),
-            carried_g: loadout::weight_g(&stage.loadout),
+            carried: loadout::rig(&stage.loadout).len(),
+            carried_g: loadout::weight_g(loadout::rig(&stage.loadout)),
         }
     }
 
@@ -1460,7 +1461,7 @@ impl Game {
     /// open.
     #[must_use]
     pub fn loadout(&self) -> Grid {
-        lock(&self.shared).loadout.clone()
+        loadout::rig(&lock(&self.shared).loadout).clone()
     }
 
     /// Moves the stack at `slot` so its origin is `at` — the cell a panel's
@@ -1469,26 +1470,19 @@ impl Game {
     ///
     /// **This is the one mutation that does not cross the wire**, and the
     /// reason is that there is no wire command to carry it: `Intent` is a flag
-    /// byte and two angles, and a cell pair is neither.
-    /// `docs/plan/34-inventory.md`'s `Move` command and its server-side
-    /// validation are the kit's server half, which is not built — so a drag
-    /// here reaches the stage through the same lock a snapshot does, in a
-    /// process where the client and the server are the same memory.
-    /// `apps/shard/src/game.rs` reaches it the same way and `docs/backlog.md`
-    /// carries what a second consumer proves about it.
+    /// byte and two angles, and a cell pair is neither. The kit's command
+    /// protocol is built but its wire form is not, so a drag here reaches the
+    /// stage through the same lock a snapshot does, in a process where the
+    /// client and the server are the same memory. `apps/shard/src/game.rs`
+    /// reaches its grid the same way.
     ///
-    /// The move itself is [`crcbl::inventory::Grid::move_within`], which is
-    /// atomic: a refused drag leaves the rig exactly as it was, down to the
-    /// slot id the panel is holding.
+    /// The move itself is [`loadout::drag`]: the kit's
+    /// [`Command::Move`](crcbl::inventory::Command::Move) applied to the
+    /// stage's [`Inventory`] as one transaction, the call a server makes for a
+    /// client's move. A refused drag leaves the rig exactly as it was, down to
+    /// the slot id the panel is holding.
     pub fn drag(&mut self, slot: SlotId, at: Cell) -> bool {
-        let mut stage = lock(&self.shared);
-        let Some(placement) = stage.loadout.slot(slot) else {
-            return false;
-        };
-        stage
-            .loadout
-            .move_within(loadout::catalog(), slot, at, placement.rotation())
-            .is_ok()
+        loadout::drag(&mut lock(&self.shared).loadout, slot, at).is_ok()
     }
 }
 
@@ -2150,9 +2144,18 @@ mod tests {
         assert!(stage.armed(), "the run started carrying no weapon");
         assert_eq!(stage.crosshair, Aim::Plate(0), "the near lane is not ahead");
 
-        let slots: Vec<_> = stage.loadout.slots().map(|(slot, _)| slot).collect();
-        for slot in slots {
-            stage.loadout.remove(slot).expect("a slot it just yielded");
+        let stacks: Vec<_> = loadout::rig(&stage.loadout)
+            .slots()
+            .map(|(_, placement)| placement.stack().id())
+            .collect();
+        for stack in stacks {
+            stage
+                .loadout
+                .despawn(crcbl::inventory::Held {
+                    container: loadout::RIG,
+                    stack,
+                })
+                .expect("a stack the rig just yielded");
         }
         assert!(!stage.armed(), "an empty rig reports a weapon");
 
@@ -2172,10 +2175,7 @@ mod tests {
         let sidearm = catalog.id_of("sidearm").expect("the table has a sidearm");
         stage
             .loadout
-            .insert(
-                catalog,
-                crcbl::inventory::Stack::new(sidearm, loadout::stack_id(0), 1),
-            )
+            .spawn(catalog, loadout::RIG, sidearm, 1)
             .expect("an empty rig takes a 2x1");
         assert!(stage.armed());
         shoot(&mut stage, 0.0, 0.0);
@@ -2190,8 +2190,8 @@ mod tests {
     /// **A drag moves a stack to where the pointer let go, and a drag onto
     /// something else moves nothing at all.**
     ///
-    /// [`Game::drag`] over the kit's atomic
-    /// [`move_within`](crcbl::inventory::Grid::move_within): the refusal is the
+    /// [`Game::drag`] over the kit's
+    /// [`Command::Move`](crcbl::inventory::Command::Move): the refusal is the
     /// half worth checking, because a drag written as a remove followed by a
     /// place would delete the stack on the way and hand back a rig missing an
     /// item rather than one that did not move.
@@ -2226,7 +2226,7 @@ mod tests {
 
         // The control: a drag onto a cell another stack covers is refused, and
         // the rig is the one it was — down to the slot ids, which is what
-        // `move_within` being one call rather than two buys.
+        // the move being one transaction rather than two calls buys.
         let other = moved
             .slots()
             .find(|(id, _)| *id != slot)
