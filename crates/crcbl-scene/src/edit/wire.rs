@@ -25,10 +25,22 @@
 //! and every op an earlier build wrote reads the same, so this did not move
 //! [`WIRE_VERSION`]: an earlier build refuses a switch by its kind byte.
 //!
+//! **An op may ask for fresh ids** (decided 2026-10-05):
+//! [`EditOp::ApplyFresh`] is a command whose spawns name stand-ins, which the
+//! server applying it replaces with ids it hands out — so two clients, or
+//! one client twice before its copy has heard back, never spawn under the
+//! same id. Beside it, [`EditCommand::OffsetProperty`] adds to a number
+//! rather than naming one. A server resolves both as it applies them and
+//! announces the plain [`EditOp::Apply`] they came to, spelled exactly as
+//! long: a stand-in becomes another `u32`, and an offset the set of a value
+//! of its own kind. Neither moved [`WIRE_VERSION`], for a switch's reason: an
+//! earlier build refuses each by its kind byte.
+//!
 //! ```text
 //! op:
 //!   [0]   version = WIRE_VERSION
-//!   [1]   0 = apply, then a command; 1 = undo; 2 = redo
+//!   [1]   0 = apply, then a command; 1 = undo; 2 = redo;
+//!         3 = apply with fresh ids, then a command
 //! command, kind byte first:
 //!   0x01  set property: entity u32, system text, path text, value
 //!   0x02  set variant: entity u32, system text, path text, snapshot
@@ -42,6 +54,7 @@
 //!   0x09  rename: entity u32, name (0 = none, 1 = text)
 //!   0x0A  batch: count u32, then that many commands
 //!   0x0B  set environment: path text, value
+//!   0x0C  offset property: entity u32, system text, path text, value
 //! value, tag byte first:
 //!   0 = bool (one byte, 0 or 1), 1 = int i64, 2 = uint u64,
 //!   3 = float (f64 bits), 4 = text
@@ -84,6 +97,7 @@ pub const MAX_SNAPSHOT_DEPTH: usize = 16;
 const OP_APPLY: u8 = 0;
 const OP_UNDO: u8 = 1;
 const OP_REDO: u8 = 2;
+const OP_APPLY_FRESH: u8 = 3;
 
 const SET_PROPERTY: u8 = 0x01;
 const SET_VARIANT: u8 = 0x02;
@@ -96,6 +110,7 @@ const UNLIST_SYSTEM: u8 = 0x08;
 const RENAME: u8 = 0x09;
 const BATCH: u8 = 0x0A;
 const SET_ENVIRONMENT: u8 = 0x0B;
+const OFFSET_PROPERTY: u8 = 0x0C;
 
 const VALUE_BOOL: u8 = 0;
 const VALUE_INT: u8 = 1;
@@ -127,6 +142,13 @@ pub enum EditOp {
     Undo,
     /// Step the history forward over the last entry undone.
     Redo,
+    /// [`Apply`](Self::Apply) this command with a fresh id for each entity it
+    /// spawns: every spawn's id is a stand-in, which the document applying it
+    /// replaces — in the spawn and wherever else the command names it — with
+    /// an id no entity holds or held. What a client of a served scene sends
+    /// for an edit that spawns, since the ids its copy would hand out may
+    /// already be another client's, or its own spawn's still on the way.
+    ApplyFresh(EditCommand),
 }
 
 /// Why an [`EditOp`] has no wire form.
@@ -234,6 +256,10 @@ pub fn encode_op(op: &EditOp) -> Result<Vec<u8>, OpEncodeError> {
             out.push(OP_APPLY);
             put_command(&mut out, command, 0)?;
         }
+        EditOp::ApplyFresh(command) => {
+            out.push(OP_APPLY_FRESH);
+            put_command(&mut out, command, 0)?;
+        }
         EditOp::Undo => out.push(OP_UNDO),
         EditOp::Redo => out.push(OP_REDO),
     }
@@ -259,6 +285,7 @@ pub fn decode_op(bytes: &[u8]) -> Result<EditOp, OpDecodeError> {
         OP_APPLY => EditOp::Apply(r.command(0)?),
         OP_UNDO => EditOp::Undo,
         OP_REDO => EditOp::Redo,
+        OP_APPLY_FRESH => EditOp::ApplyFresh(r.command(0)?),
         other => return Err(OpDecodeError::UnknownOp(other)),
     };
     match r.remaining() {
@@ -284,6 +311,18 @@ fn put_command(
             put_text(out, "system", system)?;
             put_text(out, "path", path)?;
             put_value(out, value)?;
+        }
+        EditCommand::OffsetProperty {
+            entity,
+            system,
+            path,
+            by,
+        } => {
+            out.push(OFFSET_PROPERTY);
+            put_entity(out, *entity);
+            put_text(out, "system", system)?;
+            put_text(out, "path", path)?;
+            put_value(out, by)?;
         }
         EditCommand::SetVariant {
             entity,
@@ -572,6 +611,12 @@ impl<'a> Reader<'a> {
                 system: self.text()?,
                 path: self.text()?,
                 value: self.value()?,
+            },
+            OFFSET_PROPERTY => EditCommand::OffsetProperty {
+                entity: self.entity()?,
+                system: self.text()?,
+                path: self.text()?,
+                by: self.value()?,
             },
             SET_VARIANT => EditCommand::SetVariant {
                 entity: self.entity()?,

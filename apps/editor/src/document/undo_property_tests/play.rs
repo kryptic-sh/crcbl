@@ -382,8 +382,8 @@ fn write(
 }
 
 /// [`Op::Nudge`], as `App::nudge` builds it: each selected entity's placing
-/// component moved from what its leaf holds, as one entry, passing over an
-/// entity nothing places.
+/// component offset by `delta`, as one entry, passing over an entity nothing
+/// places — recorded as the property sets of the sums it came to.
 fn nudge(
     document: &mut Document,
     selection: &Pair,
@@ -399,9 +399,25 @@ fn nudge(
         return Outcome::Unchanged;
     }
     let several = placed.len() > 1;
-    let outcome = accepted(document.apply(moved(&placed, delta)));
-    if outcome == Outcome::Recorded && several {
-        reached.push("a nudge of two entities");
+    let offsets = EditCommand::one_or_batch(
+        placed
+            .iter()
+            .map(|(entity, system, path, _)| EditCommand::OffsetProperty {
+                entity: *entity,
+                system: system.clone(),
+                path: path.clone(),
+                by: Value::Float(delta),
+            })
+            .collect(),
+    );
+    let outcome = accepted(document.apply(offsets));
+    if outcome == Outcome::Recorded {
+        if several {
+            reached.push("a nudge of two entities");
+        }
+        if document.log().applied().last() == Some(&moved(&placed, delta)) {
+            reached.push("a nudge recorded as the sets of its sums");
+        }
     }
     outcome
 }

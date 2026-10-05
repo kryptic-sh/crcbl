@@ -257,7 +257,9 @@ pub struct EditNotice {
     /// scene records it in that gesture too, so its history folds as the
     /// server's did.
     pub gesture: Option<u64>,
-    /// The operation, as the request carried it.
+    /// The operation as the server applied it: the request's, with what
+    /// the server resolves as it applies — an offset, ids asked fresh —
+    /// spelled as what they came to, so every copy writes what it wrote.
     pub op: Vec<u8>,
 }
 

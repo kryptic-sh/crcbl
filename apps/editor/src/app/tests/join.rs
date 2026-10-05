@@ -568,3 +568,5 @@ fn an_address_typed_on_the_open_line_joins() {
     rig.until_in_step("the copy lands");
     assert_eq!(rig.editor.joined_addr(), Some(addr));
 }
+
+mod compose;

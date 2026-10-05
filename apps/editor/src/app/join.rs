@@ -34,6 +34,16 @@
 //!   are gestures only while it is held.
 //! * **Undo and redo step the server's one history**, the most recent entry
 //!   whoever made it, as every client's do.
+//! * **Edits made faster than the round trip compose**: a nudge goes as an
+//!   offset and a spawn asks the server for fresh ids (`crcbl::scene_edit`'s
+//!   `route` module), so two nudges move by both and two spawns — or two
+//!   clients' at once — both land.
+//! * **What this editor spawns is selected once it lands**, as a spawn,
+//!   paste or duplicate is selected at once in an editor of its own scene:
+//!   the reply to the edit names the revision whose notice spawned it, and
+//!   that notice the ids the server gave
+//!   ([`SceneFollower::take_spawned`]). Until then nothing new is selected,
+//!   since the ids the document picked are only stand-ins.
 //! * **A refusal is said on the status line**, the server's own sentence.
 //! * **A refetched copy starts the view over**: the follower fetches again
 //!   when it misses a notice, and the copy it opens is put in place as an
@@ -64,6 +74,7 @@
 //! lost — Save asks for a directory, and closing asks first. A new scene,
 //! an open, or another join leaves without that: the server holds the scene.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -71,7 +82,8 @@ use crcbl::assets::DirSource;
 use crcbl::client::{Client, Ended};
 use crcbl::ecs::World;
 use crcbl::net::{EditGesture, EditOutcome, SessionEndReason, Transport};
-use crcbl::scene::edit::{Gesture, encode_op};
+use crcbl::scene::edit::{EditOp, Gesture, encode_op};
+use crcbl::scene::scn::SceneEntityId;
 use crcbl::scene_edit::serve::{EDIT_TICK_HZ, edit_compatibility};
 use crcbl::scene_edit::{RoutedEdit, SceneFollower};
 use crcbl::shell::Shell;
@@ -94,6 +106,11 @@ pub(super) struct Joined {
     gestures: u32,
     /// The follower's [`SceneFollower::landed_count`] when last read.
     landed: u64,
+    /// The requests sent that spawn, whose ids are selected once applied.
+    selecting: Vec<u64>,
+    /// What applied notices spawned, by revision, while a reply to a
+    /// spawn of this editor's is awaited.
+    spawned: BTreeMap<u64, Vec<SceneEntityId>>,
 }
 
 /// A drag being sent: the document's gesture its frames were made in, the id
@@ -116,6 +133,8 @@ struct Followed {
     refusals: Vec<String>,
     /// Why the session is over, once it is.
     ended: Option<String>,
+    /// What this editor's latest spawn that applied spawned, to select.
+    select: Option<Vec<SceneEntityId>>,
 }
 
 impl Joined {
@@ -140,12 +159,14 @@ impl Joined {
             open: None,
             gestures: 0,
             landed: 0,
+            selecting: Vec::new(),
+            spawned: BTreeMap::new(),
         })
     }
 
     /// Sends what the copy held this frame, in order, each drag's frames
     /// under one id — the last marked so once the pointer is up (`held`
-    /// false) — and hands back why any did not go.
+    /// false) — noting each that spawns, and hands back why any did not go.
     fn send(&mut self, routed: Vec<RoutedEdit>, held: bool) -> Vec<String> {
         let mut failures = Vec::new();
         let ending = if held {
@@ -154,6 +175,7 @@ impl Joined {
             routed.iter().rposition(|edit| edit.gesture.is_some())
         };
         for (index, edit) in routed.into_iter().enumerate() {
+            let spawns = matches!(edit.op, EditOp::ApplyFresh(_));
             let op = match encode_op(&edit.op) {
                 Ok(op) => op,
                 Err(error) => {
@@ -184,8 +206,10 @@ impl Joined {
                     self.client.send_edit(op)
                 }
             };
-            if let Err(error) = sent {
-                failures.push(error.to_string());
+            match sent {
+                Ok(request) if spawns => self.selecting.push(request),
+                Ok(_) => {}
+                Err(error) => failures.push(error.to_string()),
             }
         }
         if !held && let Some(open) = self.open.take() {
@@ -222,14 +246,40 @@ impl Joined {
             // A fetch answered sealed any drag on the server.
             self.open = None;
         }
-        let refusals = self
-            .client
-            .edit_replies()
-            .filter_map(|reply| match reply.outcome {
-                EditOutcome::Refused { message, .. } => Some(message),
-                EditOutcome::Applied { .. } => None,
-            })
-            .collect();
+        for spawned in self.follower.take_spawned() {
+            self.spawned.insert(spawned.revision, spawned.ids);
+        }
+        let mut refusals = Vec::new();
+        let mut select = None;
+        let mut answered = None;
+        for reply in self.client.edit_replies() {
+            let spawn = self
+                .selecting
+                .iter()
+                .position(|&request| request == reply.request_id)
+                .map(|at| self.selecting.remove(at));
+            match reply.outcome {
+                EditOutcome::Refused { message, .. } => refusals.push(message),
+                EditOutcome::Applied { revision } => {
+                    answered = Some(revision);
+                    // The notice came before its reply, so its spawns are
+                    // here unless a fetch passed it over, which starts the
+                    // view over anyway.
+                    if spawn.is_some()
+                        && let Some(ids) = self.spawned.get(&revision)
+                    {
+                        select = Some(ids.clone());
+                    }
+                }
+            }
+        }
+        // Replies come in the order the server applied the edits, so what
+        // spawned at or before the last one answered is no spawn awaited.
+        match answered {
+            _ if self.selecting.is_empty() => self.spawned.clear(),
+            Some(answered) => self.spawned.retain(|&revision, _| revision > answered),
+            None => {}
+        }
         let ended = if let Some(refusal) = self.client.handshake_refusal() {
             Some(format!(
                 "{} refused this editor: {}",
@@ -244,6 +294,7 @@ impl Joined {
             landed,
             refusals,
             ended,
+            select,
         }
     }
 }
@@ -381,6 +432,9 @@ impl<S: Shell + ?Sized> Editor<S> {
         let addr = joined.addr;
         if followed.landed {
             self.put_copy_in_place(addr);
+        }
+        if let Some(spawned) = followed.select {
+            self.document.set_selection(spawned);
         }
         refusals.extend(followed.refusals);
         if !refusals.is_empty() {

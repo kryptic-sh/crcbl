@@ -260,7 +260,7 @@ impl Document {
         // leaf exists only once the entity does: spawned to read them, put
         // back, then applied with the spawn as one command, which is what
         // checks the values against the component's rule and records them.
-        let undo = self.perform(&spawn)?;
+        let undo = self.perform(&spawn)?.undo;
         let sets = self.parsed_sets(id, system, fields);
         self.perform(&undo)
             .expect("an inverse produced a moment ago applies");

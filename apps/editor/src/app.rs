@@ -1647,12 +1647,13 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// Builds and applies the [`EditCommand`] one arrow key means: every
     /// selected entity moved by `delta` along `axis`, as one entry.
     ///
-    /// **The command is built from what each field currently holds**, read
-    /// back through the same dotted path it will be written through — so a
-    /// nudge is relative without the command being relative, which is what
-    /// keeps an inverse exact. It moves the component placing each entity
+    /// **The command is an offset** ([`EditCommand::OffsetProperty`]), added
+    /// to whatever the field holds when it applies, and recorded as the set
+    /// of the sum — so the inverse is exact, and two nudges made while
+    /// joined before the first comes back move by both (`crcbl::scene_edit`'s
+    /// `route` module). It moves the component placing each entity
     /// ([`Document::placing_system`]), as the gizmo does, and passes over one
-    /// nothing places.
+    /// nothing places, or whose field holds no float.
     fn nudge(&mut self, axis: usize, delta: f64) -> Result<(), EditError> {
         let selection = self.document.selection().to_vec();
         let Some(&primary) = selection.last() else {
@@ -1665,15 +1666,15 @@ impl<S: Shell + ?Sized> Editor<S> {
             let Some(system) = self.document.placing_system(entity) else {
                 continue;
             };
-            let Value::Float(was) = self.document.read(entity, &system, &path)? else {
+            let Value::Float(_) = self.document.read(entity, &system, &path)? else {
                 crcbl::log::warn!("editor: {path} of #{entity} is not a number");
                 continue;
             };
-            commands.push(EditCommand::SetProperty {
+            commands.push(EditCommand::OffsetProperty {
                 entity,
                 system,
                 path: path.clone(),
-                value: Value::Float(was + delta),
+                by: Value::Float(delta),
             });
         }
         if commands.is_empty() {

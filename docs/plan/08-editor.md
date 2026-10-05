@@ -1583,9 +1583,21 @@ brought none. A joined editor holds no lock, writes nothing into the scene's
 directory, keeps no recovery copy, says Save and Save as are the server's (it
 saves every edit, so the protocol needs no save), and refuses play mode. When
 the server quits or the link drops, the copy stays open, unrouted, with no
-directory and unsaved. `apps/editor/src/app/join.rs`'s module docs hold the
-reasons; `apps/editor/src/app/tests/join.rs` holds them through the loop against
-an `EditServer` on UDP loopback.
+directory and unsaved. **Edits faster than the round trip compose, decided for
+the long term**: a nudge is an `EditCommand::OffsetProperty`, added to what the
+leaf holds as the server applies it, and an edit that spawns is sent as an
+`EditOp::ApplyFresh`, whose spawn ids are stand-ins the server replaces with ids
+its document never held (`Document::fresh_spawns`); the notice carries the
+command as it applied — the set of the sum, the ids given — so every copy writes
+what the server wrote, and the reply's revision tells the editor which notice
+was its own, whose spawns it then selects. Per-client id ranges handed out at
+the join, and a client-side overlay of unacknowledged edits, were declined (a
+join message, sparse ids and ranges that run out; reconciling under another
+name, which still leaves two clients' spawns colliding).
+`apps/editor/src/app/join.rs`'s and `crcbl::scene_edit::route`'s and `serve`'s
+module docs hold the reasons; `apps/editor/src/app/tests/join.rs` and
+`join/compose.rs` hold them through the loop against an `EditServer` on UDP
+loopback.
 
 Everything else below stands unchanged: there is one schedule per `World`, there
 is no snapshot of a `World` (play restores from the scene's text, slice 8), the

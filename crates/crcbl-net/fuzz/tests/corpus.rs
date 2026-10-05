@@ -185,8 +185,8 @@ fn named_save_seeds_reach_their_intended_paths() {
 /// The edit seeds reach each message's decoder, one per message an edit
 /// travels as: a request and a notice, each with and without a gesture, both
 /// outcomes of a reply, and the operation inside them — a whole one, an
-/// environment write, a variant switch, one whose batches nest past the
-/// limit, and a request claiming an operation longer than any. Each whole
+/// environment write, a variant switch, an offset, a spawn asking for fresh
+/// ids, one whose batches nest past the limit, and a request claiming an operation longer than any. Each whole
 /// seed is also what its encoder writes, so a change to a layout shows up
 /// here as a seed to regenerate rather than as a corpus that stopped being
 /// edits.
@@ -198,7 +198,7 @@ fn named_edit_seeds_reach_their_intended_paths() {
         encode_edit_reply, encode_edit_request,
     };
     use crcbl_scene::edit::{
-        EditCommand, EditOp, OpDecodeError, Snapshot, Value, decode_op, encode_op,
+        EditCommand, EditOp, OpDecodeError, Snapshot, SystemRow, Value, decode_op, encode_op,
     };
     use crcbl_scene::scn::{EntityName, SceneEntityId};
 
@@ -320,6 +320,34 @@ fn named_edit_seeds_reach_their_intended_paths() {
             ],
         },
     });
+    assert_eq!(decode_op(seed).expect("a whole op"), op);
+    assert_eq!(encode_op(&op).expect("it travels"), seed);
+
+    let seed = include_bytes!("../corpus/decoder/edit-op-offset");
+    let op = EditOp::Apply(EditCommand::OffsetProperty {
+        entity: SceneEntityId(1),
+        system: "blocks".to_owned(),
+        path: "position.0".to_owned(),
+        by: Value::Float(0.01),
+    });
+    assert_eq!(decode_op(seed).expect("a whole op"), op);
+    assert_eq!(encode_op(&op).expect("it travels"), seed);
+
+    let seed = include_bytes!("../corpus/decoder/edit-op-fresh");
+    let op = EditOp::ApplyFresh(EditCommand::Batch(vec![
+        EditCommand::Spawn {
+            entity: SceneEntityId(4),
+            rows: vec![SystemRow {
+                system: "blocks".to_owned(),
+                row: "Block()".to_owned(),
+            }],
+            name: None,
+        },
+        EditCommand::Rename {
+            entity: SceneEntityId(4),
+            name: Some(EntityName::new("Gate").expect("a name")),
+        },
+    ]));
     assert_eq!(decode_op(seed).expect("a whole op"), op);
     assert_eq!(encode_op(&op).expect("it travels"), seed);
 

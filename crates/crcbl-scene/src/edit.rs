@@ -81,6 +81,21 @@
 //! read immediately before, as a property's is; and a drag of one folds into
 //! a gesture's entry as a property's does.
 //!
+//! # Offsetting a number
+//!
+//! [`OffsetProperty`](EditCommand::OffsetProperty) adds to a leaf's number
+//! rather than naming the value it ends at ([`offset_value`]): an arrow-key
+//! nudge, which is relative by nature (decided 2026-10-05). Built from the
+//! value it read, as a [`SetProperty`](EditCommand::SetProperty), two nudges
+//! sent to a server before the first came back would both name the same
+//! value, and the second would undo the first; an offset is added to
+//! whatever the leaf holds when it applies, so they compose wherever they
+//! are applied, and two clients' nudges at once both land. **It is resolved
+//! as it applies**: the editor's `Document::apply` writes the sum through
+//! the property's own path and records the property set it amounts to, so
+//! the history, its inverse and a redo hold absolute values as every other
+//! entry does, and a server tells its clients the set, not the offset.
+//!
 //! # Creating and removing entities
 //!
 //! [`Spawn`](EditCommand::Spawn) and [`Delete`](EditCommand::Delete) are each
@@ -143,8 +158,8 @@
 //!
 //! A **transform** command is not a second variant either, and that is not an
 //! omission: a brick's placement *is* `position`, a field its `#[derive(Reflect)]`
-//! describes, so a nudge is a [`SetProperty`](EditCommand::SetProperty) on
-//! `position.0`. A transform arm arrives when something carries a transform
+//! describes, so a nudge is an [`OffsetProperty`](EditCommand::OffsetProperty)
+//! of `position.0`. A transform arm arrives when something carries a transform
 //! that is not a reflected field — `crcbl::phys::Transform` on an entity with no
 //! component holding it.
 //!
@@ -184,6 +199,20 @@ pub enum EditCommand {
         path: String,
         /// What the leaf is being set to.
         value: Value,
+    },
+
+    /// Add `by` to the number in the leaf `path` names inside `entity`'s
+    /// component in `system` — an arrow-key nudge. See _Offsetting a
+    /// number_ in the [module docs](self).
+    OffsetProperty {
+        /// Whose component: the id the scene file spells.
+        entity: SceneEntityId,
+        /// Which of its components: the scene system holding it.
+        system: String,
+        /// The dotted path, in [`crcbl_reflect`]'s grammar.
+        path: String,
+        /// What is added: a number of the leaf's own kind.
+        by: Value,
     },
 
     /// Switch the enum `path` names inside `entity`'s component in `system`
@@ -301,6 +330,115 @@ impl EditCommand {
         } else {
             Self::Batch(commands)
         }
+    }
+
+    /// The id each spawn in this command files its entity under, in the
+    /// order they are applied — a batch's members' in turn.
+    #[must_use]
+    pub fn spawned(&self) -> Vec<SceneEntityId> {
+        let mut ids = Vec::new();
+        self.collect_spawned(&mut ids);
+        ids
+    }
+
+    fn collect_spawned(&self, ids: &mut Vec<SceneEntityId>) {
+        match self {
+            Self::Spawn { entity, .. } => ids.push(*entity),
+            Self::Batch(members) => {
+                for member in members {
+                    member.collect_spawned(ids);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// This command with every entity id it names — each spawn's, and each
+    /// one an edit, a delete or a rename is of, a batch's members' too —
+    /// replaced by what `to` makes of it.
+    #[must_use]
+    pub fn map_entities(self, to: &mut impl FnMut(SceneEntityId) -> SceneEntityId) -> Self {
+        match self {
+            Self::SetProperty {
+                entity,
+                system,
+                path,
+                value,
+            } => Self::SetProperty {
+                entity: to(entity),
+                system,
+                path,
+                value,
+            },
+            Self::OffsetProperty {
+                entity,
+                system,
+                path,
+                by,
+            } => Self::OffsetProperty {
+                entity: to(entity),
+                system,
+                path,
+                by,
+            },
+            Self::SetVariant {
+                entity,
+                system,
+                path,
+                value,
+            } => Self::SetVariant {
+                entity: to(entity),
+                system,
+                path,
+                value,
+            },
+            Self::Spawn { entity, rows, name } => Self::Spawn {
+                entity: to(entity),
+                rows,
+                name,
+            },
+            Self::Delete { entity } => Self::Delete { entity: to(entity) },
+            Self::Attach {
+                entity,
+                system,
+                row,
+            } => Self::Attach {
+                entity: to(entity),
+                system,
+                row,
+            },
+            Self::Detach { entity, system } => Self::Detach {
+                entity: to(entity),
+                system,
+            },
+            Self::Rename { entity, name } => Self::Rename {
+                entity: to(entity),
+                name,
+            },
+            Self::Batch(members) => Self::Batch(
+                members
+                    .into_iter()
+                    .map(|member| member.map_entities(to))
+                    .collect(),
+            ),
+            Self::SetEnvironment { .. } | Self::ListSystem { .. } | Self::UnlistSystem { .. } => {
+                self
+            }
+        }
+    }
+}
+
+/// `value` with `by` added, for an [`EditCommand::OffsetProperty`]: a float
+/// to a float, a signed whole number to a signed one and an unsigned to an
+/// unsigned — or [`None`] for two values of different kinds, a flag or a
+/// text, or a sum past what the kind holds.
+#[must_use]
+pub fn offset_value(value: &Value, by: &Value) -> Option<Value> {
+    match (value, by) {
+        (Value::Float(value), Value::Float(by)) => Some(Value::Float(value + by)),
+        (Value::Int(value), Value::Int(by)) => value.checked_add(*by).map(Value::Int),
+        (Value::UInt(value), Value::UInt(by)) => value.checked_add(*by).map(Value::UInt),
+        _ => None,
     }
 }
 
@@ -854,6 +992,114 @@ mod tests {
                 panic!("this module's tests apply property commands and batches of them: {self:?}");
             };
             set_property(component, *entity, system, path, value)
+        }
+    }
+
+    /// **Every id a command names is mapped, and only ids**: a batch of one
+    /// of each command that names an entity, mapped, names the mapped id
+    /// everywhere and is otherwise the command it was; the commands naming
+    /// none are untouched; and its spawns are listed in the order they
+    /// apply.
+    #[test]
+    fn a_commands_ids_are_mapped_wherever_it_names_one() {
+        let at = |id| SceneEntityId(id);
+        let row = || SystemRow {
+            system: "bricks".to_owned(),
+            row: "Brick()".to_owned(),
+        };
+        let naming = |id| {
+            vec![
+                set("position.0", Value::Float(1.0)).map_entities(&mut |_| at(id)),
+                EditCommand::OffsetProperty {
+                    entity: at(id),
+                    system: "bricks".to_owned(),
+                    path: "position.1".to_owned(),
+                    by: Value::Float(0.5),
+                },
+                EditCommand::SetVariant {
+                    entity: at(id),
+                    system: "bricks".to_owned(),
+                    path: "kind".to_owned(),
+                    value: Snapshot::Leaf(Value::Bool(true)),
+                },
+                EditCommand::Spawn {
+                    entity: at(id),
+                    rows: vec![row()],
+                    name: None,
+                },
+                EditCommand::Delete { entity: at(id) },
+                EditCommand::Attach {
+                    entity: at(id),
+                    system: "suns".to_owned(),
+                    row: "Sun()".to_owned(),
+                },
+                EditCommand::Detach {
+                    entity: at(id),
+                    system: "suns".to_owned(),
+                },
+                EditCommand::Rename {
+                    entity: at(id),
+                    name: None,
+                },
+            ]
+        };
+        let unnamed = vec![
+            EditCommand::SetEnvironment {
+                path: "camera.1".to_owned(),
+                value: Value::Float(2.0),
+            },
+            EditCommand::ListSystem {
+                system: "suns".to_owned(),
+                at: 1,
+            },
+            EditCommand::UnlistSystem {
+                system: "suns".to_owned(),
+            },
+        ];
+        let batch = |id| {
+            EditCommand::Batch(vec![
+                EditCommand::Batch(naming(id)),
+                EditCommand::Batch(unnamed.clone()),
+            ])
+        };
+        assert_eq!(batch(3).map_entities(&mut |id| at(id.0 + 4)), batch(7));
+        assert_eq!(batch(3).spawned(), [at(3)]);
+        let two = EditCommand::Batch(vec![
+            EditCommand::Spawn {
+                entity: at(9),
+                rows: vec![row()],
+                name: None,
+            },
+            batch(2),
+        ]);
+        assert_eq!(two.spawned(), [at(9), at(2)]);
+    }
+
+    /// An offset adds a number to a number of its own kind and refuses
+    /// anything else, a sum its kind cannot hold among them.
+    #[test]
+    fn an_offset_adds_only_a_number_of_the_leafs_own_kind() {
+        assert_eq!(
+            offset_value(&Value::Float(1.5), &Value::Float(0.25)),
+            Some(Value::Float(1.75))
+        );
+        assert_eq!(
+            offset_value(&Value::Int(-2), &Value::Int(3)),
+            Some(Value::Int(1))
+        );
+        assert_eq!(
+            offset_value(&Value::UInt(2), &Value::UInt(3)),
+            Some(Value::UInt(5))
+        );
+        for (value, by) in [
+            (Value::Float(1.0), Value::Int(1)),
+            (Value::Int(1), Value::UInt(1)),
+            (Value::Int(i64::MAX), Value::Int(1)),
+            (Value::UInt(u64::MAX), Value::UInt(1)),
+            (Value::Bool(true), Value::Bool(true)),
+            (Value::Text("a".to_owned()), Value::Text("b".to_owned())),
+        ] {
+            assert_eq!(offset_value(&value, &by), None, "{value:?} by {by:?}");
         }
     }
 

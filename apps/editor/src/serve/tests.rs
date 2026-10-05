@@ -232,6 +232,7 @@ fn another_client_mirrors_the_scene_from_the_notices() {
             EditOp::Apply(command) => mirror.apply(command).expect("the mirror applies it"),
             EditOp::Undo => assert!(mirror.undo().expect("the mirror undoes it")),
             EditOp::Redo => assert!(mirror.redo().expect("the mirror redoes it")),
+            EditOp::ApplyFresh(command) => panic!("a notice gives every id: {command:?}"),
         }
     }
     assert_eq!(files(&mut mirror), files(rig.server.document_mut()));

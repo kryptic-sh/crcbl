@@ -48,7 +48,7 @@
 //! **clean**, which a flag could not say and which this module's
 //! `the_dirty_marker_follows_the_logs_position` holds.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, btree_map};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -65,7 +65,7 @@ use crate::store::{NativeStorage, StorageError, StorageSource};
 use crate::ui::tree::{FieldEdit, VariantEdit};
 
 use crate::scene::edit::{
-    EditCommand, EditOp, Gesture, SystemRow, UndoLog, set_property, set_variant,
+    EditCommand, EditOp, Gesture, SystemRow, UndoLog, offset_value, set_property, set_variant,
 };
 
 pub mod clipboard;
@@ -215,6 +215,27 @@ pub enum EditError {
     /// Filing a second entity under it would drop one of the two out of the
     /// scene's id map, and it would come back as a save that lost a row.
     IdInUse(SceneEntityId),
+
+    /// A command asking for fresh ids ([`Document::fresh_spawns`]) found
+    /// every id from the scene's high-water mark up held, so a spawn had
+    /// none to take.
+    NoFreshId,
+
+    /// An [`EditCommand::OffsetProperty`] named a leaf holding no number it
+    /// can be added to: a flag, a text, a number of another kind than the
+    /// offset, or one the sum would carry past what its kind holds.
+    Offset {
+        /// Whose.
+        entity: SceneEntityId,
+        /// The system holding the component.
+        system: String,
+        /// The leaf's dotted path.
+        path: String,
+        /// What the leaf holds.
+        value: Value,
+        /// What was to be added to it.
+        by: Value,
+    },
 
     /// A spawn or a row-level attach named a system this scene's manifest does
     /// not list, or an edit named one the document's vocabulary cannot read a
@@ -455,6 +476,18 @@ impl fmt::Display for EditError {
             Self::NoEntity(id) => write!(f, "the scene holds no entity {id}"),
             Self::Path(error) => write!(f, "{error}"),
             Self::IdInUse(id) => write!(f, "the scene already holds an entity {id}"),
+            Self::NoFreshId => f.write_str("the scene has no id left to give a new entity"),
+            Self::Offset {
+                entity,
+                system,
+                path,
+                value,
+                by,
+            } => write!(
+                f,
+                "entity {entity}'s `{path}` in `{system}` holds {value}, which {by} cannot be \
+                 added to"
+            ),
             Self::NoSystem(system) => {
                 write!(f, "the scene has no system `{system}` to put an entity in")
             }
@@ -1051,6 +1084,10 @@ impl Document {
     /// in a document whose edits are [routed](Self::route_edits), holds it
     /// for the server and changes nothing.
     ///
+    /// An [`EditCommand::OffsetProperty`] is resolved as it applies: the sum
+    /// is written, and the log records the [`EditCommand::SetProperty`] of
+    /// it — see [`apply_resolved`](Self::apply_resolved).
+    ///
     /// The collider of whatever it touched is rebuilt afterwards, because a
     /// brick that moved and a collider that did not is a scene that draws in
     /// one place and picks in another.
@@ -1064,14 +1101,61 @@ impl Document {
     /// [`EditError::Invalid`] for a property write that would leave a value
     /// its component's rule refuses, which is put back and not recorded.
     pub fn apply(&mut self, command: EditCommand) -> Result<(), EditError> {
+        self.apply_resolved(command, None).map(drop)
+    }
+
+    /// [`apply`](Self::apply), or [`apply_in`](Self::apply_in) with
+    /// `gesture`, handing back the command as it applied: each offset as the
+    /// property set of the value it wrote, and everything else as it was
+    /// asked — what the log records, and what a server tells every client it
+    /// applied, so that each copy writes the same values whatever it held.
+    /// [`None`] when the document is [routed](Self::route_edits) and held
+    /// the command instead.
+    ///
+    /// # Errors
+    ///
+    /// As [`apply`](Self::apply), and [`EditError::Offset`] for an offset of
+    /// a leaf holding no number of its kind.
+    pub fn apply_resolved(
+        &mut self,
+        command: EditCommand,
+        gesture: Option<Gesture>,
+    ) -> Result<Option<EditCommand>, EditError> {
         self.refuse_in_play()?;
-        let Some(command) = self.route(command, None) else {
-            return Ok(());
+        let Some(command) = self.route(command, gesture) else {
+            return Ok(None);
         };
-        let undo = self.perform_valid(&command)?;
+        let Performed { done, undo } = self.perform_valid(&command)?;
         self.resolve_meshes();
-        self.log.record(command, undo);
-        Ok(())
+        match gesture {
+            Some(gesture) => self.log.record_in(done.clone(), undo, gesture),
+            None => self.log.record(done.clone(), undo),
+        }
+        Ok(Some(done))
+    }
+
+    /// `command` with each spawn's id — a stand-in — and every mention of it
+    /// replaced by an id no entity of this document holds or has held, the
+    /// first spawn taking the lowest: what a server applies for an
+    /// [`EditOp::ApplyFresh`], so two clients' spawns never ask for one id.
+    /// See the `route` module's docs.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NoFreshId`] when the ids run out before the spawns do.
+    pub fn fresh_spawns(&self, command: EditCommand) -> Result<EditCommand, EditError> {
+        // From the high-water mark, which no held id is above; one a spawn
+        // filed at the very top of the range sits on it, and is skipped.
+        let mut free = (self.ids.next_id().0..=u32::MAX)
+            .map(SceneEntityId)
+            .filter(|id| self.ids.entity(*id).is_none());
+        let mut given = BTreeMap::new();
+        for stand_in in command.spawned() {
+            if let btree_map::Entry::Vacant(entry) = given.entry(stand_in) {
+                entry.insert(free.next().ok_or(EditError::NoFreshId)?);
+            }
+        }
+        Ok(command.map_entities(&mut |id| given.get(&id).copied().unwrap_or(id)))
     }
 
     /// A new [`Gesture`], distinct from every one before it: what a drag passes
@@ -1089,14 +1173,7 @@ impl Document {
     ///
     /// As [`apply`](Self::apply).
     pub fn apply_in(&mut self, command: EditCommand, gesture: Gesture) -> Result<(), EditError> {
-        self.refuse_in_play()?;
-        let Some(command) = self.route(command, Some(gesture)) else {
-            return Ok(());
-        };
-        let undo = self.perform_valid(&command)?;
-        self.resolve_meshes();
-        self.log.record_in(command, undo, gesture);
-        Ok(())
+        self.apply_resolved(command, Some(gesture)).map(drop)
     }
 
     /// Removes every entity of `ids` from the scene, as one entry of an
@@ -1457,15 +1534,15 @@ impl Document {
     /// property write left a value its component's rule refuses — the body
     /// [`apply`](Self::apply) and [`apply_in`](Self::apply_in) share. See the
     /// module docs of `scene_edit::validation`.
-    fn perform_valid(&mut self, command: &EditCommand) -> Result<EditCommand, EditError> {
-        let undo = self.perform(command)?;
-        if let Err(error) = self.validated(command) {
-            self.perform(&undo)
+    fn perform_valid(&mut self, command: &EditCommand) -> Result<Performed, EditError> {
+        let performed = self.perform(command)?;
+        if let Err(error) = self.validated(&performed.done) {
+            self.perform(&performed.undo)
                 .expect("an inverse produced a moment ago applies");
             return Err(error);
         }
-        self.sync_written(command);
-        Ok(undo)
+        self.sync_written(&performed.done);
+        Ok(performed)
     }
 
     /// `text` about the entity `id`, as a problem names it: its name and id,
@@ -1477,11 +1554,11 @@ impl Document {
         }
     }
 
-    /// Performs `command` without touching the log, and hands back the command
-    /// that undoes it — the body [`apply`](Self::apply) and
-    /// [`replay`](Self::replay) share.
-    fn perform(&mut self, command: &EditCommand) -> Result<EditCommand, EditError> {
-        match command {
+    /// Performs `command` without touching the log, and hands back what it
+    /// came to and the command that undoes it — the body
+    /// [`apply`](Self::apply) and [`replay`](Self::replay) share.
+    fn perform(&mut self, command: &EditCommand) -> Result<Performed, EditError> {
+        let undo = match command {
             EditCommand::SetProperty {
                 entity: id,
                 system,
@@ -1527,11 +1604,21 @@ impl Document {
             EditCommand::Rename { entity: id, name } => self.set_name(*id, name.clone()),
             EditCommand::ListSystem { system, at } => self.list_system(system, *at),
             EditCommand::UnlistSystem { system } => self.unlist_system(system),
+            EditCommand::OffsetProperty {
+                entity: id,
+                system,
+                path,
+                by,
+            } => return self.offset(*id, system, path, by),
             EditCommand::Batch(commands) => {
+                let mut done = Vec::with_capacity(commands.len());
                 let mut undo = Vec::with_capacity(commands.len());
                 for command in commands {
                     match self.perform(command) {
-                        Ok(inverse) => undo.push(inverse),
+                        Ok(performed) => {
+                            done.push(performed.done);
+                            undo.push(performed.undo);
+                        }
                         Err(error) => {
                             for inverse in undo.iter().rev() {
                                 self.perform(inverse)
@@ -1542,9 +1629,49 @@ impl Document {
                     }
                 }
                 undo.reverse();
-                Ok(EditCommand::Batch(undo))
+                return Ok(Performed {
+                    done: EditCommand::Batch(done),
+                    undo: EditCommand::Batch(undo),
+                });
             }
-        }
+        }?;
+        Ok(Performed {
+            done: command.clone(),
+            undo,
+        })
+    }
+
+    /// Adds `by` to the number in `id`'s leaf `path` in `system`, handing
+    /// back the property set of the sum as what was done — so the log, its
+    /// redo and a server's notice name the value written, not the offset.
+    fn offset(
+        &mut self,
+        id: SceneEntityId,
+        system: &str,
+        path: &str,
+        by: &Value,
+    ) -> Result<Performed, EditError> {
+        let component = self.component_of(id, system)?;
+        let value = get_path(component, path)?;
+        let Some(sum) = offset_value(&value, by) else {
+            return Err(EditError::Offset {
+                entity: id,
+                system: system.to_owned(),
+                path: path.to_owned(),
+                value,
+                by: by.clone(),
+            });
+        };
+        let undo = set_property(component, id, system, path, &sum)?;
+        Ok(Performed {
+            done: EditCommand::SetProperty {
+                entity: id,
+                system: system.to_owned(),
+                path: path.to_owned(),
+                value: sum,
+            },
+            undo,
+        })
     }
 
     /// Creates `id` with a component per row of `rows`, called `name`, and
@@ -1658,11 +1785,18 @@ impl Document {
     /// Applies a command the log handed back, discarding the inverse: the entry
     /// it came from is already holding the other half.
     fn replay(&mut self, command: &EditCommand) -> Result<(), EditError> {
-        self.perform(command)?;
-        self.sync_written(command);
+        let performed = self.perform(command)?;
+        self.sync_written(&performed.done);
         self.resolve_meshes();
         Ok(())
     }
+}
+
+/// What [`Document::perform`] did: the command as it applied — an offset
+/// resolved into the set of its sum — and the command that undoes it.
+struct Performed {
+    done: EditCommand,
+    undo: EditCommand,
 }
 
 /// A world of `registry`'s systems and this tool's picking physics, with the

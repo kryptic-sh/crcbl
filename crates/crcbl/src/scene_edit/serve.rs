@@ -23,10 +23,11 @@
 //!   recent entry, whoever made it, which is the correction's rule. A client
 //!   keeps no history of its own to undo.
 //! * **Every applied operation is announced to every client, its author
-//!   included**, as an [`EditNotice`] carrying the operation's own bytes and
-//!   the revision it brought the server to, sent before the author's reply. A
-//!   client applying the notices in revision order to a copy of the scene
-//!   reaches the server's scene: the command log is the sync point. Snapshot
+//!   included**, as an [`EditNotice`] carrying the operation as it applied
+//!   (below) and the revision it brought the server to, sent before the
+//!   author's reply. A client applying the notices in revision order to a
+//!   copy of the scene reaches the server's scene: the command log is the
+//!   sync point. Snapshot
 //!   replication does not carry it — it carries the world's replicated
 //!   components, and a rename or a row's field has none — and the document's
 //!   world is not the host's.
@@ -76,6 +77,32 @@
 //! * **An undo or a redo in a gesture is refused as malformed**: a gesture
 //!   is the writes of one drag, and a step of the history is none of them.
 //!
+//! # The notice carries what applied (decided 2026-10-05)
+//!
+//! Two parts of a request are resolved only as the server applies them, and
+//! the notice names what they came to, not what was asked, so every copy
+//! writes exactly what the server wrote whatever it held:
+//!
+//! * **An offset** ([`EditCommand::OffsetProperty`], an arrow-key nudge) is
+//!   added to the leaf as the server's scene holds it, and announced as the
+//!   property set of the sum. A client sending two before the first's notice
+//!   returns moves the entity by both: each is added to what the one before
+//!   left.
+//! * **Fresh ids** ([`EditOp::ApplyFresh`]): every spawn's id is a stand-in,
+//!   which the server replaces with an id its document never held
+//!   ([`Document::fresh_spawns`]) and announces as a plain apply. A client
+//!   cannot pick ids itself: its copy's next id is the server's only until
+//!   another client, or its own spawn still on the way, takes it, and a copy
+//!   fetched afresh does not know the ids deleted before it — so two quick
+//!   spawns, or two clients' at once, would ask for one id and the second be
+//!   refused. Partitioning the ids among clients was the other way, and
+//!   declined: it needs a message at the join to hand out a range, ids no
+//!   longer dense in the files, and a range that runs out. The client learns
+//!   the ids from its own notice — the reply names its revision.
+//!
+//! The resolved op is spelled exactly as long as the one sent, so a notice
+//! carries whatever a request could.
+//!
 //! # What a client and its server agree on (decided 2026-10-05)
 //!
 //! A client of a served scene connects with [`EDIT_PROTOCOL_ID`], ticks at
@@ -94,7 +121,7 @@ use crate::net::{
 };
 use crate::reflect::PathError;
 use crate::registry::Registry;
-use crate::scene::edit::{EditOp, Gesture, OpDecodeError, decode_op};
+use crate::scene::edit::{EditCommand, EditOp, Gesture, OpDecodeError, decode_op, encode_op};
 use crate::scene::scn::ScnError;
 use crate::server::{EventNotSent, Host, HostConfig, PeerId};
 use crate::shaders::sha256::sha256;
@@ -261,7 +288,7 @@ impl EditServer {
             Err(error) => return refused(refusal_of_decode(&error), error.to_string()),
         };
         let recorded = match (&decoded, gesture) {
-            (EditOp::Apply(_), Some(wire)) => Some(
+            (EditOp::Apply(_) | EditOp::ApplyFresh(_), Some(wire)) => Some(
                 self.carried_on(peer, wire.id)
                     .unwrap_or_else(|| self.document.begin_gesture()),
             ),
@@ -273,16 +300,25 @@ impl EditServer {
             }
             (_, None) => None,
         };
-        let stepped = match &decoded {
-            EditOp::Apply(command) => match recorded {
-                Some(recorded) => self.document.apply_in(command.clone(), recorded),
-                None => self.document.apply(command.clone()),
-            }
-            .map(|()| true),
-            EditOp::Undo => self.document.undo(),
-            EditOp::Redo => self.document.redo(),
+        let undo = matches!(decoded, EditOp::Undo);
+        let redo = matches!(decoded, EditOp::Redo);
+        // What every copy is told: the command as it applied, or the step.
+        let stepped = match decoded {
+            EditOp::Apply(command) => self.apply_resolved(command, recorded),
+            EditOp::ApplyFresh(command) => self
+                .document
+                .fresh_spawns(command)
+                .and_then(|command| self.apply_resolved(command, recorded)),
+            EditOp::Undo => self
+                .document
+                .undo()
+                .map(|stepped| stepped.then(|| op.to_vec())),
+            EditOp::Redo => self
+                .document
+                .redo()
+                .map(|stepped| stepped.then(|| op.to_vec())),
         };
-        if matches!(stepped, Ok(true)) {
+        if matches!(stepped, Ok(Some(_))) {
             self.open =
                 gesture
                     .zip(recorded)
@@ -298,31 +334,57 @@ impl EditServer {
             self.open = None;
         }
         match stepped {
-            Ok(true) => {
+            Ok(Some(applied)) => {
                 self.revision += 1;
                 self.host
                     .broadcast_edit_notice(&EditNotice {
                         revision: self.revision,
                         author: peer.get(),
                         gesture: recorded.map(|recorded| recorded.0),
-                        op: op.to_vec(),
+                        op: applied,
                     })
-                    .expect("an op read off a request fits a notice: the two share a limit");
+                    .expect(
+                        "an op as it applied is spelled as long as the one sent, and an op \
+                         read off a request fits a notice: the two share a limit",
+                    );
                 EditOutcome::Applied {
                     revision: self.revision,
                 }
             }
-            Ok(false) if matches!(decoded, EditOp::Redo) => refused(
+            Ok(None) if redo => refused(
                 EditRefusal::NOTHING_TO_REDO,
                 "there is nothing undone to redo".to_owned(),
             ),
-            // Only a step of the history finds nothing to step over.
-            Ok(false) => refused(
+            Ok(None) if undo => refused(
                 EditRefusal::NOTHING_TO_UNDO,
                 "there is nothing in the history to undo".to_owned(),
             ),
+            // An apply hands back what it applied, unless the document holds
+            // its edits for another server.
+            Ok(None) => refused(
+                EditRefusal::FAILED,
+                "the served document sends its edits to another server and applies none".to_owned(),
+            ),
             Err(error) => refused(refusal_of(&error), error.to_string()),
         }
+    }
+
+    /// Applies `command` through the document, in `gesture` when it is part
+    /// of one, and hands back the wire form of what it came to — each offset
+    /// the set of its sum, each stand-in the id it was given — which is what
+    /// every copy is told. [`None`] for a document that holds its edits for
+    /// another server instead, which applies nothing here.
+    fn apply_resolved(
+        &mut self,
+        command: EditCommand,
+        gesture: Option<Gesture>,
+    ) -> Result<Option<Vec<u8>>, EditError> {
+        let Some(applied) = self.document.apply_resolved(command, gesture)? else {
+            return Ok(None);
+        };
+        Ok(Some(encode_op(&EditOp::Apply(applied)).expect(
+            "a command as it applied encodes: it is spelled as long as one that decoded",
+        )))
     }
 
     /// The document's gesture `peer`'s gesture `id` is recorded in, while its

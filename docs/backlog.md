@@ -13113,21 +13113,56 @@ the reasons):
   `Client<Box<dyn Transport>>` type, UDP on a native build; a browser build's
   join says it has no UDP to join over.
 
-**Considered and declined**: optimistic apply with reconciliation (above); a
-save operation in the protocol (above); playing a local copy (above); the
-selection carried across a refetch (an id may name another entity by then; the
-selection starts over, as an open's does).
+**Decided for the long term: edits faster than the round trip compose**
+(`crcbl::scene_edit::route`'s and `serve`'s module docs, _Edits that compose_
+and _The notice carries what applied_):
+
+- **A nudge is an offset**, `EditCommand::OffsetProperty` (wire kind `0x0C`),
+  added to whatever the leaf holds when it applies, so two nudges sent before
+  the first's notice returns move by both, and two clients' nudges both land.
+  The document resolves it as it applies (`Document::apply_resolved`) and the
+  log, its inverse, a redo and the history file hold the property set of the sum
+  — an offset is never an entry, which the undo property test asserts. The
+  editor's nudge sends an offset whether joined or not, so a joined and a local
+  nudge are the same arithmetic. Offsets add floats to floats and whole numbers
+  to whole numbers of the same signedness (`offset_value`); anything else is
+  `EditError::Offset`, refused as invalid.
+- **The server assigns spawned ids**: a routed edit that spawns is held as
+  `EditOp::ApplyFresh` (op kind 3), its spawns' ids stand-ins that the server
+  replaces — with every other mention in the command — by ids its document never
+  held, from the high-water mark up (`Document::fresh_spawns`). Chosen over
+  per-client id ranges (needs a message at the join, makes ids sparse in the
+  files, and a range runs out) and over the client picking from its copy plus
+  its pending set (two clients still collide, and a copy fetched afresh does not
+  know the ids deleted before it, so it would reuse an id the server's history
+  names).
+- **The notice carries the op as it applied** — the set of the sum, the ids
+  given — re-encoded by the server, so a copy never resolves anything itself and
+  writes exactly what the server wrote; a resolved op is spelled exactly as long
+  as the request's, so the notice's limit holds. A notice asking for fresh ids
+  is one a copy refuses, and refetches over.
+- **The editor selects what it spawned from its own notice**: it keeps the
+  request ids of its spawning edits, and the reply's revision names the notice
+  whose spawns (`SceneFollower::take_spawned`) become the selection — the last
+  spawn's, as a local spawn's selection replaces the one before.
+- **Neither moved `WIRE_VERSION`**: an earlier build refuses each by its kind
+  byte, as it does a variant switch.
+
+**Considered and declined**: a client-side overlay of routed edits not yet
+acknowledged, later edits computed against it — the optimistic apply above under
+another name, reconciled whenever another client's notice lands between, and
+leaving two clients' spawns colliding; optimistic apply with reconciliation
+(above); a save operation in the protocol (above); playing a local copy (above);
+the selection carried across a refetch (an id may name another entity by then;
+the selection starts over, as an open's does).
 
 **Behaviour that is not a bug:**
 
-- **What a joined editor spawns, pastes or duplicates is not selected**: the
-  document picks the ids, but the entities exist only once the notice comes
-  back, and a selection of an id the document does not hold selects nothing.
-- **Arrow-key nudges faster than the round trip are lost**: a nudge is built
-  from the value the copy holds, so two made before the first's notice returns
-  write the same value. Each is an entry; the second changes nothing.
-- **Two spawns before the first's notice pick the same id**, and the server
-  refuses the second as a conflict, which the status line says.
+- **The status line names the stand-in id of a joined spawn**: "Added #7" and
+  "Placed #7" say the id the copy picked, which the server may replace
+  (`Document::fresh_spawns`); the selection, once the notice lands, holds the id
+  given. Saying the given id would mean deferring the status to the landing, as
+  the selection is.
 - **A copy's meshes read from `--assets` only**: the copy is opened from memory
   and the editor does not know the served directory, so without `--assets` a
   mesh draws as a placeholder.
@@ -13139,9 +13174,6 @@ selection starts over, as an open's does).
   scene's — and a way to draw another person's selection.
 - **The author of each entry** shown in the editor: still only on the notice
   (_the server slice_, above).
-- **Spawned entities selected once their notice lands**: the editor would keep
-  the ids it asked for and select them when the follower applies the notice
-  carrying them.
 - **A joined editor's asset root**: the server could send its scene's asset
   root, or the join could take one; until then `--assets`.
 - **A status for a server that never answers**: the client's handshake retries
@@ -13151,9 +13183,10 @@ selection starts over, as an open's does).
 process — never against the `crcbl` binary (the CLI depends on the editor, so
 the editor's tests cannot run it) and never over a lossy link or between
 machines. A panel's field drag while joined is not tested, only the gizmo's and
-frames routed by hand; a refetch while joined is held by `SceneFollower`'s own
-tests, not through the editor; the browser build's refusal is compiled by the
-wasm clippy pass and never run.
+frames routed by hand; a paste while joined is not tested through the loop (an
+add and a duplicate are, and a paste is the same routed spawn); a refetch while
+joined is held by `SceneFollower`'s own tests, not through the editor; the
+browser build's refusal is compiled by the wasm clippy pass and never run.
 
 ## Tooling and infrastructure — what the plans still owe
 

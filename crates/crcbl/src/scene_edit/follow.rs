@@ -35,6 +35,11 @@
 //!   and an undo of the drag walks all of it back on both. The server seals
 //!   a gesture when it answers a fetch, so a copy never holds the end of a
 //!   drag whose beginning only the server's history has.
+//! * **What each notice spawned is kept for the caller**
+//!   ([`take_spawned`](SceneFollower::take_spawned)), by revision (decided
+//!   2026-10-05): a client asking for fresh ids learns the ones it was given
+//!   from its own notice, which the reply to it names by revision, and
+//!   selects them as a local spawn is selected.
 //! * **A stalled fetch is abandoned**: one that brings no byte for
 //!   [`FETCH_STALL_TIMEOUT`] — its parts went with a dropped link, or the
 //!   server never answered — is fetched again; and a refused or malformed
@@ -49,6 +54,7 @@ use crate::client::Client;
 use crate::net::{EditNotice, FetchedScene, Transport};
 use crate::registry::Registry;
 use crate::scene::edit::{EditOp, Gesture, decode_op};
+use crate::scene::scn::SceneEntityId;
 
 use super::{Document, memory_source};
 
@@ -68,6 +74,23 @@ pub const FETCH_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long after a refused or malformed fetch the next is asked.
 pub const FETCH_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// The most notices' spawns a [`SceneFollower`] keeps for
+/// [`take_spawned`](SceneFollower::take_spawned); past that the oldest go.
+///
+/// As many as it holds notices for a fetch: a caller that reads them every
+/// update finds every one, and one that never does holds no more than that.
+pub const MAX_KEPT_SPAWNS: usize = MAX_BUFFERED_NOTICES;
+
+/// The entities one applied notice spawned: its revision, and the ids, in
+/// the order its spawns came.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Spawned {
+    /// The revision the notice brought the copy to.
+    pub revision: u64,
+    /// What it spawned.
+    pub ids: Vec<SceneEntityId>,
+}
 
 /// A fetch asked and not yet answered.
 #[derive(Debug)]
@@ -104,6 +127,8 @@ pub struct SceneFollower {
     /// The client's [`Client::dropped_event_count`] when last read.
     dropped_seen: u64,
     last_failure: Option<String>,
+    /// What applied notices spawned, oldest first, until taken.
+    spawned: VecDeque<Spawned>,
 }
 
 impl SceneFollower {
@@ -123,6 +148,7 @@ impl SceneFollower {
             landed: 0,
             dropped_seen: 0,
             last_failure: None,
+            spawned: VecDeque::new(),
         }
     }
 
@@ -261,7 +287,18 @@ impl SceneFollower {
             ))
         };
         match applied {
-            Ok(()) => *revision = notice.revision,
+            Ok(ids) => {
+                *revision = notice.revision;
+                if !ids.is_empty() {
+                    if self.spawned.len() == MAX_KEPT_SPAWNS {
+                        self.spawned.pop_front();
+                    }
+                    self.spawned.push_back(Spawned {
+                        revision: notice.revision,
+                        ids,
+                    });
+                }
+            }
             // It waits, with what follows it, for the fetch that replaces
             // the copy.
             Err(why) => {
@@ -314,6 +351,12 @@ impl SceneFollower {
         self.landed
     }
 
+    /// What every notice applied since the last call spawned, oldest first —
+    /// at most [`MAX_KEPT_SPAWNS`] of them. See the module docs.
+    pub fn take_spawned(&mut self) -> Vec<Spawned> {
+        self.spawned.drain(..).collect()
+    }
+
     /// Why the copy last went stale or a fetch brought none, until a fetch
     /// brings one.
     #[must_use]
@@ -323,20 +366,28 @@ impl SceneFollower {
 }
 
 /// Applies one notice's operation to `document`, in the server's `gesture`
-/// when it names one, or says why it did not take: bytes that are no
-/// operation, a command the copy refuses, a step of the history with nothing
-/// to step over — an undo reaching back past the fetch — or a step named part
-/// of a gesture, which no server sends.
-fn apply(document: &mut Document, op: &[u8], gesture: Option<u64>) -> Result<(), String> {
+/// when it names one, and hands back the ids it spawned — or says why it did
+/// not take: bytes that are no operation, a command the copy refuses, a step
+/// of the history with nothing to step over — an undo reaching back past the
+/// fetch — a step named part of a gesture, or stand-ins asking for fresh
+/// ids, neither of which a server sends.
+fn apply(
+    document: &mut Document,
+    op: &[u8],
+    gesture: Option<u64>,
+) -> Result<Vec<SceneEntityId>, String> {
     let decoded = decode_op(op).map_err(|error| error.to_string())?;
     let stepped = match (decoded, gesture) {
-        (EditOp::Apply(command), None) => {
-            return document.apply(command).map_err(|e| e.to_string());
+        (EditOp::Apply(command), gesture) => {
+            let spawned = command.spawned();
+            let applied = match gesture {
+                Some(gesture) => document.apply_in(command, Gesture(gesture)),
+                None => document.apply(command),
+            };
+            return applied.map(|()| spawned).map_err(|e| e.to_string());
         }
-        (EditOp::Apply(command), Some(gesture)) => {
-            return document
-                .apply_in(command, Gesture(gesture))
-                .map_err(|e| e.to_string());
+        (EditOp::ApplyFresh(_), _) => {
+            return Err("a notice asked for fresh ids, which its server gives".to_owned());
         }
         (EditOp::Undo | EditOp::Redo, Some(_)) => {
             return Err("a notice put a step of the history in a gesture".to_owned());
@@ -345,7 +396,7 @@ fn apply(document: &mut Document, op: &[u8], gesture: Option<u64>) -> Result<(),
         (EditOp::Redo, None) => document.redo(),
     };
     match stepped {
-        Ok(true) => Ok(()),
+        Ok(true) => Ok(Vec::new()),
         Ok(false) => Err("the copy's history does not reach the step a notice took".to_owned()),
         Err(error) => Err(error.to_string()),
     }

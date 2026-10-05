@@ -122,18 +122,34 @@ fn every_command() -> Vec<EditCommand> {
             },
         },
     ];
+    let offsets = [
+        EditCommand::OffsetProperty {
+            entity: SceneEntityId(7),
+            system: "blocks".to_owned(),
+            path: "position.0".to_owned(),
+            by: Value::Float(-0.25),
+        },
+        EditCommand::OffsetProperty {
+            entity: SceneEntityId(u32::MAX),
+            system: String::new(),
+            path: String::new(),
+            by: Value::Int(i64::MIN),
+        },
+    ];
     let nested = EditCommand::Batch(vec![
         leaves[7].clone(),
         EditCommand::Batch(vec![leaves[10].clone(), leaves[8].clone()]),
         EditCommand::Batch(Vec::new()),
     ]);
     let mut all = leaves;
+    all.extend(offsets);
     all.push(nested);
     all
 }
 
 fn every_op() -> Vec<EditOp> {
     let mut ops: Vec<EditOp> = every_command().into_iter().map(EditOp::Apply).collect();
+    ops.extend(every_command().into_iter().map(EditOp::ApplyFresh));
     ops.push(EditOp::Undo);
     ops.push(EditOp::Redo);
     ops
@@ -180,6 +196,67 @@ fn a_delete_is_spelled_as_the_module_docs_say() {
     assert_eq!(bytes, [WIRE_VERSION, OP_APPLY, DELETE, 4, 3, 2, 1]);
     assert_eq!(encoded(&EditOp::Undo), [WIRE_VERSION, OP_UNDO]);
     assert_eq!(encoded(&EditOp::Redo), [WIRE_VERSION, OP_REDO]);
+}
+
+#[test]
+fn an_offset_and_fresh_ids_are_spelled_as_the_module_docs_say() {
+    let offset = EditCommand::OffsetProperty {
+        entity: SceneEntityId(2),
+        system: "b".to_owned(),
+        path: "p".to_owned(),
+        by: Value::Float(0.5),
+    };
+    let mut spelled = vec![WIRE_VERSION, OP_APPLY, OFFSET_PROPERTY, 2, 0, 0, 0];
+    for text in ["b", "p"] {
+        spelled.extend_from_slice(&1_u32.to_le_bytes());
+        spelled.extend_from_slice(text.as_bytes());
+    }
+    spelled.push(VALUE_FLOAT);
+    spelled.extend_from_slice(&0.5_f64.to_bits().to_le_bytes());
+    assert_eq!(encoded(&EditOp::Apply(offset)), spelled);
+
+    let delete = EditCommand::Delete {
+        entity: SceneEntityId(1),
+    };
+    assert_eq!(
+        encoded(&EditOp::ApplyFresh(delete)),
+        [WIRE_VERSION, OP_APPLY_FRESH, DELETE, 1, 0, 0, 0]
+    );
+}
+
+/// **What a server announces for an op is spelled as long as the op**: an
+/// offset resolved into the set of a value of its own kind, and a command
+/// asking for fresh ids applied under other ids — what lets the notice
+/// carry whatever the request could.
+#[test]
+fn a_resolved_op_is_spelled_as_long_as_the_one_sent() {
+    for (by, value) in [
+        (Value::Float(0.5), Value::Float(-3.25)),
+        (Value::Int(1), Value::Int(i64::MAX)),
+        (Value::UInt(1), Value::UInt(7)),
+    ] {
+        let offset = EditCommand::OffsetProperty {
+            entity: SceneEntityId(2),
+            system: "blocks".to_owned(),
+            path: "position.1".to_owned(),
+            by,
+        };
+        let set = EditCommand::SetProperty {
+            entity: SceneEntityId(2),
+            system: "blocks".to_owned(),
+            path: "position.1".to_owned(),
+            value,
+        };
+        assert_eq!(
+            encoded(&EditOp::Apply(offset)).len(),
+            encoded(&EditOp::Apply(set)).len()
+        );
+    }
+    for command in every_command() {
+        let fresh = encoded(&EditOp::ApplyFresh(command.clone()));
+        let given = command.map_entities(&mut |id| SceneEntityId(id.0 ^ u32::MAX));
+        assert_eq!(fresh.len(), encoded(&EditOp::Apply(given)).len());
+    }
 }
 
 #[test]

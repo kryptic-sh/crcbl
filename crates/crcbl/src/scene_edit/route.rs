@@ -20,6 +20,30 @@
 //! edits whenever another client's notice landed between them, and of a
 //! history that no longer folds exactly as the server's.
 //!
+//! # Edits that compose (decided 2026-10-05)
+//!
+//! A held edit is computed against the copy, which lags the server by the
+//! round trip, so two edits made before the first's notice returns are both
+//! computed against the same copy. Two kinds of edit would then collide,
+//! and neither is reconciled here — each is asked of the server in a form
+//! it resolves against its own scene as it applies it:
+//!
+//! * **A nudge is an offset** ([`EditCommand::OffsetProperty`]), added to
+//!   whatever the leaf holds when it applies, so two nudges move by both
+//!   rather than the second writing the value the first already wrote.
+//! * **A command that spawns asks for fresh ids**: it is held as an
+//!   [`EditOp::ApplyFresh`], its spawns' ids — the copy's next ones — taken
+//!   as stand-ins the server replaces with ids it hands out
+//!   ([`Document::fresh_spawns`]). So two spawns before the first lands, or
+//!   two clients' at once, both apply under ids of their own. A copy has no
+//!   history to step while routed, so every spawn it holds is a new entity.
+//!
+//! A local overlay of edits sent and not yet acknowledged, which later edits
+//! would be computed against, was the other way, and declined: it is the
+//! optimistic apply above under another name, with the same reconciling
+//! whenever another client's notice lands between, and it would still leave
+//! two clients' spawns asking for one id.
+//!
 //! **Nothing is validated here**: the server applies the operation through
 //! its own document and refuses what that refuses, so a second check would
 //! only be a second set of rules. Play mode is still refused here, as it is
@@ -33,7 +57,8 @@ use super::Document;
 /// it — see the module docs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoutedEdit {
-    /// What was asked: a command, an undo or a redo.
+    /// What was asked: a command — one that spawns as an
+    /// [`EditOp::ApplyFresh`], see the module docs — an undo or a redo.
     pub op: EditOp,
     /// The gesture a command was asked in ([`Document::apply_in`]) — the
     /// document's own number, which the caller maps to the one it sends —
@@ -76,8 +101,8 @@ impl Document {
         self.log = crate::scene::edit::UndoLog::new();
     }
 
-    /// Holds `command` for the server when routed, or hands it back to
-    /// apply here.
+    /// Holds `command` for the server when routed — asking for fresh ids
+    /// when it spawns, see the module docs — or hands it back to apply here.
     pub(super) fn route(
         &mut self,
         command: EditCommand,
@@ -86,10 +111,12 @@ impl Document {
         let Some(held) = self.routed.as_mut() else {
             return Some(command);
         };
-        held.push(RoutedEdit {
-            op: EditOp::Apply(command),
-            gesture,
-        });
+        let op = if command.spawned().is_empty() {
+            EditOp::Apply(command)
+        } else {
+            EditOp::ApplyFresh(command)
+        };
+        held.push(RoutedEdit { op, gesture });
         None
     }
 
@@ -113,6 +140,7 @@ mod tests {
     use crate::reflect::Value;
     use crate::scene::scn::SceneEntityId;
 
+    use super::super::EditError;
     use super::super::tests::{BLOCKS, one_block};
 
     /// Block 0 moved along x to `x`.
@@ -182,6 +210,120 @@ mod tests {
         document.apply(shift(4.0)).expect("applies");
         assert_eq!(document.log().len(), 1);
         assert_ne!(document.files().expect("saves"), before);
+    }
+
+    /// Block 0 offset along x by `by`.
+    fn nudge(by: Value) -> EditCommand {
+        EditCommand::OffsetProperty {
+            entity: SceneEntityId(0),
+            system: BLOCKS.to_owned(),
+            path: "position.0".to_owned(),
+            by,
+        }
+    }
+
+    /// One block's row, spawned under `id`.
+    fn spawn(id: u32) -> EditCommand {
+        EditCommand::Spawn {
+            entity: SceneEntityId(id),
+            rows: vec![crate::scene::edit::SystemRow {
+                system: BLOCKS.to_owned(),
+                row: "Block(position: (0.0, 0.0, 0.0), half_extents: (1.0, 1.0, 1.0))".to_owned(),
+            }],
+            name: None,
+        }
+    }
+
+    /// **An offset composes and is recorded as the set of its sum**: two in
+    /// a row move by both, each entry of the log is the absolute set its
+    /// offset came to — which `apply_resolved` hands back — so an undo puts
+    /// back the bits before it; and an offset of another kind than the leaf
+    /// is refused, recording nothing.
+    #[test]
+    fn an_offset_composes_and_is_recorded_as_the_set_of_its_sum() {
+        let mut document = one_block();
+        let applied = document
+            .apply_resolved(nudge(Value::Float(0.5)), None)
+            .expect("applies");
+        assert_eq!(applied, Some(shift(0.5)));
+        document.apply(nudge(Value::Float(0.25))).expect("applies");
+        let x = |document: &mut Document| {
+            document
+                .read(SceneEntityId(0), BLOCKS, "position.0")
+                .expect("a block has an x")
+        };
+        assert_eq!(x(&mut document), Value::Float(0.75));
+        assert_eq!(
+            document.log().applied().cloned().collect::<Vec<_>>(),
+            [shift(0.5), shift(0.75)]
+        );
+        assert!(document.undo().expect("undoes"));
+        assert_eq!(x(&mut document), Value::Float(0.5));
+
+        let refused = document.apply(nudge(Value::Int(1)));
+        assert!(
+            matches!(refused, Err(EditError::Offset { .. })),
+            "{refused:?}"
+        );
+        assert_eq!(x(&mut document), Value::Float(0.5));
+        assert_eq!(document.log().applied().count(), 1, "nothing recorded");
+    }
+
+    /// **Fresh ids are ones the document never held**: each spawn's stand-in
+    /// becomes the next id past the high-water mark — past an id a delete
+    /// freed, too — in the order the spawns come, and every other mention of
+    /// a stand-in follows it; an id the command names that is no stand-in
+    /// stays as it was.
+    #[test]
+    fn fresh_spawns_take_ids_the_document_never_held() {
+        let mut document = one_block();
+        document.apply(spawn(1)).expect("spawns");
+        document.delete(&[SceneEntityId(1)]).expect("deletes");
+        let asked = EditCommand::Batch(vec![
+            spawn(1),
+            EditCommand::Rename {
+                entity: SceneEntityId(1),
+                name: None,
+            },
+            spawn(0),
+            EditCommand::Delete {
+                entity: SceneEntityId(7),
+            },
+        ]);
+        let given = document.fresh_spawns(asked).expect("ids to give");
+        assert_eq!(
+            given,
+            EditCommand::Batch(vec![
+                spawn(2),
+                EditCommand::Rename {
+                    entity: SceneEntityId(2),
+                    name: None,
+                },
+                spawn(3),
+                EditCommand::Delete {
+                    entity: SceneEntityId(7),
+                },
+            ])
+        );
+    }
+
+    /// **A routed spawn asks for fresh ids**: an edit that spawns is held as
+    /// an [`EditOp::ApplyFresh`], and one that does not as a plain apply.
+    #[test]
+    fn a_routed_spawn_asks_for_fresh_ids() {
+        let mut document = one_block();
+        document.route_edits();
+        document.apply(spawn(1)).expect("held");
+        document.apply(shift(1.0)).expect("held");
+        let held: Vec<_> = document
+            .take_routed()
+            .into_iter()
+            .map(|edit| edit.op)
+            .collect();
+        assert_eq!(
+            held,
+            [EditOp::ApplyFresh(spawn(1)), EditOp::Apply(shift(1.0))]
+        );
     }
 
     /// **A copy whose server is gone reads unsaved**, so closing or opening

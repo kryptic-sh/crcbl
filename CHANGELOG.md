@@ -706,7 +706,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   editor holds no lock, writes nothing into the scene's directory and keeps no
   recovery copy; Save and Save as say the server saves every edit, and play mode
   is refused. When the server quits or the link drops, the scene stays open as
-  an unsaved copy with no directory. New for it:
+  an unsaved copy with no directory. Edits made faster than the round trip
+  compose: an arrow-key nudge goes as an offset the server adds to what the
+  field holds, so two nudges before the first comes back move by both, and an
+  edit that spawns asks the server for fresh ids, so two quick spawns — or two
+  clients' at once — both land under ids of their own; what the editor spawns,
+  pastes or duplicates is selected once it lands. New for it: the command
+  `crcbl_scene::edit::EditCommand::OffsetProperty` (wire kind `0x0C`), which the
+  document resolves into the property set of its sum before recording it, with
+  `offset_value`, `EditCommand::{spawned, map_entities}` and the op
+  `EditOp::ApplyFresh` (op kind 3), neither moving `WIRE_VERSION` — an
+  exhaustive `match` on `EditCommand` or `EditOp` needs an arm for each;
+  `Document::{apply_resolved, fresh_spawns}` and
+  `EditError::{NoFreshId, Offset}`; `SceneFollower::take_spawned` with
+  `follow::{Spawned, MAX_KEPT_SPAWNS}`; and an `EditNotice` now carries the
+  operation as the server applied it — offsets as the values written, stand-in
+  ids as the ids given — rather than the request's bytes. The editor's nudge
+  sends an offset whether joined or not. The decoder fuzz target has a named
+  seed for each. Also new for joining:
   `crcbl::scene_edit::Document::{route_edits, stop_routing, is_routed, take_routed, forget_saved}`
   and `RoutedEdit` — a document whose `apply`, `apply_in`, `undo` and `redo`
   hold the operation for a server instead of applying it —

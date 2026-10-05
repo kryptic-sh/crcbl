@@ -148,8 +148,9 @@ pub enum HistoryError {
         /// What the decoder said.
         error: OpDecodeError,
     },
-    /// An entry's operation decoded to an undo or a redo, which a history
-    /// does not hold.
+    /// An entry's operation decoded to an undo, a redo, or a command asking
+    /// for fresh ids, none of which a history holds: its entries are
+    /// commands as they applied, every id given.
     NotACommand(usize),
     /// An entry's command would not encode.
     Encode(OpEncodeError),
@@ -180,7 +181,7 @@ impl fmt::Display for HistoryError {
             }
             Self::Entry { index, error } => write!(f, "entry {index} will not decode: {error}"),
             Self::NotACommand(index) => {
-                write!(f, "entry {index} is an undo or a redo, not an edit")
+                write!(f, "entry {index} is not an edit as it applied")
             }
             Self::Encode(error) => write!(f, "an entry will not encode: {error}"),
             Self::Write(error) => write!(f, "it would not be written: {error}"),
@@ -441,7 +442,9 @@ fn decode(bytes: &[u8]) -> Result<Recorded, HistoryError> {
 fn command(index: usize, bytes: &[u8]) -> Result<EditCommand, HistoryError> {
     match decode_op(bytes) {
         Ok(EditOp::Apply(command)) => Ok(command),
-        Ok(EditOp::Undo | EditOp::Redo) => Err(HistoryError::NotACommand(index)),
+        Ok(EditOp::Undo | EditOp::Redo | EditOp::ApplyFresh(_)) => {
+            Err(HistoryError::NotACommand(index))
+        }
         Err(error) => Err(HistoryError::Entry { index, error }),
     }
 }

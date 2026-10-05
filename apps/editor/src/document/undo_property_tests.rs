@@ -86,13 +86,14 @@ struct Tally {
 
 /// The facts [`Tally::reached`] must hold — each a shape of edit whose undo
 /// has its own way to go wrong.
-const MUST_REACH: [&str; 18] = [
+const MUST_REACH: [&str; 19] = [
     "a gesture of several writes",
     "a drag whose leaves change part-way",
     "an environment drag of several writes",
     "a gesture that ended where it began",
     "a gesture back to its start under redo",
     "a nudge of two entities",
+    "a nudge recorded as the sets of its sums",
     "a switch to another variant",
     "a drag of two entities",
     "a delete of two entities",
@@ -322,7 +323,9 @@ fn count_commands<'a>(
     into: &mut BTreeMap<&'static str, usize>,
 ) {
     for command in commands {
-        *into.entry(variant(command)).or_default() += 1;
+        let variant = variant(command);
+        assert_ne!(variant, UNRESOLVED, "an entry holds an offset: {command:?}");
+        *into.entry(variant).or_default() += 1;
         if let EditCommand::Batch(members) = command {
             count_commands(members.iter(), into);
         }
@@ -334,9 +337,14 @@ fn count_commands<'a>(
 /// **A match with no wildcard**, so a variant added to [`EditCommand`] does not
 /// compile here until it is named — and naming it means adding it to
 /// [`EVERY_COMMAND`], which fails the run until some generated step records it.
+/// The one exception is an offset, which the document resolves into the
+/// property set of its sum before recording it: no entry may hold one, which
+/// [`count_commands`] holds, and the nudge step reaches _a nudge recorded as
+/// the sets of its sums_ in its place.
 const fn variant(command: &EditCommand) -> &'static str {
     match command {
         EditCommand::SetProperty { .. } => "SetProperty",
+        EditCommand::OffsetProperty { .. } => UNRESOLVED,
         EditCommand::SetVariant { .. } => "SetVariant",
         EditCommand::SetEnvironment { .. } => "SetEnvironment",
         EditCommand::Spawn { .. } => "Spawn",
@@ -350,7 +358,10 @@ const fn variant(command: &EditCommand) -> &'static str {
     }
 }
 
-/// Every name [`variant`] answers.
+/// What [`variant`] answers for an offset, which no entry may hold.
+const UNRESOLVED: &str = "OffsetProperty";
+
+/// Every name [`variant`] answers for a command an entry may hold.
 const EVERY_COMMAND: [&str; 11] = [
     "SetProperty",
     "SetVariant",
