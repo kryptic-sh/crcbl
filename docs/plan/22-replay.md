@@ -48,7 +48,8 @@ entries  TickEntry[tick_count]
 TickEntry  tick_id u64, msg_len u32, msg_data — one encoded ServerToClient message
 input section (version 2 on)  SIM sets (tick, name, value text), state hashes,
                               and from version 3 the peer track (per tick: roster
-                              changes, each peer's applied input frames)
+                              changes, each peer's applied input frames), whose
+                              joins name their PlayerId from version 4
 ```
 
 So: no keyframe index, no seek table, one side-track, and **no deltas at all** —
@@ -104,31 +105,35 @@ Those two bullets are the plan, not a description.
 
 A `.crpl` file carries what a re-simulation needs in an **input section** after
 its entries, versioned so an older file still reads: format version 2 added it,
-version 3 its peer track, and a version 1 file reads as one with no sets and no
-hashes, a version 2 file as one with no peer track. It holds the `Flags::SIM`
-sets the host applied — tick, name, and the value as the console prints it,
-which is what `Registry::sim_set` parses back to the same value — in the order
-applied, the recorder's state hashes (`sim_hash::hash_world` at a tick's end),
-at most one a tick, and **what the module was handed of its peers**: per tick,
-the roster's changes in the order the host applied them (joined, lost, resumed,
-left, ended by the game) and each peer's input frames as the module read them,
-after the host's checks and per-tick cap. The roster is recorded because
-`PeerInputs` lists every admitted peer, a lost one with nothing, so a module
-reacts to who is in the session as well as to what they sent. The layout and its
-rules are in `crcbl_store::replay`'s module docs; both directions refuse a
-section that breaks one, by name, and the reader is fuzzed. **One step for live
-and replayed ticks**: a live host hands the module its peers' frames through
-`Host::step`, which also keeps the record (`Host::record_peer_inputs`), and a
-re-simulation hands the recorded ones through the same step, so the two paths
-cannot drift. `Host::resimulate` checks every set against the host's registry
-and every roster change against the ones before it before a tick runs, then runs
-to the last hash and answers the first tick whose hash it does not reproduce —
-so a recorded hash per tick locates a divergence to its tick. Towers' two-player
-sessions and the sandbox's hosted ones — players joining and leaving, a
-`sv_spin_rate` set between — reproduce from their file tick for tick. What a
-re-simulation still cannot see — a game acting on `Host::events` outside its
-module — is in `docs/backlog.md`. Re-simulation is a dev-time check on top of
-playback, never a requirement of it: a viewer still plays the entries.
+version 3 its peer track and version 4 the `PlayerId` each join names. An older
+file is migrated on read by a chain of pure steps, one a version, as a save is
+(`crcbl_store::replay`'s `migrate` module), and then read by the one current
+reader: a version 1 file gains an empty section, a version 2 section an empty
+peer track, and a version 3 track's joins read as naming nobody. It holds the
+`Flags::SIM` sets the host applied — tick, name, and the value as the console
+prints it, which is what `Registry::sim_set` parses back to the same value — in
+the order applied, the recorder's state hashes (`sim_hash::hash_world` at a
+tick's end), at most one a tick, and **what the module was handed of its
+peers**: per tick, the roster's changes in the order the host applied them
+(joined, lost, resumed, left, ended by the game) and each peer's input frames as
+the module read them, after the host's checks and per-tick cap. The roster is
+recorded because `PeerInputs` lists every admitted peer, a lost one with
+nothing, so a module reacts to who is in the session as well as to what they
+sent. The layout and its rules are in `crcbl_store::replay`'s module docs; both
+directions refuse a section that breaks one, by name, and the reader is fuzzed.
+**One step for live and replayed ticks**: a live host hands the module its
+peers' frames through `Host::step`, which also keeps the record
+(`Host::record_peer_inputs`), and a re-simulation hands the recorded ones
+through the same step, so the two paths cannot drift. `Host::resimulate` checks
+every set against the host's registry and every roster change against the ones
+before it before a tick runs, then runs to the last hash and answers the first
+tick whose hash it does not reproduce — so a recorded hash per tick locates a
+divergence to its tick. Towers' two-player sessions and the sandbox's hosted
+ones — players joining and leaving, a `sv_spin_rate` set between — reproduce
+from their file tick for tick. What a re-simulation still cannot see — a game
+acting on `Host::events` outside its module — is in `docs/backlog.md`.
+Re-simulation is a dev-time check on top of playback, never a requirement of it:
+a viewer still plays the entries.
 
 ### The live recorder (built 2026-10-03)
 

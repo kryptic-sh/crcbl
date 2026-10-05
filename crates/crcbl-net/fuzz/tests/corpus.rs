@@ -1,6 +1,6 @@
 //! Named seeds from the fuzzer's corpus, replayed through the delta decoder,
-//! the replay spool's recovery, the save container's reader, the scene
-//! edit's messages, the scene fetch's and the session hello.
+//! the replay file's reader and its spool's recovery, the save container's
+//! reader, the scene edit's messages, the scene fetch's and the session hello.
 //!
 //! `fuzz_targets/decoder.rs` runs the decoders against bytes libFuzzer invents.
 //! This target runs three of them against bytes somebody named, and the two are
@@ -82,16 +82,25 @@ fn oversized_seed_crosses_the_decoder_limit() {
 
 /// The replay spool seeds reach both ends of a recovery: the whole spool
 /// keeps every record, and the same spool three bytes short drops its last,
-/// a state hash, as cut short.
+/// a state hash, as cut short. Both are version 1 spools, which recover
+/// through the migration; the version 2 seed's join names its player, and the
+/// file it recovers to names the same one.
 #[test]
 fn named_replay_spool_seeds_reach_their_intended_paths() {
-    use crcbl_store::replay::{SpoolEnd, SpoolRecovery, recover_spool};
-
-    let recover = |seed: &[u8]| -> SpoolRecovery {
-        recover_spool(std::io::Cursor::new(seed), &mut std::io::sink())
-            .expect("a spool with a whole header recovers")
+    use crcbl_net::PlayerId;
+    use crcbl_store::replay::{
+        FileTransport, RosterChangeKind, SpoolEnd, SpoolRecovery, recover_spool, spool,
     };
-    let whole = recover(include_bytes!("../corpus/decoder/replay-spool"));
+
+    let recover = |seed: &[u8]| -> (SpoolRecovery, Vec<u8>) {
+        let mut file = Vec::new();
+        let recovery = recover_spool(std::io::Cursor::new(seed), &mut file)
+            .expect("a spool with a whole header recovers");
+        (recovery, file)
+    };
+    let seed = include_bytes!("../corpus/decoder/replay-spool");
+    assert_eq!(seed[8..10], 1u16.to_le_bytes(), "a version 1 spool");
+    let (whole, _) = recover(seed);
     assert_eq!(whole.end, SpoolEnd::Whole);
     assert_eq!(
         (whole.sim_sets, whole.state_hashes, whole.peer_ticks),
@@ -99,7 +108,7 @@ fn named_replay_spool_seeds_reach_their_intended_paths() {
     );
     assert_eq!(whole.dropped_bytes, 0);
 
-    let torn = recover(include_bytes!("../corpus/decoder/replay-spool-torn"));
+    let (torn, _) = recover(include_bytes!("../corpus/decoder/replay-spool-torn"));
     assert_eq!(torn.end, SpoolEnd::CutShort);
     assert_eq!(
         (torn.sim_sets, torn.state_hashes, torn.peer_ticks),
@@ -109,6 +118,108 @@ fn named_replay_spool_seeds_reach_their_intended_paths() {
         torn.dropped_bytes, 22,
         "a 25-byte hash record, cut by three"
     );
+
+    let seed = include_bytes!("../corpus/decoder/replay-spool-v2");
+    assert_eq!(seed[8..10], spool::SPOOL_FORMAT_VERSION.to_le_bytes());
+    let (named, file) = recover(seed);
+    assert_eq!(named.end, SpoolEnd::Whole);
+    assert_eq!(
+        (named.sim_sets, named.state_hashes, named.peer_ticks),
+        (1, 2, 1)
+    );
+    let file = FileTransport::decode(&file).expect("a recovered spool's file reads");
+    assert_eq!(
+        file.peer_ticks()[0].roster[0].kind,
+        RosterChangeKind::Joined(Some(PlayerId::from_bytes(std::array::from_fn(
+            |i| i as u8 + 1
+        ))))
+    );
+}
+
+/// The replay file seeds, one at each format version with an input section,
+/// reach the reader's three ends: the version 2 seed migrates to a section
+/// with no peer track, the version 3 seed to one whose join names nobody, and
+/// the current seed reads with its join naming its player. The current seed
+/// is also what the writer writes for what it holds, so a change to the
+/// layout shows up here as a seed to regenerate.
+#[test]
+fn named_replay_file_seeds_reach_their_intended_paths() {
+    use crcbl_net::PlayerId;
+    use crcbl_net::transport::Transport;
+    use crcbl_store::replay::{
+        FileTransport, REPLAY_FORMAT_VERSION, RecordedRosterChange, ReplayWriter, RosterChangeKind,
+    };
+    use crcbl_store::{MemoryStorage, StorageSource};
+
+    let read = |seed: &[u8]| FileTransport::decode(seed).expect("the seed reads");
+    // What every seed holds before its peer track: one entry, one set and
+    // one hash, all at tick 1.
+    let common = |file: &FileTransport| {
+        assert_eq!((file.len(), file.tick_at(0).get()), (1, 1));
+        let set = &file.sim_sets()[..];
+        assert_eq!(set.len(), 1);
+        assert_eq!(
+            (set[0].set.name.as_str(), set[0].set.value.as_str()),
+            ("sv_spin_rate", "2")
+        );
+        let hashes: Vec<(u64, u64)> = file
+            .state_hashes()
+            .iter()
+            .map(|recorded| (recorded.tick.get(), recorded.hash))
+            .collect();
+        assert_eq!(hashes, [(1, 0x1234)]);
+    };
+    let join = |file: &FileTransport| -> RecordedRosterChange {
+        let ticks = file.peer_ticks();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].peers[0].frames[0].1, [1, 0xFF, 0, 0xFF]);
+        ticks[0].roster[0]
+    };
+
+    let v2 = read(include_bytes!("../corpus/decoder/replay-input-section"));
+    assert_eq!(v2.format_version(), 2);
+    common(&v2);
+    assert!(v2.peer_ticks().is_empty());
+
+    let v3 = read(include_bytes!("../corpus/decoder/replay-input-section-v3"));
+    assert_eq!(v3.format_version(), 3);
+    common(&v3);
+    let anonymous = join(&v3);
+    assert_eq!(
+        (anonymous.peer, anonymous.kind),
+        (1, RosterChangeKind::Joined(None))
+    );
+
+    let seed = include_bytes!("../corpus/decoder/replay-input-section-v4");
+    let mut current = read(seed);
+    assert_eq!(current.format_version(), REPLAY_FORMAT_VERSION);
+    common(&current);
+    let named = join(&current);
+    let player = PlayerId::from_bytes(std::array::from_fn(|i| i as u8 + 1));
+    assert_eq!(
+        (named.peer, named.kind),
+        (1, RosterChangeKind::Joined(Some(player)))
+    );
+
+    let mut writer = ReplayWriter::new(current.tick_rate());
+    let tick = current.tick_at(0);
+    let entry = current.recv().expect("connected").expect("one entry");
+    writer.push_tick(tick, &entry.payload);
+    for recorded in current.sim_sets() {
+        writer.push_sim_set(recorded.tick, recorded.set.clone());
+    }
+    for recorded in current.state_hashes() {
+        writer.push_state_hash(recorded.tick, recorded.hash);
+    }
+    for recorded in current.peer_ticks() {
+        writer.push_peer_tick(recorded.clone());
+    }
+    let storage = MemoryStorage::new();
+    let path = std::path::Path::new("rewritten.crpl");
+    writer
+        .write(&storage, path)
+        .expect("a memory storage takes every write");
+    assert_eq!(storage.read(path).expect("the file just written"), seed);
 }
 
 /// The save seeds reach the container reader's four ends: a whole save opens

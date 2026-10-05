@@ -49,6 +49,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   client refused by a ban stops retrying and reports it through
   `Client::handshake_refusal`.
 
+- **`.crpl` replays are format version 4, and a recorded join names its player**
+  (see Added: a module sees whose input it is). A peer track's join carries the
+  `PlayerId` its hello named, under a roster kind of its own (6, the player's 16
+  bytes after the peer), so a build from before refuses a version 4 file as an
+  unsupported version. `RosterChangeKind::Joined` is now
+  `Joined(Option<PlayerId>)` and `crcbl_server::RosterChange::Joined` is
+  `Joined(PeerId, Option<PlayerId>)`, so a match or a constructor of either
+  names the player; `None` is a join that names nobody. Older files still read:
+  they are migrated on read by a chain of pure steps, one a version, as a save
+  is, then read by the one current reader — a version 3 file's joins name
+  nobody, and a version 1 or 2 file reads as before. The replay spool is version
+  2 (`spool::SPOOL_FORMAT_VERSION`), and a version 1 spool still recovers, its
+  joins naming nobody. `crcbl replay` prints each join's player, or that it was
+  not recorded, and its `--json` roster entries gained a `player` key.
+
 - **`crcbl::lan::LanError` gained `Identity` and `Bans`** (see Added), so an
   exhaustive match must handle them.
 
@@ -806,6 +821,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   player, `Server::player()` names the single server's, `Client::player()` the
   client's own, and `crcbl::lan::LanHost` logs the player of each peer it
   admits.
+
+- **A module sees whose input it is: `crcbl_ecs::ClientInputs::player`**, the
+  `PlayerId` of the session that sent a view's frames, the same on a live tick
+  and on the tick re-simulated from a recording. `crcbl_server::Host` hands
+  every peer's view through `PeerInputs::iter` naming its player, the single
+  `Server` names its session's, and `Host::resimulate` names the player each
+  peer's recorded join does — `None` for input with no session and for a
+  recording from before joins named players. `ClientInputs::with_player` names
+  one on a view; `ClientInputs::new` names none. A re-simulation refuses a
+  recorded join naming a player another admitted peer is, before any tick runs
+  (`RosterFault::PlayerAdmitted`), as a host holds one session a player.
 
 - **A server-local denylist.** `crcbl_server::Denylist` — players and the reason
   each is banned, in a hand-editable text form (`to_text` / `parse`) — on

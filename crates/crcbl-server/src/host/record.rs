@@ -17,8 +17,15 @@
 //! at the tick whose module first saw it — a join, a loss or a departure the
 //! host noticed while reading its transports at that tick, or a kick or a
 //! shutdown the game made between that tick and the one before.
+//!
+//! **A join carries its player**, so the roster says who each peer is as
+//! well as when it came and went: the module is handed each peer's
+//! [`PlayerId`] with its frames
+//! ([`ClientInputs::player`](crcbl_ecs::ClientInputs::player)), and a
+//! re-simulation hands the one its recorded join names, so a module that
+//! reads it reads the same on both paths.
 
-use crcbl_core::TickId;
+use crcbl_core::{PlayerId, TickId};
 
 use super::{PeerEvent, PeerId};
 
@@ -26,8 +33,9 @@ use super::{PeerEvent, PeerId};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RosterChange {
     /// A new session was admitted, last in admission order
-    /// ([`PeerEvent::Joined`]).
-    Joined(PeerId),
+    /// ([`PeerEvent::Joined`]), for the player its hello named — `None` only
+    /// from a recording made before joins named their players.
+    Joined(PeerId, Option<PlayerId>),
     /// The peer's link dropped; it keeps its place, handed nothing
     /// ([`PeerEvent::Lost`]).
     Lost(PeerId),
@@ -46,7 +54,7 @@ impl RosterChange {
     #[must_use]
     pub const fn peer(self) -> PeerId {
         match self {
-            Self::Joined(peer)
+            Self::Joined(peer, _)
             | Self::Lost(peer)
             | Self::Resumed(peer)
             | Self::Left(peer)
@@ -54,11 +62,12 @@ impl RosterChange {
         }
     }
 
-    /// The change `event` makes to the roster — none for a
-    /// [`PeerEvent::Reaccepted`], whose session keeps its place and its link.
-    const fn of(event: PeerEvent) -> Option<Self> {
+    /// The change `event`, about a session of `player`'s, makes to the
+    /// roster — none for a [`PeerEvent::Reaccepted`], whose session keeps its
+    /// place and its link.
+    const fn of(event: PeerEvent, player: PlayerId) -> Option<Self> {
         match event {
-            PeerEvent::Joined(peer) => Some(Self::Joined(peer)),
+            PeerEvent::Joined(peer) => Some(Self::Joined(peer, Some(player))),
             PeerEvent::Lost(peer) => Some(Self::Lost(peer)),
             PeerEvent::Resumed(peer) => Some(Self::Resumed(peer)),
             PeerEvent::Left(peer) => Some(Self::Left(peer)),
@@ -130,10 +139,13 @@ struct InputRecord {
 }
 
 impl PeerLog {
-    /// Raise `event` for the game, and record its change to the roster.
-    pub(super) fn push(&mut self, event: PeerEvent) {
+    /// Raise `event`, about a session of `player`'s, for the game, and record
+    /// its change to the roster — a join with its player.
+    pub(super) fn push(&mut self, event: PeerEvent, player: PlayerId) {
         self.events.push(event);
-        if let (Some(record), Some(change)) = (self.record.as_mut(), RosterChange::of(event)) {
+        if let (Some(record), Some(change)) =
+            (self.record.as_mut(), RosterChange::of(event, player))
+        {
             record.roster.push(change);
         }
     }

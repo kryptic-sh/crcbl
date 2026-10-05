@@ -180,7 +180,8 @@ impl<T: Transport> Server<T> {
             // and not something the module reaches back through `Server` for.
             module.tick(
                 &mut self.world,
-                ClientInputs::new(&self.peer.client_inputs, self.peer.dropped_inputs),
+                ClientInputs::new(&self.peer.client_inputs, self.peer.dropped_inputs)
+                    .with_player(self.player),
             );
         }
         // `World::despawn` only marks: the entity stays in the pool and in
@@ -809,6 +810,8 @@ mod tests {
         ticks: Vec<Vec<(TickId, Vec<u8>)>>,
         /// The drop count of the last tick's view.
         dropped: u32,
+        /// The player the last tick's view named.
+        player: Option<PlayerId>,
     }
 
     /// A [`GameModule`] that records the [`ClientInputs`] of every tick it runs.
@@ -832,6 +835,7 @@ mod tests {
                     .collect(),
             );
             seen.dropped = inputs.dropped();
+            seen.player = inputs.player();
         }
     }
 
@@ -1022,7 +1026,8 @@ mod tests {
     /// **The bytes a client sealed reach the module.** The frame goes over the
     /// transport, through the session MAC, and out the other side with the tick
     /// the client stamped it with and the payload it carried — a server that
-    /// decoded it only to drop it hands the module an empty view.
+    /// decoded it only to drop it hands the module an empty view. The view
+    /// names the player the session's hello did.
     #[test]
     fn a_sealed_input_frame_reaches_the_module_with_its_tick_and_bytes() {
         let (transport, mut peer) = InMemoryTransport::pair();
@@ -1048,6 +1053,7 @@ mod tests {
             seen.ticks,
         );
         assert_eq!(seen.dropped, 0);
+        assert_eq!(seen.player, Some(HELLO_PLAYER));
         assert_eq!(server.processing_error_count(), 0);
         assert_eq!(server.dropped_input_count(), 0);
         assert_eq!(server.late_input_count(), 0);

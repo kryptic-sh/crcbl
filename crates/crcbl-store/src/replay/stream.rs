@@ -238,7 +238,7 @@ mod tests {
         RecordedPeerTick {
             tick: TickId::from_raw(tick),
             roster: vec![RecordedRosterChange {
-                kind: RosterChangeKind::Joined,
+                kind: RosterChangeKind::Joined(Some(crcbl_core::PlayerId::from_seed(peer))),
                 peer,
             }],
             peers: vec![RecordedPeerFrames {

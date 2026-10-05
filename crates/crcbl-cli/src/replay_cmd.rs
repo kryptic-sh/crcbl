@@ -5,9 +5,10 @@
 //! a file, validates it, and prints what's inside: the entries' ticks, and from
 //! format version 2 the input section's simulation sets and how many state
 //! hashes it holds, and from version 3 its peer track — how many ticks have an
-//! entry, every roster change, and each peer's frame and dropped counts. The
-//! frames themselves are counted, not printed: they are a game's own bytes,
-//! and a session holds thousands.
+//! entry, every roster change, and each peer's frame and dropped counts — with,
+//! from version 4, the player each join names. The frames themselves are
+//! counted, not printed: they are a game's own bytes, and a session holds
+//! thousands.
 //!
 //! `crcbl replay --recover <SPOOL> <FILE>` writes FILE instead, from the spool
 //! of a recording that did not finish (`crcbl::replay_record::recover`), and
@@ -176,7 +177,8 @@ fn end_name(end: &SpoolEnd) -> &'static str {
 struct PeerTrack {
     /// The ticks with an entry, in order.
     ticks: Vec<u64>,
-    /// Every roster change: its tick, what it was, and the peer's number.
+    /// Every roster change: its tick, what it was — a join with its player —
+    /// and the peer's number.
     roster: Vec<(u64, RosterChangeKind, u64)>,
     /// Each peer's frames and dropped frames over the whole track, by
     /// number.
@@ -234,6 +236,13 @@ impl PeerTrack {
                 "\n  tick {tick}: peer {peer} {}",
                 kind_name(*kind)
             ));
+            match kind {
+                RosterChangeKind::Joined(Some(player)) => {
+                    human.push_str(&format!(" as player {player}"));
+                }
+                RosterChangeKind::Joined(None) => human.push_str(" (player not recorded)"),
+                _ => {}
+            }
         }
         for (peer, (frames, dropped)) in &self.peers {
             human.push_str(&format!(
@@ -256,10 +265,19 @@ impl PeerTrack {
                 self.roster
                     .iter()
                     .map(|(tick, kind, peer)| {
+                        // Every change has the key; only a join that names
+                        // its player fills it.
+                        let player = match kind {
+                            RosterChangeKind::Joined(Some(player)) => {
+                                Json::string(player.to_string())
+                            }
+                            _ => Json::Null,
+                        };
                         Json::Object(vec![
                             ("tick", Json::Number(*tick as i64)),
                             ("change", Json::string(kind_name(*kind))),
                             ("peer", Json::Number(*peer as i64)),
+                            ("player", player),
                         ])
                     })
                     .collect(),
@@ -287,7 +305,7 @@ impl PeerTrack {
 /// A roster change's kind, as the report words it.
 const fn kind_name(kind: RosterChangeKind) -> &'static str {
     match kind {
-        RosterChangeKind::Joined => "joined",
+        RosterChangeKind::Joined(_) => "joined",
         RosterChangeKind::Lost => "lost",
         RosterChangeKind::Resumed => "resumed",
         RosterChangeKind::Left => "left",
@@ -366,7 +384,7 @@ mod tests {
         })
         .unwrap();
         assert!(
-            outcome.human.contains("format version 3"),
+            outcome.human.contains("format version 4"),
             "{}",
             outcome.human
         );
@@ -378,7 +396,7 @@ mod tests {
             "{}",
             outcome.human
         );
-        assert_eq!(outcome.json[3], ("format_version", Json::Number(3)));
+        assert_eq!(outcome.json[3], ("format_version", Json::Number(4)));
         assert_eq!(
             outcome.json[4],
             (
@@ -394,10 +412,12 @@ mod tests {
     }
 
     /// **The peer track is reported**: the ticks with an entry, every roster
-    /// change by tick, kind and peer, and each peer's frames and dropped
-    /// frames — in the human lines and in `--json`.
+    /// change by tick, kind and peer — a join with the player it names, or
+    /// that it names none — and each peer's frames and dropped frames — in
+    /// the human lines and in `--json`.
     #[test]
     fn replay_command_reports_the_peer_track() {
+        use crcbl::net::PlayerId;
         use crcbl_store::replay::{RecordedPeerFrames, RecordedRosterChange};
 
         let frames = |peer, count: u64, dropped| RecordedPeerFrames {
@@ -412,11 +432,11 @@ mod tests {
             tick: TickId::from_raw(3),
             roster: vec![
                 RecordedRosterChange {
-                    kind: RosterChangeKind::Joined,
+                    kind: RosterChangeKind::Joined(Some(PlayerId::from_bytes([0xAB; 16]))),
                     peer: 1,
                 },
                 RecordedRosterChange {
-                    kind: RosterChangeKind::Joined,
+                    kind: RosterChangeKind::Joined(None),
                     peer: 2,
                 },
             ],
@@ -447,17 +467,19 @@ mod tests {
         assert!(
             outcome.human.ends_with(
                 "peer track: 2 ticks, 3 roster changes, 3 frames, 3 dropped (ticks 3 to 7)\n  \
-                 tick 3: peer 1 joined\n  tick 3: peer 2 joined\n  tick 7: peer 2 lost\n  peer \
-                 1: 3 frames, 3 dropped"
+                 tick 3: peer 1 joined as player abababababababababababababababab\n  tick 3: \
+                 peer 2 joined (player not recorded)\n  tick 7: peer 2 lost\n  peer 1: 3 frames, \
+                 3 dropped"
             ),
             "{}",
             outcome.human
         );
-        let change = |tick, change, peer| {
+        let change = |tick, change, peer, player| {
             Json::Object(vec![
                 ("tick", Json::Number(tick)),
                 ("change", Json::string(change)),
                 ("peer", Json::Number(peer)),
+                ("player", player),
             ])
         };
         assert_eq!(
@@ -473,9 +495,14 @@ mod tests {
                     (
                         "roster",
                         Json::Array(vec![
-                            change(3, "joined", 1),
-                            change(3, "joined", 2),
-                            change(7, "lost", 2),
+                            change(
+                                3,
+                                "joined",
+                                1,
+                                Json::string("abababababababababababababababab")
+                            ),
+                            change(3, "joined", 2, Json::Null),
+                            change(7, "lost", 2, Json::Null),
                         ])
                     ),
                     (

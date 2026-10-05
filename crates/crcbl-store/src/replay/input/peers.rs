@@ -1,8 +1,8 @@
-//! The input section's peer track, from format version 3: per tick, the
-//! changes to the recorded host's roster and the input frames each peer's
-//! module was handed. The layout is in `replay`'s module docs.
+//! The input section's peer track: per tick, the changes to the recorded
+//! host's roster — each join with the player it names — and the input frames
+//! each peer's module was handed. The layout is in `replay`'s module docs.
 
-use crcbl_core::TickId;
+use crcbl_core::{PlayerId, TickId};
 use crcbl_net::MAX_CLIENT_INPUTS_PER_TICK;
 use crcbl_net::codec::MAX_FIELD_BYTES;
 
@@ -11,8 +11,9 @@ use super::{InputSectionError, Reader, count};
 /// The smallest `PeerTickEntry`: a tick and two zero counts.
 const MIN_PEER_TICK_BYTES: usize = 8 + 4 + 4;
 
-/// The size of every `RosterEntry`: a kind byte and a peer.
-const ROSTER_ENTRY_BYTES: usize = 1 + 8;
+/// The smallest `RosterEntry`: a kind byte and a peer. A join that names its
+/// player has the player after them.
+const MIN_ROSTER_ENTRY_BYTES: usize = 1 + 8;
 
 /// The smallest `PeerFramesEntry`: a peer, a dropped count and a zero frame
 /// count.
@@ -25,8 +26,11 @@ const MIN_FRAME_BYTES: usize = 8 + 4;
 /// [`RecordedRosterChange`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RosterChangeKind {
-    /// A new session was admitted, last in admission order.
-    Joined,
+    /// A new session was admitted, last in admission order, for the player
+    /// its hello named — `None` when the recording does not say: a file
+    /// written before format version 4, which recorded no players, migrates
+    /// with every join `None`.
+    Joined(Option<PlayerId>),
     /// The peer's link dropped; it keeps its place, with no input.
     Lost,
     /// A lost peer came back to the same session.
@@ -38,10 +42,18 @@ pub enum RosterChangeKind {
     Ended,
 }
 
+/// The byte of a join that names no player: every join before format
+/// version 4.
+const JOINED_CODE: u8 = 1;
+
+/// The byte of a join that names its player, which follows the peer.
+const JOINED_AS_PLAYER_CODE: u8 = 6;
+
 impl RosterChangeKind {
-    /// Every kind, in [`code`](Self::code) order.
-    const ALL: [Self; 5] = [
-        Self::Joined,
+    /// Every kind whose code is followed by nothing past the peer, in
+    /// [`code`](Self::code) order.
+    const BARE: [Self; 5] = [
+        Self::Joined(None),
         Self::Lost,
         Self::Resumed,
         Self::Left,
@@ -50,19 +62,18 @@ impl RosterChangeKind {
 
     /// Its byte in the file. Written out rather than derived from the
     /// declaration order, so reordering the variants cannot change what an
-    /// older file means.
+    /// older file means. A join that names its player took a byte of its own
+    /// rather than changing [`JOINED_CODE`]'s layout, so a version 3 track is
+    /// a version 4 track whose joins name nobody, unchanged.
     const fn code(self) -> u8 {
         match self {
-            Self::Joined => 1,
+            Self::Joined(None) => JOINED_CODE,
+            Self::Joined(Some(_)) => JOINED_AS_PLAYER_CODE,
             Self::Lost => 2,
             Self::Resumed => 3,
             Self::Left => 4,
             Self::Ended => 5,
         }
-    }
-
-    fn from_code(code: u8) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.code() == code)
     }
 }
 
@@ -128,6 +139,9 @@ pub(in crate::replay) fn encode_tick(
     for change in &entry.roster {
         buf.push(change.kind.code());
         buf.extend_from_slice(&change.peer.to_le_bytes());
+        if let RosterChangeKind::Joined(Some(player)) = change.kind {
+            buf.extend_from_slice(&player.to_bytes());
+        }
     }
     buf.extend_from_slice(&count(entry.peers.len(), "peers' frames")?.to_le_bytes());
     for peer in &entry.peers {
@@ -160,13 +174,19 @@ pub(in crate::replay) fn decode_tick(
 ) -> Result<RecordedPeerTick, InputSectionError> {
     let tick = TickId::from_raw(reader.u64("a peer tick's tick")?);
 
-    let change_count = reader.count("roster changes", ROSTER_ENTRY_BYTES)?;
+    let change_count = reader.count("roster changes", MIN_ROSTER_ENTRY_BYTES)?;
     let mut roster = Vec::with_capacity(change_count);
     for _ in 0..change_count {
         let [code] = reader.array("a roster change's kind")?;
-        let kind = RosterChangeKind::from_code(code)
-            .ok_or(InputSectionError::UnknownRosterChange(code))?;
         let peer = reader.u64("a roster change's peer")?;
+        let kind = if code == JOINED_AS_PLAYER_CODE {
+            RosterChangeKind::Joined(Some(PlayerId::from_bytes(reader.array("a join's player")?)))
+        } else {
+            RosterChangeKind::BARE
+                .into_iter()
+                .find(|kind| kind.code() == code)
+                .ok_or(InputSectionError::UnknownRosterChange(code))?
+        };
         roster.push(RecordedRosterChange { kind, peer });
     }
 
@@ -278,13 +298,20 @@ mod tests {
         RecordedRosterChange { kind, peer }
     }
 
+    /// The player `sample`'s first join names.
+    fn player() -> PlayerId {
+        PlayerId::from_seed(11)
+    }
+
+    /// A track whose first tick holds a join naming its player and one that
+    /// names nobody, as a re-recorded migrated file's would.
     fn sample() -> Vec<RecordedPeerTick> {
         vec![
             RecordedPeerTick {
                 tick: TickId::from_raw(1),
                 roster: vec![
-                    change(RosterChangeKind::Joined, 1),
-                    change(RosterChangeKind::Joined, 2),
+                    change(RosterChangeKind::Joined(Some(player())), 1),
+                    change(RosterChangeKind::Joined(None), 2),
                 ],
                 peers: Vec::new(),
             },
@@ -332,23 +359,67 @@ mod tests {
     #[test]
     fn the_track_reads_back_as_written() {
         let written = section(sample());
-        assert_eq!(InputSection::decode(&encoded(&written), true), Ok(written));
+        assert_eq!(InputSection::decode(&encoded(&written)), Ok(written));
     }
 
     #[test]
     fn every_roster_kind_keeps_its_code() {
         // The codes are the file's: a kind that read back as another would
         // swap a join for a leave in every recording made before the change.
-        let codes: Vec<u8> = RosterChangeKind::ALL
+        let codes: Vec<u8> = RosterChangeKind::BARE
             .iter()
             .map(|kind| kind.code())
             .collect();
         assert_eq!(codes, [1, 2, 3, 4, 5]);
-        for kind in RosterChangeKind::ALL {
-            assert_eq!(RosterChangeKind::from_code(kind.code()), Some(kind));
-        }
-        assert_eq!(RosterChangeKind::from_code(0), None);
-        assert_eq!(RosterChangeKind::from_code(6), None);
+        assert_eq!(RosterChangeKind::Joined(Some(player())).code(), 6);
+    }
+
+    /// **A join's player is the sixteen bytes after its peer**, under a code
+    /// of its own, and reads back as the same player; the join beside it
+    /// that names nobody keeps version 3's layout.
+    #[test]
+    fn a_join_carries_its_player_after_its_peer_and_one_without_keeps_the_old_layout() {
+        let bytes = encoded(&section(sample()[..1].to_vec()));
+        // The track's count, the tick and its change count.
+        let first = TRACK + 4 + 8 + 4;
+        assert_eq!(bytes[first], JOINED_AS_PLAYER_CODE);
+        assert_eq!(bytes[first + 1..first + 9], 1u64.to_le_bytes());
+        let player_at = first + MIN_ROSTER_ENTRY_BYTES;
+        assert_eq!(
+            bytes[player_at..player_at + PlayerId::BYTES],
+            player().to_bytes()
+        );
+        let second = player_at + PlayerId::BYTES;
+        assert_eq!(bytes[second], JOINED_CODE);
+        assert_eq!(bytes[second + 1..second + 9], 2u64.to_le_bytes());
+
+        let read = InputSection::decode(&bytes).expect("it reads");
+        assert_eq!(
+            read.peer_ticks[0].roster,
+            [
+                change(RosterChangeKind::Joined(Some(player())), 1),
+                change(RosterChangeKind::Joined(None), 2),
+            ]
+        );
+    }
+
+    /// **A join cut inside its player is refused by where it ends**: the
+    /// change count is bounded by the smallest entry, so the player is what
+    /// runs out.
+    #[test]
+    fn a_join_cut_inside_its_player_is_refused_by_where_it_ends() {
+        let joined = section(vec![RecordedPeerTick {
+            tick: TickId::from_raw(1),
+            roster: vec![change(RosterChangeKind::Joined(Some(player())), 1)],
+            peers: Vec::new(),
+        }]);
+        let bytes = encoded(&joined);
+        // Cut the player short, and the peer count after it with it.
+        let cut = &bytes[..bytes.len() - 4 - 1];
+        assert_eq!(
+            InputSection::decode(cut),
+            Err(InputSectionError::Truncated("a join's player"))
+        );
     }
 
     #[test]
@@ -358,7 +429,7 @@ mod tests {
         // change count.
         bytes[TRACK + 4 + 8 + 4] = 0x7F;
         assert_eq!(
-            InputSection::decode(&bytes, true),
+            InputSection::decode(&bytes),
             Err(InputSectionError::UnknownRosterChange(0x7F))
         );
     }
@@ -378,11 +449,11 @@ mod tests {
 
         let mut bytes = encoded(&section(sample()[..2].to_vec()));
         // The second tick's tick: count, then the first tick's entry — its
-        // tick, its two changes and its zero peers.
-        let second = TRACK + 4 + 8 + 4 + 2 * ROSTER_ENTRY_BYTES + 4;
+        // tick, its two changes, one with its player, and its zero peers.
+        let second = TRACK + 4 + 8 + 4 + 2 * MIN_ROSTER_ENTRY_BYTES + PlayerId::BYTES + 4;
         bytes[second..second + 8].copy_from_slice(&1u64.to_le_bytes());
         assert_eq!(
-            InputSection::decode(&bytes, true),
+            InputSection::decode(&bytes),
             Err(InputSectionError::PeerTickOutOfOrder {
                 previous: TickId::from_raw(1),
                 tick: TickId::from_raw(1),
@@ -412,7 +483,7 @@ mod tests {
         // the first peer's entry with its one frame of one byte.
         let second = TRACK + 4 + 8 + 4 + 4 + MIN_PEER_FRAMES_BYTES + MIN_FRAME_BYTES + 1;
         bytes[second..second + 8].copy_from_slice(&3u64.to_le_bytes());
-        assert_eq!(InputSection::decode(&bytes, true), Err(refusal));
+        assert_eq!(InputSection::decode(&bytes), Err(refusal));
     }
 
     #[test]
@@ -449,7 +520,7 @@ mod tests {
         spliced.extend_from_slice(&1u32.to_le_bytes());
         spliced.extend_from_slice(frame);
         bytes.splice(frame_count + 4..frame_count + 4, spliced);
-        assert_eq!(InputSection::decode(&bytes, true), Err(refusal));
+        assert_eq!(InputSection::decode(&bytes), Err(refusal));
     }
 
     #[test]
@@ -477,14 +548,14 @@ mod tests {
         let len_at = TRACK + 4 + 8 + 4 + 4 + MIN_PEER_FRAMES_BYTES + 8;
         bytes[len_at..len_at + 4].copy_from_slice(&((MAX_FIELD_BYTES + 1) as u32).to_le_bytes());
         bytes.push(0xAB);
-        assert_eq!(InputSection::decode(&bytes, true), Err(refusal));
+        assert_eq!(InputSection::decode(&bytes), Err(refusal));
     }
 
     #[test]
     fn a_truncated_track_is_refused_by_where_it_ends() {
         let bytes = encoded(&section(sample()));
         assert_eq!(
-            InputSection::decode(&bytes[..TRACK], true),
+            InputSection::decode(&bytes[..TRACK]),
             Err(InputSectionError::Truncated("peer ticks"))
         );
         // A frame cut short: its length says four bytes, and two follow — as
@@ -497,7 +568,7 @@ mod tests {
         }]);
         let whole = encoded(&one);
         assert_eq!(
-            InputSection::decode(&whole[..whole.len() - 2], true),
+            InputSection::decode(&whole[..whole.len() - 2]),
             Err(InputSectionError::Truncated("a frame"))
         );
     }
@@ -508,7 +579,7 @@ mod tests {
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         bytes.extend_from_slice(&[0; MIN_PEER_TICK_BYTES]);
         assert_eq!(
-            InputSection::decode(&bytes, true),
+            InputSection::decode(&bytes),
             Err(InputSectionError::CountBeyondFile {
                 what: "peer ticks",
                 declared: u32::MAX,

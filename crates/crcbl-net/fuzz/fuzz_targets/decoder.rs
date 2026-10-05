@@ -65,9 +65,9 @@ fuzz_target!(|data: &[u8]| {
     {
         let _ = SceneAssembly::new(0).push(part);
     }
-    // A replay file, header, entries and input section with its peer track:
-    // a file a player may have been sent, read before anything about it is
-    // trusted.
+    // A replay file, header, entries and input section with its peer track —
+    // an older version's migrated first: a file a player may have been sent,
+    // read before anything about it is trusted.
     let _ = crcbl_store::replay::FileTransport::decode(data);
     // A replay spool, as `crcbl replay --recover` reads the one a killed
     // recording left: its header, then framed records up to the first that

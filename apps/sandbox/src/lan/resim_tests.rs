@@ -153,7 +153,7 @@ fn record() -> Session {
     assert!(
         matches!(
             first.roster[..],
-            [RosterChange::Joined(_), RosterChange::Joined(_)]
+            [RosterChange::Joined(..), RosterChange::Joined(..)]
         ),
         "both joined on one tick: {:?}",
         first.roster

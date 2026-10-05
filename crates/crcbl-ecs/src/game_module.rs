@@ -19,7 +19,7 @@
 //!    runs, for game-specific per-tick logic (spawn/despawn decisions, scoring,
 //!    win/lose checks), and handed the [`ClientInputs`] for that tick.
 
-use crcbl_core::TickId;
+use crcbl_core::{PlayerId, TickId};
 
 use crate::World;
 
@@ -50,10 +50,20 @@ use crate::World;
 /// One session's frames: the server hosts one session, so there is no session
 /// id to key them by. A second session would be a second view, not a field
 /// added here.
+///
+/// # Whose they are
+///
+/// A server hands each view with the [`PlayerId`] of the session that sent
+/// it ([`player`](Self::player)) — the same answer on a live tick and on the
+/// same tick re-simulated from a recording, which carries the player with
+/// each join. It is `None` where nobody is known to have sent them: input
+/// made locally with no session, a server no hello has reached yet, or a
+/// recording made before recordings named their players.
 #[derive(Clone, Copy, Debug)]
 pub struct ClientInputs<'a> {
     frames: &'a [(TickId, Vec<u8>)],
     dropped: u32,
+    player: Option<PlayerId>,
 }
 
 impl<'a> ClientInputs<'a> {
@@ -61,7 +71,17 @@ impl<'a> ClientInputs<'a> {
     /// server's per-tick cap refused.
     #[must_use]
     pub const fn new(frames: &'a [(TickId, Vec<u8>)], dropped: u32) -> Self {
-        Self { frames, dropped }
+        Self {
+            frames,
+            dropped,
+            player: None,
+        }
+    }
+
+    /// The same view, as sent by `player` — `None` for nobody known.
+    #[must_use]
+    pub const fn with_player(self, player: Option<PlayerId>) -> Self {
+        Self { player, ..self }
     }
 
     /// A tick nothing arrived for.
@@ -70,6 +90,7 @@ impl<'a> ClientInputs<'a> {
         Self {
             frames: &[],
             dropped: 0,
+            player: None,
         }
     }
 
@@ -107,6 +128,13 @@ impl<'a> ClientInputs<'a> {
     #[must_use]
     pub const fn dropped(&self) -> u32 {
         self.dropped
+    }
+
+    /// The player whose session sent these frames, or `None` when nobody is
+    /// known to have — see [Whose they are](Self#whose-they-are).
+    #[must_use]
+    pub const fn player(&self) -> Option<PlayerId> {
+        self.player
     }
 }
 
@@ -296,6 +324,27 @@ mod tests {
         let capped = ClientInputs::new(&frames, 5);
         assert_eq!(capped.len(), 1);
         assert_eq!(capped.dropped(), 5);
+    }
+
+    /// A view names the player it is handed with and none until then, and
+    /// naming one leaves the frames and the drop count as they were — a
+    /// `with_player` that rebuilt the view from defaults would lose them.
+    #[test]
+    fn a_view_names_the_player_it_was_handed_with_and_keeps_its_frames() {
+        let frames = vec![(TickId::from_raw(3), vec![9])];
+        let anonymous = ClientInputs::new(&frames, 2);
+        assert_eq!(anonymous.player(), None);
+        assert_eq!(ClientInputs::empty().player(), None);
+
+        let player = PlayerId::from_seed(7);
+        let named = anonymous.with_player(Some(player));
+        assert_eq!(named.player(), Some(player));
+        assert_eq!(named.dropped(), 2);
+        assert_eq!(
+            named.iter().collect::<Vec<_>>(),
+            [(TickId::from_raw(3), &[9][..])]
+        );
+        assert_eq!(named.with_player(None).player(), None);
     }
 
     #[test]

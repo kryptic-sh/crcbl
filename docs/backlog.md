@@ -14795,8 +14795,10 @@ resumed, left, ended by the game's `kick` or `shutdown`) and each peer's frames
 as its module read them, with the dropped count. Both the writer and the reader
 refuse a section that breaks a rule, by name (`InputSectionError` in
 `StorageError::ReplayInput`); the reader is in `crates/crcbl-net/fuzz`'s target,
-with the `replay-input-section` (version 2) and `replay-input-section-v3` seeds.
-Version 1 and 2 files read with an empty peer track.
+with the `replay-input-section` (version 2), `replay-input-section-v3` and
+`replay-input-section-v4` seeds. Format version 4 (2026-10-06) names each join's
+player; older files are migrated on read (the `PlayerId` entry under Auth has
+the decisions).
 
 The host side (`crates/crcbl-server/src/host/record.rs` and `host/resim.rs`): a
 live tick moves each peer's queued frames into `PeerFrames` and hands them to
@@ -14949,20 +14951,19 @@ What it left:
   `ResimError::SetRefused`; none can today, since `apply` refuses only a set
   checked against another registry, and `Host::set_sim_registry` builds the
   store from the registry it checks against.
-- **Not covered**: neither `.crpl` seed is pinned in
-  `crates/crcbl-net/fuzz/tests/corpus.rs`, whose tests pin delta seeds and the
-  two replay spool seeds (`replay-spool`, `replay-spool-torn`) only (the version
-  3 seed was checked to decode with one peer tick by a throwaway test, not
-  kept). A recorded `dropped` count is held by a hand-written record
-  (`a_recorded_dropped_count_reaches_the_module`), not by a live peer
-  overrunning `MAX_CLIENT_INPUTS_PER_TICK`. The roster's `Left` from an expired
-  grace period and from `end_unauthenticated_sessions`, and `Ended` from
-  `Host::shutdown`, are recorded by the same `PeerLog` calls the tested kick and
-  loss use, and no test drives them. Of the recorder: a spool that cannot be
-  removed after the file is written, an output that refuses a write mid-file,
-  and the peer track's `u32` count running out are each handled by a path no
-  test drives; the window-close finish is tested by dropping towers' `Game`, not
-  through the engine's loop.
+- **Not covered**: the `.crpl` seeds are pinned in
+  `crates/crcbl-net/fuzz/tests/corpus.rs`
+  (`named_replay_file_seeds_reach_their_intended_paths`, with the spool seeds
+  beside them) since 2026-10-06. A recorded `dropped` count is held by a
+  hand-written record (`a_recorded_dropped_count_reaches_the_module`), not by a
+  live peer overrunning `MAX_CLIENT_INPUTS_PER_TICK`. The roster's `Left` from
+  an expired grace period and from `end_unauthenticated_sessions`, and `Ended`
+  from `Host::shutdown`, are recorded by the same `PeerLog` calls the tested
+  kick and loss use, and no test drives them. Of the recorder: a spool that
+  cannot be removed after the file is written, an output that refuses a write
+  mid-file, and the peer track's `u32` count running out are each handled by a
+  path no test drives; the window-close finish is tested by dropping towers'
+  `Game`, not through the engine's loop.
 
 ### Replay: nothing records, and the viewing and spectating consumers are unbuilt (2026-09-24)
 
@@ -14978,13 +14979,15 @@ auto-record as one config flag. Also unbuilt: the time-scrub debugger (timeline,
 any entity's state at a tick, two ticks diffed side by side), the replay browser
 screen with a marker seek bar and 0.25×–8× speed and frame-step, and live
 spectating as a delayed relay of the recording stream, where the broadcast delay
-is read-cursor lag. Spectating rides the dedicated server (P13);
-`crcbl_server::Host` is multi-session since 2026-09-23, so a spectator
-connection would be one more peer rather than a new host. The scrub debugger
-rides topic 7's debug tools (P10). Testing still owes seek == linear playback at
-the same tick, `verify` catching seeded nondeterminism at the right tick, and a
-crash mid-write leaving a playable file (torn tail tolerated). Verified: the
-consumer grep; the UI and relay absence is inferred from no matching symbols.
+is read-cursor lag. A POV that follows a player has its key: since 2026-10-06
+each recorded join names its `PlayerId` (the `PlayerId` entry under Auth).
+Spectating rides the dedicated server (P13); `crcbl_server::Host` is
+multi-session since 2026-09-23, so a spectator connection would be one more peer
+rather than a new host. The scrub debugger rides topic 7's debug tools (P10).
+Testing still owes seek == linear playback at the same tick, `verify` catching
+seeded nondeterminism at the right tick, and a crash mid-write leaving a
+playable file (torn tail tolerated). Verified: the consumer grep; the UI and
+relay absence is inferred from no matching symbols.
 
 ### Replay: the rules the unbuilt recording must keep
 
@@ -17191,17 +17194,62 @@ all name it. The decisions, each recorded so it is not re-argued:
   a kicked banned player is told `SessionEndReason::KICKED` ("the host removed
   this player") and reads the ban's reason only on their next join — a `BANNED`
   end reason would need a new `SessionEndReason` code.
-- **Replay and spectator POV attribution: unblocked, not built.** A recording's
-  roster (`RosterChange::Joined(PeerId)`) carries no `PlayerId`, and neither do
-  `ClientInputs` or `PeerInputs::iter`, deliberately: a module that read the id
-  live would read nothing on a re-simulation until the recording carries it, so
-  it goes into the record and the module's view in the same change, with a
-  recording-format bump. Today game code reaches a peer's player outside the
-  tick, through `Host::player`. **A draft was started and stopped
-  (2026-10-05):** branch `feat/replay-players` (commit `53eecce2`, on origin)
-  has recordings and `ClientInputs` partly carrying the player and the
-  re-simulation tests partly updated. It has not compiled through the check
-  chain; read it as a starting point, not as work to merge.
+- **Replay attribution: built (2026-10-06); spectator POV: not built.** A
+  recording names each peer's player and the module reads it the same live and
+  re-simulated. The decisions:
+  - **The player rides the join, not each input.** A peer's player cannot change
+    within its session (a re-hello or resume naming another is refused), so the
+    roster's join is the one place it is said; a field on every frame would
+    repeat it every tick. `RosterChangeKind::Joined(Option<PlayerId>)` in
+    `crcbl_store::replay` and
+    `crcbl_server::RosterChange::Joined(PeerId, Option<PlayerId>)`; a live host
+    always records `Some`.
+  - **Format version 4, a roster kind of its own**: a join that names its player
+    is kind 6 with the 16 bytes after the peer, and kind 1 keeps version 3's
+    layout and now means "player not recorded". Chosen over widening kind 1 so a
+    version 3 track is a version 4 track unchanged, and the migration step is
+    the identity.
+  - **Old recordings migrate, the id unknown — not refused.** A replay is
+    migrated on read by a chain of pure steps over its input section
+    (`crcbl_store::replay`'s `migrate` module: `STEPS`, `OLDEST_MIGRATABLE`, the
+    build-time assertion), following the save container's chain; the header and
+    entries are laid out alike in every version, so only the section is
+    rewritten. This replaced the reader's per-version branches for versions 1
+    and 2 as well, so one reader reads every file. Consequences, each pinned by
+    a test: a version 2 header over a section-less body is now refused as
+    `Truncated("state hashes")` rather than `"sets"` (the migration's empty
+    track count is the only count there); and a version 3 header over a kind 6
+    join, which no version 3 writer wrote, reads as the same version 4 file
+    would rather than being refused (a step adds no trust; the current reader's
+    rules still hold).
+  - **The spool is version 2** (`spool::SPOOL_FORMAT_VERSION`) though its
+    records are laid out as before, so an older build refuses a spool holding
+    named joins by its version instead of stopping at the first join; a version
+    1 spool recovers through the same reader.
+  - **The module's view**: `crcbl_ecs::ClientInputs::player()`, `None` for input
+    with no session, a server no hello reached, or a migrated recording's join;
+    `ClientInputs::with_player` names one, `new` names none. `PeerInputs::iter`
+    hands each peer's; the single-client `Server` hands its session's.
+    `Host::step` takes the players beside the frames and asserts the two are as
+    long.
+  - **A re-simulation refuses one player on two seats**
+    (`RosterFault::PlayerAdmitted`), as a live host holds one session a player;
+    joins naming nobody are never compared.
+  - **POV: nothing to pick by yet.** No replay tooling has a POV or follow
+    concept — the container has no POV track, recordings carry no output entries
+    for a viewer to play, and no spectator connection exists (_Replay: nothing
+    records, and the viewing and spectating consumers are unbuilt_). When one is
+    built it should follow a `PlayerId` read from the peer track's joins (a
+    peer's number is per session, the player is what a caster names), and a
+    migrated recording's joins name nobody, so a POV over one falls back to the
+    peer.
+  - **Not verified:** no shipped game module reads `ClientInputs::player` yet,
+    so towers' and the sandbox's re-simulation pins did not move and do not
+    exercise it; the players reach a module's hash only in `host::frames_tests`
+    (its `Seen` digest) and through a file only in `crcbl::replay_record`'s
+    `a_resimulation_from_the_file_names_the_players_the_live_module_read`, both
+    over in-process transports. Towers' `quit` test checks that a UDP-served
+    recording's two joins each name a player, not which.
 - **The server-side stash keyed by `PlayerId` (`34-inventory.md`): unblocked,
   not built.** The key exists; the per-server store and its transactions do not.
 - **Per-player voice mute (`32-voip.md`): unblocked, not built.** No voice
