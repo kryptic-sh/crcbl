@@ -274,22 +274,6 @@ crcbl_console::concommand! {
     }
 }
 
-/// The settings file's `save`, under the name Source gives it,
-/// `writeconfig` — so that `save` is the game's.
-///
-/// **Listed under a name its declaration does not carry**: the command is
-/// declared as `crate::settings::save`, and `concommand!` names a command after
-/// its ident. Renaming that ident is the clean form; it waits on the settings
-/// module's open work landing (`docs/backlog.md`, _One save path_), and until
-/// then this is the same help and the same body under the console name.
-#[allow(non_upper_case_globals, reason = "the ident is the console name")]
-pub static writeconfig: crcbl_console::ConCommand = {
-    fn run(cx: &mut Context<'_>, args: &[&str]) -> Result<(), Fault> {
-        crate::settings::save.run(cx, args)
-    }
-    crcbl_console::ConCommand::new("writeconfig", crate::settings::save.help(), run)
-};
-
 crcbl_console::concommand! {
     /// Print the last frame's rate and wall time.
     pub fn fps(cx, _args) {

@@ -441,9 +441,8 @@ pub mod ui_scale;
 /// what the source actually declares.
 ///
 /// **`save` is the game's save** ([`debug_console::save`], the one save path in
-/// [`save`]) and the settings file is written by `writeconfig`, Source's name
-/// for it — [`debug_console::writeconfig`] says why it is listed under a name
-/// its declaration does not carry.
+/// [`save`]) and the settings file is written by [`settings::writeconfig`],
+/// Source's name for it.
 ///
 /// **The bindings are a slice rather than a `table!` entry**, because they are
 /// generated one per catalogue key by a macro in `settings` and
@@ -460,9 +459,9 @@ pub fn console_table() -> crcbl_console::Table {
         &debug_console::quit,
         &debug_console::save,
         &debug_console::unbind,
-        &debug_console::writeconfig,
         &debug_view::debug_view,
         &settings::dump,
+        &settings::writeconfig,
         &settings::presets::quality,
     ];
     crcbl_console::Table::new(VARS, settings::console_bindings(), COMMANDS)

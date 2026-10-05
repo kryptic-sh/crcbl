@@ -145,7 +145,9 @@ pub mod presets;
 mod renderer;
 mod stage;
 
-pub use console::{ConsoleHost, SharedSettings, catalogue_value, console_bindings, dump, save};
+pub use console::{
+    ConsoleHost, SharedSettings, catalogue_value, console_bindings, dump, writeconfig,
+};
 pub use engine_audio::{AUDIO_NAMESPACE, audio_gains, set_audio_gain};
 pub use engine_display::{
     DISPLAY_MODE_KEY, DISPLAY_MODE_NAMES, PRESENT_MODE_KEY, PRESENT_MODE_NAMES, display_mode,

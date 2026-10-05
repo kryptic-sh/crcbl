@@ -21,7 +21,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   path), and the command that wrote `settings.toml` takes Source's name for it,
   `writeconfig`, with the same help, the same refusal on a run that reads no
   settings file and the same write. An `autoexec.cfg` or `--exec` line that
-  wrote settings with `save` must say `writeconfig`.
+  wrote settings with `save` must say `writeconfig`, and the command's Rust item
+  `crcbl::settings::save` is `crcbl::settings::writeconfig`.
 
 - **`crcbl_store::save::SaveWriter::write` answers the file's length**:
   `Result<usize, StorageError>` instead of `Result<(), StorageError>`, the bytes

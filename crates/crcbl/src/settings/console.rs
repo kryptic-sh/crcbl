@@ -1,5 +1,5 @@
 //! The console's variables: the stack a run shares, [`ConsoleHost`], the
-//! `save` and `dump` commands, and one [`Binding`] per catalogue key.
+//! `writeconfig` and `dump` commands, and one [`Binding`] per catalogue key.
 
 use std::any::Any;
 use std::cell::{Ref, RefCell, RefMut};
@@ -140,7 +140,7 @@ impl ConsoleHost {
         }
     }
 
-    /// This host, with `save` writing the platform settings file for
+    /// This host, with `writeconfig` writing the platform settings file for
     /// `app_name`.
     ///
     /// Left unset by [`new`](Self::new) rather than defaulted to the game's
@@ -161,7 +161,7 @@ impl ConsoleHost {
         self.stack.stack()
     }
 
-    /// The settings, to write — what `save` and `dump` reach.
+    /// The settings, to write — what `writeconfig` and `dump` reach.
     #[must_use]
     pub fn stack_mut(&mut self) -> RefMut<'_, SettingsStack> {
         self.stack.stack_mut()
@@ -187,7 +187,10 @@ impl ConsoleHost {
 
 crcbl_console::concommand! {
     /// Write the settings file. Nothing a console sets is saved until this runs.
-    pub fn save(cx, _args) {
+    ///
+    /// Source's name for it, so that `save` is the game's
+    /// ([`crate::debug_console::save`]).
+    pub fn writeconfig(cx, _args) {
         let saved = {
             let host = cx
                 .host_mut()

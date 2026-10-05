@@ -1009,9 +1009,8 @@ limits rather than fixed:
 - **`save` is the game's and `writeconfig` writes the settings file**
   (2026-10-05). `save [SLOT]` hands a `crcbl::save::SaveRequest` to the game's
   one save path (`HostedGame::save`) and prints where it landed or why not; the
-  settings command took Source's name so the shorter word could be the game's.
-  It is `crate::settings::save` listed under that name, until its ident is
-  renamed (`docs/backlog.md`, _One save path: `crcbl::save`_).
+  settings command took Source's name so the shorter word could be the game's,
+  and is declared under it (`crcbl::settings::writeconfig`).
 - **`writeconfig` writes nothing in a headless run, and says so; the browser
   path is unexercised.** `ConsoleHost::saving_as` is set for every arm but
   `SettingsSource::None`, and `writeconfig` goes through

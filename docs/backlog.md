@@ -15901,12 +15901,8 @@ routes through. The decisions, so they are not re-argued:
   tick than the one it came due on: shard writes the state its `[HUD]` line
   reports on the same tick, and the browser gate compares the two.
 - **The settings file's console command is `writeconfig` (Source's name), so
-  `save` is the game's.** It is the same `crate::settings::save` listed under
-  another name by `crcbl::debug_console::writeconfig`, because `concommand!`
-  names a command after its ident and `crates/crcbl/src/settings*` belonged to
-  another branch's open work (apply-on-confirm) when this landed. **Owed:**
-  rename that ident to `writeconfig` in `crates/crcbl/src/settings/console.rs`,
-  drop the wrapper, and reword that file's docs, which still say `save`.
+  `save` is the game's.** The command is declared under that name,
+  `crcbl::settings::writeconfig`.
 - **A slot is a bare name and a file beside the game's own** —
   `Slot::file_name`, `towers-run.crb` → `towers-run-slot2.crb` — held to the
   console `config` rule (`console_config::is_bare_name`) because it is typed and
