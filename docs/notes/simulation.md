@@ -549,7 +549,8 @@ Record; topic 14 designed `crcbl-store`'s persistence: save games as snapshots,
 layered TOML settings, per-player profiles, all through an async storage seam so
 the browser is first-class. Built from it: `StorageSource` with native storage,
 `write_atomic` and `OpfsStorage` in a browser; the save container
-(`SaveWriter`/`SaveReader`, magic `CRCBLSVE`, sector entries and a SHA-256) with
+(`SaveWriter`/`SaveReader`, magic `CRCBLSVE`, sector entries and a SHA-256), its
+migration chain and its engine-version and scene-reference header fields, with
 `AutosaveRing`; `record::Record`, the one-number profile every high score uses;
 `SettingsStack` and its layers; `crcbl::settings`, with hot-apply
 (`crcbl::settings::apply`, `Applied`) and the catalogue in code
@@ -558,10 +559,10 @@ the browser is first-class. Built from it: `StorageSource` with native storage,
 `apps/shard`, whose save loads natively and in a browser.
 
 What it left unbuilt is in `docs/backlog.md` under _Persistence (from the
-deleted 14-persistence plan, 2026-09-24)_: the migration seam, the header
-fields, saves over `SnapshotWriter`, the game-defaults and CLI layers, profiles,
-`crcbl save`, `Command::Save`, apply-on-confirm, browser fallbacks and quota,
-accessibility settings, and the test matrix.
+deleted 14-persistence plan, 2026-09-24)_: the header's per-system versions and
+thumbnail, saves over `SnapshotWriter`, the game-defaults and CLI layers,
+profiles, `crcbl save`, `Command::Save`, apply-on-confirm, browser fallbacks and
+quota, accessibility settings, and the test matrix.
 
 Code cites the plan as "topic 14". Those resolve here:
 
@@ -569,7 +570,7 @@ Code cites the plan as "topic 14". Those resolve here:
 | ---------------------------------------- | ---------------------------------------------------------------------------------- |
 | "Save games = snapshots", no second path | **A save is a snapshot**                                                           |
 | The 2026-07-27 correction; save shape    | **A save follows the galaxy wire model**                                           |
-| The migration seam, per-system versions  | **Saves are versioned, with a migration seam** (unbuilt)                           |
+| The migration seam, per-system versions  | **Saves are versioned, with a migration seam**                                     |
 | "Atomic writes always"                   | **Atomic writes are a native guarantee**                                           |
 | The layers, "four layer kinds"           | **Settings are four layers storing only the player's diffs**                       |
 | Catalogue rule 2, the spelling           | **Catalogue rule 2** and **Keys are bare snake_case nouns**                        |
@@ -603,12 +604,21 @@ The rules, each with its _why_:
   hash, tick, playtime), the sector set it covers, per-sector snapshots from the
   replication encoder, on-rails elements, and per-system extension blocks. A
   single-sector game writes exactly the simple format, so the container was
-  right from P2 instead of restructured after saves shipped. The sector set is
-  built; the rest of the header, on-rails elements and extension blocks are not.
+  right from P2 instead of restructured after saves shipped. The sector set and
+  the header's engine version and scene reference are built; per-system
+  versions, the thumbnail, on-rails elements and extension blocks are not.
 - **Saves are versioned, with a migration seam.** The header carries the format
-  and per-system versions, serde defaults absorb additive change, and
-  `fn migrate(old_ver, bytes)` was to exist from day one, empty. It does not
-  exist, though `SAVE_FORMAT_VERSION` has already been bumped once.
+  version and the engine version that wrote it. A file at an older container
+  version is migrated on open by pure steps over its bytes, one version at a
+  time, and then read by the one reader for the current layout, so no reader for
+  an old layout is kept alive. The checksum is verified against the bytes as
+  written, before any step, and a step adds no trust. Migration is in memory:
+  the file is rewritten at the current version only when the game next saves,
+  because opening is a read — a read-only source must still open, and a save the
+  game then refuses must not have been rewritten. A newer version, a step that
+  fails, and version 1 (whose checksum no toolchain reproduces) are each refused
+  by name. A game's payload inside a sector has its own version, and migrating
+  it is the game's. Per-system versions are not built.
 - **Atomic writes are a native guarantee.** `write_atomic` writes a `create_new`
   temp file, syncs it and the parent directory, renames and syncs the parent
   again. OPFS has no rename, so `OpfsStorage` prevents torn reads but does not

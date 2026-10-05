@@ -62,10 +62,9 @@
 //!   way a floor does without a byte having to agree with a roll.
 //!
 //! **A payload from an older version reads as no save**, with the reason logged.
-//! There is no migration seam — `docs/backlog.md` owes `crcbl-store` one
-//! (_The migration seam_) — so a bump orphans the saves written before it,
-//! which for a sample with no players is the honest trade and for the engine is
-//! not.
+//! `crcbl-store` migrates an older *container* on open, but the payload is this
+//! game's and has no migration of its own, so a payload bump orphans the saves
+//! written before it — for a sample with no players, the honest trade.
 //!
 //! Nor is the **clock** restored. [`SaveHeader::playtime_secs`] accumulates
 //! across sessions and is read back, but the simulation's own tick counter and
@@ -199,9 +198,9 @@ const PAYLOAD_MAGIC: &[u8; 4] = b"SHRD";
 ///
 /// **1 → 2** added what the character is carrying. **2 → 3** added what they
 /// have learned, which is also what decides the ceiling their health is checked
-/// against. A file from an older version reads as no
-/// save: there is no migration seam anywhere in `crcbl-store` yet, and inventing
-/// one here would be an engine decision taken in a sample.
+/// against. A file from an older version reads as no save: the container's
+/// migration is `crcbl-store`'s, and a payload's would be this sample's, which
+/// has written none.
 const PAYLOAD_VERSION: u16 = 3;
 
 /// The fixed part of the payload: magic, version, centre, health, downs,
@@ -647,10 +646,10 @@ impl Vault {
         let Some(source) = self.source() else {
             return false;
         };
-        let mut writer = SaveWriter::new(SaveHeader {
-            tick: TickId::from_raw(character.tick),
-            playtime_secs: character.playtime_secs,
-        });
+        let mut writer = SaveWriter::new(SaveHeader::new(
+            TickId::from_raw(character.tick),
+            character.playtime_secs,
+        ));
         writer.add_sector(SectorSave {
             sector_id: SectorId::ZERO,
             snapshot_data: encode(character),
@@ -706,6 +705,7 @@ impl crcbl::ui::DebugModule for SaveStats {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crcbl::store::save::SAVE_FORMAT_VERSION;
 
     /// A character that is nothing like a fresh zone's.
     pub(crate) fn walked() -> Character {
@@ -750,15 +750,13 @@ pub(crate) mod tests {
     /// A [`SaveData`] holding `bytes` as this zone's one sector.
     fn saved(bytes: Vec<u8>, playtime_secs: f64, tick: u64) -> SaveData {
         SaveData {
-            header: SaveHeader {
-                tick: TickId::from_raw(tick),
-                playtime_secs,
-            },
+            header: SaveHeader::new(TickId::from_raw(tick), playtime_secs),
             sectors: vec![SectorSave {
                 sector_id: SectorId::ZERO,
                 snapshot_data: bytes,
             }],
             checksum_valid: true,
+            format_version: SAVE_FORMAT_VERSION,
         }
     }
 
@@ -881,8 +879,8 @@ pub(crate) mod tests {
         assert!(decode(&elsewhere).is_none(), "another sector");
     }
 
-    /// **A payload from every version before this one reads as no save.** There
-    /// is no migration seam, so the honest answer to a file this build cannot
+    /// **A payload from every version before this one reads as no save.** The
+    /// payload has no migration, so the honest answer to a file this build cannot
     /// read is a fresh zone and a logged reason — not a field guessed from a
     /// format that had none.
     ///
@@ -1139,6 +1137,37 @@ pub(crate) mod tests {
             Vault::at(dir.clone()).load().is_none(),
             "a corrupted save was read as a character",
         );
+
+        std::fs::remove_dir_all(&dir).expect("the scratch directory is this test's");
+    }
+
+    /// A character saved by the version-2 container, before the engine version
+    /// and the scene reference were in its header: [`walked`] at payload
+    /// version 3, written by [`Vault::store`] when the container was at
+    /// version 2.
+    ///
+    /// Its payload is this game's and so would its migration be: a payload bump
+    /// that cannot read it any more must migrate it or say why it is dropped.
+    const V2_CHARACTER: &[u8] = include_bytes!("../tests/fixtures/character-v2.crb");
+
+    /// **A character saved by an older container still resumes**, exactly as
+    /// it went in: `crcbl-store` migrates the container on open, and the
+    /// payload inside it is untouched.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_character_saved_by_the_version_2_container_still_resumes() {
+        assert_eq!(
+            V2_CHARACTER[8..10],
+            2u16.to_le_bytes(),
+            "the fixture is a version-2 save"
+        );
+        let dir = std::env::temp_dir().join("crcbl-shard-save-v2");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch directory is writable");
+        std::fs::write(dir.join(SAVE_FILE), V2_CHARACTER)
+            .expect("the scratch directory is writable");
+
+        assert_eq!(Vault::at(dir.clone()).load(), Some(walked()));
 
         std::fs::remove_dir_all(&dir).expect("the scratch directory is this test's");
     }

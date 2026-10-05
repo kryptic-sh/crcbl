@@ -4,7 +4,7 @@
 //! The stage's half — that a resumed stage is the same run, tick for tick —
 //! is `crate::game::checkpoint`'s tests, which can reach the stage.
 
-use crcbl::store::save::SaveData;
+use crcbl::store::save::{SAVE_FORMAT_VERSION, SaveData};
 
 use super::payload::{PAYLOAD_VERSION, TOWER_BYTES};
 use super::*;
@@ -118,15 +118,13 @@ fn another_map() -> Map {
 /// clock — what [`decode`] is handed once the container has opened.
 fn saved(payload: Vec<u8>, checkpoint: &Checkpoint) -> SaveData {
     SaveData {
-        header: SaveHeader {
-            tick: TickId::from_raw(checkpoint.ticks),
-            playtime_secs: checkpoint.elapsed,
-        },
+        header: SaveHeader::new(TickId::from_raw(checkpoint.ticks), checkpoint.elapsed),
         sectors: vec![SectorSave {
             sector_id: SectorId::ZERO,
             snapshot_data: payload,
         }],
         checksum_valid: true,
+        format_version: SAVE_FORMAT_VERSION,
     }
 }
 
@@ -195,6 +193,35 @@ fn a_corrupt_save_is_refused_by_its_checksum() {
         matches!(&error, SaveError::Unreadable(_)) && error.to_string().contains("checksum"),
         "{error}",
     );
+}
+
+/// A run saved by the version-2 container, before the engine version and the
+/// scene reference were in its header: [`between_waves`] at payload version
+/// 1, written by this module's `write` when the container was at version 2.
+///
+/// Its payload is this game's and its migration would be too: a payload bump
+/// that cannot read it any more must migrate it or say why it is dropped.
+const V2_RUN: &[u8] = include_bytes!("../../tests/fixtures/run-v2.crb");
+
+/// **A run saved by an older container still resumes**, exactly as it went
+/// in: `crcbl-store` migrates the container on open, and the payload inside it
+/// is untouched.
+#[test]
+fn a_run_saved_by_the_version_2_container_still_resumes() {
+    assert_eq!(
+        V2_RUN[8..10],
+        2u16.to_le_bytes(),
+        "the fixture is a version-2 save"
+    );
+    let dir = scratch();
+    std::fs::write(dir.path().join(PLAYER_FILE), V2_RUN)
+        .expect("the scratch directory is writable");
+    let read = Vault::at(dir.path().to_path_buf(), PLAYER_FILE)
+        .load(&Map::built_in())
+        .expect("a version-2 save resumes")
+        .expect("a save is there");
+    assert_eq!(read, between_waves());
+    assert_eq!(read.elapsed.to_bits(), between_waves().elapsed.to_bits());
 }
 
 /// **A cut-short save is refused, wherever it was cut.** The file cut in half

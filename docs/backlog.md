@@ -15419,33 +15419,73 @@ storing only diffs, catalogue rule 2 and the key spelling, the no-store browser
 case — are in `docs/notes/simulation.md` under _What the deleted 14-persistence
 plan left behind_. What it left unbuilt is below.
 
-### The migration seam (2026-08-27)
+### The save container's migration chain: decisions that bind (2026-10-05)
 
-**Not built.** `crcbl-store`'s `save.rs` has no `migrate` and nothing else in
-the crate does. The seam was specified as existing from day one and empty in
-MVP; it is neither.
+Built: `crcbl-store`'s `save::migrate` module, container format version 3, and
+the version-skew fixtures (`crates/crcbl-store/tests/fixtures/save-v2.crb`,
+`apps/towers/tests/fixtures/run-v2.crb`,
+`apps/shard/tests/fixtures/character-v2.crb`, each written by the version-2
+writer before version 3 existed). What a later change must keep:
 
-**Sharpest evidence that it is wanted:** `SAVE_FORMAT_VERSION` has already been
-bumped once, when the checksum field turned out to be a `DefaultHasher` digest
-rather than the SHA-256 it was documented as. That is precisely the situation a
-migration seam exists for, and there was none.
+- **Steps are pure functions over the body's bytes**, one version to the next,
+  each writing the version it migrates to (`migrate::run` refuses one that does
+  not). Chosen over parsing each old layout into a header and sectors because
+  then only the current reader exists; an old layout is known only to the step
+  that leaves it. Adding a version is a step in `STEPS` and a bump of
+  `SAVE_FORMAT_VERSION`, and a `const` assertion fails the build until they
+  agree.
+- **Migration is in memory only.** `SaveReader` never writes; the file is
+  rewritten at the current version when the game next saves. Opening is a read,
+  a `FetchSource` is read-only, and a save whose payload the game then refuses
+  must not already have been rewritten.
+- **The checksum is verified against the bytes on disk, before any step**, and
+  the migrated body meets the same reader as a fresh one: a step adds no trust.
+- **Version 1 is refused, not migrated** (`FormatError::Unmigratable`): its
+  checksum was a `DefaultHasher` digest no later toolchain reproduces, so a
+  version-1 file cannot be told from a corrupt one.
+- **The engine version is `crcbl-store`'s `CARGO_PKG_VERSION`**
+  (`save::ENGINE_VERSION`), which is the workspace version every engine crate
+  shares. It is a header field the caller hands in — `SaveHeader::new` fills it
+  — rather than one the writer stamps over, so a reader can round-trip a save
+  byte for byte (the fuzz corpus's `save` seed records `0.1.0` and must not
+  change when the workspace version does). `None` means not recorded: every
+  migrated version-2 save.
+- **A game's payload migration stays the game's.** Towers' `TWRS` and shard's
+  payloads each carry their own magic and version and are held to their own
+  invariants by their own `decode`. **Considered and declined: a shared payload
+  seam.** No game has a payload step to register (towers is at its first payload
+  version; shard's older payloads were only ever on development machines), and a
+  shared chain keyed by payload magic would be the container's chain written a
+  second time for no caller. Revisit when a game ships a payload bump with
+  players' saves behind it.
+- **Bytes after the last sector are now refused** (`FormatError::TrailingBytes`)
+  where version 2's reader ignored them. A version-2 file with trailing bytes —
+  which the writer never produced — no longer opens.
 
-**What it blocks:** every future format change breaks old saves silently or
-loudly, with nothing in between.
+### Save header fields: per-system versions, thumbnail, and nobody names a scene (2026-08-27, partly built 2026-10-05)
 
-### Save header fields: engine version, scene ref + hash, per-system versions, thumbnail (2026-08-27)
+**Built 2026-10-05:** the engine version and an optional scene reference (a name
+and a 32-byte content hash), container format version 3. **Still owed:**
 
-**Not built.** The container is magic `CRCBLSVE`, a `format_version`, tick,
-playtime, a sector count, the sector entries, and a real SHA-256 over everything
-before it. `SaveHeader` carries `tick` and `playtime_secs` only.
+- **The thumbnail — deferred by the owner's decision (2026-10-05)**: it needs a
+  GPU capture of the frame at save time, which the save path (a server-side,
+  headless-capable write) has no access to.
+- **Per-system versions**: the payload inside each sector carries its own (the
+  games' `PAYLOAD_VERSION`s), and the header does not list them.
+- **Nothing writes a scene reference.** Towers and shard pass `None` through
+  `SaveHeader::new`: neither loads a `.scn/` scene for its play field, and the
+  engine has no content hash of a scene to put in it — `crcbl-scene` hashes
+  component state for determinism, not a scene's files. Towers keeps its map's
+  fingerprint inside its own payload. Wiring a scene's hash is owed when a game
+  saves over a scene it loaded; until then, loading against the wrong scene is
+  detectable only by a game's own payload.
+- **Nothing reads the engine version back** to warn or refuse. A save from
+  another engine version of the same container format opens as any other.
 
 **Also absent from the format:** on-rails elements (orbital parameters for
 anything not live-simulated) and per-system extension blocks, both named by the
 2026-07-27 galaxy-shape correction. The sector-set half of that correction _did_
 ship and is the shape `apps/shard` writes.
-
-**What it blocks:** loading a save against the wrong scene, or the wrong engine,
-is currently undetectable.
 
 ### The "no second serialization path" claim is not yet true (2026-08-27)
 
@@ -15553,10 +15593,14 @@ the OPFS checks in `web/tools/browser-e2e.mjs`:
   half — any world loaded from a save and compared through `hash_world` — waits
   on saves going through `SnapshotWriter` (_The "no second serialization path"
   claim is not yet true_).
-- **Version-skew fixtures: not built.** No save from an older
-  `SAVE_FORMAT_VERSION` is checked in; shard's
-  `a_payload_from_an_older_version_reads_as_no_save` covers its own payload
-  only. It waits on _The migration seam_.
+- **Version-skew fixtures: built for the container (2026-10-05).** A version-2
+  save of each kind is checked in and read through the migration: the engine's
+  (`crcbl_store::save::migrate`'s tests, every field and sector, and byte for
+  byte against today's writer), towers'
+  (`a_run_saved_by_the_version_2_container_still_resumes`) and shard's
+  (`a_character_saved_by_the_version_2_container_still_resumes`), and the fuzz
+  corpus keeps a `save-v2` seed. Payload skew is each game's: shard's
+  `a_payload_from_an_older_version_reads_as_no_save` covers its own.
 - **Kill-during-write: not built.** `write_atomic`'s tests cover the temp file
   and a failed rename (`atomic_write_removes_temp_file_when_rename_fails`), not
   a process killed mid-write leaving the previous save intact. A child process
@@ -17142,11 +17186,11 @@ frame, and the page shows it for `NOTICE_FOR` (in `crate::app`); tested by
   `SaveReader`, the container under the save, is fuzzed now: the
   `crates/crcbl-net/fuzz` target calls `crcbl_net_fuzz::open_save`, and
   `named_save_seeds_reach_their_intended_paths` pins the `save`,
-  `save-truncated` and `save-bit-flipped` seeds. Towers' payloads were left out
-  because **towers' lib cannot be taken by a fuzz crate cheaply**: its one
-  dependency is the `crcbl` facade (the samples' one-engine-dependency rule in
-  `apps/towers/Cargo.toml`), and the facade brings the renderer, the shell,
-  audio and every GPU backend.
+  `save-truncated`, `save-bit-flipped` and `save-v2` seeds. Towers' payloads
+  were left out because **towers' lib cannot be taken by a fuzz crate cheaply**:
+  its one dependency is the `crcbl` facade (the samples' one-engine-dependency
+  rule in `apps/towers/Cargo.toml`), and the facade brings the renderer, the
+  shell, audio and every GPU backend.
   `cargo tree -p towers -e normal,build --target x86_64-unknown-linux-gnu` lists
   110 packages, `crcbl-render`, `crcbl-vk`/`ash`, `crcbl-shell` and
   `crcbl-audio`/`cpal`/`alsa` among them, where
@@ -17463,8 +17507,10 @@ shown red by a mutation of the rule it guards.
 - **A close mid-wave still loses the wave under way**, by decision (below): the
   run since the last wave's end or the last `S` is gone, because a save cannot
   hold a wave releasing.
-- **No migration seam.** A `PAYLOAD_VERSION` bump orphans every save before it,
-  refused by name — _The migration seam_ is the engine's to build.
+- **No payload migration.** `crcbl-store` migrates the container on open, but a
+  `PAYLOAD_VERSION` bump still orphans every save before it, refused by name:
+  payload migration is towers' own, and no step is written (_The save
+  container's migration chain_ records why there is no shared seam).
 - **No in-game load.** A running native game resumes only through the lobby or
   `--resume`; a pause-menu LOAD row would need the lobby's refusal lines on the
   pause panel.
@@ -18362,11 +18408,13 @@ left out:
   twin of that rule was `save::Vault`'s, and moved into `crcbl-store` as
   `save::SaveBacking` when `apps/towers` became its second consumer
   (2026-10-03); `Vault` is a wrapper over it.
-- **No migration seam, and it now has a casualty.** `crcbl-store` is still owed
-  a `fn migrate(old_ver, bytes)` (_The migration seam_). Shard's version bumps
-  to 2 and then 3 orphaned every save written before them: they read as no save,
-  with a logged reason, and the zone opens fresh. Acceptable for a sample with
-  no players; the entry that must close is the persistence one, not this one.
+- **No payload migration.** `crcbl-store` migrates the container on open since
+  2026-10-05, and a container-version-2 save resumes
+  (`a_character_saved_by_the_version_2_container_still_resumes`). The payload's
+  bumps to 2 and then 3 orphaned every save written before them: they read as no
+  save, with a logged reason, and the zone opens fresh. Acceptable for a sample
+  with no players; payload migration is shard's own (_The save container's
+  migration chain_ records why there is no shared seam).
 - **Decided 2026-10-03, for the long term: a close saves the character.**
   `Shard::save_on_close`, through `crcbl::engine::HostedGame::exiting`, on the
   reasons towers acts on: a window closed or gone, a page's `pagehide`, or the

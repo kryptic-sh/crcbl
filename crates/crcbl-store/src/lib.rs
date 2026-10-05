@@ -107,6 +107,11 @@ pub enum StorageError {
     #[error(transparent)]
     ReplaySpool(#[from] replay::SpoolError),
 
+    /// A save refused by the container's writer or reader, named so a caller
+    /// can tell a save from a newer engine from a damaged one.
+    #[error(transparent)]
+    Save(#[from] save::FormatError),
+
     /// A generic application-level error.
     #[error("{0}")]
     Other(String),

@@ -61,6 +61,10 @@ crates/crcbl-ui/tests/fixtures/taffy/** text eol=lf
 # checked invariant does not rely on a heuristic, for the reason the comment
 # above this block records.
 *.dag  binary
+# `*.crb`: a save in `crcbl-store`'s container. The checked-in ones are
+# version-skew fixtures whose bytes, SHA-256 included, are read back by the
+# migration tests, so they are this block's case too.
+*.crb  binary
 
 # Git LFS is deliberately NOT enabled yet. Everything binary through P8 is small
 # (golden images are a few KB and get re-blessed often, which LFS handles worse

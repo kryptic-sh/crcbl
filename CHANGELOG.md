@@ -20,6 +20,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   times). A struct literal must name it — `None` for a system that was not
   timed.
 
+- **`crcbl_store::save::SaveHeader` gained `engine_version` and `scene`, and
+  `SaveData` gained `format_version`** (see Added: saves record the engine and
+  the scene, and older saves migrate). A struct literal must name them, or build
+  the header with the new `SaveHeader::new(tick, playtime_secs)`, which records
+  this build's engine version and no scene. Saves are container format version
+  3: a build from before this change refuses one as an unsupported version, so a
+  save carried back to an older build no longer opens there. This build still
+  opens version 2. `crcbl_store::StorageError` gained `Save`, which is
+  `#[non_exhaustive]` already.
+
 - **`crcbl_ui::tree::TextInputOptions` gained `keep_caret`** (see Changed: an
   engaged text input starts with its text selected). A struct literal must name
   it — `false` takes the new behaviour — or end in
@@ -667,6 +677,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   unchanged by them. The sandbox times its world on the real clock and its F3
   panel gains a "systems" section: a row per system, in schedule order, reading
   `last ms, avg mean ms`.
+
+- **Saves record the engine and the scene, and older saves migrate.** The save
+  container's header now carries the engine version that wrote it
+  (`crcbl_store::save::ENGINE_VERSION`, the workspace's package version) and an
+  optional `SceneRef`, a scene name and a SHA-256 of its content, so a save
+  loaded by another engine or against another scene can be told apart. A save at
+  an older container version is migrated on open, one version at a time, by pure
+  steps registered in `crcbl-store`, and reads as a current one;
+  `SaveData::format_version` says which version it was written at. Migration is
+  in memory only: the file is rewritten at the current version the next time the
+  game saves. A save from a newer engine is refused as `FormatError::Newer`, a
+  step that cannot migrate its input as `FormatError::Migration`, and version 1,
+  whose checksum no toolchain reproduces, as `FormatError::Unmigratable`.
+  Towers' and shard's saves from before this change still resume.
 
 - **`crcbl edit <DIR> --serve [PORT]` serves a scene to clients of the edit
   protocol.** The CLI keeps the scene open through the editor's document, with
@@ -5663,6 +5687,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **The save container refuses its header and sectors by name.**
+  `crcbl_store::save::FormatError` names every refusal — too short, bad magic, a
+  version it cannot read, a field cut short, a count past the file, a header
+  text too long, empty or not UTF-8 — where each was a `StorageError::Other`
+  string, and the reader now also refuses bytes after the last sector rather
+  than ignoring them. The writer refuses a header the reader would refuse or
+  read back differently: an empty engine version, or a scene name that is empty
+  or longer than `SCENE_NAME_MAX`.
 
 - **An engaged text input starts with its text selected, unless a pointer
   engaged it.** Accept on a focused `crcbl_ui::tree::Ui::text_input`, and

@@ -100,37 +100,46 @@ fn named_replay_spool_seeds_reach_their_intended_paths() {
     );
 }
 
-/// The save seeds reach the container reader's three ends: a whole save opens
-/// with every field, the same save a byte short is refused by both reads as cut
-/// off inside its last sector's data, and the same save with one bit of that
-/// data flipped is refused by the checked read and salvaged, flagged, by the
-/// other. They go through `crcbl_net_fuzz::open_save`, the call the fuzz target
-/// makes.
+/// The save seeds reach the container reader's four ends: a whole save opens
+/// with every field, its engine version and scene reference included; the same
+/// save a byte short is refused by both reads as cut off inside its last
+/// sector's data; the same save with one bit of that data flipped is refused by
+/// the checked read and salvaged, flagged, by the other; and a save at the
+/// previous format version opens through the migration, so the fuzzer reaches
+/// the step as well as the reader. They go through `crcbl_net_fuzz::open_save`,
+/// the call the fuzz target makes.
 #[test]
 fn named_save_seeds_reach_their_intended_paths() {
     use crcbl_net::types::SectorId;
     use crcbl_net_fuzz::open_save;
-    use crcbl_store::save::{SaveData, SaveWriter};
+    use crcbl_store::save::{SAVE_FORMAT_VERSION, SaveData, SaveWriter, SceneRef};
     use crcbl_store::{MemoryStorage, StorageSource};
 
     let seed = include_bytes!("../corpus/decoder/save");
     let whole = open_save(seed);
     let read = whole.checked.expect("the whole save opens").into_data();
     assert!(read.checksum_valid);
+    assert_eq!(read.format_version, SAVE_FORMAT_VERSION);
     assert_eq!(read.header.tick.get(), 42);
     assert_eq!(read.header.playtime_secs.to_bits(), 120.5_f64.to_bits());
+    assert_eq!(read.header.engine_version.as_deref(), Some("0.1.0"));
+    assert_eq!(
+        read.header.scene,
+        Some(SceneRef {
+            name: "scenes/arena.scn".to_owned(),
+            content_hash: std::array::from_fn(|i| i as u8 + 1),
+        })
+    );
     let sectors: Vec<(SectorId, &[u8])> = read
         .sectors
         .iter()
         .map(|sector| (sector.sector_id, sector.snapshot_data.as_slice()))
         .collect();
-    assert_eq!(
-        sectors,
-        [
-            (SectorId::ZERO, &[1, 2, 3, 4][..]),
-            (SectorId { x: 1, y: -2, z: 3 }, &[0xAA, 0xBB][..]),
-        ]
-    );
+    let sectors_of_seed = [
+        (SectorId::ZERO, &[1, 2, 3, 4][..]),
+        (SectorId { x: 1, y: -2, z: 3 }, &[0xAA, 0xBB][..]),
+    ];
+    assert_eq!(sectors, sectors_of_seed);
     assert!(
         whole
             .salvaged
@@ -180,6 +189,31 @@ fn named_save_seeds_reach_their_intended_paths() {
         .into_data();
     assert!(!salvaged.checksum_valid);
     assert_eq!(salvaged.sectors[1].snapshot_data, [0xAA, 0xBA]);
+
+    // The previous version's seed: the same two sectors with neither an engine
+    // version nor a scene, which that version's header did not have.
+    let old = include_bytes!("../corpus/decoder/save-v2");
+    assert_eq!(
+        old[8..10],
+        2u16.to_le_bytes(),
+        "the seed is a version-2 save"
+    );
+    let migrated = open_save(old)
+        .checked
+        .expect("a version-2 save opens through the migration")
+        .into_data();
+    assert_eq!(migrated.format_version, 2);
+    assert!(migrated.checksum_valid);
+    assert_eq!(migrated.header.tick.get(), 42);
+    assert_eq!(migrated.header.playtime_secs.to_bits(), 120.5_f64.to_bits());
+    assert_eq!(migrated.header.engine_version, None);
+    assert_eq!(migrated.header.scene, None);
+    let old_sectors: Vec<(SectorId, &[u8])> = migrated
+        .sectors
+        .iter()
+        .map(|sector| (sector.sector_id, sector.snapshot_data.as_slice()))
+        .collect();
+    assert_eq!(old_sectors, sectors_of_seed);
 }
 
 /// The edit seeds reach each message's decoder, one per message an edit

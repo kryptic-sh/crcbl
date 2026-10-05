@@ -110,8 +110,9 @@
 //! off the path, dead or held by no tower's hold, a bolt or burst no tower
 //! fires, a point off the field, or a byte too many or too few. Every count
 //! is held to its bound and to the bytes left before anything is reserved for
-//! it. There is no migration seam — `docs/backlog.md` owes `crcbl-store` one
-//! — so a version bump orphans older saves, which are refused by name.
+//! it. `crcbl-store` migrates an older *container* on open, but the payload
+//! is this game's and has no migration of its own, so a payload version bump
+//! orphans older saves, which are refused by name.
 
 use std::path::Path;
 
@@ -259,10 +260,10 @@ fn write(
     path: &Path,
     checkpoint: &Checkpoint,
 ) -> Result<(), SaveError> {
-    let mut writer = SaveWriter::new(SaveHeader {
-        tick: TickId::from_raw(checkpoint.ticks),
-        playtime_secs: checkpoint.elapsed,
-    });
+    let mut writer = SaveWriter::new(SaveHeader::new(
+        TickId::from_raw(checkpoint.ticks),
+        checkpoint.elapsed,
+    ));
     writer.add_sector(SectorSave {
         sector_id: SectorId::ZERO,
         snapshot_data: encode(checkpoint),
