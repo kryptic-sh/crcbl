@@ -45,8 +45,10 @@
 //!   tick          u64 little-endian
 //!   change_count  u32 little-endian
 //!   RosterEntry[change_count]:
-//!     kind        u8: 1 joined, 2 lost, 3 resumed, 4 left, 5 ended
+//!     kind        u8: 1 joined, 2 lost, 3 resumed, 4 left, 5 ended,
+//!                 6 joined as a player (format version 4 on)
 //!     peer        u64 little-endian
+//!     player      16 bytes, the `PlayerId` (kind 6 only)
 //!   peer_count    u32 little-endian
 //!   PeerFramesEntry[peer_count]:
 //!     peer        u64 little-endian
@@ -74,6 +76,9 @@
 //! each with the tick its client stamped on it, as the module read them after
 //! the host's own checks and its per-tick cap, with the count that cap
 //! refused. A peer in the roster with no entry for a tick was handed nothing.
+//! From format version 4 a join names the player its hello did, so a
+//! re-simulation hands the module each peer's player as the live host did;
+//! a join of kind 1 names nobody, which is every join of an older file.
 //! Entries are one a tick in tick order, a peer has at most one in a tick, and
 //! its frames are no more than
 //! [`MAX_CLIENT_INPUTS_PER_TICK`](crcbl_net::MAX_CLIENT_INPUTS_PER_TICK), each
@@ -85,12 +90,21 @@
 //! Both directions refuse a section that breaks a rule, by name
 //! ([`InputSectionError`]).
 //!
-//! A version 1 file has no section and reads as one with no sets and no
-//! hashes, so it plays back as it always did; a version 2 file's section ends
-//! after its hashes and reads with no peer track. [`ReplayWriter`] writes
-//! version 3, holding everything until it writes; so does [`ReplayStream`],
-//! which writes a file with no entries while a session runs, appending every
-//! entry to a spool as it comes rather than holding it — and
+//! An older file is **migrated on read**, one version at a time, by the pure
+//! steps in the `migrate` module, and then read as a current one;
+//! [`FileTransport::format_version`] says which version it was written at. The
+//! header and the entries are laid out alike in every version, so a step
+//! rewrites only the input section: a version 1 file gains an empty one, a
+//! version 2 section an empty peer track, and a version 3 track is a version 4
+//! track whose joins all name nobody ([`RosterChangeKind::Joined`]`(None)`) —
+//! kind 1's layout is unchanged, and a join that names its player took kind 6
+//! rather than changing it. A re-simulation hands a peer whose join names
+//! nobody to the module with no player, which is what a module of that file's
+//! era read. Migration happens in memory only, and a file from a newer build,
+//! or one claiming version 0, is refused by its version. [`ReplayWriter`]
+//! writes version 4, holding everything until it writes; so does
+//! [`ReplayStream`], which writes a file with no entries while a session runs,
+//! appending every entry to a spool as it comes rather than holding it — and
 //! [`recover_spool`], which writes the same file from a spool whose session
 //! never finished, keeping every whole record ([`spool`]).
 //!
@@ -106,6 +120,7 @@ use crcbl_net::transport::{Message, MessageKind, Transport, TransportError};
 use crate::{StorageError, StorageSource};
 
 mod input;
+mod migrate;
 pub mod spool;
 mod stream;
 
@@ -124,18 +139,10 @@ pub const REPLAY_MAGIC: &[u8; 8] = b"CRBLREPL";
 
 /// Current replay format version: the one [`ReplayWriter`] writes.
 ///
-/// Version 2 added the input section and version 3 its peer track; versions 1
-/// and 2, without them, still read.
-pub const REPLAY_FORMAT_VERSION: u16 = 3;
-
-/// The oldest format version [`FileTransport`] reads.
-const OLDEST_READABLE_VERSION: u16 = 1;
-
-/// The first format version with an input section.
-const INPUT_SECTION_VERSION: u16 = 2;
-
-/// The first format version whose input section has a peer track.
-const PEER_TRACK_VERSION: u16 = 3;
+/// Version 2 added the input section, version 3 its peer track and version 4
+/// the player each join names; versions 1 to 3, without them, are migrated on
+/// read, a step for each in the `migrate` module.
+pub const REPLAY_FORMAT_VERSION: u16 = 4;
 
 /// The header's size, which is the smallest a file of any version can be: a
 /// version 1 file with no entries. A later version adds at least its input
@@ -317,11 +324,11 @@ impl FileTransport {
 
     /// Read a `.crpl` replay from its bytes.
     ///
-    /// Validates the magic and format version. Returns an error if the file is
-    /// too short, has an invalid magic, contains an unsupported format
-    /// version, or — from version 2 — has an input section that breaks one of
-    /// its rules ([`StorageError::ReplayInput`]), its peer track's from
-    /// version 3.
+    /// Validates the magic and format version, and migrates a file of an older
+    /// version ([module docs](self)). Returns an error if the file is too
+    /// short, has an invalid magic, contains an unsupported format version, or
+    /// has an input section — migrated, for an older file — that breaks one of
+    /// its rules ([`StorageError::ReplayInput`]).
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         if bytes.len() < REPLAY_MIN_SIZE {
             return Err(StorageError::Other(format!(
@@ -335,12 +342,7 @@ impl FileTransport {
         }
 
         let format_version = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
-        if !(OLDEST_READABLE_VERSION..=REPLAY_FORMAT_VERSION).contains(&format_version) {
-            return Err(StorageError::Other(format!(
-                "unsupported replay format version: {format_version} (this build reads \
-                 {OLDEST_READABLE_VERSION} to {REPLAY_FORMAT_VERSION})"
-            )));
-        }
+        let steps = migrate::steps_from(format_version)?;
 
         let declared_ticks = u64::from_le_bytes(bytes[10..18].try_into().unwrap());
         let tick_rate = u32::from_le_bytes(bytes[18..22].try_into().unwrap());
@@ -391,13 +393,8 @@ impl FileTransport {
             entries.push((tick_id, msg_data));
         }
 
-        // A version 1 file ends at its entries, and its reader never looked
-        // past them, so whatever follows is left unread as it always was.
-        let input = if format_version >= INPUT_SECTION_VERSION {
-            InputSection::decode(&bytes[cursor..], format_version >= PEER_TRACK_VERSION)?
-        } else {
-            InputSection::default()
-        };
+        let section = migrate::run(steps, &bytes[cursor..]);
+        let input = InputSection::decode(&section)?;
 
         Ok(Self {
             entries,
@@ -427,7 +424,8 @@ impl FileTransport {
     }
 
     /// What the recorded host's module was handed of its peers, one entry for
-    /// each tick that had any, in tick order — none before version 3.
+    /// each tick that had any, in tick order — none before version 3, and
+    /// every join naming nobody before version 4.
     pub fn peer_ticks(&self) -> &[RecordedPeerTick] {
         &self.input.peer_ticks
     }
@@ -508,6 +506,7 @@ impl Transport for FileTransport {
 mod tests {
     use super::*;
     use crate::MemoryStorage;
+    use crcbl_core::PlayerId;
 
     fn sample_replay_data() -> ReplayWriter {
         let mut writer = ReplayWriter::new(60);
@@ -739,7 +738,7 @@ mod tests {
         RecordedPeerTick {
             tick: TickId::from_raw(tick),
             roster: vec![RecordedRosterChange {
-                kind: RosterChangeKind::Joined,
+                kind: RosterChangeKind::Joined(Some(PlayerId::from_seed(7))),
                 peer: 7,
             }],
             peers: vec![RecordedPeerFrames {
@@ -769,7 +768,7 @@ mod tests {
         writer.write(&storage, path).unwrap();
 
         let mut transport = FileTransport::open(&storage, path).unwrap();
-        assert_eq!(transport.format_version(), 3);
+        assert_eq!(transport.format_version(), 4);
         assert_eq!(transport.peer_ticks(), writer.input.peer_ticks);
         assert_eq!(transport.peer_ticks().len(), 2);
         // The track ends the section and leaves the rest as it was.
@@ -798,6 +797,97 @@ mod tests {
         assert_eq!(transport.recv().unwrap().unwrap().payload, b"snapshot_1");
     }
 
+    /// **A version 3 file migrates: its joins name nobody.** The same file
+    /// as the version 3 writer wrote it — its join under kind 1, which is all
+    /// that writer had — reads with the join `Joined(None)` and everything
+    /// else as written. The step leaves the section as it lies, so the one
+    /// reader reads it: a version 3 header over a join that names its player,
+    /// which no version 3 writer wrote, reads as the same version 4 section
+    /// would rather than through a reader kept alive for the old layout.
+    #[test]
+    fn a_version_3_file_reads_its_joins_as_naming_nobody() {
+        let mut writer = sample_replay_data();
+        writer.push_state_hash(TickId::from_raw(3), 9);
+        let mut anonymous = joined_and_sent(2);
+        anonymous.roster[0].kind = RosterChangeKind::Joined(None);
+        writer.push_peer_tick(anonymous.clone());
+        let mut bytes = writer.encode().unwrap();
+        bytes[8..10].copy_from_slice(&3u16.to_le_bytes());
+
+        let mut transport = FileTransport::decode(&bytes).unwrap();
+        assert_eq!(transport.format_version(), 3);
+        assert_eq!(transport.peer_ticks(), [anonymous]);
+        assert_eq!(transport.state_hashes(), writer.input.state_hashes);
+        assert_eq!(transport.recv().unwrap().unwrap().payload, b"snapshot_1");
+
+        let mut named = ReplayWriter::new(60);
+        named.push_peer_tick(joined_and_sent(2));
+        let mut bytes = named.encode().unwrap();
+        bytes[8..10].copy_from_slice(&3u16.to_le_bytes());
+        let transport = FileTransport::decode(&bytes).unwrap();
+        assert_eq!(transport.peer_ticks(), [joined_and_sent(2)]);
+    }
+
+    /// **A version 4 join names its player through the file**: two players'
+    /// joins and frames, written and read back, each join with its own
+    /// player — and the bytes say so, so a writer that dropped the player
+    /// and a reader that ignored it cannot agree on a round trip.
+    #[test]
+    fn two_players_joins_read_back_each_naming_its_own_player() {
+        let (first, second) = (PlayerId::from_seed(21), PlayerId::from_seed(22));
+        let mut writer = ReplayWriter::new(60);
+        writer.push_peer_tick(RecordedPeerTick {
+            tick: TickId::from_raw(4),
+            roster: vec![
+                RecordedRosterChange {
+                    kind: RosterChangeKind::Joined(Some(first)),
+                    peer: 1,
+                },
+                RecordedRosterChange {
+                    kind: RosterChangeKind::Joined(Some(second)),
+                    peer: 2,
+                },
+            ],
+            peers: vec![
+                RecordedPeerFrames {
+                    peer: 2,
+                    dropped: 0,
+                    frames: vec![(TickId::from_raw(3), vec![2])],
+                },
+                RecordedPeerFrames {
+                    peer: 1,
+                    dropped: 0,
+                    frames: vec![(TickId::from_raw(3), vec![1])],
+                },
+            ],
+        });
+        let bytes = writer.encode().unwrap();
+        for player in [first, second] {
+            assert!(
+                bytes
+                    .windows(PlayerId::BYTES)
+                    .any(|window| window == player.to_bytes()),
+                "the file holds {player}"
+            );
+        }
+
+        let transport = FileTransport::decode(&bytes).unwrap();
+        assert_eq!(transport.format_version(), REPLAY_FORMAT_VERSION);
+        assert_eq!(transport.peer_ticks(), writer.input.peer_ticks);
+        let joins: Vec<_> = transport.peer_ticks()[0]
+            .roster
+            .iter()
+            .map(|change| (change.peer, change.kind))
+            .collect();
+        assert_eq!(
+            joins,
+            [
+                (1, RosterChangeKind::Joined(Some(first))),
+                (2, RosterChangeKind::Joined(Some(second))),
+            ]
+        );
+    }
+
     #[test]
     fn a_malformed_peer_track_is_refused_through_the_file() {
         let mut writer = ReplayWriter::new(60);
@@ -814,7 +904,7 @@ mod tests {
         );
         assert!(!storage.exists(Path::new("bad.crpl")), "nothing written");
 
-        // A version 3 header over a version 2 body: the track is missing.
+        // A current header over a version 2 body: the track is missing.
         let mut bytes = ReplayWriter::new(60).encode().unwrap();
         bytes.truncate(bytes.len() - 4);
         let err = FileTransport::decode(&bytes).unwrap_err();
@@ -867,13 +957,15 @@ mod tests {
     #[test]
     fn a_version_2_file_without_its_section_is_refused_by_name() {
         // A version 2 header over a version 1 body: the counts are missing.
+        // The migration's empty peer track is the only count there, so it is
+        // read as the sets', and the hashes' is where the section ends.
         let mut bytes = version_1_bytes(60, &[(1, b"x")]);
         bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
         let err = FileTransport::decode(&bytes).unwrap_err();
         assert!(
             matches!(
                 err,
-                StorageError::ReplayInput(InputSectionError::Truncated("sets"))
+                StorageError::ReplayInput(InputSectionError::Truncated("state hashes"))
             ),
             "{err}"
         );

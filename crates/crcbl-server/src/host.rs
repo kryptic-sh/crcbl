@@ -217,16 +217,22 @@ pub trait HostModule: Send {
 #[derive(Clone, Copy)]
 pub struct PeerInputs<'a> {
     peers: &'a [PeerFrames],
+    /// Each of `peers`' players, by index.
+    players: &'a [Option<PlayerId>],
     sim_vars: &'a SimVars,
 }
 
 impl<'a> PeerInputs<'a> {
     /// Each admitted peer with its frames for this tick, in admission
-    /// order. A lost peer is listed, with nothing.
+    /// order, each naming the peer's player
+    /// ([`ClientInputs::player`]). A lost peer is listed, with nothing.
     pub fn iter(self) -> impl Iterator<Item = (PeerId, ClientInputs<'a>)> {
-        self.peers
-            .iter()
-            .map(|peer| (peer.peer, ClientInputs::new(&peer.frames, peer.dropped)))
+        self.peers.iter().zip(self.players).map(|(peer, player)| {
+            (
+                peer.peer,
+                ClientInputs::new(&peer.frames, peer.dropped).with_player(*player),
+            )
+        })
     }
 
     /// The host's simulation variables, with every set this tick's boundary
@@ -350,6 +356,9 @@ pub struct Host {
     /// The frames the current tick hands the module, one entry a peer; kept
     /// between ticks so its buffers are reused rather than reallocated.
     tick_inputs: Vec<PeerFrames>,
+    /// The player of each of `tick_inputs`, by index; kept for the same
+    /// reason.
+    tick_players: Vec<Option<PlayerId>>,
     module: Option<Box<dyn HostModule>>,
     sim: SimConsole,
     /// Whether peers' edits are held for the caller ([`Host::serve_edits`])
@@ -394,6 +403,7 @@ impl Host {
             next_session_id: 1,
             events: PeerLog::default(),
             tick_inputs: Vec::new(),
+            tick_players: Vec::new(),
             module: None,
             sim: SimConsole::default(),
             serving_edits: false,
@@ -459,20 +469,33 @@ impl Host {
         }
         let mut inputs = std::mem::take(&mut self.tick_inputs);
         take_queued_inputs(&mut self.peers, &mut inputs);
+        let mut players = std::mem::take(&mut self.tick_players);
+        players.clear();
+        players.extend(self.peers.iter().map(|peer| Some(peer.player)));
         let roster = self.events.take_roster();
-        self.step(roster, &inputs);
+        self.step(roster, &inputs, &players);
         self.tick_inputs = inputs;
+        self.tick_players = players;
     }
 
     /// The rest of a tick, once its peers' input is in hand: the tick
     /// boundary for simulation variables, the schedule, the module — handed
-    /// `peers`, every admitted peer in admission order — and the snapshots.
+    /// `peers`, every admitted peer in admission order, and `players`, the
+    /// player of each by index — and the snapshots.
     /// The live tick and a re-simulation both run it, so a replayed tick
     /// reaches the module exactly as a live one does; it is also where the
     /// input record is kept, so what it records is what the module read.
     /// `roster` is the roster's changes since the tick before, for the
     /// record.
-    fn step(&mut self, roster: Vec<RosterChange>, peers: &[PeerFrames]) {
+    fn step(
+        &mut self,
+        roster: Vec<RosterChange>,
+        peers: &[PeerFrames],
+        players: &[Option<PlayerId>],
+    ) {
+        // `PeerInputs::iter` zips the two, so a short `players` would hand the
+        // module fewer peers than it has rather than fail.
+        assert_eq!(peers.len(), players.len(), "a player for every peer");
         self.apply_sim_sets();
         self.world.tick();
         if let Some(module) = self.module.as_mut() {
@@ -480,6 +503,7 @@ impl Host {
                 &mut self.world,
                 PeerInputs {
                     peers,
+                    players,
                     sim_vars: self.sim.vars(),
                 },
             );
@@ -542,7 +566,10 @@ impl Host {
                                                 &mut self.counters,
                                             );
                                             if accepted && sent {
-                                                self.events.push(PeerEvent::Reaccepted(peer.id));
+                                                self.events.push(
+                                                    PeerEvent::Reaccepted(peer.id),
+                                                    peer.player,
+                                                );
                                             }
                                         }
                                         Err(_) => self.counters.processing_errors += 1,
@@ -738,7 +765,7 @@ impl Host {
             // Its link is down and it came back without the resume token: a
             // restarted client. The old session goes, and its place with it.
             let lost = self.peers.remove(index);
-            self.events.push(PeerEvent::Left(lost.id));
+            self.events.push(PeerEvent::Left(lost.id), lost.player);
         }
         // A lost peer still holds its place: counting only the connected
         // ones would let a newcomer take it, and the lost peer's resume would
@@ -793,7 +820,7 @@ impl Host {
             fetch_waiting: false,
             scene_stream: None,
         });
-        self.events.push(PeerEvent::Joined(id));
+        self.events.push(PeerEvent::Joined(id), hello.player);
         None
     }
 
@@ -866,8 +893,8 @@ impl Host {
             peer.link.adopt_session_key();
             peer.keyed_at = self.now;
             peer.transport = Some(pending.transport);
-            let id = peer.id;
-            self.events.push(PeerEvent::Resumed(id));
+            let (id, player) = (peer.id, peer.player);
+            self.events.push(PeerEvent::Resumed(id), player);
         }
         None
     }
@@ -891,7 +918,7 @@ impl Host {
                     peer.link
                         .session
                         .on_disconnect(self.now, &self.session_config);
-                    self.events.push(PeerEvent::Lost(peer.id));
+                    self.events.push(PeerEvent::Lost(peer.id), peer.player);
                 }
             }
             peer.link.session.expire_if_timed_out(self.now);
@@ -920,7 +947,7 @@ impl Host {
             {
                 let mut peer = self.peers.remove(index);
                 Self::end(&mut peer, SessionEndReason::KICKED, &mut self.counters);
-                self.events.push(PeerEvent::Left(peer.id));
+                self.events.push(PeerEvent::Left(peer.id), peer.player);
             } else {
                 index += 1;
             }
@@ -934,7 +961,7 @@ impl Host {
         self.peers.retain(|peer| {
             let ended = peer.link.session.state() == SessionState::Disconnected;
             if ended {
-                events.push(PeerEvent::Left(peer.id));
+                events.push(PeerEvent::Left(peer.id), peer.player);
             }
             !ended
         });
@@ -1368,7 +1395,7 @@ impl Host {
     pub fn record_peer_inputs(&mut self) {
         let roster = self.peers.iter().flat_map(|peer| {
             let lost = (!peer.is_connected()).then_some(RosterChange::Lost(peer.id));
-            std::iter::once(RosterChange::Joined(peer.id)).chain(lost)
+            std::iter::once(RosterChange::Joined(peer.id, Some(peer.player))).chain(lost)
         });
         self.events.start_recording(roster);
     }

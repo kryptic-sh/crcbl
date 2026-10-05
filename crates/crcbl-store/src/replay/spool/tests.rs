@@ -3,6 +3,7 @@
 
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 
+use crcbl_core::PlayerId;
 use crcbl_net::ConsoleSet;
 
 use super::*;
@@ -25,7 +26,7 @@ fn peer_tick(tick: u64, peer: u64, frame: &[u8]) -> RecordedPeerTick {
     RecordedPeerTick {
         tick: TickId::from_raw(tick),
         roster: vec![RecordedRosterChange {
-            kind: RosterChangeKind::Joined,
+            kind: RosterChangeKind::Joined(Some(PlayerId::from_seed(peer))),
             peer,
         }],
         peers: vec![RecordedPeerFrames {
@@ -152,6 +153,55 @@ fn a_whole_spool_recovers_to_the_file_its_stream_finishes() {
     assert_eq!(recover(&empty).unwrap().1, written(&[]));
 }
 
+/// `spool` as a version 1 stream's header would have opened it: the version
+/// and the header's CRC rewritten, every record as it is.
+fn as_version_1(mut spool: Vec<u8>) -> Vec<u8> {
+    spool[8..10].copy_from_slice(&1u16.to_le_bytes());
+    let crc = crc32(&spool[..HEADER_CRC_AT]);
+    spool[HEADER_CRC_AT..SPOOL_HEADER_BYTES].copy_from_slice(&crc.to_le_bytes());
+    spool
+}
+
+/// **A version 1 spool still recovers, its joins naming nobody**: a session
+/// whose joins name no player — all a version 1 stream could write — spooled
+/// under a version 1 header recovers whole, to the current file the writer
+/// writes for the same entries. Its records are read by the one reader, so a
+/// version 1 header over a join that names its player, which no version 1
+/// stream wrote, recovers as the same version 2 spool would.
+#[test]
+fn a_version_1_spool_recovers_with_its_joins_naming_nobody() {
+    let anonymous = |tick: u64, peer: u64, frame: &[u8]| {
+        let mut entry = peer_tick(tick, peer, frame);
+        entry.roster[0].kind = RosterChangeKind::Joined(None);
+        entry
+    };
+    let mut stream = ReplayStream::new(TICK_RATE, Cursor::new(Vec::new())).unwrap();
+    let mut writer = ReplayWriter::new(TICK_RATE);
+    for (tick, peer) in [(2, 1), (3, 2)] {
+        let entry = anonymous(tick, peer, &[7]);
+        stream.push_peer_tick(&entry).unwrap();
+        writer.push_peer_tick(entry);
+    }
+    let spool = stream.finish(&mut Vec::new()).unwrap().into_inner();
+
+    let (recovery, file) = recover(&as_version_1(spool)).unwrap();
+    assert_eq!(recovery.end, SpoolEnd::Whole);
+    assert_eq!(recovery.peer_ticks, 2);
+    assert_eq!(file, writer.encode().unwrap());
+    let read = FileTransport::decode(&file).unwrap();
+    assert_eq!(read.format_version(), crate::replay::REPLAY_FORMAT_VERSION);
+    assert_eq!(
+        read.peer_ticks()[1].roster[0].kind,
+        RosterChangeKind::Joined(None)
+    );
+
+    let pushes = [Push::Hash(1, 1), Push::Peer(2, 1, vec![7])];
+    let (named, _) = spooled(&pushes);
+    let (recovery, file) = recover(&as_version_1(named)).unwrap();
+    assert_eq!(recovery.end, SpoolEnd::Whole);
+    assert_eq!(file, written(&pushes));
+}
+
 /// **A spool cut short keeps every whole record and reports the rest**: cut
 /// at every byte of every record — what a process killed while writing that
 /// record leaves — the file holds the records before it, as `ReplayWriter`
@@ -206,6 +256,9 @@ fn a_spool_without_a_whole_header_is_refused() {
         refused(&version),
         SpoolError::Version(SPOOL_FORMAT_VERSION + 1)
     );
+    let mut version = spool.clone();
+    version[8..10].copy_from_slice(&0u16.to_le_bytes());
+    assert_eq!(refused(&version), SpoolError::Version(0));
     let mut rate = spool;
     rate[10] ^= 1;
     assert_eq!(refused(&rate), SpoolError::HeaderChecksum);

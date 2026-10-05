@@ -8,12 +8,13 @@
 //! handed of its peers ([`Host::peer_input_record`]) — the roster and each
 //! peer's frames, handed to the module through the step a live tick takes, so
 //! a module reading [`PeerInputs::iter`](super::PeerInputs::iter) reads what
-//! it read live.
+//! it read live — each peer's player included, which a re-simulation takes
+//! from the peer's recorded join.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 
-use crcbl_core::TickId;
+use crcbl_core::{PlayerId, TickId};
 use crcbl_net::ConsoleSet;
 
 use super::{AppliedSimSet, Host, PeerFrames, PeerId, RosterChange, TickInputs};
@@ -87,6 +88,9 @@ pub enum RosterFault {
     AlreadyLost,
     /// A resume of a peer that is not lost.
     NotLost,
+    /// A join naming a player another admitted peer is: a host holds one
+    /// session a player.
+    PlayerAdmitted,
 }
 
 /// Why recorded frames cannot have been handed to the peer they name.
@@ -109,6 +113,7 @@ impl fmt::Display for RosterFault {
             Self::NotAdmitted => "the peer is not admitted",
             Self::AlreadyLost => "the peer is already lost",
             Self::NotLost => "the peer is not lost",
+            Self::PlayerAdmitted => "another admitted peer is the same player",
         })
     }
 }
@@ -167,11 +172,21 @@ impl fmt::Display for ResimError {
 
 impl std::error::Error for ResimError {}
 
+/// One admitted peer of a recording's roster.
+#[derive(Debug)]
+struct Seat {
+    peer: PeerId,
+    /// The player its join named.
+    player: Option<PlayerId>,
+    /// Whether its link is up.
+    connected: bool,
+}
+
 /// The roster a recording's changes build, one change at a time.
 #[derive(Debug, Default)]
 struct Roster {
-    /// Every admitted peer in admission order, and whether its link is up.
-    peers: Vec<(PeerId, bool)>,
+    /// Every admitted peer in admission order.
+    peers: Vec<Seat>,
     /// Every peer that ever joined.
     joined: BTreeSet<PeerId>,
 }
@@ -179,27 +194,38 @@ struct Roster {
 impl Roster {
     fn apply(&mut self, change: RosterChange) -> Result<(), RosterFault> {
         let peer = change.peer();
-        let index = self.peers.iter().position(|(id, _)| *id == peer);
+        let index = self.peers.iter().position(|seat| seat.peer == peer);
         match (change, index) {
-            (RosterChange::Joined(_), Some(_)) => return Err(RosterFault::AlreadyAdmitted),
-            (RosterChange::Joined(_), None) => {
+            (RosterChange::Joined(..), Some(_)) => return Err(RosterFault::AlreadyAdmitted),
+            (RosterChange::Joined(_, player), None) => {
                 if !self.joined.insert(peer) {
                     return Err(RosterFault::Reused);
                 }
-                self.peers.push((peer, true));
+                // A player whose session is lost comes back on a fresh one
+                // only once the host has ended the old, so the roster never
+                // holds one player twice. A join that names nobody is not
+                // compared.
+                if player.is_some() && self.peers.iter().any(|seat| seat.player == player) {
+                    return Err(RosterFault::PlayerAdmitted);
+                }
+                self.peers.push(Seat {
+                    peer,
+                    player,
+                    connected: true,
+                });
             }
             (_, None) => return Err(RosterFault::NotAdmitted),
             (RosterChange::Lost(_), Some(index)) => {
-                if !self.peers[index].1 {
+                if !self.peers[index].connected {
                     return Err(RosterFault::AlreadyLost);
                 }
-                self.peers[index].1 = false;
+                self.peers[index].connected = false;
             }
             (RosterChange::Resumed(_), Some(index)) => {
-                if self.peers[index].1 {
+                if self.peers[index].connected {
                     return Err(RosterFault::NotLost);
                 }
-                self.peers[index].1 = true;
+                self.peers[index].connected = true;
             }
             (RosterChange::Left(_) | RosterChange::Ended(_), Some(index)) => {
                 self.peers.remove(index);
@@ -224,22 +250,33 @@ impl Roster {
             {
                 return Err(refuse(frames.peer, FramesFault::Twice));
             }
-            match self.peers.iter().find(|(id, _)| *id == frames.peer) {
+            match self.peers.iter().find(|seat| seat.peer == frames.peer) {
                 None => return Err(refuse(frames.peer, FramesFault::NotAdmitted)),
-                Some((_, false)) => return Err(refuse(frames.peer, FramesFault::Lost)),
-                Some((_, true)) => {}
+                Some(seat) if !seat.connected => {
+                    return Err(refuse(frames.peer, FramesFault::Lost));
+                }
+                Some(_) => {}
             }
         }
         Ok(self
             .peers
             .iter()
-            .map(|(id, _)| {
+            .map(|seat| {
                 recorded
                     .iter()
-                    .position(|frames| frames.peer == *id)
-                    .map_or_else(|| PeerFrames::none(*id), |at| recorded.swap_remove(at))
+                    .position(|frames| frames.peer == seat.peer)
+                    .map_or_else(
+                        || PeerFrames::none(seat.peer),
+                        |at| recorded.swap_remove(at),
+                    )
             })
             .collect())
+    }
+
+    /// Every admitted peer's player, in admission order: what the module is
+    /// handed beside [`hand`](Self::hand)'s frames.
+    fn players(&self) -> Vec<Option<PlayerId>> {
+        self.peers.iter().map(|seat| seat.player).collect()
     }
 }
 
@@ -250,6 +287,16 @@ struct PlannedTick {
     roster: Vec<RosterChange>,
     /// Every admitted peer after `roster`, in admission order.
     peers: Vec<PeerFrames>,
+    /// The player of each of `peers`, by index.
+    players: Vec<Option<PlayerId>>,
+}
+
+/// What the module is handed at a tick the recording has no entry for: the
+/// roster as the latest planned tick left it, each peer handed nothing.
+#[derive(Default)]
+struct Idle {
+    peers: Vec<PeerFrames>,
+    players: Vec<Option<PlayerId>>,
 }
 
 impl Host {
@@ -313,9 +360,7 @@ impl Host {
         let mut plan = self.plan_inputs(inputs)?;
         self.replay_sim_record(record);
 
-        // The roster as the latest planned tick left it, handed nothing: what
-        // the module is handed at a tick the recording has no entry for.
-        let mut idle = Vec::new();
+        let mut idle = Idle::default();
         for (tick, recorded) in hashes {
             while self.tick_id() < tick {
                 self.step_replayed(&mut plan, &mut idle);
@@ -370,6 +415,7 @@ impl Host {
                 tick: input.tick,
                 roster: input.roster,
                 peers,
+                players: roster.players(),
             });
         }
         Ok(plan)
@@ -377,7 +423,7 @@ impl Host {
 
     /// Run one more tick from `plan`: its planned input if it has one, and
     /// `idle` — the roster as the last planned tick left it — if not.
-    fn step_replayed(&mut self, plan: &mut VecDeque<PlannedTick>, idle: &mut Vec<PeerFrames>) {
+    fn step_replayed(&mut self, plan: &mut VecDeque<PlannedTick>, idle: &mut Idle) {
         // One period past the last update is exactly one more tick: the
         // clock's remainder is under a period, and its catch-up cap is at
         // least one.
@@ -386,15 +432,23 @@ impl Host {
         while self.clock.consume_tick() {
             let tick = self.clock.tick();
             if plan.front().is_some_and(|planned| planned.tick == tick)
-                && let Some(PlannedTick { roster, peers, .. }) = plan.pop_front()
+                && let Some(PlannedTick {
+                    roster,
+                    peers,
+                    players,
+                    ..
+                }) = plan.pop_front()
             {
-                self.step(roster, &peers);
-                *idle = peers
-                    .into_iter()
-                    .map(|frames| PeerFrames::none(frames.peer))
-                    .collect();
+                self.step(roster, &peers, &players);
+                *idle = Idle {
+                    peers: peers
+                        .into_iter()
+                        .map(|frames| PeerFrames::none(frames.peer))
+                        .collect(),
+                    players,
+                };
             } else {
-                self.step(Vec::new(), idle);
+                self.step(Vec::new(), &idle.peers, &idle.players);
             }
         }
     }

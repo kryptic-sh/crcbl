@@ -238,7 +238,7 @@ fn the_players_admitted_in_the_other_order_diverge_at_the_first_build() {
     assert!(
         matches!(
             first.roster[..],
-            [RosterChange::Joined(_), RosterChange::Joined(_)]
+            [RosterChange::Joined(..), RosterChange::Joined(..)]
         ),
         "{:?}",
         first.roster

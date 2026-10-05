@@ -564,8 +564,8 @@ pub fn recorded_peer_tick(entry: &TickInputs) -> RecordedPeerTick {
             .roster
             .iter()
             .map(|change| RecordedRosterChange {
-                kind: match change {
-                    RosterChange::Joined(_) => RosterChangeKind::Joined,
+                kind: match *change {
+                    RosterChange::Joined(_, player) => RosterChangeKind::Joined(player),
                     RosterChange::Lost(_) => RosterChangeKind::Lost,
                     RosterChange::Resumed(_) => RosterChangeKind::Resumed,
                     RosterChange::Left(_) => RosterChangeKind::Left,
@@ -596,7 +596,7 @@ pub fn tick_inputs(entry: &RecordedPeerTick) -> TickInputs {
             .map(|change| {
                 let peer = PeerId::from_raw(change.peer);
                 match change.kind {
-                    RosterChangeKind::Joined => RosterChange::Joined(peer),
+                    RosterChangeKind::Joined(player) => RosterChange::Joined(peer, player),
                     RosterChangeKind::Lost => RosterChange::Lost(peer),
                     RosterChangeKind::Resumed => RosterChange::Resumed(peer),
                     RosterChangeKind::Left => RosterChange::Left(peer),

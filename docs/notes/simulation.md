@@ -818,14 +818,14 @@ The `cargo tree` guard is built: `tools/check-no-renderer-deps.sh`, run by
   `f32` is the shortest text that parses back to the same bits. A variable
   without the flag is not a tick input and must not change what the simulation
   computes. The record reaches a file: a `.crpl` replay's input section (format
-  version 3) carries the applied sets, the recorder's state hashes and what the
-  module was handed of its peers — the roster's changes and each peer's applied
-  input frames, recorded on request (`Host::record_peer_inputs`) by the same
-  `Host::step` that hands them to the module, live or replayed — and
-  `Host::resimulate` re-runs a fresh host from them and names the first tick
-  whose hash it does not reproduce. A game's own reactions to `Host::events`
-  happen outside the module and are not replayed (`docs/backlog.md` has the
-  gap).
+  version 4) carries the applied sets, the recorder's state hashes and what the
+  module was handed of its peers — the roster's changes, each join naming its
+  player, and each peer's applied input frames, recorded on request
+  (`Host::record_peer_inputs`) by the same `Host::step` that hands them to the
+  module, live or replayed — and `Host::resimulate` re-runs a fresh host from
+  them and names the first tick whose hash it does not reproduce. A game's own
+  reactions to `Host::events` happen outside the module and are not replayed
+  (`docs/backlog.md` has the gap).
 
 Other documents cite the plan as "stage 4". Those resolve here:
 
@@ -1021,7 +1021,12 @@ multi-sector subscription and entity migration, and the test matrix.
   duplicate, which the client retries; one for a player whose link dropped
   replaces the lost session. A ban is refused at the handshake with its reason,
   permanently for that client. The decisions are recorded in `docs/backlog.md`,
-  _`PlayerId`: built self-asserted, and what it unblocked_.
+  _`PlayerId`: built self-asserted, and what it unblocked_. **A module reads a
+  peer's player as a tick input** (`ClientInputs::player`), so it is recorded
+  with the roster — each join in a `.crpl` names its player, format version 4 —
+  and a re-simulation hands the module the recorded one: the same answer live
+  and replayed, which is why the id stayed out of the module's view until the
+  recording carried it.
 - **Sessions are LAN, and web builds have no networking** (2026-08-09).
   WebTransport and WebSocket were removed: a browser cannot listen on a socket,
   cannot discover hosts on a local network, and an HTTPS page cannot open an

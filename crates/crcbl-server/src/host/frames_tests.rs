@@ -1,7 +1,8 @@
 //! What a host's module is handed of its peers, recorded and replayed: real
 //! `crcbl_client::Client`s over `InMemoryTransport` on the live side, and a
 //! fresh host fed the record on the other, with a module that keeps every
-//! tick's `PeerInputs` and folds them into the world's state hash.
+//! tick's `PeerInputs` — each peer's player included — and folds them into
+//! the world's state hash.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
@@ -16,9 +17,12 @@ use super::*;
 use crate::sim_hash::hash_world;
 use crate::sim_hash::tests::{StepClock, tick_times};
 
+/// One peer as the module read it: its frames and the player its view named.
+type Read = (PeerFrames, Option<PlayerId>);
+
 /// Every tick's `PeerInputs`, as the module read them, one entry a module
 /// call.
-type Handed = Arc<Mutex<Vec<Vec<PeerFrames>>>>;
+type Handed = Arc<Mutex<Vec<Vec<Read>>>>;
 
 /// A digest of everything the module was handed, so the state hash moves
 /// with the input and a re-simulation handed anything else diverges.
@@ -59,26 +63,30 @@ impl SystemTrait for Seen {
 }
 
 /// Keeps what it is handed and folds it into [`Seen`], in the order handed:
-/// a peer's place in the roster matters as much as its frames.
+/// a peer's place in the roster and its player matter as much as its frames.
 struct Reader {
     handed: Handed,
 }
 
 impl HostModule for Reader {
     fn tick(&mut self, world: &mut World, inputs: PeerInputs<'_>) {
-        let handed: Vec<PeerFrames> = inputs
+        let handed: Vec<Read> = inputs
             .iter()
-            .map(|(peer, frames)| PeerFrames {
-                peer,
-                frames: frames.iter().map(|(t, d)| (t, d.to_vec())).collect(),
-                dropped: frames.dropped(),
+            .map(|(peer, frames)| {
+                let read = PeerFrames {
+                    peer,
+                    frames: frames.iter().map(|(t, d)| (t, d.to_vec())).collect(),
+                    dropped: frames.dropped(),
+                };
+                (read, frames.player())
             })
             .collect();
         let seen = world.system_mut::<Seen>().expect("the world registers it");
         let mut hasher = DefaultHasher::new();
         hasher.write_u64(seen.digest);
-        for peer in &handed {
+        for (peer, player) in &handed {
             hasher.write_u64(peer.peer.get());
+            hasher.write(&player.map_or([0; PlayerId::BYTES], PlayerId::to_bytes));
             hasher.write_u32(peer.dropped);
             hasher.write_usize(peer.frames.len());
             for (tick, data) in &peer.frames {
@@ -91,6 +99,10 @@ impl HostModule for Reader {
         self.handed.lock().expect("not poisoned").push(handed);
     }
 }
+
+/// The seed of the first player a [`Live`] session admits; the next take the
+/// seeds after it.
+const JOINED_PLAYER_SEED: u64 = 0x10_00;
 
 /// A host whose module is a [`Reader`], at tick zero, and what it is handed.
 fn host() -> (Host, Handed) {
@@ -119,6 +131,8 @@ struct Live {
     handed: Handed,
     clients: Vec<Client<InMemoryTransport>>,
     ids: Vec<PeerId>,
+    /// Each client's player, by the index of its peer in `ids`.
+    players: Vec<PlayerId>,
     hashes: Vec<(TickId, u64)>,
     now: Duration,
     /// The record taken after every tick, when the test drains it.
@@ -134,6 +148,7 @@ impl Live {
             handed,
             clients: Vec::new(),
             ids: Vec::new(),
+            players: Vec::new(),
             hashes: Vec::new(),
             now: Duration::ZERO,
             taken: None,
@@ -182,15 +197,20 @@ impl Live {
         panic!("no such event within 600 ticks");
     }
 
+    /// A new client joins as its own player: drawn from its place in the
+    /// session, so two sessions played alike name the same players and
+    /// record alike.
     fn join(&mut self) {
         let (near, far) = InMemoryTransport::pair();
         self.host.add(Box::new(far));
+        let player = PlayerId::from_seed(JOINED_PLAYER_SEED + self.players.len() as u64);
+        self.players.push(player);
         self.clients.push(Client::new_with_compatibility(
             World::new(),
             near,
             TICK_HZ,
             COMPATIBILITY,
-            super::tests::next_player(),
+            player,
         ));
         match self.until(|event| matches!(event, PeerEvent::Joined(_))) {
             PeerEvent::Joined(id) => self.ids.push(id),
@@ -226,9 +246,10 @@ fn session_of(mut live: Live) -> Live {
 }
 
 /// The record laid out as the module was handed it: every recorded tick
-/// from the first, each with every admitted peer in admission order.
-fn as_handed(record: &[TickInputs], last: TickId) -> Vec<Vec<PeerFrames>> {
-    let mut roster: Vec<PeerId> = Vec::new();
+/// from the first, each with every admitted peer in admission order and the
+/// player its join named.
+fn as_handed(record: &[TickInputs], last: TickId) -> Vec<Vec<Read>> {
+    let mut roster: Vec<(PeerId, Option<PlayerId>)> = Vec::new();
     let mut ticks = Vec::new();
     let mut entries = record.iter().peekable();
     let first = record.first().expect("something was recorded").tick.get();
@@ -236,9 +257,9 @@ fn as_handed(record: &[TickInputs], last: TickId) -> Vec<Vec<PeerFrames>> {
         let entry = entries.next_if(|entry| entry.tick.get() == tick);
         for change in entry.iter().flat_map(|entry| &entry.roster) {
             match *change {
-                RosterChange::Joined(peer) => roster.push(peer),
+                RosterChange::Joined(peer, player) => roster.push((peer, player)),
                 RosterChange::Left(peer) | RosterChange::Ended(peer) => {
-                    roster.retain(|id| *id != peer);
+                    roster.retain(|(id, _)| *id != peer);
                 }
                 RosterChange::Lost(_) | RosterChange::Resumed(_) => {}
             }
@@ -246,16 +267,22 @@ fn as_handed(record: &[TickInputs], last: TickId) -> Vec<Vec<PeerFrames>> {
         ticks.push(
             roster
                 .iter()
-                .map(|id| {
-                    entry
-                        .and_then(|entry| entry.peers.iter().find(|frames| frames.peer == *id))
+                .map(|&(id, player)| {
+                    let frames = entry
+                        .and_then(|entry| entry.peers.iter().find(|frames| frames.peer == id))
                         .cloned()
-                        .unwrap_or_else(|| PeerFrames::none(*id))
+                        .unwrap_or_else(|| PeerFrames::none(id));
+                    (frames, player)
                 })
                 .collect(),
         );
     }
     ticks
+}
+
+/// Only the frames of what the module read, tick by tick.
+fn frames_of(handed: &[Read]) -> Vec<PeerFrames> {
+    handed.iter().map(|(frames, _)| frames.clone()).collect()
 }
 
 #[test]
@@ -273,7 +300,7 @@ fn the_record_is_what_the_module_read_with_the_roster_in_the_order_applied() {
         from_first
             .iter()
             .flatten()
-            .any(|peer| peer.frames.len() == 1),
+            .any(|(peer, _)| peer.frames.len() == 1),
         "frames were handed, so the comparison compared some"
     );
 
@@ -284,12 +311,15 @@ fn the_record_is_what_the_module_read_with_the_roster_in_the_order_applied() {
     let [a, b, c] = live.ids[..] else {
         panic!("three peers");
     };
+    let [pa, pb, pc] = live.players[..] else {
+        panic!("three players");
+    };
     assert_eq!(
         changes,
         [
-            RosterChange::Joined(a),
-            RosterChange::Joined(b),
-            RosterChange::Joined(c),
+            RosterChange::Joined(a, Some(pa)),
+            RosterChange::Joined(b, Some(pb)),
+            RosterChange::Joined(c, Some(pc)),
             RosterChange::Lost(b),
             RosterChange::Resumed(b),
             RosterChange::Ended(c),
@@ -304,8 +334,44 @@ fn the_record_is_what_the_module_read_with_the_roster_in_the_order_applied() {
         .tick;
     let before = &handed[(kicked.get() - 2) as usize];
     let at = &handed[(kicked.get() - 1) as usize];
-    assert!(before.iter().any(|peer| peer.peer == c));
-    assert!(at.iter().all(|peer| peer.peer != c));
+    assert!(before.iter().any(|(peer, _)| peer.peer == c));
+    assert!(at.iter().all(|(peer, _)| peer.peer != c));
+}
+
+/// **Each peer's input names its own player**, every tick the module is
+/// handed it — the lost peer's too, while it is lost and once it resumes —
+/// and two players' inputs are never attributed to each other: every tick
+/// lists the players of exactly the peers it lists, in their places.
+#[test]
+fn the_module_reads_each_peers_input_as_its_own_players() {
+    let live = session();
+    let handed = live.handed.lock().expect("not poisoned");
+    let player_of = |peer: PeerId| {
+        let index = live.ids.iter().position(|id| *id == peer).expect("a peer");
+        live.players[index]
+    };
+    let mut attributed = 0;
+    for tick in handed.iter() {
+        for (frames, player) in tick {
+            assert_eq!(*player, Some(player_of(frames.peer)), "{:?}", frames.peer);
+            attributed += usize::from(!frames.frames.is_empty());
+        }
+    }
+    assert!(attributed > 10, "frames were attributed: {attributed}");
+    assert!(
+        handed.iter().any(|tick| {
+            tick.iter()
+                .filter(|(frames, _)| !frames.frames.is_empty())
+                .count()
+                >= 2
+        }),
+        "some tick handed two players' frames at once"
+    );
+    assert_eq!(
+        live.host.player(live.ids[0]),
+        Some(live.players[0]),
+        "the module and the host agree"
+    );
 }
 
 #[test]
@@ -322,7 +388,7 @@ fn a_resimulated_host_hands_its_module_what_the_live_one_read() {
     assert_eq!(
         *handed.lock().expect("not poisoned"),
         *live.handed.lock().expect("not poisoned"),
-        "every tick, peer by peer"
+        "every tick, peer by peer, each with its player"
     );
     assert_eq!(
         replayed.peer_input_record(),
@@ -408,6 +474,7 @@ fn recording_begun_mid_session_opens_with_the_peers_already_in_it() {
         handed: Handed::default(),
         clients: Vec::new(),
         ids: Vec::new(),
+        players: Vec::new(),
         hashes: Vec::new(),
         now: Duration::ZERO,
         taken: None,
@@ -427,8 +494,8 @@ fn recording_begun_mid_session_opens_with_the_peers_already_in_it() {
     assert_eq!(
         record[0].roster,
         [
-            RosterChange::Joined(live.ids[0]),
-            RosterChange::Joined(lost),
+            RosterChange::Joined(live.ids[0], Some(live.players[0])),
+            RosterChange::Joined(lost, Some(live.players[1])),
             RosterChange::Lost(lost),
         ]
     );
@@ -438,6 +505,7 @@ fn recording_begun_mid_session_opens_with_the_peers_already_in_it() {
 fn a_roster_that_cannot_happen_is_refused_before_any_tick_runs() {
     let at = TickId::from_raw;
     let (a, b) = (PeerId::from_raw(1), PeerId::from_raw(2));
+    let player = PlayerId::from_seed(1);
     let tick = |tick, roster: Vec<RosterChange>, peers: Vec<PeerFrames>| TickInputs {
         tick: at(tick),
         roster,
@@ -466,27 +534,31 @@ fn a_roster_that_cannot_happen_is_refused_before_any_tick_runs() {
         (
             vec![tick(
                 1,
-                vec![RosterChange::Joined(a), RosterChange::Joined(a)],
+                vec![RosterChange::Joined(a, None), RosterChange::Joined(a, None)],
                 vec![],
             )],
-            roster(1, RosterChange::Joined(a), RosterFault::AlreadyAdmitted),
+            roster(
+                1,
+                RosterChange::Joined(a, None),
+                RosterFault::AlreadyAdmitted,
+            ),
         ),
         (
             vec![
                 tick(
                     1,
-                    vec![RosterChange::Joined(a), RosterChange::Left(a)],
+                    vec![RosterChange::Joined(a, None), RosterChange::Left(a)],
                     vec![],
                 ),
-                tick(2, vec![RosterChange::Joined(a)], vec![]),
+                tick(2, vec![RosterChange::Joined(a, None)], vec![]),
             ],
-            roster(2, RosterChange::Joined(a), RosterFault::Reused),
+            roster(2, RosterChange::Joined(a, None), RosterFault::Reused),
         ),
         (
             vec![tick(
                 1,
                 vec![
-                    RosterChange::Joined(a),
+                    RosterChange::Joined(a, None),
                     RosterChange::Lost(a),
                     RosterChange::Lost(a),
                 ],
@@ -497,7 +569,7 @@ fn a_roster_that_cannot_happen_is_refused_before_any_tick_runs() {
         (
             vec![tick(
                 1,
-                vec![RosterChange::Joined(a), RosterChange::Resumed(a)],
+                vec![RosterChange::Joined(a, None), RosterChange::Resumed(a)],
                 vec![],
             )],
             roster(1, RosterChange::Resumed(a), RosterFault::NotLost),
@@ -506,19 +578,19 @@ fn a_roster_that_cannot_happen_is_refused_before_any_tick_runs() {
         (
             vec![tick(
                 1,
-                vec![RosterChange::Ended(a), RosterChange::Joined(a)],
+                vec![RosterChange::Ended(a), RosterChange::Joined(a, None)],
                 vec![],
             )],
             roster(1, RosterChange::Ended(a), RosterFault::NotAdmitted),
         ),
         (
-            vec![tick(1, vec![RosterChange::Joined(a)], vec![sent(b)])],
+            vec![tick(1, vec![RosterChange::Joined(a, None)], vec![sent(b)])],
             frames(1, b, FramesFault::NotAdmitted),
         ),
         (
             vec![tick(
                 1,
-                vec![RosterChange::Joined(a), RosterChange::Lost(a)],
+                vec![RosterChange::Joined(a, None), RosterChange::Lost(a)],
                 vec![sent(a)],
             )],
             frames(1, a, FramesFault::Lost),
@@ -526,15 +598,34 @@ fn a_roster_that_cannot_happen_is_refused_before_any_tick_runs() {
         (
             vec![tick(
                 1,
-                vec![RosterChange::Joined(a)],
+                vec![RosterChange::Joined(a, None)],
                 vec![sent(a), sent(a)],
             )],
             frames(1, a, FramesFault::Twice),
         ),
+        // One player on two sessions at once: a host ends the lost one
+        // before it admits the player afresh. A join naming nobody is never
+        // the same player as another.
+        (
+            vec![tick(
+                1,
+                vec![
+                    RosterChange::Joined(a, Some(player)),
+                    RosterChange::Lost(a),
+                    RosterChange::Joined(b, Some(player)),
+                ],
+                vec![],
+            )],
+            roster(
+                1,
+                RosterChange::Joined(b, Some(player)),
+                RosterFault::PlayerAdmitted,
+            ),
+        ),
         (
             vec![
-                tick(3, vec![RosterChange::Joined(a)], vec![]),
-                tick(3, vec![RosterChange::Joined(b)], vec![]),
+                tick(3, vec![RosterChange::Joined(a, None)], vec![]),
+                tick(3, vec![RosterChange::Joined(b, None)], vec![]),
             ],
             ResimError::TickPassed {
                 tick: at(3),
@@ -559,7 +650,7 @@ fn a_recorded_dropped_count_reaches_the_module() {
     let peer = PeerId::from_raw(9);
     let record = vec![TickInputs {
         tick: at(2),
-        roster: vec![RosterChange::Joined(peer)],
+        roster: vec![RosterChange::Joined(peer, Some(PlayerId::from_seed(9)))],
         peers: vec![PeerFrames {
             peer,
             frames: vec![(at(1), vec![4, 2])],
@@ -581,11 +672,57 @@ fn a_recorded_dropped_count_reaches_the_module() {
     );
     let handed = handed.lock().expect("not poisoned");
     assert_eq!(handed[0], [], "no peer before its join");
-    assert_eq!(handed[1], record[0].peers);
+    assert_eq!(frames_of(&handed[1]), record[0].peers);
     assert_eq!(
-        handed[2],
+        frames_of(&handed[2]),
         [PeerFrames::none(peer)],
         "listed after, with nothing"
     );
     assert_eq!(replayed.peer_input_record(), record);
+}
+
+/// **A re-simulation hands each peer the player its join names**, on the
+/// tick it joins and every tick after, frames or none; a join that names
+/// nobody — as every join of a recording from before players were recorded
+/// does — hands its peer's input with no player. Two peers on one tick keep
+/// their own.
+#[test]
+fn a_resimulation_hands_each_peer_the_player_its_join_names() {
+    let at = TickId::from_raw;
+    let (named, anonymous) = (PeerId::from_raw(4), PeerId::from_raw(5));
+    let player = PlayerId::from_seed(4);
+    let sent = |peer| PeerFrames {
+        peer,
+        frames: vec![(at(1), vec![peer.get() as u8])],
+        dropped: 0,
+    };
+    let record = vec![TickInputs {
+        tick: at(1),
+        roster: vec![
+            RosterChange::Joined(named, Some(player)),
+            RosterChange::Joined(anonymous, None),
+        ],
+        peers: vec![sent(named), sent(anonymous)],
+    }];
+    let (mut probe, _) = host();
+    probe
+        .resimulate([], [(at(2), 0)], record.clone())
+        .expect_err("a zero hash is not reproduced");
+    let hash = hash_world(probe.world(), at(2));
+
+    let (mut replayed, handed) = host();
+    assert_eq!(replayed.resimulate([], [(at(2), hash)], record), Ok(at(2)));
+    let handed = handed.lock().expect("not poisoned");
+    assert_eq!(
+        handed[0],
+        [(sent(named), Some(player)), (sent(anonymous), None)]
+    );
+    assert_eq!(
+        handed[1],
+        [
+            (PeerFrames::none(named), Some(player)),
+            (PeerFrames::none(anonymous), None),
+        ],
+        "a tick the recording has no entry for keeps the players"
+    );
 }

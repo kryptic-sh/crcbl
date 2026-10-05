@@ -7,6 +7,7 @@
 //! [`LanHost`]: crate::lan::LanHost
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::*;
@@ -152,13 +153,24 @@ fn the_hosts_records_stay_bounded_while_the_recorder_drains_them() {
         "{}",
         file.peer_ticks().len()
     );
-    let joins = file
+    // Each join names the player its client said hello as, through the
+    // spool and the file.
+    let mut joined: Vec<_> = file
         .peer_ticks()
         .iter()
         .flat_map(|tick| &tick.roster)
-        .filter(|change| change.kind == RosterChangeKind::Joined)
-        .count();
-    assert_eq!(joins, 2);
+        .filter_map(|change| match change.kind {
+            RosterChangeKind::Joined(player) => Some(player),
+            _ => None,
+        })
+        .collect();
+    joined.sort();
+    let mut players = [
+        crate::net::PlayerId::from_seed(0),
+        crate::net::PlayerId::from_seed(1),
+    ];
+    players.sort();
+    assert_eq!(joined, players.map(Some));
     assert!(
         file.peer_ticks()
             .iter()
@@ -169,6 +181,100 @@ fn the_hosts_records_stay_bounded_while_the_recorder_drains_them() {
     // A fresh host built the same way reproduces every hash from the file.
     let mut replayed = host();
     assert_eq!(resimulate(&mut replayed, &file), Ok(last));
+}
+
+/// Each tick a module was handed: every peer, the player its view named and
+/// how many frames it carried.
+type Attributed = Arc<Mutex<Vec<Vec<(PeerId, Option<crate::net::PlayerId>, usize)>>>>;
+
+/// A module that keeps whose input it was handed, tick by tick.
+struct Attribution(Attributed);
+
+impl crate::server::HostModule for Attribution {
+    fn tick(&mut self, _world: &mut World, inputs: crate::server::PeerInputs<'_>) {
+        let tick = inputs
+            .iter()
+            .map(|(peer, view)| (peer, view.player(), view.len()))
+            .collect();
+        self.0.lock().expect("not poisoned").push(tick);
+    }
+}
+
+/// **A re-simulation from the file hands the module the players the live
+/// host did**: two clients, each its own player, recorded through the spool
+/// into the file, and a fresh host re-simulated from it reproduces every hash
+/// and reads every peer's input as the same player's on every tick — so a
+/// recording that lost a join's player, anywhere between the host and the
+/// file, hands the module `None` where it read a player live.
+#[test]
+fn a_resimulation_from_the_file_names_the_players_the_live_module_read() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("players.crpl");
+    let mut session = Session::new();
+    let live = Attributed::default();
+    session
+        .host
+        .set_module(Box::new(Attribution(Arc::clone(&live))));
+    let mut recorder = Recorder::start(&path, &mut session.host, TICK_HZ).expect("it starts");
+    for _ in 0..TICKS {
+        session.step();
+        recorder.record(&mut session.host).expect("it records");
+    }
+    let last = session.host.tick_id();
+    recorder.finish(&mut session.host).expect("it finishes");
+
+    let mut replayed = host();
+    let resimulated = Attributed::default();
+    replayed.set_module(Box::new(Attribution(Arc::clone(&resimulated))));
+    assert_eq!(resimulate(&mut replayed, &read(&path)), Ok(last));
+
+    let live = live.lock().expect("not poisoned");
+    let players = [0, 1].map(|seed| Some(crate::net::PlayerId::from_seed(seed)));
+    let both_sent = live
+        .iter()
+        .filter(|tick| tick.len() == 2 && tick.iter().all(|(_, _, frames)| *frames > 0))
+        .count();
+    assert!(
+        both_sent > TICKS / 2,
+        "two players' frames on {both_sent} ticks"
+    );
+    for tick in live.iter() {
+        let named: Vec<_> = tick.iter().map(|(_, player, _)| *player).collect();
+        assert_eq!(named, players[..tick.len()], "in admission order");
+    }
+    assert_eq!(*resimulated.lock().expect("not poisoned"), *live);
+}
+
+/// **The conversion to the file's peer track and back keeps every change and
+/// every join's player**: a join that names its player, one that names
+/// nobody — a migrated recording's, re-recorded — and each other kind, with
+/// the frames beside them.
+#[test]
+fn a_tick_of_input_converts_to_the_file_and_back_with_its_players() {
+    let (named, anonymous) = (PeerId::from_raw(3), PeerId::from_raw(4));
+    let entry = TickInputs {
+        tick: TickId::from_raw(9),
+        roster: vec![
+            RosterChange::Joined(named, Some(crate::net::PlayerId::from_seed(3))),
+            RosterChange::Joined(anonymous, None),
+            RosterChange::Lost(named),
+            RosterChange::Resumed(named),
+            RosterChange::Left(anonymous),
+            RosterChange::Ended(named),
+        ],
+        peers: vec![PeerFrames {
+            peer: named,
+            frames: vec![(TickId::from_raw(8), vec![1, 2])],
+            dropped: 1,
+        }],
+    };
+    let recorded = recorded_peer_tick(&entry);
+    assert_eq!(
+        recorded.roster[0].kind,
+        RosterChangeKind::Joined(Some(crate::net::PlayerId::from_seed(3)))
+    );
+    assert_eq!(recorded.roster[1].kind, RosterChangeKind::Joined(None));
+    assert_eq!(tick_inputs(&recorded), entry);
 }
 
 /// **A recording never overwrites**: a path something exists at is refused

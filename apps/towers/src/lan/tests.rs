@@ -1414,9 +1414,14 @@ fn quit_at_the_console_finishes_a_recording_servers_file() {
         .peer_ticks()
         .iter()
         .flat_map(|tick| &tick.roster)
-        .filter(|change| change.kind == crcbl::store::replay::RosterChangeKind::Joined)
+        .filter(|change| {
+            matches!(
+                change.kind,
+                crcbl::store::replay::RosterChangeKind::Joined(Some(_))
+            )
+        })
         .count();
-    assert_eq!(joins, 2);
+    assert_eq!(joins, 2, "both joins, each naming its player");
     assert!(
         file.peer_ticks().iter().any(|tick| !tick.peers.is_empty()),
         "the players' frames are in it"

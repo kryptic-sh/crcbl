@@ -35,6 +35,15 @@
 //!
 //! The CRC is [`crc32`](crate::crc32): corruption detection, never security.
 //!
+//! Spool version 2 holds peer ticks in format version 4's layout, whose joins
+//! may name their players; version 1 held them in version 3's. A version 3
+//! track is a version 4 track whose joins name nobody (`replay`'s `migrate`
+//! module), so a version 1 spool's records are version 2 records unchanged
+//! and the one reader reads both: one still recovers, every join naming
+//! nobody, and only its header's version says it is older. The version was bumped all the same so
+//! a build from before refuses a spool whose joins it cannot read by its
+//! version, rather than stopping at its first join.
+//!
 //! # Reading one back
 //!
 //! [`recover_spool`] trusts nothing in a spool. It keeps every record from the
@@ -60,8 +69,12 @@ use crate::crc32::{crc32, crc32_continue};
 /// Magic bytes identifying a replay spool.
 pub const SPOOL_MAGIC: &[u8; 8] = b"CRBLSPOL";
 
-/// The spool format version this build writes and reads.
-pub const SPOOL_FORMAT_VERSION: u16 = 1;
+/// The spool format version this build writes.
+pub const SPOOL_FORMAT_VERSION: u16 = 2;
+
+/// The oldest spool format version this build reads. Its records are laid
+/// out as the current version's ([module docs](self)).
+const OLDEST_READABLE_SPOOL_VERSION: u16 = 1;
 
 /// Where the header's CRC starts: it covers everything before it.
 const HEADER_CRC_AT: usize = 8 + 2 + 4;
@@ -88,7 +101,8 @@ pub enum SpoolError {
     Magic,
     /// A spool version this build does not read.
     #[error(
-        "unsupported replay spool version {0} (this build reads version {SPOOL_FORMAT_VERSION})"
+        "unsupported replay spool version {0} (this build reads versions \
+         {OLDEST_READABLE_SPOOL_VERSION} to {SPOOL_FORMAT_VERSION})"
     )]
     Version(u16),
     /// The header's CRC does not match it.
@@ -157,8 +171,10 @@ pub struct SpoolRecovery {
 /// Write a `.crpl` file into `out` from a spool a [`ReplayStream`] wrote —
 /// one whose recording never finished — keeping every whole record and
 /// dropping the first that is not and everything after it ([module
-/// docs](self)). The file is version 3 with no output entries, as the stream's
-/// own would have been for the records it holds, and reads back through
+/// docs](self)). The file is at
+/// [`REPLAY_FORMAT_VERSION`](super::REPLAY_FORMAT_VERSION), whatever the
+/// spool's version, with no output entries, as the stream's own would have
+/// been for the records it holds, and reads back through
 /// [`FileTransport`](super::FileTransport). `out` is written in order and
 /// flushed, never read or seeked; `spool` is read from its start once to
 /// find the records to keep and then once for each list, holding no more
@@ -245,7 +261,7 @@ fn decode_header(header: &[u8; SPOOL_HEADER_BYTES]) -> Result<u32, SpoolError> {
         return Err(SpoolError::Magic);
     }
     let version = u16::from_le_bytes([header[8], header[9]]);
-    if version != SPOOL_FORMAT_VERSION {
+    if !(OLDEST_READABLE_SPOOL_VERSION..=SPOOL_FORMAT_VERSION).contains(&version) {
         return Err(SpoolError::Version(version));
     }
     let crc = u32::from_le_bytes([header[14], header[15], header[16], header[17]]);

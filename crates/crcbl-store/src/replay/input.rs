@@ -1,6 +1,8 @@
-//! The input section of a `.crpl` file, from format version 2: its records,
-//! its codec and the rules both directions hold — the peer track, from
-//! version 3, in `peers`. The layout is in the parent module's docs.
+//! The input section of a `.crpl` file, at the current format version: its
+//! records, its codec and the rules both directions hold — the peer track,
+//! with each join's player, in `peers`. The layout is in the parent module's
+//! docs, and an older file's section reaches this reader through the
+//! `migrate` module's steps.
 
 use crcbl_core::TickId;
 use crcbl_net::ConsoleSet;
@@ -184,10 +186,9 @@ impl InputSection {
         peers::encode(&self.peer_ticks, buf)
     }
 
-    /// Read the section from `bytes`, which must be the rest of the file —
-    /// with its peer track when `has_peer_track`, which a version 2 file's
-    /// section ends without.
-    pub(super) fn decode(bytes: &[u8], has_peer_track: bool) -> Result<Self, InputSectionError> {
+    /// Read the section from `bytes`, which must be the rest of the file, at
+    /// the current format version.
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self, InputSectionError> {
         let mut reader = Reader { bytes };
 
         let set_count = reader.count("sets", MIN_SIM_SET_BYTES)?;
@@ -202,11 +203,7 @@ impl InputSection {
             state_hashes.push(decode_state_hash(&mut reader)?);
         }
 
-        let peer_ticks = if has_peer_track {
-            peers::decode(&mut reader)?
-        } else {
-            Vec::new()
-        };
+        let peer_ticks = peers::decode(&mut reader)?;
 
         if !reader.bytes.is_empty() {
             return Err(InputSectionError::TrailingBytes(reader.bytes.len()));
@@ -385,6 +382,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::replay::migrate;
 
     fn set(tick: u64, name: &str, value: &str) -> RecordedSimSet {
         RecordedSimSet {
@@ -430,46 +428,52 @@ mod tests {
         buf
     }
 
+    /// A version 2 file's section, read as a file of that version is: through
+    /// the migration, then the one reader.
+    fn decode_v2(bytes: &[u8]) -> Result<InputSection, InputSectionError> {
+        InputSection::decode(&migrate::run(
+            migrate::steps_from(2).expect("version 2 is read"),
+            bytes,
+        ))
+    }
+
     #[test]
     fn a_section_reads_back_as_written() {
         let section = sample();
-        assert_eq!(InputSection::decode(&encoded(&section), true), Ok(section));
+        assert_eq!(InputSection::decode(&encoded(&section)), Ok(section));
         let empty = InputSection::default();
         assert_eq!(encoded(&empty), [0; 12], "three zero counts");
-        assert_eq!(InputSection::decode(&encoded(&empty), true), Ok(empty));
+        assert_eq!(InputSection::decode(&encoded(&empty)), Ok(empty));
     }
 
     #[test]
     fn a_version_2_section_reads_with_no_peer_track() {
         let section = sample();
-        assert_eq!(
-            InputSection::decode(&encoded_v2(&section), false),
-            Ok(section)
-        );
+        assert_eq!(decode_v2(&encoded_v2(&section)), Ok(section));
         assert_eq!(encoded_v2(&InputSection::default()), [0; 8]);
     }
 
     #[test]
     fn a_section_read_as_the_wrong_version_is_refused() {
-        // A version 3 section read as version 2: its track's count is four
-        // bytes the older layout ends before.
+        // A version 3 section read as version 2: the migration gives it a
+        // second track count, four bytes past the end of its own track.
         assert_eq!(
-            InputSection::decode(&encoded(&sample()), false),
+            decode_v2(&encoded(&sample())),
             Err(InputSectionError::TrailingBytes(4))
         );
-        // And a version 2 section read as version 3 ends where its track
-        // should start.
+        // And a version 2 section read as the current one, unmigrated, ends
+        // where its track should start.
         assert_eq!(
-            InputSection::decode(&encoded_v2(&sample()), true),
+            InputSection::decode(&encoded_v2(&sample())),
             Err(InputSectionError::Truncated("peer ticks"))
         );
     }
 
     #[test]
     fn a_truncated_section_is_refused_by_where_it_ends() {
-        let bytes = encoded_v2(&sample());
+        let bytes = encoded(&sample());
         assert_eq!(
-            InputSection::decode(&[], false),
+            InputSection::decode(&[]),
             Err(InputSectionError::Truncated("sets"))
         );
         // One set whose name is cut short: its tick, a length of 20 and two
@@ -480,13 +484,13 @@ mod tests {
         cut.extend_from_slice(&20u16.to_le_bytes());
         cut.extend_from_slice(b"sv");
         assert_eq!(
-            InputSection::decode(&cut, false),
+            InputSection::decode(&cut),
             Err(InputSectionError::Truncated("name"))
         );
-        // Hashes are all one size, so a file cut inside one is caught by its
-        // count.
+        // Hashes are all one size, so a file cut inside one — the last, before
+        // the track's four-byte count — is caught by its count.
         assert_eq!(
-            InputSection::decode(&bytes[..bytes.len() - 1], false),
+            InputSection::decode(&bytes[..bytes.len() - 4 - 1]),
             Err(InputSectionError::CountBeyondFile {
                 what: "state hashes",
                 declared: 3,
@@ -500,7 +504,7 @@ mod tests {
         let mut bytes = u32::MAX.to_le_bytes().to_vec();
         bytes.extend_from_slice(&[0; MIN_SIM_SET_BYTES]);
         assert_eq!(
-            InputSection::decode(&bytes, false),
+            InputSection::decode(&bytes),
             Err(InputSectionError::CountBeyondFile {
                 what: "sets",
                 declared: u32::MAX,
@@ -512,7 +516,7 @@ mod tests {
         bytes.extend_from_slice(&2u32.to_le_bytes());
         bytes.extend_from_slice(&[0; STATE_HASH_BYTES]);
         assert_eq!(
-            InputSection::decode(&bytes, false),
+            InputSection::decode(&bytes),
             Err(InputSectionError::CountBeyondFile {
                 what: "state hashes",
                 declared: 2,
@@ -543,8 +547,9 @@ mod tests {
             bytes.extend_from_slice(&(text.len() as u16).to_le_bytes());
             bytes.extend_from_slice(text.as_bytes());
         }
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        assert_eq!(InputSection::decode(&bytes, false), Err(refusal));
+        // No hashes and no peer ticks.
+        bytes.extend_from_slice(&[0; 4 + 4]);
+        assert_eq!(InputSection::decode(&bytes), Err(refusal));
 
         let long_value = InputSection {
             sim_sets: vec![set(
@@ -563,7 +568,7 @@ mod tests {
 
     #[test]
     fn text_that_is_not_utf8_is_refused_by_field() {
-        let mut bytes = encoded_v2(&InputSection {
+        let mut bytes = encoded(&InputSection {
             sim_sets: vec![set(1, "ab", "cd")],
             state_hashes: Vec::new(),
             peer_ticks: Vec::new(),
@@ -571,7 +576,7 @@ mod tests {
         // The value's first byte: count, tick, name length, name, value length.
         bytes[4 + 8 + 2 + 2 + 2] = 0xFF;
         assert_eq!(
-            InputSection::decode(&bytes, false),
+            InputSection::decode(&bytes),
             Err(InputSectionError::NotUtf8("value"))
         );
     }
@@ -588,7 +593,7 @@ mod tests {
             tick: TickId::from_raw(4),
         };
         assert_eq!(backwards.encode(&mut Vec::new()), Err(refusal.clone()));
-        let mut bytes = encoded_v2(&InputSection {
+        let mut bytes = encoded(&InputSection {
             sim_sets: vec![set(5, "a", "1"), set(6, "a", "2")],
             state_hashes: Vec::new(),
             peer_ticks: Vec::new(),
@@ -596,7 +601,7 @@ mod tests {
         // The second set's tick: count, then the first set's 14 bytes.
         let second = 4 + 8 + 2 + 1 + 2 + 1;
         bytes[second..second + 8].copy_from_slice(&4u64.to_le_bytes());
-        assert_eq!(InputSection::decode(&bytes, false), Err(refusal));
+        assert_eq!(InputSection::decode(&bytes), Err(refusal));
 
         // Two hashes for one tick: a hash is the state at a tick's end, and a
         // tick has one end.
@@ -610,22 +615,22 @@ mod tests {
             tick: TickId::from_raw(3),
         };
         assert_eq!(twice.encode(&mut Vec::new()), Err(refusal.clone()));
-        let mut bytes = encoded_v2(&InputSection {
+        let mut bytes = encoded(&InputSection {
             sim_sets: Vec::new(),
             state_hashes: vec![hash(3, 1), hash(4, 1)],
             peer_ticks: Vec::new(),
         });
         let second = 4 + 4 + STATE_HASH_BYTES;
         bytes[second..second + 8].copy_from_slice(&3u64.to_le_bytes());
-        assert_eq!(InputSection::decode(&bytes, false), Err(refusal));
+        assert_eq!(InputSection::decode(&bytes), Err(refusal));
     }
 
     #[test]
     fn bytes_after_the_section_are_refused() {
-        let mut bytes = encoded_v2(&sample());
+        let mut bytes = encoded(&sample());
         bytes.push(0);
         assert_eq!(
-            InputSection::decode(&bytes, false),
+            InputSection::decode(&bytes),
             Err(InputSectionError::TrailingBytes(1))
         );
     }
