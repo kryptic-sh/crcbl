@@ -36,6 +36,17 @@ fn named_delta_seeds_reach_their_intended_paths() {
         decode_delta(minimal, Trust::Untrusted).expect("minimal keyframe seed must decode");
     assert!(decoded.is_keyframe);
     assert!(decoded.systems.is_empty());
+    assert_eq!(decoded.input_timing, None);
+
+    // The same keyframe carrying a late input's timing back to its client.
+    let timed = decode_delta_untrusted(include_bytes!("../corpus/decoder/delta-input-timing"))
+        .expect("the timed keyframe seed must decode");
+    assert_eq!(
+        timed
+            .input_timing
+            .map(|timing| (timing.tick.get(), timing.margin_ticks)),
+        Some((12, -2))
+    );
 
     assert!(matches!(
         decode_delta_untrusted(include_bytes!("../corpus/decoder/delta-truncated")),

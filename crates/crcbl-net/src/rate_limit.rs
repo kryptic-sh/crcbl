@@ -30,6 +30,34 @@ impl Default for InboundRateLimitConfig {
     }
 }
 
+/// The messages a peer legitimately sends on one channel each tick: a client
+/// an input and an acknowledgement of the snapshot before it, a server a
+/// snapshot and room for the acknowledgement-repair or event beside it.
+pub const MESSAGES_PER_TICK: u64 = 2;
+
+impl InboundRateLimitConfig {
+    /// The default budget, with the message rate raised to what a peer
+    /// ticking at `tick_hz` sends every second — [`MESSAGES_PER_TICK`] a tick
+    /// — where that is more.
+    ///
+    /// The default's message rate is a session at 60 Hz exactly. A faster
+    /// session's peers send more than it every second of play, and the
+    /// refused messages are not the extra ones: whichever arrives once the
+    /// bucket is dry is dropped, and a channel queued behind a dry bucket
+    /// delivers everything later and later. Inputs held for the tick they
+    /// target cannot arrive late tick after tick and still apply on it.
+    #[must_use]
+    pub fn for_tick_rate(tick_hz: u32) -> Self {
+        let default = Self::default();
+        Self {
+            messages_per_second: default
+                .messages_per_second
+                .max(MESSAGES_PER_TICK * u64::from(tick_hz)),
+            ..default
+        }
+    }
+}
+
 /// Token-bucket limiter for one inbound channel.
 ///
 /// Time is injected by the caller, so behaviour is deterministic in tests and
@@ -128,6 +156,28 @@ impl InboundRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A session's budget carries what its peers send each tick**: at the
+    /// rate the default was sized for it is the default, and a faster one
+    /// gets [`MESSAGES_PER_TICK`] a tick; the byte budget is the default's
+    /// either way.
+    #[test]
+    fn a_tick_rates_budget_carries_its_messages_per_tick() {
+        assert_eq!(
+            InboundRateLimitConfig::for_tick_rate(60),
+            InboundRateLimitConfig::default()
+        );
+        assert_eq!(
+            InboundRateLimitConfig::for_tick_rate(30),
+            InboundRateLimitConfig::default()
+        );
+        let fast = InboundRateLimitConfig::for_tick_rate(360);
+        assert_eq!(fast.messages_per_second, MESSAGES_PER_TICK * 360);
+        assert_eq!(
+            fast.bytes_per_second,
+            InboundRateLimitConfig::default().bytes_per_second
+        );
+    }
 
     #[test]
     fn same_and_backward_time_do_not_refill() {

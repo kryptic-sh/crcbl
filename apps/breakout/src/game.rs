@@ -3155,31 +3155,26 @@ mod tests {
     /// three in none.
     const JITTER_SPREAD: Duration = Duration::from_millis(10);
 
-    /// **Latency costs lag; jitter costs travel that never arrives.**
-    ///
-    /// Both halves are asserted here because either alone would be misread.
+    /// **Neither latency nor jitter costs travel: the server holds each frame
+    /// for the tick it names.**
     ///
     /// Over a link with a *constant* delay, a held key loses nothing: every
     /// frame arrives, one per tick, shifted by the round trip. The paddle is
     /// behind while the key is down and catches up once it is released, so the
     /// travel after settling is the full thirty ticks the key was held for.
     ///
-    /// Add jitter and frames stop arriving one per tick — two become due
-    /// together and the tick between them gets none. The server hands a whole
-    /// tick's queue to one [`GameModule::tick`], [`Intent::from_inputs`] folds
-    /// the pair into a single [`Intent`], and the second frame's tick of travel
-    /// is **gone**: it is still missing after the settle, which is what
-    /// separates it from lag.
+    /// Jitter makes frames arrive bunched — two due together and the tick
+    /// between them with none. Before the server's jitter buffer, a tick handed
+    /// both to one [`GameModule::tick`], [`Intent::from_inputs`] folded them
+    /// into one [`Intent`], and the second frame's tick of travel was gone for
+    /// good. Now the client stamps each frame with the tick it is for, ahead
+    /// of the server by its input lead, and the server holds each for that
+    /// tick, so the jittered arm travels the full thirty too.
     ///
-    /// **This asserts what the game does today.** A jitter buffer — holding a
-    /// frame for the tick it names instead of collapsing it — is what changes
-    /// it, and this is the test that should go red when one lands.
-    ///
-    /// [`Server::dropped_input_count`] is asserted zero in both arms so the
-    /// difference is read as the fold's and not as the per-tick cap refusing
-    /// frames.
+    /// [`Server::dropped_input_count`] is asserted zero in both arms so a
+    /// shortfall is not the per-tick cap refusing frames.
     #[test]
-    fn jitter_costs_paddle_travel_that_latency_alone_only_delays() {
+    fn jitter_costs_no_paddle_travel_once_input_is_held_for_its_tick() {
         let travel = |conditions| {
             let mut run = ImpairedRun::new(conditions);
             let step = PADDLE_SPEED * run.game.tick_dt_secs();
@@ -3216,16 +3211,15 @@ mod tests {
         });
         assert_eq!(
             jittered_dropped, 0,
-            "the server's per-tick cap refused a frame; this difference is \
-             supposed to be the fold's",
+            "the server's per-tick cap refused a frame",
         );
-        assert!(
-            jittered < steady,
+        assert_eq!(
+            jittered,
+            SWEEP_HELD_TICKS,
             "the same key held over the same delay with {JITTER_SPREAD:?} of \
-             jitter on it travelled {jittered}/{SWEEP_HELD_TICKS}, the same as \
-             without. Either arrivals stopped bunching or something is now \
-             holding a bunched frame for the tick it names — which is the jitter \
-             buffer this asserts the absence of",
+             jitter on it lost {} tick(s) of travel, so bunched frames fold into \
+             one tick again rather than each being held for the tick it names",
+            SWEEP_HELD_TICKS - jittered,
         );
     }
 

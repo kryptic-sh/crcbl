@@ -11677,9 +11677,9 @@ and `playout_tests` (bursts, reordering not inflating the interval).
   twice until the interval takes over (one arrival) and playback slows within
   its rate bound. Counted in `underruns`.
 - **Playback steps past `MAX_PLAYOUT_DELAY`, not `21-jobs.md`'s ~50 ms.** That
-  policy is for the simulation clock's input lead (the next entry); a 50 ms
-  playback step is a visible jump that slewing at the rate bound closes in about
-  half a second. Considered and declined for playback.
+  policy is the input clock's (`crcbl_client::input_lead`); a 50 ms playback
+  step is a visible jump that slewing at the rate bound closes in about half a
+  second. Considered and declined for playback.
 - **Not verified:** clock drift between server and client (the offset estimate
   should track it; no test skews a clock), and breakout's replication drift
   warning (`apps/breakout/src/game.rs`, a 1-unit threshold) against the slightly
@@ -11946,24 +11946,125 @@ no accumulate-then-swap, no edge list, no ring. Nothing spawns an input thread.
 and `26-prediction.md`'s rollback, which replays exact per-tick inputs from this
 ring.
 
-### Client tick alignment and the jitter buffer (2026-08-27)
+### Client tick alignment and the jitter buffer: what the input lead leaves (2026-10-05)
 
-**Not built for input.** The client's _playback_ now estimates the server's
-clock from snapshot arrivals and rate-corrects towards it
-(`crcbl_client::playout`, the entry _Client jitter buffer: what the adaptive
-playout delay leaves_), but nothing runs the client's input ahead of the server:
-no lead, and the input tick still advances at a constant rate. `21-jobs.md`'s
-2026-07-27 correction already settled the policy for that lead (slew below ~50
-ms, step above it, with a defined sim-side policy for the stepped interval) —
-the policy is decided and unimplemented.
+**Built (2026-10-05): `crcbl_client::input_lead` and `crcbl-server`'s
+`input_buffer`.** The client stamps each input with a tick running ahead of the
+server time its snapshots show by a lead, and the server holds each input until
+the tick it targets. The module docs of both give the mechanism in full; the
+decisions, all for the long term:
 
-**Half of this row is now closed and should not be re-derived:** the server no
-longer discards client input. It queues the frames that arrived since the tick
-began and hands them to the module as `crcbl_ecs::ClientInputs`, capped by
-`MAX_CLIENT_INPUTS_PER_TICK`, with `Server::dropped_input_count` reporting what
-the cap refused. What is still missing is a **jitter buffer keyed by target
-tick** — the queue is in arrival order, and nothing holds an early input back or
-places a late one.
+- **The lead converges on the server's measurement, not on a round-trip guess.**
+  Every snapshot's header carries an `InputTiming` (protocol version 7): the
+  tick of the input that reached the server least early since the last snapshot
+  to that peer, and its margin in whole ticks. The client remembers the lead it
+  sent each recent tick with, so a sample says exactly which leads would have
+  had that tick read in the server's last reading before it runs (a tick-wide
+  range), and the lead aims `INPUT_LEAD_MARGIN_TICKS` into it; the worst sample
+  of each `INPUT_FEEDBACK_WINDOW` raises the lead at once or lowers it by
+  `INPUT_LEAD_GAIN`. Measuring against the tick's own sent lead is what stops a
+  correction in flight being counted twice, whatever the round trip — no windup.
+  The handshake's round trip (hello to `Accept`) and the `Accept`'s
+  `server_tick` give the starting lead and server time; the playout's offset
+  replaces the latter once a snapshot arrives. Transport round-trip stats
+  (`link_stats`) are not used: the in-memory and simulated links have none, and
+  the server's sample measures what matters directly.
+- **The margin is half a tick, centred, with jitter covered on top**
+  (`INPUT_LEAD_MARGIN_TICKS`). The server reads once a tick, so it can only say
+  which reading took an input; the lead aims for the last reading before the
+  tick and sits in the middle of the leads that hit it, and the worst arrival of
+  each window places it, so jitter — the phase of the frames a client sends and
+  a host reads on included — is covered on top. A whole-tick margin was built
+  first and declined (2026-10-05): on a zero-latency loopback it held every
+  input a tick, where `21-jobs.md` asks for a lead of zero in memory, and 105
+  tests across nine samples failed; the one read (asteroids') sets input and
+  expects it on the next tick, and all of them pass with the centred margin. The
+  handshake's starting lead is a tick under its round trip for the same reason:
+  the hello waits up to a tick to be read, so the first inputs err late
+  (applied, counted) rather than held.
+- **Slew below `INPUT_STEP_THRESHOLD` (50 ms), step above it** — `21-jobs.md`'s
+  2026-07-27 correction. The slew bound is `MAX_INPUT_RATE_DEVIATION` (5%), not
+  that plan's ±0.5%: with no predicted simulation on this clock, running it fast
+  or slow only moves how far ahead the server holds inputs, and ±0.5% would
+  leave inputs late for seconds.
+- **The stepped interval's policy, as implemented**: with no client simulation,
+  it is a policy for the inputs the passed ticks would carry. A step forward
+  fast-forwards — each passed tick is sent the current input, as a hitch's are,
+  at most `DEFAULT_MAX_CATCH_UP_TICKS` in one update and the older ones dropped
+  and counted (`InputLeadStats::skipped_ticks`). A step back repeats nothing:
+  those ticks were sent and are held at the server, so nothing goes until the
+  clock passes the newest sent (`repeated_ticks`). Steps are counted. "Logged"
+  is these counters and the netgraph rows: neither crate depends on a logger.
+- **Late inputs apply on the next tick and are counted** (`late_input_count`,
+  `PeerStats::late_inputs`) — `21-jobs.md`'s apply-next policy, the prediction
+  era's rollback trigger. Dropping was declined: it loses edges (a placed tower,
+  a tap) for being a tick late. Within a tick, late frames come first, in tick
+  order.
+- **The horizon is `crcbl_net::MAX_INPUT_LEAD` (1 s)**, in ticks rounded up;
+  past it an input is refused and counted as early (`early_input_count`). The
+  client clamps its lead to it. Inputs held ahead of their tick are not counted
+  — on a converged link nearly every input is — so "early" means refused.
+- **`MAX_CLIENT_INPUTS_PER_TICK` caps each target tick**, late frames landing on
+  it included; `dropped_input_count` counts what it refused, and the tick's
+  `ClientInputs::dropped` says so when it runs. Recordings still hold what the
+  module read, so replays are unchanged.
+- **A lost peer's held inputs are discarded** (`Host` releases only for peers
+  with a link), keeping "a lost peer is listed, with nothing".
+- **Inbound budgets scale with the tick rate**
+  (`InboundRateLimitConfig::for_tick_rate`, `MESSAGES_PER_TICK` a tick, never
+  under the default). Found by `breach`'s
+  `the_range_squares_the_shooter_up_even_when_a_frame_is_many_ticks`, which runs
+  at 360 Hz: the default's 120 messages a second refused five in six of its
+  client's inputs and acknowledgements, the channel queued behind the dry
+  bucket, and inputs arrived dozens of ticks late until none got through. It
+  passed before only because a frame applied whenever it came. The byte budget
+  is unchanged, and so is every session at 60 Hz or slower.
+
+Tests, each shown red by a mutation: `input_buffer::tests` (held, late, horizon,
+tick order, cap, timing sample, horizon rounding), the server's
+`tests::an_early_input_frame_is_held_until_the_tick_it_targets` and its late,
+horizon and cap siblings, `input_lead::tests` (alignment, slew within the bound,
+step forward and its catch-up cap, step back, hitch, feedback up and down, no
+double counting, unknown ticks, the lead's ceiling), and
+`host::lead_tests::the_lead_converges_to_half_a_round_trip_plus_the_margin`,
+`host::lead_tests::under_jitter_inputs_apply_on_their_tick_and_few_are_late` (40
+ms ± 15 ms: no late input in a 16 s run; the test's bound is 1%) and
+`host::lead_tests::a_lost_peers_held_inputs_go_with_its_link`.
+
+**Left, and what each would take:**
+
+- **The constants were chosen, not tuned.** `INPUT_LEAD_MARGIN_TICKS`,
+  `INPUT_STEP_THRESHOLD`, `MAX_INPUT_RATE_DEVIATION`, `INPUT_CORRECTION_TIME`,
+  `INPUT_FEEDBACK_WINDOW`, `INPUT_LEAD_GAIN` and `MAX_INPUT_LEAD` are unmeasured
+  on a real link; every test drives an in-memory or simulated one.
+- **Loss and reordering of the timing samples are not driven.** A lost snapshot
+  loses its sample; the next carries a fresh one. No test drives loss against
+  the lead.
+- **No client simulation runs on the input clock.** When prediction lands
+  (`26-prediction.md`), the stepped interval's policy becomes a real sim policy
+  (re-simulate or skip the passed ticks), and the slew bound wants revisiting
+  against what a predicted entity looks like at 5%.
+- **A host's per-peer tick lead is not shown**: the host shows late and early
+  counts; the lead itself is the client's figure, and nothing reports it back.
+- **Behaviour, not a bug: on a link with latency an input now waits at the
+  server** for its tick, by up to the jitter the lead covers; on a steady link a
+  tick holds one frame, where before a frame arrived per client update. On a
+  zero-latency loopback it reaches the next tick, as before.
+- **The samples' own protocol versions do not move with the engine's wire.**
+  Each sample hand-shakes on its own `COMPATIBILITY`, so a sample built before
+  this change and one after fail at the first snapshot rather than at the
+  handshake — as they did for version 6. Fixing it means folding the engine's
+  version into every sample's handshake; not decided.
+- **Not verified:** clock drift between server and client (the playout offset
+  should carry it into the lead; no test skews a clock).
+- **Behaviour that surprised: a `ConditionSimulator` whose far end has gone
+  never reports the drop while it holds messages for it.** Its `recv` drains its
+  pending queue into the inner transport first and returns that send's
+  `Disconnected` without reading the inner end, so the inner transport never
+  learns the far end went and `is_connected` stays true; a host behind a
+  delaying simulator never raises `Lost`.
+  `a_lost_peers_held_inputs_go_with_its_link` delays only the client's side for
+  that reason. Not fixed here: the simulator is not this change's.
 
 ### ECS access declarations and the parallel schedule (2026-08-27)
 
@@ -12087,7 +12188,9 @@ reads.
 Nothing built. More importantly, **three of the five things this document says
 were staged for it are not built either**:
 
-- **tick sync (21)** — no lead, no server-time estimate, no rate correction.
+- **tick sync (21)** — built (2026-10-05): the input lead and the server's
+  jitter buffer (_Client tick alignment and the jitter buffer: what the input
+  lead leaves_).
 - **input tick rings (21)** — `InputTickState` is flat.
 - **module equivalence (16 / P6A)** — no wasm host; `wasmtime` is at zero
   occurrences in `Cargo.lock`.
@@ -16529,15 +16632,13 @@ sandbox add it. Decided for the long term:
   link table's jitter column is now headed `rttvar`, so the two jitters — the
   round trip's RFC 6298 deviation and the snapshots' RFC 3550 interarrival
   jitter — never share a name. A host's links carry no playout.
-- **The tick lead is the client's own tick less the newest snapshot's**, signed.
-  Nothing steers the client's `FrameClock` towards the server's (the input
-  jitter buffer, tick lead and rate correction are still absent: _The
-  plan-document audit of 2026-08-23_), so the figure today carries the
-  difference between when the two clocks started as well as the latency: a
-  client that joins a server a minute old reads about minus a minute of ticks.
-  It becomes the steered quantity when the input lead lands. A host's tick lead
-  per peer still needs that lead measured by the client and reported; nothing
-  does.
+- **The tick lead is the newest tick stamped on an input less the newest
+  snapshot's**, signed — since 2026-10-05 the steered quantity: the input clock
+  (`crcbl_client::input_lead`) keeps it near a round trip plus the margin. The
+  input lead, the server's margin and the input clock's steps are three more
+  rows (`input lead`, `input margin`, `input steps`), and a host shows each
+  peer's late and early counts as a `peer N inputs` row after the table. A
+  host's tick lead per peer still needs the client to report it; nothing does.
 - **`towers --serve` prints a line per player under its status line**:
   `  peer N: rtt R ms, loss L%, in I B/s, out O B/s` (`LinkReading::summary`),
   from the host's netgraph as of the last frame, players gone since then left
@@ -19813,9 +19914,10 @@ only input is affected. A game that read its state from snapshots would not be.
   `GameModule::tick`, so `Intent::from_inputs` folds the pair into one intent
   and the second frame's tick of travel is gone. A held key that travels 30/30
   ticks over a steady 50 ms travels 21/30 with jitter on it, and is **still**
-  21/30 after settling — which is what separates it from lag.
-  `jitter_costs_paddle_travel_that_latency_alone_only_delays` pins both halves
-  and is the test that should go red when a jitter buffer lands.
+  21/30 after settling — which is what separates it from lag. **Since the jitter
+  buffer (2026-10-05) the jittered key travels 30/30 too**: each frame is held
+  for the tick it names, and
+  `jitter_costs_no_paddle_travel_once_input_is_held_for_its_tick` pins it.
 
   **An earlier reading of this attributed the bunching to latency itself.** That
   was an artifact of driving the run on the wall clock: the ticks were unevenly
@@ -19891,13 +19993,9 @@ leaves behind is smaller than it was:
   2026-10-04): a console set, which a `Host` applies on its tick boundary, and a
   scene edit, which a host serving a scene hands to its caller (_Scene edits
   over the transport_). A game's module still receives no command.
-- **The jitter buffer, the client's tick lead and rate correction are still
-  absent**, and now they are the next thing rather than blocked behind this.
-  Input frames are handed over in arrival order with the `TickId` their client
-  stamped them with, and **nothing compares that tick against the server's
-  clock** — so the groundwork is a carried field and nothing else. A frame not
-  read during the tick it is offered in is gone; holding it is exactly what the
-  buffer would be.
+- **The jitter buffer, the client's tick lead and rate correction are built**
+  (2026-10-05): _Client tick alignment and the jitter buffer: what the input
+  lead leaves_.
 
 **What each corrected row leaves owed**, in the order a reader would meet them:
 

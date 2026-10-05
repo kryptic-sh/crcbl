@@ -2,8 +2,11 @@
 //! doing — round trip, its deviation, recent loss and resends, bytes each
 //! way, and the snapshot size — with a rolling graph of the round trip, the
 //! loss and the snapshot under the figures. A client's link also shows its
-//! playout: the buffer's depth, the delay it aims for, the arrival jitter
-//! and the tick lead.
+//! playout — the buffer's depth, the delay it aims for, the arrival jitter
+//! and the tick lead — and its input lead: how far ahead of the server time
+//! it stamps its inputs, how early the server last read one, and how often
+//! the input clock stepped. A host's link to a peer shows how many of that
+//! peer's inputs came late or too early.
 //!
 //! A [`LanHost`](super::LanHost) shows a row per peer; a
 //! [`LanClient`](super::LanClient) one, for its link to the host. Each keeps
@@ -26,8 +29,12 @@
 //! ([`Client::playout_stats`](crate::client::Client::playout_stats) and
 //! [`Client::tick_lead`](crate::client::Client::tick_lead)): the arrival
 //! jitter is RFC 3550's interarrival jitter of the snapshots, a different
-//! figure from the round trip's deviation, and labelled apart from it. A
-//! host has no playout to show, and does not measure its peers' tick lead.
+//! figure from the round trip's deviation, and labelled apart from it. Its
+//! input lead is [`Client::input_lead_stats`](crate::client::Client::input_lead_stats),
+//! the margin in it the server's own measurement carried back on a
+//! snapshot. A host has no playout to show; what it measures of its peers'
+//! input is the late and early counts
+//! ([`PeerStats`](crate::server::PeerStats)).
 //!
 //! A link that measures nothing — a listen host's own player, whose
 //! transport is an in-memory pair, or a link still connecting or down —
@@ -42,7 +49,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use crate::client::{Client, PlayoutStats};
+use crate::client::{Client, InputLeadStats, PlayoutStats};
 use crate::net::Transport;
 use crate::net::reliable::{EndpointStats, MAX_UNRELIABLE_PAYLOAD, STATS_WINDOW};
 use crate::ui::{DebugModule, DebugSection};
@@ -83,6 +90,9 @@ pub struct LinkReading {
     /// The client's playout, on a client's link to its host; `None` on a
     /// host's links to its peers.
     pub playout: Option<PlayoutReading>,
+    /// How the peer's inputs have arrived, on a host's link to a peer;
+    /// `None` on a client's link.
+    pub inputs: Option<InputCounts>,
 }
 
 impl LinkReading {
@@ -96,7 +106,9 @@ impl LinkReading {
             playout: Some(PlayoutReading {
                 stats: client.playout_stats(),
                 tick_lead: client.tick_lead(),
+                input_lead: client.input_lead_stats(),
             }),
+            inputs: None,
         }
     }
 
@@ -130,6 +142,20 @@ pub struct PlayoutReading {
     pub stats: PlayoutStats,
     /// [`Client::tick_lead`].
     pub tick_lead: Option<i64>,
+    /// [`Client::input_lead_stats`].
+    pub input_lead: InputLeadStats,
+}
+
+/// How one peer's inputs have reached the host, from its
+/// [`PeerStats`](crate::server::PeerStats).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputCounts {
+    /// Inputs that arrived after the tick they target had run, and were
+    /// applied a tick late.
+    pub late: u64,
+    /// Inputs refused for targeting a tick further ahead than the host
+    /// holds.
+    pub early: u64,
 }
 
 /// Which end of a session a netgraph shows.
@@ -359,6 +385,31 @@ fn playout_rows(playout: &PlayoutReading, out: &mut DebugSection) {
         Some(lead) => out.row("tick lead", format_args!("{lead:+} ticks")),
         None => out.row_str("tick lead", "-"),
     }
+    input_lead_rows(&playout.input_lead, out);
+}
+
+/// A client's input lead, a row a figure: the lead and the lead it steers
+/// to, the margin the server last read an input with — zero is in time —
+/// and the input clock's steps with the ticks they skipped and repeated.
+fn input_lead_rows(lead: &InputLeadStats, out: &mut DebugSection) {
+    match lead.lead.zip(lead.target) {
+        Some((now, target)) => out.row(
+            "input lead",
+            format_args!("{} ms (aims {} ms)", ms(now), ms(target)),
+        ),
+        None => out.row_str("input lead", "-"),
+    }
+    match lead.margin_ticks {
+        Some(margin) => out.row("input margin", format_args!("{margin:+} ticks")),
+        None => out.row_str("input margin", "-"),
+    }
+    out.row(
+        "input steps",
+        format_args!(
+            "{} ({} skipped, {} repeated)",
+            lead.steps, lead.skipped_ticks, lead.repeated_ticks
+        ),
+    );
 }
 
 impl DebugModule for Netgraph {
@@ -374,6 +425,14 @@ impl DebugModule for Netgraph {
                 &self.name(link),
                 format_args!("{}", link_row(&link.reading)),
             );
+        }
+        for link in &self.links {
+            if let Some(inputs) = link.reading.inputs {
+                out.row(
+                    &format!("{} inputs", self.name(link)),
+                    format_args!("late {}, early {}", inputs.late, inputs.early),
+                );
+            }
         }
         for playout in self.links.iter().filter_map(|link| link.reading.playout) {
             playout_rows(&playout, out);

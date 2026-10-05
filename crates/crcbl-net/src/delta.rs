@@ -24,7 +24,7 @@ use crcbl_core::TickId;
 
 use crate::auth::AUTH_OVERHEAD;
 use crate::codec::{ByteReader, DecodeError};
-use crate::messages::SystemSnapshot;
+use crate::messages::{InputTiming, SystemSnapshot};
 use crate::transport::MAX_IN_MEMORY_MESSAGE_BYTES;
 use crate::types::{EntityBits, EntityData, SectorId};
 
@@ -53,8 +53,12 @@ pub const MAX_BASELINE_ENCODED_BYTES: usize = 256 * 1024;
 /// Bytes of framing each entity entry costs on the wire and in a baseline.
 pub(crate) const ENTITY_ENTRY_HEADER_BYTES: usize = 12;
 /// Bytes of an encoded delta before its first system: sector, tick, baseline
-/// tick, keyframe flag and system count (see [`encode_delta`]).
-pub(crate) const DELTA_HEADER_BYTES: usize = 3 * 8 + 8 + 8 + 1 + 4;
+/// tick, keyframe flag, input timing and system count (see [`encode_delta`]).
+pub(crate) const DELTA_HEADER_BYTES: usize = 3 * 8 + 8 + 8 + 1 + INPUT_TIMING_BYTES + 4;
+/// Bytes the input timing costs in every delta's header, present or not: its
+/// flag, the input's tick and its margin. A fixed size, so a snapshot fitted
+/// to its budget stays fitted whichever peer's timing it then carries.
+const INPUT_TIMING_BYTES: usize = 1 + 8 + 4;
 /// Bytes each system costs in an encoded delta before its entities: id and
 /// the three counts.
 pub(crate) const SYSTEM_HEADER_BYTES: usize = 4 * 4;
@@ -454,6 +458,13 @@ pub struct Delta {
     pub tick: TickId,
     pub baseline_tick: Option<TickId>,
     pub is_keyframe: bool,
+    /// How early the server received the latest of the receiving client's
+    /// inputs to arrive the least early since its last snapshot; `None` when
+    /// none arrived. Not state: it rides the snapshot because the snapshot
+    /// already goes to that client every few ticks, unreliably, which is what
+    /// a timing sample wants. [`DeltaCodec`] never sets it; the server does,
+    /// per client, before encoding.
+    pub input_timing: Option<InputTiming>,
     pub systems: Vec<SystemDelta>,
 }
 
@@ -575,6 +586,7 @@ impl DeltaCodec {
             tick: current.tick,
             baseline_tick: Some(baseline.tick),
             is_keyframe: false,
+            input_timing: None,
             systems,
         }
     }
@@ -605,6 +617,7 @@ impl DeltaCodec {
             tick: current.tick,
             baseline_tick: None,
             is_keyframe: true,
+            input_timing: None,
             systems,
         }
     }
@@ -793,6 +806,9 @@ fn validate_delta_against_baseline(
 /// tick:            u64
 /// baseline_tick:   u64 (None = 0)
 /// is_keyframe:     u8
+/// input_timing:    u8 flag (0 = none, 1 = present)
+/// input_tick:      u64 (0 when none)
+/// input_margin:    i32 (0 when none)
 /// system_count:    u32
 /// Per system:
 ///   system_id:       u32
@@ -819,6 +835,13 @@ pub fn encode_delta(delta: &Delta) -> Result<Vec<u8>, BaselineDecodeError> {
     let baseline_tick = delta.baseline_tick.map_or(0, TickId::get);
     buf.extend_from_slice(&baseline_tick.to_le_bytes());
     buf.push(u8::from(delta.is_keyframe));
+    let (timing_flag, input_tick, input_margin) =
+        delta.input_timing.map_or((0u8, 0, 0), |timing| {
+            (1, timing.tick.get(), timing.margin_ticks)
+        });
+    buf.push(timing_flag);
+    buf.extend_from_slice(&input_tick.to_le_bytes());
+    buf.extend_from_slice(&input_margin.to_le_bytes());
     buf.extend_from_slice(&(delta.systems.len() as u32).to_le_bytes());
 
     for sys in &delta.systems {
@@ -890,6 +913,21 @@ pub fn decode_delta(payload: &[u8], trust: Trust) -> Result<Delta, DeltaDecodeEr
     if is_keyframe != baseline_tick.is_none() {
         return Err(DeltaDecodeError::InvalidMetadata);
     }
+
+    let timing_flag = reader.read_u8()?;
+    let input_tick = reader.read_u64()?;
+    let input_margin = reader.read_i32()?;
+    // An absent timing is all zeroes, so one packet has one reading: a flag
+    // of zero beside a tick would be a field the client silently ignores.
+    let input_timing = match timing_flag {
+        0 if input_tick == 0 && input_margin == 0 => None,
+        0 => return Err(DeltaDecodeError::InvalidMetadata),
+        1 => Some(InputTiming {
+            tick: TickId::from_raw(input_tick),
+            margin_ticks: input_margin,
+        }),
+        flag => return Err(DeltaDecodeError::InvalidFlag(flag)),
+    };
 
     let system_count = reader.read_u32()? as usize;
     if system_count > trust.max_systems() {
@@ -986,6 +1024,7 @@ pub fn decode_delta(payload: &[u8], trust: Trust) -> Result<Delta, DeltaDecodeEr
         tick,
         baseline_tick,
         is_keyframe,
+        input_timing,
         systems,
     })
 }
@@ -1252,6 +1291,7 @@ mod tests {
             tick: TickId::from_raw(1),
             baseline_tick: None,
             is_keyframe: true,
+            input_timing: None,
             systems: (0..=MAX_BASELINE_SYSTEMS as u32)
                 .map(|system_id| SystemDelta {
                     system_id,
@@ -1721,6 +1761,7 @@ mod tests {
             tick: TickId::from_raw(3),
             baseline_tick: Some(TickId::from_raw(1)),
             is_keyframe: false,
+            input_timing: None,
             systems: Vec::new(),
         };
 
@@ -1747,6 +1788,7 @@ mod tests {
             tick: TickId::from_raw(2),
             baseline_tick: Some(TickId::from_raw(2)),
             is_keyframe: false,
+            input_timing: None,
             systems: Vec::new(),
         };
 
@@ -1770,6 +1812,7 @@ mod tests {
             tick: TickId::from_raw(3),
             baseline_tick: None,
             is_keyframe: true,
+            input_timing: None,
             systems: vec![SystemDelta {
                 system_id: 1,
                 added: Vec::new(),
@@ -1832,6 +1875,7 @@ mod tests {
                 tick: TickId::from_raw(3),
                 baseline_tick: Some(TickId::from_raw(2)),
                 is_keyframe: false,
+                input_timing: None,
                 systems: vec![system],
             };
             assert!(matches!(
@@ -1850,6 +1894,7 @@ mod tests {
             tick: TickId::from_raw(1),
             baseline_tick: None,
             is_keyframe: true,
+            input_timing: None,
             systems: vec![SystemDelta {
                 system_id: 1,
                 added: vec![EntityData {
@@ -1945,6 +1990,7 @@ mod tests {
             tick: TickId::from_raw(1),
             baseline_tick: Some(TickId::from_raw(2)),
             is_keyframe: false,
+            input_timing: None,
             systems: Vec::new(),
         })
         .expect("valid delta");
@@ -1954,9 +2000,9 @@ mod tests {
             Err(DeltaDecodeError::InvalidMetadata)
         ));
 
-        let mut huge_system_count = vec![0; 45];
+        let mut huge_system_count = vec![0; DELTA_HEADER_BYTES];
         huge_system_count[40] = 1;
-        huge_system_count[41..45].copy_from_slice(&u32::MAX.to_le_bytes());
+        huge_system_count[DELTA_HEADER_BYTES - 4..].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(
             decode_delta(&huge_system_count, Trust::Untrusted),
             Err(DeltaDecodeError::InvalidLength(_))
@@ -1967,6 +2013,7 @@ mod tests {
             tick: TickId::from_raw(1),
             baseline_tick: None,
             is_keyframe: true,
+            input_timing: None,
             systems: vec![SystemDelta {
                 system_id: 1,
                 added: vec![EntityData {
@@ -1979,7 +2026,10 @@ mod tests {
             }],
         })
         .expect("valid delta");
-        huge_component[69..73].copy_from_slice(&u32::MAX.to_le_bytes());
+        // The entity's data length: past the header, the system's own
+        // header and the entity's bits.
+        let data_len = DELTA_HEADER_BYTES + SYSTEM_HEADER_BYTES + 8;
+        huge_component[data_len..data_len + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(
             decode_delta(&huge_component, Trust::Untrusted),
             Err(DeltaDecodeError::InvalidLength(_))
@@ -2005,6 +2055,76 @@ mod tests {
         }
     }
 
+    /// **The input timing crosses the wire as it was set, and absent as
+    /// absent** — a negative margin included, since a late input's is.
+    #[test]
+    fn the_input_timing_round_trips_present_and_absent() {
+        let timed = |input_timing| Delta {
+            sector: SectorId::ZERO,
+            tick: TickId::from_raw(9),
+            baseline_tick: None,
+            is_keyframe: true,
+            input_timing,
+            systems: Vec::new(),
+        };
+        for input_timing in [
+            None,
+            Some(InputTiming {
+                tick: TickId::from_raw(12),
+                margin_ticks: 3,
+            }),
+            Some(InputTiming {
+                tick: TickId::from_raw(7),
+                margin_ticks: -2,
+            }),
+        ] {
+            let payload = encode_delta(&timed(input_timing)).expect("valid delta");
+            assert_eq!(payload.len(), DELTA_HEADER_BYTES);
+            let decoded = decode_delta(&payload, Trust::Untrusted).expect("decodes");
+            assert_eq!(decoded.input_timing, input_timing);
+        }
+    }
+
+    /// **An input timing has one reading per packet**: a flag that is
+    /// neither absent nor present is refused, and so is an absent one
+    /// carrying a tick or a margin the client would ignore.
+    #[test]
+    fn decode_rejects_a_non_canonical_input_timing() {
+        let payload = encode_delta(&Delta {
+            sector: SectorId::ZERO,
+            tick: TickId::from_raw(1),
+            baseline_tick: None,
+            is_keyframe: true,
+            input_timing: None,
+            systems: Vec::new(),
+        })
+        .expect("valid delta");
+        let flag = 41;
+        let tick = flag + 1;
+        let margin = tick + 8;
+
+        let mut bad_flag = payload.clone();
+        bad_flag[flag] = 2;
+        assert!(matches!(
+            decode_delta(&bad_flag, Trust::Untrusted),
+            Err(DeltaDecodeError::InvalidFlag(2))
+        ));
+        for offset in [tick, margin] {
+            let mut stray = payload.clone();
+            stray[offset] = 1;
+            assert!(
+                matches!(
+                    decode_delta(&stray, Trust::Untrusted),
+                    Err(DeltaDecodeError::InvalidMetadata)
+                ),
+                "an absent timing with a byte set at {offset}"
+            );
+        }
+        let mut present = payload;
+        present[flag] = 1;
+        assert!(decode_delta(&present, Trust::Untrusted).is_ok());
+    }
+
     #[test]
     fn decode_rejects_non_canonical_keyframe_flag() {
         let mut payload = encode_delta(&Delta {
@@ -2012,6 +2132,7 @@ mod tests {
             tick: TickId::from_raw(1),
             baseline_tick: None,
             is_keyframe: true,
+            input_timing: None,
             systems: Vec::new(),
         })
         .expect("valid delta");
@@ -2062,6 +2183,8 @@ mod tests {
             payload.extend_from_slice(&1u64.to_le_bytes());
             payload.extend_from_slice(&0u64.to_le_bytes());
             payload.push(1);
+            // No input timing.
+            payload.extend_from_slice(&[0; INPUT_TIMING_BYTES]);
             payload.extend_from_slice(&system_count.to_le_bytes());
             payload
         };
@@ -2115,6 +2238,7 @@ mod tests {
                 tick: TickId::from_raw(entity_bits + 1),
                 baseline_tick: Some(baseline.tick),
                 is_keyframe: false,
+                input_timing: None,
                 systems: vec![SystemDelta {
                     system_id: 1,
                     added: vec![EntityData {
@@ -2136,6 +2260,7 @@ mod tests {
             tick: TickId::from_raw(MAX_BASELINE_ENTITIES as u64 + 1),
             baseline_tick: Some(tick),
             is_keyframe: false,
+            input_timing: None,
             systems: vec![SystemDelta {
                 system_id: 1,
                 added: vec![EntityData {

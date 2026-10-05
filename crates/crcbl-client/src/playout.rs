@@ -493,6 +493,13 @@ impl Playout {
     pub(crate) fn newest_tick(&self) -> Option<f64> {
         self.newest.map(|newest| newest.tick)
     }
+
+    /// The clock offset `O`: the server's tick less local time, both in
+    /// ticks, so local time plus it is the server time the snapshots show;
+    /// `None` before the first arrival. The input lead runs ahead of it.
+    pub(crate) fn server_offset(&self) -> Option<f64> {
+        self.newest.map(|_| self.offset_ticks)
+    }
 }
 
 #[cfg(test)]

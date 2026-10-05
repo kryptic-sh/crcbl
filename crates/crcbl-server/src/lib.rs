@@ -1,14 +1,16 @@
 //! Authoritative server: fixed-tick simulation loop and snapshot emission.
 //!
-//! The server is the single source of truth. Each tick it drains client inputs,
-//! advances the ECS world, and broadcasts a per-system snapshot over an
-//! unreliable transport channel. Snapshots are delta-encoded against the
+//! The server is the single source of truth. Each tick it drains client inputs
+//! into a jitter buffer that holds each until the tick it targets
+//! (`input_buffer`), advances the ECS world, and broadcasts a per-system
+//! snapshot over an unreliable transport channel. Snapshots are delta-encoded against the
 //! client's last-acked baseline (P2b protocol) and carry a per-session MAC
 //! (see [`crcbl_net::auth`]) — an unauthenticated packet reaches nothing but
 //! the error counter.
 
 pub mod cadence;
 pub mod host;
+mod input_buffer;
 mod peer;
 pub mod sim_hash;
 
@@ -116,7 +118,8 @@ impl<T: Transport> Server<T> {
         let config = SessionConfig::default();
         let session_id = SessionId(1);
         let resume_token = peer::generate_resume_token()?;
-        let rate_limit_config = InboundRateLimitConfig::default();
+        let rate_limit_config = InboundRateLimitConfig::for_tick_rate(tick_hz);
+        let input_horizon_ticks = input_buffer::horizon_ticks(clock.tick_dt());
         Ok(Self {
             world,
             transport,
@@ -127,6 +130,7 @@ impl<T: Transport> Server<T> {
                 resume_token,
                 rate_limit_config,
                 Duration::ZERO,
+                input_horizon_ticks,
             ),
             session_config: config,
             next_session_id: session_id.0 + 1,
@@ -160,6 +164,7 @@ impl<T: Transport> Server<T> {
         let was_connected = self.peer.session.state() == SessionState::Connected;
         self.peer.begin_tick();
         self.drain_inputs();
+        self.peer.release_inputs(self.clock.tick());
         self.refuse_console_sets();
         self.refuse_edits();
         self.update_session_for_transport();
@@ -235,7 +240,8 @@ impl<T: Transport> Server<T> {
 
     /// Consume queued client messages: handshake, inputs, and acks.
     ///
-    /// Inputs are queued for this tick's [`GameModule::tick`].
+    /// Inputs are held for the tick each targets (`input_buffer`); the ones
+    /// due now are released to this tick's [`GameModule::tick`] after.
     ///
     /// Each channel is drained under its own budget, so exhausting one leaves
     /// the other readable.
@@ -281,9 +287,11 @@ impl<T: Transport> Server<T> {
                 Ok(hello) => self.handle_hello(hello),
                 Err(_) => self.counters.processing_errors += 1,
             },
-            Some(crcbl_net::auth::AUTH_TAG) => self
-                .peer
-                .process_authenticated_message(payload, &mut self.counters),
+            Some(crcbl_net::auth::AUTH_TAG) => self.peer.process_authenticated_message(
+                payload,
+                self.clock.tick(),
+                &mut self.counters,
+            ),
             _ => self.counters.processing_errors += 1,
         }
     }
@@ -455,8 +463,8 @@ impl<T: Transport> Server<T> {
     /// Attach a [`GameModule`] to drive game-specific per-tick logic.
     ///
     /// The module's [`GameModule::tick`] is called every server tick after the
-    /// ECS schedule runs, and is handed the [`ClientInputs`] that arrived since
-    /// the previous tick — which is the only way client input reaches game
+    /// ECS schedule runs, and is handed the [`ClientInputs`] held for that
+    /// tick — which is the only way client input reaches game
     /// logic. Only one module can be attached at a time; calling this again
     /// replaces any existing module.
     ///
@@ -481,7 +489,7 @@ impl<T: Transport> Server<T> {
         self.counters.rate_limited_bytes
     }
 
-    /// Number of input frames refused because the tick they arrived in was
+    /// Number of input frames refused because the tick they target was
     /// already holding [`MAX_CLIENT_INPUTS_PER_TICK`].
     ///
     /// A growing value means a peer is sending input faster than this server
@@ -490,6 +498,23 @@ impl<T: Transport> Server<T> {
     #[must_use]
     pub fn dropped_input_count(&self) -> u64 {
         self.counters.dropped_inputs
+    }
+
+    /// Number of input frames that arrived after the tick they target had
+    /// run, and were applied on the next tick instead.
+    ///
+    /// A growing value means the client's input lead falls short of its
+    /// link: its inputs land a tick or more after the moment they describe.
+    #[must_use]
+    pub fn late_input_count(&self) -> u64 {
+        self.counters.late_inputs
+    }
+
+    /// Number of input frames refused for targeting a tick further ahead
+    /// than [`crcbl_net::MAX_INPUT_LEAD`] — more than this server holds.
+    #[must_use]
+    pub fn early_input_count(&self) -> u64 {
+        self.counters.early_inputs
     }
 
     /// Number of messages rejected because they were unauthenticated, carried
@@ -972,6 +997,10 @@ mod tests {
 
     // ── Client input ───────────────────────────────────────────────────────
 
+    /// The tick the first `update` after [`connect`] runs, which a test's
+    /// input targets to reach that tick's module.
+    const FIRST_TICK_AFTER_CONNECT: u64 = 2;
+
     /// **The bytes a client sealed reach the module.** The frame goes over the
     /// transport, through the session MAC, and out the other side with the tick
     /// the client stamped it with and the payload it carried — a server that
@@ -983,25 +1012,31 @@ mod tests {
         let mut crypto = connect(&mut server, &mut peer);
         let seen = record_inputs(&mut server);
 
-        send_sealed(&mut peer, &mut crypto, &input(41, &[7, 8, 9]));
+        send_sealed(
+            &mut peer,
+            &mut crypto,
+            &input(FIRST_TICK_AFTER_CONNECT, &[7, 8, 9]),
+        );
         assert_eq!(server.update(2 * TICK), 1);
 
         let seen = seen.lock().expect("test module is not poisoned");
         assert_eq!(
             seen.ticks,
-            vec![vec![(TickId::from_raw(41), vec![7, 8, 9])]],
+            vec![vec![(
+                TickId::from_raw(FIRST_TICK_AFTER_CONNECT),
+                vec![7, 8, 9]
+            )]],
             "the module was handed {:?}",
             seen.ticks,
         );
         assert_eq!(seen.dropped, 0);
         assert_eq!(server.processing_error_count(), 0);
         assert_eq!(server.dropped_input_count(), 0);
+        assert_eq!(server.late_input_count(), 0);
     }
 
-    /// **A frame is offered to one tick and then it is gone.** The queue is
-    /// emptied at the start of every tick, so the tick after the one an input
-    /// arrived in sees nothing — holding it until the tick it names is the
-    /// jitter buffer this deliberately is not.
+    /// **A frame is offered to the tick it targets and then it is gone.**
+    /// The tick after sees nothing of it.
     #[test]
     fn an_input_frame_is_cleared_after_the_tick_that_was_offered_it() {
         let (transport, mut peer) = InMemoryTransport::pair();
@@ -1009,7 +1044,11 @@ mod tests {
         let mut crypto = connect(&mut server, &mut peer);
         let seen = record_inputs(&mut server);
 
-        send_sealed(&mut peer, &mut crypto, &input(41, &[7]));
+        send_sealed(
+            &mut peer,
+            &mut crypto,
+            &input(FIRST_TICK_AFTER_CONNECT, &[7]),
+        );
         assert_eq!(server.update(2 * TICK), 1);
         assert_eq!(server.update(3 * TICK), 1);
 
@@ -1021,6 +1060,77 @@ mod tests {
             "the second tick was handed {:?} again",
             seen.ticks[1],
         );
+    }
+
+    /// **An early frame waits for its tick.** Read two ticks ahead of the
+    /// one it targets, it reaches neither of those ticks' modules and does
+    /// reach its own — and is neither late nor refused.
+    #[test]
+    fn an_early_input_frame_is_held_until_the_tick_it_targets() {
+        const AHEAD: u64 = 2;
+
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+        let seen = record_inputs(&mut server);
+
+        let target = FIRST_TICK_AFTER_CONNECT + AHEAD;
+        send_sealed(&mut peer, &mut crypto, &input(target, &[5]));
+        server.update(Duration::from_nanos(TICK.as_nanos() as u64 * (AHEAD + 2)));
+
+        let seen = seen.lock().expect("test module is not poisoned");
+        assert_eq!(
+            seen.ticks,
+            vec![vec![], vec![], vec![(TickId::from_raw(target), vec![5])]],
+        );
+        assert_eq!(server.late_input_count(), 0);
+        assert_eq!(server.early_input_count(), 0);
+    }
+
+    /// **A late frame applies on the next tick there is, and is counted.**
+    /// One targeting a tick that has already run reaches the tick about to,
+    /// carrying the tick its client stamped on it.
+    #[test]
+    fn a_late_input_frame_applies_on_the_next_tick_and_is_counted() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+        let seen = record_inputs(&mut server);
+
+        let gone = FIRST_TICK_AFTER_CONNECT - 1;
+        send_sealed(&mut peer, &mut crypto, &input(gone, &[3]));
+        assert_eq!(server.update(2 * TICK), 1);
+
+        let seen = seen.lock().expect("test module is not poisoned");
+        assert_eq!(seen.ticks, vec![vec![(TickId::from_raw(gone), vec![3])]]);
+        assert_eq!(server.late_input_count(), 1);
+        assert_eq!(server.peer_stats().late_inputs, 1);
+        assert_eq!(server.early_input_count(), 0);
+    }
+
+    /// **A frame further ahead than the server holds is refused and
+    /// counted**, and no tick up to the one it named is handed it.
+    #[test]
+    fn an_input_frame_past_the_horizon_is_refused_and_counted() {
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world_with_one_entity(), transport);
+        let mut crypto = connect(&mut server, &mut peer);
+        let seen = record_inputs(&mut server);
+
+        let horizon = input_buffer::horizon_ticks(server.clock.tick_dt());
+        let beyond = FIRST_TICK_AFTER_CONNECT + horizon + 1;
+        send_sealed(&mut peer, &mut crypto, &input(beyond, &[1]));
+        let ticks_to_beyond = beyond - FIRST_TICK_AFTER_CONNECT + 1;
+        for elapsed in 2..=ticks_to_beyond + 1 {
+            server.update(Duration::from_nanos(TICK.as_nanos() as u64 * elapsed));
+        }
+
+        let seen = seen.lock().expect("test module is not poisoned");
+        assert_eq!(seen.ticks.len() as u64, ticks_to_beyond);
+        assert!(seen.ticks.iter().all(Vec::is_empty), "{:?}", seen.ticks);
+        assert_eq!(server.early_input_count(), 1);
+        assert_eq!(server.peer_stats().early_inputs, 1);
+        assert_eq!(server.late_input_count(), 0);
     }
 
     /// **The cap is what a peer cannot spend past.** One tick's worth of
@@ -1037,7 +1147,11 @@ mod tests {
         let seen = record_inputs(&mut server);
 
         for i in 0..MAX_CLIENT_INPUTS_PER_TICK + EXCESS {
-            send_sealed(&mut peer, &mut crypto, &input(i as u64, &[i as u8]));
+            send_sealed(
+                &mut peer,
+                &mut crypto,
+                &input(FIRST_TICK_AFTER_CONNECT, &[i as u8]),
+            );
         }
         assert_eq!(server.update(2 * TICK), 1);
 
@@ -1050,10 +1164,10 @@ mod tests {
             frames.len(),
         );
         // The *first* frames sent, not the last: the cap refuses the newest.
-        assert_eq!(frames[0].0, TickId::ZERO);
+        assert_eq!(frames[0].1, [0]);
         assert_eq!(
-            frames[MAX_CLIENT_INPUTS_PER_TICK - 1].0,
-            TickId::from_raw(MAX_CLIENT_INPUTS_PER_TICK as u64 - 1),
+            frames[MAX_CLIENT_INPUTS_PER_TICK - 1].1,
+            [MAX_CLIENT_INPUTS_PER_TICK as u8 - 1],
         );
         assert_eq!(seen.dropped, EXCESS as u32, "the view must say it dropped");
         assert_eq!(server.dropped_input_count(), EXCESS as u64);

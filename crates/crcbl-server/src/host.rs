@@ -194,8 +194,8 @@ impl std::error::Error for EventNotSent {}
 
 /// Per-tick game logic for a [`Host`].
 pub trait HostModule: Send {
-    /// Called every host tick after the ECS schedule has run, with the input
-    /// each peer sent since the previous tick and the simulation variables
+    /// Called every host tick after the ECS schedule has run, with each
+    /// peer's input for the tick (`input_buffer`) and the simulation variables
     /// as the tick's boundary left them. Whatever the module despawns is
     /// swept before the tick's snapshot is taken.
     fn tick(&mut self, world: &mut World, inputs: PeerInputs<'_>);
@@ -209,7 +209,7 @@ pub struct PeerInputs<'a> {
 }
 
 impl<'a> PeerInputs<'a> {
-    /// Each admitted peer with the frames it sent this tick, in admission
+    /// Each admitted peer with its frames for this tick, in admission
     /// order. A lost peer is listed, with nothing.
     pub fn iter(self) -> impl Iterator<Item = (PeerId, ClientInputs<'a>)> {
         self.peers
@@ -368,7 +368,7 @@ impl Host {
             max_peers: config.max_peers,
             session_config: SessionConfig::default(),
             handshake_gate: HandshakeGate::new(config.compatibility),
-            rate_limit_config: InboundRateLimitConfig::default(),
+            rate_limit_config: InboundRateLimitConfig::for_tick_rate(config.tick_hz),
             now: Duration::ZERO,
             counters: Counters::default(),
             peers: Vec::new(),
@@ -431,6 +431,14 @@ impl Host {
         self.drain_peers();
         self.drain_pending();
         self.update_sessions();
+        let tick = self.clock.tick();
+        for peer in &mut self.peers {
+            if peer.transport.is_some() {
+                peer.link.release_inputs(tick);
+            } else {
+                peer.link.discard_inputs();
+            }
+        }
         let mut inputs = std::mem::take(&mut self.tick_inputs);
         take_queued_inputs(&mut self.peers, &mut inputs);
         let roster = self.events.take_roster();
@@ -524,6 +532,7 @@ impl Host {
                                 Some(crcbl_net::auth::AUTH_TAG) => {
                                     peer.link.process_authenticated_message(
                                         &msg.payload,
+                                        tick,
                                         &mut self.counters,
                                     )
                                 }
@@ -716,6 +725,7 @@ impl Host {
             resume_token,
             self.rate_limit_config,
             self.now,
+            crate::input_buffer::horizon_ticks(self.clock.tick_dt()),
         );
         link.session.begin_handshake();
         link.session
@@ -1350,6 +1360,22 @@ impl Host {
         self.counters.dropped_inputs
     }
 
+    /// Input frames, every peer's, that arrived after the tick they target
+    /// had run and were applied on the next tick instead;
+    /// [`peer_stats`](Self::peer_stats) has each peer's share.
+    #[must_use]
+    pub fn late_input_count(&self) -> u64 {
+        self.counters.late_inputs
+    }
+
+    /// Input frames, every peer's, refused for targeting a tick further
+    /// ahead than [`crcbl_net::MAX_INPUT_LEAD`];
+    /// [`peer_stats`](Self::peer_stats) has each peer's share.
+    #[must_use]
+    pub fn early_input_count(&self) -> u64 {
+        self.counters.early_inputs
+    }
+
     /// Messages rejected because they were unauthenticated, carried a bad
     /// MAC, or replayed a counter.
     #[must_use]
@@ -1513,6 +1539,9 @@ mod sim_tests;
 
 #[cfg(test)]
 mod frames_tests;
+
+#[cfg(test)]
+mod lead_tests;
 
 #[cfg(test)]
 mod fetch_tests;

@@ -51,7 +51,8 @@ fn row(label: &str, value: &str) -> DebugRow {
 
 /// **A host shows a row per peer, with that peer's figures under the
 /// heads**, and a peer whose transport measures nothing — a listen host's
-/// own player — as dashes beside its snapshot size.
+/// own player — as dashes beside its snapshot size. A peer whose inputs the
+/// host counted shows how many came late and too early, after the table.
 #[test]
 fn a_host_shows_a_row_per_peer_with_its_figures() {
     let mut netgraph = Netgraph::new(Role::Host);
@@ -64,6 +65,7 @@ fn a_host_shows_a_row_per_peer_with_its_figures() {
                     stats: Some(measured()),
                     snapshot_bytes: 857,
                     playout: None,
+                    inputs: Some(InputCounts { late: 3, early: 1 }),
                 },
             ),
             (
@@ -72,6 +74,7 @@ fn a_host_shows_a_row_per_peer_with_its_figures() {
                     stats: None,
                     snapshot_bytes: 412,
                     playout: None,
+                    inputs: None,
                 },
             ),
         ],
@@ -98,9 +101,16 @@ fn a_host_shows_a_row_per_peer_with_its_figures() {
             "peer 3 snap"
         ]
     );
+    assert_eq!(out.rows()[3], row("peer 1 inputs", "late 3, early 1"));
     assert!(
-        out.rows().iter().all(|row| row.label != "tick lead"),
-        "a host has no playout to show"
+        out.rows().iter().all(|row| row.label != "peer 3 inputs"),
+        "peer 3's inputs were not counted"
+    );
+    assert!(
+        out.rows()
+            .iter()
+            .all(|row| row.label != "tick lead" && row.label != "input lead"),
+        "a host has no playout or input lead to show"
     );
 }
 
@@ -122,6 +132,7 @@ fn a_client_shows_its_one_link_to_the_host() {
                 stats: Some(unmeasured),
                 snapshot_bytes: 0,
                 playout: None,
+                inputs: None,
             },
         )],
     );
@@ -161,6 +172,7 @@ fn a_peer_that_leaves_takes_its_history_and_a_new_one_starts_empty() {
         stats: Some(measured()),
         snapshot_bytes: 100,
         playout: None,
+        inputs: None,
     };
     let mut netgraph = Netgraph::new(Role::Host);
     netgraph.record(Duration::ZERO, [(1, reading), (2, reading)]);
@@ -205,6 +217,7 @@ fn the_history_samples_once_an_interval_whatever_the_frame_rate() {
             }),
             snapshot_bytes: 0,
             playout: None,
+            inputs: None,
         };
         netgraph.record(now, [(0, reading)]);
         now += frame;
@@ -238,6 +251,7 @@ fn the_graphs_plot_the_history_against_their_scales() {
         }),
         snapshot_bytes,
         playout: None,
+        inputs: None,
     };
     let mut netgraph = Netgraph::new(Role::Host);
     netgraph.record(Duration::ZERO, [(1, reading(5, 0)), (2, reading(10, 0))]);
@@ -373,7 +387,8 @@ const SCRIPTED_TICKS: usize = 240;
 
 /// **A joiner shows its own playout, as its client reports it**: the
 /// buffer's depth, the delay it aims for, the arrival jitter labelled for
-/// its RFC, and the tick lead. The link is scripted — an in-memory pair
+/// its RFC, the tick lead, and the input lead with the server's margin and
+/// the input clock's steps. The link is scripted — an in-memory pair
 /// behind a seeded simulator delaying every message 40 ms, give or take
 /// 15, on a clock the test drives — and measures nothing itself, so its
 /// row is dashes beside the snapshot's size.
@@ -393,6 +408,8 @@ fn a_joiner_shows_its_playout_as_its_client_reports_it() {
     )
     .expect("OS entropy is available in a test process");
     let period = session.tick_period();
+    // Input, so the server has inputs to time and send the timing back.
+    session.both_mut().1.set_input(vec![1]);
     let mut now = Duration::ZERO;
     let mut netgraph = Netgraph::new(Role::Client);
     for _ in 0..SCRIPTED_TICKS {
@@ -431,6 +448,29 @@ fn a_joiner_shows_its_playout_as_its_client_reports_it() {
         format!("{} (RFC 3550)", ms(stats.jitter))
     );
     assert_eq!(value("tick lead"), format!("{lead:+} ticks"));
+    let input = client.input_lead_stats();
+    assert_eq!(
+        value("input lead"),
+        format!(
+            "{} (aims {})",
+            ms(input.lead.expect("the clock is set")),
+            ms(input.target.expect("the handshake set it"))
+        )
+    );
+    assert_eq!(
+        value("input margin"),
+        format!(
+            "{:+} ticks",
+            input.margin_ticks.expect("the server sent its timing")
+        )
+    );
+    assert_eq!(
+        value("input steps"),
+        format!(
+            "{} ({} skipped, {} repeated)",
+            input.steps, input.skipped_ticks, input.repeated_ticks
+        )
+    );
     assert_eq!(
         value("host"),
         format!(
@@ -536,6 +576,14 @@ fn a_host_and_two_clients_over_loopback_show_their_links() {
             lan.peer_stats(peer).unwrap().last_snapshot_bytes
         );
         assert!(link.reading.snapshot_bytes > 0);
+        let stats = lan.peer_stats(peer).expect("in");
+        assert_eq!(
+            link.reading.inputs,
+            Some(InputCounts {
+                late: stats.late_inputs,
+                early: stats.early_inputs,
+            })
+        );
     }
     let rows = section(host.netgraph());
     let peer_rows: Vec<&str> = rows
@@ -544,13 +592,10 @@ fn a_host_and_two_clients_over_loopback_show_their_links() {
         .filter(|row| row.label.starts_with("peer "))
         .map(|row| row.label.as_str())
         .collect();
-    assert_eq!(
-        peer_rows,
-        peers
-            .iter()
-            .map(|id| format!("peer {id}"))
-            .collect::<Vec<_>>()
-    );
+    // A link row each, then an inputs row each.
+    let links = peers.iter().map(|id| format!("peer {id}"));
+    let inputs = peers.iter().map(|id| format!("peer {id} inputs"));
+    assert_eq!(peer_rows, links.chain(inputs).collect::<Vec<_>>());
 
     for client in &clients {
         let session = client.client().expect("joined");

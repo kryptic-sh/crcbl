@@ -7,17 +7,17 @@ for it deliberately — tick sync (21), input tick rings (21), snapshot rings
 those saved. Wave 2, arena = driver; a competitive-shooter project pulls it to
 front-of-line.
 
-**Nothing in this document is built, and three of the five things it says were
+**Nothing in this document is built, and two of the five things it says were
 staged for it are not built either.** Present: the snapshot ring
-(`crcbl_net::BaselineStore`, a per-sector `VecDeque` of baselines with eviction)
-and determinism hashing (`crcbl_server::sim_hash::hash_world`, driven by
-`crcbl sim`). Absent: **tick sync** — no lead, no server-time estimate, no rate
-correction in `crcbl-client`, `crcbl-server` or `crcbl-net`; **input tick
-rings** — `crcbl_input::InputTickState` is a flat `Vec<(String, ActionValue)>`
-with no stacking, swap or last-N ring, and the server's per-tick input queue is
-in arrival order with no tick-keyed buffer; and **module equivalence**, which is
-P6A and has no wasm host. Steps 1–3 of the delivery list below therefore begin
-with that groundwork, not with rollback. `docs/backlog.md` carries it.
+(`crcbl_net::BaselineStore`, a per-sector `VecDeque` of baselines with
+eviction), determinism hashing (`crcbl_server::sim_hash::hash_world`, driven by
+`crcbl sim`), and since 2026-10-05 **tick sync** — the client's input lead
+(`crcbl_client::input_lead`) and the server's jitter buffer keyed by target tick
+(`crcbl-server`'s `input_buffer`). Absent: **input tick rings** —
+`crcbl_input::InputTickState` is a flat `Vec<(String, ActionValue)>` with no
+stacking, swap or last-N ring; and **module equivalence**, which is P6A and has
+no wasm host. Steps 1–3 of the delivery list below therefore begin with that
+groundwork, not with rollback. `docs/backlog.md` carries it.
 
 ## Client prediction
 

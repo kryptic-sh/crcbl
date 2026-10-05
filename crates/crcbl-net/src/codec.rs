@@ -163,6 +163,11 @@ impl<'a> ByteReader<'a> {
         Ok(u64::from_le_bytes(bytes))
     }
 
+    pub(crate) fn read_i32(&mut self) -> Result<i32, DecodeError> {
+        self.read_u32()
+            .map(|raw| i32::from_le_bytes(raw.to_le_bytes()))
+    }
+
     pub(crate) fn read_i64(&mut self) -> Result<i64, DecodeError> {
         if self.remaining() < 8 {
             return Err(DecodeError::TooShort {

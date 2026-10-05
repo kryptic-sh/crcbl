@@ -17,36 +17,35 @@
 //!    systems on the world.
 //! 2. [`GameModule::tick`] — called every server tick, after the ECS schedule
 //!    runs, for game-specific per-tick logic (spawn/despawn decisions, scoring,
-//!    win/lose checks), and handed the [`ClientInputs`] that arrived since the
-//!    previous tick.
+//!    win/lose checks), and handed the [`ClientInputs`] for that tick.
 
 use crcbl_core::TickId;
 
 use crate::World;
 
-/// The client input frames the server received since the previous tick.
+/// The client input frames for one server tick.
 ///
-/// A borrowed view over the server's per-tick queue. A module iterates it to
-/// see each frame as `(TickId, &[u8])` **in arrival order**; the bytes are
-/// whatever that game's client put in them, and no engine crate looks inside.
-/// This is how player intent reaches game logic — the engine hands the module
-/// what arrived and the module decides what it means.
+/// A borrowed view over the frames the server held for this tick. A module
+/// iterates it to see each frame as `(TickId, &[u8])` **in tick order**; the
+/// bytes are whatever that game's client put in them, and no engine crate
+/// looks inside. This is how player intent reaches game logic — the engine
+/// hands the module what is due and the module decides what it means.
 ///
-/// # Cleared every tick
+/// # Which tick a frame reaches
 ///
-/// The queue behind this view is emptied at the start of each server tick, so
-/// a frame is offered to exactly one [`GameModule::tick`] call: **whatever a
+/// A client stamps each frame with the server tick it is for, running its
+/// input a little ahead of the server, and the server holds each frame until
+/// that tick — its jitter buffer — so a frame normally reaches the tick it
+/// names, and on a steady stream a tick holds one frame. A frame that arrives
+/// after its tick has run reaches the next tick instead, carrying the tick it
+/// named, which is how a module can tell it came late; within a tick the
+/// late frames come first, oldest first.
+///
+/// # Offered once
+///
+/// A frame is offered to exactly one [`GameModule::tick`] call: **whatever a
 /// module does not read during that call is gone.** A module that needs an
 /// input to survive until some later tick has to copy it out.
-///
-/// # What this deliberately is not
-///
-/// Nothing here compares a frame's [`TickId`] against the server's own clock.
-/// Aligning an input to the tick it names is a *jitter buffer*, and it comes
-/// with the client tick lead and the rate correction that keep such a buffer
-/// fed — none of which exists yet. Until it does, the tick a frame carries is
-/// the client's statement about when it sampled that input, offered as-is to a
-/// module that cares.
 ///
 /// One session's frames: the server hosts one session, so there is no session
 /// id to key them by. A second session would be a second view, not a field
@@ -74,7 +73,7 @@ impl<'a> ClientInputs<'a> {
         }
     }
 
-    /// The frames, in the order they arrived.
+    /// The frames, in tick order, and in arrival order within a tick.
     ///
     /// By value rather than by reference: the view is [`Copy`], and the
     /// iterator borrows the server's queue rather than the view over it, so a
@@ -85,23 +84,23 @@ impl<'a> ClientInputs<'a> {
             .map(|(tick, data)| (*tick, data.as_slice()))
     }
 
-    /// How many frames arrived.
+    /// How many frames there are.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.frames.len()
     }
 
-    /// Whether nothing arrived this tick.
+    /// Whether this tick has no frames.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.frames.is_empty()
     }
 
-    /// How many further frames the server refused this tick because its
+    /// How many further frames for this tick the server refused because its
     /// per-tick cap was already full.
     ///
     /// Non-zero means the peer sent more input for one tick than the server
-    /// will hold — a client running far ahead of the server's clock, or one
+    /// will hold — a client sending the same tick over and over, or one
     /// trying to make the server allocate. The frames counted here were never
     /// stored, so they are not recoverable; the number is what stops the loss
     /// being silent.
@@ -136,9 +135,9 @@ pub trait GameModule: Send {
     /// - Update meta-state that lives outside component arrays
     /// - Apply the player intent in `inputs`
     ///
-    /// `inputs` holds the client input frames that arrived since the previous
-    /// tick, in arrival order, and is empty on a tick nothing arrived for. It
-    /// does not outlive the call — see [`ClientInputs`].
+    /// `inputs` holds the client input frames for this tick, in tick order,
+    /// and is empty on a tick that has none. It does not outlive the call —
+    /// see [`ClientInputs`].
     ///
     /// The default implementation does nothing.
     fn tick(&mut self, _world: &mut World, _inputs: ClientInputs<'_>) {}
@@ -264,7 +263,7 @@ mod tests {
     /// bytes, because a view that returned them reversed, or that paired the
     /// wrong tick with the wrong payload, passes any test built on one frame.
     #[test]
-    fn the_view_yields_every_frame_in_arrival_order_with_its_own_tick() {
+    fn the_view_yields_every_frame_in_the_order_queued_with_its_own_tick() {
         let frames = vec![
             (TickId::from_raw(7), vec![1, 2]),
             (TickId::from_raw(9), vec![3]),

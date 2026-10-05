@@ -83,7 +83,7 @@ use crate::server::{Host, HostConfig, PeerEvent};
 use crate::ui::{DebugModule, DebugSection};
 
 use self::lobby::Unjoinable;
-use self::netgraph::{LinkReading, Netgraph, Role};
+use self::netgraph::{InputCounts, LinkReading, Netgraph, Role};
 
 /// The least time between two logged snapshot refusals, or two withheld
 /// updates: one a second says the world is too big without a line every
@@ -454,12 +454,15 @@ impl LanHost {
         self.netgraph.record(
             now,
             host.peers().map(|peer| {
+                let stats = host.peer_stats(peer);
                 let reading = LinkReading {
                     stats: host.peer_link_stats(peer),
-                    snapshot_bytes: host
-                        .peer_stats(peer)
-                        .map_or(0, |stats| stats.last_snapshot_bytes),
+                    snapshot_bytes: stats.map_or(0, |stats| stats.last_snapshot_bytes),
                     playout: None,
+                    inputs: stats.map(|stats| InputCounts {
+                        late: stats.late_inputs,
+                        early: stats.early_inputs,
+                    }),
                 };
                 (peer.get(), reading)
             }),

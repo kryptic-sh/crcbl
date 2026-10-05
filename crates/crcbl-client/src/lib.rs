@@ -1,7 +1,8 @@
 //! Rendering client: delta-apply, interpolation buffer, input send.
 //!
-//! The client sends its input to the server each tick and buffers incoming
-//! delta-encoded snapshots. Each delta is applied to a local [`Baseline`]
+//! The client sends its input to the server each tick, stamped with a tick
+//! running ahead of the server's by its input lead (see [`input_lead`]), and
+//! buffers incoming delta-encoded snapshots. Each delta is applied to a local [`Baseline`]
 //! to reconstruct the full server state, and the state it reconstructs is
 //! buffered by server tick. Playback runs an adaptive playout delay behind
 //! the newest snapshot (see [`playout`]) and interpolates between the two
@@ -27,9 +28,12 @@ use crcbl_net::{
 };
 use crcbl_phys::{PhysicsSystem, Transform};
 
+pub mod input_lead;
 pub mod playout;
 mod scene_fetch;
 
+use input_lead::InputLead;
+pub use input_lead::InputLeadStats;
 use playout::Playout;
 pub use playout::PlayoutStats;
 pub use scene_fetch::{SceneFetch, SceneFetchFailed};
@@ -198,8 +202,14 @@ pub struct Client<T: Transport> {
     world: World,
     /// Transport to the server.
     transport: T,
-    /// Client-side frame clock for input-tick cadence and render alpha.
+    /// Client-side frame clock for the render alpha before two snapshots are
+    /// buffered.
     clock: FrameClock,
+    /// The input clock: which server tick each input is stamped with.
+    input_lead: InputLead,
+    /// The ticks the input clock reached this update, kept between updates
+    /// so its buffer is reused.
+    due_input_ticks: Vec<TickId>,
     /// Sectors this client currently accepts replication for.
     subscribed_sectors: HashSet<SectorId>,
     /// Buffered frames after delta apply, oldest first, keyed by sector: from
@@ -224,6 +234,9 @@ pub struct Client<T: Transport> {
     compatibility: ProtocolCompatibility,
     handshake_generation: u64,
     outstanding_handshake_generation: Option<u64>,
+    /// When the outstanding hello was sent: its `Accept`'s arrival less this
+    /// is the handshake's round trip, which the input lead starts from.
+    hello_sent_at: Option<Duration>,
     /// When the outstanding hello stops being worth waiting for.
     handshake_deadline: Option<Duration>,
     /// Earliest time the next hello may be sent, after a retryable rejection.
@@ -303,11 +316,13 @@ impl<T: Transport> Client<T> {
         compatibility.assert_explicit();
         let clock = FrameClock::new(tick_hz);
         let tick_rate_hz = 1.0 / clock.tick_dt_secs();
-        let rate_limit_config = InboundRateLimitConfig::default();
+        let rate_limit_config = InboundRateLimitConfig::for_tick_rate(tick_hz);
         Self {
             world,
             transport,
             clock,
+            input_lead: InputLead::new(tick_rate_hz),
+            due_input_ticks: Vec::new(),
             subscribed_sectors: HashSet::from([SectorId::ZERO]),
             frames: HashMap::new(),
             frame_capacity: playout::jitter_buffer_capacity(tick_hz),
@@ -321,6 +336,7 @@ impl<T: Transport> Client<T> {
             compatibility,
             handshake_generation: 0,
             outstanding_handshake_generation: None,
+            hello_sent_at: None,
             handshake_deadline: None,
             handshake_retry_at: None,
             handshake_attempts: 0,
@@ -352,8 +368,8 @@ impl<T: Transport> Client<T> {
     /// Feed the current time.
     ///
     /// Drains received snapshots into the buffer, sends pending input for
-    /// each consumed tick, moves playback on, and returns the interpolation
-    /// alpha in `[0, 1]`.
+    /// each tick the input clock reached ([`input_lead`]), moves playback on,
+    /// and returns the interpolation alpha in `[0, 1]`.
     ///
     /// Playback trails the estimated latest server time by the playout delay
     /// ([`playout`]), so the alpha spans the two buffered snapshots either
@@ -365,12 +381,18 @@ impl<T: Transport> Client<T> {
         self.now = now;
         self.clock.update(now);
         self.drive_handshake();
-        while self.clock.consume_tick() {
-            let tick = self.clock.tick();
+        // The frame clock only paces the fallback alpha now; the input clock
+        // is the one inputs are stamped by.
+        while self.clock.consume_tick() {}
+        let mut due = std::mem::take(&mut self.due_input_ticks);
+        self.input_lead
+            .advance(now, self.playout.server_offset(), &mut due);
+        for tick in due.drain(..) {
             if self.send_input(tick).is_err() {
                 self.processing_error_count += 1;
             }
         }
+        self.due_input_ticks = due;
         if self.recv_snapshots().is_err() {
             self.processing_error_count += 1;
         }
@@ -409,19 +431,28 @@ impl<T: Transport> Client<T> {
         self.playout.stats()
     }
 
-    /// How far this client's own tick — the one its input is stamped with —
-    /// runs ahead of the newest snapshot it has received, in ticks; negative
-    /// when it runs behind. `None` before the first snapshot.
+    /// How far the newest tick this client stamped an input with runs ahead
+    /// of the newest snapshot it has received, in ticks; negative when it
+    /// runs behind. `None` before the first snapshot, or before the input
+    /// clock has reached a tick.
     ///
-    /// Nothing steers the client's tick towards the server's yet: it counts
-    /// from this client's first update, so the figure carries the difference
-    /// between when the two clocks started as well as the link's latency.
+    /// The input clock is steered to land each input just before the server
+    /// simulates its tick ([`input_lead`]), so on a steady link this is about
+    /// a round trip plus the margin, in ticks.
     #[must_use]
     pub fn tick_lead(&self) -> Option<i64> {
         // Every tick a session reaches is far below 2^53, so the playout's
         // `f64` holds it exactly.
         let newest = self.playout.newest_tick()? as i64;
-        Some(self.clock.tick().get() as i64 - newest)
+        Some(self.input_lead.newest_sent()?.get() as i64 - newest)
+    }
+
+    /// How the input lead stands: the lead and the lead it steers towards,
+    /// the server's latest timing sample, and how often the input clock
+    /// stepped. See [`input_lead`].
+    #[must_use]
+    pub fn input_lead_stats(&self) -> InputLeadStats {
+        self.input_lead.stats(self.playout.server_offset())
     }
 
     /// The buffered pair either side of playback in `sector`, oldest first;
@@ -768,6 +799,7 @@ impl<T: Transport> Client<T> {
         self.transport = transport;
         self.session_ended = None;
         self.outstanding_handshake_generation = None;
+        self.hello_sent_at = None;
         self.handshake_deadline = None;
         self.handshake_retry_at = None;
         self.handshake_attempts = 0;
@@ -949,6 +981,7 @@ impl<T: Transport> Client<T> {
         match result {
             Ok(()) => {
                 self.outstanding_handshake_generation = Some(generation);
+                self.hello_sent_at = Some(self.now);
                 self.handshake_deadline = Some(self.now.saturating_add(HANDSHAKE_TIMEOUT));
             }
             // A link still coming up — a `UdpTransport` before its hello
@@ -1072,8 +1105,13 @@ impl<T: Transport> Client<T> {
             HandshakeResult::Accept {
                 session_id,
                 resume_token,
+                server_tick,
                 ..
             } => {
+                let round_trip = self
+                    .hello_sent_at
+                    .map_or(Duration::ZERO, |sent| self.now.saturating_sub(sent));
+                self.input_lead.accept(server_tick, self.now, round_trip);
                 self.session_id = Some(session_id);
                 self.resume_token = Some(resume_token);
                 // The resume token is the shared secret; deriving the channel
@@ -1222,6 +1260,11 @@ impl<T: Transport> Client<T> {
                 return;
             }
         };
+        // About this client's inputs, not the sector's state: taken from any
+        // snapshot that opens, whether or not its state is applied.
+        if let Some(timing) = delta.input_timing {
+            self.input_lead.observe(timing, self.now);
+        }
 
         let sector = delta.sector;
         if !self.subscribed_sectors.contains(&sector) {
@@ -1610,28 +1653,34 @@ mod tests {
         assert_eq!(client.processing_error_count(), 0);
     }
 
-    /// **The tick lead is the client's own tick less the newest snapshot's**:
-    /// none before a snapshot, and once one of tick 4 has arrived, ten ticks
-    /// into the client's clock, six — then behind, negative, when a snapshot
-    /// from further on than the client has counted arrives.
+    /// **The tick lead is the newest tick stamped on an input less the newest
+    /// snapshot's**: none before a snapshot. Accepted at tick zero with no
+    /// round trip, the input clock runs half a tick of margin ahead of the
+    /// server time, so ten ticks on it has reached tick 10; a snapshot of
+    /// tick 4 then reads 6 — and a snapshot from further on than any tick
+    /// stamped
+    /// reads behind, negative. Neither snapshot makes the clock send a tick
+    /// again: the first steps it back, and the ticks it passes back over were
+    /// sent already.
     #[test]
-    fn the_tick_lead_is_the_clients_tick_less_the_newest_snapshots() {
+    fn the_tick_lead_is_the_newest_tick_stamped_less_the_newest_snapshots() {
         let (client_transport, mut peer) = InMemoryTransport::pair();
         let mut client = client(client_transport);
         let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
         for tick in 1..=10 {
             client.update(TICK * tick);
         }
-        assert_eq!(client.clock.tick().get(), 10);
+        assert_eq!(client.input_lead.newest_sent(), Some(TickId::from_raw(10)));
         assert_eq!(client.tick_lead(), None);
 
         send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(4, &[]));
         client.update(TICK * 10);
-        assert_eq!(client.tick_lead(), Some(6));
+        assert_eq!(client.tick_lead(), Some(10 - 4));
 
         send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(13, &[]));
         client.update(TICK * 11);
-        assert_eq!(client.tick_lead(), Some(-2));
+        assert_eq!(client.tick_lead(), Some(10 - 13));
+        assert_eq!(client.input_lead.newest_sent(), Some(TickId::from_raw(10)));
     }
 
     #[test]
@@ -2284,6 +2333,7 @@ mod tests {
                 tick: TickId::from_raw(2),
                 baseline_tick: Some(TickId::from_raw(1)),
                 is_keyframe: false,
+                input_timing: None,
                 systems: Vec::new(),
             }),
         );
@@ -2314,6 +2364,7 @@ mod tests {
                 tick: TickId::from_raw(10),
                 baseline_tick: Some(TickId::from_raw(9)),
                 is_keyframe: false,
+                input_timing: None,
                 systems: Vec::new(),
             }),
         );
@@ -2331,6 +2382,7 @@ mod tests {
                 tick: TickId::from_raw(11),
                 baseline_tick: Some(TickId::from_raw(4)),
                 is_keyframe: false,
+                input_timing: None,
                 systems: Vec::new(),
             }),
         );
@@ -2357,6 +2409,7 @@ mod tests {
                     tick: TickId::from_raw(tick),
                     baseline_tick: Some(TickId::from_raw(9)),
                     is_keyframe: false,
+                    input_timing: None,
                     systems: Vec::new(),
                 }),
             );

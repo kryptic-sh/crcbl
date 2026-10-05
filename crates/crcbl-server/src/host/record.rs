@@ -73,8 +73,8 @@ impl RosterChange {
 pub struct PeerFrames {
     /// The peer.
     pub peer: PeerId,
-    /// Its frames, in arrival order: each the tick its client stamped on it
-    /// and its bytes.
+    /// Its frames for this tick, in tick order: each the tick its client
+    /// stamped on it and its bytes.
     pub frames: Vec<(TickId, Vec<u8>)>,
     /// How many further frames the host's per-tick cap refused.
     pub dropped: u32,

@@ -775,6 +775,20 @@ The `cargo tree` guard is built: `tools/check-no-renderer-deps.sh`, run by
   buffer is shaped so client-side prediction can slot in. A dry buffer holds the
   last state rather than extrapolating, because guessing past the newest
   snapshot is prediction's job.
+- **Input runs ahead; the server holds it for its tick** (built 2026-10-05). The
+  client stamps each input with a tick about half a round trip plus a half-tick
+  margin ahead of the server's (`crcbl_client::input_lead`), converged on the
+  server's own measurement — every snapshot carries back the input that arrived
+  least early (`crcbl_net::InputTiming`, protocol version 7) — and slewing below
+  50 ms of error, stepping above it. The server keeps a per-peer jitter buffer
+  keyed by target tick (`crcbl-server`'s `input_buffer`): an early input waits
+  for its tick, a late one applies on the next tick and is counted (the
+  apply-next policy, prediction's future rollback trigger), one past
+  `MAX_INPUT_LEAD` is refused and counted, and each target tick holds
+  `MAX_CLIENT_INPUTS_PER_TICK`. So a module's `ClientInputs` is the input for
+  its tick, in tick order. The backlog's _Client tick alignment and the jitter
+  buffer: what the input lead leaves_ has the stepped interval's policy and what
+  is left.
 - **Stage 4's determinism was same-binary, same-machine**, only as far as the
   1000-tick smoke test needed. The physics plan's cross-target rule, next
   section, supersedes it.

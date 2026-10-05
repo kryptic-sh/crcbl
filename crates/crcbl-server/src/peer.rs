@@ -1,6 +1,7 @@
 //! One client's session on the server: its lifecycle, its resume credential,
 //! its authenticated channel, its inbound budgets, its ack progress and the
-//! input it sent this tick — everything that exists once per connected peer.
+//! input it sent, held by the tick it targets — everything that exists once
+//! per connected peer.
 //!
 //! [`Server`](crate::Server) holds one; [`Host`](crate::Host) holds one per
 //! peer. What is not per peer — the world, the clock, the handshake gate —
@@ -20,7 +21,8 @@ use crcbl_net::{
 };
 
 use crate::cadence::SnapshotCadence;
-use crate::{KEYFRAME_RECOVERY_SNAPSHOTS, MAX_CLIENT_INPUTS_PER_TICK, replicated_system_id};
+use crate::input_buffer::{Arrival, InputBuffer};
+use crate::{KEYFRAME_RECOVERY_SNAPSHOTS, replicated_system_id};
 
 /// The message an edit is refused with by a server serving no scene for
 /// editing: a [`Server`](crate::Server), or a [`Host`](crate::Host) that was
@@ -73,6 +75,12 @@ pub(crate) struct Counters {
     pub(crate) rate_limited_bytes: u64,
     /// Frames the per-tick input cap has refused since the server was built.
     pub(crate) dropped_inputs: u64,
+    /// Frames that arrived after the tick they target had run, each applied
+    /// on the next tick instead (see `input_buffer`).
+    pub(crate) late_inputs: u64,
+    /// Frames refused for targeting a tick further ahead than
+    /// [`crcbl_net::MAX_INPUT_LEAD`].
+    pub(crate) early_inputs: u64,
     /// Snapshots refused for their size — by the budget, for framing it
     /// cannot hold, or by a transport that took less than it reported; each
     /// is a processing error too.
@@ -189,6 +197,13 @@ pub struct PeerStats {
     /// [`Host::largest_snapshot_bytes`](crate::Host::largest_snapshot_bytes)
     /// is the high-water mark over them all.
     pub last_snapshot_bytes: usize,
+    /// This peer's input frames that arrived after the tick they target had
+    /// run, each applied on the next tick instead: its client's input lead
+    /// fell short.
+    pub late_inputs: u64,
+    /// This peer's input frames refused for targeting a tick further ahead
+    /// than [`crcbl_net::MAX_INPUT_LEAD`]: its client's lead ran too far.
+    pub early_inputs: u64,
 }
 
 /// One peer's session state.
@@ -212,16 +227,22 @@ pub(crate) struct PeerSession {
     /// recovery.
     snapshots_since_ack_progress: u32,
     last_ack_progress: Option<TickId>,
-    /// The client input frames that arrived since the current tick began, in
-    /// arrival order, handed to the module as
-    /// [`ClientInputs`](crcbl_ecs::ClientInputs) — read in place by
-    /// [`Server`](crate::Server), moved into the tick's
+    /// The frames this peer sent, held by the tick they target until it
+    /// runs: the jitter buffer (`input_buffer`).
+    inputs: InputBuffer,
+    /// The client input frames the current tick hands the module, in tick
+    /// order, released from `inputs` once the tick's messages are read —
+    /// read in place by [`Server`](crate::Server), moved into the tick's
     /// [`PeerFrames`](crate::PeerFrames) by [`Host`](crate::Host) — and
     /// emptied at the start of every tick. Bounded by
-    /// [`MAX_CLIENT_INPUTS_PER_TICK`].
+    /// [`MAX_CLIENT_INPUTS_PER_TICK`](crate::MAX_CLIENT_INPUTS_PER_TICK).
     pub(crate) client_inputs: Vec<(TickId, Vec<u8>)>,
-    /// Frames the cap refused during the current tick.
+    /// Frames for the current tick that the cap refused.
     pub(crate) dropped_inputs: u32,
+    /// This session's frames that arrived late, for [`PeerStats`].
+    late_inputs: u64,
+    /// This session's frames refused as too early, for [`PeerStats`].
+    early_inputs: u64,
     /// The console sets this peer sent, in arrival order, waiting for the
     /// server that owns the session to take them — [`Host`](crate::Host)
     /// queues them for its tick boundary, [`Server`](crate::Server) refuses
@@ -247,13 +268,15 @@ pub(crate) struct PeerSession {
 }
 
 impl PeerSession {
-    /// A session that has not handshaken yet, holding `resume_token`.
+    /// A session that has not handshaken yet, holding `resume_token`, whose
+    /// input frames are held up to `input_horizon_ticks` ahead.
     pub(crate) fn new(
         session_id: SessionId,
         config: &SessionConfig,
         resume_token: ResumeToken,
         rate_limit_config: InboundRateLimitConfig,
         now: Duration,
+        input_horizon_ticks: u64,
     ) -> Self {
         Self {
             session: SessionManager::new(session_id, config),
@@ -264,8 +287,11 @@ impl PeerSession {
             unreliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, now),
             snapshots_since_ack_progress: 0,
             last_ack_progress: None,
+            inputs: InputBuffer::new(input_horizon_ticks),
             client_inputs: Vec::new(),
             dropped_inputs: 0,
+            late_inputs: 0,
+            early_inputs: 0,
             console_sets: Vec::new(),
             edit_requests: Vec::new(),
             scene_fetches: Vec::new(),
@@ -276,7 +302,8 @@ impl PeerSession {
     }
 
     /// Replace the session and its credential, forgetting its key, its ack
-    /// progress and its snapshot cadence; the inbound budgets carry over.
+    /// progress, its snapshot cadence and the input frames it held; the
+    /// inbound budgets carry over.
     pub(crate) fn replace_session(
         &mut self,
         session_id: SessionId,
@@ -289,6 +316,7 @@ impl PeerSession {
         self.snapshots_since_ack_progress = 0;
         self.last_ack_progress = None;
         self.cadence = SnapshotCadence::default();
+        self.inputs.clear();
     }
 
     /// Count one tick against this session's snapshot cadence, returning
@@ -304,15 +332,29 @@ impl PeerSession {
             snapshot_interval_ticks: self.cadence.interval(),
             oversized_updates: self.oversized_updates,
             last_snapshot_bytes: self.last_snapshot_bytes,
+            late_inputs: self.late_inputs,
+            early_inputs: self.early_inputs,
         }
     }
 
     /// Last tick's inputs go before this tick's are read: a frame is offered
-    /// to exactly one `GameModule::tick`, and holding it for a later one is the
-    /// jitter buffer this deliberately is not.
+    /// to exactly one `GameModule::tick`, the one of the tick it targets (or
+    /// the next, when it came late).
     pub(crate) fn begin_tick(&mut self) {
         self.client_inputs.clear();
         self.dropped_inputs = 0;
+    }
+
+    /// Hand the tick `now` the frames held for it, once its messages are
+    /// read, into `client_inputs`.
+    pub(crate) fn release_inputs(&mut self, now: TickId) {
+        self.dropped_inputs = self.inputs.release(now, &mut self.client_inputs);
+    }
+
+    /// Forget every frame held: the peer's link is down, and a peer without
+    /// one is handed nothing.
+    pub(crate) fn discard_inputs(&mut self) {
+        self.inputs.clear();
     }
 
     /// Reconfigure both inbound budgets, resetting them to one second of the
@@ -339,26 +381,44 @@ impl PeerSession {
         charge(limiter, bytes, now, counters)
     }
 
-    /// Queue one decoded input frame for this tick's `GameModule::tick`,
-    /// or refuse it once the tick is holding [`MAX_CLIENT_INPUTS_PER_TICK`].
+    /// Hold one decoded input frame for the tick it targets, read while the
+    /// server is about to simulate `now`, and count it if it came late, too
+    /// early, or for a tick already holding
+    /// [`MAX_CLIENT_INPUTS_PER_TICK`](crate::MAX_CLIENT_INPUTS_PER_TICK).
     ///
     /// The **newest** frame is refused rather than the oldest evicted: the
-    /// frames already queued are the ones the module is about to read in
-    /// arrival order, and dropping from the front would hand it a reordered
-    /// prefix of what the client said. Refusing costs nothing and keeps the
-    /// order the peer sent.
-    pub(crate) fn queue_input(&mut self, tick: TickId, data: Vec<u8>, counters: &mut Counters) {
-        if self.client_inputs.len() >= MAX_CLIENT_INPUTS_PER_TICK {
-            self.dropped_inputs = self.dropped_inputs.saturating_add(1);
-            counters.dropped_inputs = counters.dropped_inputs.saturating_add(1);
-            return;
+    /// frames already held are the ones the module is about to read, and
+    /// dropping from the front would hand it a reordered prefix of what the
+    /// client said. Refusing costs nothing and keeps the order the peer sent.
+    pub(crate) fn receive_input(
+        &mut self,
+        tick: TickId,
+        data: Vec<u8>,
+        now: TickId,
+        counters: &mut Counters,
+    ) {
+        match self.inputs.receive(tick, data, now) {
+            Arrival::InTime => {}
+            Arrival::Late => {
+                self.late_inputs = self.late_inputs.saturating_add(1);
+                counters.late_inputs = counters.late_inputs.saturating_add(1);
+            }
+            Arrival::Early => {
+                self.early_inputs = self.early_inputs.saturating_add(1);
+                counters.early_inputs = counters.early_inputs.saturating_add(1);
+            }
+            Arrival::Full => {
+                counters.dropped_inputs = counters.dropped_inputs.saturating_add(1);
+            }
         }
-        self.client_inputs.push((tick, data));
     }
 
+    /// Open and act on one sealed message from this peer, read while the
+    /// server is about to simulate `now`.
     pub(crate) fn process_authenticated_message(
         &mut self,
         envelope: &[u8],
+        now: TickId,
         counters: &mut Counters,
     ) {
         // Authenticated traffic only means anything for an established
@@ -388,12 +448,13 @@ impl PeerSession {
             Some(crcbl_net::codec::INPUT_TAG | crcbl_net::codec::COMMAND_TAG) => {
                 match crcbl_net::decode_client_to_server(&payload) {
                     Ok(crcbl_net::ClientToServer::Input { tick, data }) => {
-                        self.queue_input(tick, data, counters);
+                        self.receive_input(tick, data, now, counters);
                     }
-                    // **A command is not this tick's state.** `Input` is a
-                    // sample of what the player was doing when the client
-                    // sampled it, which is why it is queued and cleared every
-                    // tick; a command is a request that is answered once.
+                    // **A command is not a tick's state.** `Input` is a
+                    // sample of what the player was doing at the tick it
+                    // names, which is why it is held for that tick and handed
+                    // to it alone; a command is a request that is answered
+                    // once.
                     // Its kind byte says which: a console set or a scene
                     // edit, each held here for the server to act on, or
                     // refuse, and answer.
@@ -468,7 +529,7 @@ impl PeerSession {
         // Every update is relevant alike until a game supplies relevance.
         let limit = transport.max_unreliable_message_bytes();
         let budget = snapshot_budget(limit);
-        let fitted =
+        let mut fitted =
             match self
                 .session
                 .priority_accumulator_mut(sector)
@@ -502,6 +563,9 @@ impl PeerSession {
             }
         };
 
+        // Fitted to its budget with the timing's bytes already counted (they
+        // are a fixed part of every header), so setting it keeps it fitted.
+        fitted.delta.input_timing = self.inputs.take_timing();
         let payload = match crcbl_net::encode_delta(&fitted.delta) {
             Ok(payload) => payload,
             Err(_) => {

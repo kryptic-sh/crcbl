@@ -85,8 +85,8 @@ pub use edit::{
 };
 pub use handshake::{HandshakeGate, HandshakeResult, Hello, RejectReason};
 pub use messages::{
-    ClientToServer, MAX_CLIENT_INPUTS_PER_TICK, ServerToClient, SessionEndReason, SnapshotReader,
-    SnapshotWriter, SystemSnapshot, replicated_system_id,
+    ClientToServer, InputTiming, MAX_CLIENT_INPUTS_PER_TICK, MAX_INPUT_LEAD, ServerToClient,
+    SessionEndReason, SnapshotReader, SnapshotWriter, SystemSnapshot, replicated_system_id,
 };
 pub use rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 pub use session::{SessionConfig, SessionManager, SessionState};

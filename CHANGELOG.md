@@ -16,6 +16,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **Snapshots carry the server's input timing, and the protocol version is 7**
+  (`ProtocolCompatibility::DEFAULT`). Every delta's header grew by a fixed 13
+  bytes — a flag, the tick of the input that reached the server least early
+  since the last snapshot, and how many ticks early it was — so a build from
+  before reads every snapshot as malformed, hence the bump. `crcbl_net::Delta`
+  has a new `input_timing: Option<crcbl_net::InputTiming>` field: a struct
+  literal must name it (`None` sends no timing). As with 6, the samples
+  hand-shake on their own `COMPATIBILITY` versions, which do not move with the
+  engine's.
+
+- **A server hands each input to the tick it targets, not the tick it arrived
+  in.** `crcbl_server::Server` and `Host` hold every client input frame until
+  the server tick its `TickId` names (see Added: client tick alignment), so
+  `ClientInputs` — and `PeerFrames::frames` — are the frames for that tick, in
+  tick order, rather than whatever arrived since the tick before in arrival
+  order. A frame for a tick that has already run is applied on the next tick and
+  counted (`late_input_count`); one more than `crcbl_net::MAX_INPUT_LEAD` ahead
+  is refused and counted (`early_input_count`). A test or tool that sent
+  hand-built input with an arbitrary tick must stamp the tick it wants applied
+  on. `crcbl_client::Client::tick_lead` now measures the newest tick stamped on
+  an input, and is `None` until the input clock has reached one.
+
+- **`crcbl::lan::netgraph::LinkReading` gained `inputs` and `PlayoutReading`
+  gained `input_lead`** (see Added), so a struct literal must name them — `None`
+  for a client's link, and `Client::input_lead_stats()`.
+
 - **The debug console's `save` saves the game; the settings file is written by
   `writeconfig`.** `save [SLOT]` is now the game's save (see Added: one save
   path), and the command that wrote `settings.toml` takes Source's name for it,
@@ -703,6 +729,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **Client tick alignment: the client's input runs ahead of the server, and the
+  server holds it until its tick.** `crcbl_client::input_lead` stamps each input
+  with a tick about half a round trip plus `INPUT_LEAD_MARGIN_TICKS` ahead of
+  the server's: it starts from the handshake's round trip and the `Accept`'s
+  tick, follows the playout's server-time estimate once snapshots arrive, and
+  then converges on what the server measured — each snapshot carries back the
+  input that arrived least early, and the lead takes the worst of each
+  `INPUT_FEEDBACK_WINDOW` at once if it asks for more and by `INPUT_LEAD_GAIN`
+  if less, each sample measured against the lead its own tick was sent with. The
+  input clock slews within `MAX_INPUT_RATE_DEVIATION` and steps past
+  `INPUT_STEP_THRESHOLD` (`21-jobs.md`'s 50 ms): a step forward sends the
+  current input for every tick it passes (at most `DEFAULT_MAX_CATCH_UP_TICKS`
+  at once), a step back sends no tick twice. `Client::input_lead_stats` reports
+  the lead, its target, the server's margin, and the steps with the ticks they
+  skipped and repeated. On the server, a per-peer jitter buffer keyed by target
+  tick holds early inputs, applies a late one on the next tick (`21-jobs.md`'s
+  apply-next policy), refuses one past `MAX_INPUT_LEAD`, and keeps
+  `MAX_CLIENT_INPUTS_PER_TICK` per target tick;
+  `Server`/`Host::late_input_count` and `early_input_count` count them, and
+  `PeerStats::late_inputs` and `early_inputs` per peer. The netgraph shows a
+  client's input lead, margin and steps, and a host's late and early counts per
+  peer.
 
 - **One save path: `crcbl::save` and `HostedGame::save`.** Every trigger a game
   has — the debug console's `save`, a key or button, the autosave, the close and
@@ -5235,6 +5284,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   migration — everything here is v0.
 
 ### Fixed
+
+- **A session faster than 60 Hz no longer refuses its own peers' traffic.**
+  `crcbl_server::Server`, `Host` and `crcbl_client::Client` built their inbound
+  budgets from `InboundRateLimitConfig::default()`, whose 120 messages a second
+  is a 60 Hz session's input and acknowledgement each tick exactly; a faster
+  session's client was refused most of what it sent, and the queue behind the
+  dry bucket delivered the rest later and later. They now start from the new
+  `InboundRateLimitConfig::for_tick_rate`, which raises the message rate to
+  `rate_limit::MESSAGES_PER_TICK` a tick where that is more; at 60 Hz and below
+  it is the default. `set_inbound_rate_limit_config` still replaces it.
 
 - **`crcbl_store::write_atomic` syncs the directory on Windows.** Its directory
   syncs opened the parent with `File::open`, which Windows refuses for a

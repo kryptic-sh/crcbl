@@ -1,5 +1,7 @@
 //! Typed protocol messages and snapshot helpers.
 
+use std::time::Duration;
+
 use crcbl_core::TickId;
 
 use crate::types::SectorId;
@@ -24,12 +26,44 @@ use crate::types::SectorId;
 pub const MAX_CLIENT_INPUTS_PER_TICK: usize =
     2 * crcbl_core::time::DEFAULT_MAX_CATCH_UP_TICKS as usize;
 
+/// The furthest ahead of the server's tick a client input may target.
+///
+/// A server holds an input until the tick it targets (its jitter buffer), and
+/// this is how far ahead it holds them: an input further ahead is refused and
+/// counted, so a peer stamping ticks far in the future cannot make the server
+/// keep everything it sends. A client's input lead is about half a round trip
+/// plus a margin, so this leaves room for a slow link and bounds the buffer at
+/// this many seconds of input at the inbound budget's rate.
+///
+/// Public because it is a statement to the other end of the wire, as
+/// [`MAX_CLIENT_INPUTS_PER_TICK`] is: a client holds its own lead under it.
+pub const MAX_INPUT_LEAD: Duration = Duration::from_secs(1);
+
+/// How early the server received one of a client's inputs, carried back to
+/// that client on a snapshot so its input lead converges on what the server
+/// measured rather than on a round-trip guess.
+///
+/// The server measures in whole ticks, because it reads its transports once a
+/// tick: `margin_ticks` is the input's target tick less the tick the server
+/// was about to simulate when it read it. Zero is in time with no tick to
+/// spare, negative is late — the tick it targets had already run — and
+/// positive is held that many ticks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputTiming {
+    /// The tick the input targeted, as its client stamped it.
+    pub tick: TickId,
+    /// Its target less the server's tick when it was read, in ticks.
+    pub margin_ticks: i32,
+}
+
 /// Messages sent from the client to the server.
 #[derive(Debug)]
 pub enum ClientToServer {
     /// An input tick — the client's input state at a given server tick.
     Input {
-        /// The server tick this input is for.
+        /// The server tick this input is for. The server holds it until
+        /// that tick and hands it to the tick's module then; see
+        /// [`MAX_INPUT_LEAD`] for how far ahead it may be.
         tick: TickId,
         /// Serialised input data.
         data: Vec<u8>,
