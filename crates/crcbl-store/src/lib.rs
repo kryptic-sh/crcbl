@@ -386,6 +386,41 @@ impl StorageSource for NativeStorage {
 
 // ── Atomic write ───────────────────────────────────────────────────────────
 
+/// Syncs `dir`'s entries to disk, so a file created in it or renamed into it
+/// survives a power cut — see [`write_atomic`].
+///
+/// On Unix a directory opens as a file and syncs like one.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+/// Windows opens a directory only with `FILE_FLAG_BACKUP_SEMANTICS`, and
+/// flushes it (`FlushFileBuffers`, which `sync_all` calls) only through a
+/// handle opened for writing: read-only, the flush is refused with "Access is
+/// denied", which is how a plain `File::open` used to skip this sync silently.
+#[cfg(windows)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    /// `FILE_FLAG_BACKUP_SEMANTICS` from the Win32 API: required to open a
+    /// directory handle at all.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)?
+        .sync_all()
+}
+
+/// A target with neither Unix nor Windows directories — the browser's stub
+/// `std::fs`, where [`write_atomic`] fails before it gets here — has none to
+/// sync.
+#[cfg(not(any(unix, windows)))]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Write `data` to `path` atomically: write a temporary sibling file, fsync
 /// both the file and its parent directory, then rename over the target.
 ///
@@ -393,6 +428,9 @@ impl StorageSource for NativeStorage {
 /// settings, golden-image output. A crash during the write leaves the original
 /// file intact, and a crash after the rename leaves a complete file at the
 /// target (the rename is atomic on the same filesystem).
+///
+/// The directory is synced on Unix and on Windows, each the way that system
+/// allows, and a failed directory sync is returned like any other error.
 ///
 /// Parent directories are created if they do not exist.
 ///
@@ -447,9 +485,9 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StorageError> {
         return Err(StorageError::from_io(&tmp_name, e));
     }
 
-    // fsync the parent directory so the link is durable.
-    if let Ok(parent_fd) = std::fs::File::open(parent) {
-        parent_fd.sync_all().ok();
+    if let Err(e) = sync_dir(parent) {
+        std::fs::remove_file(&tmp_name).ok();
+        return Err(StorageError::from_io(parent, e));
     }
 
     // Where the unit tests kill a child mid-save to prove the target is never
@@ -466,11 +504,9 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), StorageError> {
     #[cfg(test)]
     kill_during_write::reached(kill_during_write::KillPoint::AfterRename);
 
-    // fsync again after rename so the directory entry is durable on systems
-    // that require it.
-    if let Ok(parent_fd) = std::fs::File::open(parent) {
-        parent_fd.sync_all().ok();
-    }
+    // The rename landed, so the target is whole whatever this answers; an
+    // error here says only that the new entry is not yet known to be on disk.
+    sync_dir(parent).map_err(|e| StorageError::from_io(parent, e))?;
 
     Ok(())
 }
@@ -581,6 +617,20 @@ mod tests {
                     "local, not roaming, application data"
                 );
             }
+        }
+    }
+
+    /// **A directory syncs on this platform, and a failed sync is an error,
+    /// not a skip** — on Windows the flush needs a writable directory handle,
+    /// and a read-only one is refused, which used to be swallowed so the sync
+    /// never ran while `write_atomic` claimed it.
+    #[test]
+    fn a_directory_syncs_and_a_missing_one_is_an_error() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        sync_dir(dir.path()).expect("the directory syncs");
+        let missing = dir.path().join("missing");
+        if cfg!(any(unix, windows)) {
+            sync_dir(&missing).expect_err("a missing directory synced");
         }
     }
 

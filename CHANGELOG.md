@@ -5089,6 +5089,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl_store::write_atomic` syncs the directory on Windows.** Its directory
+  syncs opened the parent with `File::open`, which Windows refuses for a
+  directory, and the error was ignored, so a save, a settings file or a golden
+  image was not known to be on disk when the call returned there. It now opens
+  the directory with `FILE_FLAG_BACKUP_SEMANTICS` for writing and flushes it,
+  and a failed directory sync is returned as a `StorageError` instead of being
+  skipped on any platform.
 - **The editor's inspector no longer cuts off a vector row's last field.** At
   the default layout's side-column width a position's three drag-values, with
   numbers as wide as `-14.00`, ran past the pane's edge: the `z` field was

@@ -15624,19 +15624,20 @@ the OPFS checks in `web/tools/browser-e2e.mjs`:
     removes it. The next write and read work beside it (the test holds both). A
     game killed repeatedly mid-save accumulates them; a sweep of stale `.tmp`
     siblings at the next write is the fix if that matters, and is not built.
-  - **Finding, needs a decision: `write_atomic` never syncs the directory on
-    Windows.** Both directory syncs are `std::fs::File::open(parent)` under
-    `if let Ok`, and on Windows opening a directory that way fails with "Access
-    is denied" (checked 2026-10-05 with a scratch program on this machine,
-    toolchain 1.98.1), so both are skipped silently. The file's own `sync_all`
-    still runs before the rename, so a power cut should leave the old or the new
-    save, not a torn one (inferred from the order, not tested); what is lost is
-    durability of the rename at return, which the doc comment ("fsync both the
-    file and its parent directory") claims. Options: open the directory with
-    `FILE_FLAG_BACKUP_SEMANTICS` through `std::os::windows::fs::OpenOptionsExt`
-    and flush it (Windows-only code whose effect no test short of a power cut
-    can observe), or correct the doc comment to say the directory sync is
-    POSIX-only.
+  - **Decided 2026-10-05: `write_atomic` syncs the directory on Windows too.**
+    It used to call `std::fs::File::open(parent)` under `if let Ok`, which on
+    Windows opens nothing (a directory needs `FILE_FLAG_BACKUP_SEMANTICS`), so
+    both syncs were skipped silently while the doc comment claimed them.
+    `sync_dir` now opens the directory with that flag and a writable handle —
+    `FlushFileBuffers` on a read-only directory handle is refused with "Access
+    is denied" (checked with a scratch program on this machine, toolchain
+    1.98.1) — and a failed sync is returned, not swallowed. Chosen over
+    narrowing the doc comment to POSIX because the fix is a handful of lines in
+    `std` (`OpenOptionsExt::custom_flags`, no `unsafe`, no new crate) and the
+    guarantee is the one every save caller already assumes.
+    `a_directory_syncs_and_a_missing_one_is_an_error` goes red with a read-only
+    handle. What no test can show is that the flush reaches the platter — that
+    is the power-cut gap above.
 
 ### Settings apply-on-confirm with timed revert (2026-09-24)
 
