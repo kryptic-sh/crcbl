@@ -156,6 +156,7 @@ impl Rig {
             near,
             TICK_HZ,
             COMPATIBILITY,
+            super::tests::next_player(),
         ));
         for _ in 0..60 {
             self.step();
@@ -502,7 +503,13 @@ fn an_oversized_entity_does_not_stop_the_others() {
     );
     let (near, far) = InMemoryTransport::pair();
     host.add(Box::new(Narrow(far)));
-    let mut client = Client::new_with_compatibility(World::new(), near, TICK_HZ, COMPATIBILITY);
+    let mut client = Client::new_with_compatibility(
+        World::new(),
+        near,
+        TICK_HZ,
+        COMPATIBILITY,
+        super::tests::next_player(),
+    );
     let mut now = Duration::ZERO;
     let mut peer = None;
     while client.last_applied_tick() == TickId::ZERO {

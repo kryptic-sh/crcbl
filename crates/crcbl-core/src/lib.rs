@@ -20,6 +20,9 @@
 //! * [`log`] — stderr logging behind the [`log`](::log) facade, filtered by
 //!   `CRCBL_LOG`, with the console's log ring in [`log::console`] and the `log`
 //!   command that sets the filter while the engine runs.
+//! * [`player`] — [`PlayerId`], who a player is across sessions: drawn once by
+//!   a client, presented in every hello, and self-asserted — see the module
+//!   docs for how little an open server can trust it.
 //! * [`rand`] — deterministic values from an index, for simulations that
 //!   replay. Deliberately not a generator; see the module docs for why every
 //!   sample independently arrived at the same shape.
@@ -48,6 +51,7 @@ pub mod bounds;
 pub mod handle;
 pub mod input;
 pub mod log;
+pub mod player;
 pub mod rand;
 pub mod schedule;
 pub mod stats;
@@ -71,6 +75,7 @@ pub fn console_table() -> crcbl_console::Table {
 pub use alloc::FrameArena;
 pub use handle::{Handle, Pool};
 pub use input::KeyCode;
+pub use player::PlayerId;
 pub use surface::SurfaceTarget;
 pub use time::{EventTime, FrameClock, TickId};
 pub use world::{SECTOR_SIZE, WorldPos};

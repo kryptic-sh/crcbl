@@ -532,8 +532,10 @@ fn a_host_and_two_clients_over_loopback_show_their_links() {
         .expect("loopback UDP must be available to these tests");
     let address: SocketAddr = (Ipv4Addr::LOCALHOST, host.game_port()).into();
     let mut clients = [
-        LanClient::join(GAME, address, TICK_HZ).expect("connect"),
-        LanClient::join(GAME, address, TICK_HZ).expect("connect"),
+        LanClient::join(GAME, crate::net::PlayerId::from_seed(218), address, TICK_HZ)
+            .expect("connect"),
+        LanClient::join(GAME, crate::net::PlayerId::from_seed(219), address, TICK_HZ)
+            .expect("connect"),
     ];
 
     let mut now = Duration::ZERO;

@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 crcbl-core = { workspace = true }
 crcbl-net = { workspace = true }
+crcbl-rand = { workspace = true }
 # For `save`'s checksum. `crcbl-shaders` is dependency-free and already carries
 # a NIST-vector-tested SHA-256 (`crcbl_shaders::sha256`); duplicating it here
 # would mean two implementations to keep correct.

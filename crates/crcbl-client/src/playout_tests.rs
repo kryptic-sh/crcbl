@@ -60,8 +60,13 @@ impl Link {
 
     fn at_tick_rate(tick_hz: u32) -> Self {
         let (transport, mut peer) = InMemoryTransport::pair();
-        let mut client =
-            Client::new_with_compatibility(World::new(), transport, tick_hz, COMPATIBILITY);
+        let mut client = Client::new_with_compatibility(
+            World::new(),
+            transport,
+            tick_hz,
+            COMPATIBILITY,
+            PlayerId::from_seed(115),
+        );
         let crypto = connect(&mut client, &mut peer, Duration::ZERO);
         let clock = ManualClock::new();
         let server = ConditionSimulator::with_clock(peer, SimConditions::default(), clock.clone());
@@ -441,8 +446,13 @@ fn run_burst_probe(
 ) -> Client<InMemoryTransport> {
     let tick = Duration::from_secs(1) / BURST_TICK_HZ;
     let (transport, mut peer) = InMemoryTransport::pair();
-    let mut client =
-        Client::new_with_compatibility(World::new(), transport, BURST_TICK_HZ, COMPATIBILITY);
+    let mut client = Client::new_with_compatibility(
+        World::new(),
+        transport,
+        BURST_TICK_HZ,
+        COMPATIBILITY,
+        PlayerId::from_seed(116),
+    );
     client.set_inbound_rate_limit_config(InboundRateLimitConfig {
         messages_per_second: 100_000,
         bytes_per_second: 100_000_000,
@@ -641,8 +651,13 @@ fn the_buffer_is_bounded() {
         (FASTEST_TICK_HZ, playout::MAX_JITTER_BUFFER_FRAMES),
     ] {
         let (transport, mut peer) = InMemoryTransport::pair();
-        let mut client =
-            Client::new_with_compatibility(World::new(), transport, tick_hz, COMPATIBILITY);
+        let mut client = Client::new_with_compatibility(
+            World::new(),
+            transport,
+            tick_hz,
+            COMPATIBILITY,
+            PlayerId::from_seed(117),
+        );
         assert_eq!(client.frame_capacity, capacity, "at {tick_hz} Hz");
         client.set_inbound_rate_limit_config(InboundRateLimitConfig {
             messages_per_second: 100_000,

@@ -152,11 +152,22 @@ impl Rig {
         let mut host = host(true);
         let (near, far) = InMemoryTransport::pair();
         host.add_host_player(Box::new(far));
-        let host_player =
-            Client::new_with_compatibility(World::new(), near, TICK_HZ, COMPATIBILITY);
+        let host_player = Client::new_with_compatibility(
+            World::new(),
+            near,
+            TICK_HZ,
+            COMPATIBILITY,
+            super::tests::next_player(),
+        );
         let (near, far) = InMemoryTransport::pair();
         host.add(Box::new(far));
-        let remote = Client::new_with_compatibility(World::new(), near, TICK_HZ, COMPATIBILITY);
+        let remote = Client::new_with_compatibility(
+            World::new(),
+            near,
+            TICK_HZ,
+            COMPATIBILITY,
+            super::tests::next_player(),
+        );
         let mut rig = Self {
             host,
             host_player,

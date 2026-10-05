@@ -89,8 +89,8 @@ use crcbl::client::Client;
 use crcbl::core::FrameClock;
 use crcbl::ecs::World;
 use crcbl::lan::{LanBind, LanClient, LanGame, LanHost, how_it_ended};
-use crcbl::net::InMemoryTransport;
 use crcbl::net::udp::CONNECT_TIMEOUT;
+use crcbl::net::{InMemoryTransport, PlayerId};
 use crcbl::server::{Host, PeerEvent, PeerId};
 
 use crate::game::{COMPATIBILITY, Field, Game, GameError, Refusal, TowersModule};
@@ -203,8 +203,8 @@ impl HostLink {
     /// player. Every other player is sent `map` as they join, and every
     /// player the stage's refusals of their commands. Records the session to
     /// the new file `record` names, if it names one, from before the first
-    /// tick. Answers the link and the tick period, with the first tick spent
-    /// on this player's handshake.
+    /// tick. This player joins as `player`. Answers the link and the tick
+    /// period, with the first tick spent on this player's handshake.
     ///
     /// # Errors
     ///
@@ -218,6 +218,7 @@ impl HostLink {
         tick_hz: u32,
         map: &Map,
         record: Option<&Path>,
+        player: PlayerId,
     ) -> Result<(Self, Duration), GameError> {
         let mut lan = LanHost::open(game, bind, world, tick_hz).map_err(GameError::Lan)?;
         lan.host_mut().set_module(Box::new(module));
@@ -226,8 +227,13 @@ impl HostLink {
         }
         let (server_end, client_end) = InMemoryTransport::pair();
         lan.host_mut().add(Box::new(server_end));
-        let mut local =
-            Client::new_with_compatibility(World::new(), client_end, tick_hz, game.compatibility);
+        let mut local = Client::new_with_compatibility(
+            World::new(),
+            client_end,
+            tick_hz,
+            game.compatibility,
+            player,
+        );
         // The client clock's own step, so one period is exactly one tick of it.
         let tick_period = FrameClock::new(tick_hz).tick_dt();
 
@@ -405,7 +411,7 @@ impl RemoteLink {
 /// Why a join ended without a game.
 #[derive(Debug)]
 pub enum JoinFailure {
-    /// The host refused the handshake, for good — another build.
+    /// The host refused the handshake, for good — another build, or a ban.
     Refused {
         /// The host.
         host: SocketAddr,

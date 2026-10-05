@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::time::Duration;
 
-use crcbl_core::{FrameClock, TickId};
+use crcbl_core::{FrameClock, PlayerId, TickId};
 use crcbl_ecs::World;
 use crcbl_net::auth::SessionCrypto;
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
@@ -232,6 +232,8 @@ pub struct Client<T: Transport> {
     /// hands over a resume token to key it with.
     session_crypto: Option<SessionCrypto>,
     compatibility: ProtocolCompatibility,
+    /// Who this client says it is in every hello.
+    player: PlayerId,
     handshake_generation: u64,
     outstanding_handshake_generation: Option<u64>,
     /// When the outstanding hello was sent: its `Accept`'s arrival less this
@@ -296,11 +298,15 @@ pub struct Client<T: Transport> {
 }
 
 impl<T: Transport> Client<T> {
-    /// Create a client with explicit protocol compatibility identifiers.
+    /// Create a client with explicit protocol compatibility identifiers,
+    /// presenting itself as `player` in every hello.
     ///
     /// There is deliberately no constructor that defaults them:
     /// [`ProtocolCompatibility::DEFAULT`] carries zero engine and schema ids,
-    /// which protect nothing.
+    /// which protect nothing. Nor the player: a default every client shared
+    /// would be one player to the server's denylist and its duplicate rule.
+    /// A game presents the id it keeps (`crcbl_store::identity`); a test or
+    /// an in-process session, [`PlayerId::from_seed`].
     ///
     /// # Panics
     ///
@@ -312,6 +318,7 @@ impl<T: Transport> Client<T> {
         transport: T,
         tick_hz: u32,
         compatibility: ProtocolCompatibility,
+        player: PlayerId,
     ) -> Self {
         compatibility.assert_explicit();
         let clock = FrameClock::new(tick_hz);
@@ -334,6 +341,7 @@ impl<T: Transport> Client<T> {
             resume_token: None,
             session_crypto: None,
             compatibility,
+            player,
             handshake_generation: 0,
             outstanding_handshake_generation: None,
             hello_sent_at: None,
@@ -615,6 +623,12 @@ impl<T: Transport> Client<T> {
             .flat_map(Baseline::iter_entities)
             .filter(move |&(system_id, _, _)| system_id == wanted)
             .map(|(_, entity_bits, data)| (entity_bits, data))
+    }
+
+    /// Who this client says it is in every hello.
+    #[must_use]
+    pub const fn player(&self) -> PlayerId {
+        self.player
     }
 
     /// The accepted server session id, if the handshake has completed.
@@ -976,6 +990,7 @@ impl<T: Transport> Client<T> {
                 engine_build_id: self.compatibility.engine_build_id,
                 schema_hash: self.compatibility.schema_hash,
                 generation,
+                player: self.player,
                 session_token: self.resume_token,
             })));
         match result {
@@ -1394,7 +1409,13 @@ mod tests {
     pub(crate) const TICK: Duration = Duration::from_nanos(16_666_667);
 
     pub(crate) fn client(transport: InMemoryTransport) -> Client<InMemoryTransport> {
-        Client::new_with_compatibility(World::new(), transport, 60, COMPATIBILITY)
+        Client::new_with_compatibility(
+            World::new(),
+            transport,
+            60,
+            COMPATIBILITY,
+            PlayerId::from_seed(112),
+        )
     }
 
     /// Play the server side of a handshake and return the channel the peer
@@ -1529,6 +1550,7 @@ mod tests {
             transport,
             60,
             ProtocolCompatibility::DEFAULT,
+            PlayerId::from_seed(113),
         );
     }
 
@@ -2818,6 +2840,7 @@ mod tests {
             },
             60,
             COMPATIBILITY,
+            PlayerId::from_seed(114),
         );
         let mut now = Duration::ZERO;
         for _ in 0..REFUSALS {

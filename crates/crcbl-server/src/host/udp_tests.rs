@@ -129,6 +129,7 @@ impl<C: Clock + Clone + 'static> Rig<C> {
             transport,
             TICK_HZ,
             COMPATIBILITY,
+            super::tests::next_player(),
         ));
     }
 

@@ -108,6 +108,12 @@ impl Loopback<InMemoryTransport> {
     }
 }
 
+/// The seed of the one player a loopback has. Who they are matters to
+/// nobody — a loopback's server has no denylist and no other player — so
+/// every loopback presents the same id rather than reading one from a
+/// config directory.
+const LOOPBACK_PLAYER_SEED: u64 = 0;
+
 /// What [`Loopback::impaired`] offsets the server end's seed by.
 ///
 /// Any value that is not zero would do; this one spells `SRVR` so a seed read
@@ -277,6 +283,7 @@ impl<T: Transport> Loopback<T> {
             client_transport,
             tick_hz,
             compatibility,
+            crcbl_net::PlayerId::from_seed(LOOPBACK_PLAYER_SEED),
         );
 
         let tick_period = FrameClock::new(tick_hz).tick_dt();

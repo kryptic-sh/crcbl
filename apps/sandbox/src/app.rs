@@ -534,8 +534,13 @@ pub fn with_shell<S: Shell + ?Sized>(
     // Headless too: a `--headless --host` run is a host with no window.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        sandbox.lan = Lan::start(options.lan, options.tick_hz, options.record.as_deref())
-            .map_err(SandboxError::Game)?;
+        sandbox.lan = Lan::start(
+            options.lan,
+            options.tick_hz,
+            options.record.as_deref(),
+            options.headless,
+        )
+        .map_err(SandboxError::Game)?;
         if options.lobby {
             sandbox.lobby = Some(crate::lobby::Lobby::on_the_lan(options.tick_hz));
         }
@@ -1809,6 +1814,7 @@ mod tests {
 
         crate::lobby::Lobby::new(
             crcbl::lan::lobby::Lobby::new(crate::lan::SANDBOX, Err("not looking".to_string())),
+            Ok(crcbl::net::PlayerId::from_seed(1)),
             on_loopback(),
             TICK_HZ,
         )

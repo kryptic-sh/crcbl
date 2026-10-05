@@ -46,6 +46,7 @@ impl Rig {
                 near,
                 TICK_HZ,
                 COMPATIBILITY,
+                super::tests::next_player(),
             ));
         }
         for _ in 0..600 {

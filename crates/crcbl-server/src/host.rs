@@ -31,6 +31,17 @@
 //! fetch a peer in flight, refusing another as busy — `scene_stream`'s module
 //! docs have why.
 //!
+//! **Every peer is a player** ([`PlayerId`]), named in its hello and kept
+//! apart from its [`PeerId`]: the peer is one session, the player whoever it
+//! is across sessions ([`Host::player`]). A player on the host's
+//! [`Denylist`] is refused at the handshake with the ban's reason
+//! ([`Host::ban`]). **One session a player**: a hello naming a player whose
+//! session is connected is refused as a duplicate
+//! ([`RejectReason::DUPLICATE_PLAYER`], which the client retries), and one
+//! naming a player whose link dropped ends that session and joins afresh —
+//! the player came back without its resume token, from a restarted client.
+//! The id is self-asserted; [`PlayerId`]'s docs say what that leaves open.
+//!
 //! What the module is handed of its peers — the roster and each peer's frames
 //! — goes through one step whether it came off the transports or out of a
 //! recording, and is recorded on request ([`Host::record_peer_inputs`]);
@@ -40,7 +51,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crcbl_console::{Registry, SimVars};
-use crcbl_core::{FrameClock, TickId};
+use crcbl_core::{FrameClock, PlayerId, TickId};
 use crcbl_ecs::{ClientInputs, World};
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::reliable::EndpointStats;
@@ -51,6 +62,7 @@ use crcbl_net::{
     Transport, TransportError,
 };
 
+use crate::bans::Denylist;
 use crate::peer::{
     self, Counters, PartSent, PeerSession, PeerStats, SnapshotTooLarge, UpdateTooLarge,
 };
@@ -238,6 +250,9 @@ impl fmt::Debug for PeerInputs<'_> {
 /// An admitted session and, while it is connected, its transport.
 struct Peer {
     id: PeerId,
+    /// Who the peer's hello said it is; the same for every hello on the
+    /// session, a resume's included.
+    player: PlayerId,
     /// `None` from the moment the link drops until the peer resumes.
     transport: Option<Box<dyn Transport>>,
     link: PeerSession,
@@ -345,6 +360,8 @@ pub struct Host {
     /// The scene fetches held for [`Host::take_scene_fetches`], in the order
     /// read.
     scene_fetches: Vec<(PeerId, u64)>,
+    /// The players refused at the handshake.
+    denylist: Denylist,
 }
 
 impl Host {
@@ -382,6 +399,7 @@ impl Host {
             serving_edits: false,
             edit_requests: Vec::new(),
             scene_fetches: Vec::new(),
+            denylist: Denylist::new(),
         }
     }
 
@@ -505,6 +523,7 @@ impl Host {
                                             let result = rehello(
                                                 &self.handshake_gate,
                                                 &peer.link,
+                                                peer.player,
                                                 &hello,
                                                 tick,
                                             );
@@ -669,6 +688,11 @@ impl Host {
             self.reply(&mut pending, &checked);
             return Some(pending);
         }
+        if let Some(reason) = self.denylist.reason(hello.player) {
+            let banned = banned(hello.generation, reason);
+            self.reply(&mut pending, &banned);
+            return Some(pending);
+        }
         let resume_token = match peer::generate_resume_token() {
             Ok(token) => token,
             Err(error) => {
@@ -692,6 +716,30 @@ impl Host {
         hello: &Hello,
         resume_token: ResumeToken,
     ) -> Option<Pending> {
+        if let Some(index) = self
+            .peers
+            .iter()
+            .position(|peer| peer.player == hello.player)
+        {
+            if self.peers[index].transport.is_some() {
+                let duplicate = HandshakeResult::Reject {
+                    generation: hello.generation,
+                    reason: RejectReason {
+                        code: RejectReason::DUPLICATE_PLAYER,
+                        msg: format!(
+                            "player {} is in a session of this host already",
+                            hello.player
+                        ),
+                    },
+                };
+                self.reply(&mut pending, &duplicate);
+                return Some(pending);
+            }
+            // Its link is down and it came back without the resume token: a
+            // restarted client. The old session goes, and its place with it.
+            let lost = self.peers.remove(index);
+            self.events.push(PeerEvent::Left(lost.id));
+        }
         // A lost peer still holds its place: counting only the connected
         // ones would let a newcomer take it, and the lost peer's resume would
         // then make one more than the host allows.
@@ -735,6 +783,7 @@ impl Host {
         self.next_peer_id = self.next_peer_id.wrapping_add(1);
         self.peers.push(Peer {
             id,
+            player: hello.player,
             transport: Some(pending.transport),
             link,
             was_connected: false,
@@ -766,6 +815,14 @@ impl Host {
             return Some(pending);
         };
         let peer = &mut self.peers[index];
+        if peer.player != hello.player {
+            let reject = peer::invalid_session_token(
+                hello.generation,
+                "the session belongs to another player",
+            );
+            self.reply(&mut pending, &reject);
+            return Some(pending);
+        }
         if peer.link.session.state() != SessionState::Reconnecting {
             // Its owner is still connected: this is someone else holding the
             // token, or the owner on a second link. Either way the session
@@ -1341,6 +1398,62 @@ impl Host {
         is_host_player(&self.peers, peer)
     }
 
+    /// Who `peer`'s hello said it is, or `None` once its session has ended.
+    #[must_use]
+    pub fn player(&self, peer: PeerId) -> Option<PlayerId> {
+        self.peers.iter().find(|p| p.id == peer).map(|p| p.player)
+    }
+
+    /// The session `player` holds, lost or connected, if any — there is at
+    /// most one.
+    #[must_use]
+    pub fn peer_of(&self, player: PlayerId) -> Option<PeerId> {
+        self.peers.iter().find(|p| p.player == player).map(|p| p.id)
+    }
+
+    /// The players this host refuses at the handshake.
+    #[must_use]
+    pub const fn denylist(&self) -> &Denylist {
+        &self.denylist
+    }
+
+    /// Bans `player` for `reason` ([`Denylist::ban`]'s rules) and kicks the
+    /// session they hold, if any, which is returned. From now on their hello
+    /// is refused with [`RejectReason::BANNED`] and the reason, until
+    /// [`unban`](Self::unban).
+    pub fn ban(&mut self, player: PlayerId, reason: &str) -> Option<PeerId> {
+        self.denylist.ban(player, reason);
+        self.kick_banned().into_iter().next()
+    }
+
+    /// Lifts `player`'s ban; their next hello is answered as anyone's.
+    /// Returns whether there was one.
+    pub fn unban(&mut self, player: PlayerId) -> bool {
+        self.denylist.unban(player)
+    }
+
+    /// Replaces the denylist with `denylist` — a server's file, read at
+    /// start — and kicks every session whose player it bans. Returns the
+    /// sessions kicked.
+    pub fn set_denylist(&mut self, denylist: Denylist) -> Vec<PeerId> {
+        self.denylist = denylist;
+        self.kick_banned()
+    }
+
+    /// Kick every session whose player the denylist holds.
+    fn kick_banned(&mut self) -> Vec<PeerId> {
+        let banned: Vec<PeerId> = self
+            .peers
+            .iter()
+            .filter(|peer| self.denylist.reason(peer.player).is_some())
+            .map(|peer| peer.id)
+            .collect();
+        for &peer in &banned {
+            self.kick(peer);
+        }
+        banned
+    }
+
     /// Messages dropped because a message-rate budget was exhausted.
     #[must_use]
     pub fn rate_limited_message_count(&self) -> u64 {
@@ -1499,21 +1612,49 @@ fn is_host_player(peers: &[Peer], id: PeerId) -> bool {
 /// hello again without a token; refusing that one while the client dropped the
 /// first `Accept` as an old generation left it retrying for ever, holding a
 /// place.
+///
+/// A hello naming another player than the session's is refused whatever its
+/// token: the session is its player's.
 fn rehello(
     gate: &HandshakeGate,
     link: &PeerSession,
+    player: PlayerId,
     hello: &Hello,
     tick: TickId,
 ) -> HandshakeResult {
     let result = gate.validate(hello, link.session.session_id(), link.resume_token, tick);
-    if matches!(result, HandshakeResult::Accept { .. })
-        && hello
-            .session_token
-            .is_some_and(|token| token != link.resume_token)
+    if !matches!(result, HandshakeResult::Accept { .. }) {
+        return result;
+    }
+    if hello.player != player {
+        return peer::invalid_session_token(
+            hello.generation,
+            "the session belongs to another player",
+        );
+    }
+    if hello
+        .session_token
+        .is_some_and(|token| token != link.resume_token)
     {
         return peer::invalid_session_token(hello.generation, "session token does not match");
     }
     result
+}
+
+/// The refusal of a banned player, carrying the ban's reason.
+fn banned(generation: u64, reason: &str) -> HandshakeResult {
+    let msg = if reason.is_empty() {
+        "banned from this server".to_owned()
+    } else {
+        format!("banned from this server: {reason}")
+    };
+    HandshakeResult::Reject {
+        generation,
+        reason: RejectReason {
+            code: RejectReason::BANNED,
+            msg,
+        },
+    }
 }
 
 impl fmt::Debug for Host {
@@ -1545,6 +1686,9 @@ mod lead_tests;
 
 #[cfg(test)]
 mod fetch_tests;
+
+#[cfg(test)]
+mod player_tests;
 
 // The UDP transport is native only, by the no-web-networking rule.
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -16,12 +16,16 @@ pub(super) const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
     schema_hash: 0x0000_5045_4552,
 };
 
+/// Who every hello [`say_hello`] writes says it is: one player, as one
+/// client's hellos are, and none of the ids [`client`] draws.
+pub(super) const HELLO_PLAYER: PlayerId = PlayerId::from_bytes([0x5E; PlayerId::BYTES]);
+
 pub(super) const TICK_HZ: u32 = 60;
 pub(super) const TICK: Duration = Duration::from_nanos(16_666_667);
 
 /// A world with one system holding one entity, so every snapshot carries
 /// something.
-fn world() -> World {
+pub(super) fn world() -> World {
     let mut world = World::new();
     let entity = world.spawn();
     let mut system = System::<f32>::new("position");
@@ -30,8 +34,22 @@ fn world() -> World {
     world
 }
 
+/// A player id no other call in this test binary has drawn: every client a
+/// host admits at once must be its own player, or the host refuses the second
+/// as a duplicate.
+pub(super) fn next_player() -> PlayerId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    PlayerId::from_seed(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
 fn client(transport: InMemoryTransport) -> Client<InMemoryTransport> {
-    Client::new_with_compatibility(World::new(), transport, TICK_HZ, COMPATIBILITY)
+    Client::new_with_compatibility(
+        World::new(),
+        transport,
+        TICK_HZ,
+        COMPATIBILITY,
+        next_player(),
+    )
 }
 
 /// A host and its clients, stepped together one tick at a time.
@@ -128,12 +146,23 @@ pub(super) fn say_hello(
     generation: u64,
     token: Option<ResumeToken>,
 ) {
+    say_hello_as(transport, generation, token, HELLO_PLAYER);
+}
+
+/// [`say_hello`], as `player`.
+pub(super) fn say_hello_as(
+    transport: &mut InMemoryTransport,
+    generation: u64,
+    token: Option<ResumeToken>,
+    player: PlayerId,
+) {
     transport
         .send_reliable(Message::reliable(crcbl_net::encode_hello(&Hello {
             protocol_version: COMPATIBILITY.protocol_version,
             engine_build_id: COMPATIBILITY.engine_build_id,
             schema_hash: COMPATIBILITY.schema_hash,
             generation,
+            player,
             session_token: token,
         })))
         .unwrap();
@@ -149,7 +178,7 @@ pub(super) fn reply(transport: &mut InMemoryTransport) -> HandshakeResult {
     panic!("no handshake reply");
 }
 
-fn reject_code(result: &HandshakeResult) -> Option<u8> {
+pub(super) fn reject_code(result: &HandshakeResult) -> Option<u8> {
     match result {
         HandshakeResult::Reject { reason, .. } => Some(reason.code),
         HandshakeResult::Accept { .. } => None,
@@ -211,6 +240,7 @@ fn an_incompatible_client_is_told_so_even_when_the_host_is_full() {
             engine_build_id: COMPATIBILITY.engine_build_id,
             schema_hash: COMPATIBILITY.schema_hash ^ 1,
             generation: 1,
+            player: HELLO_PLAYER,
             session_token: None,
         })))
         .unwrap();

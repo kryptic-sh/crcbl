@@ -214,7 +214,12 @@ fn a_browser_joins_a_host_with_room_over_a_full_one() {
         announcer(announcement("a full", 5101, ours, GAME.max_players)),
         announcer(announcement("b open", 5102, ours, 1)),
     ];
-    let mut client = LanClient::browse(GAME, hearing(&mut announcers), TICK_HZ);
+    let mut client = LanClient::browse(
+        GAME,
+        crate::net::PlayerId::from_seed(220),
+        hearing(&mut announcers),
+        TICK_HZ,
+    );
     client.frame(Duration::ZERO);
     assert_eq!(client.host(), Some(game_addr(&announcers[1])));
 }
@@ -232,7 +237,12 @@ fn a_browser_hearing_only_a_full_host_goes_on_looking() {
         ours,
         GAME.max_players,
     ))];
-    let mut client = LanClient::browse(GAME, hearing(&mut announcers), TICK_HZ);
+    let mut client = LanClient::browse(
+        GAME,
+        crate::net::PlayerId::from_seed(221),
+        hearing(&mut announcers),
+        TICK_HZ,
+    );
     let mut now = Duration::ZERO;
     for _ in 0..10 {
         now += Duration::from_millis(16);
@@ -270,7 +280,12 @@ fn a_browser_joins_its_own_build_over_another() {
         announcer(announcement("a elsewhere", 5104, other_build, 1)),
         announcer(announcement("b open", 5105, ours, 1)),
     ];
-    let mut client = LanClient::browse(GAME, hearing(&mut announcers), TICK_HZ);
+    let mut client = LanClient::browse(
+        GAME,
+        crate::net::PlayerId::from_seed(222),
+        hearing(&mut announcers),
+        TICK_HZ,
+    );
     client.frame(Duration::ZERO);
     assert_eq!(client.host(), Some(game_addr(&announcers[1])));
 }

@@ -172,6 +172,7 @@ impl Rig {
                 transport,
                 EDIT_TICK_HZ,
                 edit_compatibility(&vocabulary),
+                next_player(),
             ),
             follower: SceneFollower::new(vocabulary),
             replies: Vec::new(),
@@ -593,4 +594,12 @@ fn the_help_states_the_interval_and_the_lock_code() {
         usage.contains(&format!("program holds\n    exits {EXIT_LOCKED}")),
         "the help names another exit for a held scene"
     );
+}
+
+/// A player id no other call in this test binary has drawn: every player
+/// in one session must be their own, or the host refuses the second as a
+/// duplicate.
+fn next_player() -> crcbl::net::PlayerId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    crcbl::net::PlayerId::from_seed(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }

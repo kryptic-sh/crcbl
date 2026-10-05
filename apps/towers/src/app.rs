@@ -1039,14 +1039,21 @@ fn open_game(
                     &options.map,
                     LanBind::on_the_lan(port),
                     options.record.as_deref(),
+                    SESSION
+                        .player_id(options.common.headless)
+                        .map_err(GameError::Lan)?,
                 )?;
                 if options.resume {
                     resume(&mut game, vault)?;
                 }
                 return Ok((game, None));
             }
-            LanMode::Join(addr) => LanClient::join(SESSION, addr, tick_hz),
-            LanMode::Browse => LanClient::browse_the_lan(SESSION, tick_hz),
+            LanMode::Join(addr) => SESSION
+                .player_id(options.common.headless)
+                .and_then(|player| LanClient::join(SESSION, player, addr, tick_hz)),
+            LanMode::Browse => SESSION
+                .player_id(options.common.headless)
+                .and_then(|player| LanClient::browse_the_lan(SESSION, player, tick_hz)),
         }
         .map_err(GameError::Lan)?;
         let joining = Joining::new(client, tick_hz, JOIN_TIMEOUT);
@@ -1934,6 +1941,7 @@ mod tests {
         engine.game_mut().lobby = Some(
             crate::lobby::Lobby::new(
                 crate::lan::SESSION,
+                Ok(crate::lan::tests::next_player()),
                 announcer
                     .map(loopback_browser)
                     .ok_or_else(|| "NOT LOOKING".to_string()),
@@ -1981,6 +1989,7 @@ mod tests {
             map,
             crate::lan::tests::on_loopback(),
             None,
+            crate::lan::tests::next_player(),
         )
         .expect("loopback UDP must be available to these tests");
         let port = host.lan_host().expect("a host").game_port();

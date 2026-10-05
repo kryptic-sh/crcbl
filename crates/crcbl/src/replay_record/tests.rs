@@ -66,10 +66,11 @@ impl Session {
     fn new() -> Self {
         let mut host = host();
         let clients = (0..2)
-            .map(|_| {
+            .map(|seed| {
                 let (near, far) = InMemoryTransport::pair();
                 host.add(Box::new(far));
-                Client::new_with_compatibility(World::new(), near, TICK_HZ, COMPATIBILITY)
+                let player = crate::net::PlayerId::from_seed(seed);
+                Client::new_with_compatibility(World::new(), near, TICK_HZ, COMPATIBILITY, player)
             })
             .collect();
         Self {

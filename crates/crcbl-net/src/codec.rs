@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use crate::handshake::{HandshakeResult, Hello, RejectReason};
 use crate::messages::{ClientToServer, ServerToClient, SessionEndReason, SystemSnapshot};
 use crate::types::{ResumeToken, SectorId, SessionId};
-use crcbl_core::TickId;
+use crcbl_core::{PlayerId, TickId};
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
@@ -347,16 +347,18 @@ pub fn decode_server_to_client(payload: &[u8]) -> Result<ServerToClient, DecodeE
 // ── Handshake encode/decode ───────────────────────────────────────────────────
 
 /// Tag 0x20 = Hello { protocol_version: u32 LE, engine_build_id: u64 LE,
-///   schema_hash: u64 LE, generation: u64 LE, has_session: u8,
-///   resume_token: [u8; 32] (if has_session) }
+///   schema_hash: u64 LE, generation: u64 LE, player: [u8; 16],
+///   has_session: u8, resume_token: [u8; 32] (if has_session) }
 pub fn encode_hello(hello: &Hello) -> Vec<u8> {
     let has_session = hello.session_token.is_some();
-    let mut buf = Vec::with_capacity(1 + 4 + 8 + 8 + 8 + 1 + usize::from(has_session) * 32);
+    let mut buf =
+        Vec::with_capacity(1 + 4 + 8 + 8 + 8 + PlayerId::BYTES + 1 + usize::from(has_session) * 32);
     buf.push(HELLO_TAG);
     buf.extend_from_slice(&hello.protocol_version.to_le_bytes());
     buf.extend_from_slice(&hello.engine_build_id.to_le_bytes());
     buf.extend_from_slice(&hello.schema_hash.to_le_bytes());
     buf.extend_from_slice(&hello.generation.to_le_bytes());
+    buf.extend_from_slice(&hello.player.to_bytes());
     buf.push(if has_session { 1u8 } else { 0u8 });
     if let Some(token) = &hello.session_token {
         buf.extend_from_slice(token.as_bytes());
@@ -375,6 +377,11 @@ pub fn decode_hello(payload: &[u8]) -> Result<Hello, DecodeError> {
     let engine_build_id = r.read_u64()?;
     let schema_hash = r.read_u64()?;
     let generation = r.read_u64()?;
+    let player = PlayerId::from_bytes(
+        r.read_bytes(PlayerId::BYTES)?
+            .try_into()
+            .expect("read_bytes returns exactly the length asked for"),
+    );
     let has_session = r.read_u8()?;
     let session_token = match has_session {
         0 => None,
@@ -389,6 +396,7 @@ pub fn decode_hello(payload: &[u8]) -> Result<Hello, DecodeError> {
         engine_build_id,
         schema_hash,
         generation,
+        player,
         session_token,
     })
 }
@@ -658,6 +666,7 @@ mod tests {
             engine_build_id: 0xCAFE_BABE,
             schema_hash: 0xDEAD_BEEF,
             generation: 1,
+            player: PlayerId::from_bytes([0x11; 16]),
             session_token: Some(ResumeToken::from_bytes([0xA5; 32])),
         };
         let encoded = encode_hello(&hello);
@@ -666,6 +675,7 @@ mod tests {
         assert_eq!(decoded.engine_build_id, 0xCAFE_BABE);
         assert_eq!(decoded.schema_hash, 0xDEAD_BEEF);
         assert_eq!(decoded.generation, 1);
+        assert_eq!(decoded.player, PlayerId::from_bytes([0x11; 16]));
         assert_eq!(
             decoded.session_token,
             Some(ResumeToken::from_bytes([0xA5; 32]))
@@ -677,6 +687,7 @@ mod tests {
             engine_build_id: 0,
             schema_hash: 0,
             generation: 1,
+            player: PlayerId::from_bytes([0x11; 16]),
             session_token: None,
         };
         let encoded = encode_hello(&hello_fresh);
@@ -862,6 +873,7 @@ mod tests {
             engine_build_id: 2,
             schema_hash: 3,
             generation: 1,
+            player: PlayerId::from_bytes([0x11; 16]),
             session_token: Some(ResumeToken::from_bytes([4; 32])),
         });
         assert!(matches!(
@@ -921,6 +933,7 @@ mod tests {
             engine_build_id: 0,
             schema_hash: 0,
             generation: 1,
+            player: PlayerId::from_bytes([0x11; 16]),
             session_token: None,
         });
         enc.push(0xAA);
@@ -975,9 +988,11 @@ mod tests {
             engine_build_id: 2,
             schema_hash: 3,
             generation: 1,
+            player: PlayerId::from_bytes([0x11; 16]),
             session_token: None,
         });
-        payload[29] = 2;
+        // The session flag, after the tag, the four fixed fields and the id.
+        payload[1 + 4 + 8 + 8 + 8 + PlayerId::BYTES] = 2;
         assert!(matches!(
             decode_hello(&payload),
             Err(DecodeError::InvalidLength(2))
@@ -1124,6 +1139,7 @@ mod tests {
             engine_build_id: 2,
             schema_hash: 3,
             generation: 1,
+            player: PlayerId::from_bytes([0x11; 16]),
             session_token: Some(ResumeToken::from_bytes([0xA5; 32])),
         };
 

@@ -138,13 +138,13 @@ struct Followed {
 }
 
 impl Joined {
-    /// Starts a connect to the edit server at `addr`.
+    /// Starts a connect to the edit server at `addr`, as `player`.
     ///
     /// # Errors
     ///
     /// Why no connect could start: no socket, or — in a browser build —
     /// no UDP at all.
-    fn connect(addr: SocketAddr) -> Result<Self, String> {
+    fn connect(addr: SocketAddr, player: crcbl::net::PlayerId) -> Result<Self, String> {
         let vocabulary = crate::scene::vocabulary();
         let compatibility = edit_compatibility(&vocabulary);
         Ok(Self {
@@ -154,6 +154,7 @@ impl Joined {
                 transport_to(addr)?,
                 EDIT_TICK_HZ,
                 compatibility,
+                player,
             ),
             follower: SceneFollower::new(vocabulary),
             open: None,
@@ -371,7 +372,12 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
         self.leave_join();
         self.new_scene()?;
-        match Joined::connect(addr) {
+        // The id this machine keeps for the editor, or a headless run's: who
+        // the server's denylist and its one-session-a-player rule know.
+        let joined = crcbl::store::identity::for_app(crate::layout::APP_NAME, !self.windowed)
+            .map_err(|error| format!("cannot join {addr}: no player id: {error}"))
+            .and_then(|player| Joined::connect(addr, player));
+        match joined {
             Ok(joined) => {
                 self.document.route_edits();
                 self.joined = Some(Box::new(joined));

@@ -95,3 +95,6 @@ pub use transport::{
     MessageKind, Transport, TransportError,
 };
 pub use types::{EntityBits, EntityData, ProtocolCompatibility, ResumeToken, SectorId, SessionId};
+// The identity a hello carries lives in `crcbl-core`, where the stores and
+// the ECS can name it without the network; re-exported beside the hello.
+pub use crcbl_core::PlayerId;

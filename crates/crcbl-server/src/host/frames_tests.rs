@@ -190,6 +190,7 @@ impl Live {
             near,
             TICK_HZ,
             COMPATIBILITY,
+            super::tests::next_player(),
         ));
         match self.until(|event| matches!(event, PeerEvent::Joined(_))) {
             PeerEvent::Joined(id) => self.ids.push(id),

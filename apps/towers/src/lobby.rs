@@ -81,6 +81,7 @@ use std::time::Duration;
 use crcbl::core::input::KeyCode;
 use crcbl::lan::lobby::{self, LobbyChoice, LobbyNotice, LobbyPick, PickRefused};
 use crcbl::lan::{LanBind, LanClient, LanGame};
+use crcbl::net::PlayerId;
 use crcbl::net::udp::discovery::Browser;
 use crcbl::ui::menu::{Caption, Menu, MenuItem};
 
@@ -139,6 +140,9 @@ pub struct Lobby {
     /// Where [`Pick::Host`] binds: every interface, as `--host` does, outside
     /// the tests.
     host_bind: LanBind,
+    /// Who this player hosts and joins as, or why there is no telling — which
+    /// a host or join pick shows, leaving solo and continue to play.
+    player: Result<PlayerId, String>,
     tick_hz: u32,
     /// How long a chosen host has to send its map: [`JOIN_TIMEOUT`], unless a
     /// test asked for less.
@@ -152,19 +156,27 @@ pub struct Lobby {
 impl Lobby {
     /// A lobby looking for hosts of `session` on the LAN — a [`Browser`]
     /// querying the broadcast address — hosting where `--host` does, at
-    /// `tick_hz`. A browser that cannot bind is shown as a warning rather
-    /// than refused: solo, host and connect need none.
+    /// `tick_hz`, as the player id this machine keeps for towers. A browser
+    /// that cannot bind is shown as a warning rather than refused: solo, host
+    /// and connect need none. Nor is an id that cannot be had: a host or a
+    /// join picked says why, and solo plays on.
     #[must_use]
     pub fn on_the_lan(session: LanGame, tick_hz: u32) -> Self {
         let browser = Browser::open(session.protocol_id)
             .map_err(|error| format!("NOT LOOKING FOR HOSTS: {error}"));
-        Self::new(session, browser, LanBind::on_the_lan(0), tick_hz)
+        let player = session.player_id(false).map_err(|error| {
+            crcbl::log::warn!("lobby: {error}");
+            format!("CANNOT PLAY ON THE LAN: {error}")
+        });
+        Self::new(session, player, browser, LanBind::on_the_lan(0), tick_hz)
     }
 
-    /// A lobby listening with `browser` and hosting on `host_bind`.
+    /// A lobby listening with `browser` and hosting on `host_bind`, hosting
+    /// and joining as `player`.
     #[must_use]
     pub fn new(
         session: LanGame,
+        player: Result<PlayerId, String>,
         browser: Result<Browser, String>,
         host_bind: LanBind,
         tick_hz: u32,
@@ -172,6 +184,7 @@ impl Lobby {
         Self {
             model: lobby::Lobby::new(session, browser),
             host_bind,
+            player,
             tick_hz,
             join_timeout: JOIN_TIMEOUT,
             saved: None,
@@ -345,12 +358,13 @@ impl Lobby {
         };
         // Whatever this pick starts — or fails to — replaces the join that
         // was under way, which the caller drops; a refusal is the notice.
-        let started = match self.model.pick(pick).ok()? {
-            LobbyChoice::Host => Game::host(self.tick_hz, map, self.host_bind, None)
+        let choice = self.model.pick(pick).ok()?;
+        let started = self.player.clone().and_then(|player| match choice {
+            LobbyChoice::Host => Game::host(self.tick_hz, map, self.host_bind, None, player)
                 .map(Picked::Session)
                 .map_err(|error| format!("CANNOT HOST: {error}")),
-            LobbyChoice::Join(addr) => self.join(addr),
-        };
+            LobbyChoice::Join(addr) => self.join(player, addr),
+        });
         match started {
             Ok(picked) => {
                 if let Picked::Joining(joining) = &picked
@@ -367,9 +381,10 @@ impl Lobby {
         }
     }
 
-    /// A join to the host at `addr`, which waits for the host's map.
-    fn join(&self, addr: SocketAddr) -> Result<Picked, String> {
-        LanClient::join(self.model.session(), addr, self.tick_hz)
+    /// A join to the host at `addr` as `player`, which waits for the host's
+    /// map.
+    fn join(&self, player: PlayerId, addr: SocketAddr) -> Result<Picked, String> {
+        LanClient::join(self.model.session(), player, addr, self.tick_hz)
             .map(|client| Picked::Joining(Joining::new(client, self.tick_hz, self.join_timeout)))
             .map_err(|error| format!("CANNOT JOIN {addr}: {error}"))
     }

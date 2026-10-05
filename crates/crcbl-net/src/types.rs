@@ -63,7 +63,8 @@ pub struct ProtocolCompatibility {
     /// Protocol version, incremented for breaking wire changes — including the
     /// engine's own replicated components, such as 6's quantized physics
     /// transforms, which a build from before could not read and would simply
-    /// not show, and 7's input timing in every snapshot's header.
+    /// not show, 7's input timing in every snapshot's header, and 8's
+    /// [`PlayerId`](crcbl_core::PlayerId) in every hello.
     pub protocol_version: u32,
     /// Engine and game build identifier supplied by the embedding application.
     pub engine_build_id: u64,
@@ -78,7 +79,7 @@ impl ProtocolCompatibility {
     /// embeddings must pass explicit, non-zero engine and schema identifiers to
     /// client and server constructors.
     pub const DEFAULT: Self = Self {
-        protocol_version: 7,
+        protocol_version: 8,
         engine_build_id: 0,
         schema_hash: 0,
     };
@@ -174,7 +175,7 @@ mod tests {
 
     #[test]
     fn protocol_compatibility_default_is_explicit() {
-        assert_eq!(ProtocolCompatibility::DEFAULT.protocol_version, 7);
+        assert_eq!(ProtocolCompatibility::DEFAULT.protocol_version, 8);
     }
 
     #[test]

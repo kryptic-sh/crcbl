@@ -567,6 +567,7 @@ mod tests {
             to_client,
             tick_hz,
             compatibility,
+            crate::net::PlayerId::from_seed(130),
         );
         assert_eq!(
             server.tick_id().get(),

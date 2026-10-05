@@ -75,6 +75,7 @@ pub(crate) fn browsing(host: &LanHost) -> Lobby {
     .expect("loopback UDP must be available to these tests");
     Lobby::new(
         lobby::Lobby::new(SANDBOX, Ok(browser)),
+        Ok(crcbl::net::PlayerId::from_seed(1)),
         on_loopback(),
         TICK_HZ,
     )
@@ -201,6 +202,7 @@ fn an_incompatible_host_is_listed_dimmed_and_not_joinable() {
 fn a_bad_address_is_refused_by_name() {
     let mut lobby = Lobby::new(
         lobby::Lobby::new(SANDBOX, Err("not looking".to_string())),
+        Ok(crcbl::net::PlayerId::from_seed(1)),
         on_loopback(),
         TICK_HZ,
     );

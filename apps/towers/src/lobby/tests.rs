@@ -15,13 +15,13 @@ use crcbl::ui::menu::CaptionTone;
 
 use super::*;
 use crate::lan::tests::{
-    FRAME, MAX_FRAMES, PAUSE, TICK_HZ, another_map, loopback_browser, on_loopback,
+    FRAME, MAX_FRAMES, PAUSE, TICK_HZ, another_map, loopback_browser, next_player, on_loopback,
 };
 use crate::lan::{Progress, SESSION};
 
 /// A host on loopback playing `map`, with a player of its own.
 fn host_on(map: &Map) -> Game {
-    Game::host(TICK_HZ, map, on_loopback(), None)
+    Game::host(TICK_HZ, map, on_loopback(), None, next_player())
         .expect("loopback UDP must be available to these tests")
 }
 
@@ -42,6 +42,7 @@ fn address(host: &Game) -> SocketAddr {
 fn lobby_browsing(host: &Game) -> Lobby {
     Lobby::new(
         SESSION,
+        Ok(next_player()),
         Ok(loopback_browser(announcer(host))),
         on_loopback(),
         TICK_HZ,
@@ -52,6 +53,7 @@ fn lobby_browsing(host: &Game) -> Lobby {
 fn lobby_alone() -> Lobby {
     Lobby::new(
         SESSION,
+        Ok(next_player()),
         Err("NOT LOOKING".to_string()),
         on_loopback(),
         TICK_HZ,
@@ -200,6 +202,7 @@ fn an_incompatible_host_is_listed_dimmed_and_not_joinable() {
     let port = old.game_port();
     let mut lobby = Lobby::new(
         SESSION,
+        Ok(next_player()),
         Ok(loopback_browser(announcer)),
         on_loopback(),
         TICK_HZ,

@@ -5,7 +5,7 @@
 //! will later use/re-export them for serialisation.
 
 use crate::types::{ProtocolCompatibility, ResumeToken, SessionId};
-use crcbl_core::TickId;
+use crcbl_core::{PlayerId, TickId};
 
 // ── Hello ─────────────────────────────────────────────────────────────────────
 
@@ -22,6 +22,10 @@ pub struct Hello {
     pub schema_hash: u64,
     /// Monotonically increasing identifier binding a response to this hello.
     pub generation: u64,
+    /// Who the client says it is, the same on every connect from the same
+    /// player. Self-asserted: [`PlayerId`]'s docs say how little a server
+    /// without an authenticated tier can trust it.
+    pub player: PlayerId,
     /// `None` for a fresh join; `Some` when attempting to resume a previous
     /// session (the server still decides whether the token is valid).
     pub session_token: Option<ResumeToken>,
@@ -51,13 +55,23 @@ impl RejectReason {
     pub const ENGINE_BUILD_ID_MISMATCH: u8 = 0x05;
     /// The server could not draw a resume credential from the OS CSPRNG.
     pub const ENTROPY_FAILURE: u8 = 0x06;
+    /// The server's denylist holds the client's [`PlayerId`]; the message
+    /// says why, in the operator's words.
+    pub const BANNED: u8 = 0x07;
+    /// Another session of the server holds the client's [`PlayerId`] and is
+    /// connected. Transient: once that session's link drops, the id is free
+    /// again.
+    pub const DUPLICATE_PLAYER: u8 = 0x08;
 
-    /// Whether this code means "do not bother trying again with this build".
+    /// Whether this code means "do not bother trying again with this build,
+    /// as this player".
     ///
     /// A version, schema or build mismatch is a property of the two binaries
-    /// and will not change while they are running. Everything else — a full
-    /// server, an expired token, an entropy failure, or a code this build does
-    /// not recognise — is transient, and a client that latched on it would
+    /// and will not change while they are running, and a ban is the
+    /// operator's decision about this player, which no retry changes — a
+    /// player unbanned joins again. Everything else — a full server, an
+    /// expired token, a duplicate player, an entropy failure, or a code this
+    /// build does not recognise — is transient, and a client that latched on it would
     /// wedge itself for a condition that resolves on its own. A forged reject
     /// is exactly the shape of a transient failure, which is the other reason
     /// the distinction matters: the handshake carries no MAC, so an attacker
@@ -69,6 +83,7 @@ impl RejectReason {
             Self::PROTOCOL_VERSION_MISMATCH
                 | Self::SCHEMA_MISMATCH
                 | Self::ENGINE_BUILD_ID_MISMATCH
+                | Self::BANNED
         )
     }
 }
@@ -195,6 +210,7 @@ mod tests {
             engine_build_id: 0xABCD,
             schema_hash: 0xDEAD_BEEF_CAFE,
             generation: 1,
+            player: PlayerId::from_seed(1),
             session_token: None,
         }
     }
@@ -327,7 +343,7 @@ mod tests {
     // ── Permanence classification ─────────────────────────────────────────
 
     #[test]
-    fn only_build_mismatches_are_permanent() {
+    fn only_build_mismatches_and_bans_are_permanent() {
         let reason = |code| RejectReason {
             code,
             msg: String::new(),
@@ -336,6 +352,7 @@ mod tests {
             RejectReason::PROTOCOL_VERSION_MISMATCH,
             RejectReason::SCHEMA_MISMATCH,
             RejectReason::ENGINE_BUILD_ID_MISMATCH,
+            RejectReason::BANNED,
         ] {
             assert!(reason(code).is_permanent(), "code {code:#04x}");
         }
@@ -343,6 +360,7 @@ mod tests {
             RejectReason::SERVER_FULL,
             RejectReason::INVALID_SESSION_TOKEN,
             RejectReason::ENTROPY_FAILURE,
+            RejectReason::DUPLICATE_PLAYER,
             // An unrecognised code is transient by default: a build that does
             // not know what it means must not give up over it.
             0xFE,
@@ -427,6 +445,7 @@ mod tests {
                 engine_build_id: 0xF00,
                 schema_hash: 0xBA2,
                 generation: 1,
+                player: PlayerId::from_seed(1),
                 session_token: None,
             },
             SessionId(1),
@@ -441,6 +460,7 @@ mod tests {
                 engine_build_id: 0xF00,
                 schema_hash: 0xBA2,
                 generation: 1,
+                player: PlayerId::from_seed(1),
                 session_token: None,
             },
             SessionId(1),

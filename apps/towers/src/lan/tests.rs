@@ -26,7 +26,7 @@ use crcbl::net::{
 use crcbl::server::{Host, HostConfig, PeerEvent};
 
 use super::event::{self, Event};
-use super::serve::{Console, Next, STATUS_INTERVAL, Server, serve_until_quit};
+use super::serve::{BANS_FILE, Console, Next, STATUS_INTERVAL, Server, serve_until_quit};
 use super::{JOIN_TIMEOUT, JoinFailure, Joining, MAX_PLAYERS, PROTOCOL_ID, Progress, SESSION};
 use crate::game::{Controls, Game, Refusal, Stats};
 use crate::map::{Map, MapError, MapWireError};
@@ -73,8 +73,16 @@ fn host() -> Game {
 
 /// …playing `map`.
 fn host_on(map: &Map) -> Game {
-    Game::host(TICK_HZ, map, on_loopback(), None)
+    Game::host(TICK_HZ, map, on_loopback(), None, next_player())
         .expect("loopback UDP must be available to these tests")
+}
+
+/// A player id no other call in this test binary has drawn: every player
+/// in one session must be their own, or the host refuses the second as a
+/// duplicate.
+pub(crate) fn next_player() -> crcbl::net::PlayerId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    crcbl::net::PlayerId::from_seed(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 /// A joiner: waiting for the host's map, then playing on it — or not, and
@@ -267,7 +275,8 @@ impl<A: Authority> Rig<A> {
     }
 
     fn join(&mut self) {
-        let client = LanClient::join(SESSION, self.address(), TICK_HZ).expect("connect");
+        let client =
+            LanClient::join(SESSION, next_player(), self.address(), TICK_HZ).expect("connect");
         self.joiners.push(Joiner::through(client));
     }
 
@@ -453,6 +462,7 @@ pub(crate) fn loopback_browser(announcer: SocketAddr) -> Browser {
 fn browsing(announcer: SocketAddr) -> Joiner {
     Joiner::through(LanClient::browse(
         SESSION,
+        next_player(),
         loopback_browser(announcer),
         TICK_HZ,
     ))
@@ -657,7 +667,7 @@ fn a_build_from_before_the_map_was_sent_is_refused_both_ways() {
         BEFORE_THE_MAP_WAS_SENT.protocol_version, SESSION.compatibility.protocol_version
     );
     let mut rig = Rig::new();
-    let client = LanClient::join(old, rig.address(), TICK_HZ).expect("connect");
+    let client = LanClient::join(old, next_player(), rig.address(), TICK_HZ).expect("connect");
     rig.joiners.push(Joiner::through(client));
     rig.until("the new host refusing the old joiner", |rig| {
         rig.joiners[0].failure().is_some()
@@ -669,7 +679,7 @@ fn a_build_from_before_the_map_was_sent_is_refused_both_ways() {
     assert_eq!(rig.connected(), 1, "only the host's own player is in");
 
     let mut bare = Bare::open(old);
-    let client = LanClient::join(SESSION, bare.address(), TICK_HZ).expect("connect");
+    let client = LanClient::join(SESSION, next_player(), bare.address(), TICK_HZ).expect("connect");
     let joiner = step_bare(
         &mut bare,
         Joiner::through(client),
@@ -709,7 +719,8 @@ fn a_malformed_map_ends_the_join_by_name() {
         ),
     ] {
         let mut bare = Bare::open(SESSION);
-        let client = LanClient::join(SESSION, bare.address(), TICK_HZ).expect("connect");
+        let client =
+            LanClient::join(SESSION, next_player(), bare.address(), TICK_HZ).expect("connect");
         let joiner = step_bare(
             &mut bare,
             Joiner::through(client),
@@ -740,7 +751,7 @@ fn a_malformed_map_ends_the_join_by_name() {
 fn a_joiner_builds_nothing_until_the_map_comes() {
     let map = another_map();
     let mut bare = Bare::open(SESSION);
-    let client = LanClient::join(SESSION, bare.address(), TICK_HZ).expect("connect");
+    let client = LanClient::join(SESSION, next_player(), bare.address(), TICK_HZ).expect("connect");
     let mut admitted = None;
     let in_session = |joiner: &Joiner| {
         joiner
@@ -777,7 +788,7 @@ fn a_joiner_builds_nothing_until_the_map_comes() {
     );
     assert_eq!(joiner.game().map(), &map);
 
-    let client = LanClient::join(SESSION, bare.address(), TICK_HZ).expect("connect");
+    let client = LanClient::join(SESSION, next_player(), bare.address(), TICK_HZ).expect("connect");
     let joiner = step_bare(
         &mut bare,
         Joiner::through(client),
@@ -849,8 +860,13 @@ fn a_joiner_accepted_again_is_sent_the_map_again() {
     let (near, client_side) = InMemoryTransport::pair();
     let (host_side, far) = InMemoryTransport::pair();
     host.add(Box::new(far));
-    let mut client =
-        Client::new_with_compatibility(World::new(), near, TICK_HZ, SESSION.compatibility);
+    let mut client = Client::new_with_compatibility(
+        World::new(),
+        near,
+        TICK_HZ,
+        SESSION.compatibility,
+        crcbl::net::PlayerId::from_seed(109),
+    );
     let mut relay = Relay {
         client_side,
         host_side,
@@ -895,7 +911,7 @@ fn a_joiner_accepted_again_is_sent_the_map_again() {
 fn an_event_this_build_cannot_read_is_counted_and_passed_over() {
     let map = another_map();
     let mut bare = Bare::open(SESSION);
-    let client = LanClient::join(SESSION, bare.address(), TICK_HZ).expect("connect");
+    let client = LanClient::join(SESSION, next_player(), bare.address(), TICK_HZ).expect("connect");
     let mut admitted = None;
     let mut joiner = step_bare(
         &mut bare,
@@ -1022,7 +1038,7 @@ fn a_dedicated_server_tells_a_player_what_it_refused() {
 fn a_host_nobody_answers_ends_the_join_as_no_answer() {
     let silent = std::net::UdpSocket::bind(loopback()).expect("loopback UDP");
     let address = silent.local_addr().expect("bound");
-    let client = LanClient::join(SESSION, address, TICK_HZ).expect("connect");
+    let client = LanClient::join(SESSION, next_player(), address, TICK_HZ).expect("connect");
     let joiner = Joiner::through(client).frame(FRAME);
     assert!(matches!(joiner, Joiner::Joining(_)), "{joiner:?}");
     let Joiner::Failed(failure) = joiner.frame(JOIN_TIMEOUT) else {
@@ -1307,7 +1323,8 @@ fn quit_at_the_console_tells_every_player_the_server_shut_down() {
     assert!(status.starts_with("towers: 2/4 players"), "{status}");
     assert_eq!(
         unknown,
-        "towers: no command \"frobnicate\"; the commands are status, save [SLOT], load, quit"
+        "towers: no command \"frobnicate\"; the commands are status, save [SLOT], load, \
+         ban PLAYER [REASON], unban PLAYER, bans, quit"
     );
     assert!(last.starts_with("towers: 0/4 players"), "{last}");
     assert_eq!(last.lines().count(), 1, "a link listed with nobody in");
@@ -1430,8 +1447,14 @@ fn a_hosts_recording_is_finished_when_its_game_is_dropped() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("hosted.crpl");
     let mut rig = Rig {
-        host: Game::host(TICK_HZ, &Map::built_in(), on_loopback(), Some(&path))
-            .expect("loopback UDP must be available to these tests"),
+        host: Game::host(
+            TICK_HZ,
+            &Map::built_in(),
+            on_loopback(),
+            Some(&path),
+            next_player(),
+        )
+        .expect("loopback UDP must be available to these tests"),
         joiners: Vec::new(),
     }
     .with_playing(1);
@@ -1487,7 +1510,8 @@ fn a_console_whose_input_ended_is_not_a_quit() {
 }
 
 /// **A dedicated server's status line lists each player's link under it**:
-/// `  peer N: rtt R ms, loss L%, in I B/s, out O B/s`, a line per player in
+/// `  peer N (PLAYER): rtt R ms, loss L%, in I B/s, out O B/s`, a line per
+/// player in
 /// the host's order, each with the figures the host's netgraph recorded for
 /// that peer — and the line printed when the second player came in already
 /// carries both.
@@ -1514,13 +1538,17 @@ fn a_dedicated_servers_status_line_lists_each_players_link() {
     assert_eq!(lines.len(), 1 + peers.len(), "{status}");
     for ((line, link), peer) in lines[1..].iter().zip(host.netgraph().links()).zip(peers) {
         assert_eq!(link.id, peer, "in the host's order");
+        let player = host
+            .host()
+            .player(crcbl::server::PeerId::from_raw(peer))
+            .expect("in session");
         let stats = link.reading.stats.expect("measured");
         let rtt = stats.rtt.expect("measured").as_secs_f64() * 1_000.0;
         let loss = stats.recent.loss().expect("judged") * 100.0;
         assert_eq!(
             *line,
             format!(
-                "  peer {peer}: rtt {rtt:.1} ms, loss {loss:.1}%, in {} B/s, out {} B/s",
+                "  peer {peer} ({player}): rtt {rtt:.1} ms, loss {loss:.1}%, in {} B/s, out {} B/s",
                 stats.recent.received_per_second(),
                 stats.recent.sent_per_second(),
             )
@@ -1585,6 +1613,73 @@ fn typed_at(server: &mut Server, lines: &[&str]) -> Vec<String> {
         Next::Serve
     );
     printed
+}
+
+/// **`ban` at a dedicated server's console removes a player and refuses them
+/// with the reason, `bans` lists it, the list outlives the server, and
+/// `unban` lets the player back.** The player is named by the id the status
+/// line prints, and comes back as the same id — a restarted client.
+#[test]
+fn a_dedicated_server_bans_and_unbans_a_player_at_its_console() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let bans = dir.path().join(BANS_FILE);
+    let mut rig = Rig::serving();
+    assert_eq!(rig.host.server.keep_bans(&bans).expect("no file yet"), 0);
+    let mut rig = rig.with_playing(1);
+    let player = rig.joiners[0]
+        .lan()
+        .and_then(LanClient::client)
+        .map(Client::player)
+        .expect("the joiner has a client");
+    assert!(
+        rig.host.server.status().contains(&player.to_string()),
+        "the status line names the player"
+    );
+
+    let printed = typed_at(&mut rig.host.server, &[&format!("ban {player} griefing")]);
+    assert!(
+        printed[0].starts_with(&format!("towers: banned {player}, and kicked peer ")),
+        "{printed:?}"
+    );
+    rig.until("the banned player out", |rig| rig.connected() == 0);
+
+    let address = rig.address();
+    let refused = |rig: &mut Rig<Dedicated>| {
+        let client = LanClient::join(SESSION, player, address, TICK_HZ).expect("connect");
+        rig.joiners = vec![Joiner::through(client)];
+        rig.until("the join refused", |rig| rig.joiners[0].failure().is_some());
+        rig.joiners[0].failure().map(ToString::to_string)
+    };
+    let failure = refused(&mut rig).expect("refused");
+    assert!(
+        failure.ends_with("refused the join: banned from this server: griefing"),
+        "{failure}"
+    );
+
+    let listed = typed_at(&mut rig.host.server, &["bans"]);
+    assert_eq!(listed, [format!("towers: 1 banned\n  {player} griefing")]);
+    let mut restarted = saving_server(dir.path(), None);
+    assert_eq!(restarted.keep_bans(&bans).expect("the file reads"), 1);
+    assert_eq!(
+        typed_at(&mut restarted, &["bans"]),
+        listed,
+        "the list outlived its server"
+    );
+
+    let printed = typed_at(&mut rig.host.server, &[&format!("unban {player}")]);
+    assert_eq!(printed, [format!("towers: unbanned {player}")]);
+    let client = LanClient::join(SESSION, player, address, TICK_HZ).expect("connect");
+    rig.joiners = vec![Joiner::through(client)];
+    rig.until("the unbanned player back", |rig| {
+        rig.joiners.iter().all(playing)
+    });
+    assert_eq!(
+        crcbl::server::Denylist::parse(&std::fs::read_to_string(&bans).expect("kept"))
+            .expect("reads")
+            .len(),
+        0,
+        "the unban was written"
+    );
 }
 
 /// **`save` and `load` at a dedicated server's console keep the run and put

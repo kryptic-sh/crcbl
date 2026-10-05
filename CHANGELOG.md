@@ -16,6 +16,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **Every hello carries the client's `PlayerId`, and the protocol version is 8**
+  (`ProtocolCompatibility::DEFAULT`). `crcbl_net::Hello` has a new `player`
+  field, 16 bytes on the wire after `generation`, so a build from before cannot
+  read a hello and is refused by version.
+  `crcbl_client::Client::new_with_compatibility` takes the `PlayerId` to present
+  as a fifth argument, with no default — a shared default would be one player to
+  every server — and `crcbl::lan::LanClient::join`, `browse` and
+  `browse_the_lan` take one after the game. A test passes `PlayerId::from_seed`;
+  a game passes the id it keeps (`crcbl::lan::LanGame::player_id`).
+
+- **A host holds one session a player, and a session answers only its own
+  player.** `crcbl_server::Host` refuses a fresh hello naming a player whose
+  session is connected (`RejectReason::DUPLICATE_PLAYER`, retried by the
+  client), ends a lost session when its player says hello afresh
+  (`PeerEvent::Left`, then `Joined`), and refuses a resume or a re-hello naming
+  another player than its session's as `INVALID_SESSION_TOKEN`. Tests that admit
+  several clients must give each its own id.
+
+- **`RejectReason::BANNED` is permanent** (`RejectReason::is_permanent`): a
+  client refused by a ban stops retrying and reports it through
+  `Client::handshake_refusal`.
+
+- **`crcbl::lan::LanError` gained `Identity` and `Bans`** (see Added), so an
+  exhaustive match must handle them.
+
 - **Snapshots carry the server's input timing, and the protocol version is 7**
   (`ProtocolCompatibility::DEFAULT`). Every delta's header grew by a fixed 13
   bytes — a flag, the tick of the input that reached the server least early
@@ -754,6 +779,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **A stable player identity: `crcbl_core::PlayerId`** (re-exported as
+  `crcbl_net::PlayerId`), 128 random bits a client draws once, keeps and
+  presents in every hello, kept apart from the per-session `SessionId` and
+  `PeerId`. **It is self-asserted**: on an open (LAN) server anyone who learns
+  an id can present it, so what keys on it holds back honest clients only — the
+  type's docs say so, and an authenticated tier is not built. It prints and
+  parses as 32 hex digits; `PlayerId::from_seed` gives tests and headless runs a
+  deterministic one. `crcbl_store::identity` keeps a client's id — `player.id`
+  in the config directory, the OPFS store in a browser, a fixed id for a
+  headless run (`for_app`) — and never writes over one it could not read.
+  `crcbl::lan::LanGame::player_id` is the call a sample makes.
+  `Host::player(peer)` and `Host::peer_of(player)` map between a session and its
+  player, `Server::player()` names the single server's, `Client::player()` the
+  client's own, and `crcbl::lan::LanHost` logs the player of each peer it
+  admits.
+
+- **A server-local denylist.** `crcbl_server::Denylist` — players and the reason
+  each is banned, in a hand-editable text form (`to_text` / `parse`) — on
+  `Host`: `ban` (which kicks the session the player holds), `unban`, `denylist`
+  and `set_denylist`. A banned player's hello is refused with
+  `RejectReason::BANNED` and the reason, which the client shows.
+  `crcbl::lan::bans` reads and writes the list's file atomically, and
+  `LanHost::keep_bans`, `ban` and `unban` keep a host's list in it. Towers'
+  dedicated server (`towers --serve`) takes `ban PLAYER [REASON]`,
+  `unban PLAYER` and `bans` at its console, keeps the list in `towers-bans.txt`
+  beside its run, and prints each player's id beside their link on the status
+  line.
 
 - **Client tick alignment: the client's input runs ahead of the server, and the
   server holds it until its tick.** `crcbl_client::input_lead` stamps each input

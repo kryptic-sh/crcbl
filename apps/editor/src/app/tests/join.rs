@@ -119,6 +119,7 @@ impl Watcher {
                 UdpTransport::connect(addr, EDIT_PROTOCOL_ID).expect("a socket"),
                 EDIT_TICK_HZ,
                 edit_compatibility(&vocabulary),
+                next_player(),
             ),
             follower: SceneFollower::new(vocabulary),
         }
@@ -570,3 +571,11 @@ fn an_address_typed_on_the_open_line_joins() {
 }
 
 mod compose;
+
+/// A player id no other call in this test binary has drawn: every player
+/// in one session must be their own, or the host refuses the second as a
+/// duplicate.
+fn next_player() -> crcbl::net::PlayerId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    crcbl::net::PlayerId::from_seed(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}

@@ -669,6 +669,7 @@ fn a_served_scene_is_fetched_from_another_process_and_locked_until_quit() {
         transport,
         EDIT_TICK_HZ,
         edit_compatibility(&vocabulary),
+        crcbl::net::PlayerId::from_seed(111),
     );
     let mut follower = SceneFollower::new(vocabulary);
     let started = Instant::now();

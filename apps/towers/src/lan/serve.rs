@@ -42,14 +42,16 @@
 //! `quit` ends every session with `SessionEndReason::SHUTTING_DOWN`
 //! (`Host::shutdown`), so each player is told before the sockets close, and
 //! [`serve`] answers the last status line; `status` prints the status line
-//! now; `save [SLOT]` and `load` are the run's (below); anything else prints
-//! the commands there are.
+//! now; `save [SLOT]` and `load` are the run's (below); `ban`, `unban` and
+//! `bans` are the denylist's (below); anything else prints the commands there
+//! are.
 //!
 //! # The status line, and each player's link
 //!
 //! The status line leads with the players, the wave, lives, gold, the run
-//! and how it stands, and under it comes a line per player's link — round
-//! trip, loss and bytes a second each way, from the host's netgraph
+//! and how it stands, and under it comes a line per player's link — the
+//! player's id, then round trip, loss and bytes a second each way, from the
+//! host's netgraph
 //! ([`crcbl::lan::netgraph::LinkReading::summary`]) — so the line itself
 //! stays one a reader can scan. Only the headline's news prints it early;
 //! a link's figures moving waits for the interval, or for `status`. The
@@ -72,6 +74,18 @@
 //! it. A recorded session refuses `load` and `--resume`: a recording is
 //! re-simulated from a fresh run, so a run swapped in under it would be one
 //! the recording could not reproduce.
+//!
+//! # Banning: `ban`, `unban` and `bans`
+//!
+//! `ban <PLAYER> [REASON]` refuses a player at the handshake from then on,
+//! with the reason shown to them, and kicks them if they are in;
+//! `unban <PLAYER>` lifts it; `bans` lists every ban. A player is named by
+//! the id the status line prints beside their link. The list is kept in
+//! [`BANS_FILE`] beside the server's run, read when the server starts and
+//! written after every change ([`crcbl::lan::bans`]). **A ban holds back a
+//! player who keeps their id, and nobody else**: the id is self-asserted on a
+//! LAN server, and a player who draws a new one is a stranger to the list —
+//! `crcbl::net::PlayerId`'s docs say why.
 //!
 //! # Recording: `--record <FILE>`
 //!
@@ -98,8 +112,9 @@ use crcbl::core::FrameClock;
 use crcbl::lan::console::{ConsoleLines, stdin_lines, until_next_tick};
 use crcbl::lan::netgraph::Link;
 use crcbl::lan::{LanBind, LanError, LanHost};
-use crcbl::net::SessionEndReason;
+use crcbl::net::{PlayerId, SessionEndReason};
 use crcbl::replay_record::{RecordError, RecordSummary};
+use crcbl::server::PeerId;
 
 use super::{APP, MAX_PLAYERS, SESSION, event, tell, welcome};
 use crate::game::{Autosave, Field, GameError, Stats};
@@ -107,6 +122,10 @@ use crate::map::Map;
 use crate::save::{SaveError, Vault};
 use crate::wave::{Outcome, WAVES};
 use crcbl::save::{SaveDesk, SaveFailure, SaveRequest, SaveTrigger, Saved};
+
+/// The file a dedicated server keeps its denylist in, beside its run in the
+/// data directory.
+pub(crate) const BANS_FILE: &str = "towers-bans.txt";
 
 /// The longest a running server goes without printing its status line. A
 /// change of players, wave or outcome prints one at once.
@@ -208,6 +227,47 @@ impl Server {
         Some(self.status())
     }
 
+    /// Keeps the server's denylist in the file at `path` — see
+    /// [`LanHost::keep_bans`]. Returns how many players it bans.
+    ///
+    /// # Errors
+    ///
+    /// [`GameError::Lan`] when the file is there and will not read whole.
+    pub fn keep_bans(&mut self, path: &Path) -> Result<usize, GameError> {
+        self.lan.keep_bans(path).map_err(GameError::Lan)
+    }
+
+    /// `ban`, as the line the console prints: who was banned and whether
+    /// they were kicked, or why the list was not kept.
+    fn ban_line(&mut self, player: PlayerId, reason: &str) -> String {
+        match self.lan.ban(player, reason) {
+            Ok(Some(peer)) => format!("{APP}: banned {player}, and kicked peer {}", peer.get()),
+            Ok(None) => format!("{APP}: banned {player}"),
+            Err(error) => format!("{APP}: banned {player}, but {error}"),
+        }
+    }
+
+    /// `unban`, as the line the console prints.
+    fn unban_line(&mut self, player: PlayerId) -> String {
+        match self.lan.unban(player) {
+            Ok(true) => format!("{APP}: unbanned {player}"),
+            Ok(false) => format!("{APP}: {player} is not banned"),
+            Err(error) => format!("{APP}: unbanned {player}, but {error}"),
+        }
+    }
+
+    /// `bans`, as the lines the console prints: a line a ban, by id.
+    fn bans_lines(&self) -> String {
+        let list = self.lan.host().denylist();
+        let mut lines = format!("{APP}: {} banned", list.len());
+        for (player, reason) in list.iter() {
+            let line = format!("  {player} {reason}");
+            lines.push('\n');
+            lines.push_str(line.trim_end());
+        }
+        lines
+    }
+
     /// The engine's LAN host, for the tests that join it.
     #[cfg(test)]
     pub const fn lan(&self) -> &LanHost {
@@ -253,10 +313,12 @@ impl Server {
     pub fn status(&self) -> String {
         let mut status = status_line(self.players(), &self.stats());
         let host = self.lan.host();
-        let in_session = |link: &&Link| host.peers().any(|peer| peer.get() == link.id);
-        for link in self.lan.netgraph().links().iter().filter(in_session) {
-            status.push('\n');
-            status.push_str(&link_line(link));
+        for link in self.lan.netgraph().links() {
+            // A player gone since the netgraph's frame has no player id.
+            if let Some(player) = host.player(PeerId::from_raw(link.id)) {
+                status.push('\n');
+                status.push_str(&link_line(link, player));
+            }
         }
         status
     }
@@ -366,13 +428,15 @@ fn status_line(players: usize, stats: &Stats) -> String {
 }
 
 /// One player's link under the status line, indented so the status line
-/// still leads: `  peer 2: rtt 0.4 ms, loss 0.0%, in 1200 B/s, out 3400 B/s`.
-fn link_line(link: &Link) -> String {
-    format!("  peer {}: {}", link.id, link.reading.summary())
+/// still leads, naming the player as `ban` takes them:
+/// `  peer 2 (00112233445566778899aabbccddeeff): rtt 0.4 ms, loss 0.0%, in
+/// 1200 B/s, out 3400 B/s`.
+fn link_line(link: &Link, player: PlayerId) -> String {
+    format!("  peer {} ({player}): {}", link.id, link.reading.summary())
 }
 
 /// What the console's help line names.
-const COMMANDS: &str = "status, save [SLOT], load, quit";
+const COMMANDS: &str = "status, save [SLOT], load, ban PLAYER [REASON], unban PLAYER, bans, quit";
 
 /// A line typed at the console, read.
 #[derive(Debug, PartialEq, Eq)]
@@ -388,6 +452,13 @@ enum Command {
     Refused(String),
     /// Put the saved run back.
     Load,
+    /// Refuse a player at the handshake from now on, for the reason given,
+    /// kicking them if they are in.
+    Ban(PlayerId, String),
+    /// Lift a player's ban.
+    Unban(PlayerId),
+    /// List every ban.
+    Bans,
     /// Nothing but blanks: nothing to answer.
     Blank,
     /// Anything else, trimmed.
@@ -412,6 +483,24 @@ impl Command {
                 Err(why) => Self::Refused(why),
             };
         }
+        let mut words = word.split_whitespace();
+        let first = words.next().unwrap_or_default();
+        if first.eq_ignore_ascii_case("ban") || first.eq_ignore_ascii_case("unban") {
+            let ban = first.eq_ignore_ascii_case("ban");
+            let Some(id) = words.next() else {
+                return Self::Refused(format!("{} needs a player id", first.to_lowercase()));
+            };
+            let player = match id.parse() {
+                Ok(player) => player,
+                Err(error) => return Self::Refused(format!("{id:?}: {error}")),
+            };
+            let rest: Vec<&str> = words.collect();
+            return match (ban, rest.is_empty()) {
+                (true, _) => Self::Ban(player, rest.join(" ")),
+                (false, true) => Self::Unban(player),
+                (false, false) => Self::Refused("unban takes a player id and nothing else".into()),
+            };
+        }
         if word.is_empty() {
             Self::Blank
         } else if word.eq_ignore_ascii_case("quit") {
@@ -420,6 +509,8 @@ impl Command {
             Self::Status
         } else if word.eq_ignore_ascii_case("load") {
             Self::Load
+        } else if word.eq_ignore_ascii_case("bans") {
+            Self::Bans
         } else {
             Self::Unknown(word.to_string())
         }
@@ -466,6 +557,9 @@ impl Console {
                 Command::Save(request) => print(&server.save_line(request)),
                 Command::Refused(why) => print(&format!("{APP}: {why}")),
                 Command::Load => print(&server.load_line()),
+                Command::Ban(player, reason) => print(&server.ban_line(player, &reason)),
+                Command::Unban(player) => print(&server.unban_line(player)),
+                Command::Bans => print(&server.bans_lines()),
                 Command::Blank => {}
                 Command::Unknown(word) => print(&format!(
                     "{APP}: no command {word:?}; the commands are {COMMANDS}"
@@ -501,6 +595,16 @@ pub(crate) fn serve(
         record,
         Vault::server(),
     )?;
+    match crcbl::store::NativeStorage::data_root(APP) {
+        Some(root) => {
+            let path = root.join(BANS_FILE);
+            let banned = server.keep_bans(&path)?;
+            println!("{APP}: {banned} banned, kept in {}", path.display());
+        }
+        None => crcbl::log::warn!(
+            "serve: this platform names no data directory; bans last until the server stops"
+        ),
+    }
     if resume {
         server.load().map_err(GameError::Resume)?;
         println!("{}", server.status());
@@ -581,6 +685,37 @@ mod tests {
             Command::parse("quit now"),
             Command::Unknown("quit now".into())
         );
+    }
+
+    /// **`ban`, `unban` and `bans` read a player id and a reason**, either
+    /// case, the reason being every word after the id; a missing id, one that
+    /// does not read, and an unban with more are refused, naming why.
+    #[test]
+    fn the_console_reads_its_ban_commands() {
+        let player = PlayerId::from_seed(3);
+        assert_eq!(
+            Command::parse(&format!("BAN {player}  griefing the  base ")),
+            Command::Ban(player, "griefing the base".into())
+        );
+        assert_eq!(
+            Command::parse(&format!("ban {player}")),
+            Command::Ban(player, String::new())
+        );
+        assert_eq!(
+            Command::parse(&format!("unban {}", player.to_string().to_uppercase())),
+            Command::Unban(player)
+        );
+        assert_eq!(Command::parse(" Bans "), Command::Bans);
+        assert!(
+            matches!(Command::parse("ban"), Command::Refused(why) if why.contains("player id"))
+        );
+        assert!(
+            matches!(Command::parse("unban xyz"), Command::Refused(why) if why.contains("\"xyz\""))
+        );
+        assert!(matches!(
+            Command::parse(&format!("unban {player} now")),
+            Command::Refused(_)
+        ));
     }
 
     /// **The status line says who is in and how the run stands**, and an

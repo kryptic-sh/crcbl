@@ -141,6 +141,7 @@ impl Rig {
             client_end.clone(),
             TICK_HZ,
             COMPATIBILITY,
+            super::tests::next_player(),
         );
         client.set_input(vec![1]);
         Self {

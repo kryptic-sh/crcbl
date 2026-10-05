@@ -1011,6 +1011,17 @@ multi-sector subscription and entity migration, and the test matrix.
   authenticated root; a token minted by a trusted source (or an
   operator-configured pre-shared key) upgrades it. No ranked or competitive
   integrity claim is made before that root exists (topic 27).
+- **Every client is a player, and says so itself** (2026-10-05). The hello
+  carries a `PlayerId` — 128 random bits the client draws once and keeps in its
+  config directory (`crcbl_store::identity`) — kept apart from the per-session
+  `SessionId` and `PeerId`. On an open server it is **self-asserted**: whoever
+  learns an id can present it, so what keys on it (the server-local denylist
+  today) holds back honest clients and nobody determined. A host holds one
+  session a player: a second hello for a connected player is refused as a
+  duplicate, which the client retries; one for a player whose link dropped
+  replaces the lost session. A ban is refused at the handshake with its reason,
+  permanently for that client. The decisions are recorded in `docs/backlog.md`,
+  _`PlayerId`: built self-asserted, and what it unblocked_.
 - **Sessions are LAN, and web builds have no networking** (2026-08-09).
   WebTransport and WebSocket were removed: a browser cannot listen on a socket,
   cannot discover hosts on a local network, and an HTTPS page cannot open an

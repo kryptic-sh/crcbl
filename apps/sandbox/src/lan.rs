@@ -54,7 +54,7 @@ mod imp {
     pub use crcbl::lan::{LanClient, LanError, LanMode};
     #[cfg(test)]
     use crcbl::net::udp::discovery::Announcement;
-    use crcbl::net::{ConsoleSet, ProtocolCompatibility};
+    use crcbl::net::{ConsoleSet, PlayerId, ProtocolCompatibility};
     use crcbl::server::{HostModule, PeerInputs};
     use crcbl::ui::{DebugModule, DebugPanel, DebugSection};
 
@@ -128,19 +128,25 @@ mod imp {
         /// Starts what `mode` asks for, ticking at `tick_hz` — a host and
         /// its clients must agree on it — a host recording to the new file
         /// `record` names, if it names one. A host prints where it listens,
-        /// since `--join` needs the port.
+        /// since `--join` needs the port. A client joins as the player id
+        /// this machine keeps for the sandbox, or a `headless` run's.
         ///
         /// # Errors
         ///
         /// [`LanError`] when a socket could not be bound, a connect could not
-        /// start or the recording would not.
-        pub fn start(mode: LanMode, tick_hz: u32, record: Option<&Path>) -> Result<Self, LanError> {
+        /// start, the recording would not, or a client has no player id.
+        pub fn start(
+            mode: LanMode,
+            tick_hz: u32,
+            record: Option<&Path>,
+            headless: bool,
+        ) -> Result<Self, LanError> {
             match mode {
                 LanMode::Off => Ok(Self::off()),
                 LanMode::Host { port } => Self::host(LanBind::on_the_lan(port), tick_hz, record),
-                LanMode::Join(addr) => Self::join(addr, tick_hz),
+                LanMode::Join(addr) => Self::join(SANDBOX.player_id(headless)?, addr, tick_hz),
                 LanMode::Browse => Ok(Self::in_role(Role::Client(Box::new(
-                    LanClient::browse_the_lan(SANDBOX, tick_hz)?,
+                    LanClient::browse_the_lan(SANDBOX, SANDBOX.player_id(headless)?, tick_hz)?,
                 )))),
             }
         }
@@ -158,14 +164,15 @@ mod imp {
             )?))))
         }
 
-        /// Joins the sandbox host at `addr`, ticking at `tick_hz`.
+        /// Joins the sandbox host at `addr` as `player`, ticking at
+        /// `tick_hz`.
         ///
         /// # Errors
         ///
         /// [`LanError`] when the connect could not start.
-        pub fn join(addr: SocketAddr, tick_hz: u32) -> Result<Self, LanError> {
+        pub fn join(player: PlayerId, addr: SocketAddr, tick_hz: u32) -> Result<Self, LanError> {
             Ok(Self::in_role(Role::Client(Box::new(LanClient::join(
-                SANDBOX, addr, tick_hz,
+                SANDBOX, player, addr, tick_hz,
             )?))))
         }
 

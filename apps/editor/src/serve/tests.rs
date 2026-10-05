@@ -58,7 +58,13 @@ impl Rig {
         let mut client = || {
             let (near, far) = InMemoryTransport::pair();
             server.host_mut().add(Box::new(far));
-            Client::new_with_compatibility(World::new(), near, TICK_HZ, COMPATIBILITY)
+            Client::new_with_compatibility(
+                World::new(),
+                near,
+                TICK_HZ,
+                COMPATIBILITY,
+                next_player(),
+            )
         };
         let author = client();
         let other = client();
@@ -492,4 +498,12 @@ fn a_client_that_only_listens_stays_in_session() {
     }
     assert_eq!(rig.server.host().peer_count(), 2);
     assert_eq!(rig.other.ended(), None);
+}
+
+/// A player id no other call in this test binary has drawn: every player
+/// in one session must be their own, or the host refuses the second as a
+/// duplicate.
+fn next_player() -> crcbl::net::PlayerId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    crcbl::net::PlayerId::from_seed(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }

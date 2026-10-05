@@ -31,13 +31,23 @@ const COMPATIBILITY: crcbl_net::ProtocolCompatibility = crcbl_net::ProtocolCompa
     schema_hash: 0x0050_3242,
 };
 
+/// Who every hello these tests write says it is.
+const HELLO_PLAYER: crcbl_net::PlayerId =
+    crcbl_net::PlayerId::from_bytes([0x5E; crcbl_net::PlayerId::BYTES]);
+
 fn server(world: World, transport: InMemoryTransport) -> Server<InMemoryTransport> {
     Server::try_new_with_compatibility(world, transport, 60, COMPATIBILITY)
         .expect("OS CSPRNG available")
 }
 
 fn client(world: World, transport: InMemoryTransport) -> Client<InMemoryTransport> {
-    Client::new_with_compatibility(world, transport, 60, COMPATIBILITY)
+    Client::new_with_compatibility(
+        world,
+        transport,
+        60,
+        COMPATIBILITY,
+        crcbl_net::PlayerId::from_seed(127),
+    )
 }
 
 /// Build a world with one `"counter"` system containing `n` entities whose
@@ -67,6 +77,7 @@ fn hello(generation: u64, session_token: Option<crcbl_net::ResumeToken>) -> crcb
         engine_build_id: COMPATIBILITY.engine_build_id,
         schema_hash: COMPATIBILITY.schema_hash,
         generation,
+        player: HELLO_PLAYER,
         session_token,
     }
 }
@@ -433,6 +444,7 @@ fn client_and_server_reject_compatibility_mismatches() {
             client_transport,
             60,
             client_compatibility,
+            crcbl_net::PlayerId::from_seed(128),
         );
         client.update(std::time::Duration::ZERO);
         server.update(std::time::Duration::ZERO);

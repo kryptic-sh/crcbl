@@ -17029,31 +17029,121 @@ session.
 ### No trust tiers exist, and tier 1's row overstates the baseline (2026-08-27)
 
 **Not built.** `crcbl_net::handshake::Hello` carries a protocol version, an
-engine build id and a schema hash. There is no tier field, no `PlayerId`, and no
-notion of "authenticated" above the transport.
+engine build id, a schema hash and, since 2026-10-05, the client's `PlayerId`
+(below). There is no tier field and no notion of "authenticated" above the
+transport: the `PlayerId` is self-asserted, and nothing tells a server whether
+to believe it.
 
-**The row is wrong in the optimistic direction, twice over.** Tier 1 claims
-"encrypted vs passive snooping". Nothing encrypts, and the one thing built — the
-per-session HMAC — is keyed on a token that travels in the clear in `Accept`, so
-a passive observer of the handshake can forge as well as read. The honest row
-today is "no confidentiality, integrity only against an attacker who did not see
-the handshake".
+**The row was wrong in the optimistic direction, and on UDP no longer is.** Tier
+1 claims "encrypted vs passive snooping". When this entry was written nothing
+encrypted, and the per-session HMAC was keyed on a token that travels in the
+clear in `Accept`. Since slice C (2026-09-30) every UDP datagram after the hello
+is AEAD-sealed under X25519-agreed keys, so on UDP the row holds: private
+against a passive observer, MITM-able, identity self-asserted — see _Session
+crypto, as it stands_ under the netcode entries. `InMemoryTransport` has no wire
+and Steam's transport is Valve's encryption.
 
-**What it blocks:** every feature gated on `authenticated + PlayerId`, and the
+**What it blocks:** every feature gated on `authenticated + PlayerId` — a ban
+that holds against a player who changes their id, ranked results — and the
 netcode's "no competitive claims" caveat (its trust rule, in
 `docs/notes/simulation.md`), which this document says resolves here and does
 not.
 
-### The engine has no `PlayerId` (2026-08-27)
+### `PlayerId`: built self-asserted, and what it unblocked (2026-10-05)
 
-**Not built.** No crate under `crates/` defines one. The only `PlayerId` in the
-tree is `apps/bracket`'s `queue::PlayerId`, a `u32` index into its simulated
-population — a sample type, not the engine one.
+**Built.** `crcbl_core::PlayerId` (re-exported as `crcbl_net::PlayerId`), in
+`crcbl-core` so `crcbl-net`, `crcbl-server`, `crcbl-store` and `crcbl-ecs` can
+all name it. The decisions, each recorded so it is not re-argued:
 
-**What it blocks:** bans and moderation (server-local denylist), replay and
-spectator POV attribution, the server-side stash keyed by PlayerId
-(`34-inventory.md`), and per-player voice mute (`32-voip.md`). Four documents
-key on a type that does not exist.
+- **A random 128-bit id the client draws once and keeps**, not a server-assigned
+  per-session index. The plans that key on it — the denylist, the stash, voice
+  mute, replay attribution — all need it to survive a reconnect and a client
+  restart. 128 bits rather than `27-auth.md`'s 64 because nothing coordinates
+  who draws what: the width is what keeps two players from colliding and one
+  player's id from being guessed. A backend-minted id of any narrower width fits
+  inside it if a tier 3 ever exists.
+- **Kept apart from the per-session numbers.** `crcbl_net::SessionId` and
+  `crcbl_server::PeerId` still name one session and are never reused;
+  `Host::player(peer)` and `Host::peer_of(player)` map between them.
+- **Self-asserted, and said so** — in `PlayerId`'s module docs, `crcbl_server`'s
+  `bans` docs, towers' serve docs and `docs/notes/simulation.md`. On an open
+  (LAN) server anyone who learns an id can present it; a ban holds back only a
+  player who keeps their id. The id is no secret from the server (it logs it on
+  each join and the towers status line prints it, so an operator can ban it) and
+  is never sent to other players. Auth was not built; the type does not change
+  when an authenticated tier binds it into the handshake.
+- **Wire:** `Hello` gained `player`, 16 bytes after `generation`, and
+  `ProtocolCompatibility::DEFAULT` is protocol version 8. Fuzz seeds
+  `hello-minimal`, `hello-truncated` and `hello-invalid-session-flag` were
+  regenerated and are pinned in `tests/corpus.rs`'s
+  `named_hello_seeds_reach_their_intended_paths`.
+- **One session a player (decided):** a fresh hello naming a player whose
+  session is _connected_ is refused with `RejectReason::DUPLICATE_PLAYER`, which
+  is transient, so the client retries with its backoff; a fresh hello naming a
+  player whose link _dropped_ ends that lost session (`PeerEvent::Left`) and
+  admits the new one — a restarted client, which lost its resume token. Chosen
+  over kick-the-first because at this tier kick-the-first lets anyone who knows
+  an id boot its player over and over; refuse-the-second protects the incumbent,
+  and the crash case still recovers once the old link times out. A resume or a
+  re-hello naming another player than its session's is refused as
+  `INVALID_SESSION_TOKEN` ("the session belongs to another player"). The
+  single-client `crcbl_server::Server` only records the player
+  (`Server::player`); it checks nothing, having one session.
+- **`RejectReason::BANNED` is permanent** (`is_permanent`): the client stops
+  retrying and shows the reason (`Client::handshake_refusal`), as towers' join
+  failure does. A forged ban can wedge a client until it re-joins, as a forged
+  version mismatch already can; on UDP forging one takes an active man in the
+  middle.
+- **Client persistence:** `crcbl_store::identity` — `load_or_create` over the
+  same `record::Backing` a `Record` uses (`player.id` in the config directory
+  natively, the OPFS store in a browser), `for_app(app, headless)` with a fixed
+  `HEADLESS_PLAYER_SEED` id for headless runs, and a fresh id each run where no
+  store exists. Drawn from `crcbl_rand::entropy`, the workspace's entropy seam
+  (`crcbl-store` gained the `crcbl-rand` edge; no new crate). An id that cannot
+  be read is never written over: a failed read, a browser store still restoring
+  (`IdentityError::NotResident`) and a newer format version each refuse; only a
+  plainly damaged file is replaced. `crcbl::lan::LanGame::player_id` is what
+  towers and the sandbox call; the editor's join uses `for_app` under its own
+  config name. `Client::new_with_compatibility` takes the id, with no default.
+- **First consumer, the server-local denylist:** `crcbl_server::Denylist` on
+  `Host` (`ban` kicks whoever holds the id, `unban`, `set_denylist`), refused at
+  the handshake ahead of resume and admission; `crcbl::lan::bans` keeps it in a
+  text file (a line a ban, hand-editable) through `write_atomic`, and
+  `LanHost::keep_bans` / `ban` / `unban` read and write it. Towers' `--serve`
+  console has `ban PLAYER [REASON]`, `unban PLAYER` and `bans`, the list in
+  `towers-bans.txt` beside its run in the data directory.
+
+**What it unblocked, of the four documents that keyed on it:**
+
+- **Bans and moderation (server-local denylist): built**, above. What is left:
+  `crcbl edit --serve` and the sandbox have no ban console (only towers'
+  dedicated server does, and a listen host's player has no console command for
+  it); `crcbl admin` over the console command path (`27-auth.md`) is not built;
+  a kicked banned player is told `SessionEndReason::KICKED` ("the host removed
+  this player") and reads the ban's reason only on their next join — a `BANNED`
+  end reason would need a new `SessionEndReason` code.
+- **Replay and spectator POV attribution: unblocked, not built.** A recording's
+  roster (`RosterChange::Joined(PeerId)`) carries no `PlayerId`, and neither do
+  `ClientInputs` or `PeerInputs::iter`, deliberately: a module that read the id
+  live would read nothing on a re-simulation until the recording carries it, so
+  it goes into the record and the module's view in the same change, with a
+  recording-format bump. Today game code reaches a peer's player outside the
+  tick, through `Host::player`.
+- **The server-side stash keyed by `PlayerId` (`34-inventory.md`): unblocked,
+  not built.** The key exists; the per-server store and its transactions do not.
+- **Per-player voice mute (`32-voip.md`): unblocked, not built.** No voice
+  exists.
+
+**Behaviour that surprised, not a bug:** two headless clients of one server
+present the same id (`HEADLESS_PLAYER_SEED`) and the second is refused as a
+duplicate; tests that join several pick their own seeds with
+`PlayerId::from_seed`. `apps/bracket`'s `queue::PlayerId` stays a sample type —
+a `u32` index into its simulated population — unrelated to the engine's.
+
+**Not verified:** the browser arm of `crcbl_store::identity` compiles for
+`wasm32` (CI's wasm clippy and rustdoc) but no browser build calls it, since web
+builds have no networking; and, as with every LAN wiring test, the ban flow ran
+over loopback in one process only.
 
 ### The samples this document says prove tiers do not (2026-08-27)
 
@@ -17176,9 +17266,10 @@ rollup through it; mounts and coverage, and gear declared as the grids it
 provides; items as entities with replicated identity; the command protocol
 (`Move`/`Split`/`Merge`/`Equip`/`Drop`/`TakeAll`) with server-side validation of
 reach, line of sight and space; access grants, so contents replicate only while
-a container is open; the server-side PlayerId stash and store-crossing
-transactions; and client optimism with pending/rollback. The no-dupe _property_
-is unwritten because there is no server-side transaction to fuzz.
+a container is open; the server-side stash keyed by `PlayerId` (the key exists
+since 2026-10-05, the store does not) and store-crossing transactions; and
+client optimism with pending/rollback. The no-dupe _property_ is unwritten
+because there is no server-side transaction to fuzz.
 
 **DECIDED 2026-09-06, executed in full 2026-09-07 —** option 1:
 `crcbl-inventory` was built from shard, data-driven — grid dimensions, item

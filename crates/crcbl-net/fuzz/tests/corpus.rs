@@ -1,6 +1,6 @@
 //! Named seeds from the fuzzer's corpus, replayed through the delta decoder,
 //! the replay spool's recovery, the save container's reader, the scene
-//! edit's messages and the scene fetch's.
+//! edit's messages, the scene fetch's and the session hello.
 //!
 //! `fuzz_targets/decoder.rs` runs the decoders against bytes libFuzzer invents.
 //! This target runs three of them against bytes somebody named, and the two are
@@ -467,5 +467,38 @@ fn named_scene_fetch_seeds_reach_their_intended_paths() {
             "../corpus/decoder/scene-reply-hostile-part-length"
         )),
         Err(DecodeError::InvalidLength(u32::MAX))
+    ));
+}
+
+/// The hello seeds reach the session hello's three ends: a whole fresh join
+/// carrying its player, the same hello a byte short of its session flag, and
+/// one whose flag is neither of the two values the codec writes. A layout
+/// change that moved the player, or a decoder that stopped reading it, fails
+/// the first.
+#[test]
+fn named_hello_seeds_reach_their_intended_paths() {
+    use crcbl_net::{DecodeError, Hello, PlayerId, decode_hello, encode_hello};
+
+    let seed = include_bytes!("../corpus/decoder/hello-minimal");
+    let hello = Hello {
+        protocol_version: 0,
+        engine_build_id: 0,
+        schema_hash: 0,
+        generation: 0,
+        player: PlayerId::from_bytes(std::array::from_fn(|i| i as u8 + 1)),
+        session_token: None,
+    };
+    assert_eq!(decode_hello(seed).expect("a whole hello"), hello);
+    assert_eq!(encode_hello(&hello), seed);
+
+    assert!(matches!(
+        decode_hello(include_bytes!("../corpus/decoder/hello-truncated")),
+        Err(DecodeError::TooShort { needed: 1, .. })
+    ));
+    assert!(matches!(
+        decode_hello(include_bytes!(
+            "../corpus/decoder/hello-invalid-session-flag"
+        )),
+        Err(DecodeError::InvalidLength(2))
     ));
 }

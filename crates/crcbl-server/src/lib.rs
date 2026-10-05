@@ -8,12 +8,14 @@
 //! (see [`crcbl_net::auth`]) — an unauthenticated packet reaches nothing but
 //! the error counter.
 
+pub mod bans;
 pub mod cadence;
 pub mod host;
 mod input_buffer;
 mod peer;
 pub mod sim_hash;
 
+pub use bans::{Denylist, DenylistError, MAX_BAN_REASON_CHARS};
 pub use host::{
     AppliedSimSet, EventNotSent, FramesFault, Host, HostConfig, HostModule, PeerEvent, PeerFrames,
     PeerId, PeerInputs, ResimError, RosterChange, RosterFault, SCENE_FETCH_BYTES_PER_SECOND,
@@ -33,7 +35,7 @@ pub use crcbl_net::MAX_CLIENT_INPUTS_PER_TICK;
 use std::fmt;
 use std::time::Duration;
 
-use crcbl_core::{FrameClock, TickId};
+use crcbl_core::{FrameClock, PlayerId, TickId};
 use crcbl_ecs::{ClientInputs, GameModule, World};
 use crcbl_net::reliable::EndpointStats;
 use crcbl_net::{
@@ -75,6 +77,8 @@ pub struct Server<T: Transport> {
     clock: FrameClock,
     /// The one client's session, credential, channel, budgets and inputs.
     peer: PeerSession,
+    /// Who the hello that opened the current session said it is.
+    player: Option<PlayerId>,
     session_config: SessionConfig,
     next_session_id: u64,
     session_terminated: bool,
@@ -132,6 +136,7 @@ impl<T: Transport> Server<T> {
                 Duration::ZERO,
                 input_horizon_ticks,
             ),
+            player: None,
             session_config: config,
             next_session_id: session_id.0 + 1,
             session_terminated: false,
@@ -327,6 +332,7 @@ impl<T: Transport> Server<T> {
                             .session
                             .on_connected(hello.engine_build_id, hello.schema_hash);
                         self.peer.adopt_session_key();
+                        self.player = Some(hello.player);
                     }
                 }
                 SessionState::Reconnecting => {
@@ -527,6 +533,13 @@ impl<T: Transport> Server<T> {
         self.counters.auth_failures
     }
 
+    /// Who the client said it is in the hello that opened its current
+    /// session, or `None` before a client has connected.
+    #[must_use]
+    pub const fn player(&self) -> Option<PlayerId> {
+        self.player
+    }
+
     /// Current session lifecycle state.
     #[must_use]
     pub fn session_state(&self) -> SessionState {
@@ -619,6 +632,9 @@ mod tests {
         schema_hash: 0x0053_5256,
     };
 
+    /// Who every hello these tests write says it is.
+    const HELLO_PLAYER: PlayerId = PlayerId::from_bytes([0x5E; PlayerId::BYTES]);
+
     const TICK: Duration = Duration::from_nanos(16_666_667);
 
     fn server<T: Transport>(world: World, transport: T) -> Server<T> {
@@ -642,6 +658,7 @@ mod tests {
             engine_build_id: COMPATIBILITY.engine_build_id,
             schema_hash: COMPATIBILITY.schema_hash,
             generation,
+            player: HELLO_PLAYER,
             session_token,
         })
     }
@@ -933,6 +950,7 @@ mod tests {
             engine_build_id: COMPATIBILITY.engine_build_id,
             schema_hash: COMPATIBILITY.schema_hash,
             generation: 1,
+            player: HELLO_PLAYER,
             session_token: Some(token),
         });
 

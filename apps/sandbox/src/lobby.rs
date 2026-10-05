@@ -40,6 +40,7 @@ use std::net::SocketAddr;
 
 use crcbl::lan::LanBind;
 use crcbl::lan::lobby::{self, LobbyChoice, LobbyNotice, LobbyPick, PickRefused};
+use crcbl::net::PlayerId;
 use crcbl::ui::menu::{Caption, Menu, MenuItem};
 
 use crate::lan::{Lan, SANDBOX};
@@ -57,27 +58,43 @@ pub struct Lobby {
     /// Where a host binds: every interface, as `--host` does, outside the
     /// tests.
     host_bind: LanBind,
+    /// Who this player joins as, or why there is no telling — which a join
+    /// picked shows.
+    player: Result<PlayerId, String>,
     tick_hz: u32,
 }
 
 impl Lobby {
     /// A lobby looking for sandbox hosts on the LAN, hosting where `--host`
-    /// does, at `tick_hz`.
+    /// does, at `tick_hz`, joining as the player id this machine keeps for
+    /// the sandbox. An id that cannot be had is said when a join is picked.
     #[must_use]
     pub fn on_the_lan(tick_hz: u32) -> Self {
+        let player = SANDBOX.player_id(false).map_err(|error| {
+            crcbl::log::warn!("lobby: {error}");
+            format!("CANNOT JOIN: {error}")
+        });
         Self::new(
             lobby::Lobby::on_the_lan(SANDBOX),
+            player,
             LanBind::on_the_lan(0),
             tick_hz,
         )
     }
 
-    /// A lobby knowing what `model` does, hosting on `host_bind`.
+    /// A lobby knowing what `model` does, hosting on `host_bind` and joining
+    /// as `player`.
     #[must_use]
-    pub const fn new(model: lobby::Lobby, host_bind: LanBind, tick_hz: u32) -> Self {
+    pub const fn new(
+        model: lobby::Lobby,
+        player: Result<PlayerId, String>,
+        host_bind: LanBind,
+        tick_hz: u32,
+    ) -> Self {
         Self {
             model,
             host_bind,
+            player,
             tick_hz,
         }
     }
@@ -164,7 +181,8 @@ impl Lobby {
 
     /// A join to the host at `addr`, which the lobby names while it waits.
     fn join(&mut self, addr: SocketAddr) -> Result<Started, String> {
-        let lan = Lan::join(addr, self.tick_hz)
+        let player = self.player.clone()?;
+        let lan = Lan::join(player, addr, self.tick_hz)
             .map_err(|error| format!("CANNOT JOIN {addr}: {error}"))?;
         self.model.join_started(addr);
         Ok(Started::Joining(lan))

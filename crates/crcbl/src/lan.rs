@@ -32,6 +32,15 @@
 //! - **[`console`]** is a dedicated server's stdin console and the sleep to
 //!   its next tick, for every headless server that serves on the wall clock
 //!   until it is told to stop.
+//! - **[`bans`]** is a server's denylist file: the players its host refuses
+//!   at the handshake ([`crate::server::Denylist`]), kept between runs by
+//!   [`LanHost::keep_bans`] and changed by [`LanHost::ban`] and
+//!   [`LanHost::unban`].
+//!
+//! Every client joins as a player ([`PlayerId`]): the id the sample keeps on
+//! this machine ([`LanGame::player_id`]), which the host logs beside each
+//! peer it admits and keys its denylist on. The id is self-asserted — its
+//! docs say what that leaves open.
 //!
 //! Both sides add a "lan" section to the F3 panel saying where they stand,
 //! and keep a [`netgraph::Netgraph`] — a "net" section with each link's round
@@ -68,7 +77,7 @@ use std::io;
 use std::iter::Peekable;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::num::NonZeroU16;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::args::Consumed;
@@ -77,9 +86,9 @@ use crate::ecs::World;
 use crate::net::reliable::MAX_UNRELIABLE_PAYLOAD;
 use crate::net::udp::discovery::{Announcement, Announcer, Browser, DISCOVERY_PORT};
 use crate::net::udp::{ConnectError, UdpListener, UdpTransport};
-use crate::net::{ProtocolCompatibility, SessionEndReason};
+use crate::net::{PlayerId, ProtocolCompatibility, SessionEndReason};
 use crate::replay_record::{RecordError, RecordSummary, Recorder};
-use crate::server::{Host, HostConfig, PeerEvent};
+use crate::server::{Host, HostConfig, PeerEvent, PeerId};
 use crate::ui::{DebugModule, DebugSection};
 
 use self::lobby::Unjoinable;
@@ -136,6 +145,21 @@ pub struct LanGame {
     pub compatibility: ProtocolCompatibility,
     /// The most players a host admits, and what it announces.
     pub max_players: u16,
+}
+
+impl LanGame {
+    /// The player id this machine keeps for the sample, in the config
+    /// directory [`app`](Self::app) names — drawn there the first time — or,
+    /// for a `headless` run, the one every headless run presents
+    /// ([`crate::store::identity::for_app`]). What [`LanClient::join`] and a
+    /// host's own player are handed.
+    ///
+    /// # Errors
+    ///
+    /// [`LanError::Identity`] when there is none to be had.
+    pub fn player_id(&self, headless: bool) -> Result<PlayerId, LanError> {
+        crate::store::identity::for_app(self.app, headless).map_err(LanError::Identity)
+    }
 }
 
 /// What the command line asked of the network.
@@ -213,6 +237,11 @@ pub enum LanError {
     Connect(ConnectError),
     /// The host's recording could not start.
     Record(RecordError),
+    /// The client's player id could not be had: none could be drawn, or the
+    /// one kept would not be read.
+    Identity(crate::store::identity::IdentityError),
+    /// The host's denylist file would not read, or was not written.
+    Bans(bans::BanFileError),
 }
 
 impl std::fmt::Display for LanError {
@@ -222,6 +251,8 @@ impl std::fmt::Display for LanError {
             Self::Browse(error) => write!(f, "cannot look for hosts: {error}"),
             Self::Connect(error) => write!(f, "cannot connect: {error}"),
             Self::Record(error) => write!(f, "cannot record: {error}"),
+            Self::Identity(error) => write!(f, "no player id: {error}"),
+            Self::Bans(error) => write!(f, "denylist: {error}"),
         }
     }
 }
@@ -275,6 +306,9 @@ pub struct LanHost {
     withheld: ThrottledLog,
     /// Each peer's link, for the "net" section.
     netgraph: Netgraph,
+    /// The file the host's denylist is kept in, once
+    /// [`keep_bans`](Self::keep_bans) named one.
+    ban_file: Option<PathBuf>,
 }
 
 impl LanHost {
@@ -350,7 +384,66 @@ impl LanHost {
             refusals: ThrottledLog::default(),
             withheld: ThrottledLog::default(),
             netgraph: Netgraph::new(Role::Host),
+            ban_file: None,
         })
+    }
+
+    /// Keeps the host's denylist in the file at `path` ([`bans`]): reads the
+    /// list it holds now — kicking whoever it bans — and writes it after
+    /// every [`ban`](Self::ban) and [`unban`](Self::unban) from here on.
+    /// Returns how many players it bans.
+    ///
+    /// # Errors
+    ///
+    /// [`LanError::Bans`] when the file is there and will not read whole;
+    /// the host keeps the list it had, and no file.
+    pub fn keep_bans(&mut self, path: &Path) -> Result<usize, LanError> {
+        let list = bans::read(path).map_err(LanError::Bans)?;
+        let banned = list.len();
+        for peer in self.host.set_denylist(list) {
+            crate::log::info!("lan: {peer:?} is banned; kicked");
+        }
+        self.ban_file = Some(path.to_path_buf());
+        Ok(banned)
+    }
+
+    /// Bans `player` for `reason` and kicks the session they hold, which is
+    /// returned ([`Host::ban`]), then writes the list to the file
+    /// [`keep_bans`](Self::keep_bans) named, if it named one.
+    ///
+    /// # Errors
+    ///
+    /// [`LanError::Bans`] when the file was not written: the ban holds in
+    /// this host anyway, until it stops.
+    pub fn ban(&mut self, player: PlayerId, reason: &str) -> Result<Option<PeerId>, LanError> {
+        let kicked = self.host.ban(player, reason);
+        crate::log::info!("lan: banned player {player}");
+        self.write_bans()?;
+        Ok(kicked)
+    }
+
+    /// Lifts `player`'s ban ([`Host::unban`]), writing the list as
+    /// [`ban`](Self::ban) does. Returns whether there was one.
+    ///
+    /// # Errors
+    ///
+    /// [`LanError::Bans`] when the file was not written: the ban is lifted
+    /// in this host anyway, until it stops.
+    pub fn unban(&mut self, player: PlayerId) -> Result<bool, LanError> {
+        if !self.host.unban(player) {
+            return Ok(false);
+        }
+        crate::log::info!("lan: unbanned player {player}");
+        self.write_bans()?;
+        Ok(true)
+    }
+
+    /// Writes the denylist to its file, if it is kept in one.
+    fn write_bans(&self) -> Result<(), LanError> {
+        match &self.ban_file {
+            Some(path) => bans::write(path, self.host.denylist()).map_err(LanError::Bans),
+            None => Ok(()),
+        }
     }
 
     /// Records the session to a new file at `path` from now on, until
@@ -448,7 +541,13 @@ impl LanHost {
         }
         let events: Vec<PeerEvent> = self.host.events().collect();
         for event in &events {
-            crate::log::info!("lan: {event:?}");
+            match *event {
+                PeerEvent::Joined(peer) => match self.host.player(peer) {
+                    Some(player) => crate::log::info!("lan: {event:?}, player {player}"),
+                    None => crate::log::info!("lan: {event:?}"),
+                },
+                _ => crate::log::info!("lan: {event:?}"),
+            }
         }
         let host = &self.host;
         self.netgraph.record(
@@ -592,6 +691,8 @@ impl DebugModule for LanHost {
 #[derive(Debug)]
 pub struct LanClient {
     game: LanGame,
+    /// Who this client says it is to the host it joins.
+    player: PlayerId,
     phase: Phase,
     tick_hz: u32,
     /// Whether the session's start and end have been logged.
@@ -614,40 +715,48 @@ enum Phase {
 }
 
 impl LanClient {
-    /// Starts a connect to the host of `game` at `addr`, ticking at
-    /// `tick_hz`.
+    /// Starts a connect to the host of `game` at `addr` as `player` — the id
+    /// the game keeps, `crcbl_store::identity` — ticking at `tick_hz`.
     ///
     /// # Errors
     ///
     /// [`LanError::Connect`] when no socket could be bound or no secret
     /// drawn.
-    pub fn join(game: LanGame, addr: SocketAddr, tick_hz: u32) -> Result<Self, LanError> {
-        Ok(Self::in_phase(game, connect(game, addr, tick_hz)?, tick_hz))
+    pub fn join(
+        game: LanGame,
+        player: PlayerId,
+        addr: SocketAddr,
+        tick_hz: u32,
+    ) -> Result<Self, LanError> {
+        let phase = connect(game, player, addr, tick_hz)?;
+        Ok(Self::in_phase(game, player, phase, tick_hz))
     }
 
     /// Looks for hosts of `game` with `browser`, and joins the first this
-    /// build can join: the first a [`lobby::Lobby`] would make a row, by
-    /// [`Unjoinable::of`]. A host that is full or of another build is
-    /// printed with why and passed over; with none joinable it goes on
+    /// build can join as `player`: the first a [`lobby::Lobby`] would make a
+    /// row, by [`Unjoinable::of`]. A host that is full or of another build
+    /// is printed with why and passed over; with none joinable it goes on
     /// looking.
-    pub fn browse(game: LanGame, browser: Browser, tick_hz: u32) -> Self {
-        Self::in_phase(game, Phase::Browsing(browser), tick_hz)
+    pub fn browse(game: LanGame, player: PlayerId, browser: Browser, tick_hz: u32) -> Self {
+        Self::in_phase(game, player, Phase::Browsing(browser), tick_hz)
     }
 
     /// Looks for hosts of `game` on the LAN — a [`Browser`] querying the
-    /// broadcast address — and joins the first this build can join.
+    /// broadcast address — and joins the first this build can join as
+    /// `player`.
     ///
     /// # Errors
     ///
     /// [`LanError::Browse`] when the browser's socket cannot be bound.
-    pub fn browse_the_lan(game: LanGame, tick_hz: u32) -> Result<Self, LanError> {
+    pub fn browse_the_lan(game: LanGame, player: PlayerId, tick_hz: u32) -> Result<Self, LanError> {
         let browser = Browser::open(game.protocol_id).map_err(LanError::Browse)?;
-        Ok(Self::browse(game, browser, tick_hz))
+        Ok(Self::browse(game, player, browser, tick_hz))
     }
 
-    fn in_phase(game: LanGame, phase: Phase, tick_hz: u32) -> Self {
+    fn in_phase(game: LanGame, player: PlayerId, phase: Phase, tick_hz: u32) -> Self {
         Self {
             game,
+            player,
             phase,
             tick_hz,
             reported_session: false,
@@ -697,6 +806,7 @@ impl LanClient {
 
     fn play(&mut self, now: Duration) {
         let game = self.game;
+        let player = self.player;
         match &mut self.phase {
             Phase::Browsing(browser) => {
                 browser.poll();
@@ -722,7 +832,7 @@ impl LanClient {
                     );
                 }
                 println!("{}: joining {}", game.app, chosen.addr);
-                self.phase = match connect(game, chosen.addr, self.tick_hz) {
+                self.phase = match connect(game, player, chosen.addr, self.tick_hz) {
                     Ok(phase) => phase,
                     Err(error) => {
                         crate::log::error!("lan: {error}");
@@ -753,13 +863,23 @@ impl LanClient {
     }
 }
 
-/// Starts a connect to `addr` and the session client over it. The client
-/// says hello once the transport is up; until then its sends are
+/// Starts a connect to `addr` and the session client over it, as `player`.
+/// The client says hello once the transport is up; until then its sends are
 /// backpressure, which it retries.
-fn connect(game: LanGame, addr: SocketAddr, tick_hz: u32) -> Result<Phase, LanError> {
+fn connect(
+    game: LanGame,
+    player: PlayerId,
+    addr: SocketAddr,
+    tick_hz: u32,
+) -> Result<Phase, LanError> {
     let transport = UdpTransport::connect(addr, game.protocol_id).map_err(LanError::Connect)?;
-    let client =
-        Client::new_with_compatibility(World::new(), transport, tick_hz, game.compatibility);
+    let client = Client::new_with_compatibility(
+        World::new(),
+        transport,
+        tick_hz,
+        game.compatibility,
+        player,
+    );
     Ok(Phase::Joined {
         host: addr,
         client: Box::new(client),
@@ -820,6 +940,7 @@ pub fn how_it_ended(ended: Ended, client: &Client<UdpTransport>) -> String {
     }
 }
 
+pub mod bans;
 pub mod console;
 pub mod lobby;
 pub mod netgraph;

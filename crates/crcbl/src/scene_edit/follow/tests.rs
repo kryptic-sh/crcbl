@@ -140,7 +140,7 @@ impl Rig {
 fn client_of(server: &mut EditServer) -> Client<InMemoryTransport> {
     let (near, far) = InMemoryTransport::pair();
     server.host_mut().add(Box::new(far));
-    Client::new_with_compatibility(World::new(), near, TICK_HZ, COMPATIBILITY)
+    Client::new_with_compatibility(World::new(), near, TICK_HZ, COMPATIBILITY, next_player())
 }
 
 /// Moves block 0 along x to `x`.
@@ -410,3 +410,11 @@ fn a_refused_fetch_waits_before_the_next() {
 }
 
 mod gestures;
+
+/// A player id no other call in this test binary has drawn: every player
+/// in one session must be their own, or the host refuses the second as a
+/// duplicate.
+fn next_player() -> crate::net::PlayerId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    crate::net::PlayerId::from_seed(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}

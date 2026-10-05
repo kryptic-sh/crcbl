@@ -1362,6 +1362,7 @@ pub enum GameError {
     /// would not begin. Native builds only — see [`crate::lan`].
     #[cfg(not(target_arch = "wasm32"))]
     Lan(crcbl::lan::LanError),
+
     /// `--resume` was asked for and there is no saved run it would resume —
     /// none at all, or one refused by name. See [`crate::save`].
     Resume(SaveError),
@@ -1376,6 +1377,7 @@ impl std::fmt::Display for GameError {
             Self::Server(message) => write!(f, "server creation failed: {message}"),
             #[cfg(not(target_arch = "wasm32"))]
             Self::Lan(error) => write!(f, "LAN session failed: {error}"),
+
             Self::Resume(error) => write!(f, "cannot resume: {error}"),
             Self::Art(error) => write!(f, "cannot register the build menu's icons: {error}"),
         }
@@ -1484,8 +1486,8 @@ impl Game {
     }
 
     /// Hosts a LAN session of `map` bound where `bind` says, with this player
-    /// one of its clients — see [`crate::lan`] — recording it to the new file
-    /// `record` names, if it names one.
+    /// one of its clients as `player` — see [`crate::lan`] — recording it to
+    /// the new file `record` names, if it names one.
     ///
     /// The server runs on the frame's wall time from here on, through
     /// [`Game::frame`], so a host with its pause menu open goes on serving the
@@ -1507,13 +1509,21 @@ impl Game {
         map: &Map,
         bind: crcbl::lan::LanBind,
         record: Option<&std::path::Path>,
+        player: crcbl::net::PlayerId,
     ) -> Result<Self, GameError> {
         assert!(tick_hz > 0, "tick rate must be positive");
         let map = Arc::new(map.clone());
         let (shared, world, module) = server_world(&map);
         let served = (Field(Arc::clone(&shared)), world, module);
-        let (link, tick_period) =
-            crate::lan::HostLink::open(crate::lan::SESSION, bind, served, tick_hz, &map, record)?;
+        let (link, tick_period) = crate::lan::HostLink::open(
+            crate::lan::SESSION,
+            bind,
+            served,
+            tick_hz,
+            &map,
+            record,
+            player,
+        )?;
         log_the_rules(tick_hz, tick_period, &map);
         Ok(Self {
             link: Link::Host(Box::new(link)),

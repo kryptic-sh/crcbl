@@ -76,6 +76,14 @@ The flow that keeps game servers backend-independent at connect time:
   `crcbl admin` CLI surface (kick/ban/list) over the console command path —
   works on any server, headless included.
 
+> **Built at the open tier, 2026-10-05**: `crcbl_core::PlayerId` is a random
+> **128-bit** id the client draws once and keeps (`crcbl_store::identity`),
+> carried in every `Hello` and **self-asserted** — anyone who learns an id can
+> present it. The server-local denylist exists (`crcbl_server::Denylist`,
+> towers' `--serve` console); `crcbl admin` does not. The decisions and what is
+> left are in `docs/backlog.md`, _`PlayerId`: built self-asserted, and what it
+> unblocked_.
+
 ## Ranked-integrity chain (what tier 3 buys)
 
 Authenticated identity → server-authoritative results **signed by the server
@@ -202,12 +210,12 @@ specifies is not wrong; what changes is which parts have a consumer.
 
 - **Player identity stays**, scoped to a host rather than to a service: who you
   are on the machine you joined. shard's characters belong to the shard they
-  were made on, and there is no cross-server transfer to design. Unbuilt at
-  engine level: no crate under `crates/` defines a `PlayerId`, and shard's
-  character is a local save file with no identity attached to it. The one
-  `PlayerId` in the tree is `apps/bracket`'s own `queue::PlayerId`, a `u32`
-  index into its simulated population — a sample type, not the engine one this
-  section means.
+  were made on, and there is no cross-server transfer to design. Since
+  2026-10-05 the engine has one — `crcbl_core::PlayerId`, self-asserted, see
+  _Player identity_ above — and shard's character is still a local save file
+  with no identity attached to it. The one `PlayerId` in the tree is
+  `apps/bracket`'s own `queue::PlayerId`, a `u32` index into its simulated
+  population — a sample type, not the engine one this section means.
 - **Signed results survive, at the tier a local host can back.** bracket
   (`apps/bracket`; its rules in [the samples notes](../notes/samples.md)) is the
   named consumer: the host signs a match result so a client cannot forge one,

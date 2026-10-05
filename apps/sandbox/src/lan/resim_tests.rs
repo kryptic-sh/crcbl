@@ -98,10 +98,11 @@ fn record() -> Session {
         ..SessionConfig::default()
     });
     let mut clients: Vec<Client<InMemoryTransport>> = (0..2)
-        .map(|_| {
+        .map(|seed| {
             let (near, far) = InMemoryTransport::pair();
             host.add(Box::new(far));
-            Client::new_with_compatibility(World::new(), near, TICK_HZ, COMPATIBILITY)
+            let player = crcbl::net::PlayerId::from_seed(seed);
+            Client::new_with_compatibility(World::new(), near, TICK_HZ, COMPATIBILITY, player)
         })
         .collect();
     let period = FrameClock::new(TICK_HZ).tick_dt();

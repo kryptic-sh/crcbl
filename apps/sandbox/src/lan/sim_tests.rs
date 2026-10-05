@@ -41,10 +41,22 @@ impl Rig {
         host.update(Duration::ZERO);
         let (near, far) = InMemoryTransport::pair();
         host.add_host_player(Box::new(far));
-        let own = Client::new_with_compatibility(World::new(), near, TICK_HZ, COMPATIBILITY);
+        let own = Client::new_with_compatibility(
+            World::new(),
+            near,
+            TICK_HZ,
+            COMPATIBILITY,
+            crcbl::net::PlayerId::from_seed(105),
+        );
         let (near, far) = InMemoryTransport::pair();
         host.add(Box::new(far));
-        let other = Client::new_with_compatibility(World::new(), near, TICK_HZ, COMPATIBILITY);
+        let other = Client::new_with_compatibility(
+            World::new(),
+            near,
+            TICK_HZ,
+            COMPATIBILITY,
+            crcbl::net::PlayerId::from_seed(106),
+        );
         let mut rig = Self {
             host,
             own,
