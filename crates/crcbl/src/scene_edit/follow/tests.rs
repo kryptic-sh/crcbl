@@ -219,6 +219,7 @@ fn a_late_joiner_fetches_the_scene_and_follows_it_to_the_same_bytes() {
         1,
         "it followed, not refetched"
     );
+    assert_eq!(rig.follower().landed_count(), 1);
 }
 
 /// **A scene larger than one message arrives whole**, paced out over several
@@ -291,6 +292,7 @@ fn an_undo_reaching_past_the_fetch_refetches_and_converges() {
     assert_eq!(copy, served);
     assert_eq!(rig.follower().revision(), Some(2));
     assert_eq!(rig.follower().fetch_count(), 2, "the undo refetched");
+    assert_eq!(rig.follower().landed_count(), 2, "and the refetch landed");
 }
 
 /// **A notice the client dropped refetches**: edits past what the client

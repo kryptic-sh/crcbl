@@ -50,8 +50,9 @@
 //!
 //! # What this slice is not
 //!
-//! No client half of the server protocol — the GUI still edits its own
-//! document in process — no game that
+//! No server of its own — a scene opened from a directory is edited in
+//! process, and the editor is a client only of a scene `crcbl edit --serve`
+//! serves (`app`'s `join` module) — no game that
 //! plays yet (play mode runs whatever modules a vocabulary registers, and none
 //! does), no file watcher, no multi-session editing, and no
 //! port of a sample's state into ECS. Each is named in the plan with what it waits on.

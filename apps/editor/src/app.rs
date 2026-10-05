@@ -82,6 +82,13 @@
 //! that goes without asking leaves a recovery copy. `unsaved`'s module docs
 //! say which backends hold a close request open and which recover.
 //!
+//! # A served scene can be joined
+//!
+//! `--join <IP:PORT>`, or an address typed on Ctrl+O's line, follows a scene
+//! `crcbl edit --serve` serves, every edit going to the server rather than
+//! into the document; `join`'s module docs say what a joined editor does and
+//! does not do.
+//!
 //! # Recovery copies are offered back
 //!
 //! At start-up the copies an earlier run left are pruned and the newest
@@ -129,6 +136,7 @@ use crate::panel::{FieldTarget, PanelInput, Panels, Tone, VIEWPORT_TEXTURE};
 
 mod files;
 mod instances;
+mod join;
 mod meshes;
 mod recovery;
 mod unsaved;
@@ -291,6 +299,9 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// the next draw: a document put in place by an open reads them from
     /// another root.
     rebuild_due: bool,
+    /// The served scene this editor has joined, whose copy is the document,
+    /// or [`None`] for a document of its own — see `join`.
+    joined: Option<Box<join::Joined>>,
 }
 
 /// What a held pointer button is doing: to the camera, or to a gizmo handle.
@@ -394,6 +405,12 @@ impl<S: Shell + ?Sized> Editor<S> {
         )?;
         editor.frame_scene();
         editor.offer_recovery(options.scene.as_deref());
+        if let Some(addr) = options.join
+            && let Err(error) = editor.join(addr)
+        {
+            crcbl::log::warn!("editor: {error}");
+            editor.panels.set_status(error.to_string(), Tone::Warning);
+        }
         if let Some(refusal) = refusal {
             crcbl::log::warn!("editor: {refusal}");
             let opened = editor
@@ -487,6 +504,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             autosave,
             closing: false,
             rebuild_due: false,
+            joined: None,
         })
     }
 
@@ -726,6 +744,8 @@ impl<S: Shell + ?Sized> Editor<S> {
         if let Some((target, content)) = self.paste.take() {
             self.paste_content(&target, &content);
         }
+        // After every action, so what they routed goes out this frame.
+        self.step_join(pointer.down);
         self.update_title();
 
         let outcome = self.draw()?;
@@ -1347,6 +1367,11 @@ impl<S: Shell + ?Sized> Editor<S> {
             crcbl::log::info!("editor: {action:?} waits for the unsaved bar's answer");
             return;
         }
+        if let Some(refusal) = self.refused_while_joined(action) {
+            crcbl::log::info!("editor: {refusal}");
+            self.panels.set_status(refusal, Tone::Info);
+            return;
+        }
         let outcome = match action {
             Action::Nudge { axis, sign } => self.nudge(*axis, sign * NUDGE_M),
             Action::Undo => self.document.undo().map(|_| ()),
@@ -1669,9 +1694,14 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.camera.frame(bounds, extent.0 as f32 / extent.1 as f32);
     }
 
-    /// Writes the document's title into the window, if it has changed.
+    /// Writes the document's title into the window, if it has changed — for
+    /// a joined scene, the address it is served at in place of the unsaved
+    /// marker, since the server saves it.
     fn update_title(&mut self) {
-        let title = self.document.title();
+        let title = match self.joined_addr() {
+            Some(addr) => format!("{} — joined {addr} — crcbl editor", self.document.name()),
+            None => self.document.title(),
+        };
         if title == self.title {
             return;
         }

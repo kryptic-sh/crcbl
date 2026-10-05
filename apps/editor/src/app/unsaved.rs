@@ -98,6 +98,7 @@
 //! (`recovery`'s module docs), and an autosave on a timer covers what nothing
 //! reports at all: a crash, or a process killed with its session.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use crcbl::engine::{ExitReason, Flow, LoopError, accept_close};
@@ -128,6 +129,9 @@ pub(super) enum Guarded {
     Open(Box<Document>),
     /// The window closing.
     Close,
+    /// The scene served at this address joined, in place of the one being
+    /// edited — see `join`.
+    Join(SocketAddr),
     /// The scene read again from its directory, whose files changed on disk
     /// since the editor read or wrote them — what the bar's Reload does,
     /// asked about by the save that found the change; its Overwrite makes
@@ -142,7 +146,7 @@ impl Guarded {
         match self {
             Self::Close => true,
             Self::Reload(Saving::Then(pending)) => pending.closes(),
-            Self::New | Self::Open(_) | Self::Reload(_) => false,
+            Self::New | Self::Open(_) | Self::Join(_) | Self::Reload(_) => false,
         }
     }
 }
@@ -187,7 +191,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// dropped: the newest request is the one asked about.
     pub(super) fn guard(&mut self, guarded: Guarded) -> Result<(), EditError> {
         self.after_save = None;
-        if !self.document.is_dirty() {
+        if !self.has_unsaved_edits() {
             self.unsaved = None;
             self.panels.end_unsaved();
             return self.proceed(guarded);
@@ -201,6 +205,14 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.panels.set_status(ASK, Tone::Warning);
         self.unsaved = Some(guarded);
         Ok(())
+    }
+
+    /// Whether the document holds edits saved nowhere: a dirty document of
+    /// this editor's own. A joined scene's copy holds none, whatever its
+    /// log says — the server saves every edit (`join`'s module docs) — so
+    /// nothing asks about it, recovers it or autosaves it.
+    pub(super) fn has_unsaved_edits(&self) -> bool {
+        self.joined.is_none() && self.document.is_dirty()
     }
 
     /// What follows a save `refused`, the one `saving` says was made: for
@@ -279,6 +291,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                 Some(dir) => format!("by opening `{}`", dir.display()),
                 None => format!("by opening `{}`", opened.name()),
             },
+            Guarded::Join(addr) => format!("by joining the scene served at {addr}"),
             Guarded::Close => "when the window closes".to_owned(),
         };
         format!(
@@ -394,11 +407,16 @@ impl<S: Shell + ?Sized> Editor<S> {
         // Whatever goes on, an offer Open copy took down stays down.
         self.held_offer.clear();
         match guarded {
-            Guarded::New => self.new_scene(),
+            Guarded::New => {
+                self.leave_join();
+                self.new_scene()
+            }
             Guarded::Open(document) => {
+                self.leave_join();
                 self.replace_document(*document);
                 Ok(())
             }
+            Guarded::Join(addr) => self.join(addr),
             Guarded::Close => {
                 self.closing = true;
                 Ok(())
@@ -481,7 +499,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// Hands back the copy's directory, if one was written. The copy
     /// supersedes the session's autosave, which goes.
     pub(super) fn recover_unsaved(&mut self) -> Option<PathBuf> {
-        if !self.document.is_dirty() {
+        if !self.has_unsaved_edits() {
             return None;
         }
         let name = self.document.name().to_owned();

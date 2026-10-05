@@ -1532,12 +1532,12 @@ undo and redo are protocol operations on the one global history; the notices,
 not snapshot replication, are how another client follows the scene (the command
 log is the sync point); a host serving no scene refuses edits as not editable.
 `crcbl_editor::serve`'s module docs hold the reasons, and `docs/backlog.md`'s
-_Scene edits over the transport_ entry what the slice leaves — the GUI is not
-yet a client of its own server, and the author is not in the undo log. A variant
-switch travels since 2026-10-04, as command kind `0x02` carrying its snapshot.
-The dogfood pass's environment write, `EditCommand::SetEnvironment`, travels as
-command kind `0x0B` (a path and a value, as a property's) and the server applies
-it as it applies any command.
+_Scene edits over the transport_ entry what the slice leaves — the GUI was not
+yet a client of a server (it joins one since 2026-10-05, below), and the author
+is not in the undo log. A variant switch travels since 2026-10-04, as command
+kind `0x02` carrying its snapshot. The dogfood pass's environment write,
+`EditCommand::SetEnvironment`, travels as command kind `0x0B` (a path and a
+value, as a property's) and the server applies it as it applies any command.
 
 **A client joining late fetches the scene, since 2026-10-04.**
 `Client::fetch_scene` asks for it; the server answers with the scene's saved
@@ -1563,6 +1563,29 @@ server's own number; a gesture is sealed by its last frame, by anything else
 applied for anyone (interleaving seals, since only the entry on top can fold),
 by its client's link going down, by a fetch being answered, and by a save.
 `crcbl::scene_edit::serve`'s module docs hold the reasons.
+
+**The editor joins a served scene, since 2026-10-05.** `editor --join <IP:PORT>`
+or an `IP:PORT` typed on Ctrl+O's path line connects to `crcbl edit --serve`
+with the edit server's protocol id and vocabulary digest, so a build with other
+components is refused on the status line; the scene is fetched and followed
+through a `SceneFollower`, and the follower's copy is the document the editor
+draws and edits. **Decided for the long term**: the copy's edits are routed
+(`Document::route_edits`) — `apply`, `apply_in`, `undo` and `redo` hold the
+operation and change nothing — and sent at the end of the frame, so every path
+that edits a document, panels and keys and gizmo alike, goes to the server
+unchanged; an edit shows only when its notice comes back, a round trip later,
+which is the price of a copy that is always the server's scene and never needs
+reconciling (applying first would undo local edits whenever another client's
+notice landed between them, and break the history's fold that an undo over the
+protocol needs). A drag goes as one gesture, the frame the pointer comes up on
+marked last — or the drag's last frame sent again marked last when the release
+brought none. A joined editor holds no lock, writes nothing into the scene's
+directory, keeps no recovery copy, says Save and Save as are the server's (it
+saves every edit, so the protocol needs no save), and refuses play mode. When
+the server quits or the link drops, the copy stays open, unrouted, with no
+directory and unsaved. `apps/editor/src/app/join.rs`'s module docs hold the
+reasons; `apps/editor/src/app/tests/join.rs` holds them through the loop against
+an `EditServer` on UDP loopback.
 
 Everything else below stands unchanged: there is one schedule per `World`, there
 is no snapshot of a `World` (play restores from the scene's text, slice 8), the
@@ -1657,8 +1680,8 @@ what is deferred.
   `crates/crcbl-cli/src/serve_cmd.rs`'s module docs hold the decisions, and its
   tests drive two clients through a fetch, an edit, an undo and `quit` on
   loopback; `crates/crcbl-cli/tests/scene.rs` fetches from the binary in another
-  process. The GUI does not join a served scene yet: `docs/backlog.md`'s
-  _`crcbl scene` and `crcbl edit`_ entry says what that takes.
+  process. The GUI joins a served scene since 2026-10-05 (_The editor joins a
+  served scene_, above).
 - **What it does not cover**: stdin batches, `scene paste -`, and the verbs
   beyond the eight; a scene of a game this build does not register; an open
   editor seeing a change on disk before its next Save (it notices at save time,

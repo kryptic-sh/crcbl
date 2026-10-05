@@ -321,7 +321,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         let Some(base) = self.recovery.clone() else {
             return;
         };
-        if !self.document.is_dirty() {
+        if !self.has_unsaved_edits() {
             self.autosave.due = self.elapsed + self.autosave.interval;
             self.end_autosave();
             return;

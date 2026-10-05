@@ -148,6 +148,40 @@ pub trait Transport: Send {
     }
 }
 
+/// A boxed transport is the transport it holds, every method forwarded — the
+/// defaulted ones too, so a backend's own answer is never replaced by the
+/// default. What lets a program that chooses its transport at run time, or
+/// has none on some target, hold one `Client<Box<dyn Transport>>` type.
+impl<T: Transport + ?Sized> Transport for Box<T> {
+    fn send_reliable(&mut self, msg: Message) -> Result<(), TransportError> {
+        (**self).send_reliable(msg)
+    }
+
+    fn send_unreliable(&mut self, msg: Message) -> Result<(), TransportError> {
+        (**self).send_unreliable(msg)
+    }
+
+    fn recv_reliable(&mut self) -> Result<Option<Message>, TransportError> {
+        (**self).recv_reliable()
+    }
+
+    fn recv(&mut self) -> Result<Option<Message>, TransportError> {
+        (**self).recv()
+    }
+
+    fn is_connected(&self) -> bool {
+        (**self).is_connected()
+    }
+
+    fn max_unreliable_message_bytes(&self) -> usize {
+        (**self).max_unreliable_message_bytes()
+    }
+
+    fn link_stats(&self) -> Option<crate::reliable::EndpointStats> {
+        (**self).link_stats()
+    }
+}
+
 // ── In-memory transport ───────────────────────────────────────────────────────
 
 /// An SPSC in-memory transport pair for testing and local loopback.
@@ -534,5 +568,80 @@ mod tests {
 
         let (a, _b) = InMemoryTransport::pair();
         let _ = format!("{a:?}");
+    }
+
+    // ── Box<dyn Transport> ────────────────────────────────────────────────
+
+    /// An in-memory end that answers every defaulted method its own way: a
+    /// smaller unreliable limit, link figures, and a reliable receive that
+    /// says so — what a box that fell back on a default would lose.
+    struct Opinionated(InMemoryTransport);
+
+    /// The unreliable limit [`Opinionated`] reports.
+    const OPINIONATED_LIMIT: usize = 7;
+
+    impl Transport for Opinionated {
+        fn send_reliable(&mut self, msg: Message) -> Result<(), TransportError> {
+            self.0.send_reliable(msg)
+        }
+
+        fn send_unreliable(&mut self, msg: Message) -> Result<(), TransportError> {
+            self.0.send_unreliable(msg)
+        }
+
+        fn recv_reliable(&mut self) -> Result<Option<Message>, TransportError> {
+            Err(TransportError::Channel("reliable".into()))
+        }
+
+        fn recv(&mut self) -> Result<Option<Message>, TransportError> {
+            self.0.recv()
+        }
+
+        fn is_connected(&self) -> bool {
+            self.0.is_connected()
+        }
+
+        fn max_unreliable_message_bytes(&self) -> usize {
+            OPINIONATED_LIMIT
+        }
+
+        fn link_stats(&self) -> Option<crate::reliable::EndpointStats> {
+            Some(crate::reliable::EndpointStats::default())
+        }
+    }
+
+    /// **A boxed transport answers as the transport it holds**, the
+    /// defaulted methods included: a box that fell back on a default would
+    /// report another limit, no link figures, and a reliable receive from
+    /// the shared queue.
+    #[test]
+    fn a_boxed_transport_answers_every_method_as_the_one_it_holds() {
+        let (near, far) = InMemoryTransport::pair();
+        let boxed: Box<dyn Transport> = Box::new(Opinionated(near));
+        // Through a generic bound, as a `Client<Box<dyn Transport>>` calls
+        // it: the box's own impl, not a deref to the trait object.
+        answers_as_opinionated(boxed, far);
+    }
+
+    fn answers_as_opinionated<T: Transport>(mut boxed: T, mut far: InMemoryTransport) {
+        assert_eq!(boxed.max_unreliable_message_bytes(), OPINIONATED_LIMIT);
+        assert!(boxed.link_stats().is_some());
+        assert!(matches!(
+            boxed.recv_reliable(),
+            Err(TransportError::Channel(which)) if which == "reliable"
+        ));
+        assert!(boxed.is_connected());
+
+        boxed
+            .send_reliable(Message::reliable(b"up".to_vec()))
+            .unwrap();
+        boxed
+            .send_unreliable(Message::unreliable(b"side".to_vec()))
+            .unwrap();
+        assert_eq!(far.recv().unwrap().unwrap().payload, b"up");
+        assert_eq!(far.recv().unwrap().unwrap().payload, b"side");
+        far.send_reliable(Message::reliable(b"down".to_vec()))
+            .unwrap();
+        assert_eq!(boxed.recv().unwrap().unwrap().payload, b"down");
     }
 }

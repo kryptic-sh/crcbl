@@ -1,5 +1,6 @@
 //! The command line: the shared flags every binary in this workspace takes,
-//! the asset root, the recovery directory, and one positional argument.
+//! the asset root, the recovery directory, a served scene to join, and one
+//! positional argument.
 //!
 //! Modelled on `apps/bare`'s parser, which is the smallest one here, with
 //! `apps/viewer`'s positional shape: a path is a path, not a flag, because
@@ -31,6 +32,10 @@ pub struct Options {
     /// pruned in, or [`None`] for the default — `crate::app`'s `unsaved`
     /// module's `recovery_base`, which is none at all for a headless run.
     pub recovery: Option<std::path::PathBuf>,
+    /// The address of a scene `crcbl edit <DIR> --serve` serves, to join
+    /// rather than open a directory — `crate::app`'s `join` module — or
+    /// [`None`].
+    pub join: Option<std::net::SocketAddr>,
 }
 
 /// What [`parse`] hands back.
@@ -54,6 +59,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
     let mut scene = None;
     let mut assets = None;
     let mut recovery = None;
+    let mut join = None;
     let mut args = args.peekable();
 
     while let Some(arg) = args.next() {
@@ -73,6 +79,17 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                     return Invocation::BadUsage(format!("{RECOVERY_FLAG} needs a directory"));
                 }
             },
+            Consumed::No if arg == JOIN_FLAG => match args.next() {
+                Some(addr) => match addr.parse() {
+                    Ok(addr) => join = Some(addr),
+                    Err(_) => {
+                        return Invocation::BadUsage(format!(
+                            "{JOIN_FLAG} needs an IP:PORT address, not `{addr}`"
+                        ));
+                    }
+                },
+                None => return Invocation::BadUsage(format!("{JOIN_FLAG} needs an IP:PORT")),
+            },
             Consumed::No => {
                 if arg.starts_with('-') {
                     return Invocation::BadUsage(format!("unknown argument: {arg}"));
@@ -88,11 +105,18 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
         }
     }
 
+    if let (Some(addr), Some(dir)) = (join, &scene) {
+        return Invocation::BadUsage(format!(
+            "a scene directory or a served scene, not both: {} and {JOIN_FLAG} {addr}",
+            dir.display()
+        ));
+    }
     Invocation::Run(Options {
         common,
         scene,
         assets,
         recovery,
+        join,
     })
 }
 
@@ -102,12 +126,16 @@ const ASSETS_FLAG: &str = "--assets";
 /// The flag naming the recovery directory: see [`Options::recovery`].
 const RECOVERY_FLAG: &str = "--recovery";
 
+/// The flag naming a served scene to join: see [`Options::join`].
+const JOIN_FLAG: &str = "--join";
+
 /// The `--help` text.
 pub const USAGE: &str = "\
 editor — the Crucible scene editor
 
 USAGE:
     editor [OPTIONS] [SCENE_DIR]
+    editor [OPTIONS] --join <IP:PORT>
 
 ARGS:
     <SCENE_DIR>          A .scn/ scene directory to open. Saving writes back
@@ -135,6 +163,21 @@ RECOVERY:
                          offered back — Open copy opens one with no directory,
                          so saving it asks for one — and copies older than two
                          weeks or past the newest twenty are removed
+
+JOINING:
+    --join <IP:PORT>     Join the scene `crcbl edit <DIR> --serve` serves at
+                         this address instead of opening a directory; Ctrl+O
+                         takes an IP:PORT the same way. The scene is fetched
+                         and followed as the server and its other clients
+                         edit it, and every edit here goes to the server,
+                         drags as one undo each: it shows once the server
+                         applies it, and a refusal is said on the status
+                         line. Undo and redo step the server's one history.
+                         The server saves every edit and holds the scene's
+                         lock, so Save and Save as save nothing here, and
+                         play mode is refused. When the server quits or the
+                         link drops, the scene stays open as an unsaved copy
+                         with no directory. Not with SCENE_DIR
 
 PANELS:
     The scene's entities are listed on the left, grouped by the system whose
@@ -313,6 +356,38 @@ mod tests {
         assert_eq!(options.recovery, None);
         assert!(
             matches!(run(&["--recovery"]), Invocation::BadUsage(message) if message.contains("--recovery")),
+        );
+    }
+
+    /// `--join` names a served scene's address, wants an `IP:PORT` after it,
+    /// and is refused beside a scene directory: one scene at a time.
+    #[test]
+    fn the_join_flag_names_a_served_scene() {
+        let Invocation::Run(options) = run(&["--join", "127.0.0.1:4040"]) else {
+            panic!("that is a run");
+        };
+        assert_eq!(options.join, Some(([127, 0, 0, 1], 4040).into()));
+        assert_eq!(options.scene, None);
+        let Invocation::Run(options) = run(&[]) else {
+            panic!("an empty command line is a run");
+        };
+        assert_eq!(options.join, None);
+        for wrong in [
+            &["--join"][..],
+            &["--join", "localhost"],
+            &["--join", "1.2.3.4"],
+        ] {
+            assert!(
+                matches!(run(wrong), Invocation::BadUsage(message) if message.contains("--join")),
+                "{wrong:?}"
+            );
+        }
+        let Invocation::BadUsage(message) = run(&["field.scn", "--join", "127.0.0.1:4040"]) else {
+            panic!("a directory and a served scene is not a run");
+        };
+        assert!(
+            message.contains("field.scn") && message.contains("127.0.0.1:4040"),
+            "{message}"
         );
     }
 

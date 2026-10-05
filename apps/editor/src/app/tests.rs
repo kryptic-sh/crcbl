@@ -13,6 +13,7 @@ mod context_menu;
 mod exit_criterion;
 mod files;
 mod history;
+mod join;
 mod lock;
 mod open;
 mod play;
@@ -33,6 +34,7 @@ fn options(frames: u64) -> Options {
         scene: None,
         assets: None,
         recovery: None,
+        join: None,
     }
 }
 

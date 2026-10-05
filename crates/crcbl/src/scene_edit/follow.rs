@@ -99,6 +99,8 @@ pub struct SceneFollower {
     /// last fetch landed.
     overflowed: bool,
     fetches: u64,
+    /// How many fetches have brought a copy.
+    landed: u64,
     /// The client's [`Client::dropped_event_count`] when last read.
     dropped_seen: u64,
     last_failure: Option<String>,
@@ -118,6 +120,7 @@ impl SceneFollower {
             held: VecDeque::new(),
             overflowed: false,
             fetches: 0,
+            landed: 0,
             dropped_seen: 0,
             last_failure: None,
         }
@@ -213,6 +216,7 @@ impl SceneFollower {
             Err(error) => return self.failed(error.to_string(), now),
         };
         self.copy = Some((document, scene.revision));
+        self.landed += 1;
         self.stale = false;
         self.last_failure = None;
         for notice in std::mem::take(&mut self.held) {
@@ -300,6 +304,14 @@ impl SceneFollower {
     #[must_use]
     pub const fn fetch_count(&self) -> u64 {
         self.fetches
+    }
+
+    /// How many fetches have brought a copy: each one put a document opened
+    /// afresh in place of the one before, which a caller holding state about
+    /// the copy — a selection, a view of it — starts over on.
+    #[must_use]
+    pub const fn landed_count(&self) -> u64 {
+        self.landed
     }
 
     /// Why the copy last went stale or a fetch brought none, until a fetch

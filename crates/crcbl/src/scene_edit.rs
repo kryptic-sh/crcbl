@@ -37,6 +37,9 @@
 //! And a sixth that is not an edit: [`Document::play`] runs the scene with its
 //! games' modules until [`Document::stop`] puts it back exactly as it was —
 //! see `play`'s own module docs, and why every edit is refused in between.
+//! A client's copy of a served scene routes its edits rather than applying
+//! them ([`Document::route_edits`]): they go to the server, and come back as
+//! the notices the copy follows — see `route`'s module docs.
 //!
 //! # What "dirty" means here
 //!
@@ -61,7 +64,9 @@ use crate::scene_mesh::{MeshLibrary, MeshProblem};
 use crate::store::{NativeStorage, StorageError, StorageSource};
 use crate::ui::tree::{FieldEdit, VariantEdit};
 
-use crate::scene::edit::{EditCommand, Gesture, SystemRow, UndoLog, set_property, set_variant};
+use crate::scene::edit::{
+    EditCommand, EditOp, Gesture, SystemRow, UndoLog, set_property, set_variant,
+};
 
 pub mod clipboard;
 mod environment;
@@ -75,6 +80,7 @@ mod origin;
 mod ownership;
 mod play;
 mod recovery;
+mod route;
 mod selection;
 pub mod serve;
 mod systems;
@@ -91,6 +97,7 @@ pub use recovery::{
     IN_USE_SUFFIX, InUse, KEEP_NEWEST, MAX_AGE, Pruned, RECOVERY_DIR, RecoveryCopy, SIDECAR,
     list_copies, mark_in_use, prune_copies, remove_copy,
 };
+pub use route::RoutedEdit;
 pub use serve::{EditServer, refusal_of};
 pub use systems::{IN_SCENE, SystemGroup, UNGROUPED};
 
@@ -175,6 +182,10 @@ pub struct Document {
     /// How many resolves have moved a mesh's box — see
     /// [`Document::measures`].
     measures: u64,
+    /// The edits held for a server instead of applied, while this document
+    /// is a client's copy of a served scene — or [`None`] while edits apply
+    /// here. See `scene_edit::route`.
+    routed: Option<Vec<RoutedEdit>>,
 }
 
 /// Why a document would not open, edit or save.
@@ -636,6 +647,7 @@ impl Document {
             meshes: MeshLibrary::new(),
             mesh_problems: Vec::new(),
             measures: 0,
+            routed: None,
         };
         document.log.mark_saved();
         document.resolve_meshes();
@@ -1035,7 +1047,9 @@ impl Document {
         }
     }
 
-    /// Applies `command` and records it with the inverse it produced.
+    /// Applies `command` and records it with the inverse it produced — or,
+    /// in a document whose edits are [routed](Self::route_edits), holds it
+    /// for the server and changes nothing.
     ///
     /// The collider of whatever it touched is rebuilt afterwards, because a
     /// brick that moved and a collider that did not is a scene that draws in
@@ -1051,6 +1065,9 @@ impl Document {
     /// its component's rule refuses, which is put back and not recorded.
     pub fn apply(&mut self, command: EditCommand) -> Result<(), EditError> {
         self.refuse_in_play()?;
+        let Some(command) = self.route(command, None) else {
+            return Ok(());
+        };
         let undo = self.perform_valid(&command)?;
         self.resolve_meshes();
         self.log.record(command, undo);
@@ -1073,6 +1090,9 @@ impl Document {
     /// As [`apply`](Self::apply).
     pub fn apply_in(&mut self, command: EditCommand, gesture: Gesture) -> Result<(), EditError> {
         self.refuse_in_play()?;
+        let Some(command) = self.route(command, Some(gesture)) else {
+            return Ok(());
+        };
         let undo = self.perform_valid(&command)?;
         self.resolve_meshes();
         self.log.record_in(command, undo, gesture);
@@ -1213,7 +1233,9 @@ impl Document {
 
     /// Steps back over the most recent applied command.
     ///
-    /// Returns whether there was one. The inverse is applied and **not**
+    /// Returns whether there was one — or, in a document whose edits are
+    /// [routed](Self::route_edits), holds the undo for the server, whose
+    /// history it steps, and returns `true`. The inverse is applied and **not**
     /// recorded: the entry it came from already holds both halves, so the log
     /// is walked rather than grown.
     ///
@@ -1225,6 +1247,9 @@ impl Document {
     /// panic. [`EditError::Playing`] in play mode, leaving the log where it was.
     pub fn undo(&mut self) -> Result<bool, EditError> {
         self.refuse_in_play()?;
+        if self.route_step(EditOp::Undo) {
+            return Ok(true);
+        }
         let Some(command) = self.log.undo() else {
             return Ok(false);
         };
@@ -1233,13 +1258,17 @@ impl Document {
     }
 
     /// Steps forward over the entry just above the log's position, if there is
-    /// one. Returns whether there was.
+    /// one. Returns whether there was — or, routed, holds the redo for the
+    /// server as [`undo`](Self::undo) holds an undo.
     ///
     /// # Errors
     ///
     /// As [`Document::undo`].
     pub fn redo(&mut self) -> Result<bool, EditError> {
         self.refuse_in_play()?;
+        if self.route_step(EditOp::Redo) {
+            return Ok(true);
+        }
         let Some(command) = self.log.redo() else {
             return Ok(false);
         };

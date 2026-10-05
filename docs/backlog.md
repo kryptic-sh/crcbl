@@ -12740,18 +12740,6 @@ is one of them); a `quit` that exits over a failed save (loses edits silently).
 
 **Deferred, each with what it takes:**
 
-- **The GUI editor joining a served scene as a follower** — `SceneFollower`'s
-  main future caller. The editor would open an address instead of a directory,
-  hold a `Client` and a `SceneFollower` with the editor's vocabulary, draw the
-  follower's copy, and send each command with `Client::send_edit` rather than
-  applying it in process; its undo and redo become `EditOp::Undo` and
-  `EditOp::Redo`. A drag sends each frame with `Client::send_edit_in` and an
-  `EditGesture` of the editor's own numbering, its release frame marked last
-  (_Scene edits over the transport: gestures_, below) — the panel's and the
-  gizmo's `Document::begin_gesture` would become a client-side id. The copy is
-  read-only between notices, so a refused edit must put the view back, and a
-  drag's frames show only once their notices come back, a round trip behind the
-  pointer, which may want the copy to show the frame sent ahead of its notice.
 - **A CLI client**, `crcbl scene <verb> --remote <addr>`: the verbs resolve
   names and read values against a document, so the client would fetch a copy (a
   `SceneFollower`), resolve against it, send the command and wait for its reply,
@@ -12864,10 +12852,12 @@ served scene's saved text with a `Document` given the same commands.
 
 **Deferred, each with what it takes:**
 
-- **The GUI is not a client of its own server.** `apps/editor`'s app still
-  applies to its `Document` in process; routing it means starting an
-  `EditServer` (or connecting to one), sending each command, and applying
-  notices to the view's copy.
+- **The editor's own documents are not served.** An editor joins a served scene
+  since 2026-10-05 (_the editor joins a served scene_, below), but a scene it
+  opens from a directory is still edited in process, with no server another
+  client could join; serving one would take the editor starting an `EditServer`
+  over its document and joining it, and a decision on what its window shows
+  while it serves.
 - **The author is not in the undo log**: the plan's correction shows each
   entry's author, `UndoLog` has no author column, and the notice is the only
   place the author is said.
@@ -12952,10 +12942,6 @@ server's.
 
 **Deferred, each with what it takes:**
 
-- **No program follows a scene yet**: `crcbl edit --serve` (2026-10-05) serves
-  one, and its tests are `SceneFollower`'s only callers outside this module; the
-  GUI joining a served scene is its main future caller (_`crcbl scene` and
-  `crcbl edit`_ above, its deferred items).
 - **An edit through `EditServer::document_mut` reaches no follower** — the
   revision does not move, so no copy can tell; the server slice's _Play, stop
   and save are not protocol operations_ holds it.
@@ -13052,8 +13038,6 @@ tests was seen red under a mutation of the rule it holds.
 
 **Deferred, each with what it takes:**
 
-- **The GUI editor joining a served scene** (_`crcbl scene` and `crcbl edit`_,
-  above) is the main caller still to come; the wire is ready for its drags.
 - **The author in the undo log**: still only on the notice.
 
 **Coverage gaps**: run on Windows only; in process, over `InMemoryTransport` and
@@ -13061,6 +13045,115 @@ UDP loopback, never over a lossy link or between processes with a drag; the lost
 link is a dropped in-memory transport, not a timed-out UDP peer, and the
 resume-within-one-update case is untested; the fuzz target's new seeds were
 replayed by `tests/corpus.rs`, not run under libFuzzer.
+
+### Scene edits over the transport: the editor joins a served scene (2026-10-05)
+
+**Built**: `editor --join <IP:PORT>` (`Options::join`) and an `IP:PORT` typed on
+Ctrl+O's path line join a scene `crcbl edit --serve` serves
+(`apps/editor/src/app/join.rs`: `Joined`, `Editor::join`, `Editor::step_join`);
+`crcbl::scene_edit::Document::route_edits` with `stop_routing`, `is_routed`,
+`take_routed`, `forget_saved` and `RoutedEdit` (`scene_edit/route.rs`);
+`SceneFollower::landed_count`; and `impl Transport for Box<T>` in `crcbl_net`.
+Held by `apps/editor/src/app/tests/join.rs` (an `EditServer` on UDP loopback in
+process, the editor joined by `--join` and by Ctrl+O, a second client following:
+the join and its bytes, a gizmo drag as one entry on the server and every copy,
+a release frame sent as the drag's last, undo on the server, a refusal's reason,
+a remote edit, Save, no lock and no writes, a server quitting, a mismatched
+vocabulary), `scene_edit::route`'s tests, and `crcbl_net::transport`'s
+`a_boxed_transport_answers_every_method_as_the_one_it_holds`. Every one was seen
+red under a mutation of the rule it holds.
+
+**Decided, for the long term** (`join.rs`'s and `route.rs`'s module docs carry
+the reasons):
+
+- **The follower's copy is the editor's document.** It lives in the editor
+  between updates, where it is drawn and edited, and is swapped into the
+  follower for each update (`Joined::follow`); a copy the follower fetched
+  afresh is put in place as an opened scene is (`Editor::settle_document`, split
+  out of `replace_document`), the panels afresh and nothing selected.
+- **Applied on the notice, not optimistically.** The copy's edits are routed:
+  the four ways an edit reaches the history — `apply`, `apply_in`, `undo`,
+  `redo` — hold the operation and change nothing, so every editing path routes
+  unchanged and the copy is only ever the server's scene. The latency trade-off:
+  an edit shows one round trip after it is made — a frame or two on loopback,
+  the link's latency over a network — and a drag trails the pointer by that
+  much. Optimistic apply would hide it at the price of undoing local edits
+  whenever another client's notice lands between them, and of a history that no
+  longer folds as the server's, which an undo over the protocol relies on.
+- **Nothing is validated in the copy**: the server's document refuses what it
+  refuses, and its sentence goes on the status line through the same
+  `refused_status` a playing game's refusals use. Play mode is still refused by
+  the routed document, as by any.
+- **A drag ends when the pointer comes up**, for the gizmo and a panel's field
+  drag alike: the release frame's edit is marked `last`, or — when the release
+  brought no frame — the drag's last frame is sent again marked last (it folds
+  into the same entry and changes nothing). Each drag's id is the editor's own
+  numbering, mapped from the document's `Gesture`; anything else sent, and a
+  copy fetched afresh, ends the mapping, as the server seals there too.
+- **Save and Save as save nothing while joined and say the server does**: the
+  served scene is saved after every update that applied an edit, so the protocol
+  needs no save operation, and none was added.
+- **No recovery copy and no autosave while joined**, and nothing asks about
+  unsaved edits (`Editor::has_unsaved_edits`): the server holds every applied
+  edit, and a copy offered back at the next start would look like lost work.
+- **Play mode is refused while joined**, rather than played on a local copy: the
+  copy would have to be unrouted, played, put back and routed again, and the
+  server refuses a fetch while its own scene plays for the same reason.
+- **Joining puts a new, empty scene in place first**, which lets go of a lock
+  the editor held and is what the editor shows until the copy lands; a dirty
+  scene is asked about first, as for an open (`Guarded::Join`).
+- **Leaving keeps the copy**: when the server quits or the link drops the copy
+  is unrouted, has no directory, and reads unsaved (`Document::forget_saved`,
+  which drops its history as a recovery copy's is dropped — that history was the
+  server's). A new scene, an open or another join leave without keeping it.
+- **An address on the path line is read before a path**: no scene directory is
+  named like `IP:PORT`, and Windows refuses the colon.
+- **`Box<dyn Transport>` is a `Transport`** (a blanket impl in `crcbl_net`
+  forwarding every method, the defaulted ones too), so the editor holds one
+  `Client<Box<dyn Transport>>` type, UDP on a native build; a browser build's
+  join says it has no UDP to join over.
+
+**Considered and declined**: optimistic apply with reconciliation (above); a
+save operation in the protocol (above); playing a local copy (above); the
+selection carried across a refetch (an id may name another entity by then; the
+selection starts over, as an open's does).
+
+**Behaviour that is not a bug:**
+
+- **What a joined editor spawns, pastes or duplicates is not selected**: the
+  document picks the ids, but the entities exist only once the notice comes
+  back, and a selection of an id the document does not hold selects nothing.
+- **Arrow-key nudges faster than the round trip are lost**: a nudge is built
+  from the value the copy holds, so two made before the first's notice returns
+  write the same value. Each is an entry; the second changes nothing.
+- **Two spawns before the first's notice pick the same id**, and the server
+  refuses the second as a conflict, which the status line says.
+- **A copy's meshes read from `--assets` only**: the copy is opened from memory
+  and the editor does not know the served directory, so without `--assets` a
+  mesh draws as a placeholder.
+
+**Deferred, each with what it takes:**
+
+- **Presence**: other clients' selections and cursors. It would take a message
+  kind beside the edit request — the selection is the editor's state, not the
+  scene's — and a way to draw another person's selection.
+- **The author of each entry** shown in the editor: still only on the notice
+  (_the server slice_, above).
+- **Spawned entities selected once their notice lands**: the editor would keep
+  the ids it asked for and select them when the follower applies the notice
+  carrying them.
+- **A joined editor's asset root**: the server could send its scene's asset
+  root, or the join could take one; until then `--assets`.
+- **A status for a server that never answers**: the client's handshake retries
+  until the transport gives up, and the status line says "Joining" meanwhile.
+
+**Coverage gaps**: run on Windows only, headless, over UDP loopback in one
+process — never against the `crcbl` binary (the CLI depends on the editor, so
+the editor's tests cannot run it) and never over a lossy link or between
+machines. A panel's field drag while joined is not tested, only the gizmo's and
+frames routed by hand; a refetch while joined is held by `SceneFollower`'s own
+tests, not through the editor; the browser build's refusal is compiled by the
+wasm clippy pass and never run.
 
 ## Tooling and infrastructure — what the plans still owe
 
@@ -13472,9 +13565,10 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
 - **The client+server pair**: the server half landed 2026-10-04 — command
   handling, a client send path, reason-coded replies, one global history,
   validation against current state and last-writer-wins (the plan's 2026-07-27
-  correction) — and _Scene edits over the transport_ has what it leaves: the GUI
-  as a client of it, each entry's author in the undo log, and a server hosting
-  more than one session.
+  correction) — and _Scene edits over the transport_ has what it leaves: the
+  editor serving its own documents (it joins a served scene since 2026-10-05),
+  each entry's author in the undo log, and a server hosting more than one
+  session.
 - **An edit-mode schedule** for the selection, gizmo and editor-camera systems;
   a `World` has one `Schedule` and no per-system gating.
 - **Rotation on scene components and the rotate gizmo (landed 2026-10-01): what

@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! editor [--headless] [--frames N] [--backend B] [SCENE_DIR]
+//! editor [--headless] [--frames N] [--backend B] --join <IP:PORT>
 //! ```
 //!
 //! See the [library docs](crcbl_editor) for what the slice delivers.

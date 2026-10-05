@@ -19,6 +19,13 @@
 //! selection is empty — the history is its own, and the renderer is rebuilt
 //! from its assets on the next draw. Refused in play mode, as a new scene is.
 //!
+//! **An address joins a served scene** (decided 2026-10-05): an `IP:PORT`
+//! committed on the line is the scene `crcbl edit --serve` serves there,
+//! joined as `--join` joins it, after the bar asks about unsaved edits as
+//! for an open — `join`'s module docs. Read as an address before it is read
+//! as a path: no scene directory is named like one, and Windows refuses the
+//! colon in a name.
+//!
 //! **The history is the one beside the scene**, `.crcbl-history`, which the
 //! `crcbl scene` CLI keeps: Ctrl+Z walks back an edit made from a terminal,
 //! and Save writes the history back, so the CLI's `undo` walks back the
@@ -45,6 +52,8 @@
 //! lock exists to prevent. Opening the scene this editor already holds reads
 //! it again under the lock it has, which the scene read is handed when it is
 //! put in place ([`Document::hand_lock_to`]).
+
+use std::net::SocketAddr;
 
 use crcbl::assets::DirSource;
 use crcbl::shell::Shell;
@@ -141,6 +150,13 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// scene being edited, asking first about unsaved edits — or says why not
     /// and asks again, holding what was typed. See the module docs.
     pub(super) fn open(&mut self, text: &str) {
+        if let Ok(addr) = text.trim().parse::<SocketAddr>() {
+            if let Err(error) = self.ask_join(addr) {
+                crcbl::log::warn!("editor: {error}");
+                self.panels.set_status(error.to_string(), Tone::Warning);
+            }
+            return;
+        }
         let opened = open_target(text).and_then(|dir| {
             if self.document.play_state() != PlayState::Editing {
                 return Err(EditError::Playing);
@@ -173,6 +189,15 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
     }
 
+    /// Joins the scene served at `addr`, asking first about unsaved edits,
+    /// as an open does — see `join`'s module docs. Refused in play mode.
+    fn ask_join(&mut self, addr: SocketAddr) -> Result<(), EditError> {
+        if self.document.play_state() != PlayState::Editing {
+            return Err(EditError::Playing);
+        }
+        self.guard(Guarded::Join(addr))
+    }
+
     /// Puts `document` in place of the scene being edited — see the module
     /// docs — and says what was opened.
     pub(super) fn replace_document(&mut self, mut document: Document) {
@@ -181,22 +206,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
         self.document.hand_lock_to(&mut document);
         self.document = document;
-        super::log_outline(&mut self.document);
-        self.panels = Panels::new(
-            &mut self.document,
-            self.panels.layout().clone(),
-            self.gpu.extent(),
-        );
-        // What was held over from the old scene has nothing left to land on:
-        // a drag of its handles or of an asset, and a paste asked for it.
-        self.drag = None;
-        self.dragged = None;
-        self.paste = crate::clipboard::Paste::default();
-        self.grid_extent = super::grid_extent(&scene_bounds(&mut self.document));
-        self.rebuild_due = true;
-        self.frame_scene();
-        // The panels are new, so the offer is put back up if it stands.
-        self.show_offer();
+        self.settle_document();
         let mut notes = self.document.take_recovery_notes();
         notes.extend(super::history_refusal(&mut self.document));
         let mut opened = match (self.document.origin(), self.document.recorded_origin()) {
@@ -224,6 +234,30 @@ impl<S: Shell + ?Sized> Editor<S> {
             Tone::Warning
         };
         self.panels.set_status(opened, tone);
+    }
+
+    /// Builds what shows the document afresh around the one now in place —
+    /// an opened scene, or a joined scene's copy fetched afresh (`join`) —
+    /// and logs what it holds: the panels over it, with nothing selected,
+    /// the renderer rebuilt from its assets on the next draw, and the view
+    /// framed on it.
+    pub(super) fn settle_document(&mut self) {
+        super::log_outline(&mut self.document);
+        self.panels = Panels::new(
+            &mut self.document,
+            self.panels.layout().clone(),
+            self.gpu.extent(),
+        );
+        // What was held over from the old scene has nothing left to land on:
+        // a drag of its handles or of an asset, and a paste asked for it.
+        self.drag = None;
+        self.dragged = None;
+        self.paste = crate::clipboard::Paste::default();
+        self.grid_extent = super::grid_extent(&scene_bounds(&mut self.document));
+        self.rebuild_due = true;
+        self.frame_scene();
+        // The panels are new, so the offer is put back up if it stands.
+        self.show_offer();
     }
 
     /// Saves the document into the directory `text` names and makes it the

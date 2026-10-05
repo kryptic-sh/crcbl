@@ -694,6 +694,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   beside a scene reads as before. The decoder fuzz target has a named seed for a
   request and a notice in a gesture.
 
+- **The editor joins a scene `crcbl edit --serve` serves.**
+  `editor --join <IP:PORT>`, or an `IP:PORT` typed on Ctrl+O's path line,
+  connects with the edit server's protocol id and vocabulary digest — a build
+  with other components is refused, and the status line says so — fetches the
+  scene and follows it as the server and its other clients edit it. Every edit
+  made in the editor goes to the server instead of the document and shows once
+  the server's notice comes back; a drag goes as one gesture, its release frame
+  marked last, so it is one undo on the server and every copy; undo and redo
+  step the server's one history; a refusal is said on the status line. A joined
+  editor holds no lock, writes nothing into the scene's directory and keeps no
+  recovery copy; Save and Save as say the server saves every edit, and play mode
+  is refused. When the server quits or the link drops, the scene stays open as
+  an unsaved copy with no directory. New for it:
+  `crcbl::scene_edit::Document::{route_edits, stop_routing, is_routed, take_routed, forget_saved}`
+  and `RoutedEdit` — a document whose `apply`, `apply_in`, `undo` and `redo`
+  hold the operation for a server instead of applying it —
+  `SceneFollower::landed_count`, and
+  `impl Transport for Box<T: Transport + ?Sized>` in `crcbl_net`, so a client
+  over a transport chosen at run time is one `Client<Box<dyn Transport>>` type.
+
 - **A pad chord can outrank a plain binding of its button in a context above.**
   `crcbl_input::ActionMap::set_pad_chords_outrank` marks an action so that,
   while one of its `Binding::PadChord`s has its modifier held, the chord takes
