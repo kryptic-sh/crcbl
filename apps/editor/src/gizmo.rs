@@ -61,7 +61,7 @@ pub use drag::{
     swept,
 };
 pub use ring::{RING_PX, RING_SEGMENTS, distance_to_ring, ring};
-pub use snap::{ANGLE_DEG, ANGLE_KEY, GRID_KEY, GRID_M, SCALE_KEY, SCALE_M, Snap};
+pub use snap::{ANGLE_KEY, GRID_KEY, SCALE_KEY, Snap};
 
 use crcbl::math::{DQuat, DVec3, Vec2, Vec3};
 use crcbl::render::Camera;

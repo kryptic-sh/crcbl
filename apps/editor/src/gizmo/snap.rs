@@ -14,17 +14,10 @@
 //! unturned, as most do, lands on the step's multiples all the same.
 //!
 //! The steps are the player's settings, in the editor's own `settings.toml`
-//! beside the panel layout ([`crate::layout::APP_NAME`]):
-//!
-//! ```toml
-//! [editor.snap]
-//! grid = 0.25   # metres a translate snaps the centre to
-//! scale = 0.125 # metres a scale snaps each half extent to
-//! angle = 15.0  # degrees a turn snaps to
-//! ```
-//!
-//! A scale step of half the grid's, by default, so a snapped box is a whole
-//! number of grid cells across.
+//! beside the panel layout ([`crate::layout::APP_NAME`]), under
+//! `[editor.snap]` as `grid`, `scale` and `angle`. Their defaults, and why
+//! each is the number it is, are the editor's `defaults.toml`
+//! ([`crate::defaults`]).
 
 use crcbl::store::settings::SettingsStack;
 
@@ -36,17 +29,6 @@ pub const SCALE_KEY: &str = "editor.snap.scale";
 
 /// The settings key holding the turn step.
 pub const ANGLE_KEY: &str = "editor.snap.angle";
-
-/// The translate step with nothing set, in metres.
-pub const GRID_M: f64 = 0.25;
-
-/// The scale step with nothing set, in metres of half extent: half
-/// [`GRID_M`], so a snapped box spans whole grid cells.
-pub const SCALE_M: f64 = GRID_M / 2.0;
-
-/// The turn step with nothing set, in degrees: a twenty-fourth of a turn,
-/// which lands on the right angle and the eighth and twelfth turns alike.
-pub const ANGLE_DEG: f64 = 15.0;
 
 /// The steps a snapping drag lands on.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,43 +42,28 @@ pub struct Snap {
 }
 
 impl Default for Snap {
+    /// The editor's default steps, from its `defaults.toml`.
     fn default() -> Self {
-        Self {
-            grid: GRID_M,
-            scale: SCALE_M,
-            angle: ANGLE_DEG,
-        }
+        Self::load(&crate::defaults::stack())
     }
 }
 
 impl Snap {
-    /// The steps `stack` sets, each falling back to its default where it sets
-    /// none.
+    /// The steps `stack` sets, each falling through to the editor's default
+    /// where it sets none — on [`crate::defaults::positive`]'s terms, which
+    /// also say what becomes of a step that is not a positive number.
     ///
-    /// A value that is not a positive, finite number — `0`, `-1`, `"fine"` —
-    /// is logged and passed over rather than refused: a settings file is a
-    /// thing people edit, and a step of zero would divide by it.
+    /// # Panics
+    ///
+    /// For a stack without the editor's defaults under it, as
+    /// [`crate::defaults::positive`] does.
     #[must_use]
     pub fn load(stack: &SettingsStack) -> Self {
-        let step = |key: &str, default: f64, unit: &str| {
-            if !stack.contains(key) {
-                return default;
-            }
-            match stack.get::<f64>(key) {
-                Some(step) if step.is_finite() && step > 0.0 => step,
-                _ => {
-                    crcbl::log::warn!(
-                        "editor: {key} is not a positive number of {unit}; snapping to \
-                         {default} {unit}"
-                    );
-                    default
-                }
-            }
-        };
+        let step = |key: &str, unit: &str| crate::defaults::positive(stack, key, unit);
         Self {
-            grid: step(GRID_KEY, GRID_M, "metres"),
-            scale: step(SCALE_KEY, SCALE_M, "metres"),
-            angle: step(ANGLE_KEY, ANGLE_DEG, "degrees"),
+            grid: step(GRID_KEY, "metres"),
+            scale: step(SCALE_KEY, "metres"),
+            angle: step(ANGLE_KEY, "degrees"),
         }
     }
 

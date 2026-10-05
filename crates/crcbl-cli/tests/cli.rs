@@ -2437,19 +2437,35 @@ fn list_shows_the_file_it_read_and_everything_in_it() {
     assert!(human.contains(arg(&path)), "{human}");
     assert!(human.contains("shadows = false"), "{human}");
     assert!(human.contains("difficulty = \"hard\""), "{human}");
+    // Each line names its layer: the file's own keys, and the engine's reading
+    // of a key the file does not hold.
+    assert!(
+        human.contains("engine.video.shadows = false  (user)"),
+        "{human}"
+    );
+    assert!(
+        human.contains("engine.video.render_scale = 1.0  (engine)"),
+        "{human}"
+    );
 
     let json = stdout(&settings(home, &["--json", "list"]));
     assert!(has_field(&json, "file_exists", "true"), "{json}");
     assert!(has_field(&json, "count", "2"), "{json}");
     assert!(
         json.contains(
-            r#"{"status":"read","key":"engine.video.shadows","type":"boolean","value":false}"#
+            r#"{"status":"read","key":"engine.video.shadows","type":"boolean","value":false,"layer":"user"}"#
         ),
         "{json}"
     );
     assert!(
         json.contains(
-            r#"{"status":"game","key":"game.difficulty","type":"string","value":"hard"}"#
+            r#"{"status":"game","key":"game.difficulty","type":"string","value":"hard","layer":"user"}"#
+        ),
+        "{json}"
+    );
+    assert!(
+        json.contains(
+            r#""key":"engine.video.render_scale","type":"float","value":1.0,"layer":"engine"}"#
         ),
         "{json}"
     );

@@ -129,11 +129,12 @@ mod console;
 mod engine_audio;
 mod engine_video;
 mod key_catalogue;
+pub mod launch;
 pub mod presets;
 mod renderer;
 mod stage;
 
-pub use console::{ConsoleHost, SharedSettings, console_bindings, dump, save};
+pub use console::{ConsoleHost, SharedSettings, catalogue_value, console_bindings, dump, save};
 pub use engine_audio::{AUDIO_NAMESPACE, audio_gains, set_audio_gain};
 pub use engine_video::{
     ANISOTROPIC_FILTERING_KEY, ANTIALIASING_KEY, ANTIALIASING_NAMES, FRAME_LIMIT_CEILING,

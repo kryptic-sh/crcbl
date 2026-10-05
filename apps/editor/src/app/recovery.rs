@@ -47,7 +47,7 @@
 //! # Autosave (decided 2026-10-03)
 //!
 //! While the document is dirty, every [`AUTOSAVE_KEY`] seconds of the
-//! editor's clock — [`AUTOSAVE_SECONDS`] with nothing set — the authored scene
+//! editor's clock — a minute, in [`crate::defaults`], with nothing set — the authored scene
 //! (never the played state: [`Document::write_recovery`] writes the authored
 //! files) is written into the recovery directory as a copy like any other, so
 //! a crash or a killed process loses at most that long. The interval restarts
@@ -96,10 +96,6 @@ pub const OFFERED: usize = 3;
 /// ([`crate::layout::APP_NAME`]).
 pub const AUTOSAVE_KEY: &str = "editor.autosave.interval";
 
-/// The autosave interval with nothing set, in seconds: a minute is a
-/// minute's work at most lost, and writing a scene that often costs nothing.
-pub const AUTOSAVE_SECONDS: f64 = 60.0;
-
 /// What the status line says once the offer is put away.
 const LATER: &str = "Recovery copies kept: they are offered again at the next start";
 
@@ -133,26 +129,16 @@ impl Autosave {
         }
     }
 
-    /// The interval `stack` sets, or [`AUTOSAVE_SECONDS`] where it sets none.
+    /// The interval `stack` sets, falling through to the editor's default
+    /// where it sets none, on [`crate::defaults::positive`]'s terms: an
+    /// interval of zero would write every frame.
     ///
-    /// A value that is not a positive, finite number of seconds is logged and
-    /// passed over, as the snap steps are: a settings file is a thing people
-    /// edit, and an interval of zero would write every frame.
+    /// # Panics
+    ///
+    /// For a stack without the editor's defaults under it, as
+    /// [`crate::defaults::positive`] does.
     pub(super) fn load(stack: &SettingsStack) -> Self {
-        let seconds = if stack.contains(AUTOSAVE_KEY) {
-            match stack.get::<f64>(AUTOSAVE_KEY) {
-                Some(seconds) if seconds.is_finite() && seconds > 0.0 => seconds,
-                _ => {
-                    crcbl::log::warn!(
-                        "editor: {AUTOSAVE_KEY} is not a positive number of seconds; \
-                         autosaving every {AUTOSAVE_SECONDS} seconds"
-                    );
-                    AUTOSAVE_SECONDS
-                }
-            }
-        } else {
-            AUTOSAVE_SECONDS
-        };
+        let seconds = crate::defaults::positive(stack, AUTOSAVE_KEY, "seconds");
         Self::new(Duration::from_secs_f64(seconds))
     }
 }

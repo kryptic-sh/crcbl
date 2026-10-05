@@ -27,8 +27,9 @@ use super::key_catalogue::{
 };
 use super::stage::{Deferred, apply};
 
+use super::key_catalogue::CatalogueKey;
 #[cfg(doc)]
-use super::key_catalogue::{CatalogueKey, KeyStatus, catalogue};
+use super::key_catalogue::{KeyStatus, catalogue};
 
 /// One run's settings, held by everything that edits them.
 ///
@@ -208,20 +209,34 @@ crcbl_console::concommand! {
 }
 
 crcbl_console::concommand! {
-    /// Print every key the settings stack holds, layer by layer.
+    /// Print every key the settings stack holds, and the layer it came from.
     pub fn dump(cx, _args) {
-        let text = cx
-            .host()
-            .downcast_ref::<ConsoleHost>()
-            .expect("the engine's console is only ever run over a `ConsoleHost`")
-            .stack
-            .stack()
-            .dump();
-        for line in text.lines() {
+        let lines = dump_lines(
+            &cx.host()
+                .downcast_ref::<ConsoleHost>()
+                .expect("the engine's console is only ever run over a `ConsoleHost`")
+                .stack
+                .stack(),
+        );
+        for line in lines {
             cx.print(line);
         }
         Ok(())
     }
+}
+
+/// `dump`'s lines: `key = value  (layer)`, one per key the stack holds.
+///
+/// The layer is the point — a value nobody remembers choosing is traced to the
+/// game's defaults, the player's file or this run's `--set` — and it is
+/// [`SettingsStack::entries`]' word for it, the one `crcbl settings list`
+/// prints too.
+fn dump_lines(stack: &SettingsStack) -> Vec<String> {
+    stack
+        .entries()
+        .into_iter()
+        .map(|entry| format!("{} = {}  ({})", entry.key, entry.value, entry.layer.name()))
+        .collect()
 }
 
 /// Every catalogue key as a console variable, in [`catalogue`]'s order.
@@ -258,6 +273,24 @@ fn read(host: &dyn Any, namespace: &str, name: &str, kind: Kind) -> Value {
         .expect("a settings binding is only ever given a `ConsoleHost`")
         .stack
         .stack();
+    read_stack(stack, namespace, name, kind)
+}
+
+/// What the engine reads for `entry` out of `stack`: the value the console
+/// prints for its variable, and what `crcbl settings list` prints for a key
+/// no layer holds — the engine's own default, through the same reader.
+#[must_use]
+pub fn catalogue_value(stack: &SettingsStack, entry: &CatalogueKey) -> Value {
+    let namespace = entry
+        .key
+        .strip_suffix(entry.name)
+        .and_then(|prefix| prefix.strip_suffix('.'))
+        .expect("a catalogue key is its namespace and its name, joined by a dot");
+    read_stack(stack, namespace, entry.name, entry.kind)
+}
+
+/// [`read`], on the stack itself.
+fn read_stack(stack: &SettingsStack, namespace: &str, name: &str, kind: Kind) -> Value {
     if namespace == AUDIO_NAMESPACE {
         let gains = audio_gains(stack);
         let (_, gain) = gains
@@ -656,6 +689,63 @@ mod tests {
             binding_for("display_mode").get(&host),
             Value::Enum("windowed"),
             "an absent enum reads back as the first name in its set"
+        );
+    }
+
+    /// **`dump` names the layer each key came from**: the game's default, the
+    /// player's file and this run's `--set`, each on its own line.
+    #[test]
+    fn dump_names_the_layer_each_key_came_from() {
+        let mut launch = crcbl_store::settings::LaunchLayers::new()
+            .with_game_defaults(
+                "[game]
+lives = 2
+speed = 1",
+            )
+            .expect("a test's own TOML");
+        launch.set("game.lives=4").expect("a well-formed override");
+        let storage = crcbl_store::MemoryStorage::new();
+        crcbl_store::StorageSource::write(
+            &storage,
+            std::path::Path::new(crcbl_store::settings::SETTINGS_FILE),
+            b"[game]
+name = \"Ada\"
+",
+        )
+        .expect("memory storage accepts every write");
+        let stack = SettingsStack::from_storage_with(&storage, &launch);
+
+        assert_eq!(
+            dump_lines(&stack),
+            [
+                "game.lives = 4  (cli)",
+                "game.name = \"Ada\"  (user)",
+                "game.speed = 1  (game)",
+            ]
+        );
+    }
+
+    /// **The value a key no layer holds is the engine's own reading**, the one
+    /// its console variable prints.
+    #[test]
+    fn a_catalogue_value_is_what_the_engines_reader_answers() {
+        let render_scale = catalogue()
+            .into_iter()
+            .find(|entry| entry.name == RENDER_SCALE_KEY)
+            .expect("the render scale is catalogued");
+        assert_eq!(
+            catalogue_value(&stack_from(""), &render_scale),
+            Value::Float(1.0)
+        );
+        assert_eq!(
+            catalogue_value(
+                &stack_from(
+                    "[engine.video]
+render_scale = 0.5"
+                ),
+                &render_scale
+            ),
+            Value::Float(0.5)
         );
     }
 }

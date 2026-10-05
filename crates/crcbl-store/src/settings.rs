@@ -8,11 +8,26 @@
 //! 2. **Game defaults** — compiled-in defaults shipped with the game.
 //! 3. **User settings file** — `settings.toml` on disk, storing only values the
 //!    user has explicitly changed (diff vs defaults = small files).
-//! 4. **CLI / env overrides** — single-key overrides passed at launch.
+//! 4. **Command-line overrides** — `--set key=value`, for one run.
 //!
 //! Reading a key searches layers from highest to lowest and returns the first
 //! hit. Writing a value stores it in the user settings layer, which can be
 //! persisted atomically via [`SettingsStack::save`].
+//!
+//! # The two layers around the player's file are the launch's
+//!
+//! [`LaunchLayers`] holds the game's defaults and the command line's
+//! overrides, and [`SettingsStack::layered`] puts them below and above the
+//! user file. Both are facts about one run of one binary rather than about the
+//! machine, which is why neither is ever written: [`SettingsStack::save`]
+//! persists the user layer alone, so a `--set` lasts exactly as long as the
+//! process that was given it, and a game's default stays out of the file until
+//! the player changes it — the "small files" rule above.
+//!
+//! An override's value is read by the grammar `settings.toml` is: `true`,
+//! `0.5`, `"text"`. A bare word is refused rather than taken as text, because
+//! the same word in the file would not parse either, and a flag that accepted
+//! what the file refuses would be a second dialect.
 //!
 //! # Namespace convention
 //!
@@ -61,11 +76,53 @@ pub enum SettingsLayer {
     GameDefaults(toml::Table),
     /// User settings file on disk, loaded from a [`StorageSource`].
     UserFile(StorageSettingsFile),
-    /// CLI / env overrides (parsed as TOML key = value pairs).
+    /// Command-line overrides: one run's `--set key=value` pairs, see
+    /// [`LaunchLayers::set`].
     CliOverrides(toml::Table),
 }
 
+/// Which layer of a [`SettingsStack`] a value came from.
+///
+/// What `crcbl settings list` and the console's `dump` print beside each key,
+/// so a value nobody remembers choosing can be traced to whoever chose it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LayerKind {
+    /// [`SettingsLayer::EngineDefaults`], or the engine's own reading of a key
+    /// no layer holds.
+    Engine,
+    /// [`SettingsLayer::GameDefaults`].
+    Game,
+    /// [`SettingsLayer::UserFile`]: the player's [`SETTINGS_FILE`].
+    User,
+    /// [`SettingsLayer::CliOverrides`].
+    CommandLine,
+}
+
+impl LayerKind {
+    /// The word this layer is reported under, in `--json` and to a person.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Engine => "engine",
+            Self::Game => "game",
+            Self::User => "user",
+            Self::CommandLine => "cli",
+        }
+    }
+}
+
 impl SettingsLayer {
+    /// Which kind of layer this is.
+    #[must_use]
+    pub const fn kind(&self) -> LayerKind {
+        match self {
+            Self::EngineDefaults(_) => LayerKind::Engine,
+            Self::GameDefaults(_) => LayerKind::Game,
+            Self::UserFile(_) => LayerKind::User,
+            Self::CliOverrides(_) => LayerKind::CommandLine,
+        }
+    }
+
     /// The inner TOML table, if this layer has one.
     fn table(&self) -> Option<&toml::Table> {
         match self {
@@ -176,6 +233,133 @@ impl StorageSettingsFile {
     }
 }
 
+// ── Launch layers ──────────────────────────────────────────────────────────
+
+/// The layers a run is launched with: the game's compiled-in defaults, which
+/// sit below the player's file, and the command line's overrides, which sit
+/// above it.
+///
+/// Held apart from any [`SettingsStack`] because a run opens its settings more
+/// than once — the GPU context reads `[engine.video]`, the console reads the
+/// whole file, a settings screen opens its own — and every one of those has to
+/// be the same four layers. [`SettingsStack::layered`] is how each of them gets
+/// these two.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LaunchLayers {
+    game: Option<toml::Table>,
+    cli: toml::Table,
+}
+
+/// Why a `--set` was refused.
+///
+/// The message names the key wherever there is one, so a run started with a
+/// dozen overrides is told which of them was wrong.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverrideError(String);
+
+impl std::fmt::Display for OverrideError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OverrideError {}
+
+impl LaunchLayers {
+    /// No game defaults and no overrides: a stack layered over this is the
+    /// player's file alone.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// These layers with `text` — a TOML document — as the game's defaults.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Other`] if `text` is not TOML. A game's defaults are
+    /// compiled into it, so this is a build that ships a broken table, and the
+    /// run is refused rather than started without the values the game assumes.
+    pub fn with_game_defaults(mut self, text: &str) -> Result<Self, StorageError> {
+        let table = toml::from_str(text)
+            .map_err(|e| StorageError::Other(format!("invalid game default settings: {e}")))?;
+        self.game = Some(table);
+        Ok(self)
+    }
+
+    /// Adds one `KEY=VALUE` override, answering the key it set.
+    ///
+    /// The key is dotted, as in [`SettingsStack::get`]; the value is a TOML
+    /// value, read as `settings.toml` reads one — see the module docs. A key
+    /// given twice keeps the later value, so a wrapper script can append an
+    /// override to a command line that already has one.
+    ///
+    /// # Errors
+    ///
+    /// [`OverrideError`] when `arg` has no `=`, when the key is not a dotted
+    /// settings key, when the value is not a TOML value, or when the key needs
+    /// a table where an earlier override put a value (`a=1` then `a.b=2`).
+    pub fn set(&mut self, arg: &str) -> Result<String, OverrideError> {
+        let (key, raw) = arg
+            .split_once('=')
+            .ok_or_else(|| OverrideError(format!("`{arg}` is not <KEY>=<VALUE>")))?;
+        if key.is_empty() {
+            return Err(OverrideError(format!("`{arg}` names no key")));
+        }
+        if !key.split('.').all(is_bare_key) {
+            return Err(OverrideError(format!(
+                "`{key}` is not a settings key: dotted names of letters, digits, `_` and `-`"
+            )));
+        }
+        let value: toml::Value = raw.parse().map_err(|_| {
+            OverrideError(format!(
+                "{key}: `{raw}` is not a TOML value — quote text, as in {key}=\"{raw}\""
+            ))
+        })?;
+        set_dotted(&mut self.cli, key, value).map_err(|e| OverrideError(format!("{key}: {e}")))?;
+        Ok(key.to_owned())
+    }
+
+    /// Whether there is nothing here: no game defaults and no override.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.game.is_none() && self.cli.is_empty()
+    }
+
+    /// Whether the game supplied defaults at all.
+    ///
+    /// The half [`game_defines`](Self::game_defines) needs beside it: a game
+    /// with no defaults table has said nothing about which keys are its own,
+    /// so a key it does not define is not evidence of a typo.
+    #[must_use]
+    pub const fn has_game_defaults(&self) -> bool {
+        self.game.is_some()
+    }
+
+    /// Whether the game's defaults hold `key`.
+    #[must_use]
+    pub fn game_defines(&self, key: &str) -> bool {
+        self.game
+            .as_ref()
+            .is_some_and(|table| get_dotted(table, key).is_some())
+    }
+
+    /// Every key an override sets, dotted, in key order.
+    #[must_use]
+    pub fn overridden_keys(&self) -> Vec<String> {
+        leaves(&self.cli).into_iter().map(|(key, _)| key).collect()
+    }
+}
+
+/// Whether `part` is one segment of a dotted key: a TOML bare key, which is
+/// what a section header and a `key = value` line in `settings.toml` spell.
+fn is_bare_key(part: &str) -> bool {
+    !part.is_empty()
+        && part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 // ── Stack ──────────────────────────────────────────────────────────────────
 
 /// A stack of settings layers, resolved highest-to-lowest priority.
@@ -235,9 +419,17 @@ impl SettingsStack {
     /// the stack this returns would sit **above** the player's file and beat
     /// it. A caller that wants engine or game defaults underneath assembles the
     /// stack itself instead — [`new`](Self::new), the default tables, then
-    /// `SettingsLayer::UserFile(StorageSettingsFile::load(..))` last.
+    /// `SettingsLayer::UserFile(StorageSettingsFile::load(..))` last — or asks
+    /// [`platform_with`](Self::platform_with), which does exactly that.
     #[must_use]
     pub fn platform(app_name: &str) -> Self {
+        Self::platform_with(app_name, &LaunchLayers::new())
+    }
+
+    /// [`platform`](Self::platform)'s file, [`layered`](Self::layered) between
+    /// `launch`'s game defaults and its overrides.
+    #[must_use]
+    pub fn platform_with(app_name: &str, launch: &LaunchLayers) -> Self {
         let file = Self::with_platform_storage(app_name, Self::user_file).unwrap_or_else(|| {
             #[cfg(not(target_arch = "wasm32"))]
             crcbl_core::log::warn!(
@@ -250,9 +442,30 @@ impl SettingsStack {
             );
             StorageSettingsFile::empty()
         });
+        Self::layered(launch, file)
+    }
 
+    /// The player's `file` between `launch`'s two layers: the game's defaults
+    /// below it and the command line's overrides above it.
+    ///
+    /// A layer `launch` does not have is not added, so a stack layered over
+    /// [`LaunchLayers::new`] is the one-layer stack
+    /// [`from_storage`](Self::from_storage) has always been.
+    ///
+    /// **Neither launch layer is ever saved.** [`set`](Self::set) writes the
+    /// user layer and [`save`](Self::save) persists it alone, so an override is
+    /// read for this run and gone at the next, and a game default reaches the
+    /// file only once the player changes the key.
+    #[must_use]
+    pub fn layered(launch: &LaunchLayers, file: StorageSettingsFile) -> Self {
         let mut stack = Self::new();
+        if let Some(game) = &launch.game {
+            stack.add(SettingsLayer::GameDefaults(game.clone()));
+        }
         stack.add(SettingsLayer::UserFile(file));
+        if !launch.cli.is_empty() {
+            stack.add(SettingsLayer::CliOverrides(launch.cli.clone()));
+        }
         stack
     }
 
@@ -327,9 +540,14 @@ impl SettingsStack {
     /// [`platform`](Self::platform)'s terms.
     #[must_use]
     pub fn from_storage(storage: &dyn StorageSource) -> Self {
-        let mut stack = Self::new();
-        stack.add(SettingsLayer::UserFile(Self::user_file(storage)));
-        stack
+        Self::from_storage_with(storage, &LaunchLayers::new())
+    }
+
+    /// [`from_storage`](Self::from_storage)'s file, [`layered`](Self::layered)
+    /// between `launch`'s game defaults and its overrides.
+    #[must_use]
+    pub fn from_storage_with(storage: &dyn StorageSource, launch: &LaunchLayers) -> Self {
+        Self::layered(launch, Self::user_file(storage))
     }
 
     /// [`SETTINGS_FILE`] out of `storage`, or an empty layer and a log line.
@@ -379,17 +597,68 @@ impl SettingsStack {
     /// [`contains`](Self::contains) for that, which is the pair a caller needs
     /// to warn about a value it could not read.
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
+        self.find(key, |_: &T| true).map(|(value, _)| value)
+    }
+
+    /// [`get`](Self::get), passing over a value `accept` refuses as well as one
+    /// of the wrong type, and naming the layer that answered.
+    ///
+    /// The same downward search with the same reason for it: a player's
+    /// `grid = 0` is an override the game cannot use, and the layer beneath —
+    /// the game's own default — is the right answer for it, where stopping at
+    /// the top would leave the caller holding a zero. A caller that wants to
+    /// tell the player their line did nothing compares the layer answered here
+    /// with [`layer_of`](Self::layer_of).
+    pub fn find<T: DeserializeOwned>(
+        &self,
+        key: &str,
+        accept: impl Fn(&T) -> bool,
+    ) -> Option<(T, LayerKind)> {
         for layer in self.layers.iter().rev() {
             // A layer without a table is skipped, not treated as the end of
             // the search.
             let Some(table) = layer.table() else { continue };
             if let Some(value) = get_dotted(table, key)
                 && let Ok(v) = value.clone().try_into::<T>()
+                && accept(&v)
             {
-                return Some(v);
+                return Some((v, layer.kind()));
             }
         }
         None
+    }
+
+    /// The highest-priority layer holding `key` at all, whatever type it
+    /// holds — the layer [`contains`](Self::contains) found it in.
+    #[must_use]
+    pub fn layer_of(&self, key: &str) -> Option<LayerKind> {
+        self.layers.iter().rev().find_map(|layer| {
+            layer
+                .table()
+                .and_then(|table| get_dotted(table, key))
+                .map(|_| layer.kind())
+        })
+    }
+
+    /// Every key the stack holds a value for, with the value that wins and the
+    /// layer it came from, in key order.
+    ///
+    /// A key is a dotted path to anything but a table — a list is one value,
+    /// as it is one line in the file. What `crcbl settings list` and the
+    /// console's `dump` print, so the two cannot disagree about which layer
+    /// answered.
+    #[must_use]
+    pub fn entries(&self) -> Vec<SettingsEntry> {
+        leaves(&self.merge_all())
+            .into_iter()
+            .map(|(key, value)| SettingsEntry {
+                layer: self
+                    .layer_of(&key)
+                    .expect("a key in the merged view is in some layer"),
+                key,
+                value,
+            })
+            .collect()
     }
 
     /// Whether any layer defines `key` at all, whatever type it holds.
@@ -486,7 +755,42 @@ impl SettingsStack {
     }
 }
 
+/// One key of [`SettingsStack::entries`]: the dotted key, the value that wins,
+/// and the layer it came from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettingsEntry {
+    /// The dotted key, as [`SettingsStack::get`] takes it.
+    pub key: String,
+    /// The layer the value came from.
+    pub layer: LayerKind,
+    /// The value, as the file would spell it.
+    pub value: toml::Value,
+}
+
 // ── Dotted key helpers ─────────────────────────────────────────────────────
+
+/// Every non-table value under `table`, under its dotted key, in key order.
+fn leaves(table: &toml::Table) -> Vec<(String, toml::Value)> {
+    let mut found = Vec::new();
+    // A worklist in reverse so that popping visits keys in the table's order.
+    let mut pending: Vec<(String, &toml::Value)> = table
+        .iter()
+        .rev()
+        .map(|(name, value)| (name.clone(), value))
+        .collect();
+    while let Some((key, value)) = pending.pop() {
+        match value.as_table() {
+            Some(section) => pending.extend(
+                section
+                    .iter()
+                    .rev()
+                    .map(|(name, child)| (format!("{key}.{name}"), child)),
+            ),
+            None => found.push((key, value.clone())),
+        }
+    }
+    found
+}
 
 /// Navigate a dotted key into a TOML table, returning the value if found.
 ///
@@ -959,6 +1263,282 @@ mod tests {
                 root.display()
             );
         }
+    }
+
+    // ── Launch layers ─────────────────────────────────────────────────
+
+    /// A user layer holding `toml`, as the loader would read it.
+    fn user_file(toml: &str) -> StorageSettingsFile {
+        StorageSettingsFile {
+            data: toml::from_str(toml).expect("a test's own TOML"),
+            dirty: false,
+        }
+    }
+
+    /// Launch layers with `game` as the game's defaults and `sets` as the
+    /// command line's overrides.
+    fn launch(game: &str, sets: &[&str]) -> LaunchLayers {
+        let mut launch = LaunchLayers::new()
+            .with_game_defaults(game)
+            .expect("a test's own TOML");
+        for arg in sets {
+            launch.set(arg).expect("a well-formed override");
+        }
+        launch
+    }
+
+    /// **One key through all four layers: engine < game < user < command
+    /// line.**
+    ///
+    /// Each layer is peeled off in turn, so every one of the three orderings
+    /// is asserted on its own — a stack that put the overrides beneath the
+    /// player's file answers `3` in the first assertion, one that put the
+    /// game's defaults above it answers `2` in the second.
+    #[test]
+    fn one_key_resolves_engine_then_game_then_user_then_command_line() {
+        let stack_of = |launch: &LaunchLayers, file: &str| {
+            let mut stack = SettingsStack::new();
+            stack.add(SettingsLayer::EngineDefaults(
+                toml::from_str("[game]\nlives = 1").expect("a test's own TOML"),
+            ));
+            for layer in SettingsStack::layered(launch, user_file(file)).layers {
+                stack.add(layer);
+            }
+            stack
+        };
+        let key = "game.lives";
+
+        let all = stack_of(
+            &launch("[game]\nlives = 2", &["game.lives=4"]),
+            "[game]\nlives = 3",
+        );
+        assert_eq!(all.get::<i64>(key), Some(4), "the command line wins");
+        assert_eq!(all.layer_of(key), Some(LayerKind::CommandLine));
+
+        let no_cli = stack_of(&launch("[game]\nlives = 2", &[]), "[game]\nlives = 3");
+        assert_eq!(no_cli.get::<i64>(key), Some(3), "then the player's file");
+        assert_eq!(no_cli.layer_of(key), Some(LayerKind::User));
+
+        let no_user = stack_of(&launch("[game]\nlives = 2", &[]), "");
+        assert_eq!(no_user.get::<i64>(key), Some(2), "then the game's defaults");
+        assert_eq!(no_user.layer_of(key), Some(LayerKind::Game));
+
+        let engine_only = stack_of(&LaunchLayers::new(), "");
+        assert_eq!(engine_only.get::<i64>(key), Some(1), "then the engine's");
+        assert_eq!(engine_only.layer_of(key), Some(LayerKind::Engine));
+    }
+
+    /// **An override is read for this run and never written to the file.**
+    ///
+    /// The player changes a different key and saves, and the file that comes
+    /// back holds their two keys and nothing the command line said — not the
+    /// override of a key the file already had, and not a key it did not.
+    #[test]
+    fn an_override_is_never_written_back_when_the_user_file_saves() {
+        let storage = crate::MemoryStorage::new();
+        let path = Path::new(SETTINGS_FILE);
+        storage
+            .write(path, b"volume = 3\n")
+            .expect("memory storage accepts every write");
+        let launch = launch(
+            "difficulty = \"normal\"",
+            &["volume=9", "engine.video.shadows=false"],
+        );
+
+        let mut stack = SettingsStack::from_storage_with(&storage, &launch);
+        assert_eq!(stack.get::<i64>("volume"), Some(9), "the override is read");
+        stack.set("speed", &2).expect("the user layer is writable");
+        stack.save(&storage, path).expect("memory storage saves");
+
+        let written: toml::Table = toml::from_str(
+            str::from_utf8(&storage.read(path).expect("the save wrote a file"))
+                .expect("the writer emits UTF-8"),
+        )
+        .expect("the writer emits TOML");
+        let mut expected = toml::Table::new();
+        expected.insert("volume".into(), 3.into());
+        expected.insert("speed".into(), 2.into());
+        assert_eq!(
+            written, expected,
+            "the file holds what the player wrote, and no launch layer"
+        );
+    }
+
+    /// **An override's value is a TOML value**, read as `settings.toml` reads
+    /// one, and the key it lands under is the dotted key it named.
+    #[test]
+    fn an_override_is_typed_by_the_grammar_the_file_uses() {
+        let mut layers = LaunchLayers::new();
+        for (arg, key) in [
+            ("engine.video.shadows=false", "engine.video.shadows"),
+            ("engine.video.render_scale=0.5", "engine.video.render_scale"),
+            ("game.lives=3", "game.lives"),
+            ("game.name=\"Ada\"", "game.name"),
+            ("game.empty=''", "game.empty"),
+            ("game.equation=\"a=b\"", "game.equation"),
+            ("game.list=[1, 2]", "game.list"),
+        ] {
+            assert_eq!(layers.set(arg).as_deref(), Ok(key), "`{arg}`");
+        }
+        let stack = SettingsStack::layered(&layers, StorageSettingsFile::empty());
+        assert_eq!(stack.get::<bool>("engine.video.shadows"), Some(false));
+        assert_eq!(stack.get::<f64>("engine.video.render_scale"), Some(0.5));
+        assert_eq!(stack.get::<i64>("game.lives"), Some(3));
+        assert_eq!(stack.get::<String>("game.name").as_deref(), Some("Ada"));
+        assert_eq!(stack.get::<String>("game.empty").as_deref(), Some(""));
+        assert_eq!(
+            stack.get::<String>("game.equation").as_deref(),
+            Some("a=b"),
+            "the key ends at the first `=`"
+        );
+        assert_eq!(stack.get::<Vec<i64>>("game.list"), Some(vec![1, 2]));
+    }
+
+    /// **A malformed override is refused, and the refusal names its key.**
+    ///
+    /// A bare word is the case worth pinning: `crcbl settings set` takes one
+    /// as text, but the same word on a line of `settings.toml` does not parse,
+    /// and an override follows the file.
+    #[test]
+    fn a_malformed_override_is_refused_by_name() {
+        for (arg, names) in [
+            (
+                "engine.video.render_scale=fast",
+                "engine.video.render_scale",
+            ),
+            ("game.name=Ada", "game.name"),
+            ("game.lives=", "game.lives"),
+            ("game.lives=1\nother = 2", "game.lives"),
+            ("game.lives=1 2", "game.lives"),
+        ] {
+            let refused = LaunchLayers::new()
+                .set(arg)
+                .expect_err(&format!("`{arg}` was accepted"))
+                .to_string();
+            assert!(refused.contains(names), "`{arg}`: {refused}");
+            assert!(refused.contains("not a TOML value"), "`{arg}`: {refused}");
+        }
+
+        for (arg, says) in [
+            ("game.lives", "is not <KEY>=<VALUE>"),
+            ("=3", "names no key"),
+            ("game..lives=3", "is not a settings key"),
+            ("game lives=3", "is not a settings key"),
+            (".lives=3", "is not a settings key"),
+        ] {
+            let refused = LaunchLayers::new()
+                .set(arg)
+                .expect_err(&format!("`{arg}` was accepted"))
+                .to_string();
+            assert!(refused.contains(says), "`{arg}`: {refused}");
+        }
+
+        let mut layers = LaunchLayers::new();
+        layers.set("game=1").expect("a scalar key");
+        let refused = layers
+            .set("game.lives=3")
+            .expect_err("a key through a scalar override")
+            .to_string();
+        assert!(refused.starts_with("game.lives: "), "{refused}");
+        assert_eq!(
+            layers.overridden_keys(),
+            ["game"],
+            "the refused one left no trace"
+        );
+    }
+
+    /// **A key given twice keeps the later value**, so a wrapper script can
+    /// append an override to a command line that already has one.
+    #[test]
+    fn the_later_of_two_overrides_of_one_key_wins() {
+        let layers = launch("", &["game.lives=3", "game.lives=5"]);
+        let stack = SettingsStack::layered(&layers, StorageSettingsFile::empty());
+        assert_eq!(stack.get::<i64>("game.lives"), Some(5));
+        assert_eq!(layers.overridden_keys(), ["game.lives"]);
+    }
+
+    /// A game's defaults that are not TOML refuse the run; ones that are say
+    /// which keys they hold.
+    #[test]
+    fn game_defaults_are_a_toml_document_and_answer_for_their_keys() {
+        assert!(
+            LaunchLayers::new()
+                .with_game_defaults("this is not [ toml")
+                .is_err()
+        );
+        let layers = launch("[editor.snap]\ngrid = 0.25", &[]);
+        assert!(layers.has_game_defaults());
+        assert!(layers.game_defines("editor.snap.grid"));
+        assert!(!layers.game_defines("editor.snap.angle"));
+        assert!(!LaunchLayers::new().has_game_defaults());
+        assert!(LaunchLayers::new().is_empty());
+        assert!(!layers.is_empty());
+    }
+
+    /// **A launch with nothing in it adds no layer**, so every stack this
+    /// crate built before launch layers existed is still the stack it builds.
+    #[test]
+    fn an_empty_launch_layers_nothing_around_the_file() {
+        let stack = SettingsStack::layered(&LaunchLayers::new(), StorageSettingsFile::empty());
+        assert_eq!(stack.len(), 1);
+        let stack =
+            SettingsStack::layered(&launch("a = 1", &["b=2"]), StorageSettingsFile::empty());
+        assert_eq!(stack.len(), 3);
+    }
+
+    /// **`find` passes a refused value over and the layer beneath answers**,
+    /// naming itself — which is how a caller tells a player their line did
+    /// nothing.
+    #[test]
+    fn find_passes_over_a_refused_value_to_the_layer_beneath() {
+        let stack = SettingsStack::layered(
+            &launch("[editor.snap]\ngrid = 0.25", &[]),
+            user_file("[editor.snap]\ngrid = 0.0"),
+        );
+        let positive = |step: &f64| *step > 0.0;
+        assert_eq!(
+            stack.find("editor.snap.grid", positive),
+            Some((0.25, LayerKind::Game))
+        );
+        assert_eq!(stack.layer_of("editor.snap.grid"), Some(LayerKind::User));
+        assert_eq!(
+            stack.find("editor.snap.grid", |_: &f64| true),
+            Some((0.0, LayerKind::User))
+        );
+        assert_eq!(stack.find("editor.snap.angle", positive), None);
+    }
+
+    /// **`entries` names the layer each key's value came from**, and the value
+    /// is the one that wins.
+    #[test]
+    fn entries_name_the_layer_each_value_came_from() {
+        let stack = SettingsStack::layered(
+            &launch("[game]\nlives = 2\nspeed = 1", &["game.lives=4"]),
+            user_file("[game]\nspeed = 3\nname = \"Ada\""),
+        );
+        let entries: Vec<(String, LayerKind, toml::Value)> = stack
+            .entries()
+            .into_iter()
+            .map(|entry| (entry.key, entry.layer, entry.value))
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                ("game.lives".to_owned(), LayerKind::CommandLine, 4.into()),
+                ("game.name".to_owned(), LayerKind::User, "Ada".into()),
+                ("game.speed".to_owned(), LayerKind::User, 3.into()),
+            ]
+        );
+        assert_eq!(
+            [
+                LayerKind::Engine,
+                LayerKind::Game,
+                LayerKind::User,
+                LayerKind::CommandLine,
+            ]
+            .map(LayerKind::name),
+            ["engine", "game", "user", "cli"]
+        );
     }
 
     #[test]

@@ -35,6 +35,8 @@
 use std::fmt;
 use std::process::ExitCode;
 
+use crcbl_store::settings::LaunchLayers;
+
 use crate::backend::GpuBackend;
 use crate::engine::{FrameLimit, GpuOptions, LoopConfig, Pacing};
 use crate::hal::{BindingModel, GeometryPath};
@@ -69,7 +71,11 @@ pub const COMMON_OPTIONS_HELP: &str =
     --exec <LINE>        Run a console line before the first frame, after the
                          player's autoexec.cfg. Repeatable; the lines run in
                          the order given. The one way to set a console variable
-                         on a --headless run, which reads no autoexec.cfg.";
+                         on a --headless run, which reads no autoexec.cfg.
+    --set <KEY=VALUE>    Override one setting for this run, the value spelled
+                         as in settings.toml: engine.video.shadows=false,
+                         game.speed=1.5, text in quotes. Repeatable; the later
+                         of two for one key wins. Never saved to the file.";
 
 /// The `--screenshot` line, for the samples that have wired it up.
 ///
@@ -223,6 +229,7 @@ pub fn run_front_end<O, S, E>(
     print_summary: impl FnOnce(&S) -> String,
 ) -> ExitCode
 where
+    O: AsRef<Common>,
     E: fmt::Display,
 {
     // `CRCBL_LOG=debug` turns on the per-event lines; the default is warnings.
@@ -241,16 +248,25 @@ where
     crate::core::trace::init_from_env();
 
     match invocation {
-        Invocation::Run(options) => match run(&options) {
-            Ok(summary) => {
-                println!("{}", print_summary(&summary));
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
+        Invocation::Run(options) => {
+            // Before the run, so the first settings stack it opens is already
+            // layered: the game's defaults under the player's file, `--set`
+            // over it. After the logger, so an unknown key's warning is seen.
+            if let Err(error) = options.as_ref().install_settings() {
                 eprintln!("{name}: {error}");
-                ExitCode::FAILURE
+                return ExitCode::FAILURE;
             }
-        },
+            match run(&options) {
+                Ok(summary) => {
+                    println!("{}", print_summary(&summary));
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{name}: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Invocation::Help => {
             println!("{usage}");
             ExitCode::SUCCESS
@@ -391,6 +407,35 @@ pub struct Common {
     /// holds a line break, so a fault's `--exec:2` label names the second flag
     /// rather than the second line of some flag's value.
     pub exec: Vec<String>,
+    /// Settings overrides, one `KEY=VALUE` per `--set`, in the order given.
+    ///
+    /// Each was checked when it was parsed — [`consume`](Self::consume)
+    /// refuses a malformed one by name — and they become the stack's top
+    /// layer through [`launch_layers`](Self::launch_layers). Kept as the text
+    /// that was typed rather than as parsed values so this struct stays the
+    /// plain, comparable record of a command line it is.
+    ///
+    /// **Applies to every run, headless included**, on [`exec`](Self::exec)'s
+    /// terms: a `--headless` run reads no settings file, and these were asked
+    /// for by name — see
+    /// [`SettingsSource::open_with`](crate::engine::SettingsSource::open_with).
+    pub set: Vec<String>,
+    /// The game's default settings, a TOML document, or `None` for a game that
+    /// ships none.
+    ///
+    /// Set with [`with_settings_defaults`](Self::with_settings_defaults). The
+    /// layer between the engine's own defaults and the player's file: a value
+    /// here is what the game reads until the player changes it, and the
+    /// player's file never holds it until they do.
+    pub settings_defaults: Option<&'static str>,
+}
+
+/// So [`run_front_end`] can take the shared half of an `Options` that holds
+/// it, and an `Options` that *is* only the shared half.
+impl AsRef<Self> for Common {
+    fn as_ref(&self) -> &Self {
+        self
+    }
 }
 
 impl Common {
@@ -416,7 +461,64 @@ impl Common {
             screenshot: None,
             size: None,
             exec: Vec::new(),
+            set: Vec::new(),
+            settings_defaults: None,
         }
+    }
+
+    /// Declares the game's default settings: `toml`, a TOML document, usually
+    /// `include_str!` of a file beside the game's source.
+    ///
+    /// Written into the game's `Options::default` beside the tick rate, as
+    /// `with_screenshot` is — another fact about a sample this struct cannot
+    /// guess.
+    #[must_use]
+    pub const fn with_settings_defaults(mut self, toml: &'static str) -> Self {
+        self.settings_defaults = Some(toml);
+        self
+    }
+
+    /// The launch layers this command line asks for: the game's defaults below
+    /// the player's file and every `--set` above it.
+    ///
+    /// # Errors
+    ///
+    /// The message to fail the run with, when the game's defaults are not TOML.
+    /// The overrides were checked as they were parsed, so a refusal of one here
+    /// means this struct was built by hand with a malformed entry.
+    pub fn launch_layers(&self) -> Result<LaunchLayers, String> {
+        let mut layers = LaunchLayers::new();
+        if let Some(defaults) = self.settings_defaults {
+            layers = layers
+                .with_game_defaults(defaults)
+                .map_err(|error| error.to_string())?;
+        }
+        for pair in &self.set {
+            layers.set(pair).map_err(|error| format!("--set {error}"))?;
+        }
+        Ok(layers)
+    }
+
+    /// Installs [`launch_layers`](Self::launch_layers) for the process, so
+    /// every settings stack the run opens layers them, and warns about each
+    /// override whose key nothing defines.
+    ///
+    /// What [`run_front_end`] does before the run, and so what every sample
+    /// that shares the front end gets without asking — see
+    /// [`crate::settings::launch`] for why the layers are the process's.
+    ///
+    /// # Errors
+    ///
+    /// [`launch_layers`](Self::launch_layers)'.
+    pub fn install_settings(&self) -> Result<(), String> {
+        let layers = self.launch_layers()?;
+        for key in crate::settings::launch::unknown_overrides(&layers) {
+            crate::log::warn!(
+                "settings: --set {key} names a key nothing defines, so nothing reads it"
+            );
+        }
+        crate::settings::launch::install(layers);
+        Ok(())
     }
 
     /// Declares that this sample hands its context to
@@ -612,6 +714,22 @@ impl Common {
                     ));
                 }
                 self.exec.push(line);
+            }
+            "--set" => {
+                let Some(pair) = rest.next() else {
+                    return Consumed::Bad("--set needs <KEY>=<VALUE>".into());
+                };
+                // Checked against the ones before it rather than alone, so a
+                // pair that conflicts with an earlier one — `a=1`, then
+                // `a.b=2` — is refused here, with an exit code of 2, rather
+                // than when the run is already starting.
+                let mut layers = LaunchLayers::new();
+                for earlier in self.set.iter().chain(std::iter::once(&pair)) {
+                    if let Err(error) = layers.set(earlier) {
+                        return Consumed::Bad(format!("--set {error}"));
+                    }
+                }
+                self.set.push(pair);
             }
             // `headless` is set here rather than checked after the parse,
             // because a check would have to run somewhere every game
@@ -1335,6 +1453,7 @@ mod tests {
             "--fps",
             "--size",
             "--exec",
+            "--set",
             "--debug-overlay",
             "--no-debug-overlay",
             "-h",
@@ -1347,6 +1466,7 @@ mod tests {
             let value = match flag {
                 "--pacing" => "auto",
                 "--size" => "1x1",
+                "--set" => "game.lives=1",
                 _ => "1",
             };
             let mut rest = [value.to_string()].into_iter();
@@ -1442,6 +1562,147 @@ mod tests {
         assert_eq!(binding_from_name("mesh-shader"), None);
     }
 
+    /// **`--set` is repeatable and keeps every pair, in order**, and the
+    /// layers it builds hold each one.
+    #[test]
+    fn the_set_flag_is_repeatable_and_reaches_the_launch_layers() {
+        let common = parsed(&[
+            "--set",
+            "engine.video.shadows=false",
+            "--headless",
+            "--set",
+            "game.lives=3",
+            "--set",
+            "game.lives=5",
+        ]);
+        assert_eq!(
+            common.set,
+            ["engine.video.shadows=false", "game.lives=3", "game.lives=5"]
+        );
+        let layers = common.launch_layers().expect("every pair was checked");
+        assert_eq!(
+            layers.overridden_keys(),
+            ["engine.video.shadows", "game.lives"]
+        );
+        let stack = crcbl_store::settings::SettingsStack::layered(
+            &layers,
+            crcbl_store::settings::StorageSettingsFile::empty(),
+        );
+        assert_eq!(stack.get::<bool>("engine.video.shadows"), Some(false));
+        assert_eq!(stack.get::<i64>("game.lives"), Some(5), "the later wins");
+        assert!(
+            Common::new(60).set.is_empty(),
+            "a run that passed no --set overrides nothing"
+        );
+    }
+
+    /// **A malformed `--set` is refused at the parse, by name**, and so is one
+    /// that conflicts with a pair before it.
+    #[test]
+    fn a_malformed_set_is_refused_by_name() {
+        let refused = rejected(&["--set", "engine.video.render_scale=fast"]);
+        assert!(refused.starts_with("--set "), "{refused}");
+        assert!(refused.contains("engine.video.render_scale"), "{refused}");
+        assert!(refused.contains("not a TOML value"), "{refused}");
+
+        assert!(rejected(&["--set"]).contains("<KEY>=<VALUE>"));
+        assert!(rejected(&["--set", "game.lives"]).contains("<KEY>=<VALUE>"));
+
+        let refused = rejected(&["--set", "game=1", "--set", "game.lives=3"]);
+        assert!(refused.contains("game.lives"), "{refused}");
+    }
+
+    /// **The front end installs the launch layers before the run**, so the
+    /// run's first settings stack already has them.
+    #[test]
+    fn the_front_end_installs_the_launch_layers_before_the_run() {
+        let _launch = crate::settings::launch::launch_test_guard();
+        let common = Common::new(60).with_settings_defaults(
+            "[game]
+lives = 2
+speed = 1",
+        );
+        let common = Common {
+            set: vec!["game.lives=4".into()],
+            ..common
+        };
+        let mut seen = None;
+        let code = run_front_end::<Common, (), &str>(
+            "sample",
+            "usage",
+            Invocation::Run(common),
+            |_| {
+                let stack = crate::engine::SettingsSource::None.open_editable("sample");
+                seen = Some((
+                    stack.get::<i64>("game.lives"),
+                    stack.get::<i64>("game.speed"),
+                ));
+                Ok(())
+            },
+            |()| String::new(),
+        );
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(
+            seen,
+            Some((Some(4), Some(1))),
+            "the run read the override and the game's default"
+        );
+    }
+
+    /// **A game whose defaults are not TOML does not start**, and says why.
+    #[test]
+    fn a_game_whose_defaults_are_not_toml_fails_before_the_run() {
+        let _launch = crate::settings::launch::launch_test_guard();
+        let common = Common::new(60).with_settings_defaults("this is not [ toml");
+        assert!(
+            common
+                .install_settings()
+                .expect_err("broken defaults")
+                .contains("game default settings")
+        );
+        assert_eq!(
+            run_front_end::<Common, (), &str>(
+                "sample",
+                "usage",
+                Invocation::Run(common),
+                |_| unreachable!("a run with broken defaults never starts"),
+                |()| String::new(),
+            ),
+            ExitCode::FAILURE,
+        );
+    }
+
+    /// **An override of a key nothing defines warns, naming the key**, and
+    /// still runs: unknown keys warn and never crash.
+    #[test]
+    fn an_unknown_override_warns_by_name() {
+        let _launch = crate::settings::launch::launch_test_guard();
+        let common = Common {
+            set: vec![
+                "engine.video.shadow=false".into(),
+                "engine.video.shadows=false".into(),
+            ],
+            ..Common::new(60)
+        };
+        let logs = crate::core::log::capture();
+        common
+            .install_settings()
+            .expect("an unknown key is not a refusal");
+        let warnings: Vec<String> = logs
+            .records()
+            .into_iter()
+            .filter(|record| record.level == log::Level::Warn)
+            .map(|record| record.message)
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("engine.video.shadow "), "{warnings:?}");
+        assert_eq!(
+            crate::settings::launch::installed().overridden_keys(),
+            ["engine.video.shadow", "engine.video.shadows"],
+            "and both were installed"
+        );
+    }
+
     /// The front end's contract is "argv in, exit code out", and the four
     /// exit codes are what that contract pins: 0 ran, 1 it failed, 2 bad
     /// arguments, and `--help` runs cleanly. The printed lines are each
@@ -1449,28 +1710,30 @@ mod tests {
     /// generated binary and asserts its summary line.
     #[test]
     fn the_front_end_returns_the_contract_exit_codes() {
+        // The run arms install launch layers, which are the process's.
+        let _launch = crate::settings::launch::launch_test_guard();
         assert_eq!(
-            run_front_end::<(), u32, &str>(
+            run_front_end::<Common, u32, &str>(
                 "sample",
                 "usage",
-                Invocation::Run(()),
+                Invocation::Run(Common::new(60)),
                 |_| Ok(7),
                 |n| format!("ran {n}"),
             ),
             ExitCode::SUCCESS,
         );
         assert_eq!(
-            run_front_end::<(), u32, &str>(
+            run_front_end::<Common, u32, &str>(
                 "sample",
                 "usage",
-                Invocation::Run(()),
+                Invocation::Run(Common::new(60)),
                 |_| Err("boom"),
                 |_| String::new(),
             ),
             ExitCode::FAILURE,
         );
         assert_eq!(
-            run_front_end::<(), u32, &str>(
+            run_front_end::<Common, u32, &str>(
                 "sample",
                 "usage",
                 Invocation::Help,
@@ -1480,7 +1743,7 @@ mod tests {
             ExitCode::SUCCESS,
         );
         assert_eq!(
-            run_front_end::<(), u32, &str>(
+            run_front_end::<Common, u32, &str>(
                 "sample",
                 "usage",
                 Invocation::BadUsage("nonsense".into()),

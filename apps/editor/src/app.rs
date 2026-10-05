@@ -348,6 +348,11 @@ impl<S: Shell + ?Sized> Editor<S> {
     ///
     /// [`EditorError`] if the document would not open, the window never
     /// configured, or the device would not open.
+    ///
+    /// # Panics
+    ///
+    /// If `options` holds a `--set` that [`crate::args::parse`] would have
+    /// refused — an `Options` built by hand rather than parsed.
     pub fn with_shell(mut shell: Box<S>, options: &Options) -> Result<Self, EditorError> {
         let mut document = open_document(options)?;
         log_outline(&mut document);
@@ -388,7 +393,14 @@ impl<S: Shell + ?Sized> Editor<S> {
             .expect("`r_debug_draw` is a writable bool");
 
         let settings_source = SettingsSource::for_run(options.common.headless);
-        let settings = settings_source.open_editable(layout::APP_NAME);
+        // The command line's own launch layers rather than the process's, so
+        // an editor built from `Options` — every test here — reads its
+        // defaults and its `--set` the way the binary does.
+        let launch = options
+            .common
+            .launch_layers()
+            .expect("`parse` checked every --set, and `defaults.toml` is TOML");
+        let settings = settings_source.open_editable_with(layout::APP_NAME, &launch);
         let dock = layout::load(&settings).unwrap_or_else(layout::default_layout);
 
         let mut editor = Self::build(

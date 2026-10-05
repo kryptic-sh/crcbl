@@ -25,7 +25,8 @@ mod towers_field;
 mod unsaved;
 
 fn options(frames: u64) -> Options {
-    let mut common = crcbl::args::Common::new(crate::args::DEFAULT_TICK_HZ);
+    let mut common = crcbl::args::Common::new(crate::args::DEFAULT_TICK_HZ)
+        .with_settings_defaults(crate::defaults::SETTINGS_DEFAULTS);
     common.headless = true;
     common.frames = Some(frames);
     common.backend = Some(crcbl::backend::GpuBackend::Null);
@@ -47,6 +48,43 @@ fn options(frames: u64) -> Options {
 pub(super) fn headless(frames: u64) -> Editor<HeadlessShell> {
     Editor::with_shell(Box::new(HeadlessShell::new()), &options(frames))
         .expect("the null backend runs everywhere")
+}
+
+/// **An editor started with `--set` reads the override**, and one started
+/// without reads the editor's own defaults — from the command line `parse`
+/// takes, through the stack the editor opens, to the interval and the step it
+/// runs with.
+#[test]
+fn a_set_on_the_command_line_reaches_the_editors_settings() {
+    let started = |extra: &[&str]| {
+        let argv = ["--headless", "--backend", "null", "--frames", "1"]
+            .iter()
+            .chain(extra)
+            .map(|arg| (*arg).to_owned());
+        let crate::args::Invocation::Run(options) = crate::args::parse(argv) else {
+            panic!("a well-formed command line");
+        };
+        Editor::with_shell(Box::new(HeadlessShell::new()), &options)
+            .expect("the null backend runs everywhere")
+    };
+
+    let plain = started(&[]);
+    assert_eq!(plain.autosave.interval, Duration::from_secs(60));
+    assert_eq!(plain.snap, gizmo::Snap::default());
+
+    let set = started(&[
+        "--set",
+        "editor.autosave.interval=5.0",
+        "--set",
+        "editor.snap.angle=5.0",
+    ]);
+    assert_eq!(set.autosave.interval, Duration::from_secs(5));
+    assert_eq!(set.snap.angle_step(), 5.0);
+    assert_eq!(
+        set.snap.grid_step(),
+        plain.snap.grid_step(),
+        "a key no --set names keeps its default"
+    );
 }
 
 impl<S: Shell + ?Sized> Editor<S> {

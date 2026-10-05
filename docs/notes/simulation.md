@@ -633,7 +633,12 @@ The rules, each with its _why_:
   winning; `settings.toml` holds only what the player changed, so files stay
   small and survive upgrades. Namespaces are `[engine.video]`, `[engine.audio]`,
   `[engine.input]` and `[game.*]`, free for the game. Unknown keys warn and
-  never crash. Only the engine layer and the player's file have producers today.
+  never crash. The game's defaults and the command line are a run's launch
+  layers (`crcbl_store::settings::LaunchLayers`): a game declares a TOML table
+  with `Common::with_settings_defaults`, and `--set KEY=VALUE` — the value in
+  the file's own grammar, repeatable — overrides a key for one run and is never
+  saved. Both apply to a headless run, which reads no file. No
+  environment-variable override exists.
 - **Hot-apply what can be, confirm what can blank a screen.** Volume and
   sensitivity apply at once; vsync, resolution and display mode apply on confirm
   with a timed revert provided by the engine. The first half is

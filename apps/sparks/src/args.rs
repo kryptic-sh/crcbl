@@ -61,6 +61,10 @@ OPTIONS:
                          player's autoexec.cfg. Repeatable; the lines run in
                          the order given. The one way to set a console variable
                          on a --headless run, which reads no autoexec.cfg.
+    --set <KEY=VALUE>    Override one setting for this run, the value spelled
+                         as in settings.toml: engine.video.shadows=false,
+                         game.speed=1.5, text in quotes. Repeatable; the later
+                         of two for one key wins. Never saved to the file.
     --seed <N>           Effect seed. The same seed is the same spray: every
                          particle's lifetime, direction and size is a hash of
                          this and the particle's own index, so a fixed seed and
@@ -81,6 +85,13 @@ pub struct Options {
     pub common: Common,
     /// The effect seed. The same seed is the same spray.
     pub seed: u32,
+}
+
+/// The shared half, for [`crcbl::args::run_front_end`].
+impl AsRef<Common> for Options {
+    fn as_ref(&self) -> &Common {
+        &self.common
+    }
 }
 
 impl Default for Options {

@@ -15506,18 +15506,74 @@ ground prepared.
 play-mode restore and join-in-progress are one mechanism with three triggers.
 Today they are one mechanism with one trigger and one bypass.
 
-### Two of four settings layers; the settings UI screen shipped as `apps/options` (2026-08-27)
+### Settings launch layers: decisions, and what they left (2026-10-05)
 
-**Partly built.** `crcbl-store`'s `settings.rs` has a `SettingsLayer` stack,
-appended in order so a later layer wins, and writes always land in the user
-file. The enum declares `GameDefaults` and `CliOverrides` beside
-`EngineDefaults` and `UserFile`, and **nothing outside that file's own tests
-constructs the first two**. The `crcbl settings` CLI is honest about this — its
-stack has one layer, and `list` says so.
+**Built.** All four layers of `crcbl_store::settings` now have producers:
+`LaunchLayers` holds a game's compiled-in defaults and the command line's
+overrides, and `SettingsStack::layered` puts them below and above the player's
+`settings.toml`. `crcbl settings list` and the console's `dump` name each key's
+layer. The decisions, so they are not re-argued:
 
-**What it blocks:** a game shipping compiled-in defaults that a player's file
-overrides, which is the layering the doc's whole "small files, upgrade-friendly"
-argument rests on.
+- **The flag is `--set KEY=VALUE` (owner's decision)**, spelled as
+  `crcbl scene spawn --set` is, repeatable, the later of two for one key
+  winning. The value is read by the TOML value grammar `settings.toml` uses, so
+  a bare word is refused, naming the key — where `crcbl settings set` types a
+  bare word as text. Two dialects on purpose: the flag follows the file, as the
+  owner asked, and `settings set` keeps the convenience its own docs promise.
+- **A game declares its defaults on the shared `Common`**, with
+  `Common::with_settings_defaults(include_str!(...))`, beside `with_screenshot`.
+  There is no `EngineConfig` to hang them on, and every sample's `Options`
+  already carries a `Common`. The defaults are TOML _text_ rather than a table
+  because no app depends on `toml`, and `crcbl-store` keeps the parser to
+  itself.
+- **The launch layers are the process's.** `run_front_end` installs them
+  (`crcbl::settings::launch`) before the run, and every `SettingsSource::open`
+  layers them — the GPU context's `[engine.video]`, the loop's console and the
+  samples' audio start-up read them without being handed anything. The command
+  line is process state as `std::env::args` is. A caller holding its own
+  `Common` passes the layers to `SettingsSource::open_with`, which is what the
+  editor does, so an editor built from `Options` in a test reads the same stack
+  the binary does.
+- **`SettingsSource::None` takes the launch layers.** A headless run reads no
+  file and saves nowhere, but a game's defaults and its `--set` are not a home
+  directory, and `--headless --set` is the only way to change a key on such a
+  run. With nothing launched it still answers `None`, so golden runs are
+  unchanged.
+- **Unknown keys warn and run.** An `engine.` key the catalogue does not name is
+  unknown; a game key is judged only against a game that supplied defaults,
+  since one that supplied none has not said which keys are its own.
+- **The editor is the sample that moved its defaults**: snap steps and the
+  autosave interval live once, in `apps/editor/src/defaults.toml`, and a value
+  that is not a positive number falls through to it via `SettingsStack::find`.
+  **Considered and declined for towers:** it reads no settings key of its own,
+  so there was no hard-coded default to move.
+- **The console command is the existing `dump`**, which already listed the
+  stack; it now prints `key = value  (layer)`, the line `settings list` prints.
+
+**Behaviour that surprises and is not a bug:** a key a `--set` names is pinned
+for the run. A console or settings-screen write of it lands in the user layer
+and is saved, but every read still answers the override until the process ends —
+the override is the top layer, and dropping it on a write would make a `--set`
+mean something different depending on what happened after start-up.
+
+**Not built:**
+
+- **The browser takes no `--set`.** It has no command line, and a page has no
+  string channel into the wasm entry: breach's `?map=` is an index over a `u32`
+  export. A `?set=key=value` would need a string import the shim fills before
+  boot, then `install_settings`. Relatedly, `crcbl::impl_web_pending!` boots
+  `Options::default()` without calling `Common::install_settings`, so a web
+  sample that declared game defaults would not get them in the browser. No web
+  sample declares any yet; the fix is that call in the macro's `request`.
+- **`apps/sandbox` takes no `--set`**: its parser is deliberately its own and it
+  does not use `run_front_end`.
+- **Environment-variable overrides**, which `docs/notes/simulation.md` names
+  beside the command line, have no producer.
+- **`crcbl settings list` cannot see a game's defaults**: they are compiled into
+  the game, and the CLI is not that binary. A key the file holds with a value
+  its reader cannot use is listed as the file spells it, under `user`, although
+  the game reads the default.
+- **Profiles and persisted key binds** are unchanged: see the next entry.
 
 ### Profiles: no `Profile`, no persisted key binds (2026-08-27)
 

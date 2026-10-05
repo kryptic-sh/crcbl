@@ -61,6 +61,7 @@ pub mod app;
 pub mod args;
 pub mod clipboard;
 pub mod command;
+pub mod defaults;
 pub mod document;
 pub mod gizmo;
 pub mod keys;

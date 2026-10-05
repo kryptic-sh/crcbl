@@ -8,7 +8,7 @@ use super::*;
 use std::collections::BTreeMap;
 
 use super::files::chord;
-use crate::app::recovery::{AUTOSAVE_KEY, AUTOSAVE_SECONDS, Autosave, OFFERED, now_millis};
+use crate::app::recovery::{AUTOSAVE_KEY, Autosave, OFFERED, now_millis};
 use crate::document::origin_tests::{props_in_a_game, tree};
 use crate::document::play_tests::drifting_document;
 use crate::document::{
@@ -484,7 +484,11 @@ fn the_help_text_states_the_recovery_constants() {
     assert!(usage.contains("older than two weeks"), "{usage}");
     assert_eq!(KEEP_NEWEST, 20);
     assert!(usage.contains("past the newest twenty"), "{usage}");
-    assert!((AUTOSAVE_SECONDS - 60.0).abs() < f64::EPSILON);
+    assert_eq!(
+        crate::defaults::positive(&crate::defaults::stack(), AUTOSAVE_KEY, "seconds"),
+        60.0,
+        "the interval `defaults.toml` sets is the one the usage states"
+    );
     assert!(usage.contains("(settings.toml, default 60)"), "{usage}");
     assert!(usage.contains(AUTOSAVE_KEY), "{usage}");
 }

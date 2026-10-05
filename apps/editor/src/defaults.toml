@@ -1,0 +1,18 @@
+# The editor's default settings: what each key reads until the person changes
+# it in the editor's own settings.toml. Compiled into the editor and layered
+# under that file, so the file only ever holds what was changed.
+
+[editor.snap]
+# Metres a translate snaps the centre to.
+grid = 0.25
+# Metres a scale snaps each half extent to: half the grid step, so a snapped
+# box spans a whole number of grid cells.
+scale = 0.125
+# Degrees a turn snaps to: a twenty-fourth of a turn, which lands on the right
+# angle and on the eighth and twelfth turns alike.
+angle = 15.0
+
+[editor.autosave]
+# Seconds the document may stay dirty between autosaves: a minute is a
+# minute's work at most lost, and writing a scene that often costs nothing.
+interval = 60.0

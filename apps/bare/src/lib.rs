@@ -384,6 +384,10 @@ OPTIONS:
                          player's autoexec.cfg. Repeatable; the lines run in
                          the order given. The one way to set a console variable
                          on a --headless run, which reads no autoexec.cfg.
+    --set <KEY=VALUE>    Override one setting for this run, the value spelled
+                         as in settings.toml: engine.video.shadows=false,
+                         game.speed=1.5, text in quotes. Repeatable; the later
+                         of two for one key wins. Never saved to the file.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'

@@ -1,7 +1,5 @@
 use crcbl::render::ViewRay;
 use crcbl::scene::scn::SceneEntityId;
-use crcbl::store::MemoryStorage;
-use crcbl::store::settings::SettingsStack;
 
 use super::*;
 use crate::command::Gesture;
@@ -689,7 +687,7 @@ fn snapping_lands_on_absolute_grid_multiples_from_an_off_grid_start() {
 /// positive number — or not set — is the default.
 #[test]
 fn the_snap_steps_come_from_the_settings_or_their_defaults() {
-    let mut stack = SettingsStack::from_storage(&MemoryStorage::new());
+    let mut stack = crate::defaults::stack();
     assert_eq!(Snap::load(&stack), Snap::default(), "nothing set");
 
     stack.set(GRID_KEY, &0.5).expect("a writable stack");
@@ -911,7 +909,7 @@ fn a_ring_drag_turns_about_its_axis_by_the_angle_swept() {
 #[test]
 fn a_snapped_turn_lands_on_the_angle_step() {
     let snap = Snap::default();
-    assert_eq!(snap.angle_step(), ANGLE_DEG);
+    assert_eq!(snap.angle_step(), 15.0, "the step `defaults.toml` sets");
     let centre = Vec2::new(300.0, 200.0);
     let from = Turn {
         rotation: DQuat::IDENTITY,
@@ -986,13 +984,13 @@ fn scale_lines_follow_the_boxs_turn() {
 /// two do.
 #[test]
 fn the_angle_step_comes_from_the_settings_or_its_default() {
-    let mut stack = SettingsStack::from_storage(&MemoryStorage::new());
+    let mut stack = crate::defaults::stack();
     stack.set(ANGLE_KEY, &5.0).expect("a writable stack");
     assert_eq!(Snap::load(&stack).angle_step(), 5.0);
     stack.set(ANGLE_KEY, &0.0).expect("a writable stack");
     assert_eq!(
         Snap::load(&stack).angle_step(),
-        ANGLE_DEG,
+        Snap::default().angle_step(),
         "a step of zero was taken"
     );
 }

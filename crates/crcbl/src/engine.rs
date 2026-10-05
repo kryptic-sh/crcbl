@@ -117,7 +117,7 @@ use crcbl_shell::{
     WindowId,
 };
 use crcbl_store::StorageSource;
-use crcbl_store::settings::{SETTINGS_FILE, SettingsStack};
+use crcbl_store::settings::{LaunchLayers, SETTINGS_FILE, SettingsStack, StorageSettingsFile};
 
 use crate::settings::VideoSettings;
 
@@ -814,12 +814,32 @@ impl SettingsSource<'_> {
     /// the readers' answers: it edits keys with `crate::settings`' writers and
     /// hands the same stack back to [`save`](Self::save). The readers stay
     /// convenience over this — a start-up wants the section, not the file.
+    ///
+    /// The stack is the source's file between the process's
+    /// [`installed`](crate::settings::launch::installed) launch layers — the
+    /// game's defaults and the command line's `--set` — which is what makes
+    /// those two reach every reader of a run without being handed to each.
     #[must_use]
     pub fn open(self, app_name: &str) -> Option<SettingsStack> {
+        self.open_with(app_name, &crate::settings::launch::installed())
+    }
+
+    /// [`open`](Self::open), layered with `launch` rather than the process's.
+    ///
+    /// **[`Self::None`] reads no file, and still has a stack when `launch` has
+    /// a layer.** The arm keeps a run off whichever home directory it executes
+    /// in; a game's compiled-in defaults and the flags it was started with are
+    /// not that directory, and a `--headless --set` run is exactly the run that
+    /// has no other way to change a key. With nothing in `launch` it answers
+    /// `None`, as it always has, so a golden run that passes no `--set` reads
+    /// what it always read.
+    #[must_use]
+    pub fn open_with(self, app_name: &str, launch: &LaunchLayers) -> Option<SettingsStack> {
         match self {
-            Self::Platform => Some(SettingsStack::platform(app_name)),
-            Self::Source(storage) => Some(SettingsStack::from_storage(storage)),
-            Self::None => None,
+            Self::Platform => Some(SettingsStack::platform_with(app_name, launch)),
+            Self::Source(storage) => Some(SettingsStack::from_storage_with(storage, launch)),
+            Self::None if launch.is_empty() => None,
+            Self::None => Some(SettingsStack::layered(launch, StorageSettingsFile::empty())),
         }
     }
 
@@ -837,7 +857,14 @@ impl SettingsSource<'_> {
     /// and [`save`](Self::save) is the one that answers it.
     #[must_use]
     pub fn open_editable(self, app_name: &str) -> SettingsStack {
-        self.open(app_name)
+        self.open_editable_with(app_name, &crate::settings::launch::installed())
+    }
+
+    /// [`open_editable`](Self::open_editable), layered with `launch` rather
+    /// than the process's — see [`open_with`](Self::open_with).
+    #[must_use]
+    pub fn open_editable_with(self, app_name: &str, launch: &LaunchLayers) -> SettingsStack {
+        self.open_with(app_name, launch)
             .unwrap_or_else(|| SettingsStack::from_storage(&crcbl_store::MemoryStorage::new()))
     }
 
@@ -16874,6 +16901,87 @@ mod tests {
             storage.read(path).expect("the file is still there"),
             before,
             "the headless save reached storage it was never given",
+        );
+    }
+
+    /// **One engine key through all four layers, as the engine reads it:
+    /// built-in < game default < player's file < `--set`.**
+    ///
+    /// Through [`SettingsSource::open_with`] and the engine's own reader, so
+    /// what is asserted is the scale a renderer would be handed rather than a
+    /// table lookup. Each layer is taken away in turn, so each of the three
+    /// orderings is a separate assertion.
+    #[test]
+    fn one_engine_key_resolves_built_in_then_game_then_user_then_command_line() {
+        use crcbl_store::StorageSource;
+        use crcbl_store::settings::LaunchLayers;
+
+        let key = "engine.video.render_scale";
+        let game = LaunchLayers::new()
+            .with_game_defaults("[engine.video]\nrender_scale = 0.9")
+            .expect("a test's own TOML");
+        let mut game_and_cli = game.clone();
+        game_and_cli
+            .set(&format!("{key}=0.7"))
+            .expect("a well-formed override");
+
+        let player = crcbl_store::MemoryStorage::new();
+        player
+            .write(
+                std::path::Path::new(SETTINGS_FILE),
+                b"[engine.video]\nrender_scale = 0.8\n",
+            )
+            .expect("memory storage accepts every write");
+        let nobody = crcbl_store::MemoryStorage::new();
+
+        let scale = |storage: &crcbl_store::MemoryStorage, launch: &LaunchLayers| {
+            let stack = SettingsSource::Source(storage)
+                .open_with("test", launch)
+                .expect("a source resolves to a stack");
+            (crate::settings::render_scale(&stack), stack.layer_of(key))
+        };
+        use crcbl_store::settings::LayerKind;
+        assert_eq!(
+            scale(&player, &game_and_cli),
+            (0.7, Some(LayerKind::CommandLine))
+        );
+        assert_eq!(scale(&player, &game), (0.8, Some(LayerKind::User)));
+        assert_eq!(scale(&nobody, &game), (0.9, Some(LayerKind::Game)));
+        assert_eq!(
+            scale(&nobody, &LaunchLayers::new()),
+            (1.0, None),
+            "nothing set is the engine's own full-size frame"
+        );
+    }
+
+    /// **A headless run reads no file and still takes its `--set`**, and with
+    /// nothing launched it resolves no stack at all, as it always has.
+    #[test]
+    fn a_headless_run_layers_its_launch_and_nothing_else() {
+        use crcbl_store::settings::LaunchLayers;
+
+        assert!(
+            SettingsSource::None
+                .open_with("test", &LaunchLayers::new())
+                .is_none(),
+            "a golden run that passes nothing reads what it always read"
+        );
+        let mut launch = LaunchLayers::new();
+        launch
+            .set("engine.video.shadows=false")
+            .expect("a well-formed override");
+        let stack = SettingsSource::None
+            .open_with("test", &launch)
+            .expect("an override is a layer to read");
+        assert!(
+            !crate::settings::video_effects(&stack).contains(RenderEffects::SHADOWS),
+            "the override reached the engine's reader"
+        );
+        assert!(
+            !SettingsSource::None
+                .save("test", &stack)
+                .expect("saving nowhere is not a failure"),
+            "and a headless run still saves nowhere"
         );
     }
 

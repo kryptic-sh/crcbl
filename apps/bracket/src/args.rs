@@ -61,6 +61,10 @@ OPTIONS:
                          player's autoexec.cfg. Repeatable; the lines run in
                          the order given. The one way to set a console variable
                          on a --headless run, which reads no autoexec.cfg.
+    --set <KEY=VALUE>    Override one setting for this run, the value spelled
+                         as in settings.toml: engine.video.shadows=false,
+                         game.speed=1.5, text in quotes. Repeatable; the later
+                         of two for one key wins. Never saved to the file.
     --seed <N>           Population seed. The same seed is the same ladder.
     --players <N>        How many synthetic players queue against each other
                          (default 64, and at least two — a matchmaker with one
@@ -83,6 +87,13 @@ pub struct Options {
     pub seed: u64,
     /// How many synthetic players the population holds.
     pub players: usize,
+}
+
+/// The shared half, for [`crcbl::args::run_front_end`].
+impl AsRef<Common> for Options {
+    fn as_ref(&self) -> &Common {
+        &self.common
+    }
 }
 
 impl Default for Options {

@@ -38,6 +38,13 @@ pub struct Options {
     pub join: Option<std::net::SocketAddr>,
 }
 
+/// The shared half, for [`crcbl::args::run_front_end`].
+impl AsRef<Common> for Options {
+    fn as_ref(&self) -> &Common {
+        &self.common
+    }
+}
+
 /// What [`parse`] hands back.
 pub type Invocation = crcbl::args::Invocation<Options>;
 
@@ -55,7 +62,8 @@ pub type Invocation = crcbl::args::Invocation<Options>;
 /// happens, and the flag to introduce one would be a flag with no user.
 #[must_use]
 pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
-    let mut common = Common::new(DEFAULT_TICK_HZ);
+    let mut common =
+        Common::new(DEFAULT_TICK_HZ).with_settings_defaults(crate::defaults::SETTINGS_DEFAULTS);
     let mut scene = None;
     let mut assets = None;
     let mut recovery = None;
@@ -276,6 +284,10 @@ OPTIONS:
                          player's autoexec.cfg. Repeatable; the lines run in
                          the order given. The one way to set a console variable
                          on a --headless run, which reads no autoexec.cfg.
+    --set <KEY=VALUE>    Override one setting for this run, the value spelled
+                         as in settings.toml: engine.video.shadows=false,
+                         game.speed=1.5, text in quotes. Repeatable; the later
+                         of two for one key wins. Never saved to the file.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'

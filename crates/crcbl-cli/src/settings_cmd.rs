@@ -20,12 +20,16 @@
 //!
 //! # One layer, and it is the player's file
 //!
-//! A game's engine and game defaults are compiled into the game's own binary,
-//! and this CLI is not that binary. So the stack it assembles has exactly one
-//! layer — [`SETTINGS_FILE`] — and `list` says so: a key the game defaults and
-//! the player has never changed is absent here and still has a value at run
-//! time. Reporting a merged view this process cannot actually see would be
-//! inventing the half it is missing.
+//! A game's defaults are compiled into the game's own binary, and this CLI is
+//! not that binary; a `--set` belongs to one run of it. So the stack this
+//! assembles has exactly one layer — [`SETTINGS_FILE`] — and `list` names the
+//! layer of every line: `user` for what the file holds, and `engine` for an
+//! engine key it does not, at the value the engine's own reader gives it. That
+//! reader is linked here, so that half is seen rather than guessed. A key the
+//! *game* defaults and the player never changed is absent here and still has a
+//! value at run time, and reporting a merged view this process cannot actually
+//! see would be inventing the half it is missing — the game's own console
+//! `dump` is where that layer is listed.
 //!
 //! # A quality tier is a branch and not a key
 //!
@@ -61,12 +65,15 @@
 
 use std::path::{Path, PathBuf};
 
+use crcbl::console::Value as ConsoleValue;
 use crcbl::render::RenderEffects;
 use crcbl::settings::presets::{self, QualityPreset, QualityValues};
 use crcbl::settings::{
     ANTIALIASING_KEY, Applied, RENDER_SCALE_KEY, Stage, VIDEO_KEYS, VIDEO_NAMESPACE,
 };
-use crcbl_store::settings::{SETTINGS_FILE, SettingsLayer, SettingsStack, StorageSettingsFile};
+use crcbl_store::settings::{
+    LayerKind, SETTINGS_FILE, SettingsLayer, SettingsStack, StorageSettingsFile,
+};
 use crcbl_store::{MemoryStorage, NativeStorage, StorageError, StorageSource};
 
 use crate::args::{SettingsAction, SettingsArgs};
@@ -118,18 +125,31 @@ fn list(
     path: &Path,
     file_exists: bool,
 ) -> Result<Outcome, Failure> {
-    let (entries, stray) = flatten(&file);
-    // `SettingsStack::dump` renders the merged view as TOML, which for a
-    // one-layer stack is the file itself — the same text a person would open
-    // the file to read, rather than a second rendering of it.
     let mut stack = SettingsStack::new();
     stack.add(SettingsLayer::UserFile(file));
+    let rows = rows(&stack);
+    let in_file = rows
+        .iter()
+        .filter(|row| row.layer == LayerKind::User.name())
+        .count();
+    let stray: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.status == "unknown")
+        .map(|row| row.key.as_str())
+        .collect();
 
     let header = format!("settings for `{app}` — {}", path.display());
-    // Named after the dump rather than beside each line: the dump is the file
-    // as a person would open it, and interleaving a verdict into TOML would
-    // stop it being that. A stray is worth saying out loud because it is the
-    // one thing in the file that will never do anything — see [`status_of`].
+    let state = if !file_exists {
+        " (no file yet)"
+    } else if in_file == 0 {
+        " (empty)"
+    } else {
+        ""
+    };
+    // Named after the lines rather than beside each one: a stray is worth
+    // saying out loud because it is the one thing in the file that will never
+    // do anything — see [`status_of`] — and a verdict buried in a column is
+    // one a person skims past.
     let warning = if stray.is_empty() {
         String::new()
     } else {
@@ -140,13 +160,8 @@ fn list(
             stray.join(", ")
         )
     };
-    let human = if !file_exists {
-        format!("{header} (no file yet)")
-    } else if entries.is_empty() {
-        format!("{header} (empty)")
-    } else {
-        format!("{header}\n\n{}{warning}", stack.dump().trim_end())
-    };
+    let lines = rows.iter().map(Row::line).collect::<Vec<_>>().join("\n");
+    let human = format!("{header}{state}\n\n{lines}{warning}");
 
     Ok(Outcome {
         human,
@@ -155,12 +170,17 @@ fn list(
             ("app", Json::string(app)),
             ("path", Json::string(path.display().to_string())),
             ("file_exists", Json::Bool(file_exists)),
-            ("count", Json::Number(entries.len() as i64)),
+            // The keys the player's file holds, as it always was: `settings`
+            // now also carries the engine's defaults, under their own layer.
+            ("count", Json::Number(in_file as i64)),
             (
                 "unknown",
                 Json::Array(stray.into_iter().map(Json::string).collect()),
             ),
-            ("settings", Json::Array(entries)),
+            (
+                "settings",
+                Json::Array(rows.iter().map(Row::record).collect()),
+            ),
         ],
     })
 }
@@ -647,25 +667,8 @@ fn config_root(args: &SettingsArgs, app: &str) -> Result<PathBuf, Failure> {
     })
 }
 
-// ── Rendering the file ──────────────────────────────────────────────────────
+// ── Rendering the stack ─────────────────────────────────────────────────────
 
-/// Every scalar in the file, as `{key, type, value}` records under its dotted
-/// key.
-///
-/// # User keys are values here, never JSON keys
-///
-/// Topic 11 (`docs/notes/tooling.md`) asks for stable JSON schemas, and a
-/// settings file's keys are whatever the player and the game put there.
-/// Rendering them as the object's own keys would make the schema a function of
-/// the file, so the record shape is fixed and the key travels inside it.
-///
-/// # Why this is a stack and not a recursive function
-///
-/// The values being walked are `toml`'s, and `toml` is `crcbl-store`'s
-/// dependency rather than this binary's — so nothing here can name the type,
-/// and a `fn` taking one would have to. An explicit worklist takes every type
-/// from inference instead. `toml::Table` iterates in key order, so the records
-/// come out in a stable order for a diff.
 /// The engine namespace, whose keys the engine's own catalogue is the authority
 /// on.
 ///
@@ -693,49 +696,120 @@ fn status_of(key: &str) -> &'static str {
     }
 }
 
-fn flatten(file: &StorageSettingsFile) -> (Vec<Json>, Vec<String>) {
-    let mut entries = Vec::new();
-    let mut stray = Vec::new();
-    let mut pending: Vec<_> = file
-        .table()
-        .iter()
-        .rev()
-        .map(|(name, value)| (name.clone(), value))
+/// One key of `list`: its effective value and the layer that value came
+/// from, in both renderings.
+#[derive(Debug)]
+struct Row {
+    /// The dotted key.
+    key: String,
+    /// [`LayerKind::name`] of the layer the value came from.
+    layer: &'static str,
+    /// [`status_of`] the key.
+    status: &'static str,
+    /// The value's kind, as `--json` reports it.
+    kind: &'static str,
+    /// The value as JSON.
+    json: Json,
+    /// The value as `settings.toml` would spell it.
+    human: String,
+}
+
+impl Row {
+    /// The `--json` record.
+    ///
+    /// # User keys are values here, never JSON keys
+    ///
+    /// Topic 11 (`docs/notes/tooling.md`) asks for stable JSON schemas, and a
+    /// settings file's keys are whatever the player and the game put there.
+    /// Rendering them as the object's own keys would make the schema a function
+    /// of the file, so the record shape is fixed and the key travels inside it.
+    fn record(&self) -> Json {
+        Json::Object(vec![
+            ("status", Json::string(self.status)),
+            ("key", Json::string(&self.key)),
+            ("type", Json::string(self.kind)),
+            ("value", self.json.clone()),
+            ("layer", Json::string(self.layer)),
+        ])
+    }
+
+    /// The human line: `key = value  (layer)`, the line the console's `dump`
+    /// prints for the same key.
+    fn line(&self) -> String {
+        format!("{} = {}  ({})", self.key, self.human, self.layer)
+    }
+}
+
+/// Every key `stack` holds, and every catalogue key it does not, in key order —
+/// each with the value that wins and the layer it came from.
+///
+/// A key no layer holds is reported at the engine's own reading of it, through
+/// [`crcbl::settings::catalogue_value`] — the reader the game runs, so the
+/// value printed is the one the game would use — and under
+/// [`LayerKind::Engine`]. A key a layer does hold is reported as that layer
+/// spells it, so a line a reader cannot use is shown as what the file says,
+/// with its status beside it.
+///
+/// What this process cannot see is a game's own defaults: they are compiled
+/// into the game, and this is not that binary — the module docs say why.
+fn rows(stack: &SettingsStack) -> Vec<Row> {
+    let mut rows: Vec<Row> = stack
+        .entries()
+        .into_iter()
+        .map(|entry| {
+            let value = &entry.value;
+            let (kind, json) = if let Some(value) = value.as_bool() {
+                ("boolean", Json::Bool(value))
+            } else if let Some(value) = value.as_integer() {
+                ("integer", Json::Number(value))
+            } else if let Some(value) = value.as_float() {
+                ("float", Json::Double(value))
+            } else if let Some(value) = value.as_str() {
+                ("string", Json::string(value))
+            } else {
+                // A list or a date. `set` writes neither and `get` renders
+                // neither, so it is reported as the text TOML spells it with —
+                // which is what the human line shows too.
+                ("other", Json::string(value.to_string()))
+            };
+            Row {
+                layer: entry.layer.name(),
+                status: status_of(&entry.key),
+                kind,
+                json,
+                human: value.to_string(),
+                key: entry.key,
+            }
+        })
         .collect();
 
-    while let Some((key, value)) = pending.pop() {
-        if let Some(section) = value.as_table() {
-            for (name, child) in section.iter().rev() {
-                pending.push((format!("{key}.{name}"), child));
-            }
+    for entry in crcbl::settings::catalogue() {
+        if stack.contains(&entry.key) {
             continue;
         }
-        let (kind, rendered) = if let Some(value) = value.as_bool() {
-            ("boolean", Json::Bool(value))
-        } else if let Some(value) = value.as_integer() {
-            ("integer", Json::Number(value))
-        } else if let Some(value) = value.as_float() {
-            ("float", Json::Double(value))
-        } else if let Some(value) = value.as_str() {
-            ("string", Json::string(value))
-        } else {
-            // A list or a date. `set` writes neither and `get` renders
-            // neither, so it is reported as the text TOML spells it with —
-            // which is what the human dump above shows too.
-            ("other", Json::string(value.to_string()))
+        let (kind, json, human) = match crcbl::settings::catalogue_value(stack, &entry) {
+            ConsoleValue::Bool(value) => ("boolean", Json::Bool(value), value.to_string()),
+            ConsoleValue::Int(value) => ("integer", Json::Number(value), value.to_string()),
+            ConsoleValue::Float(value) => {
+                let value = f64::from(value);
+                // `{:?}` for [`Value::bare`]'s reason: it keeps `1.0` a float.
+                ("float", Json::Double(value), format!("{value:?}"))
+            }
+            ConsoleValue::Enum(name) => ("string", Json::string(name), format!("{name:?}")),
+            ConsoleValue::Text(text) => ("string", Json::string(&text), format!("{text:?}")),
         };
-        let status = status_of(&key);
-        if status == "unknown" {
-            stray.push(key.clone());
-        }
-        entries.push(Json::Object(vec![
-            ("status", Json::string(status)),
-            ("key", Json::string(key)),
-            ("type", Json::string(kind)),
-            ("value", rendered),
-        ]));
+        rows.push(Row {
+            layer: LayerKind::Engine.name(),
+            status: status_of(&entry.key),
+            kind,
+            json,
+            human,
+            key: entry.key,
+        });
     }
-    (entries, stray)
+
+    rows.sort_by(|a, b| a.key.cmp(&b.key));
+    rows
 }
 
 #[cfg(test)]
@@ -911,10 +985,11 @@ mod tests {
         }
     }
 
-    /// `list`'s machine-readable half reports a dotted key per scalar, in a
-    /// stable order, and reports a list rather than dropping it.
+    /// `list`'s machine-readable half reports a dotted key per scalar in the
+    /// file, in a stable order, names the file as their layer, and reports a
+    /// list rather than dropping it.
     #[test]
-    fn flatten_reports_one_record_per_scalar_under_its_dotted_key() {
+    fn rows_report_one_record_per_scalar_under_its_dotted_key() {
         let storage = MemoryStorage::new();
         storage
             .write(
@@ -922,26 +997,71 @@ mod tests {
                 b"[game]\nname = \"Ada\"\n\n[engine.video]\nshadows = false\nsize = [1920, 1080]\n",
             )
             .expect("memory storage accepts every write");
-        let file = StorageSettingsFile::load(&storage, Path::new(SETTINGS_FILE))
-            .expect("a file this test wrote");
+        let stack = SettingsStack::from_storage(&storage);
 
-        let (records, stray) = flatten(&file);
-        let rendered: Vec<String> = records.iter().map(Json::to_string).collect();
+        let rendered: Vec<String> = rows(&stack)
+            .iter()
+            .filter(|row| row.layer == "user")
+            .map(|row| row.record().to_string())
+            .collect();
         assert_eq!(
             rendered,
             vec![
-                r#"{"status":"read","key":"engine.video.shadows","type":"boolean","value":false}"#
+                r#"{"status":"read","key":"engine.video.shadows","type":"boolean","value":false,"layer":"user"}"#
                     .to_string(),
-                r#"{"status":"unknown","key":"engine.video.size","type":"other","value":"[1920, 1080]"}"#
+                r#"{"status":"unknown","key":"engine.video.size","type":"other","value":"[1920, 1080]","layer":"user"}"#
                     .to_string(),
-                r#"{"status":"game","key":"game.name","type":"string","value":"Ada"}"#.to_string(),
+                r#"{"status":"game","key":"game.name","type":"string","value":"Ada","layer":"user"}"#
+                    .to_string(),
             ]
         );
-        // `size` is the typo shape this exists for: the catalogue's row is
-        // `resolution`, so nothing will ever read what was written here, and
-        // before the status column said so nothing in the tree could tell a
-        // person that.
-        assert_eq!(stray, vec!["engine.video.size".to_string()]);
+    }
+
+    /// **`list` names each key's layer**: what the file holds is `user`, and
+    /// every engine key it does not hold is listed too, as `engine`, at the
+    /// value the engine's own reader gives it.
+    #[test]
+    fn list_names_each_keys_layer_and_lists_the_engines_defaults() {
+        let storage = MemoryStorage::new();
+        storage
+            .write(
+                Path::new(SETTINGS_FILE),
+                b"[engine.video]\nrender_scale = 0.5\n",
+            )
+            .expect("memory storage accepts every write");
+        let stack = SettingsStack::from_storage(&storage);
+        let rows = rows(&stack);
+        let line_of = |key: &str| {
+            rows.iter()
+                .find(|row| row.key == key)
+                .map(Row::line)
+                .unwrap_or_else(|| panic!("{key} is not listed"))
+        };
+
+        assert_eq!(
+            line_of("engine.video.render_scale"),
+            "engine.video.render_scale = 0.5  (user)"
+        );
+        assert_eq!(
+            line_of("engine.video.shadows"),
+            "engine.video.shadows = true  (engine)",
+            "an absent switch allows the effect"
+        );
+        assert_eq!(
+            line_of("engine.video.ui_scale"),
+            "engine.video.ui_scale = 1.0  (engine)"
+        );
+        for entry in crcbl::settings::catalogue() {
+            assert!(
+                rows.iter().any(|row| row.key == entry.key),
+                "{} is not listed",
+                entry.key
+            );
+        }
+        assert!(
+            rows.windows(2).all(|pair| pair[0].key < pair[1].key),
+            "in key order, each key once"
+        );
     }
 
     // ── preset ──────────────────────────────────────────────────────────

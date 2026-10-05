@@ -30,6 +30,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   opens version 2. `crcbl_store::StorageError` gained `Save`, which is
   `#[non_exhaustive]` already.
 
+- **`crcbl::args::Common` gained `set` and `settings_defaults`, and
+  `crcbl::args::run_front_end` requires `O: AsRef<Common>`** (see Added: game
+  default settings and `--set`). A `Common` struct literal must name both —
+  `Vec::new()` and `None` keep what it did — or end in `..Common::new(rate)`. A
+  game's `Options` passed to `run_front_end` implements `AsRef<Common>`, which
+  every sample here now does; a front end whose options are a bare `Common`
+  needs nothing, since `Common` is `AsRef` of itself.
+
+- **`crcbl settings list` names each line's layer and lists the engine's
+  defaults.** The human output is now one `key = value  (layer)` line per key
+  rather than the file's TOML, and each `--json` record in `settings` gained a
+  `layer` field (`user` or `engine`); the array also carries every catalogue key
+  the file does not hold, at the value the engine's reader gives it, under
+  `engine`. `count` is still the number of keys the file holds.
+
+- **`SettingsSource::None` resolves a stack when the run has launch layers.** A
+  headless run still reads no file and saves nowhere, but a game's defaults and
+  a `--set` now reach it; with neither it answers `None` as before.
+
 - **`crcbl_ui::tree::TextInputOptions` gained `keep_caret`** (see Changed: an
   engaged text input starts with its text selected). A struct literal must name
   it — `false` takes the new behaviour — or end in
@@ -691,6 +710,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   step that cannot migrate its input as `FormatError::Migration`, and version 1,
   whose checksum no toolchain reproduces, as `FormatError::Unmigratable`.
   Towers' and shard's saves from before this change still resume.
+
+- **Game default settings, and `--set KEY=VALUE` on every sample's command
+  line** — the two settings layers `crcbl_store::settings` declared and nothing
+  built. A game declares a TOML defaults table with
+  `Common::with_settings_defaults`, and it sits between the engine's own
+  defaults and the player's `settings.toml`; `--set`, parsed by the shared
+  `crcbl::args::Common` and so taken by every sample that shares the front end,
+  sits above the file for that run and is never written to it. The value is read
+  by the grammar the file uses (`engine.video.shadows=false`, `game.speed=1.5`,
+  text in quotes), so a bare word is refused with exit 2, naming the key;
+  `--set` is repeatable, the later of two for one key winning, and an override
+  of a key nothing defines warns by name and runs. The front end installs both
+  layers for the process (`crcbl::settings::launch`), so the GPU context, the
+  console and a game's audio all read them; a caller holding its own `Common`
+  passes them to `SettingsSource::open_with` or `open_editable_with`.
+  `crcbl_store::settings` gained `LaunchLayers`,
+  `SettingsStack::{layered, platform_with, from_storage_with, find, layer_of, entries}`,
+  `LayerKind` and `SettingsEntry`. The browser has no command line and takes no
+  `--set`.
+
+- **The editor's snap steps and autosave interval are its game defaults.**
+  `apps/editor/src/defaults.toml` is the one place they are written, layered
+  under the editor's `settings.toml`; a step or interval that is not a positive
+  number falls through to it and is logged.
+  `editor::gizmo::{GRID_M, SCALE_M, ANGLE_DEG}` and the autosave's
+  `AUTOSAVE_SECONDS` are gone with the duplicates they were.
+
+- **The console's `dump` names the layer each key came from** — `game`, `user`
+  or `cli` — one `key = value  (layer)` line per key, as `crcbl settings list`
+  prints them. `crcbl::settings::catalogue_value` is the engine's reading of a
+  catalogue key, the one its console variable prints.
 
 - **`crcbl edit <DIR> --serve [PORT]` serves a scene to clients of the edit
   protocol.** The CLI keeps the scene open through the editor's document, with

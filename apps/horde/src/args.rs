@@ -54,6 +54,10 @@ OPTIONS:
                          player's autoexec.cfg. Repeatable; the lines run in
                          the order given. The one way to set a console variable
                          on a --headless run, which reads no autoexec.cfg.
+    --set <KEY=VALUE>    Override one setting for this run, the value spelled
+                         as in settings.toml: engine.video.shadows=false,
+                         game.speed=1.5, text in quotes. Repeatable; the later
+                         of two for one key wins. Never saved to the file.
     --seed <N>           Run seed. The same seed is the same horde.
     --max-enemies <N>    Ceiling on live enemies (default 1500). The plan's
                          target is 10000; raising it is what the scale
@@ -127,6 +131,13 @@ pub struct Options {
     /// The upgrade `--choose` presses at every level-up, zero-based into
     /// [`crate::game::UPGRADE_CHOICES`]; `None` when the flag was not given.
     pub choose: Option<usize>,
+}
+
+/// The shared half, for [`crcbl::args::run_front_end`].
+impl AsRef<Common> for Options {
+    fn as_ref(&self) -> &Common {
+        &self.common
+    }
 }
 
 impl Default for Options {

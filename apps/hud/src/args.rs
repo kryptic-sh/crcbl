@@ -56,6 +56,10 @@ OPTIONS:
                          player's autoexec.cfg. Repeatable; the lines run in
                          the order given. The one way to set a console variable
                          on a --headless run, which reads no autoexec.cfg.
+    --set <KEY=VALUE>    Override one setting for this run, the value spelled
+                         as in settings.toml: engine.video.shadows=false,
+                         game.speed=1.5, text in quotes. Repeatable; the later
+                         of two for one key wins. Never saved to the file.
     --seed <N>           Ticker seed. The same seed is the same damage numbers.
     --styles <DIR>       Read the stylesheet from DIR/hud.css instead of the
                          copy compiled in, and re-read it while the run is
@@ -81,6 +85,13 @@ pub struct Options {
     /// The directory `--styles` named, whose `hud.css` the HUD is styled by
     /// and polled from; `None` for the copy compiled in.
     pub styles: Option<PathBuf>,
+}
+
+/// The shared half, for [`crcbl::args::run_front_end`].
+impl AsRef<Common> for Options {
+    fn as_ref(&self) -> &Common {
+        &self.common
+    }
 }
 
 impl Default for Options {

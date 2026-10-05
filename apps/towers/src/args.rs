@@ -92,6 +92,10 @@ OPTIONS:
                          player's autoexec.cfg. Repeatable; the lines run in
                          the order given. The one way to set a console variable
                          on a --headless run, which reads no autoexec.cfg.
+    --set <KEY=VALUE>    Override one setting for this run, the value spelled
+                         as in settings.toml: engine.video.shadows=false,
+                         game.speed=1.5, text in quotes. Repeatable; the later
+                         of two for one key wins. Never saved to the file.
     --screenshot <PATH>  Write the run's last presented frame to PATH as a PNG.
                          Turns --headless on: the frame is read back off the
                          offscreen ring, which is the only surface every backend
@@ -184,6 +188,13 @@ pub struct Options {
     /// always has. Native builds only: the browser has no networking.
     #[cfg(not(target_arch = "wasm32"))]
     pub lobby: bool,
+}
+
+/// The shared half, for [`crcbl::args::run_front_end`].
+impl AsRef<Common> for Options {
+    fn as_ref(&self) -> &Common {
+        &self.common
+    }
 }
 
 impl Default for Options {
