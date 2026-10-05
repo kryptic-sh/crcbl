@@ -408,10 +408,10 @@ ignored.";
 
 /// `crcbl sim --help`.
 ///
-/// The three defaults and the tick-rate range are written here as literals,
-/// because a `const &str` cannot interpolate — `concat!` takes literals. They
-/// are pinned to [`DEFAULT_SIM_TICKS`], [`DEFAULT_SIM_TICK_RATE`],
-/// [`DEFAULT_SIM_SEED`] and [`MAX_TICK_RATE`] by
+/// The defaults and the tick-rate range are written here as literals, because
+/// a `const &str` cannot interpolate — `concat!` takes literals. They are
+/// pinned to [`DEFAULT_SIM_TICKS`], [`DEFAULT_SIM_TICK_RATE`],
+/// [`DEFAULT_SIM_SEED`], [`DEFAULT_SIM_THREADS`] and [`MAX_TICK_RATE`] by
 /// `the_sim_help_names_the_real_defaults_and_the_tick_rate_cap`, which is the
 /// only thing that can stop the two drifting — the same arrangement
 /// [`BENCH_USAGE`] and [`SCREENSHOT_USAGE`] have.
@@ -439,6 +439,11 @@ OPTIONS:
         --tick-rate <HZ>   Server tick rate, 1..=1000000000. Default: 60. It
                            sets the clock's period and never the tick count.
         --seed <SEED>      World-generation seed. Default: 0.
+        --threads <N>      Threads the world may tick on, the calling one
+                           included: a job pool of N - 1 workers. Default: 1.
+                           Zero is refused. The hash must not depend on it —
+                           a run whose hash moves with N is the determinism
+                           failure this flag exists to catch.
         --json             Emit one JSON object instead of human output.
     -h, --help             Print this text.
 
@@ -1021,6 +1026,12 @@ pub const DEFAULT_SIM_TICK_RATE: u32 = 60;
 /// The world seed `crcbl sim` builds from when `--seed` is not given.
 pub const DEFAULT_SIM_SEED: u64 = 0;
 
+/// Threads `crcbl sim` ticks on when `--threads` is not given.
+///
+/// One — the calling thread and no pool workers — so the default run is the
+/// serial one, and every other thread count is compared against it.
+pub const DEFAULT_SIM_THREADS: usize = 1;
+
 /// `crcbl sim`.
 ///
 /// There is no scene and no input script: topic 11 sketched both, and neither
@@ -1037,6 +1048,9 @@ pub struct SimArgs {
     pub tick_rate: u32,
     /// World-generation seed.
     pub seed: u64,
+    /// Threads the world may tick on, the calling thread included. Never zero;
+    /// the parser refuses it, because a run with no thread runs nothing.
+    pub threads: usize,
     /// Machine-readable output.
     pub json: bool,
 }
@@ -2004,6 +2018,7 @@ fn parse_sim(mut args: impl Iterator<Item = OsString>) -> Invocation {
         ticks: DEFAULT_SIM_TICKS,
         tick_rate: DEFAULT_SIM_TICK_RATE,
         seed: DEFAULT_SIM_SEED,
+        threads: DEFAULT_SIM_THREADS,
         json: false,
     };
 
@@ -2038,6 +2053,17 @@ fn parse_sim(mut args: impl Iterator<Item = OsString>) -> Invocation {
             },
             Some("--seed") => match whole(&mut args, "--seed") {
                 Ok(value) => parsed.seed = value,
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some("--threads") => match count(&mut args, "--threads") {
+                Ok(0) => {
+                    return Invocation::BadUsage(
+                        "`--threads` cannot be zero: it counts the calling thread, and a run \
+                         with no thread runs nothing"
+                            .to_owned(),
+                    );
+                }
+                Ok(value) => parsed.threads = value,
                 Err(message) => return Invocation::BadUsage(message),
             },
             Some(other) if other.starts_with('-') => {
@@ -3377,6 +3403,7 @@ mod tests {
         assert_eq!(args.ticks, DEFAULT_SIM_TICKS);
         assert_eq!(args.tick_rate, DEFAULT_SIM_TICK_RATE);
         assert_eq!(args.seed, DEFAULT_SIM_SEED);
+        assert_eq!(args.threads, DEFAULT_SIM_THREADS);
         assert!(!args.json);
 
         let Command::Sim(args) = command(&[
@@ -3392,6 +3419,21 @@ mod tests {
         };
         // A seed no `usize` is guaranteed to hold, taken whole — see [`whole`].
         assert_eq!((args.ticks, args.tick_rate, args.seed), (7, 240, u64::MAX));
+
+        let Command::Sim(args) = command(&["sim", "--threads", "8"]) else {
+            panic!("expected sim");
+        };
+        assert_eq!(args.threads, 8);
+        for argv in [
+            vec!["sim", "--threads"],
+            vec!["sim", "--threads", "0"],
+            vec!["sim", "--threads", "-2"],
+        ] {
+            assert!(
+                matches!(parse_args(&argv), Invocation::BadUsage(_)),
+                "{argv:?} should be a bad invocation"
+            );
+        }
     }
 
     /// Both ends of the tick-rate range, refused at parse time.
@@ -3463,6 +3505,7 @@ mod tests {
             format!("Default: {DEFAULT_SIM_TICKS}."),
             format!("Default: {DEFAULT_SIM_TICK_RATE}."),
             format!("Default: {DEFAULT_SIM_SEED}."),
+            format!("Default: {DEFAULT_SIM_THREADS}."),
             format!("1..={MAX_TICK_RATE}"),
         ] {
             assert!(

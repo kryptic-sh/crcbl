@@ -858,6 +858,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   run whose ticks left the hash unchanged. It is the baseline a parallel
   schedule is measured against.
 
+- **`crcbl sim --threads <N>` runs the determinism harness on N threads.** The
+  world gets a `crcbl_jobs::Pool` of N − 1 workers (default N = 1; zero is
+  refused), and its harness world gains two systems that use it: `swarm` steps
+  its rows in fixed blocks with `par_for` and writes their mean to a shared
+  `crowd` resource, and `herd` reads it. The printed hash must not move with N —
+  that is `docs/plan/21-jobs.md`'s killer test, and it is now runnable. `--json`
+  adds `threads` and the `workers` the pool actually got. Because the harness
+  world changed, **`crcbl sim` prints a different hash for the same seed than
+  earlier versions did**; nothing in the repository pinned one.
+
 - **Overlap hits: how deep, which way out and where.** `crcbl_phys::OverlapHit`
   carries the point on the collider's surface the sphere is pushed out from, the
   unit normal out of the collider, the penetration depth (always positive) and

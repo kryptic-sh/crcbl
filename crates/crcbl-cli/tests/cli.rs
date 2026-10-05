@@ -2213,6 +2213,30 @@ fn sim_same_input_produces_the_same_hash() {
     );
 }
 
+/// `docs/plan/21-jobs.md`'s killer test through the binary: one seed at one,
+/// two and eight threads prints one line, and a zero thread count is a bad
+/// invocation rather than a run.
+#[test]
+fn sim_threads_do_not_move_the_hash() {
+    let temporary = TempDir::new("sim-threads");
+    let run = |threads: &str| {
+        let output = crcbl(
+            temporary.path(),
+            &["sim", "--ticks", "200", "--seed", "9", "--threads", threads],
+        );
+        assert_eq!(code(&output), 0, "--threads {threads}");
+        stdout(&output)
+    };
+    let serial = run("1");
+    for threads in ["2", "8"] {
+        assert_eq!(run(threads), serial, "--threads {threads}");
+    }
+    assert_eq!(
+        code(&crcbl(temporary.path(), &["sim", "--threads", "0"])),
+        2
+    );
+}
+
 /// The tick rate changes the clock, not the number of ticks: the harness
 /// advances by exactly one period per iteration at any rate.
 #[test]
