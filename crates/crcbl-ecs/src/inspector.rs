@@ -12,6 +12,11 @@ pub struct SystemStats {
     /// clock ([`Schedule::set_clock`](crate::Schedule::set_clock)) or it has
     /// not ticked since the clock was set.
     pub tick_time: Option<TickTime>,
+    /// The systems this one must run after, by name, in schedule order: each
+    /// registered before it with a declared access that conflicts with its
+    /// own ([`Schedule::conflicts`](crate::Schedule::conflicts)). Empty for a
+    /// system that conflicts with nothing before it.
+    pub runs_after: Vec<String>,
 }
 
 /// Collects system statistics from a [`World`].
@@ -37,13 +42,20 @@ impl Inspector {
     #[must_use]
     pub fn collect(world: &World) -> Vec<SystemStats> {
         let schedule = world.schedule();
-        schedule
-            .stats()
+        let names: Vec<(String, usize)> = schedule.stats().collect();
+        names
+            .iter()
             .zip(schedule.tick_times())
-            .map(|((name, entity_count), tick_time)| SystemStats {
-                name,
-                entity_count,
+            .enumerate()
+            .map(|(index, ((name, entity_count), tick_time))| SystemStats {
+                name: name.clone(),
+                entity_count: *entity_count,
                 tick_time,
+                runs_after: schedule
+                    .runs_after(index)
+                    .into_iter()
+                    .map(|before| names[before].0.clone())
+                    .collect(),
             })
             .collect()
     }
@@ -99,6 +111,11 @@ mod tests {
     impl SystemTrait for Costly {
         fn name(&self) -> &str {
             self.name
+        }
+        /// Nothing shared: the clock it advances stands in for wall time
+        /// passing, which the schedule measures and no system reads.
+        fn access(&self) -> crate::Access {
+            crate::Access::none()
         }
         fn tick(&mut self, _dt: f64) {
             self.ticks += 1;
@@ -238,7 +255,75 @@ mod tests {
                 name: "movement".into(),
                 entity_count: 1,
                 tick_time: None,
+                runs_after: Vec::new(),
             }]
+        );
+    }
+
+    /// A system that declares what it was built with and does nothing.
+    struct Declaring {
+        name: &'static str,
+        access: crate::Access,
+    }
+
+    impl SystemTrait for Declaring {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn access(&self) -> crate::Access {
+            self.access.clone()
+        }
+        fn tick(&mut self, _dt: f64) {}
+        fn entity_count(&self) -> usize {
+            0
+        }
+        fn sweep(&mut self, _dead: &[Entity]) {}
+        fn debug_draw(&mut self, _ctx: &DebugCtx) {}
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    /// Each system lists the earlier ones it conflicts with, by name and once
+    /// each — "late" collides with "gust" on two resources and is still one
+    /// entry — and not the reader it shares only a read with.
+    #[test]
+    fn each_system_names_the_earlier_systems_it_must_run_after() {
+        use crate::{Access, Shared};
+
+        let mut world = World::new();
+        for name in ["wind", "score"] {
+            world.share(&Shared::new(name, ())).expect("distinct names");
+        }
+        for (name, access) in [
+            ("gust", Access::none().writes("wind").writes("score")),
+            ("sail", Access::none().reads("wind")),
+            ("kite", Access::none().reads("wind")),
+            ("alone", Access::none()),
+            ("late", Access::none().writes("wind").reads("score")),
+        ] {
+            world.register_system(Box::new(Declaring { name, access }));
+        }
+
+        let runs_after: Vec<(String, Vec<String>)> = Inspector::collect(&world)
+            .into_iter()
+            .map(|stats| (stats.name, stats.runs_after))
+            .collect();
+        let named = |name: &str, after: &[&str]| {
+            (
+                name.to_owned(),
+                after.iter().map(|&before| before.to_owned()).collect(),
+            )
+        };
+        assert_eq!(
+            runs_after,
+            [
+                named("gust", &[]),
+                named("sail", &["gust"]),
+                named("kite", &["gust"]),
+                named("alone", &[]),
+                named("late", &["gust", "sail", "kite"]),
+            ]
         );
     }
 
@@ -266,6 +351,7 @@ mod tests {
                 name: "a".into(),
                 entity_count: 2,
                 tick_time: None,
+                runs_after: Vec::new(),
             }
         );
         assert_eq!(
@@ -274,6 +360,7 @@ mod tests {
                 name: "b".into(),
                 entity_count: 1,
                 tick_time: None,
+                runs_after: Vec::new(),
             }
         );
     }

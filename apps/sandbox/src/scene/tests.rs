@@ -199,6 +199,62 @@ fn the_systems_section_has_a_row_per_system_with_its_tick_time() {
     );
 }
 
+/// A system that declares what it was built with and does nothing.
+struct Declaring {
+    name: &'static str,
+    access: crcbl::ecs::Access,
+}
+
+impl crcbl::ecs::SystemTrait for Declaring {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn access(&self) -> crcbl::ecs::Access {
+        self.access.clone()
+    }
+    fn tick(&mut self, _dt: f64) {}
+    fn entity_count(&self) -> usize {
+        0
+    }
+    fn sweep(&mut self, _dead: &[Entity]) {}
+    fn debug_draw(&mut self, _ctx: &crcbl::ecs::DebugCtx) {}
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// A system whose declared access conflicts with earlier ones says which, and
+/// one that conflicts with nothing — every system of the scene's own — says
+/// nothing more.
+#[test]
+fn a_system_that_must_run_after_others_names_them_in_its_row() {
+    use crcbl::ecs::{Access, Shared};
+
+    let mut scene = scene();
+    let world = scene.world_mut();
+    world
+        .share(&Shared::new("wind", 0.0_f32))
+        .expect("the world's only resource");
+    for (name, access) in [
+        ("gust", Access::none().writes("wind")),
+        ("sail", Access::none().reads("wind")),
+        ("kite", Access::none().writes("wind")),
+    ] {
+        world.register_system(Box::new(Declaring { name, access }));
+    }
+
+    assert_eq!(
+        rows(&panel_of(&scene), SYSTEMS_SECTION),
+        [
+            (SPIN, UNTIMED),
+            (SUN, UNTIMED),
+            ("gust", UNTIMED),
+            ("sail", "untimed, after gust"),
+            ("kite", "untimed, after gust, sail"),
+        ]
+    );
+}
+
 #[test]
 fn a_scene_given_no_clock_says_its_systems_are_untimed() {
     let mut scene = scene();

@@ -7,7 +7,11 @@
 //! * **System** — owns a dense `Vec<T>` of component data plus a sparse
 //!   entity→index map. Systems iterate their own arrays linearly (SoA,
 //!   cache-friendly). Cross-system access uses sparse lookups for cold paths.
-//! * **Schedule** — an ordered sequence of systems run each tick.
+//! * **Schedule** — an ordered sequence of systems run each tick. Each system
+//!   declares the [`Shared`] resources its tick reads and writes
+//!   ([`SystemTrait::access`]); the schedule derives the conflicts between
+//!   them at registration and, in debug builds, panics on a tick touching a
+//!   resource its system did not declare.
 //! * **World** — the container: entity pool, schedule, deferred-destruction
 //!   queue. `World::tick()` runs the schedule then sweeps dead entities.
 //! * **[`quantize`]** — how a replicated component declares its wire form:
@@ -45,21 +49,25 @@
 //! assert_eq!(world.entity_count(), 1);
 //! ```
 
+mod access;
 mod component_hash;
 mod entity;
 mod game_module;
 mod inspector;
 pub mod quantize;
 mod schedule;
+mod shared;
 mod system;
 mod tick_time;
 mod world;
 
+pub use access::{Access, AccessError, Conflict, ConflictKind};
 pub use component_hash::ComponentHash;
 pub use entity::{Entity, EntityMarker};
 pub use game_module::{ClientInputs, GameModule};
 pub use inspector::{Inspector, SystemStats};
 pub use schedule::Schedule;
+pub use shared::Shared;
 pub use system::{DebugCtx, DebugDrawFn, System, SystemTrait};
 pub use tick_time::{TICK_TIME_WINDOW, TickTime};
 pub use world::World;

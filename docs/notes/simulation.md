@@ -275,7 +275,10 @@ no CPU's. Worth knowing before anyone puts a particle count in a tick hash.
 
 ### P8's ECS access declarations were never reserved, and P2 says they were
 
-Decision record; the decision is in `docs/backlog.md`.
+Decision record; the decision is in `docs/backlog.md`. **Option 1 is built
+(2026-10-05)** — declarations, the derived conflicts and the debug check, with
+`run` still sequential; `docs/backlog.md`'s _ECS access declarations and the
+parallel schedule_ records its decisions and what option 2 still needs.
 
 **DECISION NEEDED — which of these P8 does.** They are not the same slice:
 
@@ -727,10 +730,14 @@ The `cargo tree` guard is built: `tools/check-no-renderer-deps.sh`, run by
 - **The system that owns the array owns its wire format.** Replication is per
   system (`SystemTrait::replicate`), which is what keeps the ECS shape and the
   wire model from fighting.
-- **Order is declared, not inferred.** `Schedule` runs systems in the order they
-  were added. The debug-build conflict assertion the plan promised was never
-  built, and there is nothing for it to look at until systems declare their
-  access (_P8's ECS access declarations were never reserved_, above).
+- **Order is declared, and so is access.** `Schedule` runs systems in the order
+  they were added. Each system declares the `Shared` resources its tick reads
+  and writes (`SystemTrait::access`, required), the schedule derives the
+  conflicts between those declarations when each system is registered
+  (`Schedule::conflicts`), and in debug builds a tick touching a resource its
+  system did not declare panics. Execution is still serial; the graph is what a
+  concurrent schedule would be built on (_P8's ECS access declarations were
+  never reserved_, above, for how this came to be).
 - **Destruction is deferred to the end of the tick**, with a removal sweep per
   system; generational ids make a stale reference safe to hold.
 - **Every system reports to the inspector and has a debug-draw slot.** The plan

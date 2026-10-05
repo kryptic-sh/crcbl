@@ -50,7 +50,7 @@ mod joints;
 use std::collections::HashMap;
 
 use crcbl_core::{Handle, Pool};
-use crcbl_ecs::{DebugCtx, Entity, SystemTrait};
+use crcbl_ecs::{Access, DebugCtx, Entity, SystemTrait};
 use glam::{DQuat, DVec3};
 
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
@@ -1738,6 +1738,12 @@ impl std::fmt::Debug for PhysicsSystem {
 impl SystemTrait for PhysicsSystem {
     fn name(&self) -> &str {
         Self::NAME
+    }
+
+    /// Nothing shared: a step works on the bodies, colliders and force
+    /// providers this system owns.
+    fn access(&self) -> Access {
+        Access::none()
     }
 
     fn tick(&mut self, dt: f64) {

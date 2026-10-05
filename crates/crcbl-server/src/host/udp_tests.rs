@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Instant;
 
 use crcbl_client::Client;
-use crcbl_ecs::{DebugCtx, Entity, System, SystemTrait};
+use crcbl_ecs::{Access, DebugCtx, Entity, System, SystemTrait};
 use crcbl_net::reliable::{MAX_UNRELIABLE_PAYLOAD, PEER_TIMEOUT};
 use crcbl_net::udp::{ListenerConfig, UdpListener, UdpTransport};
 use crcbl_net::{Clock, ManualClock, SystemClock};
@@ -61,6 +61,10 @@ struct Blob {
 impl SystemTrait for Blob {
     fn name(&self) -> &str {
         "blob"
+    }
+
+    fn access(&self) -> Access {
+        Access::none()
     }
 
     fn tick(&mut self, _dt: f64) {}
@@ -335,6 +339,10 @@ impl Churn {
 impl SystemTrait for Churn {
     fn name(&self) -> &str {
         "churn"
+    }
+
+    fn access(&self) -> Access {
+        Access::none()
     }
 
     fn tick(&mut self, _dt: f64) {

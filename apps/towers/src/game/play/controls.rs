@@ -24,7 +24,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crcbl::ecs::{DebugCtx, Entity, System, SystemTrait, World};
+use crcbl::ecs::{Access, DebugCtx, Entity, System, SystemTrait, World};
 use crcbl::registry::{ParamKind, PlayAction, PlayArg, PlayControls};
 
 use super::{TURRETS, Turret};
@@ -241,6 +241,12 @@ pub(super) fn readout(shared: Arc<Mutex<Stage>>) -> Box<dyn SystemTrait> {
 impl SystemTrait for FieldReadout {
     fn name(&self) -> &str {
         READOUT
+    }
+
+    /// Nothing shared: the tick does nothing, and the stage is read by a
+    /// tool's controls between ticks.
+    fn access(&self) -> Access {
+        Access::none()
     }
 
     fn tick(&mut self, _dt: f64) {}

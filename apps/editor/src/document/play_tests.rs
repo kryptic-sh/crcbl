@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use super::*;
 
-use crcbl::ecs::{ClientInputs, DebugCtx, GameModule, System, SystemTrait};
+use crcbl::ecs::{Access, ClientInputs, DebugCtx, GameModule, System, SystemTrait};
 
 use crate::scene::{BLOCKS, Block, GREYBOX};
 
@@ -338,6 +338,10 @@ struct Ticks(u32);
 impl SystemTrait for Ticks {
     fn name(&self) -> &str {
         "ticks"
+    }
+
+    fn access(&self) -> Access {
+        Access::none()
     }
     fn tick(&mut self, _dt: f64) {
         self.0 += 1;

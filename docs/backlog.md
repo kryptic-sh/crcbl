@@ -12150,15 +12150,130 @@ ms ± 15 ms: no late input in a 16 s run; the test's bound is 1%) and
 
 ### ECS access declarations and the parallel schedule (2026-08-27)
 
-**Not built.** `crcbl_ecs::SystemTrait` declares `name`, `tick`, `entity_count`,
-`sweep`, `debug_draw`, `hash_state` and `replicate` — no access declaration of
-any kind — and `crcbl-ecs` asserts no conflict. A conflict DAG derived from the
-trait as it stands would say every system is independent, which is the failure
-mode worth naming: it would be a green light wired to nothing.
+**Built (2026-10-05): the declaration, the conflict graph and the debug assert,
+designed together. Execution is still serial.** `crcbl_ecs::SystemTrait::access`
+(required) answers an `Access` of the `Shared` resources a system's tick reads
+and writes; `Schedule::try_add_system` refuses a name not registered with
+`Schedule::share` and derives the system's `Conflict`s with every earlier one;
+in debug builds every `Shared::read`/`write` inside a tick checks the running
+system's declaration and panics naming both. `Inspector::collect` reports
+`SystemStats::runs_after`, and the sandbox's F3 systems rows end with
+`, after a, b`.
 
-**What it would take:** an access declaration at registration, a startup DAG,
-and a debug assert on undeclared access — designed together, because the DAG
-without the assert is the vacuous version.
+**The seam, as found rather than imagined.** `SystemTrait::tick` is handed
+`&mut self` and `dt`. Reaching across systems — `World::system_mut`,
+`Schedule::iter_mut` and a downcast — needs `&mut World`, which only code
+between schedule runs has: game and host modules, tools, tests. So two ticks can
+couple only through state both systems hold, and the declaration describes
+exactly that, as named `Shared<T>` resources (`Arc<RwLock<T>>` with a name).
+Other systems' arrays, the entity allocator and events are not in the vocabulary
+because no tick can reach them (`crcbl-ecs` has no event type); they join it the
+day a tick is handed a route to one.
+
+Decided 2026-10-05, for the long term:
+
+- **Declaring is required, with no default.** A default of "touches nothing" is
+  the vacuous graph again, inherited silently by every system that forgot. Every
+  workspace impl answers; all answer `Access::none()` except `crcbl-server`'s
+  `host::rate_tests` `Churn` (reads `churn-switch`, moved from an
+  `Arc<AtomicBool>` onto `Shared` for this) and `crcbl-ecs`'s own schedule tests
+  (moved from `Rc<RefCell>`). `Simulation` forwards to its `PhysicsSystem`.
+- **Asked once, at registration**, so the graph is derived at startup and never
+  per tick, as `21-jobs.md` requires.
+- **Names are a resource's identity**, registered per schedule; a second
+  resource of one name is refused (`AccessError::DuplicateResource`).
+- **An unknown name panics in `add_system`/`register_system`, with
+  `try_add_system` returning the refusal.** `register_system` has well over a
+  hundred callers and a declaration is code, so a bad one is a bug the first run
+  finds; turning every caller into a `Result` would have bought nothing. The
+  panic message is `AccessError`'s, naming system and resource.
+- **A write covers a read; names are kept sorted** (`BTreeSet`), and conflicts
+  are listed by later system, earlier system, then resource name, so the graph
+  is a function of the registrations alone. Read against read is no conflict.
+  Order is registration order wherever there is a conflict, which serial
+  execution respects by construction.
+- **The assert covers `tick` only, in debug builds only**, through a
+  thread-local "running declaration" set around each tick by a guard that
+  restores the previous one on drop — on unwinding too. Code outside a tick is
+  never checked: it holds the world exclusively. `sweep`, `hash_state`,
+  `entity_count`, `debug_draw` and `replicate` are not checked; they run
+  serially between ticks today. `replicate` in particular is called by
+  `crcbl-server` through `Schedule::iter`, where the schedule cannot set the
+  running declaration — a concurrent snapshot would need a schedule method that
+  walks it.
+- **A poisoned `Shared` lock hands back the value** (`PoisonError::into_inner`),
+  as the towers sample's `lock` does: the panic that poisoned it is the one
+  worth reporting.
+
+**Coverage gaps, stated plainly.**
+
+- **Handles outside the seam are invisible.** `apps/towers`' `FieldReplica` and
+  `FieldReadout` hold an `Arc<Mutex<Stage>>` (their ticks do nothing; the
+  module, snapshot and hash touch the stage between ticks);
+  `host::frames_tests`' `Seen` holds an `Arc<Mutex<_>>` with an empty tick;
+  `crcbl-ecs`'s inspector tests' `Costly` advances a shared fake clock inside
+  its tick, standing in for wall time. `PhysicsSystem`'s force providers are
+  boxed trait objects that could capture anything, and `PhysicsSystem` has no
+  way to declare on a provider's behalf. Any of these that starts touching
+  shared state in a tick must move onto `Shared` first, or the assert cannot see
+  it.
+- **The truthfulness run is only as wide as the seam.** The debug workspace
+  suite runs every system's tick with the assert live and none panics; for a
+  system whose tick touches nothing shared that is a statement about the trait,
+  not a check. The one workspace system it really tests is `Churn` above:
+  dropping its `.reads(..)` reddens three `rate_tests`, and turning the assert
+  off as well greens them again.
+- **Two `Shared` of one name, only one registered**, both pass the assert for a
+  system declaring that name. An `Arc::ptr_eq` check against the registered
+  handle would close it; not done, because nothing creates such a pair.
+- **Release builds are not tested.** That the check compiles out rests on the
+  `cfg(debug_assertions)` gates as read; CI runs no release test.
+- **Re-entrant locking deadlocks or panics**: a tick holding `Shared::read` and
+  then calling `Shared::write` on the same resource meets `std::sync::RwLock`'s
+  documented "might panic or deadlock". Behaviour of the standard lock, not of
+  the declaration.
+
+**Deferred: running non-conflicting systems concurrently.** Not trivially safe,
+so not built. What it needs:
+
+- `SystemTrait: Send`, and `DebugDrawFn` and `System<T>`'s `T` with it — a
+  breaking change to every impl.
+- A runner over the conflict graph on `crcbl_jobs::Pool`: a new `crcbl-ecs` →
+  `crcbl-jobs` edge (rerun the fuzz lock's `--locked` check), with anything
+  systems emit reduced in a fixed order.
+- The determinism proof: `hash_state` per tick identical across worker counts,
+  which needs `crcbl sim --threads` (_The killer test is not runnable_, below)
+  and a harness world with real `Shared` conflicts in it.
+- An ECS bench scenario to show it helped — the 2026-09-06 decision put one
+  ahead of the parallel step, and `crcbl bench` still has only `phys` and
+  `jobs`.
+- The assert's scope widened to whatever the runner calls concurrently.
+
+**Considered and declined:** declarations over other systems' data or the entity
+allocator (no tick can reach either); a default `access` (above); a `Result`
+from `register_system` (above); declaring by typed handle instead of by name
+(the refusal and F3 both speak names, and a handle could still be registered
+with a different schedule).
+
+Evidence, each shown red under a mutation: `crcbl-ecs`'s `tests/access.rs`
+`writes_conflict_with_writes_and_reads_but_reads_do_not_conflict_with_reads`
+(read/write skipped; read/read made a conflict; write/write reported as
+read/write),
+`the_conflict_graph_does_not_depend_on_the_order_names_were_declared_in` (reads
+walked before writes instead of merged),
+`a_declaration_naming_an_unregistered_resource_is_refused_by_name` and
+`registering_a_system_that_names_an_unregistered_resource_panics_naming_both`
+(the unknown-name check skipped), `a_second_resource_of_one_name_is_refused`
+(duplicates accepted), the three debug-assert tests (the assert turned off; the
+tick run without entering its declaration; a read declaration allowing a write),
+`a_tick_that_panics_leaves_no_system_running_behind_it` and
+`outside_a_tick_nothing_is_checked` (the guard not restoring); `access::tests`
+(the same rules, unit-level);
+`inspector::tests::each_system_names_the_earlier_systems_it_must_run_after` (no
+de-duplication); `apps/sandbox`'s
+`scene::tests::a_system_that_must_run_after_others_names_them_in_its_row` (the
+suffix dropped); `crcbl-server`'s `rate_tests` (`Churn`'s declaration made a
+lie).
 
 ### `par_for` adoption inside the engine crates (2026-08-27)
 
@@ -20225,36 +20340,18 @@ which is the right baseline and not yet a comparison.
 The record behind this — the argument, the options and the measurements — is in
 `docs/notes/simulation.md` under this heading.
 
-`docs/plan/21-jobs.md`'s delivery table has a **P2** row reading "Seams
-reserved: ECS access declarations, …" and calls it a "design constraint,
-near-zero code". Its P8 row, "ECS parallel schedule (startup DAG, debug access
-asserts)", is written as if it only has to consume that seam. Measured
-2026-08-23: **the seam does not exist.** `SystemTrait` in `crcbl-ecs`'s
-`system.rs` declares nothing about access, `crcbl-ecs` has no `debug_assert` in
-it at all, and `Schedule`'s own doc claimed a debug-build conflict assertion
-that was never written — cut in the same commit as this entry.
+**Step 1 of the decision below is built (2026-10-05)**: the declarations, the
+conflict graph and the debug assert, with captured state made visible by moving
+it onto `Shared` — _ECS access declarations and the parallel schedule_ records
+the decisions. What this entry measured on 2026-08-23 — no declaration, no
+assert, a `Schedule` doc claiming one — is no longer true.
 
-**And there is nothing for a declaration to describe yet.** `SystemTrait::tick`
-takes `&mut self` and `dt`. Every impl in the workspace — `System<T>`,
-`crcbl-phys`'s `PhysicsSystem`, `crcbl sim`'s — touches only its own arrays. So
-the conflict DAG the plan describes is _empty by construction_: no two systems
-can conflict through anything the schedule can see. Systems that genuinely are
-coupled couple through captured state (a channel, a handle) that the schedule is
-never shown, and a declaration mechanism has to make that visible before a DAG
-built from it means anything. Deriving a DAG from the current trait would
-produce "everything is independent", run everything concurrently, and be wrong
-for exactly the systems that matter.
-
-**What the parallel schedule actually costs, so P8 is not planned against the
-wrong number:**
+**What the parallel schedule still costs, so P8 is not planned against the wrong
+number:**
 
 - `SystemTrait` must become `Send`, and so must `DebugDrawFn` (today
   `Box<dyn FnMut(&DebugCtx)>`, with no bound). That is a breaking change to the
-  trait and to `System<T>`'s `T`. Cheaper than it sounds — there are seven
-  `impl … SystemTrait for` sites, in `crcbl-ecs`, `crcbl-phys` and `crcbl-cli`.
-- An access vocabulary has to be invented, because "own arrays = write,
-  cross-system queries = read" (21-jobs.md's phrasing) describes an ECS where
-  reads cross systems through the world. This one has no such path.
+  trait, to `System<T>`'s `T`, and to every impl in the workspace.
 - Determinism has to survive it. `hash_state` and the sim-hash harness are what
   `crcbl-server` compares across machines, and a schedule whose completion order
   varies must still feed that hash in a fixed order.

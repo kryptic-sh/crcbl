@@ -6,7 +6,7 @@ use std::hash::Hasher;
 
 use crcbl_client::Client;
 use crcbl_console::{ConVar, Flags, Table};
-use crcbl_ecs::{DebugCtx, Entity, SystemTrait};
+use crcbl_ecs::{Access, DebugCtx, Entity, SystemTrait};
 use crcbl_net::{ConsoleOutcome, ConsoleReply, InMemoryTransport};
 
 use crcbl_store::MemoryStorage;
@@ -41,6 +41,10 @@ struct Spin {
 impl SystemTrait for Spin {
     fn name(&self) -> &str {
         "spin"
+    }
+
+    fn access(&self) -> Access {
+        Access::none()
     }
 
     fn tick(&mut self, _dt: f64) {}

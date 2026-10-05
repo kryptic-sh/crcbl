@@ -68,7 +68,7 @@ use std::hash::Hasher;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crcbl::ecs::{ClientInputs, DebugCtx, Entity, GameModule, SystemTrait, World};
+use crcbl::ecs::{Access, ClientInputs, DebugCtx, Entity, GameModule, SystemTrait, World};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{ColliderId, OverlapHit, PhysicsWorld};
@@ -1069,6 +1069,12 @@ struct FieldReplica {
 impl SystemTrait for FieldReplica {
     fn name(&self) -> &str {
         crate::replica::SYSTEM
+    }
+
+    /// Nothing shared: the tick does nothing. The stage is read by the
+    /// snapshot and the hash, between ticks.
+    fn access(&self) -> Access {
+        Access::none()
     }
 
     fn tick(&mut self, _dt: f64) {}

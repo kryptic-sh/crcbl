@@ -94,7 +94,7 @@ use serde::{Deserialize, Serialize};
 
 use crcbl_assets::AssetSource;
 use crcbl_ecs::{
-    ClientInputs, ComponentHash, DebugCtx, Entity, GameModule, System, SystemTrait, World,
+    Access, ClientInputs, ComponentHash, DebugCtx, Entity, GameModule, System, SystemTrait, World,
 };
 use crcbl_phys::{
     ColliderComponent, ContactSettings, GravityForce, MassProperties, PhysicsSystem, RigidBody,
@@ -498,6 +498,10 @@ impl fmt::Debug for Simulation {
 impl SystemTrait for Simulation {
     fn name(&self) -> &str {
         SIMULATION
+    }
+
+    fn access(&self) -> Access {
+        SystemTrait::access(&self.physics)
     }
 
     fn tick(&mut self, dt: f64) {

@@ -2,8 +2,10 @@ use std::fmt;
 
 use crcbl_core::Pool;
 
+use crate::access::AccessError;
 use crate::entity::{Entity, EntityMarker};
 use crate::schedule::Schedule;
+use crate::shared::Shared;
 use crate::system::SystemTrait;
 
 /// The top-level ECS container.
@@ -90,7 +92,23 @@ impl World {
         self.dead.clear();
     }
 
+    /// Registers a [`Shared`] resource with the schedule, so a system's
+    /// [`SystemTrait::access`] may name it. See [`Schedule::share`].
+    ///
+    /// # Errors
+    ///
+    /// [`AccessError::DuplicateResource`] when one of that name already is.
+    pub fn share<T>(&mut self, shared: &Shared<T>) -> Result<(), AccessError> {
+        self.schedule.share(shared)
+    }
+
     /// Adds a system to the schedule. Systems run in insertion order.
+    ///
+    /// # Panics
+    ///
+    /// When the system's [`SystemTrait::access`] names a resource not
+    /// registered with [`World::share`], naming both — see
+    /// [`Schedule::add_system`].
     pub fn register_system(&mut self, system: Box<dyn SystemTrait>) {
         self.schedule.add_system(system);
     }
@@ -263,6 +281,9 @@ mod tests {
             fn name(&self) -> &str {
                 "rec"
             }
+            fn access(&self) -> crate::Access {
+                crate::Access::none()
+            }
             fn tick(&mut self, _dt: f64) {
                 self.ticked = true;
             }
@@ -302,6 +323,9 @@ mod tests {
         impl SystemTrait for Odd {
             fn name(&self) -> &str {
                 "not the name anybody would guess"
+            }
+            fn access(&self) -> crate::Access {
+                crate::Access::none()
             }
             fn tick(&mut self, _dt: f64) {}
             fn entity_count(&self) -> usize {

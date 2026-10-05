@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use crcbl::core::FrameClock;
 use crcbl::core::time::{ManualTime, TimeSource};
-use crcbl::ecs::{ComponentHash, DebugCtx, Entity, System, SystemTrait, World};
+use crcbl::ecs::{Access, ComponentHash, DebugCtx, Entity, System, SystemTrait, World};
 use crcbl::server::sim_hash::hash_world;
 
 use crate::args::SimArgs;
@@ -197,6 +197,11 @@ impl CounterSystem {
 impl SystemTrait for CounterSystem {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Nothing shared: the tick counts up its own rows.
+    fn access(&self) -> Access {
+        Access::none()
     }
 
     fn tick(&mut self, _dt: f64) {

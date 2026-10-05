@@ -1,9 +1,13 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::hash::Hasher;
+use std::sync::Arc;
 
 use crcbl_core::time::TimeSource;
 
+use crate::access::{AccessError, Conflict, Declared, conflicts_between};
 use crate::entity::Entity;
+use crate::shared::Shared;
 use crate::system::{DebugCtx, SystemTrait};
 use crate::tick_time::{TickTime, TickWindow};
 
@@ -28,17 +32,21 @@ impl Hasher for ByteSink {
 /// An ordered sequence of systems run each tick.
 ///
 /// Systems are executed in insertion order, one after another, on the calling
-/// thread. Ordering is declared by the caller and nothing infers or checks a
-/// dependency between two systems — this doc claimed a debug-build conflict
-/// assertion until 2026-08-23 and there has never been one.
+/// thread.
 ///
-/// There is nothing for such a check to look at yet. [`SystemTrait::tick`]
-/// takes `&mut self` and nothing else, so as far as the schedule can see every
-/// system touches only its own arrays and no pair of them can conflict. Two
-/// systems that really are coupled are coupled through state the schedule is
-/// not shown — a channel or a handle one of them captured — which is exactly
-/// the access a declaration would have to make visible before a parallel
-/// schedule could be built on it. `docs/backlog.md` records what that costs.
+/// # Declared access and the conflict graph
+///
+/// Each system declares, at registration, the [`Shared`] resources its tick
+/// reads and writes ([`SystemTrait::access`]); a resource is registered first,
+/// with [`Schedule::share`]. From those declarations the schedule derives
+/// [`Schedule::conflicts`] as each system is added: a write against a write,
+/// or a read against a write, of one resource means the later-registered
+/// system waits for the earlier. Running in registration order respects every
+/// such edge by construction, so the graph changes nothing today; it is what a
+/// schedule running independent systems at once would be built on. In debug
+/// builds a tick that touches a resource its system did not declare panics,
+/// which is what keeps the graph honest — the [`Access`](crate::Access) docs
+/// describe the seam and what lies outside it.
 ///
 /// # Tick times
 ///
@@ -52,6 +60,14 @@ pub struct Schedule {
     systems: Vec<Box<dyn SystemTrait>>,
     /// Each system's tick times, index for index with `systems`.
     times: Vec<TickWindow>,
+    /// Each system's name and declaration as registered, index for index with
+    /// `systems`; reference-counted so a running tick's debug check can hold
+    /// one.
+    declared: Vec<Arc<Declared>>,
+    /// The names [`Schedule::share`] registered.
+    resources: BTreeSet<String>,
+    /// Grouped by `after`, then by `before`, then by resource name.
+    conflicts: Vec<Conflict>,
     clock: Option<Box<dyn TimeSource>>,
 }
 
@@ -62,14 +78,101 @@ impl Schedule {
         Self {
             systems: Vec::new(),
             times: Vec::new(),
+            declared: Vec::new(),
+            resources: BTreeSet::new(),
+            conflicts: Vec::new(),
             clock: None,
         }
     }
 
+    /// Registers `shared` under its name, so a system's
+    /// [`SystemTrait::access`] may name it.
+    ///
+    /// # Errors
+    ///
+    /// [`AccessError::DuplicateResource`] when a resource of that name is
+    /// already registered: names are how declarations tell resources apart.
+    pub fn share<T>(&mut self, shared: &Shared<T>) -> Result<(), AccessError> {
+        if self.resources.insert(shared.name().to_owned()) {
+            Ok(())
+        } else {
+            Err(AccessError::DuplicateResource {
+                resource: shared.name().to_owned(),
+            })
+        }
+    }
+
     /// Appends a system to the end of the schedule.
+    ///
+    /// # Panics
+    ///
+    /// When [`Schedule::try_add_system`] refuses it — its declaration names a
+    /// resource not registered here — with the refusal's message, which names
+    /// the system and the resource. A declaration is code, so a bad one is a
+    /// bug the first run finds.
     pub fn add_system(&mut self, system: Box<dyn SystemTrait>) {
+        if let Err(error) = self.try_add_system(system) {
+            panic!("{error}");
+        }
+    }
+
+    /// Appends a system to the end of the schedule, asking it its
+    /// [`SystemTrait::access`] and adding its conflicts with every system
+    /// before it.
+    ///
+    /// # Errors
+    ///
+    /// [`AccessError::UnknownResource`] when the declaration names a resource
+    /// no [`Schedule::share`] registered — the first such in name order. The
+    /// schedule is left as it was.
+    pub fn try_add_system(&mut self, system: Box<dyn SystemTrait>) -> Result<(), AccessError> {
+        let access = system.access();
+        if let Some(unknown) = access
+            .touched()
+            .find(|resource| !self.resources.contains(*resource))
+        {
+            return Err(AccessError::UnknownResource {
+                system: system.name().to_owned(),
+                resource: unknown.to_owned(),
+            });
+        }
+        let after = self.systems.len();
+        for (before, earlier) in self.declared.iter().enumerate() {
+            conflicts_between(before, &earlier.access, after, &access, &mut self.conflicts);
+        }
+        self.declared.push(Arc::new(Declared {
+            system: system.name().to_owned(),
+            access,
+        }));
         self.systems.push(system);
         self.times.push(TickWindow::default());
+        Ok(())
+    }
+
+    /// Every pair of systems whose declared access conflicts, one entry per
+    /// resource they collide on: the edges of the graph a concurrent schedule
+    /// would have to respect.
+    ///
+    /// Ordered by the later system, then the earlier, then the resource's
+    /// name, so the same registrations give the same list on every run.
+    #[must_use]
+    pub fn conflicts(&self) -> &[Conflict] {
+        &self.conflicts
+    }
+
+    /// The systems the one at `index` must run after — each registered before
+    /// it with a declaration that conflicts with its own — once each, in
+    /// schedule order.
+    pub(crate) fn runs_after(&self, index: usize) -> Vec<usize> {
+        let mut before: Vec<usize> = self
+            .conflicts
+            .iter()
+            .filter(|conflict| conflict.after == index)
+            .map(|conflict| conflict.before)
+            .collect();
+        // Grouped by `before` within one `after`, so repeats are adjacent.
+        before.dedup();
+        before
     }
 
     /// Times every system's tick on `clock` from the next [`run`](Self::run),
@@ -101,17 +204,21 @@ impl Schedule {
     /// Runs every system's [`SystemTrait::tick`] in order, passing the
     /// schedule's fixed timestep `dt` (seconds) through to each, and with a
     /// clock, timing each one.
+    ///
+    /// In debug builds each tick runs with its system's declaration as the
+    /// thread's running one, which every [`Shared`] access checks.
     pub fn run(&mut self, dt: f64) {
-        let Some(clock) = &self.clock else {
-            for system in &mut self.systems {
-                system.tick(dt);
+        for (index, system) in self.systems.iter_mut().enumerate() {
+            #[cfg(debug_assertions)]
+            let _running = crate::access::Running::enter(&self.declared[index]);
+            match &self.clock {
+                None => system.tick(dt),
+                Some(clock) => {
+                    let started = clock.elapsed();
+                    system.tick(dt);
+                    self.times[index].record(clock.elapsed().saturating_sub(started));
+                }
             }
-            return;
-        };
-        for (system, window) in self.systems.iter_mut().zip(&mut self.times) {
-            let started = clock.elapsed();
-            system.tick(dt);
-            window.record(clock.elapsed().saturating_sub(started));
         }
     }
 
@@ -238,23 +345,28 @@ impl Default for Schedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access::Access;
     use crate::system::System;
 
     #[test]
     fn runs_systems_in_insertion_order() {
         let mut schedule = Schedule::new();
-        let order = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let order = Shared::new("order", Vec::new());
+        schedule.share(&order).expect("the only resource");
 
         struct Probe {
             id: usize,
-            order: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+            order: Shared<Vec<usize>>,
         }
         impl SystemTrait for Probe {
             fn name(&self) -> &str {
                 "probe"
             }
+            fn access(&self) -> Access {
+                Access::none().writes("order")
+            }
             fn tick(&mut self, _dt: f64) {
-                self.order.borrow_mut().push(self.id);
+                self.order.write().push(self.id);
             }
             fn entity_count(&self) -> usize {
                 0
@@ -280,18 +392,21 @@ mod tests {
         }));
 
         schedule.run(1.0 / 60.0);
-        assert_eq!(*order.borrow(), vec![0, 1, 2]);
+        assert_eq!(*order.read(), vec![0, 1, 2]);
     }
 
     #[test]
     fn run_passes_the_schedule_dt_to_every_system() {
-        struct Recorder(std::rc::Rc<std::cell::RefCell<Vec<f64>>>);
+        struct Recorder(Shared<Vec<f64>>);
         impl SystemTrait for Recorder {
             fn name(&self) -> &str {
                 "recorder"
             }
+            fn access(&self) -> Access {
+                Access::none().writes("seen")
+            }
             fn tick(&mut self, dt: f64) {
-                self.0.borrow_mut().push(dt);
+                self.0.write().push(dt);
             }
             fn entity_count(&self) -> usize {
                 0
@@ -303,13 +418,14 @@ mod tests {
             }
         }
 
-        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = Shared::new("seen", Vec::new());
         let mut schedule = Schedule::new();
+        schedule.share(&seen).expect("the only resource");
         schedule.add_system(Box::new(Recorder(seen.clone())));
         schedule.add_system(Box::new(Recorder(seen.clone())));
 
         schedule.run(1.0 / 30.0);
-        assert_eq!(*seen.borrow(), vec![1.0 / 30.0, 1.0 / 30.0]);
+        assert_eq!(*seen.read(), vec![1.0 / 30.0, 1.0 / 30.0]);
     }
 
     #[test]

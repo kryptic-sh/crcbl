@@ -50,7 +50,7 @@ mod hosted {
     use std::hash::Hasher;
 
     use crcbl::client::Client;
-    use crcbl::ecs::{DebugCtx, Entity, SystemTrait, World};
+    use crcbl::ecs::{Access, DebugCtx, Entity, SystemTrait, World};
     use crcbl::net::Transport;
     use crcbl::server::{HostModule, PeerInputs};
 
@@ -82,6 +82,12 @@ mod hosted {
     impl SystemTrait for HostedSpin {
         fn name(&self) -> &str {
             SPIN
+        }
+
+        /// Nothing shared: the tick does nothing, and [`SpinModule`] reaches the
+        /// cube between ticks.
+        fn access(&self) -> Access {
+            Access::none()
         }
 
         /// Nothing: [`SpinModule`] spins it, because the rate is a tick input

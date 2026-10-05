@@ -82,6 +82,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   times). A struct literal must name it — `None` for a system that was not
   timed.
 
+- **`crcbl_ecs::SystemTrait` gained a required `access`, with no default** (see
+  Added: declared system access). Every system must answer what its tick touches
+  beyond its own arrays; a system whose tick works on its own arrays alone
+  answers `Access::none()`. `World::register_system` and `Schedule::add_system`
+  now panic, naming the system and the resource, when that answer names a
+  resource not registered with `World::share`; `Schedule::try_add_system`
+  returns the refusal instead. `SystemStats` gained `runs_after` — a struct
+  literal must name it, `Vec::new()` for a system that conflicts with nothing.
+
 - **`crcbl_store::save::SaveHeader` gained `engine_version` and `scene`, and
   `SaveData` gained `format_version`** (see Added: saves record the engine and
   the scene, and older saves migrate). A struct literal must name them, or build
@@ -857,6 +866,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   unchanged by them. The sandbox times its world on the real clock and its F3
   panel gains a "systems" section: a row per system, in schedule order, reading
   `last ms, avg mean ms`.
+
+- **Declared system access, the conflicts derived from it, and a debug check
+  that holds systems to it.** `crcbl_ecs::Shared<T>` is a named handle to state
+  more than one system holds; `World::share` (or `Schedule::share`) registers
+  it, refusing a second of one name. Each system's `SystemTrait::access`
+  declares the shared resources its tick reads and writes (`Access::none()`,
+  `.reads(name)`, `.writes(name)`), and the schedule derives
+  `Schedule::conflicts` from those declarations at registration: a write against
+  a write, or a read against a write, of one resource orders the later system
+  after the earlier, read against read is no conflict, and the list is the same
+  on every run. In debug builds every `Shared::read` and `Shared::write` inside
+  a tick checks the running system's declaration and panics naming the system
+  and the resource on an access it left out; release builds compile the check
+  out, and code outside a tick is never checked. The schedule still runs
+  serially in registration order, which respects every conflict by construction;
+  `Inspector::collect` reports each system's `runs_after`, and the sandbox's F3
+  "systems" rows end with `after` and those names when there are any.
 
 - **`crcbl save list|dump|diff` inspects a game's saves from outside the game.**
   Every file is opened through `SaveReader::open`, the call a game makes, so an

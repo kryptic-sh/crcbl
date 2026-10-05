@@ -4,6 +4,7 @@ use std::hash::Hasher;
 
 use crcbl_reflect::Reflect;
 
+use crate::access::Access;
 use crate::component_hash::ComponentHash;
 use crate::entity::Entity;
 
@@ -42,6 +43,22 @@ pub trait SystemTrait {
     /// use it, or its simulated speed becomes a function of the tick rate.
     /// See [`World::set_tick_dt`](crate::World::set_tick_dt).
     fn tick(&mut self, dt: f64);
+
+    /// The [`Shared`](crate::Shared) resources this system's
+    /// [`tick`](Self::tick) reads and writes — everything it touches beyond
+    /// its own arrays.
+    ///
+    /// **Required, with no default**, so that no system inherits "touches
+    /// nothing" by forgetting to answer: a schedule that took a missing answer
+    /// for independence would order nothing and say so confidently. A system
+    /// whose tick works on its own arrays alone answers [`Access::none`].
+    ///
+    /// Asked once, when the system is registered
+    /// ([`Schedule::add_system`](crate::Schedule::add_system)): the schedule
+    /// refuses a name not registered with it, derives the system's conflicts
+    /// with those registered before it, and in debug builds panics if the
+    /// tick touches a resource the answer left out.
+    fn access(&self) -> Access;
 
     /// Number of entities currently registered with this system.
     fn entity_count(&self) -> usize;
@@ -296,6 +313,11 @@ impl<T: ComponentHash + 'static> SystemTrait for System<T> {
     fn tick(&mut self, _dt: f64) {
         // Default: no-op. Users that need per-tick logic iterate the system
         // directly or implement `SystemTrait` on their own type.
+    }
+
+    /// Nothing shared: the tick does nothing, and the arrays are its own.
+    fn access(&self) -> Access {
+        Access::none()
     }
 
     fn entity_count(&self) -> usize {
@@ -615,6 +637,9 @@ mod tests {
         impl SystemTrait for Silent {
             fn name(&self) -> &str {
                 "silent"
+            }
+            fn access(&self) -> Access {
+                Access::none()
             }
             fn tick(&mut self, _dt: f64) {}
             fn entity_count(&self) -> usize {

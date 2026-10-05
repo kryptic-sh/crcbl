@@ -3,11 +3,8 @@
 //! `crcbl_client::Client`s — or a bare far end, where a test must see every
 //! snapshot — on the other side.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use crcbl_client::Client;
-use crcbl_ecs::{DebugCtx, Entity, SystemTrait};
+use crcbl_ecs::{Access, DebugCtx, Entity, Shared, SystemTrait};
 use crcbl_net::auth::SessionCrypto;
 use crcbl_net::{InMemoryTransport, Message, Trust};
 
@@ -57,7 +54,7 @@ impl Transport for Narrow {
 /// every tick while its switch is on, and hold while it is off.
 struct Churn {
     ticks: u64,
-    changing: Arc<AtomicBool>,
+    changing: Shared<bool>,
 }
 
 impl Churn {
@@ -67,6 +64,8 @@ impl Churn {
     const ENTITIES: u64 = 40;
     /// Bytes of each component: the tick it was written at, then padding.
     const COMPONENT_BYTES: usize = 16;
+    /// The shared resource holding its switch.
+    const SWITCH: &'static str = "churn-switch";
 }
 
 impl SystemTrait for Churn {
@@ -74,8 +73,13 @@ impl SystemTrait for Churn {
         "churn"
     }
 
+    /// The switch the rig flips.
+    fn access(&self) -> Access {
+        Access::none().reads(Self::SWITCH)
+    }
+
     fn tick(&mut self, _dt: f64) {
-        if self.changing.load(Ordering::Relaxed) {
+        if *self.changing.read() {
             self.ticks += 1;
         }
     }
@@ -107,17 +111,18 @@ struct Rig {
     host: Host,
     clients: Vec<Client<InMemoryTransport>>,
     ids: Vec<PeerId>,
-    changing: Arc<AtomicBool>,
+    changing: Shared<bool>,
     now: Duration,
 }
 
 impl Rig {
     fn new() -> Self {
-        let changing = Arc::new(AtomicBool::new(true));
+        let changing = Shared::new(Churn::SWITCH, true);
         let mut world = World::new();
+        world.share(&changing).expect("the world's only resource");
         world.register_system(Box::new(Churn {
             ticks: 0,
-            changing: Arc::clone(&changing),
+            changing: changing.clone(),
         }));
         let mut host = Host::new(
             world,
@@ -248,7 +253,7 @@ fn a_congested_peer_steps_down_and_up_alone() {
         applied[1]
     );
 
-    rig.changing.store(false, Ordering::Relaxed);
+    *rig.changing.write() = false;
     let ticks_to_full: u32 = SNAPSHOT_INTERVAL_STEPS[1..]
         .iter()
         .map(|interval| interval * STEP_UP_AFTER)
@@ -418,6 +423,10 @@ impl SystemTrait for Ticker {
         "ticker"
     }
 
+    fn access(&self) -> Access {
+        Access::none()
+    }
+
     fn tick(&mut self, _dt: f64) {
         self.ticks += 1;
     }
@@ -446,6 +455,10 @@ struct Boulder;
 impl SystemTrait for Boulder {
     fn name(&self) -> &str {
         "boulder"
+    }
+
+    fn access(&self) -> Access {
+        Access::none()
     }
 
     fn tick(&mut self, _dt: f64) {}

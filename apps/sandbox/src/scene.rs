@@ -46,6 +46,11 @@
 //! row that will not stay put cannot be read. The timing runs whether or not
 //! the panel shows, as the frame section's window does, so opening it shows a
 //! warm mean rather than a filling one.
+//!
+//! A system that must run after others — its declared access conflicts with
+//! theirs ([`Schedule::conflicts`](crcbl::ecs::Schedule::conflicts)) — ends its
+//! row with `after` and their names. None of the scene's own systems touches
+//! anything shared, so none of their rows does.
 
 use crcbl::console::{SimSet, SimVars};
 use crcbl::core::TickId;
@@ -377,7 +382,7 @@ impl DebugModule for Scene {
 }
 
 /// The systems section: one row per system, in schedule order, with its last
-/// tick and the window's mean.
+/// tick and the window's mean, and the systems it must run after.
 ///
 /// Reads the world only when the panel asks — a hidden panel never calls
 /// [`DebugModule::debug_section`], so the strings
@@ -393,16 +398,21 @@ impl DebugModule for SystemTimes<'_> {
             UNTIMED
         };
         for stats in Inspector::collect(self.0) {
+            let after = if stats.runs_after.is_empty() {
+                String::new()
+            } else {
+                format!(", after {}", stats.runs_after.join(", "))
+            };
             match stats.tick_time {
                 Some(time) => out.row(
                     &stats.name,
                     format_args!(
-                        "{:.3} ms, avg {:.3} ms",
+                        "{:.3} ms, avg {:.3} ms{after}",
                         millis(time.last),
                         millis(time.mean)
                     ),
                 ),
-                None => out.row_str(&stats.name, untimed),
+                None => out.row(&stats.name, format_args!("{untimed}{after}")),
             }
         }
     }

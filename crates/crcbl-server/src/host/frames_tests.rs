@@ -8,7 +8,7 @@ use std::hash::Hasher;
 use std::sync::{Arc, Mutex};
 
 use crcbl_client::Client;
-use crcbl_ecs::{DebugCtx, Entity, SystemTrait};
+use crcbl_ecs::{Access, DebugCtx, Entity, SystemTrait};
 use crcbl_net::InMemoryTransport;
 
 use super::tests::{COMPATIBILITY, TICK, TICK_HZ};
@@ -29,6 +29,10 @@ struct Seen {
 impl SystemTrait for Seen {
     fn name(&self) -> &str {
         "seen"
+    }
+
+    fn access(&self) -> Access {
+        Access::none()
     }
 
     fn tick(&mut self, _dt: f64) {}
