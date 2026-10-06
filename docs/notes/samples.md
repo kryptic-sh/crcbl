@@ -320,10 +320,12 @@ not re-measured on 2026-09-24**; each names the test that reproduces it.
   and authored art in the viewport is exactly what it must not do. Rule 4's
   debug panel applies as everywhere.
 - **The re-export watch is a poll, not a filesystem-notification dependency.**
-  `apps/viewer/src/watch.rs` `stat`s the document four times a second with a
-  settle delay, because an exporter writes a `.glb` progressively and every
-  platform API reports a re-export as a burst that has to be debounced back into
-  one anyway.
+  `apps/viewer/src/watch.rs` polls the document on the engine's
+  `crcbl_assets::watch` (since 2026-10-06), which `stat`s at an interval and
+  offers a change once it has settled, because an exporter writes a `.glb`
+  progressively and every platform API reports a re-export as a burst that has
+  to be debounced back into one anyway. Native only: a page has no file to
+  watch, so the browser build has no watch.
 - **The glTF → animation conversion is the application's**
   (`apps/viewer/src/anim.rs`), deliberately, because `crcbl-anim` does not
   depend on the glTF importer. The old "no animation playback" cap was withdrawn

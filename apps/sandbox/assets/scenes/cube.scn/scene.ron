@@ -1,0 +1,8 @@
+Scene(
+    format: 0,
+    name: "cube",
+    systems: [
+        "spin",
+        "sun",
+    ],
+)

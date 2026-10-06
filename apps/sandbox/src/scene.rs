@@ -47,10 +47,24 @@
 //! the panel shows, as the frame section's window does, so opening it shows a
 //! warm mean rather than a filling one.
 //!
+//! # Opened from a directory, and reloaded from it
+//!
+//! `--scene <DIR>` opens a `.scn/` directory of [`SPIN`] and [`SUN`] chunks
+//! in place of the two entities built here — `assets/scenes/cube.scn/` is
+//! this scene written out, so `--scene apps/sandbox/assets/scenes/cube.scn`
+//! starts where a plain run does — and **watches its chunk files**, reloading
+//! one system when its file changes (`scene::disk`). Natively only: a browser
+//! has no directory to open.
+//!
 //! A system that must run after others — its declared access conflicts with
 //! theirs ([`Schedule::conflicts`](crcbl::ecs::Schedule::conflicts)) — ends its
 //! row with `after` and their names. None of the scene's own systems touches
 //! anything shared, so none of their rows does.
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 use crcbl::console::{SimSet, SimVars};
 use crcbl::core::TickId;
@@ -59,9 +73,16 @@ use crcbl::ecs::{ComponentHash, Entity, Inspector, ScheduleClock, System, World}
 use crcbl::net::{ConsoleOutcome, ConsoleReply};
 use crcbl::reflect::Reflect;
 use crcbl::render::DirectionalLight;
+use crcbl::serde::{Deserialize, Serialize};
 use crcbl::ui::{DebugModule, DebugPanel, DebugSection, ReflectedSection};
 
 use crate::spin::sv_spin_rate;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod disk;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use disk::Reload;
 
 /// Selects the entity after the selected one, or the first.
 pub const SELECT_NEXT_KEY: KeyCode = KeyCode::PageDown;
@@ -89,8 +110,9 @@ pub const PENDING: &str = "pending";
 
 /// How far the cube has spun, as the seconds of animation
 /// `ForwardRenderer::spin` turns into its rotation.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl::reflect")]
+#[serde(crate = "crcbl::serde")]
 pub struct Spin {
     /// Seconds of animation, advanced by the fixed timestep.
     pub seconds: f32,
@@ -105,8 +127,9 @@ impl ComponentHash for Spin {
 /// The scene's one directional light, field for field the renderer's
 /// [`DirectionalLight`] — as arrays, which reflect and hash where `Vec3` does
 /// not hash.
-#[derive(Clone, Copy, Debug, PartialEq, Reflect)]
+#[derive(Clone, Copy, Debug, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl::reflect")]
+#[serde(crate = "crcbl::serde")]
 pub struct Sun {
     /// Towards the light, in render space.
     pub direction: [f32; 3],
@@ -149,8 +172,10 @@ impl ComponentHash for Sun {
 #[derive(Debug)]
 pub struct Scene {
     world: World,
-    cube: Entity,
-    sun: Entity,
+    /// The entity [`SPIN`] holds, or [`None`] for an opened scene with none.
+    cube: Option<Entity>,
+    /// The entity [`SUN`] holds, or [`None`] for an opened scene with none.
+    sun: Option<Entity>,
     selected: Option<Entity>,
     /// The values the next tick spins by.
     sim: SimVars,
@@ -160,6 +185,10 @@ pub struct Scene {
     ticks: u64,
     /// What became of each set, waiting to be printed.
     replies: Vec<ConsoleReply>,
+    /// The directory the scene was opened from and is watched in, or
+    /// [`None`] for the scene built here. Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    disk: Option<disk::Disk>,
 }
 
 impl Scene {
@@ -177,6 +206,36 @@ impl Scene {
         suns.attach(sun, Sun::from(light));
         world.register_system(Box::new(spins));
         world.register_system(Box::new(suns));
+        Self::around(world, Some(cube), Some(sun))
+    }
+
+    /// The `.scn/` directory at `dir`, its systems' ticks timed on `clock`,
+    /// watched for its chunk files changing — see the [module docs](self).
+    ///
+    /// # Errors
+    ///
+    /// The scene loader's refusal, naming the file: one that is not there,
+    /// text that is not the format, or a manifest naming a system other than
+    /// [`SPIN`] and [`SUN`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open(
+        dir: &Path,
+        clock: Option<ScheduleClock>,
+    ) -> Result<Self, crcbl::scene::scn::ScnError> {
+        let mut world = World::new();
+        world.schedule_mut().set_clock(clock);
+        world.register_system(Box::new(System::<Spin>::reflected(SPIN)));
+        world.register_system(Box::new(System::<Sun>::reflected(SUN)));
+        let disk = disk::Disk::open(dir, &mut world)?;
+        let mut scene = Self::around(world, None, None);
+        scene.disk = Some(disk);
+        scene.find_entities();
+        Ok(scene)
+    }
+
+    /// A scene of `world`, with nothing selected, no set pending, and the
+    /// simulation variables at their defaults.
+    fn around(world: World, cube: Option<Entity>, sun: Option<Entity>) -> Self {
         Self {
             world,
             cube,
@@ -186,7 +245,55 @@ impl Scene {
             pending: Vec::new(),
             ticks: 0,
             replies: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            disk: None,
         }
+    }
+
+    /// Advances the watch on the opened directory by `dt` of wall-clock
+    /// time, and reloads each chunk whose file changed — only that system's
+    /// rows — saying what became of each. Nothing for the scene built here.
+    ///
+    /// A chunk that will not read keeps the last good state, and the
+    /// warning names the file and the line.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll_disk(&mut self, dt: Duration) -> Vec<Reload> {
+        let Some(disk) = self.disk.as_mut() else {
+            return Vec::new();
+        };
+        let reloads = disk.poll(&mut self.world, dt);
+        for reload in &reloads {
+            match &reload.outcome {
+                Ok(diff) => crcbl::log::info!(
+                    "sandbox: sys/{}.ron reloaded, {} row(s) changed",
+                    reload.system,
+                    diff.changes().len(),
+                ),
+                Err(error) => crcbl::log::warn!(
+                    "sandbox: sys/{}.ron changed and could not be read, so the last good state \
+                     was kept: {error}",
+                    reload.system,
+                ),
+            }
+        }
+        if !reloads.is_empty() {
+            self.find_entities();
+        }
+        reloads
+    }
+
+    /// Finds the cube and the sun again — the first entity each system holds
+    /// — after a load or a reload may have replaced either.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn find_entities(&mut self) {
+        self.cube = self
+            .world
+            .system_mut::<System<Spin>>()
+            .and_then(|spins| spins.iter_entities().next().map(|(entity, _)| entity));
+        self.sun = self
+            .world
+            .system_mut::<System<Sun>>()
+            .and_then(|suns| suns.iter_entities().next().map(|(entity, _)| entity));
     }
 
     /// Queue `set` for the start of the next tick, the offline simulation's
@@ -210,7 +317,9 @@ impl Scene {
     /// Put the cube where a LAN session's host has it, so the frame draws the
     /// session's cube rather than this world's own.
     pub fn set_cube_seconds(&mut self, seconds: f32) {
-        let cube = self.cube;
+        let Some(cube) = self.cube else {
+            return;
+        };
         if let Some(spin) = self
             .world
             .system_mut::<System<Spin>>()
@@ -262,14 +371,14 @@ impl Scene {
 
     /// The cube's seconds of animation, or `None` once it is gone.
     pub fn cube_seconds(&mut self) -> Option<f32> {
-        let cube = self.cube;
+        let cube = self.cube?;
         let spins = self.world.system_mut::<System<Spin>>()?;
         spins.get(cube).map(|spin| spin.seconds)
     }
 
     /// The light the sun casts, or `None` once it is gone.
     pub fn light(&mut self) -> Option<DirectionalLight> {
-        let sun = self.sun;
+        let sun = self.sun?;
         let suns = self.world.system_mut::<System<Sun>>()?;
         suns.get(sun).copied().map(DirectionalLight::from)
     }
@@ -353,14 +462,14 @@ impl Scene {
 
     /// The cube's entity.
     #[cfg(test)]
-    pub const fn cube(&self) -> Entity {
-        self.cube
+    pub fn cube(&self) -> Entity {
+        self.cube.expect("the scene has a cube")
     }
 
     /// The sun's entity.
     #[cfg(test)]
-    pub const fn sun(&self) -> Entity {
-        self.sun
+    pub fn sun(&self) -> Entity {
+        self.sun.expect("the scene has a sun")
     }
 }
 

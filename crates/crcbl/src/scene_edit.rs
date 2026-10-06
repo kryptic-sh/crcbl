@@ -34,6 +34,10 @@
 //!   [`Document::save_as`] makes that directory the document's own, and
 //!   [`Document::new_scene`] starts from nothing (`scene_edit::origin`).
 //!
+//! A chunk file changed on disk is read again with
+//! [`Document::reload_chunk`], as one entry of the history — see `reload`'s
+//! module docs for what it changes and when it asks first.
+//!
 //! And a sixth that is not an edit: [`Document::play`] runs the scene with its
 //! games' modules until [`Document::stop`] puts it back exactly as it was —
 //! see `play`'s own module docs, and why every edit is refused in between.
@@ -80,6 +84,7 @@ mod origin;
 mod ownership;
 mod play;
 mod recovery;
+mod reload;
 mod route;
 mod selection;
 pub mod serve;
@@ -97,8 +102,9 @@ pub use recovery::{
     IN_USE_SUFFIX, InUse, KEEP_NEWEST, MAX_AGE, Pruned, RECOVERY_DIR, RecoveryCopy, SIDECAR,
     list_copies, mark_in_use, prune_copies, remove_copy,
 };
+pub use reload::{OverEdits, Reloaded};
 pub use route::RoutedEdit;
-pub use serve::{EditServer, refusal_of};
+pub use serve::{EditServer, SERVER_AUTHOR, refusal_of};
 pub use systems::{IN_SCENE, SystemGroup, UNGROUPED};
 
 /// A loaded scene and everything the editor knows about it.
@@ -467,6 +473,15 @@ pub enum EditError {
     /// took no lock, or a checkout — and wrote nothing. See
     /// [`Document::accept_changes_on_disk`].
     ChangedOnDisk(PathBuf),
+
+    /// A chunk reload was asked of a document with edits it has not saved,
+    /// under [`OverEdits::Refuse`], naming the system — the caller asks
+    /// whether to take the disk's chunk. See [`Document::reload_chunk`].
+    Unsaved(String),
+
+    /// A chunk reload was asked of a routed copy, whose server's document is
+    /// the one to reload — see [`Document::reload_chunk`].
+    Routed,
 }
 
 impl fmt::Display for EditError {
@@ -608,6 +623,15 @@ impl fmt::Display for EditError {
                 "the scene's files in `{}` changed since they were opened or last saved — \
                  another program or a checkout wrote them — so the save did not overwrite them",
                 dir.display()
+            ),
+            Self::Unsaved(system) => write!(
+                f,
+                "`sys/{system}.ron` changed on disk while the scene has unsaved edits; reload it \
+                 over them, or keep editing and save over it"
+            ),
+            Self::Routed => f.write_str(
+                "this copy follows a served scene, so a chunk is reloaded by its server and not \
+                 here",
             ),
         }
     }
@@ -1969,3 +1993,6 @@ mod history_tests;
 
 #[cfg(test)]
 mod lock_tests;
+
+#[cfg(test)]
+mod reload_tests;

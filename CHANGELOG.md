@@ -16,6 +16,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_scene::scn::SystemChunk` has a required `rows` method** (see Added:
+  per-chunk scene reload): a chunk file's rows as text, read into no world. A
+  codec written outside `chunk_of` and `chunk_ruled` must implement it.
+  `crcbl_scene::scn::ScnError` has an `Unlisted` variant, and
+  `crcbl::scene_edit::EditError` has `Unsaved` and `Routed`; an exhaustive
+  `match` over either must name the new arms.
+
 - **`crcbl_orbit::GameError` has an `Art` variant** (see Added: orbit's flight
   UI is `.crpix` art): the flight UI's sprites not fitting the UI pass's image
   atlas, which stops start-up. An exhaustive `match` over it must name the new
@@ -813,6 +820,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **Hot reload of a scene's chunk files, one system at a time** (stage 6's task
+  5). `crcbl_scene::scn::Scene::reload_chunk` reads `sys/<name>.ron` again,
+  compares its rows with the ones the system holds
+  (`crcbl_scene::scn::diff_chunk`, a `ChunkDiff` of `RowChange`s) and applies
+  only the difference: other systems' entities, their ids and their state are
+  not touched, a row kept under its id keeps its entity, a removed entity goes
+  with its id and its name, and a file that will not read keeps the last good
+  state. `crcbl::scene_edit::Document::reload_chunk` applies the same difference
+  as one undoable entry of the history, refusing with `EditError::Unsaved` over
+  unsaved edits unless told `OverEdits::Reload`, and
+  `crcbl::scene_edit::EditServer::reload_chunk` announces it to every client as
+  an edit by `SERVER_AUTHOR`, so copies follow it without a fetch.
+- **`crcbl_assets::watch::PolledWatch`**, the engine's polled file watch: a set
+  of paths looked at once per `POLL_INTERVAL` of the caller's clock, each change
+  offered once it has held still for `SETTLE`. Native only; the module is absent
+  on `wasm32`. No file-watcher dependency.
+- **`sandbox --scene <DIR>`** opens a `.scn/` directory of the sandbox's spin
+  and sun in place of the built-in scene and reloads a system's chunk when its
+  file changes, leaving the other system alone.
+  `apps/sandbox/assets/scenes/cube.scn` is the built-in scene written out.
+- **`crcbl_scene::scn::IdMap::iter`**, every filed id with its entity, in id
+  order.
 
 - **Orbit's flight UI is `.crpix` art** (`docs/plan/sample/06-orbit.md`, sample
   rule 11; `crcbl_orbit::art`). The instrument panel's window and its fuel and
@@ -6225,6 +6255,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **The viewer's re-export watch is the engine's `crcbl_assets::watch`**, and a
+  re-export now shows half a second to three quarters after it lands rather than
+  a quarter to a half: the settle period is two poll intervals. A page's viewer
+  has no watch at all now, where it carried one that never fired.
 
 - **`crcbl-inventory` depends on `crcbl-core` and `crcbl-store`**, for the
   stash's `PlayerId` key and its storage. `crcbl` links both already, so the

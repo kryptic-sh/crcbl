@@ -11,8 +11,12 @@ publish = false
 # sandbox is the reference consumer, so anything it needs that the umbrella does
 # not re-export is a gap in the umbrella, not a reason to add a second path
 # dependency here. `log` was the last exception and is now `crcbl::log`.
+#
+# `scn` is the scene format without the glTF importer: `--scene <DIR>` opens a
+# `.scn/` directory of the sandbox's own two systems and reloads a chunk file
+# when it changes (`src/scene/disk.rs`). No glTF is read, so none is linked.
 [dependencies]
-crcbl = { workspace = true }
+crcbl = { workspace = true, features = ["scn"] }
 
 # The helpers this sample's own unit tests read a frame back with — `ui_text`,
 # `row_value` and `headless_common`, each a fact about an engine surface that

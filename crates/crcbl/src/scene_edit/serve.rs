@@ -126,7 +126,7 @@ use crate::scene::scn::ScnError;
 use crate::server::{EventNotSent, Host, HostConfig, PeerId};
 use crate::shaders::sha256::sha256;
 
-use crate::scene_edit::{Document, EditError, PlayState};
+use crate::scene_edit::{Document, EditError, OverEdits, PlayState, Reloaded};
 
 /// The endpoint protocol id an edit server's links speak: it spells `CRED`.
 /// A listener or a client of another — a game's — answers nothing.
@@ -136,6 +136,11 @@ pub const EDIT_PROTOCOL_ID: u32 = u32::from_be_bytes(*b"CRED");
 /// world is empty, so a tick carries only the links' own traffic; the rate
 /// sets how soon an edit or a fetch's next part goes out after it is read.
 pub const EDIT_TICK_HZ: u32 = 60;
+
+/// The author a notice names for an edit the server made itself — a chunk
+/// file reloaded from disk ([`EditServer::reload_chunk`]). No peer is it: a
+/// host numbers its peers from one.
+pub const SERVER_AUTHOR: u64 = 0;
 
 /// The build identifier an edit session hand-shakes on: it spells `CRCBL`,
 /// as the samples' sessions do. What can differ between two builds of the
@@ -407,6 +412,53 @@ impl EditServer {
     pub fn gesture_open(&self) -> bool {
         self.open
             .is_some_and(|open| self.document.log().open_gesture() == Some(open.gesture))
+    }
+
+    /// Reads the served document's `sys/<system>.ron` from disk again and
+    /// applies it as [`Document::reload_chunk`] does, then announces what it
+    /// applied to every client as an edit by [`SERVER_AUTHOR`] — so each copy
+    /// follows the reload as it follows any other edit, and an undo over the
+    /// protocol walks it back on the server and on every copy alike.
+    ///
+    /// It is an operation like a client's: it seals a gesture that was open
+    /// and moves the revision. **A reload too long for one notice** — past
+    /// what an edit request carries, which a large chunk rewritten whole can
+    /// be — is announced to nobody: the revision still moves, so every copy
+    /// sees the gap at the next notice and fetches the scene again, and the
+    /// warning says so.
+    ///
+    /// # Errors
+    ///
+    /// As [`Document::reload_chunk`]; nothing is announced, and nothing
+    /// changed.
+    pub fn reload_chunk(
+        &mut self,
+        system: &str,
+        over_edits: OverEdits,
+    ) -> Result<Reloaded, EditError> {
+        let reloaded = self.document.reload_chunk(system, over_edits)?;
+        let Some(command) = &reloaded.command else {
+            return Ok(reloaded);
+        };
+        self.open = None;
+        self.revision += 1;
+        let notice = encode_op(&EditOp::Apply(command.clone()))
+            .ok()
+            .map(|op| EditNotice {
+                revision: self.revision,
+                author: SERVER_AUTHOR,
+                gesture: None,
+                op,
+            });
+        let announced =
+            notice.is_some_and(|notice| self.host.broadcast_edit_notice(&notice).is_ok());
+        if !announced {
+            crate::log::warn!(
+                "edit server: the reload of `sys/{system}.ron` is too long for one notice, so no \
+                 client was told of it; each will fetch the scene again at the next edit"
+            );
+        }
+        Ok(reloaded)
     }
 
     /// The document being served.

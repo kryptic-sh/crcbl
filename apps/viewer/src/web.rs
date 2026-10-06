@@ -32,9 +32,10 @@
 //! listing behind `I`, the wireframe and normals views, and the exposure
 //! slider.
 //!
-//! The re-export watch is native-only in effect. [`crate::watch`] polls a path,
-//! and a page has none, so it never fires — the loop carries it and nothing
-//! happens, which is the honest browser answer rather than a second code path.
+//! There is no re-export watch here. `crate::watch` polls a path on the
+//! engine's native-only `crcbl::assets::watch`, and a page has no file to
+//! look at, so the module, the field and the poll are compiled out of this
+//! build rather than carried and never fired.
 //!
 //! # The boot sequence
 //!
@@ -192,10 +193,8 @@ fn browser_options() -> Options {
 /// not deploy — opens with something and says on the console why it is not the
 /// monkey, rather than showing a visitor a failure page.
 ///
-/// The watch [`crate::app`] builds from `browser_options` names the shelf's key
-/// either way, and nothing reads it: [`crate::watch`] polls a filesystem this
-/// target has not got, so it is only ever a name in a log line that is never
-/// written.
+/// No watch is built from `browser_options` here: a page has no file to
+/// re-export over, so the re-export watch is native only.
 fn opening_document() -> crate::model::Model {
     match crate::shelf::load(crate::shelf::DEFAULT) {
         Ok((model, _)) => model,

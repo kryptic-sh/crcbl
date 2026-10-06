@@ -93,7 +93,8 @@
 //!
 //! - **Dirty-chunk tracking.** It exists to make an editor's save cheap, and
 //!   [`Scene::save`] rewrites every chunk the manifest names.
-//! - **Hot reload and the watcher** — stage 6's task 5.
+//! - **Hot reload of the assets a scene names** — textures, meshes and
+//!   shaders. A chunk file's own reload is [`reload`]'s.
 //! - **`crcbl bake` and `PackSource`**, the single-blob shipping form — task 6.
 //! - **Sidecar `.meta.ron` GUIDs.** Assets stay referenced by canonical path;
 //!   a GUID arrives through `crcbl_assets::AssetId::from_bits`.
@@ -113,8 +114,10 @@ use crcbl_assets::{AssetSource, StorageError};
 use crcbl_ecs::{ComponentHash, Entity, System, World};
 
 pub mod names;
+pub mod reload;
 
 pub use names::{EntityName, MAX_NAME_CHARS, NameError};
+pub use reload::{ChunkDiff, RowChange, chunk_text, diff_chunk};
 
 // ---------------------------------------------------------------------------
 // Ids
@@ -249,6 +252,14 @@ impl IdMap {
             return false;
         }
         self.bind("", id, entity).is_ok()
+    }
+
+    /// Every id the map files, with its entity, in id order.
+    ///
+    /// What a reload walks to find the rows a chunk no longer spells
+    /// ([`reload`]).
+    pub fn iter(&self) -> impl Iterator<Item = (SceneEntityId, Entity)> + '_ {
+        self.to_entity.iter().map(|(&id, &entity)| (id, entity))
     }
 
     /// How many entities the scene named.
@@ -441,6 +452,22 @@ pub trait SystemChunk: fmt::Debug {
     /// [`ScnError::Write`] if the component's own `Serialize` fails — in which
     /// case the component is left attached.
     fn detach_row(&self, world: &mut World, entity: Entity) -> Result<Option<String>, ScnError>;
+
+    /// Every row of `text`, this system's chunk file, as one
+    /// [`row`](Self::row)'s text each, in the order the file spells them —
+    /// read into no world.
+    ///
+    /// What a reload compares against the rows a world holds ([`reload`]):
+    /// both sides are spelled by [`row_text`], so equal components are equal
+    /// text however the file was laid out.
+    ///
+    /// # Errors
+    ///
+    /// As [`read`](Self::read) for the text itself: [`ScnError::Parse`] keyed
+    /// by `key` (a refused row included), [`ScnError::Chunk`] for another
+    /// system's chunk, [`ScnError::DuplicateId`] for an id spelled twice, and
+    /// [`ScnError::Write`] if the component's own `Serialize` fails.
+    fn rows(&self, key: &str, text: &str) -> Result<Vec<(SceneEntityId, String)>, ScnError>;
 }
 
 /// `value` as one chunk row's text — the component alone, in compact RON —
@@ -602,31 +629,13 @@ where
         key: &str,
         text: &str,
     ) -> Result<(), ScnError> {
-        let file: ChunkFile<Ruled<T, R>> =
-            ron::from_str(text).map_err(|error| ScnError::parse(key, &error))?;
-        if file.system != self.name {
-            return Err(ScnError::Chunk {
-                key: key.to_string(),
-                declared: file.system,
-                expected: self.name.clone(),
-            });
-        }
+        let file = self.parse(key, text)?;
 
         // Every row resolved to its entity first, attached second:
         // `World::spawn` and the borrow of the system out of the schedule are
         // both `&mut world`, so they cannot be held at once.
-        let mut seen = BTreeSet::new();
         let mut rows = Vec::with_capacity(file.entities.len());
         for (id, Ruled { row: data, .. }) in file.entities {
-            // Checked here and not by the map: an id an earlier chunk bound is
-            // this chunk's to attach to, and only a repeat within one chunk
-            // would replace a row.
-            if !seen.insert(id) {
-                return Err(ScnError::DuplicateId {
-                    key: key.to_string(),
-                    id,
-                });
-            }
             let entity = match ids.entity(id) {
                 Some(entity) => entity,
                 None => {
@@ -693,6 +702,48 @@ where
         };
         system_named::<T>(world, &self.name)?.detach(entity);
         Ok(Some(row))
+    }
+
+    fn rows(&self, key: &str, text: &str) -> Result<Vec<(SceneEntityId, String)>, ScnError> {
+        let file = self.parse(key, text)?;
+        file.entities
+            .into_iter()
+            .map(|(id, Ruled { row, .. })| Ok((id, row_text(&self.name, &row)?)))
+            .collect()
+    }
+}
+
+impl<T, R> ChunkOf<T, R>
+where
+    T: DeserializeOwned,
+    R: RowRule<T>,
+{
+    /// `text` as this system's chunk: ron's refusal keyed by `key`, another
+    /// system's chunk, or an id spelled twice are refused — what
+    /// [`SystemChunk::read`] and [`SystemChunk::rows`] both read through.
+    fn parse(&self, key: &str, text: &str) -> Result<ChunkFile<Ruled<T, R>>, ScnError> {
+        let file: ChunkFile<Ruled<T, R>> =
+            ron::from_str(text).map_err(|error| ScnError::parse(key, &error))?;
+        if file.system != self.name {
+            return Err(ScnError::Chunk {
+                key: key.to_string(),
+                declared: file.system,
+                expected: self.name.clone(),
+            });
+        }
+        let mut seen = BTreeSet::new();
+        for (id, _) in &file.entities {
+            // Checked here and not by the map: an id an earlier chunk bound is
+            // this chunk's to attach to, and only a repeat within one chunk
+            // would replace a row.
+            if !seen.insert(*id) {
+                return Err(ScnError::DuplicateId {
+                    key: key.to_string(),
+                    id: *id,
+                });
+            }
+        }
+        Ok(file)
     }
 }
 
@@ -1143,6 +1194,16 @@ pub enum ScnError {
     #[error("the scene's manifest names the system `{system}`, which has no registered codec")]
     NoCodec {
         /// The manifest entry.
+        system: String,
+    },
+
+    /// A chunk reload named a system the scene's manifest does not list, so
+    /// the scene holds no chunk of it to read again ([`Scene::reload_chunk`]).
+    #[error(
+        "the scene's manifest does not list the system `{system}`, so it has no chunk to reload"
+    )]
+    Unlisted {
+        /// The system named.
         system: String,
     },
 

@@ -18,7 +18,7 @@ pub(super) const BLOCKS: &str = "blocks";
 /// so a value written past the commands is not refused by one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Reflect, Serialize, Deserialize)]
 #[reflect(crate = "crcbl_reflect")]
-struct Block {
+pub(super) struct Block {
     position: [f64; 3],
     half_extents: [f64; 3],
 }
