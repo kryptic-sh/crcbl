@@ -391,6 +391,8 @@ pub mod debug_view;
 
 pub mod engine;
 
+pub mod input_inspector;
+
 pub mod knob;
 
 // Native only, as the UDP transport it wires is: web builds have no

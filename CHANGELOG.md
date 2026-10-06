@@ -849,6 +849,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   or a move the kit refuses leaves both as they were and shows why under the
   pack.
 
+- **The input inspector: why an input did what it did.**
+  `ActionMap::set_tracing` records, for each press — a key going down, a pointer
+  button, a wheel turn, an on-screen button or stick, a pad button, a pad stick
+  or trigger pushed past `PAD_ACTIVITY_THRESHOLD` — a
+  `crcbl_input::trace::TraceEntry` naming the context that consumed it and every
+  binding that read it with its action (`Outcome::Read`), or that its owner
+  withholds it (`Withheld`), a modal context blocked it (`Blocked`), nothing
+  binds it (`Unbound`), or something took it before the map heard it (`Claimed`,
+  recorded with `ActionMap::trace_claimed`). `ActionMap::trace` reads the last
+  `RESOLUTION_TRACE_CAP` entries; a repeat of the newest entry counts on it
+  rather than pushing another. Off by default, and off it costs a press one
+  check; on or off, resolution is the same.
+  `crcbl::input_inspector::InputInspector` is a debug section over a map: its
+  pads and their raw buttons, sticks and triggers, the held keys and mouse
+  buttons, the context stack top first with modal contexts marked, every
+  action's value, the last device and the trace newest first. While the debug
+  panel shows, the loop keeps tracing on for the map a game hands over through
+  `HostedGame::actions` and records the presses it takes first — the reserved
+  keys as `the loop: pause` and so on, keys a menu or the console kept from the
+  game as `the loop's menu` and `the console`. `apps/horde` adds the section.
+  `ActionMap::last_device_changed` is the edge a game swapping its control
+  prompts reads, cleared by `begin_tick`; `ActionMap::held_keys`,
+  `held_mouse_buttons`, `pointer` and `is_context_modal` read the raw state the
+  section shows.
+
 - **Orbit's flight UI is `.crpix` art** (`docs/plan/sample/06-orbit.md`, sample
   rule 11; `crcbl_orbit::art`). The instrument panel's window and its fuel and
   throttle gauges are nine-slices, and under them is a navball-lite: a dial

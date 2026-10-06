@@ -306,7 +306,7 @@ fn pad_button_named(name: &str) -> Option<PadButton> {
         .find(|button| pad_button_name(*button) == name)
 }
 
-const fn stick_name(stick: Stick) -> &'static str {
+pub(crate) const fn stick_name(stick: Stick) -> &'static str {
     match stick {
         Stick::Left => "Left",
         Stick::Right => "Right",
@@ -319,7 +319,7 @@ fn stick_named(name: &str) -> Option<Stick> {
         .find(|stick| stick_name(*stick) == name)
 }
 
-const fn trigger_name(trigger: Trigger) -> &'static str {
+pub(crate) const fn trigger_name(trigger: Trigger) -> &'static str {
     match trigger {
         Trigger::Left => "Left",
         Trigger::Right => "Right",

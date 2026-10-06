@@ -1548,8 +1548,9 @@ loads its controls from; `ActionMap::last_device`; the in-memory
 XInput, GameController and Web Gamepad backends; and `ActionMap::virtual_stick`,
 driven by `crcbl_ui::touch`'s `TouchStick` in `apps/horde`. The rest is in
 `docs/backlog.md` under _Input: patterns, RON bindings, rebind persistence and
-every gamepad backend_, _Input: no rebind screen, no input inspector, no
-`crcbl input` CLI_ and _Input thread, stacked `InputTickState`, last-N ring_.
+every gamepad backend_, _Input: the inspector shipped; the rebind screen and
+`crcbl input` are owed_ and _Input thread, stacked `InputTickState`, last-N
+ring_.
 
 Code cites the plan by its layers, its pattern evaluator, its binding sketch and
 its quirk-table scoping. Those resolve here:
@@ -1584,7 +1585,12 @@ one binding two ways.
 through; a held input is withheld from a new owner until released. One
 declarative mechanism replaces ad-hoc "the UI ate the input" rules. The answer
 to "input eaten mysteriously" is the inspector showing each input's full
-resolution path — debuggability designed in, and still owed.
+resolution path — debuggability designed in, built 2026-10-06:
+`ActionMap::set_tracing` records each press's consuming context and reading
+bindings (`crcbl_input::trace`), and `crcbl::input_inspector::InputInspector`
+shows them in the debug panel beside the raw state, the stack and every action's
+value. The decisions behind it are in `docs/backlog.md` under _Input: the
+inspector shipped; the rebind screen and `crcbl input` are owed_.
 
 **Pattern semantics are defined by unit-test tables, never by playtesting.** The
 plan made the evaluator a pure function over timestamped edges. As built it runs
