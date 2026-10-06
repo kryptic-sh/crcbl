@@ -258,6 +258,21 @@ pub fn desktop_rect(rect: Rect) -> PhysicalRect {
     )
 }
 
+/// The seam's rectangle as a `RECT` in the same space, which is how an input
+/// method is told where the caret is.
+///
+/// The far edges saturate rather than wrap: an area reaching past `i32::MAX`
+/// is clipped to it, where a wrapped edge would land left of the near one.
+#[must_use]
+pub const fn rect_from(area: PhysicalRect) -> Rect {
+    Rect {
+        left: area.x,
+        top: area.y,
+        right: area.x.saturating_add_unsigned(area.width),
+        bottom: area.y.saturating_add_unsigned(area.height),
+    }
+}
+
 /// A client `RECT` as the seam's physical size.
 ///
 /// `GetClientRect` always answers with a zero origin, so only the extent is
@@ -478,6 +493,22 @@ mod tests {
         // A failed `GetDpiForWindow` answers zero, and a window scaled by zero
         // has no pixels.
         assert!((scale_from_dpi(0) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_text_input_area_becomes_its_rect_and_saturates_at_the_far_edge() {
+        let caret = PhysicalRect::new(40, 60, 8, 20);
+        let rect = rect_from(caret);
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (40, 60, 48, 80)
+        );
+        assert_eq!(desktop_rect(rect), caret, "the round trip is exact");
+        let huge = rect_from(PhysicalRect::new(-5, 10, u32::MAX, u32::MAX));
+        assert_eq!(
+            (huge.left, huge.top, huge.right, huge.bottom),
+            (-5, 10, i32::MAX, i32::MAX)
+        );
     }
 
     #[test]

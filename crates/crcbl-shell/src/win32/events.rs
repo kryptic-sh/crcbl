@@ -291,6 +291,20 @@ pub enum RawEvent {
         /// `GetMessageTime` milliseconds.
         millis: u32,
     },
+    /// `WM_IME_COMPOSITION` with a new composition string, or
+    /// `WM_IME_ENDCOMPOSITION`.
+    ///
+    /// **The string is not here**, for the reason [`FilesDropped`]'s paths are
+    /// not: it lives on [`Shared`](super::proc::Shared)'s own queue and this is
+    /// the marker that claims it, in its place in the stream.
+    ///
+    /// [`FilesDropped`]: Self::FilesDropped
+    Preedit {
+        /// `HWND` as an integer.
+        hwnd: isize,
+        /// `GetMessageTime` milliseconds.
+        millis: u32,
+    },
     /// `WM_DISPLAYCHANGE` — a monitor was plugged, unplugged or reconfigured.
     MonitorsChanged,
 }
@@ -315,6 +329,7 @@ impl RawEvent {
             | Self::Touch { hwnd, .. }
             | Self::RawMotion { hwnd, .. }
             | Self::RawKey { hwnd, .. }
+            | Self::Preedit { hwnd, .. }
             | Self::FilesDropped { hwnd, .. } => Some(hwnd),
             Self::MonitorsChanged | Self::DeviceRemoved { .. } => None,
         }
@@ -442,6 +457,16 @@ mod tests {
             // reappearance unplugged again — is two handles to forget.
             RawEvent::DeviceRemoved { device: 0x100 },
             RawEvent::DeviceRemoved { device: 0x200 },
+            // Two compositions in one pump: each replaces the last, but the
+            // consumer is owed both, in order.
+            RawEvent::Preedit {
+                hwnd: A,
+                millis: 1_300,
+            },
+            RawEvent::Preedit {
+                hwnd: A,
+                millis: 1_301,
+            },
         ];
         for event in events {
             enqueue(&mut queue, event);

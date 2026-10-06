@@ -4108,9 +4108,13 @@ the gaps below.
   adding a segmentation crate such as `unicode-segmentation` (a new dependency)
   or keeping `char`. **Why:** the fix is a new dependency, which is the owner's
   to add; revisit with the owner if a game's text shows a split accent.
-- **Pre-edit is not drawn**: the shell has no pre-edit event (`appkit/view.rs`
-  records the marked text's length and nothing reads it), so composition text
-  cannot be underlined at the caret until the shell seam grows one.
+- **Pre-edit is not drawn**: the seam carries `ShellEvent::TextPreedit` and
+  `Shell::set_text_input_area` (merged 2026-10-06), and the Win32 backend sends
+  and honours them, unverified against a real input method (see _No verified IME
+  pre-edit_ under Win32 below). `crcbl::text_input` does neither yet: drawing
+  the pre-edit underlined at the caret, and telling the shell the caret's
+  rectangle, are the field's half. AppKit still records only the marked text's
+  length (`appkit/view.rs`), and Wayland's `text-input-v3` pre-edit is unbound.
 - **The web clipboard refuses copy and paste**, shown by the field's `:refused`
   border. Options: implement the web backend's clipboard, or keep an in-process
   fallback so copy and paste work within one page.
@@ -26099,38 +26103,57 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   infers. Wiring it means a third system library (`shell32` is already linked
   for the drop calls) and a decision about _where_ a process-wide property is
   set when a host application embedded the engine.
-- **No IME pre-edit, and a CJK commit has not been watched.**
+- **No verified IME pre-edit, and a CJK commit has not been watched.**
   `ShellCaps::TEXT_IME` is set since 2026-09-21, on the bar X11 and Wayland use:
   composed text reaches the engine. `win32_e2e`'s
   `a_dead_key_typed_by_another_process_composes_with_the_next_key` proves the
   dead-key half on a real desktop. The IME half rests on `DefWindowProc` turning
   `WM_IME_CHAR` into `WM_CHAR`, which is documented behaviour but has not been
-  run here, because no East Asian IME was installed. Still owed: a pre-edit
-  event on the seam (no backend has one), and placing the candidate window at
-  the caret (`ImmSetCompositionWindow`).
+  run here, because no East Asian IME was working on any desk tried.
 
-  **DEFERRED 2026-09-21, with the work parked on branch
-  `wip/win32-ime-preedit`** (commit `009c93bc`, pushed). It adds
-  `ShellEvent::TextPreedit` and a provided `Shell::set_text_input_area` to the
-  seam, and the Win32 half: `WM_IME_COMPOSITION` read into a pre-edit,
-  `WM_IME_ENDCOMPOSITION` as an empty one, and `ImmSetCompositionWindow` /
-  `ImmSetCandidateWindow` at the caret area. Verified there: clippy and the
-  private-items rustdoc on Windows, Linux and macOS targets, and unit tests for
-  the UTF-16 cursor conversion (`keys::preedit`) and the payload queues. **Not
-  verified:** the real-IME e2e test
-  (`an_input_method_composition_is_a_pre_edit_and_its_result_a_commit`, behind
-  the branch's `win32-ime-e2e` feature) never passed. On the RX 7900 XTX desktop
-  the Microsoft Japanese IME reported itself open in hiragana through
-  `ImmGetConversionStatus`, yet typed plain `k` `a`. ja-JP's `BasicTyping`
-  feature was stuck downloading throughout (`Get-InstalledLanguage` showed
-  `LanguageFeatures: None`), which is the likely cause. The branch's
-  `desktop::ThreadLocalInput` guard, which enables
+  **Decided 2026-10-06 (owner): the pre-edit code is merged unverified rather
+  than left parked to rot.** It was written 2026-09-21 and brought onto `main`
+  2026-10-06: `ShellEvent::TextPreedit` and a provided
+  `Shell::set_text_input_area` on the seam, and the Win32 half —
+  `WM_IME_COMPOSITION` read into a pre-edit (`input::composition`),
+  `WM_IME_ENDCOMPOSITION` as an empty one, one end per composition
+  (`keys::Composing`), and `ImmSetCompositionWindow` / `ImmSetCandidateWindow`
+  at the caret area (`input::place_ime`), restated at every
+  `WM_IME_STARTCOMPOSITION`. Verified: unit tests for the UTF-16 cursor
+  conversion (`keys::preedit`), the `GCS_*` test (`keys::composition_changed`),
+  the end de-duplication, the area conversion (`geometry::rect_from`), the
+  payload queues in `proc::Shared`, and the `COMPOSITIONFORM` / `CANDIDATEFORM`
+  layouts; clippy and rustdoc on the Windows, Linux, macOS and wasm targets.
+  **Not verified: anything an input method does with it.**
+
+  **Owed: the real-IME e2e test.**
+  `an_input_method_composition_is_a_pre_edit_and_its_result_a_commit` in
+  `tests/win32_e2e.rs` stays behind the `win32-ime-e2e` feature and out of CI
+  (`run-win32-e2e.ps1` does not enable it), and it has never passed. On the RX
+  7900 XTX desktop (2026-09-21) the Microsoft Japanese IME reported itself open
+  in hiragana through `ImmGetConversionStatus`, yet typed plain `k` `a`. ja-JP's
+  `BasicTyping` feature was stuck downloading throughout
+  (`Get-InstalledLanguage` showed `LanguageFeatures: None`), which is the likely
+  cause. The test's `desktop::ThreadLocalInput` guard, which enables
   `SPI_SETTHREADLOCALINPUTSETTINGS` so a per-thread language switch activates a
   TSF input method, did not change the result either, but it was only tried
-  without the feature installed. To resume: on a machine where typing Japanese
-  in Notepad works, run the branch's test (the command is in its `Cargo.toml`
-  under `win32-ime-e2e`), drop the guard if the test passes without it, then
-  rebase onto `main`.
+  without the feature installed. To close it: on a machine where typing Japanese
+  in Notepad works, run the test (the command is in `crcbl-shell`'s `Cargo.toml`
+  under `win32-ime-e2e`), drop the guard if the test passes without it, and fix
+  whatever it finds. Until then no doc may call the Win32 pre-edit working.
+
+  **Run again 2026-10-06, with ja-JP's `BasicTyping` installed**
+  (`Get-InstalledLanguage` now lists it), on the same desktop: **it fails the
+  same way, so the stuck download was not the cause.** What passed, for the
+  first time against a real input method: the IME opened in hiragana on the test
+  window, and `set_text_input_area` placed its composition window at the caret
+  area's corner (40, 60, read back through `ImmGetCompositionWindow`). What did
+  not: the injected keys arrived as `Key` then `TextCommit` and no composition
+  ever started, and the test timed out at its 20 s wait (`win32_e2e.rs`' wait
+  for the composition). The next suspect is the injection itself — whether keys
+  `tests/bin/send_input_win32.rs` sends with `SendInput` reach the IME at all,
+  which typing the same keys by hand into the test window would answer — then
+  `ThreadLocalInput`. Composition placement is verified; the pre-edit is not.
 
 - **Per-device ids: what is not verified.** `win32::devices` attributes each
   key, button and wheel message to the raw report that produced it, and keys ids

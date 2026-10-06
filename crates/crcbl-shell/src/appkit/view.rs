@@ -64,7 +64,8 @@
 //! `-[NSResponder inputContext]` to be non-nil, which requires the responder to
 //! **conform to `NSTextInputClient`** — eleven methods, all of them required.
 //! They are implemented below. What is deliberately not implemented is
-//! *displaying* the pre-edit: the seam has no pre-edit event, so marked text is
+//! *displaying* the pre-edit: this backend does not send
+//! [`TextPreedit`](crate::ShellEvent::TextPreedit) yet, so marked text is
 //! tracked because an input method cannot compose without the answers and is
 //! never surfaced. `firstRectForCharacterRange:` answers with the window's own
 //! origin rather than a caret the seam does not model, so a candidate window
@@ -734,7 +735,8 @@ unsafe extern "C" fn do_command_by_selector(_view: Id, _cmd: Sel, _selector: Sel
 
 /// `setMarkedText:selectedRange:replacementRange:` — the pre-edit string.
 ///
-/// Recorded as a *length* and never shown: the seam has no pre-edit event, and
+/// Recorded as a *length* and never shown: this backend does not send
+/// [`TextPreedit`](crate::ShellEvent::TextPreedit) yet, and
 /// an input method cannot compose at all without something answering
 /// `hasMarkedText` and `markedRange` consistently.
 ///

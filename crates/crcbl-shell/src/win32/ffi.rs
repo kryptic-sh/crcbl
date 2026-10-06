@@ -1,5 +1,5 @@
-//! Hand-written FFI to `user32`, `gdi32`, `shcore`, `shell32` and `kernel32`,
-//! and the wire structures the Win32 backend passes across it.
+//! Hand-written FFI to `user32`, `gdi32`, `shcore`, `shell32`, `imm32` and
+//! `kernel32`, and the wire structures the Win32 backend passes across it.
 //!
 //! # Decision: `#[link]`, not `dlopen` — the opposite of the two Linux backends
 //!
@@ -11,13 +11,13 @@
 //! machine without libwayland is an ordinary machine.
 //!
 //! **That premise does not hold here, and the asymmetry is deliberate rather
-//! than an oversight.** `user32.dll`, `gdi32.dll`, `shell32.dll` and
-//! `kernel32.dll` are part of the operating system: a Windows that lacks them is
-//! not a Windows this engine failed to support, it is a Windows that cannot run
-//! any process at all. `shcore.dll` ships with every Windows since 8.1, which is
-//! below this backend's floor. There is nothing for a runtime probe to discover,
-//! and `LoadLibraryW` + `GetProcAddress` for five system libraries would buy
-//! exactly one thing: a fallible code path with no failure.
+//! than an oversight.** `user32.dll`, `gdi32.dll`, `shell32.dll`, `imm32.dll`
+//! and `kernel32.dll` are part of the operating system: a Windows that lacks
+//! them is not a Windows this engine failed to support, it is a Windows that
+//! cannot run any process at all. `shcore.dll` ships with every Windows since
+//! 8.1, which is below this backend's floor. There is nothing for a runtime
+//! probe to discover, and `LoadLibraryW` + `GetProcAddress` for the system
+//! libraries would buy exactly one thing: a fallible code path with no failure.
 //!
 //! The registry consequence is the one that matters and it is satisfied:
 //! Windows has a single backend, so there is no fall-through to protect. If a
@@ -50,7 +50,6 @@
 //! | Not used | What it would buy | Why not |
 //! | --- | --- | --- |
 //! | `EnumDisplayDevicesW` | a monitor's marketing name | it usually answers "Generic PnP Monitor", which is worse than the device name for telling two displays apart |
-//! | `ImmGetContext` and the `WM_IME_*` family | a pre-edit string and a caret-placed candidate window | the seam has no pre-edit event on any backend; committed IME text already arrives as `WM_CHAR` through `DefWindowProc`, which is what [`TEXT_IME`](crate::ShellCaps::TEXT_IME) claims. See [`Win32Shell::caps`](super::Win32Shell) |
 //! | `ToUnicode` | the character a key produces | it **consumes** dead-key state, so calling it would eat the accent `WM_CHAR` was about to deliver. [`MapVirtualKeyW`] with `MAPVK_VK_TO_CHAR` answers the same question without side effects |
 //! | `GetAsyncKeyState` | modifier state | it reads the hardware *now*, not at the message's time. [`GetKeyboardState`] is the snapshot that belongs to the message being processed |
 //! | `RegisterDragDrop` and `IDropTarget` | drag *feedback* — a drop cursor, hover highlighting, non-file formats | it is COM: `OleInitialize`, a hand-written vtable, `IUnknown` reference counting and an apartment this crate does not own. `WM_DROPFILES` delivers the file paths the seam asks for; see `win32::dnd` for the whole comparison |
@@ -794,6 +793,33 @@ pub struct RawMouse {
     pub ul_extra_information: u32,
 }
 
+/// `COMPOSITIONFORM` — where an input method draws its composition window.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CompositionForm {
+    /// `CFS_*`: which of the two fields below mean anything.
+    pub dw_style: u32,
+    /// The window's top-left, in client coordinates, for `CFS_POINT`.
+    pub pt_current_pos: Point,
+    /// The area it may use, in client coordinates, for `CFS_RECT` (not used
+    /// here: `CFS_POINT` puts the window at the caret).
+    pub rc_area: Rect,
+}
+
+/// `CANDIDATEFORM` — where an input method opens its candidate list.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CandidateForm {
+    /// Which candidate list; `0` is the one every input method has.
+    pub dw_index: u32,
+    /// `CFS_*`.
+    pub dw_style: u32,
+    /// Where the list goes, in client coordinates.
+    pub pt_current_pos: Point,
+    /// For `CFS_EXCLUDE`, the area the list must not cover.
+    pub rc_area: Rect,
+}
+
 /// `RAWKEYBOARD`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -937,6 +963,13 @@ pub mod msg {
     pub const SYS_KEY_DOWN: u32 = 0x0104;
     /// `WM_SYSKEYUP`.
     pub const SYS_KEY_UP: u32 = 0x0105;
+    /// `WM_IME_STARTCOMPOSITION` — an input method began composing.
+    pub const IME_START_COMPOSITION: u32 = 0x010D;
+    /// `WM_IME_ENDCOMPOSITION` — the composition was committed or abandoned.
+    pub const IME_END_COMPOSITION: u32 = 0x010E;
+    /// `WM_IME_COMPOSITION` — the composition changed. `lParam` holds the
+    /// `GCS_*` flags naming what did.
+    pub const IME_COMPOSITION: u32 = 0x010F;
     /// `WM_SYSCOMMAND` — a window-menu command. `wParam`'s low four bits are
     /// the system's own and are masked off before comparing with an `SC_*`.
     pub const SYS_COMMAND: u32 = 0x0112;
@@ -1281,6 +1314,19 @@ pub mod value {
     /// `GIDC_REMOVAL` — the `wParam` of a `WM_INPUT_DEVICE_CHANGE` for a device
     /// that left.
     pub const GIDC_REMOVAL: usize = 2;
+
+    /// `GCS_COMPSTR` — the composition string changed, or the index that reads
+    /// it.
+    pub const GCS_COMP_STR: u32 = 0x0008;
+    /// `GCS_CURSORPOS` — the index that reads the cursor within it.
+    pub const GCS_CURSOR_POS: u32 = 0x0080;
+    /// `CFS_DEFAULT` — the input method places its window itself.
+    pub const CFS_DEFAULT: u32 = 0x0000;
+    /// `CFS_POINT` — the composition window starts at `ptCurrentPos`.
+    pub const CFS_POINT: u32 = 0x0002;
+    /// `CFS_EXCLUDE` — the candidate list opens at `ptCurrentPos` without
+    /// covering `rcArea`.
+    pub const CFS_EXCLUDE: u32 = 0x0080;
     /// `MOUSE_MOVE_ABSOLUTE` — the report carries a *position*, not a delta.
     ///
     /// Set by a remote-desktop session, a tablet and some virtual machines. A
@@ -1618,6 +1664,29 @@ unsafe extern "system" {
     // Releases the `HDROP`. Not optional: the memory is the shell's and is
     // leaked without it.
     pub fn DragFinish(hdrop: Handle);
+}
+
+// The `imm32` surface: the input method's composition string, and where its
+// windows go. A Text Services Framework IME reaches a window that is not
+// TSF-aware through these same calls, so this is the whole surface for both.
+#[cfg(target_os = "windows")]
+#[link(name = "imm32")]
+unsafe extern "system" {
+    // Null for a window whose thread has no input context; released with
+    // `ImmReleaseContext` by whoever took it.
+    pub fn ImmGetContext(hwnd: Handle) -> Handle;
+    pub fn ImmReleaseContext(hwnd: Handle, context: Handle) -> Bool32;
+    // With a null buffer it answers the size in **bytes**; with a buffer it
+    // copies and answers how many bytes it copied. `GCS_CURSORPOS` answers the
+    // cursor as a code unit index and copies nothing.
+    pub fn ImmGetCompositionStringW(
+        context: Handle,
+        index: u32,
+        buffer: *mut c_void,
+        size: u32,
+    ) -> i32;
+    pub fn ImmSetCompositionWindow(context: Handle, form: *const CompositionForm) -> Bool32;
+    pub fn ImmSetCandidateWindow(context: Handle, form: *const CandidateForm) -> Bool32;
 }
 
 // The `gdi32` surface: one call, for the class background brush.
@@ -2009,6 +2078,22 @@ mod tests {
         assert_eq!(core::mem::offset_of!(RawInput, data.mouse), 24);
         assert_eq!(core::mem::offset_of!(RawInput, data.keyboard), 24);
         assert!(size_of::<RawKeyboard>() <= size_of::<RawMouse>());
+
+        // The input method's placement forms. These rows were printed by the
+        // same kind of program against mingw-w64's `imm.h`, built by GCC 16.2
+        // for x64, rather than against the Windows SDK: the x64 ABI is the
+        // same either way.
+        assert_layout!(CompositionForm, 28, {
+            dw_style: 0, 4;
+            pt_current_pos: 4, 8;
+            rc_area: 12, 16;
+        });
+        assert_layout!(CandidateForm, 32, {
+            dw_index: 0, 4;
+            dw_style: 4, 4;
+            pt_current_pos: 8, 8;
+            rc_area: 16, 16;
+        });
 
         // The one a *test* writes rather than reads. A wrong length here puts
         // the file list where `DragQueryFileW` does not look, and the drop test

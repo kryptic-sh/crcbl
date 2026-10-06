@@ -850,6 +850,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- The shell seam reports an input method's composition in progress as the new
+  `ShellEvent::TextPreedit` (each replaces the last; empty text means it ended)
+  and takes a caret rectangle through the new provided method
+  `Shell::set_text_input_area`, which is a no-op on backends with nothing to
+  place. The Win32 shell sends the pre-edit from `WM_IME_COMPOSITION` and places
+  the input method's composition window and candidate list at the given area; no
+  other backend sends it yet, and `crcbl::text_input` does not draw it.
+  Committed text still arrives only as `ShellEvent::TextCommit`. **The Win32
+  pre-edit and placement are unverified against a real input method**: the
+  desktop test for them, behind the `win32-ime-e2e` feature and outside CI, has
+  never passed; only the string decoding and bookkeeping are unit-tested.
+
 - **Puppet plays on a pad, its prompts follow the device, and run and jump
   rebind.** `apps/puppet` walks on the left stick or the d-pad, runs on the
   right bumper and jumps on South beside its keys, through one `move` axis that
@@ -6757,7 +6769,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - The Win32 shell now reports `ShellCaps::TEXT_IME`: dead keys and input-method
   commits already arrived as `ShellEvent::TextCommit`, and a real-desktop test
   now proves the composition, so a consumer branching on the bit gets the same
-  answer as on X11 and Wayland. There is still no pre-edit event.
+  answer as on X11 and Wayland.
 
 - Bitmap UI draw conversion streams glyph positions directly into triangle
   storage instead of allocating an intermediate layout vector. The owned
