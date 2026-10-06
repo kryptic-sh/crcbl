@@ -8,24 +8,24 @@ use crate::scene::scn::RowChange;
 
 /// The second system, holding the same component as [`BLOCKS`], so one
 /// entity can be in both.
-const PADS: &str = "pads";
+pub(super) const PADS: &str = "pads";
 
 const HEADER: &str = "Scene(format: 0, name: \"two\", systems: [\"blocks\", \"pads\"])";
 
 /// Blocks 0 and 1.
-const BLOCKS_RON: &str = "Chunk(system: \"blocks\", entities: [\
+pub(super) const BLOCKS_RON: &str = "Chunk(system: \"blocks\", entities: [\
     (0, Block(position: (0.0, 0.0, 0.0), half_extents: (1.0, 1.0, 1.0))),\
     (1, Block(position: (1.0, 0.0, 0.0), half_extents: (1.0, 1.0, 1.0))),\
 ])";
 
 /// Pads 1 and 2: entity 1 is in both systems.
-const PADS_RON: &str = "Chunk(system: \"pads\", entities: [\
+pub(super) const PADS_RON: &str = "Chunk(system: \"pads\", entities: [\
     (1, Block(position: (10.0, 0.0, 0.0), half_extents: (1.0, 1.0, 1.0))),\
     (2, Block(position: (20.0, 0.0, 0.0), half_extents: (1.0, 1.0, 1.0))),\
 ])";
 
 /// [`vocabulary`] and [`PADS`].
-fn two_systems() -> Registry {
+pub(super) fn two_systems() -> Registry {
     let mut registry = vocabulary();
     registry.register::<Block>(PADS);
     registry
@@ -34,7 +34,7 @@ fn two_systems() -> Registry {
 /// The two-system scene with entity 0 named `Gate`, saved into a fresh
 /// directory under `base` and opened from there: a clean document whose
 /// directory it is.
-fn opened(base: &tempfile::TempDir) -> (PathBuf, Document) {
+pub(super) fn opened(base: &tempfile::TempDir) -> (PathBuf, Document) {
     let mut source = empty_source();
     for (key, text) in [
         ("scene.ron", HEADER),
@@ -56,12 +56,12 @@ fn opened(base: &tempfile::TempDir) -> (PathBuf, Document) {
 }
 
 /// Writes `text` as `dir`'s blocks chunk, as a text editor would.
-fn write_blocks(dir: &Path, text: &str) {
+pub(super) fn write_blocks(dir: &Path, text: &str) {
     std::fs::write(dir.join("sys/blocks.ron"), text).expect("the chunk written");
 }
 
 /// Block `id`'s x in `system`.
-fn x_of(document: &mut Document, id: u32, system: &str) -> Option<Value> {
+pub(super) fn x_of(document: &mut Document, id: u32, system: &str) -> Option<Value> {
     document.read(SceneEntityId(id), system, "position.0").ok()
 }
 
@@ -86,6 +86,8 @@ fn a_clean_document_reloads_one_chunk_as_one_entry_and_stays_clean() {
     assert_eq!(
         reloaded
             .diff
+            .as_ref()
+            .expect("a changed file is compared")
             .changes()
             .iter()
             .map(RowChange::id)
@@ -265,4 +267,92 @@ fn a_routed_copy_refuses_a_reload() {
         Err(EditError::Routed)
     ));
     assert!(document.take_routed().is_empty(), "the reload was routed");
+}
+
+/// A pad moved, as an unsaved edit of the document's.
+fn move_a_pad(document: &mut Document, x: f64) {
+    document
+        .apply(EditCommand::SetProperty {
+            entity: SceneEntityId(2),
+            system: PADS.to_owned(),
+            path: "position.0".to_owned(),
+            value: Value::Float(x),
+        })
+        .expect("a pad moves");
+}
+
+/// **The document's own save is no change to reload**: a watch sees the
+/// save's writes like any other, and with edits made since, the chunk the
+/// document wrote is neither asked about nor compared.
+#[test]
+fn the_documents_own_save_is_no_change_to_reload() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (_dir, mut document) = opened(&base);
+    move_a_pad(&mut document, 25.0);
+    document.save().expect("saves");
+    move_a_pad(&mut document, 30.0);
+    let before = document.files().expect("ids");
+
+    for system in [BLOCKS, PADS] {
+        let reloaded = document
+            .reload_chunk(system, OverEdits::Refuse)
+            .expect("its own writing is no change");
+        assert_eq!(reloaded.diff, None, "`{system}` was compared");
+        assert_eq!(reloaded.command, None);
+    }
+    assert_eq!(document.files().expect("ids"), before);
+    assert_eq!(document.log().len(), 2);
+}
+
+/// **A change of layout alone is taken in without asking**, even over
+/// unsaved edits: no row changes, nothing is recorded, and the save that
+/// follows does not refuse over it.
+#[test]
+fn a_change_of_layout_alone_is_taken_in_without_asking() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (dir, mut document) = opened(&base);
+    move_a_pad(&mut document, 25.0);
+
+    write_blocks(&dir, &BLOCKS_RON.replace("),(", "),\n    ("));
+    let reloaded = document
+        .reload_chunk(BLOCKS, OverEdits::Refuse)
+        .expect("a layout change asks nothing");
+    assert!(reloaded.diff.expect("compared").is_empty());
+    assert_eq!(reloaded.command, None);
+    assert_eq!(document.log().len(), 1, "a layout change was recorded");
+    assert!(document.is_dirty(), "the pad's edit went");
+    document
+        .save()
+        .expect("the save does not refuse over a file it took in");
+}
+
+/// **A reload takes in its own chunk and no other**: a second file changed
+/// at the same moment still makes the next save ask, and once that file is
+/// reloaded too the save goes ahead.
+#[test]
+fn a_reload_takes_in_its_own_chunk_and_no_other() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let (dir, mut document) = opened(&base);
+    write_blocks(
+        &dir,
+        &BLOCKS_RON.replace("(1.0, 0.0, 0.0)", "(4.0, 0.0, 0.0)"),
+    );
+    std::fs::write(
+        dir.join("sys/pads.ron"),
+        PADS_RON.replace("(20.0, 0.0, 0.0)", "(21.0, 0.0, 0.0)"),
+    )
+    .expect("the other chunk written");
+
+    document
+        .reload_chunk(BLOCKS, OverEdits::Refuse)
+        .expect("reloads");
+    assert!(
+        matches!(document.save(), Err(EditError::ChangedOnDisk(_))),
+        "the save wrote over a file nothing took in"
+    );
+    document
+        .reload_chunk(PADS, OverEdits::Refuse)
+        .expect("reloads");
+    assert_eq!(x_of(&mut document, 2, PADS), Some(Value::Float(21.0)));
+    document.save().expect("both files taken in");
 }

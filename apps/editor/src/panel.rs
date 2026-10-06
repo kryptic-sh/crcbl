@@ -807,8 +807,16 @@ impl Panels {
         self.ask(text, Asking::ChangedOnDisk);
     }
 
-    /// The body [`begin_unsaved`](Self::begin_unsaved) and
-    /// [`begin_changed_on_disk`](Self::begin_changed_on_disk) share.
+    /// Puts the unsaved bar up saying `text` about a chunk file changed on
+    /// disk under unsaved edits, its buttons Keep mine and Reload from disk —
+    /// otherwise as [`begin_unsaved`](Self::begin_unsaved).
+    pub fn begin_chunk_changed(&mut self, text: String) {
+        self.ask(text, Asking::ChunkChanged);
+    }
+
+    /// The body [`begin_unsaved`](Self::begin_unsaved),
+    /// [`begin_changed_on_disk`](Self::begin_changed_on_disk) and
+    /// [`begin_chunk_changed`](Self::begin_chunk_changed) share.
     fn ask(&mut self, text: String, asking: Asking) {
         self.path_line.close();
         self.release_keyboard();
@@ -832,11 +840,13 @@ impl Panels {
         self.unsaved.asking()
     }
 
-    /// The unsaved bar's Save, Discard and Cancel buttons, as the last frame
-    /// laid them out.
+    /// The unsaved bar's button giving `answer`, as the last frame laid it
+    /// out.
     #[cfg(test)]
-    pub(crate) fn unsaved_buttons(&self) -> [NodeKey; 3] {
-        self.unsaved.buttons().expect("the unsaved bar is laid out")
+    pub(crate) fn unsaved_button(&self, answer: Unsaved) -> NodeKey {
+        self.unsaved
+            .button(answer)
+            .expect("the unsaved bar is laid out with that button")
     }
 
     /// Puts the recovery bar up saying `heading` over a line per copy,

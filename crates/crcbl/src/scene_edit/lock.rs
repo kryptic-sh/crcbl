@@ -48,13 +48,19 @@
 //! The lock binds only the programs that take it. An older build, a person's
 //! text editor or a checkout writes the scene without asking, so a document
 //! also remembers what its directory held when it last read or wrote it — a
-//! SHA-256 over the files it owns there, each file's key and bytes, the
-//! history's own scene digest — and **a save into that directory refuses
-//! when the files are no longer those** ([`EditError::ChangedOnDisk`]),
-//! writing nothing. The check reads the document's own files again at save
+//! SHA-256 of each file it owns there, by key — and **a save into that
+//! directory refuses when the files are no longer those**
+//! ([`EditError::ChangedOnDisk`]), writing nothing. The check reads the document's own files again at save
 //! time, which is a handful of small files. The caller decides what next: the
 //! editor asks whether to overwrite them or to reload the scene from disk,
 //! and [`Document::accept_changes_on_disk`] is how it says to overwrite.
+//!
+//! **One digest per file, not one over them all** (decided 2026-10-06), so a
+//! chunk reloaded from disk is taken in alone ([`Document::reload_chunk`]):
+//! another file changed at the same moment still makes the next save ask,
+//! and a chunk file holding what the document itself last wrote there is
+//! told apart from one another program changed — a watch sees the
+//! document's own save as a change like any other.
 //!
 //! # What neither touches
 //!
@@ -65,14 +71,16 @@
 //!
 //! [`HISTORY`]: super::HISTORY
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::registry::Registry;
 
-use super::history::{DIGEST_BYTES, scene_digest};
+use crate::shaders::sha256::sha256;
+
+use super::history::DIGEST_BYTES;
 use super::{Document, EditError, ownership};
 
 /// The lock file's name in the scene directory.
@@ -245,15 +253,34 @@ impl Document {
         self.on_disk = self
             .origin
             .as_deref()
-            .map(|dir| disk_digest(dir, &self.owned));
+            .map(|dir| disk_digests(dir, &self.owned));
+    }
+
+    /// Remembers `bytes` as what the file `key` of the document's directory
+    /// holds, and no other file — a chunk reloaded from it, taken in alone
+    /// (see the module docs). A document with no directory remembers nothing.
+    pub(super) fn record_file(&mut self, key: &str, bytes: &[u8]) {
+        if let Some(on_disk) = &mut self.on_disk {
+            on_disk.insert(key.to_owned(), sha256(bytes));
+        }
+    }
+
+    /// Whether `bytes` are what the file `key` of the document's directory
+    /// held when the document last read or wrote it — its own writing, or a
+    /// file nobody has changed since.
+    pub(super) fn last_read(&self, key: &str, bytes: &[u8]) -> bool {
+        self.on_disk
+            .as_ref()
+            .and_then(|on_disk| on_disk.get(key))
+            .is_some_and(|recorded| *recorded == sha256(bytes))
     }
 
     /// [`EditError::ChangedOnDisk`] when the document's own files in `dir`,
     /// its directory, no longer hold what it last read or wrote there — see
     /// the module docs.
     pub(super) fn refuse_changed_on_disk(&self, dir: &Path) -> Result<(), EditError> {
-        match self.on_disk {
-            Some(recorded) if disk_digest(dir, &self.owned) != recorded => {
+        match &self.on_disk {
+            Some(recorded) if disk_digests(dir, &self.owned) != *recorded => {
                 Err(EditError::ChangedOnDisk(dir.to_path_buf()))
             }
             _ => Ok(()),
@@ -261,21 +288,23 @@ impl Document {
     }
 }
 
-/// The history's scene digest over the files `keys` names in `dir`, as their
-/// bytes stand on disk. A file that is not there, or will not be read, is
-/// left out, so it differs from the file that was read; one unreadable at
-/// both ends compares the same, and the save that follows meets the reason
-/// itself when it writes.
-fn disk_digest(dir: &Path, keys: &BTreeSet<String>) -> [u8; DIGEST_BYTES] {
-    let files: Vec<(&str, Vec<u8>)> = keys
-        .iter()
+/// What the document remembers of its directory: a SHA-256 of each file's
+/// bytes, by key.
+pub(super) type DiskDigests = BTreeMap<String, [u8; DIGEST_BYTES]>;
+
+/// The SHA-256 of each file `keys` names in `dir`, as its bytes stand on
+/// disk. A file that is not there, or will not be read, is left out, so it
+/// differs from the file that was read; one unreadable at both ends compares
+/// the same, and the save that follows meets the reason itself when it
+/// writes.
+fn disk_digests(dir: &Path, keys: &BTreeSet<String>) -> DiskDigests {
+    keys.iter()
         .filter_map(|key| {
             std::fs::read(dir.join(key))
                 .ok()
-                .map(|bytes| (key.as_str(), bytes))
+                .map(|bytes| (key.clone(), sha256(&bytes)))
         })
-        .collect();
-    scene_digest(files.iter().map(|(key, bytes)| (*key, bytes.as_slice())))
+        .collect()
 }
 
 #[cfg(test)]

@@ -19,7 +19,8 @@ with `DirSource` and `MemorySource`); glTF parsing and validation
 per-chunk scene reload (2026-10-06): `crcbl_assets::watch`, which the viewer's
 re-export reload now polls through, and `crcbl_scene::scn::Scene::reload_chunk`
 with its edit-history form `crcbl::scene_edit::Document::reload_chunk`, which
-`sandbox --scene` drives.
+`sandbox --scene` drives and the editor and `crcbl edit --serve` follow through
+`crcbl::scene_edit::ChunkWatch`.
 
 What it left unbuilt is in `docs/backlog.md`: texture and shader reload under
 _Asset hot reload: the watch and per-chunk scene reload are built; assets and

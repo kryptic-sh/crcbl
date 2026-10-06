@@ -89,6 +89,12 @@
 //! into the document; `join`'s module docs say what a joined editor does and
 //! does not do.
 //!
+//! # The scene's files are watched
+//!
+//! A chunk file another program changes is reloaded into a clean scene as
+//! one undoable entry, and asked about on the unsaved bar when the scene has
+//! unsaved edits; `watch`'s module docs say when it is held instead.
+//!
 //! # Recovery copies are offered back
 //!
 //! At start-up the copies an earlier run left are pruned and the newest
@@ -140,6 +146,7 @@ mod join;
 mod meshes;
 mod recovery;
 mod unsaved;
+mod watch;
 
 use instances::Placed;
 use meshes::Shelf;
@@ -302,6 +309,8 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// The served scene this editor has joined, whose copy is the document,
     /// or [`None`] for a document of its own — see `join`.
     joined: Option<Box<join::Joined>>,
+    /// The document's chunk files, watched — see `watch`.
+    disk: watch::Disk,
 }
 
 /// What a held pointer button is doing: to the camera, or to a gizmo handle.
@@ -469,6 +478,8 @@ impl<S: Shell + ?Sized> Editor<S> {
         };
 
         let panels = Panels::new(&mut document, dock.clone(), gpu.extent());
+        // The clock starts at zero, as `elapsed` does.
+        let disk = watch::Disk::new(&document, Duration::ZERO);
         let title = document.title();
         let snap = gizmo::Snap::load(&settings);
         let autosave = recovery::Autosave::load(&settings);
@@ -517,6 +528,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             closing: false,
             rebuild_due: false,
             joined: None,
+            disk,
         })
     }
 
@@ -756,6 +768,9 @@ impl<S: Shell + ?Sized> Editor<S> {
         if let Some((target, content)) = self.paste.take() {
             self.paste_content(&target, &content);
         }
+        // After every action, so a stop of play this frame lets a change
+        // held for it in.
+        self.follow_disk();
         // After every action, so what they routed goes out this frame.
         self.step_join(pointer.down);
         self.update_title();

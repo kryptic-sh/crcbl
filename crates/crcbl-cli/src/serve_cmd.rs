@@ -62,6 +62,26 @@
 //!   discovery port, which one program on a machine can hold, and no client
 //!   browses for an edit server yet: a client connects to the address the
 //!   server prints. An announcement waits on a client that browses.
+//! * **The scene's chunk files are watched** (decided 2026-10-06), and a
+//!   chunk another program changed is reloaded through
+//!   [`EditServer::reload_chunk`], so every client follows it as an edit
+//!   by the server, with no fetch, and an undo over the protocol walks it
+//!   back. The served document's own saves are no change to it
+//!   (`crcbl::scene_edit`'s `reload` module docs), and the header,
+//!   `names.ron` and `env.ron` are not watched.
+//! * **The disk's chunk is taken over unsaved edits, once no drag is
+//!   open** (decided 2026-10-06), as [`OverEdits::Reload`]: the reload is one
+//!   more entry on top, so every edit beneath it stays in the history and a
+//!   client can undo the reload. The editor asks a person instead
+//!   (`apps/editor`'s `watch` module); a server has nobody to ask, and its
+//!   edits are unsaved only between an update and its save, or while a
+//!   drag or a failed save holds them — and refusing the reload would leave
+//!   every later save refused over the changed file
+//!   ([`crcbl::scene_edit::EditError::ChangedOnDisk`]), the server unable to
+//!   save or quit. **A drag holds it**: a chunk changed while a client's drag
+//!   is open is reloaded by the update that ends the drag, before that
+//!   update's save, so the drag is still one entry; the log says it waits.
+//!   Each reload, and each chunk that would not read, is logged.
 //! * **Malformed input is counted, never fatal**: a datagram no link
 //!   claims, a message that will not decode and one that fails its seal
 //!   are each counted where they were read — the listener's and the host's
@@ -79,7 +99,7 @@ use crcbl::lan::console::{ConsoleLines, stdin_lines, until_next_tick};
 use crcbl::net::SessionEndReason;
 use crcbl::net::udp::UdpListener;
 use crcbl::scene_edit::serve::{EDIT_PROTOCOL_ID, EDIT_TICK_HZ, edit_compatibility};
-use crcbl::scene_edit::{Document, EditServer, SceneLock};
+use crcbl::scene_edit::{ChunkWatch, Document, EditServer, OverEdits, SceneLock};
 use crcbl::server::HostConfig;
 
 use crate::json::Json;
@@ -163,6 +183,8 @@ pub(crate) struct Server {
     dir: PathBuf,
     /// Held from [`open`](Self::open) to [`quit`](Self::quit).
     lock: Option<SceneLock>,
+    /// The scene's chunk files, watched — see the module docs.
+    watch: ChunkWatch,
     /// The revision the files on disk stand at.
     saved_revision: u64,
     /// Why the last save failed, until one lands.
@@ -213,14 +235,16 @@ impl Server {
             },
         );
         // The host's clock takes its baseline here, as `LanHost::open`'s
-        // does.
+        // does, and so does the watch's.
         edit.update(Duration::ZERO);
+        let watch = ChunkWatch::new(edit.document(), Duration::ZERO);
         Ok(Self {
             edit,
             listener,
             addr,
             dir: dir.to_path_buf(),
             lock: Some(lock),
+            watch,
             saved_revision: 0,
             unsaved: None,
             printed: None,
@@ -234,9 +258,10 @@ impl Server {
     }
 
     /// Takes in newly connected clients, answers their edits and fetches at
-    /// `now` — the time since serving began — saves what that applied, and
-    /// answers the status line when it is due: when its headline changed, or
-    /// it has been quiet for [`STATUS_INTERVAL`].
+    /// `now` — the time since serving began — reloads the chunks changed on
+    /// disk, saves what that applied, and answers the status line when it is
+    /// due: when its headline changed, or it has been quiet for
+    /// [`STATUS_INTERVAL`].
     pub fn frame(&mut self, now: Duration) -> Option<String> {
         while let Some(peer) = self.listener.accept() {
             crcbl::log::info!("{APP}: {} connected", peer.peer_addr());
@@ -246,6 +271,9 @@ impl Server {
         for event in self.edit.host_mut().events() {
             crcbl::log::info!("{APP}: {event:?}");
         }
+        // Before the save, which would refuse over a changed file it had
+        // not taken in.
+        self.follow_disk(now);
         if self.edit.revision() != self.saved_revision
             && !self.edit.gesture_open()
             && let Err(why) = self.save_now()
@@ -259,6 +287,38 @@ impl Server {
         self.printed = Some(headline);
         self.next_status = now + STATUS_INTERVAL;
         Some(self.status())
+    }
+
+    /// Reloads each chunk changed on disk that has settled by `now`, over
+    /// unsaved edits, once no client's drag is open — see the module docs.
+    fn follow_disk(&mut self, now: Duration) {
+        let settled = self.watch.poll(self.edit.document(), now);
+        if self.edit.gesture_open() {
+            for system in settled {
+                crcbl::log::info!(
+                    "{APP}: `sys/{system}.ron` changed on disk; it is reloaded when the drag \
+                     under way ends"
+                );
+            }
+            return;
+        }
+        for system in self.watch.take_due() {
+            match self.edit.reload_chunk(&system, OverEdits::Reload) {
+                Ok(reloaded) => {
+                    if let (Some(_), Some(diff)) = (&reloaded.command, &reloaded.diff) {
+                        crcbl::log::info!(
+                            "{APP}: reloaded `sys/{system}.ron` from disk, {} rows changed, \
+                             at revision {}",
+                            diff.changes().len(),
+                            self.edit.revision()
+                        );
+                    }
+                }
+                Err(error) => crcbl::log::warn!(
+                    "{APP}: `sys/{system}.ron` changed on disk and was not reloaded: {error}"
+                ),
+            }
+        }
     }
 
     /// Saves the scene and its history as the document stands, or says why
@@ -469,3 +529,6 @@ pub(crate) fn serve_until_quit(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod watch_tests;
