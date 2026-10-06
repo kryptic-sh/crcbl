@@ -5,6 +5,21 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ## Top priority: EW physics migration handoff (2026-10-07)
 
+Work in this order before the lower-priority backlog:
+
+- **Engine prerequisite:** add selectable accelerated contacts with the
+  acceptance criteria below. The current closest-contact API cannot complete
+  EW's migration safely.
+- **Game integration after that API lands:** update EW's engine pin and replace
+  the covered airborne contact forecasts, keeping its wall, ceiling and braking
+  regressions green. This is a consumer migration, not another engine feature.
+
+Upstream review: fetched crcbl `origin/main` before this update; the checkout
+was already at `0e32b692`. The current `world/arc_sweep.rs` still exposes only
+closest accelerated contacts. EW's `src/controller_ballistic.rs` still uses
+`find_wall` and `hits_ceiling` forecast bisections, so this handoff remains
+open.
+
 **Engine implementation needed first: selectable accelerated contacts.** EW's
 direct migration exposed a missing query capability. Let the caller choose the
 earliest relevant arc contact after rejecting a departing support or a
@@ -122,6 +137,15 @@ recipe in `src/hideout_inventory/food_crafting_recipes.rs` likewise combines
 game materials, station access and authored medical output. Neither feature
 demonstrates a reusable engine requirement or adds an engine migration
 prerequisite.
+
+The subsequent splint recipe and persisted batch jobs also stay in EW.
+`FoodCraftJob::output_ids` and `HideoutInventory::start_food_craft_batch` in
+`src/hideout_inventory/food_crafting.rs` track exact output identities and
+reserve game-owned ingredients; recipe and station limits live in
+`src/hideout_inventory/food_crafting_recipes.rs`. These shipped contracts do not
+establish a missing engine scheduler or inventory API. Batch controls in the
+current EW working tree remain unfinished and are not evidence of a validated
+reusable engine feature.
 
 1. **Curved-path collision queries with contact times — delivered 2026-10-06,
    awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
