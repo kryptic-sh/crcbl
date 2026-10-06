@@ -6,7 +6,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requests (2026-10-06)
 
 These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `9c00dc46` after pulling `origin/main`, using EW `4cc34958`. The
+against crcbl `bffec64a` after pulling `origin/main`, using EW `3270d677`. The
 first is now delivered in crcbl and awaits EW's migration; the second remains
 open: `world/candidate_sweeps.rs` still accepts straight segments rather than
 accelerated trajectories. That refresh inspected source only; the EW test
@@ -17,11 +17,12 @@ local mechanism. Gameplay rules stay in EW.
 Implementation handoff: deliver the non-mutating upright preview first, then add
 the accelerated capsule query as a separate verified slice. Each handoff needs
 its public API, regression coverage and published commit so EW can update its
-pin and delete the matching workaround. The game still pins crcbl `32e35110`;
-pulling this documentation worktree does not validate a game upgrade to the
-newer engine runtime. `move_upright` still writes the bound collider, as a move
-must; the preview below is the call that does not. `sweep_capsule_all` in
-`world/candidate_sweeps.rs` still takes a `Segment`.
+pin and delete the matching workaround. EW now pins crcbl `bffec64a`, which
+predates the preview below, so EW's workaround stays until it moves its pin.
+`move_upright` still writes the bound collider, as a move must; the preview is
+the call that does not. `world/candidate_sweeps.rs::sweep_capsule_all` still
+takes a `Segment`. That backlog refresh rechecked those implementations and the
+game consumers; it does not add runtime verification.
 
 Keep the recent inventory eligibility work in EW: `HideoutInventory`'s
 `can_fit_stashed_firearm_swap` and `firearm_swap_placement` in
