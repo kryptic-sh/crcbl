@@ -8,10 +8,11 @@ grids, equipment slots, weapon attachments. Kit rules follow the player kit
 (30): first-class, optional, zero engine privileges. Drag-drop lands wave 1 (the
 editor asset browser wants it); the kit is FPS-era with breach.
 
-> **Status, 2026-09-07, re-checked 2026-09-25.** Part 2 is built and has two
-> consumers; part 1's pointer mechanism is built, and the rest of part 1 is
-> still the engine's to build. By the Delivery table's weight that is well under
-> half the document, which is why it stays rather than folding into the notes.
+> **Status, 2026-09-07, re-checked 2026-09-25, updated 2026-10-06.** Part 2 is
+> built and has two consumers; part 1's pointer mechanism is built, and the rest
+> of part 1 is still the engine's to build. By the Delivery table's weight that
+> is well under half the document, which is why it stays rather than folding
+> into the notes.
 >
 > **Part 1, drag-drop: the pointer half is in `crcbl-ui`.** It shipped
 > 2026-09-23 as `crcbl_ui::grid_drag` — `CellGrid`, `GridDrag<P>`, a typed
@@ -50,10 +51,25 @@ editor asset browser wants it); the kit is FPS-era with breach.
 > and it took no engine change either; see "Decided" below for what the second
 > consumer measured.
 >
+> **The move protocol and the stash: built 2026-10-06.** `crcbl_inventory`'s
+> `Inventory::apply` takes the six commands below — `Move`, `Split`, `Merge`,
+> `Equip`, `Drop`, `TakeAll` — and applies each as one transaction: run against
+> copies of the containers it touches and committed whole, or refused with a
+> named `Refusal` and nothing changed. Ownership (`Access`) and every grid rule
+> are the kit's; reach and line of sight are a check the caller passes in,
+> because distance is the world's. The inventory mints every `StackId` (a split
+> is the only command that does), and a player's stash is a set of
+> `ContainerId::Stash` containers in the same inventory, so a move between a rig
+> and a stash is the same single transaction. `crcbl_inventory::stash` writes
+> the stashes and the mint to a versioned, checksummed file through the server's
+> `StorageSource`. `apps/breach`'s drag is a `Command::Move`; no sample runs a
+> server that keeps a stash. `docs/backlog.md`'s _The move protocol and the
+> stash_ records each decision.
+>
 > What of this document is still unbuilt is the Delivery table below: the rest
 > of part 1 (above), nesting and the rollup through it, mounts and coverage,
-> items as entities, the command protocol and access grants, the stash, and
-> client optimism.
+> items as entities, the commands' wire form and access grants, and client
+> optimism.
 >
 > **Icon bake:** `crcbl icon bake` is not a verb. `crcbl-cli`'s parser accepts
 > `new`, `run`, `build`, `screenshot`, `replay`, `crpix`, `lod`, `import`,
@@ -284,16 +300,32 @@ UI just doesn't wait to look responsive.
 - **Scripted pointer drag through `HeadlessShell`**: press over one cell,
   release over another, and the placement is where the pointer let go.
 
+- **No-dupe property (the headline), built 2026-10-06**: `crcbl_inventory`'s
+  `no_command_stream_duplicates_or_loses_an_item` plays thousands of seeded
+  command streams from several players against their rigs, equipment slots, a
+  shared crate and ground, and their stashes — every command kind, applied and
+  refused. After every step a refused command has changed nothing, each item's
+  count is conserved except by an explicit spawn or despawn, and the set of
+  stack ids changes only by a split's freshly minted id, a whole merge's source,
+  or a spawn or despawn. Seeded with `crcbl-rand`, not fuzzed: the commands have
+  no wire form for a fuzzer to decode.
+- **Atomic commands**: every refusal leaves the inventory equal and the stash
+  file byte-identical
+  (`every_command_refuses_with_its_named_reason_and_changes_nothing`), and a
+  cross-container move or take-all refused part-way leaves its source whole.
+- **Stash**: round-trips through its file in memory and through
+  `NativeStorage`'s atomic write, refuses a file that disagrees with itself, and
+  one player's stash is refused to another before and after a reload.
+
 **Not built, and each waits on the slice it belongs to:**
 
-- **No-dupe property (the headline)**: fuzzed concurrent move/split/merge
-  streams from N clients against shared containers. Needs the command protocol —
-  there is no server-side inventory transaction to fuzz.
 - Nesting depth and cycle rejection; weight/volume rollup under deep nesting.
 - **Coverage-conflict property** against a hand-written truth table for the
   shipped vocabulary: needs mounts and coverage.
-- Stash survives a server restart; store-crossing moves are atomic under
-  injected failure.
+- Store-crossing moves under an injected save failure. A store-crossing move is
+  atomic in memory (one transaction of one inventory); the stash save is a
+  separate whole-file write the server schedules, and nothing injects a failure
+  into it.
 - Access property: container contents never appear in any message before a grant
   or after a revoke.
 - The other three devices: pad, keyboard and touch drags completing the same
@@ -302,19 +334,19 @@ UI just doesn't wait to look responsive.
 
 ## Delivery
 
-| Slice                                                                                                                                                                                                                  | Phase                                               |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| UI drag-drop capability (sources/targets/ghost/`:drop-ok`), pointer + pad/keyboard/touch paths                                                                                                                         | wave 1 (editor asset browser is the first consumer) |
-| ✅ Uniform grid model (+ filters) + placement/rotation + stacking — `crcbl-inventory`, consumed by `apps/shard` and `apps/breach`                                                                                      | shipped 2026-09-07                                  |
-| Nesting: grids inside grids, depth cap and cycle rejection                                                                                                                                                             | FPS-era                                             |
-| Mounts and coverage; gear as the grids it provides                                                                                                                                                                     | FPS-era                                             |
-| Persistence: **server-side PlayerId stash store** and store-crossing transactions. A carried grid in a game's own save is shipped — `apps/shard/src/save.rs` writes placements, ids and rotations at payload version 2 | FPS-era                                             |
-| Items as entities: stable identity as replicated components                                                                                                                                                            | FPS-era                                             |
-| Command protocol + server validation + atomic moves + access grants                                                                                                                                                    | FPS-era                                             |
-| Client optimism + pending/rollback UX                                                                                                                                                                                  | FPS-era                                             |
-| Icon bake (`crcbl icon bake`) + 3D inspect view. A grid UI exists as a _game's_, in `apps/shard/src/panel.rs`; the engine's is part 1                                                                                  | FPS-era                                             |
-| Weight/volume rollup → player-kit encumbrance. `Grid::weight_g` is the flat sum over one grid; the rollup needs nesting                                                                                                | FPS-era                                             |
-| Contested-loot policy hooks, container types (mag-only, quick-slots)                                                                                                                                                   | breach-driven                                       |
+| Slice                                                                                                                                                                                                                                                    | Phase                                               |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| UI drag-drop capability (sources/targets/ghost/`:drop-ok`), pointer + pad/keyboard/touch paths                                                                                                                                                           | wave 1 (editor asset browser is the first consumer) |
+| ✅ Uniform grid model (+ filters) + placement/rotation + stacking — `crcbl-inventory`, consumed by `apps/shard` and `apps/breach`                                                                                                                        | shipped 2026-09-07                                  |
+| Nesting: grids inside grids, depth cap and cycle rejection                                                                                                                                                                                               | FPS-era                                             |
+| Mounts and coverage; gear as the grids it provides                                                                                                                                                                                                       | FPS-era                                             |
+| ✅ Persistence: **server-side PlayerId stash store** and store-crossing transactions — `crcbl_inventory::stash`. A carried grid in a game's own save is shipped too — `apps/shard/src/save.rs` writes placements, ids and rotations at payload version 2 | shipped 2026-10-06                                  |
+| Items as entities: stable identity as replicated components                                                                                                                                                                                              | FPS-era                                             |
+| Command protocol + server validation + atomic moves: ✅ shipped 2026-10-06 (`Inventory::apply`). Access grants and the commands' wire form: not built                                                                                                    | FPS-era                                             |
+| Client optimism + pending/rollback UX                                                                                                                                                                                                                    | FPS-era                                             |
+| Icon bake (`crcbl icon bake`) + 3D inspect view. A grid UI exists as a _game's_, in `apps/shard/src/panel.rs`; the engine's is part 1                                                                                                                    | FPS-era                                             |
+| Weight/volume rollup → player-kit encumbrance. `Grid::weight_g` is the flat sum over one grid; the rollup needs nesting                                                                                                                                  | FPS-era                                             |
+| Contested-loot policy hooks, container types (mag-only, quick-slots)                                                                                                                                                                                     | breach-driven                                       |
 
 ## Risks
 

@@ -1298,16 +1298,16 @@ impl Game {
     ///
     /// **This is the one mutation that does not cross the wire**, and the
     /// reason is that there is no wire command to carry it: `Intent` is a flag
-    /// byte and a bearing, and a cell pair is neither. `docs/plan/34-inventory.md`'s
-    /// `Move` command and its server-side validation are the kit's server half,
-    /// which is not built — so a drag here reaches the stage through the same
-    /// lock a snapshot does, in a process where the client and the server are
-    /// the same memory. `docs/backlog.md` carries it as what breach's adoption
-    /// has to force.
+    /// byte and a bearing, and a cell pair is neither. The kit's command
+    /// protocol is built but its wire form is not, so a drag here reaches the
+    /// stage through the same lock a snapshot does, in a process where the
+    /// client and the server are the same memory.
     ///
     /// The move itself is [`crcbl::inventory::Grid::move_within`], which is
     /// atomic: a refused drag leaves the grid exactly as it was, down to the
-    /// slot id the panel is holding.
+    /// slot id the panel is holding. `apps/breach` applies the kit's
+    /// `Command::Move` to an `Inventory` for the same drag; shard keeps the
+    /// bare grid its save and its floor are written against.
     pub fn drag(&mut self, slot: SlotId, at: Cell) -> bool {
         let mut stage = lock(&self.shared);
         let Some(placement) = stage.grid.slot(slot) else {

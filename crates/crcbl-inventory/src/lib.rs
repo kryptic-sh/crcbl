@@ -16,13 +16,18 @@
 //! server decides whether a move is legal and the client predicts the same
 //! answer. That only works if the code answering is *the same code*, which
 //! means it cannot live in a game, cannot live in `crcbl-ui`, and cannot carry
-//! anything a browser build refuses to link. So it depends on `serde`, `ron`
-//! and `thiserror` and on nothing else — no `glam`, no `crcbl-core`, no IO, no
-//! clock. `crates/crcbl-inventory/Cargo.toml` argues each of the three.
+//! anything a browser build refuses to link. The placement half — [`Grid`],
+//! [`Catalog`], [`Shape`] — depends on `serde`, `ron` and `thiserror` and has
+//! no IO and no clock. The authority half — the [`Inventory`] a [`Command`] is
+//! applied to and the [`stash`] — names the two engine crates the plan names
+//! for it: `crcbl-core`, for the [`PlayerId`](crcbl_core::PlayerId) a stash and
+//! a container's owner are keyed by, and `crcbl-store`, for the
+//! [`StorageSource`](crcbl_store::StorageSource) a stash is written through.
+//! `crates/crcbl-inventory/Cargo.toml` argues each.
 //!
 //! The arrow runs *into* this crate from games and from `crcbl` (behind the
-//! `inventory` feature), never out of it. Nothing consumes it yet: `apps/shard`
-//! is the sample whose loot loop forced the kit, and is the first one that will.
+//! `inventory` feature), never out of it. `apps/shard` is the sample whose loot
+//! loop forced the kit, and `apps/breach` the second consumer.
 //!
 //! # The decisions this crate is built on
 //!
@@ -63,23 +68,47 @@
 //! writer does: a writer whose output depends on the host is not one a data
 //! file can be kept in git as.
 //!
+//! # The move protocol
+//!
+//! Every change a player makes is a [`Command`] — `Move`, `Split`, `Merge`,
+//! `Equip`, `Drop`, `TakeAll` — applied by [`Inventory::apply`] as one
+//! transaction: validated and run against copies of the containers it touches,
+//! committed whole or refused with a [`Refusal`] and nothing changed. Items
+//! enter and leave only through [`Inventory::spawn`] and
+//! [`Inventory::despawn`]; a split is the only command that mints a
+//! [`StackId`], and the inventory is the one mint. A player's stash is a set of
+//! containers in the same inventory, keyed by their `PlayerId`, so a move
+//! between a rig and a stash is the same single transaction. [`inventory`]'s
+//! module docs argue each of these.
+//!
 //! # What is deliberately not here
 //!
 //! Nesting (a grid inside a grid) and the weight rollup through it, mounts and
-//! coverage, items as entities, the server's authority and its commands, the
-//! stash, and client optimism. Every one of them is in the plan and none of
-//! them is in this crate yet; [`Grid::weight_g`] is the flat sum of what one
-//! grid holds, and says so. Icons are not here either — an [`ItemDef`] carries
-//! a [`letter`](ItemDef::letter) and a [`colour`](ItemDef::colour), which is
-//! the placeholder cell a panel can draw before `crcbl icon bake` exists.
+//! coverage, items as entities with replicated identity, access grants (which
+//! containers a client is sent the contents of), the commands' wire form and
+//! replication, and client optimism. Every one of them is in the plan and none
+//! of them is in this crate yet; [`Grid::weight_g`] is the flat sum of what one
+//! grid holds, and says so. Reach and line of sight are not here by design: a
+//! command takes the caller's reach check, because distance is the world's.
+//! Icons are not here either — an [`ItemDef`] carries a
+//! [`letter`](ItemDef::letter) and a [`colour`](ItemDef::colour), which is the
+//! placeholder cell a panel can draw before `crcbl icon bake` exists.
 
 pub mod catalog;
+pub mod command;
 pub mod grid;
+pub mod inventory;
 pub mod shape;
+pub mod stash;
+#[cfg(test)]
+mod test_items;
 
 pub use catalog::{Catalog, CatalogError, ItemDef, ItemId, Tag};
+pub use command::{Access, Applied, Command, ContainerId, Held, Refusal};
 pub use grid::{Grid, Placement, SlotId, Stack, StackId};
+pub use inventory::Inventory;
 pub use shape::{Cell, MAX_SHAPE, Rotation, Shape};
+pub use stash::{StashError, StashLayout};
 
 /// Why a footprint, a placement or a stack operation was refused.
 ///

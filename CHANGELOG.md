@@ -806,6 +806,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The inventory move protocol: `crcbl_inventory::Inventory` and its
+  commands.** `Inventory::apply(catalog, player, command, reach)` takes
+  `Command::Move`, `Split`, `Merge`, `Equip`, `Drop` and `TakeAll` and applies
+  each as one transaction across any of its containers: run against copies of
+  the grids it touches and committed whole, or refused with a named `Refusal`
+  (`NotYours`, `OutOfReach`, `NoSuchStack`, `NotASlot`, a grid rule, …) and
+  nothing changed, the id mint included. Commands name a stack by `StackId`
+  (`Held`), containers say who may touch them (`Access::Player` or `Open`), and
+  reach and line of sight are the caller's `reach` check. The inventory mints
+  every new `StackId` — `Split` and `Inventory::spawn` are the only minters —
+  and `spawn`/`despawn` are the only ways an item enters or leaves. `add` takes
+  a game's own grid and refuses a stack id the inventory already holds.
+  `Grid::find` answers which slot holds a stack id.
+
+- **The server-side stash: `crcbl_inventory::stash`.** A player's stash is
+  `ContainerId::Stash { player, grid }` containers in the server's one
+  `Inventory`, keyed by `PlayerId` and laid out by a `StashLayout`
+  (`Inventory::with_stash`, `open_stash`, `stash`), so rig-to-stash moves are
+  ordinary single transactions. `stash::save` and `stash::load` write every
+  stash and the id mint to one versioned, CRC-checked file through a
+  `StorageSource` — `write_atomic` natively, the server's data directory, never
+  a client profile — and a file that disagrees with itself (one stack twice, an
+  id past the mint, an overlap, an unknown item) is refused, not half-read.
+
 - **A stable player identity: `crcbl_core::PlayerId`** (re-exported as
   `crcbl_net::PlayerId`), 128 random bits a client draws once, keeps and
   presents in every hello, kept apart from the per-session `SessionId` and
@@ -6083,6 +6107,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **`crcbl-inventory` depends on `crcbl-core` and `crcbl-store`**, for the
+  stash's `PlayerId` key and its storage. `crcbl` links both already, so the
+  `inventory` feature adds no crate.
+
+- **`apps/breach`'s rig is an `Inventory`, and a drag is a `Command::Move`**
+  (`loadout::drag`) rather than a direct `Grid::move_within`.
 
 - **The fullscreen key and the pause menu's FULLSCREEN go through the confirm
   prompt, and a kept toggle is remembered.** Each applies the opposite mode at

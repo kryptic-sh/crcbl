@@ -520,7 +520,7 @@ mod tests {
     ///
     /// The second half is the control, and it is what the capture is for: a
     /// panel that reported the cell under the pointer at release would call
-    /// every click a drag onto itself, and `Grid::move_within` would then be
+    /// every click a drag onto itself, and the kit's `Move` would then be
     /// asked to move every item onto its own cell on every click.
     #[test]
     fn a_press_on_one_cell_and_a_release_on_another_is_a_drag() {
