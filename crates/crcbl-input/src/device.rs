@@ -36,6 +36,21 @@ impl ActionMap {
         self.devices.first().copied()
     }
 
+    /// Whether [`ActionMap::last_device`] changed since the last
+    /// [`ActionMap::begin_tick`] — the edge a game swapping its control
+    /// prompts reads, as it reads [`ActionMap::just_pressed`] for a button.
+    ///
+    /// Set only when a different device takes the front: the keyboard
+    /// speaking again while it is already the last device changes nothing,
+    /// and neither does a device moving up behind it. What counts as speaking
+    /// is `device.rs`'s rule, so a pad stick drifting inside
+    /// [`PAD_ACTIVITY_THRESHOLD`](crate::PAD_ACTIVITY_THRESHOLD) never raises
+    /// it.
+    #[must_use]
+    pub const fn last_device_changed(&self) -> bool {
+        self.device_changed
+    }
+
     /// The family of the pad that last spoke, by the same rule, or `None`
     /// before any pad did — what [`ActionMap::hint`] names a pad button after.
     ///
@@ -50,6 +65,9 @@ impl ActionMap {
     /// Records that `device` spoke: it moves to the front of the recency
     /// list, and the rest keep their order.
     pub(crate) fn spoke(&mut self, device: Device) {
+        if self.devices.first() != Some(&device) {
+            self.device_changed = true;
+        }
         if let Some(index) = self.devices.iter().position(|&seen| seen == device) {
             self.devices.remove(index);
         }
@@ -137,6 +155,51 @@ mod tests {
         ] {
             assert_eq!(binding.device(), device, "{binding}");
         }
+    }
+
+    /// **The change edge rises when a different device takes over on a real
+    /// press, and not on a pad stick drifting inside the activity threshold**,
+    /// nor on the same device speaking again; [`ActionMap::begin_tick`] clears
+    /// it.
+    #[test]
+    fn the_last_device_changes_on_a_real_press_and_not_on_drift() {
+        use crate::{GamepadEvent, GamepadId, GamepadSnapshot, PAD_ACTIVITY_THRESHOLD, PadAxis};
+
+        let pad = |map: &mut ActionMap, edit: &dyn Fn(&mut GamepadSnapshot)| {
+            let mut snapshot = GamepadSnapshot::neutral(PadKind::Xbox);
+            edit(&mut snapshot);
+            map.gamepad_event(&GamepadEvent::State {
+                id: GamepadId(4),
+                snapshot,
+            });
+        };
+        let mut map = ActionMap::new();
+        assert!(!map.last_device_changed());
+
+        map.key_event(KeyCode::KeyQ, true);
+        assert!(map.last_device_changed(), "the first device to speak");
+        map.begin_tick(0.0);
+        assert!(!map.last_device_changed(), "begin_tick clears the edge");
+
+        let drift = PAD_ACTIVITY_THRESHOLD * 0.9;
+        pad(&mut map, &|pad| pad.axes[PadAxis::LeftX as usize] = drift);
+        pad(&mut map, &|pad| pad.axes[PadAxis::LeftY as usize] = -drift);
+        assert_eq!(
+            map.last_device(),
+            Some(Device::Keyboard),
+            "drift is not a push"
+        );
+        assert!(!map.last_device_changed(), "and raises nothing");
+
+        map.key_event(KeyCode::KeyE, true);
+        assert!(
+            !map.last_device_changed(),
+            "the keyboard speaking again changes nothing"
+        );
+
+        pad(&mut map, &|pad| pad.buttons.insert(PadButton::South));
+        assert_eq!(map.last_device(), Some(Device::Gamepad));
+        assert!(map.last_device_changed(), "a pad press takes over");
     }
 
     /// **Each device takes over when it speaks**, whether or not anything is

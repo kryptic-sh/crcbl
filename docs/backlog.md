@@ -14732,10 +14732,87 @@ no backend opens an output path (XInput's `XInputSetState`, evdev's
 force-feedback `EV_FF`, GameController's `GCDeviceHaptics`, the Web Gamepad
 `vibrationActuator`). Scheduled beside device assignment as post-MVP.
 
-### Input: no rebind screen, no input inspector, no `crcbl input` CLI (2026-09-24)
+### Input: the inspector shipped; the rebind screen and `crcbl input` are owed (2026-09-24, inspector 2026-10-06)
 
-The input plan scheduled three tools on top of the action layer, and none
-exists:
+The input plan scheduled three tools on top of the action layer. The inspector
+landed on 2026-10-06; the other two do not exist.
+
+**The input inspector, built.** `ActionMap::set_tracing` records a resolution
+trace (`crates/crcbl-input/src/trace.rs`),
+`crcbl::input_inspector::InputInspector` draws a map as a debug section
+(`crates/crcbl/src/input_inspector.rs`), the loop keeps the game's map tracing
+while the panel shows and records its own claims (`Loop::frame_body`,
+`fresh_press`, `reserved_key_use` in `crates/crcbl/src/engine.rs`), and
+`apps/horde` adds the section. Decided 2026-10-06, long term:
+
+- **The trace is a ring of recent presses, not one frame's list.** A frame's
+  list is empty again before anyone reads it. `RESOLUTION_TRACE_CAP` entries,
+  oldest dropped, and an input repeating the newest entry exactly counts on it
+  (`TraceEntry::count`), so a touchpad scroll does not push every key press out.
+- **Opt in per map** (`set_tracing`, off by default): off, a press costs the
+  `Option` check and nothing else. Resolution is the same either way —
+  `trace::tests::resolution_is_identical_with_tracing_on_and_off`.
+- **Presses only.** A key down (not an OS auto-repeat), a pointer button, a
+  wheel turn, an on-screen button or a stick leaving centre, a pad button, a pad
+  stick or trigger pushed past `PAD_ACTIVITY_THRESHOLD`. Not releases (the
+  press's route), not pointer motion or position (every frame the mouse moves
+  would fill the ring), not a level moving while already out.
+- **Explained after resolving, from the same routes** (`Routes::owner`,
+  `Suppressed::holds`, `ActionMap::blocking_modal` in `context.rs`, and
+  `ActionMap::reads` in `trace.rs` asking each binding `resolve_slot`'s
+  question). `reads` restates which binding kinds each action kind reads, so
+  `trace::tests::a_binding_is_traced_as_reading_exactly_when_its_action_moves`
+  holds it to resolution over every press-driven binding on every action kind; a
+  new `Binding` variant needs a row there.
+- **The loop does not add the section itself.** Each sample's tests hold its
+  panel to exactly its modules (asteroids, breach, orbit, puppet and others
+  assert the title list), so the section is the game's to add in
+  `HostedGame::debug_sections`. The loop's half — tracing on while the panel
+  shows, and the claims — is wired for every game whose `HostedGame::actions`
+  answers.
+- **Claims are recorded on the game's map by name**: `the loop: pause` (and
+  `debug overlay`, `fullscreen`, `console`) for the reserved keys,
+  `the loop's menu` and `the console` for a fresh press `MenuPump::observe` kept
+  from the game.
+- **The last device stays `ActionMap::last_device`, one notion, any activity**
+  (`device.rs`): a press, pointer motion, a wheel turn, a pad stick or trigger
+  past `PAD_ACTIVITY_THRESHOLD`, whether or not a binding reads it. Considered
+  and declined: a second "last device whose input resolved to an action" for
+  prompts. `crcbl::ui_nav` reads the same device for hover against focus, and a
+  mouse moved over a menu must show hover though nothing binds motion; and
+  `ActionMap::hint` already falls back through the devices heard before the last
+  one when the last binds nothing, so a mouse nudge in a pad game with motion
+  unbound keeps the pad prompt. Two notions would let a HUD prompt and the
+  menu's mode disagree. What is left of the flicker: an unbound key pressed on a
+  device that does bind the action (a pad player bumping the keyboard) switches
+  the prompt, and so does mouse motion where mouse look is bound. **Mouse motion
+  counts**, at any non-zero delta; drift below `PAD_ACTIVITY_THRESHOLD` never
+  does. `ActionMap::last_device_changed` is the change edge, cleared by
+  `begin_tick` like `just_pressed`; with `last_device`, `last_pad_kind` and
+  `hint` it is everything puppet's device-swap prompts need engine-side.
+
+Not done:
+
+- **The loop's own menu map has no section.** `menu_actions` is the loop's, and
+  the panel's sections come from the game; its claims show on the game's map as
+  `the loop's menu`, but which `ui` action took the key is in the menu map's
+  trace, which nothing turns on or shows. A loop-level section would move the
+  title list every sample's test asserts.
+- **Pad presses the menu claims are not traced on the game's map.**
+  `PadClaims::for_game` clears the claimed buttons before the game hears the
+  pad, so they never arrive and nothing records them.
+- **Only horde adds the section.** No other sample does, and nothing was looked
+  at on screen: the rows are checked through the draw list
+  (`input_inspector::tests`, horde's
+  `the_debug_panel_carries_the_input_section`), never in a window.
+- **A modifier key alone traces as unbound** (`Shift` with only chords on it),
+  which is what routing says — a chord's modifier is read raw and owned by no
+  context — but reads oddly in the panel.
+- **The panel can outgrow the screen.** A map with many actions puts a row per
+  action plus up to `RESOLUTION_TRACE_CAP` trace rows beside the engine's own
+  sections, and the panel neither scrolls nor clips.
+
+The other two tools:
 
 - **A listen-for-input rebind flow** provided by the engine, for the P10
   settings screen to host. `apps/options`' `CONTROLS` page is a sample's flow
@@ -14743,12 +14820,6 @@ exists:
   diff over the defaults); the engine has the `HostedGame::captures_input` seam
   it runs on, and the screen itself is still P10's. See _Profiles: key binds
   built_.
-- **An input inspector panel**: live devices, raw values, resolved action
-  states, the active context stack, the last-active device, and each input's
-  full resolution path — which context consumed it and through which binding.
-  The plan named it as the answer to "input eaten mysteriously" by the context
-  stack. Standalone; it needs nothing unbuilt. No inspector exists in `crcbl-ui`
-  or `crcbl`.
 - **`crcbl input`**, a CLI to inspect and edit bindings. `crcbl-cli`'s `Command`
   enum (`crates/crcbl-cli/src/args.rs`) has no `input`. Editing needs the
   binding asset to exist first; inspecting a game's declared actions needs a way
@@ -18802,7 +18873,10 @@ content this workspace did not author.
 **Not built:** no state machine, no jump, no run, no root motion, no animation
 events and therefore no footstep cues, no socket prop, and none of the
 device-swap showcase — the rebind UI and the glyph hints that follow the
-last-active device. That last group is topic 19's forcing function.
+last-active device. That last group is topic 19's forcing function. The engine
+half of the hints is built: `ActionMap::last_device`, its change edge
+`last_device_changed`, `last_pad_kind` and `ActionMap::hint` (see _Input: the
+inspector shipped_), so the prompts are puppet's own work now.
 
 **Also not built:** milestone 5's golden frames. `apps/puppet` has no `tests/`
 directory at all, so nothing pins a pose; the Pages demo half of milestone 5 is
