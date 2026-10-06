@@ -110,7 +110,7 @@ use crcbl::assets::{AssetSource, DirSource, MemorySource};
 use crcbl::ecs::{ComponentHash, System, World};
 use crcbl::greybox::{GREYBOX_TILE_M, cube, grid_material, grid_page, platform, sphere};
 use crcbl::math::{DVec3, Mat4, Vec3};
-use crcbl::phys::{BoxCollider, PhysicsWorld, Sphere};
+use crcbl::phys::{BoxCollider, ColliderId, PhysicsWorld, Sphere};
 use crcbl::reflect::Reflect;
 use crcbl::registry::{FieldError, OrientedBox, Placement, Registry, Validate};
 use crcbl::render::scene::{Capacities, Geometry, InstanceDesc, MeshDesc, ProbeGrid, SceneDesc};
@@ -1356,10 +1356,22 @@ impl Map {
     /// approximates.
     #[must_use]
     pub fn world(&self) -> PhysicsWorld {
+        self.world_with_ids().0
+    }
+
+    /// [`Map::world`], with the collider each surface became: the `i`th id is
+    /// [`Map::surfaces`]'s `i`th row's.
+    ///
+    /// What a table keyed by collider is filled from — `crate::audio`'s
+    /// acoustic materials — because the row is where the map knows what each
+    /// collider is.
+    #[must_use]
+    pub fn world_with_ids(&self) -> (PhysicsWorld, Vec<ColliderId>) {
         let mut world = PhysicsWorld::new();
+        let mut ids = Vec::with_capacity(self.surfaces.len());
         for surface in &self.surfaces {
             let origin = DVec3::from_array(surface.position);
-            match surface.shape {
+            let id = match surface.shape {
                 // A `BoxCollider` is a centre and half-extents, which is exactly
                 // what `Placement` answers — and a `platform` stands *on* its
                 // origin, so that centre is half a height up. Read from there
@@ -1367,14 +1379,13 @@ impl Map {
                 // cannot disagree.
                 Shape::Platform { .. } => {
                     let placed = surface.placement().expect("a surface is a thing in space");
-                    world.add_box(BoxCollider::new(placed.centre, placed.half_extents));
+                    world.add_box(BoxCollider::new(placed.centre, placed.half_extents))
                 }
-                Shape::Dome { radius } => {
-                    world.add_sphere(Sphere::new(origin, radius));
-                }
-            }
+                Shape::Dome { radius } => world.add_sphere(Sphere::new(origin, radius)),
+            };
+            ids.push(id);
         }
-        world
+        (world, ids)
     }
 }
 

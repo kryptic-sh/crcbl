@@ -7,6 +7,7 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::occlusion::{Occlusion, VoiceOcclusion};
 use crate::spatial::{CueGrammar, Listener, SpatialCue, compute_cue};
 use crate::{AudioSample, AudioSource, CHANNELS, INTERNAL_SAMPLE_RATE};
 
@@ -307,6 +308,10 @@ pub struct Voice {
     /// How much this voice matters when a [voice budget](Mixer::set_voice_budget)
     /// is full. Higher outranks lower; `0` is the default and the lowest.
     priority: u8,
+    /// Rule 5: the lowpass and gain of whatever stands between this voice and
+    /// the ear, and the ramp toward the latest target. Clear until a game says
+    /// otherwise — see [`crate::occlusion`].
+    occlusion: VoiceOcclusion,
 }
 
 impl Voice {
@@ -335,6 +340,7 @@ impl Voice {
             delay: std::array::from_fn(|_| DelayLine::new(DELAY_CAPACITY)),
             bus: Bus::default(),
             priority: 0,
+            occlusion: VoiceOcclusion::new(),
         }
     }
 
@@ -432,6 +438,24 @@ impl Voice {
         self.looping
     }
 
+    /// Start the voice already occluded by `occlusion`, clamped as the type
+    /// documents.
+    ///
+    /// **No ramp from clear**, unlike [`Mixer::set_occlusion`]: a sound that
+    /// starts behind a wall was never heard in the open, so its first frame is
+    /// already muffled.
+    #[must_use]
+    pub fn with_occlusion(mut self, occlusion: Occlusion) -> Self {
+        self.occlusion.start_at(occlusion);
+        self
+    }
+
+    /// The occlusion this voice is at or ramping toward, as clamped.
+    #[must_use]
+    pub fn occlusion(&self) -> Occlusion {
+        self.occlusion.target()
+    }
+
     /// The shared clamp behind [`Voice::with_mix`] and [`Mixer::set_mix`].
     fn apply_mix(&mut self, mix: VoiceMix) {
         self.volume = finite_or(mix.volume, 0.0, 0.0, 1.0);
@@ -475,6 +499,11 @@ impl Voice {
     /// multiplication is not associative, so a regrouping that reads as a
     /// refactor moves every sample of every golden buffer; `the_gain_chain_is_    /// voice_then_bus_then_master` is what holds it, with three gains whose
     /// products differ under regrouping.
+    ///
+    /// `sample` there is the delayed source sample after this voice's occlusion
+    /// filter ([`crate::occlusion`]), whose own gain is folded into it. A clear
+    /// voice's filter returns its input bit for bit, so the line holds unchanged
+    /// for every voice nobody occluded.
     fn mix_block(
         &mut self,
         buffer: &mut [AudioSample],
@@ -519,6 +548,7 @@ impl Voice {
         // line delays its own ear.
         let itd = self.itd_samples;
         let delay = [(-itd).max(0.0), itd.max(0.0)];
+        self.occlusion.begin_block(sample_rate);
 
         for (i, out) in buffer.as_chunks_mut::<CHANNELS>().0.iter_mut().enumerate() {
             if pos as usize >= frames {
@@ -539,9 +569,12 @@ impl Voice {
             } else {
                 1.0
             };
+            let occlusion = self.occlusion.step();
             let sample = self.delay[0].push_and_read(self.data[base], delay[0]);
+            let sample = self.occlusion.process(0, sample, occlusion);
             out[0] += sample * self.volume * self.gains.0 * fade * bus * master;
             let sample = self.delay[1].push_and_read(self.data[base + 1], delay[1]);
+            let sample = self.occlusion.process(1, sample, occlusion);
             out[1] += sample * self.volume * self.gains.1 * fade * bus * master;
             pos += step;
         }
@@ -934,6 +967,36 @@ impl Mixer {
         };
         voice.apply_mix(mix);
         true
+    }
+
+    /// Muffle a playing voice by what stands between it and the ear. Answers
+    /// whether it was still playing.
+    ///
+    /// The voice **ramps** to `occlusion` over
+    /// [`OCCLUSION_RAMP_FRAMES`](crate::occlusion::OCCLUSION_RAMP_FRAMES)
+    /// rather than stepping, so a game updating this as occluders move does not
+    /// zipper. Clamped as [`Occlusion`] documents; [`Occlusion::CLEAR`] ramps
+    /// back to a voice bit-identical to one never occluded.
+    ///
+    /// The mixer casts no ray: the answer comes from the game's own query, and
+    /// `crcbl::occlusion` is the engine's.
+    pub fn set_occlusion(&self, id: VoiceId, occlusion: Occlusion) -> bool {
+        let mut voices = self.lock();
+        let Some((_, voice)) = voices.iter_mut().find(|(voice_id, _)| *voice_id == id) else {
+            return false;
+        };
+        voice.occlusion.set(occlusion);
+        true
+    }
+
+    /// The occlusion `id` is at or ramping toward, or `None` if it is not
+    /// playing.
+    #[must_use]
+    pub fn occlusion(&self, id: VoiceId) -> Option<Occlusion> {
+        self.lock()
+            .iter()
+            .find(|(voice_id, _)| *voice_id == id)
+            .map(|(_, voice)| voice.occlusion())
     }
 
     /// A snapshot of every sounding voice's handle and mix parameters.

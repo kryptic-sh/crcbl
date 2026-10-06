@@ -106,7 +106,11 @@ FPS-era, with breach; the capture seam is useful earlier.
   and would bypass every routing/moderation guarantee — rejected.
 - Server enforces routing: team packets reach only that roster; world packets
   reach only audibly-plausible listeners (range + occlusion test, sharing the
-  vis/occlusion ray budget from 31).
+  vis/occlusion ray budget from 31). The occlusion half exists:
+  `crcbl::occlusion::occlusion_between` walks every collider between two points
+  through any filtered ray query, so the server casts it through its own
+  `PhysicsWorld` with the same material table and combining rule the client's
+  audio uses.
 - **Bandwidth honesty**: relay cost is O(speakers × listeners). Mitigated by
   audibility culling, per-speaker rate caps, and a hard cap on concurrent
   relayed speakers (excess = queued/dropped with a UI indicator).
