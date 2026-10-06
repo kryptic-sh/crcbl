@@ -420,17 +420,13 @@ pub(super) struct ViewInputs<'a> {
     pub(super) task_lanes: u32,
     /// The mesh layout every group below is built against.
     pub(super) mesh_layout: BindGroupLayoutHandle,
-    /// The scene's half of every group — see [`SharedBindings`]. The page
-    /// sampler is per slot, because [`ForwardRenderer::adopt_page_sampler`]
-    /// moves each slot to a new one on that slot's own frame.
+    /// The scene's half of every group — see [`SharedBindings`]. The pages
+    /// and their sampler are per slot, because [`ForwardRenderer::adopt_pages`]
+    /// moves each slot to new ones on that slot's own frame.
     pub(super) vertices: BufferHandle,
     pub(super) draw_constants: BufferHandle,
     pub(super) materials: BufferHandle,
-    pub(super) page: ImageViewHandle,
-    pub(super) normal_page: ImageViewHandle,
-    pub(super) mro_page: ImageViewHandle,
-    pub(super) emissive_page: ImageViewHandle,
-    pub(super) page_samplers: &'a [SamplerHandle],
+    pub(super) pages: &'a [PageBindings],
     pub(super) probes: &'a [BufferHandle],
     pub(super) specular_dfg: ImageViewHandle,
     pub(super) ltc_table: ImageViewHandle,
@@ -763,9 +759,9 @@ pub(super) struct View {
     pub(super) mesh_group_entries: Vec<Vec<BindGroupEntry>>,
     /// `[frame]`: the entries [`View::prepass_groups`] was built from.
     ///
-    /// Kept for one rebuild only: the page sampler's, which
-    /// [`ForwardRenderer::adopt_page_sampler`] performs on every group of the
-    /// mesh layout a slot holds. Handles, so the cost is a few words a group.
+    /// Kept for one rebuild only: the pages' and their sampler's, which
+    /// [`ForwardRenderer::adopt_pages`] performs on every group of the mesh
+    /// layout a slot holds. Handles, so the cost is a few words a group.
     pub(super) prepass_group_entries: Vec<Vec<BindGroupEntry>>,
     /// `[frame]`: the camera's group rebuilt against the two screen-space
     /// channels the forward pass reads — the blurred occlusion and the contact
@@ -1059,11 +1055,7 @@ impl View {
                 draw_constants: inputs.draw_constants,
                 mesh_table: inputs.mesh_table,
                 materials: inputs.materials,
-                page: inputs.page,
-                normal_page: inputs.normal_page,
-                mro_page: inputs.mro_page,
-                emissive_page: inputs.emissive_page,
-                page_sampler: inputs.page_samplers[frame],
+                pages: inputs.pages[frame],
                 clusters: inputs.clusters,
                 shadow_sampler: inputs.shadow_sampler,
                 lights: lights.lights(frame),
@@ -3322,14 +3314,11 @@ impl ForwardRenderer {
                 vertices: self.pool.vertex_buffer(),
                 draw_constants: self.draw_constants,
                 materials: self.materials.buffer(),
-                page: self.base_color_page.view,
-                normal_page: self.normal_page.view,
-                mro_page: self.mro_page.view,
-                emissive_page: self.emissive_page.view,
-                // The sampler each slot's groups name today, so a view built
-                // while a new anisotropy is still moving through the ring is
-                // adopted on the same frames the primary camera's groups are.
-                page_samplers: &self.slot_page_samplers,
+                // What each slot's groups name today, so a view built while a
+                // new anisotropy or a replaced page is still moving through the
+                // ring is adopted on the same frames the primary camera's
+                // groups are.
+                pages: &self.slot_pages,
                 probes: &probes,
                 specular_dfg: self.specular_dfg.view,
                 ltc_table: self.ltc_table.view,

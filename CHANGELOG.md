@@ -16,6 +16,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_assets::AssetState` has a `Reloading` variant** (see Added: texture
+  hot reload): an asset whose bytes are in force while newer ones are read. An
+  exhaustive `match` over the state must name the new arm; `Asset::bytes`
+  answers in it as it does in `Ready`.
+
 - **`crcbl_options::controls::Controls` is `crcbl::rebind::Rebinder`** (see
   Added: the rebind flow is the engine's). `Controls::open(store)` is
   `crcbl_options::controls::open(store)`; `Controls::key`, `button` and `pad` no
@@ -899,6 +904,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `apps/sandbox/assets/scenes/cube.scn` is the built-in scene written out.
 - **`crcbl_scene::scn::IdMap::iter`**, every filed id with its entity, in id
   order.
+- **Texture hot reload** (stage 6's task 5): a texture saved again beside a glTF
+  document shows in `apps/viewer` without the document being reopened.
+  `crcbl_assets::AssetRegistry::reload` re-reads an asset under the same handle,
+  id and refcount, keeping the old bytes beside the new (`Asset::reloaded`)
+  until the consumer calls `commit_reload` (`Asset::revision` moves) or
+  `refuse_reload` (the reason at `Asset::reload_failure`, a `ReloadFailure`).
+  `crcbl_render::ForwardRenderer::replace_page` uploads a material page whole
+  into a new image, moves each frame slot onto it at that slot's own
+  `begin_frame` and destroys the old image once no slot names it, so no frame
+  samples a half-written page; a replacement keeps the kind's layer count, so no
+  material row is rewritten, and may change its extent.
+  `crcbl_scene::gltf_render::build_texture_pages` rebuilds a document's pages
+  and material table alone, `decode_image` is the decoder a page is built
+  through, `GltfImage::key` is the file an image was read from,
+  `GltfScene::without_geometry` keeps a document's materials and images without
+  its vertices, and `GltfScene::set_image_bytes` puts a reloaded file in place.
+  `OffscreenSetup::replace_page` reaches the renderer's from the umbrella's
+  offscreen frame. The viewer's watch is native only.
 
 - **`crcbl_ui::grid_drag` drags on the pad, the keyboard and touch, as well as
   the pointer, through one state machine.** `GridDrag::frame_with(ui, input)`

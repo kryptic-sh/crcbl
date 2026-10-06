@@ -374,6 +374,51 @@ impl GltfScene {
     pub fn unsupported_required_extensions(&self) -> &[String] {
         &self.unsupported_required
     }
+
+    /// This document's materials, their texture slots and its images, with
+    /// none of its geometry, hierarchy or animation: everything
+    /// [`build_texture_pages`](crate::gltf_render::build_texture_pages) reads,
+    /// and nothing it does not.
+    ///
+    /// What a texture hot reload keeps of a document once its renderer is
+    /// built. The encoded images are the inputs a page is rebuilt from when one
+    /// of them changes; the vertices, already on the device, are not, and
+    /// keeping them would hold a second copy of the largest part of the file
+    /// for nothing. Every index still holds — no instance names a mesh because
+    /// there are none, and every texture slot names an image that is here.
+    #[must_use]
+    pub fn without_geometry(&self) -> Self {
+        Self {
+            meshes: Vec::new(),
+            materials: self.materials.clone(),
+            base_color_textures: self.base_color_textures.clone(),
+            normal_textures: self.normal_textures.clone(),
+            metallic_roughness_textures: self.metallic_roughness_textures.clone(),
+            occlusion_textures: self.occlusion_textures.clone(),
+            emissive_textures: self.emissive_textures.clone(),
+            images: self.images.clone(),
+            nodes: Vec::new(),
+            instances: Vec::new(),
+            skins: Vec::new(),
+            clips: Vec::new(),
+            unsupported_required: self.unsupported_required.clone(),
+        }
+    }
+
+    /// Replaces image `image`'s encoded bytes with `bytes`, and returns whether
+    /// there was such an image.
+    ///
+    /// A texture hot reload's read: the file at [`GltfImage::key`] was written
+    /// again, and the page built from this document next is built from what it
+    /// holds now. The name, the declared `mimeType` and the key are the
+    /// document's and stay as they were.
+    pub fn set_image_bytes(&mut self, image: usize, bytes: Vec<u8>) -> bool {
+        let Some(entry) = self.images.get_mut(image) else {
+            return false;
+        };
+        entry.bytes = Ok(bytes);
+        true
+    }
 }
 
 /// One entry of the document's `skins` array: which nodes are its joints, and
@@ -621,6 +666,7 @@ impl GltfTexture {
 pub struct GltfImage {
     name: Option<String>,
     mime: Option<String>,
+    key: Option<String>,
     bytes: Result<Vec<u8>, String>,
 }
 
@@ -642,6 +688,21 @@ impl GltfImage {
     #[must_use]
     pub fn mime(&self) -> Option<&str> {
         self.mime.as_deref()
+    }
+
+    /// The asset key the bytes were read from, for an image in a file beside
+    /// the document, or `None` for one inside a `bufferView` or a `data:` URI,
+    /// which has no file of its own.
+    ///
+    /// The key the source was asked for, relative to the same root the
+    /// document's own key is — so it is what a texture hot reload watches and
+    /// re-reads: this file changing is this image changing. Set whether or not
+    /// the read succeeded, since a file that was missing at import is one a
+    /// later save can bring.
+    #[inline]
+    #[must_use]
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
     }
 
     /// The encoded bytes, or the reason the import could not get them.
@@ -1531,7 +1592,7 @@ fn read_images(
     for image in document.images() {
         let index = image.index();
         let name = image.name().map(str::to_owned);
-        let (mime, bytes) = match image.source() {
+        let (mime, image_key, bytes) = match image.source() {
             gltf::image::Source::View { view, mime_type } => {
                 // `check_views` put every view inside its own buffer and
                 // `check_images` put this view inside the document, so the
@@ -1539,23 +1600,28 @@ fn read_images(
                 let buffer = &buffers[view.buffer().index()];
                 let start = view.offset();
                 let bytes = buffer[start..start + view.length()].to_vec();
-                (Some(mime_type.to_owned()), Ok(bytes))
+                (Some(mime_type.to_owned()), None, Ok(bytes))
             }
             gltf::image::Source::Uri { uri, mime_type } => {
-                let bytes = if uri.starts_with("data:") {
-                    Err(
-                        "its bytes are a data: URI, which needs a base64 decoder this build \
-                         does not have"
-                            .to_owned(),
+                let (image_key, bytes) = if uri.starts_with("data:") {
+                    (
+                        None,
+                        Err(
+                            "its bytes are a data: URI, which needs a base64 decoder this \
+                             build does not have"
+                                .to_owned(),
+                        ),
                     )
                 } else {
-                    match source.read(Path::new(&uri_sibling(parent, uri))) {
+                    let image_key = uri_sibling(parent, uri);
+                    let bytes = match source.read(Path::new(&image_key)) {
                         Ok(bytes) => Ok(bytes),
                         Err(pending @ StorageError::Pending(_)) => return Err(pending),
                         Err(error) => Err(format!("{uri:?} could not be read: {error}")),
-                    }
+                    };
+                    (Some(image_key), bytes)
                 };
-                (mime_type.map(str::to_owned), bytes)
+                (mime_type.map(str::to_owned), image_key, bytes)
             }
         };
         if let Err(why) = &bytes {
@@ -1566,7 +1632,12 @@ fn read_images(
                 name.as_deref().unwrap_or("<unnamed>"),
             );
         }
-        images.push(GltfImage { name, mime, bytes });
+        images.push(GltfImage {
+            name,
+            mime,
+            key: image_key,
+            bytes,
+        });
     }
     Ok(images)
 }

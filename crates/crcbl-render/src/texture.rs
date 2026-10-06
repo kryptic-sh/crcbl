@@ -38,8 +38,12 @@
 //!
 //! This is a **startup** path, not a frame path: it records its own barriers
 //! and blocks on [`Device::wait_idle`], which is only legal because no graph
-//! exists yet. See this crate's docs on the one rule — the two staging uploads
-//! ([`crate::forward`]'s cube and this) are its named exceptions.
+//! is being recorded while it runs. See this crate's docs on the one rule — the
+//! two staging uploads ([`crate::forward`]'s cube and this) are its named
+//! exceptions. Its barriers name only the image it creates, so a caller between
+//! two frames — [`ForwardRenderer::replace_page`](crate::forward::ForwardRenderer::replace_page)
+//! reloading a page — touches nothing a frame in flight reads, and the wait
+//! means no frame can bind the image before its copy has landed.
 //!
 //! # Why it is not in `ui_pass`
 //!

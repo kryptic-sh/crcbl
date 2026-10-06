@@ -6308,7 +6308,7 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
 Log macros test the level before formatting; disabled tracing is one atomic
 load; the debug overlay and console return early when hidden; animation sampling
 does not allocate; ECS schedules run without archetype moves; tick catch-up is
-capped; steady-state frames make no descriptor writes (`adopt_page_sampler` and
+capped; steady-state frames make no descriptor writes (`adopt_pages` and
 `refresh_sky_view` return early); the depth prepass with a read-only
 `GreaterOrEqual` colour pass removes overdraw; SSAO already runs at half
 resolution.
@@ -11964,9 +11964,9 @@ pose by `Sampler`). Tested in `crates/crcbl-anim/tests/machine.rs`.
 
 - **Hot reload of the asset.** The engine's polled watch exists
   (`crcbl_assets::watch`, 2026-10-06) and an asset reload path does not (_Asset
-  hot reload: the watch and per-chunk scene reload are built; assets and shaders
-  are not_), and puppet compiles its asset in for the browser. A reload would
-  also have to map a live `MachineState`'s state index and parameter slots
+  hot reload: the watch, per-chunk scene reload and texture reload are built;
+  shaders are not_), and puppet compiles its asset in for the browser. A reload
+  would also have to map a live `MachineState`'s state index and parameter slots
   across an asset whose order changed — by name, through `StateMachine::state`
   and the parameter lookups — or restart the machine.
 - **Transition interruption.** No transition is evaluated while a fade is in
@@ -12888,10 +12888,10 @@ The plan's rules — the format matrix, the `.scn/` directory and its
 deterministic writer, v0 formats, the sidecar GUID, the no-synchronous-IO rule —
 are in `docs/notes/tooling.md` under _What the deleted 06-assets-scenes plan
 left behind_. Its other open work already had entries and keeps them: _Asset hot
-reload: the watch and per-chunk scene reload are built; assets and shaders are
-not_, _`crcbl-assets` after stage 6 task 2_, _glTF import: what the first half
-left, and what it found upstream_, _Sidecar meta RON: three items want it, and
-nothing writes one yet_, _No golden over a real glTF document_ and _Viewer's
+reload: the watch, per-chunk scene reload and texture reload are built; shaders
+are not_, _`crcbl-assets` after stage 6 task 2_, _glTF import: what the first
+half left, and what it found upstream_, _Sidecar meta RON: three items want it,
+and nothing writes one yet_, _No golden over a real glTF document_ and _Viewer's
 hot-reload demo is built but not recorded_. What had none is below.
 
 ### `crcbl bake`, `PackSource`, the cooked mesh and `import --out`
@@ -12948,8 +12948,8 @@ serve an editor and wait on `apps/editor` growing past its in-process slices
   load unit coincide. Needs physics sector streaming first.
 
 Per-chunk hot reload, the fourth editor-facing piece, landed 2026-10-06; what it
-left is under _Asset hot reload: the watch and per-chunk scene reload are built;
-assets and shaders are not_.
+left is under _Asset hot reload: the watch, per-chunk scene reload and texture
+reload are built; shaders are not_.
 
 ### The Sponza-class exit: a real scene through the full path
 
@@ -13298,7 +13298,7 @@ machine, a client's link dropping mid-fetch and its resume, and a scene near
   checkout) shows the editor's old copy until Ctrl+S asks. The per-chunk reload
   and the rule for unsaved edits landed 2026-10-06 (`Document::reload_chunk`);
   the editor polling its directory is what is left, under _Asset hot reload: the
-  watch and per-chunk scene reload are built; assets and shaders are not_.
+  watch, per-chunk scene reload and texture reload are built; shaders are not_.
 
 **Coverage gaps**: run on Windows only in this slice; the verbs were never run
 against breakout's or puppet's scenes, only towers' field and the umbrella's
@@ -13730,16 +13730,20 @@ then finds, which is why this is its own change rather than a line in the slice
 that found it: a widened guard needs its own red-then-green and whatever it
 turns up needs fixing in the same commit.
 
-### Asset hot reload: the watch and per-chunk scene reload are built; assets and shaders are not (2026-08-27, updated 2026-10-06)
+### Asset hot reload: the watch, per-chunk scene reload and texture reload are built; shaders are not (2026-08-27, updated 2026-10-06)
 
-**Built 2026-10-06: the engine's watch and stage 6's per-chunk scene reload.**
-Of stage 6's exit criteria, **"editing one chunk file reloads only that system"
-is met**, and "editing a texture, shader or scene chunk on disk shows in the
-running sandbox without a restart" is met for the scene chunk only:
-`sandbox --scene <DIR>` reloads a changed `sys/<name>.ron` under a running loop,
-held by `apps/sandbox`'s
-`the_scene_flag_opens_its_directory_and_follows_an_edit`. Textures and shaders
-are below, unbuilt.
+**Built 2026-10-06: the engine's watch, stage 6's per-chunk scene reload, and
+texture reload.** Of stage 6's exit criteria, **"editing one chunk file reloads
+only that system" is met**, and "editing a texture, shader or scene chunk on
+disk shows in the running sandbox without a restart" is **met for the scene
+chunk and for textures**, and not for shaders: `sandbox --scene <DIR>` reloads a
+changed `sys/<name>.ron` under a running loop, held by `apps/sandbox`'s
+`the_scene_flag_opens_its_directory_and_follows_an_edit`; and `apps/viewer`
+reloads a texture beside its document, held by
+`a_texture_written_again_reaches_the_page_without_reopening_the_document`. The
+texture half is shown in the viewer rather than the sandbox because the sandbox
+draws no texture at all — its scene is untextured cubes — so there is nothing
+there to edit. Shaders are below, unbuilt.
 
 - **The watch**, `crcbl_assets::watch::PolledWatch`: a set of paths, looked at
   once per `POLL_INTERVAL` of the caller's clock (a `Duration` each poll, so a
@@ -13759,6 +13763,31 @@ are below, unbuilt.
   files; `apps/sandbox/assets/scenes/cube.scn` is its built-in scene as the
   writer writes it, held equal by
   `the_committed_scene_is_the_built_in_one_written_out`.
+- **Texture reload**, in three layers. `crcbl_assets::AssetRegistry::reload`
+  re-reads an asset into `AssetState::Reloading`, keeping its old bytes
+  (`Asset::bytes`) beside the new (`Asset::reloaded`) until the consumer calls
+  `commit_reload` (the new bytes, `Asset::revision` moves) or `refuse_reload`
+  (the old bytes, the reason at `Asset::reload_failure`); a source that cannot
+  read the file keeps the old bytes too. `crcbl_scene::gltf_render`'s
+  `build_texture_pages` rebuilds a document's pages and material table from its
+  materials and images alone — the first half of `build_render_scene`, which now
+  calls it — over `GltfScene::without_geometry` with `set_image_bytes` holding
+  the new file, and `decode_image` is asked first.
+  `ForwardRenderer::replace_page` uploads a kind's page whole into a new image;
+  each frame slot's mesh-layout groups move onto it at that slot's own
+  `begin_frame` (`adopt_pages`, which `adopt_page_sampler` became, now covering
+  the sampler and all four pages), and the old image is destroyed once no slot
+  names it. `apps/viewer/src/textures.rs` joins them: a `PolledWatch` over every
+  image the document names by a URI beside it (`GltfImage::key`), a registry
+  over the document's directory, and a refusal for a file the decoder refuses or
+  a rebuild that would move a material's layer. Held by
+  `crcbl_assets::registry`'s reload tests, `crcbl-render`'s
+  `forward::tests::page_reload`, `crcbl-scene`'s
+  `a_replaced_image_rebuilds_its_layer_and_leaves_every_row_where_it_was`, the
+  viewer's three `texture` tests, and on a device by
+  `crates/crcbl/tests/gltf_e2e.rs`'s
+  `a_texture_reloaded_between_frames_shows_whole_in_the_next_frame`, which reads
+  back every frame of a lap of the ring after the swap.
 
 **Decisions, each for the long term:**
 
@@ -13805,17 +13834,68 @@ are below, unbuilt.
   its own: naming one is the development loop, and an unchanged file changes
   nothing, so a headless run with `--scene` stays reproducible. Only the chunk
   files are watched.
+- **A reloading asset keeps its handle, its id, its refcount and its old
+  bytes.** Nothing that references it is rebound, and the frame draws the old
+  texture until the new one is on the device. So there is still no `Unloaded`
+  state: an entry with no bytes is not something a reload produces. A reload of
+  a `Loading` or `Failed` entry is refused, since there is no old asset to keep
+  and that is a first load.
+- **The registry holds bytes; the device copy and its retirement are the
+  renderer's.** `crcbl-assets` decodes and uploads nothing, so the "swap when
+  the GPU side has it" is the consumer calling `commit_reload` after its upload
+  returned, and the retire is the renderer's own.
+- **A replaced page is a new image, every time.** Writing into the image a frame
+  in flight samples is the half-uploaded frame, so the whole page — every layer
+  and its chain, through the same `upload_page` the renderer was built with —
+  goes into a fresh allocation, and a changed extent is no different from an
+  unchanged one. The upload is `crate::texture`'s blocking startup path, run
+  between frames on an image no frame names yet, so no frame can bind it before
+  its copy has landed; `crcbl-render`'s one-rule docs name it.
+- **Retired when no slot names it, not after a frame count.** Each slot moves at
+  its own `begin_frame`, which is when the ring guarantees its previous
+  submission retired; a slot whose rebuild was refused stays on the old page and
+  tries again, so a count of `FRAMES_IN_FLIGHT` frames would free an image that
+  slot still binds. The anisotropy sampler had the slot rule already; the pages
+  now share it, one rebuild per slot whatever changed. The HAL's `destroy_image`
+  then leaves the device free to the backend (`crcbl-vk` and `crcbl-dx12` hold
+  it behind the submissions that used it).
+- **A replacement keeps the kind's layer count**, so every material row's layer
+  index names the same texture and no row is rewritten; one that would add or
+  drop layers is refused. In the viewer a rebuild whose material table differs —
+  an image that did not decode when the document opened and does now — is
+  refused with "re-export the document": that is a new scene.
+- **The viewer is the consumer, natively only.** `apps/viewer/src/textures.rs`
+  is compiled out of the browser build with the rest of the viewer's watching,
+  and its `Gpu::replace_page` with it; `ForwardRenderer::replace_page` and the
+  registry's reload are portable and have no browser caller.
 
 **Deferred, each with what it would take:**
 
-- **Texture reload.** A reimport path through `AssetRegistry` — the `Unloaded`
-  state its module docs keep out until something can produce it — and an
-  in-place GPU pool update: the reimported texture's range swapped in the pool
-  and the stale range retired through the stage 2 deletion queue, which
-  `AssetRegistry`'s refcount stops short of.
-- **Shader reload.** A Slang recompile at run time and the pipelines keyed by
-  the shader's hash, rebuilt when it changes. `crcbl-shaders` computes the
-  identity and nothing keys a pipeline on it; Slang is compiled offline today.
+- **Shader reload.** Two pieces, neither started: Slang compiled at run time (it
+  is compiled offline today, and the committed SPIR-V, DXIL and MSL are what
+  every backend loads), and pipelines keyed by the shader's hash so a changed
+  module rebuilds exactly the pipelines built from it. `crcbl-shaders` computes
+  the identity and nothing keys a pipeline on it. A rebuilt pipeline would
+  follow the page's rule — the new one in force from each slot's next frame, the
+  old one destroyed once no slot records with it.
+- **A page update smaller than the page.** Every texture reload uploads its
+  kind's whole page. A spare layer per page — the new texels written into a
+  layer no frame samples, the material rows repointed at a frame boundary, the
+  old layer freed after — would upload one layer, at the cost of a layer of
+  device memory per kind and material rows written per frame slot. Not built: a
+  development reload of a page of a few layers is not slow enough to need it.
+- **An upload that does not block.** `replace_page` waits for the device to go
+  idle, which stalls the frame on a large page. Recording the copy as a graph
+  pass, ordered against the frame's reads by the page's import, would not.
+- **A texture broken or missing when the document opened is not patched in**:
+  the page has no layer for it, and adding one rewrites the material table. The
+  viewer refuses the reload with "re-export the document"; a reload that wrote
+  the material table per frame slot, as the pages are, would accept it.
+- **Only glTF images beside a document reload.** An image inside a `.glb`, a
+  sprite sheet (`crcbl-sprite`), the UI's glyph and image atlases and grass's
+  cover and card textures have no reload path; each would need its own rebuild
+  and the same slot rule. The engine decodes PNG only, so a JPEG or KTX texture
+  is refused at the decode as it is at the first build.
 - **The editor watching its scene.** `Document::reload_chunk` and the rule are
   built and tested; `apps/editor` does not poll its origin yet. What it would
   take: a `PolledWatch` over the document's chunk files, driven from the frame,
@@ -13849,12 +13929,20 @@ every look to catch a rewrite with the same length and time, which costs a read
 of every file every interval for a case an edit does not produce; tearing down a
 system's whole entities (above).
 
+**Considered and declined for textures:** an `Unloaded` state during a reload
+(above — the old bytes are kept instead); a frame-count retirement (above); an
+in-place write into the image in force, which is the half-uploaded frame.
+
 **Coverage gaps:** run on Windows only. The watch's `stat` and rename cases were
 not run on Linux or macOS in this slice, and no test drives a writer that pauses
 between chunks for longer than `SETTLE`, which would be offered half written and
-then refused as a parse error until it finishes.
-`crates/crcbl-assets/src/registry.rs`'s module docs still keep `Unloaded` out,
-correctly: nothing reimports an asset the registry holds.
+then refused as a parse error until it finishes. Texture reload's device test
+ran on Vulkan and D3D12 on one RX 7900 XTX; Metal and WebGPU never ran it, and
+`crcbl-mtl` is clippy-checked only. The viewer's rollback of a kind already
+replaced when a later kind's replacement is refused has no test: the null
+backend cannot be made to refuse one upload of several. A source answering
+`Pending` to a reload is held only by the registry's scripted source, never a
+browser.
 
 ### No golden over a real glTF document (2026-08-27, re-verified 2026-09-24)
 
@@ -14161,7 +14249,7 @@ format feature 5 opens and saves, and `Ui::inspector` is the inspector slice 3
 draws. Feature 6's asset browser landed 2026-10-01 without a watcher or
 `crcbl bake` — a Refresh button, and glTF imported directly — and what those two
 would still give it is in the asset browser bullet below and _Asset hot reload:
-the watch and per-chunk scene reload are built; assets and shaders are not_
+the watch, per-chunk scene reload and texture reload are built; shaders are not_
 above.
 
 **Its four owner decisions were answered 2026-09-16** and are recorded in
@@ -21715,8 +21803,10 @@ that are not:
   `Box.glb` under a running viewer, and the reload landed one poll later. What
   the milestone actually asks for is a **recording** of the Blender loop, and
   nobody has made one. The poll is the engine's `crcbl_assets::watch` since
-  2026-10-06; the reload is still the viewer's own, since `crcbl-assets`
-  reimports nothing.
+  2026-10-06; a re-exported document's reload is still the viewer's own,
+  rebuilding the renderer, while a texture saved again beside it reloads through
+  `AssetRegistry::reload` and `ForwardRenderer::replace_page`
+  (`apps/viewer/src/textures.rs`, 2026-10-06).
 
 Then **V-S**, the sample itself, against the plan's own exit criteria: ≥90% of
 the Khronos glTF-Sample-Models suite loads without crashing, unsupported
@@ -28080,17 +28170,22 @@ that an artist cannot name a file with a space. If that becomes a real
 complaint, the fix is percent-encoding in the fetch backend, not a second key
 rule here — two rules is how the two backends drift apart.
 
-**No `Unloaded` state and no GPU retire.** The plan lists
-`Unloaded → Loading → Ready | Failed`; only the last three are built, because
-nothing can produce `Unloaded` — an unrequested asset has no entry and a
-released one is removed. It comes back with hot reload (task 5), which turns a
-`Ready` entry back into one with no bytes, and with the refcounted release's
-other half: the retire calls into the stage 2 deletion queue, which need a
-GPU-resident asset to retire and therefore the importer.
+**No `Unloaded` state, a `Reloading` one, and the GPU retire is the renderer's
+(decided 2026-10-06).** The plan lists `Unloaded → Loading → Ready | Failed`;
+the last three are built, and nothing can produce `Unloaded` — an unrequested
+asset has no entry and a released one is removed. Hot reload was expected to
+bring it back by turning a `Ready` entry into one with no bytes; texture reload
+keeps the bytes instead (`AssetState::Reloading` holds the old and the new until
+the consumer commits or refuses), so the frame never draws a hole, and
+`Unloaded` stays out. The GPU retire is not the registry's: the registry holds
+bytes and the device copy is the consumer's, so `ForwardRenderer::replace_page`
+retires a replaced page once no frame slot names it. See _Asset hot reload: the
+watch, per-chunk scene reload and texture reload are built; shaders are not_.
 
-**`Ready` and `Failed` are terminal, with no retry.** A failed asset stays
-failed until a caller releases and re-requests it. No backoff, no retry budget,
-no distinction between a 404 and a transient network error — the last of those
+**`Failed` is terminal, and `Ready` until a reload, with no retry.** A failed
+asset stays failed until a caller releases and re-requests it, and a reload of
+one is refused: there is no old asset to keep. No backoff, no retry budget, no
+distinction between a 404 and a transient network error — the last of those
 would matter for a browser source and does not exist yet.
 
 **The IO seam has consumers; registry adoption remains separate.**
@@ -28099,7 +28194,12 @@ would matter for a browser source and does not exist yet.
 loads resident documents through `MemorySource`. These consumers invalidate the
 old claim that the crate has no dependents; they do not establish a frame
 workload for `AssetRegistry::poll`. The performance entry above retains that
-registry-specific adoption and measurement gap.
+registry-specific adoption and measurement gap. Since 2026-10-06 the registry
+has one consumer, `apps/viewer`'s texture watch (`apps/viewer/src/textures.rs`):
+a registry per open document over the image files beside it, polled once a
+frame. The glTF importer still reads those images itself rather than through it,
+so each is read twice when a document opens; routing the importer's image reads
+through a registry it is handed would make that one read.
 
 **Not reviewed or built:** the exit criterion "no synchronous IO anywhere in
 engine crates (CI: deny `std::fs` outside `DirSource` + tooling)". There is no

@@ -102,6 +102,8 @@ pub mod menu;
 pub mod model;
 pub mod shelf;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod textures;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod watch;
 
 #[cfg(target_arch = "wasm32")]

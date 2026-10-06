@@ -209,8 +209,11 @@ use crcbl_shaders::atmosphere::{SKY_VIEW_BUILD_ROWS, SkyView, SkyViewBuild};
 
 mod bucket_draws;
 mod frame_prepare;
+mod pages;
 mod shadow_inputs;
 mod view;
+
+use pages::{PageBindings, RetiredPage, upload_page};
 
 pub use shadow_inputs::{FRAME_UNIFORMS_READERS, UniformsField, UniformsReader};
 
@@ -539,12 +542,19 @@ const SHADOW_ATLAS_BINDING: u32 = 15;
 /// The bind-group slot the shadow atlas's **comparison** sampler is bound to.
 const SHADOW_SAMPLER_BINDING: u32 = 16;
 
+/// The bind-group slot the base-colour page is bound to.
+///
+/// Named because [`ForwardRenderer::replace_page`] rewrites it in every group
+/// of the mesh layout, as it does each page's binding — see
+/// `pages::page_binding`.
+const BASE_COLOR_PAGE_BINDING: u32 = 7;
+
 /// The bind-group slot the base-colour page's sampler is bound to.
 ///
-/// Named because it is the one entry [`ForwardRenderer::set_anisotropy`]
-/// rewrites in every group of the mesh layout: a sampler is a resource a group
-/// holds by handle, so a new sampler is a new group, and the rebuild finds the
-/// entry by this number.
+/// Named because it is an entry [`ForwardRenderer::set_anisotropy`] rewrites
+/// in every group of the mesh layout: a sampler is a resource a group holds by
+/// handle, so a new sampler is a new group, and the rebuild finds the entry by
+/// this number.
 const PAGE_SAMPLER_BINDING: u32 = 8;
 
 /// The shared fragment shader's light list. Both shader modules declare it
@@ -1586,19 +1596,26 @@ pub struct ForwardRenderer {
     /// The anisotropy [`ForwardRenderer::base_color_sampler`] was created
     /// with, after [`set_anisotropy`](ForwardRenderer::set_anisotropy)'s clamp.
     anisotropy: f32,
-    /// `[frame]`: the page sampler that slot's mesh-layout groups name at
-    /// [`PAGE_SAMPLER_BINDING`].
+    /// How many layers each [`PageKind`]'s page holds, indexed by
+    /// [`PageKind::index`] — zero for a kind the description named none of.
     ///
-    /// A slot moves onto [`ForwardRenderer::base_color_sampler`] at its own
-    /// `begin_frame` and not before — see
-    /// [`ForwardRenderer::adopt_page_sampler`] — so this is what says which
-    /// slots still name a sampler
-    /// [`set_anisotropy`](ForwardRenderer::set_anisotropy) replaced.
-    slot_page_samplers: Vec<SamplerHandle>,
-    /// Page samplers [`set_anisotropy`](ForwardRenderer::set_anisotropy)
-    /// replaced and some slot may still name. Each is destroyed as the last
-    /// slot naming it moves off, or at [`destroy`](ForwardRenderer::destroy).
-    retired_page_samplers: Vec<SamplerHandle>,
+    /// What [`replace_page`](ForwardRenderer::replace_page) holds a
+    /// replacement to, so every material row's layer number goes on naming the
+    /// same texture.
+    page_layers: [usize; PageKind::ALL.len()],
+    /// `[frame]`: the page sampler and the four page views that slot's
+    /// mesh-layout groups name.
+    ///
+    /// A slot moves onto [`ForwardRenderer::page_bindings`] at its own
+    /// `begin_frame` and not before — see [`ForwardRenderer::adopt_pages`] —
+    /// so this is what says which slots still name a sampler
+    /// [`set_anisotropy`](ForwardRenderer::set_anisotropy) replaced or a page
+    /// [`replace_page`](ForwardRenderer::replace_page) did.
+    slot_pages: Vec<PageBindings>,
+    /// Page samplers and pages replaced while some slot may still name them.
+    /// Each is destroyed as the last slot naming it moves off, or at
+    /// [`destroy`](ForwardRenderer::destroy).
+    retired_pages: Vec<RetiredPage>,
 
     /// Draw calls the last [`ForwardRenderer::add_passes`] recorded — see
     /// [`ForwardRenderer::counters`], which is the only thing that reads it.
@@ -2296,9 +2313,9 @@ pub struct ForwardRenderer {
     /// `[frame][view]`: the entries [`ForwardRenderer::shadow_groups`] was built
     /// from.
     ///
-    /// Kept for one rebuild only: the page sampler's, which
-    /// [`ForwardRenderer::adopt_page_sampler`] performs on every group of the
-    /// mesh layout a slot holds — [`View::prepass_group_entries`]' reason.
+    /// Kept for one rebuild only: the pages' and their sampler's, which
+    /// [`ForwardRenderer::adopt_pages`] performs on every group of the mesh
+    /// layout a slot holds — [`View::prepass_group_entries`]' reason.
     shadow_group_entries: Vec<Vec<Vec<BindGroupEntry>>>,
 
     /// The ground grid's pipeline and uniform ring — see [`crate::grid`].
@@ -2646,18 +2663,12 @@ struct SharedBindings<'a> {
     draw_constants: BufferHandle,
     mesh_table: BufferHandle,
     materials: BufferHandle,
-    page: ImageViewHandle,
-    /// Binding [`NORMAL_PAGE_BINDING`], §2's normal page — shared for the
-    /// base-colour page's reason exactly, and read through the same sampler
-    /// beside it.
-    normal_page: ImageViewHandle,
-    /// Binding [`MRO_PAGE_BINDING`], §2's packed metallic-roughness-occlusion
-    /// page — shared and sampled on the normal page's terms exactly.
-    mro_page: ImageViewHandle,
-    /// Binding [`EMISSIVE_PAGE_BINDING`], §2's emissive page — shared and
-    /// sampled on the normal page's terms exactly.
-    emissive_page: ImageViewHandle,
-    page_sampler: SamplerHandle,
+    /// Bindings [`BASE_COLOR_PAGE_BINDING`], [`NORMAL_PAGE_BINDING`],
+    /// [`MRO_PAGE_BINDING`] and [`EMISSIVE_PAGE_BINDING`] — the four material
+    /// pages, every one read through the sampler at [`PAGE_SAMPLER_BINDING`]
+    /// beside them — as this frame slot names them, which is what
+    /// [`ForwardRenderer::adopt_pages`] moves one slot at a time.
+    pages: PageBindings,
     /// `Some` on [`GeometryPath::MeshShader`] and on no other path, which is
     /// what decides whether the mesh-only bindings exist at all.
     clusters: Option<&'a ClusterPool>,
@@ -2830,19 +2841,21 @@ impl MeshGroup {
                 resource: BindingResource::whole_buffer(shared.materials),
             },
             BindGroupEntry {
-                binding: 7,
+                binding: BASE_COLOR_PAGE_BINDING,
                 array_index: 0,
                 // **One entry, `array_index: 0`**, because the page is one
                 // image and the layer is chosen in the shader. A bindless array
                 // would be one entry per texture at ascending array indices,
                 // which is the write path `BindGroupEntry`'s own docs describe
                 // and the one this pass does not take.
-                resource: BindingResource::ImageView(shared.page),
+                resource: BindingResource::ImageView(
+                    shared.pages.views[PageKind::BaseColor.index()],
+                ),
             },
             BindGroupEntry {
                 binding: PAGE_SAMPLER_BINDING,
                 array_index: 0,
-                resource: BindingResource::Sampler(shared.page_sampler),
+                resource: BindingResource::Sampler(shared.pages.sampler),
             },
         ];
         if let Some(clusters) = shared.clusters {
@@ -2972,7 +2985,7 @@ impl MeshGroup {
         entries.push(BindGroupEntry {
             binding: NORMAL_PAGE_BINDING,
             array_index: 0,
-            resource: BindingResource::ImageView(shared.normal_page),
+            resource: BindingResource::ImageView(shared.pages.views[PageKind::Normal.index()]),
         });
         // And the area lights' table above that, on the same ascending terms —
         // see [`LTC_TABLE_BINDING`].
@@ -3003,12 +3016,14 @@ impl MeshGroup {
         entries.push(BindGroupEntry {
             binding: MRO_PAGE_BINDING,
             array_index: 0,
-            resource: BindingResource::ImageView(shared.mro_page),
+            resource: BindingResource::ImageView(
+                shared.pages.views[PageKind::MetallicRoughnessOcclusion.index()],
+            ),
         });
         entries.push(BindGroupEntry {
             binding: EMISSIVE_PAGE_BINDING,
             array_index: 0,
-            resource: BindingResource::ImageView(shared.emissive_page),
+            resource: BindingResource::ImageView(shared.pages.views[PageKind::Emissive.index()]),
         });
         entries.sort_by_key(|entry| entry.binding);
         entries
@@ -3743,47 +3758,28 @@ impl ForwardRenderer {
         // bindings, so a page nothing names is created 1×1 in its own format
         // holding [`PAGE_PLACEHOLDER_TEXEL`] — which the shader never reads,
         // and which is magenta so that a frame says so if it ever does.
+        //
+        // The upload itself is [`upload_page`], shared with
+        // [`ForwardRenderer::replace_page`] so a page reloaded under a running
+        // renderer is built exactly as this one was. A layer's chain is host
+        // work proportional to its texels, so a page of many large layers is
+        // serviced one layer at a time.
         let mut pages: [Option<UploadedTexture>; PageKind::ALL.len()] = [None; PageKind::ALL.len()];
         let mut page_extents = [(1, 1); PageKind::ALL.len()];
+        let mut page_layers = [0; PageKind::ALL.len()];
         for kind in PageKind::ALL {
-            let authored = scene.page.extent(kind);
             let layers = scene.page.layers(kind);
-            // A layer's chain is host work proportional to its texels, so a
-            // page of many large layers is serviced one layer at a time.
-            let chains: Vec<Vec<Vec<u8>>> = layers
-                .iter()
-                .map(|texels| {
-                    let chain = kind.chain(texels, authored);
-                    service();
-                    chain
-                })
-                .collect();
-            let levels: Vec<Vec<&[u8]>> = layers
-                .iter()
-                .zip(&chains)
-                .map(|(level0, below)| {
-                    std::iter::once(level0.as_ref())
-                        .chain(below.iter().map(Vec::as_slice))
-                        .collect()
-                })
-                .collect();
-            let placeholder: [&[u8]; 1] = [&PAGE_PLACEHOLDER_TEXEL[..]];
-            let (extent, uploading): (u32, Vec<&[&[u8]]>) = if levels.is_empty() {
-                (1, vec![&placeholder[..]])
-            } else {
-                (authored, levels.iter().map(Vec::as_slice).collect())
-            };
-            let page = upload_texture_mip_layers(
+            let (page, extent) = upload_page(
                 device,
                 queue,
-                kind.upload_label(),
-                kind.format(),
-                extent,
-                extent,
-                &uploading,
+                kind,
+                scene.page.extent(kind),
+                layers,
+                service,
             )?;
             rollback.textures.push(page);
             page_extents[kind.index()] = (extent, extent);
+            page_layers[kind.index()] = layers.len();
             pages[kind.index()] = Some(page);
             service();
         }
@@ -3802,6 +3798,17 @@ impl ForwardRenderer {
         let anisotropy = Self::anisotropy_for(&device.caps());
         let base_color_sampler = Self::create_page_sampler(device, anisotropy)?;
         rollback.samplers.push(base_color_sampler);
+        // What every slot's groups are built naming, and what each moves off
+        // only at its own frame — see `ForwardRenderer::adopt_pages`.
+        let page_bindings = PageBindings {
+            sampler: base_color_sampler,
+            views: [
+                base_color_page.view,
+                normal_page.view,
+                mro_page.view,
+                emissive_page.view,
+            ],
+        };
 
         // The material table, before the instances: an instance is written with
         // the material id it carries, so the row has to exist to be named.
@@ -4309,7 +4316,7 @@ impl ForwardRenderer {
                 flags: BindingFlags::empty(),
             },
             BindGroupLayoutEntry {
-                binding: 7,
+                binding: BASE_COLOR_PAGE_BINDING,
                 // Both stages, for binding 6's reason exactly: the fragment
                 // stage samples it, and Slang's Metal backend materialises
                 // every global in every entry point — `vertexMain` in
@@ -4969,7 +4976,7 @@ impl ForwardRenderer {
         // scene resources above — see [`view`], which is where the line between
         // the two is drawn. Into the rollback whole as soon as it exists, so a
         // failure further down releases it with everything else.
-        let page_samplers = vec![base_color_sampler; instance_buffers.len()];
+        let slot_pages = vec![page_bindings; instance_buffers.len()];
         rollback.primary = Some(View::build(
             device,
             queue,
@@ -4997,11 +5004,7 @@ impl ForwardRenderer {
                 vertices,
                 draw_constants,
                 materials: material_buffer,
-                page: base_color_page.view,
-                normal_page: normal_page.view,
-                mro_page: mro_page.view,
-                emissive_page: emissive_page.view,
-                page_samplers: &page_samplers,
+                pages: &slot_pages,
                 probes: &probe_buffers,
                 specular_dfg: specular_dfg.view,
                 ltc_table: ltc_table.view,
@@ -5212,11 +5215,7 @@ impl ForwardRenderer {
                 draw_constants,
                 mesh_table,
                 materials: material_buffer,
-                page: base_color_page.view,
-                normal_page: normal_page.view,
-                mro_page: mro_page.view,
-                emissive_page: emissive_page.view,
-                page_sampler: base_color_sampler,
+                pages: page_bindings,
                 clusters: rollback.clusters.as_ref(),
                 shadow_sampler,
                 lights: primary.lights.lights(frame),
@@ -5558,11 +5557,12 @@ impl ForwardRenderer {
             mro_page,
             emissive_page,
             page_extents,
+            page_layers,
             base_color_sampler,
             anisotropy,
-            // Every slot's groups were just built naming this sampler.
-            slot_page_samplers: vec![base_color_sampler; FRAMES_IN_FLIGHT],
-            retired_page_samplers: Vec::new(),
+            // Every slot's groups were just built naming these.
+            slot_pages: vec![page_bindings; FRAMES_IN_FLIGHT],
+            retired_pages: Vec::new(),
             // No frame has been recorded yet, and the counters say so rather
             // than reporting the count a frame *would* have.
             recorded_draws: 0,
@@ -9337,8 +9337,11 @@ impl ForwardRenderer {
             return Ok(());
         }
         let sampler = Self::create_page_sampler(device, wanted)?;
-        self.retired_page_samplers
-            .push(std::mem::replace(&mut self.base_color_sampler, sampler));
+        self.retired_pages
+            .push(RetiredPage::Sampler(std::mem::replace(
+                &mut self.base_color_sampler,
+                sampler,
+            )));
         self.anisotropy = wanted;
         Ok(())
     }
@@ -9409,90 +9412,6 @@ impl ForwardRenderer {
             anisotropy,
             ..SamplerDesc::default()
         })
-    }
-
-    /// Moves this frame's slot onto [`ForwardRenderer::base_color_sampler`],
-    /// where [`set_anisotropy`](Self::set_anisotropy) replaced it since the
-    /// slot last drew.
-    ///
-    /// Every group of the mesh layout the slot holds — the camera's, the depth
-    /// prepass's and each shadow view's — is rebuilt from the entries it was
-    /// built from with [`PAGE_SAMPLER_BINDING`] rewritten, and the occlusion
-    /// cache is dropped, since it was built from the camera's entries and
-    /// names the old sampler too. **Every replacement is created before any
-    /// group is destroyed**, so a refusal leaves the slot whole on the sampler
-    /// it had and the next `begin_frame` tries again. A replaced sampler is
-    /// destroyed here the moment no slot names it.
-    ///
-    /// Called from `begin_frame_body` once the ring has rotated: that is the
-    /// point at which this slot's previous submission has retired, which is
-    /// what makes destroying its groups sound.
-    fn adopt_page_sampler(&mut self, device: &dyn Device) -> Result<(), HalError> {
-        let frame = self.frame;
-        let sampler = self.base_color_sampler;
-        if self.slot_page_samplers[frame] == sampler {
-            return Ok(());
-        }
-        let layout = self.mesh_layout;
-        let mut fresh =
-            Vec::with_capacity(2 * (1 + self.views.len()) + self.shadow_groups[frame].len());
-        // Every view's pair — the primary camera's and each secondary view's —
-        // then the shadow views, in the order the swap below walks them.
-        let lists = std::iter::once(&mut self.primary)
-            .chain(self.views.iter_mut().flatten())
-            .flat_map(|view| {
-                [
-                    (&mut view.mesh_group_entries[frame], "mesh frame"),
-                    (&mut view.prepass_group_entries[frame], "depth prepass"),
-                ]
-            })
-            .chain(
-                self.shadow_group_entries[frame]
-                    .iter_mut()
-                    .map(|entries| (entries, "shadow view")),
-            );
-        for (entries, label) in lists {
-            match rebuilt_with_sampler(device, layout, sampler, entries, label) {
-                Ok(group) => fresh.push(group),
-                Err(error) => {
-                    for group in fresh {
-                        device.destroy_bind_group(group);
-                    }
-                    return Err(error);
-                }
-            }
-        }
-        let mut fresh = fresh.into_iter();
-        let mut swap = |slot: &mut BindGroupHandle| {
-            let stale = std::mem::replace(
-                slot,
-                fresh
-                    .next()
-                    .unwrap_or_else(|| unreachable!("one fresh group per entry list")),
-            );
-            device.destroy_bind_group(stale);
-        };
-        for view in std::iter::once(&mut self.primary).chain(self.views.iter_mut().flatten()) {
-            swap(&mut view.mesh_groups[frame]);
-            swap(&mut view.prepass_groups[frame]);
-            if let Some((_, stale)) = view.screen_channel_groups[frame].take() {
-                device.destroy_bind_group(stale);
-            }
-        }
-        for group in &mut self.shadow_groups[frame] {
-            swap(group);
-        }
-        self.slot_page_samplers[frame] = sampler;
-        let named = &self.slot_page_samplers;
-        self.retired_page_samplers.retain(|retired| {
-            if named.contains(retired) {
-                true
-            } else {
-                device.destroy_sampler(*retired);
-                false
-            }
-        });
-        Ok(())
     }
 
     /// The extent a frame handed `target` is actually drawn at.
@@ -10948,8 +10867,8 @@ impl ForwardRenderer {
         device.destroy_bind_group_layout(self.mesh_layout);
         self.base_color_page.destroy(device);
         device.destroy_sampler(self.base_color_sampler);
-        for sampler in self.retired_page_samplers {
-            device.destroy_sampler(sampler);
+        for retired in self.retired_pages {
+            retired.destroy(device);
         }
         device.destroy_buffer(self.draw_constants);
         if let Some(clusters) = self.clusters {
@@ -11727,36 +11646,12 @@ pub(crate) fn named_entry(
     })
 }
 
-/// `entries` with [`PAGE_SAMPLER_BINDING`] rewritten to `sampler`, as a new
-/// group of `layout` — [`ForwardRenderer::adopt_page_sampler`]'s one step.
-///
-/// The rewrite is in place, so a list whose group the device refused is
-/// already right for the retry.
-fn rebuilt_with_sampler(
-    device: &dyn Device,
-    layout: BindGroupLayoutHandle,
-    sampler: SamplerHandle,
-    entries: &mut [BindGroupEntry],
-    label: &str,
-) -> Result<BindGroupHandle, HalError> {
-    let slot = entries
-        .iter_mut()
-        .find(|entry| entry.binding == PAGE_SAMPLER_BINDING)
-        .unwrap_or_else(|| unreachable!("{label}: every mesh-layout group names the page sampler"));
-    slot.resource = BindingResource::Sampler(sampler);
-    device.create_bind_group(&BindGroupDesc {
-        label: Some(label),
-        layout,
-        entries,
-        variable_count: None,
-    })
-}
-
 // `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     mod instance_upload;
     mod load_service;
+    mod page_reload;
     mod shadow_reach;
 
     use super::*;

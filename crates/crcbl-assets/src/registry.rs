@@ -1,49 +1,70 @@
 //! Handles, load states, and the table that owns both.
 //!
-//! # The states, and the ones that are not here
+//! # The states, and the one that is not here
 //!
 //! Stage 6's asset model listed `Unloaded → Loading → Ready | Failed`.
-//! Three of those four exist here. `Unloaded` does not, because nothing can
-//! observe it: an asset nobody has requested has no entry, and an entry whose
-//! last reference is released is removed. "Not in the registry" is `None` from
+//! Three of those four exist here, and a fourth the model did not name:
+//! `Reloading`. `Unloaded` does not, because nothing can observe it: an asset
+//! nobody has requested has no entry, and an entry whose last reference is
+//! released is removed. "Not in the registry" is `None` from
 //! [`AssetRegistry::get`], not a state a handle can be in — and a state that no
 //! value ever holds is a match arm every caller writes and no test can reach.
 //!
-//! It comes back when something can produce it. An asset's hot reload (step 5)
-//! turns a `Ready` entry back into one with no bytes; the GPU deletion queue
-//! that asset model names for refcounted release will want an entry that is
-//! retiring rather than gone. Neither exists — step 5's watch (this crate's
-//! native `watch` module) and its scene-chunk reload are built, and nothing
-//! reimports an asset this table holds — and neither is guessed at here.
+//! **A reload does not bring it back either.** The model expected a hot reload
+//! to turn a `Ready` entry back into one with no bytes. It keeps them instead:
+//! a [`Reloading`](AssetState::Reloading) entry still answers
+//! [`Asset::bytes`] with what it had, and holds the new bytes beside them
+//! ([`Asset::reloaded`]) until the consumer that decodes and uploads them says
+//! it has ([`AssetRegistry::commit_reload`]) or could not
+//! ([`AssetRegistry::refuse_reload`]). The frame goes on drawing the old asset
+//! for as long as the new one is on its way, and a file caught half written or
+//! refused by its decoder leaves the old one in place rather than a hole.
+//!
+//! The retiring entry the GPU deletion queue might have wanted is not here
+//! either: what is retired is the consumer's device copy, and the renderer
+//! retires that itself once no frame in flight names it — see
+//! `crcbl_render::forward::ForwardRenderer::replace_page`.
 //!
 //! # The transitions
 //!
 //! ```text
-//!                  source answers bytes
-//!     request ──────────────────────────► Ready
-//!        │                                  ▲
-//!        │ source answers Pending           │ poll: source answers bytes
-//!        ├──────────────────► Loading ──────┤
-//!        │                       │          │
-//!        │ source answers an     │ poll: source answers an error
-//!        │ error                 ▼          │
-//!        └──────────────────► Failed ◄──────┘
+//!                   source answers bytes
+//!     request ────────────────────────────► Ready ◄───────────────┐
+//!        │                                    ▲  │                 │ commit_reload: the new bytes
+//!        │ source answers Pending             │  │ reload          │ refuse_reload: the old bytes
+//!        ├────────────────► Loading ──────────┘  ▼                 │ a source error: the old bytes
+//!        │                     │   poll: bytes  Reloading ─────────┘
+//!        │ source answers      │
+//!        │ an error            │ poll: an error
+//!        └────────────────► Failed ◄
 //! ```
 //!
-//! `Ready` and `Failed` are terminal. Re-requesting an asset in either state
-//! adds a reference and hands back the same handle; it does not retry, because
-//! a retry policy nothing has asked for is a policy nobody has checked. A
-//! caller that wants one releases and requests again.
+//! `Failed` is terminal, and `Ready` is terminal until somebody asks for a
+//! reload. Re-requesting an asset in either state adds a reference and hands
+//! back the same handle; it does not retry, because a retry policy nothing has
+//! asked for is a policy nobody has checked. A caller that wants one releases
+//! and requests again. A reload asked of a `Loading` or `Failed` entry is
+//! refused: there is no old asset to keep drawing, so it is a first load, and
+//! a first load is a request.
+//!
+//! # A reload keeps the handle
+//!
+//! The entry is the same entry throughout: the same [`AssetHandle`], the same
+//! [`AssetId`], the same refcount. Whatever holds the handle — a material, a
+//! scene chunk naming the asset by id — goes on naming the same asset, and sees
+//! the new bytes once [`Asset::revision`] moves. Nothing that references an
+//! asset has to be told it was reloaded in order to stay valid.
 //!
 //! # Refcounts
 //!
 //! [`request`](AssetRegistry::request) deduplicates by [`AssetId`], so two
 //! callers naming one asset get one entry, one load and one handle.
 //! [`release`](AssetRegistry::release) decrements, and the entry is dropped at
-//! zero. That is the plan's "refcounted release" minus its other half: the GPU
-//! retire calls, which need the stage 2 deletion queue and a GPU-resident asset
-//! to retire, and this crate has neither.
+//! zero — reloading or not. That is the plan's "refcounted release"; the GPU
+//! half of it is the consumer's, because the device copy is the consumer's and
+//! this crate decodes and uploads nothing.
 
+use core::fmt;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -77,8 +98,36 @@ pub enum AssetState {
     Loading,
     /// The bytes are here: [`Asset::bytes`] returns them.
     Ready,
+    /// The bytes are here and newer ones are on their way: [`Asset::bytes`]
+    /// still returns the old, and [`Asset::reloaded`] returns the new once the
+    /// source has answered — see [`AssetRegistry::reload`].
+    Reloading,
     /// The load failed: [`Asset::error`] says how. Terminal.
     Failed,
+}
+
+/// Why a reload left an asset's bytes as they were.
+///
+/// Kept on the entry ([`Asset::reload_failure`]) until the next reload
+/// commits, so a tool can show it beside the asset as well as log it.
+#[derive(Debug)]
+pub enum ReloadFailure {
+    /// The source could not produce the new bytes: the file went missing, or
+    /// stopped being readable, between the change being noticed and the read.
+    Source(StorageError),
+    /// The consumer could not use them — a decoder refused the file, or a
+    /// device refused the upload — and said why through
+    /// [`AssetRegistry::refuse_reload`].
+    Refused(String),
+}
+
+impl fmt::Display for ReloadFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Source(error) => write!(f, "the source could not read it: {error}"),
+            Self::Refused(why) => f.write_str(why),
+        }
+    }
 }
 
 /// One asset's entry: its identity, its key, and its bytes or the reason there
@@ -89,16 +138,26 @@ pub struct Asset {
     key: String,
     refs: u32,
     load: Load,
+    /// Reloads committed since the first load — see [`Asset::revision`].
+    revision: u32,
+    /// Why the last reload left the bytes as they were, until one commits.
+    reload_failure: Option<ReloadFailure>,
 }
 
 /// The state and its payload. Private because `Failed`'s
 /// [`StorageError`] is not `Clone` and `Ready`'s bytes should be borrowed, not
-/// matched out; [`Asset::state`], [`Asset::bytes`] and [`Asset::error`] are the
-/// three questions a caller actually asks.
+/// matched out; [`Asset::state`], [`Asset::bytes`], [`Asset::reloaded`] and
+/// [`Asset::error`] are the questions a caller actually asks.
 #[derive(Debug)]
 enum Load {
     Loading,
     Ready(Vec<u8>),
+    /// The bytes in force, and the reload's read beside them once the source
+    /// has answered.
+    Reloading {
+        current: Vec<u8>,
+        next: Option<Vec<u8>>,
+    },
     Failed(StorageError),
 }
 
@@ -131,19 +190,57 @@ impl Asset {
         match self.load {
             Load::Loading => AssetState::Loading,
             Load::Ready(_) => AssetState::Ready,
+            Load::Reloading { .. } => AssetState::Reloading,
             Load::Failed(_) => AssetState::Failed,
         }
     }
 
-    /// The loaded bytes, or `None` unless the state is
-    /// [`Ready`](AssetState::Ready).
+    /// The bytes in force, or `None` unless the state is
+    /// [`Ready`](AssetState::Ready) or [`Reloading`](AssetState::Reloading).
+    ///
+    /// While reloading these are still the **old** bytes — the ones the
+    /// consumer's device copy was made from — until
+    /// [`AssetRegistry::commit_reload`] swaps the new ones in.
     #[inline]
     #[must_use]
     pub fn bytes(&self) -> Option<&[u8]> {
         match &self.load {
-            Load::Ready(bytes) => Some(bytes),
+            Load::Ready(bytes) | Load::Reloading { current: bytes, .. } => Some(bytes),
             _ => None,
         }
+    }
+
+    /// The bytes a reload read, waiting for the consumer to commit or refuse
+    /// them — or `None` when no reload is under way or its source has not
+    /// answered yet.
+    #[inline]
+    #[must_use]
+    pub fn reloaded(&self) -> Option<&[u8]> {
+        match &self.load {
+            Load::Reloading {
+                next: Some(bytes), ..
+            } => Some(bytes),
+            _ => None,
+        }
+    }
+
+    /// How many reloads have been committed since the first load.
+    ///
+    /// The handle does not change across a reload — see the
+    /// [module docs](self) — so this is what a holder compares to learn that
+    /// the bytes behind it did.
+    #[inline]
+    #[must_use]
+    pub const fn revision(&self) -> u32 {
+        self.revision
+    }
+
+    /// Why the last reload left the bytes as they were, or `None` if none has
+    /// failed since one last committed.
+    #[inline]
+    #[must_use]
+    pub const fn reload_failure(&self) -> Option<&ReloadFailure> {
+        self.reload_failure.as_ref()
     }
 
     /// Why the load failed, or `None` unless the state is
@@ -239,13 +336,15 @@ impl<S: AssetSource> AssetRegistry<S> {
             key,
             refs: 1,
             load,
+            revision: 0,
+            reload_failure: None,
         });
         self.by_id.insert(id, handle);
         Ok(handle)
     }
 
-    /// Advance every [`Loading`](AssetState::Loading) asset, and return how
-    /// many are still loading.
+    /// Advance every [`Loading`](AssetState::Loading) asset and every reload
+    /// still waiting on its source, and return how many are still waiting.
     ///
     /// Call once a frame. Asking the source again is the whole mechanism: a
     /// browser source answers [`Pending`](StorageError::Pending) until its shim
@@ -258,21 +357,119 @@ impl<S: AssetSource> AssetRegistry<S> {
         let waiting: Vec<AssetHandle> = self
             .assets
             .iter()
-            .filter(|(_, asset)| asset.state() == AssetState::Loading)
+            .filter(|(_, asset)| asset.waits_on_source())
             .map(|(handle, _)| handle)
             .collect();
         for handle in waiting {
             let key = self.assets.get(handle).map(|asset| asset.key.clone());
             let Some(key) = key else { continue };
-            let load = classify(self.source.read(Path::new(&key)));
-            if matches!(load, Load::Loading) {
+            let answer = self.source.read(Path::new(&key));
+            let Some(asset) = self.assets.get_mut(handle) else {
+                continue;
+            };
+            let answered = if matches!(asset.load, Load::Loading) {
+                asset.load = classify(answer);
+                !matches!(asset.load, Load::Loading)
+            } else {
+                asset.take_reload_answer(answer)
+            };
+            if !answered {
                 pending += 1;
-            }
-            if let Some(asset) = self.assets.get_mut(handle) {
-                asset.load = load;
             }
         }
         pending
+    }
+
+    /// Read the asset `handle` names again, keeping the bytes it has until the
+    /// consumer commits the new ones, and return whether a reload is now under
+    /// way.
+    ///
+    /// The hot-reload entry point: a watch saw the file change, and the
+    /// consumer — the code that decodes the bytes and uploads them — asks for
+    /// them here. On `true` the entry is [`Reloading`](AssetState::Reloading):
+    /// [`Asset::bytes`] is still the old bytes, and [`Asset::reloaded`] is the
+    /// new ones as soon as the source has answered — at once for
+    /// [`DirSource`](crate::DirSource), at a later [`poll`](Self::poll) for a
+    /// source that answers [`Pending`](StorageError::Pending). The consumer
+    /// then calls [`commit_reload`](Self::commit_reload) once its device copy
+    /// is made from them, or [`refuse_reload`](Self::refuse_reload) if it could
+    /// not make one.
+    ///
+    /// **A reload of an entry already reloading starts again**: the file
+    /// changed a second time, and the newer read supersedes whatever the first
+    /// brought back that nobody committed.
+    ///
+    /// `false` for a released handle; for an entry still
+    /// [`Loading`](AssetState::Loading) or [`Failed`](AssetState::Failed),
+    /// which has no old asset to keep, so that is a first load and a first load
+    /// is a [`request`](Self::request); and for a source that refuses the read
+    /// outright, which leaves the entry [`Ready`](AssetState::Ready) on its old
+    /// bytes with the error at [`Asset::reload_failure`].
+    pub fn reload(&mut self, handle: AssetHandle) -> bool {
+        let Some(asset) = self.assets.get_mut(handle) else {
+            return false;
+        };
+        let current = match std::mem::replace(&mut asset.load, Load::Loading) {
+            Load::Ready(current) | Load::Reloading { current, .. } => current,
+            other => {
+                asset.load = other;
+                return false;
+            }
+        };
+        asset.load = Load::Reloading {
+            current,
+            next: None,
+        };
+        let answer = self.source.read(Path::new(&asset.key));
+        asset.take_reload_answer(answer);
+        asset.state() == AssetState::Reloading
+    }
+
+    /// Swap a reload's bytes in, and return whether there were any to swap.
+    ///
+    /// Called by the consumer once its device copy is made from
+    /// [`Asset::reloaded`]: the entry goes back to [`Ready`](AssetState::Ready)
+    /// on the new bytes, [`Asset::revision`] moves, and any earlier
+    /// [`Asset::reload_failure`] is cleared. The handle, the id and the
+    /// refcount are untouched.
+    ///
+    /// `false`, changing nothing, unless the entry is reloading and its source
+    /// has answered.
+    pub fn commit_reload(&mut self, handle: AssetHandle) -> bool {
+        let Some(asset) = self.assets.get_mut(handle) else {
+            return false;
+        };
+        let Load::Reloading {
+            next: Some(next), ..
+        } = &mut asset.load
+        else {
+            return false;
+        };
+        asset.load = Load::Ready(std::mem::take(next));
+        asset.revision += 1;
+        asset.reload_failure = None;
+        true
+    }
+
+    /// Give a reload up, keeping the bytes in force, and record `why`.
+    ///
+    /// Called by the consumer when the new bytes are no use to it — a decoder
+    /// refused them, or a device refused the upload. The entry goes back to
+    /// [`Ready`](AssetState::Ready) on its **old** bytes, which is what the
+    /// consumer's device copy still holds, and `why` is
+    /// [`Asset::reload_failure`] until a later reload commits.
+    ///
+    /// Returns whether a reload was given up; `false`, changing nothing, when
+    /// none was under way.
+    pub fn refuse_reload(&mut self, handle: AssetHandle, why: String) -> bool {
+        let Some(asset) = self.assets.get_mut(handle) else {
+            return false;
+        };
+        if asset.state() != AssetState::Reloading {
+            return false;
+        }
+        asset.give_up_reload(ReloadFailure::Refused(why));
+        true
     }
 
     /// The asset `handle` names, or `None` if it has been released.
@@ -309,6 +506,45 @@ impl<S: AssetSource> AssetRegistry<S> {
         self.assets.remove(handle);
         self.by_id.remove(&id);
         true
+    }
+}
+
+impl Asset {
+    /// Whether [`AssetRegistry::poll`] has a read to make for this entry: a
+    /// first load, or a reload whose source has not answered.
+    const fn waits_on_source(&self) -> bool {
+        matches!(
+            self.load,
+            Load::Loading | Load::Reloading { next: None, .. }
+        )
+    }
+
+    /// Files a reload's read: the bytes become [`Asset::reloaded`], `Pending`
+    /// leaves the reload waiting, and an error gives it up on the old bytes.
+    /// Returns whether the source has answered — anything but `Pending`.
+    fn take_reload_answer(&mut self, answer: Result<Vec<u8>, StorageError>) -> bool {
+        match answer {
+            Ok(bytes) => {
+                if let Load::Reloading { next, .. } = &mut self.load {
+                    *next = Some(bytes);
+                }
+                true
+            }
+            Err(StorageError::Pending(_)) => false,
+            Err(error) => {
+                self.give_up_reload(ReloadFailure::Source(error));
+                true
+            }
+        }
+    }
+
+    /// Back to [`Ready`](AssetState::Ready) on the bytes in force, recording
+    /// why.
+    fn give_up_reload(&mut self, failure: ReloadFailure) {
+        if let Load::Reloading { current, .. } = &mut self.load {
+            self.load = Load::Ready(std::mem::take(current));
+        }
+        self.reload_failure = Some(failure);
     }
 }
 
@@ -592,6 +828,210 @@ mod tests {
             registry.source().reads().len(),
             2,
             "a re-request after release really re-reads"
+        );
+    }
+
+    /// **A reload keeps the handle and swaps the bytes** — but only at the
+    /// commit. Until then the old bytes are what [`Asset::bytes`] answers,
+    /// because they are what the consumer's device copy was made from.
+    #[test]
+    fn a_reload_keeps_the_handle_and_swaps_the_bytes_at_the_commit() {
+        let source = ScriptedSource::default();
+        source.ready("tex/brick.png", b"old texels");
+        let mut registry = AssetRegistry::new(source);
+        let id = AssetId::from_path(Path::new("tex/brick.png")).unwrap();
+        let handle = registry.request(Path::new("tex/brick.png")).unwrap();
+
+        registry.source().ready("tex/brick.png", b"new texels");
+        assert!(registry.reload(handle), "a ready asset reloads");
+        let asset = registry.get(handle).expect("the handle still resolves");
+        assert_eq!(asset.state(), AssetState::Reloading);
+        assert_eq!(
+            asset.bytes(),
+            Some(&b"old texels"[..]),
+            "nothing swapped yet"
+        );
+        assert_eq!(asset.reloaded(), Some(&b"new texels"[..]));
+        assert_eq!(asset.revision(), 0);
+
+        assert!(registry.commit_reload(handle));
+        let asset = registry.get(handle).expect("the handle still resolves");
+        assert_eq!(asset.state(), AssetState::Ready);
+        assert_eq!(asset.bytes(), Some(&b"new texels"[..]));
+        assert_eq!(asset.reloaded(), None);
+        assert_eq!(asset.revision(), 1, "the commit is what a holder can see");
+        assert_eq!(registry.find(id), Some(handle), "one id, one handle, still");
+        assert_eq!(registry.len(), 1, "a reload is not a second entry");
+        assert!(
+            !registry.commit_reload(handle),
+            "a second commit has nothing to swap"
+        );
+        assert_eq!(registry.get(handle).map(Asset::revision), Some(1));
+    }
+
+    /// **A consumer that cannot use the new bytes keeps the old ones**, and the
+    /// reason stays on the entry until a later reload commits.
+    #[test]
+    fn a_refused_reload_keeps_the_old_bytes_and_says_why() {
+        let source = ScriptedSource::default();
+        source.ready("tex/brick.png", b"old texels");
+        let mut registry = AssetRegistry::new(source);
+        let handle = registry.request(Path::new("tex/brick.png")).unwrap();
+
+        registry.source().ready("tex/brick.png", b"half a png");
+        assert!(registry.reload(handle));
+        assert!(registry.refuse_reload(handle, "the PNG decoder refused it".to_owned()));
+        let asset = registry.get(handle).expect("the handle still resolves");
+        assert_eq!(asset.state(), AssetState::Ready);
+        assert_eq!(asset.bytes(), Some(&b"old texels"[..]));
+        assert_eq!(asset.revision(), 0, "a refusal is not a revision");
+        assert!(
+            matches!(
+                asset.reload_failure(),
+                Some(ReloadFailure::Refused(why)) if why == "the PNG decoder refused it"
+            ),
+            "the refusal is reported: {:?}",
+            asset.reload_failure()
+        );
+        assert!(
+            !registry.refuse_reload(handle, "again".to_owned()),
+            "no reload is under way to refuse"
+        );
+        assert!(!registry.commit_reload(handle), "nor one to commit");
+
+        // The next good save clears the report.
+        registry.source().ready("tex/brick.png", b"whole png");
+        assert!(registry.reload(handle));
+        assert!(registry.commit_reload(handle));
+        let asset = registry.get(handle).expect("the handle still resolves");
+        assert_eq!(asset.bytes(), Some(&b"whole png"[..]));
+        assert!(asset.reload_failure().is_none());
+    }
+
+    /// **A file that cannot be read when the reload asks keeps the old bytes**:
+    /// a source error is a refusal the source makes, not a failed asset.
+    #[test]
+    fn a_reload_the_source_refuses_keeps_the_old_bytes() {
+        let source = ScriptedSource::default();
+        source.ready("tex/brick.png", b"old texels");
+        let mut registry = AssetRegistry::new(source);
+        let handle = registry.request(Path::new("tex/brick.png")).unwrap();
+
+        registry.source().fails("tex/brick.png");
+        assert!(!registry.reload(handle), "no reload is under way");
+        let asset = registry.get(handle).expect("the handle still resolves");
+        assert_eq!(asset.state(), AssetState::Ready, "not Failed");
+        assert_eq!(asset.bytes(), Some(&b"old texels"[..]));
+        assert!(matches!(
+            asset.reload_failure(),
+            Some(ReloadFailure::Source(StorageError::Other(_)))
+        ));
+    }
+
+    /// **A source that answers `Pending` leaves the reload waiting on the old
+    /// bytes**, and `poll` brings the new ones in — the browser's shape.
+    #[test]
+    fn a_pending_reload_waits_on_the_old_bytes_until_a_poll_brings_the_new() {
+        let source = ScriptedSource::default();
+        source.ready("tex/brick.png", b"old texels");
+        let mut registry = AssetRegistry::new(source);
+        let handle = registry.request(Path::new("tex/brick.png")).unwrap();
+
+        registry.source().after("tex/brick.png", 2, b"new texels");
+        assert!(registry.reload(handle));
+        let asset = registry.get(handle).expect("still held");
+        assert_eq!(asset.state(), AssetState::Reloading);
+        assert_eq!(asset.reloaded(), None, "the source has not answered");
+        assert_eq!(asset.bytes(), Some(&b"old texels"[..]));
+        assert!(
+            !registry.commit_reload(handle),
+            "nothing to commit before the bytes arrive"
+        );
+
+        assert_eq!(registry.poll(), 1, "the second Pending");
+        assert_eq!(registry.poll(), 0, "the bytes arrive");
+        assert_eq!(
+            registry.get(handle).and_then(Asset::reloaded),
+            Some(&b"new texels"[..])
+        );
+        let reads = registry.source().reads().len();
+        assert_eq!(registry.poll(), 0);
+        assert_eq!(
+            registry.source().reads().len(),
+            reads,
+            "a reload that has its bytes is not read again"
+        );
+        assert!(registry.commit_reload(handle));
+        assert_eq!(
+            registry.get(handle).and_then(Asset::bytes),
+            Some(&b"new texels"[..])
+        );
+    }
+
+    /// **A reference held across a reload stays valid**, and the refcount is
+    /// the entry's, not the reload's: a release while reloading drops a
+    /// reference and leaves the reload to finish.
+    #[test]
+    fn a_reference_held_across_a_reload_stays_valid() {
+        let source = ScriptedSource::default();
+        source.ready("tex/brick.png", b"old texels");
+        let mut registry = AssetRegistry::new(source);
+        let first = registry.request(Path::new("tex/brick.png")).unwrap();
+        let second = registry.request(Path::new("tex/brick.png")).unwrap();
+        assert_eq!(first, second);
+
+        registry.source().ready("tex/brick.png", b"new texels");
+        assert!(registry.reload(first));
+        assert_eq!(registry.get(first).map(Asset::refs), Some(2));
+        assert!(!registry.release(first), "one reference left");
+        assert!(registry.commit_reload(second));
+        let asset = registry.get(second).expect("the held reference resolves");
+        assert_eq!(asset.refs(), 1);
+        assert_eq!(asset.bytes(), Some(&b"new texels"[..]));
+
+        assert!(registry.release(second), "that was the last one");
+        assert!(registry.get(first).is_none());
+        assert!(registry.is_empty());
+    }
+
+    /// **A second change while reloading supersedes the first**, and a reload
+    /// is refused where there is no old asset to keep.
+    #[test]
+    fn a_second_reload_supersedes_and_a_first_load_cannot_reload() {
+        let source = ScriptedSource::default();
+        source.ready("tex/brick.png", b"one");
+        source.after("tex/late.png", 3, b"late");
+        source.fails("tex/broken.png");
+        let mut registry = AssetRegistry::new(source);
+        let handle = registry.request(Path::new("tex/brick.png")).unwrap();
+        let loading = registry.request(Path::new("tex/late.png")).unwrap();
+        let failed = registry.request(Path::new("tex/broken.png")).unwrap();
+
+        registry.source().ready("tex/brick.png", b"two");
+        assert!(registry.reload(handle));
+        registry.source().ready("tex/brick.png", b"three");
+        assert!(registry.reload(handle), "the file changed again");
+        let asset = registry.get(handle).expect("still held");
+        assert_eq!(asset.bytes(), Some(&b"one"[..]), "still the bytes in force");
+        assert_eq!(asset.reloaded(), Some(&b"three"[..]), "the newer read");
+
+        assert!(!registry.reload(loading), "a first load is a request");
+        assert_eq!(
+            registry.get(loading).map(Asset::state),
+            Some(AssetState::Loading)
+        );
+        assert!(
+            !registry.reload(failed),
+            "a failed asset has nothing to keep"
+        );
+        assert_eq!(
+            registry.get(failed).map(Asset::state),
+            Some(AssetState::Failed)
+        );
+        assert!(registry.release(failed));
+        assert!(
+            !registry.reload(failed),
+            "a released handle reloads nothing"
         );
     }
 
