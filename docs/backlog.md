@@ -16714,6 +16714,14 @@ the framing refusal, systems left out) and
 `host::udp_tests::a_session_changing_more_than_a_datagram_holds_updates_back_and_converges`,
 each shown red by a mutation.
 
+**Behaviour, not a bug: that UDP test can time out under heavy load.** It runs
+real loopback sockets against wall time and gives up at `udp_tests`'
+`WAIT_LIMIT`. On 2026-10-06 it failed once with "gave up waiting for the client
+to converge" while three worktrees compiled on this machine, then passed ten
+runs in a row alone (about 0.18 s each) and in the full suite. A failure of it
+during a loaded local run wants a rerun before a diagnosis; one that repeats on
+an idle machine or in CI is real.
+
 **Built: the rate drop** (2026-10-01), `crcbl_server::cadence`. Each
 `PeerSession` holds a `SnapshotCadence`: a snapshot every tick, stepping to
 every second then every third tick (`SNAPSHOT_INTERVAL_STEPS`) after
