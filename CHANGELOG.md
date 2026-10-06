@@ -795,6 +795,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A read-only physics world on the client: `crcbl_client::ClientQueryWorld`**,
+  for camera booms and occlusion rays. It holds the scene's statics — the
+  `PhysicsWorld` the game's own scene loader builds, as its server does — and
+  `follow(&client, alpha, max_step, shape_of)` puts a collider on each
+  replicated entity at its interpolated pose, asking the game for the shape the
+  first time an entity appears (no wire bytes) and removing the collider of an
+  entity that despawned or left the subscribed sectors. Its queries are
+  `cast_ray`, `sweep_sphere`, `overlap_sphere_into` and the ids-only
+  `overlap_sphere_ids_into`, each the `crcbl-phys` query on this view, and
+  `collider_of` names a replica's collider for a `QueryFilter` to leave out.
+  Every answer is the client's interpolated view, behind the server by the
+  playout delay, and not authoritative.
+
+- **`crcbl_client::Client::interpolate_snapping`**: `interpolate` with each
+  entity that moved farther than `max_step` metres per server tick between the
+  two snapshots either side of playback shown where it landed rather than lerped
+  across the gap — a teleport, respawn or wrap, which the snapshots carry no
+  flag for. `interpolate` is unchanged.
+
+- **`crcbl_phys::PhysicsWorld::add_collider` and `place_collider`** add and move
+  a `ColliderComponent` on a body at a `Transform`, placed exactly as
+  `PhysicsSystem` places its own colliders (which now go through them), so a
+  second world built from the same components answers the same queries.
+
 - **A stable player identity: `crcbl_core::PlayerId`** (re-exported as
   `crcbl_net::PlayerId`), 128 random bits a client draws once, keeps and
   presents in every hello, kept apart from the per-session `SessionId` and
