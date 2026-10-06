@@ -6,7 +6,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requests (2026-10-06)
 
 These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `69926bb8` after pulling `origin/main`, using EW `1ca2c16a`. Both
+against crcbl `7be51c1e` after pulling `origin/main`, using EW `73594237`. Both
 remain open: `CharacterController::move_upright` still synchronizes its bound
 collider, and `world/candidate_sweeps.rs::sweep_capsule_all` still takes a
 straight `Segment`. EW's `preview_airborne_motion` still restores the live
@@ -17,17 +17,22 @@ source only; the test evidence below belongs to earlier verification runs.
 Implementation handoff: deliver the non-mutating upright preview first, then add
 the accelerated capsule query as a separate verified slice. Each handoff needs
 its public API, regression coverage and published commit so EW can update its
-pin and delete the matching workaround. EW still pins crcbl `bffec64a`;
-`69926bb8` only updated this handoff. Gameplay rules stay in EW.
+pin and delete the matching workaround. EW still pins crcbl `bffec64a`. The
+upstream changes since that pin only updated this handoff. Gameplay rules stay
+in EW.
 
 Do not port EW's current hip-fire convergence or prone weapon/terrain handling
 yet. `src/game_hip_convergence.rs` combines rendered weapon pose with gameplay
-aim and ADS rules; its cached-input correction is still uncommitted and under
-validation. The weapon/floor response in EW's `docs/backlog.md` still needs a
-choice between limiting weapon aim and retracting/lifting the weapon while
-leaving ADS. Prove the shared camera, weapon and hand behavior in the game
-before proposing a reusable engine API. These are game follow-ups, not
-additional implementation requests for crcbl.
+aim and ADS rules. Its stance-aware correction is preserved on EW branch
+`wip/stance-aware-hip-convergence` at `b0a7132b`, with a known failure in
+`grenade_quick_melee_hits_the_falling_target_at_delayed_contact`. The corrected
+pose places an arm ahead of the intended head contact; the fixture decision
+remains pending in EW's backlog. It is not ready for an engine port. The
+weapon/floor response in EW's `docs/backlog.md` still needs a choice between
+limiting weapon aim and retracting/lifting the weapon while leaving ADS. Prove
+the shared camera, weapon and hand behavior in the game before proposing a
+reusable engine API. These are game follow-ups, not additional implementation
+requests for crcbl.
 
 Keep the recent inventory eligibility work in EW: `HideoutInventory`'s
 `can_fit_stashed_firearm_swap` and `firearm_swap_placement` in
