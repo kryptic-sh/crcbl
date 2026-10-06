@@ -43,7 +43,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   hovered cell for the pointer as before. `apps/breach`'s
   `Game::drag(from, slot, to, at)` names both containers and answers the kit's
   `Result<Applied, Refusal>`, and its panel's `PanelStats::moved` replaces
-  `dragged`.
+  `dragged`. `crcbl_shard::panel::draw` takes a `DragInput` in place of a
+  `PointerInput`, and `crcbl_shard::Game::drag` answers
+  `Result<(), InventoryError>` rather than whether anything moved.
 
 - **`crcbl_orbit::GameError` has an `Art` variant** (see Added: orbit's flight
   UI is `.crpix` art): the flight UI's sprites not fitting the UI pass's image
@@ -926,6 +928,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   first-fit's cell). A drag between the two is one `Command::Move`, and a drop
   or a move the kit refuses leaves both as they were and shows why under the
   pack.
+- **`apps/shard`'s inventory panel takes the pad, the keyboard and a finger**,
+  on the same grid drag: arrows, `W/A/S/D` or the d-pad move the focus, `Space`,
+  `Enter` or South picks up and drops, `Backspace` or East cancels (`Escape`
+  stays the pause key), and a finger held still on a stack for `LONG_PRESS`
+  lifts it and drops it where it lifts. While the panel is open its keys are the
+  panel's, so the `Space` that picks a stack up does not swing and `W` does not
+  walk. The carried stack's ghost follows the hand, and a drop the grid refuses
+  leaves it as it was and shows why under the summary. Shard has one grid, so
+  there is no quick action and nothing to link.
 
 - **The input inspector: why an input did what it did.**
   `ActionMap::set_tracing` records, for each press — a key going down, a pointer

@@ -56,14 +56,16 @@
 //! both on one line at one cadence; `apps/quarry` and `apps/breach` do the same,
 //! and for the same reason.
 
-use crcbl::core::input::KeyCode;
+use crcbl::core::input::{ContactId, KeyCode, TouchPhase};
 use crcbl::engine::{
-    Booted, Clock, ExitReason, FrameInfo, HostedGame, PointerUpdate, RunSummary, wait_for_configure,
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, PointerUpdate, RunSummary, TouchUpdate,
+    wait_for_configure,
 };
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::math::{Vec2, Vec3};
 use crcbl::prelude::*;
 use crcbl::shell::{DisplayMode, WindowId};
+use crcbl::ui::grid_drag::DragInput;
 use crcbl::ui::widget::PointerInput;
 
 use crate::camera::Iso;
@@ -123,6 +125,15 @@ const ACTION_PICKUP: &str = "pickup";
 /// is closed until it does.
 const PANEL_KEY: KeyCode = KeyCode::KeyI;
 
+/// The keyboard's `ui_back` on the inventory panel, beside the `Escape` the
+/// reserved `ui` context binds.
+///
+/// `Escape` is the loop's [`PAUSE_KEY`](crcbl::engine::PAUSE_KEY) and never
+/// reaches [`Shard::key_event`], so without a second key the keyboard could
+/// pick a stack up and not put it back where it came from. `Backspace` is free
+/// in this sample's map and the console only reads it while it is open.
+const PANEL_BACK_KEY: KeyCode = KeyCode::Backspace;
+
 /// The key that puts the torches out and lights them again.
 ///
 /// **Not in the [`ActionMap`]**, and the module docs say why: it is presentation,
@@ -169,6 +180,31 @@ fn action_map() -> ActionMap {
             bindings,
         });
     }
+    map
+}
+
+/// The keyboard and the pad as the inventory panel reads them: the reserved
+/// `ui` context — `ui_move`, `ui_accept`, `ui_back`, with [`PANEL_BACK_KEY`]
+/// added to the last — pushed only while the panel is open.
+///
+/// **A map of its own, not the game's**, for `apps/breach`'s reason: the
+/// game's map begins a tick per simulation tick, the panel's edges are per
+/// frame — [`crcbl::ui_nav`] asks for a tick begun once a UI frame — and the
+/// panel works on a paused frame, which runs no tick at all. So
+/// [`Shard::draw`] reads this one and begins its tick, and
+/// [`Shard::key_event`] sends a press to whichever of the two has the
+/// keyboard: the panel while it is open, so `Space` picking a stack up is not
+/// also a swing and `W` carrying it is not also a step.
+fn panel_actions() -> ActionMap {
+    let mut map = ActionMap::new();
+    crcbl::input::ui::declare(&mut map).expect("a new map has no ui action in it");
+    let mut back = map
+        .bindings(crcbl::input::ui::BACK)
+        .expect("declare declared ui_back")
+        .to_vec();
+    back.push(Binding::Key(PANEL_BACK_KEY));
+    map.rebind(crcbl::input::ui::BACK, back)
+        .expect("ui_back is declared and a key binding has no dead zone");
     map
 }
 
@@ -292,10 +328,29 @@ pub struct Shard {
     /// `crate::panel` argues: the browser gate's still-frame control looks at a
     /// canvas with nothing on it but the zone.
     panel_open: bool,
-    /// Which cell of that panel owns the pointer press, and which stack the drag
-    /// riding on it holds, across frames — what an immediate-mode drag cannot
-    /// do without.
+    /// The keyboard and the pad as the panel reads them — see
+    /// [`panel_actions`] for why it is not [`Shard::actions`].
+    panel_actions: ActionMap,
+    /// Which cell of that panel owns the pointer press, which stack the drag
+    /// holds and in which hand, the pad's focus and the finger being followed,
+    /// across frames — what an immediate-mode drag cannot do without.
     ui: PanelState,
+    /// Contacts since the last frame, for the panel's long press: kept
+    /// normalised, as the pointer is, and offered in [`HostedGame::draw`]
+    /// where the extent that turns them into pixels is known.
+    pending_touches: Vec<TouchUpdate>,
+    /// The fingers that are down.
+    ///
+    /// **What tells a finger's pointer echo from a mouse.** A touchscreen's
+    /// primary contact also arrives as the pointer, and a pointer press takes
+    /// hold of a stack at once — which would beat the long press to every
+    /// stack a finger landed on. The loop hands a batch's contacts over before
+    /// its pointer, so a press that arrives while a finger is down is that
+    /// finger's echo; see `Shard::pointer_is_a_finger`.
+    fingers: Vec<ContactId>,
+    /// Whether the pointer's button is down because a finger is, so its press,
+    /// its movement and its release are the finger's and reach no panel.
+    pointer_is_a_finger: bool,
     /// The last pointer update carrying an absolute surface position.
     ///
     /// Kept because [`PointerUpdate::at`] is `Some` only on the frames it
@@ -707,7 +762,11 @@ fn assemble<S: Shell + ?Sized>(
             // as broken, and the whole subject here is what they light.
             torches_lit: true,
             panel_open: false,
+            panel_actions: panel_actions(),
             ui: PanelState::new(),
+            pending_touches: Vec::new(),
+            fingers: Vec::new(),
+            pointer_is_a_finger: false,
             panel_pointer: PointerUpdate {
                 at: Some(Vec2::ZERO),
                 motion: None,
@@ -822,10 +881,57 @@ impl HostedGame for Shard {
                 // is for: without it the capture outlives the panel and the
                 // next drag starts already holding a cell.
                 self.ui.clear();
+                // The panel's keys are the panel's only while it is up.
+                let ui = crcbl::input::ui::CONTEXT;
+                let restacked = if self.panel_open {
+                    self.panel_actions.push_context(ui)
+                } else {
+                    self.panel_actions.pop_context(ui)
+                };
+                restacked.expect("the ui context is pushed exactly while the panel is open");
             }
             return;
         }
+        // **A press goes to whichever map has the keyboard, and a release to
+        // both**, so a key held across the panel opening or closing is let go
+        // in the map that saw it go down.
+        if pressed && self.panel_open {
+            self.panel_actions.key_event(key, true);
+            return;
+        }
+        if !pressed {
+            self.panel_actions.key_event(key, false);
+        }
         self.pending_keys.push((key, pressed));
+    }
+
+    /// The pad, for the inventory panel: its `ui` context binds the d-pad, the
+    /// left stick and the face buttons, and is on the stack only while the
+    /// panel is open. The zone binds no pad, so nothing else hears it.
+    fn gamepad_event(&mut self, event: &crcbl::input::GamepadEvent) {
+        self.panel_actions.gamepad_event(event);
+    }
+
+    /// A finger: counted for the pointer echo, and queued for the panel's long
+    /// press while it is open.
+    ///
+    /// Counted whether or not the panel is open, because a finger that went
+    /// down before `I` was pressed still has an echo on the pointer.
+    fn touch_event(&mut self, touch: TouchUpdate) {
+        match touch.phase {
+            TouchPhase::Began => {
+                if !self.fingers.contains(&touch.contact) {
+                    self.fingers.push(touch.contact);
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.fingers.retain(|finger| *finger != touch.contact);
+            }
+            TouchPhase::Moved => {}
+        }
+        if self.panel_open {
+            self.pending_touches.push(touch);
+        }
     }
 
     /// The pointer, kept for the inventory panel and used by nothing else.
@@ -835,12 +941,29 @@ impl HostedGame for Shard {
     /// [`HostedGame::draw`] where the extent is known. [`PointerUpdate::pixels`]
     /// owns the conversion, alongside the touch path's
     /// [`TouchUpdate::pixels`](crcbl::engine::TouchUpdate::pixels).
+    ///
+    /// **A finger's echo is not the pointer.** A press while a finger is down,
+    /// and everything the pointer does until that press is released, belongs
+    /// to the finger, which reaches the panel through [`Shard::touch_event`];
+    /// see `Shard::fingers`.
     fn pointer_event(&mut self, pointer: PointerUpdate) {
+        if pointer.pressed && !self.fingers.is_empty() {
+            self.pointer_is_a_finger = true;
+        }
+        if self.pointer_is_a_finger {
+            self.pointer_is_a_finger = !pointer.released;
+            return;
+        }
         // Keep only an absolute position: a frame without one must retain the
         // panel's last known point. Pixels are resolved at draw time, once the
         // framebuffer extent is known.
         if let Some(at) = pointer.at {
             self.panel_pointer.at = Some(at);
+            // A pointer that moved is the device that spoke last, which is
+            // what hides the pad's focus on the panel again.
+            if self.panel_open {
+                self.panel_actions.pointer_position(at.x, at.y);
+            }
         }
         if pointer.pressed {
             self.pointer_down = true;
@@ -915,14 +1038,15 @@ impl HostedGame for Shard {
         if self.panel_open {
             let extent = gpu.extent();
             let grid = self.game.grid();
-            self.panel = crate::panel::draw(
-                draw_list,
-                gpu.atlas(),
-                extent,
-                &grid,
-                self.game.seed(),
-                &mut self.ui,
-                PointerInput {
+            // Shard reads a finger nowhere else, so whether the drag is
+            // following it — what `PanelState::touch` answers — decides
+            // nothing here.
+            for touch in self.pending_touches.drain(..) {
+                self.ui
+                    .touch(touch.contact, touch.phase, touch.pixels(extent));
+            }
+            let input = DragInput {
+                pointer: PointerInput {
                     pos: self
                         .panel_pointer
                         .pixels(extent)
@@ -933,14 +1057,32 @@ impl HostedGame for Shard {
                     released: std::mem::take(&mut self.pointer_released),
                     secondary_pressed: false,
                 },
+                nav: crcbl::ui_nav::nav_input(&self.panel_actions),
+                // One grid, so no quick action: see `crate::panel`.
+                quick: None,
+                dt: frame.render_dt,
+            };
+            self.panel = crate::panel::draw(
+                draw_list,
+                gpu.atlas(),
+                extent,
+                &grid,
+                self.game.seed(),
+                &mut self.ui,
+                input,
             );
+            // The grid decides; the panel shows what it said.
             if let Some((slot, at)) = self.panel.dragged {
-                self.game.drag(slot, at);
+                self.ui.note(self.game.drag(slot, at));
             }
         } else {
             self.panel = PanelStats::default();
             self.pointer_released = false;
+            self.pending_touches.clear();
         }
+        // Once a frame, open or not, after the frame read it: the panel's
+        // edges are this frame's and no other's. See [`panel_actions`].
+        self.panel_actions.begin_tick(frame.render_dt.as_secs_f32());
     }
 
     /// **Shard's two modules, and no third.**
@@ -1657,36 +1799,10 @@ mod tests {
     /// more".
     #[test]
     fn a_pointer_drag_moves_an_item_between_two_cells() {
-        let mut engine = scripted(&headless(4_000));
-        frames(&mut engine, 8);
-        hold_until(
-            &mut engine,
-            &[KeyCode::KeyW, KeyCode::Space],
-            "a foe fell",
-            |engine| engine.game().game().stats().floor > 0,
-        );
-        hold_until(
-            &mut engine,
-            &[KeyCode::KeyF],
-            "the pickup landed",
-            |engine| engine.game().game().stats().carried > 0,
-        );
-
-        let window = engine.window();
-        engine
-            .shell_mut()
-            .key_press(window, KeyCode::KeyI)
-            .expect("the window is live");
-        frames(&mut engine, 2);
-        assert!(engine.game().panel_open());
-
+        let mut engine = carrying_one_with_the_panel_open();
         let grid = engine.game().game().grid();
         let (slot, placement) = grid.slots().next().expect("the one stack");
-        let shape = crate::loot::catalog()
-            .get(placement.stack().item())
-            .expect("the item it carries")
-            .shape()
-            .rotated(placement.rotation());
+        let shape = footprint(placement);
         let from = placement.at();
         // The one place in the grid nothing else is: this grid holds one stack,
         // so any cell its footprint fits in is free.
@@ -1716,6 +1832,330 @@ mod tests {
             moved.slot(slot).expect("the stack").stack(),
             placement.stack(),
             "the drag replaced the stack rather than moving it",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// One key pressed and let go, a frame each.
+    fn tap(engine: &mut Loop<HeadlessShell>, key: KeyCode) {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .key_press(window, key)
+            .expect("the window is live");
+        frames(engine, 1);
+        engine
+            .shell_mut()
+            .key_release(window, key)
+            .expect("the window is live");
+        frames(engine, 1);
+    }
+
+    /// A run that has felled the husk and taken what it left, with the panel
+    /// open: what the panel tests start from, since a fresh character carries
+    /// nothing to drag.
+    fn carrying_one_with_the_panel_open() -> Loop<HeadlessShell> {
+        let mut engine = scripted(&headless(4_000));
+        frames(&mut engine, 8);
+        hold_until(
+            &mut engine,
+            &[KeyCode::KeyW, KeyCode::Space],
+            "a foe fell",
+            |engine| engine.game().game().stats().floor > 0,
+        );
+        hold_until(
+            &mut engine,
+            &[KeyCode::KeyF],
+            "the pickup landed",
+            |engine| engine.game().game().stats().carried > 0,
+        );
+        tap(&mut engine, PANEL_KEY);
+        assert!(engine.game().panel_open());
+        engine
+    }
+
+    /// The footprint `placement` covers, turned as it lies.
+    fn footprint(placement: crcbl::inventory::Placement) -> crcbl::inventory::Shape {
+        crate::loot::catalog()
+            .get(placement.stack().item())
+            .expect("the item it carries")
+            .shape()
+            .rotated(placement.rotation())
+    }
+
+    /// The one stack the run carries, which first-fit put on the first cell,
+    /// where the pad's and the keyboard's focus lands.
+    fn the_one_stack(engine: &Loop<HeadlessShell>) -> crcbl::inventory::Placement {
+        let grid = engine.game().game().grid();
+        let (_, placement) = grid.slots().next().expect("the one stack");
+        assert_eq!(grid.len(), 1, "the run carries more than the husk's drop");
+        assert_eq!(
+            placement.at(),
+            Cell::new(0, 0),
+            "first-fit put it elsewhere"
+        );
+        placement
+    }
+
+    /// Where the carried stack is now.
+    fn where_it_is(engine: &Loop<HeadlessShell>, stack: crcbl::inventory::StackId) -> Cell {
+        let grid = engine.game().game().grid();
+        let slot = grid.find(stack).expect("the stack is still carried");
+        grid.slot(slot).expect("its placement").at()
+    }
+
+    /// How many [`crate::panel::FOCUS`] outlines the last frame drew.
+    fn focus_outlines(engine: &Loop<HeadlessShell>) -> usize {
+        engine
+            .gpu()
+            .draw_list()
+            .commands()
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    crcbl::ui::draw_list::DrawCommand::RectOutline { color, .. }
+                        if *color == crate::panel::FOCUS
+                )
+            })
+            .count()
+    }
+
+    /// **The keyboard picks the stack up, carries it down and drops it through
+    /// the `ui_*` actions a pad sends, and the `Space` that picks it up is not
+    /// a swing.**
+    ///
+    /// The whole keyboard path: shell key → [`Shard::key_event`] → the panel's
+    /// map → [`crcbl::ui_nav::nav_input`] → `crate::panel`'s grid drag →
+    /// `Game::drag`. The first arrow lands focus on the first cell, which holds
+    /// the stack; `Space` picks it up; arrows carry it to the bottom row;
+    /// `Enter` drops it there. The swing counter is the control for the
+    /// routing: `Space` is the strike key everywhere else.
+    #[test]
+    fn the_keyboard_carries_a_stack_and_space_does_not_swing() {
+        let mut engine = carrying_one_with_the_panel_open();
+        let stack = the_one_stack(&engine);
+        // The swing that felled the husk sets the next one a strike period
+        // off; waiting it out is what lets a `Space` that reached the zone
+        // swing, so the counter below can see one.
+        let period = crate::foe::STRIKE_PERIOD_S / crcbl::engine::HEADLESS_FRAME_STEP.as_secs_f64();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        frames(&mut engine, period.ceil() as usize + 1);
+        let swings = engine.game().game().stats().swings;
+
+        tap(&mut engine, KeyCode::ArrowDown);
+        assert_eq!(
+            focus_outlines(&engine),
+            1,
+            "the keyboard's focus is not shown"
+        );
+        tap(&mut engine, KeyCode::Space);
+        let to = Cell::new(0, crate::loot::GRID_H - footprint(stack).height());
+        for _ in 0..to.y {
+            tap(&mut engine, KeyCode::ArrowDown);
+        }
+        tap(&mut engine, KeyCode::Enter);
+
+        assert_eq!(where_it_is(&engine, stack.stack().id()), to);
+        assert_eq!(
+            engine.game().game().stats().swings,
+            swings,
+            "the Space that picked the stack up swung at the zone",
+        );
+
+        // The mouse speaking last hides the keyboard's focus again.
+        pointer(&mut engine, Vec2::new(5.0, 5.0), None);
+        assert_eq!(focus_outlines(&engine), 0, "the focus outlived the mouse");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **`Backspace` takes the keyboard's drag back**, `Escape` being the
+    /// loop's: the `Enter` after it picks the stack up again rather than
+    /// dropping it a row down, which is what it would do to a drag still held.
+    #[test]
+    fn backspace_takes_the_keyboards_drag_back() {
+        let mut engine = carrying_one_with_the_panel_open();
+        let stack = the_one_stack(&engine);
+        tap(&mut engine, KeyCode::ArrowDown);
+        tap(&mut engine, KeyCode::Space);
+        tap(&mut engine, KeyCode::ArrowDown);
+        tap(&mut engine, PANEL_BACK_KEY);
+        tap(&mut engine, KeyCode::Enter);
+        assert_eq!(
+            where_it_is(&engine, stack.stack().id()),
+            stack.at(),
+            "the drag outlived Backspace and the Enter after it dropped it",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// A pad holding `buttons` and nothing else, as the loop would hand it to
+    /// [`Shard::gamepad_event`] — which a headless run has no source for, so
+    /// these tests hand it over themselves.
+    fn pad_holding(engine: &mut Loop<HeadlessShell>, buttons: &[crcbl::input::PadButton]) {
+        use crcbl::input::{GamepadEvent, GamepadId, GamepadSnapshot, PadKind};
+        engine.game_mut().gamepad_event(&GamepadEvent::State {
+            id: GamepadId(1),
+            snapshot: GamepadSnapshot {
+                buttons: buttons.iter().copied().collect(),
+                ..GamepadSnapshot::neutral(PadKind::Xbox)
+            },
+        });
+    }
+
+    /// One pad button pressed and let go, a frame each.
+    fn press(engine: &mut Loop<HeadlessShell>, button: crcbl::input::PadButton) {
+        pad_holding(engine, &[button]);
+        frames(engine, 1);
+        pad_holding(engine, &[]);
+        frames(engine, 1);
+    }
+
+    /// **The pad picks the stack up, carries it down with the d-pad and drops
+    /// it with South; East takes a second drag back**, so the South after it
+    /// picks the stack up again rather than dropping it.
+    ///
+    /// The path from [`Shard::gamepad_event`] on — the panel's map, its `ui`
+    /// context's pad bindings, `crate::panel`'s grid drag, `Game::drag`. The
+    /// focus outline is the control that the first press only landed it.
+    #[test]
+    fn the_pad_carries_a_stack_and_east_takes_a_drag_back() {
+        use crcbl::input::PadButton;
+        let mut engine = carrying_one_with_the_panel_open();
+        let stack = the_one_stack(&engine);
+        let id = stack.stack().id();
+
+        press(&mut engine, PadButton::DpadDown);
+        assert_eq!(focus_outlines(&engine), 1, "the pad's focus is not shown");
+        press(&mut engine, PadButton::South);
+        let to = Cell::new(0, crate::loot::GRID_H - footprint(stack).height());
+        for _ in 0..to.y {
+            press(&mut engine, PadButton::DpadDown);
+        }
+        press(&mut engine, PadButton::South);
+        assert_eq!(where_it_is(&engine, id), to, "the pad's drop did not land");
+
+        press(&mut engine, PadButton::South);
+        press(&mut engine, PadButton::DpadUp);
+        press(&mut engine, PadButton::East);
+        press(&mut engine, PadButton::South);
+        assert_eq!(
+            where_it_is(&engine, id),
+            to,
+            "the drag outlived East and the South after it dropped it",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// A finger's event at `at`, with the pointer echo a touch backend sends
+    /// for its primary contact — which [`HeadlessShell::touch`] leaves to the
+    /// script — and a frame.
+    fn finger(engine: &mut Loop<HeadlessShell>, phase: TouchPhase, at: Vec2) {
+        let window = engine.window();
+        let point = PhysicalPoint {
+            x: f64::from(at.x),
+            y: f64::from(at.y),
+        };
+        let shell = engine.shell_mut();
+        shell
+            .touch(window, ContactId(1), phase, point)
+            .expect("the headless shell has touch");
+        shell
+            .move_pointer(window, point, (0.0, 0.0))
+            .expect("the window is live");
+        let echo = match phase {
+            TouchPhase::Began => Some(PointerState::Pressed),
+            TouchPhase::Ended | TouchPhase::Cancelled => Some(PointerState::Released),
+            TouchPhase::Moved => None,
+        };
+        if let Some(state) = echo {
+            shell
+                .button(window, PointerButton::Left, state, Some(point))
+                .expect("the window is live");
+        }
+        engine.frame().expect("a frame");
+    }
+
+    /// How many cells of a ghost the last frame drew: rectangles at
+    /// [`crate::panel::GHOST_ALPHA`].
+    fn ghost_cells(engine: &Loop<HeadlessShell>) -> usize {
+        engine
+            .gpu()
+            .draw_list()
+            .commands()
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    crcbl::ui::draw_list::DrawCommand::Rect { color, .. }
+                        if color[3] == crate::panel::GHOST_ALPHA
+                )
+            })
+            .count()
+    }
+
+    /// How many headless frames a finger has to stay put to lift a stack.
+    fn long_press_frames() -> usize {
+        let frames = crcbl::ui::grid_drag::LONG_PRESS
+            .as_nanos()
+            .div_ceil(crcbl::engine::HEADLESS_FRAME_STEP.as_nanos());
+        usize::try_from(frames).expect("a long press is a few dozen frames")
+    }
+
+    /// **A finger held still on the stack for the long press lifts it, the
+    /// ghost follows the finger, and lifting the finger drops it** — one frame
+    /// short of the long press, nothing is in the air.
+    ///
+    /// The whole touch path: shell contact → [`Shard::touch_event`] →
+    /// `PanelState::touch` → the kit's long press → `Game::drag`, with the
+    /// pointer echo a real touchscreen sends alongside, which must not take
+    /// hold first.
+    #[test]
+    fn a_long_press_lifts_the_stack_and_lifting_the_finger_drops_it() {
+        let mut engine = carrying_one_with_the_panel_open();
+        let stack = the_one_stack(&engine);
+        let to = Cell::new(0, crate::loot::GRID_H - footprint(stack).height());
+        let took_hold = cell_centre(&engine, stack.at());
+
+        finger(&mut engine, TouchPhase::Began, took_hold);
+        frames(&mut engine, long_press_frames() - 2);
+        assert_eq!(
+            ghost_cells(&engine),
+            0,
+            "lifted before the long press was up"
+        );
+        frames(&mut engine, 1);
+        assert!(ghost_cells(&engine) > 0, "the long press lifted nothing");
+
+        let let_go = cell_centre(&engine, to);
+        finger(&mut engine, TouchPhase::Moved, let_go);
+        finger(&mut engine, TouchPhase::Ended, let_go);
+        frames(&mut engine, 1);
+        assert_eq!(where_it_is(&engine, stack.stack().id()), to);
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A finger that lands on the stack and moves at once is not a drag**,
+    /// though its pointer echo pressed on the stack and let go elsewhere: the
+    /// echo belongs to the finger, and a finger that wandered before the long
+    /// press was up was given up.
+    ///
+    /// The control is the pointer drag test above: the same press, move and
+    /// release from a mouse moves the stack.
+    #[test]
+    fn a_fingers_pointer_echo_does_not_drag() {
+        let mut engine = carrying_one_with_the_panel_open();
+        let stack = the_one_stack(&engine);
+        let to = Cell::new(0, crate::loot::GRID_H - footprint(stack).height());
+        let (took_hold, let_go) = (cell_centre(&engine, stack.at()), cell_centre(&engine, to));
+        finger(&mut engine, TouchPhase::Began, took_hold);
+        finger(&mut engine, TouchPhase::Moved, let_go);
+        finger(&mut engine, TouchPhase::Ended, let_go);
+        frames(&mut engine, 2);
+        assert_eq!(
+            where_it_is(&engine, stack.stack().id()),
+            stack.at(),
+            "the finger's pointer echo dragged the stack",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

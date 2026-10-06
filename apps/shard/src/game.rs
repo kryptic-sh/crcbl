@@ -84,7 +84,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crcbl::ecs::{ClientInputs, GameModule, World};
-use crcbl::inventory::{Cell, Grid, SlotId, Stack};
+use crcbl::inventory::{Cell, Grid, InventoryError, SlotId, Stack};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{CharacterConfig, CharacterController, MoveOutcome, PhysicsWorld};
@@ -1294,7 +1294,8 @@ impl Game {
 
     /// Moves the stack at `slot` so its origin is `at` — the cell a panel's
     /// drag landed it on, grab offset already applied by
-    /// [`crcbl::ui::grid_drag`]. Answers whether anything moved.
+    /// [`crcbl::ui::grid_drag`] — or answers why the grid refused it, for the
+    /// panel to show.
     ///
     /// **This is the one mutation that does not cross the wire**, and the
     /// reason is that there is no wire command to carry it: `Intent` is a flag
@@ -1308,15 +1309,20 @@ impl Game {
     /// slot id the panel is holding. `apps/breach` applies the kit's
     /// `Command::Move` to an `Inventory` for the same drag; shard keeps the
     /// bare grid its save and its floor are written against.
-    pub fn drag(&mut self, slot: SlotId, at: Cell) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// [`InventoryError::NoSuchSlot`] for a slot the grid no longer holds, and
+    /// whatever [`crcbl::inventory::Grid::move_within`] refused the move for.
+    pub fn drag(&mut self, slot: SlotId, at: Cell) -> Result<(), InventoryError> {
         let mut stage = lock(&self.shared);
-        let Some(placement) = stage.grid.slot(slot) else {
-            return false;
-        };
+        let placement = stage
+            .grid
+            .slot(slot)
+            .ok_or(InventoryError::NoSuchSlot(slot))?;
         stage
             .grid
             .move_within(loot::catalog(), slot, at, placement.rotation())
-            .is_ok()
     }
 }
 
@@ -2080,17 +2086,19 @@ mod tests {
         let mut game = Game::new(DEFAULT_TICK_HZ, loot::DEFAULT_SEED, Some(carrying))
             .expect("the loopback comes up");
 
-        assert!(
+        assert_eq!(
             game.drag(first, Cell::new(1, 0)),
+            Ok(()),
             "a drag onto an empty cell was refused",
         );
         let moved = game.grid();
         assert!(moved.at(Cell::new(0, 0)).is_none(), "it did not leave");
         assert!(moved.at(Cell::new(1, 0)).is_some(), "it did not arrive");
 
-        assert!(
-            !game.drag(first, Cell::new(2, 2)),
-            "a drag onto a taken cell was accepted",
+        assert_eq!(
+            game.drag(first, Cell::new(2, 2)),
+            Err(InventoryError::Occupied { x: 2, y: 2 }),
+            "a drag onto a taken cell was accepted, or refused for another reason",
         );
         let back = game.grid();
         assert!(

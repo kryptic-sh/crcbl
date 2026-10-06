@@ -17829,7 +17829,8 @@ decisions, each recorded so it is not re-argued:
   `Grid::find_slot` picks in the other one. No sample runs a server that keeps a
   stash, so the stash is tested at the kit level only (`stash::tests`, through
   `MemoryStorage` and `NativeStorage`). Shard's drag still calls
-  `Grid::move_within` on its bare grid.
+  `Grid::move_within` on its bare grid, deliberately: _Shard's inventory panel
+  on the four-device drag_ says why.
 
 **Still owed from this slice:** a container cannot be removed from an
 `Inventory` (a corpse that despawns, a match that ends), which a server will
@@ -17934,16 +17935,19 @@ sources and targets outside a `CellGrid` (the plan's ghost subtree with them);
   which drags on press, so a phone gets the pointer's drag and not the long
   press. Wiring `touch_event` means not also feeding that contact's pointer
   echo, which `PointerUpdate` cannot tell apart today. Touch is verified with
-  synthetic contacts only, and no real finger has driven it.
+  synthetic contacts only, and no real finger has driven it. `apps/shard` does
+  offer contacts and tells the echo apart by a rule of its own (a press while a
+  finger is down; see _Shard's inventory panel on the four-device drag_), which
+  breach could adopt.
 - **Not tested end to end:** a command the kit refuses after the panel predicted
   it would land (`PanelState::note` on `Game::send`'s or `Game::drag`'s `Err`);
   breach's containers cannot be filled to refuse a send. The panel's drawing of
   a noted refusal is tested, and so is `loadout::send`'s refusal.
 - **The pad path has no app-level test**: `HeadlessShell` has no pad source, so
   breach's `gamepad_event` is exercised only through the kit's `NavInput` tests
-  and the keyboard's identical path.
-- **`apps/shard` is still pointer-only**; it would take its own map and the same
-  few lines breach has.
+  and the keyboard's identical path. Shard's test hands `GamepadEvent`s to
+  `Shard::gamepad_event` through `Loop::game_mut`, which is the hook's whole
+  body but not the loop's polling or its withholding of a menu's buttons.
 
 ### Inventory kit: the 3D inspect view, contested-loot hooks, container types (2026-09-25)
 
@@ -19801,6 +19805,67 @@ gate cannot be in that state now that only a mouse takes the lock. The candidate
 fix, if it ever bites, is to release the lock when a touch contact arrives — the
 poll re-arms on the next frame, so a later mouse click takes it back — rather
 than to drop the contact or report it somewhere the finger is not.
+
+### Shard's inventory panel on the four-device drag (2026-10-06)
+
+**Built**: `apps/shard/src/panel.rs` takes a `DragInput`, so the pointer, the
+pad, the keyboard and a finger all drag through `crcbl_ui::grid_drag`, and
+`Game::drag` answers the grid's `InventoryError`. The decisions, each recorded
+so it is not re-argued:
+
+- **One grid, so no `GridDrag::link` and no quick action.** The floor is not a
+  container: a stack lying there is taken by walking to it and pressing `F`
+  (`Controls::pickup`, applied inside a tick). A "take" or "send" quick action
+  needs a second container to move to, and inventing one for the panel would be
+  a second copy of the floor.
+- **No move onto `crcbl_inventory::Inventory`.** It would remove no duplicated
+  validation: the panel's preview asks `Grid::can_move_within` (as breach's
+  does) and `Game::drag` asks `Grid::move_within`, which runs the same check, so
+  there is one rule already. What it would add is an owner, a reach closure and
+  a `ContainerId` for a single grid with no second container, plus a way out to
+  the bare `Grid` that `crate::save`'s payload and `Stage::take_loot` are
+  written against. The save format is untouched, so no payload bump;
+  `save::tests` (round trip, the v2 container fixture) pass unedited. Revisit
+  when shard gets a second container — a stash or a corpse to loot from — which
+  is when a `Command::Move` between two would earn it.
+- **The panel's own `ActionMap`** (`app::panel_actions`), breach's pattern: the
+  `ui` context pushed while the panel is open, ticked once a frame in `draw`, a
+  press to whichever map has the keyboard and a release to both — so `Space`
+  picking a stack up is not a swing and `W` is not a step.
+- **`Backspace` is added to `ui_back`** in that map (`app::PANEL_BACK_KEY`),
+  because `Escape` is the loop's pause key and never reaches `key_event`. Breach
+  has the same gap and did not take this; it is a one-line rebind there too.
+- **Touch is wired, and the pointer echo is told apart by fingers down.**
+  `Shard::touch_event` counts the contacts that are down and queues them for the
+  panel, which offers them to `GridDrag::touch` in `draw` (where the extent
+  turns them into pixels). A primary-button press that arrives while a finger is
+  down is that finger's echo: it, every pointer update after it and its release
+  are dropped (`Shard::pointer_is_a_finger`). That rests on the loop dispatching
+  a batch's contacts before its pointer, which it does, and on a backend sending
+  the echo in the same batch as the contact or later, which
+  `web/engine/shell.js` does (one DOM `pointerdown` forwards the contact and
+  then the button).
+- **A refused drop says why under the summary** (`PanelState::note`, a third row
+  the panel always reserves), from the panel's own check or from `Game::drag`'s
+  `Err`.
+
+**Gaps, stated plainly:**
+
+- **No real finger has driven it**, and the echo rule was read, not watched, on
+  every backend: native touch backends (Win32's `WM_POINTER`, Wayland, AppKit)
+  were not checked for whether the echo can arrive in a batch before its
+  contact. A hybrid device's mouse press made while a finger is down is read as
+  that finger's echo and dropped.
+- **A drop whose origin would land off the top or left edge is refused
+  silently**: drawn refusing and moving nothing, but with no reason under the
+  summary, because the kit reports no target there and `OutOfBounds` cannot name
+  a negative cell.
+- **A refused drop is not tested at the app level**: the published seed's first
+  drop is a `1×1`, and a grid holding one `1×1` takes it anywhere. The panel's
+  tests cover the refusal and its reason; `game::tests` covers `Game::drag`'s
+  `Err`.
+- **The pad's app-level test calls `Shard::gamepad_event` directly** through
+  `Loop::game_mut`; the loop's polling of a pad source is not exercised.
 
 ### `apps/shard` covers all six verbs of milestone 1 (2026-09-07)
 
