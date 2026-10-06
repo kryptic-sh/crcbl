@@ -97,6 +97,14 @@
 //! circuit on the spawn pad from the first tick, and the first movement key ends
 //! it for good — the arrangement `apps/orbit` and `apps/viewer` both use.
 //!
+//! # Two beacons hum behind the mounds
+//!
+//! The one sound: [`audio`] stands a beacon behind each mound and hears it from
+//! the camera through the same [`crcbl::client::ClientQueryWorld`] the boom is
+//! swept through, so a mound between the two muffles it — earth more than
+//! brush — and walking round comes clear. That is the cue grammar's rule 5,
+//! [`crcbl::occlusion`], in a sample. A headless run plays nothing.
+//!
 //! # What is not here yet
 //!
 //! No root motion (the rig's clips are in place; `crcbl-anim` proves root
@@ -125,6 +133,7 @@
 pub mod anim;
 pub mod app;
 mod args;
+pub mod audio;
 pub mod camera;
 pub mod game;
 mod gpu;

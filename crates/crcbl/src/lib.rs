@@ -35,6 +35,7 @@
 //! crcbl::backend   → (this crate)    runtime GPU backend selection
 //! crcbl::adapter   → (this crate)    which adapter inside that backend
 //! crcbl::acoustic_path → (this crate) the barriers a sound's route crosses
+//! crcbl::occlusion → (this crate)    occlusion rays to a voice's muffling, under a budget
 //! crcbl::engine    → (this crate)    the shell↔HAL join every sample repeats
 //! crcbl::ui_nav    → (this crate)    the `ui` actions as the UI tree's NavInput
 //! crcbl::lan       → (this crate)    LAN host, join and browse (native only)
@@ -396,6 +397,8 @@ pub mod knob;
 // networking, by the LOCKED rule in `docs/notes/simulation.md`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lan;
+
+pub mod occlusion;
 
 pub mod perf;
 

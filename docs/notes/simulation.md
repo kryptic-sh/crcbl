@@ -564,7 +564,19 @@ The rules, each with its _why_:
   smoothed across blocks. Same learnability contract: a material is a fixed,
   versioned preset, so players learn "behind wood" versus "behind concrete".
   Closed rooms need no special case. Portal and room-graph propagation is
-  post-MVP.
+  post-MVP. Built 2026-10-06, split at the physics line:
+  `crcbl_audio::occlusion` holds the sound half — `AcousticMaterial` and its
+  presets (`PRESETS_VERSION`), the combining rule (`Occlusion::through`:
+  attenuations add, the lowest cutoff wins) and a one-pole lowpass per voice
+  with an exact −3 dB coefficient and a gain, both ramped linearly over
+  `OCCLUSION_RAMP_FRAMES` — and `crcbl::occlusion` holds the ray half: the walk
+  through every collider between ear and emitter (`occlusion_between`, over any
+  filtered ray query, so a server's audibility test casts the same walk), the
+  material side table keyed by collider (`AcousticMaterials`; no audio field on
+  a `crcbl-phys` collider), and `OcclusionTracker`, which spends a named ray
+  budget per frame round robin through the client's query world. A voice at
+  `Occlusion::CLEAR` is bit-identical to one from before, so no golden moves
+  unless a game turns occlusion on. `apps/puppet`'s beacons are the consumer.
 - **ITD uses fractional delay lines** (2026-07-27): an integer tap that changes
   as an emitter moves clicks, and delay modulation _is_ pitch shift, which
   corrupts rules 3 and 4. The named machinery is interpolated fractional delay,

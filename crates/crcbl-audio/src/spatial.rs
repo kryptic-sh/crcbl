@@ -332,7 +332,7 @@ fn cents_to_ratio(cents: f32) -> f32 {
 }
 
 /// Converts dB to linear gain.
-fn db_to_linear(db: f32) -> f32 {
+pub(crate) fn db_to_linear(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
 }
 

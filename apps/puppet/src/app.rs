@@ -41,6 +41,7 @@ use crcbl::prelude::*;
 use crcbl::shell::{DisplayMode, WindowId};
 
 use crate::anim::Animator;
+use crate::audio::Audio;
 use crate::camera::Follow;
 use crate::game::{Controls, Game, RenderState, Stats};
 use crate::gpu::Gpu;
@@ -194,10 +195,14 @@ pub struct Puppet {
     /// The third-person camera. **Presentation**: it never crosses the wire, and
     /// the only thing the simulation is told about it is its yaw.
     follow: Follow,
-    /// What the camera's boom is swept against: the map's colliders, built
-    /// once from the same [`Map`] the server's controller walks. **The
-    /// client's own copy**, because the stage's world is the simulation's.
+    /// What the camera's boom is swept against and the beacons are heard
+    /// through: the map's colliders, built once from the same [`Map`] the
+    /// server's controller walks. **The client's own copy**, because the
+    /// stage's world is the simulation's.
     query: ClientQueryWorld,
+    /// The beacons behind the mounds, or `None` on a headless run, which opens
+    /// no device and plays nothing. See [`crate::audio`].
+    audio: Option<Audio>,
     /// Refilled from the simulation every frame.
     render_state: RenderState,
     /// The simulation's numbers, snapshotted in [`Puppet::draw`].
@@ -361,6 +366,9 @@ fn assemble<S: Shell + ?Sized>(
 ) -> Result<Loop<S>, PuppetError> {
     let booted = crcbl::engine::arm_screenshot(booted, &options.common);
     let game = Game::new(options.common.tick_hz, &options.map).map_err(PuppetError::Game)?;
+    let (statics, colliders) = options.map.world_with_ids();
+    let audio = (!options.common.headless)
+        .then(|| Audio::open(crate::audio::materials(options.map.surfaces(), &colliders)));
     Ok(Loop::new(
         booted,
         Puppet {
@@ -369,7 +377,8 @@ fn assemble<S: Shell + ?Sized>(
             actions: action_map(),
             pending_keys: Vec::new(),
             follow: Follow::default(),
-            query: ClientQueryWorld::new(options.map.world()),
+            query: ClientQueryWorld::new(statics),
+            audio,
             render_state: RenderState::default(),
             stats: Stats::default(),
             page: PageStats::default(),
@@ -511,7 +520,12 @@ impl HostedGame for Puppet {
             self.render_state.feet as f32 + crate::camera::FOCUS_HEIGHT,
             self.render_state.position.z as f32,
         );
-        gpu.set_camera(self.follow.camera(focus, &mut self.query));
+        let camera = self.follow.camera(focus, &mut self.query);
+        // The ear rides the camera, through the same world its boom swept.
+        if let Some(audio) = &mut self.audio {
+            audio.hear_from(&camera, &mut self.query);
+        }
+        gpu.set_camera(camera);
         // The sun turns on the simulation's clock, so the shadows on the map
         // stop where they are while the loop is paused — see [`Map::sun`].
         gpu.set_sun(self.map.sun(self.render_state.elapsed));
@@ -529,12 +543,25 @@ impl HostedGame for Puppet {
     /// **Puppet's one module, and no second.**
     ///
     /// No network section: this sample runs over `InMemoryTransport` and has no
-    /// connection to report on. No audio section either — milestone 1 plays
-    /// nothing, and a section that said so would be a module with no system
-    /// behind it. What it does have is the character, and every row in it is a
-    /// number [`crcbl::phys::CharacterController`] produced.
+    /// connection to report on. No audio section either: the beacons are two
+    /// held voices with nothing to count, and a headless run, which is what
+    /// this panel is tested on, has no audio at all. What it does have is the
+    /// character, and every row in it is a number
+    /// [`crcbl::phys::CharacterController`] produced.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.stats);
+    }
+
+    /// The beacons' mixer, which the console's `[engine.audio]` keys move —
+    /// refused on a headless run, which has none.
+    fn set_bus_gain(
+        &mut self,
+        bus: crcbl::audio::mixer::Bus,
+        gain: f32,
+    ) -> Result<(), crcbl::settings::Unsupported> {
+        let audio = self.audio.as_ref().ok_or(crcbl::settings::Unsupported)?;
+        audio.set_bus_gain(bus, gain);
+        Ok(())
     }
 
     fn summary(&self, run: RunSummary) -> Summary {
