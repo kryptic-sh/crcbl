@@ -25890,6 +25890,19 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   under `win32-ime-e2e`), drop the guard if the test passes without it, and fix
   whatever it finds. Until then no doc may call the Win32 pre-edit working.
 
+  **Run again 2026-10-06, with ja-JP's `BasicTyping` installed**
+  (`Get-InstalledLanguage` now lists it), on the same desktop: **it fails the
+  same way, so the stuck download was not the cause.** What passed, for the
+  first time against a real input method: the IME opened in hiragana on the test
+  window, and `set_text_input_area` placed its composition window at the caret
+  area's corner (40, 60, read back through `ImmGetCompositionWindow`). What did
+  not: the injected keys arrived as `Key` then `TextCommit` and no composition
+  ever started, and the test timed out at its 20 s wait (`win32_e2e.rs`' wait
+  for the composition). The next suspect is the injection itself — whether keys
+  `tests/bin/send_input_win32.rs` sends with `SendInput` reach the IME at all,
+  which typing the same keys by hand into the test window would answer — then
+  `ThreadLocalInput`. Composition placement is verified; the pre-edit is not.
+
 - **Per-device ids: what is not verified.** `win32::devices` attributes each
   key, button and wheel message to the raw report that produced it, and keys ids
   by interface path. Unit tests cover the matching and the table; the hands-on
