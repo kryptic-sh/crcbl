@@ -6,7 +6,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requests (2026-10-06)
 
 These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `69926bb8` after pulling `origin/main`, using EW `1ca2c16a`. Both
+against crcbl `6f3893c3` after pulling `origin/main`, using EW `dbd33b6f`. Both
 are now delivered in crcbl and await EW's migration: item 1 as
 `CharacterController::preview_upright`, item 2 as
 `PhysicsWorld::sweep_capsule_arc`. Until EW moves its pin, its
@@ -26,12 +26,16 @@ new `sweep_capsule_arc`. Gameplay rules stay in EW.
 
 Do not port EW's current hip-fire convergence or prone weapon/terrain handling
 yet. `src/game_hip_convergence.rs` combines rendered weapon pose with gameplay
-aim and ADS rules; its cached-input correction is still uncommitted and under
-validation. The weapon/floor response in EW's `docs/backlog.md` still needs a
-choice between limiting weapon aim and retracting/lifting the weapon while
-leaving ADS. Prove the shared camera, weapon and hand behavior in the game
-before proposing a reusable engine API. These are game follow-ups, not
-additional implementation requests for crcbl.
+aim and ADS rules. Its stance-aware correction is preserved on EW branch
+`wip/stance-aware-hip-convergence` at `b0a7132b`, with a known failure in
+`grenade_quick_melee_hits_the_falling_target_at_delayed_contact`. The corrected
+pose places an arm ahead of the intended head contact; the fixture decision
+remains pending in EW's backlog. It is not ready for an engine port. The
+weapon/floor response in EW's `docs/backlog.md` still needs a choice between
+limiting weapon aim and retracting/lifting the weapon while leaving ADS. Prove
+the shared camera, weapon and hand behavior in the game before proposing a
+reusable engine API. These are game follow-ups, not additional implementation
+requests for crcbl.
 
 Keep the recent inventory eligibility work in EW: `HideoutInventory`'s
 `can_fit_stashed_firearm_swap` and `firearm_swap_placement` in
@@ -40,6 +44,15 @@ payloads, installed magazines and stash ownership. They are not a demonstrated
 missing engine capability; `src/game_stash_grids.rs` already uses crcbl's
 `grid_drag` for pointer interaction. Reconsider a port only after a reusable
 requirement is demonstrated, rather than moving these game rules into crcbl.
+
+The recent cartridge-ejection fixes do not add another engine request.
+`src/game_ejected_cases.rs::account_ejection_at_port` supplies the authored
+cartridge orientation, launch velocity, spin and mechanical release delay to
+`WorldItemMotion::launched_from_authored_transform` in
+`src/game_world_items.rs`. Keep the firearm-specific port axes, cartridge
+ownership and release timing in EW. These fixes use the existing motion path; no
+missing engine API was demonstrated. Native live-round validation remains
+unfinished in EW, so this review does not claim that playback is fully verified.
 
 1. **Non-mutating character-motion previews: delivered in crcbl, awaiting EW's
    migration.** EW's `PlayerController::preview_airborne_motion` in
