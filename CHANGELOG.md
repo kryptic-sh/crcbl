@@ -24,6 +24,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Result<Applied, Refusal>`, and its panel's `PanelStats::moved` replaces
   `dragged`.
 
+- **`crcbl_orbit::GameError` has an `Art` variant** (see Added: orbit's flight
+  UI is `.crpix` art): the flight UI's sprites not fitting the UI pass's image
+  atlas, which stops start-up. An exhaustive `match` over it must name the new
+  arm. `crcbl_orbit::page::draw` takes the registered `crcbl_orbit::art::Art`,
+  and `crcbl_orbit::RenderState` has `velocity`, `periapsis_at` and
+  `apoapsis_at` fields, so a struct literal of it must name them or take
+  `..RenderState::default()`.
+
+- **`crcbl_ecs::SystemTrait` is `Send`**, so a schedule can tick systems on a
+  job pool's threads (below). With it: `DebugDrawFn` is
+  `Box<dyn FnMut(&DebugCtx) + Send>`, `System<T>` is a `SystemTrait` only for a
+  `T: Send`, `crcbl_phys::ForceProvider` is `Send`,
+  `crcbl::registry::Registry::register` asks `T: Send`, and
+  `Schedule::set_clock` takes a `crcbl_ecs::ScheduleClock`
+  (`Box<dyn TimeSource + Send + Sync>`), because a pooled schedule reads the
+  clock on the thread that ran each system. A system holding an `Rc`, a
+  `RefCell` handle or a `Cell` shared with anything else no longer compiles;
+  move it to `Shared`, an `Arc` or an atomic.
+
 - **Every hello carries the client's `PlayerId`, and the protocol version is 8**
   (`ProtocolCompatibility::DEFAULT`). `crcbl_net::Hello` has a new `player`
   field, 16 bytes on the wire after `generation`, so a build from before cannot
@@ -830,6 +849,65 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   or a move the kit refuses leaves both as they were and shows why under the
   pack.
 
+- **Orbit's flight UI is `.crpix` art** (`docs/plan/sample/06-orbit.md`, sample
+  rule 11; `crcbl_orbit::art`). The instrument panel's window and its fuel and
+  throttle gauges are nine-slices, and under them is a navball-lite: a dial
+  whose top is straight up from the surface, with prograde, retrograde and
+  heading markers riding its rim at the angle each makes with the local
+  vertical, sky over ground under the planet's air and black over grey round the
+  moon. The map marks the ship and the orbit's apoapsis and periapsis with
+  glyphs, labelled `AP` and `PE`. Three sheets in `apps/orbit/assets/` —
+  `markers`, `navball` and `chrome` — are baked by a new `build.rs`; the art is
+  placeholder, written as text. The bodies and the trajectory stay geometry, and
+  the readouts stay text.
+- **`crcbl::engine::PageBundle::images_mut`**, the UI pass's image atlas, for a
+  sample whose frame is a page to register its own art into, as towers' own
+  bundle already could.
+
+- **The animation state machine: `crcbl_anim::machine`.** A hand-authored RON
+  asset (`StateMachine::from_ron`) of parameters (`Float`, `Bool`, `Trigger`),
+  states that each play a clip or a 1D blend over a float parameter (`Clip`,
+  `Blend1d`), and transitions with conditions (`Above`, `Below`, `IsTrue`,
+  `IsFalse`, `Triggered`), an optional exit time and a crossfade. Every name is
+  resolved at parse and refused by name with a `MachineError` — an unknown state
+  or parameter, a parameter used as the wrong kind, a negative crossfade, an
+  exit time or event outside the cycle, a duplicate — and `Machine::new` binds
+  the asset to its clips by name, refusing an unknown clip. The per-character
+  `MachineState` is `Copy` plain data (state, normalised time, the fade in
+  flight, up to `MAX_PARAMETERS` parameter values) with a field-by-field `Hash`
+  for a tick hash. `Machine::step` advances it by a fixed `dt` with basic IEEE
+  arithmetic only, so it is deterministic across targets; triggers persist until
+  a transition consumes them, and no transition is evaluated while a fade is in
+  flight. `Sampler` poses a skeleton from a state without stepping it.
+  `crcbl-anim` now depends on `serde` and `ron` for the asset format.
+
+- **Animation events.** A state carries a track of `Event(at, name)` at
+  normalised times; `Machine::step` reports each event its advance crossed,
+  exactly once per crossing — across loop wraps, across several whole cycles in
+  one step, and from time zero on entry — and mutes the outgoing state's track
+  during a fade. The tick is the clock: the same events land on the same ticks
+  whatever frame rate drives them.
+
+- **Root motion.** `Machine::root_velocity` measures the root joint's
+  translation channel across a step, crossfaded as the pose is and whole across
+  a loop seam, and returns it as a velocity for the character controller — never
+  for the transform. `Sampler::new(skeleton, Some(root))` strips that
+  translation from the drawn pose so the root stays in place.
+  `Clip::translation_of` reads one joint's translation channel without sampling
+  a pose.
+
+- **`apps/puppet` runs, jumps and counts footsteps through the state machine.**
+  Shift runs (`game::RUN_SPEED`), Space jumps (`game::JUMP_SPEED`, on the key's
+  edge, from the ground), and `assets/anim/character.ron` picks idle, a run that
+  blends the walk and a new run stride by measured speed, or a jump with a new
+  tuck clip. The machine is stepped on the server's tick in `anim::Locomotion`;
+  the client poses the rig from the `MachineState` copied into `RenderState`.
+  Footsteps from the run's event track are counted on the `[HUD]` line
+  (`state:`, `steps:`), the debug panel and the overlay; `[POSE]` gains
+  `state:`, and `blend` is now how far the character is out of its idle stance.
+  The intent byte gained the run and jump flags, so puppet's protocol version
+  is 2. The rig's clips are in place, so puppet applies no root motion.
+
 - **Audio occlusion, the cue grammar's rule 5: a voice heard through something
   is muffled and quieter, by what it is heard through.**
   `crcbl_audio::occlusion::Occlusion { cutoff_hz, gain }` is a per-voice target,
@@ -984,6 +1062,40 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   trigger, each file this run wrote and its size, where the autosave goes, and
   the saves that did not land. `crcbl_store::save::SaveBacking::root` names the
   directory for it.
+
+- **`crcbl bench --scenario ecs` times one `crcbl_ecs` schedule a tick at a
+  time.** Eight systems over `--entities` rows each (default 10000), every one
+  stepping the same damped spring, with mixed declarations: one writes `wind`
+  and two read it, two write `score` and one reads it, and three touch nothing
+  shared — five conflicts. It reports the per-tick p50, p95, p99 and max beside
+  the schedule's shape, and the world's `hash_world` as the checksum, failing a
+  run whose ticks left the hash unchanged. It is the baseline a parallel
+  schedule is measured against.
+
+- **`crcbl sim --threads <N>` runs the determinism harness on N threads.** The
+  world's schedule is handed a `crcbl_jobs::Pool` of N − 1 workers (default N =
+  1; zero is refused), and the harness world gains a conflict for it to respect:
+  `swarm` writes its rows' mean to a shared `crowd` resource and `herd` reads
+  it, while the systems before `herd` share a stage. The printed hash must not
+  move with N — that is `docs/plan/21-jobs.md`'s killer test, and it is now
+  runnable. `--json` adds `threads` and the `workers` the pool actually got.
+  Because the harness world changed, **`crcbl sim` prints a different hash for
+  the same seed than earlier versions did**; nothing in the repository pinned
+  one.
+
+- **A `crcbl_ecs` schedule can tick its systems in parallel.**
+  `Schedule::stages` groups the systems at registration into runs of consecutive
+  systems no two of which conflict, and `Schedule::set_pool` / `World::set_pool`
+  hand the schedule a `crcbl_jobs::Pool` that ticks each stage across its
+  threads, one stage after another. The state is bit-identical to the serial run
+  — systems in one stage share nothing but resources they all only read — and
+  the per-system tick times are still each system's own. Off unless a pool is
+  handed over: no world has one by default. Sweeps, debug draws, hashing and
+  replication stay on the calling thread in schedule order.
+  `crcbl bench --scenario ecs --workers <N>` measures it; on a Ryzen 9 9950X3D
+  under Windows the default eight-system tick went from a 514 µs p50 serially to
+  273 µs on seven workers — near the halving its four equal-cost stages cap it
+  at — while a 100-entity world was slower than serial from seven workers on.
 
 - **Overlap hits: how deep, which way out and where.** `crcbl_phys::OverlapHit`
   carries the point on the collider's surface the sphere is pushed out from, the

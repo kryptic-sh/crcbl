@@ -1,5 +1,5 @@
-//! The character's rig: a greybox humanoid, its skeleton, and its two clips —
-//! authored here in code, with no asset on disk.
+//! The character's rig: a greybox humanoid, its skeleton, and its four clips
+//! — authored here in code, with no asset on disk.
 //!
 //! ```text
 //!                 ┌──────┐  1.80        joints, in palette order
@@ -60,10 +60,17 @@
 //! That is deliberate and the browser gate depends on it — "the character
 //! settles when it stands" is only a claim a pose can be held to if standing
 //! still is a fixed pose. [`walk`] is a one-second stride: legs swinging,
-//! knees bending, arms counter-swinging and the hips dropping twice.
+//! knees bending, arms counter-swinging and the hips dropping twice. [`run`] is
+//! the same stride swung further and turned over faster, and [`jump`] gathers
+//! into a tuck and holds it.
 //!
-//! Both are authored so that their first and last keyframes agree, which is
-//! what lets [`crate::anim`] wrap the phase without a jump at the seam.
+//! The two strides are authored so that their first and last keyframes agree,
+//! which is what lets the state machine loop them without a jump at the seam.
+//! All four are **in place**: nothing drives [`ROOT`], so they author no root
+//! motion and the controller alone moves the character.
+//!
+//! Which clip plays when is not decided here: `assets/anim/character.ron` names
+//! them, and [`clip`] is the lookup it is bound through.
 
 use std::borrow::Cow;
 
@@ -404,25 +411,72 @@ pub const WALK_CYCLE_S: f32 = 1.0;
 /// How much ground one stride of [`walk`] covers, in metres.
 ///
 /// The boxes have no feet to plant, so this is authored rather than measured —
-/// but it is the number the clip *means*, and two things read it as one:
-/// [`crate::anim`] turns the phase over once per this much ground so the legs
-/// do not skate, and it divides by [`WALK_CYCLE_S`] to give the speed the clip
-/// is authored for, which is where the top of the locomotion set sits.
+/// but it is the number the clip *means*: divided by [`WALK_CYCLE_S`] it is the
+/// speed the clip is authored for, which is where the state machine's run
+/// blend plays the walk at full weight ([`crate::anim::WALK_STOP_MPS`]).
 pub const STRIDE_M: f32 = 2.6;
 
-/// How far a thigh swings from vertical at the extremes of the stride, in
-/// radians. A positive rotation about `+X` carries the leg toward `-Z`, which
-/// is the direction this engine calls forward.
-const THIGH_SWING: f32 = 0.55;
-/// How far an arm swings, in radians — less than the legs, and out of phase
-/// with the leg on its own side.
-const ARM_SWING: f32 = 0.45;
-/// How far the arms hang out from the body, in radians about `+Z`.
+/// How long one stride of [`run`] lasts, in seconds — shorter than the walk's,
+/// because a run turns its legs over faster as well as further.
+pub const RUN_CYCLE_S: f32 = 0.7;
+
+/// How much ground one stride of [`run`] covers, in metres. Authored, for the
+/// reason [`STRIDE_M`] gives; with [`RUN_CYCLE_S`] it is the speed the run clip
+/// is authored for, which is where the top of the locomotion blend sits.
+pub const RUN_STRIDE_M: f32 = 3.85;
+
+/// How far an arm hangs out from the body, in radians about `+Z`.
 const ARM_SPLAY: f32 = 0.12;
-/// How far the hips drop at the bottom of each step, in metres.
-const HIP_BOB: f32 = 0.04;
-/// How far the chest twists against the stride, in radians about `+Y`.
-const CHEST_TWIST: f32 = 0.08;
+
+/// How a gait swings the body: what tells [`walk`] and [`run`] apart.
+struct Gait {
+    /// How long one stride lasts, in seconds.
+    cycle: f32,
+    /// How far a thigh swings from vertical at the extremes of the stride, in
+    /// radians. A positive rotation about `+X` carries the leg toward `-Z`,
+    /// which is the direction this engine calls forward.
+    thigh: f32,
+    /// How far an arm swings, in radians — out of phase with the leg on its own
+    /// side.
+    arm: f32,
+    /// The left knee's bend at each quarter of the stride, in radians. Every
+    /// value is negative, because a knee only bends one way: the shin comes up
+    /// behind, never through the front of the leg.
+    left_knee: [f32; 5],
+    /// The right knee's, half a stride out of step with the left.
+    right_knee: [f32; 5],
+    /// How far the hips drop at the bottom of each step, in metres.
+    hip_bob: f32,
+    /// How far the chest twists against the stride, in radians about `+Y`.
+    chest_twist: f32,
+}
+
+/// The walk: a brisk stride, legs and arms swinging moderately.
+const WALK: Gait = Gait {
+    cycle: WALK_CYCLE_S,
+    thigh: 0.55,
+    arm: 0.45,
+    left_knee: [-0.15, -0.70, -0.10, -0.25, -0.15],
+    right_knee: [-0.10, -0.25, -0.15, -0.70, -0.10],
+    hip_bob: 0.04,
+    chest_twist: 0.08,
+};
+
+/// The run: the same shape as the walk, swung further — the thighs nearer
+/// horizontal, the trailing shin kicked up behind, the arms pumping.
+const RUN: Gait = Gait {
+    cycle: RUN_CYCLE_S,
+    thigh: 0.85,
+    arm: 0.75,
+    left_knee: [-0.30, -1.40, -0.20, -0.50, -0.30],
+    right_knee: [-0.20, -0.50, -0.30, -1.40, -0.20],
+    hip_bob: 0.07,
+    chest_twist: 0.12,
+};
+
+/// How long the jump takes to gather into its tuck, in seconds. The clip holds
+/// the tuck after that, for however long the character is in the air.
+pub const JUMP_TUCK_S: f32 = 0.3;
 
 /// The stance the character holds when it is standing still.
 ///
@@ -455,19 +509,95 @@ pub fn idle() -> Clip {
     ])
 }
 
-/// One stride, over [`WALK_CYCLE_S`].
+/// One walking stride, over [`WALK_CYCLE_S`].
 ///
 /// The first and last keyframes of every channel agree, so the phase wraps
 /// without a jump.
 #[must_use]
 pub fn walk() -> Clip {
+    stride(&WALK)
+}
+
+/// One running stride, over [`RUN_CYCLE_S`]: the walk's shape swung further,
+/// and its first and last keyframes agree as the walk's do.
+#[must_use]
+pub fn run() -> Clip {
+    stride(&RUN)
+}
+
+/// The jump: from the stance into a tuck — knees drawn up, arms thrown up and
+/// out — over [`JUMP_TUCK_S`], then held. A one-shot, which the state machine
+/// plays without looping.
+#[must_use]
+pub fn jump() -> Clip {
+    let gather = |joint: usize, from: Quat, to: Quat| {
+        Channel::new(
+            joint,
+            vec![0.0, JUMP_TUCK_S],
+            Interpolation::Linear,
+            Track::Rotation(vec![from, to]),
+        )
+        .expect("two keyframes and two values")
+    };
+    Clip::new(vec![
+        gather(
+            LEFT_THIGH,
+            Quat::from_rotation_x(0.06),
+            Quat::from_rotation_x(0.95),
+        ),
+        gather(
+            RIGHT_THIGH,
+            Quat::from_rotation_x(0.06),
+            Quat::from_rotation_x(0.75),
+        ),
+        gather(
+            LEFT_SHIN,
+            Quat::from_rotation_x(-0.12),
+            Quat::from_rotation_x(-1.30),
+        ),
+        gather(
+            RIGHT_SHIN,
+            Quat::from_rotation_x(-0.12),
+            Quat::from_rotation_x(-1.10),
+        ),
+        gather(
+            LEFT_ARM,
+            Quat::from_rotation_z(ARM_SPLAY),
+            Quat::from_rotation_z(0.9),
+        ),
+        gather(
+            RIGHT_ARM,
+            Quat::from_rotation_z(-ARM_SPLAY),
+            Quat::from_rotation_z(-0.9),
+        ),
+    ])
+}
+
+/// The clip the character's state machine names `name`, if the rig has one.
+///
+/// The lookup [`crcbl::anim::Machine::new`] binds the asset with: the asset
+/// names clips and this rig authors them, so the two meet here and nowhere
+/// else.
+#[must_use]
+pub fn clip(name: &str) -> Option<Clip> {
+    match name {
+        "idle" => Some(idle()),
+        "walk" => Some(walk()),
+        "run" => Some(run()),
+        "jump" => Some(jump()),
+        _ => None,
+    }
+}
+
+/// One stride of `gait`.
+fn stride(gait: &Gait) -> Clip {
     // Quarters of the stride: contact, mid-swing, contact again, mid-swing.
     let beats = vec![
         0.0,
-        0.25 * WALK_CYCLE_S,
-        0.5 * WALK_CYCLE_S,
-        0.75 * WALK_CYCLE_S,
-        WALK_CYCLE_S,
+        0.25 * gait.cycle,
+        0.5 * gait.cycle,
+        0.75 * gait.cycle,
+        gait.cycle,
     ];
     let turning = |joint: usize, angles: [f32; 5], axis: fn(f32) -> Quat| {
         Channel::new(
@@ -492,8 +622,9 @@ pub fn walk() -> Clip {
         )
         .expect("five keyframes and five values")
     };
-    let s = THIGH_SWING;
-    let a = ARM_SWING;
+    let s = gait.thigh;
+    let a = gait.arm;
+    let twist = gait.chest_twist;
     Clip::new(vec![
         turning(
             LEFT_THIGH,
@@ -501,27 +632,13 @@ pub fn walk() -> Clip {
             Quat::from_rotation_x as fn(f32) -> Quat,
         ),
         turning(RIGHT_THIGH, [-s, 0.0, s, 0.0, -s], Quat::from_rotation_x),
-        // A knee only bends one way, so every value is negative: the shin comes
-        // up behind, never through the front of the leg.
-        turning(
-            LEFT_SHIN,
-            [-0.15, -0.70, -0.10, -0.25, -0.15],
-            Quat::from_rotation_x,
-        ),
-        turning(
-            RIGHT_SHIN,
-            [-0.10, -0.25, -0.15, -0.70, -0.10],
-            Quat::from_rotation_x,
-        ),
+        turning(LEFT_SHIN, gait.left_knee, Quat::from_rotation_x),
+        turning(RIGHT_SHIN, gait.right_knee, Quat::from_rotation_x),
         // Arms counter-swing: the left arm goes back as the left leg comes
         // forward, which is what stops a walk reading as a march.
         swinging(LEFT_ARM, [-a, 0.0, a, 0.0, -a], ARM_SPLAY),
         swinging(RIGHT_ARM, [a, 0.0, -a, 0.0, a], -ARM_SPLAY),
-        turning(
-            CHEST,
-            [0.0, CHEST_TWIST, 0.0, -CHEST_TWIST, 0.0],
-            Quat::from_rotation_y,
-        ),
+        turning(CHEST, [0.0, twist, 0.0, -twist, 0.0], Quat::from_rotation_y),
         // The hips drop at the bottom of each step — twice per stride, which is
         // why this channel has the beats the legs do and half their period.
         Channel::new(
@@ -529,7 +646,7 @@ pub fn walk() -> Clip {
             beats.clone(),
             Interpolation::Linear,
             Track::Translation(
-                [0.0, -HIP_BOB, 0.0, -HIP_BOB, 0.0]
+                [0.0, -gait.hip_bob, 0.0, -gait.hip_bob, 0.0]
                     .into_iter()
                     .map(|drop| Vec3::new(0.0, HIP_Y + drop, 0.0))
                     .collect(),
@@ -542,7 +659,8 @@ pub fn walk() -> Clip {
 #[cfg(test)]
 mod tests {
     use super::{
-        HEIGHT, JOINTS, PARTS, REACH, WALK_CYCLE_S, idle, parts, positions, skeleton, walk,
+        HEIGHT, JOINTS, JUMP_TUCK_S, PARTS, REACH, ROOT, RUN_CYCLE_S, WALK_CYCLE_S, clip, idle,
+        jump, parts, positions, run, skeleton, walk,
     };
     use crcbl::anim::{Palette, Pose};
     use crcbl::math::Vec3;
@@ -699,6 +817,54 @@ mod tests {
         clip.sample_into(0.0, &skeleton, &mut start);
         clip.sample_into(WALK_CYCLE_S, &skeleton, &mut end);
         assert_eq!(start, end);
+    }
+
+    /// The run loops as the walk does, over its own shorter cycle.
+    #[test]
+    fn the_run_clip_meets_itself_at_the_seam() {
+        let skeleton = skeleton();
+        let clip = run();
+        assert_eq!(clip.duration(), RUN_CYCLE_S);
+        let mut start = Pose::new(&skeleton);
+        let mut end = Pose::new(&skeleton);
+        clip.sample_into(0.0, &skeleton, &mut start);
+        clip.sample_into(RUN_CYCLE_S, &skeleton, &mut end);
+        assert_eq!(start, end);
+    }
+
+    /// The jump gathers and then holds: past its tuck the pose stops moving,
+    /// which is what a one-shot the machine holds at its end draws while the
+    /// character is in the air.
+    #[test]
+    fn the_jump_clip_gathers_into_a_tuck_and_holds_it() {
+        let skeleton = skeleton();
+        let clip = jump();
+        assert_eq!(clip.duration(), JUMP_TUCK_S);
+        let mut start = Pose::new(&skeleton);
+        let mut tuck = Pose::new(&skeleton);
+        let mut later = Pose::new(&skeleton);
+        clip.sample_into(0.0, &skeleton, &mut start);
+        clip.sample_into(JUMP_TUCK_S, &skeleton, &mut tuck);
+        clip.sample_into(4.0 * JUMP_TUCK_S, &skeleton, &mut later);
+        assert_ne!(start, tuck, "the jump never gathered");
+        assert_eq!(tuck, later, "the tuck was not held");
+    }
+
+    /// The lookup the state machine is bound through knows every clip, and
+    /// none of them drives the root — they are in place.
+    #[test]
+    fn every_clip_is_in_place_and_reachable_by_name() {
+        for name in ["idle", "walk", "run", "jump"] {
+            let found = clip(name).unwrap_or_else(|| panic!("no clip is named {name:?}"));
+            assert!(
+                found
+                    .channels()
+                    .iter()
+                    .all(|channel| channel.joint() != ROOT),
+                "{name} drives the root, so it authors root motion this sample does not apply"
+            );
+        }
+        assert!(clip("swim").is_none());
     }
 
     /// And it moves: the feet are somewhere different a quarter of the way

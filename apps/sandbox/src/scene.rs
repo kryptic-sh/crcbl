@@ -55,8 +55,7 @@
 use crcbl::console::{SimSet, SimVars};
 use crcbl::core::TickId;
 use crcbl::core::input::KeyCode;
-use crcbl::core::time::TimeSource;
-use crcbl::ecs::{ComponentHash, Entity, Inspector, System, World};
+use crcbl::ecs::{ComponentHash, Entity, Inspector, ScheduleClock, System, World};
 use crcbl::net::{ConsoleOutcome, ConsoleReply};
 use crcbl::reflect::Reflect;
 use crcbl::render::DirectionalLight;
@@ -167,7 +166,7 @@ impl Scene {
     /// A cube that has not spun yet and a sun shining as `light` does, its
     /// systems' ticks timed on `clock` — or, with `None`, not timed.
     #[must_use]
-    pub fn new(light: DirectionalLight, clock: Option<Box<dyn TimeSource>>) -> Self {
+    pub fn new(light: DirectionalLight, clock: Option<ScheduleClock>) -> Self {
         let mut world = World::new();
         world.schedule_mut().set_clock(clock);
         let cube = world.spawn();

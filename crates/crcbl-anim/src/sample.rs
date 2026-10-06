@@ -328,6 +328,34 @@ impl Clip {
     }
 }
 
+impl Clip {
+    /// The translation this clip drives `joint` to at `time` seconds, or `None`
+    /// if no channel drives that joint's translation.
+    ///
+    /// One channel read, not a pose: what root-motion extraction needs, which
+    /// is the root's path and nothing else
+    /// ([`Machine::root_velocity`](crate::machine::Machine::root_velocity)).
+    /// Where two channels drive the same translation the later one wins, which
+    /// is [`sample_into`](Self::sample_into)'s rule.
+    ///
+    /// `None` rather than the rest translation, because the only question a
+    /// caller asks of an undriven joint is how far it moved — and it did not.
+    #[must_use]
+    pub fn translation_of(&self, joint: usize, time: f32) -> Option<Vec3> {
+        self.channels()
+            .iter()
+            .rev()
+            .find_map(|channel| match channel.track() {
+                Track::Translation(values) if channel.joint() == joint => Some(sample_vec3(
+                    values,
+                    channel.interpolation(),
+                    locate(channel.times(), time),
+                )),
+                _ => None,
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Segment, locate};

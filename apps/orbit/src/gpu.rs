@@ -8,13 +8,14 @@
 //! # There is no sprite pass and no camera yet
 //!
 //! `docs/plan/sample/06-orbit.md` wants the bodies and the rocket in 3D with a
-//! sprite layer of chrome over them, and neither exists here: the milestones
-//! this sample has reached draw the map and the instruments out of the draw
-//! list's own primitives, measured in pixels against the surface, which is what
-//! the UI pass has always drawn in. So there is nothing yet for a camera to
-//! project and nothing for a sprite to be, and this file will grow a third pass
-//! rather than change the two it has. `crate::page` says why a curve is a row of
-//! dots in the meantime.
+//! layer of `.crpix` chrome over them, and only the chrome exists here: the
+//! milestones this sample has reached draw the map and the instruments into the
+//! draw list, measured in pixels against the surface, which is what the UI pass
+//! has always drawn in. The chrome's sprites are image quads from the UI pass's
+//! own atlas — [`crate::art`] registers them through [`Gpu::images_mut`] — so
+//! they need no pass of their own. There is nothing yet for a camera to
+//! project, and when the bodies go 3D this file will grow a third pass rather
+//! than change the two it has.
 //!
 //! # The frame is [`crcbl::engine::PageBundle`]'s
 //!
@@ -121,6 +122,12 @@ impl Gpu {
     #[must_use]
     pub const fn video(&self) -> &crcbl::settings::VideoSettings {
         self.0.video()
+    }
+
+    /// See [`PageBundle::images_mut`]: where [`crate::art`] registers the
+    /// flight UI's sprites.
+    pub const fn images_mut(&mut self) -> &mut crcbl::ui::image::ImageAtlas {
+        self.0.images_mut()
     }
 
     /// See [`PageBundle::atlas`].

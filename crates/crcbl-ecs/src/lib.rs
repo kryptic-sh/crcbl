@@ -10,8 +10,11 @@
 //! * **Schedule** — an ordered sequence of systems run each tick. Each system
 //!   declares the [`Shared`] resources its tick reads and writes
 //!   ([`SystemTrait::access`]); the schedule derives the conflicts between
-//!   them at registration and, in debug builds, panics on a tick touching a
-//!   resource its system did not declare.
+//!   them at registration, groups the systems into stages no two systems of
+//!   which conflict, and, in debug builds, panics on a tick touching a
+//!   resource its system did not declare. Handed a `crcbl_jobs::Pool`, it
+//!   ticks each stage's systems across the pool's threads, with the same
+//!   result as running them one by one.
 //! * **World** — the container: entity pool, schedule, deferred-destruction
 //!   queue. `World::tick()` runs the schedule then sweeps dead entities.
 //! * **[`quantize`]** — how a replicated component declares its wire form:
@@ -66,7 +69,7 @@ pub use component_hash::ComponentHash;
 pub use entity::{Entity, EntityMarker};
 pub use game_module::{ClientInputs, GameModule};
 pub use inspector::{Inspector, SystemStats};
-pub use schedule::Schedule;
+pub use schedule::{Schedule, ScheduleClock};
 pub use shared::Shared;
 pub use system::{DebugCtx, DebugDrawFn, System, SystemTrait};
 pub use tick_time::{TICK_TIME_WINDOW, TickTime};

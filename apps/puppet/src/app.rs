@@ -62,6 +62,10 @@ const ACTION_BACK: &str = "back";
 const ACTION_LEFT: &str = "left";
 /// See [`ACTION_FORWARD`].
 const ACTION_RIGHT: &str = "right";
+/// Run rather than walk, for as long as it is held. Either shift key.
+const ACTION_RUN: &str = "run";
+/// Jump.
+const ACTION_JUMP: &str = "jump";
 /// Swing the camera about the character, anticlockwise and clockwise.
 const ACTION_CAMERA_LEFT: &str = "camera-left";
 /// See [`ACTION_CAMERA_LEFT`].
@@ -84,6 +88,8 @@ fn action_map() -> ActionMap {
         (ACTION_BACK, vec![KeyCode::KeyS, KeyCode::ArrowDown]),
         (ACTION_LEFT, vec![KeyCode::KeyA, KeyCode::ArrowLeft]),
         (ACTION_RIGHT, vec![KeyCode::KeyD, KeyCode::ArrowRight]),
+        (ACTION_RUN, vec![KeyCode::ShiftLeft, KeyCode::ShiftRight]),
+        (ACTION_JUMP, vec![KeyCode::Space]),
         (ACTION_CAMERA_LEFT, vec![KeyCode::KeyQ]),
         (ACTION_CAMERA_RIGHT, vec![KeyCode::KeyE]),
         (ACTION_CAMERA_UP, vec![KeyCode::KeyR]),
@@ -101,9 +107,11 @@ fn action_map() -> ActionMap {
 /// What the keyboard is asking the **simulation** for on the tick `actions` has
 /// just begun, at the yaw the view is currently at.
 ///
-/// Every one of these reads the **held** state: walking is a thing that happens
-/// for as long as a key is down, and there is nothing in milestone 1 that
-/// happens on a press. The camera actions are deliberately absent — they are
+/// Walking and running read the **held** state: they happen for as long as a
+/// key is down. The jump reads the held state *or* this tick's press edge, so
+/// a tap that went down and up between two ticks still reaches the server,
+/// which takes the jump on the edge it sees tick to tick — holding the key
+/// does not jump again. The camera actions are deliberately absent — they are
 /// read in [`Puppet::draw`], on the frame's clock, because the camera is not
 /// part of what the server owns.
 fn controls(actions: &ActionMap, yaw: f32) -> Controls {
@@ -112,6 +120,8 @@ fn controls(actions: &ActionMap, yaw: f32) -> Controls {
         back: actions.button_held(ACTION_BACK),
         left: actions.button_held(ACTION_LEFT),
         right: actions.button_held(ACTION_RIGHT),
+        run: actions.button_held(ACTION_RUN),
+        jump: actions.button_held(ACTION_JUMP) || actions.just_pressed(ACTION_JUMP),
         yaw,
     }
 }
@@ -146,6 +156,8 @@ pub struct Summary {
     pub climbed: u64,
     /// How many ticks it was stopped by something too steep to stand on.
     pub blocked: u64,
+    /// How many footsteps the animation raised over the whole run.
+    pub footsteps: u64,
     /// How many commands the last overlay drew. Zero would mean a run that
     /// presented frames with nothing on them, which is the one failure a
     /// headless smoke test could otherwise report as a pass.
@@ -201,12 +213,14 @@ pub struct Puppet {
     stats: Stats,
     /// What the last overlay drew, from the same frame.
     page: PageStats,
-    /// The character's rig, posed from the simulation's measured speed.
+    /// The character's rig, posed from the animation state the simulation
+    /// left.
     ///
-    /// **Presentation, like the camera**: it runs on the frame's clock, nothing
-    /// in it crosses the wire, and the tick would draw the same picture without
-    /// it. The animation rules in `docs/notes/simulation.md` put pose
-    /// evaluation on the client, and this is where puppet's client is.
+    /// **Presentation, like the camera**: it samples the state machine's state
+    /// and never steps it, nothing in it crosses the wire, and the tick would
+    /// run the same without it. The animation rules in
+    /// `docs/notes/simulation.md` put pose evaluation on the client, and this
+    /// is where puppet's client is.
     anim: Animator,
     /// Seconds of frame time since the last `[POSE]` line.
     pose_report: f32,
@@ -220,8 +234,8 @@ pub struct Puppet {
 const POSE_REPORT_S: f32 = 1.0;
 
 impl Puppet {
-    /// The `[POSE]` line: what the locomotion blend did with the speed the
-    /// controller measured.
+    /// The `[POSE]` line: what the animation did with the state the server's
+    /// state machine left.
     ///
     /// **A second line rather than four more terms on the `[HUD]` one**, and
     /// the reason is which clock each is on. The `[HUD]` line is logged from
@@ -233,30 +247,34 @@ impl Puppet {
     /// it.
     ///
     /// `web/tools/browser-e2e.mjs` reads three claims out of it, and each is a
-    /// number nothing but the blend can move:
+    /// number nothing but the animation can move:
     ///
-    /// * `blend` — where the character sits across the locomotion set, 0 at the
-    ///   idle stop and 1 at [`crate::anim::WALK_STOP_MPS`]. It follows `speed`,
-    ///   which is measured from the controller's own displacement.
+    /// * `blend` — how far the character is out of its idle stance, 0 in idle
+    ///   and 1 running or jumping ([`crate::anim::Animator::blend`]). The state
+    ///   machine leaves idle when `speed`, measured from the controller's own
+    ///   displacement, passes the asset's threshold, and fades between them.
     /// * `mid` — how many frames the blend has spent **strictly between** the
-    ///   two stops. The heartbeat is a second apart and a crossing takes less
-    ///   than that, so the counter is what says the weight swept rather than
+    ///   two ends. The heartbeat is a second apart and a fade takes less than
+    ///   that, so the counter is what says the weight swept rather than
     ///   snapped.
     /// * `dev` — how far the pose has carried a joint from the rest pose, in
-    ///   metres. It sweeps while the character walks and holds still while it
+    ///   metres. It sweeps while the character moves and holds still while it
     ///   stands, because [`crate::rig::idle`] is a stance.
-    fn report_pose(&mut self, render_dt: f32, speed: f32) {
+    ///
+    /// `state` is the state machine's current state, for a reader.
+    fn report_pose(&mut self, render_dt: f32) {
         self.pose_report += render_dt;
         if self.pose_report < POSE_REPORT_S {
             return;
         }
         self.pose_report = 0.0;
         crcbl::log::info!(
-            "[POSE] speed: {:.2}  blend: {:.2}  mid: {}  dev: {:.3}",
-            speed,
+            "[POSE] speed: {:.2}  blend: {:.2}  mid: {}  dev: {:.3}  state: {}",
+            self.render_state.speed,
             self.anim.blend(),
             self.anim.partial(),
             self.anim.deviation(),
+            self.anim.state_name(),
         );
     }
 }
@@ -485,16 +503,13 @@ impl HostedGame for Puppet {
         self.render_state = self.game.render_state();
         self.stats = self.game.stats();
 
-        // The pose runs on the **frame** clock and off the simulation's
-        // *measured* speed — see [`crate::anim`] for why measured and not
-        // commanded. `render_dt` and not `dt`, so a paused loop holds the pose
-        // where the simulation left it rather than walking on the spot.
-        #[allow(clippy::cast_possible_truncation)]
-        let speed = self.render_state.speed as f32;
-        let render_dt = frame.render_dt.as_secs_f32();
-        self.anim.advance(render_dt, speed);
+        // The pose is sampled from the state machine's state as the last tick
+        // left it — see [`crate::anim`] for why the client samples and never
+        // steps. A paused loop runs no tick, so the pose holds where the
+        // simulation left it rather than walking on the spot.
+        self.anim.advance(&self.render_state.anim);
         gpu.set_palette(self.anim.palette());
-        self.report_pose(render_dt, speed);
+        self.report_pose(frame.render_dt.as_secs_f32());
 
         gpu.place_character(self.render_state.position, self.render_state.facing);
         // The simulation is `f64` and the renderer's camera is `f32`; this is
@@ -521,6 +536,7 @@ impl HostedGame for Puppet {
             gpu.extent(),
             &self.render_state,
             self.anim.blend(),
+            self.anim.state_name(),
         );
     }
 
@@ -558,6 +574,7 @@ impl HostedGame for Puppet {
             ],
             climbed: self.stats.climbed,
             blocked: self.stats.blocked,
+            footsteps: self.stats.footsteps,
             commands: self.page.commands,
         }
     }
@@ -565,7 +582,7 @@ impl HostedGame for Puppet {
     fn log_summary(summary: &Summary) {
         crcbl::log::info!(
             "puppet: {} frames, {} ticks, feet at {:.2} {:.2} {:.2}, {} step(s) climbed, \
-             {} tick(s) blocked, {} overlay commands ({:?})",
+             {} tick(s) blocked, {} footstep(s), {} overlay commands ({:?})",
             summary.run.frames,
             summary.run.ticks,
             summary.feet[0],
@@ -573,6 +590,7 @@ impl HostedGame for Puppet {
             summary.feet[2],
             summary.climbed,
             summary.blocked,
+            summary.footsteps,
             summary.commands,
             summary.run.exit,
         );
@@ -639,6 +657,10 @@ mod tests {
             summary.feet[1].abs() < 0.05,
             "the circuit left the flat, at {:.2} m",
             summary.feet[1],
+        );
+        assert!(
+            summary.footsteps > 0,
+            "two seconds of walking the circuit raised no footstep",
         );
     }
 
@@ -806,6 +828,42 @@ mod tests {
             walked.position,
             stopped.position,
         );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **Shift and Space reach the state machine**: the run key carries the
+    /// character into the run state, and a tap of the jump key — down and up
+    /// again — puts it in the jump. The shell-to-server path for the two new
+    /// actions, made where a failure names the step.
+    #[test]
+    fn the_run_and_jump_keys_reach_the_state_machine() {
+        let mut engine = scripted(&headless(240));
+        let window = engine.window();
+        for key in [KeyCode::KeyW, KeyCode::ShiftLeft] {
+            engine
+                .shell_mut()
+                .key_press(window, key)
+                .expect("the window is live");
+        }
+        for _ in 0..60 {
+            engine.frame().expect("a frame");
+        }
+        assert_eq!(engine.game().game().stats().anim, "run");
+
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::Space)
+            .expect("the window is live");
+        let mut jumped = false;
+        for _ in 0..10 {
+            engine.frame().expect("a frame");
+            jumped |= engine.game().game().stats().anim == "jump";
+        }
+        assert!(jumped, "a tap of Space never put the character in the jump");
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

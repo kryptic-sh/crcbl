@@ -18,7 +18,7 @@
 //! crcbl::vfx       → crcbl-vfx       particle effects, pooled and hashed (feature `vfx`)
 //! crcbl::inventory → crcbl-inventory grids, items, placement and stacking (feature `inventory`)
 //! crcbl::ecs       → crcbl-ecs       the world, components, systems, the schedule
-//! crcbl::anim      → crcbl-anim      skeletons, clips, pose sampling, joint palettes
+//! crcbl::anim      → crcbl-anim      skeletons, clips, sampling, palettes, the state machine
 //! crcbl::nav       → crcbl-nav       ground-grid routing and bounded reach
 //! crcbl::phys      → crcbl-phys      rigid bodies, colliders, forces, queries
 //! crcbl::net       → crcbl-net       the transport seam and the wire protocol
@@ -81,15 +81,17 @@
 //! phase (`crcbl-render` at P1, `crcbl-ecs` / `crcbl-net` at P2, …); nothing
 //! here is expected to be removed.
 
-/// [`crcbl-anim`](crcbl_anim): skeletons, animation clips, clip sampling and
-/// the joint palette a skinning pass consumes.
+/// [`crcbl-anim`](crcbl_anim): skeletons, animation clips, clip sampling,
+/// the joint palette a skinning pass consumes, and the state machine above
+/// them.
 ///
-/// The client runtime of skeletal animation — sampling, 1D blending, two-bone
-/// IK and the palette — and nothing above it: no state machine, no root motion
-/// (both owed in `docs/backlog.md`), and GPU skinning is [`render`]'s. It
-/// depends on `glam` alone, so re-exporting it adds no crate to a game's graph
-/// beyond the one; in particular it does **not** drag in the glTF importer,
-/// which stays behind `crcbl::scene`'s feature where it belongs.
+/// Skeletal animation's runtime — sampling, 1D blending, two-bone IK, the
+/// palette, and the state machine with its events and root motion
+/// ([`anim::machine`]) — while GPU skinning is
+/// [`render`]'s. It depends on `glam`, `serde` and `ron`, all already in this
+/// crate's graph, so re-exporting it adds no crate to a game's graph beyond the
+/// one; in particular it does **not** drag in the glTF importer, which stays
+/// behind `crcbl::scene`'s feature where it belongs.
 pub use crcbl_anim as anim;
 /// [`crcbl-assets`](crcbl_assets): the IO seam — [`AssetSource`], the
 /// [`DirSource`] over a directory, and the registry above them.

@@ -1895,6 +1895,94 @@ fn bench_phys_reports_three_distributions_and_the_answers_beside_them() {
     );
 }
 
+/// `crcbl bench --scenario ecs` end to end: one per-tick distribution, the
+/// schedule's shape beside it, and the world's hash as the checksum.
+///
+/// Nothing below asserts a duration: what is pinned is that a full percentile
+/// set came out, that the schedule had the conflicts its declarations make,
+/// and that the checksum is the hex string `crcbl sim` prints a hash as.
+#[test]
+fn bench_ecs_reports_a_per_tick_distribution_and_the_schedule_beside_it() {
+    let temporary = TempDir::new("bench-ecs");
+    let output = crcbl(
+        temporary.path(),
+        &[
+            "bench",
+            "--scenario",
+            "ecs",
+            "--entities",
+            "200",
+            "--iterations",
+            "20",
+            "--warmup",
+            "2",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = stdout(&output);
+    assert_eq!(json.lines().count(), 1, "exactly one line: {json}");
+    assert!(
+        json.starts_with(r#"{"ok":true,"command":"bench","scenario":"ecs""#),
+        "{json}"
+    );
+    assert!(json.contains(r#""environment":{"arch":"#), "{json}");
+    assert_eq!(numbers(&json, "entities"), vec![200]);
+    assert_eq!(numbers(&json, "systems"), vec![8]);
+    assert_eq!(numbers(&json, "conflicts"), vec![5]);
+
+    let ladder: Vec<usize> = ["p50", "p95", "p99", "max"]
+        .iter()
+        .map(|key| numbers(&json, key)[0])
+        .collect();
+    assert!(
+        ladder.windows(2).all(|pair| pair[0] <= pair[1]),
+        "out of order: {ladder:?} in {json}"
+    );
+    assert!(!json.contains("mean"), "{json}");
+
+    let checksum = field_values(&json, "checksum").next().expect("a checksum");
+    let hex = checksum.trim_matches('"');
+    assert!(
+        checksum.starts_with('"') && hex.len() == 16 && u64::from_str_radix(hex, 16).is_ok(),
+        "the checksum is not a sixteen-digit hex string: {checksum}"
+    );
+}
+
+/// `crcbl bench --scenario ecs --workers N` ticks the schedule on a pool and
+/// prints the checksum the serial run prints, with the workers it got.
+#[test]
+fn bench_ecs_on_a_pool_prints_the_serial_checksum() {
+    let temporary = TempDir::new("bench-ecs-workers");
+    let run = |extra: &[&str]| {
+        let mut args = vec![
+            "bench",
+            "--scenario",
+            "ecs",
+            "--entities",
+            "100",
+            "--iterations",
+            "20",
+            "--json",
+        ];
+        args.extend_from_slice(extra);
+        let output = crcbl(temporary.path(), &args);
+        assert_eq!(code(&output), 0, "{extra:?}");
+        stdout(&output)
+    };
+    let serial = run(&[]);
+    let pooled = run(&["--workers", "3"]);
+    let checksum = |json: &str| field_values(json, "checksum").next().map(str::to_owned);
+    assert_eq!(checksum(&pooled), checksum(&serial));
+    assert_eq!(numbers(&pooled, "workers"), vec![3]);
+    assert!(serial.contains(r#""workers":null"#), "{serial}");
+}
+
 /// **The same crowd in a smaller arena answers more per query**, which is the
 /// fact `docs/backlog.md` says a scale number is meaningless without.
 ///
@@ -2151,6 +2239,30 @@ fn sim_same_input_produces_the_same_hash() {
         sim_parts(&first).0,
         sim_parts(&other_length).0,
         "the hash must depend on how long the world ran",
+    );
+}
+
+/// `docs/plan/21-jobs.md`'s killer test through the binary: one seed at one,
+/// two and eight threads prints one line, and a zero thread count is a bad
+/// invocation rather than a run.
+#[test]
+fn sim_threads_do_not_move_the_hash() {
+    let temporary = TempDir::new("sim-threads");
+    let run = |threads: &str| {
+        let output = crcbl(
+            temporary.path(),
+            &["sim", "--ticks", "200", "--seed", "9", "--threads", threads],
+        );
+        assert_eq!(code(&output), 0, "--threads {threads}");
+        stdout(&output)
+    };
+    let serial = run("1");
+    for threads in ["2", "8"] {
+        assert_eq!(run(threads), serial, "--threads {threads}");
+    }
+    assert_eq!(
+        code(&crcbl(temporary.path(), &["sim", "--threads", "0"])),
+        2
     );
 }
 

@@ -466,9 +466,10 @@ pub fn row_text<T: Serialize>(system: &str, value: &T) -> Result<String, ScnErro
 ///
 /// `T` is the component the chunk file holds rows of; the three bounds are what
 /// each half needs — `Serialize`/`DeserializeOwned` for the file,
-/// [`ComponentHash`] and `'static` because that is what
-/// `impl SystemTrait for System<T>` already requires and so what the schedule
-/// can hold.
+/// [`ComponentHash`] and `'static` because `impl SystemTrait for System<T>`
+/// requires both, so every system the schedule holds has them. That impl also
+/// requires `Send`, which is not asked for here: the codec reaches a system by
+/// downcast, and the schedule already holds no system without it.
 ///
 /// ```
 /// use crcbl_ecs::{ComponentHash, System, World};

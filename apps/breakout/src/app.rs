@@ -838,7 +838,11 @@ mod tests {
             ["surround", "sprites", "ui-composite", "ui-overlay"],
             "the paused frame's passes, in declaration order:\n{dump}"
         );
-        assert_menu_art_above_the_cut_and_under(engine.gpu().draw_list(), "PAUSED");
+        assert_menu_art_above_the_cut_and_under(
+            engine.gpu().draw_list(),
+            engine.gpu().menu_skin(),
+            "PAUSED",
+        );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

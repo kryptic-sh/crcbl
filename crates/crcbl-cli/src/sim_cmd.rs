@@ -28,13 +28,28 @@
 //! real per-tick mutation to hash. Nothing a game links should be able to reach
 //! them, so they are private to this binary rather than surface on
 //! `crcbl-server` or `crcbl-ecs`.
+//!
+//! # `--threads`, and what it proves
+//!
+//! `docs/plan/21-jobs.md`'s killer test is the same input at `--threads 1`,
+//! `2` and `N` giving the same state hash. So the world is handed a [`Pool`]
+//! of `--threads - 1` workers ([`World::set_pool`]) and its schedule ticks each
+//! stage across it. The world gives that something to get wrong: [`Swarm`]
+//! writes its rows' mean to the [`CROWD`] resource and [`Herd`] reads it — a
+//! real [`Shared`] conflict, which puts the two in different stages — while the
+//! systems before [`Herd`] touch nothing in common and share a stage. A
+//! schedule that let [`Herd`] tick beside [`Swarm`] would read the mean before
+//! or after it was written, depending on the threads, and the hash would show
+//! it.
 
 use std::hash::Hasher;
 use std::time::Duration;
 
 use crcbl::core::FrameClock;
+use crcbl::core::rand::{hash_unit, salt};
 use crcbl::core::time::{ManualTime, TimeSource};
-use crcbl::ecs::{Access, ComponentHash, DebugCtx, Entity, System, SystemTrait, World};
+use crcbl::ecs::{Access, ComponentHash, DebugCtx, Entity, Shared, System, SystemTrait, World};
+use crcbl::jobs::{Pool, default_spawner};
 use crcbl::server::sim_hash::hash_world;
 
 use crate::args::SimArgs;
@@ -45,12 +60,16 @@ use crate::report::{Failure, Outcome};
 ///
 /// # Errors
 ///
-/// [`Failure`] if the clock and the world disagree about how many ticks ran,
-/// which is the one condition that would make the two numbers in the output
-/// contract mean different things.
+/// [`Failure`] if the pool's workers cannot be started, or if the clock and the
+/// world disagree about how many ticks ran, which is the one condition that
+/// would make the two numbers in the output contract mean different things.
 pub fn run(args: &SimArgs) -> Result<Outcome, Failure> {
-    // Build a deterministic world. Same seed → same entity layout.
+    // Build a deterministic world. Same seed → same entity layout, whatever
+    // the pool it is handed.
+    let pool = pool(args.threads)?;
+    let workers = pool.workers();
     let mut world = build_world(args.seed);
+    world.set_pool(Some(pool));
     // The parser holds `tick_rate` to `1..=MAX_TICK_RATE`, so this division
     // neither divides by zero nor truncates to a zero period.
     let period = Duration::from_nanos(1_000_000_000u64 / u64::from(args.tick_rate));
@@ -119,8 +138,22 @@ pub fn run(args: &SimArgs) -> Result<Outcome, Failure> {
             ("final_tick", Json::Number(final_tick.get() as i64)),
             ("seed", Json::string(args.seed.to_string())),
             ("tick_rate", Json::Number(i64::from(args.tick_rate))),
+            ("threads", Json::Number(args.threads as i64)),
+            // What the spawner gave, which is not the request on a runtime
+            // with no threads: the hash above is only evidence about the
+            // thread counts the run actually had.
+            ("workers", Json::Number(workers as i64)),
         ],
     })
+}
+
+/// A pool giving the world `threads` threads, the calling one included: the
+/// thread that runs the schedule ticks systems too, so it is `threads - 1`
+/// workers.
+fn pool(threads: usize) -> Result<Pool, Failure> {
+    let workers = threads.saturating_sub(1);
+    Pool::with_workers(default_spawner().as_ref(), workers)
+        .map_err(|error| Failure::new(format!("could not start {workers} pool workers: {error}")))
 }
 
 /// Builds a deterministic world from a seed.
@@ -130,7 +163,8 @@ pub fn run(args: &SimArgs) -> Result<Outcome, Failure> {
 ///
 /// One system ([`CounterSystem`]) has real per-tick behaviour — it increments
 /// each entity's f32 component by 1.0 every tick, so the state hash genuinely
-/// depends on tick count, not just on `(seed, ticks)`.
+/// depends on tick count, not just on `(seed, ticks)`. [`Swarm`] and [`Herd`]
+/// are the conflict a parallel schedule has to respect; see the module docs.
 fn build_world(seed: u64) -> World {
     let mut world = World::new();
 
@@ -165,7 +199,183 @@ fn build_world(seed: u64) -> World {
     }
     world.register_system(Box::new(counters));
 
+    let crowd = Shared::new(CROWD, 0.0_f64);
+    // The one resource this world registers, so the name cannot collide.
     world
+        .share(&crowd)
+        .expect("the harness registers one resource");
+    let swarm_seed = salt(seed, SWARM_SALT);
+    world.register_system(Box::new(Swarm {
+        rows: (0..SWARM_ROWS)
+            .map(|index| Row::seeded(swarm_seed, index))
+            .collect(),
+        crowd: crowd.clone(),
+        written: 0.0,
+    }));
+    let herd_seed = salt(seed, HERD_SALT);
+    world.register_system(Box::new(Herd {
+        rows: (0..HERD_ROWS)
+            .map(|index| Row::seeded(herd_seed, index))
+            .collect(),
+        crowd,
+    }));
+
+    world
+}
+
+// ---------------------------------------------------------------------------
+// Swarm and Herd — a conflict over a shared resource
+// ---------------------------------------------------------------------------
+
+/// The resource [`Swarm`] writes its rows' mean to and [`Herd`] reads.
+const CROWD: &str = "crowd";
+
+/// Rows [`Swarm`] steps each tick.
+const SWARM_ROWS: usize = 4096;
+
+/// Rows [`Herd`] steps each tick.
+const HERD_ROWS: usize = 256;
+
+/// What [`Swarm`]'s rows are dealt from, salted into the seed so its rows and
+/// [`Herd`]'s are not one stream.
+const SWARM_SALT: u64 = 1;
+
+/// [`SWARM_SALT`] for [`Herd`].
+const HERD_SALT: u64 = 2;
+
+/// How hard a row's spring pulls it towards the point it is driven at.
+const STIFFNESS: f64 = 4.0;
+
+/// How much of a row's velocity its spring loses, per second.
+const DAMPING: f64 = 0.5;
+
+/// One entity's state in [`Swarm`] or [`Herd`].
+#[derive(Clone, Copy, Debug)]
+struct Row {
+    position: f64,
+    velocity: f64,
+}
+
+impl Row {
+    /// The row at `index` dealt from `seed`, both halves in `-1.0..1.0`.
+    fn seeded(seed: u64, index: usize) -> Self {
+        let index = index as u64;
+        Self {
+            position: hash_unit(seed, 2 * index) * 2.0 - 1.0,
+            velocity: hash_unit(seed, 2 * index + 1) * 2.0 - 1.0,
+        }
+    }
+
+    /// One semi-implicit Euler step of a damped spring pulled towards `target`.
+    ///
+    /// Multiplies and adds only, which IEEE 754 rounds the same everywhere, so
+    /// the hash is a property of the inputs and not of the machine.
+    fn step(&mut self, target: f64, dt: f64) {
+        let accel = STIFFNESS * (target - self.position) - DAMPING * self.velocity;
+        self.velocity += accel * dt;
+        self.position += self.velocity * dt;
+    }
+
+    fn hash(&self, hasher: &mut dyn Hasher) {
+        hasher.write_u64(self.position.to_bits());
+        hasher.write_u64(self.velocity.to_bits());
+    }
+}
+
+/// Steps its rows, then writes their mean to [`CROWD`].
+struct Swarm {
+    rows: Vec<Row>,
+    crowd: Shared<f64>,
+    /// The mean last written, hashed here because a resource belongs to no
+    /// system and nothing else would hash it.
+    written: f64,
+}
+
+impl SystemTrait for Swarm {
+    fn name(&self) -> &str {
+        "swarm"
+    }
+
+    fn access(&self) -> Access {
+        Access::none().writes(CROWD)
+    }
+
+    fn tick(&mut self, dt: f64) {
+        for row in &mut self.rows {
+            row.step(0.0, dt);
+        }
+        let mean = self.rows.iter().map(|row| row.position).sum::<f64>() / SWARM_ROWS as f64;
+        *self.crowd.write() = mean;
+        self.written = mean;
+    }
+
+    fn entity_count(&self) -> usize {
+        SWARM_ROWS
+    }
+
+    fn sweep(&mut self, _dead: &[Entity]) {}
+
+    fn debug_draw(&mut self, _ctx: &DebugCtx) {}
+
+    fn hash_state(&self, hasher: &mut dyn Hasher) {
+        for row in &self.rows {
+            row.hash(hasher);
+        }
+        hasher.write_u64(self.written.to_bits());
+    }
+
+    fn contributes_to_hash(&self) -> bool {
+        true
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// Steps its rows towards whatever [`Swarm`] last wrote to [`CROWD`].
+struct Herd {
+    rows: Vec<Row>,
+    crowd: Shared<f64>,
+}
+
+impl SystemTrait for Herd {
+    fn name(&self) -> &str {
+        "herd"
+    }
+
+    fn access(&self) -> Access {
+        Access::none().reads(CROWD)
+    }
+
+    fn tick(&mut self, dt: f64) {
+        let target = *self.crowd.read();
+        for row in &mut self.rows {
+            row.step(target, dt);
+        }
+    }
+
+    fn entity_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn sweep(&mut self, _dead: &[Entity]) {}
+
+    fn debug_draw(&mut self, _ctx: &DebugCtx) {}
+
+    fn hash_state(&self, hasher: &mut dyn Hasher) {
+        for row in &self.rows {
+            row.hash(hasher);
+        }
+    }
+
+    fn contributes_to_hash(&self) -> bool {
+        true
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -240,15 +450,97 @@ impl SystemTrait for CounterSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::args::{DEFAULT_SIM_TICK_RATE, MAX_TICK_RATE};
+    use crate::args::{DEFAULT_SIM_THREADS, DEFAULT_SIM_TICK_RATE, MAX_TICK_RATE};
+    use crcbl::core::TickId;
 
     fn args(ticks: u64, seed: u64) -> SimArgs {
         SimArgs {
             ticks,
             tick_rate: DEFAULT_SIM_TICK_RATE,
             seed,
+            threads: DEFAULT_SIM_THREADS,
             json: false,
         }
+    }
+
+    /// The world's hash after each of `ticks` ticks, on `threads` threads.
+    fn tick_hashes(seed: u64, ticks: u64, threads: usize) -> Vec<u64> {
+        let mut world = build_world(seed);
+        world.set_pool(Some(pool(threads).expect("a pool")));
+        (1..=ticks)
+            .map(|tick| {
+                world.tick();
+                hash_world(&world, TickId::from_raw(tick))
+            })
+            .collect()
+    }
+
+    /// **The killer test**: one seed at one, two and eight threads gives the
+    /// same state hash after every tick — `docs/plan/21-jobs.md`'s
+    /// determinism rule, over a world whose schedule runs a stage of several
+    /// systems across the pool and keeps [`Herd`] after [`Swarm`].
+    #[test]
+    fn the_hash_after_every_tick_is_the_same_at_any_thread_count() {
+        const TICKS: u64 = 120;
+        let serial = tick_hashes(11, TICKS, 1);
+        assert!(
+            serial.windows(2).all(|pair| pair[0] != pair[1]),
+            "the world must change every tick, or equal hashes prove nothing"
+        );
+        for threads in [2, 8] {
+            assert_eq!(
+                tick_hashes(11, TICKS, threads),
+                serial,
+                "{threads} threads moved the hash"
+            );
+        }
+        // And the multi-threaded runs had a pool with workers in it.
+        assert!(pool(8).expect("a pool").workers() > 0);
+    }
+
+    /// The harness world gives a parallel schedule both things to get right:
+    /// a stage of several systems to run at once, and [`Herd`] in a stage of
+    /// its own after [`Swarm`]'s.
+    #[test]
+    fn the_harness_world_has_a_shared_stage_and_a_conflict_between_stages() {
+        let world = build_world(11);
+        let schedule = world.schedule();
+        let names: Vec<&str> = schedule.iter().map(SystemTrait::name).collect();
+        let stage_of = |name: &str| {
+            let index = names
+                .iter()
+                .position(|each| *each == name)
+                .expect("the harness registers it");
+            schedule
+                .stages()
+                .iter()
+                .position(|stage| stage.contains(&index))
+                .expect("every system is in a stage")
+        };
+        assert!(
+            stage_of("swarm") < stage_of("herd"),
+            "{:?}",
+            schedule.stages()
+        );
+        assert!(
+            schedule.stages().iter().any(|stage| stage.len() > 1),
+            "{:?}",
+            schedule.stages()
+        );
+    }
+
+    /// `run` at eight threads reports the hash the serial run does, and the
+    /// thread count it was asked for.
+    #[test]
+    fn run_reports_the_same_hash_and_its_thread_count_at_any_thread_count() {
+        let serial = run(&args(30, 4)).expect("a serial run");
+        let threaded = run(&SimArgs {
+            threads: 8,
+            ..args(30, 4)
+        })
+        .expect("a threaded run");
+        assert_eq!(serial.human, threaded.human);
+        assert!(threaded.json.contains(&("threads", Json::Number(8))));
     }
 
     /// Every system this harness builds contributes to the hash, so the warning
@@ -284,6 +576,7 @@ mod tests {
                 ticks: 32,
                 tick_rate: rate,
                 seed: 5,
+                threads: DEFAULT_SIM_THREADS,
                 json: false,
             })
             .expect("a run at every legal rate");
@@ -308,6 +601,7 @@ mod tests {
             ticks: 4,
             tick_rate: DEFAULT_SIM_TICK_RATE,
             seed: u64::MAX,
+            threads: DEFAULT_SIM_THREADS,
             json: true,
         })
         .expect("a run");

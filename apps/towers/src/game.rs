@@ -1003,6 +1003,9 @@ pub(crate) use checkpoint::Autosave;
 pub use checkpoint::NotSaved;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod parallel_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod resim_tests;
 
 /// The stage, as the server hosts it.

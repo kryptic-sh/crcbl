@@ -23,7 +23,7 @@ import { bootDemo } from '../../engine/demo.js';
 
 bootDemo({
   init,
-  hint: 'W/A/S/D or the arrows walk, relative to where the camera is looking · Q/E swing the camera, R/F raise and lower it · ESC opens the panel · F3 shows the stats · F11 fullscreen',
+  hint: 'W/A/S/D or the arrows walk, relative to where the camera is looking · Shift runs, Space jumps · Q/E swing the camera, R/F raise and lower it · ESC opens the panel · F3 shows the stats · F11 fullscreen',
   savedLabel: 'Nothing',
   bind: (ex) => ({
     prepare: () => ex.__crcbl_puppet_prepare(),

@@ -232,11 +232,11 @@ presence at all, except `render-harness`, which has one that is not a demo —
 - Skeletal animation: designed in topic 17, scheduled post-MVP wave 1 with the
   puppet sample (09) as forcing function & acceptance test. **It started early
   and is partly built**: `crcbl-anim` ships `Skeleton`, `Clip`, `Pose`,
-  `Palette`, `BlendSpace1d` and two-bone IK, `crcbl-render` skins on the GPU,
-  and `apps/puppet` blends a locomotion set by speed. What is out of MVP scope
-  is the rest — the cook, the state machine, root motion and events — which
-  `docs/backlog.md` carries under _Animation (from the deleted 17-animation
-  plan, 2026-09-24)_.
+  `Palette`, `BlendSpace1d`, two-bone IK and the state machine with events and
+  root motion, `crcbl-render` skins on the GPU, and `apps/puppet` runs idle, run
+  and jump through the machine. What is out of MVP scope is the rest — the cook,
+  blend layers and the remaining post ops — which `docs/backlog.md` carries
+  under _Animation (from the deleted 17-animation plan, 2026-09-24)_.
 - Scripting-as-text: game logic is wasm modules (topic 16); Lua VM template
   covers script-style workflows post-MVP.
 - Audio: reverb zones, portal/room-graph propagation, doppler, surround — the

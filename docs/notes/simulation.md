@@ -308,10 +308,15 @@ no CPU's. Worth knowing before anyone puts a particle count in a tick hash.
 
 ### P8's ECS access declarations were never reserved, and P2 says they were
 
-Decision record; the decision is in `docs/backlog.md`. **Option 1 is built
-(2026-10-05)** — declarations, the derived conflicts and the debug check, with
-`run` still sequential; `docs/backlog.md`'s _ECS access declarations and the
-parallel schedule_ records its decisions and what option 2 still needs.
+Decision record. **All three are built, in the order recommended below**: the
+`phys` bench, then option 1 (2026-10-05) — declarations, the derived conflicts
+and the debug check — then a parallel run (2026-10-06), after
+`crcbl bench --scenario ecs` gave it a baseline. The run is not option 2 as
+written: nothing is opt-in per system and nothing rests on an unchecked promise.
+The schedule groups systems into stages by their checked declarations and ticks
+a stage across a job pool the host hands it, opt-in per world.
+`docs/backlog.md`'s _ECS access declarations and the parallel schedule_ records
+the decisions and the numbers.
 
 **DECISION NEEDED — which of these P8 does.** They are not the same slice:
 
@@ -780,9 +785,11 @@ The `cargo tree` guard is built: `tools/check-no-renderer-deps.sh`, run by
   and writes (`SystemTrait::access`, required), the schedule derives the
   conflicts between those declarations when each system is registered
   (`Schedule::conflicts`), and in debug builds a tick touching a resource its
-  system did not declare panics. Execution is still serial; the graph is what a
-  concurrent schedule would be built on (_P8's ECS access declarations were
-  never reserved_, above, for how this came to be).
+  system did not declare panics. The schedule also groups the systems into
+  stages no two systems of which conflict, and a world handed a job pool
+  (`World::set_pool`) ticks each stage across it, with the serial result; no
+  world has one by default (_P8's ECS access declarations were never reserved_,
+  above, for how this came to be).
 - **Destruction is deferred to the end of the tick**, with a removal sweep per
   system; generational ids make a stale reference safe to hold.
 - **Every system reports to the inspector and has a debug-draw slot.** The plan
@@ -1395,8 +1402,9 @@ forcing function. Built from it: the source stage (`crcbl_scene::gltf_import`'s
 `read_skins` and `read_clips` into `GltfSkin`, `GltfClip` and `GltfChannel`);
 the conversion into `crcbl-anim`'s types in `apps/viewer/src/anim.rs`
 (`skeleton_of`, `joint_of`); `crcbl_anim`'s `Skeleton`, `Clip` with
-`Clip::sample_into`, `Pose`, `Palette`, `blend_into` and `BlendSpace1d`, which
-puppet mixes idle, walk and run through by measured speed; two-bone IK
+`Clip::sample_into`, `Pose`, `Palette`, `blend_into` and `BlendSpace1d`; the
+state machine with animation events and root motion (`crcbl_anim::machine`,
+2026-10-06), which puppet plays idle, run and jump through; two-bone IK
 (`crcbl_anim::ik::{solve_two_bone, rotate_joint}`, with no production caller);
 GPU skinning (`crates/crcbl-render/src/skinning.rs` over
 `crates/crcbl-shaders/shaders/skinning.slang`) with the double-buffered region
@@ -1445,13 +1453,26 @@ transcendental, claims no determinism, and nothing in it belongs in a tick hash.
 **Root motion drives the character controller, never the transform.** The
 extracted velocity goes to topic 5's L0 controller, which resolves it against
 the world like any other move. Decided before any code to avoid the classic
-desync between an animation that moved a body and a server that did not.
+desync between an animation that moved a body and a server that did not. Built
+as `Machine::root_velocity`, which returns a velocity and touches no transform,
+with `Sampler` stripping the same translation from the drawn pose.
 
-**`crcbl-anim` depends on `glam` alone.** Not on `crcbl-scene`, not on `gltf`,
-so a browser build that only plays cooked clips links no parser. The glTF to
-`Skeleton` conversion is index bookkeeping belonging to whoever holds both
-crates — today `apps/viewer/src/anim.rs`, where `skeleton_of` walks
-`skin.joints()` in order so a palette index stays the one `JOINTS_0` means.
+**The state machine is stepped on the tick and is deterministic by
+construction** (built 2026-10-06). `Machine::step` takes a fixed `dt` and uses
+only IEEE-exact `f32` operations — no transcendental — so a `MachineState` is
+the same bit for bit on every target; its `Hash` is field by field over a
+canonical float encoding. Events are reported over the half-open span each step
+advanced, so consecutive steps tile the timeline and each crossing fires once
+whatever the frame rate. No transition is evaluated while a crossfade is in
+flight, and only the current state's events fire during a fade.
+
+**`crcbl-anim` depends on `glam`, plus `serde` and `ron` for the state machine's
+asset.** Not on `crcbl-scene`, not on `gltf`, so a browser build that only plays
+cooked clips links no glTF parser; `ron` was already in every graph that reaches
+the crate through `crcbl`. The glTF to `Skeleton` conversion is index
+bookkeeping belonging to whoever holds both crates — today
+`apps/viewer/src/anim.rs`, where `skeleton_of` walks `skin.joints()` in order so
+a palette index stays the one `JOINTS_0` means.
 
 **The source format is glTF, read unresampled.** No new source format: import
 extends the asset pipeline, and the importer keeps the file's own keyframes in
