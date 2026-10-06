@@ -806,7 +806,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `overlap_sphere_ids_into`, each the `crcbl-phys` query on this view, and
   `collider_of` names a replica's collider for a `QueryFilter` to leave out.
   Every answer is the client's interpolated view, behind the server by the
-  playout delay, and not authoritative.
+  playout delay, and not authoritative. `apps/puppet`'s follow camera sweeps its
+  boom through one, so the eye stops short of the ground and the steps instead
+  of seeing through them (`Follow::camera` takes the world).
 
 - **`crcbl_client::Client::interpolate_snapping`**: `interpolate` with each
   entity that moved farther than `max_step` metres per server tick between the

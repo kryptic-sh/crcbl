@@ -32,6 +32,7 @@
 //! the camera. [`crate::camera`] is where it becomes a direction, and
 //! `crcbl-phys` never sees either.
 
+use crcbl::client::ClientQueryWorld;
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{Booted, Clock, FrameInfo, HostedGame, RunSummary, wait_for_configure};
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
@@ -181,6 +182,10 @@ pub struct Puppet {
     /// The third-person camera. **Presentation**: it never crosses the wire, and
     /// the only thing the simulation is told about it is its yaw.
     follow: Follow,
+    /// What the camera's boom is swept against: the map's colliders, built
+    /// once from the same [`Map`] the server's controller walks. **The
+    /// client's own copy**, because the stage's world is the simulation's.
+    query: ClientQueryWorld,
     /// Refilled from the simulation every frame.
     render_state: RenderState,
     /// The simulation's numbers, snapshotted in [`Puppet::draw`].
@@ -346,6 +351,7 @@ fn assemble<S: Shell + ?Sized>(
             actions: action_map(),
             pending_keys: Vec::new(),
             follow: Follow::default(),
+            query: ClientQueryWorld::new(options.map.world()),
             render_state: RenderState::default(),
             stats: Stats::default(),
             page: PageStats::default(),
@@ -490,7 +496,7 @@ impl HostedGame for Puppet {
             self.render_state.feet as f32 + crate::camera::FOCUS_HEIGHT,
             self.render_state.position.z as f32,
         );
-        gpu.set_camera(self.follow.camera(focus));
+        gpu.set_camera(self.follow.camera(focus, &mut self.query));
         // The sun turns on the simulation's clock, so the shadows on the map
         // stop where they are while the loop is paused — see [`Map::sun`].
         gpu.set_sun(self.map.sun(self.render_state.elapsed));

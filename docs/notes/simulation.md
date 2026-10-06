@@ -858,10 +858,10 @@ L1 row, `apps/towers` the trigger and swept-bolt slice, and `apps/puppet` and
 What it left unbuilt is in `docs/backlog.md` under _Physics (from the deleted
 05-physics plan, 2026-09-24)_: bubbles and the per-sector broadphase,
 heightfields, buoyancy and wind forces, the debug suite, the camera-relative
-upload, the rest of the constructed maths, the client-side query world,
-design-speed bullet tests, and the tick substeps and `crcbl sim` gaps under
-_Physics and tessellation_. Orbit's moon transfer and 3D view, which the stage's
-acceptance test needs, are under _orbit_.
+upload, the rest of the constructed maths, what the client-side query world
+left, design-speed bullet tests, and the tick substeps and `crcbl sim` gaps
+under _Physics and tessellation_. Orbit's moon transfer and 3D view, which the
+stage's acceptance test needs, are under _orbit_.
 
 - **The layer table is the contract.** L0/L1/CCD gate the MVP; L2 was a stretch
   and L3 post-MVP, and solver work never blocks the sample ladder. Each layer is
@@ -875,7 +875,12 @@ acceptance test needs, are under _orbit_.
   never _advances_ simulation, but it hosts a read-only query world**
   (2026-07-27): statics from scene load and dynamic colliders rebuilt from
   snapshots, with interpolation-buffer staleness, for the camera boom's sweeps
-  (30) and audio occlusion rays (13).
+  (30) and audio occlusion rays (13). Built 2026-10-06 as
+  `crcbl_client::ClientQueryWorld`: the shape of each replica comes from the
+  game's own archetype knowledge rather than the wire, its colliders are placed
+  by the server's own placement (`PhysicsWorld::add_collider`), and a replica
+  that moved faster than the game's largest step per tick is placed where it
+  landed rather than lerped through the gap (`Client::interpolate_snapping`).
 - **Authoritative physics is CPU; visual-only physics is GPU and never read
   back.** Does gameplay care? CPU. Eye candy? GPU compute, rendered from device
   buffers. A readback would poison the frame loop.
