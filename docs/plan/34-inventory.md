@@ -14,9 +14,9 @@ editor asset browser wants it); the kit is FPS-era with breach.
 > to build. By the Delivery table's weight that is well under half the document,
 > which is why it stays rather than folding into the notes.
 >
-> **Part 1, drag-drop: the grid drag is in `crcbl-ui`.** Its pointer half shipped
-> 2026-09-23 as `crcbl_ui::grid_drag` — `CellGrid`, `GridDrag<P>`, a typed
-> payload, `can_accept`, drop feedback as widget state (`DropFeedback`),
+> **Part 1, drag-drop: the grid drag is in `crcbl-ui`.** Its pointer half
+> shipped 2026-09-23 as `crcbl_ui::grid_drag` — `CellGrid`, `GridDrag<P>`, a
+> typed payload, `can_accept`, drop feedback as widget state (`DropFeedback`),
 > cross-grid drags and the grab offset — built on `widget.rs`'s press capture,
 > and `apps/shard` and `apps/breach` use it with their own copies deleted. A
 > panel's `can_accept` asks `Grid::can_move_within` (2026-09-25), which runs
