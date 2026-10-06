@@ -1,5 +1,5 @@
-//! Blending: two poses mixed by weight, a locomotion set selected by speed,
-//! and the timed fade a state switch needs.
+//! Blending: two poses mixed by weight, and a locomotion set selected by
+//! speed.
 //!
 //! The blending step of the animation evaluation stack (recorded in
 //! `docs/notes/simulation.md`, _What the deleted 17-animation plan left
@@ -17,16 +17,12 @@
 //!
 //! # What is not here
 //!
-//! No graph, no nodes, no state machine and no events. A blend tree with one
-//! shape — the locomotion set — is that shape, and the machinery to describe
-//! *other* shapes has no second caller to justify it.
-//!
-//! **No crossfade either, and its absence is deliberate.** A state switch fades
-//! over a duration, and the timer for that is a dozen lines — but a locomotive
-//! set that is continuous in speed never switches states, so nothing in this
-//! workspace would call it. It arrives with the state machine that needs it,
-//! which is the sample's to own: which states exist is the sample's question
-//! and not this crate's.
+//! No graph and no nodes. A blend tree with one shape — the locomotion set — is
+//! that shape, and the machinery to describe *other* shapes has no second
+//! caller to justify it. The timed crossfade a state switch needs is the state
+//! machine's ([`crate::machine`]), which owns the switch: it fades with
+//! [`blend_into`], and its 1D blend state samples through the same code
+//! [`BlendSpace1d`] does.
 //!
 //! # Weights are clamped, never extrapolated
 //!
@@ -180,14 +176,6 @@ impl fmt::Display for BlendSpaceError {
 
 impl std::error::Error for BlendSpaceError {}
 
-/// One stop of a [`BlendSpace1d`]: a clip and the axis position it is authored
-/// for.
-#[derive(Clone, Debug, PartialEq)]
-struct Stop {
-    position: f32,
-    clip: Clip,
-}
-
 /// Clips placed along one axis, blended by where a value falls between them.
 ///
 /// The axis is the caller's: for `docs/plan/sample/09-puppet.md` it is the
@@ -221,7 +209,10 @@ struct Stop {
 /// caller's pose and blends nothing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlendSpace1d {
-    stops: Vec<Stop>,
+    /// Each stop's axis position, strictly ascending.
+    positions: Vec<f32>,
+    /// Each stop's clip, in the same order.
+    clips: Vec<Clip>,
     lower_pose: Pose,
     upper_pose: Pose,
 }
@@ -243,22 +234,11 @@ impl BlendSpace1d {
     /// refused too — there is no weight between them, and which one wins would
     /// be an accident of the search.
     pub fn new(stops: Vec<(f32, Clip)>, skeleton: &Skeleton) -> Result<Self, BlendSpaceError> {
-        if stops.is_empty() {
-            return Err(BlendSpaceError::Empty);
-        }
-        for (index, &(position, _)) in stops.iter().enumerate() {
-            if !position.is_finite() {
-                return Err(BlendSpaceError::NotFinite { stop: index });
-            }
-            if index > 0 && position <= stops[index - 1].0 {
-                return Err(BlendSpaceError::OutOfOrder { stop: index });
-            }
-        }
+        check_positions(stops.iter().map(|&(position, _)| position))?;
+        let (positions, clips) = stops.into_iter().unzip();
         Ok(Self {
-            stops: stops
-                .into_iter()
-                .map(|(position, clip)| Stop { position, clip })
-                .collect(),
+            positions,
+            clips,
             lower_pose: Pose::new(skeleton),
             upper_pose: Pose::new(skeleton),
         })
@@ -272,14 +252,14 @@ impl BlendSpace1d {
     #[inline]
     #[must_use]
     pub fn stops(&self) -> usize {
-        self.stops.len()
+        self.positions.len()
     }
 
     /// The position of each stop, in ascending order.
     #[inline]
     #[must_use]
     pub fn positions(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
-        self.stops.iter().map(|stop| stop.position)
+        self.positions.iter().copied()
     }
 
     /// Which two stops a position falls between, and how far between them.
@@ -288,41 +268,7 @@ impl BlendSpace1d {
     /// the first, which is [`crate::sample`]'s rule for a `NaN` time.
     #[must_use]
     pub fn locate(&self, position: f32) -> Blend {
-        let last = self.stops.len() - 1;
-        if last == 0 {
-            return Blend {
-                lower: 0,
-                upper: 0,
-                weight: 0.0,
-            };
-        }
-        if position.is_nan() || position <= self.stops[0].position {
-            return Blend {
-                lower: 0,
-                upper: 1,
-                weight: 0.0,
-            };
-        }
-        if position >= self.stops[last].position {
-            return Blend {
-                lower: last - 1,
-                upper: last,
-                weight: 1.0,
-            };
-        }
-        // Strictly inside the space, so the partition point is in `1..=last`
-        // and the segment below it exists.
-        let upper = self
-            .stops
-            .partition_point(|stop| stop.position <= position)
-            .max(1);
-        let lower = upper - 1;
-        let span = self.stops[upper].position - self.stops[lower].position;
-        Blend {
-            lower,
-            upper,
-            weight: (position - self.stops[lower].position) / span,
-        }
+        locate(&self.positions, position)
     }
 
     /// Samples the set at `position` and `phase`, writing one local transform
@@ -338,29 +284,118 @@ impl BlendSpace1d {
     /// same reason.
     pub fn sample_into(&mut self, position: f32, phase: f32, skeleton: &Skeleton, pose: &mut Pose) {
         let blend = self.locate(position);
-        // A position sitting on a stop is that clip, untouched: no scratch, no
-        // blend, and no chance of a pose a few ulps off the one authored.
-        if blend.weight <= 0.0 {
-            self.stops[blend.lower].sample_into(phase, skeleton, pose);
-            return;
-        }
-        if blend.weight >= 1.0 {
-            self.stops[blend.upper].sample_into(phase, skeleton, pose);
-            return;
-        }
-        self.stops[blend.lower].sample_into(phase, skeleton, &mut self.lower_pose);
-        self.stops[blend.upper].sample_into(phase, skeleton, &mut self.upper_pose);
-        blend_into(&self.lower_pose, &self.upper_pose, blend.weight, pose);
+        sample_located(
+            blend,
+            [&self.clips[blend.lower], &self.clips[blend.upper]],
+            phase,
+            skeleton,
+            [&mut self.lower_pose, &mut self.upper_pose],
+            pose,
+        );
     }
 }
 
-impl Stop {
-    /// Samples this stop's clip at `phase` of its own duration.
-    #[inline]
-    fn sample_into(&self, phase: f32, skeleton: &Skeleton, pose: &mut Pose) {
-        self.clip
-            .sample_into(phase * self.clip.duration(), skeleton, pose);
+/// Checks a run of stop positions: at least one, every one finite, and each
+/// strictly above the one before it.
+///
+/// What [`BlendSpace1d::new`] refuses a set for, shared with the state
+/// machine's 1D blend so a stop list means the same thing in both.
+pub(crate) fn check_positions(
+    positions: impl IntoIterator<Item = f32>,
+) -> Result<(), BlendSpaceError> {
+    let mut previous = None;
+    let mut count = 0;
+    for (index, position) in positions.into_iter().enumerate() {
+        if !position.is_finite() {
+            return Err(BlendSpaceError::NotFinite { stop: index });
+        }
+        if previous.is_some_and(|below| position <= below) {
+            return Err(BlendSpaceError::OutOfOrder { stop: index });
+        }
+        previous = Some(position);
+        count += 1;
     }
+    if count == 0 {
+        return Err(BlendSpaceError::Empty);
+    }
+    Ok(())
+}
+
+/// Which two of `positions` a position falls between, and how far between
+/// them — [`BlendSpace1d::locate`]'s answer, over positions
+/// [`check_positions`] has accepted.
+///
+/// A position off either end clamps to the end stop; a `NaN` position holds
+/// the first, which is [`crate::sample`]'s rule for a `NaN` time.
+pub(crate) fn locate(positions: &[f32], position: f32) -> Blend {
+    let last = positions.len() - 1;
+    if last == 0 {
+        return Blend {
+            lower: 0,
+            upper: 0,
+            weight: 0.0,
+        };
+    }
+    if position.is_nan() || position <= positions[0] {
+        return Blend {
+            lower: 0,
+            upper: 1,
+            weight: 0.0,
+        };
+    }
+    if position >= positions[last] {
+        return Blend {
+            lower: last - 1,
+            upper: last,
+            weight: 1.0,
+        };
+    }
+    // Strictly inside the space, so the partition point is in `1..=last`
+    // and the segment below it exists.
+    let upper = positions.partition_point(|&stop| stop <= position).max(1);
+    let lower = upper - 1;
+    let span = positions[upper] - positions[lower];
+    Blend {
+        lower,
+        upper,
+        weight: (position - positions[lower]) / span,
+    }
+}
+
+/// Samples the two clips `blend` names at `phase` of each one's own duration
+/// and mixes them by its weight into `pose`, using `scratch` for the two ends.
+///
+/// A weight sitting on a stop is that clip, untouched: no scratch, no blend,
+/// and no chance of a pose a few ulps off the one authored. Shared by
+/// [`BlendSpace1d`] and the state machine's 1D blend state, which samples the
+/// same way and must not drift from it.
+pub(crate) fn sample_located(
+    blend: Blend,
+    clips: [&Clip; 2],
+    phase: f32,
+    skeleton: &Skeleton,
+    scratch: [&mut Pose; 2],
+    pose: &mut Pose,
+) {
+    let [lower, upper] = clips;
+    if blend.weight <= 0.0 {
+        sample_at_phase(lower, phase, skeleton, pose);
+        return;
+    }
+    if blend.weight >= 1.0 {
+        sample_at_phase(upper, phase, skeleton, pose);
+        return;
+    }
+    let [lower_pose, upper_pose] = scratch;
+    sample_at_phase(lower, phase, skeleton, lower_pose);
+    sample_at_phase(upper, phase, skeleton, upper_pose);
+    blend_into(lower_pose, upper_pose, blend.weight, pose);
+}
+
+/// Samples `clip` at `phase` of its own duration.
+#[inline]
+pub(crate) fn sample_at_phase(clip: &Clip, phase: f32, skeleton: &Skeleton, pose: &mut Pose) {
+    clip.sample_into(phase * clip.duration(), skeleton, pose);
 }
 
 #[cfg(test)]

@@ -393,7 +393,10 @@ dependencies = [
 name = "crcbl-anim"
 version = "0.1.0"
 dependencies = [
+ "crcbl-rand",
  "glam",
+ "ron",
+ "serde",
 ]
 
 [[package]]

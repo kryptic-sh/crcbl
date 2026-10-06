@@ -1,0 +1,49 @@
+// The character's animation state machine: idle, run and jump.
+//
+// Stepped on the server, once a tick, by `apps/puppet/src/anim.rs`'s
+// `Locomotion`, which sets the three parameters from what the controller did:
+// `speed` is the measured ground speed in metres a second, `grounded` is the
+// controller's own verdict, and `jump` is set on the tick the character leaves
+// the ground. The clip names are `apps/puppet/src/rig.rs`'s `clip` lookup.
+//
+// The run's stops are the speeds the two strides are authored for —
+// `rig::STRIDE_M / rig::WALK_CYCLE_S` and `rig::RUN_STRIDE_M / rig::RUN_CYCLE_S`
+// — and `anim::tests::the_run_blend_stops_are_the_rigs_authored_speeds` fails
+// if either drifts from the rig.
+StateMachine(
+    parameters: [
+        Float(name: "speed", default: 0.0),
+        Bool(name: "grounded", default: true),
+        Trigger(name: "jump"),
+    ],
+    initial: "idle",
+    states: [
+        State(name: "idle", motion: Clip("idle")),
+        State(
+            name: "run",
+            motion: Blend1d(parameter: "speed", stops: [(2.6, "walk"), (5.5, "run")]),
+            // A foot comes down at the start and the middle of every stride.
+            events: [
+                Event(at: 0.0, name: "footstep"),
+                Event(at: 0.5, name: "footstep"),
+            ],
+        ),
+        State(name: "jump", motion: Clip("jump"), looping: false),
+    ],
+    // Tried in this order, the first that holds wins: the jumps come first so
+    // a jump on the tick the character starts moving is not held back by the
+    // idle -> run fade.
+    transitions: [
+        Transition(from: "idle", to: "jump", when: [Triggered("jump")], crossfade: 0.08),
+        Transition(from: "run", to: "jump", when: [Triggered("jump")], crossfade: 0.08),
+        Transition(from: "idle", to: "run", when: [Above("speed", 0.5)], crossfade: 0.2),
+        Transition(from: "run", to: "idle", when: [Below("speed", 0.5)], crossfade: 0.25),
+        Transition(
+            from: "jump",
+            to: "run",
+            when: [IsTrue("grounded"), Above("speed", 0.5)],
+            crossfade: 0.12,
+        ),
+        Transition(from: "jump", to: "idle", when: [IsTrue("grounded")], crossfade: 0.15),
+    ],
+)

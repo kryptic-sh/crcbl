@@ -33,6 +33,8 @@ USAGE:
 
 CONTROLS:
     W/A/S/D or arrows    Walk, relative to where the camera is looking
+    Shift                Run while held
+    Space                Jump
     Q / E                Swing the camera about the character
     R / F                Raise and lower it
     ESC                  Pause, F3 the debug panel, F11 fullscreen
