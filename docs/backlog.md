@@ -15,7 +15,7 @@ Work in this order before the lower-priority backlog:
   regressions green. This is a consumer migration, not another engine feature.
 
 Upstream review: pulled crcbl `origin/main` with `--ff-only` before this update;
-the checkout was already at `4c942900`. Reviewed against EW main `b68f5cab`. The
+the checkout was already at `34d829b7`. Reviewed against EW main `6fa0f8a2`. The
 current `world/arc_sweep.rs` still exposes only closest accelerated contacts.
 EW's `src/controller_ballistic.rs` still uses `find_wall` and `hits_ceiling`
 forecast bisections, so this handoff remains open.
@@ -156,13 +156,20 @@ establish no additional engine prerequisite. `CraftWaterSource` and
 `select_craft_water`, `validate_craft_water` and `consume_craft_water` in
 `src/hideout_inventory/food_crafting_water.rs` reserve measured water from
 identified game containers and retain their shells. Water budgets, ingredient
-eligibility and meal outputs remain game rules. The uncommitted filter assembly
-work in `src/hideout_inventory/food_crafting_tools.rs` similarly reserves a
-reusable toolkit against game construction and crafting jobs. That work is not
-shipped or fully validated; do not treat it as evidence for an engine port.
-Revisit reusable reservation support only if a concrete engine limitation is
-demonstrated. Selectable accelerated contacts remain the engine implementation
-priority ahead of EW's contact-forecast migration.
+eligibility and meal outputs remain game rules. Filter assembly shipped in EW
+`34689fcc`; `src/hideout_inventory/food_crafting_tools.rs` reserves a reusable
+toolkit against game construction and crafting jobs. Revisit reusable
+reservation support only if a concrete engine limitation is demonstrated.
+
+The subsequent warehouse survey and named-exit quests also stay in EW.
+`QuestLog::record_places` in `src/quests.rs` retains the best qualifying set
+from a single extracted raid; `QuestLog::record_exit` credits an authored
+`RaidExit` from `src/extraction.rs`. These are game progression and extraction
+rules, not a missing engine quest framework. This review found no additional
+engine prerequisite in those features. Selectable accelerated contacts remain
+the top engine implementation priority, followed by EW's contact-forecast
+migration. The API review confirms the existing gap; it does not constitute a
+new physics regression run.
 
 1. **Curved-path collision queries with contact times — delivered 2026-10-06,
    awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
