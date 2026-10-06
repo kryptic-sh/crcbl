@@ -24,6 +24,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `apoapsis_at` fields, so a struct literal of it must name them or take
   `..RenderState::default()`.
 
+- **`crcbl_ecs::SystemTrait` is `Send`**, so a schedule can tick systems on a
+  job pool's threads (below). With it: `DebugDrawFn` is
+  `Box<dyn FnMut(&DebugCtx) + Send>`, `System<T>` is a `SystemTrait` only for a
+  `T: Send`, `crcbl_phys::ForceProvider` is `Send`,
+  `crcbl::registry::Registry::register` asks `T: Send`, and
+  `Schedule::set_clock` takes a `crcbl_ecs::ScheduleClock`
+  (`Box<dyn TimeSource + Send + Sync>`), because a pooled schedule reads the
+  clock on the thread that ran each system. A system holding an `Rc`, a
+  `RefCell` handle or a `Cell` shared with anything else no longer compiles;
+  move it to `Shared`, an `Arc` or an atomic.
+
 - **Every hello carries the client's `PlayerId`, and the protocol version is 8**
   (`ProtocolCompatibility::DEFAULT`). `crcbl_net::Hello` has a new `player`
   field, 16 bytes on the wire after `generation`, so a build from before cannot
@@ -972,6 +983,40 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   trigger, each file this run wrote and its size, where the autosave goes, and
   the saves that did not land. `crcbl_store::save::SaveBacking::root` names the
   directory for it.
+
+- **`crcbl bench --scenario ecs` times one `crcbl_ecs` schedule a tick at a
+  time.** Eight systems over `--entities` rows each (default 10000), every one
+  stepping the same damped spring, with mixed declarations: one writes `wind`
+  and two read it, two write `score` and one reads it, and three touch nothing
+  shared — five conflicts. It reports the per-tick p50, p95, p99 and max beside
+  the schedule's shape, and the world's `hash_world` as the checksum, failing a
+  run whose ticks left the hash unchanged. It is the baseline a parallel
+  schedule is measured against.
+
+- **`crcbl sim --threads <N>` runs the determinism harness on N threads.** The
+  world's schedule is handed a `crcbl_jobs::Pool` of N − 1 workers (default N =
+  1; zero is refused), and the harness world gains a conflict for it to respect:
+  `swarm` writes its rows' mean to a shared `crowd` resource and `herd` reads
+  it, while the systems before `herd` share a stage. The printed hash must not
+  move with N — that is `docs/plan/21-jobs.md`'s killer test, and it is now
+  runnable. `--json` adds `threads` and the `workers` the pool actually got.
+  Because the harness world changed, **`crcbl sim` prints a different hash for
+  the same seed than earlier versions did**; nothing in the repository pinned
+  one.
+
+- **A `crcbl_ecs` schedule can tick its systems in parallel.**
+  `Schedule::stages` groups the systems at registration into runs of consecutive
+  systems no two of which conflict, and `Schedule::set_pool` / `World::set_pool`
+  hand the schedule a `crcbl_jobs::Pool` that ticks each stage across its
+  threads, one stage after another. The state is bit-identical to the serial run
+  — systems in one stage share nothing but resources they all only read — and
+  the per-system tick times are still each system's own. Off unless a pool is
+  handed over: no world has one by default. Sweeps, debug draws, hashing and
+  replication stay on the calling thread in schedule order.
+  `crcbl bench --scenario ecs --workers <N>` measures it; on a Ryzen 9 9950X3D
+  under Windows the default eight-system tick went from a 514 µs p50 serially to
+  273 µs on seven workers — near the halving its four equal-cost stages cap it
+  at — while a 100-entity world was slower than serial from seven workers on.
 
 - **Overlap hits: how deep, which way out and where.** `crcbl_phys::OverlapHit`
   carries the point on the collider's surface the sphere is pushed out from, the

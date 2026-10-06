@@ -369,7 +369,7 @@ impl Map {
 /// same way.
 fn rows<T>(world: &mut World, ids: &IdMap) -> Vec<T>
 where
-    T: Clone + ComponentHash + 'static,
+    T: Clone + ComponentHash + Send + 'static,
 {
     let system = world
         .system_mut::<System<T>>()

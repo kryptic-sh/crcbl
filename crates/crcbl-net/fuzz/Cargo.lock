@@ -134,7 +134,15 @@ name = "crcbl-ecs"
 version = "0.1.0"
 dependencies = [
  "crcbl-core",
+ "crcbl-jobs",
  "crcbl-reflect",
+]
+
+[[package]]
+name = "crcbl-jobs"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

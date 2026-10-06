@@ -313,7 +313,8 @@ fn pool_fields(stats: PoolStats) -> Vec<(&'static str, Json)> {
 mod tests {
     use super::*;
     use crate::args::{
-        BenchScenario, DEFAULT_BENCH_BODIES, DEFAULT_BENCH_EXTENT, DEFAULT_BENCH_TICKS,
+        BenchScenario, DEFAULT_BENCH_BODIES, DEFAULT_BENCH_ENTITIES, DEFAULT_BENCH_EXTENT,
+        DEFAULT_BENCH_TICKS,
     };
     use crate::bench::profile;
 
@@ -332,12 +333,13 @@ mod tests {
             items: ITEMS,
             chunk: CHUNK,
             // This scenario reads none of them, and `--bodies`/`--extent`/
-            // `--ticks` are refused on a `jobs` invocation; the parser's own
-            // defaults, so that a `BenchArgs` built here is one the parser
-            // could have made.
+            // `--ticks`/`--entities` are refused on a `jobs` invocation; the
+            // parser's own defaults, so that a `BenchArgs` built here is one
+            // the parser could have made.
             bodies: DEFAULT_BENCH_BODIES,
             extent: DEFAULT_BENCH_EXTENT,
             ticks: DEFAULT_BENCH_TICKS,
+            entities: DEFAULT_BENCH_ENTITIES,
             iterations,
             warmup,
             json: false,

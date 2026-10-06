@@ -353,11 +353,16 @@ SCENARIOS:
             worth, and then N sphere overlaps, one per body. The three phases
             are timed and reported separately. `--ticks` repeats the movement
             so the queries run against a tree the crowd has walked away from.
+    ecs     One `crcbl_ecs` schedule ticked over a fixed world, timed per tick:
+            systems over N entities each, some touching nothing shared, some
+            reading a shared resource and some writing one, so the conflict
+            graph has independent systems between ordered writers.
 
-OPTIONS (both scenarios):
+OPTIONS (every scenario):
         --scenario <NAME>    Which scenario to run. Required.
         --iterations <N>     Timed iterations — a `par_for` call for `jobs`, one
-                             build, refit and query pass for `phys`.
+                             build, refit and query pass for `phys`, one tick
+                             for `ecs`.
                              Default: 200. Below 20 the run reports its maximum
                              and no percentile.
         --warmup <N>         Untimed iterations first, excluded from the
@@ -394,15 +399,25 @@ OPTIONS (phys):
                              the crowd also spreads as it walks, so read the
                              query line against the neighbour count beside it.
 
-A flag that belongs to one scenario is refused on the other rather than
+OPTIONS (ecs):
+        --entities <N>       Rows every system owns and steps each tick.
+                             Default: 10000.
+        --workers <N>        Tick each stage of the schedule on a pool of N
+                             worker threads and the calling one. Not given, the
+                             schedule has no pool and ticks every system in
+                             order on the calling thread: the serial baseline.
+                             0 is a pool with no workers, which costs the stage
+                             loop and nothing else.
+
+A flag that belongs to one scenario is refused on the others rather than
 ignored.";
 
 /// `crcbl sim --help`.
 ///
-/// The three defaults and the tick-rate range are written here as literals,
-/// because a `const &str` cannot interpolate — `concat!` takes literals. They
-/// are pinned to [`DEFAULT_SIM_TICKS`], [`DEFAULT_SIM_TICK_RATE`],
-/// [`DEFAULT_SIM_SEED`] and [`MAX_TICK_RATE`] by
+/// The defaults and the tick-rate range are written here as literals, because
+/// a `const &str` cannot interpolate — `concat!` takes literals. They are
+/// pinned to [`DEFAULT_SIM_TICKS`], [`DEFAULT_SIM_TICK_RATE`],
+/// [`DEFAULT_SIM_SEED`], [`DEFAULT_SIM_THREADS`] and [`MAX_TICK_RATE`] by
 /// `the_sim_help_names_the_real_defaults_and_the_tick_rate_cap`, which is the
 /// only thing that can stop the two drifting — the same arrangement
 /// [`BENCH_USAGE`] and [`SCREENSHOT_USAGE`] have.
@@ -430,6 +445,11 @@ OPTIONS:
         --tick-rate <HZ>   Server tick rate, 1..=1000000000. Default: 60. It
                            sets the clock's period and never the tick count.
         --seed <SEED>      World-generation seed. Default: 0.
+        --threads <N>      Threads the world may tick on, the calling one
+                           included: a job pool of N - 1 workers. Default: 1.
+                           Zero is refused. The hash must not depend on it —
+                           a run whose hash moves with N is the determinism
+                           failure this flag exists to catch.
         --json             Emit one JSON object instead of human output.
     -h, --help             Print this text.
 
@@ -831,6 +851,14 @@ pub enum BenchScenario {
     /// `crate::bench::phys` for what the fixture is and why density is a
     /// parameter of it rather than a detail.
     Phys,
+    /// One `crcbl_ecs` schedule of systems with mixed access declarations,
+    /// ticked over a fixed world.
+    ///
+    /// The third one because `docs/backlog.md`'s 2026-09-06 decision puts an
+    /// ECS bench ahead of any parallel schedule: a tick of a realistic
+    /// schedule is the number such a runner has to improve on. See
+    /// `crate::bench::ecs`.
+    Ecs,
 }
 
 impl BenchScenario {
@@ -844,27 +872,38 @@ impl BenchScenario {
         match self {
             Self::Jobs => "jobs",
             Self::Phys => "phys",
+            Self::Ecs => "ecs",
         }
     }
 }
 
 /// Every scenario, for the name lookup and the rejection message.
-const SCENARIOS: &[BenchScenario] = &[BenchScenario::Jobs, BenchScenario::Phys];
+const SCENARIOS: &[BenchScenario] = &[BenchScenario::Jobs, BenchScenario::Phys, BenchScenario::Ecs];
 
-/// Which scenario each of `bench`'s per-scenario flags belongs to.
+/// Which scenarios each of `bench`'s per-scenario flags belongs to.
 ///
 /// A table rather than a `match` in the parser so the refusal message can name
-/// the owner, and so the two halves of the help text have one list behind them.
-/// `--iterations`, `--warmup` and `--json` are absent because every scenario
-/// reads them.
-const SCENARIO_FLAGS: &[(&str, BenchScenario)] = &[
-    ("--workers", BenchScenario::Jobs),
-    ("--items", BenchScenario::Jobs),
-    ("--chunk", BenchScenario::Jobs),
-    ("--bodies", BenchScenario::Phys),
-    ("--extent", BenchScenario::Phys),
-    ("--ticks", BenchScenario::Phys),
+/// the owners, and so the two halves of the help text have one list behind
+/// them. `--iterations`, `--warmup` and `--json` are absent because every
+/// scenario reads them.
+const SCENARIO_FLAGS: &[(&str, &[BenchScenario])] = &[
+    ("--workers", &[BenchScenario::Jobs, BenchScenario::Ecs]),
+    ("--items", &[BenchScenario::Jobs]),
+    ("--chunk", &[BenchScenario::Jobs]),
+    ("--bodies", &[BenchScenario::Phys]),
+    ("--extent", &[BenchScenario::Phys]),
+    ("--ticks", &[BenchScenario::Phys]),
+    ("--entities", &[BenchScenario::Ecs]),
 ];
+
+/// The scenarios in `owners`, by name, as a refusal names them.
+fn owner_names(owners: &[BenchScenario]) -> String {
+    owners
+        .iter()
+        .map(|&owner| format!("`{}`", owner.name()))
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
 
 /// The scenario `name` selects, or `None` if no scenario answers to it.
 fn scenario_from_name(name: &str) -> Option<BenchScenario> {
@@ -939,12 +978,21 @@ pub const DEFAULT_BENCH_EXTENT: usize = 48;
 /// only has an answer above it.
 pub const DEFAULT_BENCH_TICKS: usize = 1;
 
+/// Rows each of the `ecs` scenario's systems owns when `--entities` is not
+/// given.
+///
+/// [`DEFAULT_BENCH_ITEMS`]' crowd, the size `apps/horde`'s plan set as its exit
+/// criterion, so the default run is a schedule over a world of the size the
+/// engine is asked to carry.
+pub const DEFAULT_BENCH_ENTITIES: usize = 10_000;
+
 /// `crcbl bench`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BenchArgs {
     /// Which workload to run.
     pub scenario: BenchScenario,
-    /// Pool workers, or `None` for the count `Pool::new` would pick.
+    /// Pool workers. `None` is the count `Pool::new` would pick for `jobs`, and
+    /// no pool at all for `ecs`.
     ///
     /// `Some(0)` is legal and is the serial baseline: every chunk runs on the
     /// calling thread.
@@ -963,6 +1011,9 @@ pub struct BenchArgs {
     /// querying it. Never zero, which would leave the refit phase timing a
     /// crowd that had not moved.
     pub ticks: usize,
+    /// Rows each of the `ecs` scenario's systems owns. Never zero: a system
+    /// over no rows has nothing to step, and its mean is undefined.
+    pub entities: usize,
     /// Timed calls. Never zero, for the same reason.
     pub iterations: usize,
     /// Untimed calls first, excluded from everything reported.
@@ -991,6 +1042,12 @@ pub const DEFAULT_SIM_TICK_RATE: u32 = 60;
 /// The world seed `crcbl sim` builds from when `--seed` is not given.
 pub const DEFAULT_SIM_SEED: u64 = 0;
 
+/// Threads `crcbl sim` ticks on when `--threads` is not given.
+///
+/// One — the calling thread and no pool workers — so the default run is the
+/// serial one, and every other thread count is compared against it.
+pub const DEFAULT_SIM_THREADS: usize = 1;
+
 /// `crcbl sim`.
 ///
 /// There is no scene and no input script: topic 11 sketched both, and neither
@@ -1007,6 +1064,9 @@ pub struct SimArgs {
     pub tick_rate: u32,
     /// World-generation seed.
     pub seed: u64,
+    /// Threads the world may tick on, the calling thread included. Never zero;
+    /// the parser refuses it, because a run with no thread runs nothing.
+    pub threads: usize,
     /// Machine-readable output.
     pub json: bool,
 }
@@ -1791,6 +1851,7 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
         bodies: DEFAULT_BENCH_BODIES,
         extent: DEFAULT_BENCH_EXTENT,
         ticks: DEFAULT_BENCH_TICKS,
+        entities: DEFAULT_BENCH_ENTITIES,
         iterations: DEFAULT_BENCH_ITERATIONS,
         warmup: DEFAULT_BENCH_WARMUP,
         json: false,
@@ -1867,6 +1928,13 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
                 }
                 Err(message) => return Invocation::BadUsage(message),
             },
+            Some("--entities") => match count(&mut args, "--entities") {
+                Ok(value) => {
+                    parsed.entities = value;
+                    given.push("--entities");
+                }
+                Err(message) => return Invocation::BadUsage(message),
+            },
             Some("--iterations") => match count(&mut args, "--iterations") {
                 Ok(value) => parsed.iterations = value,
                 Err(message) => return Invocation::BadUsage(message),
@@ -1899,11 +1967,11 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
     // name and pointed at the one that reads it. Driven from `SCENARIO_FLAGS`
     // rather than from `given`, so a flag the table forgot is a flag no arm
     // above can have pushed.
-    for &(flag, owner) in SCENARIO_FLAGS {
-        if owner != scenario && given.contains(&flag) {
+    for &(flag, owners) in SCENARIO_FLAGS {
+        if !owners.contains(&scenario) && given.contains(&flag) {
             return Invocation::BadUsage(format!(
-                "`{flag}` is a `{}` option and this run is `--scenario {}`",
-                owner.name(),
+                "`{flag}` is a {} option and this run is `--scenario {}`",
+                owner_names(owners),
                 scenario.name()
             ));
         }
@@ -1947,6 +2015,11 @@ fn parse_bench(mut args: impl Iterator<Item = OsString>) -> Invocation {
             "a crowd that never moves gives the refit phase nothing to refit, so its \
              timing would be the cost of setting every body back where it already was",
         ),
+        (
+            parsed.entities,
+            "--entities",
+            "a system over no rows has nothing to step and no mean to write",
+        ),
     ] {
         if value == 0 {
             return Invocation::BadUsage(format!("`{flag}` cannot be zero: {why}"));
@@ -1961,6 +2034,7 @@ fn parse_sim(mut args: impl Iterator<Item = OsString>) -> Invocation {
         ticks: DEFAULT_SIM_TICKS,
         tick_rate: DEFAULT_SIM_TICK_RATE,
         seed: DEFAULT_SIM_SEED,
+        threads: DEFAULT_SIM_THREADS,
         json: false,
     };
 
@@ -1995,6 +2069,17 @@ fn parse_sim(mut args: impl Iterator<Item = OsString>) -> Invocation {
             },
             Some("--seed") => match whole(&mut args, "--seed") {
                 Ok(value) => parsed.seed = value,
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some("--threads") => match count(&mut args, "--threads") {
+                Ok(0) => {
+                    return Invocation::BadUsage(
+                        "`--threads` cannot be zero: it counts the calling thread, and a run \
+                         with no thread runs nothing"
+                            .to_owned(),
+                    );
+                }
+                Ok(value) => parsed.threads = value,
                 Err(message) => return Invocation::BadUsage(message),
             },
             Some(other) if other.starts_with('-') => {
@@ -3214,6 +3299,52 @@ mod tests {
         }
     }
 
+    /// The `ecs` default, pinned for
+    /// `bench_defaults_to_the_pass_it_stands_in_for`'s reason, and the help
+    /// quoting it pinned to the constant for
+    /// `bench_phys_defaults_to_a_crowd_at_a_stated_density`'s.
+    #[test]
+    fn bench_ecs_defaults_to_a_world_of_the_stated_size() {
+        let Command::Bench(args) = command(&["bench", "--scenario", "ecs"]) else {
+            panic!("expected bench");
+        };
+        assert_eq!(args.scenario, BenchScenario::Ecs);
+        assert_eq!(args.entities, DEFAULT_BENCH_ENTITIES);
+        assert_eq!(args.iterations, DEFAULT_BENCH_ITERATIONS);
+        assert_eq!(args.warmup, DEFAULT_BENCH_WARMUP);
+
+        let Command::Bench(args) = command(&["bench", "--scenario", "ecs", "--entities", "300"])
+        else {
+            panic!("expected bench");
+        };
+        assert_eq!(args.entities, 300);
+
+        let ecs_options = BENCH_USAGE
+            .split_once("OPTIONS (ecs):")
+            .expect("the help has an ecs section")
+            .1;
+        assert!(
+            ecs_options.contains(&format!("Default: {DEFAULT_BENCH_ENTITIES}.")),
+            "`bench --help` does not name the default:\n{ecs_options}"
+        );
+        assert!(matches!(
+            parse_args(&["bench", "--scenario", "ecs", "--entities"]),
+            Invocation::BadUsage(_)
+        ));
+        // Refused where it is not read. Asserted by name here because
+        // `a_bench_flag_is_refused_on_the_scenario_that_does_not_read_it` walks
+        // `SCENARIO_FLAGS`, and so cannot see a flag the table forgot.
+        for other in ["jobs", "phys"] {
+            assert!(
+                matches!(
+                    parse_args(&["bench", "--scenario", other, "--entities", "5"]),
+                    Invocation::BadUsage(_)
+                ),
+                "`--entities` was accepted on `{other}`"
+            );
+        }
+    }
+
     /// **A flag that belongs to one scenario is refused on the other, by name,
     /// and pointed at the scenario that reads it.**
     ///
@@ -3226,13 +3357,13 @@ mod tests {
     /// arm to accept it fails here too.
     #[test]
     fn a_bench_flag_is_refused_on_the_scenario_that_does_not_read_it() {
-        for &(flag, owner) in SCENARIO_FLAGS {
+        for &(flag, owners) in SCENARIO_FLAGS {
             for &scenario in SCENARIOS {
                 let argv = vec!["bench", "--scenario", scenario.name(), flag, "1"];
-                if scenario == owner {
+                if owners.contains(&scenario) {
                     assert!(
                         matches!(parse_args(&argv), Invocation::Command(_)),
-                        "{argv:?} is the scenario that owns {flag}"
+                        "{argv:?} is a scenario that owns {flag}"
                     );
                     continue;
                 }
@@ -3240,7 +3371,9 @@ mod tests {
                     panic!("{argv:?} should be a bad invocation");
                 };
                 assert!(message.contains(flag), "{message}");
-                assert!(message.contains(owner.name()), "{message}");
+                for owner in owners {
+                    assert!(message.contains(owner.name()), "{message}");
+                }
                 assert!(message.contains(scenario.name()), "{message}");
             }
         }
@@ -3258,6 +3391,8 @@ mod tests {
             ("phys", "--extent"),
             ("phys", "--ticks"),
             ("phys", "--iterations"),
+            ("ecs", "--entities"),
+            ("ecs", "--iterations"),
         ] {
             let Invocation::BadUsage(message) =
                 parse_args(&["bench", "--scenario", scenario, flag, "0"])
@@ -3286,6 +3421,7 @@ mod tests {
         assert_eq!(args.ticks, DEFAULT_SIM_TICKS);
         assert_eq!(args.tick_rate, DEFAULT_SIM_TICK_RATE);
         assert_eq!(args.seed, DEFAULT_SIM_SEED);
+        assert_eq!(args.threads, DEFAULT_SIM_THREADS);
         assert!(!args.json);
 
         let Command::Sim(args) = command(&[
@@ -3301,6 +3437,21 @@ mod tests {
         };
         // A seed no `usize` is guaranteed to hold, taken whole — see [`whole`].
         assert_eq!((args.ticks, args.tick_rate, args.seed), (7, 240, u64::MAX));
+
+        let Command::Sim(args) = command(&["sim", "--threads", "8"]) else {
+            panic!("expected sim");
+        };
+        assert_eq!(args.threads, 8);
+        for argv in [
+            vec!["sim", "--threads"],
+            vec!["sim", "--threads", "0"],
+            vec!["sim", "--threads", "-2"],
+        ] {
+            assert!(
+                matches!(parse_args(&argv), Invocation::BadUsage(_)),
+                "{argv:?} should be a bad invocation"
+            );
+        }
     }
 
     /// Both ends of the tick-rate range, refused at parse time.
@@ -3372,6 +3523,7 @@ mod tests {
             format!("Default: {DEFAULT_SIM_TICKS}."),
             format!("Default: {DEFAULT_SIM_TICK_RATE}."),
             format!("Default: {DEFAULT_SIM_SEED}."),
+            format!("Default: {DEFAULT_SIM_THREADS}."),
             format!("1..={MAX_TICK_RATE}"),
         ] {
             assert!(

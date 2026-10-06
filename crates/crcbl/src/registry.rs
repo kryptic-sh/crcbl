@@ -516,6 +516,10 @@ impl Registry {
     /// component to whichever entity happened to come first and leave a scene
     /// holding none of a system with nothing to copy.
     ///
+    /// `Send` because the system holding the rows is a
+    /// [`SystemTrait`](crcbl_ecs::SystemTrait), which a schedule may tick on
+    /// another thread.
+    ///
     /// # Panics
     ///
     /// If `system` is already registered, naming it and both component types. A
@@ -531,6 +535,7 @@ impl Registry {
             + Placement
             + Validate
             + Default
+            + Send
             + 'static,
     {
         let system = system.into();
@@ -1119,7 +1124,7 @@ where
 /// [`SystemTrait::debug_fields`](crcbl_ecs::SystemTrait::debug_fields).
 fn register_of<T>(world: &mut World, name: &str)
 where
-    T: ComponentHash + Reflect + 'static,
+    T: ComponentHash + Reflect + Send + 'static,
 {
     world.register_system(Box::new(System::<T>::reflected(name)));
 }

@@ -470,6 +470,7 @@ name = "crcbl-ecs"
 version = "0.1.0"
 dependencies = [
  "crcbl-core",
+ "crcbl-jobs",
  "crcbl-reflect",
 ]
 
@@ -658,6 +659,7 @@ dependencies = [
  "crcbl-console",
  "crcbl-core",
  "crcbl-ecs",
+ "crcbl-jobs",
  "crcbl-net",
  "crcbl-phys",
  "crcbl-rand",

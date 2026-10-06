@@ -27,8 +27,8 @@ pub fn hash_world(world: &World, tick: TickId) -> u64 {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use core::cell::Cell;
     use core::time::Duration;
+    use std::sync::{Mutex, PoisonError};
 
     use super::*;
     use crcbl_core::time::TimeSource;
@@ -39,7 +39,7 @@ pub(crate) mod tests {
     /// long — a time that is never zero, which is what a hash that wrongly
     /// folded it in would show.
     #[derive(Debug, Default)]
-    pub(crate) struct StepClock(Cell<Duration>);
+    pub(crate) struct StepClock(Mutex<Duration>);
 
     impl StepClock {
         pub(crate) const STEP: Duration = Duration::from_micros(250);
@@ -47,9 +47,10 @@ pub(crate) mod tests {
 
     impl TimeSource for StepClock {
         fn elapsed(&self) -> Duration {
-            let now = self.0.get();
-            self.0.set(now + Self::STEP);
-            now
+            let mut now = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let then = *now;
+            *now += Self::STEP;
+            then
         }
     }
 

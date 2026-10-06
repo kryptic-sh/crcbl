@@ -1717,6 +1717,9 @@ mod fetch_tests;
 #[cfg(test)]
 mod player_tests;
 
+#[cfg(test)]
+mod parallel_tests;
+
 // The UDP transport is native only, by the no-web-networking rule.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod udp_tests;

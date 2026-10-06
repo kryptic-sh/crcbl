@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::hash::Hasher;
+use std::ops::Range;
 use std::sync::Arc;
 
 use crcbl_core::time::TimeSource;
+use crcbl_jobs::Pool;
 
 use crate::access::{AccessError, Conflict, Declared, conflicts_between};
 use crate::entity::Entity;
@@ -29,10 +31,45 @@ impl Hasher for ByteSink {
     }
 }
 
+/// A clock a schedule times its systems on: shared with the pool's workers
+/// when the systems tick there, hence `Sync`, and `Send` so a world that owns
+/// one can move to the thread that runs it.
+pub type ScheduleClock = Box<dyn TimeSource + Send + Sync>;
+
+/// One registered system and what the schedule keeps beside it.
+///
+/// Kept together so a stage of the schedule is one contiguous `&mut` slice,
+/// which is the shape [`Pool::par_for`] splits.
+struct Slot {
+    system: Box<dyn SystemTrait>,
+    /// The system's tick times.
+    times: TickWindow,
+    /// The system's name and declaration as registered; reference-counted so
+    /// a running tick's debug check can hold one.
+    declared: Arc<Declared>,
+}
+
+impl Slot {
+    /// Runs the system's tick, timed on `clock` when there is one, with its
+    /// declaration as this thread's running one in debug builds.
+    fn tick(&mut self, clock: Option<&(dyn TimeSource + Send + Sync)>, dt: f64) {
+        #[cfg(debug_assertions)]
+        let _running = crate::access::Running::enter(&self.declared);
+        match clock {
+            None => self.system.tick(dt),
+            Some(clock) => {
+                let started = clock.elapsed();
+                self.system.tick(dt);
+                self.times.record(clock.elapsed().saturating_sub(started));
+            }
+        }
+    }
+}
+
 /// An ordered sequence of systems run each tick.
 ///
-/// Systems are executed in insertion order, one after another, on the calling
-/// thread.
+/// Without a pool — the default — systems are executed in insertion order, one
+/// after another, on the calling thread.
 ///
 /// # Declared access and the conflict graph
 ///
@@ -41,47 +78,71 @@ impl Hasher for ByteSink {
 /// with [`Schedule::share`]. From those declarations the schedule derives
 /// [`Schedule::conflicts`] as each system is added: a write against a write,
 /// or a read against a write, of one resource means the later-registered
-/// system waits for the earlier. Running in registration order respects every
-/// such edge by construction, so the graph changes nothing today; it is what a
-/// schedule running independent systems at once would be built on. In debug
-/// builds a tick that touches a resource its system did not declare panics,
-/// which is what keeps the graph honest — the [`Access`](crate::Access) docs
-/// describe the seam and what lies outside it.
+/// system waits for the earlier. In debug builds a tick that touches a
+/// resource its system did not declare panics, which is what keeps the graph
+/// honest — the [`Access`](crate::Access) docs describe the seam and what lies
+/// outside it.
+///
+/// # Stages, and running them on a pool
+///
+/// The systems are also grouped, at registration, into
+/// [`stages`](Schedule::stages): runs of consecutive systems no two of which
+/// conflict. A system starts a new stage when it conflicts with any system in
+/// the stage before it; otherwise it joins that stage. So every conflict's
+/// earlier system is in an earlier stage than its later one, and running the
+/// stages in order — each one finished before the next starts — keeps every
+/// order a conflict protects.
+///
+/// Handed a [`Pool`] ([`Schedule::set_pool`]), `run` ticks each stage's
+/// systems across the pool's workers and the calling thread, with the end of
+/// [`Pool::par_for`] as the barrier between stages. The answer is the serial
+/// one bit for bit: systems in one stage touch nothing in common except
+/// resources they all only read, so the order they ran in cannot show. Only
+/// ticks run there. [`sweep`](Schedule::sweep),
+/// [`debug_draw`](Schedule::debug_draw), [`hash_state`](Schedule::hash_state)
+/// and everything [`iter`](Schedule::iter) hands out run on the calling
+/// thread in schedule order, pool or not.
+///
+/// **Two things do differ under a pool, and neither is state.** A system that
+/// logs from its tick logs in completion order rather than schedule order. And
+/// a tick that panics no longer stops the systems after it in its stage: they
+/// run, and the lowest-placed panic is re-raised once the stage is done —
+/// [`Pool::par_for`]'s rule — where serially the systems after it would not
+/// have ticked.
 ///
 /// # Tick times
 ///
 /// Given a clock ([`Schedule::set_clock`]), `run` reads it either side of every
 /// system's tick and keeps a [`TickTime`] per system, which
 /// [`Inspector::collect`](crate::Inspector::collect) reports. Without one —
-/// the default — nothing is measured and no clock is read. The times are
-/// never part of [`Schedule::hash_state`]; [`TickTime`]'s docs say why that
-/// is the whole of their licence to exist.
+/// the default — nothing is measured and no clock is read. Under a pool the
+/// clock is read on whichever thread ran the system, so each time is that
+/// system's own tick and not its stage's. The times are never part of
+/// [`Schedule::hash_state`]; [`TickTime`]'s docs say why that is the whole of
+/// their licence to exist.
 pub struct Schedule {
-    systems: Vec<Box<dyn SystemTrait>>,
-    /// Each system's tick times, index for index with `systems`.
-    times: Vec<TickWindow>,
-    /// Each system's name and declaration as registered, index for index with
-    /// `systems`; reference-counted so a running tick's debug check can hold
-    /// one.
-    declared: Vec<Arc<Declared>>,
+    slots: Vec<Slot>,
     /// The names [`Schedule::share`] registered.
     resources: BTreeSet<String>,
     /// Grouped by `after`, then by `before`, then by resource name.
     conflicts: Vec<Conflict>,
-    clock: Option<Box<dyn TimeSource>>,
+    /// Consecutive, ascending and covering every slot, in schedule order.
+    stages: Vec<Range<usize>>,
+    clock: Option<ScheduleClock>,
+    pool: Option<Pool>,
 }
 
 impl Schedule {
-    /// Creates an empty schedule with no clock.
+    /// Creates an empty schedule with no clock and no pool.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            systems: Vec::new(),
-            times: Vec::new(),
-            declared: Vec::new(),
+            slots: Vec::new(),
             resources: BTreeSet::new(),
             conflicts: Vec::new(),
+            stages: Vec::new(),
             clock: None,
+            pool: None,
         }
     }
 
@@ -117,8 +178,8 @@ impl Schedule {
     }
 
     /// Appends a system to the end of the schedule, asking it its
-    /// [`SystemTrait::access`] and adding its conflicts with every system
-    /// before it.
+    /// [`SystemTrait::access`], adding its conflicts with every system before
+    /// it, and placing it in the last stage or a new one.
     ///
     /// # Errors
     ///
@@ -136,29 +197,56 @@ impl Schedule {
                 resource: unknown.to_owned(),
             });
         }
-        let after = self.systems.len();
-        for (before, earlier) in self.declared.iter().enumerate() {
-            conflicts_between(before, &earlier.access, after, &access, &mut self.conflicts);
+        let after = self.slots.len();
+        let first_new = self.conflicts.len();
+        for (before, earlier) in self.slots.iter().enumerate() {
+            conflicts_between(
+                before,
+                &earlier.declared.access,
+                after,
+                &access,
+                &mut self.conflicts,
+            );
         }
-        self.declared.push(Arc::new(Declared {
-            #[cfg(debug_assertions)]
-            system: system.name().to_owned(),
-            access,
-        }));
-        self.systems.push(system);
-        self.times.push(TickWindow::default());
+        match self.stages.last_mut() {
+            Some(stage)
+                if !self.conflicts[first_new..]
+                    .iter()
+                    .any(|conflict| stage.contains(&conflict.before)) =>
+            {
+                stage.end = after + 1;
+            }
+            _ => self.stages.push(after..after + 1),
+        }
+        self.slots.push(Slot {
+            declared: Arc::new(Declared {
+                #[cfg(debug_assertions)]
+                system: system.name().to_owned(),
+                access,
+            }),
+            system,
+            times: TickWindow::default(),
+        });
         Ok(())
     }
 
     /// Every pair of systems whose declared access conflicts, one entry per
-    /// resource they collide on: the edges of the graph a concurrent schedule
-    /// would have to respect.
+    /// resource they collide on: the edges the [`stages`](Self::stages)
+    /// respect.
     ///
     /// Ordered by the later system, then the earlier, then the resource's
     /// name, so the same registrations give the same list on every run.
     #[must_use]
     pub fn conflicts(&self) -> &[Conflict] {
         &self.conflicts
+    }
+
+    /// The schedule's stages, as ranges of schedule positions in order: each a
+    /// run of consecutive systems no two of which conflict, and every system
+    /// in exactly one. See the [type docs](Self).
+    #[must_use]
+    pub fn stages(&self) -> &[Range<usize>] {
+        &self.stages
     }
 
     /// The systems the one at `index` must run after — each registered before
@@ -176,6 +264,19 @@ impl Schedule {
         before
     }
 
+    /// Ticks each stage's systems on `pool` from the next [`run`](Self::run),
+    /// or on the calling thread alone with `None`, handing back the pool it
+    /// had.
+    ///
+    /// The schedule owns the pool because [`Pool::par_for`] takes `&mut self`:
+    /// one thread drives a pool at a time, and while the schedule runs, that
+    /// thread is the one running it. A pool with no workers — built on
+    /// [`Inline`](crcbl_jobs::Inline), as in a browser without threads — runs
+    /// every system on the calling thread in schedule order, as no pool does.
+    pub fn set_pool(&mut self, pool: Option<Pool>) -> Option<Pool> {
+        std::mem::replace(&mut self.pool, pool)
+    }
+
     /// Times every system's tick on `clock` from the next [`run`](Self::run),
     /// or stops timing them with `None`. Either way the times measured so far
     /// are dropped, since they were taken on a clock that is no longer this
@@ -189,10 +290,10 @@ impl Schedule {
     /// `performance.now()` its shim passes in once a frame, which cannot
     /// time anything inside one. Such a schedule stays untimed and its
     /// systems report no [`TickTime`] rather than a zero.
-    pub fn set_clock(&mut self, clock: Option<Box<dyn TimeSource>>) {
+    pub fn set_clock(&mut self, clock: Option<ScheduleClock>) {
         self.clock = clock;
-        for window in &mut self.times {
-            window.clear();
+        for slot in &mut self.slots {
+            slot.times.clear();
         }
     }
 
@@ -202,22 +303,35 @@ impl Schedule {
         self.clock.is_some()
     }
 
-    /// Runs every system's [`SystemTrait::tick`] in order, passing the
-    /// schedule's fixed timestep `dt` (seconds) through to each, and with a
-    /// clock, timing each one.
+    /// Runs every system's [`SystemTrait::tick`], passing the schedule's fixed
+    /// timestep `dt` (seconds) through to each, and with a clock, timing each
+    /// one: in schedule order on the calling thread, or a stage at a time
+    /// across the pool given to [`set_pool`](Self::set_pool).
     ///
-    /// In debug builds each tick runs with its system's declaration as the
+    /// In debug builds each tick runs with its system's declaration as its
     /// thread's running one, which every [`Shared`] access checks.
+    ///
+    /// # Panics
+    ///
+    /// When a system's tick does — under a pool, after the rest of its stage
+    /// has run; see the [type docs](Self).
     pub fn run(&mut self, dt: f64) {
-        for (index, system) in self.systems.iter_mut().enumerate() {
-            #[cfg(debug_assertions)]
-            let _running = crate::access::Running::enter(&self.declared[index]);
-            match &self.clock {
-                None => system.tick(dt),
-                Some(clock) => {
-                    let started = clock.elapsed();
-                    system.tick(dt);
-                    self.times[index].record(clock.elapsed().saturating_sub(started));
+        let clock = self.clock.as_deref();
+        match &mut self.pool {
+            None => {
+                for slot in &mut self.slots {
+                    slot.tick(clock, dt);
+                }
+            }
+            Some(pool) => {
+                for stage in &self.stages {
+                    // One system per chunk: the split is the stage's own and
+                    // never the worker count's.
+                    pool.par_for(&mut self.slots[stage.clone()], 1, |_, slots| {
+                        for slot in slots {
+                            slot.tick(clock, dt);
+                        }
+                    });
                 }
             }
         }
@@ -226,42 +340,42 @@ impl Schedule {
     /// Calls [`SystemTrait::sweep`] on every system with the given dead
     /// entities.
     pub fn sweep(&mut self, dead: &[Entity]) {
-        for system in &mut self.systems {
-            system.sweep(dead);
+        for slot in &mut self.slots {
+            slot.system.sweep(dead);
         }
     }
 
     /// Calls [`SystemTrait::debug_draw`] on every system.
     pub fn debug_draw(&mut self, ctx: &DebugCtx) {
-        for system in &mut self.systems {
-            system.debug_draw(ctx);
+        for slot in &mut self.slots {
+            slot.system.debug_draw(ctx);
         }
     }
 
     /// Number of systems in the schedule.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.systems.len()
+        self.slots.len()
     }
 
     /// Whether the schedule is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.systems.is_empty()
+        self.slots.is_empty()
     }
 
     /// Returns `(name, entity_count)` for every system — used by
     /// [`Inspector`](crate::Inspector).
     pub(crate) fn stats(&self) -> impl Iterator<Item = (String, usize)> + '_ {
-        self.systems
+        self.slots
             .iter()
-            .map(|s| (s.name().to_string(), s.entity_count()))
+            .map(|slot| (slot.system.name().to_string(), slot.system.entity_count()))
     }
 
     /// Every system's [`TickTime`], in schedule order: `None` for a system
     /// not timed since the clock was set, and for all of them without one.
     pub(crate) fn tick_times(&self) -> impl Iterator<Item = Option<TickTime>> + '_ {
-        self.times.iter().map(TickWindow::read)
+        self.slots.iter().map(|slot| slot.times.read())
     }
 
     /// Hash every system's state (name + component data) into `hasher`,
@@ -276,12 +390,12 @@ impl Schedule {
     /// `"a"` whose first data byte is `b'b'`.
     pub fn hash_state(&self, hasher: &mut dyn Hasher) {
         let mut entries: Vec<(&str, Vec<u8>)> = self
-            .systems
+            .slots
             .iter()
-            .map(|system| {
+            .map(|slot| {
                 let mut bytes = ByteSink::default();
-                system.hash_state(&mut bytes);
-                (system.name(), bytes.0)
+                slot.system.hash_state(&mut bytes);
+                (slot.system.name(), bytes.0)
             })
             .collect();
         entries.sort_unstable();
@@ -302,33 +416,35 @@ impl Schedule {
     /// forgot to override [`SystemTrait::hash_state`]; the determinism harness
     /// should warn about them.
     pub fn non_contributing_systems(&self) -> Vec<&str> {
-        self.systems
+        self.slots
             .iter()
-            .filter(|s| !s.contributes_to_hash())
-            .map(|s| s.name())
+            .filter(|slot| !slot.system.contributes_to_hash())
+            .map(|slot| slot.system.name())
             .collect()
     }
 
     /// Iterates the systems in schedule order — used by the server's
     /// snapshot emission to call [`SystemTrait::replicate`] on each.
     pub fn iter(&self) -> impl Iterator<Item = &dyn SystemTrait> {
-        self.systems.iter().map(AsRef::as_ref)
+        self.slots.iter().map(|slot| slot.system.as_ref())
     }
 
     /// Mutably iterates the systems in schedule order — used by game code
     /// (and tests) to reach a concrete system via [`SystemTrait::as_any_mut`].
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut (dyn SystemTrait + '_)> + '_ {
-        self.systems
+        self.slots
             .iter_mut()
-            .map(|system| &mut **system as &mut (dyn SystemTrait + '_))
+            .map(|slot| &mut *slot.system as &mut (dyn SystemTrait + '_))
     }
 }
 
 impl fmt::Debug for Schedule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Schedule")
-            .field("system_count", &self.systems.len())
+            .field("system_count", &self.slots.len())
+            .field("stages", &self.stages.len())
             .field("timed", &self.is_timed())
+            .field("pool_workers", &self.pool.as_ref().map(Pool::workers))
             .finish()
     }
 }
@@ -532,5 +648,303 @@ mod tests {
 
         let stats: Vec<_> = schedule.stats().collect();
         assert_eq!(stats, vec![("a".into(), 2), ("b".into(), 1)]);
+    }
+
+    // -- stages and the pool --------------------------------------------------
+
+    /// A system that steps one value, reading one resource and writing
+    /// another as it is told — enough to build any shape of conflict graph.
+    ///
+    /// A writer blends its value into what the resource held, so two writers'
+    /// order shows in what a later reader sees; a reader folds what it read
+    /// into its value, so whether it ran before or after a writer shows in its
+    /// own hash. The step grows the value and wraps it at [`Lane::WRAP`], so it
+    /// never settles: a schedule whose values converged would hash alike
+    /// whatever order its systems had run in.
+    struct Lane {
+        name: &'static str,
+        value: f64,
+        reads: Option<Shared<f64>>,
+        writes: Option<Shared<f64>>,
+    }
+
+    impl Lane {
+        /// Where a value wraps, keeping it bounded without letting it settle.
+        const WRAP: f64 = 997.0;
+
+        fn new(
+            name: &'static str,
+            reads: Option<&Shared<f64>>,
+            writes: Option<&Shared<f64>>,
+        ) -> Self {
+            Self {
+                name,
+                value: name.len() as f64,
+                reads: reads.cloned(),
+                writes: writes.cloned(),
+            }
+        }
+    }
+
+    impl SystemTrait for Lane {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn access(&self) -> Access {
+            let mut access = Access::none();
+            if let Some(read) = &self.reads {
+                access = access.reads(read.name());
+            }
+            if let Some(written) = &self.writes {
+                access = access.writes(written.name());
+            }
+            access
+        }
+        fn tick(&mut self, dt: f64) {
+            let input = self.reads.as_ref().map_or(0.0, |read| *read.read());
+            self.value = (1.5 * self.value + input + dt) % Self::WRAP;
+            if let Some(written) = &self.writes {
+                let mut value = written.write();
+                *value = (0.5 * *value + self.value) % Self::WRAP;
+            }
+        }
+        fn entity_count(&self) -> usize {
+            1
+        }
+        fn sweep(&mut self, _dead: &[Entity]) {}
+        fn debug_draw(&mut self, _ctx: &DebugCtx) {}
+        fn hash_state(&self, hasher: &mut dyn Hasher) {
+            hasher.write_u64(self.value.to_bits());
+        }
+        fn contributes_to_hash(&self) -> bool {
+            true
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    /// A schedule of [`Lane`]s with every kind of edge in it: readers after a
+    /// writer, two writers of one resource, a reader of one resource that
+    /// writes another, and systems that touch nothing between them.
+    fn mixed() -> Schedule {
+        let wind = Shared::new("wind", 0.0);
+        let score = Shared::new("score", 0.0);
+        let mut schedule = Schedule::new();
+        schedule.share(&wind).expect("distinct names");
+        schedule.share(&score).expect("distinct names");
+        for lane in [
+            Lane::new("gust", None, Some(&wind)),
+            Lane::new("drift", Some(&wind), None),
+            Lane::new("spin", None, None),
+            Lane::new("drag", Some(&wind), None),
+            Lane::new("tally", Some(&wind), Some(&score)),
+            Lane::new("decay", None, None),
+            Lane::new("audit", None, Some(&score)),
+            Lane::new("pulse", Some(&score), None),
+            Lane::new("calm", None, Some(&wind)),
+            Lane::new("rest", None, None),
+        ] {
+            schedule.add_system(Box::new(lane));
+        }
+        schedule
+    }
+
+    fn stage_of(schedule: &Schedule, index: usize) -> usize {
+        schedule
+            .stages()
+            .iter()
+            .position(|stage| stage.contains(&index))
+            .unwrap_or_else(|| panic!("system {index} is in no stage"))
+    }
+
+    /// **No stage holds two systems that conflict**: every conflict's earlier
+    /// system sits in a stage strictly before its later one's.
+    #[test]
+    fn conflicting_systems_never_share_a_stage() {
+        let schedule = mixed();
+        assert!(!schedule.conflicts().is_empty());
+        for conflict in schedule.conflicts() {
+            assert!(
+                stage_of(&schedule, conflict.before) < stage_of(&schedule, conflict.after),
+                "{conflict:?} shares a stage: {:?}",
+                schedule.stages()
+            );
+        }
+        // And the stages are the greedy ones, not merely legal: a system joins
+        // the stage before it unless it conflicts with something in it.
+        assert_eq!(schedule.stages(), [0..1, 1..6, 6..7, 7..10]);
+    }
+
+    /// **The stages keep registration order**: consecutive ranges, ascending,
+    /// covering every system once — so running them in order runs every
+    /// conflicting pair in the order it was registered.
+    #[test]
+    fn the_stages_cover_the_schedule_in_registration_order() {
+        let schedule = mixed();
+        let mut next = 0;
+        for stage in schedule.stages() {
+            assert_eq!(stage.start, next, "{:?}", schedule.stages());
+            assert!(stage.end > stage.start, "{:?}", schedule.stages());
+            next = stage.end;
+        }
+        assert_eq!(next, schedule.len());
+
+        // A schedule of systems that touch nothing is one stage.
+        let mut free = Schedule::new();
+        for name in ["a", "b", "c"] {
+            free.add_system(Box::new(Lane::new(name, None, None)));
+        }
+        assert_eq!(free.stages().len(), 1);
+        assert_eq!(free.stages()[0], 0..3);
+    }
+
+    fn hash(schedule: &Schedule) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        schedule.hash_state(&mut hasher);
+        hasher.finish()
+    }
+
+    fn pool(workers: usize) -> Pool {
+        Pool::with_workers(crcbl_jobs::default_spawner().as_ref(), workers).expect("a pool")
+    }
+
+    /// **A pool changes nothing about the answer**: [`mixed`] ticked serially,
+    /// on a pool with no workers, and on pools of one and seven workers hashes
+    /// the same after every tick.
+    #[test]
+    fn a_schedule_on_a_pool_hashes_as_it_does_serially_after_every_tick() {
+        const TICKS: usize = 200;
+        let run = |pool: Option<Pool>| {
+            let mut schedule = mixed();
+            schedule.set_pool(pool);
+            (0..TICKS)
+                .map(|_| {
+                    schedule.run(1.0 / 60.0);
+                    hash(&schedule)
+                })
+                .collect::<Vec<_>>()
+        };
+        let serial = run(None);
+        assert!(serial.windows(2).all(|pair| pair[0] != pair[1]));
+        for workers in [0, 1, 7] {
+            assert_eq!(run(Some(pool(workers))), serial, "{workers} workers");
+        }
+    }
+
+    /// Two systems that each wait for the other to arrive, or give up after
+    /// [`Meet::PATIENCE`]: they can only both meet if they tick at once.
+    struct Meet {
+        name: &'static str,
+        arrived: Arc<std::sync::atomic::AtomicUsize>,
+        met: bool,
+    }
+
+    impl Meet {
+        /// Far longer than a worker takes to wake, and short enough that the
+        /// serial schedule this test exists to tell apart fails promptly.
+        const PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+    }
+
+    impl SystemTrait for Meet {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn access(&self) -> Access {
+            Access::none()
+        }
+        fn tick(&mut self, _dt: f64) {
+            use std::sync::atomic::Ordering;
+            self.arrived.fetch_add(1, Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + Self::PATIENCE;
+            while self.arrived.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            self.met = self.arrived.load(Ordering::SeqCst) >= 2;
+        }
+        fn entity_count(&self) -> usize {
+            0
+        }
+        fn sweep(&mut self, _dead: &[Entity]) {}
+        fn debug_draw(&mut self, _ctx: &DebugCtx) {}
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    /// **A stage really runs at once on a pool**: two systems that can only
+    /// finish together do — which a schedule that kept ticking one at a time
+    /// with a pool in hand could not manage.
+    #[test]
+    fn a_pool_ticks_the_systems_of_one_stage_at_once() {
+        let arrived = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut schedule = Schedule::new();
+        for name in ["left", "right"] {
+            schedule.add_system(Box::new(Meet {
+                name,
+                arrived: Arc::clone(&arrived),
+                met: false,
+            }));
+        }
+        assert_eq!(schedule.stages().len(), 1, "both meets share one stage");
+        schedule.set_pool(Some(pool(1)));
+        schedule.run(1.0 / 60.0);
+        let met: Vec<bool> = schedule
+            .iter_mut()
+            .map(|system| {
+                system
+                    .as_any_mut()
+                    .downcast_mut::<Meet>()
+                    .expect("both are meets")
+                    .met
+            })
+            .collect();
+        assert_eq!(met, [true, true]);
+    }
+
+    /// A system whose tick takes at least [`Slow::COST`].
+    struct Slow(&'static str);
+
+    impl Slow {
+        const COST: std::time::Duration = std::time::Duration::from_millis(2);
+    }
+
+    impl SystemTrait for Slow {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn access(&self) -> Access {
+            Access::none()
+        }
+        fn tick(&mut self, _dt: f64) {
+            std::thread::sleep(Self::COST);
+        }
+        fn entity_count(&self) -> usize {
+            0
+        }
+        fn sweep(&mut self, _dead: &[Entity]) {}
+        fn debug_draw(&mut self, _ctx: &DebugCtx) {}
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    /// **The clock still times every system on a pool**, each with its own
+    /// tick's length, whichever thread ran it.
+    #[test]
+    fn a_timed_schedule_on_a_pool_records_every_systems_tick() {
+        let mut schedule = Schedule::new();
+        for name in ["a", "b", "c", "d"] {
+            schedule.add_system(Box::new(Slow(name)));
+        }
+        schedule.set_clock(Some(Box::new(crcbl_core::time::MonotonicTime::new())));
+        schedule.set_pool(Some(pool(3)));
+        schedule.run(1.0 / 60.0);
+        let times: Vec<Option<TickTime>> = schedule.tick_times().collect();
+        assert_eq!(times.len(), 4);
+        for (index, time) in times.into_iter().enumerate() {
+            let time = time.unwrap_or_else(|| panic!("system {index} was not timed"));
+            assert!(time.last >= Slow::COST, "system {index}: {time:?}");
+        }
     }
 }
