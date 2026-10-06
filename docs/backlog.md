@@ -5,6 +5,48 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ## Top priority: EW physics migration handoff (2026-10-07)
 
+**Engine implementation needed first: selectable accelerated contacts.** EW's
+direct migration exposed a missing query capability. Let the caller choose the
+earliest relevant arc contact after rejecting a departing support or a
+non-approaching surface, without mutating the world or losing the character's
+self-exclusion and query mask. An ordered contact query or an acceptance
+predicate may satisfy this; preserve meaningful later contacts within compound
+colliders and meshes, not only a list of collider-first hits. Keep the existing
+closest-query contract for callers that need starting overlaps. Do not globally
+ignore overlaps: an incoming starting contact must still be available.
+
+Reproduction in EW `72f15ced`: use the setup from
+`ceiling_contact_uses_the_remaining_time_for_descent` in
+`src/controller_ballistic_tests.rs` (floor, low ceiling, grounded player, then
+`request_jump`). Sweep the player's capsule expanded by `ground_clearance_m`
+with its jump velocity, gravity and the fixture's coarse interval.
+`sweep_capsule_arc` returns a walkable floor at time zero with `started_inside`,
+for both bound and unbound controllers; `preview_airborne_motion` on the same
+interval reports the ceiling. `QueryFilter` has only one excluded collider,
+already needed for the bound character; replacing it with the floor is not a
+valid workaround. Keep gameplay surface classification in EW.
+
+Acceptance: this departing-floor/ceiling case, approaching starting contacts, a
+non-approaching slope ahead of a finite wall, and a floor/ceiling hiding a later
+wall. Exercise separate colliders plus compound and mesh geometry; preserve
+self-exclusion, masks, triggers, deterministic ordering, world state and
+absolute contact times. In EW, require
+`ceiling_contact_uses_the_remaining_time_for_descent`,
+`wall_and_ceiling_contacts_preserve_jump_descent`, and
+`ceiling_contact_does_not_delay_wall_steering` to stay green alongside
+`braking_near_a_wall_preserves_contact_before_reversal` and the hidden-wall
+fixtures in `src/controller_contact_forecast_tests.rs`.
+
+Evidence: a direct closest-arc migration failed those ceiling/timing
+regressions; restoring the existing implementation passed the controller suite.
+The isolated departing-support probe confirmed the time-zero floor result and
+the preview's ceiling contact. Logs and trial/probe sources are under
+`%TEMP%/ew-crcbl-update-review/`: `arc-migration-trial.log`,
+`arc-migration-restored.log`, `ballistic-arc-trial.rs`,
+`arc-departing-support-probe.rs` and `arc-departing-support-probe.log`. No
+failing migration was shipped. These checks establish the need; they do not
+validate a new engine implementation.
+
 The remaining top-priority integration is adopting
 `PhysicsWorld::sweep_capsule_arc` in EW's applicable airborne contact forecasts
 in `src/controller_ballistic.rs::move_with_gravity`. The API is already on crcbl
