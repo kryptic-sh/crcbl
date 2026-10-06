@@ -91,6 +91,16 @@ pub struct Model {
     /// the imported scene is dropped at the end of [`load_from`] and this is
     /// the last point it exists.
     pub unsupported: Vec<String>,
+    /// The document's materials, texture slots and images with its geometry
+    /// stripped — [`GltfScene::without_geometry`] — kept so a texture written
+    /// again can be rebuilt into its page without reopening the document. See
+    /// [`crate::textures`].
+    ///
+    /// The exception to "the imported scene is dropped", and a small one: the
+    /// encoded images and the material rows, never the vertices. Native only,
+    /// with the watch that reads it — a page has no file to write again.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub textures: GltfScene,
 }
 
 /// What [`crate::gpu`] needs to draw this document's skinned geometry: the
@@ -297,14 +307,25 @@ pub fn load(path: &Path) -> Result<Model, LoadError> {
         // directory has a file name and fails later, at the read.
         LoadError::NotAFile(path.to_path_buf())
     })?);
+    load_from(&DirSource::at(root_of(path)), &key, path)
+}
+
+/// The asset root [`load`] opens the document at `path` under: its own
+/// directory, so the files beside it resolve — see the
+/// [module docs](self).
+///
+/// One function because the native texture watch, `crate::textures` — not
+/// linked, since it does not exist in a browser build — roots its registry at
+/// the same place, and a texture key resolved against a different root would
+/// name a different file.
+#[must_use]
+pub fn root_of(path: &Path) -> PathBuf {
     // A bare `model.glb` has an empty parent, which as a root means "the
     // process's working directory" — the same thing the shell meant by it.
-    let root = match path.parent() {
+    match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
-    };
-
-    load_from(&DirSource::at(root), &key, path)
+    }
 }
 
 /// Reads the document `key` names **out of `source`**, converts it, and works
@@ -379,6 +400,8 @@ pub fn load_from(
         playable,
         skinned,
         unsupported,
+        #[cfg(not(target_arch = "wasm32"))]
+        textures: imported.without_geometry(),
     })
 }
 

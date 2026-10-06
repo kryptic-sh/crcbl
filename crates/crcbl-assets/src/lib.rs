@@ -55,7 +55,7 @@ pub mod watch;
 
 use core::fmt;
 
-pub use registry::{Asset, AssetHandle, AssetRegistry, AssetState};
+pub use registry::{Asset, AssetHandle, AssetRegistry, AssetState, ReloadFailure};
 pub use source::{AssetEntry, AssetSource, DirSource, MemorySource};
 
 /// The error every fallible call in this crate returns, re-exported from

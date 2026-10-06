@@ -40,6 +40,15 @@
 //! measures what the *shader* does with such a layer; what only a file can
 //! prove is that the importer put one there.
 //!
+//! # And a texture reloaded between two frames
+//!
+//! `a_texture_reloaded_between_frames_shows_whole_in_the_next_frame` draws the
+//! base-colour document, rebuilds its pages from a second document whose image
+//! has every swatch moved, swaps them in through
+//! `ForwardRenderer::replace_page`, and reads back every frame of a full lap of
+//! the ring: each must be the new texture in all four quadrants. A frame still
+//! sampling the old page, or one that mixed the two, fails a quadrant.
+//!
 //! `#[ignore]` like `render_e2e.rs` and `tiling_e2e.rs`: it needs a real GPU,
 //! which `CRCBL_GPU` names and `tests/run-gltf-e2e.sh` supplies. It commits no
 //! golden image — the claim is which hue is in which quadrant, not a pixel-exact
@@ -58,7 +67,7 @@ use crcbl::render::{
     Antialiasing, Camera, DirectionalLight, EffectOverride, EffectRequest, ForwardRenderer,
     Projection, RenderEffects,
 };
-use crcbl::scene::gltf_render::build_render_scene;
+use crcbl::scene::gltf_render::{build_render_scene, build_texture_pages};
 use crcbl::screenshot::{ForwardScene, OffscreenSetup};
 use crcbl_assets::DirSource;
 use crcbl_golden::{ChannelOrder, Image};
@@ -137,6 +146,19 @@ const YELLOW: Hue = Hue {
     name: "yellow",
     channels: [true, true, false],
 };
+
+/// [`TEXELS`] with every swatch moved to another corner: what the base-colour
+/// image is saved as by
+/// `a_texture_reloaded_between_frames_shows_whole_in_the_next_frame`.
+///
+/// No corner keeps its hue, so a frame that sampled the old page anywhere —
+/// whole, or half of it — reads the wrong hue in some quadrant.
+const RELOADED_TEXELS: [u8; 16] = [
+    0x00, 0x00, 0xFF, 0xFF, // (0, 0) blue
+    0xFF, 0xFF, 0x00, 0xFF, // (1, 0) yellow
+    0xFF, 0x00, 0x00, 0xFF, // (0, 1) red
+    0x00, 0xFF, 0x00, 0xFF, // (1, 1) green
+];
 
 /// The nested hierarchy the base-colour document is drawn under: a parent that
 /// translates and turns a quarter-turn about `Z`, and a child that translates
@@ -455,6 +477,25 @@ fn draw_the_imported_quad(
     sun: DirectionalLight,
     effects: Option<EffectRequest>,
 ) -> Image {
+    let mut setup = open_the_imported_quad(document, centre, sun, effects);
+    let format = setup.format();
+    let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+    // Before a hue is read out of a quadrant: a device lost during the frame,
+    // and a specification violation the layer refused, both surface here and
+    // nowhere else — so a run that sampled the pixels first would report a wrong
+    // colour where the real answer is that the frame was never legal.
+    setup.finish();
+    image_of(format, width, height, &pixels)
+}
+
+/// [`draw_the_imported_quad`]'s fixture before its frame: the document
+/// imported, converted, made resident and framed, its pins checked.
+fn open_the_imported_quad(
+    document: &[u8],
+    centre: Vec3,
+    sun: DirectionalLight,
+    effects: Option<EffectRequest>,
+) -> Offscreen {
     // A logger before anything opens, for `render_e2e.rs`'s reason: without one
     // every `log::info!` a backend emits on the way to a device goes nowhere,
     // and on a runner nobody can log into that output is the whole diagnosis.
@@ -513,23 +554,18 @@ fn draw_the_imported_quad(
         })
     })
     .unwrap_or_else(|why| panic!("a GPU backend opens for the glTF test: {why}"));
-    let mut setup = Offscreen::guard(SUITE, setup);
-
+    let setup = Offscreen::guard(SUITE, setup);
     assert_pins_arrived(&setup);
+    setup
+}
 
-    let format = setup.format();
-    let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
-    // Before a hue is read out of a quadrant: a device lost during the frame,
-    // and a specification violation the layer refused, both surface here and
-    // nowhere else — so a run that sampled the pixels first would report a wrong
-    // colour where the real answer is that the frame was never legal.
-    setup.finish();
-
+/// A read-back frame as an [`Image`], in the channel order `format` stores.
+fn image_of(format: Format, width: u32, height: u32, pixels: &[u8]) -> Image {
     let order = match format {
         Format::Bgra8Unorm | Format::Bgra8UnormSrgb => ChannelOrder::Bgra,
         _ => ChannelOrder::Rgba,
     };
-    Image::from_readback(width, height, &pixels, order).expect("the readback is one image")
+    Image::from_readback(width, height, pixels, order).expect("the readback is one image")
 }
 
 /// The average pixel of the patch at the centre of one quadrant.
@@ -768,3 +804,125 @@ const DARK_CEILING: f32 = 8.0;
 /// Swept on both drivers, where it saturates at 255 — the factor's first
 /// channel is one and the texel is white.
 const BRIGHT_FLOOR: f32 = 200.0;
+
+/// Imports `document` as `meshes/panel.glb` through a real [`DirSource`], as
+/// [`open_the_imported_quad`] does.
+fn import_the_document(document: &[u8]) -> crcbl::scene::GltfScene {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let root = dir.path().join("assets");
+    std::fs::create_dir_all(root.join("meshes")).expect("the asset tree");
+    std::fs::write(root.join("meshes/panel.glb"), document).expect("the document");
+    crcbl::scene::import_gltf(&DirSource::at(root), Path::new("meshes/panel.glb"))
+        .expect("the fixture imports")
+}
+
+/// Every quadrant of `image` is the hue `expected` gives it, with `when`
+/// naming the frame in the message.
+fn assert_quadrants(image: &Image, expected: &[((bool, bool), Hue)], when: &str) {
+    for &((right, bottom), hue) in expected {
+        let pixel = quadrant(image, right, bottom);
+        eprintln!(
+            "crcbl gltf e2e: {when}: quadrant right={right} bottom={bottom} is \
+             ({:.0}, {:.0}, {:.0}), expecting {}",
+            pixel[0], pixel[1], pixel[2], hue.name
+        );
+        assert!(
+            is_hue(pixel, hue),
+            "{when}: the quadrant at right={right} bottom={bottom} should be {} and is \
+             ({:.0}, {:.0}, {:.0})",
+            hue.name,
+            pixel[0],
+            pixel[1],
+            pixel[2],
+        );
+    }
+}
+
+/// **A texture reloaded between two frames is the whole of the next frame's
+/// texture**, and of every frame after it: stage 6's texture reload on a
+/// device.
+///
+/// The pages come from `build_texture_pages` over a second document whose
+/// image moved every swatch — the viewer's own path for a texture saved again
+/// — and go in through `ForwardRenderer::replace_page`. Each frame of a full
+/// lap of the ring is read back: a slot that went on binding the old page
+/// reads an old hue in every quadrant, and a frame that sampled a page
+/// half-written would read one in some. Neither may happen, because the page is
+/// a new image uploaded whole before any slot names it.
+///
+/// # Sabotage
+///
+/// `ForwardRenderer::adopt_pages` returning at its first check, so no slot
+/// moves off the page it was built with. Red on Vulkan and on D3D12 on
+/// 2026-10-06, on an RX 7900 XTX — on Vulkan with `"frame 0 after the reload:
+/// the quadrant at right=false bottom=true should be blue and is (230, 95,
+/// 88)"`, the old red in the first frame after the swap.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-gltf-e2e.sh"]
+fn a_texture_reloaded_between_frames_shows_whole_in_the_next_frame() {
+    let sun = DirectionalLight {
+        direction: Vec3::Z,
+        color: Vec3::splat(1.2),
+        ambient: Vec3::splat(0.35),
+    };
+    let key = Path::new("meshes/panel.glb");
+    let first = build_texture_pages(&import_the_document(&quad_glb()), key);
+    let reloaded = build_texture_pages(
+        &import_the_document(&quad_document(
+            &png_bytes(2, 2, &RELOADED_TEXELS),
+            PIVOTED_NODES,
+            BASE_COLOUR_MATERIAL,
+        )),
+        key,
+    );
+    assert_eq!(
+        reloaded.materials, first.materials,
+        "the saved-again image names the same layer, so the pages alone are swapped"
+    );
+
+    let mut setup = open_the_imported_quad(&quad_glb(), QUAD_CENTRE, sun, None);
+    let format = setup.format();
+    // The hues the composed hierarchy puts in each quadrant — see
+    // `an_imported_gltf_draws_its_own_texture_where_its_own_hierarchy_puts_it`
+    // for the mapping, which carries the texel at (0, 0) to the bottom left.
+    let before = [
+        ((false, true), RED),
+        ((false, false), GREEN),
+        ((true, false), YELLOW),
+        ((true, true), BLUE),
+    ];
+    let after = [
+        ((false, true), BLUE),
+        ((false, false), YELLOW),
+        ((true, false), GREEN),
+        ((true, true), RED),
+    ];
+    let mut frames = Vec::new();
+    let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+    frames.push((
+        "before the reload".to_owned(),
+        image_of(format, width, height, &pixels),
+    ));
+
+    assert!(
+        setup
+            .replace_page(crcbl::render::PageKind::BaseColor, &reloaded.page)
+            .expect("the device takes the page"),
+        "a forward scene has pages to replace"
+    );
+    for frame in 0..=crcbl::engine::FRAMES_IN_FLIGHT {
+        let ((width, height), pixels) = setup.draw_and_readback().expect("the frame renders");
+        frames.push((
+            format!("frame {frame} after the reload"),
+            image_of(format, width, height, &pixels),
+        ));
+    }
+    // Before a hue is read, for `draw_the_imported_quad`'s reason.
+    setup.finish();
+
+    let (when, image) = &frames[0];
+    assert_quadrants(image, &before, when);
+    for (when, image) in &frames[1..] {
+        assert_quadrants(image, &after, when);
+    }
+}

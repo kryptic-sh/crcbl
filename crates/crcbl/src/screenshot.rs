@@ -7292,6 +7292,35 @@ impl OffscreenSetup {
         }
     }
 
+    /// Replaces `kind`'s material page in this scene's forward renderer with
+    /// `page`'s layers of that kind, for the frames drawn after this call —
+    /// [`ForwardRenderer::replace_page`].
+    ///
+    /// **What it exists for is texture hot reload's frame**: a page swapped
+    /// between two frames has to show in the next one whole, and the only way
+    /// to ask that of a scene built by this module is to change it between
+    /// frames.
+    ///
+    /// Returns whether it reached a renderer, on [`Self::set_tonemap_curve`]'s
+    /// terms: the sprite and UI scenes have no material pages.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::hal::HalError`] from the replacement, in which case the page in
+    /// force goes on drawing.
+    pub fn replace_page(
+        &mut self,
+        kind: crate::render::PageKind,
+        page: &crate::render::PageDesc<'_>,
+    ) -> Result<bool, crate::hal::HalError> {
+        match &mut self.scene {
+            SceneState::Forward { renderer, .. } => renderer
+                .replace_page(self.device.as_ref(), self.queue, kind, page)
+                .map(|()| true),
+            SceneState::Sprite { .. } | SceneState::Ui { .. } => Ok(false),
+        }
+    }
+
     /// The two buffers this scene's grass generation pass writes, or [`None`]
     /// where it has no field or draws through no forward renderer.
     ///

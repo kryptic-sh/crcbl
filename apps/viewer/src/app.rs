@@ -69,6 +69,8 @@ use crate::menu::{MenuKind, Menus};
 use crate::model::{self, LoadError, Model};
 use crate::shelf;
 #[cfg(not(target_arch = "wasm32"))]
+use crate::textures::Textures;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::watch::Watch;
 
 /// Frames the model again, fitting it in the view from wherever the camera is.
@@ -367,6 +369,15 @@ pub struct Viewer {
     /// Native only: a page has no file to watch, see [`crate::watch`].
     #[cfg(not(target_arch = "wasm32"))]
     watch: Watch,
+    /// The texture hot reload — see [`crate::textures`]: the images beside the
+    /// document, watched, and put on screen when one is written again.
+    ///
+    /// Rebuilt with every document the frame adopts, beside [`Viewer::watch`]:
+    /// a re-export may name different images, and a dropped or shelved
+    /// document is somewhere else entirely. Native only, for the watch's
+    /// reason.
+    #[cfg(not(target_arch = "wasm32"))]
+    textures: Textures,
     /// Which row of [`crate::shelf`] the panel's `SHELF` cycler is showing.
     ///
     /// **What the arrows will open, not a claim about what is on screen.** The
@@ -594,6 +605,8 @@ fn assemble<S: Shell + ?Sized>(
             exposure_handle: crate::menu::handle_at(exposure),
             #[cfg(not(target_arch = "wasm32"))]
             watch: Watch::new(&document_path(options)),
+            #[cfg(not(target_arch = "wasm32"))]
+            textures: Textures::new(&document_path(options), model),
             dropped: Vec::new(),
             reloads: 0,
             turned: 0.0,
@@ -784,6 +797,10 @@ impl Viewer {
             );
             return;
         }
+        // The re-export may name other images, and its pages were just built
+        // from the files as they are, so the texture watch starts again on
+        // them.
+        self.textures = Textures::new(self.watch.path(), &model);
         crcbl::log::info!(
             "viewer: {key} reloaded — {} instance(s), {} skipped",
             self.instances,
@@ -925,6 +942,7 @@ impl Viewer {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 self.watch = Watch::new(&path);
+                self.textures = Textures::new(&path, &model);
             }
             crcbl::log::info!(
                 "viewer: {key} opened — {} instance(s), {} skipped",
@@ -1008,6 +1026,7 @@ impl Viewer {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.watch = Watch::new(&path);
+            self.textures = Textures::new(&path, &model);
         }
         #[cfg(target_arch = "wasm32")]
         drop(path);
@@ -1398,6 +1417,13 @@ impl HostedGame for Viewer {
         // Native only, with the watch: a page has no file to re-export over.
         #[cfg(not(target_arch = "wasm32"))]
         self.poll_for_re_export(gpu, frame.render_dt.as_secs_f64());
+        // The textures beside the document, on the same clock and for the same
+        // reason — see [`crate::textures`]. After the re-export poll, which
+        // rebuilds this watch when it reloads the document, so a frame that
+        // reloaded the document does not also reload a texture of the one it
+        // replaced.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.textures.poll(frame.render_dt.as_secs_f64(), gpu);
         // A document dropped on the window, in the same place and for the same
         // reason — see [`Viewer::poll_for_dropped_files`]. Compiled everywhere
         // rather than gated: the list it drains is filled by an event no
@@ -1858,6 +1884,7 @@ mod tests {
     };
     use crcbl::math::Vec2;
     use crcbl::math::Vec3;
+    use crcbl::render::PageKind;
     use crcbl::shell::{HeadlessShell, PhysicalPoint};
 
     use crate::fixture;
@@ -3241,6 +3268,189 @@ mod tests {
             1,
             "a document nobody touched was reloaded again",
         );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// A document whose base-colour texture is `paint.png` beside it, holding a
+    /// `side`-texel square of `texel`, and the options that open it.
+    fn textured_at(side: u32, texel: [u8; 4]) -> (tempfile::TempDir, Options, PathBuf) {
+        let (dir, options) = model_at(&fixture::textured_quad_glb("paint.png"), 4096);
+        let png = dir.path().join("paint.png");
+        write_png(&png, side, texel);
+        (dir, options, png)
+    }
+
+    /// `path` as a `side`-texel square PNG of `texel`.
+    fn write_png(path: &Path, side: u32, texel: [u8; 4]) {
+        crcbl_golden::Image::filled(side, side, texel)
+            .expect("a square has texels")
+            .save_png(path)
+            .expect("the texture is written");
+    }
+
+    /// Two seconds of headless frames: a bound on a reload, rather than a wait
+    /// that hangs when one never comes. `crcbl::assets::watch` offers a change
+    /// once it has held still for `SETTLE`, well inside it.
+    fn two_seconds_of_frames() -> usize {
+        (2.0 / crcbl::engine::HEADLESS_FRAME_STEP.as_secs_f64()).ceil() as usize
+    }
+
+    /// **A texture written again reaches the device without the document being
+    /// reopened** — stage 6's texture reload, through the viewer's own frame.
+    ///
+    /// The page image is the observable: a reload that did not reach the
+    /// renderer leaves the handle where it was, and one that reopened the
+    /// document moves [`Viewer::reloads`], which must stay at zero. The new
+    /// file is twice the size, so the page's extent moves with it — a fresh
+    /// allocation, which is the only kind a reload makes — and so the watch
+    /// can tell the two files apart by length on a filesystem with a coarse
+    /// modification time.
+    #[test]
+    fn a_texture_written_again_reaches_the_page_without_reopening_the_document() {
+        let (_dir, options, png) = textured_at(2, [0xFF, 0x00, 0x00, 0xFF]);
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        let before = engine.gpu().page_import(PageKind::BaseColor);
+        assert_eq!(before.extent, (2, 2), "the page is sized by the one image");
+        assert_eq!(
+            engine.game().textures.paths().collect::<Vec<_>>(),
+            [png.as_path()],
+            "the image beside the document is watched"
+        );
+
+        write_png(&png, 4, [0x00, 0x00, 0xFF, 0xFF]);
+        for _ in 0..two_seconds_of_frames() {
+            engine.frame().expect("a frame");
+            if engine.game().textures.reloads() > 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            engine.game().textures.reloads(),
+            1,
+            "two seconds of frames did not pick the texture up"
+        );
+        assert_eq!(engine.game().textures.refusals(), 0);
+        let after = engine.gpu().page_import(PageKind::BaseColor);
+        assert_ne!(after.image, before.image, "the page is a new image");
+        assert_eq!(after.extent, (4, 4), "at the new file's extent");
+        assert_eq!(
+            engine.game().reloads,
+            0,
+            "the document was reopened, which is not a texture reload"
+        );
+
+        // And it settles: the same file, unchanged, is not reloaded again.
+        for _ in 0..two_seconds_of_frames() {
+            engine.frame().expect("a frame");
+        }
+        assert_eq!(engine.game().textures.reloads(), 1);
+
+        // **And a second save is measured against the first, not the
+        // original**: saving the first texture back is a change from what is
+        // on screen, though it is what the document opened with.
+        write_png(&png, 2, [0xFF, 0x00, 0x00, 0xFF]);
+        for _ in 0..two_seconds_of_frames() {
+            engine.frame().expect("a frame");
+            if engine.game().textures.reloads() > 1 {
+                break;
+            }
+        }
+        assert_eq!(engine.game().textures.reloads(), 2);
+        assert_eq!(
+            engine.gpu().page_import(PageKind::BaseColor).extent,
+            (2, 2),
+            "the original saved back is on screen again"
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A texture the decoder refuses keeps the one on screen**, and the next
+    /// good save still lands — a file caught half written is what this is.
+    #[test]
+    fn a_texture_that_will_not_decode_keeps_the_one_on_screen() {
+        let (_dir, options, png) = textured_at(2, [0xFF, 0x00, 0x00, 0xFF]);
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        let before = engine.gpu().page_import(PageKind::BaseColor);
+
+        std::fs::write(&png, b"not a png, and a different length").expect("the bad save");
+        for _ in 0..two_seconds_of_frames() {
+            engine.frame().expect("a frame");
+            if engine.game().textures.refusals() > 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            engine.game().textures.refusals(),
+            1,
+            "two seconds of frames did not look at the bad save"
+        );
+        assert!(
+            engine
+                .game()
+                .textures
+                .last_refusal()
+                .is_some_and(|why| why.contains("decodes PNG only")),
+            "the refusal is the decoder's: {:?}",
+            engine.game().textures.last_refusal()
+        );
+        assert_eq!(engine.game().textures.reloads(), 0);
+        assert_eq!(
+            engine.gpu().page_import(PageKind::BaseColor),
+            before,
+            "a refused texture left the page as it was"
+        );
+
+        write_png(&png, 4, [0x00, 0xFF, 0x00, 0xFF]);
+        for _ in 0..two_seconds_of_frames() {
+            engine.frame().expect("a frame");
+            if engine.game().textures.reloads() > 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            engine.game().textures.reloads(),
+            1,
+            "the good save after a bad one did not land"
+        );
+        assert_eq!(engine.gpu().page_import(PageKind::BaseColor).extent, (4, 4));
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A texture that was broken when the document opened is not patched in
+    /// when it is fixed**: the page has no layer for it, so the rows would have
+    /// to change, and that is a re-export rather than a texture reload. The
+    /// refusal says so, and the pages stay as they are.
+    #[test]
+    fn a_texture_broken_at_open_and_fixed_later_asks_for_a_re_export() {
+        let (_dir, options) = model_at(&fixture::textured_quad_glb("paint.png"), 4096);
+        let png = model_path(&options).with_file_name("paint.png");
+        std::fs::write(&png, b"broken when the document opened").expect("the bad texture");
+        let mut engine = scripted(&options);
+        engine.frame().expect("a frame");
+        let before = engine.gpu().page_import(PageKind::BaseColor);
+        assert_eq!(before.extent, (1, 1), "no layer: the placeholder texel");
+
+        write_png(&png, 2, [0xFF, 0x00, 0x00, 0xFF]);
+        for _ in 0..two_seconds_of_frames() {
+            engine.frame().expect("a frame");
+            if engine.game().textures.refusals() > 0 {
+                break;
+            }
+        }
+        assert_eq!(engine.game().textures.refusals(), 1);
+        assert_eq!(engine.game().textures.reloads(), 0);
+        assert!(
+            engine
+                .game()
+                .textures
+                .last_refusal()
+                .is_some_and(|why| why.contains("re-export the document")),
+            "the refusal names what to do: {:?}",
+            engine.game().textures.last_refusal()
+        );
+        assert_eq!(engine.gpu().page_import(PageKind::BaseColor), before);
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

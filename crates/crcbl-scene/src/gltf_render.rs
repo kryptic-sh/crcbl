@@ -267,13 +267,13 @@ pub struct MeshOrigin {
 /// thing that went wrong.
 #[must_use]
 pub fn build_render_scene(scene: &GltfScene, key: &Path) -> RenderScene {
-    let mut skips = Skips {
-        key,
-        list: Vec::new(),
-    };
+    let TexturePages {
+        page,
+        materials,
+        skipped,
+    } = build_texture_pages(scene, key);
+    let mut skips = Skips { key, list: skipped };
 
-    let (page, layers) = pack_page(scene, &mut skips);
-    let materials = material_rows(scene, &layers, &mut skips);
     let (meshes, origins, slots) = resident_meshes(scene, &mut skips);
     let instances = place_instances(scene, &slots, &mut skips);
 
@@ -296,6 +296,47 @@ pub fn build_render_scene(scene: &GltfScene, key: &Path) -> RenderScene {
         },
         instances,
         origins,
+        skipped: skips.list,
+    }
+}
+
+/// A document's material pages and its material table, and what was lost
+/// building them: the half of [`build_render_scene`] that reads the materials
+/// and the images and nothing else.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TexturePages {
+    /// The pages, every kind — [`SceneDesc::page`]'s value.
+    pub page: PageDesc<'static>,
+    /// The material table, its texture columns pointed at
+    /// [`page`](Self::page) — [`SceneDesc::materials`]' value.
+    pub materials: Vec<mesh::GpuMaterial>,
+    /// Every [`Skip`] the pages and the table produced, in the order found.
+    pub skipped: Vec<Skip>,
+}
+
+/// Build `scene`'s material pages and material table, and nothing else.
+///
+/// What [`build_render_scene`] starts with, and on its own what a texture hot
+/// reload needs: an image of `scene` was replaced
+/// ([`GltfScene::set_image_bytes`]), and the pages are rebuilt from the images
+/// as they are now — every filter, extent and packing rule the first build
+/// used, because it is the same code. A rebuild whose
+/// [`materials`](TexturePages::materials) equal the ones in force names every
+/// layer by the same number, so the renderer can take the pages alone
+/// (`ForwardRenderer::replace_page`) and leave every row as it is.
+///
+/// `key` is what every warning names, as [`build_render_scene`]'s is.
+#[must_use]
+pub fn build_texture_pages(scene: &GltfScene, key: &Path) -> TexturePages {
+    let mut skips = Skips {
+        key,
+        list: Vec::new(),
+    };
+    let (page, layers) = pack_page(scene, &mut skips);
+    let materials = material_rows(scene, &layers, &mut skips);
+    TexturePages {
+        page,
+        materials,
         skipped: skips.list,
     }
 }
@@ -426,7 +467,7 @@ fn pack_page(scene: &GltfScene, skips: &mut Skips<'_>) -> (PageDesc<'static>, La
     // `skips` twice and report one loss as two.
     let mut decoded: Vec<(usize, crcbl_sprite::load::Rgba8)> = Vec::new();
     for image in images_in(&[&base, &normal, &metallic_roughness, &occlusion, &emissive]) {
-        match decode_image(scene, image, skips) {
+        match decode_scene_image(scene, image, skips) {
             Some(rgba) => decoded.push((image, rgba)),
             None => continue,
         }
@@ -518,7 +559,7 @@ fn pack_page(scene: &GltfScene, skips: &mut Skips<'_>) -> (PageDesc<'static>, La
     if let Some(extent) = extents[PageKind::MetallicRoughnessOcclusion.index()] {
         // Keyed on the images that *decoded*, so a material whose occlusion
         // image was refused shares the layer of one that named no occlusion at
-        // all — the two shade identically, and `decode_image` has already said
+        // all — the two shade identically, and `decode_scene_image` has already said
         // why once.
         let live = |image: Option<usize>| {
             image.filter(|image| decoded.iter().any(|(decoded, _)| decoded == image))
@@ -687,66 +728,67 @@ const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 /// The first three bytes of every JPEG: `SOI` then the first marker.
 const JPEG_MAGIC: [u8; 3] = [0xFF, 0xD8, 0xFF];
 
-/// Decode one image to RGBA8, or record why it could not be.
-///
-/// The **bytes** decide the format, not the document's `mimeType`: a declared
-/// type is a claim by whoever wrote the file, and a `.png` that is really a JPEG
-/// is a thing exporters produce. The declaration is used only to make the
-/// message say what the file claimed.
-fn decode_image(
+/// Decode one of `scene`'s images to RGBA8, or record why it could not be.
+fn decode_scene_image(
     scene: &GltfScene,
     image: usize,
     skips: &mut Skips<'_>,
 ) -> Option<crcbl_sprite::load::Rgba8> {
-    let at = image_label(scene, image);
     let entry = &scene.images()[image];
-    let bytes = match entry.bytes() {
-        Ok(bytes) => bytes,
-        Err(why) => {
-            // Already warned about by the importer, which is where the read
-            // failed; recorded here so one list holds everything a viewer shows.
-            skips.push("image", at, why.to_owned());
-            return None;
-        }
+    let decoded = match entry.bytes() {
+        // Already warned about by the importer, which is where the read
+        // failed; recorded here so one list holds everything a viewer shows.
+        Err(why) => Err(why.to_owned()),
+        Ok(bytes) => decode_image(bytes, entry.mime()),
     };
+    match decoded {
+        Ok(rgba) => Some(rgba),
+        Err(why) => {
+            skips.push("image", image_label(scene, image), why);
+            None
+        }
+    }
+}
 
+/// Decode an image's encoded bytes to RGBA8 the way a page is built from
+/// them, or say why they cannot be.
+///
+/// The **bytes** decide the format, not the document's `mimeType`: a declared
+/// type is a claim by whoever wrote the file, and a `.png` that is really a JPEG
+/// is a thing exporters produce. `mime` is used only to make the message say
+/// what the file claimed.
+///
+/// Public for a texture hot reload, which asks it of a file's new bytes before
+/// anything is rebuilt from them: a save the decoder refuses keeps the texture
+/// already drawn rather than becoming a page that has lost a layer.
+///
+/// # Errors
+///
+/// A sentence naming what is wrong — not a PNG, no texels, or what the
+/// decoder said — written to stand beside the image in a list of losses.
+pub fn decode_image(bytes: &[u8], mime: Option<&str>) -> Result<crcbl_sprite::load::Rgba8, String> {
     if !bytes.starts_with(&PNG_MAGIC) {
         let found = if bytes.starts_with(&JPEG_MAGIC) {
             "JPEG".to_owned()
         } else {
             format!(
                 "neither PNG nor JPEG (mimeType {})",
-                entry.mime().unwrap_or("undeclared")
+                mime.unwrap_or("undeclared")
             )
         };
-        skips.push(
-            "image",
-            at,
-            format!(
-                "its bytes are {found}, and this build decodes PNG only; every material \
-                 naming it shades without it, through its factors alone"
-            ),
-        );
-        return None;
+        return Err(format!(
+            "its bytes are {found}, and this build decodes PNG only; every material naming it \
+             shades without it, through its factors alone"
+        ));
     }
 
     match crcbl_sprite::load::decode_png(bytes) {
-        Ok(rgba) if rgba.width > 0 && rgba.height > 0 => Some(rgba),
-        Ok(rgba) => {
-            skips.push(
-                "image",
-                at,
-                format!(
-                    "it decodes to {}×{}, which has no texels",
-                    rgba.width, rgba.height
-                ),
-            );
-            None
-        }
-        Err(error) => {
-            skips.push("image", at, format!("the PNG decoder refused it: {error}"));
-            None
-        }
+        Ok(rgba) if rgba.width > 0 && rgba.height > 0 => Ok(rgba),
+        Ok(rgba) => Err(format!(
+            "it decodes to {}×{}, which has no texels",
+            rgba.width, rgba.height
+        )),
+        Err(error) => Err(format!("the PNG decoder refused it: {error}")),
     }
 }
 
@@ -2520,5 +2562,111 @@ mod tests {
                 quad_binding(source as usize)
             );
         }
+    }
+
+    /// Four texels that are not [`IMAGE_TEXELS`] anywhere: the "saved again"
+    /// side of a reload.
+    const RELOADED_TEXELS: [u8; 16] = [
+        0x00, 0x00, 0xFF, 0xFF, // (0, 0) blue
+        0xFF, 0xFF, 0x00, 0xFF, // (1, 0) yellow
+        0xFF, 0x00, 0x00, 0xFF, // (0, 1) red
+        0x00, 0xFF, 0x00, 0xFF, // (1, 1) green
+    ];
+
+    /// **The pages a reload rebuilds are the ones the first build made**, from
+    /// the same code: `build_render_scene`'s page and table are
+    /// `build_texture_pages`', and a document stripped of its geometry builds
+    /// the same pair.
+    #[test]
+    fn the_texture_pages_alone_are_the_render_scenes_own() {
+        let scene = import_glb_bytes(&textured_glb(&image_png(), "image/png", 0))
+            .expect("the fixture imports");
+        let whole = build_render_scene(&scene, Path::new(KEY));
+        let pages = build_texture_pages(&scene, Path::new(KEY));
+        assert_eq!(pages.page, whole.scene.page);
+        assert_eq!(pages.materials, whole.scene.materials);
+
+        let stripped = scene.without_geometry();
+        assert!(stripped.meshes().is_empty() && stripped.nodes().is_empty());
+        assert_eq!(stripped.images(), scene.images());
+        assert_eq!(build_texture_pages(&stripped, Path::new(KEY)), pages);
+    }
+
+    /// **A replaced image rebuilds its layer and leaves every row where it
+    /// was**, which is what lets the renderer take the pages alone — and an
+    /// image of a new size moves the page's extent with it.
+    #[test]
+    fn a_replaced_image_rebuilds_its_layer_and_leaves_every_row_where_it_was() {
+        let scene = import_glb_bytes(&textured_glb(&image_png(), "image/png", 0))
+            .expect("the fixture imports");
+        let before = build_texture_pages(&scene, Path::new(KEY));
+        let mut reloaded = scene.without_geometry();
+
+        assert!(reloaded.set_image_bytes(0, png_bytes(2, 2, &RELOADED_TEXELS)));
+        let after = build_texture_pages(&reloaded, Path::new(KEY));
+        assert_eq!(after.skipped, [], "the new image decodes");
+        assert_eq!(
+            after.materials, before.materials,
+            "every row names the same layer"
+        );
+        assert_eq!(
+            &before.page.layers(PageKind::BaseColor)[0][..],
+            &IMAGE_TEXELS[..]
+        );
+        assert_eq!(
+            &after.page.layers(PageKind::BaseColor)[0][..],
+            &RELOADED_TEXELS[..],
+            "the layer is the file as it is now"
+        );
+
+        let larger: Vec<u8> = RELOADED_TEXELS.repeat(4);
+        assert!(reloaded.set_image_bytes(0, png_bytes(4, 4, &larger)));
+        let grown = build_texture_pages(&reloaded, Path::new(KEY));
+        assert_eq!(grown.page.extent(PageKind::BaseColor), 4);
+        assert_eq!(grown.page.layers(PageKind::BaseColor)[0].len(), 4 * 4 * 4);
+        assert_eq!(grown.materials, before.materials);
+
+        assert!(
+            !reloaded.set_image_bytes(1, Vec::new()),
+            "the document has one image"
+        );
+    }
+
+    /// **An image read from a file beside the document carries that file's
+    /// key**, which is what a hot reload watches; one inside a `bufferView`
+    /// has no file and carries none.
+    #[test]
+    fn an_image_beside_the_document_carries_its_key_and_an_embedded_one_none() {
+        let embedded = import_glb_bytes(&textured_glb(&image_png(), "image/png", 0))
+            .expect("the fixture imports");
+        assert_eq!(embedded.images()[0].key(), None);
+
+        let (json, bin) = textured_parts(&image_png(), "image/png", 0);
+        let json = replacing(
+            &json,
+            r#""bufferView": 4, "mimeType": "image/png""#,
+            r#""uri": "paint.png""#,
+        );
+        let assets = crate::gltf_fixture::Assets::new();
+        assets.write("meshes/beside.glb", &glb(&json, Some(&bin)));
+        assets.write("meshes/paint.png", &image_png());
+        let beside = assets
+            .import("meshes/beside.glb")
+            .expect("the fixture imports");
+        assert_eq!(beside.images()[0].key(), Some("meshes/paint.png"));
+        assert_eq!(beside.images()[0].bytes(), Ok(&image_png()[..]));
+    }
+
+    /// **The decoder a reload asks first says why it refuses**, in the words
+    /// the first build's skip list uses.
+    #[test]
+    fn decoding_a_reloaded_image_refuses_half_a_png_and_a_jpeg_by_name() {
+        let png = image_png();
+        assert!(decode_image(&png, Some("image/png")).is_ok());
+        let half = decode_image(&png[..png.len() / 2], Some("image/png"))
+            .expect_err("half a PNG does not decode");
+        assert!(half.starts_with("the PNG decoder refused it"), "{half}");
+        let jpeg = decode_image(&[0xFF, 0xD8, 0xFF, 0xE0], None).expect_err("not a PNG");
+        assert!(jpeg.contains("JPEG"), "{jpeg}");
     }
 }

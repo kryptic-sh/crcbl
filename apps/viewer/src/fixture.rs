@@ -497,6 +497,76 @@ fn document_with(
     glb(&json, &bin)
 }
 
+/// A `.glb` of the quad at the origin whose material samples a base-colour
+/// texture read from `image_uri`, a file beside the document.
+///
+/// The one alteration is the texture, and it is **outside** the container on
+/// purpose: an image in a `bufferView` has no file of its own to write again,
+/// so only this shape reaches [`crate::textures`]. The UVs put the image across
+/// the whole face.
+#[must_use]
+pub fn textured_quad_glb(image_uri: &str) -> Vec<u8> {
+    /// One UV per corner, the image's top-left at the quad's top-left — glTF's
+    /// `v` grows downward.
+    const UVS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+
+    let mut bin = Vec::new();
+    for value in POSITIONS.iter().chain(NORMALS.iter()).flatten() {
+        bin.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in UVS.iter().flatten() {
+        bin.extend_from_slice(&value.to_le_bytes());
+    }
+    let index_offset = bin.len();
+    for index in INDICES {
+        bin.extend_from_slice(&index.to_le_bytes());
+    }
+    let node = node_clause(Vec3::ZERO, true, Vec3::ONE);
+    // `metallicFactor` zero for `document_with`'s reason.
+    let json = format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0] }}],
+  "nodes": [{node}],
+  "meshes": [{{
+    "name": "panel",
+    "primitives": [{{
+      "attributes": {{ "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 }},
+      "indices": 3,
+      "material": 0
+    }}]
+  }}],
+  "materials": [{{
+    "name": "paint",
+    "pbrMetallicRoughness": {{
+      "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+      "metallicFactor": 0.0,
+      "roughnessFactor": 1.0,
+      "baseColorTexture": {{ "index": 0 }}
+    }}
+  }}],
+  "textures": [{{ "source": 0 }}],
+  "images": [{{ "name": "paint", "uri": "{image_uri}" }}],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3" }},
+    {{ "bufferView": 1, "componentType": 5126, "count": 4, "type": "VEC3" }},
+    {{ "bufferView": 2, "componentType": 5126, "count": 4, "type": "VEC2" }},
+    {{ "bufferView": 3, "componentType": 5123, "count": 6, "type": "SCALAR" }}
+  ],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": 48 }},
+    {{ "buffer": 0, "byteOffset": 48, "byteLength": 48 }},
+    {{ "buffer": 0, "byteOffset": 96, "byteLength": 32 }},
+    {{ "buffer": 0, "byteOffset": {index_offset}, "byteLength": 12 }}
+  ],
+  "buffers": [{{ "byteLength": {} }}]
+}}"#,
+        bin.len(),
+    );
+    glb(&json, &bin)
+}
+
 /// A `.glb` container around `json` and `bin`, padded as the format requires:
 /// the `JSON` chunk to a multiple of four with spaces, the `BIN` chunk with
 /// zeroes.

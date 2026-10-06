@@ -23,8 +23,8 @@ impl ForwardRenderer {
         culls.clear();
         let result = (|| {
             // This slot's groups first, so everything below binds groups naming
-            // the sampler in force — see `adopt_page_sampler`.
-            self.adopt_page_sampler(device)?;
+            // the pages and the sampler in force — see `adopt_pages`.
+            self.adopt_pages(device)?;
 
             // Topic 39's four layers, applied here and nowhere
             // else. Frozen for the frame because this call and `add_passes` have to

@@ -662,6 +662,37 @@ impl Gpu {
         Ok(())
     }
 
+    /// Replaces `kind`'s material page with `page`'s, in force from the next
+    /// frame — [`ForwardRenderer::replace_page`], the device half of
+    /// [`crate::textures`]' reload.
+    ///
+    /// Native only, with the watch that calls it.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the replacement; the page in force stays in force.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn replace_page(
+        &mut self,
+        kind: crcbl::render::PageKind,
+        page: &crcbl::render::PageDesc<'_>,
+    ) -> Result<(), HalError> {
+        self.renderer
+            .replace_page(self.ctx.device(), self.ctx.queue(), kind, page)
+    }
+
+    /// The page of `kind` in force, as the renderer declares it to a graph —
+    /// what a test reads to see that a reload reached the device.
+    #[cfg(test)]
+    pub const fn page_import(&self, kind: crcbl::render::PageKind) -> crcbl::render::ImportedImage {
+        match kind {
+            crcbl::render::PageKind::BaseColor => self.renderer.base_color_page_import(),
+            crcbl::render::PageKind::Normal => self.renderer.normal_page_import(),
+            crcbl::render::PageKind::MetallicRoughnessOcclusion => self.renderer.mro_page_import(),
+            crcbl::render::PageKind::Emissive => self.renderer.emissive_page_import(),
+        }
+    }
+
     /// Draws the document's triangles as lines instead of filling them.
     ///
     /// **Returns the state actually in force**, which is what the caller must
