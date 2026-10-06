@@ -5,10 +5,22 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ## Top priority: EW engine requests (2026-10-06)
 
-These requests take priority over the feature-expansion order below. Audited
-against crcbl `2cb7ceb3` after pulling `origin/main`, using EW `10aa6562`.
-Implement and validate each independently; EW then updates its engine pin and
-removes the superseded local mechanism. Gameplay rules stay in EW.
+These requests take priority over the feature-expansion order below. Rechecked
+against crcbl `8af219c2` after pulling `origin/main`, using EW `e166976b`. Both
+remain open: `CharacterController::move_upright` still synchronizes its bound
+collider, and `world/candidate_sweeps.rs` still accepts straight segments rather
+than accelerated trajectories. This follow-up inspected source only; the test
+evidence below belongs to the earlier verification runs. Implement and validate
+each independently; EW then updates its engine pin and removes the superseded
+local mechanism. Gameplay rules stay in EW.
+
+Keep the recent inventory eligibility work in EW: `HideoutInventory`'s
+`can_fit_stashed_firearm_swap` and `firearm_swap_placement` in
+`src/hideout_inventory/deployment/firearm_swap.rs` depend on equipped-firearm
+payloads, installed magazines and stash ownership. They are not a demonstrated
+missing engine capability; `src/game_stash_grids.rs` already uses crcbl's
+`grid_drag` for pointer interaction. Reconsider a port only after a reusable
+requirement is demonstrated, rather than moving these game rules into crcbl.
 
 1. **Non-mutating character-motion previews.** EW's
    `PlayerController::preview_airborne_motion` in
