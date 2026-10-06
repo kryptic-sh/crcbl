@@ -6,24 +6,32 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requests (2026-10-06)
 
 These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `bffec64a` after pulling `origin/main`, using EW `3270d677`. Both
+against crcbl `69926bb8` after pulling `origin/main`, using EW `1ca2c16a`. Both
 are now delivered in crcbl and await EW's migration: item 1 as
 `CharacterController::preview_upright`, item 2 as
-`PhysicsWorld::sweep_capsule_arc`. That refresh inspected source only; the EW
-test evidence below belongs to the earlier verification runs. Implement and
-validate each independently; EW then updates its engine pin and removes the
-superseded local mechanism. Gameplay rules stay in EW.
+`PhysicsWorld::sweep_capsule_arc`. Until EW moves its pin, its
+`preview_airborne_motion` still restores the live collider after a preview and
+`move_with_gravity` still subdivides accelerated motion and forecasts contacts
+with straight sweeps. This refresh inspected source only; the test evidence
+below belongs to earlier verification runs.
 
 Implementation handoff: deliver the non-mutating upright preview first, then add
 the accelerated capsule query as a separate verified slice. Each handoff needs
 its public API, regression coverage and published commit so EW can update its
-pin and delete the matching workaround. EW now pins crcbl `bffec64a`, which
-predates the preview below, so EW's workaround stays until it moves its pin.
-`move_upright` still writes the bound collider, as a move must; the preview is
-the call that does not. `world/candidate_sweeps.rs::sweep_capsule_all` still
-takes a `Segment`, by design: the straight contract is kept, and the arc is the
-new `sweep_capsule_arc`. That backlog refresh rechecked those implementations
-and the game consumers; it does not add runtime verification.
+pin and delete the matching workaround. EW still pins crcbl `bffec64a`, which
+predates both deliveries. `move_upright` still writes the bound collider, as a
+move must; the preview is the call that does not. `sweep_capsule_all` still
+takes a straight `Segment` by design: that contract is kept, and the arc is the
+new `sweep_capsule_arc`. Gameplay rules stay in EW.
+
+Do not port EW's current hip-fire convergence or prone weapon/terrain handling
+yet. `src/game_hip_convergence.rs` combines rendered weapon pose with gameplay
+aim and ADS rules; its cached-input correction is still uncommitted and under
+validation. The weapon/floor response in EW's `docs/backlog.md` still needs a
+choice between limiting weapon aim and retracting/lifting the weapon while
+leaving ADS. Prove the shared camera, weapon and hand behavior in the game
+before proposing a reusable engine API. These are game follow-ups, not
+additional implementation requests for crcbl.
 
 Keep the recent inventory eligibility work in EW: `HideoutInventory`'s
 `can_fit_stashed_firearm_swap` and `firearm_swap_placement` in
