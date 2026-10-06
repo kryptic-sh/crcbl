@@ -850,6 +850,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Non-mutating upright previews from `crcbl_phys::CharacterController`.**
+  `preview_upright(world.overlap_queries(), &mut scratch, motion)` returns an
+  `UprightPreview`: the `MoveOutcome`, the resulting `capsule`, the `ground` and
+  the ordered `contacts` that `move_and_slide_into` would give from the same
+  state, to the bit, because it runs the same solve and skips only the write to
+  the character's own collider. It takes the controller by `&self` and the world
+  as a read-only `OverlapQueries` view, so it moves no collider, refits no
+  broadphase and changes no later query or move. The self-collider exclusion,
+  query mask, skin, step and ground rules are the previewing controller's; to
+  preview a different capsule, preview from a controller built with it.
+
 - The shell seam reports an input method's composition in progress as the new
   `ShellEvent::TextPreedit` (each replaces the last; empty text means it ended)
   and takes a caret rectangle through the new provided method

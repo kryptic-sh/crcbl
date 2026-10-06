@@ -6,10 +6,10 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requests (2026-10-06)
 
 These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `9c00dc46` after pulling `origin/main`, using EW `4cc34958`. Both
-remain open: `CharacterController::move_upright` still synchronizes its bound
-collider, and `world/candidate_sweeps.rs` still accepts straight segments rather
-than accelerated trajectories. This follow-up inspected source only; the test
+against crcbl `9c00dc46` after pulling `origin/main`, using EW `4cc34958`. The
+first is now delivered in crcbl and awaits EW's migration; the second remains
+open: `world/candidate_sweeps.rs` still accepts straight segments rather than
+accelerated trajectories. That refresh inspected source only; the EW test
 evidence below belongs to the earlier verification runs. Implement and validate
 each independently; EW then updates its engine pin and removes the superseded
 local mechanism. Gameplay rules stay in EW.
@@ -19,9 +19,9 @@ the accelerated capsule query as a separate verified slice. Each handoff needs
 its public API, regression coverage and published commit so EW can update its
 pin and delete the matching workaround. The game still pins crcbl `32e35110`;
 pulling this documentation worktree does not validate a game upgrade to the
-newer engine runtime. The newer upstream changes have not removed either
-workaround: the bound-collider write remains in `character.rs::move_upright`,
-and `world/candidate_sweeps.rs::sweep_capsule_all` still takes a `Segment`.
+newer engine runtime. `move_upright` still writes the bound collider, as a move
+must; the preview below is the call that does not. `sweep_capsule_all` in
+`world/candidate_sweeps.rs` still takes a `Segment`.
 
 Keep the recent inventory eligibility work in EW: `HideoutInventory`'s
 `can_fit_stashed_firearm_swap` and `firearm_swap_placement` in
@@ -31,31 +31,56 @@ missing engine capability; `src/game_stash_grids.rs` already uses crcbl's
 `grid_drag` for pointer interaction. Reconsider a port only after a reusable
 requirement is demonstrated, rather than moving these game rules into crcbl.
 
-1. **Non-mutating character-motion previews.** EW's
-   `PlayerController::preview_airborne_motion` in
-   `src/controller_contact_forecast.rs` constructs a preview controller, calls
-   `move_and_slide_into`, then restores the live character collider with
-   `PhysicsWorld::set_capsule`. The engine move synchronizes the bound collider
-   even when invoked on a copied controller. Port the reusable preview operation
-   into `crcbl-phys`: return the predicted outcome, resulting capsule/ground
-   state and ordered slide contacts without changing the source controller or
-   any live collider. Preserve self-exclusion, query masks, skin and step/ground
-   semantics, and use the actual movement solver rather than a second solver. EW
-   must still be able to preview its explicitly enlarged contact capsule; its
-   margin policy remains game-local. This request is for upright motion, the
-   current consumer, not an unexercised family of preview APIs.
+1. **Non-mutating character-motion previews: delivered in crcbl, awaiting EW's
+   migration.** EW's `PlayerController::preview_airborne_motion` in
+   `src/controller_contact_forecast.rs` built a preview controller, called
+   `move_and_slide_into`, then restored the live character collider with
+   `PhysicsWorld::set_capsule`, because the engine move writes its bound
+   collider even from a copied controller.
 
-   Acceptance: compare preview results with a real move from identical initial
-   state, including attached and unattached colliders, starting overlaps,
-   ceilings, walls, steps and support loss. Verify unchanged world queries and
-   controller state after repeated previews, not just unchanged final position.
-   Preserve EW's `ceiling_contact_does_not_delay_wall_steering` in
-   `src/controller_wall_ceiling_timing_tests.rs` and
-   `ceiling_contact_uses_the_remaining_time_for_descent` in
-   `src/controller_ballistic_tests.rs`. Those regressions passed in EW's earlier
-   workspace verification run; they were not rerun for this source-only refresh.
-   Migrate the preview helper and remove its temporary live-collider
-   update/restore sequence. Do not claim that this alone replaces
+   **Shipped:**
+   `CharacterController::preview_upright(&self, world: OverlapQueries<'_>, scratch: &mut QueryScratch, motion: DVec3) -> UprightPreview`.
+   `UprightPreview` holds the `MoveOutcome`, the resulting `capsule`, the
+   `ground` and the ordered `contacts` (`Vec<SlideContact>`) that
+   `move_and_slide_into` would give from the same state. The signature is the
+   guarantee: the controller is borrowed shared, and the world is reached only
+   through the read-only view, so no collider moves and the broadphase is
+   neither refitted nor rebuilt. It is the move's own solve: `move_upright` is
+   now `solve_upright` plus the self-collider write, the preview runs
+   `solve_upright` on a copy and stops, and the solve reads the world only
+   through the private `WorldReader`. Self-exclusion, the query mask, skin, step
+   and ground rules are the previewing controller's own. The capsule previewed
+   is the receiver's, so EW keeps building its enlarged contact controller and
+   previews from it; the margin policy stays in EW.
+
+   **Coverage**, in `crates/crcbl-phys/src/character/preview_tests.rs`: a
+   preview equals the move made after it, to the bit (outcome, contacts,
+   capsule, ground and the collider the move writes), over a wall, a start
+   inside a box, a ceiling, a step, walking off a ledge and a masked collider,
+   each unbound and bound.
+   `repeated_previews_change_no_query_no_controller_field_and_no_later_move`
+   compares collider boxes, broadphase counters, fixed sweeps and penetrations,
+   every controller field, and a later move against a twin that never previewed.
+   `ceiling_contact_does_not_take_travel_from_the_wall_contact` and
+   `a_ceiling_contact_reports_its_share_and_leaves_the_descent_free` port the
+   engine half of EW's `ceiling_contact_does_not_delay_wall_steering` and
+   `ceiling_contact_uses_the_remaining_time_for_descent`: contact order and
+   fractions, horizontal travel kept, coarse and split chords agreeing, and a
+   bound collider following the move and never the preview. The gameplay half
+   (air-control arcs, contact-time bisection, velocities) stays EW's and is not
+   tested in crcbl. Mutation-checked: a preview that writes the collider fails
+   the no-touch test, and does not compile under the shipped signature; a
+   preview that starts ungrounded or drops its self collider fails the
+   preview-equals-move tests.
+
+   **What EW changes:** in `preview_airborne_motion`, keep the enlarged
+   `preview` controller and replace its `move_and_slide_into` call and the
+   `set_capsule` restore after it with
+   `preview.preview_upright(world.overlap_queries(), &mut QueryScratch::new(), motion)`,
+   returning the result's `outcome`, `capsule` and `contacts`. `world` can stay
+   `&mut PhysicsWorld`: `overlap_queries` takes it once to build the broadphase.
+   Then update the engine pin and rerun the two regressions above. Delete this
+   entry once EW confirms the migration. This does not replace
    `projected_landing`, which also simulates EW gameplay state.
 
 2. **Curved-path collision queries with contact times.** Promote the existing
@@ -4673,8 +4698,9 @@ Behaviour to know, and gaps in what shipped:
   deepest. No penetration depth or push-out is reported for a lying capsule.
 - **Only the `&mut PhysicsWorld` forms exist.** The fit check also has an
   `OverlapQueries` form; the lying sweep is crate-private
-  (`PhysicsWorld::sweep_lying_capsule`), and `PhysicsSystem` and
-  `EntityOverlapQueries` have no entity-returning form of either.
+  (`OverlapQueries::sweep_lying_capsule`, which the character slide runs), and
+  `PhysicsSystem` and `EntityOverlapQueries` have no entity-returning form of
+  either.
 - **Declined: making `Capsule` a two-endpoint shape.** Every Y-aligned query —
   the Y-growth sweeps, the penetrations, `ColliderComponent::Capsule` — is built
   on `centre` and `half_height`; a separate query shape kept this change

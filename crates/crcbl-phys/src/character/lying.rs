@@ -30,7 +30,7 @@ use std::f64::consts::{PI, TAU};
 
 use glam::DVec3;
 
-use super::{Body, CharacterController, GroundProbe, MIN_MOVE, SlideContact, UP};
+use super::{Body, CharacterController, GroundProbe, MIN_MOVE, SlideContact, UP, WorldReader};
 use crate::broadphase::Segment;
 use crate::collider::LyingCapsule;
 use crate::world::{ColliderId, PhysicsWorld};
@@ -233,7 +233,13 @@ impl CharacterController {
         let was_grounded = self.ground.is_some();
 
         let motion = self.ground_adjusted(motion, was_grounded);
-        let report = self.slide(world, motion, was_grounded, Body::Lying(*body), contacts);
+        let report = self.slide(
+            &mut WorldReader::of(world),
+            motion,
+            was_grounded,
+            Body::Lying(*body),
+            contacts,
+        );
         let slid = LyingCapsule {
             head: self.position,
             ..*body

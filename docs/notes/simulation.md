@@ -1311,6 +1311,13 @@ and 1.7 ms on eight threads (Ryzen 7950X, 60 Hz, 4 substeps).
   solver-driven; dynamic bodies react through one-way pushes with a force
   budget, so the player shoves crates and a crate cannot launch the player. That
   reads as a decision, not a bug.
+- **A character preview is the move's own solve.**
+  `CharacterController::preview_upright` runs the solve `move_and_slide_into`
+  runs — depenetration, the slide with its step-up, the ground probe — on a copy
+  of the controller against a read-only `OverlapQueries` view, and skips the one
+  write a move makes, its self collider's capsule. Its signature is what keeps
+  it from touching anything. A separate forecasting solver was declined: it
+  would drift from the move it forecasts.
 - **Scope:** soft bodies, cloth, fracture and fluids are not the contact
   solver's; anything deformable is a separate topic with its own case. Vehicles
   are joints plus wheels-as-raycasts, post-MVP.

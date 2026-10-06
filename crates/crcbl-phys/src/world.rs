@@ -720,6 +720,28 @@ impl OverlapQueries<'_> {
             scratch,
         )
     }
+
+    /// What a [`LyingCapsule`] moved by `motion`, without turning, meets first
+    /// among the solid colliders `filter` admits, and how far along the motion
+    /// it gets: the sweep [`crate::CharacterController::move_lying`] slides
+    /// with. See [`sweep_lying_capsule_core`] for how each shape is met.
+    pub(crate) fn sweep_lying_capsule(
+        &self,
+        capsule: &LyingCapsule,
+        motion: DVec3,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+    ) -> Option<(ColliderId, SweptContact)> {
+        sweep_lying_capsule_core(
+            self.bvh,
+            self.colliders,
+            self.generations,
+            capsule,
+            motion,
+            filter,
+            scratch,
+        )
+    }
 }
 
 /// The one implementation of "which colliders overlap this sphere, and how".
@@ -1074,7 +1096,7 @@ fn lying_capsule_blocker_core(
 }
 
 /// Where a sweep that reports no contact point met a collider:
-/// [`PhysicsWorld::sweep_lying_capsule`]'s answer.
+/// [`OverlapQueries::sweep_lying_capsule`]'s answer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SweptContact {
     /// The share of the motion covered before the contact, in `[0, 1]`.
@@ -1100,7 +1122,7 @@ impl From<ShapeHit> for SweptContact {
 }
 
 /// The one implementation of "what does this lying capsule, moved without
-/// turning, hit first": [`PhysicsWorld::sweep_lying_capsule`].
+/// turning, hit first": [`OverlapQueries::sweep_lying_capsule`].
 ///
 /// A mesh sweeps it exactly, turned into the mesh's frame, as it sweeps an
 /// upright capsule. The parametric shapes are placed as in
@@ -1732,12 +1754,23 @@ impl PhysicsWorld {
     /// at a time — see [`OverlapQueries`] for why the type is what enforces
     /// that rather than a rule in a comment.
     pub fn overlap_queries(&mut self) -> OverlapQueries<'_> {
+        self.overlap_queries_with_scratch().0
+    }
+
+    /// [`overlap_queries`](Self::overlap_queries) together with the world's
+    /// own query buffers, for a caller in this crate that runs a whole
+    /// sequence of queries against one view — a character move — under the
+    /// exclusive borrow it already holds, and so needs no buffers of its own.
+    pub(crate) fn overlap_queries_with_scratch(
+        &mut self,
+    ) -> (OverlapQueries<'_>, &mut QueryScratch) {
         self.ensure_bvh();
-        OverlapQueries {
+        let view = OverlapQueries {
             colliders: &self.colliders,
             generations: &self.generations,
             bvh: self.bvh.as_ref().expect("ensure_bvh built it"),
-        }
+        };
+        (view, &mut self.scratch)
     }
 
     /// Return all collider ids that meet the query AABB.
@@ -2061,29 +2094,19 @@ impl PhysicsWorld {
         blocker
     }
 
-    /// What a [`LyingCapsule`] moved by `motion`, without turning, meets first
-    /// among the solid colliders `filter` admits, and how far along the motion
-    /// it gets: the sweep [`crate::CharacterController::move_lying`] slides
-    /// with. See [`sweep_lying_capsule_core`] for how each shape is met.
+    /// [`OverlapQueries::sweep_lying_capsule`] in the world's own buffers.
+    ///
+    /// Only the world's tests ask it this way: the controller's slide runs
+    /// against a view it holds for the whole move.
+    #[cfg(test)]
     pub(crate) fn sweep_lying_capsule(
         &mut self,
         capsule: &LyingCapsule,
         motion: DVec3,
         filter: QueryFilter,
     ) -> Option<(ColliderId, SweptContact)> {
-        self.ensure_bvh();
-        let mut scratch = core::mem::take(&mut self.scratch);
-        let hit = sweep_lying_capsule_core(
-            self.bvh.as_ref().expect("ensure_bvh built it"),
-            &self.colliders,
-            &self.generations,
-            capsule,
-            motion,
-            filter,
-            &mut scratch,
-        );
-        self.scratch = scratch;
-        hit
+        let (view, scratch) = self.overlap_queries_with_scratch();
+        view.sweep_lying_capsule(capsule, motion, filter, scratch)
     }
 
     /// Get the AABB of a collider by id.

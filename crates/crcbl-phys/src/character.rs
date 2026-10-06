@@ -116,12 +116,16 @@ use glam::DVec3;
 use crate::broadphase::Segment;
 use crate::collider::{Capsule, LyingCapsule};
 use crate::query::{Penetration, ShapeHit};
-use crate::world::{ALL_LAYERS, ColliderId, PhysicsWorld, QueryFilter, SweptContact};
+use crate::world::{
+    ALL_LAYERS, ColliderId, OverlapQueries, PhysicsWorld, QueryFilter, QueryScratch, SweptContact,
+};
 
 mod lying;
+mod preview;
 mod slide_contact;
 
 pub use lying::{LyingMoveOutcome, LyingTurnOutcome};
+pub use preview::UprightPreview;
 pub use slide_contact::SlideContact;
 
 /// The world's up axis. `crcbl` is right-handed with `+Y` up, and
@@ -316,6 +320,28 @@ enum Body {
     /// A body lying back from the controller's position, which is its head;
     /// the capsule's own `head` is not read.
     Lying(LyingCapsule),
+}
+
+/// The world as a move reads it: a shared view of its colliders, and the
+/// buffers that view's queries work in.
+///
+/// Every phase of a move queries through this and never through
+/// `&mut PhysicsWorld`, so the solve has no way to write the world. The one
+/// write a move makes, synchronizing its
+/// [self collider](CharacterController::with_self_collider), comes after the
+/// solve and outside it — which is what lets
+/// [`CharacterController::preview_upright`] run the same solve and stop there.
+struct WorldReader<'w, 's> {
+    view: OverlapQueries<'w>,
+    scratch: &'s mut QueryScratch,
+}
+
+impl<'w> WorldReader<'w, 'w> {
+    /// Read `world` through the view and buffers it keeps for itself.
+    fn of(world: &'w mut PhysicsWorld) -> Self {
+        let (view, scratch) = world.overlap_queries_with_scratch();
+        Self { view, scratch }
+    }
 }
 
 /// A step-up that survived all three of its checks.
@@ -534,7 +560,7 @@ impl CharacterController {
             distance.is_finite() && distance >= 0.0,
             "a ground probe looks a finite, non-negative distance down, not {distance}",
         );
-        self.probe_below(world, position, distance)
+        self.probe_below(&mut WorldReader::of(world), position, distance)
     }
 
     /// A solid collider a body lying as `capsule` would be inside, or `None`
@@ -634,10 +660,33 @@ impl CharacterController {
         self.move_upright(world, motion, Some(contacts))
     }
 
-    /// The one upright move, recording into `contacts` when there are any.
+    /// The one upright move, recording into `contacts` when there are any:
+    /// [`solve_upright`](Self::solve_upright), then the self collider
+    /// synchronized to where it left the capsule.
     fn move_upright(
         &mut self,
         world: &mut PhysicsWorld,
+        motion: DVec3,
+        contacts: Option<&mut Vec<SlideContact>>,
+    ) -> MoveOutcome {
+        let outcome = self.solve_upright(&mut WorldReader::of(world), motion, contacts);
+        if let Some(collider) = self.self_collider {
+            world.set_capsule(collider, self.capsule());
+        }
+        outcome
+    }
+
+    /// Everything an upright move decides — depenetration, the slide, the
+    /// step-up and the ground probe — applied to this controller and to
+    /// nothing else: the world is only read.
+    ///
+    /// [`move_upright`](Self::move_upright) commits the result to the world;
+    /// [`preview_upright`](Self::preview_upright) runs it on a copy and keeps
+    /// what it found. One solve for both is what makes a preview the move's
+    /// answer to the bit rather than a second algorithm's.
+    fn solve_upright(
+        &mut self,
+        world: &mut WorldReader<'_, '_>,
         motion: DVec3,
         contacts: Option<&mut Vec<SlideContact>>,
     ) -> MoveOutcome {
@@ -648,10 +697,6 @@ impl CharacterController {
         let adjusted = self.ground_adjusted(motion, was_grounded);
         let report = self.slide(world, adjusted, was_grounded, Body::Upright, contacts);
         self.settle_on_ground(world, was_grounded, motion);
-
-        if let Some(collider) = self.self_collider {
-            world.set_capsule(collider, self.capsule());
-        }
 
         MoveOutcome {
             motion: self.position - start,
@@ -672,12 +717,17 @@ impl CharacterController {
     /// sharing a normal would double the push, and a corner's two normals
     /// summed points somewhere neither of them does. Resolving the deepest and
     /// asking again converges on the corner and never overshoots.
-    fn depenetrate(&mut self, world: &mut PhysicsWorld) -> DVec3 {
+    fn depenetrate(&mut self, world: &mut WorldReader<'_, '_>) -> DVec3 {
         let mut total = DVec3::ZERO;
         for _ in 0..self.config.depenetration_passes {
             let capsule = self.capsule();
             let mut contacts = std::mem::take(&mut self.contacts);
-            world.capsule_penetrations_filtered_into(&capsule, self.filter(), &mut contacts);
+            world.view.capsule_penetrations_filtered_into(
+                &capsule,
+                self.filter(),
+                world.scratch,
+                &mut contacts,
+            );
             let deepest = contacts
                 .iter()
                 .max_by(|a, b| a.1.depth.total_cmp(&b.1.depth))
@@ -730,7 +780,7 @@ impl CharacterController {
     /// a contact steers the loop, so recording cannot change the move.
     fn slide(
         &mut self,
-        world: &mut PhysicsWorld,
+        world: &mut WorldReader<'_, '_>,
         motion: DVec3,
         was_grounded: bool,
         body: Body,
@@ -893,7 +943,7 @@ impl CharacterController {
     /// at once before a character in a corner actually gains height, which is
     /// what `tests::a_character_pressed_into_a_corner_does_not_climb_it` was
     /// checked against.
-    fn try_step_up(&self, world: &mut PhysicsWorld, remaining: DVec3) -> Option<StepUp> {
+    fn try_step_up(&self, world: &mut WorldReader<'_, '_>, remaining: DVec3) -> Option<StepUp> {
         if self.config.step_offset <= 0.0 {
             return None;
         }
@@ -945,7 +995,12 @@ impl CharacterController {
     /// walked off a lip is still standing on the floor below. Snapping only
     /// happens to a character that was already walking and is not asking to go
     /// up, so a jump is not swallowed by the floor it just left.
-    fn settle_on_ground(&mut self, world: &mut PhysicsWorld, was_grounded: bool, motion: DVec3) {
+    fn settle_on_ground(
+        &mut self,
+        world: &mut WorldReader<'_, '_>,
+        was_grounded: bool,
+        motion: DVec3,
+    ) {
         self.ground = None;
         // An explicit ascent leaves support even inside the ground probe's
         // reach. Use requested motion here: walking uphill also rises, but
@@ -995,7 +1050,7 @@ impl CharacterController {
     /// the two cannot disagree about what counts as ground.
     fn probe_below(
         &self,
-        world: &mut PhysicsWorld,
+        world: &mut WorldReader<'_, '_>,
         from: DVec3,
         distance: f64,
     ) -> Option<GroundProbe> {
@@ -1021,7 +1076,7 @@ impl CharacterController {
     /// How far the capsule gets along `delta` before something stops it, a
     /// skin width short of it across its normal, and never past `delta`
     /// itself: see [`skin_short`](Self::skin_short).
-    fn clear_travel(&self, world: &mut PhysicsWorld, from: DVec3, delta: DVec3) -> f64 {
+    fn clear_travel(&self, world: &mut WorldReader<'_, '_>, from: DVec3, delta: DVec3) -> f64 {
         let distance = delta.length();
         if distance <= MIN_MOVE {
             return 0.0;
@@ -1055,7 +1110,7 @@ impl CharacterController {
     /// sweep, whichever shape it is moving.
     fn sweep_body(
         &self,
-        world: &mut PhysicsWorld,
+        world: &mut WorldReader<'_, '_>,
         body: Body,
         delta: DVec3,
     ) -> Option<(ColliderId, SweptContact)> {
@@ -1063,13 +1118,14 @@ impl CharacterController {
             Body::Upright => self
                 .sweep(world, self.position, self.position + delta)
                 .map(|(collider, hit)| (collider, hit.into())),
-            Body::Lying(lying) => world.sweep_lying_capsule(
+            Body::Lying(lying) => world.view.sweep_lying_capsule(
                 &LyingCapsule {
                     head: self.position,
                     ..lying
                 },
                 delta,
                 self.filter(),
+                world.scratch,
             ),
         }
     }
@@ -1078,15 +1134,16 @@ impl CharacterController {
     /// off its query mask left out of it.
     fn sweep(
         &self,
-        world: &mut PhysicsWorld,
+        world: &mut WorldReader<'_, '_>,
         from: DVec3,
         to: DVec3,
     ) -> Option<(ColliderId, ShapeHit)> {
-        world.sweep_capsule_filtered(
+        world.view.sweep_capsule_filtered(
             &Segment::new(from, to),
             self.config.radius,
             self.config.half_height,
             self.filter(),
+            world.scratch,
         )
     }
 
@@ -2003,3 +2060,7 @@ mod crease_tests;
 #[cfg(test)]
 #[path = "character/rest_tests.rs"]
 mod rest_tests;
+
+#[cfg(test)]
+#[path = "character/preview_tests.rs"]
+mod preview_tests;
