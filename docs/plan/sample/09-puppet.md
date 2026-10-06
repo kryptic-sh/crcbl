@@ -105,14 +105,27 @@ and turns the body toward where it went. `apps/breach` drives the same
 controller from inside the character's head and `apps/shard` from a fixed
 isometric rig; `crcbl-phys` gained nothing for any of the three.
 
-Not built — the rest of milestone 2, all of milestones 3 and 4, and half of 5:
-the state machine, jump, run, root motion, animation events and the footstep
-cues, the socket prop, and the whole device-swap showcase with its rebind UI and
-glyph hints. `docs/backlog.md` carries the list. **Milestone 5's other half is
-done**: `apps/puppet/src/web.rs` is the `wasm32` front end, `web/demos/puppet/`
-is its page and `puppet` is a row in `web/build.sh`'s `DEMOS`. What that
-milestone still owes is the golden frames — `apps/puppet` has no `tests/`
-directory, so nothing pins a pose.
+**Milestone 4 is half built: the keyboard and the pad, swapped live.** One
+`move` axis takes `WASD`, the arrows, the left stick and the d-pad, and run and
+jump each carry a key and a pad button (`apps/puppet/src/bindings.rs`), so the
+server's state machine is driven identically from either device. The control
+prompt under the panel follows the device that last spoke — `ActionMap::hint`'s
+text labels, rebuilt when `ActionMap::last_device_changed` rises — and a
+`CONTROLS` row on the pause panel opens an overlay that rebinds run and jump by
+pressing the input, kept in the player's profile. That overlay is the engine's
+`crcbl::rebind`, the flow `apps/options`' `CONTROLS` page runs on too. Labels,
+not glyph artwork: button art is a game's art direction, and this sample has
+none. What milestone 4 still owes: the **touch** device world (puppet has no
+on-screen controls), the camera on the right stick, and rebinding the walk
+itself, which a single captured input cannot replace.
+
+Not built — root motion in puppet, the footstep cues, the socket prop, and the
+touch half of the device-swap showcase. The state machine, the run, the jump and
+footstep events are built. `docs/backlog.md` carries the list. **Milestone 5's
+other half is done**: `apps/puppet/src/web.rs` is the `wasm32` front end,
+`web/demos/puppet/` is its page and `puppet` is a row in `web/build.sh`'s
+`DEMOS`. What that milestone still owes is the golden frames — `apps/puppet` has
+no `tests/` directory, so nothing pins a pose.
 
 ## Exit criteria
 

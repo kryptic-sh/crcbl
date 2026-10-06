@@ -15,7 +15,7 @@
 //! blended between clips and crossfaded between states rather than snapped.
 //!
 //! ```text
-//!   shell key ──▶ ActionMap ──▶ Controls ──wire──▶ Intent
+//!   keys, pad ──▶ ActionMap ──▶ Controls ──wire──▶ Intent
 //!                                                    │
 //!                    camera yaw ──▶ OrbitCamera::walk_direction ──┤
 //!                                                    ▼
@@ -97,6 +97,14 @@
 //! circuit on the spawn pad from the first tick, and the first movement key ends
 //! it for good — the arrangement `apps/orbit` and `apps/viewer` both use.
 //!
+//! # The keyboard or a pad, swapped any time
+//!
+//! [`bindings`] binds every action on both devices at once and reads them into
+//! the same [`Controls`], so the server never learns which one the player is
+//! holding. The prompt under the panel names the device that last spoke, and a
+//! `CONTROLS` row on the pause panel rebinds run and jump through the engine's
+//! [`crcbl::rebind`], kept in the player's profile.
+//!
 //! # Two beacons hum behind the mounds
 //!
 //! The one sound: [`audio`] stands a beacon behind each mound and hears it from
@@ -109,7 +117,7 @@
 //!
 //! No root motion (the rig's clips are in place; `crcbl-anim` proves root
 //! motion on its own), no footstep *sound* (puppet plays no audio, so a
-//! footstep is a counted event), no socket and no device swapping: those are
+//! footstep is a counted event), no socket and no touch controls: those are
 //! the rest of milestones 2 to 4, and `docs/backlog.md` carries the list. Two things are
 //! visible in the picture rather than merely absent from it, and both are named
 //! where they are: the slopes are **rounded**, because `crcbl-phys` has no
@@ -134,6 +142,7 @@ pub mod anim;
 pub mod app;
 mod args;
 pub mod audio;
+pub mod bindings;
 pub mod camera;
 pub mod game;
 mod gpu;
@@ -149,5 +158,5 @@ pub use app::{Loop, PendingLoop, Puppet, PuppetError, Summary, run, start, with_
 pub use args::{Invocation, Options, USAGE, parse};
 pub use camera::Follow;
 pub use game::{Controls, DEFAULT_TICK_HZ, Game, GameError, RenderState, Stats};
-pub use menu::{MenuKind, Menus};
+pub use menu::{MenuKind, Menus, PuppetAction};
 pub use page::PageStats;

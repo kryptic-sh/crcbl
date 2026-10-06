@@ -14,10 +14,11 @@
 //!   gpu.frame()
 //! ```
 //!
-//! What is left here is start-up, because a window's title is this sample's; the
-//! action map, because a keyboard is not something [`crate::game`] should know
-//! about; the camera, because it is presentation; and the trait methods, because
-//! they are what a hosted game is.
+//! What is left here is start-up, because a window's title is this sample's;
+//! the input queues, because the map's edges are the tick's; the camera,
+//! because it is presentation; and the trait methods, because they are what a
+//! hosted game is. The action map itself is [`crate::bindings`]', because a
+//! keyboard or a pad is not something [`crate::game`] should know about.
 //!
 //! # The camera turns on the frame's clock, the character walks on the tick's
 //!
@@ -35,108 +36,23 @@
 use crcbl::client::ClientQueryWorld;
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{Booted, Clock, FrameInfo, HostedGame, RunSummary, wait_for_configure};
-use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
+use crcbl::input::{ActionMap, GamepadEvent};
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
+use crcbl::rebind::{Capture, Rebinder};
 use crcbl::shell::{DisplayMode, WindowId};
+use crcbl::store::profile::ProfileStore;
 
 use crate::anim::Animator;
 use crate::audio::Audio;
 use crate::camera::Follow;
-use crate::game::{Controls, Game, RenderState, Stats};
+use crate::game::{Game, RenderState, Stats};
 use crate::gpu::Gpu;
 use crate::map::Map;
-use crate::menu::{MenuKind, Menus};
+use crate::menu::{MenuKind, Menus, PuppetAction};
 use crate::page::PageStats;
 
 pub use crate::args::Options;
-
-// ---- the controls --------------------------------------------------------------
-
-/// Walk away from the camera. Two bindings each, so the demo is playable on the
-/// arrow keys alone and on `WASD` alone.
-const ACTION_FORWARD: &str = "forward";
-/// See [`ACTION_FORWARD`].
-const ACTION_BACK: &str = "back";
-/// See [`ACTION_FORWARD`].
-const ACTION_LEFT: &str = "left";
-/// See [`ACTION_FORWARD`].
-const ACTION_RIGHT: &str = "right";
-/// Run rather than walk, for as long as it is held. Either shift key.
-const ACTION_RUN: &str = "run";
-/// Jump.
-const ACTION_JUMP: &str = "jump";
-/// Swing the camera about the character, anticlockwise and clockwise.
-const ACTION_CAMERA_LEFT: &str = "camera-left";
-/// See [`ACTION_CAMERA_LEFT`].
-const ACTION_CAMERA_RIGHT: &str = "camera-right";
-/// Raise and lower the camera's elevation.
-const ACTION_CAMERA_UP: &str = "camera-up";
-/// See [`ACTION_CAMERA_UP`].
-const ACTION_CAMERA_DOWN: &str = "camera-down";
-
-/// The keyboard this sample is walked with.
-///
-/// Declared in one place so the bindings and the read-out below cannot name
-/// different actions: a typo in either is an action that resolves to nothing,
-/// and [`ActionMap`] answers `false` for an action nobody declared rather than
-/// complaining.
-fn action_map() -> ActionMap {
-    let mut map = ActionMap::new();
-    for (name, keys) in [
-        (ACTION_FORWARD, vec![KeyCode::KeyW, KeyCode::ArrowUp]),
-        (ACTION_BACK, vec![KeyCode::KeyS, KeyCode::ArrowDown]),
-        (ACTION_LEFT, vec![KeyCode::KeyA, KeyCode::ArrowLeft]),
-        (ACTION_RIGHT, vec![KeyCode::KeyD, KeyCode::ArrowRight]),
-        (ACTION_RUN, vec![KeyCode::ShiftLeft, KeyCode::ShiftRight]),
-        (ACTION_JUMP, vec![KeyCode::Space]),
-        (ACTION_CAMERA_LEFT, vec![KeyCode::KeyQ]),
-        (ACTION_CAMERA_RIGHT, vec![KeyCode::KeyE]),
-        (ACTION_CAMERA_UP, vec![KeyCode::KeyR]),
-        (ACTION_CAMERA_DOWN, vec![KeyCode::KeyF]),
-    ] {
-        map.declare(ActionDecl {
-            name: name.into(),
-            kind: ActionKind::Button,
-            bindings: keys.into_iter().map(Binding::Key).collect(),
-        });
-    }
-    map
-}
-
-/// What the keyboard is asking the **simulation** for on the tick `actions` has
-/// just begun, at the yaw the view is currently at.
-///
-/// Walking and running read the **held** state: they happen for as long as a
-/// key is down. The jump reads the held state *or* this tick's press edge, so
-/// a tap that went down and up between two ticks still reaches the server,
-/// which takes the jump on the edge it sees tick to tick — holding the key
-/// does not jump again. The camera actions are deliberately absent — they are
-/// read in [`Puppet::draw`], on the frame's clock, because the camera is not
-/// part of what the server owns.
-fn controls(actions: &ActionMap, yaw: f32) -> Controls {
-    Controls {
-        forward: actions.button_held(ACTION_FORWARD),
-        back: actions.button_held(ACTION_BACK),
-        left: actions.button_held(ACTION_LEFT),
-        right: actions.button_held(ACTION_RIGHT),
-        run: actions.button_held(ACTION_RUN),
-        jump: actions.button_held(ACTION_JUMP) || actions.just_pressed(ACTION_JUMP),
-        yaw,
-    }
-}
-
-/// How far the camera should turn this frame, given what is held down and how
-/// long the frame was: `(yaw, pitch)` in radians.
-fn camera_turn(actions: &ActionMap, seconds: f32) -> (f32, f32) {
-    let axis = |positive: &str, negative: &str| {
-        f32::from(i8::from(actions.button_held(positive)) - i8::from(actions.button_held(negative)))
-    };
-    (
-        axis(ACTION_CAMERA_RIGHT, ACTION_CAMERA_LEFT) * crate::camera::TURN_RATE * seconds,
-        axis(ACTION_CAMERA_UP, ACTION_CAMERA_DOWN) * crate::camera::TURN_RATE * seconds,
-    )
-}
 
 // ---- summary -----------------------------------------------------------------
 
@@ -182,8 +98,11 @@ pub struct Puppet {
     /// at the simulation's own elapsed time, and a run reading the built-in
     /// map's sun while walking a loaded one would light the wrong world.
     map: Map,
-    /// The keyboard, resolved into [`Controls`] once per tick.
-    actions: ActionMap,
+    /// The keyboard and the pad, resolved into
+    /// [`Controls`](crate::game::Controls) once per tick — inside the rebind
+    /// flow that keeps the player's run and jump binds in their profile. See
+    /// [`crate::bindings`].
+    controls: Rebinder,
     /// Key events from the shell pump, replayed after `ActionMap::begin_tick`.
     ///
     /// The pump runs once per **frame** and the map's edge flags are per
@@ -192,6 +111,24 @@ pub struct Puppet {
     /// the map asks for, and it is what makes a frame that runs no ticks
     /// lossless.
     pending_keys: Vec<(KeyCode, bool)>,
+    /// Pad events from the loop's pad poll, replayed after the keys, for the
+    /// reason [`Puppet::pending_keys`] queues a key.
+    ///
+    /// Every event, in order, rather than the last snapshot only: a press and
+    /// its release inside one frame are two edges — a tap of jump — and a
+    /// connection carries the pad's family, which the prompt names buttons
+    /// after. After the keys because the loop polls the pads after the shell's
+    /// events, so that is the order the player made them in.
+    pending_pads: Vec<GamepadEvent>,
+    /// The control prompt under the panel, for the device the player last
+    /// used — [`crate::bindings::prompt`]. Rebuilt when the map's last device
+    /// changes and when a rebind moves a label, not every frame.
+    prompt: String,
+    /// Which of puppet's panels the pause shows: the pause panel itself, or
+    /// the controls overlay opened from it. The clash panel is not one of
+    /// them: it is shown over the overlay while the rebind flow has a clash in
+    /// it.
+    panel: MenuKind,
     /// The third-person camera. **Presentation**: it never crosses the wire, and
     /// the only thing the simulation is told about it is its yaw.
     follow: Follow,
@@ -369,13 +306,21 @@ fn assemble<S: Shell + ?Sized>(
     let (statics, colliders) = options.map.world_with_ids();
     let audio = (!options.common.headless)
         .then(|| Audio::open(crate::audio::materials(options.map.surfaces(), &colliders)));
+    // The profile follows the settings file's rule: the player's own natively
+    // and in a browser, nowhere from a headless run.
+    let controls =
+        crate::bindings::open(ProfileStore::for_app(Puppet::NAME, options.common.headless));
+    let prompt = crate::bindings::prompt(controls.actions());
     Ok(Loop::new(
         booted,
         Puppet {
             game,
             map: options.map.clone(),
-            actions: action_map(),
+            controls,
             pending_keys: Vec::new(),
+            pending_pads: Vec::new(),
+            prompt,
+            panel: MenuKind::Paused,
             follow: Follow::default(),
             query: ClientQueryWorld::new(statics),
             audio,
@@ -424,6 +369,29 @@ impl Puppet {
     pub const fn page(&self) -> &PageStats {
         &self.page
     }
+
+    /// The control prompt the overlay draws, for this crate's own tests.
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    /// The rebind flow and the map inside it.
+    pub const fn controls(&self) -> &Rebinder {
+        &self.controls
+    }
+
+    /// Keeps this run's binds in `store` instead, read from it now — what a
+    /// test uses, so a restart can be two runs over one temp directory.
+    pub fn keep_binds_in(&mut self, store: ProfileStore) {
+        self.controls = crate::bindings::open(store);
+        self.prompt = crate::bindings::prompt(self.controls.actions());
+    }
+
+    /// The prompt for the device the map now names, after anything that may
+    /// have moved a label.
+    fn refresh_prompt(&mut self) {
+        self.prompt = crate::bindings::prompt(self.controls.actions());
+    }
 }
 
 /// Puppet's half of the frame, and nothing else.
@@ -431,10 +399,8 @@ impl HostedGame for Puppet {
     type Error = crate::game::GameError;
     type Gpu = Gpu;
     type MenuKind = MenuKind;
-    /// Puppet declares no menu action of its own — see [`crate::menu`].
-    /// Uninhabited rather than a placeholder enum, so [`Puppet::apply`] is a
-    /// match on nothing and the compiler agrees there is no case to handle.
-    type MenuAction = core::convert::Infallible;
+    /// The controls overlay's rows — see [`crate::menu`].
+    type MenuAction = PuppetAction;
     type Summary = Summary;
 
     const NAME: &'static str = "puppet";
@@ -444,46 +410,126 @@ impl HostedGame for Puppet {
     }
 
     fn tick(&mut self, _gpu: &mut Gpu, tick_dt: f64) {
+        let actions = self.controls.actions_mut();
         // `ActionMap` holds its timers in `f32`, which is the precision an
         // input edge is worth.
         #[allow(clippy::cast_possible_truncation)]
-        self.actions.begin_tick(tick_dt as f32);
+        actions.begin_tick(tick_dt as f32);
         for (key, pressed) in self.pending_keys.drain(..) {
-            self.actions.key_event(key, pressed);
+            actions.key_event(key, pressed);
         }
+        for event in self.pending_pads.drain(..) {
+            actions.gamepad_event(&event);
+        }
+        // Read on the tick whose replay raised it: the next `begin_tick`
+        // clears the edge, and a frame can run two ticks before it draws.
+        let swapped = actions.last_device_changed();
         // The yaw goes with the buttons: what the player asked for is "forward",
         // and forward only means something beside the angle they were looking
         // along when they asked.
-        self.game
-            .set_controls(controls(&self.actions, self.follow.yaw()));
+        self.game.set_controls(crate::bindings::controls(
+            self.controls.actions(),
+            self.follow.yaw(),
+        ));
         self.game.tick();
+        if swapped {
+            self.refresh_prompt();
+        }
     }
 
     fn key_event(&mut self, key: KeyCode, pressed: bool) {
-        // Queued rather than fed straight in: the map's edges belong to the
-        // tick, not to the frame. See [`Puppet::pending_keys`].
-        self.pending_keys.push((key, pressed));
+        // A press heard while the overlay listens is the player's answer, not
+        // play, so it is not queued — or resuming would replay a captured
+        // Space as a jump. A release always is: one the map never saw held is
+        // harmless, and one it did see is owed.
+        let answer = pressed && self.controls.listening();
+        self.controls.key(key, pressed);
+        if !answer {
+            // Queued rather than fed straight in: the map's edges belong to the
+            // tick, not to the frame. See [`Puppet::pending_keys`].
+            self.pending_keys.push((key, pressed));
+        }
+    }
+
+    /// The pads, queued like the keys and shown to the rebind flow — every
+    /// event, so a button already held when the overlay starts listening is
+    /// known to be held.
+    ///
+    /// A snapshot heard while the overlay listens is not queued, for
+    /// [`Puppet::key_event`]'s reason. Nothing is lost by it: a snapshot is
+    /// the pad's whole state, so the next one the map hears carries every
+    /// release the skipped one had.
+    fn gamepad_event(&mut self, event: &GamepadEvent) {
+        let answer = self.controls.listening() && matches!(event, GamepadEvent::State { .. });
+        self.controls.pad(event);
+        if !answer {
+            self.pending_pads.push(*event);
+        }
+    }
+
+    /// While the controls overlay listens for the input to bind.
+    ///
+    /// Keys and pad buttons only: puppet binds no pointer input and feeds its
+    /// map none, so a mouse button bound here would be an action nothing could
+    /// press. A click while listening reaches no panel and binds nothing.
+    fn captures_input(&self) -> bool {
+        self.controls.listening()
     }
 
     /// The map the console's `bind` and `unbind` rebind.
     ///
-    /// The same map the queued keys above are replayed into, so a rebind typed
-    /// at the console moves the key this game actually plays on rather than a
-    /// copy of it.
+    /// The same map the queued inputs above are replayed into, so a rebind
+    /// typed at the console moves the key this game actually plays on rather
+    /// than a copy of it — and the profile follows, by
+    /// [`Rebinder::persist`]'s rule.
     fn actions(&mut self) -> Option<&mut ActionMap> {
-        Some(&mut self.actions)
+        Some(self.controls.actions_mut())
     }
 
-    fn menu_action(_id: crcbl::ui::WidgetId) -> Option<core::convert::Infallible> {
-        None
+    fn menu_action(id: crcbl::ui::WidgetId) -> Option<PuppetAction> {
+        PuppetAction::of(id)
     }
 
-    fn apply(&mut self, action: core::convert::Infallible) {
-        match action {}
+    fn apply(&mut self, action: PuppetAction) {
+        match action {
+            PuppetAction::Controls => self.panel = MenuKind::Controls,
+            PuppetAction::Back => {
+                self.controls.cancel();
+                self.panel = MenuKind::Paused;
+            }
+            PuppetAction::Rebind(index) => self.controls.listen(index),
+            PuppetAction::ResetControls => self.controls.reset(),
+            PuppetAction::Swap => self.controls.swap(),
+            PuppetAction::Cancel => self.controls.cancel(),
+        }
     }
 
-    fn menu_kind(&mut self, _menus: &mut Menus, paused: bool) -> MenuKind {
-        MenuKind::of(paused)
+    /// The profile written if the binds moved, the overlay's rows and both
+    /// panels' captions refreshed, and the panel this frame shows.
+    ///
+    /// The write comes first, on every frame and not only a paused one, so a
+    /// console `bind` typed mid-walk reaches the profile and the prompt too.
+    /// Resuming leaves the overlay: the next pause opens on the pause panel,
+    /// and a clash nobody answered is dropped as `CANCEL` would drop it.
+    fn menu_kind(&mut self, menus: &mut Menus, paused: bool) -> MenuKind {
+        if self.controls.persist() {
+            self.refresh_prompt();
+        }
+        if !paused {
+            self.controls.cancel();
+            self.panel = MenuKind::Paused;
+            return MenuKind::None;
+        }
+        if let Some(menu) = menus.get_mut(MenuKind::Controls) {
+            self.controls.refresh_page(crate::bindings::IDS, menu);
+        }
+        if let Some(menu) = menus.get_mut(MenuKind::Conflict) {
+            self.controls.refresh_conflict(menu);
+        }
+        match self.controls.capture() {
+            Capture::Conflict { .. } => MenuKind::Conflict,
+            Capture::Idle | Capture::Listening { .. } => self.panel,
+        }
     }
 
     fn draw(
@@ -495,7 +541,8 @@ impl HostedGame for Puppet {
         // **The camera turns on the wall clock**, so a paused frame can still be
         // looked around from — and so the turn is smooth on a machine whose
         // frames do not line up with its ticks.
-        let (yaw, pitch) = camera_turn(&self.actions, frame.render_dt.as_secs_f32());
+        let (yaw, pitch) =
+            crate::bindings::camera_turn(self.controls.actions(), frame.render_dt.as_secs_f32());
         if yaw != 0.0 || pitch != 0.0 {
             self.follow.turn(yaw, pitch);
         }
@@ -537,6 +584,7 @@ impl HostedGame for Puppet {
             &self.render_state,
             self.anim.blend(),
             self.anim.state_name(),
+            &self.prompt,
         );
     }
 
@@ -933,6 +981,351 @@ mod tests {
                 .iter()
                 .any(|t| t == "GROUND"),
             "the overlay is drawn behind the panel",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    // ---- the pad, the prompt and the controls overlay ------------------------
+
+    use crate::menu::PuppetAction;
+    use crcbl::input::{Binding, GamepadId, GamepadSnapshot, PadAxis, PadButton, PadKind};
+    use crcbl::rebind::ProfileWrite;
+    use crcbl::store::profile::PROFILE_FILE;
+    use crcbl::store::record::Backing;
+    use crcbl_sample_test::ScriptedPads;
+
+    /// The pad these tests hold: an Xbox one, so the prompt's words are known.
+    const PAD: GamepadId = GamepadId(1);
+
+    /// A scripted run with a scripted pad plugged in, and that pad's handle.
+    fn with_pad(frames: u64) -> (Loop<HeadlessShell>, ScriptedPads) {
+        let mut engine = scripted(&headless(frames));
+        let pads = ScriptedPads::default();
+        engine.set_pad_source(Some(Box::new(pads.clone())));
+        pads.push([GamepadEvent::Connected {
+            id: PAD,
+            kind: PadKind::Xbox,
+        }]);
+        (engine, pads)
+    }
+
+    /// A snapshot of [`PAD`], edited from neutral.
+    fn pad_state(edit: impl FnOnce(&mut GamepadSnapshot)) -> GamepadEvent {
+        let mut snapshot = GamepadSnapshot::neutral(PadKind::Xbox);
+        edit(&mut snapshot);
+        GamepadEvent::State { id: PAD, snapshot }
+    }
+
+    fn frames(engine: &mut Loop<HeadlessShell>, count: usize) {
+        for _ in 0..count {
+            engine.frame().expect("a frame");
+        }
+    }
+
+    fn tap(engine: &mut Loop<HeadlessShell>, key: KeyCode) {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .key_press(window, key)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, key)
+            .expect("the window is live");
+    }
+
+    /// **The pad drives the state machine the way the keys do**: the left
+    /// stick pushed up with the right bumper held carries the character into
+    /// the run, a tap of South — down and up inside one poll — puts it in the
+    /// jump, and letting go brings it back to idle. The shell-to-server path
+    /// of `the_run_and_jump_keys_reach_the_state_machine`, from the loop's pad
+    /// poll instead.
+    #[test]
+    fn the_pad_drives_idle_run_and_jump_like_the_keys() {
+        let (mut engine, pads) = with_pad(480);
+        let running = pad_state(|pad| {
+            pad.axes[PadAxis::LeftY as usize] = 1.0;
+            pad.buttons.insert(crate::bindings::RUN_PAD_BUTTON);
+        });
+        pads.push([running]);
+        frames(&mut engine, 60);
+        assert_eq!(engine.game().game().stats().anim, "run");
+        assert!(
+            !engine.game().game().render_state().patrolling,
+            "the stick did not take the controls from the circuit"
+        );
+
+        let jumping = pad_state(|pad| {
+            pad.axes[PadAxis::LeftY as usize] = 1.0;
+            pad.buttons.insert(crate::bindings::RUN_PAD_BUTTON);
+            pad.buttons.insert(PadButton::South);
+        });
+        pads.push([jumping, running]);
+        let mut jumped = false;
+        for _ in 0..10 {
+            engine.frame().expect("a frame");
+            jumped |= engine.game().game().stats().anim == "jump";
+        }
+        assert!(jumped, "a tap of South never put the character in the jump");
+
+        pads.push([pad_state(|_| {})]);
+        let mut idle = false;
+        for _ in 0..240 {
+            engine.frame().expect("a frame");
+            if engine.game().game().stats().anim == "idle" {
+                idle = true;
+                break;
+            }
+        }
+        assert!(idle, "letting go of the pad never brought the idle back");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The prompt follows the device the player last used, and a drifting
+    /// stick does not take it.** A key keeps the keyboard's words; a press on
+    /// the pad swaps the line the frame draws to the pad's; a key swaps it to
+    /// the keyboard again; and a stick resting a little off centre swaps
+    /// nothing back.
+    #[test]
+    fn the_prompt_follows_the_last_device_and_not_a_drifting_stick() {
+        let (mut engine, pads) = with_pad(64);
+        let keyboard = crate::bindings::prompt(&crate::bindings::action_map());
+        let drawn = |engine: &Loop<HeadlessShell>| {
+            let prompt = engine.game().prompt().to_owned();
+            assert!(
+                ui_text(engine.gpu().draw_list()).contains(&prompt),
+                "the frame did not draw the prompt {prompt:?}"
+            );
+            prompt
+        };
+
+        tap(&mut engine, KeyCode::KeyD);
+        frames(&mut engine, 2);
+        assert_eq!(drawn(&engine), keyboard);
+
+        pads.push([
+            pad_state(|pad| pad.buttons.insert(PadButton::South)),
+            pad_state(|_| {}),
+        ]);
+        frames(&mut engine, 2);
+        let on_the_pad = drawn(&engine);
+        assert!(
+            on_the_pad.starts_with("Left stick walk   RB run   A jump"),
+            "a pad press left the prompt at {on_the_pad:?}"
+        );
+
+        tap(&mut engine, KeyCode::KeyD);
+        frames(&mut engine, 2);
+        assert_eq!(drawn(&engine), keyboard, "a key did not take it back");
+
+        // Inside the stick's own dead zone and well inside the activity
+        // threshold: what a worn stick reads at rest.
+        pads.push([pad_state(|pad| {
+            pad.axes[PadAxis::LeftX as usize] = 0.15;
+            pad.axes[PadAxis::LeftY as usize] = -0.1;
+        })]);
+        frames(&mut engine, 4);
+        assert_eq!(drawn(&engine), keyboard, "a drifting stick took the prompt");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// A directory of this test's own under the system temp directory, empty.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("puppet-{name}-{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("a scratch dir of this test's own");
+        }
+        std::fs::create_dir_all(&dir).expect("the temp dir is writable");
+        dir
+    }
+
+    /// A scripted run whose binds are kept in `dir`, standing in for the
+    /// player's config directory — what a "restart" opens twice.
+    fn run_over_profile(dir: &std::path::Path, frames: u64) -> Loop<HeadlessShell> {
+        let mut engine = scripted(&headless(frames));
+        engine.game_mut().keep_binds_in(ProfileStore::open(
+            Backing::Native(dir.to_path_buf()),
+            PROFILE_FILE,
+        ));
+        engine
+    }
+
+    /// The row of [`crate::bindings::ROWS`] for `name`.
+    fn row(name: &str) -> usize {
+        crate::bindings::ROWS
+            .iter()
+            .position(|row| row.name == name)
+            .unwrap_or_else(|| panic!("no row {name}"))
+    }
+
+    /// Pauses, opens the controls overlay from the pause panel and starts
+    /// listening for `name`, as ENTER on the two rows does.
+    fn listen_for(engine: &mut Loop<HeadlessShell>, name: &str) {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        frames(engine, 2);
+        assert_eq!(engine.menu_kind(), MenuKind::Paused);
+        let open = Puppet::menu_action(crate::bindings::CONTROLS_ID).expect("CONTROLS fires");
+        engine.game_mut().apply(open);
+        frames(engine, 1);
+        assert_eq!(engine.menu_kind(), MenuKind::Controls);
+        let listen = Puppet::menu_action(crate::bindings::IDS.action(row(name)))
+            .expect("an action row fires");
+        engine.game_mut().apply(listen);
+        assert!(
+            engine.game().captures_input(),
+            "the row did not start listening"
+        );
+    }
+
+    fn jump_bindings(engine: &Loop<HeadlessShell>) -> Vec<Binding> {
+        engine
+            .game()
+            .controls()
+            .actions()
+            .bindings(crate::bindings::ACTION_JUMP)
+            .expect("jump is declared")
+            .to_vec()
+    }
+
+    /// **A rebind made in the overlay is there after a restart, and is what
+    /// the character jumps on.** Listening on `JUMP`, a press of `J` replaces
+    /// Space and keeps the pad's South; the profile is written; and a second
+    /// run over the same directory opens with it, prints it in the prompt, and
+    /// jumps on a tap of `J`.
+    #[test]
+    fn a_rebind_in_the_overlay_survives_a_restart() {
+        let dir = scratch("rebind-restart");
+        let rebound = vec![
+            Binding::Key(KeyCode::KeyJ),
+            Binding::PadButton(PadButton::South),
+        ];
+
+        let mut engine = run_over_profile(&dir, 64);
+        frames(&mut engine, 2);
+        listen_for(&mut engine, "jump");
+        tap(&mut engine, KeyCode::KeyJ);
+        frames(&mut engine, 2);
+        assert!(
+            !engine.game().captures_input(),
+            "a captured key left it listening"
+        );
+        assert_eq!(engine.menu_kind(), MenuKind::Controls);
+        assert_eq!(jump_bindings(&engine), rebound);
+        assert_eq!(engine.game().controls().saved(), &ProfileWrite::Saved);
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+
+        let mut restarted = run_over_profile(&dir, 64);
+        assert_eq!(jump_bindings(&restarted), rebound, "the restart lost it");
+        assert!(
+            restarted.game().prompt().contains("J jump"),
+            "the prompt still names the old key: {:?}",
+            restarted.game().prompt()
+        );
+        tap(&mut restarted, KeyCode::KeyJ);
+        let mut jumped = false;
+        for _ in 0..10 {
+            restarted.frame().expect("a frame");
+            jumped |= restarted.game().game().stats().anim == "jump";
+        }
+        assert!(jumped, "a tap of the rebound key never jumped");
+        restarted.finish(ExitReason::FrameBudget).expect("teardown");
+        std::fs::remove_dir_all(&dir).expect("a scratch dir of this test's own");
+    }
+
+    /// **The press the overlay captured is not replayed as play.** Rebinding
+    /// jump to `J` with the loop paused, then resuming, must not jump: the
+    /// press was the player's answer to the overlay, not a press of the new
+    /// binding.
+    #[test]
+    fn a_captured_press_is_not_replayed_when_the_run_resumes() {
+        let dir = scratch("captured-not-replayed");
+        let mut engine = run_over_profile(&dir, 64);
+        frames(&mut engine, 2);
+        listen_for(&mut engine, "jump");
+        tap(&mut engine, KeyCode::KeyJ);
+        frames(&mut engine, 1);
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        frames(&mut engine, 1);
+        assert!(!engine.is_paused(), "Escape did not resume");
+        for _ in 0..10 {
+            engine.frame().expect("a frame");
+            assert_ne!(
+                engine.game().game().stats().anim,
+                "jump",
+                "the captured J was replayed as a jump"
+            );
+        }
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+        std::fs::remove_dir_all(&dir).expect("a scratch dir of this test's own");
+    }
+
+    /// **A clash asks, by the rebind flow's policy**: Shift is run's, so a
+    /// press of it for jump opens the clash panel naming run, `CANCEL` leaves
+    /// both, and `SWAP` gives jump the Shift and run jump's old Space — the
+    /// pad buttons stay where they were.
+    #[test]
+    fn a_clash_in_the_overlay_asks_and_swap_trades_the_keys() {
+        let (mut engine, _pads) = with_pad(64);
+        frames(&mut engine, 2);
+        listen_for(&mut engine, "jump");
+        tap(&mut engine, KeyCode::ShiftLeft);
+        frames(&mut engine, 1);
+        assert_eq!(engine.menu_kind(), MenuKind::Conflict);
+        assert!(
+            ui_text(engine.gpu().draw_list())
+                .iter()
+                .any(|line| line == "Shift IS ON RUN"),
+            "the clash is not named on the panel"
+        );
+
+        let cancel = Puppet::menu_action(crate::bindings::IDS.cancel()).expect("CANCEL fires");
+        engine.game_mut().apply(cancel);
+        frames(&mut engine, 1);
+        assert_eq!(engine.menu_kind(), MenuKind::Controls);
+        assert_eq!(
+            jump_bindings(&engine),
+            [
+                Binding::Key(KeyCode::Space),
+                Binding::PadButton(PadButton::South)
+            ]
+        );
+
+        let listen = Puppet::menu_action(crate::bindings::IDS.action(row("jump")))
+            .expect("an action row fires");
+        engine.game_mut().apply(listen);
+        tap(&mut engine, KeyCode::ShiftLeft);
+        frames(&mut engine, 1);
+        assert_eq!(engine.menu_kind(), MenuKind::Conflict);
+        engine.game_mut().apply(PuppetAction::Swap);
+        frames(&mut engine, 1);
+        assert_eq!(
+            jump_bindings(&engine),
+            [
+                Binding::Key(KeyCode::ShiftLeft),
+                Binding::PadButton(PadButton::South)
+            ]
+        );
+        assert_eq!(
+            engine
+                .game()
+                .controls()
+                .actions()
+                .bindings(crate::bindings::ACTION_RUN),
+            Some(
+                &[
+                    Binding::Key(KeyCode::Space),
+                    Binding::Key(KeyCode::ShiftRight),
+                    Binding::PadButton(crate::bindings::RUN_PAD_BUTTON),
+                ][..]
+            )
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

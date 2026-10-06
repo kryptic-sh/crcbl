@@ -728,20 +728,6 @@ mod tests {
         engine
     }
 
-    /// A pad source a test scripts: what is queued is reported on the loop's
-    /// next poll, once. Cloned so the test keeps a handle after the loop owns
-    /// it.
-    #[derive(Clone, Debug, Default)]
-    struct ScriptedPads(std::rc::Rc<std::cell::RefCell<Vec<crcbl::input::GamepadEvent>>>);
-
-    impl crcbl::engine::PadSource for ScriptedPads {
-        fn poll(&mut self, emit: &mut dyn FnMut(crcbl::input::GamepadEvent)) {
-            for event in self.0.borrow_mut().drain(..) {
-                emit(event);
-            }
-        }
-    }
-
     /// **The control hint on screen switches from the keys to the pad and
     /// back**, through the loop: a key from the shell, then a pad from the
     /// loop's pad poll, each into the game's action map and out as the HUD
@@ -751,7 +737,7 @@ mod tests {
         use crcbl::input::{GamepadEvent, GamepadId, GamepadSnapshot, PadAxis, PadKind};
 
         let mut engine = playing(64);
-        let pads = ScriptedPads::default();
+        let pads = crcbl_sample_test::ScriptedPads::default();
         engine.set_pad_source(Some(Box::new(pads.clone())));
         let hint = |engine: &Loop<HeadlessShell>| {
             ui_text(engine.gpu().draw_list())
@@ -768,7 +754,7 @@ mod tests {
         let id = GamepadId(1);
         let mut pushed = GamepadSnapshot::neutral(PadKind::Xbox);
         pushed.axes[PadAxis::LeftX as usize] = 1.0;
-        pads.0.borrow_mut().extend([
+        pads.push([
             GamepadEvent::Connected {
                 id,
                 kind: PadKind::Xbox,

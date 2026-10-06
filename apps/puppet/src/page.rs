@@ -1,4 +1,4 @@
-//! The overlay: a readout panel and the control hint, over the 3D frame.
+//! The overlay: a readout panel and the control prompt, over the 3D frame.
 //!
 //! ```text
 //!  ┌ puppet ──────────┐
@@ -13,8 +13,12 @@
 //!  │ STEPS         14 │
 //!  └──────────────────┘
 //!
-//!     W/A/S/D walk   SHIFT run   SPACE jump   Q/E turn the camera   R/F tilt it
+//!     WASD walk   Shift run   Space jump   Q/E turn the camera   R/F tilt it
 //! ```
+//!
+//! The prompt is [`crate::bindings::prompt`]'s, for the device the player last
+//! used — the line above on the keyboard, `Left stick walk   RB run   A jump`
+//! and the camera keys once an Xbox pad speaks. This page only draws it.
 //!
 //! # It is small on purpose
 //!
@@ -58,9 +62,6 @@ const PANEL: ReadoutPanel = ReadoutPanel {
     label: LABEL,
 };
 
-/// The control hint, which is the whole of what a first-time visitor needs.
-const HINT: &str = "W/A/S/D walk   SHIFT run   SPACE jump   Q/E turn the camera   R/F tilt it";
-
 /// What the page drew, for the loop's own tests and its summary line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PageStats {
@@ -78,7 +79,8 @@ pub struct PageStats {
 /// state the pose was sampled in. Both arrive as arguments rather than on
 /// `state` because they are the client's reading of the pose: the simulation
 /// sends the machine's state, and the names and weights are what the client's
-/// copy of the asset makes of it.
+/// copy of the asset makes of it. `prompt` is the control prompt, which is the
+/// whole of what a first-time visitor needs.
 pub fn draw(
     list: &mut DrawList,
     atlas: &FontAtlas,
@@ -86,6 +88,7 @@ pub fn draw(
     state: &RenderState,
     blend: f32,
     anim: &str,
+    prompt: &str,
 ) -> PageStats {
     let rows: [ReadoutRow; 9] = [
         ReadoutRow::new("X", format!("{:.2} m", state.position.x), VALUE),
@@ -117,7 +120,7 @@ pub fn draw(
     ];
 
     PANEL.draw(list, atlas, &rows);
-    PANEL.hint(list, atlas, extent, HINT);
+    PANEL.hint(list, atlas, extent, prompt);
 
     PageStats {
         commands: list.len(),
@@ -130,6 +133,26 @@ mod tests {
     use crcbl::math::{DVec3, Vec2};
     use crcbl::ui::readout::NATURAL_SCALE;
     use crcbl::ui::widget::NATURAL_FONT_SIZE;
+
+    /// A prompt to draw: the keyboard's, as a run opens on.
+    fn keyboard_prompt() -> String {
+        crate::bindings::prompt(&crate::bindings::action_map())
+    }
+
+    /// The prompt for a pad whose family nobody could place, which prints the
+    /// longest words the label table has for these bindings — the widest line
+    /// the page is ever handed.
+    fn generic_pad_prompt() -> String {
+        use crcbl::input::{GamepadEvent, GamepadId, GamepadSnapshot, PadButton, PadKind};
+        let mut actions = crate::bindings::action_map();
+        let mut snapshot = GamepadSnapshot::neutral(PadKind::Generic);
+        snapshot.buttons.insert(PadButton::South);
+        actions.gamepad_event(&GamepadEvent::State {
+            id: GamepadId(1),
+            snapshot,
+        });
+        crate::bindings::prompt(&actions)
+    }
 
     /// **The page draws something, and what it draws says where the character
     /// is.** A frame with an empty draw list is the one failure a headless
@@ -146,7 +169,8 @@ mod tests {
             footsteps: 14,
             ..RenderState::default()
         };
-        let stats = draw(&mut list, &atlas, (960, 720), &state, 0.78, "run");
+        let prompt = keyboard_prompt();
+        let stats = draw(&mut list, &atlas, (960, 720), &state, 0.78, "run", &prompt);
         assert!(stats.commands > 0, "the page drew nothing at all");
 
         let text: Vec<&str> = list
@@ -174,8 +198,8 @@ mod tests {
             "the ground reading is missing: {text:?}"
         );
         assert!(
-            text.contains(&HINT),
-            "the control hint is missing: {text:?}"
+            text.contains(&prompt.as_str()),
+            "the control prompt is missing: {text:?}"
         );
         // The two milestone-2 readings: the speed the world allowed, and the
         // blend weight it selected.
@@ -204,6 +228,14 @@ mod tests {
     /// against, and the right-aligned readings start inside their own panel.
     #[test]
     fn every_reading_is_laid_out_where_it_can_actually_be_seen() {
+        for prompt in [keyboard_prompt(), generic_pad_prompt()] {
+            laid_out_where_it_can_be_seen(&prompt);
+        }
+    }
+
+    /// [`every_reading_is_laid_out_where_it_can_actually_be_seen`] for one
+    /// prompt.
+    fn laid_out_where_it_can_be_seen(prompt: &str) {
         let atlas = FontAtlas::built_in();
         let mut list = DrawList::new();
         let state = RenderState {
@@ -213,7 +245,7 @@ mod tests {
             ..RenderState::default()
         };
         let extent = (960u32, 720u32);
-        draw(&mut list, &atlas, extent, &state, 0.5, "jump");
+        draw(&mut list, &atlas, extent, &state, 0.5, "jump", prompt);
 
         let drawn: Vec<(Vec2, &str)> = list
             .commands()
@@ -240,7 +272,7 @@ mod tests {
         }
 
         let panel_right = PANEL.inset + PANEL.width;
-        for (pos, text) in drawn.iter().filter(|(_, text)| *text != HINT) {
+        for (pos, text) in drawn.iter().filter(|(_, text)| *text != prompt) {
             assert!(
                 pos.x >= PANEL.inset
                     && pos.x + atlas.text_width(text, NATURAL_SCALE) <= panel_right,

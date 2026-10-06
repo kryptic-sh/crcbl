@@ -1399,15 +1399,6 @@ const STICK_MOVE: &str = "stick_move";
 /// that direction out of noise.
 const MOVE_DEAD_ZONE: f32 = 0.25;
 
-/// Where one of the eight directions ends and the next begins: `sin(π/8)`, the
-/// component a unit vector has at 22.5° off an axis.
-///
-/// Applied to the **normalised** direction, so the eight sectors are 45° wide
-/// each and a diagonal is no harder to hold than a cardinal.
-/// `the_eight_sectors_are_the_angle_they_claim` checks this against `f32::sin`,
-/// because a transcribed constant is a transcription until something computes
-/// it.
-const MOVE_SECTOR: f32 = 0.382_683_43;
 /// The one edge that both **starts** a waiting run and **restarts** a live one.
 ///
 /// Two jobs on one action, the way asteroids' `fire` both begins a game and
@@ -1476,7 +1467,8 @@ struct Intent {
 }
 
 /// The four digital directions a stick deflection asks for, as
-/// `(up, down, left, right)`.
+/// `(up, down, left, right)` — [`crcbl::input::eight_way`] at this game's
+/// [`MOVE_DEAD_ZONE`].
 ///
 /// **This game walks at one speed**, and it always has: [`Intent::direction`]
 /// normalises, so a wizard leaning on the stick and a wizard leaning on `W`
@@ -1484,24 +1476,8 @@ struct Intent {
 /// analog value the honest one rather than a loss — the wire form carries four
 /// bits, the simulation reads a normalised direction, and an analog magnitude
 /// would have nowhere to go on either side.
-///
-/// Two thresholds, and they measure different things: [`MOVE_DEAD_ZONE`] is
-/// about *how far* the thumb has moved and rejects the middle of the pad,
-/// [`MOVE_SECTOR`] is about *which way* it points and splits the rest into eight
-/// equal sectors. Folding them into one would make a stick pushed gently
-/// north-east ask for nothing while the same push due north asked for a walk.
 fn eight_way(x: f32, y: f32) -> (bool, bool, bool, bool) {
-    let length = x.hypot(y);
-    if length < MOVE_DEAD_ZONE {
-        return (false, false, false, false);
-    }
-    let (x, y) = (x / length, y / length);
-    (
-        y >= MOVE_SECTOR,
-        y <= -MOVE_SECTOR,
-        x <= -MOVE_SECTOR,
-        x >= MOVE_SECTOR,
-    )
+    crcbl::input::eight_way(x, y, MOVE_DEAD_ZONE)
 }
 
 const INTENT_UP: u8 = 1 << 0;

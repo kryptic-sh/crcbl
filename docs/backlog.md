@@ -14833,7 +14833,8 @@ force-feedback `EV_FF`, GameController's `GCDeviceHaptics`, the Web Gamepad
 ### Input: the inspector shipped; the rebind screen and `crcbl input` are owed (2026-09-24, inspector 2026-10-06)
 
 The input plan scheduled three tools on top of the action layer. The inspector
-landed on 2026-10-06; the other two do not exist.
+landed on 2026-10-06, and the rebind flow's engine half the same day; the
+settings screen hosting it and `crcbl input` do not exist.
 
 **The input inspector, built.** `ActionMap::set_tracing` records a resolution
 trace (`crates/crcbl-input/src/trace.rs`),
@@ -14912,12 +14913,11 @@ Not done:
 
 The other two tools:
 
-- **A listen-for-input rebind flow** provided by the engine, for the P10
-  settings screen to host. `apps/options`' `CONTROLS` page is a sample's flow
-  (pick an action, press the input, ask on a clash, kept in the profile as a
-  diff over the defaults); the engine has the `HostedGame::captures_input` seam
-  it runs on, and the screen itself is still P10's. See _Profiles: key binds
-  built_.
+- **The rebind screen for the P10 settings screen to host.** The flow itself is
+  the engine's since 2026-10-06: `crcbl::rebind` (`Rebinder`, `RebindRow`,
+  `RebindIds`, `menus`), lifted out of `apps/options`' `CONTROLS` page, which
+  runs on it with `apps/puppet`'s controls overlay. What is still P10's is a
+  settings screen that hosts it for every game. See _Profiles: key binds built_.
 - **`crcbl input`**, a CLI to inspect and edit bindings. `crcbl-cli`'s `Command`
   enum (`crates/crcbl-cli/src/args.rs`) has no `input`. Editing needs the
   binding asset to exist first; inspecting a game's declared actions needs a way
@@ -16234,10 +16234,14 @@ Decisions, each with its reason:
 - **Unlocks**, or any field but binds. The file is versioned
   (`PROFILE_VERSION`), so a field is added with a version bump and a refusal of
   the older layout's absence, not a migration format.
-- **The engine-provided rebind flow for the P10 settings screen.** The page is
-  the options sample's. Its state machine (`apps/options/src/controls.rs`) is
-  what that screen would lift; the engine half that exists is
-  `HostedGame::captures_input` and the `crcbl-input` text layer.
+- **The P10 settings screen hosting the rebind flow.** The flow is the engine's
+  since 2026-10-06 (`crcbl::rebind`, lifted from `apps/options/src/controls.rs`,
+  which keeps only its actions and ids). Decided with the lift: its input hooks
+  observe and never feed the map, because where a map's edges land is the host's
+  (a game replays after `begin_tick`); a row names each label once; and a clash
+  with an action the page does not list asks like any clash, naming the action
+  by its name — before, options' flow would have taken the input silently, which
+  no options test reached since it lists every action it declares.
 - **What a capture can take**: a key, a mouse button, or a pad button going
   down. Not a pad stick or trigger, not a chord, not a touch control. While
   listening, a touch still reaches the menu, because the loop routes contacts to
@@ -19057,11 +19061,8 @@ so nothing drives the root and `Machine::root_velocity` would answer zero; root
 motion is proven at the crate level only (`tests/machine.rs`). A footstep
 **sound** — puppet has no audio path, so the cue is a counted event; wiring it
 to a `crcbl-audio` cue is the obvious next step once puppet plays anything. No
-socket prop, and none of the device-swap showcase — the rebind UI and the glyph
-hints that follow the last-active device. That last group is topic 19's forcing
-function. The engine half of the hints is built: `ActionMap::last_device`, its
-change edge `last_device_changed`, `last_pad_kind` and `ActionMap::hint` (see
-_Input: the inspector shipped_), so the prompts are puppet's own work now.
+socket prop, and the touch half of the device-swap showcase — see _Puppet's
+device-swap showcase: the keyboard and the pad built, touch owed_.
 
 **Not verified in a browser:** the browser gate's `[POSE]` checks still read
 `blend` and `mid`, whose meaning moved from "across the idle↔walk blend" to "out
@@ -19078,6 +19079,70 @@ done (`apps/puppet/src/web.rs`, `web/demos/puppet/`, the `puppet` row in
 
 **One engine limit is visible in the picture**: the slopes are rounded, because
 `crcbl-phys` has no oriented box to make a wedge out of.
+
+### Puppet's device-swap showcase: the keyboard and the pad built, touch owed (2026-10-06)
+
+**Built:** pad play, prompts that follow the last-active device, and a controls
+overlay that rebinds run and jump (`apps/puppet/src/bindings.rs`, the
+`HostedGame` hooks in `apps/puppet/src/app.rs`, `apps/puppet/src/menu.rs`).
+Decided 2026-10-06, long term:
+
+- **One `move` axis for every device.** The four walk buttons became one `Axis2`
+  that `WASD`, the arrows, `PadStick` left and `PadDpad` sum into, read through
+  `crcbl_input::eight_way` into the four bits the wire already carried — horde's
+  shape, and the function lifted out of horde so the two share it. The server
+  (`game::Controls`, `Intent`) is untouched, so the state machine cannot tell a
+  pad from the keys.
+- **Run on the right bumper, jump on South.** A stick click (where
+  `apps/options` puts sprint) cannot be held down by the thumb steering that
+  stick.
+- **The prompt is `ActionMap::hint` text, one line, rebuilt on
+  `last_device_changed`** (read in `Puppet::tick` right after the replay, since
+  the next `begin_tick` clears it) and after a rebind (`Rebinder::persist`
+  answering `true`). Labels only: glyph art is a game's art direction
+  (`crates/crcbl-input/src/hint.rs`), and this sample has none. The camera keys
+  have no pad binding, so on the pad the line still prints `Q/E` and `R/F` — the
+  hint's fallback, and the truth.
+- **Pad events are queued like keys** and replayed after the keys in
+  `Puppet::tick`, so a South tap inside one poll still reaches a tick as an
+  edge.
+- **The overlay is `crcbl::rebind`**, opened from a `CONTROLS` row appended to
+  the loop's pause items at `FIRST_GAME_ID`; puppet's profile is
+  `ProfileStore::for_app("puppet", headless)`. Rows: run and jump. Not `move` (a
+  single captured input cannot replace a four-key composite and a stick) and not
+  the camera keys.
+- **What the overlay hears while listening is the player's answer, not play**: a
+  captured key press or pad snapshot is not queued for the play map, so resuming
+  does not replay a captured `J` as a jump; releases are always queued.
+- **Puppet captures keys and pad buttons, not mouse buttons**: it binds no
+  pointer input and feeds its map none, so a mouse binding would be an action
+  nothing presses.
+
+**Not built:**
+
+- **The touch device world.** Puppet has no on-screen stick or buttons; horde's
+  `TouchStick` and `Binding::Virtual` are the pattern, and the plan's "full
+  play-through on each device class alone" needs it.
+- **The camera on the right stick.** The camera actions are four keyboard
+  buttons; a pad player walks camera-relative but cannot turn the view. An
+  `Axis2` with `PadStick` right is the obvious shape; its keyboard prompt would
+  print `Binding::Wasd`'s run-together label, which is why it was left.
+- **Rebinding the walk**, for the composite reason above.
+
+Surprising, not bugs:
+
+- **A stick pushed between the dead zones walks without taking the prompt.** The
+  stick walks once past `STICK_DEAD_ZONE` and `MOVE_DEAD_ZONE`, and the device
+  only counts as speaking past `PAD_ACTIVITY_THRESHOLD`, which is larger, so a
+  gentle push walks while the prompt stays on the keys until the stick goes
+  further or a button is pressed.
+- **A key inside the walk composite does not clash.** `bound_elsewhere` matches
+  exact bindings, so binding jump to `W` gives `W` both jobs without asking.
+
+Coverage gaps: no real pad has driven puppet (every check is a scripted
+`ScriptedPads` source, headless); the overlay and the prompt were not looked at
+in a window; and `web/tools/browser-e2e.mjs` was not run against the pause
+panel's fourth row or puppet's profile in OPFS.
 
 ### Puppet's `--scene` is proven to the simulation, not to the frame (2026-09-07)
 
@@ -20387,8 +20452,10 @@ of `docs/plan/sample/09-puppet.md` still wants:
   fixed `DISTANCE`, so it passes through the mounds. A spring arm over
   `PhysicsWorld::sweep_capsule` is the obvious fix and is client work per
   `docs/plan/30-player-kit.md`.
-- **No rebind UI, no gamepad, no device-swap handling** — the action map in
-  `puppet::app` is fixed at build time.
+- **No touch controls, and no camera on the pad** — the keyboard and the pad
+  both play, the prompt follows the last device and run and jump rebind (see
+  _Puppet's device-swap showcase_); an on-screen stick and a right-stick camera
+  are what is left.
 - **No `.crpix` art and no audio.** Everything is greybox geometry from
   `crcbl::greybox` over a tinted grid page, so the demo carries no asset at all
   and the web build ships an empty manifest.

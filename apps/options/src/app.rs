@@ -314,7 +314,8 @@ pub struct Screen {
     controls: Controls,
     /// Which page the player is on — the settings or `CONTROLS`. The clash
     /// panel is not a page: it is shown over `CONTROLS` while
-    /// [`Controls::capture`] has a clash in it.
+    /// [`Rebinder::capture`](crcbl::rebind::Rebinder::capture) has a clash
+    /// in it.
     page: MenuKind,
 }
 
@@ -480,7 +481,7 @@ impl Screen {
             display_rungs: [0; 2],
             // The profile follows the settings file's rule: the player's own
             // natively and in a browser, nowhere from a headless run.
-            controls: Controls::open(ProfileStore::for_app(APP_NAME, store.headless())),
+            controls: crate::controls::open(ProfileStore::for_app(APP_NAME, store.headless())),
             page: MenuKind::Settings,
         }
     }
@@ -489,7 +490,7 @@ impl Screen {
     /// test uses, so a restart can be two screens over one temp directory.
     #[must_use]
     pub fn with_profile(mut self, profile: ProfileStore) -> Self {
-        self.controls = Controls::open(profile);
+        self.controls = crate::controls::open(profile);
         self
     }
 
@@ -880,6 +881,14 @@ impl Screen {
         }
     }
 
+    /// A mouse button for the `CONTROLS` page: fed to its map, then shown to
+    /// the flow, which captures it while listening — the order
+    /// [`HostedGame::key_event`] keeps for a key.
+    fn press(&mut self, button: crcbl::core::input::PointerButton, pressed: bool) {
+        self.controls.actions_mut().mouse_button(button, pressed);
+        self.controls.button(button, pressed);
+    }
+
     /// The `CONTROLS` page's half of the frame: the profile written if the
     /// binds moved, every row and both panels' captions refreshed, and the
     /// menu this frame shows.
@@ -889,13 +898,10 @@ impl Screen {
     fn reconcile_controls(&mut self, menus: &mut Menus) -> MenuKind {
         self.controls.persist();
         if let Some(menu) = menus.get_mut(MenuKind::Controls) {
-            for index in 0..crate::controls::ACTIONS.len() {
-                menu.set_item_hint(crate::controls::action_id(index), self.controls.hint(index));
-            }
-            menu.subtitle = self.controls.subtitle();
+            self.controls.refresh_page(crate::controls::IDS, menu);
         }
         if let Some(menu) = menus.get_mut(MenuKind::Conflict) {
-            menu.subtitle = self.controls.conflict_subtitle();
+            self.controls.refresh_conflict(menu);
         }
         match self.controls.capture() {
             crate::controls::Capture::Conflict { .. } => MenuKind::Conflict,
@@ -1007,12 +1013,13 @@ impl HostedGame for Screen {
     /// and, while that page listens, every key, Escape and the menu's own
     /// included. See [`crate::controls`].
     fn key_event(&mut self, key: KeyCode, pressed: bool) {
+        self.controls.actions_mut().key_event(key, pressed);
         self.controls.key(key, pressed);
     }
 
     /// Every button but the primary one, for the `CONTROLS` page.
     fn button_event(&mut self, button: crcbl::core::input::PointerButton, pressed: bool) {
-        self.controls.button(button, pressed);
+        self.press(button, pressed);
     }
 
     /// The primary button, which the loop reports as part of the pointer: a
@@ -1020,15 +1027,16 @@ impl HostedGame for Screen {
     fn pointer_event(&mut self, pointer: crcbl::engine::PointerUpdate) {
         let primary = crcbl::core::input::PointerButton::Left;
         if pointer.pressed {
-            self.controls.button(primary, true);
+            self.press(primary, true);
         }
         if pointer.released {
-            self.controls.button(primary, false);
+            self.press(primary, false);
         }
     }
 
     /// The pads, for the `CONTROLS` page.
     fn gamepad_event(&mut self, event: &crcbl::input::GamepadEvent) {
+        self.controls.actions_mut().gamepad_event(event);
         self.controls.pad(event);
     }
 
@@ -1039,7 +1047,7 @@ impl HostedGame for Screen {
 
     /// The `CONTROLS` page's map, so the console's `bind` rebinds the actions
     /// this screen lists — and the profile follows, by
-    /// [`Controls::persist`]'s rule.
+    /// [`Rebinder::persist`](crcbl::rebind::Rebinder::persist)'s rule.
     fn actions(&mut self) -> Option<&mut crcbl::input::ActionMap> {
         Some(self.controls.actions_mut())
     }
@@ -2998,6 +3006,7 @@ mod tests {
 
     use crate::controls::{ACTIONS, Capture};
     use crcbl::input::{Binding, GamepadEvent, GamepadId, GamepadSnapshot, PadButton, PadKind};
+    use crcbl::rebind::ProfileWrite;
     use crcbl::store::profile::PROFILE_FILE;
     use crcbl::store::record::Backing;
 
@@ -3081,7 +3090,7 @@ mod tests {
             Binding::PadButton(PadButton::South),
         ];
         assert_eq!(bindings(&screen, "jump"), rebound);
-        assert_eq!(screen.controls().saved(), &SaveState::Saved);
+        assert_eq!(screen.controls().saved(), &ProfileWrite::Saved);
 
         let (restarted, _) = screen_over_profile(&dir);
         assert_eq!(bindings(&restarted, "jump"), rebound, "the restart lost it");
@@ -3109,7 +3118,7 @@ mod tests {
         assert!(!screen.captures_input(), "Escape left the page listening");
         assert_eq!(screen.menu_kind(&mut menus, false), MenuKind::Controls);
         assert_eq!(bindings(&screen, "jump"), before, "Escape was bound");
-        assert_eq!(screen.controls().saved(), &SaveState::Untouched);
+        assert_eq!(screen.controls().saved(), &ProfileWrite::Untouched);
         assert!(
             !dir.join(PROFILE_FILE).exists(),
             "a cancelled capture wrote the profile"
@@ -3232,7 +3241,7 @@ mod tests {
             .rebind("reload", vec![Binding::Key(KeyCode::KeyT)])
             .expect("a declared action");
         reconcile_controls_only(&mut screen, &mut menus);
-        assert_eq!(screen.controls().saved(), &SaveState::Saved);
+        assert_eq!(screen.controls().saved(), &ProfileWrite::Saved);
         let (restarted, _) = screen_over_profile(&dir);
         assert_eq!(
             bindings(&restarted, "reload"),
@@ -3254,7 +3263,7 @@ mod tests {
         listen_for(&mut screen, &mut menus, "sprint");
         key_tap(&mut screen, KeyCode::KeyV);
         reconcile_controls_only(&mut screen, &mut menus);
-        assert_eq!(screen.controls().saved(), &SaveState::Nowhere);
+        assert_eq!(screen.controls().saved(), &ProfileWrite::Nowhere);
         assert_eq!(
             bindings(&screen, "sprint")[0],
             Binding::Key(KeyCode::KeyV),
@@ -3268,7 +3277,7 @@ mod tests {
             .map(|line| line.text.clone())
             .collect();
         assert!(
-            said.contains(&SaveState::Nowhere.hint()),
+            said.contains(&ProfileWrite::Nowhere.hint()),
             "the page does not say: {said:?}"
         );
     }

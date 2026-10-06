@@ -404,6 +404,8 @@ pub mod occlusion;
 
 pub mod perf;
 
+pub mod rebind;
+
 // Native only: it writes through `std::fs`, and the hosts it records are the
 // LAN's, which web builds do not have.
 #[cfg(not(target_arch = "wasm32"))]

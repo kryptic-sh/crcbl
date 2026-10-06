@@ -2965,35 +2965,6 @@ fn two_games_with_one_seed_agree_about_every_run() {
 
 // ---- the movement action -------------------------------------------------
 
-/// [`MOVE_SECTOR`] is the angle it claims to be, computed rather than
-/// eyeballed.
-///
-/// A transcribed constant is a transcription until something checks it, and
-/// nothing else in this file would notice a digit dropped from the middle of
-/// it: the eight sectors would simply stop being equal.
-#[test]
-fn the_eight_sectors_are_the_angle_they_claim() {
-    let want = (std::f32::consts::PI / 8.0).sin();
-    assert!(
-        (MOVE_SECTOR - want).abs() < 1e-6,
-        "MOVE_SECTOR is {MOVE_SECTOR}, sin(π/8) is {want}",
-    );
-
-    // Either side of the boundary between "due east" and "north-east", at
-    // full deflection. One degree in from each side, so the check is about
-    // the split and not about a float landing exactly on it.
-    let at = |degrees: f32| {
-        let radians = degrees.to_radians();
-        eight_way(radians.cos(), radians.sin())
-    };
-    assert_eq!(at(21.5), (false, false, false, true), "east");
-    assert_eq!(at(23.5), (true, false, false, true), "north-east");
-    assert_eq!(at(66.5), (true, false, false, true), "still north-east");
-    assert_eq!(at(68.5), (true, false, false, false), "north");
-    assert_eq!(at(180.0), (false, false, true, false), "west");
-    assert_eq!(at(-90.0), (false, true, false, false), "south");
-}
-
 /// A thumb that has barely moved asks for nothing at all.
 #[test]
 fn a_stick_inside_the_dead_zone_asks_for_nothing() {

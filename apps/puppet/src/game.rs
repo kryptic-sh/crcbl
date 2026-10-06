@@ -185,9 +185,10 @@ pub const PATROL_PERIOD: f64 = 3.5;
 // Controls and the wire
 // ---------------------------------------------------------------------------
 
-/// What the keyboard is asking for this tick, before it is sealed.
+/// What the player is asking for this tick, before it is sealed — from the
+/// keyboard or a pad, which [`crate::bindings::controls`] makes the same thing.
 ///
-/// The four movement keys and the camera's azimuth. The camera keys are **not**
+/// The four walk directions and the camera's azimuth. The camera keys are **not**
 /// here: the camera is presentation, it turns on the frame's clock in
 /// [`crate::app`], and what the simulation needs of it is the one angle below.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

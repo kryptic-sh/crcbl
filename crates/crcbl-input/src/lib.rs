@@ -55,6 +55,7 @@ pub mod binding_asset;
 pub mod binding_text;
 mod context;
 mod device;
+mod eight_way;
 mod emit;
 // Linux-only: the `evdev` backend. Compiled into every target's tests too, so
 // its mapping, normalisation, layouts and poller run on the Windows and macOS
@@ -103,6 +104,7 @@ pub use binding_asset::{AssetRefusal, AssetWriteError, BindingAssetError};
 pub use binding_text::BindingParseError;
 pub use context::{GAMEPLAY_CONTEXT, GLOBAL_CONTEXT};
 pub use device::Device;
+pub use eight_way::{EIGHT_WAY_SECTOR, eight_way};
 pub use emit::Pattern;
 pub use gamepad::{
     GamepadEvent, GamepadId, GamepadSnapshot, PAD_ACTIVITY_THRESHOLD, PadAxis, PadButton,

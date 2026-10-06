@@ -16,6 +16,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_options::controls::Controls` is `crcbl::rebind::Rebinder`** (see
+  Added: the rebind flow is the engine's). `Controls::open(store)` is
+  `crcbl_options::controls::open(store)`; `Controls::key`, `button` and `pad` no
+  longer feed the map, so a caller feeds `actions_mut()` itself; `saved()`
+  answers a `crcbl::rebind::ProfileWrite` rather than the sample's `SaveState`;
+  and `Capture::Conflict`'s `other` is the clashing action's name, a `String`,
+  rather than an index into `ACTIONS`.
+
+- **`crcbl_puppet::MenuKind` has `Controls` and `Conflict` variants** and
+  `MenuKind::of` is gone; `Puppet`'s `MenuAction` is
+  `crcbl_puppet::PuppetAction` rather than `Infallible`; and
+  `crcbl_puppet::page::draw` takes the control prompt as its last argument. An
+  exhaustive `match` over the menu kind must name the two new arms.
+
 - **`crcbl_ui::grid_drag::CellResponse` has a `focused` field**, and `GridDrag`
   is no longer `Eq` (it keeps the finger's position). `GridResponse` answers a
   cell's `drop` for the cell under the hand carrying the drag, which is the
@@ -821,6 +835,40 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **Puppet plays on a pad, its prompts follow the device, and run and jump
+  rebind.** `apps/puppet` walks on the left stick or the d-pad, runs on the
+  right bumper and jumps on South beside its keys, through one `move` axis that
+  `WASD`, the arrows, the stick and the d-pad sum into, so the server's state
+  machine is driven identically from either device. The control prompt under the
+  panel is `crcbl_puppet::bindings::prompt` — `ActionMap::hint`'s labels for the
+  device that last spoke, `WASD walk   Shift run   Space jump` on the keys and
+  `Left stick walk   RB run   A jump` on an Xbox pad — rebuilt when
+  `ActionMap::last_device_changed` rises, so a stick drifting inside
+  `PAD_ACTIVITY_THRESHOLD` does not take it. A `CONTROLS` row on the pause panel
+  opens an overlay that rebinds run and jump by pressing the input, kept in
+  puppet's `profile.toml`.
+
+- **`crcbl::rebind`: the listen-for-input rebind flow, lifted out of
+  `apps/options`.** `Rebinder` is the state machine and the profile — listening,
+  Escape to cancel, a capture replacing the bindings on its own device, the
+  clash panel with `SWAP` and `CANCEL`, and `persist` writing the profile
+  whenever the map's overrides change, whoever changed them. `RebindRow` lists
+  the actions a page offers, `RebindIds` places the page's widget ids from one
+  number, and `menus` builds the page and the clash panel. `apps/options`'
+  `CONTROLS` page and puppet's overlay both run on it. Two behaviours are new
+  with the lift: a row names each label once (the two Shift keys read `Shift`),
+  and a clash with an action the page does not list asks as any clash does,
+  naming that action by its name, where it used to take the input silently.
+
+- **`crcbl_input::eight_way`** splits a 2-D axis into the four digital
+  directions a game walking at one speed asks for, through a dead zone and eight
+  45° sectors (`EIGHT_WAY_SECTOR`). Lifted from `apps/horde`, which puppet now
+  shares it with.
+
+- **`crcbl_sample_test::ScriptedPads`**, a pad source a sample's headless test
+  queues events on for the loop's next poll — lifted from horde's tests, which
+  puppet's now share.
 
 - **`crcbl_ui::grid_drag` drags on the pad, the keyboard and touch, as well as
   the pointer, through one state machine.** `GridDrag::frame_with(ui, input)`

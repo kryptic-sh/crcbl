@@ -26,13 +26,15 @@
 //!
 //! # And the helpers a sample's own unit tests share
 //!
-//! [`ui_text`], [`row_value`] and [`headless_common`] are not about a golden at
-//! all: they are what a `#[cfg(test)]` module in a sample's `src/app.rs` reads
-//! a frame back with, and each is a fact about an *engine* surface — how a
-//! frame's text comes off `Loop::gpu().draw_list()`, how the debug panel lays a
-//! label/value pair out and that a duplicate label makes the reading
-//! meaningless, and what a deterministic headless run is. Fifteen samples had
-//! written them out, character for character.
+//! [`ui_text`], [`row_value`], [`headless_common`] and [`ScriptedPads`] are not
+//! about a golden at all: they are what a `#[cfg(test)]` module in a sample's
+//! `src/app.rs` reads a frame back with or drives it through, and each is a
+//! fact about an *engine* surface — how a frame's text comes off
+//! `Loop::gpu().draw_list()`, how the debug panel lays a label/value pair out
+//! and that a duplicate label makes the reading meaningless, what a
+//! deterministic headless run is, and how a pad reaches the loop's poll.
+//! Fifteen samples had written the first three out, character for character,
+//! and two samples needed the last.
 //!
 //! They live here because a dev-dependency is reachable from a crate's own test
 //! module as well as from its `tests/`, and because this crate already exists
@@ -52,11 +54,15 @@
 //! that *doesn't* need `crcbl` went there instead — see
 //! [`crcbl_golden::srgb`].
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::Command;
+use std::rc::Rc;
 
 use crcbl::args::Common;
 use crcbl::backend::GpuBackend;
+use crcbl::engine::PadSource;
+use crcbl::input::GamepadEvent;
 use crcbl::ui::draw_list::{DrawCommand, DrawList};
 use crcbl::ui::menu::MenuSkin;
 use crcbl_golden::{Golden, Image};
@@ -86,6 +92,31 @@ pub fn headless_common(tick_hz: u32, frames: u64) -> Common {
         backend: Some(GpuBackend::Null),
         frames: Some(frames),
         ..Common::new(tick_hz)
+    }
+}
+
+/// A pad source a test scripts: what is queued with [`ScriptedPads::push`] is
+/// reported on the loop's next poll, once.
+///
+/// Cloned so the test keeps a handle after
+/// `Loop::set_pad_source` takes ownership of the source — the clones share
+/// one queue. A headless run has no pad source of its own, so this is how a
+/// sample's tests drive its pad controls through the loop's own poll.
+#[derive(Clone, Debug, Default)]
+pub struct ScriptedPads(Rc<RefCell<Vec<GamepadEvent>>>);
+
+impl ScriptedPads {
+    /// Queues `events` for the loop's next poll, in order.
+    pub fn push(&self, events: impl IntoIterator<Item = GamepadEvent>) {
+        self.0.borrow_mut().extend(events);
+    }
+}
+
+impl PadSource for ScriptedPads {
+    fn poll(&mut self, emit: &mut dyn FnMut(GamepadEvent)) {
+        for event in self.0.borrow_mut().drain(..) {
+            emit(event);
+        }
     }
 }
 
