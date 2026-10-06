@@ -3,6 +3,63 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## Top priority: EW engine requests (2026-10-06)
+
+These requests take priority over the feature-expansion order below. Audited
+against crcbl `2cb7ceb3` after pulling `origin/main`, using EW `10aa6562`.
+Implement and validate each independently; EW then updates its engine pin and
+removes the superseded local mechanism. Gameplay rules stay in EW.
+
+1. **Non-mutating character-motion previews.** EW's
+   `PlayerController::preview_airborne_motion` in
+   `src/controller_contact_forecast.rs` constructs a preview controller, calls
+   `move_and_slide_into`, then restores the live character collider with
+   `PhysicsWorld::set_capsule`. The engine move synchronizes the bound collider
+   even when invoked on a copied controller. Port the reusable preview operation
+   into `crcbl-phys`: return the predicted outcome, resulting capsule/ground
+   state and ordered slide contacts without changing the source controller or
+   any live collider. Preserve self-exclusion, query masks, skin and step/ground
+   semantics, and use the actual movement solver rather than a second solver. EW
+   must still be able to preview its explicitly enlarged contact capsule; its
+   margin policy remains game-local. This request is for upright motion, the
+   current consumer, not an unexercised family of preview APIs.
+
+   Acceptance: compare preview results with a real move from identical initial
+   state, including attached and unattached colliders, starting overlaps,
+   ceilings, walls, steps and support loss. Verify unchanged world queries and
+   controller state after repeated previews, not just unchanged final position.
+   Preserve EW's `ceiling_contact_does_not_delay_wall_steering` in
+   `src/controller_wall_ceiling_timing_tests.rs` and
+   `ceiling_contact_uses_the_remaining_time_for_descent` in
+   `src/controller_ballistic_tests.rs`. Those regressions passed in EW's
+   workspace run for this audit. Migrate the preview helper and remove its
+   temporary live-collider update/restore sequence. Do not claim that this alone
+   replaces `projected_landing`, which also simulates EW gameplay state.
+
+2. **Curved-path collision queries with contact times.** Promote the existing
+   curved-path gap in "EW integration follow-ups" below. EW's
+   `PlayerController::move_with_gravity` in `src/controller_ballistic.rs` bounds
+   chord error, expands candidate sweeps and bisects contact forecasts to retain
+   time after wall and ceiling hits. Engine `SlideContact::fraction` and
+   `sweep_capsule_all` describe straight displacement, not elapsed time on an
+   accelerated trajectory. Add a constant-acceleration capsule query returning
+   the earliest contact time, collider and normal over a supplied interval, with
+   explicit starting-overlap behavior and the existing query filters. Keep
+   gravity, air-control limits, wall response and landing damage in EW.
+
+   Acceptance: analytic wall/ceiling times; an arc that touches and leaves a
+   surface although its endpoint chord misses it; zero acceleration; attached
+   self-collider exclusion; and coarse/fine update agreement. Retain the current
+   straight-sweep contract. First prove the missing arc cases in the game, then
+   validate the engine query against them and remove only the local
+   approximations it replaces. This is a needed addition, not a claim that EW's
+   current approximation is general continuous collision detection. Tilted and
+   curved walls, moving geometry and continuous native playback remain
+   validation gaps. Projectile/grenade flight is a later consumer: the current
+   `src/game_projectile_doors_tests.rs` asserts contact-plane agreement, not
+   complete curved-trajectory impact-position agreement; do not report it as
+   validating this new query.
+
 Current goal: complete the full codebase performance review, record actionable
 findings and verification gaps in this backlog, and implement supported
 low-hanging performance improvements before feature expansion to keep the engine
@@ -21,67 +78,26 @@ on shard on 2026-09-27.
 
 ## EW integration follow-ups
 
-- **The next fixed-rate sample is a read (built 2026-10-05); EW migrates.**
-  `FixedRateSchedule::next_sample_time_seconds` is public: the absolute time of
-  the next sample not yet emitted or skipped, the first the next `advance`
-  reaching it emits, always past `simulation_time_seconds`, and reading it
-  consumes nothing
-  (`schedule::tests::the_next_sample_time_is_the_sample_emitted_next_and_reading_it_takes_nothing`
-  holds it to the emitted sample bit for bit across phases, advances and skips;
-  the index formula itself is held by the pinned-time tests, which go red when
-  it moves). What is left is EW's: update its engine pin and replace
-  `ai_grenade_decision_event_seconds`'s copied-schedule replay with the query.
-  As EW's own profile said, this is not an established end-to-end speedup.
-
-- **Cross-context pad chord routing is built (2026-10-05); EW migrates.**
-  `ActionMap::set_pad_chords_outrank(name, true)` marks an action whose
-  `Binding::PadChord`s take their button from the contexts above while the
-  modifier is held (module docs of `crates/crcbl-input/src/context.rs`).
-  `ActionMap::pad_chords_outrank` reads the mark, and a binding asset spells it
-  `pad_chords_outrank: true`. `context::outrank_tests` reproduces EW's controls
-  (global map and inventory on Select and Start and global free look and
-  backpack drop on LB with each, reload in gameplay, a modal screen) and covers
-  every acceptance point. Each test went red under a mutation of its rule. EW's
-  own regression (`wip/controller-menu-chord-dispatch` at `cb15f742`) was run
-  against this change from a scratch clone. Unchanged, it still fails at the
-  Select chord's Reload assertion, as expected, since nothing in EW marks
-  reload. With the first step below applied in the clone only (two lines, never
-  committed), it passes, and so do EW's other `game::actions` tests. EW's full
-  suite was not run. What EW has to do at its next engine pin:
-  - In `GameActions::new`, call `set_pad_chords_outrank(name, true)` for every
-    rebindable action declared in `GAMEPLAY_CONTEXT`, the ones a player can give
-    a pad chord on Controls. Nothing else in the rebind or override path
-    changes: the mark is the action's, so `set_overrides`, the saved text and
-    restoring the defaults keep it.
-  - Optionally, move `FREE_LOOK` and `DROP_BACKPACK` back into
-    `GAMEPLAY_CONTEXT` with the mark. They live in `GLOBAL_CONTEXT` only so
-    their chords claim the button. Marked in gameplay, their chords still beat
-    the global Select/Start, and a modal screen blocks them, so the game-side
-    gate that keeps them off behind screens could go. Not verified in EW.
-  - Then turn
-    `reassigned_menu_button_chords_dispatch_the_selected_gameplay_action` green
-    and cover modal suppression and held-input transitions through the game
-    loop, as EW planned.
-
-  **Decision.** The routing is a per-action mark, not a per-binding one.
-  Overrides replace an action's bindings and EW's Controls page builds plain
-  `Binding::PadChord` values, so a mark on the binding would have to survive
-  every rebind and be added at capture time, and would need a new text form. The
-  action's mark survives all of that unchanged. The read stays the chord rule
-  that already applies within one context: a held modifier shadows the plain
-  binding, stretched across the contexts between, with no parallel system. A
-  held button whose reader the modifier changes is withheld until released,
-  which is the existing change-of-owner rule (`Routes::pad_reader` is what both
-  a push and a pad snapshot compare). That rule is what keeps layer-first
-  release, a modifier pressed over a held button, unplugging one of two pads and
-  focus loss from leaking. Declined: moving every gameplay action into the
-  global context, or disabling whole menu actions while a pad chord is held,
-  because both weaken modal isolation or unrelated keyboard input (EW's own
-  reasoning, held by `keyboard_menu_bindings_work_while_the_chord_is_held` and
-  the modal test). A map-wide or per-context switch was also declined: it is
-  coarser than any game needs, and it would change precedence for actions nobody
-  marked. A chord that always outranks without a mark was declined because it
-  silently changes ordinary context precedence.
+- **Pad chord routing constraints retained after EW migration.** **Decision.**
+  The routing is a per-action mark, not a per-binding one. Overrides replace an
+  action's bindings and EW's Controls page builds plain `Binding::PadChord`
+  values, so a mark on the binding would have to survive every rebind and be
+  added at capture time, and would need a new text form. The action's mark
+  survives all of that unchanged. The read stays the chord rule that already
+  applies within one context: a held modifier shadows the plain binding,
+  stretched across the contexts between, with no parallel system. A held button
+  whose reader the modifier changes is withheld until released, which is the
+  existing change-of-owner rule (`Routes::pad_reader` is what both a push and a
+  pad snapshot compare). That rule is what keeps layer-first release, a modifier
+  pressed over a held button, unplugging one of two pads and focus loss from
+  leaking. Declined: moving every gameplay action into the global context, or
+  disabling whole menu actions while a pad chord is held, because both weaken
+  modal isolation or unrelated keyboard input (EW's own reasoning, held by
+  `keyboard_menu_bindings_work_while_the_chord_is_held` and the modal test). A
+  map-wide or per-context switch was also declined: it is coarser than any game
+  needs, and it would change precedence for actions nobody marked. A chord that
+  always outranks without a mark was declined because it silently changes
+  ordinary context precedence.
 
   **Not built.** Key chords (`Binding::Chord`) and mouse button chords
   (`Binding::ButtonChord`) have no outranking mark. Nobody has asked for one,
@@ -89,25 +105,6 @@ on shard on 2026-09-27.
   and mouse buttons. Add it the same way if a game needs it. A marked action
   that is disabled still claims its chord's button, as a disabled action keeps
   its keys (the context module's "binds is by binding" rule).
-
-- **Decided 2026-10-03: exact stationarity, not a tolerance**, for EW's
-  stationary-drift report against `1d24972a`
-  (`stationary_leg_treatment_keeps_depletion_and_recovery_chronological`). A
-  character asked to go where it cannot stays bit for bit where it is, so EW's
-  exact feet assertion stands and the engine changed. The cause, isolated by
-  running EW's test against the engine with the slide instrumented: the game
-  still asks for `(0, 0, -6)` during treatment, into another character's capsule
-  standing at `z = -4`; the capsule-against-capsule sweep's time is not exact,
-  so each tick met it about 1e-15 nearer than the skin width, and the back-off
-  every hit nearer than the skin now gets
-  (`fix(phys): back off every slide hit nearer than the skin`) moved the capsule
-  that 1e-15 — an ulp — along the normal. The slide now skips a back-off too
-  short to count as a move (`MIN_MOVE`); the turned-box hover it was added for
-  backs off by nearly a skin width and is unchanged. Held by
-  `character::rest_tests` (EW's geometry: red with the guard removed, at exactly
-  EW's `-3.390000000000001` to `-3.39`); EW's test passes against the fix. EW
-  also has to add `secondary_pressed: false` to its `PointerInput` literals at
-  the next pin (context menus).
 
 **Decided 2026-10-01: both API requests are accepted, in the engine, in this
 order** — the slide contacts first (EW's forecasting repeats whole
@@ -128,8 +125,8 @@ fraction, requested, applied and remaining displacements, `started_inside` and
 `stepped_up`; `MoveOutcome` is unchanged. The lying move records the same way
 through
 `CharacterController::move_lying_into(world, &body, motion, &mut Vec<SlideContact>)`
-(its slide only, not the settle). EW migrates `controller_contact_forecast.rs`
-onto it and deletes its shortened previews. What it left:
+(its slide only, not the settle). EW now reads these contacts in
+`controller_contact_forecast.rs`. Remaining work:
 
 - **No times along a curved path.** `SlideContact::fraction` is a distance share
   along one straight sweep, documented as not being time. A caller integrating
@@ -139,8 +136,8 @@ onto it and deletes its shortened previews. What it left:
   gap, as the turned-box capsule sweep already does for straight motion) and a
   slide loop that re-integrates the remainder after each clip, which changes
   movement and so cannot share `move_and_slide`'s bit-for-bit promise. Not
-  started; EW's ballistic braking forecast is the consumer that would justify
-  it.
+  started; now a top-priority EW request above. Its ballistic braking forecast
+  is the initial consumer.
 - **The slide owns the skin, not the sweep (decided 2026-10-01, long term).** It
   backs off any hit nearer than `CharacterConfig::skin_width`, so every sweep
   with a tolerance (conservative advancement, meshes, future shapes) is covered
@@ -185,8 +182,8 @@ collider slot rather than by broadphase order. EW's acceptance cases were not
 run (no EW checkout here); they were derived from the request as tests: a
 ceiling met before a wall, a grazed wall then one ahead, a wall just past the
 sweep's end not reported, triggers and masked and excluded colliders left out, a
-turned box's turned normal. EW migrates `src/controller_ballistic.rs` onto it.
-What it left:
+turned box's turned normal. EW now uses `sweep_capsule_all` in
+`src/controller_ballistic.rs`. Remaining work:
 
 - **One hit per collider, so a mesh hides its own later triangles.** A triangle
   mesh is one collider and reports only the first triangle the sweep meets
