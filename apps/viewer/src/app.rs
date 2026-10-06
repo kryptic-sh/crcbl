@@ -68,6 +68,7 @@ use crate::listing::Listing;
 use crate::menu::{MenuKind, Menus};
 use crate::model::{self, LoadError, Model};
 use crate::shelf;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::watch::Watch;
 
 /// Frames the model again, fitting it in the view from wherever the camera is.
@@ -363,6 +364,8 @@ pub struct Viewer {
     /// [`crate::listing`]. Hidden until [`LISTING_KEY`] is pressed.
     listing: Listing,
     /// Milestone 3's re-export loop — see [`crate::watch`] and [`Viewer::tick`].
+    /// Native only: a page has no file to watch, see [`crate::watch`].
+    #[cfg(not(target_arch = "wasm32"))]
     watch: Watch,
     /// Which row of [`crate::shelf`] the panel's `SHELF` cycler is showing.
     ///
@@ -589,6 +592,7 @@ fn assemble<S: Shell + ?Sized>(
             exposure,
             exposure_pending: None,
             exposure_handle: crate::menu::handle_at(exposure),
+            #[cfg(not(target_arch = "wasm32"))]
             watch: Watch::new(&document_path(options)),
             dropped: Vec::new(),
             reloads: 0,
@@ -747,6 +751,7 @@ impl Viewer {
     /// would be a worse tool than one that kept drawing. The skips are printed
     /// to stderr as they are at start-up, for `load_and_report`'s reason: the
     /// person who just re-exported is the one who needs to read them.
+    #[cfg(not(target_arch = "wasm32"))]
     fn poll_for_re_export(&mut self, gpu: &mut Gpu, dt: f64) {
         if !self.watch.poll(dt) {
             return;
@@ -790,7 +795,7 @@ impl Viewer {
     /// renderer is rebuilt around it, and the bounds, the counts and the
     /// listing follow.
     ///
-    /// The tail of [`Viewer::poll_for_re_export`], and the whole of what a
+    /// The tail of `Viewer::poll_for_re_export` (native), and the whole of what a
     /// dropped document does with the frame — see
     /// [`Viewer::poll_for_dropped_files`] for one dropped on the window and
     /// `Viewer::poll_for_dropped_document` for one dropped on a page. One
@@ -917,7 +922,10 @@ impl Viewer {
             // would replace the document on screen. `Watch::new` treats what is
             // on disk now as already loaded, which is exactly true — it was just
             // read.
-            self.watch = Watch::new(&path);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.watch = Watch::new(&path);
+            }
             crcbl::log::info!(
                 "viewer: {key} opened — {} instance(s), {} skipped",
                 self.instances,
@@ -994,11 +1002,15 @@ impl Viewer {
         // **And the re-export watch follows it**, as it follows a dropped file:
         // the shelf is a directory of real files, so re-exporting one of them
         // over the top reloads exactly as re-exporting the file on the command
-        // line does. In a browser the path is a key and `crate::watch` polls a
-        // filesystem the target has not got, so the watch is built and never
-        // fires — which is what it already did for the document the page opens
-        // with.
-        self.watch = Watch::new(&path);
+        // line does. In a browser the path is a key and there is no
+        // filesystem to watch, so there is no watch to repoint and the path
+        // is let go.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.watch = Watch::new(&path);
+        }
+        #[cfg(target_arch = "wasm32")]
+        drop(path);
         let verdict = format!(
             "{key} opened from the shelf — {} instance(s), {} skipped",
             self.instances, self.skipped,
@@ -1012,7 +1024,7 @@ impl Viewer {
     /// if one has landed since the last frame.
     ///
     /// The browser half of the drop-target item, and the counterpart
-    /// of [`Viewer::poll_for_re_export`] — the native viewer is pointed at a
+    /// of `Viewer::poll_for_re_export` — the native viewer is pointed at a
     /// path and this one is handed bytes, and past that they are the same
     /// event. [`crate::web`] owns the buffer the page writes into and the
     /// sentence the page reads back; this is the frame that turns one into the
@@ -1383,6 +1395,8 @@ impl HostedGame for Viewer {
         // used to give it: the tick ran immediately before this, so a document
         // that lands is framed and listed by the rest of this call rather than
         // by the next one.
+        // Native only, with the watch: a page has no file to re-export over.
+        #[cfg(not(target_arch = "wasm32"))]
         self.poll_for_re_export(gpu, frame.render_dt.as_secs_f64());
         // A document dropped on the window, in the same place and for the same
         // reason — see [`Viewer::poll_for_dropped_files`]. Compiled everywhere
@@ -3181,9 +3195,10 @@ mod tests {
         // filesystem with a coarse modification time.
         std::fs::write(model_path(&options), fixture::two_quads_glb()).expect("the re-export");
 
-        // `Watch` looks at the file four times a second and needs two agreeing
-        // looks, so half a second of ticks. Bounded rather than open, so a
-        // reload that never happens fails here instead of hanging.
+        // `Watch` looks at the file every `POLL_INTERVAL` and offers a change
+        // once it has held still for `SETTLE` (`crcbl::assets::watch`), well
+        // inside two seconds of ticks. Bounded rather than open, so a reload
+        // that never happens fails here instead of hanging.
         let ticks_per_second = f64::from(crate::args::DEFAULT_TICK_HZ);
         let frames = (ticks_per_second * 2.0).ceil() as usize;
         for _ in 0..frames {
@@ -3262,8 +3277,8 @@ mod tests {
         // different length on disk.
         std::fs::write(model_path(&options), fixture::two_quads_glb()).expect("the re-export");
 
-        // `Watch` looks at the file four times a second and needs two agreeing
-        // looks, so half a second of frames. A headless frame is
+        // `Watch` looks at the file every `POLL_INTERVAL` and offers a change
+        // once it has held still for `SETTLE`. A headless frame is
         // `crcbl::engine::HEADLESS_FRAME_STEP` of wall clock, and this allows
         // two seconds of them — bounded rather than open, so a reload that
         // never happens fails here instead of hanging.
@@ -3691,8 +3706,8 @@ mod tests {
             "the watch is still on the file the command line named",
         );
 
-        // `Watch` looks four times a second and needs two agreeing looks, so
-        // two seconds of frames is the bound every re-export test here uses.
+        // `Watch` offers a change once it has held still for `SETTLE`, well
+        // inside the two seconds of frames every re-export test here allows.
         let frames = (f64::from(crate::args::DEFAULT_TICK_HZ) * 2.0).ceil() as usize;
 
         // The control, first: the document the run was started with is written

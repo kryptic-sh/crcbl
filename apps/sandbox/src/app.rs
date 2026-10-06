@@ -69,7 +69,9 @@ use crcbl::engine::{
 };
 use crcbl::prelude::*;
 
-use crate::lan::{Lan, LanError, SimRoute};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::lan::LanError;
+use crate::lan::{Lan, SimRoute};
 use crate::steam::SteamLink;
 use crcbl::render::RenderEffects;
 use crcbl::shell::{DisplayMode, PhysicalSize, ShellBackend as Backend, open, open_backend};
@@ -192,6 +194,10 @@ pub struct Options {
     /// `crcbl::replay_record`. Native builds only.
     #[cfg(not(target_arch = "wasm32"))]
     pub record: Option<std::path::PathBuf>,
+    /// The `.scn/` directory `--scene` named, opened in place of the
+    /// built-in scene and watched — see `crate::scene`. Native builds only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub scene: Option<std::path::PathBuf>,
     /// Open on the LAN lobby — see `crate::lobby`.
     ///
     /// [`crate::args::parse`] sets it for a command line that chose no
@@ -222,6 +228,8 @@ impl Default for Options {
             lan: crate::lan::LanMode::Off,
             #[cfg(not(target_arch = "wasm32"))]
             record: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            scene: None,
             #[cfg(not(target_arch = "wasm32"))]
             lobby: false,
         }
@@ -291,9 +299,51 @@ pub struct Summary {
 ///
 /// An alias rather than an enum: [`crcbl::engine::LoopError`] owns these
 /// variants for every sample. The sandbox has no simulation of its own to
-/// fail; its `Game` variant is a LAN session that could not start
-/// ([`LanError`]), which in a web build is uninhabited, and free.
-pub type SandboxError = crcbl::engine::LoopError<LanError>;
+/// fail; its `Game` variant is [`StartError`].
+pub type SandboxError = crcbl::engine::LoopError<StartError>;
+
+/// The clock the scene's systems' ticks are timed on — the built-in scene's
+/// and one `--scene` opened alike.
+///
+/// The real clock always, not only while the panel shows: two clock reads a
+/// system a tick, and the mean is warm when F3 opens it. This sample has no
+/// browser build (`web/demos` holds none), so `MonotonicTime`'s `Instant` is
+/// a clock it has.
+fn scene_clock() -> Option<crcbl::ecs::ScheduleClock> {
+    Some(Box::new(crcbl::core::time::MonotonicTime::new()))
+}
+
+/// What can stop the sandbox's own half from starting. In a web build,
+/// which starts no LAN session and opens no directory, nothing can, and the
+/// type is uninhabited.
+#[derive(Debug)]
+pub enum StartError {
+    /// A LAN session could not start. Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    Lan(LanError),
+    /// The scene directory `--scene` named would not open, the loader's
+    /// sentence naming the file. Native only, as the flag is.
+    #[cfg(not(target_arch = "wasm32"))]
+    Scene(crcbl::scene::scn::ScnError),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lan(error) => write!(f, "{error}"),
+            Self::Scene(error) => write!(f, "--scene: {error}"),
+        }
+    }
+}
+
+/// Nothing to say: a web build's `StartError` has no value.
+#[cfg(target_arch = "wasm32")]
+impl std::fmt::Display for StartError {
+    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {}
+    }
+}
 
 /// The sandbox, as the engine's loop hosts it.
 ///
@@ -378,14 +428,7 @@ impl Sandbox {
             shown: None,
             wait_unpresented,
             unpresented: None,
-            // Timed on the real clock always, not only while the panel shows:
-            // two clock reads a system a tick, and the mean is warm when F3
-            // opens it. This sample has no browser build (`web/demos` holds
-            // none), so `MonotonicTime`'s `Instant` is a clock it has.
-            scene: Scene::new(
-                light,
-                Some(Box::new(crcbl::core::time::MonotonicTime::new())),
-            ),
+            scene: Scene::new(light, scene_clock()),
             effects,
             steam: SteamLink::off(),
             lan: Lan::off(),
@@ -526,6 +569,14 @@ pub fn with_shell<S: Shell + ?Sized>(
         effects,
         gpu.light,
     );
+    // Before the window shows anything, so a directory that will not open
+    // stops the run with the loader's sentence rather than drawing the
+    // built-in scene in its place.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(dir) = &options.scene {
+        sandbox.scene = Scene::open(dir, scene_clock())
+            .map_err(|error| SandboxError::Game(StartError::Scene(error)))?;
+    }
     // Windowed runs only: a headless run is CI's, and must neither need nor
     // touch a developer's Steam client.
     if !options.headless {
@@ -540,7 +591,7 @@ pub fn with_shell<S: Shell + ?Sized>(
             options.record.as_deref(),
             options.headless,
         )
-        .map_err(SandboxError::Game)?;
+        .map_err(|error| SandboxError::Game(StartError::Lan(error)))?;
         if options.lobby {
             sandbox.lobby = Some(crate::lobby::Lobby::on_the_lan(options.tick_hz));
         }
@@ -579,9 +630,9 @@ pub fn with_shell<S: Shell + ?Sized>(
 /// cube on the fixed timestep so a `--headless --frames N` run is a
 /// bit-reproducible picture on every machine.
 impl HostedGame for Sandbox {
-    /// The sandbox has no simulation, so all it can fail at is starting a LAN
-    /// session; in a web build, which has none, the type is uninhabited.
-    type Error = LanError;
+    /// The sandbox has no simulation, so all it can fail at is starting: a
+    /// LAN session, or the scene `--scene` named.
+    type Error = StartError;
     type Gpu = Gpu;
     /// Paused, in the lobby, or neither.
     type MenuKind = MenuKind;
@@ -804,6 +855,11 @@ impl HostedGame for Sandbox {
         // host that stopped reading its peers would time every one of them
         // out.
         self.lan.frame(frame.render_dt);
+        // And the scene directory's watch, on wall time too: a chunk edited
+        // while the pause panel is up is reloaded under it, and shows when
+        // the next tick hands the light and the spin to the GPU.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.scene.poll_disk(frame.render_dt);
         #[cfg(not(target_arch = "wasm32"))]
         self.follow_session();
         // Re-read rather than kept: the device clamps last, so what the summary
@@ -941,6 +997,8 @@ mod tests {
             lan: crate::lan::LanMode::Off,
             #[cfg(not(target_arch = "wasm32"))]
             record: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            scene: None,
             #[cfg(not(target_arch = "wasm32"))]
             lobby: false,
         }
@@ -1295,6 +1353,90 @@ mod tests {
             (per_tick - 2.0 / 60.0).abs() < 1e-5,
             "the cube turned {per_tick} a tick, not twice a tick's length"
         );
+    }
+
+    /// The committed scene copied into a fresh directory, its sun's colour
+    /// starting at `red` — so a run that drew the built-in scene instead
+    /// cannot pass for one that opened the file.
+    fn scene_dir(red: f32) -> (tempfile::TempDir, std::path::PathBuf) {
+        let committed =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scenes/cube.scn");
+        let base = tempfile::tempdir().expect("a temporary directory");
+        let dir = base.path().join("cube.scn");
+        std::fs::create_dir_all(dir.join("sys")).expect("the scene's directories");
+        for key in ["scene.ron", "env.ron", "sys/spin.ron"] {
+            std::fs::copy(committed.join(key), dir.join(key)).expect("a scene file");
+        }
+        write_sun(&dir, red);
+        (base, dir)
+    }
+
+    /// Writes `dir`'s sun chunk with its colour's red at `red`.
+    fn write_sun(dir: &std::path::Path, red: f32) {
+        let light = crcbl::render::DirectionalLight::default();
+        let committed = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/scenes/cube.scn/sys/sun.ron"),
+        )
+        .expect("the committed sun");
+        let text = committed.replace(
+            &format!("color: ({:?},", light.color.x),
+            &format!("color: ({red:?},"),
+        );
+        assert_ne!(text, committed, "the sun's colour was not found");
+        std::fs::write(dir.join("sys/sun.ron"), text).expect("the sun's chunk");
+    }
+
+    /// **`--scene` opens the directory it names, and an edit to one of its
+    /// chunks reaches the frame while the run goes on** — the stage's exit
+    /// criterion, end to end through the loop: the sun's colour on disk is
+    /// the light the GPU is handed, before and after the file changes.
+    #[test]
+    fn the_scene_flag_opens_its_directory_and_follows_an_edit() {
+        let (_base, dir) = scene_dir(0.5);
+        let mut options = headless(400);
+        options.scene = Some(dir.clone());
+        let mut engine = scripted(&options);
+        run_frames(&mut engine, 2);
+        assert_eq!(
+            engine.gpu().light.color.x,
+            0.5,
+            "the run did not draw the scene it was pointed at"
+        );
+        let spun = engine.gpu().elapsed();
+
+        write_sun(&dir, 0.25);
+        for _ in 0..120 {
+            run_frames(&mut engine, 1);
+            if engine.gpu().light.color.x == 0.25 {
+                break;
+            }
+        }
+        assert_eq!(
+            engine.gpu().light.color.x,
+            0.25,
+            "two seconds of frames did not reload the edited sun"
+        );
+        assert!(
+            engine.gpu().elapsed() > spun,
+            "the reload of the sun stopped or reset the cube"
+        );
+    }
+
+    /// **A `--scene` naming no scene stops the start**, with the loader's
+    /// sentence, rather than drawing the built-in scene in its place.
+    #[test]
+    fn a_scene_flag_naming_no_scene_stops_the_start() {
+        let base = tempfile::tempdir().expect("a temporary directory");
+        let mut options = headless(4);
+        options.scene = Some(base.path().to_path_buf());
+        match with_shell(Box::new(HeadlessShell::new()), &options) {
+            Err(SandboxError::Game(StartError::Scene(error))) => {
+                assert!(error.to_string().contains("scene.ron"), "{error}");
+            }
+            Err(other) => panic!("refused for another reason: {other}"),
+            Ok(_) => panic!("a directory with no scene started"),
+        }
     }
 
     /// **Losing focus stops the simulation, and the cube stops with it.**

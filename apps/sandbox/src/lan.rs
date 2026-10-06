@@ -38,9 +38,9 @@
 //! `wasm32` the three flags are not parsed at all and [`Lan`] is inert, as
 //! `crate::steam`'s link is without its feature.
 
-pub use imp::{Lan, LanError, SimRoute};
+pub use imp::{Lan, SimRoute};
 #[cfg(not(target_arch = "wasm32"))]
-pub use imp::{LanMode, SANDBOX, Standing};
+pub use imp::{LanError, LanMode, SANDBOX, Standing};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
@@ -470,15 +470,5 @@ mod imp {
 
         /// No section without a session.
         pub fn debug_sections(&self, _panel: &mut DebugPanel) {}
-    }
-
-    /// Nothing to fail at: a web build starts no LAN session.
-    #[derive(Debug)]
-    pub enum LanError {}
-
-    impl std::fmt::Display for LanError {
-        fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match *self {}
-        }
     }
 }

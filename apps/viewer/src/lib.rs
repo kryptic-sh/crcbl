@@ -21,7 +21,7 @@
 //! wireframe and `N` in world-space normals; `-` and `=` step the exposure,
 //! and so does the slider on the `ESC` panel — see [`menu`]. Re-export the
 //! file and the frame becomes the new document, which is milestone 3's artist
-//! loop — see [`watch`].
+//! loop — see `watch`, natively; a page has no file to re-export over.
 //!
 //! **And it ships a shelf of models.** `viewer` with no path opens Suzanne;
 //! the `ESC` panel's `SHELF` row steps through the Khronos CC0 models
@@ -101,6 +101,7 @@ pub mod listing;
 pub mod menu;
 pub mod model;
 pub mod shelf;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod watch;
 
 #[cfg(target_arch = "wasm32")]

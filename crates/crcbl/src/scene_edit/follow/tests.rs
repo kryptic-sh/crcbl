@@ -17,7 +17,7 @@ use crate::server::HostConfig;
 
 use super::super::tests::{BLOCKS, one_block, vocabulary};
 use super::*;
-use crate::scene_edit::{EditServer, empty_source};
+use crate::scene_edit::{EditServer, OverEdits, empty_source};
 
 const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
     protocol_version: ProtocolCompatibility::DEFAULT.protocol_version,
@@ -220,6 +220,51 @@ fn a_late_joiner_fetches_the_scene_and_follows_it_to_the_same_bytes() {
         "it followed, not refetched"
     );
     assert_eq!(rig.follower().landed_count(), 1);
+}
+
+/// **A chunk the server reloads from disk is followed like any edit**: the
+/// copy reaches the server's scene with no second fetch, and an undo over
+/// the protocol walks the reload back on both.
+#[test]
+fn a_chunk_the_server_reloads_from_disk_is_followed_without_a_refetch() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let dir = base.path().join("one.scn");
+    one_block().save_as(&dir).expect("a fresh directory");
+    let document = Document::open_dir(&dir, vocabulary()).expect("the saved scene opens");
+    let mut rig = Rig::new(document);
+    rig.join();
+    rig.caught_up();
+    let before = rig.both_files().0;
+
+    let edited = before["sys/blocks.ron"].replace("position: (0.0,", "position: (6.0,");
+    assert_ne!(edited, before["sys/blocks.ron"], "the edit changed nothing");
+    std::fs::write(dir.join("sys/blocks.ron"), &edited).expect("the chunk written");
+    let reloaded = rig
+        .server
+        .reload_chunk(BLOCKS, OverEdits::Refuse)
+        .expect("a clean served document reloads");
+    assert!(reloaded.command.is_some());
+    assert_eq!(rig.server.revision(), 1, "the reload moved no revision");
+
+    rig.caught_up();
+    let (served, copy) = rig.both_files();
+    assert_eq!(
+        served["sys/blocks.ron"], edited,
+        "the server did not take the disk's"
+    );
+    assert_eq!(copy, served, "the copy did not follow the reload");
+    assert_eq!(
+        rig.follower().fetch_count(),
+        1,
+        "it refetched rather than followed"
+    );
+
+    rig.send(&EditOp::Undo);
+    rig.caught_up();
+    let (served, copy) = rig.both_files();
+    assert_eq!(served, before, "the undo did not walk the reload back");
+    assert_eq!(copy, served);
+    assert_eq!(rig.follower().fetch_count(), 1);
 }
 
 /// **A scene larger than one message arrives whole**, paced out over several

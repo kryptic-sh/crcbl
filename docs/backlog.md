@@ -11322,9 +11322,9 @@ caller.
 stretch that "should mostly work by construction"; nobody examined it. The
 editor is treated as a native target (`docs/notes/browser.md`, _What the deleted
 10-wasm-webgpu plan left behind_) because its asset browser, OS drag-drop
-import, `crcbl import` and hot reload's notify-based file watcher are all
-native-shaped. `apps/editor` exists now, native only: it has no `web.rs` and no
-demo under `web/demos`.
+import, `crcbl import` and hot reload's polled file watch are all native-shaped.
+`apps/editor` exists now, native only: it has no `web.rs` and no demo under
+`web/demos`.
 
 **What it would take:** decide what a browser editor does about those four — a
 browser file picker or OPFS in place of the asset browser's directory walk,
@@ -11962,12 +11962,13 @@ pose by `Sampler`). Tested in `crates/crcbl-anim/tests/machine.rs`.
 
 **Deferred, each with what it would take:**
 
-- **Hot reload of the asset.** There is no engine asset-reload path (_Asset hot
-  reload: two polled watches, and no engine reload path_), and puppet compiles
-  its asset in for the browser. A reload would also have to map a live
-  `MachineState`'s state index and parameter slots across an asset whose order
-  changed — by name, through `StateMachine::state` and the parameter lookups —
-  or restart the machine. Cheap once a polled watch exists; not before.
+- **Hot reload of the asset.** The engine's polled watch exists
+  (`crcbl_assets::watch`, 2026-10-06) and an asset reload path does not (_Asset
+  hot reload: the watch and per-chunk scene reload are built; assets and shaders
+  are not_), and puppet compiles its asset in for the browser. A reload would
+  also have to map a live `MachineState`'s state index and parameter slots
+  across an asset whose order changed — by name, through `StateMachine::state`
+  and the parameter lookups — or restart the machine.
 - **Transition interruption.** No transition is evaluated while a fade is in
   flight, so a trigger set mid-fade waits (triggers persist until consumed). An
   interrupt rule — snapshot the blended pose and fade from it, Unity's
@@ -12887,11 +12888,11 @@ The plan's rules — the format matrix, the `.scn/` directory and its
 deterministic writer, v0 formats, the sidecar GUID, the no-synchronous-IO rule —
 are in `docs/notes/tooling.md` under _What the deleted 06-assets-scenes plan
 left behind_. Its other open work already had entries and keeps them: _Asset hot
-reload: two polled watches, and no engine reload path_, _`crcbl-assets` after
-stage 6 task 2_, _glTF import: what the first half left, and what it found
-upstream_, _Sidecar meta RON: three items want it, and nothing writes one yet_,
-_No golden over a real glTF document_ and _Viewer's hot-reload demo is built but
-not recorded_. What had none is below.
+reload: the watch and per-chunk scene reload are built; assets and shaders are
+not_, _`crcbl-assets` after stage 6 task 2_, _glTF import: what the first half
+left, and what it found upstream_, _Sidecar meta RON: three items want it, and
+nothing writes one yet_, _No golden over a real glTF document_ and _Viewer's
+hot-reload demo is built but not recorded_. What had none is below.
 
 ### `crcbl bake`, `PackSource`, the cooked mesh and `import --out`
 
@@ -12946,8 +12947,9 @@ serve an editor and wait on `apps/editor` growing past its in-process slices
   sector (`sys/<name>/{sector}.ron`), so a sector's scene data and its physics
   load unit coincide. Needs physics sector streaming first.
 
-Per-chunk hot reload is the fourth editor-facing piece, and it is under _Asset
-hot reload: two polled watches, and no engine reload path_.
+Per-chunk hot reload, the fourth editor-facing piece, landed 2026-10-06; what it
+left is under _Asset hot reload: the watch and per-chunk scene reload are built;
+assets and shaders are not_.
 
 ### The Sponza-class exit: a real scene through the full path
 
@@ -13293,9 +13295,10 @@ machine, a client's link dropping mid-fetch and its resume, and a scene near
   directory.
 - **The editor noticing a change on disk as it happens**: it notices at Save
   time only. A scene changed behind it (by a program that took no lock, or a
-  checkout) shows the editor's old copy until Ctrl+S asks. Watching would take
-  per-chunk hot reload (_Asset hot reload: two polled watches, and no engine
-  reload path_) and a decision on what a watched change does to unsaved edits.
+  checkout) shows the editor's old copy until Ctrl+S asks. The per-chunk reload
+  and the rule for unsaved edits landed 2026-10-06 (`Document::reload_chunk`);
+  the editor polling its directory is what is left, under _Asset hot reload: the
+  watch and per-chunk scene reload are built; assets and shaders are not_.
 
 **Coverage gaps**: run on Windows only in this slice; the verbs were never run
 against breakout's or puppet's scenes, only towers' field and the umbrella's
@@ -13727,38 +13730,131 @@ then finds, which is why this is its own change rather than a line in the slice
 that found it: a widened guard needs its own red-then-green and whatever it
 turns up needs fixing in the same commit.
 
-### Asset hot reload: two polled watches, and no engine reload path (2026-08-27, re-verified 2026-09-24)
+### Asset hot reload: the watch and per-chunk scene reload are built; assets and shaders are not (2026-08-27, updated 2026-10-06)
 
-**Partly built, in two places that are not the engine's asset path.**
-`apps/viewer/src/watch.rs` polls one glTF document and reloads it when a
-re-export settles, and `crcbl_ui`'s stylesheets reload through
-`Ui::poll_stylesheets`, keeping the last good sheet on a parse error — both
-polled, with no file-watcher dependency (`notify` is in no `Cargo.toml`). No
-application loads or polls a stylesheet yet, so the "styles hot-reload like web
-dev" claim is built and not demonstrated.
+**Built 2026-10-06: the engine's watch and stage 6's per-chunk scene reload.**
+Of stage 6's exit criteria, **"editing one chunk file reloads only that system"
+is met**, and "editing a texture, shader or scene chunk on disk shows in the
+running sandbox without a restart" is met for the scene chunk only:
+`sandbox --scene <DIR>` reloads a changed `sys/<name>.ron` under a running loop,
+held by `apps/sandbox`'s
+`the_scene_flag_opens_its_directory_and_follows_an_edit`. Textures and shaders
+are below, unbuilt.
 
-**Not built:** everything stage 6's task 5 named. There is no asset reimport
-path, no in-place GPU pool update (the design: a reimported mesh's range is
-swapped in the pool and the stale range retires through the deletion queue), no
-shader recompile keyed by hash (the design: a Slang recompile rebuilds the
-pipelines keyed by shader hash; `crcbl-shaders` computes the identity and
-nothing keys on it), and no per-chunk scene reload (the design: a changed
-`sys/<name>.ron` tears down and re-instantiates only that system's scene
-entities, server-side, with replication propagating the change, and the editor's
-revert reuses the same path; `scn::IdMap::remove` and `restore` exist since
-2026-09-30). Reload is dev-only and its bar is "doesn't crash, usually works".
-`crates/crcbl-assets/src/registry.rs`'s module docs still describe hot reload as
-the thing that would reintroduce the `Unloaded` state, which the registry
-deliberately does not have because nothing can reach it today.
+- **The watch**, `crcbl_assets::watch::PolledWatch`: a set of paths, looked at
+  once per `POLL_INTERVAL` of the caller's clock (a `Duration` each poll, so a
+  test drives time), each change offered once its stamp — modification time and
+  length — has held still for `SETTLE`. No thread. `apps/viewer`'s `watch.rs` is
+  a one-path wrapper on it now, and its own poll-and-settle code and most of its
+  tests moved into the engine's.
+- **The reload**, in three layers over one difference.
+  `crcbl_scene::scn::diff_chunk` compares a chunk file's rows with the ones its
+  system holds, as row text; `Scene::reload_chunk` applies the difference
+  straight to a world (what `apps/sandbox` uses);
+  `crcbl::scene_edit::Document::reload_chunk` applies it as edit commands, one
+  undoable entry; `EditServer::reload_chunk` announces that entry to every
+  client as an edit by `SERVER_AUTHOR`, so copies follow it with no fetch
+  (`a_chunk_the_server_reloads_from_disk_is_followed_without_a_refetch`).
+- **The sandbox** opens a `.scn/` directory with `--scene` and watches its chunk
+  files; `apps/sandbox/assets/scenes/cube.scn` is its built-in scene as the
+  writer writes it, held equal by
+  `the_committed_scene_is_the_built_in_one_written_out`.
 
-**What it would take:** a watch over the asset source (the two polled watches
-show a poll is enough for one path; a directory of thousands of files is the
-case `notify` would be for, and adding it is the user's decision), the reimport
-path, and the deletion-queue retire calls `AssetRegistry`'s refcount stops short
-of. **What it blocks:** the editor's revert path and an asset browser that
-follows the disk by itself (it has a Refresh button), and stage 6's exit
-criteria: editing a texture, shader or scene chunk on disk shows in the running
-sandbox without a restart, and editing one chunk file reloads only that system.
+**Decisions, each for the long term:**
+
+- **Polled, with no file-watcher crate (the owner's decision, 2026-10-06).** The
+  viewer's glTF watch and `Ui::poll_stylesheets` showed a poll is enough for the
+  paths a person edits by hand. `notify` stays out until a directory of
+  thousands of files needs it, which is the owner's call. Why: no new
+  dependency, deterministic under a test's clock, and the same on every platform
+  the engine targets — and every platform API reports a save as a burst that has
+  to be debounced back into one anyway.
+- **The watch lives in `crcbl-assets`**, the lowest crate that fits: it is the
+  asset IO seam, the viewer and the sandbox both reach it through `crcbl`, and
+  it decodes nothing, as the rest of that crate does not.
+- **`SETTLE` is two poll intervals**, so a change is offered half a second to
+  three quarters after it lands. Longer than one interval so a writer pausing
+  between chunks for less than that is still one write; the viewer's own watch
+  offered at the second look, a quarter of a second sooner.
+- **Native only, absent on `wasm32`** rather than present and silent: the module
+  does not compile there, and the viewer's watch, field and poll are compiled
+  out of its browser build — which used to carry a watch that never fired.
+- **Row by row, not system by system.** The design said a changed chunk tears
+  down and re-instantiates its system's entities. An entity may hold rows in
+  several systems, so that would take its other systems' rows with it; the
+  reload instead adds, replaces and removes only the rows whose text differs,
+  and despawns an entity only when a removal leaves it in no system (its id and
+  name going with it). An unchanged row is not touched, so its entity keeps its
+  runtime state.
+- **Ids are the file's**: an added row is filed under the id the file spells
+  (`IdMap::restore`), so a reload that keeps an id keeps its entity.
+- **A file that will not read keeps the last good state**, reported with the
+  file, line and column; everything is read and checked before anything changes.
+- **The editor rule** (`crcbl::scene_edit`'s `reload` module docs): a document
+  with no unsaved edits reloads as one history entry and stays clean; one with
+  unsaved edits asks first (`EditError::Unsaved` under `OverEdits::Refuse`), as
+  a save asks on `EditError::ChangedOnDisk`, and `OverEdits::Reload` lands the
+  reload on top of the edits as one more entry; the scene lock does not stop it,
+  since a change seen while it is held came from a program that took none; after
+  a reload the directory counts as what the document last read; play mode and a
+  routed copy refuse.
+- **In the document, a changed row of an entity no other system holds is a
+  delete and a spawn** under the same id and name, because a detach of an
+  entity's last row is refused; a shared entity's is a detach and an attach.
+- **The sandbox watches whenever `--scene` names a directory**, with no flag of
+  its own: naming one is the development loop, and an unchanged file changes
+  nothing, so a headless run with `--scene` stays reproducible. Only the chunk
+  files are watched.
+
+**Deferred, each with what it would take:**
+
+- **Texture reload.** A reimport path through `AssetRegistry` — the `Unloaded`
+  state its module docs keep out until something can produce it — and an
+  in-place GPU pool update: the reimported texture's range swapped in the pool
+  and the stale range retired through the stage 2 deletion queue, which
+  `AssetRegistry`'s refcount stops short of.
+- **Shader reload.** A Slang recompile at run time and the pipelines keyed by
+  the shader's hash, rebuilt when it changes. `crcbl-shaders` computes the
+  identity and nothing keys a pipeline on it; Slang is compiled offline today.
+- **The editor watching its scene.** `Document::reload_chunk` and the rule are
+  built and tested; `apps/editor` does not poll its origin yet. What it would
+  take: a `PolledWatch` over the document's chunk files, driven from the frame,
+  and the unsaved bar (`apps/editor/src/app/unsaved.rs`) asking on
+  `EditError::Unsaved` with "reload over them" and "keep mine". The editor's
+  revert reusing the reload path waits on the same wiring; it reopens the whole
+  scene today. `crcbl edit --serve` does not watch either; it would call
+  `EditServer::reload_chunk` the same way.
+- **The header, `env.ron` and `names.ron` are not watched or reloaded**: a
+  manifest change needs a restart. Reloading them means a manifest diff —
+  systems listed and unlisted — and an environment write, which the document has
+  commands for (`ListSystem`, `SetEnvironment`, `Rename`).
+- **A reload too long for one notice** is announced to nobody: the server's
+  revision moves, so copies refetch at the next notice — and stay stale until
+  one comes. A notice that could say "fetch again", or a reload split into
+  notices that fold into one entry on the copy, would close it.
+- **A reload accepts the whole directory as read** (`accept_changes_on_disk`),
+  so another file changed at the same moment — one the watch does not cover,
+  like `scene.ron` — is overwritten by the next save without the save asking. A
+  digest kept per file would let it accept the one chunk.
+- **A reload refused in play mode is not retried**: the watch offered the change
+  once, so it is picked up only at the file's next change.
+- **`Ui::poll_stylesheets` keeps its own poll**, with no settle period: a sheet
+  caught half-written keeps the last good sheet, which is that module's own
+  answer to the same problem. Moving it onto `PolledWatch` would change when a
+  sheet reloads; considered and left, since no application loads a stylesheet
+  from a path yet and nothing would show the difference.
+
+**Considered and declined:** a file-watcher crate (above); hashing contents on
+every look to catch a rewrite with the same length and time, which costs a read
+of every file every interval for a case an edit does not produce; tearing down a
+system's whole entities (above).
+
+**Coverage gaps:** run on Windows only. The watch's `stat` and rename cases were
+not run on Linux or macOS in this slice, and no test drives a writer that pauses
+between chunks for longer than `SETTLE`, which would be offered half written and
+then refused as a parse error until it finishes.
+`crates/crcbl-assets/src/registry.rs`'s module docs still keep `Unloaded` out,
+correctly: nothing reimports an asset the registry holds.
 
 ### No golden over a real glTF document (2026-08-27, re-verified 2026-09-24)
 
@@ -14065,7 +14161,8 @@ format feature 5 opens and saves, and `Ui::inspector` is the inspector slice 3
 draws. Feature 6's asset browser landed 2026-10-01 without a watcher or
 `crcbl bake` — a Refresh button, and glTF imported directly — and what those two
 would still give it is in the asset browser bullet below and _Asset hot reload:
-two polled watches, and no engine reload path_ above.
+the watch and per-chunk scene reload are built; assets and shaders are not_
+above.
 
 **Its four owner decisions were answered 2026-09-16** and are recorded in
 `08-editor.md`: the edit command enum and undo log exist from day one and are
@@ -18164,9 +18261,9 @@ pad, arrows or WASD alone behind a focus-path e2e — `crcbl_ui`'s focus exists
 
 ### Viewer's hot-reload demo is built but not recorded (2026-08-27)
 
-**Partly built.** `apps/viewer/src/watch.rs` polls the document's path four
-times a second with a settle delay — deliberately a poll rather than a
-filesystem-notification dependency, because every platform API reports a
+**Partly built.** `apps/viewer/src/watch.rs` polls the document's path on the
+engine's `crcbl_assets::watch` with a settle period — deliberately a poll rather
+than a filesystem-notification dependency, because every platform API reports a
 re-export as a burst that must be debounced back into one anyway. So the Blender
 → re-export → live update loop works. Milestone 3 asks for the loop to be
 **recorded** as a demo ("doubles as engine marketing"), and no recording exists.
@@ -21617,8 +21714,9 @@ that are not:
   2026-08-19 against a real Vulkan device, swapping Khronos `Avocado.glb` for
   `Box.glb` under a running viewer, and the reload landed one poll later. What
   the milestone actually asks for is a **recording** of the Blender loop, and
-  nobody has made one. It also remains the app's own poll rather than P9's
-  reload: `crcbl-assets` has no reload of its own.
+  nobody has made one. The poll is the engine's `crcbl_assets::watch` since
+  2026-10-06; the reload is still the viewer's own, since `crcbl-assets`
+  reimports nothing.
 
 Then **V-S**, the sample itself, against the plan's own exit criteria: ≥90% of
 the Khronos glTF-Sample-Models suite loads without crashing, unsupported

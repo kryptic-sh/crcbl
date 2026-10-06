@@ -9,10 +9,12 @@
 //! [`AssetRegistry::get`], not a state a handle can be in — and a state that no
 //! value ever holds is a match arm every caller writes and no test can reach.
 //!
-//! It comes back when something can produce it. Hot reload (step 5) turns a
-//! `Ready` entry back into one with no bytes; the GPU deletion queue that
-//! asset model names for refcounted release will want an entry that is retiring
-//! rather than gone. Neither exists, and neither is guessed at here.
+//! It comes back when something can produce it. An asset's hot reload (step 5)
+//! turns a `Ready` entry back into one with no bytes; the GPU deletion queue
+//! that asset model names for refcounted release will want an entry that is
+//! retiring rather than gone. Neither exists — step 5's watch (this crate's
+//! native `watch` module) and its scene-chunk reload are built, and nothing
+//! reimports an asset this table holds — and neither is guessed at here.
 //!
 //! # The transitions
 //!

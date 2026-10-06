@@ -15,16 +15,20 @@ with `DirSource` and `MemorySource`); glTF parsing and validation
 (`crcbl_scene::gltf_render`), which `apps/viewer` draws; the `.scn/` directory
 (`crcbl_scene::scn`) with its three writer properties in
 `crates/crcbl-scene/tests/scn_roundtrip.rs`, read by `apps/breakout` and
-`apps/puppet`; the reporting half of `crcbl import`; and a viewer-local polled
-reload (`apps/viewer/src/watch.rs`).
+`apps/puppet`; the reporting half of `crcbl import`; and step 5's watch and
+per-chunk scene reload (2026-10-06): `crcbl_assets::watch`, which the viewer's
+re-export reload now polls through, and `crcbl_scene::scn::Scene::reload_chunk`
+with its edit-history form `crcbl::scene_edit::Document::reload_chunk`, which
+`sandbox --scene` drives.
 
-What it left unbuilt is in `docs/backlog.md`: engine hot reload under _Asset hot
-reload: two polled watches, and no engine reload path_; the sidecar GUIDs,
-`FetchSource`, GPU retire and the `std::fs` gate under _`crcbl-assets` after
-stage 6 task 2_ and _Sidecar meta RON: three items want it, and nothing writes
-one yet_; and under _What the deleted 06-assets-scenes plan left unbuilt_,
-`crcbl bake` with `PackSource`, the cooked mesh and `import --out`, the scene
-format's editor leftovers, and the Sponza-class exit.
+What it left unbuilt is in `docs/backlog.md`: texture and shader reload under
+_Asset hot reload: the watch and per-chunk scene reload are built; assets and
+shaders are not_; the sidecar GUIDs, `FetchSource`, GPU retire and the `std::fs`
+gate under _`crcbl-assets` after stage 6 task 2_ and _Sidecar meta RON: three
+items want it, and nothing writes one yet_; and under _What the deleted
+06-assets-scenes plan left unbuilt_, `crcbl bake` with `PackSource`, the cooked
+mesh and `import --out`, the scene format's editor leftovers, and the
+Sponza-class exit.
 
 Code cites the plan as "stage 6" or "topic 6", by task (also called step) and by
 section. Those resolve here:
@@ -35,7 +39,7 @@ section. Those resolve here:
 | Task (step) 2                                 | `AssetId`, the handle, the load states, `AssetSource`, `DirSource`                                 | Built (`crcbl-assets`)                                                     |
 | Task (step) 3                                 | glTF import into the GPU pools: meshes, materials, textures, mips                                  | Built through `gltf_import` and `gltf_render`; mips per **Mips at import** |
 | Task 4                                        | The `.scn/` directory, the deterministic writer, the roundtrip property tests                      | Built (`crcbl_scene::scn`); dirty-chunk tracking owed                      |
-| Task (step) 5                                 | The watcher and the reload paths for assets, shaders and scene chunks                              | Owed; the viewer has its own polled reload                                 |
+| Task (step) 5                                 | The watcher and the reload paths for assets, shaders and scene chunks                              | Watcher and scene-chunk reload built; asset and shader reload owed         |
 | Task 6                                        | `crcbl import` wiring and `crcbl bake`                                                             | The report is built; `--out`, `bake` and `PackSource` owed                 |
 | Task 7, the Sponza exit                       | A real glTF scene through a `.scn/` directory at stage 3's performance targets                     | Owed                                                                       |
 | Format matrix                                 | **Source formats are open standards; cooked formats are ours**                                     | Rule                                                                       |
@@ -172,9 +176,14 @@ The rules, each with its _why_:
   as in the pool** — positions alone, then attributes, each contiguous so the
   loader uploads each to its own buffer without repacking — with the cluster and
   LOD tables beside them indexing the position stream.
-- **Hot reload is dev-only, and its bar is "doesn't crash, usually works".**
-  When the engine path is built, a changed chunk file reloads only its own
-  system's entities, server-side, and the editor's revert reuses the same path.
+- **Hot reload is dev-only, and its bar is "doesn't crash, usually works".** A
+  changed chunk file reloads only its own system's rows, server-side, as one
+  entry of the edit history that every client follows (built 2026-10-06); the
+  editor's revert is to reuse the same path, and does not yet. The watch is
+  polled, with no file-watcher dependency, until a directory of thousands of
+  files needs one — the owner's decision, and the reasons, are in
+  `docs/backlog.md` under _Asset hot reload: the watch and per-chunk scene
+  reload are built; assets and shaders are not_.
 
 ## What the deleted 11-cli-headless plan left behind (2026-09-25)
 

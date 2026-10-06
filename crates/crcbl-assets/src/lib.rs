@@ -7,6 +7,10 @@
 //! here knows what an asset *is* — bytes in, bytes out. Decoding (glTF, PNG,
 //! WAV) is step 3 and lands in the crates that own those formats.
 //!
+//! And step 5's watcher: `watch` (native only — a browser has no file to look
+//! at) polls a set of paths and reports each once its change has settled,
+//! which is what hot reload is built on. It reads no bytes either.
+//!
 //! # Why a crate of its own
 //!
 //! `crcbl-store` is persistence: data the *player* produces — saves, settings,
@@ -44,6 +48,10 @@
 
 pub mod registry;
 pub mod source;
+// Native only: there is no filesystem in a browser to look at, and a watch
+// that compiled there and never fired would be a check that silently passes.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod watch;
 
 use core::fmt;
 

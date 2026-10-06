@@ -1,0 +1,8 @@
+Chunk(
+    system: "spin",
+    entities: [
+        (0, Spin(
+            seconds: 0.0,
+        )),
+    ],
+)

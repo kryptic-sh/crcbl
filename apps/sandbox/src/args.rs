@@ -69,6 +69,11 @@ OPTIONS:
                           `--host`, `--join` and `--browse` exclude each
                           other, and are native builds only: web builds have
                           no networking.
+        --scene <DIR>     Open the .scn/ scene directory DIR in place of the
+                          built-in cube and sun, and reload a system's chunk
+                          file when it changes on disk, leaving the others
+                          untouched. apps/sandbox/assets/scenes/cube.scn is
+                          the built-in scene written out. Native builds only.
         --record <FILE>   Record the session `--host` runs to a new .crpl
                           file FILE, which `crcbl replay` reads: every tick's
                           state hash, every `sv_spin_rate` set and every
@@ -198,6 +203,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                 Some(title) => options.title = title,
                 None => return Invocation::BadUsage("--title needs a value".to_string()),
             },
+            #[cfg(not(target_arch = "wasm32"))]
+            "--scene" => match args.next() {
+                Some(dir) => options.scene = Some(std::path::PathBuf::from(dir)),
+                None => return Invocation::BadUsage("--scene needs a value".to_string()),
+            },
             "--size" => match size("--size", &mut args) {
                 Ok(size) => options.size = size,
                 Err(message) => return Invocation::BadUsage(message),
@@ -320,7 +330,10 @@ mod tests {
             "--fps",
             "144",
             "--wait-unpresented",
+            "--scene",
+            "some.scn",
         ]);
+        assert_eq!(options.scene, Some(std::path::PathBuf::from("some.scn")));
         assert_eq!(options.pacing, crcbl::engine::Pacing::Adaptive);
         assert_eq!(options.limit, crcbl::engine::FrameLimit::fps(144));
         assert!(options.headless);

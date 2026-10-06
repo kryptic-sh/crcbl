@@ -2223,7 +2223,7 @@ CLI clients without defining them). MVP rules:
   backend.
 - **The editor is a native target.** Stage 10 listed editor-in-browser as a
   stretch that "should mostly work by construction"; the asset browser, OS
-  drag-drop import, `crcbl import` and hot reload's notify-based file watcher
-  are all native-shaped, and nobody has examined what a browser would do with
-  them. Treated as native-only until something makes the case; recorded so the
-  stretch goal is not mistaken for a plan.
+  drag-drop import, `crcbl import` and hot reload's polled file watch are all
+  native-shaped, and nobody has examined what a browser would do with them.
+  Treated as native-only until something makes the case; recorded so the stretch
+  goal is not mistaken for a plan.
