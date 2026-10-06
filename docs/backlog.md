@@ -11545,8 +11545,8 @@ Left, and why:
 - **A shape that changes while replicated** (crouching, a vehicle's door) is not
   followed: `shape_of` is asked once. It would need a per-entity shape revision
   on the wire or a "shape changed" hook.
-- **Audio occlusion is not wired.** `crcbl-audio` has no occlusion hook (see
-  _Occlusion (rule 5)_). The ray is there now.
+- **Audio occlusion casts through it** (`crcbl::occlusion::OcclusionTracker`,
+  puppet's beacons); see _Occlusion (rule 5): built, and what it left_.
 - **The rest of the topic 30 boom**: damped follow, recenter, zoom tiers, aim
   mode and player fade. Not built.
 
@@ -15665,18 +15665,78 @@ Linux runner, which is what rules out an architecture cause and pins it on libm.
 **What it blocks:** any cross-platform golden buffer that pins bytes rather than
 a waveform.
 
-### Occlusion (rule 5) (2026-08-27)
+### Occlusion (rule 5): built, and what it left (2026-10-06)
 
-**Not built; its stated dependency is met.** `crcbl-phys` has the ray query
-(`cast_ray`), and since 2026-10-06 the client has a world to cast it in
-(`crcbl_client::ClientQueryWorld::cast_ray`). What is owed: acoustic materials
-on colliders (`{density, muffle_cutoff_hz, attenuation_db}` presets) and a
-per-voice filter. There is no biquad or one-pole anywhere in the voice path —
-the only lowpass in `crcbl-audio` is inside the noise generator.
+**Built.** `crcbl_audio::occlusion` (the sound half) and `crcbl::occlusion` (the
+ray half), with `apps/puppet`'s two beacons as the consumer. Decided, and why:
 
-**What it blocks:** an MVP exit criterion ("occlusion audible and
-material-distinct"), and `32-voip.md`'s world-voice audibility test, which
-reuses the same occlusion.
+- **The filter is a one-pole lowpass with the exact −3 dB coefficient**
+  (`y = 2 − cos ω`, `b = y − √(y² − 1)`, `a = 1 − b`), then a gain. Not a
+  biquad: a 6 dB/octave slope reads as "through a wall" with no resonance to
+  tune. `cos` is `crcbl_core::trig::cos`, so the coefficient is the same bits on
+  every target. Tested against the closed form at the cutoff and by a sine run
+  through it, and for unity DC gain.
+- **A new target ramps linearly over `OCCLUSION_RAMP_FRAMES` output frames**,
+  each frame computed from the ramp's ends, so where a ramp is does not depend
+  on block size (`a_ramp_is_the_same_however_the_blocks_are_cut`).
+- **A clear voice is bit-identical to one from before**: at `Occlusion::CLEAR`
+  the coefficient is exactly one and the filter passes the sample through
+  instead of computing `y + 1·(x − y)`, which rounds. So no golden moves unless
+  a game turns occlusion on
+  (`a_clear_voice_is_bit_identical_to_one_never_occluded` pins it to the gain
+  chain written out).
+- **A collider's material is a side table in the umbrella**
+  (`crcbl::occlusion::AcousticMaterials`, keyed by `ColliderId`, with a
+  fallback), not a field or a generic tag on a `crcbl-phys` collider: physics
+  has no business knowing about sound, and a tag would be carried by every
+  physics caller for one consumer. Materials are game data; puppet fills its
+  table from its surface rows by label (`crate::audio::material_of`), through
+  the new `Map::world_with_ids`.
+- **The combining rule: attenuations add, the lowest cutoff wins**
+  (`Occlusion::through`), over every collider the ray crosses, each once, in the
+  order crossed, up to `crcbl::occlusion::MAX_OCCLUDERS`. The walk re-casts past
+  each hit excluding it, because `QueryFilter` excludes one collider at a time.
+- **The ray budget counts casts, not voices**: `OcclusionTracker` spends at most
+  its budget (`DEFAULT_OCCLUSION_RAYS_PER_FRAME`) a frame, round robin in
+  tracking order, and begins a voice only while a whole walk's worth is left. A
+  voice not reached keeps its last value.
+- **The walk takes any filtered ray query** (`occlusion_between(cast, …)`), so
+  `docs/plan/32-voip.md`'s world-voice audibility test — range plus occlusion,
+  on the server — can cast the same walk through a `PhysicsWorld` (the tests
+  do), rather than a second copy.
+
+**The MVP exit criterion ("occlusion audible and material-distinct"): met in
+code and tests, not by ear.** Audible: puppet's beacons are muffled behind the
+mounds and come clear around them, and the mix measurably loses level
+(`the_mounds_take_level_out_of_the_mix`). Material-distinct: every preset gives
+a distinct cutoff and gain (`every_preset_gives_a_distinct_target`), the same
+wall named as two materials occludes differently
+(`two_materials_give_distinct_targets`), and puppet's two mounds muffle
+differently from the spawn. **Not done: nobody has listened** — every check is
+headless, and no audio was played to a device.
+
+Left, and why:
+
+- **`AcousticMaterial::density` is not read.** The preset schema names it, and
+  it is what a mass-law transmission loss needs (surface mass is density times
+  thickness), but a ray reports where it enters a collider and not where it
+  leaves, so there is no thickness. It would take an exit point per hit — a
+  reverse cast from the emitter end, or a ray query that reports both roots.
+- **No sample tracks a moving emitter or replicated occluders.** Puppet's
+  beacons stand still and its query world holds statics only; the tracker's
+  `track` moves an emitter and the query world's `follow` moves replicas, both
+  tested only in their crates.
+- **No exclusion for the emitter's or the listener's own collider.** A sound
+  raised on an entity with a collider, or an ear inside the local player's
+  replica, would be occluded by itself. `occlusion_between` passes one exclusion
+  per cast and uses it for the walk; a per-voice mask or an extra exclusion
+  would be the fix when a sample needs it.
+- **Puppet has no debug-panel row for occlusion**, so the browser gate cannot
+  see it, and puppet's `HostedGame::set_bus_gain` is untested on a headless run
+  (it has no audio there).
+- **The gain's `powf`** is libm's, under _Audio's transcendentals and deny_.
+- **`Mixer::set_mix` still steps a beacon's pan and level each frame** (see _ITD
+  parameter smoothing_); the occlusion ramp does not cover it.
 
 ### Golden audio buffers per sample, and `crcbl audio render` (2026-08-27)
 
@@ -18652,15 +18712,15 @@ term:**
   would fill the screen. Drawn on the overhead view and the fly camera.
 
 **Deferred:** sound assets (every sound is a `synth` sine or noise burst, not
-designed by anyone); occlusion muffling a lane behind terrain — `crcbl-audio`
-has none and this field has no terrain to be behind — and any off-screen-wave
-cue beyond the grammar's distance and direction, both from the plan's "audio
-grammar in anger" bullet; a held sound for a slow tower's whole hold rather than
-a cue as it takes hold; no audio row on the `[HUD]` line, so the browser gate
-cannot see a cue; the bars do not scale with distance or the window's DPI, and
-do not fade; no golden audio buffer is pinned, because a hash of float output
-would pin the platform's `sin` as well — the test holds the mix to being the
-same twice and to panning with the picture instead.
+designed by anyone); occlusion muffling a lane behind terrain — the engine has
+it now (`crcbl::occlusion`), but this field has no terrain to be behind — and
+any off-screen-wave cue beyond the grammar's distance and direction, both from
+the plan's "audio grammar in anger" bullet; a held sound for a slow tower's
+whole hold rather than a cue as it takes hold; no audio row on the `[HUD]` line,
+so the browser gate cannot see a cue; the bars do not scale with distance or the
+window's DPI, and do not fade; no golden audio buffer is pinned, because a hash
+of float output would pin the platform's `sin` as well — the test holds the mix
+to being the same twice and to panning with the picture instead.
 
 **Coverage gaps:** **nothing was heard or seen on a device** — every check is
 headless, natively; no ear judged a sound, its level or the budget, and no eye

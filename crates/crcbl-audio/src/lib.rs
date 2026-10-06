@@ -41,6 +41,7 @@
 
 pub mod event;
 pub mod mixer;
+pub mod occlusion;
 pub mod qoa;
 pub mod spatial;
 pub mod synth;
