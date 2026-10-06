@@ -434,6 +434,26 @@ deadline, and which no deadline changes. If it recurs, give the grass tests a
 smaller field on that runner (the `bucket_price` gate-scene pattern) or split
 the frame's submission so no one command buffer runs long.
 
+## Checks that fail without a defect (2026-10-06)
+
+Each of these has failed once and passed on a rerun with the code unchanged. A
+failure of one wants a rerun before a diagnosis; one that repeats on an idle
+machine, or twice in CI, is real.
+
+- **`editor document::undo_property_tests::random_histories_walk_back_through_every_state`**
+  — a proptest that takes about 25 s alone. During a local verify on 2026-10-06,
+  with two other worktrees compiling, three of the editor's app tests took 148
+  to 157 s and this one passed nextest's 240 s limit and was killed; alone it
+  passed in 25.6 s.
+- **`crcbl-server host::udp_tests::a_session_changing_more_than_a_datagram_holds_updates_back_and_converges`**
+  — real loopback sockets against wall time; see its note under the snapshot
+  budget entry.
+- **The Pages job's "a finger opens the console and types a whole line at it"**
+  (`web/tools/browser-e2e.mjs`, the breakout page) — on 2026-10-06, run
+  37409100181 at `32e35110` timed out on it and on the line after it, which
+  waits for the same console; a rerun of that job passed and deployed. Nothing
+  in that push touched the console, touch input or breakout outside a test.
+
 ## Concurrent GPU devices: what the fix left (2026-10-02)
 
 The `gpu` test group holds every device-opening suite to eight at a time, and
@@ -20545,17 +20565,19 @@ of `docs/plan/sample/09-puppet.md` still wants:
   `map::rim_angle` is what states each mound's angle, and the mesh is a
   tessellation of the same sphere. A wedge or oriented-box collider is what
   would let the map read as a ramp; it is not needed for the controller path.
-- **The camera does not collide.** `camera::Follow` is a yaw, a pitch and a
-  fixed `DISTANCE`, so it passes through the mounds. A spring arm over
-  `PhysicsWorld::sweep_capsule` is the obvious fix and is client work per
-  `docs/plan/30-player-kit.md`.
+- **The boom pulls in and nothing else of topic 30's camera is built.**
+  `camera::Follow::camera` sweeps a `BOOM_RADIUS` sphere through the client's
+  `ClientQueryWorld` and shortens the boom at the first hit (2026-10-06); the
+  damped follow, recenter, zoom tiers, aim mode and player fade that
+  `docs/plan/30-player-kit.md` describes are not.
 - **No touch controls, and no camera on the pad** — the keyboard and the pad
   both play, the prompt follows the last device and run and jump rebind (see
   _Puppet's device-swap showcase_); an on-screen stick and a right-stick camera
   are what is left.
-- **No `.crpix` art and no audio.** Everything is greybox geometry from
-  `crcbl::greybox` over a tinted grid page, so the demo carries no asset at all
-  and the web build ships an empty manifest.
+- **No `.crpix` art.** Everything is greybox geometry from `crcbl::greybox` over
+  a tinted grid page. Its only sound is the two occluded beacons
+  `apps/puppet/src/audio.rs` synthesizes (2026-10-06), so it carries no audio
+  asset either.
 - **No golden-frame check.** The browser gate asserts the controller's behaviour
   — that the character advances under held input, stops when it is released,
   climbs the 0.3 m step and is refused by the 0.9 m one — and the blend's
@@ -20570,11 +20592,9 @@ of `docs/plan/sample/09-puppet.md` still wants:
 `apps/viewer` draws a document deformed by its own clip in a browser. What is
 still missing or silently lost:
 
-- **No state machine.** `crcbl-anim` samples a clip, blends two poses and
-  interpolates a 1D set; what is still missing above that is the state machine
-  `docs/plan/sample/09-puppet.md` names — and the crossfade it switches with,
-  which is deliberately absent until that caller exists — plus the retargeting
-  that would let one rig's clips drive another's.
+- **No retargeting.** The state machine and its crossfade are built
+  (`crcbl_anim::machine`, 2026-10-06, puppet drives it); what is still missing
+  above them is the retargeting that would let one rig's clips drive another's.
 - **`JOINTS_1`/`WEIGHTS_1` are not read** and are not warned about either, so a
   document binding a vertex to more than four joints loses the rest silently.
   Deliberate for now — every plausible palette here is four-wide — but it is a
@@ -20975,10 +20995,6 @@ leaves behind is smaller than it was:
   `DefaultLabels` text; glyph artwork stays a game's, per
   `crates/crcbl-input/src/hint.rs`.
 
-- **Client tick alignment.** No lead, no EWMA server-time estimate, no rate
-  correction. `crcbl-client` advances playback at a constant rate, which is an
-  interpolation buffer and what its own header calls it. Blocked behind the
-  server consuming input at all.
 - **The input thread and the stacked `InputTickState`.** It is a flat
   `Vec<(String, ActionValue)>`; there is no stacking, no accumulate-then-swap
   and no last-N ring, and nothing on any platform spawns an input thread. Worth
