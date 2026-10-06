@@ -6,13 +6,13 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requests (2026-10-06)
 
 These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `9c00dc46` after pulling `origin/main`, using EW `4cc34958`. Both
-remain open: `CharacterController::move_upright` still synchronizes its bound
-collider, and `world/candidate_sweeps.rs` still accepts straight segments rather
-than accelerated trajectories. This follow-up inspected source only; the test
-evidence below belongs to the earlier verification runs. Implement and validate
-each independently; EW then updates its engine pin and removes the superseded
-local mechanism. Gameplay rules stay in EW.
+against crcbl `9c00dc46` after pulling `origin/main`, using EW `4cc34958`.
+`CharacterController::move_upright` still synchronizes its bound collider; the
+accelerated capsule query of item 2 has since been delivered and awaits EW's
+migration. This follow-up inspected source only; the test evidence below belongs
+to the earlier verification runs. Implement and validate each independently; EW
+then updates its engine pin and removes the superseded local mechanism. Gameplay
+rules stay in EW.
 
 Implementation handoff: deliver the non-mutating upright preview first, then add
 the accelerated capsule query as a separate verified slice. Each handoff needs
@@ -58,41 +58,66 @@ requirement is demonstrated, rather than moving these game rules into crcbl.
    update/restore sequence. Do not claim that this alone replaces
    `projected_landing`, which also simulates EW gameplay state.
 
-2. **Curved-path collision queries with contact times.** Promote the existing
-   curved-path gap in "EW integration follow-ups" below. EW's
+2. **Curved-path collision queries with contact times — delivered 2026-10-06,
+   awaiting EW's migration.** Built on branch `feat/phys-arc-query` (not yet on
+   `main` when written; EW pins it once it is). EW's
    `PlayerController::move_with_gravity` in `src/controller_ballistic.rs` bounds
    chord error, expands candidate sweeps and bisects contact forecasts to retain
-   time after wall and ceiling hits. Engine `SlideContact::fraction` and
-   `sweep_capsule_all` describe straight displacement, not elapsed time on an
-   accelerated trajectory. Add a constant-acceleration capsule query returning
-   the earliest contact time, collider and normal over a supplied interval, with
-   explicit starting-overlap behavior and the existing query filters. Keep
-   gravity, air-control limits, wall response and landing damage in EW.
+   time after wall and ceiling hits, because `SlideContact::fraction` and
+   `sweep_capsule_all` describe straight displacement. The engine now answers
+   the time:
+   `PhysicsWorld::sweep_capsule_arc(&AcceleratedPath::new(start, velocity, acceleration, duration), radius, half_height, filter)`
+   returns `Option<(ColliderId, ArcHit)>`,
+   `ArcHit { time, point, normal, started_inside, part }`, with `time` in
+   `[0, duration]` and never later than the first touch.
+   `OverlapQueries::sweep_capsule_arc(.., &mut QueryScratch)` is the `&self`
+   form; there is no `PhysicsSystem` form, as there is none for the straight
+   capsule sweeps. Masks, triggers and the excluded collider apply as in
+   `sweep_capsule_filtered`; a capsule that starts touching or inside a collider
+   meets it at time zero with `started_inside`. The search is conservative
+   advancement against the plane bounding each shape, the path's exact quadratic
+   height above it as the step, stopping within `ARC_TIME_TOLERANCE` (the same
+   1e-9 s EW's bisection uses) and after at most `ARC_MAX_ITERATIONS` steps per
+   shape. The straight sweeps are unchanged.
 
-   Acceptance: analytic wall/ceiling times; an arc that touches and leaves a
-   surface although its endpoint chord misses it; zero acceleration; attached
-   self-collider exclusion; and coarse/fine update agreement. Retain the current
-   straight-sweep contract. First prove the missing arc cases in the game, then
-   validate the engine query against them and remove only the local
-   approximations it replaces. This is a needed addition, not a claim that EW's
-   current approximation is general continuous collision detection. Tilted and
-   curved walls, moving geometry and continuous native playback remain
-   validation gaps. Projectile/grenade flight is a later consumer: the current
-   `src/game_projectile_doors_tests.rs` asserts contact-plane agreement, not
-   complete curved-trajectory impact-position agreement; do not report it as
-   validating this new query.
+   Coverage, `crates/crcbl-phys/src/world/arc_sweep_tests.rs` and the unit tests
+   in `query/arc.rs`: analytic wall, ceiling (box and mesh) and floor times;
+   braking and jump paths that touch and leave a surface while the straight
+   sweep along their chord misses it (both halves asserted), and the same paths
+   turning back a hair short, which miss; a ceiling above both ends of a jump
+   met at its apex; zero acceleration against the straight sweep for a box face,
+   a sphere, a standing capsule and both sides of a mesh wall; an unturned box
+   edge at its analytic time; starting overlap; attached self-collider
+   exclusion; masks and triggers; coarse/fine agreement against a wall and a
+   sphere in 2, 7 and 64 pieces; bit-identical reruns; and EW's
+   `braking_near_a_wall_preserves_contact_before_reversal` ported as
+   `braking_near_a_wall_preserves_contact_before_reversal`, every axis, turn,
+   attachment and update length, coarse and 1 ms fine. Mutation-checked:
+   sweeping the chord instead of the arc fails the touch-and-leave, braking,
+   analytic, apex and coarse/fine tests; leaving the apex out of the broadphase
+   bounds fails the bounds, apex, touch-and-leave and braking tests; ignoring
+   the filter, the starting-overlap check or the root's curvature each fails its
+   own tests.
 
-   Game evidence added in EW `17b62e5f`:
-   `braking_near_a_wall_preserves_contact_before_reversal` in
-   `src/controller_wall_braking_tests.rs` explicitly asserts that a straight
-   endpoint sweep misses a wall reached by the analytic braking arc before
-   reversal. It requires that case to execute and checks contact, position and
-   velocity across coarse/fine updates and attached/unattached colliders. The
-   workspace test run passed; disabling the turning-point split made the coarse
-   reversal case fail before the split was restored. Port this fixture with the
-   query. This proves the planar braking case only: candidates hidden later
-   along the sweep, tilted/curved walls and moving geometry still need game
-   fixtures before claiming coverage.
+   What EW can replace with it: the contact detection the chord-error cap
+   (`MAX_BALLISTIC_CHORD_ERROR_SKINS`) exists for, the braking probe widened by
+   the chord error through `sweep_capsule_all` with its turning-point split, and
+   the `find_wall` and `hits_ceiling` bisections, each reading `ArcHit::time`
+   and classifying `ArcHit::normal` itself. What it cannot: the
+   `changes_support` bisection, which needs `move_and_slide`'s and
+   `move_lying`'s grounding, steps and prone lying capsule; the movement itself,
+   which still goes through the straight `move_with_sidestep`, so a chord cap on
+   the moved step remains EW's choice; the post-move straight sweep that retains
+   a passed wall's normal; and wall response, air control, landing damage and
+   `projected_landing`, which stay gameplay.
+
+   Validation gaps, not covered and not claimed: tilted and curved walls, moving
+   geometry, continuous native playback, projectile and grenade flight
+   (`src/game_projectile_doors_tests.rs` checks contact planes, not curved
+   impact positions), candidates hidden later along the path (the query returns
+   the first contact only), lying-capsule paths, and zero-acceleration agreement
+   for turned boxes and capsules, whose straight sweep stops a little short by
+   design. EW's fixture proves the planar braking case only.
 
 Current goal: complete the full codebase performance review, record actionable
 findings and verification gaps in this backlog, and implement supported
@@ -162,16 +187,13 @@ through
 (its slide only, not the settle). EW now reads these contacts in
 `controller_contact_forecast.rs`. Remaining work:
 
-- **No times along a curved path.** `SlideContact::fraction` is a distance share
-  along one straight sweep, documented as not being time. A caller integrating
-  gravity or air control that needs when an arc touches still has to sweep the
-  arc in chords short enough to stand in for it. Doing it in the engine means a
-  sweep whose motion is a polynomial in t (conservative advancement over the
-  gap, as the turned-box capsule sweep already does for straight motion) and a
-  slide loop that re-integrates the remainder after each clip, which changes
-  movement and so cannot share `move_and_slide`'s bit-for-bit promise. Not
-  started; now a top-priority EW request above. Its ballistic braking forecast
-  is the initial consumer.
+- **Curved-path times are a query; a curved slide loop is not built.**
+  `PhysicsWorld::sweep_capsule_arc` answers when an accelerated capsule first
+  touches (top-priority request 2 above). `SlideContact::fraction` is still a
+  distance share along one straight sweep. A slide loop that re-integrates the
+  remainder after each clip would change movement, so it cannot share
+  `move_and_slide`'s bit-for-bit promise; not started, and nobody has asked for
+  it beyond the query.
 - **The slide owns the skin, not the sweep (decided 2026-10-01, long term).** It
   backs off any hit nearer than `CharacterConfig::skin_width`, so every sweep
   with a tolerance (conservative advancement, meshes, future shapes) is covered

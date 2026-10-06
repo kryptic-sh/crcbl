@@ -17,6 +17,7 @@ use crate::contact::sweep::time_of_contact;
 use crate::mesh::{MeshScratch, PlacedMesh, TriangleMesh};
 use crate::query::{self, OverlapHit, Penetration, ShapeHit, TurnedCapsule};
 
+mod arc_sweep;
 mod candidate_sweeps;
 mod entry;
 mod placement;
@@ -3701,3 +3702,7 @@ mod compound_tests;
 #[cfg(test)]
 #[path = "world/turned_capsule_tests.rs"]
 mod turned_capsule_tests;
+
+#[cfg(test)]
+#[path = "world/arc_sweep_tests.rs"]
+mod arc_sweep_tests;

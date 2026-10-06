@@ -70,7 +70,7 @@ impl TurnedCapsule {
 
     /// The core's ends, as the contact pipeline places them: the centre less
     /// and plus the half-height turned.
-    fn core(&self) -> (DVec3, DVec3) {
+    pub(crate) fn core(&self) -> (DVec3, DVec3) {
         if self.stands() {
             return (self.capsule.bottom(), self.capsule.top());
         }
