@@ -853,6 +853,16 @@ pub struct RenderState {
     pub ship: [f64; 2],
     /// Which way the engine points, in the same plane.
     pub attitude: [f64; 2],
+    /// The ship's velocity in the same plane: what the navball's prograde and
+    /// retrograde markers point along.
+    pub velocity: [f64; 2],
+    /// Where the orbit's periapsis is in the same plane, while there is a
+    /// trajectory to put one on and the orbit is eccentric enough for it to
+    /// have a direction — see `apsides` in this module.
+    pub periapsis_at: Option<[f64; 2]>,
+    /// Where its apoapsis is: as [`periapsis_at`](Self::periapsis_at), and
+    /// `None` too on an escape trajectory, which has no high point.
+    pub apoapsis_at: Option<[f64; 2]>,
     /// Whether [`path`](Self::path) comes back round to its own first point,
     /// so the map can stroke the closing arc as well. False on a trajectory
     /// that escapes, whose samples stop where the map stops.
@@ -867,6 +877,36 @@ pub struct RenderState {
     /// spread of times needs no angle and is right for an escape trajectory
     /// too.
     pub path: Vec<[f64; 2]>,
+}
+
+/// How eccentric an orbit has to be before [`apsides`] gives it a direction.
+///
+/// The eccentricity vector is the difference of two terms that are equal on a
+/// circle, so below this its direction is the rounding in that subtraction
+/// rather than a property of the orbit, and the map's apsis glyphs would spin
+/// round a circular orbit from one frame to the next.
+const MIN_APSIS_ECCENTRICITY: f64 = 1e-9;
+
+/// The unit vector from the body's centre towards periapsis, for a ship at
+/// `position` moving at `velocity` about a body of gravitational parameter
+/// `mu` — or `None` for an orbit too near circular to have one.
+///
+/// The eccentricity vector, `((v² − μ/r)·r − (r·v)·v) / μ` (Vallado,
+/// _Fundamentals of Astrodynamics and Applications_, the `RV2COE` algorithm),
+/// which points at periapsis and is as long as the eccentricity.
+/// `crcbl::phys::Orbit::from_state` forms the same vector and keeps only its
+/// length, because an orbit's size and shape are all its readouts need; the map
+/// is what needs the direction too.
+fn apsides(mu: f64, position: DVec3, velocity: DVec3) -> Option<DVec3> {
+    let radius = position.length();
+    if !(mu > 0.0 && radius > 0.0) {
+        return None;
+    }
+    let eccentricity = ((velocity.length_squared() - mu / radius) * position
+        - position.dot(velocity) * velocity)
+        / mu;
+    let length = eccentricity.length();
+    (length > MIN_APSIS_ECCENTRICITY && length.is_finite()).then(|| eccentricity / length)
 }
 
 // ---- the debug panel's section -----------------------------------------------
@@ -918,12 +958,16 @@ impl crcbl::ui::DebugModule for FlightStats {
 pub enum GameError {
     /// The operating system would not seed the server's resume credential.
     Server(String),
+    /// The flight UI's sprites did not fit the UI pass's image atlas. See
+    /// [`crate::art`].
+    Art(crcbl::ui::image::AtlasError),
 }
 
 impl std::fmt::Display for GameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Server(message) => write!(f, "server creation failed: {message}"),
+            Self::Art(error) => write!(f, "cannot register the flight UI's art: {error}"),
         }
     }
 }
@@ -1133,9 +1177,12 @@ impl Game {
         out.autopilot = flight.autopilot;
         out.ship = [offset.x, offset.y];
         out.attitude = [flight.attitude.x, flight.attitude.y];
+        out.velocity = [flight.ship.velocity.x, flight.ship.velocity.y];
 
         out.path.clear();
         out.path_closed = false;
+        out.periapsis_at = None;
+        out.apoapsis_at = None;
         // **Only where there is a trajectory to draw.** A ship going straight
         // up from a standstill has exactly zero angular momentum — this planet
         // does not rotate, so the launch is radial — and the conic through that
@@ -1153,6 +1200,12 @@ impl Game {
             // point, so the arc from the last back to it is the map's to draw.
             out.path_closed = out.period.is_some();
             let mu = flight.frames.mu(flight.frame);
+            if let Some(towards) = apsides(mu, offset, flight.ship.velocity) {
+                let at = |distance: f64| [towards.x * distance, towards.y * distance];
+                out.periapsis_at = Some(at(orbit.periapsis()));
+                // The apoapsis is the far end of the same axis.
+                out.apoapsis_at = orbit.apoapsis().map(|distance| at(-distance));
+            }
             for sample in 0..PATH_SAMPLES {
                 let ahead = span * sample as f64 / PATH_SAMPLES as f64;
                 let at = propagate(mu, flight.ship, ahead);
@@ -1494,6 +1547,62 @@ mod tests {
         }
     }
 
+    /// **The apsis direction comes out where an ellipse put it**, from states
+    /// whose answer is known without the formula: a ship moving sideways
+    /// faster than a circular orbit there is at its own periapsis, slower is
+    /// at its own apoapsis, and exactly the circular speed has no apsides.
+    #[test]
+    fn the_apsis_direction_points_at_periapsis() {
+        let radius = PLANET_RADIUS + TARGET_APOAPSIS;
+        let circular = (PLANET_MU / radius).sqrt();
+        let at = DVec3::new(radius, 0.0, 0.0);
+        let sideways = |speed: f64| DVec3::new(0.0, speed, 0.0);
+
+        let fast = apsides(PLANET_MU, at, sideways(circular * 1.1)).expect("eccentric");
+        assert!(
+            (fast - DVec3::X).length() < 1e-12,
+            "{fast}: here is periapsis"
+        );
+        let slow = apsides(PLANET_MU, at, sideways(circular * 0.9)).expect("eccentric");
+        assert!(
+            (slow + DVec3::X).length() < 1e-12,
+            "{slow}: here is apoapsis"
+        );
+
+        assert_eq!(apsides(PLANET_MU, at, sideways(circular)), None, "a circle");
+        assert_eq!(apsides(PLANET_MU, DVec3::ZERO, sideways(1.0)), None);
+    }
+
+    /// **The map's apsis glyphs sit on the orbit the readouts report**: at the
+    /// periapsis and apoapsis radii the panel prints, and in the direction the
+    /// propagator's own samples come nearest and go farthest.
+    #[test]
+    fn the_apsides_are_where_the_path_comes_nearest_and_goes_farthest() {
+        let state = seen(&flown(ASCENT_TICKS));
+        let radius = |point: [f64; 2]| (point[0] * point[0] + point[1] * point[1]).sqrt();
+        let angle = |point: [f64; 2]| point[1].atan2(point[0]);
+        let periapsis = state
+            .periapsis_at
+            .expect("an eccentric orbit has a periapsis");
+        let apoapsis = state.apoapsis_at.expect("a closed one has an apoapsis");
+        assert!((radius(periapsis) - (state.periapsis + state.body_radius)).abs() < 1e-6);
+        let high = state.apoapsis.expect("closed") + state.body_radius;
+        assert!((radius(apoapsis) - high).abs() < 1e-6);
+
+        // Two samples' worth of angle: the samples are spread in time, and the
+        // nearest one can sit up to one spacing either side of the apsis.
+        let tolerance = 2.0 * std::f64::consts::TAU / PATH_SAMPLES as f64;
+        let apart = |a: f64, b: f64| {
+            let turn = (a - b).rem_euclid(std::f64::consts::TAU);
+            turn.min(std::f64::consts::TAU - turn)
+        };
+        let by_radius = |a: &&[f64; 2], b: &&[f64; 2]| radius(**a).total_cmp(&radius(**b));
+        let nearest = state.path.iter().min_by(by_radius).expect("a path");
+        let farthest = state.path.iter().max_by(by_radius).expect("a path");
+        assert!(apart(angle(*nearest), angle(periapsis)) < tolerance);
+        assert!(apart(angle(*farthest), angle(apoapsis)) < tolerance);
+    }
+
     /// Straight up is a trajectory with no orbit in it, and the map says so by
     /// drawing nothing rather than by dividing by zero.
     #[test]
@@ -1510,5 +1619,7 @@ mod tests {
              there is nothing to propagate, and it drew {} samples",
             state.path.len()
         );
+        assert_eq!(state.periapsis_at, None, "and no apsis to mark on it");
+        assert_eq!(state.apoapsis_at, None);
     }
 }

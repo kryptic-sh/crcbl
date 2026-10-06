@@ -18,7 +18,11 @@ use crate::components::{RigidBody, Transform};
 /// Implementations read the body's state (velocity, position) and write
 /// into `body.force_accum`. They must **not** clear the accumulator —
 /// that is the integrator's job after the step.
-pub trait ForceProvider: std::fmt::Debug {
+///
+/// `Send`, because the [`PhysicsSystem`](crate::PhysicsSystem) holding the
+/// providers is a `crcbl_ecs::SystemTrait`, which a schedule may tick on
+/// another thread.
+pub trait ForceProvider: std::fmt::Debug + Send {
     /// Apply force for this substep.
     ///
     /// `dt` is the integration timestep so providers can compute

@@ -1,81 +1,199 @@
-//! The locomotion driver: the character's measured speed becomes a pose.
+//! The character's animation: a state machine the server steps, and the pose
+//! the client draws from the state it was sent.
 //!
 //! ```text
-//!   MoveOutcome::motion ──▶ Stage::speed  (smoothed, on the tick)
-//!                                 │
-//!                                 ▼
-//!            BlendSpace1d::locate ──▶ blend weight ──▶ HUD
-//!            BlendSpace1d::sample_into(speed, phase)
-//!                                 │
-//!                            Pose ─┴─▶ Palette::compute ──▶ skinning dispatch
+//!   server, on the tick                           client, on the frame
+//!   ───────────────────                           ────────────────────
+//!   MoveOutcome ─▶ speed, grounded, jumped
+//!                        │
+//!   Locomotion::tick ─▶ Machine::step ─▶ MachineState ──copy──▶ Animator::advance
+//!                        │                                          │
+//!                        └─▶ footstep events, counted     Sampler ─▶ Palette ─▶ skinning
 //! ```
 //!
-//! `docs/plan/sample/09-puppet.md`'s milestone 2, first half: "client blend
-//! tree (1D locomotion by speed)". The blending itself is
-//! [`crcbl::anim::blend`]'s; what is here is the sample's half — which clips sit
-//! where on the axis, how fast the stride runs, and the three readings the
-//! browser gate holds the result to.
+//! `docs/plan/sample/09-puppet.md`'s milestone 2: idle, run and jump through
+//! [`crcbl::anim::machine`], with the footsteps its run state's event track
+//! carries. The asset is `assets/anim/character.ron`, compiled in so a browser
+//! build and a test read the same file; the clips it names are [`rig`]'s.
 //!
-//! # This runs on the client, and the speed it reads does not
+//! # The machine runs on the server, the pose on the client
 //!
-//! The animation rules put pose evaluation on the client — pose math is client
-//! presentation and free to vary (`docs/notes/simulation.md`, _What the deleted
-//! 17-animation plan left behind_) — so nothing in this module is on the tick
-//! and nothing here crosses the wire. What crosses is the number it
-//! is driven by: [`crate::game::Stats::speed`] is measured from the
-//! controller's own [`MoveOutcome::motion`](crcbl::phys::MoveOutcome), on the
-//! authoritative side, at the fixed timestep.
+//! The split `docs/notes/simulation.md` gives animation (_What the deleted
+//! 17-animation plan left behind_): state-machine ticks, transition decisions,
+//! normalised clip time and events are the server's, and sampling a pose is the
+//! client's. [`Locomotion`] is the server's half — it lives on
+//! [`crate::game`]'s stage, is stepped once per tick at the fixed timestep, and
+//! counts footsteps as the machine reports them, so a footstep lands on the
+//! same tick whatever the frame rate. [`Animator`] is the client's half: it is
+//! handed the [`MachineState`] the tick left and poses the rig from it, never
+//! stepping the machine itself, so the two cannot disagree about where in a
+//! clip the character is.
 //!
-//! **Measured, not commanded.** A demo could drive this off the input flag —
-//! "a key is down, therefore walk" — and it would look right until the
-//! character walked into a wall, where the flag says walk and the body is not
-//! moving. Reading what the world actually allowed is what makes the pose track
-//! the controller instead of the keyboard, and it is why the browser gate can
-//! assert the two against each other.
+//! **Driven by measured speed, not commanded.** `speed` is
+//! [`crate::game::Stats::speed`], measured from the controller's own
+//! [`MoveOutcome::motion`](crcbl::phys::MoveOutcome), so a character pushing
+//! against a riser it cannot climb stands in idle — which is what it is doing.
 //!
-//! # The phase runs faster the faster the character goes
+//! # Root motion is not used here
 //!
-//! One stride per [`rig::STRIDE_M`] of ground covered, floored at
-//! [`REST_CYCLE_HZ`] so the clock never stops. Feet that cycled at a fixed rate
-//! would skate whenever the speed was anything but the one the walk was
-//! authored at, and the blend would be mixing two clips at unrelated points of
-//! their cycles — which [`BlendSpace1d`] is documented as taking a *phase*
-//! rather than a time to avoid.
+//! [`rig`]'s clips are authored in place: nothing drives the root joint, so
+//! [`Machine::root_velocity`](crcbl::anim::Machine::root_velocity) would answer
+//! zero on every tick, and the controller is moved by the input as it always
+//! was. Root motion is proven in `crcbl-anim`'s own tests, not here —
+//! `docs/backlog.md` records it.
 
-use crcbl::anim::{Blend, BlendSpace1d, Palette, Pose, Skeleton};
+use crcbl::anim::{
+    BoolParam, EventId, FloatParam, Machine, MachineState, Palette, Pose, Sampler, Skeleton,
+    StateId, StateMachine, TriggerParam,
+};
 use crcbl::math::{Mat4, Vec3};
 
 use crate::rig;
 
+/// The character's state machine, as committed.
+pub const MACHINE_RON: &str = include_str!("../assets/anim/character.ron");
+
 /// The speed, in metres per second, at which [`rig::walk`] plays at full
-/// weight.
+/// weight in the run state's blend.
 ///
-/// **The speed the clip is authored for**, which is one stride of
-/// [`rig::STRIDE_M`] over [`rig::WALK_CYCLE_S`] — not the speed the controller
-/// is asked for. The two are different numbers on purpose, and both halves
-/// matter:
-///
-/// * The clip has to play at its own cadence somewhere, or the legs skate at
-///   every speed.
-/// * The stop has to be a speed the reading actually **reaches**. The measured
-///   speed is a first-order filter approaching what the world allowed, so it
-///   arrives from below and never quite lands on it; a stop at
-///   [`crate::game::WALK_SPEED`] would leave a walking character a hair short
-///   of the top of the set for ever, and the blend weight would never sit
-///   still. `the_walk_stop_is_a_speed_the_controller_passes` is what holds it
-///   under the commanded walk.
-///
-/// A character faster than this plays the walk at full weight, which is what
-/// [`BlendSpace1d`] does at either end of its axis.
+/// **The speed the clip is authored for**, one stride of [`rig::STRIDE_M`] over
+/// [`rig::WALK_CYCLE_S`], and the asset's first blend stop —
+/// `the_run_blend_stops_are_the_rigs_authored_speeds` holds the two together.
 pub const WALK_STOP_MPS: f32 = rig::STRIDE_M / rig::WALK_CYCLE_S;
 
-/// How many strides a standing character's clock runs through per second.
+/// The speed at which [`rig::run`] plays at full weight: one stride of
+/// [`rig::RUN_STRIDE_M`] over [`rig::RUN_CYCLE_S`], and the asset's second
+/// blend stop.
+pub const RUN_STOP_MPS: f32 = rig::RUN_STRIDE_M / rig::RUN_CYCLE_S;
+
+/// Every state the asset declares, in its order. Named here so the debug line
+/// can carry a state as a `&'static str`, and checked against the asset by
+/// `the_committed_asset_binds_to_the_rig`.
+pub const STATES: [&str; 3] = ["idle", "run", "jump"];
+
+/// The event the run state's track raises when a foot comes down.
+pub const FOOTSTEP: &str = "footstep";
+
+/// The asset, parsed and bound to [`rig`]'s clips.
 ///
-/// The idle clip is a stance and holds one pose whatever the phase, so this
-/// changes nothing on screen while the character stands. It matters at the
-/// moment it starts moving: a phase frozen at whatever value it stopped on
-/// would put the first step of every walk at a different point of the stride.
-pub const REST_CYCLE_HZ: f32 = 0.6;
+/// # Panics
+///
+/// Never for the committed asset: it is compiled in, and
+/// `the_committed_asset_binds_to_the_rig` parses and binds this exact text.
+#[must_use]
+pub fn machine() -> Machine {
+    let asset = StateMachine::from_ron(MACHINE_RON)
+        .unwrap_or_else(|error| panic!("assets/anim/character.ron: {error}"));
+    Machine::new(asset, rig::clip)
+        .unwrap_or_else(|error| panic!("assets/anim/character.ron against the rig: {error}"))
+}
+
+// ---------------------------------------------------------------------------
+// The server's half
+// ---------------------------------------------------------------------------
+
+/// The character's animation state on the server: the machine, the state it is
+/// in, and the handles the stage sets it through.
+#[derive(Debug)]
+pub struct Locomotion {
+    machine: Machine,
+    state: MachineState,
+    speed: FloatParam,
+    grounded: BoolParam,
+    jump: TriggerParam,
+    footstep: EventId,
+    /// What the last step reported, reused so a tick allocates nothing.
+    events: Vec<EventId>,
+}
+
+impl Default for Locomotion {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Locomotion {
+    /// The machine at its initial state.
+    ///
+    /// # Panics
+    ///
+    /// Never for the committed asset — see [`machine`] — which declares every
+    /// parameter and event resolved here; `the_committed_asset_binds_to_the_rig`
+    /// resolves them too.
+    #[must_use]
+    pub fn new() -> Self {
+        let machine = machine();
+        let asset = machine.asset();
+        let speed = asset
+            .float_parameter("speed")
+            .unwrap_or_else(|error| panic!("assets/anim/character.ron: {error}"));
+        let grounded = asset
+            .bool_parameter("grounded")
+            .unwrap_or_else(|error| panic!("assets/anim/character.ron: {error}"));
+        let jump = asset
+            .trigger_parameter("jump")
+            .unwrap_or_else(|error| panic!("assets/anim/character.ron: {error}"));
+        let footstep = asset
+            .event(FOOTSTEP)
+            .unwrap_or_else(|| panic!("assets/anim/character.ron raises no {FOOTSTEP:?}"));
+        let state = machine.start();
+        Self {
+            machine,
+            state,
+            speed,
+            grounded,
+            jump,
+            footstep,
+            events: Vec::new(),
+        }
+    }
+
+    /// One tick: what the controller did becomes the machine's parameters, and
+    /// the machine steps by `dt` seconds. Answers how many footsteps the step
+    /// crossed.
+    ///
+    /// `jumped` is whether the character left the ground on *this* tick; it
+    /// sets the trigger, which the machine holds until a transition takes it.
+    pub fn tick(&mut self, dt: f32, speed: f32, grounded: bool, jumped: bool) -> u64 {
+        self.state.set_float(self.speed, speed);
+        self.state.set_bool(self.grounded, grounded);
+        if jumped {
+            self.state.trigger(self.jump);
+        }
+        self.machine.step(&mut self.state, dt, &mut self.events);
+        self.events
+            .iter()
+            .filter(|&&event| event == self.footstep)
+            .map(|_| 1)
+            .sum()
+    }
+
+    /// The state as it stands — what the client is sent.
+    #[inline]
+    #[must_use]
+    pub const fn state(&self) -> MachineState {
+        self.state
+    }
+
+    /// The current state's name, as one of [`STATES`].
+    ///
+    /// # Panics
+    ///
+    /// If the asset declares a state [`STATES`] does not list, which
+    /// `the_committed_asset_binds_to_the_rig` rules out for the committed one.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        let name = self.machine.asset().state_name(self.state.state());
+        STATES
+            .into_iter()
+            .find(|&known| known == name)
+            .unwrap_or_else(|| panic!("state {name:?} is not one of {STATES:?}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The client's half
+// ---------------------------------------------------------------------------
 
 /// The points a joint's motion is measured at: its own origin and one metre out
 /// along each of its axes.
@@ -87,20 +205,22 @@ pub const REST_CYCLE_HZ: f32 = 0.6;
 /// `Player::deviation` probes the same four points for the same reason.
 const PROBES: [Vec3; 4] = [Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z];
 
-/// The character's rig, its locomotion set, and the pose it is currently in.
+/// The character's rig, posed from the [`MachineState`] the server sent.
 ///
-/// Built once and advanced in place: sampling, blending and composing the
+/// Built once and advanced in place: sampling, crossfading and composing the
 /// palette all write into buffers this owns, so a frame allocates nothing.
 #[derive(Debug)]
 pub struct Animator {
+    machine: Machine,
     skeleton: Skeleton,
-    space: BlendSpace1d,
+    sampler: Sampler,
     pose: Pose,
     palette: Palette,
+    idle: StateId,
     /// Where each joint's probes sit in the rest pose, flattened joint-major.
     /// What [`deviation`](Self::deviation) is measured against.
     rest_probes: Vec<Vec3>,
-    phase: f32,
+    state: MachineState,
     blend: f32,
     partial: u64,
     deviation: f32,
@@ -113,63 +233,54 @@ impl Default for Animator {
 }
 
 impl Animator {
-    /// The rig, posed in its idle stance and ready to be advanced.
+    /// The rig, posed at the machine's initial state.
     ///
     /// # Panics
     ///
-    /// Never: the stops below are two finite positions in ascending order,
-    /// which is all [`BlendSpace1d::new`] refuses a set for not being.
+    /// Never for the committed asset, which has an `idle` state — see
+    /// [`machine`].
     #[must_use]
     pub fn new() -> Self {
+        let machine = machine();
+        let idle = machine
+            .asset()
+            .state(STATES[0])
+            .unwrap_or_else(|| panic!("assets/anim/character.ron has no {:?}", STATES[0]));
         let skeleton = rig::skeleton();
-        let space = BlendSpace1d::new(
-            vec![(0.0, rig::idle()), (WALK_STOP_MPS, rig::walk())],
-            &skeleton,
-        )
-        .expect("idle at zero and walk at the walk speed ascend");
+        // No root-motion joint: the rig's clips are in place — see the module
+        // docs.
+        let sampler = Sampler::new(&skeleton, None);
         let pose = Pose::new(&skeleton);
         let mut palette = Palette::new(&skeleton);
         palette.compute(&skeleton, &pose);
         let rest_probes = probes(&palette);
+        let state = machine.start();
         let mut animator = Self {
+            machine,
             skeleton,
-            space,
+            sampler,
             pose,
             palette,
+            idle,
             rest_probes,
-            phase: 0.0,
+            state,
             blend: 0.0,
             partial: 0,
             deviation: 0.0,
         };
-        animator.advance(0.0, 0.0);
+        animator.advance(&state);
         animator
     }
 
-    /// Advances the phase by `dt` seconds and reposes the character for
-    /// `speed`, in metres per second.
-    pub fn advance(&mut self, dt: f32, speed: f32) {
-        let Blend {
-            lower,
-            upper,
-            weight,
-        } = self.space.locate(speed);
-        // Where the character sits across the *whole* set rather than within
-        // one of its segments, which is the number the overlay and the browser
-        // gate both read: 0 at the idle end, 1 at the fastest stop.
-        let segments = (self.space.stops() - 1).max(1) as f32;
-        self.blend = (lower as f32 + weight) / segments;
-        if lower != upper && weight > 0.0 && weight < 1.0 {
+    /// Poses the rig as `state` describes.
+    pub fn advance(&mut self, state: &MachineState) {
+        self.state = *state;
+        self.blend = 1.0 - self.idle_weight();
+        if self.blend > 0.0 && self.blend < 1.0 {
             self.partial += 1;
         }
-
-        // One stride per `rig::STRIDE_M` of ground, and never slower than the
-        // resting clock. `max` and not a sum, so that at `WALK_STOP_MPS` the
-        // clip runs at exactly the cadence it was authored at.
-        let cycles = (speed / rig::STRIDE_M).max(REST_CYCLE_HZ);
-        self.phase = (self.phase + cycles * dt).rem_euclid(1.0);
-        self.space
-            .sample_into(speed, self.phase, &self.skeleton, &mut self.pose);
+        self.sampler
+            .sample_into(&self.machine, state, &self.skeleton, &mut self.pose);
         self.palette.compute(&self.skeleton, &self.pose);
 
         self.deviation = probes(&self.palette)
@@ -180,6 +291,24 @@ impl Animator {
             });
     }
 
+    /// How much of the pose is the idle stance: 1 standing in idle, 0 in any
+    /// other state, and the crossfade weight in between while one fades into
+    /// the other.
+    fn idle_weight(&self) -> f32 {
+        let Some(fade) = self.state.fade() else {
+            return f32::from(u8::from(self.state.state() == self.idle));
+        };
+        let incoming = fade.weight();
+        let mut weight = 0.0;
+        if self.state.state() == self.idle {
+            weight += incoming;
+        }
+        if fade.from() == self.idle {
+            weight += 1.0 - incoming;
+        }
+        weight
+    }
+
     /// The skinning matrices this frame, in palette order — what a
     /// [`SkinRange`](crcbl::render::SkinRange) is handed.
     #[inline]
@@ -188,21 +317,23 @@ impl Animator {
         self.palette.matrices()
     }
 
-    /// Where the character sits across the locomotion set: 0 standing still, 1
-    /// at [`WALK_STOP_MPS`].
+    /// How far the character is out of its idle stance: 0 standing in idle, 1
+    /// running or jumping, and in between while a crossfade carries it from one
+    /// to the other.
     #[inline]
     #[must_use]
     pub const fn blend(&self) -> f32 {
         self.blend
     }
 
-    /// How many advances have found the blend **strictly between** two stops.
+    /// How many advances have found the blend **strictly between** idle and
+    /// moving — the frames a crossfade into or out of idle was on screen.
     ///
     /// A counter rather than a reading because the thing it is evidence for is
-    /// a transition: the heartbeat the browser gate reads is a second apart, and
-    /// a weight that swept 0 to 1 in between would show up on it as a snap. This
-    /// rises once per frame for as long as the crossing takes, so the gate can
-    /// ask whether the crossing *happened* rather than hoping to sample it.
+    /// a transition: the heartbeat the browser gate reads is a second apart,
+    /// and a fade a fifth of a second long would show up on it as a snap. This
+    /// rises once per frame for as long as the fade takes, so the gate can ask
+    /// whether the fade *happened* rather than hoping to sample it.
     #[inline]
     #[must_use]
     pub const fn partial(&self) -> u64 {
@@ -214,11 +345,17 @@ impl Animator {
     ///
     /// This is the number that says the rig is being posed at all. It holds
     /// still while the character stands, because [`rig::idle`] is a stance, and
-    /// sweeps while it walks.
+    /// sweeps while it runs.
     #[inline]
     #[must_use]
     pub const fn deviation(&self) -> f32 {
         self.deviation
+    }
+
+    /// The name of the state the last advance posed.
+    #[must_use]
+    pub fn state_name(&self) -> &str {
+        self.machine.asset().state_name(self.state.state())
     }
 }
 
@@ -238,155 +375,218 @@ fn probes(palette: &Palette) -> Vec<Vec3> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Animator, REST_CYCLE_HZ, WALK_STOP_MPS};
+    use super::{Animator, FOOTSTEP, Locomotion, RUN_STOP_MPS, STATES, WALK_STOP_MPS, machine};
+    use crate::rig;
+    use crcbl::anim::{Pose, Sampler};
 
-    /// A tick of the frame clock, for the tests below. Not the simulation's:
-    /// this runs on the frame.
-    const DT: f32 = 1.0 / 60.0;
+    /// One tick at the default rate.
+    const DT: f32 = 1.0 / crate::game::DEFAULT_TICK_HZ as f32;
 
-    /// Standing still is the idle end of the set, and the pose does not move.
-    /// The browser gate's settle check is this claim, in a browser.
+    /// Ticks the server half `ticks` times at `speed`, grounded, and hands each
+    /// resulting state to the client half.
+    fn drive(server: &mut Locomotion, client: &mut Animator, speed: f32, ticks: u32) {
+        for _ in 0..ticks {
+            server.tick(DT, speed, true, false);
+            client.advance(&server.state());
+        }
+    }
+
+    /// **The committed asset parses and binds to the rig**, and declares
+    /// exactly the states, parameters and event the sample drives it by.
+    #[test]
+    fn the_committed_asset_binds_to_the_rig() {
+        let machine = machine();
+        let asset = machine.asset();
+        assert_eq!(asset.state_count(), STATES.len());
+        for name in STATES {
+            assert!(asset.state(name).is_some(), "the asset has no {name:?}");
+        }
+        assert!(
+            asset.event(FOOTSTEP).is_some(),
+            "the run raises no footsteps"
+        );
+        assert!(asset.float_parameter("speed").is_ok());
+        assert!(asset.bool_parameter("grounded").is_ok());
+        assert!(asset.trigger_parameter("jump").is_ok());
+        assert_eq!(Locomotion::new().label(), "idle");
+    }
+
+    /// **The run's blend stops are the speeds the rig's strides are authored
+    /// for**: at [`WALK_STOP_MPS`] the run state draws the walk clip exactly,
+    /// at [`RUN_STOP_MPS`] the run clip — and a hair inside either stop, it
+    /// draws neither, because the blend has begun. The second half is what
+    /// catches a stop the asset moved *outward*, which the clamp at the ends of
+    /// a blend would otherwise hide. So the numbers in the asset and the
+    /// constants in [`rig`] cannot drift apart unseen.
+    #[test]
+    fn the_run_blend_stops_are_the_rigs_authored_speeds() {
+        /// How far inside a stop the second reading is taken, in metres per
+        /// second: far enough that the weight is plainly off the end, near
+        /// enough that a stop drifting by a tenth is caught.
+        const INSIDE_MPS: f32 = 0.05;
+
+        let machine = machine();
+        let skeleton = rig::skeleton();
+        let mut sampler = Sampler::new(&skeleton, None);
+        let mut drawn = Pose::new(&skeleton);
+        let mut expected = Pose::new(&skeleton);
+        for (stop, inside, clip, cycle) in [
+            (
+                WALK_STOP_MPS,
+                WALK_STOP_MPS + INSIDE_MPS,
+                rig::walk(),
+                rig::WALK_CYCLE_S,
+            ),
+            (
+                RUN_STOP_MPS,
+                RUN_STOP_MPS - INSIDE_MPS,
+                rig::run(),
+                rig::RUN_CYCLE_S,
+            ),
+        ] {
+            for (speed, on_the_stop) in [(stop, true), (inside, false)] {
+                let mut server = Locomotion::new();
+                for _ in 0..60 {
+                    server.tick(DT, speed, true, false);
+                }
+                let state = server.state();
+                assert_eq!(server.label(), "run");
+                assert!(state.fade().is_none(), "still fading at {speed} m/s");
+                sampler.sample_into(&machine, &state, &skeleton, &mut drawn);
+                clip.sample_into(state.time() * cycle, &skeleton, &mut expected);
+                if on_the_stop {
+                    assert_eq!(drawn, expected, "at {speed} m/s the run is not that clip");
+                } else {
+                    assert_ne!(drawn, expected, "at {speed} m/s the blend has not begun");
+                }
+            }
+        }
+    }
+
+    /// Standing still is idle, and the pose does not move. The browser gate's
+    /// settle check is this claim, in a browser.
     #[test]
     fn standing_still_holds_one_pose() {
-        let mut animator = Animator::new();
-        animator.advance(DT, 0.0);
-        let held = animator.deviation();
-        let palette = animator.palette().to_vec();
-        for _ in 0..120 {
-            animator.advance(DT, 0.0);
-        }
-        assert_eq!(animator.blend(), 0.0);
-        assert_eq!(animator.deviation(), held);
-        assert_eq!(animator.palette(), palette.as_slice());
+        let mut server = Locomotion::new();
+        let mut client = Animator::new();
+        drive(&mut server, &mut client, 0.0, 1);
+        let held = client.deviation();
+        let palette = client.palette().to_vec();
+        drive(&mut server, &mut client, 0.0, 120);
+        assert_eq!(client.blend(), 0.0);
+        assert_eq!(client.state_name(), "idle");
+        assert_eq!(client.deviation(), held);
+        assert_eq!(client.palette(), palette.as_slice());
     }
 
     /// And the stance it holds is a posed one, not the rest pose — otherwise
     /// the check above would pass over a character nothing had posed at all.
     #[test]
     fn the_stance_it_holds_is_a_posed_one() {
-        let mut animator = Animator::new();
-        animator.advance(DT, 0.0);
+        let mut server = Locomotion::new();
+        let mut client = Animator::new();
+        drive(&mut server, &mut client, 0.0, 1);
         assert!(
-            animator.deviation() > 0.01,
+            client.deviation() > 0.01,
             "the idle stance moved the rig by only {} m",
-            animator.deviation()
+            client.deviation()
         );
     }
 
-    /// Walking moves it, and keeps moving it.
+    /// Running moves the pose, and keeps moving it.
     #[test]
-    fn walking_carries_the_pose() {
-        let mut animator = Animator::new();
-        animator.advance(DT, WALK_STOP_MPS);
+    fn running_carries_the_pose() {
+        let mut server = Locomotion::new();
+        let mut client = Animator::new();
+        #[allow(clippy::cast_possible_truncation)]
+        let walking = crate::game::WALK_SPEED as f32;
+        drive(&mut server, &mut client, walking, 30);
         let mut seen = Vec::new();
         for _ in 0..60 {
-            animator.advance(DT, WALK_STOP_MPS);
-            seen.push(animator.deviation());
+            drive(&mut server, &mut client, walking, 1);
+            seen.push(client.deviation());
         }
-        let distinct = {
-            let mut sorted = seen.clone();
-            sorted.sort_by(f32::total_cmp);
-            sorted.dedup();
-            sorted.len()
-        };
-        assert_eq!(animator.blend(), 1.0);
+        seen.sort_by(f32::total_cmp);
+        seen.dedup();
+        assert_eq!(client.blend(), 1.0);
+        assert_eq!(client.state_name(), "run");
         assert!(
-            distinct > 20,
-            "a walking character should take a new pose nearly every frame; it took {distinct} \
-             across {} frames",
+            seen.len() > 20,
+            "a running character should take a new pose nearly every tick; it took {}",
             seen.len()
         );
     }
 
-    /// **The property the demo exists to show**: the blend follows the speed
-    /// continuously, so an accelerating character passes through the middle of
-    /// the set rather than snapping across it.
+    /// **The property the browser gate holds the demo to**: the blend sweeps
+    /// from idle to moving and back through the crossfades, rather than
+    /// snapping — the between-the-ends counter rises on the way up and again on
+    /// the way down.
     #[test]
-    fn the_blend_follows_the_speed_through_the_middle() {
-        let mut animator = Animator::new();
-        let mut weights = Vec::new();
-        for step in 0..=40 {
-            let speed = WALK_STOP_MPS * step as f32 / 40.0;
-            animator.advance(DT, speed);
-            weights.push(animator.blend());
-        }
-        assert_eq!(weights.first().copied(), Some(0.0));
-        assert_eq!(weights.last().copied(), Some(1.0));
-        for pair in weights.windows(2) {
-            assert!(
-                pair[1] >= pair[0],
-                "the blend went backwards as the speed rose: {pair:?}"
-            );
-        }
-        let inside = weights.iter().filter(|&&w| w > 0.0 && w < 1.0).count();
-        assert!(
-            inside > 30,
-            "the blend should sit between the stops for most of a sweep; it did for {inside} \
-             of {} steps",
-            weights.len()
+    fn the_blend_sweeps_through_the_crossfade_both_ways() {
+        let mut server = Locomotion::new();
+        let mut client = Animator::new();
+        #[allow(clippy::cast_possible_truncation)]
+        let walking = crate::game::WALK_SPEED as f32;
+
+        drive(&mut server, &mut client, walking, 60);
+        assert_eq!(
+            client.blend(),
+            1.0,
+            "a second of walking is not out of idle"
         );
+        let rising = client.partial();
         assert!(
-            animator.partial() >= inside as u64,
-            "every advance that found the blend inside the set should have been counted"
+            rising > 5,
+            "the fade into the run spent {rising} frame(s) between the ends"
+        );
+
+        drive(&mut server, &mut client, 0.0, 60);
+        assert_eq!(
+            client.blend(),
+            0.0,
+            "a second of standing is not back in idle"
+        );
+        let falling = client.partial() - rising;
+        assert!(
+            falling > 5,
+            "the fade back to idle spent {falling} frame(s) between the ends"
         );
     }
 
-    /// A speed past the top of the set saturates rather than running past it.
+    /// A character held at a steady speed leaves the blend **exactly** at the
+    /// top, so the counter that says a fade happened does not tick for ever
+    /// while nothing is fading.
     #[test]
-    fn a_speed_past_the_set_holds_its_top() {
-        let mut animator = Animator::new();
-        animator.advance(DT, 100.0 * WALK_STOP_MPS);
-        assert_eq!(animator.blend(), 1.0);
+    fn a_steady_run_leaves_the_crossing_counter_alone() {
+        let mut server = Locomotion::new();
+        let mut client = Animator::new();
+        #[allow(clippy::cast_possible_truncation)]
+        let walking = crate::game::WALK_SPEED as f32;
+        drive(&mut server, &mut client, walking, 120);
+        let settled = client.partial();
+        drive(&mut server, &mut client, walking, 120);
+        assert_eq!(client.blend(), 1.0);
+        assert_eq!(
+            client.partial(),
+            settled,
+            "the counter rose with nothing fading"
+        );
     }
 
-    /// **The stop is a speed the controller passes**, so a character actually
-    /// walking sits at the top of the set rather than a hair short of it for
-    /// ever — see [`WALK_STOP_MPS`].
+    /// **Both stops are speeds the controller passes**, so a character walking
+    /// or running at the commanded speed sits at or past the stop that gait is
+    /// authored for rather than a hair short of it.
     #[test]
-    fn the_walk_stop_is_a_speed_the_controller_passes() {
+    fn the_blend_stops_are_speeds_the_controller_passes() {
         assert!(
             f64::from(WALK_STOP_MPS) < crate::game::WALK_SPEED,
-            "the walk stop is {WALK_STOP_MPS} m/s and the controller only ever reaches {}",
+            "the walk stop is {WALK_STOP_MPS} m/s and the controller walks at {}",
             crate::game::WALK_SPEED,
         );
-    }
-
-    /// And a character held at the commanded walk speed leaves the blend
-    /// **exactly** at the top, so the counter that says a crossing happened does
-    /// not tick for ever while nothing is crossing.
-    #[test]
-    fn a_steady_walk_leaves_the_crossing_counter_alone() {
-        let mut animator = Animator::new();
-        #[allow(clippy::cast_possible_truncation)]
-        let commanded = crate::game::WALK_SPEED as f32;
-        for _ in 0..120 {
-            animator.advance(DT, commanded);
-        }
-        let settled = animator.partial();
-        for _ in 0..120 {
-            animator.advance(DT, commanded);
-        }
-        assert_eq!(animator.blend(), 1.0);
-        assert_eq!(
-            animator.partial(),
-            settled,
-            "the blend counted {} crossing frame(s) while the character walked at a constant \
-             speed",
-            animator.partial() - settled,
-        );
-    }
-
-    /// The clock runs while the character stands, so the first step of a walk
-    /// does not start from wherever the last one stopped.
-    #[test]
-    fn the_phase_runs_while_the_character_stands() {
-        let mut animator = Animator::new();
-        let start = animator.phase;
-        animator.advance(1.0, 0.0);
         assert!(
-            (animator.phase - (start + REST_CYCLE_HZ).rem_euclid(1.0)).abs() < 1e-5,
-            "a second of standing should carry the phase by {REST_CYCLE_HZ}, and it reached {}",
-            animator.phase
+            f64::from(RUN_STOP_MPS) < crate::game::RUN_SPEED,
+            "the run stop is {RUN_STOP_MPS} m/s and the controller runs at {}",
+            crate::game::RUN_SPEED,
         );
     }
 }

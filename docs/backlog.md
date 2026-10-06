@@ -5121,7 +5121,7 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   against `VK_EXT_memory_budget` where the device has it. Every VRAM item below
   is verified against it.
 - **No render CPU benchmark.** The only CPU span over recording is `DRAW_SPAN`
-  (`crates/crcbl/src/perf.rs`); `crcbl bench` has `jobs` and `phys` only. Add
+  (`crates/crcbl/src/perf.rs`); `crcbl bench` has `jobs`, `phys` and `ecs`. Add
   spans around graph build, compile, execute and submit, a counting allocator
   over a null-device frame, and `crcbl bench` scenarios for a rendered frame,
   `phys-step`, `net-snapshot`, `client-interpolate`, `audio-mix` and an idle
@@ -11949,47 +11949,81 @@ models are not in the tree (no Fox, CesiumMan or RiggedFigure file, searched
 cannot fail is no check: show it red by perturbing one keyframe before blessing
 it.
 
-### State machine, root motion, events, post ops (2026-08-27)
+### What the animation state machine leaves unbuilt (2026-10-06)
 
-**Not built.** `crcbl-anim`'s own module header says so: no state machine, no
-root motion, no GPU skinning _in that crate_. Confirmed against its module list
-— `blend`, `clip`, `ik`, `palette`, `sample`, `skeleton`, `trs`.
+**Built:** `crcbl_anim::machine` — the RON asset (`StateMachine::from_ron`),
+states playing a clip or a 1D blend, transitions on `Above`/`Below`/`IsTrue`/
+`IsFalse`/`Triggered` conditions with exit time and crossfade, the POD
+`MachineState` with a field-by-field `Hash`, animation events reported once per
+crossing, and root motion (`Machine::root_velocity`, stripped from the drawn
+pose by `Sampler`). Tested in `crates/crcbl-anim/tests/machine.rs`.
+`apps/puppet` is the consumer: idle, run and jump through
+`assets/anim/character.ron`.
 
-Specifically absent, with the design each was given:
+**Deferred, each with what it would take:**
 
-- **The state machine**: a RON asset, hot-reloadable, whose states are blend
-  trees and whose transitions are condition expressions over actions and
-  parameters plus exit time, with crossfade durations. Hand-authored first; an
-  editor panel views it before it ever edits it (_Animation debug tools_ below).
-  Its logic runs on the server: ticks, transition decisions and normalised clip
-  time are small POD state, replicated and saved like any component and folded
-  into the tick hash, and the client interpolates between replicated states as
-  it does transforms.
-- **Animation events** — a footstep at t=0.3 raising a gameplay or audio event —
-  timed on the server from the cooked event track. The proof owed is a test that
-  the event fires on the exact tick whatever the frame rate, and a state-machine
-  property test: scripted parameter sequences give a deterministic state/time
-  hash on the determinism harness.
-- **Root motion**, extracted on the server from the cooked root track and
-  applied as velocity to the character controller, **never to the transform** —
-  the rule in `docs/notes/simulation.md`.
-- **Blend layers**: per-bone masks (upper body shooting while the legs run),
-  additive layers (aim offsets), and a 2D directional blend space — the last
-  only once a sample needs strafing.
+- **Hot reload of the asset.** There is no engine asset-reload path (_Asset hot
+  reload: two polled watches, and no engine reload path_), and puppet compiles
+  its asset in for the browser. A reload would also have to map a live
+  `MachineState`'s state index and parameter slots across an asset whose order
+  changed — by name, through `StateMachine::state` and the parameter lookups —
+  or restart the machine. Cheap once a polled watch exists; not before.
+- **Transition interruption.** No transition is evaluated while a fade is in
+  flight, so a trigger set mid-fade waits (triggers persist until consumed). An
+  interrupt rule — snapshot the blended pose and fade from it, Unity's
+  "interruption source" — needs a sampled pose on the server or a three-way fade
+  on the client; neither has a caller yet.
+- **The server strip.** `Machine` holds full `Clip`s, and the server reads only
+  their durations and the root's translation channel. With a cook, the server
+  would bind the strip (duration, root track, event track) and the client the
+  full curves — `Machine::new` takes clips by lookup, so the seam is there. Owed
+  with _No cook, no cooked clip format_.
+- **Replication and save as a component.** `MachineState` is `Copy` and hashed,
+  but has no `serde` derive and is not a registered ECS component: puppet has no
+  ECS entity (its stage is behind a shared cell) and copies the state into
+  `RenderState`. A deserialised state would need validating against its machine
+  (a state index in range), which is why no derive was added ahead of a caller.
+  The client does not interpolate between replicated states either: puppet
+  samples the state the last tick left.
+- **The `crcbl sim` determinism harness.** The determinism property is proven in
+  `tests/machine.rs` (seeded parameters, identical hashes and events across runs
+  and across 30 Hz, 144 Hz and jittered frame clocks) and in puppet's
+  `the_animation_state_is_the_same_on_two_identical_runs`, not on the stage-4
+  harness, which hashes an ECS world puppet does not have.
+- **Cadence below the walk stop.** A blend state's cycle is its clips' durations
+  mixed by weight, so between the move threshold and the walk stop the walk
+  plays at its own cadence and the feet skate. A rate multiplier read from a
+  parameter would fix it; puppet's acceleration ramp makes it brief.
+- **Blend layers**: per-bone masks, additive layers (aim offsets), and a 2D
+  directional blend space — the last only once a sample needs strafing.
 - **Post ops**: sockets and attachments (a weapon on a hand joint) and look-at.
   Full-body IK is not planned.
+- **The editor's state-machine panel**, view first — _Animation debug tools_.
 
-The server-side items depend on the server strip (_No cook, no cooked clip
-format_ above); masks, additive layers, sockets and look-at do not.
+**Decided:**
 
-**Two-bone IK is built**, which this entry used to list as absent:
-`crcbl_anim::ik::{solve_two_bone, rotate_joint}`, tested in
-`crates/crcbl-anim/tests/ik.rs`. No production code calls it yet — EW's port is
-parked on EW's side, recorded under _EW's engine-port audit_.
+- `crcbl-anim` depends on `serde` and `ron` for the asset format — the pair
+  `crcbl-input` and `crcbl-inventory` read their files with, already in every
+  graph through `crcbl`. Still no `crcbl-scene` arrow.
+- Parameters are capped at `MAX_PARAMETERS` so `MachineState` is a fixed-size
+  `Copy` value; bools and triggers are stored as `0.0`/`1.0` in the same array.
+- Only the current state's event track fires; the outgoing state is muted during
+  a fade, so a walk being faded out does not add a footstep to the run's.
+- A zero-length clip (a one-keyframe stance) is a held pose: its time does not
+  advance and it crosses no events.
+- Events must sit in `0..1`; 1 is refused because on a looping state it is the
+  same instant as 0.
+- Clips are bound by name at `Machine::new`, not at parse, because the asset
+  does not hold the clips.
 
-Present and working: `Clip::sample_into`, `blend_into`, `BlendSpace1d`, `Pose`,
-`Palette::compute` — `apps/puppet` mixes idle↔walk↔run by measured speed through
-them.
+**Considered and declined:** removing `BlendSpace1d` now that puppet blends
+through the machine. It has no in-tree caller left, but it is public API and its
+sampling is the same code the machine's 1D blend state runs
+(`blend::sample_located`).
+
+**Two-bone IK is built**: `crcbl_anim::ik::{solve_two_bone, rotate_joint}`,
+tested in `crates/crcbl-anim/tests/ik.rs`. No production code calls it yet —
+EW's port is parked on EW's side, recorded under _EW's engine-port audit_.
 
 ### Animation debug tools are unbuilt past the viewer's skeleton overlay (2026-09-24)
 
@@ -12003,9 +12037,11 @@ enum in `crates/crcbl-cli/src/args.rs` has no `anim`.
 
 **What it would take:** a debug panel over `Pose` and `BlendSpace1d` for the
 scrubber and inspector, which could land now; the live view and the editor panel
-once a state machine exists; and `crcbl anim dump` once there is a cooked format
-to dump. Verified by the CLI's `Command` enum and by grepping `apps/` and
-`crates/` for a scrubber (none found).
+over `crcbl_anim::MachineState`, which exists since 2026-10-06 (puppet shows
+only the state's name and the footstep count, on its overlay and `[HUD]`); and
+`crcbl anim dump` once there is a cooked format to dump. Verified by the CLI's
+`Command` enum and by grepping `apps/` and `crates/` for a scrubber (none
+found).
 
 ### GPU skinning follow-ons (2026-08-27)
 
@@ -12210,12 +12246,57 @@ ms ± 15 ms: no late input in a 16 s run; the test's bound is 1%) and
 
 ### ECS access declarations and the parallel schedule (2026-08-27)
 
-**The next slice was started and stopped (2026-10-05):** branch
-`feat/ecs-parallel` (commit `9c734ab4`, on origin) has a draft
-`crcbl bench --scenario ecs` and the start of `crcbl sim --threads`, neither
-through the check chain, and no parallel runner. The plan for it is the deferred
-list below: the bench and `sim --threads` first, then a staged runner on
-`crcbl-jobs` only if `hash_state` is identical across thread counts.
+**Built (2026-10-06): the parallel schedule, opt-in.** `Schedule::stages` groups
+the systems at registration into runs of consecutive systems no two of which
+conflict — a system starts a new stage when it conflicts with one in the stage
+before, and joins it otherwise. `Schedule::set_pool` / `World::set_pool` hand
+the schedule a `crcbl_jobs::Pool`; `run` then ticks each stage with
+`Pool::par_for`, one system a chunk, and the end of `par_for` is the barrier
+before the next stage. Without a pool `run` is the serial loop it was. Built
+with it: `SystemTrait: Send` (and `DebugDrawFn`, `System<T>`'s `T`,
+`crcbl_phys::ForceProvider`, `crcbl::registry::Registry::register`'s `T`),
+`set_clock` taking `crcbl_ecs::ScheduleClock` (`TimeSource + Send + Sync`),
+`crcbl bench --scenario ecs [--workers N]` and `crcbl sim --threads N`.
+
+Decided 2026-10-06:
+
+- **Off by default.** No world has a pool until a host hands it one. Who sizes a
+  pool is the topology's call (`21-jobs.md`: cores minus pinned threads), the
+  gain is capped by the stage shape, and small worlds lose (numbers below).
+  Turning it on for a host is one `set_pool` call; no host does yet.
+- **Greedy consecutive stages, not a DAG scheduler.** Stages keep registration
+  order by construction and give `par_for` a contiguous slice; a system that
+  could have run beside a non-adjacent earlier one waits instead. Simple and
+  deterministic; a DAG runner is the upgrade if a schedule's shape ever wastes
+  enough to measure.
+- **Only `tick` runs on the pool.** `sweep`, `debug_draw`, `hash_state`,
+  `iter`/`replicate` and every game or host module stay on the calling thread in
+  schedule order, so the assert's scope (ticks) already covers everything the
+  runner runs concurrently.
+- **Under a pool, a tick that panics lets the rest of its stage run**, and the
+  lowest-placed panic is re-raised after it (`par_for`'s rule); a tick that logs
+  logs in completion order. Neither touches state; both are in `Schedule`'s
+  docs.
+- **Each system's tick time is read on the thread that ran it**, so the
+  inspector still shows each system's own cost, never its stage's.
+
+**The bench, measured 2026-10-06** on a Ryzen 9 9950X3D under Windows, release,
+`crcbl bench --scenario ecs` (eight systems, five conflicts, four stages, 200
+timed ticks, 20 warm-up), per-tick p50 / p95, pasted from the tool. Every run
+printed the serial checksum (`5330902cbb2daaa9`, `9491d54379cfe843`,
+`50a99d1f0c06f96e` for 10000, 1000 and 100 entities):
+
+| `--entities` | no pool          | `--workers 0`    | 1                | 3                | 7                | 15               |
+| ------------ | ---------------- | ---------------- | ---------------- | ---------------- | ---------------- | ---------------- |
+| 10000        | 513.8 / 532.2 µs | 514.5 / 550.1 µs | 389.2 / 446.5 µs | 327.4 / 348.0 µs | 273.2 / 278.0 µs | 274.5 / 284.8 µs |
+| 1000         | 51.6 / 51.8 µs   | 51.5 / 73.2 µs   | 40.3 / 42.6 µs   | 36.3 / 41.4 µs   | 35.4 / 36.4 µs   | 40.6 / 42.2 µs   |
+| 100          | 5.2 / 5.3 µs     | 5.3 / 5.4 µs     | 4.4 / 6.7 µs     | 4.7 / 6.8 µs     | 7.5 / 9.0 µs     | 15.8 / 19.3 µs   |
+
+The serial baseline taken before the runner existed, same machine:
+`per tick: p50 520.600 µs, p95 528.200 µs` (10000),
+`p50 52.100 µs, p95 52.200 µs` (1000), `p50 5.300 µs, p95 5.400 µs` (100). The
+10000 row stops at about half the serial tick because three of its four stages
+hold one system each: that is the stage shape's ceiling, not the pool's.
 
 **Built (2026-10-05): the declaration, the conflict graph and the debug assert,
 designed together. Execution is still serial.** `crcbl_ecs::SystemTrait::access`
@@ -12300,21 +12381,50 @@ Decided 2026-10-05, for the long term:
   documented "might panic or deadlock". Behaviour of the standard lock, not of
   the declaration.
 
-**Deferred: running non-conflicting systems concurrently.** Not trivially safe,
-so not built. What it needs:
+**Still open after the parallel schedule:**
 
-- `SystemTrait: Send`, and `DebugDrawFn` and `System<T>`'s `T` with it — a
-  breaking change to every impl.
-- A runner over the conflict graph on `crcbl_jobs::Pool`: a new `crcbl-ecs` →
-  `crcbl-jobs` edge (rerun the fuzz lock's `--locked` check), with anything
-  systems emit reduced in a fixed order.
-- The determinism proof: `hash_state` per tick identical across worker counts,
-  which needs `crcbl sim --threads` (_The killer test is not runnable_, below)
-  and a harness world with real `Shared` conflicts in it.
-- An ECS bench scenario to show it helped — the 2026-09-06 decision put one
-  ahead of the parallel step, and `crcbl bench` still has only `phys` and
-  `jobs`.
-- The assert's scope widened to whatever the runner calls concurrently.
+- **No host turns it on.** `crcbl-server`'s `Host`, the samples and the editor
+  all run without a pool; adopting it is a per-host decision against that host's
+  thread budget, with the bench above as the price list.
+- **The bench's world is synthetic.** No sample's real schedule has been timed
+  with a pool; the samples' server worlds are mostly one or two systems
+  (`apps/towers`' is one, `FieldReplica`, whose tick is empty), which a pool
+  cannot speed up.
+- **Release builds are not tested**, as for the assert: the runner's tests run
+  in the debug suite only.
+- **The killer test is a test, not a CI job of its own.**
+  `sim_cmd::tests::the_hash_after_every_tick_is_the_same_at_any_thread_count`
+  (1, 2 and 8 threads, every tick) runs in the workspace suite on every push,
+  over the harness world only; `21-jobs.md`'s input-script version waits on _The
+  determinism smoke test has no input script_.
+
+**Coverage gaps of the parallel slice:**
+
+- **`apps/towers`' `parallel_tests` cannot go red under any runner mutation**:
+  its world's one system has an empty tick, so a runner that skipped, doubled or
+  reordered ticks leaves the hash alone. It pins only that handing the towers
+  host a pool perturbs nothing. The tests with teeth are below.
+- **A stage-grouping bug is caught by a race**, so the hash tests' red under
+  "conflicting systems in one stage" is probabilistic in principle; it went red
+  three runs out of three each time it was tried. The structural tests
+  (`conflicting_systems_never_share_a_stage`) are the deterministic guard.
+
+Evidence for the parallel slice, each shown red under a mutation: `crcbl-ecs`'s
+`schedule::tests::conflicting_systems_never_share_a_stage` and
+`a_schedule_on_a_pool_hashes_as_it_does_serially_after_every_tick` (the conflict
+check skipped, so every system joins the last stage), the latter alone (the
+stages run last-first), `the_stages_cover_the_schedule_in_registration_order` (a
+stage's end not extended, dropping a system),
+`a_pool_ticks_the_systems_of_one_stage_at_once` (the pool held but every stage
+ticked on the calling thread),
+`a_timed_schedule_on_a_pool_records_every_systems_tick` (pooled ticks run
+without the clock); `crcbl-server`'s
+`host::parallel_tests::a_host_on_a_pool_hashes_as_it_does_serially_after_every_tick`
+and `crcbl-cli`'s `sim_cmd::tests` hash tests (the conflict check skipped: red
+three runs of three); `sim_cmd::tests` before the runner (the swarm's blocks
+split by worker count; its block sums folded in completion order: red three of
+three); `bench::ecs::tests` (no sample recorded; the moved-hash guard always
+passing; the writers not writing; a writer declared a reader).
 
 **Considered and declined:** declarations over other systems' data or the entity
 allocator (no tick can reach either); a default `access` (above); a `Result`
@@ -12350,18 +12460,6 @@ depends on `crcbl-jobs` (checked each `Cargo.toml`). What exists is adoption
 over results a batch query filled, and `crcbl-phys`'s allocation-free `*_into`
 query forms (`overlap_sphere_into` and friends) exist so that it can. That is
 the shape a crate-side adoption would build on, and it is not the same thing.
-
-### The killer test is not runnable (2026-08-27)
-
-`21-jobs.md`'s determinism killer test is "same input script at `--threads 1`,
-`2`, `N` → identical state hash per tick". `crcbl sim` takes `--ticks`,
-`--tick-rate` and `--seed` and **no worker count**
-(`crates/crcbl-cli/src/args.rs`). So the one CI gate this whole topic leans on
-cannot be run at all today.
-
-**What it would take:** a `--threads` flag on `crcbl sim` that actually drives
-the pool, and a harness world with parallel work in it. Cheap, and it is the
-precondition for trusting any parallel change.
 
 ### Cross-origin isolation on Pages, and no demo page runs workers (2026-08-27)
 
@@ -15075,7 +15173,7 @@ eight missing pieces that code cites ("the seventh missing piece") are in
 Pieces 1, 6, 7 and 8 are closed (`crcbl_core::trace`, `Pool::stats`,
 `crcbl_render::counters`, `crcbl_render::cull_stats`), and piece 2, the
 benchmark harness, is closed for the headless scenarios:
-`crcbl bench --scenario jobs|phys` (`crates/crcbl-cli/src/bench/`) pins the
+`crcbl bench --scenario jobs|phys|ecs` (`crates/crcbl-cli/src/bench/`) pins the
 scenario, warms up, reports p50/p95/p99 and max with no mean, refuses
 percentiles below `MIN_PERCENTILE_SAMPLES`, and emits JSON beside an environment
 block. Re-verified 2026-09-24: `crates/crcbl-cli/src/args.rs` parses no
@@ -16844,6 +16942,14 @@ the framing refusal, systems left out) and
 `host::udp_tests::a_session_changing_more_than_a_datagram_holds_updates_back_and_converges`,
 each shown red by a mutation.
 
+**Behaviour, not a bug: that UDP test can time out under heavy load.** It runs
+real loopback sockets against wall time and gives up at `udp_tests`'
+`WAIT_LIMIT`. On 2026-10-06 it failed once with "gave up waiting for the client
+to converge" while three worktrees compiled on this machine, then passed ten
+runs in a row alone (about 0.18 s each) and in the full suite. A failure of it
+during a loaded local run wants a rerun before a diagnosis; one that repeats on
+an idle machine or in CI is real.
+
 **Built: the rate drop** (2026-10-01), `crcbl_server::cadence`. Each
 `PeerSession` holds a `SnapshotCadence`: a snapshot every tick, stepping to
 every second then every third tick (`SNAPSHOT_INTERVAL_STEPS`) after
@@ -18065,19 +18171,30 @@ rest of the samples use. **What it blocks:** the exit criterion "sector boundary
 crossing invisible at max warp and live rates alike", which is the sample's
 reason for existing on the ladder at S5.
 
-### Orbit owes sample rule 11 and claims no exemption (2026-08-27)
+### Orbit's flight art is placeholder, and what it left (2026-10-06)
 
-**Not built.** The doc asks for `.crpix` art for the flight UI's chrome and the
-map view — the navball-lite, prograde/retrograde markers, apo/peri glyphs.
-`apps/orbit` has no `build.rs` and no `assets/`; the flight instruments are
-rectangles, polylines and text. Unlike hud, viewer, sparks, lantern, quarry,
-shard and puppet, this sample's doc grants **no** rule 11 exemption, so this is
-an open obligation rather than a settled decision.
+**Rule 11 is met** — `apps/orbit/assets/{markers,navball,chrome}.crpix`, drawn
+by `apps/orbit/src/page.rs` — but these are not:
 
-**What it would take:** either the sheets, or an argued exemption written into
-the doc. The exemption is hard to argue: rule 11's own text says the exemption
-is narrow and orbit has explicit 2D chrome. **What it blocks:** rule 11's claim
-that the ladder has no untextured-quad holdouts left.
+- **The art is placeholder, written as text**, as towers' icons are. An art pass
+  would replace the three sheets; nothing else would change, because
+  `crate::art` finds every frame by name.
+- **The apsis direction is a second copy of the eccentricity vector.** `apsides`
+  in `apps/orbit/src/game.rs` forms it from the state, and
+  `crcbl_phys::Orbit::from_state` already forms the same vector and keeps only
+  its length. Exposing the direction from `crcbl-phys` would delete the copy;
+  not done here because `crcbl-phys` was being changed in another worktree at
+  the time. A test pins orbit's copy to known states either way.
+- **No golden pins the picture.** Orbit has no image golden and its browser-gate
+  row reads the `[HUD]` line only, so a sprite drawn in the wrong place passes
+  every gate that does not read the draw list. `page`'s tests hold each sprite
+  to its frame and the navball's markers to their angles; the picture itself was
+  looked at once, in `--screenshot` frames at 960x720 on the pad and mid-ascent,
+  and at no other size.
+- **The markers are placed, not turned.** The UI pass's image quad has no
+  rotation, so a marker on the navball's rim stands upright wherever it rides —
+  as KSP's do — and the map's ship marker shows no heading; the engine plume is
+  what shows it, while the throttle is open.
 
 ### Orbit's crash scrub and its drift record are owed (2026-09-25)
 
@@ -18868,15 +18985,32 @@ exists — what has not been done is pointing puppet at it. **What it blocks:**
 the honesty check, which is the only criterion that tests the importer against
 content this workspace did not author.
 
-### The rest of puppet's milestones 2, 3 and 4 are unbuilt (2026-08-27)
+### The rest of puppet's milestones 2, 3 and 4 are unbuilt (2026-08-27, updated 2026-10-06)
 
-**Not built:** no state machine, no jump, no run, no root motion, no animation
-events and therefore no footstep cues, no socket prop, and none of the
-device-swap showcase — the rebind UI and the glyph hints that follow the
-last-active device. That last group is topic 19's forcing function. The engine
-half of the hints is built: `ActionMap::last_device`, its change edge
-`last_device_changed`, `last_pad_kind` and `ActionMap::hint` (see _Input: the
-inspector shipped_), so the prompts are puppet's own work now.
+**Built since:** the state machine (idle, run, jump through
+`assets/anim/character.ron`), the run (Shift, `game::RUN_SPEED`, a run stride in
+`rig::run`), the jump (Space, `game::JUMP_SPEED`, `rig::jump`) and animation
+events — footsteps from the run state's track, raised on the server's tick and
+counted on the `[HUD]` line, the debug panel and the overlay.
+
+**Not built:** root motion **in puppet** — `rig`'s clips are authored in place,
+so nothing drives the root and `Machine::root_velocity` would answer zero; root
+motion is proven at the crate level only (`tests/machine.rs`). A footstep
+**sound** — puppet has no audio path, so the cue is a counted event; wiring it
+to a `crcbl-audio` cue is the obvious next step once puppet plays anything. No
+socket prop, and none of the device-swap showcase — the rebind UI and the glyph
+hints that follow the last-active device. That last group is topic 19's forcing
+function. The engine half of the hints is built: `ActionMap::last_device`, its
+change edge `last_device_changed`, `last_pad_kind` and `ActionMap::hint` (see
+_Input: the inspector shipped_), so the prompts are puppet's own work now.
+
+**Not verified in a browser:** the browser gate's `[POSE]` checks still read
+`blend` and `mid`, whose meaning moved from "across the idle↔walk blend" to "out
+of the idle stance, through the crossfades"; the headless tests in
+`apps/puppet/src/anim.rs` hold the same claims
+(`the_blend_sweeps_through_the_crossfade_both_ways`,
+`a_steady_run_leaves_the_crossing_counter_alone`), but
+`web/tools/browser-e2e.mjs` was not run against this change.
 
 **Also not built:** milestone 5's golden frames. `apps/puppet` has no `tests/`
 directory at all, so nothing pins a pose; the Pages demo half of milestone 5 is
@@ -18885,9 +19019,6 @@ done (`apps/puppet/src/web.rs`, `web/demos/puppet/`, the `puppet` row in
 
 **One engine limit is visible in the picture**: the slopes are rounded, because
 `crcbl-phys` has no oriented box to make a wedge out of.
-
-**What it blocks:** the footstep-timing exit criterion is topic 17's event test
-"live", and nothing else in the tree exercises animation events.
 
 ### Puppet's `--scene` is proven to the simulation, not to the frame (2026-09-07)
 
@@ -20156,25 +20287,11 @@ What else is open:
 
 ### What puppet's locomotion blend leaves for the rest of milestone 2
 
-`apps/puppet` ships the map, the controller path, the orbit-follow camera and —
-as of the blend layer — a skinned character blended between an idle stance and a
-walk by its own measured speed. What milestone 2 of
-`docs/plan/sample/09-puppet.md` still wants:
+`apps/puppet` ships the map, the controller path, the orbit-follow camera and a
+skinned character posed through the animation state machine — idle, a run that
+blends a walk and a run stride by measured speed, and a jump. What milestone 2
+of `docs/plan/sample/09-puppet.md` still wants:
 
-- **No state machine, and no crossfade to feed it.** The locomotion set is
-  continuous in speed, so nothing in the sample ever _switches_ states. A
-  `Crossfade` — the timed weight a switch fades over — was written and tested
-  during the blend slice and then **removed before it landed**, because it had
-  no in-tree caller and machinery kept for a use that has not arrived is
-  indirection to read through. It comes back with the idle/walk/run/jump/fall
-  machine the plan names, which is the caller that makes the fade something a
-  demo can be checked on. It is a dozen lines plus its tests; the shape is
-  described in `crcbl-anim/src/blend.rs`'s module docs.
-- **No run, so the set has two stops and not three.** `game::WALK_SPEED` is the
-  only gait the controller has, so `anim::Animator` places idle at 0 and walk at
-  `anim::WALK_STOP_MPS`. `BlendSpace1d` takes any number of stops and is tested
-  with three; adding a run means a second commanded speed in `game`, a run clip
-  in `rig`, and a third stop.
 - **The skin weights are all 1.** `rig::box_part` binds each vertex wholly to
   the nearer of its limb's two joints, because a cuboid has vertices only at its
   two ends. The limb still shears between the joints — which is why the parts
@@ -20194,10 +20311,11 @@ walk by its own measured speed. What milestone 2 of
   on the render-graph dump naming the `skinning` pass — the dump is logged once,
   at the first frame, before the harness can raise the log level, so that one
   needs the dump re-emitted or the level set at boot.
-- **No jump.** `game::run_tick` integrates a fall speed and nothing ever pushes
-  it upward, so `MoveOutcome::hit_ceiling` is never true in this sample.
-- **No root motion, no animation events and no attachment socket** — milestone
-  2's remaining items and milestone 3's.
+- **`MoveOutcome::hit_ceiling` is never true in this sample.** The jump pushes
+  the character up, but nothing on the map is low enough to hit.
+- **No root motion and no attachment socket** — the clips are in place (see _The
+  rest of puppet's milestones 2, 3 and 4 are unbuilt_), and the socket is
+  milestone 3's.
 - **Slopes are spheres, because `crcbl-phys` has no oriented box.** Its
   colliders are `Sphere`, an axis-aligned `BoxCollider` and a Y-aligned
   `Capsule`, so a ramp at an arbitrary angle cannot be built — `map::world` uses
@@ -20760,41 +20878,13 @@ work anybody can start.
   promised in P8 what the physics topic scheduled later; the physics topic was
   the one to believe.
 
-- **The ECS parallel schedule is the real remaining P8 work**, and it is blocked
-  on a decision rather than on effort — see the entry above.
+- **The ECS parallel schedule is built (2026-10-06)**, opt-in per world — see
+  _ECS access declarations and the parallel schedule_.
 
 So P8 as written looks like a large slice and is mostly already answered. What
-it leaves is: pick an option for the ECS schedule, and give the `phys` bench
-something to compare a parallel adoption against — today it measures one thread,
-which is the right baseline and not yet a comparison.
-
-### P8's ECS access declarations were never reserved, and P2 says they were
-
-The record behind this — the argument, the options and the measurements — is in
-`docs/notes/simulation.md` under this heading.
-
-**Step 1 of the decision below is built (2026-10-05)**: the declarations, the
-conflict graph and the debug assert, with captured state made visible by moving
-it onto `Shared` — _ECS access declarations and the parallel schedule_ records
-the decisions. What this entry measured on 2026-08-23 — no declaration, no
-assert, a `Schedule` doc claiming one — is no longer true.
-
-**What the parallel schedule still costs, so P8 is not planned against the wrong
-number:**
-
-- `SystemTrait` must become `Send`, and so must `DebugDrawFn` (today
-  `Box<dyn FnMut(&DebugCtx)>`, with no bound). That is a breaking change to the
-  trait, to `System<T>`'s `T`, and to every impl in the workspace.
-- Determinism has to survive it. `hash_state` and the sim-hash harness are what
-  `crcbl-server` compares across machines, and a schedule whose completion order
-  varies must still feed that hash in a fixed order.
-
-**DECIDED 2026-09-06 —** 3 → 1 → 2, in that order: the broadphase bench first,
-then `SystemTrait::access()` read and write sets with debug conflict asserts,
-then opt-in parallel systems. Bevy's `SystemParam` access sets and Unity DOTS'
-`[ReadOnly]` are the shape, and both gate parallelism on declared access rather
-than the other way round. It schedules an ECS bench scenario ahead of the
-schedule work.
+it leaves is giving the `phys` bench something to compare a parallel adoption
+against — today it measures one thread, which is the right baseline and not yet
+a comparison.
 
 ### DECIDED — a refit-only tree degrades, and the number is now known
 
@@ -29110,7 +29200,7 @@ the same heading. What they leave owed:
   `report()`, a human summary, and no Chrome Trace Event emitter. Text, no
   dependency, and `crcbl-cli` already has JSON machinery.
 - **`crcbl bench` has no `--compare <baseline>` and no `--trace <path>`.**
-  `crates/crcbl-cli/src/bench/` landed with its `jobs` and `phys` scenarios,
+  `crates/crcbl-cli/src/bench/` has its `jobs`, `phys` and `ecs` scenarios,
   warm-up, p50/p95/p99/max, `MIN_PERCENTILE_SAMPLES`, `--json` and a mandatory
   environment block; that module's own header records those two as the rows it
   did not start. Until they land, two runs are compared by a person reading two

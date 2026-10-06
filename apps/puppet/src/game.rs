@@ -19,11 +19,11 @@
 //! # How input becomes a world-space displacement
 //!
 //! ```text
-//!   keys ──▶ Controls ──▶ Intent { yaw, forward, strafe } ──wire──▶ Intent
-//!                                                                    │
-//!                            OrbitCamera::walk_direction(yaw, …) ──┘
+//!   keys ──▶ Controls ──▶ Intent { yaw, forward, strafe, run, jump } ──wire──▶ Intent
+//!                                                                              │
+//!                                  OrbitCamera::walk_direction(yaw, …) ──────┘
 //!                                     │
-//!                        × WALK_SPEED × dt  ──▶ move_and_slide
+//!               × WALK_SPEED or RUN_SPEED × dt  ──▶ move_and_slide
 //! ```
 //!
 //! **The yaw crosses the wire and the direction is derived on the server.** The
@@ -42,6 +42,16 @@
 //! the one that was asked for — at [`TURN_RATE`]. A character sliding along a
 //! wall therefore faces along the wall, which is where it is going.
 //!
+//! # The character's animation state is stepped here, on the tick
+//!
+//! [`crate::anim::Locomotion`] — the state machine that picks idle, run or
+//! jump, and the footsteps its run raises — is part of the stage, stepped at
+//! the end of every tick from what the move just did: the measured speed, the
+//! controller's grounded verdict, and whether this tick was the one the
+//! character left the ground. The pose is not: the frame poses the rig from the
+//! [`MachineState`] copied into [`RenderState`]. See [`crate::anim`] for why
+//! the line falls there.
+//!
 //! # It walks a circuit until somebody takes the controls
 //!
 //! A page that has just loaded has had no input, and a character standing still
@@ -54,6 +64,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use crcbl::anim::MachineState;
 use crcbl::ecs::{ClientInputs, GameModule, World};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
@@ -61,14 +72,18 @@ use crcbl::phys::{CharacterConfig, CharacterController, MoveOutcome, PhysicsWorl
 use crcbl::render::OrbitCamera;
 use crcbl::session::Loopback;
 
+use crate::anim::Locomotion;
 use crate::camera::facing_of;
 use crate::map::Map;
 
 /// Distinct from every other sample's, because they are distinct protocols: a
 /// client built for one must not hand-shake with a server running another. The
 /// low half spells `PUP`.
+///
+/// Version 2 is the intent byte with the run and jump flags: a version-1 server
+/// refuses those bits as frames it did not write, so the two must not meet.
 const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
-    protocol_version: 1,
+    protocol_version: 2,
     engine_build_id: 0x0043_5243_424C,
     schema_hash: 0x0000_0050_5550,
 };
@@ -83,6 +98,21 @@ pub const DEFAULT_TICK_HZ: u32 = 60;
 /// speed the [`crate::map`] lane's steps are read at — fast enough to cross the
 /// map without waiting, slow enough that a step is climbed rather than vaulted.
 pub const WALK_SPEED: f64 = 3.2;
+
+/// How fast the character runs, in metres a second, while the run key is held.
+///
+/// Over [`crate::anim::RUN_STOP_MPS`], the speed the run clip is authored for,
+/// for the reason [`WALK_SPEED`] sits over the walk's: the measured speed
+/// approaches this from below, and the blend has to reach its top stop on the
+/// way.
+pub const RUN_SPEED: f64 = 6.0;
+
+/// How fast a jump leaves the ground, in metres a second upward.
+///
+/// It rises `v² / 2g` under [`GRAVITY`]: enough to read as a jump, and short of
+/// the high step's riser, which `the_input_drives_idle_run_and_jump` holds it
+/// to.
+pub const JUMP_SPEED: f64 = 2.8;
 
 /// Gravity, in metres per second squared.
 ///
@@ -110,11 +140,11 @@ const FACING_EPSILON: f64 = 1e-4;
 /// How long the measured ground speed takes to catch up with the character's
 /// real one, in seconds.
 ///
-/// **The locomotion blend is what this is for.** `move_and_slide` reports the
+/// **The animation is what this is for.** `move_and_slide` reports the
 /// displacement of one tick, and the commanded speed goes from nothing to
 /// [`WALK_SPEED`] on the tick a key goes down — so an unsmoothed reading is a
-/// square wave, and a blend driven by it snaps between idle and walk instead of
-/// passing through. A third of a second is long enough that the crossing is
+/// square wave, and the run state's blend driven by it snaps between the walk
+/// and the run stride instead of passing through. A third of a second is long enough that the crossing is
 /// visible and short enough that the legs are moving before the character has
 /// gone anywhere.
 const SPEED_SMOOTHING_S: f64 = 0.35;
@@ -166,6 +196,11 @@ pub struct Controls {
     pub back: bool,
     pub left: bool,
     pub right: bool,
+    /// Held: move at [`RUN_SPEED`] rather than [`WALK_SPEED`].
+    pub run: bool,
+    /// Held: jump. The jump is taken on the tick this goes down while the
+    /// character is grounded; holding it does not jump again on landing.
+    pub jump: bool,
     /// Where the view is pointing, in [`crate::camera::Follow::yaw`]'s measure.
     pub yaw: f32,
 }
@@ -177,6 +212,8 @@ struct Intent {
     back: bool,
     left: bool,
     right: bool,
+    run: bool,
+    jump: bool,
     yaw: f32,
 }
 
@@ -184,10 +221,13 @@ const INTENT_FORWARD: u8 = 1 << 0;
 const INTENT_BACK: u8 = 1 << 1;
 const INTENT_LEFT: u8 = 1 << 2;
 const INTENT_RIGHT: u8 = 1 << 3;
+const INTENT_RUN: u8 = 1 << 4;
+const INTENT_JUMP: u8 = 1 << 5;
 
 /// Every bit the flag byte defines. One set outside this mask is a frame
 /// something other than [`Intent::to_wire`] wrote.
-const INTENT_FLAGS: u8 = INTENT_FORWARD | INTENT_BACK | INTENT_LEFT | INTENT_RIGHT;
+const INTENT_FLAGS: u8 =
+    INTENT_FORWARD | INTENT_BACK | INTENT_LEFT | INTENT_RIGHT | INTENT_RUN | INTENT_JUMP;
 
 /// How many bytes one sealed intent is: a flag byte and the yaw as an IEEE-754
 /// binary32, little-endian.
@@ -198,9 +238,11 @@ impl Intent {
     ///
     /// The yaw is deliberately not part of the question: a camera always has an
     /// angle, so an intent that counted it would be "anything" on the first
-    /// frame and the circuit would never run at all.
+    /// frame and the circuit would never run at all. A jump counts, because it
+    /// is a thing the player did; the run key alone does not, because it only
+    /// says how fast to go once they do.
     const fn is_moving(self) -> bool {
-        self.forward || self.back || self.left || self.right
+        self.forward || self.back || self.left || self.right || self.jump
     }
 
     /// The forward axis, in `-1..=1`. Both keys held is neither, which is what
@@ -229,6 +271,12 @@ impl Intent {
         }
         if self.right {
             flags |= INTENT_RIGHT;
+        }
+        if self.run {
+            flags |= INTENT_RUN;
+        }
+        if self.jump {
+            flags |= INTENT_JUMP;
         }
         let mut bytes = Vec::with_capacity(INTENT_BYTES);
         bytes.push(flags);
@@ -261,6 +309,8 @@ impl Intent {
             back: flags & INTENT_BACK != 0,
             left: flags & INTENT_LEFT != 0,
             right: flags & INTENT_RIGHT != 0,
+            run: flags & INTENT_RUN != 0,
+            jump: flags & INTENT_JUMP != 0,
             yaw,
         })
     }
@@ -285,6 +335,8 @@ impl Intent {
             merged.back |= frame.back;
             merged.left |= frame.left;
             merged.right |= frame.right;
+            merged.run |= frame.run;
+            merged.jump |= frame.jump;
             merged.yaw = frame.yaw;
         }
         merged
@@ -347,10 +399,22 @@ struct Stage {
     /// **What the world allowed, not what was asked for.** It is measured from
     /// [`MoveOutcome::motion`] rather than from [`WALK_SPEED`] and the input
     /// flags, so a character pushing against the riser it cannot climb reads as
-    /// standing still — which is what it is doing. [`crate::anim`] blends the
-    /// locomotion set on this number, and that is the difference between a pose
-    /// that tracks the body and one that tracks the keyboard.
+    /// standing still — which is what it is doing. [`crate::anim`]'s state
+    /// machine leaves idle and blends its run on this number, and that is the
+    /// difference between a pose that tracks the body and one that tracks the
+    /// keyboard.
     speed: f64,
+    /// The character's animation state machine, stepped at the end of every
+    /// tick — see the module docs.
+    locomotion: Locomotion,
+    /// Whether the jump key was down last tick, so a held key jumps once and
+    /// not again on every landing.
+    jump_held: bool,
+    /// How many footsteps the animation has raised — the run state's event
+    /// track, counted. **The cue this sample has for them**: puppet plays no
+    /// audio, so a footstep is a counted gameplay event on the `[HUD]` line
+    /// and the debug panel rather than a sound.
+    footsteps: u64,
 }
 
 /// Where the character's feet are, given where its capsule's centre is.
@@ -383,6 +447,9 @@ impl Stage {
             blocked: 0,
             highest: spawn.y,
             speed: 0.0,
+            locomotion: Locomotion::new(),
+            jump_held: false,
+            footsteps: 0,
         }
     }
 }
@@ -432,12 +499,24 @@ fn run_tick(stage: &mut Stage, player: Intent, dt: f64) {
     // world. Everything below this line is metres.
     let direction =
         OrbitCamera::walk_direction(f64::from(intent.yaw), intent.ahead(), intent.across());
-    let horizontal = direction * WALK_SPEED * dt;
+    let gait = if intent.run { RUN_SPEED } else { WALK_SPEED };
+    let horizontal = direction * gait * dt;
+
+    // A jump is taken on the tick the key goes down, and only from the ground:
+    // the edge rather than the level, so holding it does not bounce, and the
+    // last tick's verdict, because this tick's move has not happened yet.
+    let jumped = intent.jump && !stage.jump_held && stage.outcome.grounded;
+    stage.jump_held = intent.jump;
+    if jumped {
+        stage.fall_speed = JUMP_SPEED;
+    }
 
     // Gravity is integrated while the character is off the ground and reset the
     // moment it is on it. A grounded `move_and_slide` discards the vertical it
     // is asked for anyway — it takes its rise from the ramp instead — so this is
-    // about what the *next* tick falls at, not about this one.
+    // about what the *next* tick falls at, not about this one. An upward
+    // request is the exception the controller makes, which is how a jump
+    // leaves the ground at all.
     stage.fall_speed += GRAVITY * dt;
     let motion = horizontal + DVec3::Y * stage.fall_speed * dt;
 
@@ -466,6 +545,14 @@ fn run_tick(stage: &mut Stage, player: Intent, dt: f64) {
     if stage.speed < STANDING_SPEED {
         stage.speed = 0.0;
     }
+
+    // The animation, last: it reads what this tick's move did. `f32` is the
+    // precision `crcbl::anim` keeps its clock in.
+    #[allow(clippy::cast_possible_truncation)]
+    let footsteps = stage
+        .locomotion
+        .tick(dt as f32, stage.speed as f32, outcome.grounded, jumped);
+    stage.footsteps += footsteps;
 
     stage.climbed += u64::from(outcome.stepped_up);
     stage.blocked += u64::from(outcome.hit_wall);
@@ -542,10 +629,16 @@ pub struct RenderState {
     /// Whether the circuit is still walking it.
     pub patrolling: bool,
     /// How fast it is travelling over the ground, in metres a second — the
-    /// smoothed, *measured* speed [`crate::anim`] blends the locomotion set on.
+    /// smoothed, *measured* speed [`crate::anim`]'s state machine is driven by.
     pub speed: f64,
     /// Seconds of simulated time — what [`crate::map::Map::sun`] takes.
     pub elapsed: f64,
+    /// The animation state machine's state as the tick left it — what
+    /// [`crate::anim::Animator`] poses the rig from. **A copy**, the way the
+    /// design has the server's animation state reach the client.
+    pub anim: MachineState,
+    /// How many footsteps the animation has raised.
+    pub footsteps: u64,
 }
 
 /// The stage's numbers, for the debug overlay.
@@ -561,6 +654,10 @@ pub struct Stats {
     pub slides: u32,
     pub patrolling: bool,
     pub speed: f64,
+    /// The animation state the character is in, as one of
+    /// [`crate::anim::STATES`].
+    pub anim: &'static str,
+    pub footsteps: u64,
 }
 
 impl crcbl::ui::DebugModule for Stats {
@@ -583,6 +680,8 @@ impl crcbl::ui::DebugModule for Stats {
         section.row("top", format_args!("{:.2} m", self.highest));
         section.row("slides", format_args!("{}", self.slides));
         section.row("speed", format_args!("{:.2} m/s", self.speed));
+        section.row("anim", format_args!("{}", self.anim));
+        section.row("steps", format_args!("{}", self.footsteps));
         section.row(
             "pilot",
             format_args!("{}", if self.patrolling { "circuit" } else { "player" }),
@@ -700,6 +799,8 @@ impl Game {
             back: controls.back,
             left: controls.left,
             right: controls.right,
+            run: controls.run,
+            jump: controls.jump,
             yaw: controls.yaw,
         };
     }
@@ -754,6 +855,9 @@ impl Game {
     ///   near it.
     /// * `top` — the highest its feet have been. The control for `climbed`: it
     ///   reaches [`crate::map::LOW_STEP_TOP`] and never [`crate::map::HIGH_STEP_TOP`].
+    ///
+    /// Two more that the animation produces, on the tick: `state` is the state
+    /// machine's current state and `steps` the footsteps it has raised.
     fn log_heartbeat(&self) {
         let stage = lock(&self.shared);
         if !crcbl::engine::heartbeat_due(stage.ticks, HEARTBEAT_TICKS) {
@@ -762,7 +866,7 @@ impl Game {
         let position = stage.character.position();
         crcbl::log::info!(
             "[HUD] tick: {}  px: {:.2}  py: {:.2}  pz: {:.2}  ground: {}  climbed: {}  \
-             blocked: {}  top: {:.2}  pilot: {}",
+             blocked: {}  top: {:.2}  pilot: {}  state: {}  steps: {}",
             stage.ticks,
             position.x,
             feet_of(&stage.character),
@@ -776,6 +880,8 @@ impl Game {
             } else {
                 "player"
             },
+            stage.locomotion.label(),
+            stage.footsteps,
         );
     }
 
@@ -792,6 +898,8 @@ impl Game {
             patrolling: stage.patrolling,
             elapsed: stage.elapsed,
             speed: stage.speed,
+            anim: stage.locomotion.state(),
+            footsteps: stage.footsteps,
         }
     }
 
@@ -810,6 +918,8 @@ impl Game {
             slides: stage.outcome.slides,
             patrolling: stage.patrolling,
             speed: stage.speed,
+            anim: stage.locomotion.label(),
+            footsteps: stage.footsteps,
         }
     }
 }
@@ -872,8 +982,8 @@ mod tests {
     }
 
     /// **The measured speed rises to the walk and comes back to a standstill**,
-    /// and it does both *gradually* — which is what [`crate::anim`] blends the
-    /// locomotion set on, and the same pair the browser gate asserts through
+    /// and it does both *gradually* — which is what [`crate::anim`]'s run blend
+    /// mixes its strides on, and the same pair the browser gate asserts through
     /// the blend weight.
     ///
     /// The gradual half is the point. The commanded speed is a square wave, and
@@ -1159,6 +1269,8 @@ mod tests {
         let intent = Intent {
             forward: true,
             right: true,
+            run: true,
+            jump: true,
             yaw: 1.25,
             ..Intent::default()
         };
@@ -1193,7 +1305,7 @@ mod tests {
             back: true,
             left: true,
             right: true,
-            yaw: 0.0,
+            ..Intent::default()
         };
         assert_eq!(both.ahead(), 0.0);
         assert_eq!(both.across(), 0.0);
@@ -1206,6 +1318,119 @@ mod tests {
             .is_moving(),
             "a camera angle is not a request to move",
         );
+    }
+
+    /// **The movement input drives idle, run and jump through the state
+    /// machine** — the run key and a forward key out of idle into the run, the
+    /// jump key into the jump and off the ground, a landing back into the run
+    /// with the key still held and no second jump, and letting go back to idle.
+    #[test]
+    fn the_input_drives_idle_run_and_jump() {
+        let mut stage = standing();
+        walk(&mut stage, Intent::default(), 0.5);
+        assert_eq!(stage.locomotion.label(), "idle");
+
+        // Down the lane, which is flat for longer than this whole script runs.
+        let run = Intent {
+            forward: true,
+            run: true,
+            ..Intent::default()
+        };
+        walk(&mut stage, run, 1.0);
+        assert_eq!(stage.locomotion.label(), "run");
+        assert!(
+            stage.speed > f64::from(crate::anim::WALK_STOP_MPS),
+            "the run key left the character at {:.2} m/s",
+            stage.speed,
+        );
+
+        let leap = Intent { jump: true, ..run };
+        run_tick(&mut stage, leap, DT);
+        assert_eq!(stage.locomotion.label(), "jump");
+        assert!(!stage.outcome.grounded, "the jump did not leave the ground");
+
+        // Hold the key through the flight and past the landing.
+        let take_off = feet_of(&stage.character);
+        let mut peak = take_off;
+        let mut landed = false;
+        for _ in 0..(1.0 / DT).round() as u64 {
+            run_tick(&mut stage, leap, DT);
+            peak = peak.max(feet_of(&stage.character));
+            landed |= stage.outcome.grounded;
+        }
+        assert!(
+            landed,
+            "a second after the jump the character had not landed"
+        );
+        assert!(
+            stage.outcome.grounded,
+            "the held key jumped again on landing"
+        );
+        assert!(
+            peak > take_off + 0.25 && peak < map::HIGH_STEP_TOP,
+            "the jump peaked at {peak:.2} m",
+        );
+        assert_eq!(stage.locomotion.label(), "run", "it did not land running");
+
+        walk(&mut stage, Intent::default(), 2.0);
+        assert_eq!(stage.locomotion.label(), "idle");
+    }
+
+    /// **Footsteps fire while the character runs and not while it stands** —
+    /// the run state's event track, raised on the server's tick and counted.
+    #[test]
+    fn footsteps_fire_while_running_and_not_while_standing() {
+        let mut stage = standing();
+        walk(&mut stage, Intent::default(), 2.0);
+        assert_eq!(stage.footsteps, 0, "a standing character took steps");
+
+        let forward = Intent {
+            forward: true,
+            ..Intent::default()
+        };
+        walk(&mut stage, forward, 2.0);
+        let walked = stage.footsteps;
+        // Two footfalls a stride, and a stride is about a second at a walk.
+        assert!(walked >= 3, "two seconds of walking took {walked} step(s)");
+
+        walk(&mut stage, Intent::default(), 1.0);
+        let settled = stage.footsteps;
+        walk(&mut stage, Intent::default(), 2.0);
+        assert_eq!(
+            stage.footsteps, settled,
+            "the character kept stepping after it stopped",
+        );
+    }
+
+    /// **The animation state is part of what a tick determines**: two stages
+    /// driven by the same intents agree on it bit for bit, through its
+    /// field-by-field hash — and the hash moves while the character does.
+    #[test]
+    fn the_animation_state_is_the_same_on_two_identical_runs() {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+
+        let script = |stage: &mut Stage| {
+            let mut hashes = Vec::new();
+            for tick in 0..240_u64 {
+                let intent = Intent {
+                    forward: tick % 90 < 60,
+                    run: tick % 50 < 20,
+                    jump: tick % 70 == 10,
+                    yaw: 0.3,
+                    ..Intent::default()
+                };
+                run_tick(stage, intent, DT);
+                let mut hasher = DefaultHasher::new();
+                stage.locomotion.state().hash(&mut hasher);
+                hashes.push(hasher.finish());
+            }
+            (hashes, stage.footsteps)
+        };
+        let first = script(&mut standing());
+        let second = script(&mut standing());
+        assert_eq!(first, second, "two identical runs animated differently");
+        let distinct: std::collections::HashSet<u64> = first.0.iter().copied().collect();
+        assert!(distinct.len() > 100, "the animation state barely moved");
     }
 
     /// The short way round, including across the wrap.

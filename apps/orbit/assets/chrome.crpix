@@ -1,0 +1,66 @@
+# The flight panel's chrome: the frame the readouts sit in, and the two gauges
+# under it.
+#
+# Square, with the `nine:` at the bottom, drawn `art::CHROME_SCALE` pixels to
+# the texel and stretched by the UI pass's nine-slice, which is why **every
+# stretched band is one colour along its whole span**: the columns between the
+# left and right insets agree along any row, and the rows between the top and
+# bottom insets along any column. A band that did not would smear
+# across the panel's width. `crates/crcbl-render/assets/menu.crpix` keeps the
+# same rule for the same reason.
+#
+# * `panel` is the window: an outline, a bevel lit from the top left, and a
+#   body that lets the map show faintly through — the `e0` on `p` is the
+#   translucency the panel always had.
+# * `track` is a gauge's empty well, drawn as it is.
+# * `fill` is the part of a gauge that is full. White on purpose, so the draw's
+#   tint is its colour and one frame serves the fuel gauge and the throttle's
+#   alike; the lower rows are a shade down, which is what makes it read as a
+#   bar rather than a stripe. Its rim is clear, so it sits inside the track's
+#   outline.
+#
+# **Placeholder art, written as text**, like the rest of `assets/`.
+crpix: 8 8 3 8 1
+
+palette:
+  . c None
+  k c #0b0d14
+  l c #9ea6b8
+  d c #2c3242
+  p c #454b5de0
+  t c #26293a
+  w c #ffffff
+  s c #c4c4c4
+
+frame panel:
+  kkkkkkkk
+  kllllldk
+  klppppdk
+  klppppdk
+  klppppdk
+  klppppdk
+  kddddddk
+  kkkkkkkk
+
+frame track:
+  kkkkkkkk
+  kttttttk
+  kttttttk
+  kttttttk
+  kttttttk
+  kttttttk
+  kttttttk
+  kkkkkkkk
+
+frame fill:
+  ........
+  .wwwwww.
+  .wwwwww.
+  .wwwwww.
+  .wwwwww.
+  .ssssss.
+  .ssssss.
+  ........
+
+nine: 3 3 3 3
+sample: pixel

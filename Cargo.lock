@@ -393,7 +393,10 @@ dependencies = [
 name = "crcbl-anim"
 version = "0.1.0"
 dependencies = [
+ "crcbl-rand",
  "glam",
+ "ron",
+ "serde",
 ]
 
 [[package]]
@@ -470,6 +473,7 @@ name = "crcbl-ecs"
 version = "0.1.0"
 dependencies = [
  "crcbl-core",
+ "crcbl-jobs",
  "crcbl-reflect",
 ]
 
@@ -658,6 +662,7 @@ dependencies = [
  "crcbl-console",
  "crcbl-core",
  "crcbl-ecs",
+ "crcbl-jobs",
  "crcbl-net",
  "crcbl-phys",
  "crcbl-rand",
@@ -1589,6 +1594,7 @@ version = "0.1.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
+ "crcbl-sprite",
  "glam",
 ]
 

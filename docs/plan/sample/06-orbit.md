@@ -80,11 +80,20 @@ Not built: **milestones 3 and 4.** The moon's frame exists and a ship that
 reached it would be handed over, but nothing flies there yet. The bodies are
 drawn as a **map view** over the flight instruments rather than in 3D, so the
 Scope's "no visible seam or jitter" claim has not been looked at in a 3D frame.
-And the `.crpix` art rule 11 asks for is not there — `apps/orbit` has no
-`build.rs` and no `assets/`, and the navball-lite, the prograde/retrograde
-markers and the apo/peri glyphs are drawn as rectangles, polylines and text.
-That is rule 11 owed rather than exempted; this doc claims no exemption and
-should not be read as taking one.
+
+**Rule 11 is met (2026-10-06), with no exemption claimed.** `apps/orbit/assets/`
+holds three `.crpix` sheets that `build.rs` bakes: `markers` (prograde,
+retrograde, heading, the apoapsis and periapsis glyphs, the ship), `navball`
+(the navball-lite, one frame under air and one in vacuum) and `chrome` (the
+panel's window and the gauges, nine-sliced). `apps/orbit/src/art.rs` registers
+them and `apps/orbit/src/page.rs` draws them: the navball-lite is a flat dial
+whose top is the local vertical, with the markers riding its rim, and the map
+marks the apsides and the ship. They are image quads from the UI pass's atlas,
+as towers' build-menu icons are, rather than a `SpriteRenderer` pass, because
+everything this sample draws is still the UI pass's page. What stays geometry is
+data rather than chrome — the bodies, which the Scope keeps for 3D, and the
+trajectory — and the readouts stay text. The art is placeholder, written as
+text.
 
 **Milestone 1 is built with one substitution (re-checked 2026-09-25):** landing
 is `touch_down`'s radius test in `apps/orbit/src/game.rs` — altitude against the

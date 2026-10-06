@@ -7,9 +7,13 @@
 //!  │ Z       -2.71 m  │
 //!  │ GROUND      YES  │
 //!  │ PILOT    PLAYER  │
+//!  │ SPEED   3.20 m/s │
+//!  │ BLEND       1.00 │
+//!  │ STATE        RUN │
+//!  │ STEPS         14 │
 //!  └──────────────────┘
 //!
-//!            W/A/S/D walk   Q/E turn the camera   R/F tilt it
+//!     W/A/S/D walk   SHIFT run   SPACE jump   Q/E turn the camera   R/F tilt it
 //! ```
 //!
 //! # It is small on purpose
@@ -55,7 +59,7 @@ const PANEL: ReadoutPanel = ReadoutPanel {
 };
 
 /// The control hint, which is the whole of what a first-time visitor needs.
-const HINT: &str = "W/A/S/D walk   Q/E turn the camera   R/F tilt it";
+const HINT: &str = "W/A/S/D walk   SHIFT run   SPACE jump   Q/E turn the camera   R/F tilt it";
 
 /// What the page drew, for the loop's own tests and its summary line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,18 +73,21 @@ pub struct PageStats {
 /// `atlas` is only measured against — the glyphs themselves are the UI pass's
 /// business — and it is what right-aligns the readings against a proportional
 /// font rather than against a guess; see [`ReadoutPanel::draw_at`].
-/// `blend` is where the character sits across the locomotion set —
-/// [`crate::anim::Animator::blend`]. It arrives as an argument rather than on
-/// `state` because it is not something the simulation knows: the speed is, and
-/// the pose the speed selects is the client's.
+/// `blend` is how far the character is out of its idle stance —
+/// [`crate::anim::Animator::blend`] — and `anim` the name of the state machine
+/// state the pose was sampled in. Both arrive as arguments rather than on
+/// `state` because they are the client's reading of the pose: the simulation
+/// sends the machine's state, and the names and weights are what the client's
+/// copy of the asset makes of it.
 pub fn draw(
     list: &mut DrawList,
     atlas: &FontAtlas,
     extent: (u32, u32),
     state: &RenderState,
     blend: f32,
+    anim: &str,
 ) -> PageStats {
-    let rows: [ReadoutRow; 7] = [
+    let rows: [ReadoutRow; 9] = [
         ReadoutRow::new("X", format!("{:.2} m", state.position.x), VALUE),
         ReadoutRow::new("Y", format!("{:.2} m", state.feet), VALUE),
         ReadoutRow::new("Z", format!("{:.2} m", state.position.z), VALUE),
@@ -103,6 +110,10 @@ pub fn draw(
         // together is the eyeball check that the blend tracks the body.
         ReadoutRow::new("SPEED", format!("{:.2} m/s", state.speed), VALUE),
         ReadoutRow::new("BLEND", format!("{blend:.2}"), VALUE),
+        // Which state the machine picked, and the footsteps its run raised —
+        // the one animation event this sample has, counted on the server.
+        ReadoutRow::new("STATE", anim.to_uppercase(), VALUE),
+        ReadoutRow::new("STEPS", format!("{}", state.footsteps), VALUE),
     ];
 
     PANEL.draw(list, atlas, &rows);
@@ -132,9 +143,10 @@ mod tests {
             feet: 0.3,
             grounded: true,
             speed: 2.5,
+            footsteps: 14,
             ..RenderState::default()
         };
-        let stats = draw(&mut list, &atlas, (960, 720), &state, 0.78);
+        let stats = draw(&mut list, &atlas, (960, 720), &state, 0.78, "run");
         assert!(stats.commands > 0, "the page drew nothing at all");
 
         let text: Vec<&str> = list
@@ -175,6 +187,14 @@ mod tests {
             text.contains(&"0.78"),
             "the blend reading is missing: {text:?}"
         );
+        assert!(
+            text.contains(&"RUN"),
+            "the animation state is missing: {text:?}"
+        );
+        assert!(
+            text.contains(&"14"),
+            "the footstep count is missing: {text:?}"
+        );
     }
 
     /// **A reading that is measured wrong is drawn off the surface, and the
@@ -193,7 +213,7 @@ mod tests {
             ..RenderState::default()
         };
         let extent = (960u32, 720u32);
-        draw(&mut list, &atlas, extent, &state, 0.5);
+        draw(&mut list, &atlas, extent, &state, 0.5, "jump");
 
         let drawn: Vec<(Vec2, &str)> = list
             .commands()

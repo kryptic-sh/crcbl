@@ -67,8 +67,7 @@ impl Inspector {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex, PoisonError};
     use std::time::Duration;
 
     use crcbl_core::time::TimeSource;
@@ -80,11 +79,21 @@ mod tests {
     /// A clock the test's systems move: reading it costs nothing, and a tick
     /// takes exactly as long as the system says it did.
     #[derive(Debug, Clone, Default)]
-    struct FakeClock(Rc<Cell<Duration>>);
+    struct FakeClock(Arc<Mutex<Duration>>);
+
+    impl FakeClock {
+        fn get(&self) -> Duration {
+            *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+
+        fn set(&self, now: Duration) {
+            *self.0.lock().unwrap_or_else(PoisonError::into_inner) = now;
+        }
+    }
 
     impl TimeSource for FakeClock {
         fn elapsed(&self) -> Duration {
-            self.0.get()
+            self.get()
         }
     }
 
@@ -119,8 +128,8 @@ mod tests {
         }
         fn tick(&mut self, _dt: f64) {
             self.ticks += 1;
-            let now = self.clock.0.get();
-            self.clock.0.set(now + (self.cost)(self.ticks));
+            let now = self.clock.get();
+            self.clock.set(now + (self.cost)(self.ticks));
         }
         fn entity_count(&self) -> usize {
             0
@@ -154,7 +163,7 @@ mod tests {
             .schedule_mut()
             .set_clock(Some(Box::new(clock.clone())));
         // Time passing between ticks is nobody's tick.
-        clock.0.set(Duration::from_secs(7));
+        clock.set(Duration::from_secs(7));
 
         world.tick();
         let took = |ms| {

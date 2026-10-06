@@ -1,21 +1,37 @@
 [package]
 name = "crcbl-anim"
-description = "Crucible skeletal animation: clip sampling and joint palettes"
+description = "Crucible skeletal animation: clip sampling, joint palettes and the animation state machine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# `glam` and nothing else, and the absence of `crcbl-scene` is the design rather
-# than an omission. This crate owns the runtime types and the maths;
-# `crates/crcbl-scene/src/gltf_import.rs` owns the parse. Turning a `GltfSkin`
-# and a `GltfClip` into a `Skeleton` and a `Clip` is a few dozen lines of index
-# bookkeeping that belongs to whoever holds both — and a *second* consumer
-# needing the same conversion is what would justify extracting it here. Until
-# then a dependency arrow from the animation runtime to a glTF parser would put
-# that parser in every browser build that plays a cooked clip.
+# `glam` for the maths, plus the two crates the state machine's file format
+# needs — and the absence of `crcbl-scene` is the design rather than an
+# omission. This crate owns the runtime types and the maths;
+# `crates/crcbl-scene/src/gltf_import.rs` owns the glTF parse. Turning a
+# `GltfSkin` and a `GltfClip` into a `Skeleton` and a `Clip` is a few dozen
+# lines of index bookkeeping that belongs to whoever holds both — and a
+# *second* consumer needing the same conversion is what would justify
+# extracting it here. Until then a dependency arrow from the animation runtime
+# to a glTF parser would put that parser in every browser build that plays a
+# cooked clip.
 [dependencies]
 glam = { workspace = true }
+# The state machine is a hand-authored RON asset (`src/machine/asset.rs`), read
+# into file-form structs `serde` derives and then resolved by name. The same
+# format and the same pair `crcbl-input` and `crcbl-inventory` read their files
+# with, so a game that hand-edits one data file does not learn a second syntax
+# for the next — and both were already in every graph that reaches this crate
+# through `crcbl`, so the arrow adds no third-party crate to a build.
+serde = { workspace = true }
+ron = { workspace = true }
+
+[dev-dependencies]
+# The seeded parameter sequences the state machine's determinism property is
+# driven by: the workspace's own portable generator, so a seed is the same run
+# on every target.
+crcbl-rand = { workspace = true }
 
 [lints]
 workspace = true

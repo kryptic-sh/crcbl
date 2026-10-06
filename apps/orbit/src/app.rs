@@ -32,7 +32,8 @@ use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::prelude::*;
 use crcbl::shell::{DisplayMode, WindowId};
 
-use crate::game::{Controls, FlightStats, Game, Phase, RenderState};
+use crate::art::Art;
+use crate::game::{Controls, FlightStats, Game, GameError, Phase, RenderState};
 use crate::gpu::Gpu;
 use crate::menu::{MenuKind, Menus};
 use crate::page::PageStats;
@@ -164,6 +165,8 @@ pub struct Orbit {
     stats: FlightStats,
     /// What the last page drew, from the same frame.
     page: PageStats,
+    /// Where the flight UI's sprites are in the UI pass's image atlas.
+    art: Art,
 }
 
 /// The loop orbit runs in.
@@ -240,12 +243,15 @@ pub fn with_shell<S: Shell + ?Sized>(
 ///
 /// # Errors
 ///
-/// [`OrbitError`] if the flight's server could not be built.
+/// [`OrbitError`] if the flight's server could not be built, or the flight
+/// UI's art did not fit the UI pass's image atlas.
 fn assemble<S: Shell + ?Sized>(
     booted: Booted<S, Gpu>,
     options: &Options,
 ) -> Result<Loop<S>, OrbitError> {
-    let booted = crcbl::engine::arm_screenshot(booted, &options.common);
+    let mut booted = crcbl::engine::arm_screenshot(booted, &options.common);
+    let art = Art::register(booted.gpu.images_mut())
+        .map_err(|error| OrbitError::Game(GameError::Art(error)))?;
     let game = Game::new(options.common.tick_hz).map_err(OrbitError::Game)?;
     Ok(Loop::new(
         booted,
@@ -256,6 +262,7 @@ fn assemble<S: Shell + ?Sized>(
             render_state: RenderState::default(),
             stats: FlightStats::default(),
             page: PageStats::default(),
+            art,
         },
         options.common.loop_config(),
     ))
@@ -290,6 +297,13 @@ impl Orbit {
     /// What the last frame's page drew.
     pub const fn page(&self) -> &PageStats {
         &self.page
+    }
+
+    /// Where the flight UI's sprites were registered, for the loop's own
+    /// tests to find them in a frame's draw list.
+    #[cfg(test)]
+    const fn art(&self) -> &Art {
+        &self.art
     }
 }
 
@@ -354,7 +368,13 @@ impl HostedGame for Orbit {
     ) {
         self.game.render_state(&mut self.render_state);
         self.stats = self.game.stats();
-        self.page = crate::page::draw(draw_list, gpu.atlas(), gpu.extent(), &self.render_state);
+        self.page = crate::page::draw(
+            draw_list,
+            gpu.atlas(),
+            &self.art,
+            gpu.extent(),
+            &self.render_state,
+        );
     }
 
     /// **orbit's one module, and no second.**
@@ -572,6 +592,42 @@ mod tests {
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
+    /// **The flight UI's art reaches the frame through the real loop**: the
+    /// art registered into the GPU's own image atlas at start-up, and the
+    /// draw list the UI pass uploads holding quads cut from it — the navball,
+    /// its heading marker and the ship, which a rocket on the pad already has.
+    /// `crate::page`'s own tests hold every marker to its place.
+    #[test]
+    fn the_frame_draws_the_flight_ui_from_its_sheets() {
+        let mut engine = scripted(&headless(8));
+        engine.frame().expect("a frame");
+        engine.frame().expect("a frame");
+        let art = *engine.game().art();
+        let quads: Vec<(crcbl::math::Vec2, crcbl::math::Vec2)> = engine
+            .gpu()
+            .draw_list()
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                crcbl::ui::draw_list::DrawCommand::Image { uv_min, uv_max, .. } => {
+                    Some((*uv_min, *uv_max))
+                }
+                _ => None,
+            })
+            .collect();
+        for (name, image) in [
+            ("navball", art.navball_air),
+            ("heading", art.heading),
+            ("ship", art.ship),
+        ] {
+            assert!(
+                quads.contains(&(image.uv_min(), image.uv_max())),
+                "no {name} quad in the frame: {quads:?}",
+            );
+        }
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
     /// Escape stops the flight and puts the one menu this sample has on screen;
     /// escape again starts it. The page keeps drawing behind it either way.
     #[test]
@@ -604,7 +660,11 @@ mod tests {
         // **And the panel's art reached the frame, not just its labels**: in
         // the list, above the cut and under the title, and the list drawn as
         // its two halves.
-        assert_menu_art_above_the_cut_and_under(engine.gpu().draw_list(), "PAUSED");
+        assert_menu_art_above_the_cut_and_under(
+            engine.gpu().draw_list(),
+            engine.gpu().menu_skin(),
+            "PAUSED",
+        );
         assert_eq!(
             pass_labels(engine.gpu().last_dump()),
             ["backdrop", "ui-composite", "ui-overlay"],

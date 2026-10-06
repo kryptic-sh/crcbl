@@ -802,6 +802,7 @@ mod tests {
             bodies,
             extent,
             ticks,
+            entities: crate::args::DEFAULT_BENCH_ENTITIES,
             iterations,
             warmup,
             json: false,

@@ -620,7 +620,11 @@ mod tests {
         // **And the panel's art reached the frame, not just its labels**: in
         // the list, above the cut and under the title, and the list drawn as
         // its two halves.
-        assert_menu_art_above_the_cut_and_under(engine.gpu().draw_list(), "PAUSED");
+        assert_menu_art_above_the_cut_and_under(
+            engine.gpu().draw_list(),
+            engine.gpu().menu_skin(),
+            "PAUSED",
+        );
         assert_eq!(
             pass_labels(engine.gpu().last_dump()),
             ["backdrop", "ui-composite", "ui-overlay"],

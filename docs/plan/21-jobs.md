@@ -140,16 +140,20 @@ learning goal fits the project charter). Used _inside_ a stage:
   only where a dependency exists. Debug builds assert undeclared access (the P2
   "asserted conflicts" hook grows teeth here).
 
-**Built of this section: the pool and `par_for` only.** `crcbl_jobs::Pool`
-(`pool.rs`, over `deque.rs`) offers `new`, `with_workers`, `workers`, `stats`,
-`reset_stats` and `par_for` over a mutable slice with fixed chunks, `chunk`
-being the serial cutoff. `scope`, the tree-ordered reductions, the relaxed mode
-and the ECS parallel schedule are unbuilt, and so is the job-handle primitive in
-the table above; `docs/backlog.md` carries each. What the parallel schedule
-stands on is built (2026-10-05): access declared at registration, the conflict
-graph derived then, and the debug-build assert. The vocabulary is named `Shared`
-resources rather than "own arrays = write, cross-system queries = read", because
-a tick is handed no route to another system's arrays at all.
+**Built of this section: the pool, `par_for` and the ECS parallel schedule.**
+`crcbl_jobs::Pool` (`pool.rs`, over `deque.rs`) offers `new`, `with_workers`,
+`workers`, `stats`, `reset_stats` and `par_for` over a mutable slice with fixed
+chunks, `chunk` being the serial cutoff. `scope`, the tree-ordered reductions
+and the relaxed mode are unbuilt, and so is the job-handle primitive in the
+table above; `docs/backlog.md` carries each. **The ECS parallel schedule is
+built (2026-10-06)**: access declared at registration (2026-10-05), the conflict
+graph derived then, the debug-build assert, and stages — runs of consecutive
+systems no two of which conflict — ticked across a `Pool` a host hands the world
+(`World::set_pool`), with the serial state bit for bit. It is a stage barrier
+rather than a DAG, it is opt-in (no world has a pool by default), and only ticks
+run on the pool. The vocabulary is named `Shared` resources rather than "own
+arrays = write, cross-system queries = read", because a tick is handed no route
+to another system's arrays at all.
 
 ## Degradation (wasm + low-core, mandated by stage 10)
 
@@ -178,12 +182,10 @@ by the determinism rule.
   regressions visible as a red bar, not a vibe).
 - Ring overflow counters + mailbox staleness (consumer using an old state
   because producer is behind) surfaced in the inspector.
-- A headless sim runnable at any worker count. `crcbl sim` is the determinism
-  harness — `--ticks`, `--tick-rate` and `--seed` — and a worker count is what
-  it would gain to make the killer test below runnable.
-  **`crcbl bench --scenario jobs --workers <N>` already exposes one** — `0` is
-  the serial baseline — so what is missing is the knob on `crcbl sim`, not the
-  knob.
+- A headless sim runnable at any worker count: `crcbl sim --threads <N>`
+  (2026-10-06) hands the harness world's schedule a pool of N − 1 workers, and
+  its hash must not move with N. `crcbl bench --scenario jobs|ecs --workers <N>`
+  time the pool alone and a pooled schedule.
 
 ## Testing (topic 12)
 
@@ -204,7 +206,7 @@ by the determinism rule.
 | **Seams reserved**: mailbox between sim/client (exists as interpolation buffer), audio ring (exists), `tick(dt)` runner shape                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | P2 — done. The ECS access declarations, which this row claimed until 2026-08-23 and which were not written then, were built 2026-10-05: `SystemTrait::access`, the conflicts `Schedule` derives from it, and a debug-build check on every `Shared` access inside a tick; see `docs/backlog.md`. |
 | **Tick-id protocol** — built. **Client tick alignment is built** (2026-10-05): the client stamps each input with a tick running ahead of the server by its input lead (`crcbl_client::input_lead`), converged on the server's per-snapshot `InputTiming`, slewing below 50 ms and stepping above it; the server holds each input in a per-peer **jitter buffer keyed by target tick** (`crcbl-server`'s `input_buffer`), applies a late one on the next tick and refuses one past `MAX_INPUT_LEAD`, each counted. The backlog's _Client tick alignment and the jitter buffer: what the input lead leaves_ has the decisions and what is left | P2 (with the replication protocol)                                                                                                                                                                                                                                                              |
 | Input thread + stacked `InputTickState` (accumulate-then-swap, last-N ring) — **none of the three**, checked 2026-08-23: `InputTickState` is a flat `Vec<(String, ActionValue)>` with no stacking, swap or ring, and nothing on any platform spawns an input thread.                                                                                                                                                                                                                                                                                                                                                                         | P2 (with the action layer; single-thread runner inlines it on wasm)                                                                                                                                                                                                                             |
-| ECS parallel schedule (startup DAG, debug access asserts)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | P8                                                                                                                                                                                                                                                                                              |
+| ECS parallel schedule (startup DAG, debug access asserts) — **built 2026-10-06** as greedy stages over the declared conflicts, ticked on a host-supplied `Pool`; opt-in, see `docs/backlog.md`                                                                                                                                                                                                                                                                                                                                                                                                                                               | P8                                                                                                                                                                                                                                                                                              |
 | Pipeline-thread formalization (named threads, timeline profiler view)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | P8                                                                                                                                                                                                                                                                                              |
 | Physics/anim/VFX `par_for` adoption — **not inside any of the three crates**: neither `crcbl-phys`, `crcbl-anim` nor `crcbl-vfx` depends on `crcbl-jobs`. What exists is adoption **by a caller**: `apps/horde` holds the `Pool` and runs its steering `par_for` over results a batch query filled, and `crcbl-phys`'s allocation-free `*_into` query forms exist so that it can. That is what a crate-side adoption would build on, and it is not the same thing                                                                                                                                                                            | P8 → wave 1 as each system scales                                                                                                                                                                                                                                                               |
 | wasm-threads pool re-enable (SharedArrayBuffer) — **built**: `./web/build.sh --threads`, gated per push by `ci.yml`'s `jobs-worker-e2e`; the published site stays the unthreaded build and runs `Inline`, which is supported                                                                                                                                                                                                                                                                                                                                                                                                                 | post-MVP                                                                                                                                                                                                                                                                                        |

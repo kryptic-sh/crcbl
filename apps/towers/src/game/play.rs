@@ -338,7 +338,7 @@ impl FieldPlay {
 fn mirror<K, T>(world: &mut World, known: &mut Mirror<K>, rows: Vec<(Identity<K>, T)>)
 where
     K: Copy + PartialEq,
-    T: ComponentHash + 'static,
+    T: ComponentHash + Send + 'static,
 {
     known.retain(|(identity, entity)| {
         let alive = rows.iter().any(|(live, _)| live == identity);
@@ -586,7 +586,7 @@ mod tests {
     }
 
     /// Every mirrored row of `T`, by entity.
-    fn rows<T: ComponentHash + Copy + 'static>(world: &mut World) -> Vec<(Entity, T)> {
+    fn rows<T: ComponentHash + Copy + Send + 'static>(world: &mut World) -> Vec<(Entity, T)> {
         world
             .system_mut::<System<T>>()
             .expect("registered")

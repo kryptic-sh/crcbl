@@ -144,19 +144,20 @@ fn a_selected_entity_lists_each_owning_systems_fields() {
 /// A clock that answers each read with the next of a scripted list of
 /// readings — which is how long every system's tick took, two reads a tick.
 #[derive(Debug)]
-struct Readings(std::cell::RefCell<std::collections::VecDeque<u64>>);
+struct Readings(std::sync::Mutex<std::collections::VecDeque<u64>>);
 
 impl Readings {
     fn millis(readings: &[u64]) -> Self {
-        Self(std::cell::RefCell::new(readings.iter().copied().collect()))
+        Self(std::sync::Mutex::new(readings.iter().copied().collect()))
     }
 }
 
-impl TimeSource for Readings {
+impl crcbl::core::time::TimeSource for Readings {
     fn elapsed(&self) -> core::time::Duration {
         let reading = self
             .0
-            .borrow_mut()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop_front()
             .expect("the test scripted every read the schedule takes");
         core::time::Duration::from_millis(reading)
