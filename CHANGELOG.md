@@ -795,6 +795,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Audio occlusion, the cue grammar's rule 5: a voice heard through something
+  is muffled and quieter, by what it is heard through.**
+  `crcbl_audio::occlusion::Occlusion { cutoff_hz, gain }` is a per-voice target,
+  set with `Mixer::set_occlusion(id, occlusion)` (read back with
+  `Mixer::occlusion`) or `Voice::with_occlusion` for a voice that starts behind
+  a wall. Each voice runs a one-pole lowpass whose coefficient puts the cutoff
+  exactly 3 dB down, then the gain, and both ramp linearly to a new target over
+  `OCCLUSION_RAMP_FRAMES` so a moving occluder does not zipper. A voice at
+  `Occlusion::CLEAR` — every voice until a game says otherwise — mixes the same
+  bits it did before.
+  `AcousticMaterial { density, muffle_cutoff_hz, attenuation_db }` has five
+  versioned presets (`FOLIAGE`, `GLASS`, `THIN_WOOD`, `METAL`, `CONCRETE`,
+  `PRESETS_VERSION`), and `Occlusion::through(materials)` combines them:
+  attenuations add and the lowest cutoff wins. `crcbl::occlusion` casts the
+  rays: `occlusion_between(cast, ear, emitter, &materials)` walks every collider
+  between two points through any filtered ray query, `AcousticMaterials` is the
+  side table naming each `ColliderId`'s material (with a fallback), and
+  `OcclusionTracker` keeps tracked voices occluded through a `ClientQueryWorld`
+  under a per-frame ray budget (`DEFAULT_OCCLUSION_RAYS_PER_FRAME`), round
+  robin, a voice it does not reach keeping its last value. `apps/puppet` now
+  hums: a beacon behind each mound, heard from the camera through the boom's own
+  query world, muffled by earth behind one and brush behind the other
+  (`Map::world_with_ids` names each surface's collider). A headless run plays
+  nothing.
+
 - **A read-only physics world on the client: `crcbl_client::ClientQueryWorld`**,
   for camera booms and occlusion rays. It holds the scene's statics — the
   `PhysicsWorld` the game's own scene loader builds, as its server does — and
