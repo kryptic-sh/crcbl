@@ -5,24 +5,24 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ## Top priority: EW physics migration handoff (2026-10-07)
 
-Rechecked after pulling crcbl `origin/main` at `aa432f8c`, against EW `9edf68a8`
-and its in-progress bandage crafting changes. Both requested engine capabilities
-are now on crcbl main: `CharacterController::preview_upright` (`ac3e9400`) and
-`PhysicsWorld::sweep_capsule_arc` (`e1c8f8ee`). No additional engine feature
-requirement was demonstrated by the reviewed game changes.
+The remaining top-priority integration is adopting
+`PhysicsWorld::sweep_capsule_arc` in EW's applicable airborne contact forecasts
+in `src/controller_ballistic.rs::move_with_gravity`. The API is already on crcbl
+main in `e1c8f8ee`; do not duplicate its implementation. EW now pins crcbl
+`8d83a042`. Keep this handoff until the covered straight-sweep forecasts have
+been replaced and the game regressions pass, then remove it. Air control,
+landing rules and the `projected_landing` gameplay simulation stay in EW.
 
-The top-priority outstanding work is EW adoption: update its crcbl pin, migrate
-`preview_airborne_motion` first, then the applicable contact forecasts in
-`move_with_gravity`, as separate verified slices. EW still pins crcbl
-`bffec64a`; its preview restores the live collider and its accelerated motion
-uses straight-sweep forecasts. Keep this integration handoff until those
-workarounds have been replaced and the game regressions pass, then remove it. Do
-not duplicate the engine implementations. Gameplay rules stay in EW.
-
-This refresh inspected the engine APIs and EW callers only; it did not rerun the
-engine tests or validate EW against the new revision. The coverage reports below
-were supplied with the engine implementations and remain migration acceptance
-guidance, not fresh verification results.
+The preview migration is no longer outstanding: EW `72f15ced` uses
+`CharacterController::preview_upright`. Its repeated-preview regression was
+observed failing with broadphase refits under the old move-and-restore path and
+passing with the new API. Windows workspace formatting, Clippy, tests, release
+build, macOS cross Clippy and release M4/ELCAN headless Vulkan/DX12 captures
+passed. Linux cross Clippy still stops at the missing ALSA cross-compilation
+sysroot; native macOS/Linux, physical desktop input and constrained-VRAM checks
+remain unverified. Evidence is under `%TEMP%/ew-crcbl-update-review/` with the
+`engine-preview-` prefix and `preview-migration-negative.log`. The arc coverage
+report below belongs to its engine implementation, not a new verification run.
 
 Do not port EW's current hip-fire convergence or prone weapon/terrain handling
 yet. `src/game_hip_convergence.rs` combines rendered weapon pose with gameplay
@@ -75,65 +75,13 @@ gap. The subsequent `src/medication/product.rs::MedicationProduct` and medical
 vendor resale rules also belong to EW's catalogue and economy. The shipped
 medkit replenishment work in `src/hideout_inventory/medkit_replenishment.rs`
 updates an existing stashed kit within its authored capacity; its recipe,
-station gate and ingredient reservations remain game rules. The in-progress
-bandage recipe in `src/hideout_inventory/food_crafting_recipes.rs` likewise
-combines game materials, station access and authored medical output. Neither
-feature demonstrates a reusable engine requirement or adds an engine migration
+station gate and ingredient reservations remain game rules. The shipped bandage
+recipe in `src/hideout_inventory/food_crafting_recipes.rs` likewise combines
+game materials, station access and authored medical output. Neither feature
+demonstrates a reusable engine requirement or adds an engine migration
 prerequisite.
 
-1. **Non-mutating character-motion previews: delivered in crcbl, awaiting EW's
-   migration.** EW's `PlayerController::preview_airborne_motion` in
-   `src/controller_contact_forecast.rs` built a preview controller, called
-   `move_and_slide_into`, then restored the live character collider with
-   `PhysicsWorld::set_capsule`, because the engine move writes its bound
-   collider even from a copied controller.
-
-   **Shipped:**
-   `CharacterController::preview_upright(&self, world: OverlapQueries<'_>, scratch: &mut QueryScratch, motion: DVec3) -> UprightPreview`.
-   `UprightPreview` holds the `MoveOutcome`, the resulting `capsule`, the
-   `ground` and the ordered `contacts` (`Vec<SlideContact>`) that
-   `move_and_slide_into` would give from the same state. The signature is the
-   guarantee: the controller is borrowed shared, and the world is reached only
-   through the read-only view, so no collider moves and the broadphase is
-   neither refitted nor rebuilt. It is the move's own solve: `move_upright` is
-   now `solve_upright` plus the self-collider write, the preview runs
-   `solve_upright` on a copy and stops, and the solve reads the world only
-   through the private `WorldReader`. Self-exclusion, the query mask, skin, step
-   and ground rules are the previewing controller's own. The capsule previewed
-   is the receiver's, so EW keeps building its enlarged contact controller and
-   previews from it; the margin policy stays in EW.
-
-   **Coverage**, in `crates/crcbl-phys/src/character/preview_tests.rs`: a
-   preview equals the move made after it, to the bit (outcome, contacts,
-   capsule, ground and the collider the move writes), over a wall, a start
-   inside a box, a ceiling, a step, walking off a ledge and a masked collider,
-   each unbound and bound.
-   `repeated_previews_change_no_query_no_controller_field_and_no_later_move`
-   compares collider boxes, broadphase counters, fixed sweeps and penetrations,
-   every controller field, and a later move against a twin that never previewed.
-   `ceiling_contact_does_not_take_travel_from_the_wall_contact` and
-   `a_ceiling_contact_reports_its_share_and_leaves_the_descent_free` port the
-   engine half of EW's `ceiling_contact_does_not_delay_wall_steering` and
-   `ceiling_contact_uses_the_remaining_time_for_descent`: contact order and
-   fractions, horizontal travel kept, coarse and split chords agreeing, and a
-   bound collider following the move and never the preview. The gameplay half
-   (air-control arcs, contact-time bisection, velocities) stays EW's and is not
-   tested in crcbl. Mutation-checked: a preview that writes the collider fails
-   the no-touch test, and does not compile under the shipped signature; a
-   preview that starts ungrounded or drops its self collider fails the
-   preview-equals-move tests.
-
-   **What EW changes:** in `preview_airborne_motion`, keep the enlarged
-   `preview` controller and replace its `move_and_slide_into` call and the
-   `set_capsule` restore after it with
-   `preview.preview_upright(world.overlap_queries(), &mut QueryScratch::new(), motion)`,
-   returning the result's `outcome`, `capsule` and `contacts`. `world` can stay
-   `&mut PhysicsWorld`: `overlap_queries` takes it once to build the broadphase.
-   Then update the engine pin and rerun the two regressions above. Delete this
-   entry once EW confirms the migration. This does not replace
-   `projected_landing`, which also simulates EW gameplay state.
-
-2. **Curved-path collision queries with contact times — delivered 2026-10-06,
+1. **Curved-path collision queries with contact times — delivered 2026-10-06,
    awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
    `PlayerController::move_with_gravity` in `src/controller_ballistic.rs` bounds
    chord error, expands candidate sweeps and bisects contact forecasts to retain
