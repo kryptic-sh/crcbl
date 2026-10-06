@@ -425,6 +425,42 @@ leak — `entity_to_index.get().copied()` where `remove()` belongs — is caught
 per-tick assertion stays green through it. Do not delete that loop as duplicated
 work.
 
+### The accelerated capsule query, as built (2026-10-06)
+
+`PhysicsWorld::sweep_capsule_arc` (`world/arc_sweep.rs`, with the shape-level
+search in `query/arc.rs` and the mesh's in `PlacedMesh::sweep_arc`) is EW's
+second engine request: the earliest contact time of a capsule on a
+constant-acceleration path. Decisions, so they are not re-argued:
+
+- **The step is bounded by a plane, not by a speed.** The narrow phase's normal
+  picks a direction, the shape's support along it gives a plane the whole shape
+  lies behind, and the capsule's height above that plane is exactly
+  `n · (v s + ½ a s²)` from where it is: its first root is a safe step. That
+  bound implies the `|v| + |a| t` rate bound the request named and is never
+  looser, it is exact for a flat face (one step), and a path that never reaches
+  the plane is clear for good, which ends the search for a body sliding along a
+  wall. A speed bound alone would crawl along such a wall a tolerance at a time.
+- **No convexity assumption beyond each piece.** Spheres, boxes and capsules are
+  convex; a mesh is advanced triangle by triangle, two-sided, as its straight
+  sweep is. The support function holds for any direction, so a narrow phase
+  whose normal is approximate (the capsule-box distance is a golden-section
+  search) makes the bound looser, never unsafe.
+- **Starting overlap is the straight sweeps' rule**: met at time zero with
+  `started_inside`, whatever the motion. Skipping a collider that starts in
+  contact and heads away was considered and declined: the path can curve back
+  into it later, and catching that would need a second rule for when the
+  collider counts again.
+- **No `PhysicsSystem` form.** The entity-level surface mirrors the sphere
+  queries and `sweep_body`, not the capsule sweeps, and EW calls the world.
+- **`&self` lives on `OverlapQueries`.** `PhysicsWorld`'s form takes `&mut self`
+  only to build the broadphase lazily and borrow its scratch, as every world
+  query does; it changes no collider.
+
+Measured while red-checking: mutating the query to its chord fails the
+touch-and-leave, braking-fixture, analytic and coarse/fine tests; leaving the
+apex out of the broadphase bounds fails the bounds test and the apex ceiling
+test.
+
 ## What the deleted 13-audio plan left behind (2026-09-24)
 
 Record; topic 13 designed `crcbl-audio`, the first-party audio engine, around

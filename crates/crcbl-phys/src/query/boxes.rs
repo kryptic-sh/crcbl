@@ -212,7 +212,7 @@ pub(crate) fn contact_box(target: &BoxCollider) -> ContactShape {
 
 /// The point of `target` nearest the segment `a`–`b`: the segment's nearest
 /// point clamped into the box, in the box's own frame.
-fn nearest_on_box(target: &BoxCollider, a: DVec3, b: DVec3) -> DVec3 {
+pub(crate) fn nearest_on_box(target: &BoxCollider, a: DVec3, b: DVec3) -> DVec3 {
     let p0 = target.local_point(a);
     let along = target.local_point(b) - p0;
     let t = closest_on_segment_to_box(p0, along, target.half_extents);

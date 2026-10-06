@@ -8,6 +8,7 @@
 //! [`BoxCollider`](crate::BoxCollider), which may be turned, and are what the
 //! query world answers its boxes with.
 
+mod arc;
 mod boxes;
 mod capsules;
 mod sphere_overlap;
@@ -16,11 +17,16 @@ use crate::broadphase::Ray;
 use crate::collider::{Aabb, Capsule, Sphere};
 use glam::DVec3;
 
-pub(crate) use self::boxes::contact_box;
+pub use self::arc::{ARC_MAX_ITERATIONS, ARC_TIME_TOLERANCE, AcceleratedPath, ArcHit};
+pub(crate) use self::arc::{
+    arc_capsule_vs_box, arc_capsule_vs_sphere, arc_capsule_vs_turned_capsule, earliest_contact,
+    support,
+};
 pub use self::boxes::{
     aabb_overlaps_box, capsule_penetration_vs_box, ray_vs_box, sphere_overlap_vs_box,
     sphere_overlaps_box, swept_capsule_vs_box, swept_sphere_vs_box,
 };
+pub(crate) use self::boxes::{contact_box, nearest_on_box};
 pub(crate) use self::capsules::{
     TurnedCapsule, capsule_penetration_vs_turned_capsule, ray_vs_turned_capsule,
     sphere_overlap_vs_turned_capsule, swept_capsule_vs_turned_capsule,

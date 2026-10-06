@@ -861,6 +861,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   query mask, skin, step and ground rules are the previewing controller's; to
   preview a different capsule, preview from a controller built with it.
 
+- **`crcbl_phys::PhysicsWorld::sweep_capsule_arc` sweeps a capsule along a
+  constant-acceleration path and answers the contact time.** It takes an
+  `AcceleratedPath` (start, velocity, acceleration, duration), the capsule's
+  radius and half-height and a `QueryFilter`, and returns the first collider met
+  with an `ArcHit`: the `time` in `[0, duration]`, the point, the normal, the
+  part and `started_inside`. A capsule that begins touching or inside a collider
+  meets it at time zero, flagged, as the straight sweeps do; masks, triggers and
+  an excluded collider apply as they do there.
+  `OverlapQueries::sweep_capsule_arc` is the `&self` form. It is conservative
+  advancement against the plane bounding each shape, with the path's exact
+  quadratic height above that plane as the step, so a path that reaches a
+  surface and turns back before its end is met although the chord between its
+  ends misses it; it stops within `ARC_TIME_TOLERANCE` and after at most
+  `ARC_MAX_ITERATIONS` steps per shape, and never reports a time later than the
+  first touch. With no acceleration it agrees with `sweep_capsule_filtered`,
+  except at an unturned box's edges and corners, which the straight sweep meets
+  early by inflating the box with square corners. It is validated on flat walls,
+  ceilings and floors, round shapes and EW's planar braking fixture; tilted and
+  curved walls, moving geometry and projectile flight are not yet. The straight
+  sweeps are unchanged.
+
 - The shell seam reports an input method's composition in progress as the new
   `ShellEvent::TextPreedit` (each replaces the last; empty text means it ended)
   and takes a caret rectangle through the new provided method

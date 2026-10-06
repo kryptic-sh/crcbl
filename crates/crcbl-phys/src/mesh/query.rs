@@ -17,7 +17,10 @@ use super::geometry::{
 use crate::broadphase::{BvhHit, Ray, Segment};
 use crate::collider::{Aabb, Capsule, Sphere};
 use crate::components::Transform;
-use crate::query::{OverlapHit, Penetration, ShapeHit};
+use crate::contact::shape::ContactShape;
+use crate::query::{
+    AcceleratedPath, ArcHit, OverlapHit, Penetration, ShapeHit, earliest_contact, support,
+};
 
 /// A query's nearest hit on a [`TriangleMesh`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -375,6 +378,81 @@ impl PlacedMesh {
         let half = self.transform.rotation.inverse() * half;
         let hit = self.mesh.sweep_with(&local, radius, half, scratch)?;
         Some(self.hit_to_world(hit.hit))
+    }
+
+    /// A capsule of `radius` about `-half ..= +half`, turned with the world,
+    /// its centre following `path`: the first triangle it touches, from
+    /// either side, as [`crate::PhysicsWorld::sweep_capsule_arc`] reports
+    /// one.
+    ///
+    /// Each triangle the path's bounds reach is advanced on alone, by the
+    /// segment-to-triangle distance the straight sweep's starting test uses;
+    /// of two met at the same time the lower-numbered triangle is kept, as
+    /// the straight sweep keeps it.
+    pub(crate) fn sweep_arc(
+        &self,
+        path: &AcceleratedPath,
+        radius: f64,
+        half: DVec3,
+        scratch: &mut MeshScratch,
+    ) -> Option<ArcHit> {
+        let turn = self.transform.rotation.inverse();
+        let local = path.in_frame(self.transform.position, turn);
+        let half = turn * half;
+        let reach = DVec3::splat(radius) + half.abs();
+        let bounds = local.bounds();
+        self.mesh.bvh().traverse_aabb_into(
+            &Aabb::new(bounds.min - reach, bounds.max + reach),
+            &mut scratch.stack,
+            &mut scratch.found,
+        );
+        let separation = |index: u32, p0: DVec3, p1: DVec3| {
+            let corners = self.mesh.corners(index as usize);
+            let normal = self.mesh.normal(index as usize);
+            let closest = segment_triangle(p0, p1, &corners, normal);
+            let away = closest.on_segment - closest.on_triangle.point;
+            let distance = away.length();
+            let centre = (p0 + p1) * 0.5;
+            (
+                distance - radius,
+                facing(away, distance, normal, centre - corners[0]),
+                closest.on_triangle.point,
+            )
+        };
+        // (time, triangle, normal, started inside)
+        let mut best: Option<(f64, u32, DVec3, bool)> = None;
+        for &index in &scratch.found {
+            let triangle = ContactShape::Triangle {
+                corners: self.mesh.corners(index as usize),
+                normal: self.mesh.normal(index as usize),
+                active_edges: self.mesh.active_edges(index as usize),
+            };
+            let Some((time, normal, started_inside)) = earliest_contact(
+                &local,
+                half,
+                radius,
+                |direction| support(&triangle, direction),
+                |p0, p1| {
+                    let (distance, normal, _) = separation(index, p0, p1);
+                    (distance, normal)
+                },
+            ) else {
+                continue;
+            };
+            if best.is_none_or(|(bt, bi, _, _)| time < bt || (time == bt && index < bi)) {
+                best = Some((time, index, normal, started_inside));
+            }
+        }
+        let (time, triangle, normal, started_inside) = best?;
+        let centre = local.position_at(time);
+        let (_, _, point) = separation(triangle, centre - half, centre + half);
+        Some(ArcHit {
+            time,
+            point: to_world(&self.transform, point),
+            normal: self.transform.rotation * normal,
+            started_inside,
+            part: 0,
+        })
     }
 
     /// How `sphere` overlaps the mesh — the capsule push-out for a capsule of
