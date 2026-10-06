@@ -1,17 +1,17 @@
-//! Skeletal animation: clip sampling and joint palettes.
+//! Skeletal animation: clip sampling, joint palettes, and the state machine
+//! above them.
 //!
-//! The client half of the animation evaluation stack recorded in
-//! `docs/notes/simulation.md` (_What the deleted 17-animation plan left
-//! behind_) — its clip-sampling step, the palette the stack ends at, and the
-//! blending above them; plus two-bone IK ([`ik`]), the one post op a caller has
-//! asked for, by EW, whose character rig is to place its hands with it; **nothing
-//! above that**. There is no GPU skinning here — the skinning dispatch is
-//! `crcbl-render`'s (`skinning.rs`), and it takes a [`Palette`] this crate
-//! produced. A state machine and root motion are later slices with their own
-//! consumers, and building them now against no caller is the failure this
-//! project guards against. What is here is what `docs/plan/sample/09-puppet.md`
-//! needs through its milestone 2: a character posed from a clip, and a
-//! locomotion set mixed by speed.
+//! The animation evaluation stack recorded in `docs/notes/simulation.md` (_What
+//! the deleted 17-animation plan left behind_) — its clip-sampling step, the
+//! palette the stack ends at, and the blending above them; two-bone IK
+//! ([`ik`]), the one post op a caller has asked for, by EW, whose character rig
+//! is to place its hands with it; and the state machine ([`machine`]) with its
+//! animation events and root motion, which `apps/puppet`'s idle, run and jump
+//! are the consumer of. There is no GPU skinning here — the skinning dispatch
+//! is `crcbl-render`'s (`skinning.rs`), and it takes a [`Palette`] this crate
+//! produced. Blend layers, masks, additive layers, 2D blend spaces and the
+//! remaining post ops (sockets, look-at) are not here; `docs/backlog.md`
+//! carries them.
 //!
 //! ```text
 //! Skeleton   joints in palette order — parent index, inverse bind, rest pose
@@ -24,6 +24,11 @@
 //!
 //! rotate_joint    one joint turned by a rotation spelled in model space
 //! solve_two_bone  a limb's end put on a target, bent towards a pole
+//!
+//! StateMachine    the RON asset: states, transitions, parameters, events
+//! Machine         that asset bound to its clips; steps a MachineState
+//! MachineState    one character's state, time, fade and parameters — POD
+//! Sampler         a MachineState becomes a Pose, root motion stripped
 //! ```
 //!
 //! # A frame
@@ -61,8 +66,9 @@
 //!
 //! # This crate does not import glTF
 //!
-//! It depends on `glam` and nothing else — in particular not on `crcbl-scene`,
-//! which is where the parse lives. `crates/crcbl-scene/src/gltf_import.rs`
+//! It depends on `glam`, and on `serde` and `ron` for the state machine's file
+//! format — in particular not on `crcbl-scene`, which is where the glTF parse
+//! lives. `crates/crcbl-scene/src/gltf_import.rs`
 //! hands out `GltfSkin`, `GltfClip` and `GltfChannel`; turning those into a
 //! [`Skeleton`] and a [`Clip`] is index bookkeeping that belongs to whoever
 //! holds both, and a *second* consumer needing the same conversion is what
@@ -77,14 +83,19 @@
 //!
 //! # Determinism
 //!
-//! None is claimed. The animation rules in `docs/notes/simulation.md` put pose
-//! evaluation on the client — pose math is client presentation and free to vary
-//! — and this crate is `f32` throughout, with a slerp that goes through a
-//! transcendental. Nothing here belongs in a tick hash.
+//! None is claimed for pose evaluation. The animation rules in
+//! `docs/notes/simulation.md` put it on the client — pose math is client
+//! presentation and free to vary — and this crate is `f32` throughout, with a
+//! slerp that goes through a transcendental. A pose belongs in no tick hash.
+//!
+//! **The state machine's stepping is the exception**: it is the server's, and
+//! it is deterministic by construction — see [`machine`] for why, and for the
+//! field-by-field hash of [`MachineState`] that folds into a tick hash.
 
 pub mod blend;
 pub mod clip;
 pub mod ik;
+pub mod machine;
 pub mod palette;
 pub mod sample;
 pub mod skeleton;
@@ -93,6 +104,10 @@ pub mod trs;
 pub use blend::{Blend, BlendSpace1d, BlendSpaceError, blend_into};
 pub use clip::{Channel, Clip, ClipError, Interpolation, Track};
 pub use ik::{FRAME_TOLERANCE, IkError, IkInput, PARALLEL_TOLERANCE, rotate_joint, solve_two_bone};
+pub use machine::{
+    Advance, BoolParam, EventId, Fade, FloatParam, MAX_PARAMETERS, Machine, MachineError,
+    MachineState, ParameterKind, Sampler, Span, StateId, StateMachine, TriggerParam,
+};
 pub use palette::Palette;
 pub use sample::Pose;
 pub use skeleton::{Joint, Skeleton, SkeletonError};

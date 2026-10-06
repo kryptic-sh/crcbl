@@ -1402,8 +1402,9 @@ forcing function. Built from it: the source stage (`crcbl_scene::gltf_import`'s
 `read_skins` and `read_clips` into `GltfSkin`, `GltfClip` and `GltfChannel`);
 the conversion into `crcbl-anim`'s types in `apps/viewer/src/anim.rs`
 (`skeleton_of`, `joint_of`); `crcbl_anim`'s `Skeleton`, `Clip` with
-`Clip::sample_into`, `Pose`, `Palette`, `blend_into` and `BlendSpace1d`, which
-puppet mixes idle, walk and run through by measured speed; two-bone IK
+`Clip::sample_into`, `Pose`, `Palette`, `blend_into` and `BlendSpace1d`; the
+state machine with animation events and root motion (`crcbl_anim::machine`,
+2026-10-06), which puppet plays idle, run and jump through; two-bone IK
 (`crcbl_anim::ik::{solve_two_bone, rotate_joint}`, with no production caller);
 GPU skinning (`crates/crcbl-render/src/skinning.rs` over
 `crates/crcbl-shaders/shaders/skinning.slang`) with the double-buffered region
@@ -1452,13 +1453,26 @@ transcendental, claims no determinism, and nothing in it belongs in a tick hash.
 **Root motion drives the character controller, never the transform.** The
 extracted velocity goes to topic 5's L0 controller, which resolves it against
 the world like any other move. Decided before any code to avoid the classic
-desync between an animation that moved a body and a server that did not.
+desync between an animation that moved a body and a server that did not. Built
+as `Machine::root_velocity`, which returns a velocity and touches no transform,
+with `Sampler` stripping the same translation from the drawn pose.
 
-**`crcbl-anim` depends on `glam` alone.** Not on `crcbl-scene`, not on `gltf`,
-so a browser build that only plays cooked clips links no parser. The glTF to
-`Skeleton` conversion is index bookkeeping belonging to whoever holds both
-crates — today `apps/viewer/src/anim.rs`, where `skeleton_of` walks
-`skin.joints()` in order so a palette index stays the one `JOINTS_0` means.
+**The state machine is stepped on the tick and is deterministic by
+construction** (built 2026-10-06). `Machine::step` takes a fixed `dt` and uses
+only IEEE-exact `f32` operations — no transcendental — so a `MachineState` is
+the same bit for bit on every target; its `Hash` is field by field over a
+canonical float encoding. Events are reported over the half-open span each step
+advanced, so consecutive steps tile the timeline and each crossing fires once
+whatever the frame rate. No transition is evaluated while a crossfade is in
+flight, and only the current state's events fire during a fade.
+
+**`crcbl-anim` depends on `glam`, plus `serde` and `ron` for the state machine's
+asset.** Not on `crcbl-scene`, not on `gltf`, so a browser build that only plays
+cooked clips links no glTF parser; `ron` was already in every graph that reaches
+the crate through `crcbl`. The glTF to `Skeleton` conversion is index
+bookkeeping belonging to whoever holds both crates — today
+`apps/viewer/src/anim.rs`, where `skeleton_of` walks `skin.joints()` in order so
+a palette index stays the one `JOINTS_0` means.
 
 **The source format is glTF, read unresampled.** No new source format: import
 extends the asset pipeline, and the importer keeps the file's own keyframes in

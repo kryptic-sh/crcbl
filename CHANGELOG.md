@@ -829,6 +829,50 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   sample whose frame is a page to register its own art into, as towers' own
   bundle already could.
 
+- **The animation state machine: `crcbl_anim::machine`.** A hand-authored RON
+  asset (`StateMachine::from_ron`) of parameters (`Float`, `Bool`, `Trigger`),
+  states that each play a clip or a 1D blend over a float parameter (`Clip`,
+  `Blend1d`), and transitions with conditions (`Above`, `Below`, `IsTrue`,
+  `IsFalse`, `Triggered`), an optional exit time and a crossfade. Every name is
+  resolved at parse and refused by name with a `MachineError` — an unknown state
+  or parameter, a parameter used as the wrong kind, a negative crossfade, an
+  exit time or event outside the cycle, a duplicate — and `Machine::new` binds
+  the asset to its clips by name, refusing an unknown clip. The per-character
+  `MachineState` is `Copy` plain data (state, normalised time, the fade in
+  flight, up to `MAX_PARAMETERS` parameter values) with a field-by-field `Hash`
+  for a tick hash. `Machine::step` advances it by a fixed `dt` with basic IEEE
+  arithmetic only, so it is deterministic across targets; triggers persist until
+  a transition consumes them, and no transition is evaluated while a fade is in
+  flight. `Sampler` poses a skeleton from a state without stepping it.
+  `crcbl-anim` now depends on `serde` and `ron` for the asset format.
+
+- **Animation events.** A state carries a track of `Event(at, name)` at
+  normalised times; `Machine::step` reports each event its advance crossed,
+  exactly once per crossing — across loop wraps, across several whole cycles in
+  one step, and from time zero on entry — and mutes the outgoing state's track
+  during a fade. The tick is the clock: the same events land on the same ticks
+  whatever frame rate drives them.
+
+- **Root motion.** `Machine::root_velocity` measures the root joint's
+  translation channel across a step, crossfaded as the pose is and whole across
+  a loop seam, and returns it as a velocity for the character controller — never
+  for the transform. `Sampler::new(skeleton, Some(root))` strips that
+  translation from the drawn pose so the root stays in place.
+  `Clip::translation_of` reads one joint's translation channel without sampling
+  a pose.
+
+- **`apps/puppet` runs, jumps and counts footsteps through the state machine.**
+  Shift runs (`game::RUN_SPEED`), Space jumps (`game::JUMP_SPEED`, on the key's
+  edge, from the ground), and `assets/anim/character.ron` picks idle, a run that
+  blends the walk and a new run stride by measured speed, or a jump with a new
+  tuck clip. The machine is stepped on the server's tick in `anim::Locomotion`;
+  the client poses the rig from the `MachineState` copied into `RenderState`.
+  Footsteps from the run's event track are counted on the `[HUD]` line
+  (`state:`, `steps:`), the debug panel and the overlay; `[POSE]` gains
+  `state:`, and `blend` is now how far the character is out of its idle stance.
+  The intent byte gained the run and jump flags, so puppet's protocol version
+  is 2. The rig's clips are in place, so puppet applies no root motion.
+
 - **Audio occlusion, the cue grammar's rule 5: a voice heard through something
   is muffled and quieter, by what it is heard through.**
   `crcbl_audio::occlusion::Occlusion { cutoff_hz, gain }` is a per-voice target,

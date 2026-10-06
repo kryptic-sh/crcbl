@@ -11949,47 +11949,81 @@ models are not in the tree (no Fox, CesiumMan or RiggedFigure file, searched
 cannot fail is no check: show it red by perturbing one keyframe before blessing
 it.
 
-### State machine, root motion, events, post ops (2026-08-27)
+### What the animation state machine leaves unbuilt (2026-10-06)
 
-**Not built.** `crcbl-anim`'s own module header says so: no state machine, no
-root motion, no GPU skinning _in that crate_. Confirmed against its module list
-— `blend`, `clip`, `ik`, `palette`, `sample`, `skeleton`, `trs`.
+**Built:** `crcbl_anim::machine` — the RON asset (`StateMachine::from_ron`),
+states playing a clip or a 1D blend, transitions on `Above`/`Below`/`IsTrue`/
+`IsFalse`/`Triggered` conditions with exit time and crossfade, the POD
+`MachineState` with a field-by-field `Hash`, animation events reported once per
+crossing, and root motion (`Machine::root_velocity`, stripped from the drawn
+pose by `Sampler`). Tested in `crates/crcbl-anim/tests/machine.rs`.
+`apps/puppet` is the consumer: idle, run and jump through
+`assets/anim/character.ron`.
 
-Specifically absent, with the design each was given:
+**Deferred, each with what it would take:**
 
-- **The state machine**: a RON asset, hot-reloadable, whose states are blend
-  trees and whose transitions are condition expressions over actions and
-  parameters plus exit time, with crossfade durations. Hand-authored first; an
-  editor panel views it before it ever edits it (_Animation debug tools_ below).
-  Its logic runs on the server: ticks, transition decisions and normalised clip
-  time are small POD state, replicated and saved like any component and folded
-  into the tick hash, and the client interpolates between replicated states as
-  it does transforms.
-- **Animation events** — a footstep at t=0.3 raising a gameplay or audio event —
-  timed on the server from the cooked event track. The proof owed is a test that
-  the event fires on the exact tick whatever the frame rate, and a state-machine
-  property test: scripted parameter sequences give a deterministic state/time
-  hash on the determinism harness.
-- **Root motion**, extracted on the server from the cooked root track and
-  applied as velocity to the character controller, **never to the transform** —
-  the rule in `docs/notes/simulation.md`.
-- **Blend layers**: per-bone masks (upper body shooting while the legs run),
-  additive layers (aim offsets), and a 2D directional blend space — the last
-  only once a sample needs strafing.
+- **Hot reload of the asset.** There is no engine asset-reload path (_Asset hot
+  reload: two polled watches, and no engine reload path_), and puppet compiles
+  its asset in for the browser. A reload would also have to map a live
+  `MachineState`'s state index and parameter slots across an asset whose order
+  changed — by name, through `StateMachine::state` and the parameter lookups —
+  or restart the machine. Cheap once a polled watch exists; not before.
+- **Transition interruption.** No transition is evaluated while a fade is in
+  flight, so a trigger set mid-fade waits (triggers persist until consumed). An
+  interrupt rule — snapshot the blended pose and fade from it, Unity's
+  "interruption source" — needs a sampled pose on the server or a three-way fade
+  on the client; neither has a caller yet.
+- **The server strip.** `Machine` holds full `Clip`s, and the server reads only
+  their durations and the root's translation channel. With a cook, the server
+  would bind the strip (duration, root track, event track) and the client the
+  full curves — `Machine::new` takes clips by lookup, so the seam is there. Owed
+  with _No cook, no cooked clip format_.
+- **Replication and save as a component.** `MachineState` is `Copy` and hashed,
+  but has no `serde` derive and is not a registered ECS component: puppet has no
+  ECS entity (its stage is behind a shared cell) and copies the state into
+  `RenderState`. A deserialised state would need validating against its machine
+  (a state index in range), which is why no derive was added ahead of a caller.
+  The client does not interpolate between replicated states either: puppet
+  samples the state the last tick left.
+- **The `crcbl sim` determinism harness.** The determinism property is proven in
+  `tests/machine.rs` (seeded parameters, identical hashes and events across runs
+  and across 30 Hz, 144 Hz and jittered frame clocks) and in puppet's
+  `the_animation_state_is_the_same_on_two_identical_runs`, not on the stage-4
+  harness, which hashes an ECS world puppet does not have.
+- **Cadence below the walk stop.** A blend state's cycle is its clips' durations
+  mixed by weight, so between the move threshold and the walk stop the walk
+  plays at its own cadence and the feet skate. A rate multiplier read from a
+  parameter would fix it; puppet's acceleration ramp makes it brief.
+- **Blend layers**: per-bone masks, additive layers (aim offsets), and a 2D
+  directional blend space — the last only once a sample needs strafing.
 - **Post ops**: sockets and attachments (a weapon on a hand joint) and look-at.
   Full-body IK is not planned.
+- **The editor's state-machine panel**, view first — _Animation debug tools_.
 
-The server-side items depend on the server strip (_No cook, no cooked clip
-format_ above); masks, additive layers, sockets and look-at do not.
+**Decided:**
 
-**Two-bone IK is built**, which this entry used to list as absent:
-`crcbl_anim::ik::{solve_two_bone, rotate_joint}`, tested in
-`crates/crcbl-anim/tests/ik.rs`. No production code calls it yet — EW's port is
-parked on EW's side, recorded under _EW's engine-port audit_.
+- `crcbl-anim` depends on `serde` and `ron` for the asset format — the pair
+  `crcbl-input` and `crcbl-inventory` read their files with, already in every
+  graph through `crcbl`. Still no `crcbl-scene` arrow.
+- Parameters are capped at `MAX_PARAMETERS` so `MachineState` is a fixed-size
+  `Copy` value; bools and triggers are stored as `0.0`/`1.0` in the same array.
+- Only the current state's event track fires; the outgoing state is muted during
+  a fade, so a walk being faded out does not add a footstep to the run's.
+- A zero-length clip (a one-keyframe stance) is a held pose: its time does not
+  advance and it crosses no events.
+- Events must sit in `0..1`; 1 is refused because on a looping state it is the
+  same instant as 0.
+- Clips are bound by name at `Machine::new`, not at parse, because the asset
+  does not hold the clips.
 
-Present and working: `Clip::sample_into`, `blend_into`, `BlendSpace1d`, `Pose`,
-`Palette::compute` — `apps/puppet` mixes idle↔walk↔run by measured speed through
-them.
+**Considered and declined:** removing `BlendSpace1d` now that puppet blends
+through the machine. It has no in-tree caller left, but it is public API and its
+sampling is the same code the machine's 1D blend state runs
+(`blend::sample_located`).
+
+**Two-bone IK is built**: `crcbl_anim::ik::{solve_two_bone, rotate_joint}`,
+tested in `crates/crcbl-anim/tests/ik.rs`. No production code calls it yet —
+EW's port is parked on EW's side, recorded under _EW's engine-port audit_.
 
 ### Animation debug tools are unbuilt past the viewer's skeleton overlay (2026-09-24)
 
@@ -12003,9 +12037,11 @@ enum in `crates/crcbl-cli/src/args.rs` has no `anim`.
 
 **What it would take:** a debug panel over `Pose` and `BlendSpace1d` for the
 scrubber and inspector, which could land now; the live view and the editor panel
-once a state machine exists; and `crcbl anim dump` once there is a cooked format
-to dump. Verified by the CLI's `Command` enum and by grepping `apps/` and
-`crates/` for a scrubber (none found).
+over `crcbl_anim::MachineState`, which exists since 2026-10-06 (puppet shows
+only the state's name and the footstep count, on its overlay and `[HUD]`); and
+`crcbl anim dump` once there is a cooked format to dump. Verified by the CLI's
+`Command` enum and by grepping `apps/` and `crates/` for a scrubber (none
+found).
 
 ### GPU skinning follow-ons (2026-08-27)
 
@@ -18878,12 +18914,30 @@ exists — what has not been done is pointing puppet at it. **What it blocks:**
 the honesty check, which is the only criterion that tests the importer against
 content this workspace did not author.
 
-### The rest of puppet's milestones 2, 3 and 4 are unbuilt (2026-08-27)
+### The rest of puppet's milestones 2, 3 and 4 are unbuilt (2026-08-27, updated 2026-10-06)
 
-**Not built:** no state machine, no jump, no run, no root motion, no animation
-events and therefore no footstep cues, no socket prop, and none of the
-device-swap showcase — the rebind UI and the glyph hints that follow the
-last-active device. That last group is topic 19's forcing function.
+**Built since:** the state machine (idle, run, jump through
+`assets/anim/character.ron`), the run (Shift, `game::RUN_SPEED`, a run stride in
+`rig::run`), the jump (Space, `game::JUMP_SPEED`, `rig::jump`) and animation
+events — footsteps from the run state's track, raised on the server's tick and
+counted on the `[HUD]` line, the debug panel and the overlay.
+
+**Not built:** root motion **in puppet** — `rig`'s clips are authored in place,
+so nothing drives the root and `Machine::root_velocity` would answer zero; root
+motion is proven at the crate level only (`tests/machine.rs`). A footstep
+**sound** — puppet has no audio path, so the cue is a counted event; wiring it
+to a `crcbl-audio` cue is the obvious next step once puppet plays anything. No
+socket prop, and none of the device-swap showcase — the rebind UI and the glyph
+hints that follow the last-active device. That last group is topic 19's forcing
+function.
+
+**Not verified in a browser:** the browser gate's `[POSE]` checks still read
+`blend` and `mid`, whose meaning moved from "across the idle↔walk blend" to "out
+of the idle stance, through the crossfades"; the headless tests in
+`apps/puppet/src/anim.rs` hold the same claims
+(`the_blend_sweeps_through_the_crossfade_both_ways`,
+`a_steady_run_leaves_the_crossing_counter_alone`), but
+`web/tools/browser-e2e.mjs` was not run against this change.
 
 **Also not built:** milestone 5's golden frames. `apps/puppet` has no `tests/`
 directory at all, so nothing pins a pose; the Pages demo half of milestone 5 is
@@ -18892,9 +18946,6 @@ done (`apps/puppet/src/web.rs`, `web/demos/puppet/`, the `puppet` row in
 
 **One engine limit is visible in the picture**: the slopes are rounded, because
 `crcbl-phys` has no oriented box to make a wedge out of.
-
-**What it blocks:** the footstep-timing exit criterion is topic 17's event test
-"live", and nothing else in the tree exercises animation events.
 
 ### Puppet's `--scene` is proven to the simulation, not to the frame (2026-09-07)
 
@@ -20163,25 +20214,11 @@ What else is open:
 
 ### What puppet's locomotion blend leaves for the rest of milestone 2
 
-`apps/puppet` ships the map, the controller path, the orbit-follow camera and —
-as of the blend layer — a skinned character blended between an idle stance and a
-walk by its own measured speed. What milestone 2 of
-`docs/plan/sample/09-puppet.md` still wants:
+`apps/puppet` ships the map, the controller path, the orbit-follow camera and a
+skinned character posed through the animation state machine — idle, a run that
+blends a walk and a run stride by measured speed, and a jump. What milestone 2
+of `docs/plan/sample/09-puppet.md` still wants:
 
-- **No state machine, and no crossfade to feed it.** The locomotion set is
-  continuous in speed, so nothing in the sample ever _switches_ states. A
-  `Crossfade` — the timed weight a switch fades over — was written and tested
-  during the blend slice and then **removed before it landed**, because it had
-  no in-tree caller and machinery kept for a use that has not arrived is
-  indirection to read through. It comes back with the idle/walk/run/jump/fall
-  machine the plan names, which is the caller that makes the fade something a
-  demo can be checked on. It is a dozen lines plus its tests; the shape is
-  described in `crcbl-anim/src/blend.rs`'s module docs.
-- **No run, so the set has two stops and not three.** `game::WALK_SPEED` is the
-  only gait the controller has, so `anim::Animator` places idle at 0 and walk at
-  `anim::WALK_STOP_MPS`. `BlendSpace1d` takes any number of stops and is tested
-  with three; adding a run means a second commanded speed in `game`, a run clip
-  in `rig`, and a third stop.
 - **The skin weights are all 1.** `rig::box_part` binds each vertex wholly to
   the nearer of its limb's two joints, because a cuboid has vertices only at its
   two ends. The limb still shears between the joints — which is why the parts
@@ -20201,10 +20238,11 @@ walk by its own measured speed. What milestone 2 of
   on the render-graph dump naming the `skinning` pass — the dump is logged once,
   at the first frame, before the harness can raise the log level, so that one
   needs the dump re-emitted or the level set at boot.
-- **No jump.** `game::run_tick` integrates a fall speed and nothing ever pushes
-  it upward, so `MoveOutcome::hit_ceiling` is never true in this sample.
-- **No root motion, no animation events and no attachment socket** — milestone
-  2's remaining items and milestone 3's.
+- **`MoveOutcome::hit_ceiling` is never true in this sample.** The jump pushes
+  the character up, but nothing on the map is low enough to hit.
+- **No root motion and no attachment socket** — the clips are in place (see _The
+  rest of puppet's milestones 2, 3 and 4 are unbuilt_), and the socket is
+  milestone 3's.
 - **Slopes are spheres, because `crcbl-phys` has no oriented box.** Its
   colliders are `Sphere`, an axis-aligned `BoxCollider` and a Y-aligned
   `Capsule`, so a ramp at an arbitrary angle cannot be built — `map::world` uses

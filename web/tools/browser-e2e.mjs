@@ -1579,20 +1579,22 @@ const EXPECTATIONS = {
       // by `apps/puppet`'s `the_browser_gates_step_heights_are_this_maps`.
       lowStep: 0.3,
       highStep: 0.9,
-      // **And the locomotion blend, which is milestone 2.** These three come
+      // **And the animation, which is milestone 2.** These three come
       // off a `[POSE]` line rather than the `[HUD]` one, because
       // `apps/puppet/src/app.rs` logs them on the frame's clock and the
       // heartbeat above is logged on the simulation's — that file argues it.
       //
-      // * `blend` — where the character sits across `apps/puppet/src/anim.rs`'s
-      //   locomotion set, 0 at the idle stance and 1 at the walk. It is a
-      //   function of the *measured* speed, so a demo whose pose followed the
-      //   keyboard instead would report it while standing against a wall.
+      // * `blend` — how far the character is out of its idle stance, 0 in
+      //   idle and 1 running (`apps/puppet/src/anim.rs`'s `Animator::blend`).
+      //   The state machine leaves idle on the *measured* speed, so a demo
+      //   whose pose followed the keyboard instead would report it while
+      //   standing against a wall.
       // * `mid` — how many frames the weight has spent strictly between the two
-      //   stops. The counter is the whole anti-snap claim: these lines are a
-      //   second apart and a crossing takes about a second and a half, so
-      //   sampling the weight cannot tell a sweep from a jump and counting the
-      //   frames can. It stops rising the moment the weight reaches an end.
+      //   ends, which is the crossfade between idle and the run. The counter is
+      //   the whole anti-snap claim: these lines are a second apart and a fade
+      //   takes a fraction of that, so sampling the weight cannot tell a fade
+      //   from a cut and counting the frames can. It stops rising the moment
+      //   the weight reaches an end.
       // * `dev` — how far the pose has carried a joint from the rest pose, in
       //   metres. It sweeps while the character walks and holds still while it
       //   stands, because `apps/puppet/src/rig.rs`'s idle is a stance.
@@ -2706,13 +2708,13 @@ const LOADOUT_LUMA_SWING = 20;
 const WALK_STEP_TOLERANCE_M = 0.05;
 
 /**
- * How near the walk end of puppet's locomotion set the blend weight must get
- * while the character is walking.
+ * How near the moving end puppet's blend weight must get while the character
+ * is walking.
  *
- * `apps/puppet/src/anim.rs` puts the walk stop at the speed the clip is
- * authored for, which is under the speed the controller commands — so a walking
- * character saturates the set at exactly 1. This leaves room for the beat the
- * reading was taken on to have landed during a turn.
+ * `apps/puppet/src/anim.rs`'s state machine is in its run state, out of the
+ * idle stance entirely, once the measured speed passes its threshold and the
+ * crossfade has run — so a walking character reads exactly 1. This leaves room
+ * for the beat the reading was taken on to have landed during a fade.
  */
 const BLEND_WALK_MIN = 0.9;
 
