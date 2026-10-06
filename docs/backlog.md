@@ -11477,18 +11477,78 @@ platform transcendentals, `mul_add` and glam's trig-based rotation builders in
   _different_ platform `libm` still passes, once their arithmetic is
   constructed, and the byte-pinned cross-platform golden buffers they block.
 
-### Client-side read-only query world (2026-08-27)
+### Client-side read-only query world: built, and what it left (2026-10-06)
 
-**Not built, and still unowned.** The physics plan's 2026-07-27 correction made
-this a P10 deliverable: the client hosts a read-only `PhysicsWorld` (statics
-from scene load, dynamic colliders reconstructed from snapshots) for camera boom
-sweeps (30) and audio occlusion rays (13). `crcbl-client` imports
-`crcbl_phys::Transform` and nothing else from the physics crate — no
-`PhysicsWorld`, no query surface.
+**Built** as `crcbl_client::ClientQueryWorld`
+(`crates/crcbl-client/src/query_world.rs`), the physics plan's 2026-07-27 P10
+deliverable: a `PhysicsWorld` the client queries and never steps, holding the
+scene's statics and a collider on each replicated entity at its interpolated
+pose. `apps/puppet`'s follow camera sweeps its boom through one
+(`Follow::camera`, `BOOM_RADIUS`). Decided, and why:
 
-Today each sample that needs a client-side query builds its own; `apps/breach`
-casts its pistol ray on the **server** side instead, which sidesteps the problem
-rather than solving it.
+- **In `crcbl-client`, not `crcbl`.** `crcbl-client` already depended on
+  `crcbl-phys` (for `Transform`), and `tools/check-no-renderer-deps.sh` guards
+  `crcbl-ui` and `crcbl-server` only; `crcbl-phys` reaches no renderer either
+  way. So no dependency edge changed.
+- **Statics are a `PhysicsWorld` the game builds**, handed to
+  `ClientQueryWorld::new`. No engine type turns a scene into colliders — each
+  sample's chunk rows are its own (`apps/puppet`'s `Surface`, towers' map) — and
+  the game's loader is the one its server already uses (`Map::world` in puppet),
+  so both sides hold the same statics by construction.
+- **Shape is the game's, not the wire's.** The snapshots carry a transform per
+  entity and nothing else. `follow` asks a `shape_of(entity_bits)` closure the
+  first time an entity appears, because a game knows what each archetype it
+  replicates is shaped like. Zero wire bytes. An entity keeps the shape it
+  arrived with until it leaves.
+- **Placed by `crcbl-phys`'s own placement.** `PhysicsWorld::add_collider` and
+  `place_collider` (moved out of `PhysicsSystem` into
+  `crates/crcbl-phys/src/world/placement.rs`) put a `ColliderComponent` at a
+  `Transform` exactly as the server's query world does, so
+  `queries_match_the_servers_world_at_the_same_pose` can demand bit-equal hits.
+- **A teleport snaps, decided by speed.** `Client::interpolate_snapping` shows
+  an entity that moved farther than `max_step` metres per server tick (scaled by
+  the ticks between the pair, so a lost snapshot is not a jump) at the newer
+  snapshot instead of lerping through the gap. The snapshots carry no teleport
+  flag, and asteroids' "a wrap knows it is a teleport" rule is a server-side
+  rule a client cannot see, so speed is the only signal the client has. The
+  caller passes `max_step` to `follow`.
+- **Gone from the state means gone.** A replica not in the interpolated state
+  loses its collider on that `follow`, which covers a despawn and a sector the
+  client unsubscribed from (`set_subscribed_sectors` drops its frames).
+- **Queries take `&mut self`**, because `PhysicsWorld`'s broadphase is rebuilt
+  lazily. Read-only means only `follow` changes the collider set. The surface is
+  `cast_ray`, `sweep_sphere`, `overlap_sphere_into` (each with a `QueryFilter`)
+  and the ids-only `overlap_sphere_ids_into`, plus `collider_of` so a boom can
+  leave the local player's own replica out.
+- **The boom pulls in and returns immediately.** An eased return would spend its
+  frames inside what it just left. The radius is checked against the near
+  plane's corners at a 32:9 window (`the_boom_is_wider_than_the_near_plane`).
+
+Left, and why:
+
+- **No sample feeds it replicas yet.** `apps/puppet` replicates no entity (its
+  module's stage is read through a mutex), so its world is statics only and it
+  never calls `follow`. The dynamic half is proven by `crcbl-client`'s tests
+  only. The first sample with replicated bodies and a boom or occlusion ray
+  should call `follow`.
+- **No sample had an ad-hoc client query to replace.** Every `PhysicsWorld::new`
+  under `apps/` is the server's stage, a test, or `apps/towers`' dev-camera
+  `Walker`. `Walker` drives a `CharacterController`, whose `move_and_slide`
+  needs a world it may move through, not a read-only view, so it stays its own
+  world (declined: folding it in would hand game code the mutation the type
+  exists to withhold).
+- **`apps/breach` still casts its pistol on the server**, which is right for a
+  hit that decides damage. The query world is for presentation.
+- **Only the default sector.** `follow` reads `Client::interpolate_snapping`,
+  which reads `SectorId::ZERO` as `interpolate` does. A multi-sector client
+  needs both to grow a sector.
+- **A shape that changes while replicated** (crouching, a vehicle's door) is not
+  followed: `shape_of` is asked once. It would need a per-entity shape revision
+  on the wire or a "shape changed" hook.
+- **Audio occlusion is not wired.** `crcbl-audio` has no occlusion hook (see
+  _Occlusion (rule 5)_). The ray is there now.
+- **The rest of the topic 30 boom**: damped follow, recenter, zoom tiers, aim
+  mode and player fade. Not built.
 
 ### Sphere overlaps answer hits: decisions, and what they left (2026-10-05)
 
@@ -15607,11 +15667,12 @@ a waveform.
 
 ### Occlusion (rule 5) (2026-08-27)
 
-**Not built; its stated dependency is now half met.** `crcbl-phys` has the ray
-query (`cast_ray`), so the "needs phys BVH" half is available. What is owed:
-acoustic materials on colliders (`{density, muffle_cutoff_hz, attenuation_db}`
-presets) and a per-voice filter. There is no biquad or one-pole anywhere in the
-voice path — the only lowpass in `crcbl-audio` is inside the noise generator.
+**Not built; its stated dependency is met.** `crcbl-phys` has the ray query
+(`cast_ray`), and since 2026-10-06 the client has a world to cast it in
+(`crcbl_client::ClientQueryWorld::cast_ray`). What is owed: acoustic materials
+on colliders (`{density, muffle_cutoff_hz, attenuation_db}` presets) and a
+per-voice filter. There is no biquad or one-pole anywhere in the voice path —
+the only lowpass in `crcbl-audio` is inside the noise generator.
 
 **What it blocks:** an MVP exit criterion ("occlusion audible and
 material-distinct"), and `32-voip.md`'s world-voice audibility test, which

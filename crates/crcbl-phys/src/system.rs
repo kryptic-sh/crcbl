@@ -51,9 +51,9 @@ use std::collections::HashMap;
 
 use crcbl_core::{Handle, Pool};
 use crcbl_ecs::{Access, DebugCtx, Entity, SystemTrait};
-use glam::{DQuat, DVec3};
+use glam::DVec3;
 
-use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
+use crate::collider::Aabb;
 use crate::components::{ColliderComponent, RigidBody, Transform};
 use crate::contact::broadphase::ProxyId;
 use crate::contact::island::{self, IslandId, Islands};
@@ -848,57 +848,7 @@ impl PhysicsSystem {
         *self.transform_slot(id) = *transform;
         self.remove_collider(entity);
 
-        let collider = match component {
-            ColliderComponent::Sphere {
-                offset,
-                radius,
-                is_trigger,
-            } => {
-                let centre = placed_centre(*offset, transform);
-                let collider = self.world.add_sphere(Sphere::new(centre, *radius));
-                self.world.set_trigger(collider, *is_trigger);
-                collider
-            }
-            ColliderComponent::Box {
-                offset,
-                half_extents,
-                is_trigger,
-            } => {
-                let collider = self
-                    .world
-                    .add_box(query_box(*offset, *half_extents, transform));
-                self.world.set_trigger(collider, *is_trigger);
-                collider
-            }
-            ColliderComponent::Capsule {
-                offset,
-                radius,
-                half_height,
-                is_trigger,
-            } => {
-                let centre = placed_centre(*offset, transform);
-                let collider = self.world.add_turned_capsule(
-                    Capsule::new(centre, *radius, *half_height),
-                    transform.rotation,
-                );
-                self.world.set_trigger(collider, *is_trigger);
-                collider
-            }
-            ColliderComponent::Compound {
-                offset,
-                shape,
-                is_trigger,
-            } => {
-                let collider = self.world.add_compound(shape, *offset, transform);
-                self.world.set_trigger(collider, *is_trigger);
-                collider
-            }
-            ColliderComponent::Mesh { mesh, is_trigger } => {
-                let collider = self.world.add_mesh(mesh.clone(), *transform);
-                self.world.set_trigger(collider, *is_trigger);
-                collider
-            }
-        };
+        let collider = self.world.add_collider(component, transform);
 
         let record = self.records.get_mut(id).expect("a live record");
         record.collider = Some((collider, component.clone()));
@@ -1609,7 +1559,7 @@ impl PhysicsSystem {
             BodySet::Static => &self.statics.transforms[record.index],
             BodySet::Sleeping => self.islands.transform(record.island, record.index),
         };
-        place_collider(&mut self.world, *collider, component, transform);
+        self.world.place_collider(*collider, component, transform);
     }
 }
 
@@ -1629,77 +1579,9 @@ fn apply_forces(awake: &mut AwakeSet, providers: &[Box<dyn ForceProvider>], dt: 
 fn sync_colliders(world: &mut PhysicsWorld, records: &Pool<BodyRecord>, awake: &AwakeSet) {
     for (id, transform) in awake.ids.iter().zip(awake.transforms.iter()) {
         if let Some((collider, component)) = records.get(*id).and_then(|r| r.collider.as_ref()) {
-            place_collider(world, *collider, component, transform);
+            world.place_collider(*collider, component, transform);
         }
     }
-}
-
-/// Move `collider` to where `component` sits on a body at `transform`.
-fn place_collider(
-    world: &mut PhysicsWorld,
-    collider: ColliderId,
-    component: &ColliderComponent,
-    transform: &Transform,
-) {
-    match component {
-        ColliderComponent::Sphere { offset, radius, .. } => {
-            world.set_sphere(
-                collider,
-                Sphere::new(placed_centre(*offset, transform), *radius),
-            );
-        }
-        ColliderComponent::Box {
-            offset,
-            half_extents,
-            ..
-        } => {
-            world.set_box(collider, query_box(*offset, *half_extents, transform));
-        }
-        ColliderComponent::Capsule {
-            offset,
-            radius,
-            half_height,
-            ..
-        } => {
-            world.set_turned_capsule(
-                collider,
-                Capsule::new(placed_centre(*offset, transform), *radius, *half_height),
-                transform.rotation,
-            );
-        }
-        ColliderComponent::Compound { offset, shape, .. } => {
-            world.set_compound(collider, shape, *offset, transform);
-        }
-        ColliderComponent::Mesh { mesh, .. } => {
-            world.set_mesh(collider, mesh.clone(), *transform);
-        }
-    }
-}
-
-/// Where a sphere or a capsule `offset` from a body at `transform` is
-/// centred: the offset turned by the body's rotation, as the contact pipeline
-/// places it ([`crate::contact::shape::ContactShape::placed`]).
-///
-/// An unturned body, or no offset, adds the offset as it is: the product
-/// with the identity can change a zero's sign, and the colliders of unturned
-/// bodies keep the centres they had before offsets turned, to the bit.
-fn placed_centre(offset: DVec3, transform: &Transform) -> DVec3 {
-    if transform.rotation == DQuat::IDENTITY || offset == DVec3::ZERO {
-        transform.position + offset
-    } else {
-        transform.position + transform.rotation * offset
-    }
-}
-
-/// What the query world holds for a box collider `offset` from a body at
-/// `transform`: the box turned with the body, its offset turned too, as the
-/// contact pipeline places it ([`crate::contact::shape::ContactShape::placed`]).
-fn query_box(offset: DVec3, half_extents: DVec3, transform: &Transform) -> BoxCollider {
-    BoxCollider::new(
-        transform.position + transform.rotation * offset,
-        half_extents,
-    )
-    .with_rotation(transform.rotation)
 }
 
 /// `value`'s bits with every zero and every `NaN` made one: `-0.0` hashes as

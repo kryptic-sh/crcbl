@@ -30,12 +30,14 @@ use crcbl_phys::{PhysicsSystem, Transform};
 
 pub mod input_lead;
 pub mod playout;
+pub mod query_world;
 mod scene_fetch;
 
 use input_lead::InputLead;
 pub use input_lead::InputLeadStats;
 use playout::Playout;
 pub use playout::PlayoutStats;
+pub use query_world::ClientQueryWorld;
 pub use scene_fetch::{SceneFetch, SceneFetchFailed};
 
 /// How long the client waits for a handshake reply before assuming the hello
@@ -519,19 +521,57 @@ impl<T: Transport> Client<T> {
     /// returned by [`Self::update`]. Entities present in only one snapshot
     /// appear at that snapshot's transform; with fewer than two snapshots the
     /// one held is used as-is.
+    ///
+    /// Every move is lerped, however far: a respawn or a wrap is drawn
+    /// crossing the gap it jumped. [`Self::interpolate_snapping`] is the form
+    /// that does not.
     #[must_use]
     pub fn interpolate(&self, alpha: f32) -> InterpolatedState {
+        self.interpolate_snapping(alpha, f64::INFINITY)
+    }
+
+    /// [`Self::interpolate`], with each entity that moved farther than
+    /// `max_step` metres per server tick between the two snapshots either side
+    /// of playback shown at the newer snapshot's transform rather than lerped.
+    ///
+    /// **A jump is not a path.** Lerping a teleport, a respawn or a wrap puts
+    /// the entity at every point of a gap it never crossed, which a picture
+    /// gets away with for a frame and a query does not: a camera sweep or an
+    /// occlusion ray that meets a collider standing in that gap is answering
+    /// for a wall that was never there. The snapshots carry no teleport flag,
+    /// so the jump is told by its speed: `max_step` is the farthest the game
+    /// lets anything move in one tick, and a move faster than that across the
+    /// pair's ticks did not happen by moving. The newer transform is the one
+    /// shown because that is where the entity is; the older one is where it
+    /// has left.
+    ///
+    /// # Panics
+    ///
+    /// If `max_step` is negative or `NaN`, which would snap every entity or
+    /// none without saying which.
+    #[must_use]
+    pub fn interpolate_snapping(&self, alpha: f32, max_step: f64) -> InterpolatedState {
+        assert!(
+            max_step >= 0.0,
+            "the largest step per tick must be zero or more, got {max_step}"
+        );
         let empty = HashMap::new();
-        let (prev, current) = match self.playback_pair(SectorId::ZERO) {
-            Some((prev, current)) => (&prev.transforms, &current.transforms),
+        let (prev, current, span) = match self.playback_pair(SectorId::ZERO) {
+            Some((prev, current)) => (
+                &prev.transforms,
+                &current.transforms,
+                (current.tick.get() - prev.tick.get()) as f64,
+            ),
             None => (
                 &empty,
                 self.frames
                     .get(&SectorId::ZERO)
                     .and_then(VecDeque::back)
                     .map_or(&empty, |frame| &frame.transforms),
+                0.0,
             ),
         };
+        let snap_distance = max_step * span;
 
         let alpha = f64::from(alpha.clamp(0.0, 1.0));
         let mut transforms: Vec<(u64, Transform)> = current
@@ -539,6 +579,10 @@ impl<T: Transport> Client<T> {
             .map(|(&entity_bits, current_transform)| {
                 let transform = prev
                     .get(&entity_bits)
+                    .filter(|prev_transform| {
+                        prev_transform.position.distance(current_transform.position)
+                            <= snap_distance
+                    })
                     .map_or(*current_transform, |prev_transform| {
                         prev_transform.lerp(current_transform, alpha)
                     });
