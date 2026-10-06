@@ -15,7 +15,7 @@ Work in this order before the lower-priority backlog:
   regressions green. This is a consumer migration, not another engine feature.
 
 Upstream review: pulled crcbl `origin/main` with `--ff-only` before this update;
-the checkout was already at `42448689`. Reviewed against EW main `56904d90`. The
+the checkout was already at `4c942900`. Reviewed against EW main `b68f5cab`. The
 current `world/arc_sweep.rs` still exposes only closest accelerated contacts.
 EW's `src/controller_ballistic.rs` still uses `find_wall` and `hits_ceiling`
 forecast bisections, so this handoff remains open.
@@ -150,6 +150,19 @@ in EW `56904d90`; its ingredient reserves, station gates and snack output in
 `src/hideout_inventory/food_crafting_recipes.rs` remain game rules. Reviewing
 these additions found no further engine migration prerequisite. Do not introduce
 a generic engine crafting scheduler for these contracts.
+
+The cooked-meal and tuna recipes shipped in EW `79a2b6f4` and `b68f5cab` also
+establish no additional engine prerequisite. `CraftWaterSource` and
+`select_craft_water`, `validate_craft_water` and `consume_craft_water` in
+`src/hideout_inventory/food_crafting_water.rs` reserve measured water from
+identified game containers and retain their shells. Water budgets, ingredient
+eligibility and meal outputs remain game rules. The uncommitted filter assembly
+work in `src/hideout_inventory/food_crafting_tools.rs` similarly reserves a
+reusable toolkit against game construction and crafting jobs. That work is not
+shipped or fully validated; do not treat it as evidence for an engine port.
+Revisit reusable reservation support only if a concrete engine limitation is
+demonstrated. Selectable accelerated contacts remain the engine implementation
+priority ahead of EW's contact-forecast migration.
 
 1. **Curved-path collision queries with contact times — delivered 2026-10-06,
    awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
