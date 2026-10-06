@@ -58,6 +58,7 @@ use std::process::Command;
 use crcbl::args::Common;
 use crcbl::backend::GpuBackend;
 use crcbl::ui::draw_list::{DrawCommand, DrawList};
+use crcbl::ui::menu::MenuSkin;
 use crcbl_golden::{Golden, Image};
 
 /// A deterministic headless run of `frames` frames at `tick_hz`.
@@ -123,28 +124,45 @@ pub fn ui_images(list: &DrawList) -> Vec<[f32; 4]> {
 }
 
 /// Asserts that a paused frame's list carries the menu's **art above the overlay
-/// cut and under the menu's title**: the scrim and the frames are image quads
-/// pushed after `DrawList::begin_overlay` and before the `title` string, and
-/// nothing below the cut is one.
+/// cut and under the menu's title**: the scrim and the frames — image quads cut
+/// from `skin` — are pushed after `DrawList::begin_overlay` and before the
+/// `title` string, and nothing below the cut is one.
 ///
 /// The picture half of "the pause menu covers the HUD and its words cover the
 /// picture", read off the one list the UI pass draws — a menu whose art never
 /// went in draws its labels over the bare game, and one whose art went in after
 /// its title paints the frame over its own words.
 ///
+/// Menu art is told apart **by where in the atlas it was cut from**, not by
+/// being an image at all: a game's own HUD may draw pictures from the same
+/// atlas below the cut — `apps/orbit`'s flight panel is nine-sliced — and
+/// those are not the menu's.
+///
 /// # Panics
 ///
 /// When any of the three does not hold, naming which.
-pub fn assert_menu_art_above_the_cut_and_under(list: &DrawList, title: &str) {
-    let is_image = |command: &DrawCommand| matches!(command, DrawCommand::Image { .. });
+pub fn assert_menu_art_above_the_cut_and_under(list: &DrawList, skin: &MenuSkin, title: &str) {
+    let images = [
+        skin.panel.image,
+        skin.buttons.idle.image,
+        skin.buttons.hovered.image,
+        skin.buttons.pressed.image,
+        skin.scrim,
+    ];
+    let is_menu_art = |command: &DrawCommand| match command {
+        DrawCommand::Image { uv_min, uv_max, .. } => images
+            .iter()
+            .any(|image| uv_min.cmpge(image.uv_min()).all() && uv_max.cmple(image.uv_max()).all()),
+        _ => false,
+    };
     assert!(
-        !list.base_commands().iter().any(is_image),
+        !list.base_commands().iter().any(is_menu_art),
         "menu art landed below the overlay cut, under the game's HUD"
     );
     let overlay = list.overlay_commands();
     let first_image = overlay
         .iter()
-        .position(is_image)
+        .position(is_menu_art)
         .expect("the paused frame's overlay holds no menu art");
     let title_at = overlay
         .iter()

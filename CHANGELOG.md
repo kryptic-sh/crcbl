@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_orbit::GameError` has an `Art` variant** (see Added: orbit's flight
+  UI is `.crpix` art): the flight UI's sprites not fitting the UI pass's image
+  atlas, which stops start-up. An exhaustive `match` over it must name the new
+  arm. `crcbl_orbit::page::draw` takes the registered `crcbl_orbit::art::Art`,
+  and `crcbl_orbit::RenderState` has `velocity`, `periapsis_at` and
+  `apoapsis_at` fields, so a struct literal of it must name them or take
+  `..RenderState::default()`.
+
 - **Every hello carries the client's `PlayerId`, and the protocol version is 8**
   (`ProtocolCompatibility::DEFAULT`). `crcbl_net::Hello` has a new `player`
   field, 16 bytes on the wire after `generation`, so a build from before cannot
@@ -795,6 +803,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Orbit's flight UI is `.crpix` art** (`docs/plan/sample/06-orbit.md`, sample
+  rule 11; `crcbl_orbit::art`). The instrument panel's window and its fuel and
+  throttle gauges are nine-slices, and under them is a navball-lite: a dial
+  whose top is straight up from the surface, with prograde, retrograde and
+  heading markers riding its rim at the angle each makes with the local
+  vertical, sky over ground under the planet's air and black over grey round the
+  moon. The map marks the ship and the orbit's apoapsis and periapsis with
+  glyphs, labelled `AP` and `PE`. Three sheets in `apps/orbit/assets/` —
+  `markers`, `navball` and `chrome` — are baked by a new `build.rs`; the art is
+  placeholder, written as text. The bodies and the trajectory stay geometry, and
+  the readouts stay text.
+- **`crcbl::engine::PageBundle::images_mut`**, the UI pass's image atlas, for a
+  sample whose frame is a page to register its own art into, as towers' own
+  bundle already could.
 - **A stable player identity: `crcbl_core::PlayerId`** (re-exported as
   `crcbl_net::PlayerId`), 128 random bits a client draws once, keeps and
   presents in every hello, kept apart from the per-session `SessionId` and

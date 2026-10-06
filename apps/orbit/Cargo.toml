@@ -28,6 +28,14 @@ crcbl = { workspace = true }
 # `glam`'s and so does this sample, rather than converting at every call.
 glam = { workspace = true }
 
+# The build script's half: `build.rs` bakes `assets/*.crpix`, the flight UI's
+# markers, navball and chrome, and it needs `crcbl-sprite`'s PNG *encoder*,
+# which `crcbl` does not re-export. Named here rather than as a normal
+# dependency so `bake` stays out of the shipped binary — `apps/towers/Cargo.toml`
+# has the same pair.
+[build-dependencies]
+crcbl-sprite = { workspace = true, features = ["bake"] }
+
 # The helpers this sample's own unit tests read a frame back with — `ui_text`,
 # `row_value` and `headless_common`, each a fact about an engine surface that
 # every sample had written out for itself. A dev-dependency, so it reaches no

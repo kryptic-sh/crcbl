@@ -17785,19 +17785,30 @@ rest of the samples use. **What it blocks:** the exit criterion "sector boundary
 crossing invisible at max warp and live rates alike", which is the sample's
 reason for existing on the ladder at S5.
 
-### Orbit owes sample rule 11 and claims no exemption (2026-08-27)
+### Orbit's flight art is placeholder, and what it left (2026-10-06)
 
-**Not built.** The doc asks for `.crpix` art for the flight UI's chrome and the
-map view — the navball-lite, prograde/retrograde markers, apo/peri glyphs.
-`apps/orbit` has no `build.rs` and no `assets/`; the flight instruments are
-rectangles, polylines and text. Unlike hud, viewer, sparks, lantern, quarry,
-shard and puppet, this sample's doc grants **no** rule 11 exemption, so this is
-an open obligation rather than a settled decision.
+**Rule 11 is met** — `apps/orbit/assets/{markers,navball,chrome}.crpix`, drawn
+by `apps/orbit/src/page.rs` — but these are not:
 
-**What it would take:** either the sheets, or an argued exemption written into
-the doc. The exemption is hard to argue: rule 11's own text says the exemption
-is narrow and orbit has explicit 2D chrome. **What it blocks:** rule 11's claim
-that the ladder has no untextured-quad holdouts left.
+- **The art is placeholder, written as text**, as towers' icons are. An art pass
+  would replace the three sheets; nothing else would change, because
+  `crate::art` finds every frame by name.
+- **The apsis direction is a second copy of the eccentricity vector.** `apsides`
+  in `apps/orbit/src/game.rs` forms it from the state, and
+  `crcbl_phys::Orbit::from_state` already forms the same vector and keeps only
+  its length. Exposing the direction from `crcbl-phys` would delete the copy;
+  not done here because `crcbl-phys` was being changed in another worktree at
+  the time. A test pins orbit's copy to known states either way.
+- **No golden pins the picture.** Orbit has no image golden and its browser-gate
+  row reads the `[HUD]` line only, so a sprite drawn in the wrong place passes
+  every gate that does not read the draw list. `page`'s tests hold each sprite
+  to its frame and the navball's markers to their angles; the picture itself was
+  looked at once, in `--screenshot` frames at 960x720 on the pad and mid-ascent,
+  and at no other size.
+- **The markers are placed, not turned.** The UI pass's image quad has no
+  rotation, so a marker on the navball's rim stands upright wherever it rides —
+  as KSP's do — and the map's ship marker shows no heading; the engine plume is
+  what shows it, while the throttle is open.
 
 ### Orbit's crash scrub and its drift record are owed (2026-09-25)
 

@@ -176,6 +176,13 @@ impl PageBundle {
         self.ctx.video()
     }
 
+    /// The image atlas the UI pass draws pictures from, to register a page's
+    /// own art into — see [`UiRenderer::images_mut`] for when a registration
+    /// reaches the GPU.
+    pub const fn images_mut(&mut self) -> &mut crcbl_ui::image::ImageAtlas {
+        self.ui.images_mut()
+    }
+
     /// The glyph atlas the UI pass renders text from.
     ///
     /// A page that centres anything must measure with the *same* atlas the pass

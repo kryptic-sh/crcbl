@@ -41,6 +41,7 @@
 
 pub mod app;
 mod args;
+pub mod art;
 pub mod game;
 mod gpu;
 pub mod menu;

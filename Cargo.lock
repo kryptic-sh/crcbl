@@ -1585,6 +1585,7 @@ version = "0.1.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
+ "crcbl-sprite",
  "glam",
 ]
 
