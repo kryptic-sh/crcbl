@@ -207,6 +207,39 @@ and a wrapped length that happened to match would index past the slice. It
 stays, and this paragraph is why the sabotage log for that slice shows the
 length check going red instead.
 
+### The move protocol and the stash, as built (2026-10-06)
+
+The kit's server half: `crcbl_inventory::Inventory`, its six commands and the
+stash. The decisions are listed in `docs/backlog.md` under _The move protocol
+and the stash_; this is what the slice measured.
+
+**The atomicity is in the type, not in each command.** `Inventory::apply` runs
+the command body against copies of the containers it touches, and that body
+borrows the inventory immutably, so no command can reach a real grid before the
+commit. The sabotage that matters — committing the copies even when a later step
+refuses, which is what "remove, then add" amounts to — turns the cross-container
+refusal test, the every-refusal test, the split-mint test and the no-dupe
+property red together.
+
+**Measured, one run of the no-dupe property** (2,000 seeded streams of 64 steps,
+three players, every stash opened): of the six commands in the order move,
+split, merge, equip, drop, take-all, 800, 290, 405, 1,090, 4,587 and 563 landed,
+and every kind was refused over 10,000 times; 23,567 spawns and 2,535 despawns
+landed. Most commands are refused by design — they aim at stale ids, other
+players' containers and cells past an edge — and the tally assertion at the end
+is what stops a generator change from quietly making every command a refusal.
+Sabotages each caught: the mint not advancing (a split re-mints an id the
+property has seen), a cross-container move that copies instead of removing (an
+id held twice), a whole merge that leaves its source at zero (the property alone
+catches this one: the id set should have lost the source), and a take-all that
+keeps what fitted before its refusal.
+
+**Breach is the consumer, and it found nothing to change.** Its drag became
+`loadout::drag`, a `Command::Move` on a one-container inventory, with the rig
+`Access::Player` of a fixed in-process id; its tests that empty and refill the
+rig now go through `despawn` and `spawn`, the explicit doors. Shard kept its
+bare grid, because its save and its derived floor are written against one.
+
 ### Cross-fleet stash: decided and out of scope (2026-08-27)
 
 **Deliberately not built.** Engine stash = per-server-instance store;

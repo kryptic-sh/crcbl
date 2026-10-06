@@ -179,11 +179,12 @@ crcbl-water = { path = "crates/crcbl-water", version = "0.1.0" }
 # this crate implements it, so the crate with the bodies in it does not link the
 # crate with the weather in it.
 crcbl-wind = { path = "crates/crcbl-wind", version = "0.1.0" }
-# The grid-inventory kit: the container primitive, the item catalogue and the
-# placement rules, headless. `serde`, `ron` and `thiserror` and nothing else —
-# no `glam` and no `crcbl-core` — so the arrow into it costs a browser build
-# the simulation and no more, and the server and the client can link the same
-# placement code without agreeing on a renderer.
+# The grid-inventory kit: the container primitive, the item catalogue, the
+# placement rules and the move protocol with its server-side stash, headless.
+# `serde`, `ron` and `thiserror`, plus `crcbl-core` for the `PlayerId` a stash
+# is keyed by and `crcbl-store` for the storage it is written through — no
+# renderer — so the server and the client can link the same placement code
+# without agreeing on one.
 crcbl-inventory = { path = "crates/crcbl-inventory", version = "0.1.0" }
 # Ground navigation: the grid router EW proved before the engine had one, and
 # the rung below `docs/plan/24-navigation.md`'s navmesh. `glam` and `thiserror`

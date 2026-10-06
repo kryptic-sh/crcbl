@@ -17249,8 +17249,10 @@ all name it. The decisions, each recorded so it is not re-argued:
     `a_resimulation_from_the_file_names_the_players_the_live_module_read`, both
     over in-process transports. Towers' `quit` test checks that a UDP-served
     recording's two joins each name a player, not which.
-- **The server-side stash keyed by `PlayerId` (`34-inventory.md`): unblocked,
-  not built.** The key exists; the per-server store and its transactions do not.
+- **The server-side stash keyed by `PlayerId` (`34-inventory.md`): built
+  (2026-10-06)** as `crcbl_inventory::stash`, with store-crossing moves as
+  ordinary transactions of one `Inventory`. No sample has a server that keeps
+  one; see _The move protocol and the stash_ under the inventory heading.
 - **Per-player voice mute (`32-voip.md`): unblocked, not built.** No voice
   exists.
 
@@ -17383,13 +17385,12 @@ engine change made on behalf of either.
 **What is still owed**, each of it in the plan and none of it built: nesting
 (grids inside grids, the depth cap and cycle rejection) and the weight/volume
 rollup through it; mounts and coverage, and gear declared as the grids it
-provides; items as entities with replicated identity; the command protocol
-(`Move`/`Split`/`Merge`/`Equip`/`Drop`/`TakeAll`) with server-side validation of
-reach, line of sight and space; access grants, so contents replicate only while
-a container is open; the server-side stash keyed by `PlayerId` (the key exists
-since 2026-10-05, the store does not) and store-crossing transactions; and
-client optimism with pending/rollback. The no-dupe _property_ is unwritten
-because there is no server-side transaction to fuzz.
+provides, so an `Equip` checks coverage conflicts; items as entities with
+replicated identity; the commands' wire form, their replication and their rate
+limit; weight caps as a command check; access grants, so contents replicate only
+while a container is open; and client optimism with pending/rollback. The
+command protocol, the stash and the no-dupe property are built — see _The move
+protocol and the stash_ below.
 
 **DECIDED 2026-09-06, executed in full 2026-09-07 —** option 1:
 `crcbl-inventory` was built from shard, data-driven — grid dimensions, item
@@ -17411,6 +17412,92 @@ stack), `rotate` and every `Rotation` but `Deg0` (neither panel has a rotate
 key), and nesting. Those remain the parts most likely to be shard-shaped, and
 they are still the parts with no consumer. Breach did not hit the missing
 cross-grid move either, because it carries one grid.
+
+### The move protocol and the stash (2026-10-06)
+
+**Built** in `crates/crcbl-inventory`: `command.rs` (`Command` — `Move`,
+`Split`, `Merge`, `Equip`, `Drop`, `TakeAll` — `Applied`, `Refusal`,
+`ContainerId`, `Access`, `Held`), `inventory.rs` (`Inventory::apply`, `spawn`,
+`despawn`, `add`, `open_stash`) and `stash.rs` (`StashLayout`, the stash file,
+`save`/`load`/`encode`/`decode`). The no-dupe property is
+`inventory::no_dupe::no_command_stream_duplicates_or_loses_an_item`. The
+decisions, each recorded so it is not re-argued:
+
+- **A command runs against copies and commits whole.** `Inventory::apply` copies
+  each container's grid the first time a step touches it, runs every step on the
+  copies through a body that borrows the inventory immutably, and writes the
+  copies back and advances the mint only when the last step succeeded. "Never
+  remove, then add" is structural rather than a rule each command keeps. Chosen
+  over validate-everything-then-apply-infallibly because a take-all's later
+  placements depend on its earlier ones, so a separate validation pass would be
+  a second implementation of first-fit. Cost: at most two grid clones a command,
+  on the server; a panel's per-frame `can_accept` still asks
+  `Grid::can_move_within`, which copies nothing.
+- **Commands name a stack by `StackId`, not `SlotId`** (`Held`): a slot is
+  reused once its placement leaves, so a stale command from the loser of a
+  contested loot must miss (`Refusal::NoSuchStack`) rather than land on what the
+  winner's move left there.
+- **Reach and line of sight are the caller's**, a
+  `Fn(PlayerId, ContainerId) -> bool` every `apply` takes and asks once per
+  container the command names, after existence and ownership. The kit has no
+  world to measure in; physics in the kit was the rejected alternative.
+- **Ownership is `Access`**: `Player(id)` containers answer only that player
+  (`Refusal::NotYours`); `Open` containers — corpses, crates, the ground —
+  answer anyone the reach check admits. A stash grid is always its player's.
+- **The inventory mints every id, one counter per server instance.** `Split` and
+  `spawn` are the only minters. One inventory per server means ids are unique
+  across every rig, world container and stash it holds, and a stack keeps its id
+  across containers. A container `add`ed with ids minted elsewhere (shard's loot
+  roster, breach's kit) is refused if any id is already held or held twice, and
+  moves the mint past its highest. **Not guaranteed:** an adopted id below the
+  mint can equal one an earlier `despawn` removed, so "never reused" holds only
+  for minted ids; an audit trail would need a despawned-id record.
+- **The stash lives inside the `Inventory`**, as
+  `ContainerId::Stash { player, grid }` containers, so rig to stash ("send to
+  stash") and back ("take from stash") is an ordinary two-container transaction.
+  A stash in a second structure would need a two-store commit to be atomic; the
+  plan's "both sides commit or neither" is satisfied by there being one store.
+- **The stash file** is written through `StorageSource::write` (natively
+  `write_atomic`), CRC-32 checked, with the mint in it so a restarted server
+  never re-mints a held id. Grids are rebuilt through `Grid::place`; one stack
+  twice, an id past the mint, an overlap, a count past the item's maximum, an
+  unknown item key and trailing bytes each read as damaged — so a catalogue edit
+  that drops an item a stash holds refuses the whole file rather than losing the
+  item. A player's grids are as written, not as today's `StashLayout`, so
+  enlarging the stash does not brick existing players. **There is no migration
+  chain yet**: only version 1 exists; the first bump adds one in
+  `crcbl_store::save`'s `migrate` shape.
+- **`TakeAll` is all-or-nothing.** A take-all that runs out of room part-way is
+  refused whole. Take-what-fits is the other policy a game could want; it is a
+  knob nobody has asked for.
+- **`Drop` is a quick-move into an `Open` container** (the ground pile a game
+  keeps), not a hand-off out of the kit, so dropped items stay inside the
+  conservation the property checks. **`Equip` is a quick-move into a filtered
+  grid**, refused with `NotASlot` for an unfiltered one; coverage conflicts wait
+  on mounts and coverage.
+- **`crcbl-inventory` now depends on `crcbl-core` and `crcbl-store`.** Rejected:
+  the stash in `crcbl-store` (every `crcbl-store` user would link the optional
+  kit) and an `Inventory<K>` generic over its owner key (one instantiation, and
+  persistence would still need the storage seam). Both crates build for wasm and
+  `crcbl` already links both, so the `inventory` feature adds no crate.
+- **No fuzz target.** `crates/crcbl-net/fuzz` fuzzes bytes a peer chooses, and
+  the commands have no wire form yet; the stash file is the server's own. When
+  commands get a wire decoder, that decoder is the target, and taking
+  `crcbl-inventory` into the fuzz crate changes its `Cargo.lock`.
+- **Consumer:** `apps/breach`'s drag is `loadout::drag`, a `Command::Move` on an
+  `Inventory` whose one container is the rig, owned by `loadout::owner`. No
+  sample runs a server that keeps a stash, so the stash is tested at the kit
+  level only (`stash::tests`, through `MemoryStorage` and `NativeStorage`).
+  Shard's drag still calls `Grid::move_within` on its bare grid.
+
+**Still owed from this slice:** a container cannot be removed from an
+`Inventory` (a corpse that despawns, a match that ends), which a server will
+need, and what happens to its contents is the decision that comes with it; a
+store-crossing move under an injected save failure (`34-inventory.md`'s Testing)
+is not tested, because the stash save is one write of the whole file after the
+transaction rather than part of it; and a stash save is the caller's to schedule
+— nothing saves on a timer or on each command. The per-instance payload finding
+below did not fall out of this work and stays open.
 
 ### A loaded `Grid`'s occupancy map is not re-derived
 
@@ -17471,13 +17558,14 @@ item rotated in a panel, over the render-to-texture view path, which
 (locks, timers, as game data), and container types such as mag-only rigs and
 quick-slots, also game data. Breach is the sample that would drive them.
 
-### Inventory: the rules the unbuilt kit must keep
+### Inventory: the rules the kit must keep
 
-`docs/plan/34-inventory.md` still stands and holds them: everything is a grid
-(an equipment slot is a `1×1` filtered grid, and there is no second slot
-concept); mount and coverage are orthogonal and two worn items conflict if and
-only if their coverage sets intersect; gear is the grids it provides; a move is
-one atomic server-side transaction, never remove-then-add; the stash is
+`docs/plan/34-inventory.md` still stands and holds them; the move protocol and
+the stash, built 2026-10-06, keep the two about moves and the stash: everything
+is a grid (an equipment slot is a `1×1` filtered grid, and there is no second
+slot concept); mount and coverage are orthogonal and two worn items conflict if
+and only if their coverage sets intersect; gear is the grids it provides; a move
+is one atomic server-side transaction, never remove-then-add; the stash is
 server-side, per server instance, never in the client profile; and the kit stops
 at containers, grids, stacks, attachments and the move protocol.
 

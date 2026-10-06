@@ -6,18 +6,22 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Three dependencies, and every one of them is a *format* or an *error*, not a
-# runtime. There is no `glam` here (a cell is two `u8`s, not a vector), no
-# `crcbl-core` (nothing in this crate has a handle, a clock or an arena) and no
-# IO of any kind — which is what lets `wasm32-unknown-unknown` build it from the
-# first commit and what lets the server and the client link the same placement
-# code without either of them agreeing on a renderer.
+# The placement half — `Grid`, `Catalog`, `Shape` — needs three dependencies,
+# and every one of them is a *format* or an *error*, not a runtime. There is no
+# `glam` in it (a cell is two `u8`s, not a vector) and no IO of any kind, which
+# is what lets the server and the client link the same placement code without
+# either of them agreeing on a renderer.
 #
 # `serde` carries a grid into a save and a catalogue out of a file. `derive` is
 # on because the alternative is a hand-written visitor per type, and the two
 # types that *do* have hand-written impls (`Shape`, `Catalog`) are hand-written
 # because their file form is deliberately not their memory form — see
 # `src/shape.rs` and `src/catalog.rs`.
+#
+# The authority half — `Inventory`, its commands and the stash — adds the two
+# engine crates the plan names for it, and nothing else: see the two entries
+# at the end of this table. Both build for `wasm32-unknown-unknown`, and every
+# game reaches this crate through `crcbl`, which links both already.
 [dependencies]
 serde = { workspace = true }
 # The catalogue's file format, and the same one `crcbl_render::stack` already
@@ -29,6 +33,15 @@ ron = { workspace = true }
 # `InventoryError` and `CatalogError` are returned from every fallible call, so
 # they need `Display` and `Error` without a macro of this crate's own.
 thiserror = { workspace = true }
+# `PlayerId`: whose stash a grid is, and who owns a container a command names.
+# The id is `crcbl-core`'s so that the stash, the denylist and replay
+# attribution all key on the one type the handshake carries.
+crcbl-core = { workspace = true }
+# `StorageSource` and the CRC-32 the stash file is written with and checked by.
+# A stash is server-side and written through the same seam as every other
+# persisted thing — natively `write_atomic` under the server's data directory —
+# so a crash mid-save leaves the previous stash whole.
+crcbl-store = { workspace = true }
 
 # The placement invariants — first-fit finds a placement whenever a brute-force
 # sweep can, a refused move leaves the grid untouched — hold over every shape
@@ -37,6 +50,14 @@ thiserror = { workspace = true }
 # this is a dev-dependency rather than a table of hand-picked footprints.
 [dev-dependencies]
 proptest = { workspace = true }
+# The no-dupe property's command streams: seeded, so a failing sequence is
+# reproduced from the seed the assertion prints, and portable, so it is the
+# same sequence on every machine — `crcbl-rand`'s whole contract.
+crcbl-rand = { workspace = true }
+# A real directory for the stash's round trip through `NativeStorage`, whose
+# `write` is `write_atomic` — the path a server actually takes. As in
+# `crates/crcbl-store/Cargo.toml`.
+tempfile = "3"
 
 [lints]
 workspace = true
