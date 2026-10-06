@@ -6,7 +6,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requests (2026-10-07)
 
 These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `d50fb3f8` after pulling `origin/main`, using EW `ef7976ce`. Both
+against crcbl `f5cb3c7b` after pulling `origin/main`, using EW `06341cf0`. Both
 are now delivered in crcbl and await EW's migration: item 1 as
 `CharacterController::preview_upright`, item 2 as
 `PhysicsWorld::sweep_capsule_arc`. Until EW moves its pin, its
@@ -71,7 +71,13 @@ Keep authored medical product identity in EW as well.
 `src/medical/product.rs::MedicalProduct` defines treatment kind, capacity and
 timing, while `MedicalItem::from_product` creates the configured reserve. These
 are game catalogue and treatment rules, not a demonstrated engine capability
-gap. Neither recent feature adds an engine migration prerequisite.
+gap. The subsequent `src/medication/product.rs::MedicationProduct` and medical
+vendor resale rules also belong to EW's catalogue and economy. The uncommitted
+medkit replenishment work in `src/hideout_inventory/medkit_replenishment.rs`
+updates an existing stashed kit within its authored capacity; its recipe,
+station gate and ingredient reservations remain game rules. That unfinished work
+is not evidence of a reusable engine requirement. None of these changes adds an
+engine migration prerequisite.
 
 1. **Non-mutating character-motion previews: delivered in crcbl, awaiting EW's
    migration.** EW's `PlayerController::preview_airborne_motion` in
