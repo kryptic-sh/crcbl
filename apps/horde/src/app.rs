@@ -479,10 +479,16 @@ impl HostedGame for Horde {
     /// and how many draw calls the survivors cost. The audio section is the
     /// silence explained: [`crate::audio::MAX_VOICES`] is the mixer's voice
     /// budget, and its refusal and steal counts are the only record of a cue
-    /// that happened and was not heard, or was cut short.
+    /// that happened and was not heard, or was cut short. The input section
+    /// is the map every key, pad and on-screen control here plays through,
+    /// and where each press went — this sample has all three devices, and a
+    /// device hint that follows whichever spoke last.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.scene);
         panel.add(&self.game.audio);
+        panel.add(&crcbl::input_inspector::InputInspector::new(
+            self.game.action_map(),
+        ));
     }
 
     fn summary(&self, run: RunSummary) -> Summary {
@@ -1703,6 +1709,39 @@ mod tests {
         // The frame-timing module is still there beside it, or this replaced
         // the panel rather than adding to it.
         assert!(text.iter().any(|line| line == "frame"), "{text:?}");
+    }
+
+    /// **The input section reaches the panel with the map's rows**, and its
+    /// trace says where a played key went: `W` into `move`, `Q` nowhere.
+    #[test]
+    fn the_debug_panel_carries_the_input_section() {
+        use crcbl::input_inspector::{CONTEXTS_ROW, INPUT_SECTION, LAST_DEVICE_ROW};
+
+        let mut engine = scripted(&headless_with(8, |common| {
+            common.debug_overlay = Some(true)
+        }));
+        engine.frame().expect("a frame");
+        tap(&mut engine, KeyCode::KeyW);
+        tap(&mut engine, KeyCode::KeyQ);
+        engine.frame().expect("a frame");
+
+        let text = ui_text(engine.gpu().draw_list());
+        let value = |label: &str| {
+            text.iter()
+                .position(|line| line == label)
+                .and_then(|at| text.get(at + 1))
+                .unwrap_or_else(|| panic!("no {label:?} row: {text:?}"))
+                .as_str()
+        };
+        assert!(
+            text.iter().any(|line| line == INPUT_SECTION),
+            "the input section never reached the UI pass: {text:?}",
+        );
+        assert_eq!(value(LAST_DEVICE_ROW), "Keyboard");
+        assert_eq!(value(CONTEXTS_ROW), "global > gameplay");
+        assert_eq!(value("restart"), "released");
+        assert_eq!(value("KeyW"), "gameplay: move (Wasd:KeyW,KeyS,KeyA,KeyD)");
+        assert_eq!(value("KeyQ"), "unbound");
     }
 
     /// **A click that focuses the window does not fire a button.**

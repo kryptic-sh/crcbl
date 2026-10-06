@@ -521,6 +521,22 @@ The rules, each with its _why_:
   `ui_next` and `ui_prev` — they commit it and move focus in tree order, opening
   the drag-value focus lands on for typing, so a vector row's axes are typed in
   turn as a spreadsheet's cells are.
+- **A grid drag is one state machine for four devices** (built 2026-10-06,
+  `crcbl_ui::grid_drag`). Engaging a cell is picking it up: `ui_accept` on the
+  focused cell lifts it, `ui_move` carries it, `ui_accept` drops it and
+  `ui_back` puts it back, through the same `NavInput` every other widget reads;
+  the pointer presses and lets go; a finger long-presses (`LONG_PRESS`, within
+  `LONG_PRESS_SLOP`), drags and lifts, because a finger that moves at once is a
+  scroll. Every hand reports the same drop, so a game validates a pad's drop
+  exactly as a mouse's. The grids are immediate-mode, so the drag keeps its own
+  focus over cells rather than the tree's, resolved like the tree's against the
+  previous frame's grids, with the landing press inert and focus shown only in
+  `InputMode::Navigation`. Crossing grids is an explicit `GridDrag::link`, not
+  the tree's spatial search, because two grids side by side are usually one
+  inventory the game knows the shape of. **Quick actions** (`QuickAction`) are
+  numbers the game assigns; the kit reports which was asked of which payload and
+  never knows what "equip" means. The ghost is a rectangle per footprint cell
+  the panel fills, since only the game knows the footprint.
 - **Spatial navigation is beam first, distance second** (revised 2026-09-15).
   Candidates overlapping the band the current rect projects in the move's
   direction beat any outside it, and only then does distance decide. Godot 4.4's

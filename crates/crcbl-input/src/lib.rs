@@ -27,8 +27,16 @@
 //! one of the last three press a named button action when it fires
 //! (`emit.rs`).
 //! [`ActionMap::last_device`] names the kind of [`Device`] that last spoke,
-//! and [`ActionMap::hint`] how an action's binding is shown to the player on
-//! it ([`hint`]).
+//! [`ActionMap::last_device_changed`] says it just changed, and
+//! [`ActionMap::hint`] how an action's binding is shown to the player on it
+//! ([`hint`]).
+//!
+//! # Why an input did what it did
+//!
+//! [`ActionMap::set_tracing`] records, for each press, the context that
+//! consumed it and every binding that read it — or that a modal context
+//! stopped it, or that nothing binds it — in a bounded ring an input
+//! inspector reads ([`trace`]).
 //!
 //! # Gamepads
 //!
@@ -75,6 +83,7 @@ mod patterns;
 mod product_name;
 mod repeat;
 pub mod text;
+pub mod trace;
 pub mod ui;
 // The vendor and product ids the evdev and browser backends name a pad's
 // family from; only those two read them.
@@ -103,12 +112,13 @@ pub use hint::{DefaultLabels, Hint, HintLabels};
 pub use overrides::{ActionOverride, OverrideRefusal};
 pub use patterns::{DOUBLE_TAP_WINDOW, DoubleTap, HOLD_TIME, Hold, TAP_TIME, Tap};
 pub use repeat::{Cardinal, REPEAT_DELAY, REPEAT_INTERVAL, Repeat};
+pub use trace::{Outcome, RESOLUTION_TRACE_CAP, TraceEntry, TracedInput, TracedRead};
 
 use context::{Routes, Suppressed, View};
 use crcbl_core::input::{KeyCode, PointerButton};
 use patterns::PatternState;
 use repeat::RepeatState;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// Every connected pad and what it last reported, ordered by id so a sum over
 /// them runs in the same order every run.
@@ -830,6 +840,12 @@ pub struct ActionMap {
     /// The family of the pad that last spoke — see
     /// [`ActionMap::last_pad_kind`].
     last_pad_kind: Option<PadKind>,
+    /// Whether the front of `devices` changed since the last
+    /// [`ActionMap::begin_tick`] — see [`ActionMap::last_device_changed`].
+    device_changed: bool,
+    /// The resolution trace, while [`ActionMap::set_tracing`] has it on — see
+    /// `trace.rs`.
+    trace: Option<VecDeque<TraceEntry>>,
 
     // Raw input state -------------------------------------------------------
     held_keys: HeldKeys,
@@ -887,6 +903,8 @@ impl ActionMap {
             suppressed: Suppressed::default(),
             devices: Vec::new(),
             last_pad_kind: None,
+            device_changed: false,
+            trace: None,
             held_keys: HeldKeys::new(),
             key_presses: 0,
             held_buttons: HashSet::new(),
@@ -1051,10 +1069,11 @@ impl ActionMap {
     /// since letting go of a key after reaching for the mouse is not the
     /// keyboard speaking.
     pub fn key_event(&mut self, key: KeyCode, pressed: bool) {
+        // An OS auto-repeat of a key already down keeps its first serial: it
+        // is not a new press, and the trace does not record it again.
+        let fresh = pressed && !self.held_keys.contains_key(&key);
         if pressed {
-            // An OS auto-repeat of a key already down keeps its first serial:
-            // it is not a new press.
-            if !self.held_keys.contains_key(&key) {
+            if fresh {
                 self.key_presses += 1;
                 self.held_keys.insert(key, self.key_presses);
             }
@@ -1074,18 +1093,25 @@ impl ActionMap {
         } else {
             self.resolve_matching(|b| b.owns_key(key) || (wheel && b.reads_wheel()));
         }
+        if fresh {
+            self.traced(|| TracedInput::Key(key));
+        }
     }
 
     /// Feed a mouse-button event.
     pub fn mouse_button(&mut self, button: PointerButton, pressed: bool) {
+        let mut fresh = false;
         if pressed {
-            self.held_buttons.insert(button);
+            fresh = self.held_buttons.insert(button);
             self.spoke(Device::Pointer);
         } else {
             self.held_buttons.remove(&button);
             self.suppressed.buttons.remove(&button);
         }
         self.resolve_matching(|b| b.mouse_button() == Some(button));
+        if fresh {
+            self.traced(|| TracedInput::MouseButton(button));
+        }
     }
 
     /// Feed mouse motion (delta in pixels since the last event).
@@ -1114,12 +1140,16 @@ impl ActionMap {
         if !dx.is_finite() || !dy.is_finite() {
             return;
         }
-        if dx != 0.0 || dy != 0.0 {
+        let turned = dx != 0.0 || dy != 0.0;
+        if turned {
             self.spoke(Device::Pointer);
         }
         self.scroll_delta.0 += dx;
         self.scroll_delta.1 += dy;
         self.resolve_matching(Binding::reads_wheel);
+        if turned {
+            self.traced(|| TracedInput::Wheel);
+        }
     }
 
     /// Feed the pointer's position, normalised to the surface: −1.0 at one edge
@@ -1175,10 +1205,11 @@ impl ActionMap {
     /// [`Binding::Virtual`] with this id on an [`ActionKind::Button`] exactly as
     /// a key event drives a [`Binding::Key`], edges included.
     pub fn virtual_button(&mut self, control: &str, pressed: bool) {
+        // `contains` first so a control that is already held costs no
+        // allocation: this runs once per frame per held control.
+        let fresh = pressed && !self.held_controls.contains(control);
         if pressed {
-            // `contains` first so a control that is already held costs no
-            // allocation: this runs once per frame per held control.
-            if !self.held_controls.contains(control) {
+            if fresh {
                 self.held_controls.insert(control.to_owned());
             }
             self.spoke(Device::Touch);
@@ -1187,6 +1218,9 @@ impl ActionMap {
             self.suppressed.controls.remove(control);
         }
         self.resolve_matching(|b| matches!(b, Binding::Virtual(id) if id == control));
+        if fresh {
+            self.traced(|| TracedInput::Control(control.to_owned()));
+        }
     }
 
     /// Feed an on-screen **stick**: where the control named by `control` is
@@ -1203,27 +1237,33 @@ impl ActionMap {
         if !x.is_finite() || !y.is_finite() {
             return;
         }
-        if x != 0.0 || y != 0.0 {
+        let deflected = x != 0.0 || y != 0.0;
+        if deflected {
             self.spoke(Device::Touch);
         }
-        if let Some(held) = self.control_sticks.get_mut(control) {
-            *held = (x, y);
+        let before = if let Some(held) = self.control_sticks.get_mut(control) {
+            std::mem::replace(held, (x, y))
         } else {
             self.control_sticks.insert(control.to_owned(), (x, y));
-        }
+            (0.0, 0.0)
+        };
         // Centred is a stick's release: what lifts a suppress.
-        if x == 0.0 && y == 0.0 {
+        if !deflected {
             self.suppressed.control_sticks.remove(control);
         }
         self.resolve_matching(|b| matches!(b, Binding::Virtual(id) if id == control));
+        if deflected && before == (0.0, 0.0) {
+            self.traced(|| TracedInput::ControlStick(control.to_owned()));
+        }
     }
 
     /// Called at the start of each server tick.
     ///
     /// - Resets per-frame edge flags (`just_pressed`, `just_released` on every
-    ///   button action, `pointer_moved` on every 1-D axis, and what
+    ///   button action, `pointer_moved` on every 1-D axis, what
     ///   [`ActionMap::repeated`], [`ActionMap::tapped`],
-    ///   [`ActionMap::hold_fired`] and [`ActionMap::double_tapped`] read).
+    ///   [`ActionMap::hold_fired`] and [`ActionMap::double_tapped`] read, and
+    ///   [`ActionMap::last_device_changed`]).
     /// - Zeroes accumulated mouse-motion and scroll deltas.
     /// - Releases every action a pattern emitted since the last tick, and
     ///   presses the ones a pattern emits as this tick begins — see `emit.rs`.
@@ -1237,6 +1277,7 @@ impl ActionMap {
         }
         self.mouse_delta = (0.0, 0.0);
         self.scroll_delta = (0.0, 0.0);
+        self.device_changed = false;
         // Every slot, live or not: one taken off the stack while pressed must
         // not come back pressed.
         for slot in &mut self.slots {
@@ -1354,6 +1395,39 @@ impl ActionMap {
             Some(ActionValue::Axis2(axis)) => (axis.x, axis.y),
             _ => (0.0, 0.0),
         }
+    }
+
+    // -- reading raw input --------------------------------------------------
+
+    /// Every key held down, in the order they were pressed — what an input
+    /// inspector shows beside the actions they drive. Raw: a key no context
+    /// binds, or one withheld, is listed as much as any other.
+    #[must_use]
+    pub fn held_keys(&self) -> Vec<KeyCode> {
+        let mut held: Vec<(u64, KeyCode)> = self
+            .held_keys
+            .iter()
+            .map(|(&key, &serial)| (serial, key))
+            .collect();
+        held.sort_unstable();
+        held.into_iter().map(|(_, key)| key).collect()
+    }
+
+    /// Every pointer button held down, in [`PointerButton`]'s order. Raw, as
+    /// [`ActionMap::held_keys`] is.
+    #[must_use]
+    pub fn held_mouse_buttons(&self) -> Vec<PointerButton> {
+        let mut held: Vec<PointerButton> = self.held_buttons.iter().copied().collect();
+        held.sort_unstable();
+        held
+    }
+
+    /// Where the pointer last was, normalised to the surface as
+    /// [`ActionMap::pointer_position`] takes it, or `None` before it reported
+    /// a position.
+    #[must_use]
+    pub const fn pointer(&self) -> Option<(f32, f32)> {
+        self.pointer
     }
 
     /// The button behind `name`, if it is declared and is one.

@@ -113,6 +113,7 @@ use crcbl_core::input::{KeyCode, PointerButton};
 use super::{
     ActionMap, ActionMapError, Binding, HeldKeys, Modifier, PadButton, PadButtons, Stick, Trigger,
 };
+use crate::trace::TracedInput;
 
 /// The base context: always active, and where [`ActionMap::declare`] puts an
 /// action.
@@ -216,6 +217,22 @@ impl Suppressed {
             | Binding::MouseMotion
             | Binding::MouseScroll
             | Binding::PointerPosition { .. } => false,
+        }
+    }
+
+    /// Whether this withholds `input` itself — the trace's
+    /// [`Outcome::Withheld`](crate::trace::Outcome::Withheld). The wheel is a
+    /// delta, and nothing withholds it.
+    pub(crate) fn holds(&self, input: &TracedInput) -> bool {
+        match input {
+            TracedInput::Key(key) => self.keys.contains(key),
+            TracedInput::MouseButton(button) => self.buttons.contains(button),
+            TracedInput::Wheel => false,
+            TracedInput::Control(id) => self.controls.contains(id.as_str()),
+            TracedInput::ControlStick(id) => self.control_sticks.contains(id.as_str()),
+            TracedInput::PadButton(button) => self.pad_buttons.contains(*button),
+            TracedInput::PadStick(stick) => self.pad_sticks.contains(stick),
+            TracedInput::PadTrigger(trigger) => self.pad_triggers.contains(trigger),
         }
     }
 }
@@ -379,6 +396,23 @@ impl Routes {
         self.scroll_chords.contains(&key)
     }
 
+    /// The context that reads `input` while `held` is every pad button down,
+    /// if an active one binds it: the owner, or for a pad button the context
+    /// [`Self::pad_reader`] hands it to.
+    pub(crate) fn owner(&self, input: &TracedInput, held: PadButtons) -> Option<usize> {
+        match input {
+            TracedInput::Key(key) => self.keys.get(key).copied(),
+            TracedInput::MouseButton(button) => self.buttons.get(button).copied(),
+            TracedInput::Wheel => self.scroll,
+            TracedInput::Control(id) | TracedInput::ControlStick(id) => {
+                self.controls.get(id.as_str()).copied()
+            }
+            TracedInput::PadButton(button) => self.pad_reader(*button, held),
+            TracedInput::PadStick(stick) => self.pad_sticks.get(stick).copied(),
+            TracedInput::PadTrigger(trigger) => self.pad_triggers.get(trigger).copied(),
+        }
+    }
+
     /// The context that reads `button` while `held` is down: the topmost one
     /// with an outranking chord on it whose modifier is held, or else its
     /// owner. What a change of owner compares for a pad button, so the
@@ -414,8 +448,7 @@ impl Routes {
         // Every pad chord a context above binds, outranking or not: a context
         // that binds a chord itself keeps it from an outranking one beneath.
         let mut pad_chords_above = HashSet::new();
-        let order = std::iter::once(GLOBAL_INDEX).chain(map.stack.iter().rev().copied());
-        for context in order {
+        for context in map.route_order() {
             let bindings = || {
                 map.slots
                     .iter()
@@ -637,6 +670,45 @@ impl ActionMap {
             .iter()
             .position(|name| name == context)
             .is_some_and(|index| self.is_active(index))
+    }
+
+    /// Every active context in the order routing claims inputs for them:
+    /// [`GLOBAL_CONTEXT`], then the stack from the top down.
+    fn route_order(&self) -> impl Iterator<Item = usize> + '_ {
+        std::iter::once(GLOBAL_INDEX).chain(self.stack.iter().rev().copied())
+    }
+
+    /// The modal context that stops an input from reaching a context beneath
+    /// it with a binding `claims` accepts, if one does — what routing does to
+    /// everything a modal context does not bind but the pointer's position and
+    /// motion, which the trace never asks about.
+    pub(crate) fn blocking_modal(&self, claims: impl Fn(&Binding) -> bool) -> Option<usize> {
+        let mut modal = None;
+        for context in self.route_order() {
+            let binds = || {
+                self.slots
+                    .iter()
+                    .filter(|slot| slot.context == context)
+                    .any(|slot| slot.decl.bindings.iter().any(&claims))
+            };
+            if modal.is_some() && binds() {
+                return modal;
+            }
+            if modal.is_none() && self.modal.contains(&context) {
+                modal = Some(context);
+            }
+        }
+        None
+    }
+
+    /// Whether `context` was pushed with [`ActionMap::push_context_modal`].
+    /// `false` for one not on the stack, or never declared.
+    #[must_use]
+    pub fn is_context_modal(&self, context: &str) -> bool {
+        self.contexts
+            .iter()
+            .position(|name| name == context)
+            .is_some_and(|index| self.modal.contains(&index))
     }
 
     /// Whether the context at `index` routes input: [`GLOBAL_CONTEXT`] always,

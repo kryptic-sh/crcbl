@@ -14927,10 +14927,87 @@ no backend opens an output path (XInput's `XInputSetState`, evdev's
 force-feedback `EV_FF`, GameController's `GCDeviceHaptics`, the Web Gamepad
 `vibrationActuator`). Scheduled beside device assignment as post-MVP.
 
-### Input: no rebind screen, no input inspector, no `crcbl input` CLI (2026-09-24)
+### Input: the inspector shipped; the rebind screen and `crcbl input` are owed (2026-09-24, inspector 2026-10-06)
 
-The input plan scheduled three tools on top of the action layer, and none
-exists:
+The input plan scheduled three tools on top of the action layer. The inspector
+landed on 2026-10-06; the other two do not exist.
+
+**The input inspector, built.** `ActionMap::set_tracing` records a resolution
+trace (`crates/crcbl-input/src/trace.rs`),
+`crcbl::input_inspector::InputInspector` draws a map as a debug section
+(`crates/crcbl/src/input_inspector.rs`), the loop keeps the game's map tracing
+while the panel shows and records its own claims (`Loop::frame_body`,
+`fresh_press`, `reserved_key_use` in `crates/crcbl/src/engine.rs`), and
+`apps/horde` adds the section. Decided 2026-10-06, long term:
+
+- **The trace is a ring of recent presses, not one frame's list.** A frame's
+  list is empty again before anyone reads it. `RESOLUTION_TRACE_CAP` entries,
+  oldest dropped, and an input repeating the newest entry exactly counts on it
+  (`TraceEntry::count`), so a touchpad scroll does not push every key press out.
+- **Opt in per map** (`set_tracing`, off by default): off, a press costs the
+  `Option` check and nothing else. Resolution is the same either way —
+  `trace::tests::resolution_is_identical_with_tracing_on_and_off`.
+- **Presses only.** A key down (not an OS auto-repeat), a pointer button, a
+  wheel turn, an on-screen button or a stick leaving centre, a pad button, a pad
+  stick or trigger pushed past `PAD_ACTIVITY_THRESHOLD`. Not releases (the
+  press's route), not pointer motion or position (every frame the mouse moves
+  would fill the ring), not a level moving while already out.
+- **Explained after resolving, from the same routes** (`Routes::owner`,
+  `Suppressed::holds`, `ActionMap::blocking_modal` in `context.rs`, and
+  `ActionMap::reads` in `trace.rs` asking each binding `resolve_slot`'s
+  question). `reads` restates which binding kinds each action kind reads, so
+  `trace::tests::a_binding_is_traced_as_reading_exactly_when_its_action_moves`
+  holds it to resolution over every press-driven binding on every action kind; a
+  new `Binding` variant needs a row there.
+- **The loop does not add the section itself.** Each sample's tests hold its
+  panel to exactly its modules (asteroids, breach, orbit, puppet and others
+  assert the title list), so the section is the game's to add in
+  `HostedGame::debug_sections`. The loop's half — tracing on while the panel
+  shows, and the claims — is wired for every game whose `HostedGame::actions`
+  answers.
+- **Claims are recorded on the game's map by name**: `the loop: pause` (and
+  `debug overlay`, `fullscreen`, `console`) for the reserved keys,
+  `the loop's menu` and `the console` for a fresh press `MenuPump::observe` kept
+  from the game.
+- **The last device stays `ActionMap::last_device`, one notion, any activity**
+  (`device.rs`): a press, pointer motion, a wheel turn, a pad stick or trigger
+  past `PAD_ACTIVITY_THRESHOLD`, whether or not a binding reads it. Considered
+  and declined: a second "last device whose input resolved to an action" for
+  prompts. `crcbl::ui_nav` reads the same device for hover against focus, and a
+  mouse moved over a menu must show hover though nothing binds motion; and
+  `ActionMap::hint` already falls back through the devices heard before the last
+  one when the last binds nothing, so a mouse nudge in a pad game with motion
+  unbound keeps the pad prompt. Two notions would let a HUD prompt and the
+  menu's mode disagree. What is left of the flicker: an unbound key pressed on a
+  device that does bind the action (a pad player bumping the keyboard) switches
+  the prompt, and so does mouse motion where mouse look is bound. **Mouse motion
+  counts**, at any non-zero delta; drift below `PAD_ACTIVITY_THRESHOLD` never
+  does. `ActionMap::last_device_changed` is the change edge, cleared by
+  `begin_tick` like `just_pressed`; with `last_device`, `last_pad_kind` and
+  `hint` it is everything puppet's device-swap prompts need engine-side.
+
+Not done:
+
+- **The loop's own menu map has no section.** `menu_actions` is the loop's, and
+  the panel's sections come from the game; its claims show on the game's map as
+  `the loop's menu`, but which `ui` action took the key is in the menu map's
+  trace, which nothing turns on or shows. A loop-level section would move the
+  title list every sample's test asserts.
+- **Pad presses the menu claims are not traced on the game's map.**
+  `PadClaims::for_game` clears the claimed buttons before the game hears the
+  pad, so they never arrive and nothing records them.
+- **Only horde adds the section.** No other sample does, and nothing was looked
+  at on screen: the rows are checked through the draw list
+  (`input_inspector::tests`, horde's
+  `the_debug_panel_carries_the_input_section`), never in a window.
+- **A modifier key alone traces as unbound** (`Shift` with only chords on it),
+  which is what routing says — a chord's modifier is read raw and owned by no
+  context — but reads oddly in the panel.
+- **The panel can outgrow the screen.** A map with many actions puts a row per
+  action plus up to `RESOLUTION_TRACE_CAP` trace rows beside the engine's own
+  sections, and the panel neither scrolls nor clips.
+
+The other two tools:
 
 - **A listen-for-input rebind flow** provided by the engine, for the P10
   settings screen to host. `apps/options`' `CONTROLS` page is a sample's flow
@@ -14938,12 +15015,6 @@ exists:
   diff over the defaults); the engine has the `HostedGame::captures_input` seam
   it runs on, and the screen itself is still P10's. See _Profiles: key binds
   built_.
-- **An input inspector panel**: live devices, raw values, resolved action
-  states, the active context stack, the last-active device, and each input's
-  full resolution path — which context consumed it and through which binding.
-  The plan named it as the answer to "input eaten mysteriously" by the context
-  stack. Standalone; it needs nothing unbuilt. No inspector exists in `crcbl-ui`
-  or `crcbl`.
 - **`crcbl input`**, a CLI to inspect and edit bindings. `crcbl-cli`'s `Command`
   enum (`crates/crcbl-cli/src/args.rs`) has no `input`. Editing needs the
   binding asset to exist first; inspecting a game's declared actions needs a way
@@ -17620,9 +17691,9 @@ with their copies deleted. What remains:
   systems, and use none of `UiState`, `WidgetId` or `PointerInput`, so adopting
   `GridDrag` is a UI-input architecture change for EW's user, not a port (EW
   backlog `acf54c4`). Revisit if EW moves its UI input onto `UiState`.
-- **Cross-grid drags and rotation mid-drag (`Held::refit`, `payload_mut`) have
-  no in-tree consumer**; they are unit-tested only.
-- **Nothing is drawn under the pointer mid-drag**; no sample draws a ghost.
+- **Rotation mid-drag (`Held::refit`, `turn_quarter`, `payload_mut`) has no
+  in-tree consumer**; it is unit-tested only. Cross-grid drags have one since
+  2026-10-06: `apps/breach`'s rig and pack.
 
 ### A save's grid is rebuilt by placing, not by deserialising (2026-09-07)
 
@@ -17673,8 +17744,9 @@ never reads. Still unexercised after two consumers: `Grid::filter` (neither
 sample equips anything), `split` and `merge` (neither has a verb that divides a
 stack), `rotate` and every `Rotation` but `Deg0` (neither panel has a rotate
 key), and nesting. Those remain the parts most likely to be shard-shaped, and
-they are still the parts with no consumer. Breach did not hit the missing
-cross-grid move either, because it carries one grid.
+they are still the parts with no consumer. Breach has carried a second
+container, a pack, since 2026-10-06, and a move between the two is a
+`Command::Move`.
 
 ### The move protocol and the stash (2026-10-06)
 
@@ -17748,10 +17820,12 @@ decisions, each recorded so it is not re-argued:
   commands get a wire decoder, that decoder is the target, and taking
   `crcbl-inventory` into the fuzz crate changes its `Cargo.lock`.
 - **Consumer:** `apps/breach`'s drag is `loadout::drag`, a `Command::Move` on an
-  `Inventory` whose one container is the rig, owned by `loadout::owner`. No
-  sample runs a server that keeps a stash, so the stash is tested at the kit
-  level only (`stash::tests`, through `MemoryStorage` and `NativeStorage`).
-  Shard's drag still calls `Grid::move_within` on its bare grid.
+  `Inventory` holding the rig and a pack, both owned by `loadout::owner`, and
+  its pad's quick action is `loadout::send`, a `Command::Move` to the cell
+  `Grid::find_slot` picks in the other one. No sample runs a server that keeps a
+  stash, so the stash is tested at the kit level only (`stash::tests`, through
+  `MemoryStorage` and `NativeStorage`). Shard's drag still calls
+  `Grid::move_within` on its bare grid.
 
 **Still owed from this slice:** a container cannot be removed from an
 `Inventory` (a corpse that despawns, a match that ends), which a server will
@@ -17798,18 +17872,74 @@ beside it.
 
 ### Drag-drop on pad, keyboard and touch, and the rest of the drag's shape (2026-09-25)
 
-**Not built.** `crcbl_ui::grid_drag` is pointer-only: `GridDrag::frame` takes a
-`PointerInput`, and nothing in the module reads a pad, a key or a touch
-(verified 2026-09-25 by reading `grid_drag.rs`). `docs/plan/34-inventory.md`'s
-part 1 makes all four devices first class through one model — engaging a slot
-picks up, `ui_move` navigates while carrying, `ui_accept` drops, `ui_back`
-cancels to the origin, and touch is long-press, drag and release — and asks
-besides for a ghost subtree following the pointer or focus (the entry above
-notes no sample draws one), auto-scroll at a scrolling container's edge,
-multi-select drags carrying the selection as one payload, cross-window drags,
-and drag sources and targets outside a `CellGrid`. Its risk note: pad quick-move
-actions ("send to stash", "equip") matter more than literal dragging on a pad,
-and the kit ships both. The design stays in that plan until it folds.
+**Built 2026-10-06** in `crcbl_ui::grid_drag` (`nav.rs`, `touch.rs`,
+`device_tests.rs` beside `mod.rs`), consumed by `apps/breach`. The decisions,
+each recorded so it is not re-argued:
+
+- **One state machine, a `Hand` per device.** `GridDrag::frame_with` takes a
+  `DragInput` (pointer, the tree's `NavInput`, `dt`, a `QuickAction`); contacts
+  arrive between frames through `GridDrag::touch`, as `crate::touch`'s controls
+  take theirs. `Held::hand` is `Pointer(widget)`, `Cursor` or `Touch(contact)`,
+  and only a pointer drag rides the `UiState` capture. Every hand ends through
+  `finish`/`release`, so a game validates a pad's drop the way it validates a
+  mouse's. `frame(ui, pointer)` is unchanged in behaviour, and every
+  pre-existing test passes unedited.
+- **The drag keeps its own focus over cells**, because the grids are
+  immediate-mode and there is no tree node for the tree's focus to rest on. It
+  copies the tree's rules: resolved when a frame begins against the grids the
+  previous frame ran, the landing press inert, focus shown only in
+  `InputMode::Navigation` or while the cursor carries, and a pointer press
+  focusing what it pressed.
+- **Crossing grids is an explicit `GridDrag::link`**, one way per call, landing
+  on the near edge's nearest row or column; an unlinked edge stops focus. Chosen
+  over the tree's beam search because a game's grids are one inventory whose
+  layout it knows, and over wrapping because a wrap inside a backpack would move
+  an item to the far side by accident.
+- **Long press: `LONG_PRESS` (500 ms) within `LONG_PRESS_SLOP` (10 px)**,
+  UIKit's defaults; a finger that wanders first is given up (`touch` answers
+  `false`) so the caller can scroll with it. A cancelled contact cancels the
+  drag.
+- **Quick actions are numbers the game assigns** (`QuickAction(u16)`), reported
+  as a `QuickMove` with the focused cell's payload. The names, the bindings and
+  the command are the game's: breach's is `ACTION_SEND` (`X`, West) mapped to
+  `panel::SEND` and `loadout::send`.
+- **The ghost is placement, not a subtree**: `DragFrame::ghost` gives the origin
+  cell's corner, the cell size and the tint, and the panel fills the footprint,
+  since only the game knows it. The plan's "ordinary UI subtree" waits on a
+  source or target outside a `CellGrid`.
+- **Breach's panel reads its own `ActionMap`** (`app::panel_actions`): the `ui`
+  context plus `send`, pushed while the panel is open and ticked once a frame in
+  `draw`, because the game's map ticks per simulation tick and the panel works
+  paused. A press goes to whichever map has the keyboard, a release to both. A
+  pack (`loadout::PACK`, 4×2, empty at spawn) was added so a drag and a quick
+  action have somewhere else to go; the trigger still reads the rig alone, so a
+  stowed sidearm does not fire, and the summary row is the rig's.
+
+**Deferred, each its own slice:** auto-scroll at a scrolling grid's edge (a
+carry cursor moved onto a cell outside a `GridWindow` lands there unseen);
+multi-select drags carrying a selection as one payload; cross-window drags; drag
+sources and targets outside a `CellGrid` (the plan's ghost subtree with them);
+`ui_next`/`ui_prev` between grids.
+
+**Gaps, stated plainly:**
+
+- **Keyboard `ui_back` does not reach breach's panel**: `Escape` is the loop's
+  `PAUSE_KEY` and never reaches `key_event`. The pad's East cancels, and `I`
+  closes the panel, which cancels too.
+- **Breach offers no contacts.** Its primary contact arrives as the pointer,
+  which drags on press, so a phone gets the pointer's drag and not the long
+  press. Wiring `touch_event` means not also feeding that contact's pointer
+  echo, which `PointerUpdate` cannot tell apart today. Touch is verified with
+  synthetic contacts only, and no real finger has driven it.
+- **Not tested end to end:** a command the kit refuses after the panel predicted
+  it would land (`PanelState::note` on `Game::send`'s or `Game::drag`'s `Err`);
+  breach's containers cannot be filled to refuse a send. The panel's drawing of
+  a noted refusal is tested, and so is `loadout::send`'s refusal.
+- **The pad path has no app-level test**: `HeadlessShell` has no pad source, so
+  breach's `gamepad_event` is exercised only through the kit's `NavInput` tests
+  and the keyboard's identical path.
+- **`apps/shard` is still pointer-only**; it would take its own map and the same
+  few lines breach has.
 
 ### Inventory kit: the 3D inspect view, contested-loot hooks, container types (2026-09-25)
 
@@ -19026,7 +19156,9 @@ motion is proven at the crate level only (`tests/machine.rs`). A footstep
 to a `crcbl-audio` cue is the obvious next step once puppet plays anything. No
 socket prop, and none of the device-swap showcase — the rebind UI and the glyph
 hints that follow the last-active device. That last group is topic 19's forcing
-function.
+function. The engine half of the hints is built: `ActionMap::last_device`, its
+change edge `last_device_changed`, `last_pad_kind` and `ActionMap::hint` (see
+_Input: the inspector shipped_), so the prompts are puppet's own work now.
 
 **Not verified in a browser:** the browser gate's `[POSE]` checks still read
 `blend` and `mid`, whose meaning moved from "across the idle↔walk blend" to "out

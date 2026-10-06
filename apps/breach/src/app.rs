@@ -59,11 +59,12 @@ use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Booted, Clock, FrameInfo, HostedGame, PointerUpdate, RunSummary, wait_for_configure,
 };
-use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
+use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding, PadButton};
 use crcbl::inventory::Grid;
 use crcbl::math::{Vec2, Vec3};
 use crcbl::prelude::*;
 use crcbl::shell::{DisplayMode, PointerMode, WindowId};
+use crcbl::ui::grid_drag::DragInput;
 use crcbl::ui::widget::PointerInput;
 
 use crate::camera::Eye;
@@ -72,7 +73,7 @@ use crate::gpu::{Gpu, Paths};
 use crate::loadout;
 use crate::menu::{MenuKind, Menus};
 use crate::page::PageStats;
-use crate::panel::{PanelState, PanelStats};
+use crate::panel::{PanelMove, PanelState, PanelStats};
 
 pub use crate::args::Options;
 
@@ -119,6 +120,11 @@ const ACTION_FIRE: &str = "fire";
 /// [`crate::panel`] is what it opens, and it is closed until it does.
 const PANEL_KEY: KeyCode = KeyCode::KeyI;
 
+/// The loadout panel's quick action: the focused stack sent to the other
+/// container ([`crate::panel::SEND`]). `X` on the keyboard and the pad's West
+/// face button, beside South's `ui_accept` and East's `ui_back`.
+const ACTION_SEND: &str = "send";
+
 /// The keyboard and the mouse this sample is played with.
 ///
 /// Declared in one place so the bindings and the read-out below cannot name
@@ -144,6 +150,34 @@ fn action_map() -> ActionMap {
             bindings,
         });
     }
+    map
+}
+
+/// The keyboard and the pad as the loadout panel reads them: the reserved
+/// `ui` context — `ui_move`, `ui_accept`, `ui_back` — and [`ACTION_SEND`] in
+/// it, pushed only while the panel is open.
+///
+/// **A map of its own, not the game's.** The game's map begins a tick per
+/// simulation tick, and the panel's edges are per frame —
+/// [`crcbl::ui_nav`] asks for a tick begun once a UI frame — and the panel
+/// works on a paused frame, which runs no tick at all. So [`Breach::draw`]
+/// reads this one and begins its tick, and [`Breach::key_event`] sends a press
+/// to whichever of the two has the keyboard: the panel while it is open, so
+/// `Space` accepting a drop is not also a shot.
+fn panel_actions() -> ActionMap {
+    let mut map = ActionMap::new();
+    crcbl::input::ui::declare(&mut map).expect("a new map has no ui action in it");
+    map.declare_in(
+        crcbl::input::ui::CONTEXT,
+        ActionDecl {
+            name: ACTION_SEND.into(),
+            kind: ActionKind::Button,
+            bindings: vec![
+                Binding::Key(KeyCode::KeyX),
+                Binding::PadButton(PadButton::West),
+            ],
+        },
+    );
     map
 }
 
@@ -297,6 +331,9 @@ pub struct Breach {
     /// [`crate::panel`] argues: the browser gate looks at a canvas with nothing
     /// on it but the room.
     panel_open: bool,
+    /// The keyboard and the pad as the panel reads them — see
+    /// [`panel_actions`] for why it is not [`Breach::actions`].
+    panel_actions: ActionMap,
     /// Which cell of that panel owns the pointer press, and which stack the drag
     /// riding on it holds, across frames — what an immediate-mode drag cannot
     /// do without.
@@ -544,6 +581,7 @@ fn assemble<S: Shell + ?Sized>(
             captured: false,
             pending_fire: false,
             panel_open: false,
+            panel_actions: panel_actions(),
             ui: PanelState::new(),
             panel_pointer: PointerUpdate {
                 at: Some(Vec2::ZERO),
@@ -644,12 +682,37 @@ impl HostedGame for Breach {
                 self.captured = false;
                 self.pointer_down = false;
                 self.pointer_released = false;
+                // The panel's keys are the panel's only while it is up.
+                let ui = crcbl::input::ui::CONTEXT;
+                let restacked = if self.panel_open {
+                    self.panel_actions.push_context(ui)
+                } else {
+                    self.panel_actions.pop_context(ui)
+                };
+                restacked.expect("the ui context is pushed exactly while the panel is open");
             }
             return;
+        }
+        // **A press goes to whichever map has the keyboard, and a release to
+        // both**, so a key held across the panel opening or closing is let go
+        // in the map that saw it go down.
+        if pressed && self.panel_open {
+            self.panel_actions.key_event(key, true);
+            return;
+        }
+        if !pressed {
+            self.panel_actions.key_event(key, false);
         }
         // Queued rather than fed straight in: the map's edges belong to the
         // tick, not to the frame. See [`Breach::pending_keys`].
         self.pending_keys.push((key, pressed));
+    }
+
+    /// The pad, for the loadout panel: its `ui` context binds the d-pad, the
+    /// left stick and the face buttons, and is on the stack only while the
+    /// panel is open. The range binds no pad, so nothing else hears it.
+    fn gamepad_event(&mut self, event: &crcbl::input::GamepadEvent) {
+        self.panel_actions.gamepad_event(event);
     }
 
     /// The map the console's `bind` and `unbind` rebind.
@@ -693,6 +756,11 @@ impl HostedGame for Breach {
         // back, and [`Breach::key_event`] is what dropped the capture the
         // moment the panel opened.
         if self.panel_open {
+            // A pointer that moved is the device that spoke last, which is
+            // what hides the pad's focus on the panel again.
+            if let Some(at) = pointer.at {
+                self.panel_actions.pointer_position(at.x, at.y);
+            }
             if pointer.pressed {
                 self.pointer_down = true;
             }
@@ -813,14 +881,9 @@ impl HostedGame for Breach {
         // only while it is open — [`crate::panel`] is where that matters.
         if self.panel_open {
             let extent = gpu.extent();
-            let grid = self.game.loadout();
-            self.panel = crate::panel::draw(
-                draw_list,
-                gpu.atlas(),
-                extent,
-                &grid,
-                &mut self.ui,
-                PointerInput {
+            let (rig, pack) = (self.game.loadout(), self.game.pack());
+            let input = DragInput {
+                pointer: PointerInput {
                     pos: self
                         .panel_pointer
                         .pixels(extent)
@@ -831,13 +894,37 @@ impl HostedGame for Breach {
                     released: std::mem::take(&mut self.pointer_released),
                     secondary_pressed: false,
                 },
+                nav: crcbl::ui_nav::nav_input(&self.panel_actions),
+                quick: self
+                    .panel_actions
+                    .just_pressed(ACTION_SEND)
+                    .then_some(crate::panel::SEND),
+                dt: frame.render_dt,
+            };
+            self.panel = crate::panel::draw(
+                draw_list,
+                gpu.atlas(),
+                extent,
+                (&rig, &pack),
+                &mut self.ui,
+                input,
             );
-            if let Some((slot, at)) = self.panel.dragged {
-                self.game.drag(slot, at);
+            // The kit decides; the panel shows what it said.
+            match self.panel.moved {
+                Some(PanelMove::Drag { from, slot, to, at }) => {
+                    self.ui.note(self.game.drag(from, slot, to, at));
+                }
+                Some(PanelMove::Send { from, slot }) => {
+                    self.ui.note(self.game.send(from, slot));
+                }
+                None => {}
             }
         } else {
             self.panel = PanelStats::default();
         }
+        // Once a frame, open or not, after the frame read it: the panel's
+        // edges are this frame's and no other's. See [`panel_actions`].
+        self.panel_actions.begin_tick(frame.render_dt.as_secs_f32());
     }
 
     /// **Breach's two modules, and no third.**
@@ -1589,6 +1676,157 @@ mod tests {
             engine.game().game().stats().shots,
             shots,
             "a click on the rig pulled the trigger",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// One key pressed and let go, a frame each.
+    fn tap(engine: &mut Loop<HeadlessShell>, key: KeyCode) {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .key_press(window, key)
+            .expect("the window is live");
+        frames(engine, 1);
+        engine
+            .shell_mut()
+            .key_release(window, key)
+            .expect("the window is live");
+        frames(engine, 1);
+    }
+
+    /// The practice map with the loadout panel open: what the panel tests
+    /// below start from, firing nothing by themselves.
+    fn with_the_panel_open(frames_run: u64) -> Loop<HeadlessShell> {
+        let mut engine = scripted(&on(crate::map::MapChoice::Practice, frames_run));
+        frames(&mut engine, 4);
+        tap(&mut engine, PANEL_KEY);
+        assert!(engine.game().panel_open());
+        engine
+    }
+
+    /// **The keyboard carries a stack from the rig into the pack through the
+    /// `ui_*` actions a pad sends, and the `Space` that picks it up is not a
+    /// shot.**
+    ///
+    /// The whole keyboard path: shell key → [`Breach::key_event`] → the
+    /// panel's map → [`crcbl::ui_nav::nav_input`] → `crate::panel`'s grid drag
+    /// → `Game::drag` → the kit's `Command::Move` between two containers. The
+    /// first arrow lands focus on the rig's first cell, which holds the
+    /// sidearm; `Space` picks it up; three more arrows carry it off the rig's
+    /// bottom edge into the pack; `Enter` drops it there. The shot counter is
+    /// the control for the routing: `Space` is the trigger's key everywhere
+    /// else.
+    #[test]
+    fn the_keyboard_carries_a_stack_into_the_pack_and_space_does_not_fire() {
+        let mut engine = with_the_panel_open(400);
+        let shots = engine.game().game().stats().shots;
+        let rig = engine.game().game().loadout();
+        let sidearm = rig
+            .slot(rig.at(Cell::new(0, 0)).expect("the sidearm"))
+            .expect("held")
+            .stack();
+
+        tap(&mut engine, KeyCode::ArrowDown);
+        assert_eq!(
+            focus_outlines(&engine),
+            1,
+            "the keyboard's focus is not shown"
+        );
+        tap(&mut engine, KeyCode::Space);
+        for _ in 0..loadout::GRID_H {
+            tap(&mut engine, KeyCode::ArrowDown);
+        }
+        tap(&mut engine, KeyCode::Enter);
+
+        let (rig, pack) = (engine.game().game().loadout(), engine.game().game().pack());
+        assert_eq!(
+            rig.find(sidearm.id()),
+            None,
+            "the sidearm is still in the rig"
+        );
+        let stowed = pack
+            .find(sidearm.id())
+            .expect("the sidearm is not in the pack");
+        assert_eq!(pack.slot(stowed).expect("held").at(), Cell::new(0, 0));
+        assert_eq!(
+            engine.game().game().stats().shots,
+            shots,
+            "the Space that picked the sidearm up pulled the trigger",
+        );
+
+        // The mouse speaking last hides the keyboard's focus again.
+        pointer(&mut engine, Vec2::new(5.0, 5.0), None);
+        assert_eq!(focus_outlines(&engine), 0, "the focus outlived the mouse");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// How many [`crate::panel::FOCUS`] outlines the last frame drew.
+    fn focus_outlines(engine: &Loop<HeadlessShell>) -> usize {
+        engine
+            .gpu()
+            .draw_list()
+            .commands()
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    crcbl::ui::draw_list::DrawCommand::RectOutline { color, .. }
+                        if *color == crate::panel::FOCUS
+                )
+            })
+            .count()
+    }
+
+    /// **`X` sends the focused stack to the other container**, the panel's
+    /// quick action, through the same `Command::Move` a drag is.
+    #[test]
+    fn x_sends_the_focused_stack_into_the_pack() {
+        let mut engine = with_the_panel_open(200);
+        let rig = engine.game().game().loadout();
+        let sidearm = rig
+            .slot(rig.at(Cell::new(0, 0)).expect("the sidearm"))
+            .expect("held")
+            .stack();
+        tap(&mut engine, KeyCode::ArrowDown);
+        tap(&mut engine, KeyCode::KeyX);
+        assert!(
+            engine.game().game().pack().find(sidearm.id()).is_some(),
+            "X did not send the sidearm to the pack",
+        );
+        assert_eq!(engine.game().game().loadout().find(sidearm.id()), None);
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A drop the rig will not take moves nothing, and the panel says why.**
+    /// The sidearm let go with its origin on the last column runs off the
+    /// edge: the rig is the one it was, and the reason is on the canvas.
+    #[test]
+    fn a_refused_drop_moves_nothing_and_the_panel_says_why() {
+        let mut engine = with_the_panel_open(200);
+        let before = engine.game().game().loadout();
+        let took_hold = cell_centre(&engine, Cell::new(0, 0));
+        let let_go = cell_centre(&engine, Cell::new(loadout::GRID_W - 1, 2));
+        pointer(&mut engine, took_hold, None);
+        pointer(&mut engine, took_hold, Some(PointerState::Pressed));
+        pointer(&mut engine, let_go, None);
+        pointer(&mut engine, let_go, Some(PointerState::Released));
+
+        assert_eq!(
+            engine.game().game().loadout(),
+            before,
+            "a refused drop moved something"
+        );
+        let why = crcbl::inventory::Refusal::Grid(crcbl::inventory::InventoryError::OutOfBounds {
+            x: loadout::GRID_W - 1,
+            y: 2,
+            w: 2,
+            h: 1,
+        });
+        assert!(
+            ui_text(engine.gpu().draw_list()).contains(&why.to_string()),
+            "the refusal is not on the panel: {:?}",
+            ui_text(engine.gpu().draw_list()),
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

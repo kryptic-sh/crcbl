@@ -3616,6 +3616,32 @@ impl Pending {
     }
 }
 
+/// The key `event` freshly pressed — not a release, and not an OS auto-repeat
+/// of a key already down — which is what a resolution trace records.
+fn fresh_press(event: &ShellEvent) -> Option<crcbl_core::input::KeyCode> {
+    match event {
+        ShellEvent::Key {
+            key_code: Some(code),
+            state: crcbl_shell::ButtonState::Pressed,
+            repeat: false,
+            ..
+        } => Some(*code),
+        _ => None,
+    }
+}
+
+/// What the loop keeps a reserved key for, as the game's resolution trace
+/// names the claim — see [`crate::input::ActionMap::trace_claimed`].
+const fn reserved_key_use(code: crcbl_core::input::KeyCode) -> Option<&'static str> {
+    match code {
+        DEBUG_OVERLAY_KEY => Some("the loop: debug overlay"),
+        PAUSE_KEY => Some("the loop: pause"),
+        FULLSCREEN_KEY => Some("the loop: fullscreen"),
+        CONSOLE_KEY => Some("the loop: console"),
+        _ => None,
+    }
+}
+
 /// Whether `game` is capturing input this frame: its own answer, unless the
 /// debug console is open, which is drawn over the game and keeps the keyboard
 /// — see [`HostedGame::captures_input`].
@@ -7200,6 +7226,13 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // event in it has not moved the cursor, and a menu whose hover state
         // reset every still frame would flicker.
         let mut pending = self.pointer.pending();
+        // The game's map keeps its resolution trace while the debug panel
+        // shows, for the input section to read (`crate::input_inspector`), and
+        // pays nothing for it otherwise. Before the pump, so this frame's
+        // presses are in it.
+        if let Some(actions) = self.game.actions() {
+            actions.set_tracing(self.debug.is_visible());
+        }
         let game = &mut self.game;
         // **Last frame's menu, deliberately.** The pump runs before this
         // frame's state is known, and the menu the player is pressing keys at
@@ -7258,6 +7291,12 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             // claim and the held-key list are `MenuPump`'s. What comes back
             // from that is the key the *game* should see.
             if pending.observe(&event) == Handled::Loop {
+                if let Some(code) = fresh_press(&event)
+                    && let Some(by) = reserved_key_use(code)
+                    && let Some(actions) = game.actions()
+                {
+                    actions.trace_claimed(crate::input::TracedInput::Key(code), by);
+                }
                 return;
             }
             if swallow_text && matches!(event, ShellEvent::TextCommit { .. }) {
@@ -7279,6 +7318,17 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             // open without the loop letting go of the menu's keys by hand.
             if let Some((code, pressed)) = menu.observe(&event) {
                 game.key_event(code, pressed);
+            } else if let Some(code) = fresh_press(&event)
+                && let Some(actions) = game.actions()
+            {
+                // A fresh press the pump kept from the game: the open console
+                // claims every key, a panel with input the keys it binds.
+                let by = if console_showing {
+                    "the console"
+                } else {
+                    "the loop's menu"
+                };
+                actions.trace_claimed(crate::input::TracedInput::Key(code), by);
             }
         });
         // Steam, between the two: after the shell, as its overlay is a focus
@@ -8777,6 +8827,9 @@ mod tests {
 
     // The confirm flow's checks, on the same fixture.
     mod confirm_flow;
+
+    // The game's resolution trace through the loop, on the same fixture.
+    mod input_trace;
 
     // The Steam limb's checks, which run on this module's fixture.
 

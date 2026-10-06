@@ -100,7 +100,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use super::{ActionMap, Binding, Device, Pads};
+use super::{ActionMap, Binding, Device, Pads, TracedInput};
 
 /// One physical pad, for as long as it stays connected.
 ///
@@ -423,7 +423,16 @@ pub(crate) fn valid_deadzone(value: f32) -> bool {
     (0.0..1.0).contains(&value)
 }
 
-/// Whether any stick or trigger is past [`PAD_ACTIVITY_THRESHOLD`].
+/// The input each of [`deflected`]'s answers is about, in its order.
+const DEFLECTED_INPUTS: [TracedInput; 4] = [
+    TracedInput::PadStick(Stick::Left),
+    TracedInput::PadStick(Stick::Right),
+    TracedInput::PadTrigger(Trigger::Left),
+    TracedInput::PadTrigger(Trigger::Right),
+];
+
+/// Whether each stick and trigger is past [`PAD_ACTIVITY_THRESHOLD`], in
+/// [`DEFLECTED_INPUTS`]' order.
 fn deflected(snapshot: &GamepadSnapshot) -> [bool; 4] {
     let stick = |stick| {
         let (x, y) = snapshot.stick(stick);
@@ -456,6 +465,9 @@ impl ActionMap {
     /// pad keeps its previous state. One for a pad never announced as
     /// [`GamepadEvent::Connected`] connects it.
     pub fn gamepad_event(&mut self, event: &GamepadEvent) {
+        // What this event pressed, for the trace once it has resolved.
+        let mut pressed = PadButtons::EMPTY;
+        let mut went_over = [false; 4];
         match *event {
             GamepadEvent::Connected { id, kind } => {
                 self.pads.insert(id, GamepadSnapshot::neutral(kind));
@@ -471,18 +483,31 @@ impl ActionMap {
                     .pads
                     .insert(id, snapshot)
                     .unwrap_or(GamepadSnapshot::neutral(snapshot.kind));
-                let pressed = !snapshot.buttons.difference(before.buttons).is_empty();
-                let went_over = deflected(&before)
-                    .into_iter()
+                pressed = snapshot.buttons.difference(before.buttons);
+                for ((over, was), is) in went_over
+                    .iter_mut()
+                    .zip(deflected(&before))
                     .zip(deflected(&snapshot))
-                    .any(|(was, is)| is && !was);
-                if pressed || went_over {
+                {
+                    *over = is && !was;
+                }
+                if !pressed.is_empty() || went_over.contains(&true) {
                     self.spoke(Device::Gamepad);
                     self.last_pad_kind = Some(snapshot.kind);
                 }
             }
         }
         self.repad();
+        for button in PadButton::ALL {
+            if pressed.contains(button) {
+                self.traced(|| TracedInput::PadButton(button));
+            }
+        }
+        for (over, input) in went_over.into_iter().zip(DEFLECTED_INPUTS) {
+            if over {
+                self.traced(|| input);
+            }
+        }
     }
 
     /// Drop every pad to neutral — what focus loss owes the pads, called beside
