@@ -6,7 +6,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requests (2026-10-06)
 
 These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `6f3893c3` after pulling `origin/main`, using EW `dbd33b6f`. Both
+against crcbl `465cad1d` after pulling `origin/main`, using EW `0f788a60`. Both
 are now delivered in crcbl and await EW's migration: item 1 as
 `CharacterController::preview_upright`, item 2 as
 `PhysicsWorld::sweep_capsule_arc`. Until EW moves its pin, its
@@ -51,8 +51,21 @@ cartridge orientation, launch velocity, spin and mechanical release delay to
 `WorldItemMotion::launched_from_authored_transform` in
 `src/game_world_items.rs`. Keep the firearm-specific port axes, cartridge
 ownership and release timing in EW. These fixes use the existing motion path; no
-missing engine API was demonstrated. Native live-round validation remains
-unfinished in EW, so this review does not claim that playback is fully verified.
+missing engine API was demonstrated. EW now records controlled headless
+Vulkan/DX12 live-round checks in its backlog, including inventory splitting
+during a Mossberg pump cycle. Continuous playback, physical desktop input and
+close-up release continuity remain unverified; those are game validation tasks.
+
+The live ownership work also stays in EW. `EquippedFirearm::physical_item_ids`
+in `src/equipped_firearms/ownership.rs` validates firearm shells, installed
+parts and reload-held magazines or clips. `ColtPythonRangeReload` exposes held
+speedloader identities and cartridges for player and AI ownership scans. These
+contracts depend on EW's firearm mechanisms, item identities and persistence
+rules. The remaining `raid_return_snapshot` dependency in
+`src/game_raid_owned_ammunition.rs` and `src/game_raid_world_ammunition.rs`
+needs a game-local live cartridge traversal; it does not establish a missing
+crcbl inventory API. Finish and validate that traversal in EW before
+reconsidering whether any generic support is needed.
 
 1. **Non-mutating character-motion previews: delivered in crcbl, awaiting EW's
    migration.** EW's `PlayerController::preview_airborne_motion` in
