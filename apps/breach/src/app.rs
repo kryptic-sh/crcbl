@@ -1524,7 +1524,7 @@ mod tests {
     /// The claim `docs/plan/34-inventory.md`'s part 1 is about, made through
     /// `crcbl::ui::grid_drag`, the drag `apps/shard` shares. The whole path:
     /// shell button → `PointerUpdate` → [`PointerUpdate::pixels`] →
-    /// `crate::panel`'s grid drag → `Game::drag` → `Grid::move_within`.
+    /// `crate::panel`'s grid drag → `Game::drag` → the kit's `Command::Move`.
     ///
     /// Two controls. The cell the stack left must be empty, because a panel
     /// that drew the item under the pointer without moving the placement would
