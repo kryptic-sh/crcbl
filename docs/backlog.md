@@ -6,22 +6,28 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requests (2026-10-06)
 
 These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `bffec64a` after pulling `origin/main`, using EW `3270d677`. Both
+against crcbl `69926bb8` after pulling `origin/main`, using EW `1ca2c16a`. Both
 remain open: `CharacterController::move_upright` still synchronizes its bound
-collider, and `world/candidate_sweeps.rs` still accepts straight segments rather
-than accelerated trajectories. This follow-up inspected source only; the test
-evidence below belongs to the earlier verification runs. Implement and validate
-each independently; EW then updates its engine pin and removes the superseded
-local mechanism. Gameplay rules stay in EW.
+collider, and `world/candidate_sweeps.rs::sweep_capsule_all` still takes a
+straight `Segment`. EW's `preview_airborne_motion` still restores the live
+collider after a preview; `move_with_gravity` still subdivides accelerated
+motion and forecasts contacts with straight sweeps. This refresh inspected
+source only; the test evidence below belongs to earlier verification runs.
 
 Implementation handoff: deliver the non-mutating upright preview first, then add
 the accelerated capsule query as a separate verified slice. Each handoff needs
 its public API, regression coverage and published commit so EW can update its
-pin and delete the matching workaround. EW now pins crcbl `bffec64a`; its engine
-upgrade did not remove either workaround. The bound-collider write remains in
-`character.rs::move_upright`, and `world/candidate_sweeps.rs::sweep_capsule_all`
-still takes a `Segment`. This backlog refresh rechecked those implementations
-and the game consumers; it does not add runtime verification.
+pin and delete the matching workaround. EW still pins crcbl `bffec64a`;
+`69926bb8` only updated this handoff. Gameplay rules stay in EW.
+
+Do not port EW's current hip-fire convergence or prone weapon/terrain handling
+yet. `src/game_hip_convergence.rs` combines rendered weapon pose with gameplay
+aim and ADS rules; its cached-input correction is still uncommitted and under
+validation. The weapon/floor response in EW's `docs/backlog.md` still needs a
+choice between limiting weapon aim and retracting/lifting the weapon while
+leaving ADS. Prove the shared camera, weapon and hand behavior in the game
+before proposing a reusable engine API. These are game follow-ups, not
+additional implementation requests for crcbl.
 
 Keep the recent inventory eligibility work in EW: `HideoutInventory`'s
 `can_fit_stashed_firearm_swap` and `firearm_swap_placement` in
