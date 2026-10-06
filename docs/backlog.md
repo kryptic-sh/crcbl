@@ -6,13 +6,22 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requests (2026-10-06)
 
 These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `8af219c2` after pulling `origin/main`, using EW `e166976b`. Both
+against crcbl `9c00dc46` after pulling `origin/main`, using EW `4cc34958`. Both
 remain open: `CharacterController::move_upright` still synchronizes its bound
 collider, and `world/candidate_sweeps.rs` still accepts straight segments rather
 than accelerated trajectories. This follow-up inspected source only; the test
 evidence below belongs to the earlier verification runs. Implement and validate
 each independently; EW then updates its engine pin and removes the superseded
 local mechanism. Gameplay rules stay in EW.
+
+Implementation handoff: deliver the non-mutating upright preview first, then add
+the accelerated capsule query as a separate verified slice. Each handoff needs
+its public API, regression coverage and published commit so EW can update its
+pin and delete the matching workaround. The game still pins crcbl `32e35110`;
+pulling this documentation worktree does not validate a game upgrade to the
+newer engine runtime. The newer upstream changes have not removed either
+workaround: the bound-collider write remains in `character.rs::move_upright`,
+and `world/candidate_sweeps.rs::sweep_capsule_all` still takes a `Segment`.
 
 Keep the recent inventory eligibility work in EW: `HideoutInventory`'s
 `can_fit_stashed_firearm_swap` and `firearm_swap_placement` in
@@ -43,10 +52,11 @@ requirement is demonstrated, rather than moving these game rules into crcbl.
    Preserve EW's `ceiling_contact_does_not_delay_wall_steering` in
    `src/controller_wall_ceiling_timing_tests.rs` and
    `ceiling_contact_uses_the_remaining_time_for_descent` in
-   `src/controller_ballistic_tests.rs`. Those regressions passed in EW's
-   workspace run for this audit. Migrate the preview helper and remove its
-   temporary live-collider update/restore sequence. Do not claim that this alone
-   replaces `projected_landing`, which also simulates EW gameplay state.
+   `src/controller_ballistic_tests.rs`. Those regressions passed in EW's earlier
+   workspace verification run; they were not rerun for this source-only refresh.
+   Migrate the preview helper and remove its temporary live-collider
+   update/restore sequence. Do not claim that this alone replaces
+   `projected_landing`, which also simulates EW gameplay state.
 
 2. **Curved-path collision queries with contact times.** Promote the existing
    curved-path gap in "EW integration follow-ups" below. EW's
