@@ -3,10 +3,10 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## Top priority: EW engine requests (2026-10-06)
+## Top priority: EW engine requests (2026-10-07)
 
 These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `465cad1d` after pulling `origin/main`, using EW `0f788a60`. Both
+against crcbl `d50fb3f8` after pulling `origin/main`, using EW `ef7976ce`. Both
 are now delivered in crcbl and await EW's migration: item 1 as
 `CharacterController::preview_upright`, item 2 as
 `PhysicsWorld::sweep_capsule_arc`. Until EW moves its pin, its
@@ -61,11 +61,17 @@ in `src/equipped_firearms/ownership.rs` validates firearm shells, installed
 parts and reload-held magazines or clips. `ColtPythonRangeReload` exposes held
 speedloader identities and cartridges for player and AI ownership scans. These
 contracts depend on EW's firearm mechanisms, item identities and persistence
-rules. The remaining `raid_return_snapshot` dependency in
-`src/game_raid_owned_ammunition.rs` and `src/game_raid_world_ammunition.rs`
-needs a game-local live cartridge traversal; it does not establish a missing
-crcbl inventory API. Finish and validate that traversal in EW before
-reconsidering whether any generic support is needed.
+rules. The live cartridge traversal now lives in
+`src/game_raid_live_ammunition.rs`: personal, AI and dropped-firearm ownership
+scans use it without requiring an idle raid-return snapshot. It includes
+reload-held magazines, Mosin clips and pending TOZ shells. This does not
+establish a missing crcbl inventory API; keep the traversal game-local.
+
+Keep authored medical product identity in EW as well.
+`src/medical/product.rs::MedicalProduct` defines treatment kind, capacity and
+timing, while `MedicalItem::from_product` creates the configured reserve. These
+are game catalogue and treatment rules, not a demonstrated engine capability
+gap. Neither recent feature adds an engine migration prerequisite.
 
 1. **Non-mutating character-motion previews: delivered in crcbl, awaiting EW's
    migration.** EW's `PlayerController::preview_airborne_motion` in
