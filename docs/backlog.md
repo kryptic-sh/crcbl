@@ -3,26 +3,26 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## Top priority: EW engine requests (2026-10-07)
+## Top priority: EW physics migration handoff (2026-10-07)
 
-These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `f5cb3c7b` after pulling `origin/main`, using EW `06341cf0`. Both
-are now delivered in crcbl and await EW's migration: item 1 as
-`CharacterController::preview_upright`, item 2 as
-`PhysicsWorld::sweep_capsule_arc`. Until EW moves its pin, its
-`preview_airborne_motion` still restores the live collider after a preview and
-`move_with_gravity` still subdivides accelerated motion and forecasts contacts
-with straight sweeps. This refresh inspected source only; the test evidence
-below belongs to earlier verification runs.
+Rechecked after pulling crcbl `origin/main` at `aa432f8c`, against EW `9edf68a8`
+and its in-progress bandage crafting changes. Both requested engine capabilities
+are now on crcbl main: `CharacterController::preview_upright` (`ac3e9400`) and
+`PhysicsWorld::sweep_capsule_arc` (`e1c8f8ee`). No additional engine feature
+requirement was demonstrated by the reviewed game changes.
 
-Implementation handoff: deliver the non-mutating upright preview first, then add
-the accelerated capsule query as a separate verified slice. Each handoff needs
-its public API, regression coverage and published commit so EW can update its
-pin and delete the matching workaround. EW still pins crcbl `bffec64a`, which
-predates both deliveries. `move_upright` still writes the bound collider, as a
-move must; the preview is the call that does not. `sweep_capsule_all` still
-takes a straight `Segment` by design: that contract is kept, and the arc is the
-new `sweep_capsule_arc`. Gameplay rules stay in EW.
+The top-priority outstanding work is EW adoption: update its crcbl pin, migrate
+`preview_airborne_motion` first, then the applicable contact forecasts in
+`move_with_gravity`, as separate verified slices. EW still pins crcbl
+`bffec64a`; its preview restores the live collider and its accelerated motion
+uses straight-sweep forecasts. Keep this integration handoff until those
+workarounds have been replaced and the game regressions pass, then remove it. Do
+not duplicate the engine implementations. Gameplay rules stay in EW.
+
+This refresh inspected the engine APIs and EW callers only; it did not rerun the
+engine tests or validate EW against the new revision. The coverage reports below
+were supplied with the engine implementations and remain migration acceptance
+guidance, not fresh verification results.
 
 Do not port EW's current hip-fire convergence or prone weapon/terrain handling
 yet. `src/game_hip_convergence.rs` combines rendered weapon pose with gameplay
@@ -72,12 +72,14 @@ Keep authored medical product identity in EW as well.
 timing, while `MedicalItem::from_product` creates the configured reserve. These
 are game catalogue and treatment rules, not a demonstrated engine capability
 gap. The subsequent `src/medication/product.rs::MedicationProduct` and medical
-vendor resale rules also belong to EW's catalogue and economy. The uncommitted
+vendor resale rules also belong to EW's catalogue and economy. The shipped
 medkit replenishment work in `src/hideout_inventory/medkit_replenishment.rs`
 updates an existing stashed kit within its authored capacity; its recipe,
-station gate and ingredient reservations remain game rules. That unfinished work
-is not evidence of a reusable engine requirement. None of these changes adds an
-engine migration prerequisite.
+station gate and ingredient reservations remain game rules. The in-progress
+bandage recipe in `src/hideout_inventory/food_crafting_recipes.rs` likewise
+combines game materials, station access and authored medical output. Neither
+feature demonstrates a reusable engine requirement or adds an engine migration
+prerequisite.
 
 1. **Non-mutating character-motion previews: delivered in crcbl, awaiting EW's
    migration.** EW's `PlayerController::preview_airborne_motion` in
@@ -132,8 +134,7 @@ engine migration prerequisite.
    `projected_landing`, which also simulates EW gameplay state.
 
 2. **Curved-path collision queries with contact times — delivered 2026-10-06,
-   awaiting EW's migration.** Built on branch `feat/phys-arc-query` (not yet on
-   `main` when written; EW pins it once it is). EW's
+   awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
    `PlayerController::move_with_gravity` in `src/controller_ballistic.rs` bounds
    chord error, expands candidate sweeps and bisects contact forecasts to retain
    time after wall and ceiling hits, because `SlideContact::fraction` and
