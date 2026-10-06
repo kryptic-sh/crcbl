@@ -60,6 +60,18 @@ removes the superseded local mechanism. Gameplay rules stay in EW.
    complete curved-trajectory impact-position agreement; do not report it as
    validating this new query.
 
+   Game evidence added in EW `17b62e5f`:
+   `braking_near_a_wall_preserves_contact_before_reversal` in
+   `src/controller_wall_braking_tests.rs` explicitly asserts that a straight
+   endpoint sweep misses a wall reached by the analytic braking arc before
+   reversal. It requires that case to execute and checks contact, position and
+   velocity across coarse/fine updates and attached/unattached colliders. The
+   workspace test run passed; disabling the turning-point split made the coarse
+   reversal case fail before the split was restored. Port this fixture with the
+   query. This proves the planar braking case only: candidates hidden later
+   along the sweep, tilted/curved walls and moving geometry still need game
+   fixtures before claiming coverage.
+
 Current goal: complete the full codebase performance review, record actionable
 findings and verification gaps in this backlog, and implement supported
 low-hanging performance improvements before feature expansion to keep the engine
