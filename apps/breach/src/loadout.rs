@@ -35,13 +35,19 @@
 //!
 //! # A drag is the kit's `Move` command
 //!
-//! The rig is the one container of an [`Inventory`], and a drag that
-//! rearranges it is [`drag`]: a [`Command::Move`] applied as the kit's single
-//! transaction, the same call a server makes when a client's move arrives —
-//! rather than this sample reaching into the grid with a move of its own. It
-//! still does not cross the wire (`crate::game`'s `Game::drag` says why), so
-//! the command is applied on behalf of [`owner`], the one player a milestone-0
-//! run has, and no reach check refuses it: the rig is on the player's back.
+//! The rig and the [`PACK`] are the two containers of an [`Inventory`], and a
+//! drag inside either or from one to the other is [`drag`]: a
+//! [`Command::Move`] applied as the kit's single transaction, the same call a
+//! server makes when a client's move arrives — rather than this sample reaching
+//! into a grid with a move of its own. The pad's quick action is [`send`], the
+//! same command with the cell first-fit chooses in the other container. Neither
+//! crosses the wire yet (`crate::game`'s `Game::drag` says why), so the command
+//! is applied on behalf of [`owner`], the one player a milestone-0 run has, and
+//! no reach check refuses it: both are on the player's back.
+//!
+//! **The pack is why a drag has somewhere else to go.** It holds nothing at
+//! spawn and the trigger does not read it: a sidearm stowed in the pack is not
+//! a sidearm in hand, so [`is_armed`] still asks the rig alone.
 //!
 //! # The table is a data file
 //!
@@ -61,8 +67,8 @@
 
 use crcbl::core::PlayerId;
 use crcbl::inventory::{
-    Access, Applied, Catalog, Cell, Command, ContainerId, Grid, Held, Inventory, Refusal, SlotId,
-    Stack, StackId,
+    Access, Applied, Catalog, Cell, Command, ContainerId, Grid, Held, Inventory, InventoryError,
+    Placement, Refusal, SlotId, Stack, StackId,
 };
 
 /// The item table, compiled in. See the module docs for why it is not an asset.
@@ -147,9 +153,22 @@ pub fn packed() -> Grid {
 /// The rig's local id in the [`Inventory`] [`carried`] builds.
 const RIG_ID: u32 = 0;
 
-/// The rig's place in the [`Inventory`] [`carried`] builds — its only
-/// container.
+/// The rig's place in the [`Inventory`] [`carried`] builds.
 pub const RIG: ContainerId = ContainerId::Local(RIG_ID);
+
+/// The pack's local id in the [`Inventory`] [`carried`] builds.
+const PACK_ID: u32 = 1;
+
+/// The pack's place in the [`Inventory`] [`carried`] builds: the second
+/// container, empty at spawn.
+pub const PACK: ContainerId = ContainerId::Local(PACK_ID);
+
+/// How many cells across the pack is: the rig's width, so the panel draws the
+/// two as one column.
+pub const PACK_W: u8 = GRID_W;
+
+/// How many cells down.
+pub const PACK_H: u8 = 2;
 
 /// The seed of [`owner`]'s id.
 const OWNER_SEED: u64 = 0;
@@ -162,19 +181,23 @@ pub fn owner() -> PlayerId {
     PlayerId::from_seed(OWNER_SEED)
 }
 
-/// The inventory a run starts with: [`packed`] as its one container, [`RIG`],
-/// [`owner`]'s alone.
+/// The inventory a run starts with: [`packed`] as the [`RIG`] and an empty
+/// [`PACK`], both [`owner`]'s alone.
 ///
 /// # Panics
 ///
-/// Never: an empty inventory takes any one container, and [`KIT`]'s ids are
-/// distinct by [`stack_id`]'s construction.
+/// Never: the two ids are distinct, the pack holds no stack to clash with
+/// the rig's, and [`KIT`]'s ids are distinct by [`stack_id`]'s construction.
 #[must_use]
 pub fn carried() -> Inventory {
     let mut inventory = Inventory::new();
     inventory
         .add(RIG_ID, Access::Player(owner()), packed())
         .expect("an empty inventory takes the rig");
+    let pack = Grid::new(PACK_W, PACK_H, None).expect("neither side of the pack is zero");
+    inventory
+        .add(PACK_ID, Access::Player(owner()), pack)
+        .expect("the pack is a second id holding nothing");
     inventory
 }
 
@@ -191,28 +214,95 @@ pub fn rig(inventory: &Inventory) -> &Grid {
         .expect("the inventory carried() built holds the rig")
 }
 
-/// Moves the stack at `slot` of the rig so its origin is `at`, as the kit's
-/// [`Command::Move`], keeping its rotation.
+/// The pack in `inventory`, which [`carried`] put there.
+///
+/// # Panics
+///
+/// As [`rig`]: if `inventory` is not one [`carried`] built.
+#[must_use]
+pub fn pack(inventory: &Inventory) -> &Grid {
+    inventory
+        .grid(PACK)
+        .expect("the inventory carried() built holds the pack")
+}
+
+/// The container a quick action sends a stack in `from` to: the pack from the
+/// rig, and the rig from anything else.
+#[must_use]
+pub fn other(from: ContainerId) -> ContainerId {
+    if from == RIG { PACK } else { RIG }
+}
+
+/// Moves the stack at `slot` of `from` so its origin is `at` in `to` — the
+/// same container or the other — as the kit's [`Command::Move`], keeping its
+/// rotation.
 ///
 /// # Errors
 ///
-/// [`Refusal::Grid`] with [`NoSuchSlot`](crcbl::inventory::InventoryError::NoSuchSlot)
-/// for an empty slot, or whatever the move is refused for — in which case the
-/// rig is exactly as it was, down to the slot id the panel is holding.
-pub fn drag(inventory: &mut Inventory, slot: SlotId, at: Cell) -> Result<Applied, Refusal> {
-    let placement = rig(inventory)
-        .slot(slot)
-        .ok_or(crcbl::inventory::InventoryError::NoSuchSlot(slot))?;
+/// [`Refusal::NoSuchContainer`] for a container `inventory` does not hold,
+/// [`Refusal::Grid`] with [`NoSuchSlot`](InventoryError::NoSuchSlot) for an
+/// empty slot, or whatever the move is refused for — in which case both
+/// containers are exactly as they were, down to the slot ids the panel is
+/// holding.
+pub fn drag(
+    inventory: &mut Inventory,
+    from: ContainerId,
+    slot: SlotId,
+    to: ContainerId,
+    at: Cell,
+) -> Result<Applied, Refusal> {
+    let placement = placement(inventory, from, slot)?;
     let command = Command::Move {
         stack: Held {
-            container: RIG,
+            container: from,
             stack: placement.stack().id(),
         },
-        to: RIG,
+        to,
         at,
         rotation: placement.rotation(),
     };
     inventory.apply(catalog(), owner(), command, |_, _| true)
+}
+
+/// The pad's quick action: the stack at `slot` of `from` sent to the [`other`]
+/// container, wherever [`Grid::find_slot`]'s first-fit puts it — the kit's
+/// [`Command::Move`], so it is refused or applied whole as a drag is.
+///
+/// # Errors
+///
+/// As [`drag`], and [`Refusal::Grid`] with [`NoRoom`](InventoryError::NoRoom)
+/// when nothing in the other container fits it.
+pub fn send(
+    inventory: &mut Inventory,
+    from: ContainerId,
+    slot: SlotId,
+) -> Result<Applied, Refusal> {
+    let to = other(from);
+    let placement = placement(inventory, from, slot)?;
+    let (at, rotation) = inventory
+        .grid(to)
+        .ok_or(Refusal::NoSuchContainer(to))?
+        .find_slot(catalog(), placement.stack().item())
+        .ok_or(InventoryError::NoRoom)?;
+    let command = Command::Move {
+        stack: Held {
+            container: from,
+            stack: placement.stack().id(),
+        },
+        to,
+        at,
+        rotation,
+    };
+    inventory.apply(catalog(), owner(), command, |_, _| true)
+}
+
+/// The placement at `slot` of `from`.
+fn placement(inventory: &Inventory, from: ContainerId, slot: SlotId) -> Result<Placement, Refusal> {
+    Ok(inventory
+        .grid(from)
+        .ok_or(Refusal::NoSuchContainer(from))?
+        .slot(slot)
+        .ok_or(InventoryError::NoSuchSlot(slot))?)
 }
 
 /// The identity of [`KIT`]'s `index`th entry: **one-based**, so `StackId(0)` is
@@ -384,5 +474,64 @@ mod tests {
             "taking the {} out did not take its weight with it",
             def.name(),
         );
+    }
+
+    /// **Send moves a stack whole into the other container and back**, as one
+    /// [`Command::Move`]: the sidearm leaves the rig — which then fires
+    /// nothing — lands where first-fit puts it in the pack keeping its stack
+    /// id, and comes back the same way.
+    #[test]
+    fn send_moves_a_stack_into_the_other_container_and_back() {
+        let mut inventory = carried();
+        let slot = rig(&inventory).at(Cell::new(0, 0)).expect("the sidearm");
+        let stack = rig(&inventory).slot(slot).expect("held").stack();
+
+        assert_eq!(send(&mut inventory, RIG, slot), Ok(Applied::Moved));
+        assert_eq!(rig(&inventory).find(stack.id()), None, "still in the rig");
+        let stowed = pack(&inventory)
+            .find(stack.id())
+            .expect("the sidearm is not in the pack");
+        assert_eq!(
+            pack(&inventory).slot(stowed).expect("held").at(),
+            Cell::new(0, 0),
+            "not where first-fit puts it",
+        );
+        assert_eq!(pack(&inventory).slot(stowed).expect("held").stack(), stack);
+        assert!(!is_armed(rig(&inventory)), "a stowed sidearm still fires");
+
+        assert_eq!(send(&mut inventory, PACK, stowed), Ok(Applied::Moved));
+        assert!(pack(&inventory).is_empty(), "the pack kept a copy");
+        assert!(is_armed(rig(&inventory)), "the sidearm did not come back");
+    }
+
+    /// **A send with nowhere to go, or of nothing, changes nothing.** A pack
+    /// one cell big has no room for the `2×1` sidearm in either rotation, and
+    /// a slot nothing holds is refused by name; both containers are as they
+    /// were after each.
+    #[test]
+    fn a_refused_send_leaves_both_containers_as_they_were() {
+        let mut inventory = Inventory::new();
+        inventory
+            .add(RIG_ID, Access::Player(owner()), packed())
+            .expect("the rig");
+        let tiny = Grid::new(1, 1, None).expect("1x1 is a grid");
+        inventory
+            .add(PACK_ID, Access::Player(owner()), tiny)
+            .expect("the pack");
+        let before = (rig(&inventory).clone(), pack(&inventory).clone());
+        let sidearm = rig(&inventory).at(Cell::new(0, 0)).expect("the sidearm");
+
+        assert_eq!(
+            send(&mut inventory, RIG, sidearm),
+            Err(Refusal::Grid(InventoryError::NoRoom)),
+        );
+        assert_eq!((rig(&inventory).clone(), pack(&inventory).clone()), before);
+
+        let nothing = SlotId(u16::MAX);
+        assert_eq!(
+            send(&mut inventory, RIG, nothing),
+            Err(Refusal::Grid(InventoryError::NoSuchSlot(nothing))),
+        );
+        assert_eq!((rig(&inventory).clone(), pack(&inventory).clone()), before);
     }
 }

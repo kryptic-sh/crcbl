@@ -4,7 +4,7 @@
 use super::*;
 
 /// A 4×3 grid of 10-pixel cells at `(100, 50)`.
-const GRID: CellGrid = CellGrid {
+pub(super) const GRID: CellGrid = CellGrid {
     origin: Vec2::new(100.0, 50.0),
     cell: Vec2::splat(10.0),
     columns: 4,
@@ -14,7 +14,7 @@ const GRID: CellGrid = CellGrid {
 };
 
 /// A second grid, beside the first, with its own ids.
-const OTHER: CellGrid = CellGrid {
+pub(super) const OTHER: CellGrid = CellGrid {
     origin: Vec2::new(200.0, 50.0),
     cell: Vec2::splat(10.0),
     columns: 2,
@@ -24,9 +24,9 @@ const OTHER: CellGrid = CellGrid {
 };
 
 /// The payload the tests drag: an item name, anchored at `ORIGIN`.
-const ITEM: &str = "plate";
+pub(super) const ITEM: &str = "plate";
 /// Where the item's footprint starts.
-const ORIGIN: UVec2 = UVec2::new(1, 0);
+pub(super) const ORIGIN: UVec2 = UVec2::new(1, 0);
 /// The item's footprint: a 2×2, so it covers `(1, 0)..=(2, 1)`.
 const SIZE: UVec2 = UVec2::splat(2);
 
@@ -35,19 +35,19 @@ fn covers(cell: UVec2) -> bool {
         .is_some_and(|offset| offset.cmplt(SIZE).all())
 }
 
-fn source(cell: UVec2) -> Option<Grip<&'static str>> {
+pub(super) fn source(cell: UVec2) -> Option<Grip<&'static str>> {
     covers(cell).then_some(Grip {
         payload: ITEM,
         origin: ORIGIN,
     })
 }
 
-fn centre(grid: &CellGrid, cell: UVec2) -> Vec2 {
+pub(super) fn centre(grid: &CellGrid, cell: UVec2) -> Vec2 {
     let (at, to) = grid.cell_bounds(cell);
     (at + to) * 0.5
 }
 
-fn press(pos: Vec2) -> PointerInput {
+pub(super) fn press(pos: Vec2) -> PointerInput {
     PointerInput {
         pos,
         down: true,
@@ -56,7 +56,7 @@ fn press(pos: Vec2) -> PointerInput {
     }
 }
 
-fn release(pos: Vec2) -> PointerInput {
+pub(super) fn release(pos: Vec2) -> PointerInput {
     PointerInput {
         pos,
         down: false,

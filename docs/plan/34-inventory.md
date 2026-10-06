@@ -9,21 +9,40 @@ grids, equipment slots, weapon attachments. Kit rules follow the player kit
 editor asset browser wants it); the kit is FPS-era with breach.
 
 > **Status, 2026-09-07, re-checked 2026-09-25, updated 2026-10-06.** Part 2 is
-> built and has two consumers; part 1's pointer mechanism is built, and the rest
-> of part 1 is still the engine's to build. By the Delivery table's weight that
-> is well under half the document, which is why it stays rather than folding
-> into the notes.
+> built and has two consumers; part 1's grid drag is built for all four devices,
+> with its ghost and quick-moves, and the rest of part 1 is still the engine's
+> to build. By the Delivery table's weight that is well under half the document,
+> which is why it stays rather than folding into the notes.
 >
-> **Part 1, drag-drop: the pointer half is in `crcbl-ui`.** It shipped
+> **Part 1, drag-drop: the grid drag is in `crcbl-ui`.** Its pointer half shipped
 > 2026-09-23 as `crcbl_ui::grid_drag` — `CellGrid`, `GridDrag<P>`, a typed
 > payload, `can_accept`, drop feedback as widget state (`DropFeedback`),
 > cross-grid drags and the grab offset — built on `widget.rs`'s press capture,
-> and `apps/shard` and `apps/breach` use it with their own copies deleted. It is
-> grids only: there is no general drag source or drop target outside a
-> `CellGrid`, no ghost drawn under the pointer, and no pad, keyboard or touch
-> path. A panel's `can_accept` asks `Grid::can_move_within` (2026-09-25), which
-> runs `move_within`'s check against the grid as it is, the item's own cells
-> counting as free, without cloning the grid or moving anything.
+> and `apps/shard` and `apps/breach` use it with their own copies deleted. A
+> panel's `can_accept` asks `Grid::can_move_within` (2026-09-25), which runs
+> `move_within`'s check against the grid as it is, the item's own cells counting
+> as free, without cloning the grid or moving anything.
+>
+> **The four devices and the ghost: built 2026-10-06.** `GridDrag` is one state
+> machine whichever hand holds the payload, as the bullet below asks: engaging a
+> focused cell with `ui_accept` picks up, `ui_move` carries the cursor across
+> cells and across grids the panel links (`GridDrag::link`), `ui_accept` drops
+> and `ui_back` cancels to the origin; touch is a long press (`LONG_PRESS`),
+> drag and lift; the pointer is unchanged. Every hand ends in the same drop
+> report, which the game validates. `DragFrame::ghost` places the carried
+> footprint under the pointer, the finger or the carry cursor, tinted by the
+> target's answer. The risk note's quick-moves ship beside the drag as
+> `QuickAction`/`QuickMove`, numbers the game assigns. `apps/breach` is the
+> consumer: a pack beside its rig, the pad and the keyboard on its panel, `X` or
+> West sending the focused stack across as a `Command::Move`, the ghost drawn,
+> and a refusal shown under the pack. Breach does not offer contacts — its
+> primary contact reaches it as the pointer — so touch is tested with synthetic
+> contacts only.
+>
+> Still unbuilt from this part: drag sources and targets outside a `CellGrid`,
+> auto-scroll at a scrolling container's edge, multi-select drags and
+> cross-window drags; `docs/backlog.md`'s _Drag-drop on pad, keyboard and touch_
+> entry carries them.
 >
 > **The styling half is not how the feedback arrives.** This section hangs
 > feedback on `:drop-ok` / `:drop-bad` pseudo-classes "like everything else
@@ -299,6 +318,12 @@ UI just doesn't wait to look responsive.
   twice, or two items in one cell reads as no save.
 - **Scripted pointer drag through `HeadlessShell`**: press over one cell,
   release over another, and the placement is where the pointer let go.
+- **The other three devices, built 2026-10-06**: `crcbl_ui::grid_drag`'s
+  `device_tests` drive the pad's carry cursor (pick up, carry across a linked
+  grid, drop, cancel), a synthetic finger's long press either side of
+  `LONG_PRESS`, the ghost and the quick action; `apps/breach` drives real keys
+  through `HeadlessShell` into a move from its rig to its pack, and a refused
+  drop that moves nothing and says why.
 
 - **No-dupe property (the headline), built 2026-10-06**: `crcbl_inventory`'s
   `no_command_stream_duplicates_or_loses_an_item` plays thousands of seeded
@@ -328,15 +353,13 @@ UI just doesn't wait to look responsive.
   into it.
 - Access property: container contents never appear in any message before a grant
   or after a revoke.
-- The other three devices: pad, keyboard and touch drags completing the same
-  moves. The pointer one is scripted; the four-device claim is part 1's.
 - Golden frames for grid rendering and drop-state styling.
 
 ## Delivery
 
 | Slice                                                                                                                                                                                                                                                    | Phase                                               |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| UI drag-drop capability (sources/targets/ghost/`:drop-ok`), pointer + pad/keyboard/touch paths                                                                                                                                                           | wave 1 (editor asset browser is the first consumer) |
+| UI drag-drop capability: ✅ grid sources and targets, ghost, pointer + pad/keyboard/touch paths and quick-moves (2026-10-06, `crcbl_ui::grid_drag`); sources and targets outside a grid, auto-scroll, multi-select and cross-window not built            | wave 1 (editor asset browser is the first consumer) |
 | ✅ Uniform grid model (+ filters) + placement/rotation + stacking — `crcbl-inventory`, consumed by `apps/shard` and `apps/breach`                                                                                                                        | shipped 2026-09-07                                  |
 | Nesting: grids inside grids, depth cap and cycle rejection                                                                                                                                                                                               | FPS-era                                             |
 | Mounts and coverage; gear as the grids it provides                                                                                                                                                                                                       | FPS-era                                             |

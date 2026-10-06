@@ -81,7 +81,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crcbl::ecs::{ClientInputs, GameModule, World};
-use crcbl::inventory::{Cell, Grid, Inventory, SlotId};
+use crcbl::inventory::{Applied, Cell, ContainerId, Grid, Inventory, Refusal, SlotId};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{
@@ -1464,9 +1464,17 @@ impl Game {
         loadout::rig(&lock(&self.shared).loadout).clone()
     }
 
-    /// Moves the stack at `slot` so its origin is `at` — the cell a panel's
-    /// drag landed it on, grab offset already applied by
-    /// [`crcbl::ui::grid_drag`]. Answers whether anything moved.
+    /// What the player's pack holds, for the panel that draws it beside the
+    /// rig: a clone, for [`Game::loadout`]'s reason. It is
+    /// [`loadout::PACK_W`] by [`loadout::PACK_H`] cells.
+    #[must_use]
+    pub fn pack(&self) -> Grid {
+        loadout::pack(&lock(&self.shared).loadout).clone()
+    }
+
+    /// Moves the stack at `slot` of `from` so its origin is `at` in `to` — the
+    /// cell a panel's drag landed it on, grab offset already applied by
+    /// [`crcbl::ui::grid_drag`]. Answers what the kit did, or why it refused.
     ///
     /// **This is the one mutation that does not cross the wire**, and the
     /// reason is that there is no wire command to carry it: `Intent` is a flag
@@ -1479,10 +1487,31 @@ impl Game {
     /// The move itself is [`loadout::drag`]: the kit's
     /// [`Command::Move`](crcbl::inventory::Command::Move) applied to the
     /// stage's [`Inventory`] as one transaction, the call a server makes for a
-    /// client's move. A refused drag leaves the rig exactly as it was, down to
-    /// the slot id the panel is holding.
-    pub fn drag(&mut self, slot: SlotId, at: Cell) -> bool {
-        loadout::drag(&mut lock(&self.shared).loadout, slot, at).is_ok()
+    /// client's move. A refused drag leaves both containers exactly as they
+    /// were, down to the slot ids the panel is holding.
+    ///
+    /// # Errors
+    ///
+    /// The kit's [`Refusal`], which the panel shows.
+    pub fn drag(
+        &mut self,
+        from: ContainerId,
+        slot: SlotId,
+        to: ContainerId,
+        at: Cell,
+    ) -> Result<Applied, Refusal> {
+        loadout::drag(&mut lock(&self.shared).loadout, from, slot, to, at)
+    }
+
+    /// The panel's quick action: the stack at `slot` of `from` sent to the
+    /// other container, through the same lock [`Game::drag`] takes and as the
+    /// same command — see [`loadout::send`].
+    ///
+    /// # Errors
+    ///
+    /// The kit's [`Refusal`], which the panel shows.
+    pub fn send(&mut self, from: ContainerId, slot: SlotId) -> Result<Applied, Refusal> {
+        loadout::send(&mut lock(&self.shared).loadout, from, slot)
     }
 }
 
@@ -2206,7 +2235,10 @@ mod tests {
         // free: the rig is wider than the kit is tall.
         let to = Cell::new(from.x, loadout::GRID_H - 1);
         assert_ne!(from, to, "the stack already sits on the bottom row");
-        assert!(game.drag(slot, to), "the drag was refused");
+        assert!(
+            game.drag(loadout::RIG, slot, loadout::RIG, to).is_ok(),
+            "the drag was refused"
+        );
         let moved = game.loadout();
         assert_eq!(
             moved.slot(slot).expect("the stack is still held").at(),
@@ -2233,7 +2265,7 @@ mod tests {
             .map(|(_, held)| held.at())
             .expect("the kit is more than one stack");
         assert!(
-            !game.drag(slot, other),
+            game.drag(loadout::RIG, slot, loadout::RIG, other).is_err(),
             "a stack was dropped onto another one"
         );
         assert_eq!(game.loadout(), moved, "a refused drag moved something");

@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_ui::grid_drag::CellResponse` has a `focused` field**, and `GridDrag`
+  is no longer `Eq` (it keeps the finger's position). `GridResponse` answers a
+  cell's `drop` for the cell under the hand carrying the drag, which is the
+  hovered cell for the pointer as before. `apps/breach`'s
+  `Game::drag(from, slot, to, at)` names both containers and answers the kit's
+  `Result<Applied, Refusal>`, and its panel's `PanelStats::moved` replaces
+  `dragged`.
+
 - **Every hello carries the client's `PlayerId`, and the protocol version is 8**
   (`ProtocolCompatibility::DEFAULT`). `crcbl_net::Hello` has a new `player`
   field, 16 bytes on the wire after `generation`, so a build from before cannot
@@ -794,6 +802,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **`crcbl_ui::grid_drag` drags on the pad, the keyboard and touch, as well as
+  the pointer, through one state machine.** `GridDrag::frame_with(ui, input)`
+  takes a `DragInput` — the pointer, the tree's `NavInput`, the frame's `dt` and
+  an optional `QuickAction` — and `GridDrag::frame(ui, pointer)` is that with
+  the pointer alone, unchanged in behaviour. The pad and the keyboard move a
+  focus over cells (`GridDrag::focus`): `ui_accept` on the focused cell picks
+  up, `ui_move` carries it, `ui_accept` drops and `ui_back` cancels to the
+  origin; a step off a grid's edge goes to the grid `GridDrag::link` names, and
+  the first press with nothing focused only lands focus. A finger is offered
+  with `GridDrag::touch(contact, phase, at)` and lifts what is under it after
+  holding within `LONG_PRESS_SLOP` pixels for `LONG_PRESS`; a cancelled contact
+  cancels. Every hand ends through the same `DragFrame::finish` and `release`,
+  and `Held::hand` says which one holds it.
+- **`DragFrame::ghost`**: where the carried payload is drawn — following the
+  pointer or the finger, snapped to the carry cursor's cell, grab offset kept —
+  with the `DropFeedback` under the hand as its tint. `apps/breach` draws it.
+- **Quick actions on a focused cell: `DragFrame::take_quick_move`** reports a
+  `QuickMove { action, payload, from }` for a `QuickAction` the game numbered,
+  without a drag, for the game to turn into a command.
+- **`apps/breach` carries a pack beside its rig**, and its loadout panel takes
+  the pad and the keyboard: arrows or the d-pad move the focus, `Space`, `Enter`
+  or South picks up and drops, East cancels, and `X` or West sends the focused
+  stack to the other container (`loadout::send`, a `Command::Move` to
+  first-fit's cell). A drag between the two is one `Command::Move`, and a drop
+  or a move the kit refuses leaves both as they were and shows why under the
+  pack.
 
 - **A read-only physics world on the client: `crcbl_client::ClientQueryWorld`**,
   for camera booms and occlusion rays. It holds the scene's statics — the

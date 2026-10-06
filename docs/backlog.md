@@ -17357,9 +17357,9 @@ with their copies deleted. What remains:
   systems, and use none of `UiState`, `WidgetId` or `PointerInput`, so adopting
   `GridDrag` is a UI-input architecture change for EW's user, not a port (EW
   backlog `acf54c4`). Revisit if EW moves its UI input onto `UiState`.
-- **Cross-grid drags and rotation mid-drag (`Held::refit`, `payload_mut`) have
-  no in-tree consumer**; they are unit-tested only.
-- **Nothing is drawn under the pointer mid-drag**; no sample draws a ghost.
+- **Rotation mid-drag (`Held::refit`, `turn_quarter`, `payload_mut`) has no
+  in-tree consumer**; it is unit-tested only. Cross-grid drags have one since
+  2026-10-06: `apps/breach`'s rig and pack.
 
 ### A save's grid is rebuilt by placing, not by deserialising (2026-09-07)
 
@@ -17410,8 +17410,9 @@ never reads. Still unexercised after two consumers: `Grid::filter` (neither
 sample equips anything), `split` and `merge` (neither has a verb that divides a
 stack), `rotate` and every `Rotation` but `Deg0` (neither panel has a rotate
 key), and nesting. Those remain the parts most likely to be shard-shaped, and
-they are still the parts with no consumer. Breach did not hit the missing
-cross-grid move either, because it carries one grid.
+they are still the parts with no consumer. Breach has carried a second
+container, a pack, since 2026-10-06, and a move between the two is a
+`Command::Move`.
 
 ### The move protocol and the stash (2026-10-06)
 
@@ -17485,10 +17486,12 @@ decisions, each recorded so it is not re-argued:
   commands get a wire decoder, that decoder is the target, and taking
   `crcbl-inventory` into the fuzz crate changes its `Cargo.lock`.
 - **Consumer:** `apps/breach`'s drag is `loadout::drag`, a `Command::Move` on an
-  `Inventory` whose one container is the rig, owned by `loadout::owner`. No
-  sample runs a server that keeps a stash, so the stash is tested at the kit
-  level only (`stash::tests`, through `MemoryStorage` and `NativeStorage`).
-  Shard's drag still calls `Grid::move_within` on its bare grid.
+  `Inventory` holding the rig and a pack, both owned by `loadout::owner`, and
+  its pad's quick action is `loadout::send`, a `Command::Move` to the cell
+  `Grid::find_slot` picks in the other one. No sample runs a server that keeps a
+  stash, so the stash is tested at the kit level only (`stash::tests`, through
+  `MemoryStorage` and `NativeStorage`). Shard's drag still calls
+  `Grid::move_within` on its bare grid.
 
 **Still owed from this slice:** a container cannot be removed from an
 `Inventory` (a corpse that despawns, a match that ends), which a server will
@@ -17535,18 +17538,74 @@ beside it.
 
 ### Drag-drop on pad, keyboard and touch, and the rest of the drag's shape (2026-09-25)
 
-**Not built.** `crcbl_ui::grid_drag` is pointer-only: `GridDrag::frame` takes a
-`PointerInput`, and nothing in the module reads a pad, a key or a touch
-(verified 2026-09-25 by reading `grid_drag.rs`). `docs/plan/34-inventory.md`'s
-part 1 makes all four devices first class through one model — engaging a slot
-picks up, `ui_move` navigates while carrying, `ui_accept` drops, `ui_back`
-cancels to the origin, and touch is long-press, drag and release — and asks
-besides for a ghost subtree following the pointer or focus (the entry above
-notes no sample draws one), auto-scroll at a scrolling container's edge,
-multi-select drags carrying the selection as one payload, cross-window drags,
-and drag sources and targets outside a `CellGrid`. Its risk note: pad quick-move
-actions ("send to stash", "equip") matter more than literal dragging on a pad,
-and the kit ships both. The design stays in that plan until it folds.
+**Built 2026-10-06** in `crcbl_ui::grid_drag` (`nav.rs`, `touch.rs`,
+`device_tests.rs` beside `mod.rs`), consumed by `apps/breach`. The decisions,
+each recorded so it is not re-argued:
+
+- **One state machine, a `Hand` per device.** `GridDrag::frame_with` takes a
+  `DragInput` (pointer, the tree's `NavInput`, `dt`, a `QuickAction`); contacts
+  arrive between frames through `GridDrag::touch`, as `crate::touch`'s controls
+  take theirs. `Held::hand` is `Pointer(widget)`, `Cursor` or `Touch(contact)`,
+  and only a pointer drag rides the `UiState` capture. Every hand ends through
+  `finish`/`release`, so a game validates a pad's drop the way it validates a
+  mouse's. `frame(ui, pointer)` is unchanged in behaviour, and every
+  pre-existing test passes unedited.
+- **The drag keeps its own focus over cells**, because the grids are
+  immediate-mode and there is no tree node for the tree's focus to rest on. It
+  copies the tree's rules: resolved when a frame begins against the grids the
+  previous frame ran, the landing press inert, focus shown only in
+  `InputMode::Navigation` or while the cursor carries, and a pointer press
+  focusing what it pressed.
+- **Crossing grids is an explicit `GridDrag::link`**, one way per call, landing
+  on the near edge's nearest row or column; an unlinked edge stops focus. Chosen
+  over the tree's beam search because a game's grids are one inventory whose
+  layout it knows, and over wrapping because a wrap inside a backpack would move
+  an item to the far side by accident.
+- **Long press: `LONG_PRESS` (500 ms) within `LONG_PRESS_SLOP` (10 px)**,
+  UIKit's defaults; a finger that wanders first is given up (`touch` answers
+  `false`) so the caller can scroll with it. A cancelled contact cancels the
+  drag.
+- **Quick actions are numbers the game assigns** (`QuickAction(u16)`), reported
+  as a `QuickMove` with the focused cell's payload. The names, the bindings and
+  the command are the game's: breach's is `ACTION_SEND` (`X`, West) mapped to
+  `panel::SEND` and `loadout::send`.
+- **The ghost is placement, not a subtree**: `DragFrame::ghost` gives the origin
+  cell's corner, the cell size and the tint, and the panel fills the footprint,
+  since only the game knows it. The plan's "ordinary UI subtree" waits on a
+  source or target outside a `CellGrid`.
+- **Breach's panel reads its own `ActionMap`** (`app::panel_actions`): the `ui`
+  context plus `send`, pushed while the panel is open and ticked once a frame in
+  `draw`, because the game's map ticks per simulation tick and the panel works
+  paused. A press goes to whichever map has the keyboard, a release to both. A
+  pack (`loadout::PACK`, 4×2, empty at spawn) was added so a drag and a quick
+  action have somewhere else to go; the trigger still reads the rig alone, so a
+  stowed sidearm does not fire, and the summary row is the rig's.
+
+**Deferred, each its own slice:** auto-scroll at a scrolling grid's edge (a
+carry cursor moved onto a cell outside a `GridWindow` lands there unseen);
+multi-select drags carrying a selection as one payload; cross-window drags; drag
+sources and targets outside a `CellGrid` (the plan's ghost subtree with them);
+`ui_next`/`ui_prev` between grids.
+
+**Gaps, stated plainly:**
+
+- **Keyboard `ui_back` does not reach breach's panel**: `Escape` is the loop's
+  `PAUSE_KEY` and never reaches `key_event`. The pad's East cancels, and `I`
+  closes the panel, which cancels too.
+- **Breach offers no contacts.** Its primary contact arrives as the pointer,
+  which drags on press, so a phone gets the pointer's drag and not the long
+  press. Wiring `touch_event` means not also feeding that contact's pointer
+  echo, which `PointerUpdate` cannot tell apart today. Touch is verified with
+  synthetic contacts only, and no real finger has driven it.
+- **Not tested end to end:** a command the kit refuses after the panel predicted
+  it would land (`PanelState::note` on `Game::send`'s or `Game::drag`'s `Err`);
+  breach's containers cannot be filled to refuse a send. The panel's drawing of
+  a noted refusal is tested, and so is `loadout::send`'s refusal.
+- **The pad path has no app-level test**: `HeadlessShell` has no pad source, so
+  breach's `gamepad_event` is exercised only through the kit's `NavInput` tests
+  and the keyboard's identical path.
+- **`apps/shard` is still pointer-only**; it would take its own map and the same
+  few lines breach has.
 
 ### Inventory kit: the 3D inspect view, contested-loot hooks, container types (2026-09-25)
 

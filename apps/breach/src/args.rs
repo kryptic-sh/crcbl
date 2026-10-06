@@ -52,8 +52,11 @@ CONTROLS:
     Arrows               Look: left/right turns, up/down tilts
     SPACE                Fire. One pull is one shot, and only while the rig
                          holds a weapon.
-    I                    Open the loadout: the grid the rig is, dragged with
-                         the pointer. It gives the cursor back while it is up.
+    I                    Open the loadout: the rig and the pack, dragged with
+                         the pointer, or with the arrows or the d-pad and
+                         SPACE/ENTER/South to pick up and drop (East puts it
+                         back). X or West sends the focused item to the other
+                         grid. It gives the cursor back while it is up.
     ESC                  Pause, F3 the debug panel, F11 fullscreen
 
 OPTIONS:
