@@ -6,7 +6,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requests (2026-10-06)
 
 These requests take priority over the feature-expansion order below. Rechecked
-against crcbl `7be51c1e` after pulling `origin/main`, using EW `73594237`. Both
+against crcbl `6f3893c3` after pulling `origin/main`, using EW `dbd33b6f`. Both
 remain open: `CharacterController::move_upright` still synchronizes its bound
 collider, and `world/candidate_sweeps.rs::sweep_capsule_all` still takes a
 straight `Segment`. EW's `preview_airborne_motion` still restores the live
@@ -41,6 +41,15 @@ payloads, installed magazines and stash ownership. They are not a demonstrated
 missing engine capability; `src/game_stash_grids.rs` already uses crcbl's
 `grid_drag` for pointer interaction. Reconsider a port only after a reusable
 requirement is demonstrated, rather than moving these game rules into crcbl.
+
+The recent cartridge-ejection fixes do not add another engine request.
+`src/game_ejected_cases.rs::account_ejection_at_port` supplies the authored
+cartridge orientation, launch velocity, spin and mechanical release delay to
+`WorldItemMotion::launched_from_authored_transform` in
+`src/game_world_items.rs`. Keep the firearm-specific port axes, cartridge
+ownership and release timing in EW. These fixes use the existing motion path; no
+missing engine API was demonstrated. Native live-round validation remains
+unfinished in EW, so this review does not claim that playback is fully verified.
 
 1. **Non-mutating character-motion previews.** EW's
    `PlayerController::preview_airborne_motion` in
