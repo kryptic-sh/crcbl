@@ -19,6 +19,7 @@ use crate::query::{self, OverlapHit, Penetration, ShapeHit, TurnedCapsule};
 
 mod candidate_sweeps;
 mod entry;
+mod placement;
 
 use entry::{ColliderEntry, PlacedCompound, Primitive};
 
