@@ -303,11 +303,8 @@ struct Recorded {
 /// The SHA-256 the history binds itself to: each file's key and bytes, in
 /// the order handed — key order, from a map or a set — each as its length in
 /// eight little-endian bytes and then its bytes, so no two different sets of
-/// files run together into the same bytes. The scene lock's check of the
-/// files on disk is the same digest (`scene_edit::lock`).
-pub(super) fn scene_digest<'a>(
-    files: impl IntoIterator<Item = (&'a str, &'a [u8])>,
-) -> [u8; DIGEST_BYTES] {
+/// files run together into the same bytes.
+fn scene_digest<'a>(files: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> [u8; DIGEST_BYTES] {
     let mut bytes = Vec::new();
     for (key, text) in files {
         for part in [key.as_bytes(), text] {

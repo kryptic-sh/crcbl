@@ -13176,7 +13176,8 @@ tests, `apps/editor/src/app/tests/lock.rs` and the binary's
   with what it was asked for.
 - **After the unsaved bar's Save, the second question decides the first**:
   Overwrite saves and goes on with the close, open or new scene; Reload reads
-  the disk's scene back, dropping the edits (logged as discarded), and goes on,
+  the disk's scene back over the edits (logged as discarded; since 2026-10-06
+  one entry `Document::revert` records, which Ctrl+Z walks back), and goes on,
   since the person asked to go and chose the disk over their edits, so nothing
   is left to lose and stopping would make them ask twice; Cancel keeps the edits
   and abandons the close or open, answering a close request "keep". A reload
@@ -13310,12 +13311,6 @@ machine, a client's link dropping mid-fetch and its resume, and a scene near
   `crcbl scene spawn` → `crcbl screenshot` → `crcbl sim`) still waits on
   `import --out` writing a scene and on `screenshot`/`sim` taking a scene
   directory.
-- **The editor noticing a change on disk as it happens**: it notices at Save
-  time only. A scene changed behind it (by a program that took no lock, or a
-  checkout) shows the editor's old copy until Ctrl+S asks. The per-chunk reload
-  and the rule for unsaved edits landed 2026-10-06 (`Document::reload_chunk`);
-  the editor polling its directory is what is left, under _Asset hot reload: the
-  watch and per-chunk scene reload are built; assets and shaders are not_.
 
 **Coverage gaps**: run on Windows only in this slice; the verbs were never run
 against breakout's or puppet's scenes, only towers' field and the umbrella's
@@ -13758,6 +13753,19 @@ held by `apps/sandbox`'s
 `the_scene_flag_opens_its_directory_and_follows_an_edit`. Textures and shaders
 are below, unbuilt.
 
+**Built 2026-10-06, later: the editor and `crcbl edit --serve` follow their
+scene's chunk files, and the editor's revert is the reload.**
+`crcbl::scene_edit::ChunkWatch` (`scene_edit/watch.rs`, native only) is a
+`PolledWatch` over a document's chunk files that follows its directory and
+manifest and holds each changed chunk until it is taken. `apps/editor`'s
+`app/watch.rs` polls it once a frame on the editor's clock;
+`crates/crcbl-cli/src/serve_cmd.rs`'s `Server::follow_disk` polls it each serve
+frame. `Document::revert` (`scene_edit/reload.rs`) is the changed-on-disk bar's
+Reload. Held by `scene_edit::{reload_tests, revert_tests, watch_tests}`, the
+editor's `app/tests/watch.rs` and two new tests in `app/tests/lock.rs`, the
+panel's `a_changed_chunk_is_asked_about_with_two_buttons`, and
+`serve_cmd/watch_tests.rs`; each was seen red under a mutation of its rule.
+
 - **The watch**, `crcbl_assets::watch::PolledWatch`: a set of paths, looked at
   once per `POLL_INTERVAL` of the caller's clock (a `Duration` each poll, so a
   test drives time), each change offered once its stamp — modification time and
@@ -13822,6 +13830,56 @@ are below, unbuilt.
   its own: naming one is the development loop, and an unchanged file changes
   nothing, so a headless run with `--scene` stays reproducible. Only the chunk
   files are watched.
+- **What is no change is not asked about** (2026-10-06, later). A chunk file
+  holding what the document last read or wrote there reloads nothing
+  (`Reloaded::diff` is `None`): a watch sees the document's own save like any
+  other write, and without this a save followed by an edit would ask about the
+  document's own file. A file whose rows all match, a change of layout alone, is
+  taken in without asking. This needed **one digest per file**
+  (`scene_edit::lock`'s `DiskDigests`) in place of one over the whole directory.
+- **A reload takes in its own chunk file and no other** (2026-10-06, later):
+  another file changed at the same moment still makes the next save ask. This
+  closed the limit that a reload accepted the whole directory as read.
+- **The editor's rule** (`apps/editor/src/app/watch.rs`'s module docs): a clean
+  scene reloads at once, one entry, and stays clean, the status line naming the
+  file. Over unsaved edits the unsaved bar asks (`Asking::ChunkChanged`,
+  `Guarded::Chunks`), every chunk changed at once in one question. **Keep mine**
+  (Enter, or Escape, since keeping is all a cancel would do) changes nothing and
+  takes nothing in, so the next save asks Overwrite or Reload as over any file
+  changed on disk. **Reload from disk** (D) is `OverEdits::Reload`, one entry on
+  top, still dirty. Two buttons, not three: the bar's buttons are a list per
+  question now (`Asking::buttons`).
+- **The editor holds a change it cannot take**, rather than dropping it: while
+  the bar asks something else, while the scene plays (the status line says it
+  comes in when play stops), and while a gizmo drag is held. It is taken in the
+  first frame that can, which closed the limit that a reload refused in play
+  mode was not retried. A joined copy has no directory and watches nothing.
+- **The editor's revert is one entry through the reload** (2026-10-06, later):
+  the changed-on-disk bar's Reload runs `Document::revert`, every chunk through
+  `reload_chunk`'s difference and commands (`commands_of`), then the names
+  (`Rename`s) and the environment (`SetEnvironment`s), performed in order and
+  recorded as one entry, after which the document is clean and the whole
+  directory is what it last read. Chosen over clearing the history, which the
+  reopen did: the revert is then undoable, as a reload is, and the two cannot
+  disagree about what the disk says. **A header changed on disk** — the
+  manifest's systems or the scene's name — is `EditError::HeaderChanged`,
+  changing nothing, and the editor then opens the scene again whole as before,
+  its history starting over: listing and unlisting systems in place is the
+  header reload deferred below.
+- **The serve's rule** (`serve_cmd.rs`'s module docs): a changed chunk goes
+  through `EditServer::reload_chunk` as `OverEdits::Reload`, taking the disk's
+  chunk over unsaved edits, once no client's drag is open. Chosen over refusing
+  and reporting: a server's document is unsaved only between an update and its
+  save, while a drag is open or after a failed save, nobody is at the server to
+  ask, and a refusal would leave every later save refused over the changed file
+  (`ChangedOnDisk`), the server unable to save or quit. The reload is one entry
+  on top, so a client can undo it. **A drag holds it**: the update that ends the
+  drag reloads before it saves, so the drag stays one entry; the log says the
+  chunk waits.
+- **`ChunkWatch` follows the document**: a scene opened in place, a save-as, a
+  system listed or unlisted, or a join each start the watch afresh, taking the
+  files as they stand as seen; what was due in another directory is dropped, and
+  a system no longer listed drops out.
 
 **Deferred, each with what it would take:**
 
@@ -13833,28 +13891,28 @@ are below, unbuilt.
 - **Shader reload.** A Slang recompile at run time and the pipelines keyed by
   the shader's hash, rebuilt when it changes. `crcbl-shaders` computes the
   identity and nothing keys a pipeline on it; Slang is compiled offline today.
-- **The editor watching its scene.** `Document::reload_chunk` and the rule are
-  built and tested; `apps/editor` does not poll its origin yet. What it would
-  take: a `PolledWatch` over the document's chunk files, driven from the frame,
-  and the unsaved bar (`apps/editor/src/app/unsaved.rs`) asking on
-  `EditError::Unsaved` with "reload over them" and "keep mine". The editor's
-  revert reusing the reload path waits on the same wiring; it reopens the whole
-  scene today. `crcbl edit --serve` does not watch either; it would call
-  `EditServer::reload_chunk` the same way.
 - **The header, `env.ron` and `names.ron` are not watched or reloaded**: a
-  manifest change needs a restart. Reloading them means a manifest diff —
-  systems listed and unlisted — and an environment write, which the document has
-  commands for (`ListSystem`, `SetEnvironment`, `Rename`).
+  manifest change needs a restart, and a revert over one reads the scene again
+  whole. `Document::revert` already writes the names and the environment back
+  with `Rename` and `SetEnvironment`, so watching `names.ron` and `env.ron` is
+  mostly a watch entry and a reload of those two through the same steps; the
+  header is the hard part — a manifest diff, systems listed and unlisted in
+  place (`ListSystem`, `UnlistSystem`, an unlist refused while a system holds
+  entities, the order the chunks save in) and the scene's name, which no command
+  sets. Left as one piece, since a watch of two of the three files would still
+  need a restart for the third.
+- **The serve still cannot save over a changed header**: a `scene.ron` written
+  behind its lock makes every save refuse until `accept_changes_on_disk`, as
+  before the watch (`a_quit_whose_save_fails_keeps_serving_and_the_edit`). It
+  closes with the header reload.
+- **A chunk changed in the moment the watch starts afresh is missed** until its
+  next change: a new watch takes the files as they stand as already seen
+  (`ChunkWatch`'s module docs). Adding and removing single paths on
+  `PolledWatch` would close it.
 - **A reload too long for one notice** is announced to nobody: the server's
   revision moves, so copies refetch at the next notice — and stay stale until
   one comes. A notice that could say "fetch again", or a reload split into
   notices that fold into one entry on the copy, would close it.
-- **A reload accepts the whole directory as read** (`accept_changes_on_disk`),
-  so another file changed at the same moment — one the watch does not cover,
-  like `scene.ron` — is overwritten by the next save without the save asking. A
-  digest kept per file would let it accept the one chunk.
-- **A reload refused in play mode is not retried**: the watch offered the change
-  once, so it is picked up only at the file's next change.
 - **`Ui::poll_stylesheets` keeps its own poll**, with no settle period: a sheet
   caught half-written keeps the last good sheet, which is that module's own
   answer to the same problem. Moving it onto `PolledWatch` would change when a
@@ -13869,7 +13927,14 @@ system's whole entities (above).
 **Coverage gaps:** run on Windows only. The watch's `stat` and rename cases were
 not run on Linux or macOS in this slice, and no test drives a writer that pauses
 between chunks for longer than `SETTLE`, which would be offered half written and
-then refused as a parse error until it finishes.
+then refused as a parse error until it finishes. The editor's watch is driven
+through the headless loop and the null backend, never a window; a change held by
+the unsaved bar asking something else, and one held by a gizmo drag, have no
+test of their own (play mode's hold does). The serve's watch runs in process
+against the rig, never the `crcbl` binary. `Document::revert`'s roll-back of
+steps already performed when a later one is refused is not reached by a test:
+the scene is read whole and checked first, so a refusal part way needs a row a
+component's rule refuses, which no test vocabulary here has.
 `crates/crcbl-assets/src/registry.rs`'s module docs still keep `Unloaded` out,
 correctly: nothing reimports an asset the registry holds.
 

@@ -32,8 +32,8 @@
 //! ```text
 //!     a save ──changed on disk──▶ the bar ──Overwrite──▶ that save again,
 //!                                                        over them
-//!                                         ──Reload─────▶ read them back, the
-//!                                                        edits here dropped
+//!                                         ──Reload─────▶ read them back over
+//!                                                        the edits here
 //!                                         ──Cancel─────▶ nothing
 //! ```
 //!
@@ -55,9 +55,18 @@
 //! ```text
 //!     close / open / new ──dirty──▶ the bar ──Save──▶ changed on disk ──▶ the bar
 //!         ──Overwrite──▶ saved over them, then the close / open / new
-//!         ──Reload─────▶ read back, the edits dropped, then the close / open / new
+//!         ──Reload─────▶ read back over the edits, then the close / open / new
 //!         ──Cancel─────▶ nothing: the edits kept, a close kept open
 //! ```
+//!
+//! **Reload is one entry of the history** (decided 2026-10-06):
+//! [`Document::revert`] reads every chunk back through the chunk reload's
+//! difference, then the names and the environment, so Ctrl+Z brings back the
+//! edits it replaced, and a revert cannot disagree with the watch's reload
+//! (`watch`) about what the disk says. A header changed on disk — the
+//! systems it lists, or the scene's name — is the one thing a revert does
+//! not take in ([`EditError::HeaderChanged`]): the scene is then read again
+//! whole and put in place, its history starting over, as before.
 //!
 //! Reload goes on because the person asked for the close or open and then
 //! chose the disk's scene over their edits: nothing is left to lose, and
@@ -117,6 +126,10 @@ const ASK: &str = "Unsaved edits: Enter saves, D discards, Escape cancels";
 /// disk.
 const ASK_CHANGED: &str = "Changed on disk: Enter overwrites, D reloads, Escape cancels";
 
+/// What the status line says once the scene was read back from disk over
+/// the edits here.
+const REVERTED: &str = "Reloaded from disk: Ctrl+Z puts back the edits it replaced";
+
 /// What the status line says once the bar is cancelled.
 const KEPT: &str = "Cancelled: the scene and its unsaved edits are as they were";
 
@@ -137,6 +150,10 @@ pub(super) enum Guarded {
     /// asked about by the save that found the change; its Overwrite makes
     /// that save again over them instead. See the module docs.
     Reload(Saving),
+    /// These systems' chunk files, changed on disk under unsaved edits,
+    /// reloaded over them — what the bar's Reload from disk does; Keep mine
+    /// leaves them. See `watch`.
+    Chunks(Vec<String>),
 }
 
 impl Guarded {
@@ -146,7 +163,7 @@ impl Guarded {
         match self {
             Self::Close => true,
             Self::Reload(Saving::Then(pending)) => pending.closes(),
-            Self::New | Self::Open(_) | Self::Join(_) | Self::Reload(_) => false,
+            Self::New | Self::Open(_) | Self::Join(_) | Self::Reload(_) | Self::Chunks(_) => false,
         }
     }
 }
@@ -272,8 +289,17 @@ impl<S: Shell + ?Sized> Editor<S> {
     }
 
     /// What the bar says about `guarded`: whose edits, and what loses them.
-    fn question(&self, guarded: &Guarded) -> String {
+    pub(super) fn question(&self, guarded: &Guarded) -> String {
         let what = match guarded {
+            Guarded::Chunks(systems) => {
+                return format!(
+                    "{} changed on disk while `{}` has unsaved edits: Keep mine leaves the file \
+                     as it is and the next save asks before writing over it; Reload from disk \
+                     takes its rows over the edits here, as one step Ctrl+Z walks back",
+                    super::watch::files(systems),
+                    self.document.name()
+                );
+            }
             Guarded::Reload(_) => {
                 let dir = self
                     .document
@@ -311,6 +337,15 @@ impl<S: Shell + ?Sized> Editor<S> {
             return Ok(());
         };
         self.panels.end_unsaved();
+        // Two answers, and no edit is discarded by either: Reload from disk
+        // lands on top of them, and Keep mine is Enter and Escape alike.
+        if let Guarded::Chunks(systems) = &guarded {
+            match answer {
+                Unsaved::Discard => self.reload_over_edits(systems),
+                Unsaved::Save | Unsaved::Cancel => self.keep_over_disk(systems),
+            }
+            return Ok(());
+        }
         match answer {
             Unsaved::Cancel => {
                 self.kept(&guarded);
@@ -400,13 +435,20 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.panels.set_status(KEPT, Tone::Info);
     }
 
-    /// Does what `guarded` asked for, which ends the document's session: its
+    /// Does what `guarded` asked for, which — but for a chunk reloaded over
+    /// the edits, which keeps the scene — ends the document's session: its
     /// autosave goes — see `recovery`.
     fn proceed(&mut self, guarded: Guarded) -> Result<(), EditError> {
-        self.end_autosave();
-        // Whatever goes on, an offer Open copy took down stays down.
-        self.held_offer.clear();
+        if !matches!(guarded, Guarded::Chunks(_)) {
+            self.end_autosave();
+            // Whatever goes on, an offer Open copy took down stays down.
+            self.held_offer.clear();
+        }
         match guarded {
+            Guarded::Chunks(systems) => {
+                self.reload_over_edits(&systems);
+                Ok(())
+            }
             Guarded::New => {
                 self.leave_join();
                 self.new_scene()
@@ -422,7 +464,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                 Ok(())
             }
             Guarded::Reload(saving) => {
-                let reloaded = self.reload();
+                let reloaded = self.revert();
                 match saving {
                     Saving::Then(pending) => match reloaded {
                         Ok(()) => self.proceed(*pending),
@@ -437,17 +479,25 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
     }
 
-    /// Reads the scene back from its own directory and puts it in place of
-    /// the one being edited, under the lock the editor holds on it.
-    fn reload(&mut self) -> Result<(), EditError> {
-        let dir = self
-            .document
-            .origin()
-            .ok_or(EditError::NoOrigin)?
-            .to_path_buf();
-        let document = Document::open_with_history_or_fresh(dir, crate::scene::vocabulary())?;
-        self.replace_document(document);
-        Ok(())
+    /// Reads the scene back from its own directory, the bar's Reload — see
+    /// the module docs: through [`Document::revert`], as one entry of the
+    /// history, or, for a header changed on disk, by reading the scene again
+    /// whole and putting it in place of the one being edited, under the lock
+    /// the editor holds on it.
+    fn revert(&mut self) -> Result<(), EditError> {
+        match self.document.revert() {
+            Ok(_) => {
+                self.panels.set_status(REVERTED, Tone::Info);
+                Ok(())
+            }
+            Err(EditError::HeaderChanged(dir)) => {
+                let document =
+                    Document::open_with_history_or_fresh(dir, crate::scene::vocabulary())?;
+                self.replace_document(document);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Answers a close request: at once for a clean document, and otherwise

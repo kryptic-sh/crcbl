@@ -35,8 +35,9 @@
 //!   [`Document::new_scene`] starts from nothing (`scene_edit::origin`).
 //!
 //! A chunk file changed on disk is read again with
-//! [`Document::reload_chunk`], as one entry of the history — see `reload`'s
-//! module docs for what it changes and when it asks first.
+//! [`Document::reload_chunk`], as one entry of the history, and the whole
+//! scene with [`Document::revert`] — see `reload`'s module docs for what
+//! each changes and when a reload asks first.
 //!
 //! And a sixth that is not an edit: [`Document::play`] runs the scene with its
 //! games' modules until [`Document::stop`] puts it back exactly as it was —
@@ -90,6 +91,8 @@ mod selection;
 pub mod serve;
 mod systems;
 mod validation;
+#[cfg(not(target_arch = "wasm32"))]
+mod watch;
 
 pub use environment::Environment;
 pub use field::text_of;
@@ -106,6 +109,8 @@ pub use reload::{OverEdits, Reloaded};
 pub use route::RoutedEdit;
 pub use serve::{EditServer, SERVER_AUTHOR, refusal_of};
 pub use systems::{IN_SCENE, SystemGroup, UNGROUPED};
+#[cfg(not(target_arch = "wasm32"))]
+pub use watch::ChunkWatch;
 
 /// A loaded scene and everything the editor knows about it.
 #[derive(Debug)]
@@ -167,11 +172,12 @@ pub struct Document {
     /// program editing it took one — see `scene_edit::lock`. Only ever on
     /// the document's own directory: whatever moves the origin lets it go.
     lock: Option<SceneLock>,
-    /// What [`owned`](Self::owned) held in [`origin`](Self::origin) when the
-    /// document last read or wrote it, as the history's scene digest — what
-    /// a save there checks the directory against. [`None`] for a document
-    /// with no origin. See `scene_edit::lock`.
-    on_disk: Option<[u8; history::DIGEST_BYTES]>,
+    /// What each file of [`owned`](Self::owned) held in
+    /// [`origin`](Self::origin) when the document last read or wrote it, as
+    /// its digest — what a save there checks the directory against, and what
+    /// a chunk reload tells the document's own writing by. [`None`] for a
+    /// document with no origin. See `scene_edit::lock`.
+    on_disk: Option<lock::DiskDigests>,
     /// The scene as it stood when play began, and what is running it — or
     /// [`None`] while editing. See [`Document::play`].
     play: Option<play::Session>,
@@ -479,9 +485,15 @@ pub enum EditError {
     /// whether to take the disk's chunk. See [`Document::reload_chunk`].
     Unsaved(String),
 
-    /// A chunk reload was asked of a routed copy, whose server's document is
-    /// the one to reload — see [`Document::reload_chunk`].
+    /// A chunk reload or a revert was asked of a routed copy, whose server's
+    /// document is the one to reload — see [`Document::reload_chunk`].
     Routed,
+
+    /// A revert found the scene's header in its directory — the systems its
+    /// manifest lists, or its name — changed on disk, which a revert does not
+    /// take in, and changed nothing; the scene is to be read again whole. See
+    /// [`Document::revert`].
+    HeaderChanged(PathBuf),
 }
 
 impl fmt::Display for EditError {
@@ -632,6 +644,12 @@ impl fmt::Display for EditError {
             Self::Routed => f.write_str(
                 "this copy follows a served scene, so a chunk is reloaded by its server and not \
                  here",
+            ),
+            Self::HeaderChanged(dir) => write!(
+                f,
+                "the header `scene.ron` in `{}` changed on disk — the systems it lists or the \
+                 scene's name — so the scene is to be read again whole rather than reverted",
+                dir.display()
             ),
         }
     }
@@ -1996,3 +2014,9 @@ mod lock_tests;
 
 #[cfg(test)]
 mod reload_tests;
+
+#[cfg(test)]
+mod revert_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod watch_tests;

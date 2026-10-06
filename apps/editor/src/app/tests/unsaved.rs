@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use super::files::{chord, type_and_enter};
 use crate::document::origin_tests::tree;
+use crate::keys::Unsaved;
 
 /// Makes the editor's scene dirty, with something selected.
 fn dirty(editor: &mut Editor<HeadlessShell>) {
@@ -112,7 +113,7 @@ fn nothing_else_is_done_while_the_bar_asks() {
     );
     assert!(editor.panels.unsaved().is_some(), "the bar went down");
 
-    let [_, discard, _] = editor.panels.unsaved_buttons();
+    let discard = editor.panels.unsaved_button(Unsaved::Discard);
     let at = centre(&editor, discard);
     click(&mut editor, at);
     assert_eq!(editor.panels.unsaved(), None);

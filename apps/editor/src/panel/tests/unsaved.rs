@@ -32,22 +32,43 @@ fn click_frames(page: &mut Page, at: Vec2) -> Vec<PanelFrame> {
 /// it was told.
 #[test]
 fn each_button_on_the_bar_hands_back_its_answer() {
-    for (index, answer) in [Unsaved::Save, Unsaved::Discard, Unsaved::Cancel]
-        .into_iter()
-        .enumerate()
-    {
+    for answer in [Unsaved::Save, Unsaved::Discard, Unsaved::Cancel] {
         let mut page = Page::built_in();
         page.panels
             .begin_unsaved("Unsaved edits to `greybox`".to_owned());
         assert_eq!(page.panels.unsaved(), Some("Unsaved edits to `greybox`"));
         page.idle();
-        let at = page.centre(page.panels.unsaved_buttons()[index]);
+        let at = page.centre(page.panels.unsaved_button(answer));
         let answers: Vec<_> = click_frames(&mut page, at)
             .into_iter()
             .filter_map(|frame| frame.unsaved)
             .collect();
-        assert_eq!(answers, [answer], "button {index}");
+        assert_eq!(answers, [answer], "{answer:?}");
     }
+}
+
+/// **A changed chunk is asked about with two buttons**, Keep mine and Reload
+/// from disk, each handing back its answer: keeping is all a cancel would
+/// do, so there is no third.
+#[test]
+fn a_changed_chunk_is_asked_about_with_two_buttons() {
+    for answer in [Unsaved::Save, Unsaved::Discard] {
+        let mut page = Page::built_in();
+        page.panels
+            .begin_chunk_changed("`sys/blocks.ron` changed on disk".to_owned());
+        assert_eq!(page.panels.unsaved_asking(), Some(Asking::ChunkChanged));
+        page.idle();
+        let at = page.centre(page.panels.unsaved_button(answer));
+        let answers: Vec<_> = click_frames(&mut page, at)
+            .into_iter()
+            .filter_map(|frame| frame.unsaved)
+            .collect();
+        assert_eq!(answers, [answer], "{answer:?}");
+    }
+    let mut page = Page::built_in();
+    page.panels.begin_chunk_changed("changed".to_owned());
+    page.idle();
+    assert_eq!(page.panels.unsaved.button(Unsaved::Cancel), None);
 }
 
 /// **While the bar is up, the panels act on nothing else**: a click on an

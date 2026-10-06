@@ -34,8 +34,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   per-chunk scene reload): a chunk file's rows as text, read into no world. A
   codec written outside `chunk_of` and `chunk_ruled` must implement it.
   `crcbl_scene::scn::ScnError` has an `Unlisted` variant, and
-  `crcbl::scene_edit::EditError` has `Unsaved` and `Routed`; an exhaustive
-  `match` over either must name the new arms.
+  `crcbl::scene_edit::EditError` has `Unsaved`, `Routed` and `HeaderChanged`; an
+  exhaustive `match` over either must name the new arms.
 
 - **`crcbl_ui::grid_drag::CellResponse` has a `focused` field**, and `GridDrag`
   is no longer `Eq` (it keeps the finger's position). `GridResponse` answers a
@@ -890,7 +890,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   as one undoable entry of the history, refusing with `EditError::Unsaved` over
   unsaved edits unless told `OverEdits::Reload`, and
   `crcbl::scene_edit::EditServer::reload_chunk` announces it to every client as
-  an edit by `SERVER_AUTHOR`, so copies follow it without a fetch.
+  an edit by `SERVER_AUTHOR`, so copies follow it without a fetch. A chunk file
+  holding what the document last read or wrote there — its own save, seen by a
+  watch — reloads nothing (`Reloaded::diff` is `None`), a change of layout alone
+  is taken in without asking, and a reload takes in its own file and no other,
+  so another file changed at the same moment still makes the next save ask.
+- **The editor and `crcbl edit --serve` follow their scene's chunk files.**
+  `crcbl::scene_edit::ChunkWatch` (native only) watches a document's chunk
+  files, following its directory and manifest, and holds each changed chunk
+  until its caller can take it. The editor reloads a changed chunk into a clean
+  scene as one undoable entry; over unsaved edits the unsaved bar asks, with
+  **Keep mine** (Enter or Escape: the edits stay and the next save asks before
+  writing over the file) and **Reload from disk** (D: the file's rows land on
+  top of the edits as one more entry). A change seen during play mode, while the
+  bar asks something else or during a gizmo drag is held and comes in once it
+  can. The serve reloads a changed chunk through `EditServer::reload_chunk`, so
+  joined editors follow it with no fetch, taking the disk's chunk over unsaved
+  edits once no client's drag is open — a drag holds it until the update that
+  ends it, before that update's save.
+- **`crcbl::scene_edit::Document::revert`** reads the whole scene back from the
+  document's directory through the chunk reload's difference — every chunk, then
+  the names and the environment — as one entry of the history, after which the
+  document is clean; a header changed on disk refuses it with
+  `EditError::HeaderChanged`.
 - **`crcbl_assets::watch::PolledWatch`**, the engine's polled file watch: a set
   of paths looked at once per `POLL_INTERVAL` of the caller's clock, each change
   offered once it has held still for `SETTLE`. Native only; the module is absent
@@ -6374,6 +6396,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **The editor's Reload on the changed-on-disk bar is one undoable entry**,
+  through `Document::revert`, where it opened the scene again and started its
+  history over: Ctrl+Z brings back the edits it replaced. A header changed on
+  disk — its systems or its name — still opens the scene again whole. The scene
+  lock's check of the files on disk keeps one digest per file rather than one
+  over them all.
 
 - **The viewer's re-export watch is the engine's `crcbl_assets::watch`**, and a
   re-export now shows half a second to three quarters after it lands rather than

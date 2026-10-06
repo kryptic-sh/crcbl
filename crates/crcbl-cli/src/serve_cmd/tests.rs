@@ -30,7 +30,7 @@ use crate::report::EXIT_LOCKED;
 use crate::scene_args::{EditArgs, SceneArgs, SceneEdit, SceneVerb};
 
 /// One frame at [`EDIT_TICK_HZ`].
-const FRAME: Duration = Duration::from_nanos(1_000_000_000 / EDIT_TICK_HZ as u64);
+pub(super) const FRAME: Duration = Duration::from_nanos(1_000_000_000 / EDIT_TICK_HZ as u64);
 
 /// The most frames any wait here runs: ten seconds of the server's time, and
 /// a few seconds of wall time at [`PAUSE`] a step.
@@ -40,7 +40,7 @@ const MAX_FRAMES: usize = 600;
 const PAUSE: Duration = Duration::from_millis(1);
 
 /// Plot 4, `entry`, in towers' field.
-const ENTRY: SceneEntityId = SceneEntityId(4);
+pub(super) const ENTRY: SceneEntityId = SceneEntityId(4);
 
 /// Loopback, any free port.
 fn loopback() -> SocketAddr {
@@ -49,10 +49,10 @@ fn loopback() -> SocketAddr {
 
 /// A private directory that cleans itself up, as the binary's tests have:
 /// this crate takes no `tempfile` for a test helper.
-struct TempDir(PathBuf);
+pub(super) struct TempDir(PathBuf);
 
 impl TempDir {
-    fn new(label: &str) -> Self {
+    pub(super) fn new(label: &str) -> Self {
         let path = std::env::temp_dir().join(format!(
             "crcbl-cli-serve-{label}-{}-{:?}",
             std::process::id(),
@@ -71,7 +71,7 @@ impl Drop for TempDir {
 }
 
 /// A copy of towers' committed field under `temp`, named `name`.
-fn field_copy(temp: &TempDir, name: &str) -> PathBuf {
+pub(super) fn field_copy(temp: &TempDir, name: &str) -> PathBuf {
     let from = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
@@ -97,7 +97,7 @@ fn copy_tree(from: &Path, to: &Path) {
 
 /// The scene's files under `dir` — every file but its history and its lock
 /// — as text, keyed as [`Document::files`] keys them.
-fn scene_files(dir: &Path) -> BTreeMap<String, String> {
+pub(super) fn scene_files(dir: &Path) -> BTreeMap<String, String> {
     let mut files = BTreeMap::new();
     collect(dir, dir, &mut files);
     files
@@ -123,7 +123,7 @@ fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, String>) {
 
 /// `entry` moved to `(x, 0, -2.25)`, as `crcbl scene move` writes it: one
 /// entry of three writes to its plot's position.
-fn move_entry(x: f64) -> EditCommand {
+pub(super) fn move_entry(x: f64) -> EditCommand {
     let axis = |axis: usize, value: f64| EditCommand::SetProperty {
         entity: ENTRY,
         system: "plots".to_owned(),
@@ -135,23 +135,23 @@ fn move_entry(x: f64) -> EditCommand {
 
 /// A client of the server and its copy of the scene, with the replies to
 /// its edits gathered as they come.
-struct Joined {
-    client: Client<UdpTransport>,
-    follower: SceneFollower,
+pub(super) struct Joined {
+    pub(super) client: Client<UdpTransport>,
+    pub(super) follower: SceneFollower,
     replies: Vec<crcbl::net::EditReply>,
 }
 
 /// A server, the clients joined to it, and the clock they share.
-struct Rig {
-    server: Server,
-    clients: Vec<Joined>,
-    now: Duration,
+pub(super) struct Rig {
+    pub(super) server: Server,
+    pub(super) clients: Vec<Joined>,
+    pub(super) now: Duration,
     printed: Vec<String>,
 }
 
 impl Rig {
     /// The scene at `dir`, served on loopback, with nobody joined.
-    fn serving(dir: &Path) -> Self {
+    pub(super) fn serving(dir: &Path) -> Self {
         Self {
             server: Server::open(dir, loopback())
                 .expect("loopback UDP must be available to these tests"),
@@ -162,7 +162,7 @@ impl Rig {
     }
 
     /// A client connecting now, following the scene; its index.
-    fn join(&mut self) -> usize {
+    pub(super) fn join(&mut self) -> usize {
         let vocabulary = crcbl_editor::scene::vocabulary();
         let transport =
             UdpTransport::connect(self.server.local_addr(), EDIT_PROTOCOL_ID).expect("a socket");
@@ -180,7 +180,7 @@ impl Rig {
         self.clients.len() - 1
     }
 
-    fn step(&mut self) {
+    pub(super) fn step(&mut self) {
         self.now += FRAME;
         if let Some(line) = self.server.frame(self.now) {
             self.printed.push(line);
@@ -194,7 +194,7 @@ impl Rig {
     }
 
     /// Steps until `done` holds, or panics naming `what`.
-    fn until(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
+    pub(super) fn until(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
         for _ in 0..MAX_FRAMES {
             self.step();
             if done(self) {
@@ -205,7 +205,7 @@ impl Rig {
     }
 
     /// Steps until every client's copy stands at the server's revision.
-    fn caught_up(&mut self) {
+    pub(super) fn caught_up(&mut self) {
         self.until("every copy at the server's revision", |rig| {
             let revision = rig.server.edit.revision();
             rig.clients.iter().all(|joined| {
@@ -215,7 +215,7 @@ impl Rig {
     }
 
     /// Sends `op` from client `index`, and steps until its reply comes.
-    fn send(&mut self, index: usize, op: &EditOp) -> EditOutcome {
+    pub(super) fn send(&mut self, index: usize, op: &EditOp) -> EditOutcome {
         self.send_bytes(index, encode_op(op).expect("every op here travels"))
     }
 
@@ -227,7 +227,12 @@ impl Rig {
 
     /// Sends `op` from client `index` as one edit of `gesture`, and steps
     /// until its reply comes.
-    fn send_in(&mut self, index: usize, op: &EditOp, gesture: EditGesture) -> EditOutcome {
+    pub(super) fn send_in(
+        &mut self,
+        index: usize,
+        op: &EditOp,
+        gesture: EditGesture,
+    ) -> EditOutcome {
         let bytes = encode_op(op).expect("every op here travels");
         self.send_request(index, bytes, Some(gesture))
     }
@@ -262,7 +267,7 @@ impl Rig {
     }
 
     /// Each client's copy of the scene, as saved text.
-    fn copies(&mut self) -> Vec<BTreeMap<String, String>> {
+    pub(super) fn copies(&mut self) -> Vec<BTreeMap<String, String>> {
         self.clients
             .iter_mut()
             .map(|joined| {

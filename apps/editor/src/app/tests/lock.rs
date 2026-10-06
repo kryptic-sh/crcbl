@@ -19,17 +19,17 @@ use super::files::{chord, type_and_enter};
 use super::unsaved::{close_pending, press, request_close};
 
 /// The frames each editor here may run.
-const FRAMES: u64 = 256;
+pub(super) const FRAMES: u64 = 256;
 
 /// Plot 4, `entry`, in towers' field: what the editor relabels here.
-const ENTRY: SceneEntityId = SceneEntityId(4);
+pub(super) const ENTRY: SceneEntityId = SceneEntityId(4);
 
 /// Plot 6 in towers' field: what another program relabels here.
-const FAR_PLOT: SceneEntityId = SceneEntityId(6);
+pub(super) const FAR_PLOT: SceneEntityId = SceneEntityId(6);
 
 /// An editor started on the scene directory `scene`, as `editor <SCENE_DIR>`
 /// starts, or why it did not start.
-fn start_on(scene: &Path) -> Result<Editor<HeadlessShell>, EditorError> {
+pub(super) fn start_on(scene: &Path) -> Result<Editor<HeadlessShell>, EditorError> {
     let mut options = options(FRAMES);
     options.scene = Some(scene.to_path_buf());
     Editor::with_shell(Box::new(HeadlessShell::new()), &options)
@@ -66,14 +66,14 @@ fn ctrl_o(editor: &mut Editor<HeadlessShell>, dir: &Path) {
 
 /// The scene's own files in `dir`, byte for byte — every file but the
 /// history.
-fn scene_files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+pub(super) fn scene_files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut files = tree(dir);
     files.remove(HISTORY);
     files
 }
 
 /// `document`'s files as bytes, keyed as [`scene_files`] keys them.
-fn files_of(document: &mut Document) -> BTreeMap<String, Vec<u8>> {
+pub(super) fn files_of(document: &mut Document) -> BTreeMap<String, Vec<u8>> {
     document
         .files()
         .expect("every entity has an id")
@@ -85,7 +85,7 @@ fn files_of(document: &mut Document) -> BTreeMap<String, Vec<u8>> {
 /// Another program's edit, made without the lock — an older build, or a
 /// text editor: the scene opened from `dir`, a plot relabelled, saved.
 /// Hands back the files it wrote.
-fn edited_behind(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+pub(super) fn edited_behind(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     let mut other = Document::open_dir(dir, crate::scene::vocabulary()).expect("the field opens");
     other.apply(relabel(FAR_PLOT, "far")).expect("a label");
     other.save().expect("saved");
@@ -93,7 +93,7 @@ fn edited_behind(dir: &Path) -> BTreeMap<String, Vec<u8>> {
 }
 
 /// A plot's label set to `text`.
-fn relabel(entity: SceneEntityId, text: &str) -> EditCommand {
+pub(super) fn relabel(entity: SceneEntityId, text: &str) -> EditCommand {
     EditCommand::SetProperty {
         entity,
         system: "plots".to_owned(),
@@ -104,7 +104,9 @@ fn relabel(entity: SceneEntityId, text: &str) -> EditCommand {
 
 /// An editor on a copy of towers' field with the entry plot relabelled, and
 /// the field changed on disk behind it since; and the files on disk.
-fn editing_a_changed_field(dir: &Path) -> (Editor<HeadlessShell>, BTreeMap<String, Vec<u8>>) {
+pub(super) fn editing_a_changed_field(
+    dir: &Path,
+) -> (Editor<HeadlessShell>, BTreeMap<String, Vec<u8>>) {
     let mut editor = start_on(dir).expect("the field opens");
     editor
         .document_mut()
@@ -246,6 +248,58 @@ fn reload_reads_the_changed_scene_back() {
         "not the disk's scene"
     );
     assert_eq!(scene_files(&dir), theirs, "Reload wrote");
+    assert!(held(&dir), "Reload let the scene go");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **Reload goes through the chunk reload and is one entry that Ctrl+Z
+/// takes back** (decided 2026-10-06): the history keeps the edit beneath
+/// it, and one undo brings the edit back, the scene dirty again.
+#[test]
+fn reload_is_one_entry_that_undo_takes_back() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let dir = towers_field(base.path());
+    let (mut editor, _) = editing_a_changed_field(&dir);
+    let ours = files_of(editor.document_mut());
+
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyS);
+    tap(&mut editor, KeyCode::KeyD);
+    assert_eq!(
+        editor.document().log().len(),
+        2,
+        "the reload is not one entry over the edit"
+    );
+    assert!(!editor.document().is_dirty());
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyZ);
+    assert_eq!(
+        files_of(editor.document_mut()),
+        ours,
+        "undo did not bring the edit back"
+    );
+    assert!(editor.document().is_dirty());
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A header changed on disk is read back whole**: the scene another
+/// program renamed is opened again in place, its history starting over,
+/// since a revert does not take a header in.
+#[test]
+fn reload_over_a_changed_header_reads_the_scene_again_whole() {
+    let base = tempfile::tempdir().expect("a temporary directory");
+    let dir = towers_field(base.path());
+    let (mut editor, _) = editing_a_changed_field(&dir);
+    let header = dir.join("scene.ron");
+    let text = std::fs::read_to_string(&header).expect("a header");
+    let renamed = text.replacen("name: \"", "name: \"renamed ", 1);
+    assert_ne!(renamed, text, "the header names no scene");
+    std::fs::write(&header, renamed).expect("written");
+
+    chord(&mut editor, Modifiers::CTRL, KeyCode::KeyS);
+    tap(&mut editor, KeyCode::KeyD);
+    assert_eq!(editor.panels.unsaved(), None, "Reload left the bar up");
+    assert!(editor.document().name().starts_with("renamed "));
+    assert!(editor.document().log().is_empty(), "the history went on");
+    assert!(!editor.document().is_dirty());
     assert!(held(&dir), "Reload let the scene go");
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }

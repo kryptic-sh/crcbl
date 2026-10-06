@@ -23,6 +23,7 @@ mod scene_inspector;
 mod selection;
 mod towers_field;
 mod unsaved;
+mod watch;
 
 fn options(frames: u64) -> Options {
     let mut common = crcbl::args::Common::new(crate::args::DEFAULT_TICK_HZ)

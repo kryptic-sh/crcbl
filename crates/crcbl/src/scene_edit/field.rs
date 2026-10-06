@@ -154,7 +154,7 @@ impl Document {
 
 /// Pushes `value`'s fields, the value itself at `path` included, onto `texts`
 /// — see [`Document::field_texts`].
-fn texts_of(value: &dyn Reflect, path: &str, texts: &mut Vec<(String, String)>) {
+pub(super) fn texts_of(value: &dyn Reflect, path: &str, texts: &mut Vec<(String, String)>) {
     let child = |name: &str| {
         if path.is_empty() {
             name.to_owned()
