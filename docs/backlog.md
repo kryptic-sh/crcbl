@@ -15,7 +15,7 @@ Work in this order before the lower-priority backlog:
   regressions green. This is a consumer migration, not another engine feature.
 
 Upstream review: pulled crcbl `origin/main` with `--ff-only` before this update;
-the checkout was already at `34d829b7`. Reviewed against EW main `6fa0f8a2`. The
+the checkout was already at `e858a5b0`. Reviewed against EW main `8e06e586`. The
 current `world/arc_sweep.rs` still exposes only closest accelerated contacts.
 EW's `src/controller_ballistic.rs` still uses `find_wall` and `hits_ceiling`
 forecast bisections, so this handoff remains open.
@@ -170,6 +170,16 @@ engine prerequisite in those features. Selectable accelerated contacts remain
 the top engine implementation priority, followed by EW's contact-forecast
 migration. The API review confirms the existing gap; it does not constitute a
 new physics regression run.
+
+The subsequent body-part kill conditions and live target availability notices
+also stay in EW. `QuestKill::hit_part` and `KillCondition::hit_part` in
+`src/quests.rs` carry the directly struck part into game progression;
+`src/game_quest_body_part_tests.rs` covers fired-round attribution through a
+delayed death. `Game::draw_raid_quest_availability` in `src/game_map_quests.rs`
+derives remaining targets from credited kills and combatant life state. These
+are game combat and objective rules using existing engine capabilities. They add
+no engine prerequisite; selectable accelerated contacts remain the first
+implementation request.
 
 1. **Curved-path collision queries with contact times — delivered 2026-10-06,
    awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
