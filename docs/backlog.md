@@ -14,11 +14,11 @@ Work in this order before the lower-priority backlog:
   the covered airborne contact forecasts, keeping its wall, ceiling and braking
   regressions green. This is a consumer migration, not another engine feature.
 
-Upstream review: fetched crcbl `origin/main` before this update; the checkout
-was already at `0e32b692`. The current `world/arc_sweep.rs` still exposes only
-closest accelerated contacts. EW's `src/controller_ballistic.rs` still uses
-`find_wall` and `hits_ceiling` forecast bisections, so this handoff remains
-open.
+Upstream review: pulled crcbl `origin/main` with `--ff-only` before this update;
+the checkout was already at `42448689`. Reviewed against EW main `56904d90`. The
+current `world/arc_sweep.rs` still exposes only closest accelerated contacts.
+EW's `src/controller_ballistic.rs` still uses `find_wall` and `hits_ceiling`
+forecast bisections, so this handoff remains open.
 
 **Engine implementation needed first: selectable accelerated contacts.** EW's
 direct migration exposed a missing query capability. Let the caller choose the
@@ -143,9 +143,13 @@ The subsequent splint recipe and persisted batch jobs also stay in EW.
 `src/hideout_inventory/food_crafting.rs` track exact output identities and
 reserve game-owned ingredients; recipe and station limits live in
 `src/hideout_inventory/food_crafting_recipes.rs`. These shipped contracts do not
-establish a missing engine scheduler or inventory API. Batch controls in the
-current EW working tree remain unfinished and are not evidence of a validated
-reusable engine feature.
+establish a missing engine scheduler or inventory API. Batch controls shipped in
+EW `fba58ed7`; `src/hideout_ui/craft_batch_selection.rs` builds the exact output
+identities and displays recipe totals. The oats and dried-fruit recipe shipped
+in EW `56904d90`; its ingredient reserves, station gates and snack output in
+`src/hideout_inventory/food_crafting_recipes.rs` remain game rules. Reviewing
+these additions found no further engine migration prerequisite. Do not introduce
+a generic engine crafting scheduler for these contracts.
 
 1. **Curved-path collision queries with contact times — delivered 2026-10-06,
    awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
