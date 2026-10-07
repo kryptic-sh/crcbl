@@ -20,6 +20,13 @@ cross Clippy passed; evidence is under `%TEMP%/ew-crcbl-update-review/` with the
 independently of these game results. The local Windows foreground-focus test
 limitation is tracked separately below.
 
+EW's `.github/workflows/ci.yml` defines Ubuntu tests and a null-backend headless
+run, but its configured remote is GitLab and the local `glab ci list` query
+returned 404. No GitLab CI configuration was found in that checkout. This is
+missing execution evidence, not proof that no external pipeline or mirror
+exists; obtain an accessible pipeline result before counting it as native
+acceptance. The local Windows host has no registered WSL distribution.
+
 **Engine feature audit:** no additional proven engine API requirement was found
 in EW main `1c5bee71`. Recent projectile scheduling in
 `src/game_projectile_schedule.rs` depends on combatant state, armor and door
