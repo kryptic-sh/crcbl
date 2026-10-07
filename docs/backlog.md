@@ -677,6 +677,41 @@ machine, or twice in CI, is real.
   37409100181 at `32e35110` timed out on it and on the line after it, which
   waits for the same console; a rerun of that job passed and deployed. Nothing
   in that push touched the console, touch input or breakout outside a test.
+- **`towers lan::tests::four_players_win_the_whole_table_on_a_dedicated_server`**
+  — four players against a dedicated server over real sockets, judged by the
+  game's outcome. On 2026-10-07, CI run 37540311343 at `e858a5b0` failed it on
+  `build + test (macos-latest)` after 101.7 s with "the team did not win: wave
+  10, 12 leaks". Every commit from `aa432f8c` to `a9a5d98a` changed only
+  Markdown, and the same code passed CI at `0e32b692`, `42448689`, `4c942900`,
+  `34d829b7`, `3c2275b7`, `87df9dd8` and `a9a5d98a`. A slow runner delaying the
+  players' builds past a wave is the likely cause; not confirmed.
+- **Local rustdoc passes during a busy verify.** A workspace `cargo doc` run has
+  failed with only `could not document <crate>` four times on 2026-10-05 and
+  10-06, each while other worktrees compiled; the full log named
+  `memory allocation of … bytes failed`. Rerun the pass whole with
+  `CARGO_BUILD_JOBS=4` and the log kept before calling it red. CI is unaffected.
+
+## Docs-only pushes starve the Pages deploy (2026-10-07)
+
+**Seen.** `pages.yml` cancels a superseded run on main (the owner's rule,
+2026-08-30), and its comments accept that pushes landing faster than a deploy
+chain. On 2026-10-06 and 10-07 EW's agent pushed a backlog-only commit to main
+roughly hourly, each one before the previous Pages run finished, so no deploy
+completed from `9c00dc46` until `a9a5d98a`. In that window main received 18 of
+EW's `docs:` commits, each changing only `docs/backlog.md`, and one push of the
+EW physics work. Every main CI run that finished passed, bar one flaky towers
+failure (above); only the publish was starved. Landing the EW physics work
+(`aa432f8c`) meant pushing into that cadence, which the owner approved; an EW
+request to pause its pushes went unanswered (its session was offline).
+
+**Decided (not built): skip the Pages workflow for pushes that change only
+Markdown.** A backlog or notes edit changes nothing the site serves, so its run
+is pure cost and it cancels a deploy that matters. Long-term this is better than
+asking every agent to batch its docs pushes, which nothing enforces. What it
+takes: a `paths-ignore` of `**/*.md` on the `push` trigger in `pages.yml`, after
+checking that no demo page or build step reads a Markdown file (the site build
+would need to be grepped for that first); CI keeps running on docs pushes, since
+its doc-citation and prettier checks are what guard them.
 
 ## Concurrent GPU devices: what the fix left (2026-10-02)
 
