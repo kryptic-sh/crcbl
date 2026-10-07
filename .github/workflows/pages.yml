@@ -22,6 +22,10 @@ on:
   pull_request:
   push:
     branches: [main]
+    # Markdown is not a site input. A docs-only push must not cancel an
+    # in-flight deployment; pull requests still run every browser gate.
+    paths-ignore:
+      - '**/*.md'
   workflow_dispatch:
 
 permissions:

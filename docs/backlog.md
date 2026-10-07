@@ -681,28 +681,6 @@ machine, or twice in CI, is real.
   `memory allocation of … bytes failed`. Rerun the pass whole with
   `CARGO_BUILD_JOBS=4` and the log kept before calling it red. CI is unaffected.
 
-## Docs-only pushes starve the Pages deploy (2026-10-07)
-
-**Seen.** `pages.yml` cancels a superseded run on main (the owner's rule,
-2026-08-30), and its comments accept that pushes landing faster than a deploy
-chain. On 2026-10-06 and 10-07 EW's agent pushed a backlog-only commit to main
-roughly hourly, each one before the previous Pages run finished, so no deploy
-completed from `9c00dc46` until `a9a5d98a`. In that window main received 18 of
-EW's `docs:` commits, each changing only `docs/backlog.md`, and one push of the
-EW physics work. Every main CI run that finished passed, bar one flaky towers
-failure (above); only the publish was starved. Landing the EW physics work
-(`aa432f8c`) meant pushing into that cadence, which the owner approved; an EW
-request to pause its pushes went unanswered (its session was offline).
-
-**Decided (not built): skip the Pages workflow for pushes that change only
-Markdown.** A backlog or notes edit changes nothing the site serves, so its run
-is pure cost and it cancels a deploy that matters. Long-term this is better than
-asking every agent to batch its docs pushes, which nothing enforces. What it
-takes: a `paths-ignore` of `**/*.md` on the `push` trigger in `pages.yml`, after
-checking that no demo page or build step reads a Markdown file (the site build
-would need to be grepped for that first); CI keeps running on docs pushes, since
-its doc-citation and prettier checks are what guard them.
-
 ## Concurrent GPU devices: what the fix left (2026-10-02)
 
 The `gpu` test group holds every device-opening suite to eight at a time, and
