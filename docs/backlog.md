@@ -53,8 +53,10 @@ passed at `0b22817b`. Passing records for every new inspector, tab and outliner
 regression, including the editor Shift+Arrow test, were verified in each job
 log. Those logs are `%TEMP%/crcbl-ui-0b22817b-linux.log`,
 `%TEMP%/crcbl-ui-0b22817b-macos.log` and `%TEMP%/crcbl-ui-0b22817b-windows.log`.
-The full CI run still awaits GPU jobs; Pages run `37614793414` still awaits
-browser jobs.
+The full CI run still awaits Metal; Vulkan passed. Pages run `37614793414` still
+awaits browser jobs and has a Tumble timeout, detailed in the browser timeout
+entry below. Retry that failed job after the current run finishes; do not change
+the hash assertion or polling budget.
 
 The full editor's ignored GPU regression,
 `app::instances::tests::filtered_editor_images_match_eager_writes_through_history`,
@@ -6935,6 +6937,16 @@ were well formed and the rerun met the pinned hash — so, as with the shard ent
 below, the fixes on the table are longer waits or a faster path to the checked
 state, not a code change. Not reproduced locally; the rate is unknown beyond
 "twice in a day".
+
+The Tumble timeout recurred on UI batch `0b22817b` in Pages run `37614793414` on
+2026-10-07: the determinism check exhausted its wait at tick 540. The saved
+`web-e2e-tumble` artifact subsequently records tick 600 with both the computed
+and pinned hash equal to `fc176a5d1a72f6c7`. The job log reports all other
+checks passing. This distinguishes a missed deadline from a hash mismatch; it
+does not make the failed gate pass. A retry is pending completion of the other
+jobs. Keep the assertion and polling budget unchanged while checking the retry.
+Local evidence is `%TEMP%/crcbl-ui-tumble-failure.log` and
+`%TEMP%/crcbl-ui-tumble-0b22817b/tumble-swiftshader.log`.
 
 ## The shard browser job can time out its own gameplay waits (2026-09-11)
 
