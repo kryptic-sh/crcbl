@@ -5,6 +5,14 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ## Top priority: new EW engine requirements
 
+**Next phase, after the EW-requested engine features pass their engine tests and
+native CI:** continue the UI and editor work. Reconcile the UI remainder below
+and `docs/plan/08-editor.md` with the implementation before selecting each
+slice; older entries can describe features that have since shipped. Keep shared
+UI behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
+coverage and the native CI matrix for each change. EW adoption remains
+game-owned and does not delay this phase.
+
 The audit through EW `71ae9135` found no additional proven feature to migrate or
 add. Put a reproduced engine limitation here before lower-priority feature work,
 with the game caller, required contract and a regression case. Existing game
