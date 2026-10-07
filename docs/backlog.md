@@ -60,22 +60,7 @@ Linux/macOS/Windows CI remains pending. Logs use `%TEMP%/crcbl-ledge-`. Finish
 this engine regression before further UI work; EW adopts it independently.
 Delete this entry when validation completes.
 
-### Validate outliner model cleanup
-
-`OutlinerState::retain` in `crates/crcbl-ui/src/tree/widgets/outliner/state.rs`
-removes state for items absent from the application's complete model, including
-click history, while retaining valid hidden rows. `Panels::refresh` calls it
-after document membership changes. The editor regression reproduced a click
-before deletion combining with a click after undo to start renaming. It fails
-before the fix and passes with it; outliner unit checks cover hidden
-selection/expansion and range/click retention, with each removal mechanism
-independently disabled to prove failure. Focused UI and editor tests, workspace
-formatting and all-feature Clippy pass. The full workspace run completed with
-only the existing Windows foreground-focus setup failure in
-`hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`. Logs use
-`%TEMP%/crcbl-outliner-retain-`. Native Linux, macOS and Windows jobs for
-`8e13f1a9` passed, with each new regression explicitly passing in the job logs.
-Full CI and Pages for that revision remain pending.
+### Validate outliner input refresh
 
 The input follow-up in `tree/widgets/tests/outliner/retention.rs` reproduces a
 held expansion button restoring state after its row was removed. Expansion
