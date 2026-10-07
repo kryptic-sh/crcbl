@@ -3,41 +3,7 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## P0: finish EW clearance validation — highest priority
-
-Complete validation of the published box-edge clearance correction before
-further UI/editor work. The engine fix is already on main as `38cce411`; do not
-create a competing implementation or treat publication as still pending.
-
-`world/capsule_sweep.rs` now uses capsule-to-box distance and conservative
-advancement instead of the inflated-box slab that admitted false floor contacts
-beyond platform edges. Preserve
-`departing_a_platform_keeps_downward_and_outward_motion` and
-`clearance_past_a_box_edge_does_not_cancel_free_fall` in
-`crates/crcbl-phys/src/character/skin_tests.rs`, together with the
-wall-partition contract from `2eac6b4e` and existing corner, slope, step and
-mesh coverage.
-
-At `e3f44f4c`, native Linux, macOS and Windows test jobs in
-[CI run 37682659604](https://github.com/kryptic-sh/crcbl/actions/runs/37682659604)
-passed. Each new clearance and outliner regression and the existing character
-skin cases explicitly passed in every native job log, saved under
-`%TEMP%/crcbl-e3f44f4c-`. Documentation push `ccb8c6a4` cancelled the remaining
-GPU jobs; replacement CI `37685182224` has unchanged engine code and passed
-every job. The original Pages `37682659597` remains in flight. Keep its watch
-running and inspect the final result before further feature work or publication.
-Local foreground-focus setup failures provide no cursor-validation evidence;
-preserve the focus precondition.
-
-EW owns adoption independently on `wip/engine-clearance-adoption`. Its local
-formatting, Clippy, full tests, release build and Linux/macOS cross Clippy pass
-with this revision. M4 and ELCAN captures on Vulkan and DX12 were inspected.
-Evidence uses `engine-clearance-fixed-` under `%TEMP%/ew-crcbl-update-review/`.
-Native Linux/macOS game runtime, physical desktop input and constrained-VRAM
-acceptance remain game tasks, not engine completion gates. Delete this priority
-entry when engine validation completes.
-
-## Next priority: UI and editor
+## Priority: UI and editor
 
 Continue the UI/editor phase after the EW-requested engine work. Keep shared UI
 behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
