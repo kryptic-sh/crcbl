@@ -620,8 +620,12 @@ impl Ui {
             }
             if !spent {
                 if let Some(direction) = nav.direction {
+                    let before = self.focus.focused;
                     if !self.tree_item_step(direction) && !self.submenu_step(direction) {
                         self.move_spatially(direction, modal);
+                    }
+                    if !direction.is_horizontal() && before != self.focus.focused {
+                        self.vertical_focus_move = before.zip(self.focus.focused);
                     }
                 } else if nav.next || nav.prev {
                     self.move_in_tree_order(nav.next, modal);

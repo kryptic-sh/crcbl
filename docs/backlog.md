@@ -40,6 +40,16 @@ local Vulkan and D3D12, with Vulkan validation clean. Logs use
 recorded Windows foreground-focus setup. Native CI for this change remains
 pending.
 
+Outliner range mode now applies vertical focus movement within the same
+outliner. The editor's existing modifier routing supplies Shift+Up/Down;
+headless shell-event coverage checks extension, shrinking and the primary
+entity. Widget regressions cover fixed anchors, collapsed descendants, starting
+without an anchor, disabled builds, crossing between outliners and clearing the
+movement each frame. Removing the relevant guards makes their regressions fail.
+Workspace formatting and all-feature Clippy pass. The full workspace test run
+fails only at the recorded Windows foreground-focus setup, with logs under
+`%TEMP%/crcbl-outliner-range-`. Native CI for this slice remains pending.
+
 The audit through EW `c91e46fe` found no additional proven feature to migrate or
 add. Put a reproduced engine limitation here before lower-priority feature work,
 with the game caller, required contract and a regression case. Existing game
@@ -4150,12 +4160,6 @@ in `crcbl_input::list`). Decisions, then what is left.
   a drop target resolved from the pointer against last frame's pane rectangles
   into a `DockSide` (the five-zone hit test), and a preview drawn over the pane
   the drop would take.
-- **Keyboard range selection needs a defined gesture.** The row builder applies
-  `OutlinerOptions::select` when a row activates; extending selection while
-  stepping focus with shift and an arrow still needs its own routing and
-  behavior verification. Modifier-click selection is already supplied by the
-  editor's `app::select_mode` through `PanelInput::select`, so changing
-  `NavInput` or `PointerInput` merely to supply those clicks is unnecessary.
 - **`OutlinerState::select` with `Range` walks the model** to find the anchor,
   so a range click costs the model's length; `Replace` and `Toggle` are
   constant.

@@ -41,6 +41,9 @@
 //!   modifier, mapped by the caller from its own input exactly as
 //!   [`NavInput`](crate::tree::NavInput) is: `Toggle` adds or removes one row,
 //!   `Range` takes every row between the anchor and the one acted on.
+//!   With `Range`, up and down also extend the selection to the focused row
+//!   inside this outliner; without an anchor the previous focused row starts
+//!   the range. Plain navigation and horizontal expansion do not select.
 //! * **A double-click** on a row — a second click on it within
 //!   [`DOUBLE_CLICK_TIME`] and [`DRAG_THRESHOLD`] of the first, as a text
 //!   input's word selection is timed — is [`OutlinerState::double_clicked`]
@@ -117,7 +120,9 @@ pub struct OutlinerOptions {
     pub row_height: f32,
     /// How far one level of depth indents a row, in pixels.
     pub indent: f32,
-    /// How a click or an accept this frame changes the selection.
+    /// How a click or an accept this frame changes the selection. With
+    /// [`SelectMode::Range`], up and down extend it from the anchor to the
+    /// focused row; without an anchor the previous focused row starts it.
     pub select: SelectMode,
 }
 
@@ -406,6 +411,26 @@ impl Ui {
         let mut changed = self.apply_expansion(key, state);
         if state.is_stale() {
             state.flatten(tree);
+        }
+
+        if options.select == SelectMode::Range
+            && !self.building_disabled()
+            && let Some((from, to)) = self.vertical_focus_move
+            && self.inside(from, Some(key))
+            && self.inside(to, Some(key))
+            && let (
+                WidgetState::TreeItem {
+                    item: Some(from), ..
+                },
+                WidgetState::TreeItem { item: Some(to), .. },
+            ) = (self.widget_state(from), self.widget_state(to))
+            && state.rows().iter().any(|row| row.id == from)
+            && state.rows().iter().any(|row| row.id == to)
+        {
+            if state.anchor().is_none() {
+                changed |= state.select(from, SelectMode::Replace);
+            }
+            changed |= state.select(to, SelectMode::Range);
         }
 
         let height = row_span(options.row_height);

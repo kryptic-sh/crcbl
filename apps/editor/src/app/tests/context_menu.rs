@@ -9,7 +9,7 @@ use crcbl::ui::tree::Ui;
 
 /// The outliner row of entity `id` in the built-in scene: one header, then a
 /// row per block in id order.
-fn row_key(editor: &Editor<HeadlessShell>, id: SceneEntityId) -> NodeKey {
+pub(super) fn row_key(editor: &Editor<HeadlessShell>, id: SceneEntityId) -> NodeKey {
     let index = usize::try_from(id.0).expect("a small id") + 1;
     editor.panels.row_keys()[index]
 }

@@ -2,6 +2,9 @@
 //! bounded build whatever the tree's size, expand and collapse by pointer and
 //! by key, and selection by pointer and by key.
 
+#[path = "outliner/range.rs"]
+mod range;
+
 use super::*;
 use crate::tree::{
     LIST_OVERSCAN, OutlinerBuilder, OutlinerId, OutlinerOptions, OutlinerRow, OutlinerState,

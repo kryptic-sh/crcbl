@@ -490,6 +490,8 @@ pub struct Ui {
     /// The tree row [`Ui::tree_item_step`] opened or closed when this frame
     /// began, if it opened or closed one.
     tree_toggled: Option<NodeKey>,
+    /// The focus endpoints of this frame's up or down navigation step.
+    vertical_focus_move: Option<(NodeKey, NodeKey)>,
     /// The open pop-ups, the topmost last; see `popup.rs`.
     popups: Vec<popup::OpenPopup>,
     /// Each pop-up root this frame built, as its index in `nodes` and its
@@ -544,6 +546,7 @@ impl Ui {
         self.clipboard_requests.clear();
         self.pointer = pointer;
         self.tree_toggled = None;
+        self.vertical_focus_move = None;
         self.popup_roots.clear();
         self.typeahead.built = None;
         let clicked = self.resolve_pointer(pointer);

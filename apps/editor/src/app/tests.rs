@@ -16,6 +16,7 @@ mod history;
 mod join;
 mod lock;
 mod open;
+mod outliner;
 mod play;
 mod play_strip;
 mod recovery;

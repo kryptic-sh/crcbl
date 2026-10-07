@@ -4446,7 +4446,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   WAI-ARIA tree view rule `Ui::tree_node` already follows, and `SelectMode` is
   the frame's modifier for single, toggle and range selection, mapped by the
   caller from its own input as `NavInput` is. A row is `:open` while expanded
-  and `:checked` while selected.
+  and `:checked` while selected. Range mode also extends and shrinks selection
+  with vertical focus movement; the editor maps Shift+Up/Down to it and keeps
+  the range endpoint as the primary entity.
 - **`Ui::tabs`** builds a tab strip and only the pane that is showing, with the
   showing tab remembered by its title's hash, so it survives a rebuild that
   reorders or inserts tabs. Each tab is a button, so focus walks the strip.
