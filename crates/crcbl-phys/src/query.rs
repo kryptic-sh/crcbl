@@ -9,6 +9,7 @@
 //! query world answers its boxes with.
 
 mod arc;
+mod arc_selection;
 mod boxes;
 mod capsules;
 mod sphere_overlap;
@@ -19,9 +20,9 @@ use glam::DVec3;
 
 pub use self::arc::{ARC_MAX_ITERATIONS, ARC_TIME_TOLERANCE, AcceleratedPath, ArcHit};
 pub(crate) use self::arc::{
-    arc_capsule_vs_box, arc_capsule_vs_sphere, arc_capsule_vs_turned_capsule, earliest_contact,
-    support,
+    arc_capsule_vs_box, arc_capsule_vs_sphere, arc_capsule_vs_turned_capsule, support,
 };
+pub(crate) use self::arc_selection::contact_where;
 pub use self::boxes::{
     aabb_overlaps_box, capsule_penetration_vs_box, ray_vs_box, sphere_overlap_vs_box,
     sphere_overlaps_box, swept_capsule_vs_box, swept_sphere_vs_box,

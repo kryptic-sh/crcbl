@@ -916,7 +916,7 @@ fn sweep_sphere_hits(
         view.generations,
         &scratch.candidates,
         filter,
-        |shape| match shape {
+        |_, _, shape| match shape {
             Primitive::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
             Primitive::Box(b) => query::swept_sphere_vs_box(segment, radius, b),
             Primitive::Capsule(c) => query::swept_sphere_vs_turned_capsule(segment, radius, c),
@@ -966,7 +966,7 @@ fn sweep_capsule_hits(
         view.generations,
         &scratch.candidates,
         filter,
-        |shape| match shape {
+        |_, _, shape| match shape {
             Primitive::Sphere(s) => query::swept_capsule_vs_sphere(segment, radius, half_height, s),
             Primitive::Box(b) => query::swept_capsule_vs_box(segment, radius, half_height, b),
             Primitive::Capsule(c) => {
@@ -1263,7 +1263,7 @@ fn swept_hits_core<H: SweptHit>(
     generations: &[u32],
     candidates: &[u32],
     filter: ResolvedFilter,
-    mut narrow: impl FnMut(Primitive<'_>) -> Option<H>,
+    mut narrow: impl FnMut(ColliderId, usize, Primitive<'_>) -> Option<H>,
     mut visit: impl FnMut(ColliderId, H),
 ) {
     for &element in candidates {
@@ -1275,7 +1275,7 @@ fn swept_hits_core<H: SweptHit>(
             continue;
         }
         for (part, shape) in slot.entry.primitives() {
-            if let Some(hit) = narrow(shape)
+            if let Some(hit) = narrow(id_for_slot_in(generations, element), part, shape)
                 && hit.t() < f64::INFINITY
             {
                 visit(id_for_slot_in(generations, element), hit.with_part(part));
@@ -1291,7 +1291,7 @@ fn closest_swept_core<H: SweptHit>(
     generations: &[u32],
     candidates: &[u32],
     filter: ResolvedFilter,
-    narrow: impl FnMut(Primitive<'_>) -> Option<H>,
+    mut narrow: impl FnMut(Primitive<'_>) -> Option<H>,
 ) -> Option<(ColliderId, H)> {
     let mut closest = None;
     swept_hits_core(
@@ -1299,7 +1299,7 @@ fn closest_swept_core<H: SweptHit>(
         generations,
         candidates,
         filter,
-        narrow,
+        |_, _, shape| narrow(shape),
         |id, hit| {
             keep_closest(&mut closest, id, hit);
         },
@@ -3726,6 +3726,9 @@ mod compound_tests;
 #[path = "world/turned_capsule_tests.rs"]
 mod turned_capsule_tests;
 
+#[cfg(test)]
+#[path = "world/arc_selection_tests.rs"]
+mod arc_selection_tests;
 #[cfg(test)]
 #[path = "world/arc_sweep_tests.rs"]
 mod arc_sweep_tests;

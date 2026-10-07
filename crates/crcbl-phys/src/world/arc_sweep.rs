@@ -21,7 +21,7 @@ use crate::query::{
 use super::entry::Primitive;
 use super::{
     ColliderId, OverlapQueries, PhysicsWorld, QueryFilter, QueryScratch, ResolvedFilter, SweptHit,
-    closest_swept_core,
+    keep_closest, swept_hits_core,
 };
 
 impl PhysicsWorld {
@@ -86,13 +86,39 @@ impl PhysicsWorld {
         half_height: f64,
         filter: QueryFilter,
     ) -> Option<(ColliderId, ArcHit)> {
+        self.sweep_capsule_arc_where(path, radius, half_height, filter, |_, _| true)
+    }
+
+    /// The earliest arc contact accepted by `accept`, with the same filters,
+    /// times and tie breaking as [`Self::sweep_capsule_arc`].
+    ///
+    /// Each compound part and each mesh triangle is considered independently:
+    /// rejecting a departing floor does not hide a ceiling or wall in the same
+    /// collider. Starting contacts are offered too, so an incoming overlap can
+    /// be accepted. The predicate sees world-space points and normals and times
+    /// measured from the original path start. It must not depend on visit order.
+    ///
+    /// After rejection, the search continues after separation from that
+    /// primitive, so a departing support can be met again on the way back.
+    /// Separations shorter than [`crate::ARC_TIME_TOLERANCE`] may be treated
+    /// as continuous contact. Acceptance is evaluated at contact entries, not
+    /// continuously while overlapping.
+    pub fn sweep_capsule_arc_where(
+        &mut self,
+        path: &AcceleratedPath,
+        radius: f64,
+        half_height: f64,
+        filter: QueryFilter,
+        accept: impl Fn(ColliderId, &ArcHit) -> bool,
+    ) -> Option<(ColliderId, ArcHit)> {
         let mut scratch = core::mem::take(&mut self.scratch);
-        let hit = self.overlap_queries().sweep_capsule_arc(
+        let hit = self.overlap_queries().sweep_capsule_arc_where(
             path,
             radius,
             half_height,
             filter,
             &mut scratch,
+            accept,
         );
         self.scratch = scratch;
         hit
@@ -112,6 +138,21 @@ impl OverlapQueries<'_> {
         filter: QueryFilter,
         scratch: &mut QueryScratch,
     ) -> Option<(ColliderId, ArcHit)> {
+        self.sweep_capsule_arc_where(path, radius, half_height, filter, scratch, |_, _| true)
+    }
+
+    /// [`PhysicsWorld::sweep_capsule_arc_where`] under a shared borrow, using
+    /// the caller's scratch buffers. No collider or broadphase state is changed.
+    #[must_use]
+    pub fn sweep_capsule_arc_where(
+        &self,
+        path: &AcceleratedPath,
+        radius: f64,
+        half_height: f64,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+        accept: impl Fn(ColliderId, &ArcHit) -> bool,
+    ) -> Option<(ColliderId, ArcHit)> {
         let filter = ResolvedFilter::solid(self.colliders, self.generations, filter);
         // Everything within the capsule's reach of the box round the whole
         // path, its turning points included, and not only round its ends.
@@ -122,22 +163,34 @@ impl OverlapQueries<'_> {
             &mut scratch.stack,
             &mut scratch.candidates,
         );
-        closest_swept_core(
+        let mut closest = None;
+        swept_hits_core(
             self.colliders,
             self.generations,
             &scratch.candidates,
             filter,
-            |shape| match shape {
-                Primitive::Sphere(s) => arc_capsule_vs_sphere(path, radius, half_height, s),
-                Primitive::Box(b) => arc_capsule_vs_box(path, radius, half_height, b),
-                Primitive::Capsule(c) => {
-                    arc_capsule_vs_turned_capsule(path, radius, half_height, c)
-                }
-                Primitive::Mesh(m) => {
-                    m.sweep_arc(path, radius, DVec3::Y * half_height, &mut scratch.mesh)
+            |id, part, shape| {
+                let accepted = |hit: &ArcHit| accept(id, &hit.with_part(part));
+                match shape {
+                    Primitive::Sphere(s) => {
+                        arc_capsule_vs_sphere(path, radius, half_height, s, accepted)
+                    }
+                    Primitive::Box(b) => arc_capsule_vs_box(path, radius, half_height, b, accepted),
+                    Primitive::Capsule(c) => {
+                        arc_capsule_vs_turned_capsule(path, radius, half_height, c, accepted)
+                    }
+                    Primitive::Mesh(m) => m.sweep_arc_where(
+                        path,
+                        radius,
+                        DVec3::Y * half_height,
+                        &mut scratch.mesh,
+                        accepted,
+                    ),
                 }
             },
-        )
+            |id, hit| keep_closest(&mut closest, id, hit),
+        );
+        closest
     }
 }
 

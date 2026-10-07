@@ -169,10 +169,10 @@ pub struct ArcHit {
     pub point: DVec3,
     /// Unit normal pointing away from the surface met, toward the capsule.
     pub normal: DVec3,
-    /// Whether the capsule began the path already touching or inside the
-    /// collider: [`time`](Self::time) is then zero whichever way it moves,
-    /// as a straight sweep's [`ShapeHit::started_inside`](crate::ShapeHit)
-    /// is.
+    /// Whether this is the contact at the original path's starting overlap.
+    /// Its [`time`](Self::time) is zero whichever way the capsule moves, as a
+    /// straight sweep's [`ShapeHit::started_inside`](crate::ShapeHit) is. A
+    /// later re-entry selected after rejecting that overlap is not flagged.
     pub started_inside: bool,
     /// The part of the collider met, as
     /// [`ShapeHit::part`](crate::ShapeHit::part) means it.
@@ -186,14 +186,20 @@ pub(crate) fn arc_capsule_vs_sphere(
     radius: f64,
     half_height: f64,
     target: &Sphere,
+    accept: impl Fn(&ArcHit) -> bool,
 ) -> Option<ArcHit> {
     let shape = ContactShape::Sphere {
         centre: target.centre,
         radius: target.radius,
     };
-    arc_capsule_vs_shape(path, radius, half_height, &shape, |_, _, normal| {
-        target.centre + normal * target.radius
-    })
+    arc_capsule_vs_shape(
+        path,
+        radius,
+        half_height,
+        &shape,
+        |_, _, normal| target.centre + normal * target.radius,
+        accept,
+    )
 }
 
 /// [`arc_capsule_vs_sphere`] against a box collider, turned or not.
@@ -202,6 +208,7 @@ pub(crate) fn arc_capsule_vs_box(
     radius: f64,
     half_height: f64,
     target: &BoxCollider,
+    accept: impl Fn(&ArcHit) -> bool,
 ) -> Option<ArcHit> {
     arc_capsule_vs_shape(
         path,
@@ -209,6 +216,7 @@ pub(crate) fn arc_capsule_vs_box(
         half_height,
         &contact_box(target),
         |bottom, top, _| nearest_on_box(target, bottom, top),
+        accept,
     )
 }
 
@@ -218,6 +226,7 @@ pub(crate) fn arc_capsule_vs_turned_capsule(
     radius: f64,
     half_height: f64,
     target: &TurnedCapsule,
+    accept: impl Fn(&ArcHit) -> bool,
 ) -> Option<ArcHit> {
     let (a, b) = target.core();
     arc_capsule_vs_shape(
@@ -228,6 +237,7 @@ pub(crate) fn arc_capsule_vs_turned_capsule(
         |bottom, top, normal| {
             closest_between_segments(a, b, bottom, top).0 + normal * target.capsule.radius
         },
+        accept,
     )
 }
 
@@ -240,23 +250,21 @@ fn arc_capsule_vs_shape(
     half_height: f64,
     target: &ContactShape,
     nearest: impl Fn(DVec3, DVec3, DVec3) -> DVec3,
+    accept: impl Fn(&ArcHit) -> bool,
 ) -> Option<ArcHit> {
     let half = DVec3::Y * half_height;
-    let (time, normal, started_inside) = earliest_contact(
+    super::arc_selection::contact_where(
         path,
         half,
         radius,
         |direction| support(target, direction),
         |a, b| gap(target, &ContactShape::Capsule { a, b, radius }),
-    )?;
-    let centre = path.position_at(time);
-    Some(ArcHit {
-        time,
-        point: nearest(centre - half, centre + half, normal),
-        normal,
-        started_inside,
-        part: 0,
-    })
+        |time, normal| {
+            let centre = path.position_at(time);
+            nearest(centre - half, centre + half, normal)
+        },
+        accept,
+    )
 }
 
 /// The time a capsule of `radius` about the segment from `-half` to `+half`

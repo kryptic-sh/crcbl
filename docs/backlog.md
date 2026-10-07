@@ -5,70 +5,44 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ## Top priority: EW physics migration handoff (2026-10-07)
 
-Work in this order before the lower-priority backlog:
+**Game migration is the remaining handoff.** Adopt
+`PhysicsWorld::sweep_capsule_arc_where` in EW's applicable airborne contact
+forecasts in `src/controller_ballistic.rs::move_with_gravity`, then update its
+engine pin. The predicate receives collider identity and `ArcHit`, including
+world-space normal and absolute contact time, so EW retains its wall, ceiling
+and approaching-surface classification. Rejection preserves later compound
+parts, mesh triangles and re-entry into the same primitive after separation.
+Self-exclusion, masks and trigger rules still apply. The closest arc query
+continues to report starting overlaps; incoming overlaps remain selectable.
 
-- **Engine prerequisite:** add selectable accelerated contacts with the
-  acceptance criteria below. The current closest-contact API cannot complete
-  EW's migration safely.
-- **Game integration after that API lands:** update EW's engine pin and replace
-  the covered airborne contact forecasts, keeping its wall, ceiling and braking
-  regressions green. This is a consumer migration, not another engine feature.
-
-Upstream review: pulled crcbl `origin/main` with `--ff-only` before this update;
-the checkout was already at `f0ccb2b1`. Reviewed against EW main `0e097337`. The
-current `world/arc_sweep.rs` still exposes only closest accelerated contacts.
-EW's `src/controller_ballistic.rs` still uses `find_wall` and `hits_ceiling`
-forecast bisections, so this handoff remains open.
-
-**Engine implementation needed first: selectable accelerated contacts.** EW's
-direct migration exposed a missing query capability. Let the caller choose the
-earliest relevant arc contact after rejecting a departing support or a
-non-approaching surface, without mutating the world or losing the character's
-self-exclusion and query mask. An ordered contact query or an acceptance
-predicate may satisfy this; preserve meaningful later contacts within compound
-colliders and meshes, not only a list of collider-first hits. Keep the existing
-closest-query contract for callers that need starting overlaps. Do not globally
-ignore overlaps: an incoming starting contact must still be available.
-
-Reproduction in EW `72f15ced`: use the setup from
-`ceiling_contact_uses_the_remaining_time_for_descent` in
-`src/controller_ballistic_tests.rs` (floor, low ceiling, grounded player, then
-`request_jump`). Sweep the player's capsule expanded by `ground_clearance_m`
-with its jump velocity, gravity and the fixture's coarse interval.
-`sweep_capsule_arc` returns a walkable floor at time zero with `started_inside`,
-for both bound and unbound controllers; `preview_airborne_motion` on the same
-interval reports the ceiling. `QueryFilter` has only one excluded collider,
-already needed for the bound character; replacing it with the floor is not a
-valid workaround. Keep gameplay surface classification in EW.
-
-Acceptance: this departing-floor/ceiling case, approaching starting contacts, a
-non-approaching slope ahead of a finite wall, and a floor/ceiling hiding a later
-wall. Exercise separate colliders plus compound and mesh geometry; preserve
-self-exclusion, masks, triggers, deterministic ordering, world state and
-absolute contact times. In EW, require
+The previous closest-only trial failed because a departing time-zero floor hid
+the ceiling. Keep this handoff until EW's `find_wall` and `hits_ceiling`
+forecast bisections have been replaced and its game regressions pass:
 `ceiling_contact_uses_the_remaining_time_for_descent`,
-`wall_and_ceiling_contacts_preserve_jump_descent`, and
-`ceiling_contact_does_not_delay_wall_steering` to stay green alongside
-`braking_near_a_wall_preserves_contact_before_reversal` and the hidden-wall
-fixtures in `src/controller_contact_forecast_tests.rs`.
+`wall_and_ceiling_contacts_preserve_jump_descent`,
+`ceiling_contact_does_not_delay_wall_steering`,
+`braking_near_a_wall_preserves_contact_before_reversal`, and the hidden-wall
+fixtures in `src/controller_contact_forecast_tests.rs`. Air control, landing
+rules, support-change forecasts and `projected_landing` stay in EW.
 
-Evidence: a direct closest-arc migration failed those ceiling/timing
-regressions; restoring the existing implementation passed the controller suite.
-The isolated departing-support probe confirmed the time-zero floor result and
-the preview's ceiling contact. Logs and trial/probe sources are under
-`%TEMP%/ew-crcbl-update-review/`: `arc-migration-trial.log`,
-`arc-migration-restored.log`, `ballistic-arc-trial.rs`,
-`arc-departing-support-probe.rs` and `arc-departing-support-probe.log`. No
-failing migration was shipped. These checks establish the need; they do not
-validate a new engine implementation.
-
-The remaining top-priority integration is adopting
-`PhysicsWorld::sweep_capsule_arc` in EW's applicable airborne contact forecasts
-in `src/controller_ballistic.rs::move_with_gravity`. The API is already on crcbl
-main in `e1c8f8ee`; do not duplicate its implementation. EW now pins crcbl
-`8d83a042`. Keep this handoff until the covered straight-sweep forecasts have
-been replaced and the game regressions pass, then remove it. Air control,
-landing rules and the `projected_landing` gameplay simulation stay in EW.
+Engine selection coverage is in
+`crates/crcbl-phys/src/world/arc_selection_tests.rs`: departing support followed
+by ceiling or finite wall, separate/compound/mesh geometry, incoming overlaps,
+same-primitive departure and return, rotated mesh coordinates, slope rejection,
+self-exclusion, masks, triggers, deterministic ties and unchanged world state.
+The focused suite passes; deliberately bypassing the predicate and disabling
+re-entry each made the relevant regressions fail before restoration. Workspace
+formatting and Clippy pass. The Windows workspace no-fail-fast run completed
+with only `crcbl-shell`'s cursor-visibility test failing because Windows refused
+foreground focus; its isolated rerun failed at the same setup assertion. The
+physics suites passed. Logs are under `%TEMP%` as
+`crcbl-selectable-arc-workspace-complete.log` and
+`crcbl-selectable-arc-final-test.log`; the final run completed with the same
+foreground-focus failure and no other failing target. EW's local migration
+controller suite passes in
+`%TEMP%/ew-crcbl-update-review/selectable-arc-reentry.log`, but its dependency
+pin and full integration checks remain open. Native macOS/Linux validation is
+not yet verified.
 
 The preview migration is no longer outstanding: EW `72f15ced` uses
 `CharacterController::preview_upright`. Its repeated-preview regression was
@@ -169,10 +143,8 @@ The subsequent warehouse survey and named-exit quests also stay in EW.
 from a single extracted raid; `QuestLog::record_exit` credits an authored
 `RaidExit` from `src/extraction.rs`. These are game progression and extraction
 rules, not a missing engine quest framework. This review found no additional
-engine prerequisite in those features. Selectable accelerated contacts remain
-the top engine implementation priority, followed by EW's contact-forecast
-migration. The API review confirms the existing gap; it does not constitute a
-new physics regression run.
+engine prerequisite in those features. EW's contact-forecast migration remains
+the top integration priority.
 
 The subsequent body-part kill conditions and live target availability notices
 also stay in EW. `QuestKill::hit_part` and `KillCondition::hit_part` in
@@ -181,16 +153,16 @@ also stay in EW. `QuestKill::hit_part` and `KillCondition::hit_part` in
 delayed death. `Game::draw_raid_quest_availability` in `src/game_map_quests.rs`
 derives remaining targets from credited kills and combatant life state. These
 are game combat and objective rules using existing engine capabilities. They add
-no engine prerequisite; selectable accelerated contacts remain the first
-implementation request. The subsequent attack-source and required/forbidden
-armor conditions also stay in EW: `QuestKill::damage_source` and
-`QuestKill::worn_armor` retain game combat metadata, while
-`KillCondition::required_armor` and `KillCondition::forbidden_armor` apply game
-progression rules. Unknown equipment is distinct from recorded empty slots.
-These contracts do not demonstrate a missing engine API. The full-flight
-gear-change regression in `src/game_quest_forbidden_armor_tests.rs` exercises
-impact-time sampling with the existing physics path; it does not validate the
-requested accelerated-contact API.
+no engine prerequisite; the contact-forecast migration remains open. The
+subsequent attack-source and required/forbidden armor conditions also stay in
+EW: `QuestKill::damage_source` and `QuestKill::worn_armor` retain game combat
+metadata, while `KillCondition::required_armor` and
+`KillCondition::forbidden_armor` apply game progression rules. Unknown equipment
+is distinct from recorded empty slots. These contracts do not demonstrate a
+missing engine API. The full-flight gear-change regression in
+`src/game_quest_forbidden_armor_tests.rs` exercises impact-time sampling with
+the existing physics path; it does not validate the requested
+accelerated-contact API.
 
 The subsequent stance conditions also stay in EW. `Game::note_ai_harm` in
 `src/game_ai_death.rs` records the player's stance with the impact metadata;
@@ -226,9 +198,8 @@ map scale to the available window and keeps labels readable using the existing
 `DrawList::scale` and `set_scale` APIs. This is game presentation policy, not a
 missing engine scaling API. Neither feature should delay the physics request.
 
-Selectable accelerated contacts remain the first engine implementation request,
-followed by the game migration above. This refresh rechecked the current source
-and upstream state; no new engine or game physics regression run was performed.
+The selectable query is available for the game migration above; game adoption
+and its regression checks remain open.
 
 1. **Curved-path collision queries with contact times — delivered 2026-10-06,
    awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
@@ -285,9 +256,8 @@ and upstream state; no new engine or game physics regression run was performed.
    Validation gaps, not covered and not claimed: tilted and curved walls, moving
    geometry, continuous native playback, projectile and grenade flight
    (`src/game_projectile_doors_tests.rs` checks contact planes, not curved
-   impact positions), candidates hidden later along the path (the query returns
-   the first contact only), lying-capsule paths, and zero-acceleration agreement
-   for turned boxes and capsules, whose straight sweep stops a little short by
+   impact positions), lying-capsule paths, and zero-acceleration agreement for
+   turned boxes and capsules, whose straight sweep stops a little short by
    design. EW's fixture proves the planar braking case only.
 
 Current goal: complete the full codebase performance review, record actionable
@@ -657,6 +627,26 @@ which was a `DeviceLost` from the paravirtual driver's watchdog rather than a
 deadline, and which no deadline changes. If it recurs, give the grass tests a
 smaller field on that runner (the `bucket_price` gate-scene pattern) or split
 the frame's submission so no one command buffer runs long.
+
+## Windows foreground focus unavailable locally
+
+`crcbl-shell`'s
+`win32::shell::tests::hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`
+failed in the selectable-arc workspace runs and in isolation before reaching its
+cursor assertions. `focus_and_confirm` in
+`crates/crcbl-shell/src/win32/shell/tests.rs` reported that
+`SetForegroundWindow` was refused. A desktop capable of granting focus is still
+required to validate this test; it was not skipped or weakened.
+
+## Verification tools can succeed when their programs are missing
+
+`tools/check-doc-citations.sh` and `tools/check-wrapped-strings.sh` returned
+success locally when invoked with Git Bash without its `usr/bin` on `PATH`:
+`grep` and `sed` were missing, so no content was inspected. Rerunning with the
+correct `PATH` exercised the checks and passed. Add explicit required-program
+checks or propagate failures out of their process substitutions; preserve the
+existing assertions rather than treating an empty scan as evidence. CI uses a
+complete Linux tool environment; that does not validate this failure path.
 
 ## Checks that fail without a defect (2026-10-06)
 

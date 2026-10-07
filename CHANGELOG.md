@@ -880,7 +880,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   early by inflating the box with square corners. It is validated on flat walls,
   ceilings and floors, round shapes and EW's planar braking fixture; tilted and
   curved walls, moving geometry and projectile flight are not yet. The straight
-  sweeps are unchanged.
+  sweeps are unchanged. `PhysicsWorld::sweep_capsule_arc_where` and its
+  shared-borrow `OverlapQueries` form let the caller select the earliest contact
+  with a predicate over collider identity and `ArcHit`. Rejected departing
+  supports and non-approaching surfaces no longer hide later compound parts or
+  mesh triangles. After separation, a later return to the same primitive is
+  considered too, with time still measured from the original path start.
+  Incoming starting overlaps remain selectable; filters and deterministic tie
+  breaking match the closest query. Acceptance is evaluated at contact entries,
+  not continuously during overlap, and separations shorter than
+  `ARC_TIME_TOLERANCE` may be treated as continuous contact.
 
 - The shell seam reports an input method's composition in progress as the new
   `ShellEvent::TextPreedit` (each replaces the last; empty text means it ended)
