@@ -5,6 +5,56 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ## Top priority: new EW engine requirements
 
+### P0: preserve character wall clearance across movement subdivisions
+
+**Required before lower-priority engine feature work.** EW's moving-AI
+revival/stow timing work needs constant-direction character motion against a
+static wall to preserve the same clearance when a movement interval is split at
+an arrival or equipment boundary. The missing contract is in
+`crates/crcbl-phys/src/character.rs::CharacterController::move_and_slide`, not a
+request to move EW's medical or waypoint scheduler into crcbl.
+
+A direct physics-only regression,
+`wall_skin_is_independent_of_displacement_partition`, fails in EW's current
+`src/game_ai_medical_boundary.rs` unpublished draft on
+`wip/moving-ai-stow-timing`. The test uses no EW controller, AI, nutrition or
+scheduling code. Reproduce with `CharacterConfig::default()` and independent
+identical worlds/controllers:
+
+- Add a floor box at `(0, -0.5, 0)`, half-extents `(10, 0.5, 10)`.
+- Add a wall box at `(0, 1, -(radius + skin_width + 0.1))`, half-extents
+  `(5, 1, 0.1)`.
+- Start the controller at `Y * (radius + half_height + skin_width)` and call
+  `move_and_slide(world, -Y * 0.1)`; require the result to be grounded.
+- Set `increment = skin_width * 0.5`. Move one controller once by
+  `-Z * (increment * 15)`, and the other fifteen times by `-Z * increment`.
+- Require final positions to agree within `1e-9`. The reproduced result is
+  coarse `(0, 0.9099999999999999, -6.418476861114186e-17)` versus split
+  `(0, 0.9099999999999999, -0.005000000000000064)`, with `skin_width = 0.01`.
+
+The focused Windows run failed again during this audit; its log is
+`%TEMP%/ew-crcbl-update-review/engine-wall-skin-backlog-audit.log`. It ran
+against EW's pinned `cd66ad90`. After pulling engine `main` at `ce03bd09`,
+comparison confirmed no changes to `crcbl-phys`, `crcbl-core`, `crcbl-ecs`, the
+workspace manifest or lockfile between those revisions. This is not a native
+Linux/macOS validation or a claim that the engine fix already exists.
+
+**Implementation and acceptance:** investigate the short sweep that consumes
+clearance without reaching physical contact: `CharacterController::slide`
+accepts its full request on a sweep miss, whereas a sweep hit applies
+`skin_short` and may back away. The documented skin contract currently describes
+contact sweeps; make subdivided approach clearance explicit and enforce it
+without blocking valid motion away from or along a wall. Add the minimal
+regression to crcbl, prove it fails before the fix, and cover sub-skin requests,
+oblique approaches, corners, slopes, steps and lying-body motion. Preserve
+bounded query work and the `move_and_slide_into` equivalence contract. Engine
+workspace checks and native CI must pass; EW then adopts the revision and reruns
+its blocked-waypoint and moving-stow regressions. The game still owns movement
+locks, gait changes and reachable-arrival scheduling; the engine fix alone does
+not finish that work.
+
+### Other EW audit findings and UI follow-up
+
 **Next phase, after the EW-requested engine features pass their engine tests and
 native CI:** continue the UI and editor work. Reconcile the UI remainder below
 and `docs/plan/08-editor.md` with the implementation before selecting each
@@ -49,10 +99,11 @@ contracts; scene/asset work should start from a concrete authoring workflow. No
 choice has been received yet. Continue validating the current batch while
 keeping the existing docking boundary.
 
-The audit through EW `3d71b0c0` found no additional proven feature to migrate or
-add. Put a reproduced engine limitation here before lower-priority feature work,
-with the game caller, required contract and a regression case. Existing game
-acceptance tasks below do not establish a missing engine API.
+The audit through EW `8d5f92dc` and the moving-AI draft found the wall-clearance
+requirement above. No other proven feature is ready for migration. Put a
+reproduced engine limitation here before lower-priority feature work, with the
+game caller, required contract and a regression case. Existing game acceptance
+tasks below do not establish a missing engine API.
 
 The latest traversal checks in `src/controller_traversal_tests.rs` and ledge
 departure checks in `src/game_airborne_timing_tests.rs` exercise existing
@@ -84,8 +135,13 @@ revival completion and defibrillator stowing. Their regression cases in
 ownership. These contracts depend on EW's health, equipment and revival rules;
 they do not demonstrate a missing crcbl scheduler API. Keep the remaining
 bleeding combinations, moving-AI stow/death checks, player handoffs and native
-revival playback in EW. The nearby-player perception/healing discrepancy still
-needs diagnosis in EW before it can establish any engine requirement.
+revival playback in EW. The nearby-player perception/healing discrepancy was
+traced to EW refreshing `seriously_injured` only at the end of an outer update.
+Its fix and fixture decision remain on EW branch `wip/revival-injury-refresh`;
+this is game state ordering, not a missing engine requirement. EW
+`PlayerController::projected_movement_heading` also keeps game recoil/free-look
+policy while using the existing engine `turn_lying` query for constrained turns;
+no additional turning API is needed.
 
 Prone weapon/terrain handling still needs a game behavior decision and
 validation before a reusable port can be specified. GPU residency likewise needs
