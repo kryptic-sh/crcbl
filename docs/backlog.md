@@ -388,7 +388,10 @@ same pin.
   fuzz-workspace compilation. All-feature workspace tests completed with only
   the same Windows foreground-focus setup failure; the pinned T-handle hash and
   parsed-font tests passed without expectation changes. Logs use
-  `%TEMP%/crcbl-deps-migration-`. Native Unix, GPU golden and browser validation
+  `%TEMP%/crcbl-deps-migration-`. The wasm workspace Clippy gate (with CI's
+  crate exclusions) and macOS all-target/all-feature cross-Clippy also pass;
+  their logs end in `wasm.log` and `macos.log`. These do not establish native
+  linking or runtime behavior. Native Unix, GPU golden and browser validation
   remain pending on this migration. EW was notified that adopting it requires
   aligning its direct glam dependency.
 - **Slang 2026.14 → 2026.18.2: done 2026-09-25** (`7c536496`, `42fd36b0`),
