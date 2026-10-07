@@ -241,3 +241,46 @@ fn a_ui_scale_typed_at_the_console_is_the_next_frames() {
     assert_eq!(engine.ui_scale(), 2.0, "the console's write was not live");
     assert_eq!(engine.gpu.draw_list.scale(), 2.0);
 }
+
+#[test]
+fn a_settings_screen_scale_request_updates_the_next_frames_layout_and_input() {
+    for (requested, expected) in [
+        (2.0, 2.0),
+        (crate::settings::MAX_UI_SCALE, crate::settings::MAX_UI_SCALE),
+        (crate::settings::MIN_UI_SCALE, crate::settings::MIN_UI_SCALE),
+        (10.0, 1.0),
+        (0.1, 1.0),
+    ] {
+        let mut engine = at_ui_scale(1.0, FULL);
+        pause_key(&mut engine);
+        engine.game_mut().pending_change = Some((
+            format!(
+                "{}.{}",
+                crate::settings::VIDEO_NAMESPACE,
+                crate::settings::UI_SCALE_KEY,
+            ),
+            crcbl_console::Value::Float(requested),
+        ));
+        step(&mut engine);
+        assert_eq!(
+            engine.ui_scale(),
+            1.0,
+            "the request changed an active frame"
+        );
+        assert_eq!(engine.gpu.draw_list.scale(), 1.0);
+        assert!(!engine.confirm.is_showing());
+        assert_eq!(
+            crate::settings::ui_scale(&engine.console.host_mut().stack()),
+            expected,
+        );
+        step(&mut engine);
+        assert_eq!(engine.ui_scale(), expected, "the host request was not live");
+        assert_eq!(engine.gpu.draw_list.scale(), expected);
+        let layout = engine.menu_layout().expect("the pause menu");
+        let drawn = menu_drawn(&engine, &layout, expected);
+        assert!(spelled(engine.gpu.draw_list.overlay_commands()).starts_with(&drawn));
+        let resume = menu_button(&engine) * expected;
+        click(&mut engine, resume);
+        assert!(!engine.is_paused(), "scaled RESUME input missed the button");
+    }
+}

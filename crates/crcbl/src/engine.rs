@@ -6533,7 +6533,8 @@ pub trait HostedGame: Sized {
     /// player keeps it — so a row reads the kept value back off the stack it
     /// shares through [`settings`](Self::settings). A key that is not a
     /// confirm key is written at once, as [`crate::settings::apply`] writes
-    /// it, which a game's own write already does better.
+    /// it. A UI-scale request updates the loop's UI on the next frame, keeping
+    /// this frame's layout and hit tests at the scale they started with.
     ///
     /// Taken like [`take_pending_frame_limit`](Self::take_pending_frame_limit),
     /// and the empty default is the answer for every game with no such row.
@@ -6903,8 +6904,7 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// contacts.
     console_button: ConsoleButton,
     /// `[engine.video] ui_scale`: read off the console's stack at
-    /// [`Loop::new`], and moved by a console write when
-    /// [`Self::drain_console`] takes it.
+    /// [`Loop::new`], and moved by console writes or host settings requests.
     ///
     /// Kept rather than read each frame, because the read warns on a value it
     /// cannot use and a warning a frame is not a warning.
@@ -8171,6 +8171,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                 shell: self.shell.as_mut(),
                 window: self.window,
                 gpu: &mut self.gpu,
+                ui_multiplier: &mut self.ui_multiplier,
             };
             let mut stack = self.console.host_mut().stack_mut();
             crate::settings::confirm::change(&mut stack, key, value, &mut stage)
@@ -8213,6 +8214,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             shell: self.shell.as_mut(),
             window: self.window,
             gpu: &mut self.gpu,
+            ui_multiplier: &mut self.ui_multiplier,
         };
         held.observe(&stage);
         if held.tick(frame_time) {
@@ -8253,6 +8255,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             shell: self.shell.as_mut(),
             window: self.window,
             gpu: &mut self.gpu,
+            ui_multiplier: &mut self.ui_multiplier,
         };
         match held.revert(&mut stage) {
             Ok(()) => log::info!("settings: `{key}` put back"),

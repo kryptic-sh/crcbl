@@ -138,9 +138,10 @@ pub trait Stage {
     ///
     /// # Errors
     ///
-    /// [`Unsupported`] where this host draws no UI at a scale — every host but
-    /// the [`Loop`](crate::engine::Loop)'s console, whose [`Deferred`] carries
-    /// it to the loop's own menus, console and overlay.
+    /// [`Unsupported`] where this host cannot change its UI scale. The
+    /// [`Loop`](crate::engine::Loop) accepts console writes through [`Deferred`]
+    /// and settings-screen requests through
+    /// [`HostedGame::take_pending_change`](crate::engine::HostedGame::take_pending_change).
     fn set_ui_scale(&mut self, scale: f32) -> Result<(), Unsupported> {
         let _ = scale;
         Err(Unsupported)

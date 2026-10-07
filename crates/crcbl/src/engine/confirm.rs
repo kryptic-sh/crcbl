@@ -1,6 +1,5 @@
-//! The loop's half of a confirm key: the prompt it draws over a pending
-//! display change, and the window-and-swapchain [`Stage`] the change is
-//! applied through.
+//! Host settings changes: the stage that applies them and the prompt drawn
+//! over a pending display change.
 //!
 //! [`crate::settings::confirm`] is the flow — apply live, hold the previous
 //! value, count down on frame time, keep or revert. What a settings module
@@ -147,18 +146,22 @@ pub fn prompt_lines(pending: &PendingChange) -> Vec<Caption> {
     ]
 }
 
-/// The window and the swapchain, as the [`Stage`] a confirm key is applied
-/// through.
+/// The window, swapchain and UI multiplier as the [`Stage`] for host requests.
 ///
-/// Built for one call and dropped, because it borrows the loop's shell and
-/// bundle — the two things a settings module cannot hold.
+/// Built for one call and dropped, because it borrows the loop's host state.
 pub(super) struct WindowStage<'a, S: Shell + ?Sized, G: GameGpu> {
     pub(super) shell: &'a mut S,
     pub(super) window: WindowId,
     pub(super) gpu: &'a mut G,
+    pub(super) ui_multiplier: &'a mut f32,
 }
 
 impl<S: Shell + ?Sized, G: GameGpu> Stage for WindowStage<'_, S, G> {
+    fn set_ui_scale(&mut self, scale: f32) -> Result<(), Unsupported> {
+        *self.ui_multiplier = scale;
+        Ok(())
+    }
+
     /// [`ModeRequest::mode`]: what the window system has the window in.
     fn display_mode(&self) -> Result<DisplayMode, Unsupported> {
         ModeRequest::mode(&*self.shell, self.window).ok_or(Unsupported)

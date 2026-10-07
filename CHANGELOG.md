@@ -5884,6 +5884,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **UI-scale requests from settings screens take effect without restarting.**
+  `HostedGame::take_pending_change` applies `engine.video.ui_scale` to the
+  loop's menus, console and overlay on the next frame, keeping the current
+  frame's drawing and input at the scale it started with. Invalid typed values
+  remain rejected.
+
 - **Deleting and undoing an editor entity no longer reuses its old click to
   start renaming.** The outliner forgets removed rows when document membership
   changes, while preserving selections hidden inside collapsed systems. Queued

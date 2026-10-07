@@ -20,10 +20,14 @@ mesh coverage.
 
 At `e3f44f4c`, native Linux, macOS and Windows test jobs in
 [CI run 37682659604](https://github.com/kryptic-sh/crcbl/actions/runs/37682659604)
-have passed. The overall run is still in progress. Confirm the remaining jobs
-and publication checks before closing this priority entry. Local
-foreground-focus setup failures provide no cursor-validation evidence; preserve
-the focus precondition.
+passed. Each new clearance and outliner regression and the existing character
+skin cases explicitly passed in every native job log, saved under
+`%TEMP%/crcbl-e3f44f4c-`. Documentation push `ccb8c6a4` cancelled the remaining
+GPU jobs; replacement CI `37685182224` has unchanged engine code and passed
+every job. The original Pages `37682659597` remains in flight. Keep its watch
+running and inspect the final result before further feature work or publication.
+Local foreground-focus setup failures provide no cursor-validation evidence;
+preserve the focus precondition.
 
 EW owns adoption independently on `wip/engine-clearance-adoption`. Its local
 formatting, Clippy, full tests, release build and Linux/macOS cross Clippy pass
@@ -40,14 +44,20 @@ behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
 coverage and the native Linux/macOS/Windows CI matrix for each change. Reconcile
 older entries with the implementation before choosing a slice.
 
-### Finish published workflow checks
+### Validate host-requested UI scale
 
-The published `e3f44f4c` clearance and outliner corrections passed the native
-Linux, macOS and Windows jobs in CI `37682659604`. Each new regression and the
-existing character skin cases explicitly passed in every native job log, saved
-under `%TEMP%/crcbl-e3f44f4c-`. Full CI and Pages `37682659597` remain in
-flight; keep their watches running and inspect their final results. Delete this
-entry when those workflows complete successfully.
+`engine::confirm::WindowStage` now applies UI-scale requests from
+`HostedGame::take_pending_change` to the loop's multiplier. The current frame
+keeps its original drawing and hit-test scale; the next frame uses the new
+value. The regression in `engine/tests/ui_scale.rs` failed before the fix and
+passes with it, covering valid limits, rejected out-of-range requests, recorded
+menu geometry and pointer activation. Existing scale tests were moved unchanged
+out of `engine.rs`. Disabling the update or applying it during the request's
+frame makes the regression fail. Workspace formatting and all-feature Clippy
+pass. The full workspace run failed only in the known Windows foreground-focus
+setup test `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`;
+native CI remains pending. Logs use `%TEMP%/crcbl-host-ui-scale-`. Delete this
+entry when validation completes.
 
 ### Further editor scope
 
@@ -842,15 +852,12 @@ migrates every caller and deletes its own copy in the same change.
   which would stretch glyph masks rasterised at the logical size, and **a
   rebuild of the finished list** (EW's `UiScale::to_window`), which costs a
   second list every frame. The engine's own UI draws at DPI × `ui_scale`
-  (2026-09-28). **Still open:** (1) a write to `ui_scale` through any `Stage`
-  but the console's `Deferred` (`GpuStage`, or a game's own settings screen;
-  `apps/options` has no `ui_scale` row today) answers `Applied::NextStart`, and
-  the running `Loop` does not see it until restart: the loop caches the
-  multiplier, and only its console's `Deferred` moves it. (2) Not verified: the
-  browser build at a `devicePixelRatio` above one, where the engine's UI now
-  draws larger; the browser gate in CI (`pages.yml`) is what would show it. (3)
-  At a fractional factor the logical extent (`engine::logical_extent`) rounds
-  each axis to a whole logical pixel, because the menu and console layouts take
+  (2026-09-28). **Still open:** `apps/options` has no `ui_scale` row. `GpuStage`
+  owns no UI and continues to answer `Applied::NextStart`; a hosted settings
+  screen should request the change through `HostedGame::take_pending_change`.
+  The browser build at a `devicePixelRatio` above one remains unverified. At a
+  fractional factor the logical extent (`engine::logical_extent`) rounds each
+  axis to a whole logical pixel, because the menu and console layouts take
   `(u32, u32)`, so an edge can sit up to half a logical pixel off the window's
   edge.
 - **Declined: the distance-phase footstep accumulator.** Once gait, surfaces and
