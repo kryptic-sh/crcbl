@@ -31,6 +31,15 @@ and all-feature Clippy pass; full workspace tests fail only at the recorded
 Windows foreground-focus setup. Logs use `%TEMP%/crcbl-outliner-disabled-`. This
 test-only follow-up still needs its native CI matrix after the push.
 
+At `ce03bd09`, CI run `37624430912` failed its Linux setup before tests ran:
+`tools/fetch-shelf.sh` received curl connection-reset errors while fetching
+`BarramundiFish_baseColor.png` and `BarramundiFish_normal.png` from the pinned
+upstream shelf. The missing assets correctly failed setup; no test result was
+produced. Retry that job after the active workflow finishes, retaining the asset
+hashes and test assertions. Evidence is
+`%TEMP%/crcbl-ce03bd09-linux-failure.log`. The existing watch processes also
+cover Pages run `37624430936`, which rechecks the prior Tumble timeout.
+
 **Next UI/editor scope:** the existing scene-editor MVP exit criteria in
 `docs/plan/08-editor.md` are recorded as met headlessly. The owner was offered a
 choice of pane dragging/layout customization, richer inspector editing, or
