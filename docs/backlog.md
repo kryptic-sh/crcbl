@@ -41,8 +41,23 @@ physics suites passed. Logs are under `%TEMP%` as
 foreground-focus failure and no other failing target. EW's local migration
 controller suite passes in
 `%TEMP%/ew-crcbl-update-review/selectable-arc-reentry.log`, but its dependency
-pin and full integration checks remain open. Native macOS/Linux validation is
-not yet verified.
+pin and full integration checks remain open. CI run `37589563333` for `00996915`
+passed native Windows, Linux and macOS tests; its GPU checks are still running.
+
+EW's full suite exposed repeated rejected contacts while falling parallel to the
+equipment table in `game::m45a1_tests`. A positive signed gap rounded to a zero
+supporting-plane height, so continuation repeatedly treated roundoff as
+separation. The engine regression
+`a_rejected_roundoff_contact_is_not_repeated_during_parallel_fall` failed on the
+repeated callback before the fix; it now passes and also checks later return to
+the same wall. Continuation requires clearance beyond the rejected conservative
+gap and coordinate roundoff. EW's controller, M45A1 and full workspace suites
+pass with the candidate fix, recorded in
+`%TEMP%/ew-crcbl-update-review/selectable-arc-progress-full-test.log`; its
+published dependency pin remains outstanding. Engine workspace formatting and
+Clippy pass with this follow-up. The full test run completed with only the same
+Windows foreground-focus failure in `crcbl-shell`; the log is
+`%TEMP%/crcbl-roundoff-workspace-test.log`.
 
 The preview migration is no longer outstanding: EW `72f15ced` uses
 `CharacterController::preview_upright`. Its repeated-preview regression was

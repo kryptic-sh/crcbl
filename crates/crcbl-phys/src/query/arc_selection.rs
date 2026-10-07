@@ -4,6 +4,11 @@ use glam::DVec3;
 
 use super::arc::{ARC_TIME_TOLERANCE, AcceleratedPath, ArcHit, earliest_contact};
 
+/// Relative coordinate allowance when separating from a rejected contact.
+/// The signed gap and supporting-plane height use different arithmetic;
+/// their roundoff must not turn continuous contact into repeated re-entry.
+const CONTACT_ROUNDOFF: f64 = 8.0 * f64::EPSILON;
+
 pub(crate) fn contact_where(
     path: &AcceleratedPath,
     half: DVec3,
@@ -38,7 +43,14 @@ pub(crate) fn contact_where(
         if after <= time || after >= path.duration {
             return None;
         }
-        let overlaps = |centre: DVec3| separation(centre - half, centre + half).0 <= 0.0;
+        let centre = path.position_at(time);
+        let contact_gap = separation(centre - half, centre + half).0.max(0.0);
+        let scale = centre.abs().element_sum()
+            + hit.point.abs().element_sum()
+            + half.abs().element_sum()
+            + radius;
+        let clearance = contact_gap + scale * CONTACT_ROUNDOFF;
+        let overlaps = |centre: DVec3| separation(centre - half, centre + half).0 <= clearance;
         from = first_separation(path, after, path.duration, &overlaps)?;
     }
 }

@@ -101,8 +101,9 @@ impl PhysicsWorld {
     /// After rejection, the search continues after separation from that
     /// primitive, so a departing support can be met again on the way back.
     /// Separations shorter than [`crate::ARC_TIME_TOLERANCE`] may be treated
-    /// as continuous contact. Acceptance is evaluated at contact entries, not
-    /// continuously while overlapping.
+    /// as continuous contact, as may gaps within the rejected contact's
+    /// conservative distance and coordinate roundoff. Acceptance is evaluated
+    /// at contact entries, not continuously while overlapping.
     pub fn sweep_capsule_arc_where(
         &mut self,
         path: &AcceleratedPath,

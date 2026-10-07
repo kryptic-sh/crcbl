@@ -889,7 +889,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Incoming starting overlaps remain selectable; filters and deterministic tie
   breaking match the closest query. Acceptance is evaluated at contact entries,
   not continuously during overlap, and separations shorter than
-  `ARC_TIME_TOLERANCE` may be treated as continuous contact.
+  `ARC_TIME_TOLERANCE` may be treated as continuous contact. Continuation also
+  accounts for the rejected contact's conservative gap and coordinate roundoff,
+  so falling parallel to a barely touching wall does not repeatedly offer the
+  same rejected contact.
 
 - The shell seam reports an input method's composition in progress as the new
   `ShellEvent::TextPreedit` (each replaces the last; empty text means it ended)

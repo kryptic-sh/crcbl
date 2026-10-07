@@ -295,3 +295,50 @@ fn non_approaching_slope_does_not_hide_finite_wall() {
     assert_eq!(hit.0, wall);
     assert!((hit.1.time - (1.4 - RADIUS) / 4.0).abs() < EXACT);
 }
+
+#[test]
+fn a_rejected_roundoff_contact_is_not_repeated_during_parallel_fall() {
+    let mut world = PhysicsWorld::new();
+    world.add_box(BoxCollider::new(
+        DVec3::new(7.0, 1.0, 8.0),
+        DVec3::new(0.5, 1.0, 0.625),
+    ));
+    let path = AcceleratedPath::new(
+        DVec3::new(7.0, 0.9099999999999999, 8.935),
+        DVec3::ZERO,
+        DVec3::NEG_Y * 9.81,
+        0.06385508568141009,
+    );
+    let calls = std::cell::Cell::new(0);
+    let hit = world.sweep_capsule_arc_where(&path, 0.31, 0.6, QueryFilter::ALL, |_, hit| {
+        calls.set(calls.get() + 1);
+        assert_eq!(
+            calls.get(),
+            1,
+            "the same rejected entry was offered again: {hit:?}"
+        );
+        assert!(hit.normal.distance(DVec3::Z) < EXACT);
+        false
+    });
+    assert!(hit.is_none());
+    assert_eq!(
+        calls.get(),
+        1,
+        "the roundoff contact must exercise rejection"
+    );
+
+    let returning = AcceleratedPath {
+        velocity: DVec3::Z,
+        acceleration: path.acceleration - DVec3::Z * 4.0,
+        duration: 0.55,
+        ..path
+    };
+    let hit = world
+        .sweep_capsule_arc_where(&returning, 0.31, 0.6, QueryFilter::ALL, |_, hit| {
+            returning.velocity_at(hit.time).dot(hit.normal) < 0.0
+        })
+        .expect("rejecting the near-contact must retain the return to that wall")
+        .1;
+    assert!((hit.time - 0.5).abs() < EXACT, "{hit:?}");
+    assert!(!hit.started_inside);
+}
