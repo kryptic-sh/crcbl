@@ -3,7 +3,42 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## Current priority: UI and editor
+## P0: EW character clearance — highest priority
+
+Finish and publish the box-edge clearance correction before further UI/editor
+work. This is a confirmed engine defect blocking EW's engine adoption, rather
+than a request to move gameplay rules into crcbl.
+
+EW's `wip/engine-clearance-adoption` contains
+`skin_envelope_does_not_suspend_a_capsule_beyond_a_platform_corner` in
+`src/controller_contact_forecast.rs`. The physics-only regression passes on
+`cd66ad90` and fails on published main `8e13f1a9`: a capsule leaving a platform
+loses downward motion to a clearance-only contact while reporting ungrounded.
+The inflated-box slab admits a false contact outside the rounded corner. EW's
+existing `long_jump_update_cannot_skip_a_narrow_overhang` and
+`ledge_departure_inside_an_update_preserves_fall_timing` assertions also fail
+during that adoption. Preserve their assertions and the wall-partition fix in
+`2eac6b4e`.
+
+The local correction `c8020b95` already adds
+`departing_a_platform_keeps_downward_and_outward_motion` and
+`clearance_past_a_box_edge_does_not_cancel_free_fall` in
+`crates/crcbl-phys/src/character/skin_tests.rs`. Reuse this work; do not create
+a competing implementation. Complete engine validation and publish the
+correction with passing native Linux/macOS/Windows CI. Required behavior: false
+clearance contacts must not cancel free fall, while real wall clearance remains
+independent of displacement subdivision. Retain existing corner, slope, step and
+mesh coverage. The local foreground-focus setup failure supplies no
+cursor-validation evidence; keep its precondition intact.
+
+EW owns the subsequent pin update, full game regression run and runtime
+acceptance. Those game checks are not engine completion gates. Evidence for the
+adoption failure is under `%TEMP%/ew-crcbl-update-review/`, in
+`engine-clearance-corner-red.log`, `engine-clearance-corner-old-pin.log` and
+`engine-clearance-wip-final-test.log`. Delete this priority entry when the
+engine correction is published and its validation completes.
+
+## Next priority: UI and editor
 
 Continue the UI/editor phase after the EW-requested engine work. Keep shared UI
 behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
@@ -36,6 +71,13 @@ optional scope question has no answer yet. Continue correcting existing UI and
 editor workflows without treating that question as a blocker.
 
 ### EW engine requests
+
+Review of EW main `f38fbb11` found no additional demonstrated feature ready for
+an engine port. The recent nutrition/bleeding death timestamps in
+`src/game_nutrition_damage.rs` and `src/wounds.rs`, and grenade release delays
+in `src/game_grenades.rs`, depend on game health, item ownership and fuse rules.
+Keep those contracts in EW. Unreachable-waypoint scheduling also remains a game
+issue after the clearance fix; it does not establish a missing engine scheduler.
 
 EW adopts engine revisions independently. Game acceptance, movement locks, gait
 changes and reachable-arrival scheduling remain in EW. New engine work needs a
