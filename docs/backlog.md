@@ -50,6 +50,23 @@ Workspace formatting and all-feature Clippy pass. The full workspace test run
 fails only at the recorded Windows foreground-focus setup, with logs under
 `%TEMP%/crcbl-outliner-range-`. Native CI for this slice remains pending.
 
+The full editor's ignored GPU regression,
+`app::instances::tests::filtered_editor_images_match_eager_writes_through_history`,
+was explicitly run on local Vulkan after the UI batch. It passed with exact
+image agreement through edits and undo/redo on the Radeon RX 7900 XTX; the
+validation layer was enabled and the log reports no validation errors. The log
+is `%TEMP%/crcbl-ui-editor-vk-history.log`. This is offscreen GPU evidence, not
+a physical-desktop interaction check.
+
+**Next UI/editor scope:** the existing scene-editor MVP exit criteria in
+`docs/plan/08-editor.md` are recorded as met headlessly. The owner was offered a
+choice of pane dragging/layout customization, richer inspector editing, or
+scene/asset workflows for the next expansion. Pane dragging extends the current
+splitter-only docking decision; inspector expansion may need new reflection
+contracts; scene/asset work should start from a concrete authoring workflow. No
+choice has been received yet. Continue validating the current batch while
+keeping the existing docking boundary.
+
 The audit through EW `c91e46fe` found no additional proven feature to migrate or
 add. Put a reproduced engine limitation here before lower-priority feature work,
 with the game caller, required contract and a regression case. Existing game
