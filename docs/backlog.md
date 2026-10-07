@@ -13,69 +13,23 @@ UI behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
 coverage and the native CI matrix for each change. EW adoption remains
 game-owned and does not delay this phase.
 
-**Current UI batch awaiting GPU/browser completion:** inspector composite groups
-now use `Ui::collapsing_keyed`, so switching enum fields cannot transfer a
-previous field's open state. The variant-switch regression failed before the
-fix; the keyed-header reorder regression fails when its supplied key is
-discarded. Workspace formatting and all-feature Clippy pass. Full workspace
-tests fail only at the recorded Windows foreground-focus setup. The
-`ui_inspector` and `ui_widgets` goldens match their committed references on
-local Vulkan and D3D12; Vulkan validation is clean. Logs use
-`%TEMP%/crcbl-ui-group-identity-`.
+**UI validation remaining:** engine CI `37618134904` passed completely at
+`dfc47089`, covering the inspector identity, scrolling tabs and outliner range
+selection changes on Linux, macOS and Windows, including GPU and windowed
+checks. Pages run `37614793414` finished with only the Tumble timeout failing;
+its macOS seam probe and deployment were skipped. The browser timeout entry
+below retains the evidence. The next push includes the test-only outliner
+follow-up and reruns the unchanged Tumble check with the full browser suite;
+verify that run and its deployment before closing this gate.
 
-The tab pointer path now also checks disabling between press and release,
-clicking while disabled and clicking after re-enabling. Removing the tab's
-build-time disabled guard makes the regression fail on the release; production
-behavior is unchanged. Workspace formatting and all-feature Clippy pass; the
-full workspace test run fails only at the recorded Windows foreground-focus
-setup. Logs use `%TEMP%/crcbl-tabs-disabled-`.
-
-The tab strip now uses the existing scroll container behavior so focus reveals
-an overflowed tab and a horizontal wheel can expose it for pointer activation.
-Both regressions fail when the scroll style is removed. Workspace formatting and
-all-feature Clippy pass. The existing `ui_layout` golden matches exactly on
-local Vulkan and D3D12, with Vulkan validation clean. Logs use
-`%TEMP%/crcbl-tabs-overflow-`. The full workspace test run fails only at the
-recorded Windows foreground-focus setup.
-
-Outliner range mode now applies vertical focus movement within the same
-outliner. The editor's existing modifier routing supplies Shift+Up/Down;
-headless shell-event coverage checks extension, shrinking and the primary
-entity. Widget regressions cover fixed anchors, collapsed descendants, starting
-without an anchor, disabled builds, crossing between outliners and clearing the
-movement each frame. Removing the relevant guards makes their regressions fail.
-Workspace formatting and all-feature Clippy pass. The full workspace test run
-fails only at the recorded Windows foreground-focus setup, with logs under
-`%TEMP%/crcbl-outliner-range-`.
-
-The subsequent outliner pointer regression covers disabled toggle and row
-clicks, disabling between press and release, and re-enabling without replaying
-the discarded input or counting it toward a double-click. Removing either
-production disabled guard makes it fail. Workspace formatting and all-feature
-Clippy pass; full workspace tests fail only at the recorded Windows
-foreground-focus setup. Logs use `%TEMP%/crcbl-outliner-disabled-`. This
-test-only follow-up awaits a push and its native CI matrix after the active runs
-finish.
-
-The Linux, macOS and Windows native workspace jobs in CI run `37614793336`
-passed at `0b22817b`. Passing records for every new inspector, tab and outliner
-regression, including the editor Shift+Arrow test, were verified in each job
-log. Those logs are `%TEMP%/crcbl-ui-0b22817b-linux.log`,
-`%TEMP%/crcbl-ui-0b22817b-macos.log` and `%TEMP%/crcbl-ui-0b22817b-windows.log`.
-Vulkan passed, but the documentation push `dfc47089` cancelled the remaining
-Metal job. CI run `37618134904` checks the same source with that documentation
-update. Pages run `37614793414` still awaits browser jobs and has a Tumble
-timeout, detailed in the browser timeout entry below. Retry that failed job
-after the current run finishes; do not change the hash assertion or polling
-budget.
-
-The full editor's ignored GPU regression,
-`app::instances::tests::filtered_editor_images_match_eager_writes_through_history`,
-was explicitly run on local Vulkan after the UI batch. It passed with exact
-image agreement through edits and undo/redo on the Radeon RX 7900 XTX; the
-validation layer was enabled and the log reports no validation errors. The log
-is `%TEMP%/crcbl-ui-editor-vk-history.log`. This is offscreen GPU evidence, not
-a physical-desktop interaction check.
+The outliner pointer regression in
+`crates/crcbl-ui/src/tree/widgets/tests/outliner/disabled.rs` covers disabled
+toggle and row clicks, disabling between press and release, and re-enabling
+without replaying the discarded input or counting it toward a double-click.
+Removing either production disabled guard makes it fail. Workspace formatting
+and all-feature Clippy pass; full workspace tests fail only at the recorded
+Windows foreground-focus setup. Logs use `%TEMP%/crcbl-outliner-disabled-`. This
+test-only follow-up still needs its native CI matrix after the push.
 
 **Next UI/editor scope:** the existing scene-editor MVP exit criteria in
 `docs/plan/08-editor.md` are recorded as met headlessly. The owner was offered a
@@ -6965,9 +6919,12 @@ The Tumble timeout recurred on UI batch `0b22817b` in Pages run `37614793414` on
 `web-e2e-tumble` artifact subsequently records tick 600 with both the computed
 and pinned hash equal to `fc176a5d1a72f6c7`. The job log reports all other
 checks passing. This distinguishes a missed deadline from a hash mismatch; it
-does not make the failed gate pass. A retry is pending completion of the other
-jobs. Keep the assertion and polling budget unchanged while checking the retry.
-Local evidence is `%TEMP%/crcbl-ui-tumble-failure.log` and
+does not make the failed gate pass. The run finished with every other browser
+demo passing; the macOS seam probe and deployment were skipped. The test-only
+outliner follow-up will start another full Pages run, including Tumble, so no
+separate retry of the superseded run is needed. Keep the assertion and polling
+budget unchanged while checking that run. Local evidence is
+`%TEMP%/crcbl-ui-tumble-failure.log` and
 `%TEMP%/crcbl-ui-tumble-0b22817b/tumble-swiftshader.log`.
 
 ## The shard browser job can time out its own gameplay waits (2026-09-11)
