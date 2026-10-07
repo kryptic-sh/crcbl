@@ -127,18 +127,7 @@ impl OverlapQueries<'_> {
                         centre: s.centre,
                         radius: s.radius,
                     }),
-                    Primitive::Box(b) => match body {
-                        CapsuleSweepShape::Upright(c) if !b.is_turned() => {
-                            query::swept_capsule_vs_box(&path, radius, c.half_height, b).map(
-                                |hit| CapsuleSweepHit {
-                                    contact: hit.into(),
-                                    penetration: query::capsule_penetration_vs_box(&c, b)
-                                        .map_or(0.0, |p| p.depth),
-                                },
-                            )
-                        }
-                        _ => advance(query::contact_box(b)),
-                    },
+                    Primitive::Box(b) => advance(query::contact_box(b)),
                     Primitive::Capsule(c) => advance(c.contact_shape()),
                     Primitive::Mesh(m) => m
                         .sweep_where(

@@ -273,3 +273,48 @@ fn sub_skin_moves_climb_steps_and_follow_walkable_slopes() {
         assert!(moved.y * direction < 0.0);
     }
 }
+
+#[test]
+fn clearance_past_a_box_edge_does_not_cancel_free_fall() {
+    let config = CharacterConfig::default();
+    for outward in [DVec3::X, DVec3::NEG_X, DVec3::Z, DVec3::NEG_Z] {
+        for gap in [0.25, 0.5, 0.75] {
+            let mut world = PhysicsWorld::new();
+            world.add_box(BoxCollider::new(
+                DVec3::new(0.0, -0.5, 0.0),
+                DVec3::new(1.0, 0.5, 1.0),
+            ));
+            let start = outward * (1.0 + config.radius + config.skin_width * gap)
+                + DVec3::Y * (config.half_height + config.radius + config.skin_width);
+            let mut character = CharacterController::new(config, start);
+            let motion = DVec3::NEG_Y * config.skin_width * 0.5;
+            let mut contacts = Vec::new();
+            let result = character.move_and_slide_into(&mut world, motion, &mut contacts);
+            assert!(contacts.is_empty(), "false ledge contacts: {contacts:?}");
+            assert!(!result.grounded);
+            assert!((character.position() - start - motion).length() < 1e-9);
+        }
+    }
+}
+
+#[test]
+fn departing_a_platform_keeps_downward_and_outward_motion() {
+    let mut world = PhysicsWorld::new();
+    world.add_box(BoxCollider::new(
+        DVec3::new(0.0, 3.9, 13.0),
+        DVec3::new(4.0, 0.1, 4.0),
+    ));
+    let mut character = CharacterController::new(
+        CharacterConfig::default(),
+        DVec3::new(0.0, 4.91, 8.699999998),
+    );
+    let motion = DVec3::new(0.0, -0.02, -0.21);
+    let mut contacts = Vec::new();
+    let outcome = character.move_and_slide_into(&mut world, motion, &mut contacts);
+    assert!(!outcome.grounded);
+    assert!(
+        contacts.is_empty(),
+        "false departure contacts: {contacts:?}"
+    );
+    assert!((outcome.motion - motion).length() < 1e-9, "{outcome:?}");
+}

@@ -45,6 +45,21 @@ behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
 coverage and the native Linux/macOS/Windows CI matrix for each change. Reconcile
 older entries with the implementation before choosing a slice.
 
+### Validate box-edge clearance correction
+
+EW reproduced a clearance-only floor contact cancelling downward motion after
+leaving a box platform. `character::skin_tests` now covers its exact platform
+and departure plus free fall beyond each box edge. Both regressions fail with
+the former axis-aligned inflated-box clearance sweep and pass using the existing
+capsule-to-box distance and conservative advancement in
+`world/capsule_sweep.rs`. Existing wall, corner, mesh, slope and step skin
+checks pass. Workspace formatting and all-feature Clippy pass. The full
+workspace run failed only in the known Windows foreground-focus setup test
+`hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`; native
+Linux/macOS/Windows CI remains pending. Logs use `%TEMP%/crcbl-ledge-`. Finish
+this engine regression before further UI work; EW adopts it independently.
+Delete this entry when validation completes.
+
 ### Validate outliner model cleanup
 
 `OutlinerState::retain` in `crates/crcbl-ui/src/tree/widgets/outliner/state.rs`
@@ -58,8 +73,9 @@ independently disabled to prove failure. Focused UI and editor tests, workspace
 formatting and all-feature Clippy pass. The full workspace run completed with
 only the existing Windows foreground-focus setup failure in
 `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`. Logs use
-`%TEMP%/crcbl-outliner-retain-`. Native CI for this slice remains pending; close
-this entry once it passes.
+`%TEMP%/crcbl-outliner-retain-`. Native Linux, macOS and Windows jobs for
+`8e13f1a9` passed, with each new regression explicitly passing in the job logs.
+Full CI and Pages for that revision remain pending.
 
 The input follow-up in `tree/widgets/tests/outliner/retention.rs` reproduces a
 held expansion button restoring state after its row was removed. Expansion

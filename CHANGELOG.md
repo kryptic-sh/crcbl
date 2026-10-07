@@ -5896,7 +5896,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Parallel and departing motion remain free, and ground snapping continues to
   own clearance on walkable slopes. Short moves can also climb valid steps: the
   controller tries the step before backing away from its riser, and parallel
-  faces cannot hide its landing or ground support.
+  faces cannot hide its landing or ground support. Clearance around box edges
+  follows the rounded capsule, so leaving a platform does not create a false
+  floor contact that suspends a falling character.
 
 - **Pinned Slang verification works with Windows text output.** Shader
   generation and `crcbl-shaders`' build script canonicalize CRLF to LF for WGSL
