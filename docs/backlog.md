@@ -96,12 +96,12 @@ physical desktop checks and residency measurements are not crcbl completion
 gates. Do not request EW hosts or require its migration before completing engine
 work.
 
-Engine CI run `37604969501` passed at `cd66ad90`, including the Linux, macOS and
-Windows native workspace jobs and Metal end-to-end checks. This covers the
-dependency migration and rotated-query regression. Pages run `37604969422` still
-awaits browser jobs. These results do not cover the subsequent inspector
-identity fix. The local Windows foreground-focus test limitation is tracked
-separately below.
+Engine CI run `37604969501` and Pages run `37604969422` passed at `cd66ad90`,
+including native Linux, macOS and Windows tests, GPU checks and browser gates.
+The Pages deployment succeeded and the published site returned HTTP 200. This
+covers the dependency migration and rotated-query regression; the subsequent
+UI/editor changes still need their own CI. The local Windows foreground-focus
+test limitation is tracked separately below.
 
 **Rotated accelerated-query coverage:**
 `world::arc_sweep_tests::rotated_targets_are_met_at_the_analytic_time` in
@@ -412,19 +412,6 @@ turned box's turned normal. EW now uses `sweep_capsule_all` in
   ties by broadphase order (`closest_hit_core`); only the sweeps were changed.
   Both are small once a caller asks.
 
-- **Complete platform validation of the EW integration fixes.** Windows
-  workspace formatting and Clippy pass. The full workspace test run has only the
-  cursor-focus failure below. Physics regressions cover small upward moves,
-  short box sweeps and extreme-scale stationary overlap checks. Screenshot CLI
-  tests pass, with inspected Vulkan/DX12 cube, sprite and UI captures. Clipboard
-  tests pass with the desktop fixture mutex; replacing its shared mutex with an
-  unrelated mutex fails the gate assertion. Non-Windows native execution and
-  platform CI remain unverified. EW still needs native playback of the combined
-  ceiling/braking fixture. Reproduce with
-  `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all` and
-  `cargo test --workspace --no-fail-fast`; local logs are
-  `short-box-engine-tests.log`, `short-box-sweep-*.log`, `ceiling-braking-*.log`
-  and `stack-fixed-*` under `%TEMP%/ew-crcbl-update-review/`.
 - **Repeat the Windows cursor test in a foreground-capable session.**
   `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for` in
   `crates/crcbl-shell/src/win32/shell/tests.rs` fails in `focus_and_confirm`
@@ -462,23 +449,6 @@ same pin.
 
 **What is left:**
 
-- **Re-surveyed 2026-10-07:** the compatible lockfile refresh passed local
-  workspace formatting and Clippy, `cargo deny --all-features check` and
-  `cargo check --locked --manifest-path crates/crcbl-net/fuzz/Cargo.toml` and
-  the parsed-font UI tests. Full workspace tests completed with only the known
-  Windows foreground-focus setup failure in `crcbl-shell`; logs use
-  `%TEMP%/crcbl-deps-oct07-`. Native Unix and browser checks on these updated
-  locks remain pending CI. The separate glam 0.34.1 and skrifa 0.48.0 migration
-  now passes all-feature workspace Clippy, dependency policy checks and
-  fuzz-workspace compilation. All-feature workspace tests completed with only
-  the same Windows foreground-focus setup failure; the pinned T-handle hash and
-  parsed-font tests passed without expectation changes. Logs use
-  `%TEMP%/crcbl-deps-migration-`. The wasm workspace Clippy gate (with CI's
-  crate exclusions) and macOS all-target/all-feature cross-Clippy also pass;
-  their logs end in `wasm.log` and `macos.log`. These do not establish native
-  linking or runtime behavior. Native Unix, GPU golden and browser validation
-  remain pending on this migration. EW was notified that adopting it requires
-  aligning its direct glam dependency.
 - **Slang 2026.14 → 2026.18.2: done 2026-09-25** (`7c536496`, `42fd36b0`),
   through CI's `regenerated-shaders` artifact on branch `deps/slang-2026.18`,
   which passed CI whole. The WGSL and DXIL came out unchanged; 46 Metal files
