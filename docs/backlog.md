@@ -15,7 +15,7 @@ Work in this order before the lower-priority backlog:
   regressions green. This is a consumer migration, not another engine feature.
 
 Upstream review: pulled crcbl `origin/main` with `--ff-only` before this update;
-the checkout was already at `a2e94542`. Reviewed against EW main `82195df9`. The
+the checkout was already at `f0ccb2b1`. Reviewed against EW main `0e097337`. The
 current `world/arc_sweep.rs` still exposes only closest accelerated contacts.
 EW's `src/controller_ballistic.rs` still uses `find_wall` and `hits_ceiling`
 forecast bisections, so this handoff remains open.
@@ -218,10 +218,17 @@ combatant scenes and whole-frame profiling remain game follow-ups. The pending
 wound/treatment chronology work is also a game simulation concern, not evidence
 of a missing engine API.
 
+The latest ammunition conditions and map layout fixes do not add an engine
+prerequisite. `QuestKill::ammunition` and `KillCondition::ammunition` in EW's
+`src/quests.rs` preserve and match authored cartridge loadings for progression;
+keep those rules in the game. `Game::draw_raid_map` in `src/game_map.rs` fits
+map scale to the available window and keeps labels readable using the existing
+`DrawList::scale` and `set_scale` APIs. This is game presentation policy, not a
+missing engine scaling API. Neither feature should delay the physics request.
+
 Selectable accelerated contacts remain the first engine implementation request,
-followed by the game migration above. This refresh rechecked source, upstream
-state and the existing EW verification logs; no new engine or game physics
-regression run was performed.
+followed by the game migration above. This refresh rechecked the current source
+and upstream state; no new engine or game physics regression run was performed.
 
 1. **Curved-path collision queries with contact times — delivered 2026-10-06,
    awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
