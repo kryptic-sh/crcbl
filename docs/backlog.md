@@ -15,7 +15,7 @@ Work in this order before the lower-priority backlog:
   regressions green. This is a consumer migration, not another engine feature.
 
 Upstream review: pulled crcbl `origin/main` with `--ff-only` before this update;
-the checkout was already at `87df9dd8`. Reviewed against EW main `2a370c65`. The
+the checkout was already at `a9a5d98a`. Reviewed against EW main `66a86dc4`. The
 current `world/arc_sweep.rs` still exposes only closest accelerated contacts.
 EW's `src/controller_ballistic.rs` still uses `find_wall` and `hits_ceiling`
 forecast bisections, so this handoff remains open.
@@ -197,9 +197,22 @@ The inventory check in `src/game_stash_container_outline_tests.rs` covers
 container equipment changing during a drag; `missing_classes` in
 `src/inventory_ui/container_slots.rs` already derives empty targets from the
 current carried containers. Neither addition establishes another engine API
-requirement. Uncommitted bleeding-condition work in EW was inspected only as
-work in progress, not as validated or shipped behavior. No new engine or game
-physics regression run was performed for this documentation refresh.
+requirement.
+
+EW's subsequent bleeding-condition and projectile-ordering changes also stay in
+the game. `PlayerBleedingHistory` in `src/game_quest_bleeding_history.rs`
+reconstructs impact-time quest metadata from game wounds and treatments;
+`Game::advance_projectiles_with_doors` in `src/game_projectile_schedule.rs`
+orders projectile contacts while retaining each free-flight chord. Its collision
+selection in `src/game_projectile_contacts.rs` depends on game ownership,
+combatant life state, armor and body traversal. These implementations do not
+establish a missing engine scheduler or query-cache API. The uncommitted
+projectile query-budget and profiling work is still an investigation, not a
+validated reusable feature ready for migration. Reconsider an engine request
+only if that investigation demonstrates a capability the existing queries cannot
+provide. Selectable accelerated contacts remain the first engine implementation
+request, followed by the game migration above. This refresh rechecked source and
+upstream state; no new engine or game physics regression run was performed.
 
 1. **Curved-path collision queries with contact times — delivered 2026-10-06,
    awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
