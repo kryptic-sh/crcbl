@@ -229,9 +229,19 @@ impl Ui {
         let parsed = self.node_selector(&selector);
         let key = self.widget_key(parsed, Location::caller());
 
-        let mut changed = self.apply_expansion(key, state);
+        let expansion = self.apply_expansion(key, state);
         if state.is_stale() {
             state.flatten(tree);
+        }
+        let mut changed = false;
+        for (id, was_open) in expansion.into_iter().rev() {
+            if state.rows().iter().any(|row| row.id == id && row.branch) {
+                changed = true;
+            } else {
+                // Input resolves against the previous frame. A branch that
+                // disappeared must not regain expansion state from that input.
+                state.set_expanded(id, was_open);
+            }
         }
 
         if options.select == SelectMode::Range
@@ -276,12 +286,16 @@ impl Ui {
     /// Answers the expand and collapse this frame's input asked of the outliner
     /// on `key` — a click on a row's toggle, and the left or right a focused
     /// row took through the tree view rule — before the rows are flattened.
-    /// Returns whether the expansion moved.
-    fn apply_expansion(&mut self, key: NodeKey, state: &mut OutlinerState) -> bool {
+    /// Returns each change's previous state for validation against the new model.
+    fn apply_expansion(
+        &mut self,
+        key: NodeKey,
+        state: &mut OutlinerState,
+    ) -> Vec<(OutlinerId, bool)> {
         if self.building_disabled() {
-            return false;
+            return Vec::new();
         }
-        let mut changed = false;
+        let mut changed = Vec::new();
         // Only the row the tree view rule actually toggled this frame, never
         // whatever the focused row's last build left in the store: the caller
         // may have collapsed it from outside since, and reading the store back
@@ -294,14 +308,18 @@ impl Ui {
                 ..
             } = self.widget_state(toggled)
         {
-            changed |= state.set_expanded(id, open);
+            let was_open = state.is_expanded(id);
+            if state.set_expanded(id, open) {
+                changed.push((id, was_open));
+            }
         }
         if let Some(clicked) = self.clicked_key()
             && self.inside(clicked, Some(key))
             && let WidgetState::OutlinerToggle(id) = self.widget_state(clicked)
         {
+            let was_open = state.is_expanded(id);
             state.toggle_expanded(id);
-            changed = true;
+            changed.push((id, was_open));
         }
         changed
     }

@@ -61,6 +61,15 @@ only the existing Windows foreground-focus setup failure in
 `%TEMP%/crcbl-outliner-retain-`. Native CI for this slice remains pending; close
 this entry once it passes.
 
+The input follow-up in `tree/widgets/tests/outliner/retention.rs` reproduces a
+held expansion button restoring state after its row was removed. Expansion
+changes are now checked against the refreshed model; pointer and keyboard
+regressions also cover surviving branches and branches replaced by leaves. Both
+fail when that check is disabled, and pass with it. Formatting and all-feature
+Clippy pass. The follow-up's full workspace run failed only in the same Windows
+foreground-focus setup test named above; native CI remains pending. Its logs use
+`%TEMP%/crcbl-outliner-release-`.
+
 ### Further editor scope
 
 The scene-editor MVP exit criteria in `docs/plan/08-editor.md` are recorded as

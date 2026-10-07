@@ -6,6 +6,8 @@
 mod disabled;
 #[path = "outliner/range.rs"]
 mod range;
+#[path = "outliner/retention.rs"]
+mod retention;
 
 use super::*;
 use crate::tree::{

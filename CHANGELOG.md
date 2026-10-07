@@ -5886,7 +5886,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 - **Deleting and undoing an editor entity no longer reuses its old click to
   start renaming.** The outliner forgets removed rows when document membership
-  changes, while preserving selections hidden inside collapsed systems.
+  changes, while preserving selections hidden inside collapsed systems. Queued
+  pointer and keyboard expansion input is ignored when its branch disappears or
+  becomes a leaf during a model refresh.
 
 - **Subdividing character movement preserves wall clearance.** Upright and lying
   character moves check their skin envelope when the physical sweep misses, so
