@@ -3,6 +3,28 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## Top priority: new EW engine requirements
+
+The audit through EW `71ae9135` found no additional proven feature to migrate or
+add. Put a reproduced engine limitation here before lower-priority feature work,
+with the game caller, required contract and a regression case. Existing game
+acceptance tasks below do not establish a missing engine API.
+
+The latest traversal checks in `src/controller_traversal_tests.rs` and ledge
+departure checks in `src/game_airborne_timing_tests.rs` exercise existing
+physics queries. Traversal stamina and nutrition subdivision in
+`src/controller_traversal.rs` and `src/game_nutrition_movement.rs` remain game
+rules. The unfinished nutrition/traversal regression is not evidence for an
+engine scheduler request. `ReloadCore::resume` in `src/reload.rs` recovers a
+held magazine after failed insertion; stash source-change checks in
+`src/game_stash_source_change_tests.rs` protect game item ownership. Neither
+requires another crcbl capability.
+
+Prone weapon/terrain handling still needs a game behavior decision and
+validation before a reusable port can be specified. GPU residency likewise needs
+measured pressure and a proven game-local policy. Keep those decisions in EW's
+backlog; do not create speculative engine implementations for them.
+
 ## Engine feature acceptance and EW ownership (2026-10-07)
 
 The physics API handoff shipped in EW `1c5bee71`, pinned to engine `020051c2`.
