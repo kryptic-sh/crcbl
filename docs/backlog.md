@@ -6,17 +6,28 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requirements
 
 Confirmed engine blockers for EW take priority over UI/editor expansion. The
-review of EW main `30f736f9` against upstream crcbl `67dcc00f` found no new
+review of EW main `5c2680f7` against upstream crcbl `582352ab` found no new
 proven engine feature ready to add or migrate. Do not treat the candidates below
 as implementation requests until their game-side prerequisites are satisfied.
 
 - **Projectile and loose-item timing stays in EW.**
   `Game::advance_projectiles_and_world_items` in
-  `src/game_projectile_schedule.rs` now interleaves contacts, grenade expiry and
-  loose-item advancement through `src/game_world_item_step.rs`. Its ownership,
-  damage, fuse and contact-invalidation rules are game-specific. Queued-throw
-  death ordering and release-pose acceptance remain game work; this does not
-  establish a missing crcbl scheduler API.
+  `src/game_projectile_schedule.rs` interleaves projectile and melee contacts,
+  grenade expiry and loose-item advancement through
+  `src/game_world_item_step.rs`. Ordinary player pin preparation and prepared AI
+  throws now advance on that contact timeline; earlier player death cancels
+  queued melee. The ownership, damage, fuse and contact-invalidation rules are
+  game-specific. Keep the regression contracts in
+  `src/game_projectile_hand_death_tests.rs` and
+  `src/game_ai_grenade_preparation_death_tests.rs` in EW.
+
+  The remaining held-holster defect is also game ordering: early
+  `Game::advance_holster_hold` can finish holstering before an earlier fatal
+  projectile is resolved, leaving the shell in corpse inventory instead of
+  dropping the state committed at death. Fix and validate that EW handoff;
+  revival handoffs, AI holstering before grenade access and native release-pose
+  acceptance remain unverified. None establishes a missing crcbl scheduler API.
+
 - **Movement forecasting uses existing engine APIs.**
   `src/game_ai_route_arrival.rs` confirms waypoint arrival through the game
   controller; `src/controller_contact_forecast.rs` uses existing upright
