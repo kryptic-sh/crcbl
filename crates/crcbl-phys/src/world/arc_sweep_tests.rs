@@ -6,7 +6,7 @@
 //! pasted: `gap = speed t + ½ acceleration t²` along the axis the surface
 //! faces, by [`reach_time`].
 
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 
 use crate::broadphase::Segment;
 use crate::character::CharacterConfig;
@@ -365,6 +365,42 @@ fn with_no_acceleration_the_arc_meets_what_the_straight_sweep_meets() {
             "{name}: {hit:?} against {straight:?}"
         );
         assert!(!hit.started_inside && !straight.started_inside, "{name}");
+    }
+}
+
+#[test]
+fn rotated_targets_are_met_at_the_analytic_time() {
+    for turned_capsule in [false, true] {
+        for acceleration in [0.0, 2.0] {
+            let mut world = PhysicsWorld::new();
+            let (target, normal, extent) = if turned_capsule {
+                let rotation = DQuat::from_rotation_arc(DVec3::Y, DVec3::X);
+                let target =
+                    world.add_turned_capsule(Capsule::new(DVec3::ZERO, 0.5, 1.0), rotation);
+                (target, DVec3::X, 1.5)
+            } else {
+                let rotation = crate::rotation_from_scaled_axis(DVec3::Y * 0.4);
+                let target = world.add_box(
+                    BoxCollider::new(DVec3::ZERO, DVec3::new(0.5, 2.0, 2.0))
+                        .with_rotation(rotation),
+                );
+                (target, rotation * DVec3::X, 0.5)
+            };
+            let start_distance = 3.0;
+            let speed = 4.0;
+            let path = AcceleratedPath::new(
+                normal * start_distance,
+                -normal * speed,
+                -normal * acceleration,
+                1.0,
+            );
+            let (id, hit) = arc(&mut world, &path).expect("the rotated target");
+            let expected = reach_time(start_distance - extent - RADIUS, speed, acceleration);
+            assert_eq!(id, target);
+            assert_on_time(&hit, expected);
+            assert!((hit.normal - normal).length() < AGREEMENT, "{hit:?}");
+            assert!(!hit.started_inside);
+        }
     }
 }
 
