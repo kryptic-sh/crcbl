@@ -3,7 +3,7 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## Top priority: EW integration acceptance (2026-10-07)
+## Engine feature acceptance and EW ownership (2026-10-07)
 
 The physics API handoff shipped in EW `1c5bee71`, pinned to engine `020051c2`.
 `src/controller_ballistic.rs::move_with_gravity` and
@@ -11,21 +11,17 @@ The physics API handoff shipped in EW `1c5bee71`, pinned to engine `020051c2`.
 contacts. Preserve the game-owned air-control, landing and support-transition
 rules; the game reports no further engine feature gap from this migration.
 
-Remaining acceptance needs suitable hosts: native EW linking and runtime on
-macOS/Linux, physical desktop input/IME and cursor behavior, and
-constrained-VRAM measurements. Cross Clippy and headless Windows captures do not
-establish those. EW's pinned workspace tests, release build and macOS/Linux
-cross Clippy passed; evidence is under `%TEMP%/ew-crcbl-update-review/` with the
-`selectable-arc-` prefix. Engine native CI and GPU validation must be checked
-independently of these game results. The local Windows foreground-focus test
-limitation is tracked separately below.
+**Owner clarification:** crcbl owns regression coverage for every engine feature
+added for EW and passing engine CI on Linux, macOS and Windows. EW decides when
+and how to adopt those features. Its native builds, gameplay acceptance,
+physical desktop checks and residency measurements are not crcbl completion
+gates. Do not request EW hosts or require its migration before completing engine
+work.
 
-EW's `.github/workflows/ci.yml` defines Ubuntu tests and a null-backend headless
-run, but its configured remote is GitLab and the local `glab ci list` query
-returned 404. No GitLab CI configuration was found in that checkout. This is
-missing execution evidence, not proof that no external pipeline or mirror
-exists; obtain an accessible pipeline result before counting it as native
-acceptance. The local Windows host has no registered WSL distribution.
+Engine CI run `37595149138` passed at `6b05a72a`, including native workspace
+tests on Linux, macOS and Windows. The queued dependency migration needs its own
+CI result; it cannot inherit that earlier pass. The local Windows
+foreground-focus test limitation is tracked separately below.
 
 **Engine feature audit:** no additional proven engine API requirement was found
 in EW main `1c5bee71`. Recent projectile scheduling in
@@ -120,8 +116,7 @@ The subsequent warehouse survey and named-exit quests also stay in EW.
 from a single extracted raid; `QuestLog::record_exit` credits an authored
 `RaidExit` from `src/extraction.rs`. These are game progression and extraction
 rules, not a missing engine quest framework. This review found no additional
-engine prerequisite in those features. EW's remaining integration acceptance is
-listed above.
+engine prerequisite in those features. EW owns its integration acceptance.
 
 The subsequent body-part kill conditions and live target availability notices
 also stay in EW. `QuestKill::hit_part` and `KillCondition::hit_part` in
@@ -175,12 +170,11 @@ map scale to the available window and keeps labels readable using the existing
 `DrawList::scale` and `set_scale` APIs. This is game presentation policy, not a
 missing engine scaling API. Neither feature adds a physics request.
 
-Remaining accelerated-query coverage gaps: tilted and curved walls, moving
-geometry, continuous native playback, projectile and grenade flight,
-lying-capsule paths, and zero-acceleration agreement for turned boxes and
-capsules. These are verification gaps, not established missing APIs. Reproduce a
-game failure before requesting an extension; preserve the shipped wall, ceiling,
-same-surface return and parallel-fall regressions in EW.
+EW's scene-level checks for continuous playback, projectile and grenade flight,
+and moving geometry remain game-owned. Engine regressions must independently
+cover each supported accelerated-query contract, including contact selection,
+transformed geometry, absolute hit times, query filtering and termination after
+rejection. A game adoption decision is not a substitute for these engine tests.
 
 Current goal: complete the full codebase performance review, record actionable
 findings and verification gaps in this backlog, and implement supported
