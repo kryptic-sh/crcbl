@@ -3,75 +3,22 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## Top priority: EW physics migration handoff (2026-10-07)
+## EW integration: remaining platform acceptance (2026-10-07)
 
-**Game migration is the remaining handoff.** Adopt
-`PhysicsWorld::sweep_capsule_arc_where` in EW's applicable airborne contact
-forecasts in `src/controller_ballistic.rs::move_with_gravity`, then update its
-engine pin. The predicate receives collider identity and `ArcHit`, including
-world-space normal and absolute contact time, so EW retains its wall, ceiling
-and approaching-surface classification. Rejection preserves later compound
-parts, mesh triangles and re-entry into the same primitive after separation.
-Self-exclusion, masks and trigger rules still apply. The closest arc query
-continues to report starting overlaps; incoming overlaps remain selectable.
+The physics API handoff shipped in EW `1c5bee71`, pinned to engine `020051c2`.
+`src/controller_ballistic.rs::move_with_gravity` and
+`src/controller_contact_forecast.rs::forecast_airborne_wall` use selectable arc
+contacts. Preserve the game-owned air-control, landing and support-transition
+rules; the game reports no further engine feature gap from this migration.
 
-The previous closest-only trial failed because a departing time-zero floor hid
-the ceiling. Keep this handoff until EW's `find_wall` and `hits_ceiling`
-forecast bisections have been replaced and its game regressions pass:
-`ceiling_contact_uses_the_remaining_time_for_descent`,
-`wall_and_ceiling_contacts_preserve_jump_descent`,
-`ceiling_contact_does_not_delay_wall_steering`,
-`braking_near_a_wall_preserves_contact_before_reversal`, and the hidden-wall
-fixtures in `src/controller_contact_forecast_tests.rs`. Air control, landing
-rules, support-change forecasts and `projected_landing` stay in EW.
-
-Engine selection coverage is in
-`crates/crcbl-phys/src/world/arc_selection_tests.rs`: departing support followed
-by ceiling or finite wall, separate/compound/mesh geometry, incoming overlaps,
-same-primitive departure and return, rotated mesh coordinates, slope rejection,
-self-exclusion, masks, triggers, deterministic ties and unchanged world state.
-The focused suite passes; deliberately bypassing the predicate and disabling
-re-entry each made the relevant regressions fail before restoration. Workspace
-formatting and Clippy pass. The Windows workspace no-fail-fast run completed
-with only `crcbl-shell`'s cursor-visibility test failing because Windows refused
-foreground focus; its isolated rerun failed at the same setup assertion. The
-physics suites passed. Logs are under `%TEMP%` as
-`crcbl-selectable-arc-workspace-complete.log` and
-`crcbl-selectable-arc-final-test.log`; the final run completed with the same
-foreground-focus failure and no other failing target. EW's local migration
-controller suite passes in
-`%TEMP%/ew-crcbl-update-review/selectable-arc-reentry.log`, but its dependency
-pin and full integration checks remain open. CI run `37589563333` for `00996915`
-passed native Windows, Linux and macOS tests; its GPU checks are still running.
-
-EW's full suite exposed repeated rejected contacts while falling parallel to the
-equipment table in `game::m45a1_tests`. A positive signed gap rounded to a zero
-supporting-plane height, so continuation repeatedly treated roundoff as
-separation. The engine regression
-`a_rejected_roundoff_contact_is_not_repeated_during_parallel_fall` failed on the
-repeated callback before the fix; it now passes and also checks later return to
-the same wall. Continuation requires clearance beyond the rejected conservative
-gap and coordinate roundoff. EW's controller, M45A1 and full workspace suites
-pass with the candidate fix, recorded in
-`%TEMP%/ew-crcbl-update-review/selectable-arc-progress-full-test.log`; its
-published dependency pin remains outstanding. Engine workspace formatting and
-Clippy pass with this follow-up. The full test run completed with only the same
-Windows foreground-focus failure in `crcbl-shell`; the log is
-`%TEMP%/crcbl-roundoff-workspace-test.log`.
-
-The preview migration is no longer outstanding: EW `72f15ced` uses
-`CharacterController::preview_upright`. Its repeated-preview regression was
-observed failing with broadphase refits under the old move-and-restore path and
-passing with the new API. Windows workspace formatting, Clippy, tests, release
-build, macOS cross Clippy and release M4/ELCAN headless Vulkan/DX12 captures
-passed. EW Linux cross Clippy now also passes using a temporary ALSA sysroot and
-target-scoped pkgconf configuration, recorded in EW `82195df9`. This checks
-types and lints; it does not establish Linux linking, test execution or runtime
-validation, or a separate engine workspace pass. Native macOS/Linux, physical
-desktop input and constrained-VRAM checks remain unverified. Evidence is under
-`%TEMP%/ew-crcbl-update-review/` with the `engine-preview-` prefix and
-`preview-migration-negative.log`. The arc coverage report below belongs to its
-engine implementation, not a new verification run.
+Remaining acceptance needs suitable hosts: native EW linking and runtime on
+macOS/Linux, physical desktop input/IME and cursor behavior, and
+constrained-VRAM measurements. Cross Clippy and headless Windows captures do not
+establish those. EW's pinned workspace tests, release build and macOS/Linux
+cross Clippy passed; evidence is under `%TEMP%/ew-crcbl-update-review/` with the
+`selectable-arc-` prefix. Engine native CI and GPU validation must be checked
+independently of these game results. The local Windows foreground-focus test
+limitation is tracked separately below.
 
 Do not port EW's current hip-fire convergence or prone weapon/terrain handling
 yet. `src/game_hip_convergence.rs` combines rendered weapon pose with gameplay
@@ -482,13 +429,17 @@ same pin.
   identity agrees, but compiling `atlas_view.slang::vertexMain` through the
   installed Windows tools produced a different DXIL artifact from the committed
   Linux output. The reproduction is under `%TEMP%/crcbl-shader-newlines/` as
-  `atlas_view.vertex.hlsl` and `atlas_view.vertex.dxil`. `build.rs::pinned_dxc`
-  therefore skips local DXIL recompilation and `compile-shaders.sh --check`
-  refuses this compiler. Verify the Windows release asset and explain the DXIL
-  difference before defining a platform-specific pin; do not loosen the match
-  merely because the source commit agrees. Windows Slang's WGSL, MSL and SPIR-V
-  output passed after canonicalizing text CRLF to LF; the whole generator
-  remains unverified locally because of the DXC gate. Slang is installed at
+  `atlas_view.vertex.hlsl` and `atlas_view.vertex.dxil`. Comparing DXC's
+  disassembly found only the shader hash and compiler-identity metadata changed
+  for this entry point; that does not establish binary equivalence or cover the
+  remaining shaders. The disassemblies are `committed-dxil.txt` and
+  `windows-dxil.txt` beside the reproduction. `build.rs::pinned_dxc` therefore
+  skips local DXIL recompilation and `compile-shaders.sh --check` refuses this
+  compiler. Verify the Windows release asset and explain the DXIL difference
+  before defining a platform-specific pin; do not loosen the match merely
+  because the source commit agrees. Windows Slang's WGSL, MSL and SPIR-V output
+  passed after canonicalizing text CRLF to LF; the whole generator remains
+  unverified locally because of the DXC gate. Slang is installed at
   `~/.local/opt/slang-2026.18.2/bin/slangc.exe` and was selected through
   `CRCBL_SLANGC` for verification. A global override was not set: older
   checkouts still reject its Windows text output. Select it per checkout after
@@ -861,16 +812,6 @@ unverified. Native suite passes do not establish Metal or Direct3D image parity,
 or cross-submission Vulkan validation coverage. The null recording workload did
 not exercise water, grass, probe-capture replacement or FXAA. Keep these
 coverage gaps separate from the completed entry-allocation implementation.
-
-Harness documentation gap: `crates/crcbl/tests/run-render-e2e.sh` describes
-`CRCBL_VK_ICD=hardware`, but its shared
-`crates/crcbl-vk/tests/vulkan-icd.sh::crcbl_pin_vk_icd` treats every nonempty
-value as a manifest path. The UI trial refused that shorthand before tests ran;
-using the installed Radeon manifest ran the named discrete adapter and matched
-the render goldens. Correct the header or deliberately unify shorthand handling
-across callers while preserving invalid-pin refusal and loader-variable
-precedence. This is a harness contract mismatch, with no evidence of a renderer
-regression.
 
 Next performance trial (updated 2026-09-30): P21's mesh-tail task-stage cost,
 the best-measured frame-path cost left, is closed. Its three steps shipped —
