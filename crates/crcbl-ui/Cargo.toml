@@ -47,7 +47,7 @@ cssparser = { version = "0.38.0", default-features = false }
 # and the committed font carries TrueType instructions the interpreter runs
 # instead. `std` stays on, because the other float backend is `libm`. Behind
 # the `parsed-font` feature below.
-skrifa ={ version = "0.47.0", default-features = false, features = ["std"], optional = true }
+skrifa ={ version = "0.48.0", default-features = false, features = ["std"], optional = true }
 
 [features]
 # `crcbl_ui::font`'s parsed font: `skrifa`, the committed Atkinson Hyperlegible

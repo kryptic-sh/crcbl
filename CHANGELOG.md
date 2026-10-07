@@ -16,6 +16,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **Public math types now use glam 0.34.** Applications that pass their own glam
+  vectors, matrices or quaternions into engine APIs must align their glam
+  dependency with the engine's version line.
+
 - **`crcbl_assets::AssetState` has a `Reloading` variant** (see Added: texture
   hot reload): an asset whose bytes are in force while newer ones are read. An
   exhaustive `match` over the state must name the new arm; `Asset::bytes`
@@ -6483,8 +6487,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 - **Refreshed the workspace and decoder-fuzz dependency locks**, including
   `ctutils`, `libc`, `zerocopy` and `zeroize`, plus workspace font/Objective-C
-  dependencies and the fuzz build's `arbitrary` and `cc`. Dependency feature
-  selections and manifest constraints are unchanged.
+  dependencies and the fuzz build's `arbitrary` and `cc`. The optional parsed
+  font implementation now uses skrifa 0.48. Dependency feature selections are
+  unchanged.
 
 - **The editor's Reload on the changed-on-disk bar is one undoable entry**,
   through `Document::revert`, where it opened the scene again and started its

@@ -376,11 +376,14 @@ same pin.
   the parsed-font UI tests. Full workspace tests completed with only the known
   Windows foreground-focus setup failure in `crcbl-shell`; logs use
   `%TEMP%/crcbl-deps-oct07-`. Native Unix and browser checks on these updated
-  locks remain pending CI. Cargo's verbose dry run also reports `glam` 0.34.1
-  and `skrifa` 0.48.0 beyond current constraints. Migrate these separately,
-  preserving simulation hashes and parsed-font output checks. EW was notified
-  that a future glam update requires aligning its direct dependency before
-  adopting that engine pin.
+  locks remain pending CI. The separate glam 0.34.1 and skrifa 0.48.0 migration
+  now passes all-feature workspace Clippy, dependency policy checks and
+  fuzz-workspace compilation. All-feature workspace tests completed with only
+  the same Windows foreground-focus setup failure; the pinned T-handle hash and
+  parsed-font tests passed without expectation changes. Logs use
+  `%TEMP%/crcbl-deps-migration-`. Native Unix, GPU golden and browser validation
+  remain pending on this migration. EW was notified that adopting it requires
+  aligning its direct glam dependency.
 - **Slang 2026.14 → 2026.18.2: done 2026-09-25** (`7c536496`, `42fd36b0`),
   through CI's `regenerated-shaders` artifact on branch `deps/slang-2026.18`,
   which passed CI whole. The WGSL and DXIL came out unchanged; 46 Metal files
@@ -409,11 +412,13 @@ same pin.
   checkouts still reject its Windows text output. Select it per checkout after
   adopting the fix.
 - **Held, with the reason:** `rand_core` and `rand_chacha` stay on 0.9, since
-  `proptest` 1.11 (its latest) still depends on that line and 0.10 would put a
-  second copy under `deny.toml`'s duplicate ban. Move when proptest does. Every
-  GitHub Action is on its latest major; the one the first survey missed,
-  `actions/cache@v4` inside the local `apt-packages` action, went to v6, and
-  Dependabot's `github-actions` entry now reads `/.github/actions/*` as well.
+  `proptest` 1.11 still depends on that line, verified with `cargo tree` on
+  2026-10-07. Moving to 0.10 would add a second `rand_chacha` under
+  `deny.toml`'s duplicate ban; the existing `rand_core` 0.10 exception is only
+  for x25519's traits. Move when proptest does. Every GitHub Action is on its
+  latest major; the one the first survey missed, `actions/cache@v4` inside the
+  local `apt-packages` action, went to v6, and Dependabot's `github-actions`
+  entry now reads `/.github/actions/*` as well.
 
 ## Wasm `--all-targets` builds fail, and CI does not build them (2026-09-28)
 

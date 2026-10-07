@@ -19,7 +19,7 @@ repository = "https://github.com/kryptic-sh/crcbl"
 # same one `crcbl-shell` makes for libwayland-client and libxcb.
 ash = "0.38"
 bitflags = "2.9"
-glam = "0.33"
+glam = "0.34"
 # glTF 2.0 import (`crcbl-scene`). `default-features = false` is load-bearing,
 # and is the shape `bevy_gltf` uses for the same crate: the default `import`
 # feature does blocking `std::fs` reads, which bypasses `crcbl_assets::
