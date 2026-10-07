@@ -58,10 +58,12 @@ physical desktop checks and residency measurements are not crcbl completion
 gates. Do not request EW hosts or require its migration before completing engine
 work.
 
-Engine CI run `37595149138` passed at `6b05a72a`, including native workspace
-tests on Linux, macOS and Windows. The queued dependency migration needs its own
-CI result; it cannot inherit that earlier pass. The local Windows
-foreground-focus test limitation is tracked separately below.
+The Linux, macOS and Windows native workspace jobs in engine CI run
+`37604969501` passed at `cd66ad90`, covering the dependency migration and
+rotated-query regression. The full run still awaits its Metal end-to-end job;
+Pages run `37604969422` still awaits browser jobs. These results do not cover
+the subsequent inspector identity fix. The local Windows foreground-focus test
+limitation is tracked separately below.
 
 **Rotated accelerated-query coverage:**
 `world::arc_sweep_tests::rotated_targets_are_met_at_the_analytic_time` in
@@ -70,8 +72,9 @@ normal checks for rotated boxes and capsules, with and without acceleration. The
 local regression passes; independently removing either target's rotation makes
 it fail. Workspace formatting and all-feature Clippy pass. The full all-feature
 workspace test run fails only at the recorded `crcbl-shell` foreground-focus
-setup, with logs under `%TEMP%/crcbl-rotated-arc-`. Native matrix validation for
-this addition remains pending with the dependency migration.
+setup, with logs under `%TEMP%/crcbl-rotated-arc-`. The regression's passing
+result was verified directly in the Linux, macOS and Windows job logs for run
+`37604969501`.
 
 **Engine feature audit:** no additional proven engine API requirement was found
 in EW main `1c5bee71`. Recent projectile scheduling in
