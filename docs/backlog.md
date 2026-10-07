@@ -3,6 +3,37 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## Top priority: EW engine requirements
+
+Confirmed engine blockers for EW take priority over UI/editor expansion. The
+review of EW main `30f736f9` against upstream crcbl `67dcc00f` found no new
+proven engine feature ready to add or migrate. Do not treat the candidates below
+as implementation requests until their game-side prerequisites are satisfied.
+
+- **Projectile and loose-item timing stays in EW.**
+  `Game::advance_projectiles_and_world_items` in
+  `src/game_projectile_schedule.rs` now interleaves contacts, grenade expiry and
+  loose-item advancement through `src/game_world_item_step.rs`. Its ownership,
+  damage, fuse and contact-invalidation rules are game-specific. Queued-throw
+  death ordering and release-pose acceptance remain game work; this does not
+  establish a missing crcbl scheduler API.
+- **Movement forecasting uses existing engine APIs.**
+  `src/game_ai_route_arrival.rs` confirms waypoint arrival through the game
+  controller; `src/controller_contact_forecast.rs` uses existing upright
+  previews and selectable accelerated capsule contacts. Route reach, gait,
+  stamina and landing policy stay in EW. No additional query contract was
+  demonstrated by these changes.
+- **Prone weapon collision is not ready to port.** Choose and validate the game
+  response to terrain contact (limit aim or retract/lift the weapon and leave
+  ADS) before specifying reusable pose support.
+- **GPU residency is not ready to port.** Measure constrained-memory pressure
+  and validate game-local ownership, eviction and fallback behavior before
+  requesting a shared residency API.
+
+For a newly demonstrated engine gap, put its request here first, with the EW
+caller, reproduction, required API behavior and an engine regression. Keep
+native game acceptance and engine-version adoption in EW's backlog.
+
 ## Priority: UI and editor
 
 Continue the UI/editor phase after the EW-requested engine work. Keep shared UI
@@ -36,20 +67,7 @@ editor workflows without treating that question as a blocker.
 
 ### EW engine requests
 
-The review through EW main `3c2052ee` found no additional demonstrated feature
-ready for migration. Fatal-landing and blast grenade releases, raid-deadline
-splitting and extraction eligibility depend on EW health, inventory and raid
-rules (`src/game_impairment.rs`, `src/game_blast.rs` and `src/game_tick.rs`).
-Projectile-death release ordering and out-of-bounds timing still need game-side
-investigation; neither establishes a missing engine API. Keep those
-investigations in EW rather than requesting a speculative shared scheduler.
-
-Review of EW main `f38fbb11` found no additional demonstrated feature ready for
-an engine port. The recent nutrition/bleeding death timestamps in
-`src/game_nutrition_damage.rs` and `src/wounds.rs`, and grenade release delays
-in `src/game_grenades.rs`, depend on game health, item ownership and fuse rules.
-Keep those contracts in EW. Unreachable-waypoint scheduling also remains a game
-issue after the clearance fix; it does not establish a missing engine scheduler.
+The current audit and port prerequisites are at the top of this backlog.
 
 EW adopts engine revisions independently. Game acceptance, movement locks, gait
 changes and reachable-arrival scheduling remain in EW. New engine work needs a
