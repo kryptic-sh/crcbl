@@ -58,20 +58,6 @@ behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
 coverage and the native Linux/macOS/Windows CI matrix for each change. Reconcile
 older entries with the implementation before choosing a slice.
 
-### Validate shared dock minimum sizes
-
-The shared stylesheet now lets dock and split containers shrink below oversized
-content; the editor's duplicate container rules have been removed. The
-regression `oversized_content_stays_inside_the_nested_dock_layout` in
-`crates/crcbl-ui/src/tree/widgets/tests/dock.rs` failed against the old defaults
-and passes with the change. Existing widget tests, workspace formatting and
-all-feature Clippy pass. The full workspace run failed only at the known Windows
-foreground-focus setup in
-`hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`. The existing
-`ui_layout` image comparison passes exactly on Vulkan and Direct3D 12. Native CI
-remains pending. Logs use `%TEMP%/crcbl-dock-sizing-`. Delete this entry after
-validation.
-
 ### Further editor scope
 
 The scene-editor MVP exit criteria in `docs/plan/08-editor.md` are recorded as
