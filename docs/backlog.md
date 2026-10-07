@@ -5,7 +5,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ## Top priority: new EW engine requirements
 
-The audit through EW `71ae9135` found no additional proven feature to migrate or
+The audit through EW `c91e46fe` found no additional proven feature to migrate or
 add. Put a reproduced engine limitation here before lower-priority feature work,
 with the game caller, required contract and a regression case. Existing game
 acceptance tasks below do not establish a missing engine API.
@@ -14,11 +14,22 @@ The latest traversal checks in `src/controller_traversal_tests.rs` and ledge
 departure checks in `src/game_airborne_timing_tests.rs` exercise existing
 physics queries. Traversal stamina and nutrition subdivision in
 `src/controller_traversal.rs` and `src/game_nutrition_movement.rs` remain game
-rules. The unfinished nutrition/traversal regression is not evidence for an
-engine scheduler request. `ReloadCore::resume` in `src/reload.rs` recovers a
-held magazine after failed insertion; stash source-change checks in
+rules. `src/game_nutrition_traversal_tests.rs` now covers nutrition depletion
+before a vault obstruction through player ticks and the player/AI nutrition
+movement timelines. This exercises existing queries, not a missing engine
+scheduler contract. `ReloadCore::resume` in `src/reload.rs` recovers a held
+magazine after failed insertion; stash source-change checks in
 `src/game_stash_source_change_tests.rs` protect game item ownership. Neither
 requires another crcbl capability.
+
+The subsequent inventory checks in
+`src/game_stash_armor_source_change_tests.rs`,
+`src/game_stash_protected_equipment_tests.rs` and
+`src/magazine_inventory/secure_storage_tests.rs` protect exact item ownership
+when armor is replaced during a drag, an occupied stash rejects protected
+equipment, or automatic placement excludes secure storage. These are EW
+equipment and loot policies; no reusable engine transfer requirement was
+demonstrated. Keep them in the game.
 
 Prone weapon/terrain handling still needs a game behavior decision and
 validation before a reusable port can be specified. GPU residency likewise needs
