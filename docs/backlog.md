@@ -31,6 +31,15 @@ full workspace test run fails only at the recorded Windows foreground-focus
 setup. Logs use `%TEMP%/crcbl-tabs-disabled-`. Native CI for this new test is
 pending.
 
+The tab strip now uses the existing scroll container behavior so focus reveals
+an overflowed tab and a horizontal wheel can expose it for pointer activation.
+Both regressions fail when the scroll style is removed. Workspace formatting and
+all-feature Clippy pass. The existing `ui_layout` golden matches exactly on
+local Vulkan and D3D12, with Vulkan validation clean. Logs use
+`%TEMP%/crcbl-tabs-overflow-`. The full workspace test run fails only at the
+recorded Windows foreground-focus setup. Native CI for this change remains
+pending.
+
 The audit through EW `c91e46fe` found no additional proven feature to migrate or
 add. Put a reproduced engine limitation here before lower-priority feature work,
 with the game caller, required contract and a regression case. Existing game
@@ -4163,12 +4172,9 @@ in `crcbl_input::list`). Decisions, then what is left.
   helper should wait for another actual caller, preserving the editor's
   least-movement behavior and row margin; no generic wheel-input redesign is
   required for the existing editor path.
-- **A tab strip neither wraps nor scrolls**, so tabs past the pane's width are
-  clipped; arrows move between tabs only because spatial navigation finds them,
-  and activation is manual (focus, then accept). **A tab's pane is dropped when
-  another shows**, with every widget state inside it — the same rule a closed
-  `Ui::collapsing` body follows, but a text input in a tab loses its caret on a
-  switch.
+- **A tab's pane is dropped when another shows**, with every widget state inside
+  it — the same rule a closed `Ui::collapsing` body follows, but a text input in
+  a tab loses its caret on a switch.
 - **A dock gives every split the same `min`**, and a divider's position is
   pixels rather than a fraction (inherited from rung 7b), so a layout restored
   at a different window size keeps the pixel split. A per-pane minimum would

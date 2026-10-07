@@ -4450,6 +4450,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`Ui::tabs`** builds a tab strip and only the pane that is showing, with the
   showing tab remembered by its title's hash, so it survives a rebuild that
   reorders or inserts tabs. Each tab is a button, so focus walks the strip.
+  Narrow strips scroll to reveal the focused tab and accept horizontal wheel
+  scrolling, keeping overflowed tabs reachable without activating them.
 - **`Ui::dock` and `DockLayout`** build nested splits from a value the
   application owns and saves: panes addressed by name, each divider's position
   written back into the value the frame a drag or an engaged step moves it, and

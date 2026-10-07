@@ -440,6 +440,7 @@ tabs {
 .tab-strip {
   gap: 2px;
   flex-shrink: 0;
+  overflow: scroll;
 }
 
 .tab {

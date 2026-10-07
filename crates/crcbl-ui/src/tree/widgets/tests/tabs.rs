@@ -211,3 +211,71 @@ fn disabling_tabs_on_release_keeps_the_showing_pane() {
     assert_eq!(switched.pane, Some(2), "re-enabling did not restore clicks");
     assert!(switched.tabs.changed);
 }
+
+fn narrow_ui() -> Ui {
+    let mut ui = Ui::new();
+    ui.add_stylesheet("narrow.css", "#views { width: 100px; }");
+    ui
+}
+
+#[test]
+fn navigating_a_narrow_tab_strip_reveals_the_focused_tab() {
+    let mut ui = narrow_ui();
+    let first = tabs_page(&mut ui, &TITLES, idle(), NavInput::default());
+    let strip = children_of(&ui, first.tabs.key)[0];
+    let log = tab_key(&ui, &first, &TITLES, "Log");
+    assert!(rect(&ui, log).1.x > rect(&ui, strip).1.x);
+
+    tabs_page(&mut ui, &TITLES, idle(), NavInput::NAVIGATION);
+    tabs_page(&mut ui, &TITLES, idle(), NavInput::NEXT);
+    let reached = tabs_page(&mut ui, &TITLES, idle(), NavInput::NEXT);
+    assert_eq!(ui.focused(), Some(log));
+    assert_eq!(reached.pane, Some(0), "focus activated the tab");
+    assert!(
+        ui.scroll_offset_of(strip).x > 0.0,
+        "the strip did not scroll"
+    );
+    let (left, right) = rect(&ui, strip);
+    let (min, max) = rect(&ui, log);
+    assert!(
+        min.x >= left.x && max.x <= right.x,
+        "the focused tab is clipped"
+    );
+    let shown = tabs_page(&mut ui, &TITLES, idle(), NavInput::ACCEPT);
+    assert_eq!(shown.pane, Some(2));
+
+    tabs_page(&mut ui, &TITLES, idle(), NavInput::PREV);
+    let returned = tabs_page(&mut ui, &TITLES, idle(), NavInput::PREV);
+    let scene = tab_key(&ui, &returned, &TITLES, "Scene");
+    assert_eq!(ui.focused(), Some(scene));
+    assert_eq!(ui.scroll_offset_of(strip), Vec2::ZERO);
+    assert_eq!(returned.pane, Some(2), "focus changed the showing pane");
+}
+
+#[test]
+fn a_horizontal_wheel_reveals_a_tab_for_pointer_activation() {
+    let mut ui = narrow_ui();
+    let first = tabs_page(&mut ui, &TITLES, idle(), NavInput::default());
+    let strip = children_of(&ui, first.tabs.key)[0];
+    let over_strip = PointerInput::hovering(centre(&ui, strip));
+    tabs_page(&mut ui, &TITLES, over_strip, NavInput::default());
+    assert!(ui.scroll_wheel(Vec2::new(PAGE, 0.0)));
+    let scrolled = tabs_page(&mut ui, &TITLES, over_strip, NavInput::default());
+    assert_eq!(scrolled.pane, Some(0), "scrolling activated a tab");
+    assert!(
+        !ui.scroll_wheel(Vec2::new(PAGE, 0.0)),
+        "the strip overscrolled"
+    );
+    let log = tab_key(&ui, &scrolled, &TITLES, "Log");
+    let (left, right) = rect(&ui, strip);
+    let (min, max) = rect(&ui, log);
+    assert!(
+        min.x >= left.x && max.x <= right.x,
+        "the tab stayed clipped"
+    );
+    let at = centre(&ui, log);
+    tabs_page(&mut ui, &TITLES, press(at), NavInput::default());
+    let shown = tabs_page(&mut ui, &TITLES, release(at), NavInput::default());
+    assert_eq!(shown.pane, Some(2), "the revealed tab was not clickable");
+    assert!(shown.tabs.changed);
+}
