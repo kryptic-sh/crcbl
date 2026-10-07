@@ -6,7 +6,7 @@ script_dir=$(dirname "$0")
 cd "$script_dir/.."
 
 # The child Bash runs the checks, which invoke these exported command mocks.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 check() {
   local script=$1 mode=$2 expected=$3 result=0 output
   shift 3
