@@ -15,7 +15,7 @@ Work in this order before the lower-priority backlog:
   regressions green. This is a consumer migration, not another engine feature.
 
 Upstream review: pulled crcbl `origin/main` with `--ff-only` before this update;
-the checkout was already at `a9a5d98a`. Reviewed against EW main `66a86dc4`. The
+the checkout was already at `a2e94542`. Reviewed against EW main `82195df9`. The
 current `world/arc_sweep.rs` still exposes only closest accelerated contacts.
 EW's `src/controller_ballistic.rs` still uses `find_wall` and `hits_ceiling`
 forecast bisections, so this handoff remains open.
@@ -75,11 +75,14 @@ The preview migration is no longer outstanding: EW `72f15ced` uses
 observed failing with broadphase refits under the old move-and-restore path and
 passing with the new API. Windows workspace formatting, Clippy, tests, release
 build, macOS cross Clippy and release M4/ELCAN headless Vulkan/DX12 captures
-passed. Linux cross Clippy still stops at the missing ALSA cross-compilation
-sysroot; native macOS/Linux, physical desktop input and constrained-VRAM checks
-remain unverified. Evidence is under `%TEMP%/ew-crcbl-update-review/` with the
-`engine-preview-` prefix and `preview-migration-negative.log`. The arc coverage
-report below belongs to its engine implementation, not a new verification run.
+passed. EW Linux cross Clippy now also passes using a temporary ALSA sysroot and
+target-scoped pkgconf configuration, recorded in EW `82195df9`. This checks
+types and lints; it does not establish Linux linking, test execution or runtime
+validation, or a separate engine workspace pass. Native macOS/Linux, physical
+desktop input and constrained-VRAM checks remain unverified. Evidence is under
+`%TEMP%/ew-crcbl-update-review/` with the `engine-preview-` prefix and
+`preview-migration-negative.log`. The arc coverage report below belongs to its
+engine implementation, not a new verification run.
 
 Do not port EW's current hip-fire convergence or prone weapon/terrain handling
 yet. `src/game_hip_convergence.rs` combines rendered weapon pose with gameplay
@@ -206,13 +209,19 @@ reconstructs impact-time quest metadata from game wounds and treatments;
 orders projectile contacts while retaining each free-flight chord. Its collision
 selection in `src/game_projectile_contacts.rs` depends on game ownership,
 combatant life state, armor and body traversal. These implementations do not
-establish a missing engine scheduler or query-cache API. The uncommitted
-projectile query-budget and profiling work is still an investigation, not a
-validated reusable feature ready for migration. Reconsider an engine request
-only if that investigation demonstrates a capability the existing queries cannot
-provide. Selectable accelerated contacts remain the first engine implementation
-request, followed by the game migration above. This refresh rechecked source and
-upstream state; no new engine or game physics regression run was performed.
+establish a missing engine scheduler or query-cache API. EW `80320239` now
+caches contacts for each retained flight chord, caps chords at door transitions
+and invalidates outstanding contacts after combatant impacts. Its invalidation
+rules depend on game death, armor and raid state, so keep this implementation in
+EW. The Windows workspace checks and projectile profiling completed; dense
+combatant scenes and whole-frame profiling remain game follow-ups. The pending
+wound/treatment chronology work is also a game simulation concern, not evidence
+of a missing engine API.
+
+Selectable accelerated contacts remain the first engine implementation request,
+followed by the game migration above. This refresh rechecked source, upstream
+state and the existing EW verification logs; no new engine or game physics
+regression run was performed.
 
 1. **Curved-path collision queries with contact times — delivered 2026-10-06,
    awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
