@@ -31,7 +31,8 @@
 # extension — before it is asked to exist.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+script_dir=$(dirname "$0")
+cd "$script_dir/.."
 
 # Paths that are deliberately not in the tree, each with the reason it is cited.
 # A path belongs here only when the doc is describing something that does not
@@ -51,28 +52,52 @@ allowed() {
 # stale. Everything else describes the tree as it is now, so it has to resolve.
 # The directory of the nearest `Cargo.toml` at or above a file, or empty.
 crate_root_of() {
-  dir=$(dirname "$1")
-  while [ "$dir" != "." ] && [ "$dir" != "/" ]; do
+  local dir parent
+  dir=$(dirname "$1") || return
+  while [ "$dir" != "." ]; do
     if [ -e "$dir/Cargo.toml" ]; then
       printf '%s' "$dir"
       return 0
     fi
-    dir=$(dirname "$dir")
+    parent=$(dirname "$dir") || return
+    [ "$parent" != "$dir" ] || break
+    dir=$parent
   done
   return 0
 }
 
+# grep's no-match status means an empty scan; every other error must reach
+# the caller rather than disappearing in a process substitution.
+grep_matches() {
+  local result=0
+  grep "$@" || result=$?
+  if [ "$result" -gt 1 ]; then
+    return "$result"
+  fi
+}
+
 files=("$@")
 if [ ${#files[@]} -eq 0 ]; then
-  mapfile -t files < <(
-    git ls-files '*.md' '*.rs' '*.mjs' '*.js' '*.yml' '*.sh' '*.slang' |
-      grep -v '^CHANGELOG.md$'
-  )
+  tracked=$(git ls-files '*.md' '*.rs' '*.mjs' '*.js' '*.yml' '*.sh' '*.slang' |
+    grep_matches -v '^CHANGELOG.md$')
+  if [ -z "$tracked" ]; then
+    printf 'doc citations: no files to check\n' >&2
+    exit 1
+  fi
+  mapfile -t files <<<"$tracked"
 fi
 
 status=0
 checked=0
 for file in "${files[@]}"; do
+  if [ ! -f "$file" ]; then
+    printf 'doc citations: not a file: %s\n' "$file" >&2
+    exit 1
+  fi
+  # Capture the pipeline before reading it so pipefail reaches this shell.
+  tick='`'
+  paths=$(grep_matches -oE "$tick(crates|apps|web|docs|tools|\.github)/[A-Za-z0-9_./+-]+$tick" "$file" |
+    tr -d "$tick" | sed 's/[.,;:]$//' | sort -u)
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     checked=$((checked + 1))
@@ -91,18 +116,21 @@ for file in "${files[@]}"; do
     line=$(grep -n -F -- "\`$path\`" "$file" | head -1 | cut -d: -f1)
     printf '%s:%s: cites a path that does not exist: %s\n' "$file" "${line:-?}" "$path"
     status=1
-  done < <(
-    # The delimiter is a backtick; naming it keeps it out of a quoted pattern.
-    tick='`'
-    grep -oE "$tick(crates|apps|web|docs|tools|\.github)/[A-Za-z0-9_./+-]+$tick" "$file" |
-      tr -d "$tick" | sed 's/[.,;:]$//' | sort -u
-  )
+  done <<<"$paths"
 
   case "$file" in
     *.md) ;;
     *) continue ;;
   esac
 
+  # Inline code spans first: a doc that quotes a broken link as its example —
+  # `docs/backlog.md` does, in the entry this pass closes — is showing the
+  # syntax, not writing a link, and a gate that cannot tell them apart fails on
+  # the file describing it.
+  tick='`'
+  targets=$(sed "s/${tick}${tick}[^${tick}]*${tick}${tick}//g; s/${tick}[^${tick}]*${tick}//g" \
+    "$file" |
+    grep_matches -oE '\]\([^)]+\)' | sed 's/^](//; s/)$//' | sort -u)
   while IFS= read -r target; do
     [ -n "$target" ] || continue
     # A scheme or a bare fragment is not a repository path.
@@ -126,16 +154,7 @@ for file in "${files[@]}"; do
     line=$(grep -n -F -- "]($target)" "$file" | head -1 | cut -d: -f1)
     printf '%s:%s: links to a path that does not exist: %s\n' "$file" "${line:-?}" "$target"
     status=1
-  done < <(
-    # Inline code spans first: a doc that quotes a broken link as its example —
-    # `docs/backlog.md` does, in the entry this pass closes — is showing the
-    # syntax, not writing a link, and a gate that cannot tell them apart fails on
-    # the file describing it.
-    tick='`'
-    sed "s/${tick}${tick}[^${tick}]*${tick}${tick}//g; s/${tick}[^${tick}]*${tick}//g" \
-      "$file" |
-      grep -oE '\]\([^)]+\)' | sed 's/^](//; s/)$//' | sort -u
-  )
+  done <<<"$targets"
 done
 
 if [ "$status" -eq 0 ]; then

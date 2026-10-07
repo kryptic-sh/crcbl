@@ -144,6 +144,9 @@ jobs:
       - name: The docs cite paths that exist
         run: ./tools/check-doc-citations.sh
 
+      - name: Prose checks reject incomplete scans
+        run: bash tools/prose-checks-test.sh
+
       # A string literal wrapped without its trailing `\` keeps the newline and
       # the next line's indentation, so the message prints as a sentence with a
       # hole in it. It compiles, `rustfmt` leaves it alone, clippy has no lint

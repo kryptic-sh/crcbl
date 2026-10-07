@@ -638,16 +638,6 @@ cursor assertions. `focus_and_confirm` in
 `SetForegroundWindow` was refused. A desktop capable of granting focus is still
 required to validate this test; it was not skipped or weakened.
 
-## Verification tools can succeed when their programs are missing
-
-`tools/check-doc-citations.sh` and `tools/check-wrapped-strings.sh` returned
-success locally when invoked with Git Bash without its `usr/bin` on `PATH`:
-`grep` and `sed` were missing, so no content was inspected. Rerunning with the
-correct `PATH` exercised the checks and passed. Add explicit required-program
-checks or propagate failures out of their process substitutions; preserve the
-existing assertions rather than treating an empty scan as evidence. CI uses a
-complete Linux tool environment; that does not validate this failure path.
-
 ## Checks that fail without a defect (2026-10-06)
 
 Each of these has failed once and passed on a rerun with the code unchanged. A

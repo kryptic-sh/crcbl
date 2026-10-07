@@ -19,11 +19,15 @@
 # `crcbl-wl-scanner` stay quiet without an exception list to maintain.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+script_dir=$(dirname "$0")
+cd "$script_dir/.."
 
 files=("$@")
 if [ ${#files[@]} -eq 0 ]; then
-  mapfile -t files < <(git ls-files '*.rs')
+  tracked=$(git ls-files '*.rs')
+  if [ -n "$tracked" ]; then
+    mapfile -t files <<<"$tracked"
+  fi
 fi
 
 # A gate whose scope matches nothing reports success forever.
@@ -54,6 +58,12 @@ if grep -nP "$pattern" "${files[@]}"; then
   printf 'backslash that joins its halves, so it prints with the newline and\n'
   printf "the next line's indentation inside the sentence. Add the backslash.\n"
   exit 1
+else
+  result=$?
+  if [ "$result" -ne 1 ]; then
+    printf 'wrapped strings: grep could not complete the scan (status %s)\n' "$result" >&2
+    exit "$result"
+  fi
 fi
 
 printf 'wrapped strings: %s file(s) checked, no collapsed literals\n' "${#files[@]}"
