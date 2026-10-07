@@ -50,7 +50,7 @@ Workspace formatting and all-feature Clippy pass. The full workspace test run
 fails only at the recorded Windows foreground-focus setup, with logs under
 `%TEMP%/crcbl-outliner-range-`. Native CI for this slice remains pending.
 
-The audit through EW `c91e46fe` found no additional proven feature to migrate or
+The audit through EW `3d71b0c0` found no additional proven feature to migrate or
 add. Put a reproduced engine limitation here before lower-priority feature work,
 with the game caller, required contract and a regression case. Existing game
 acceptance tasks below do not establish a missing engine API.
@@ -75,6 +75,18 @@ when armor is replaced during a drag, an occupied stash rejects protected
 equipment, or automatic placement excludes secure storage. These are EW
 equipment and loot policies; no reusable engine transfer requirement was
 demonstrated. Keep them in the game.
+
+Recent revival fixes in `src/game_tick.rs`, `src/game_character_revival.rs` and
+`src/game_nutrition.rs` order rescuer nutrition death, preparation handoffs,
+revival completion and defibrillator stowing. Their regression cases in
+`src/game_revival_nutrition_tests.rs`,
+`src/game_revival_transition_timing_tests.rs` and
+`src/game_revival_stow_death_tests.rs` protect gameplay timing and exact tool
+ownership. These contracts depend on EW's health, equipment and revival rules;
+they do not demonstrate a missing crcbl scheduler API. Keep the remaining
+bleeding combinations, moving-AI stow/death checks, player handoffs and native
+revival playback in EW. The nearby-player perception/healing discrepancy still
+needs diagnosis in EW before it can establish any engine requirement.
 
 Prone weapon/terrain handling still needs a game behavior decision and
 validation before a reusable port can be specified. GPU residency likewise needs
