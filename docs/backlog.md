@@ -475,9 +475,19 @@ same pin.
   which passed CI whole. The WGSL and DXIL came out unchanged; 46 Metal files
   changed, mostly `#line` directives, as did nine SPIR-V modules, and
   `crcbl-mtl`'s embedded copy of `indirect_count_args.metal` moved with them.
-  dxc v1.9.2607 is already the latest. The local `~/.local/opt` slangc on the
-  Windows machine is still 2026.14 and now warns; installing 2026.18.2 there
-  restores the byte check. Main went green with it, and the branch was deleted.
+  dxc v1.9.2607 is already the latest. Main went green with it, and the branch
+  was deleted. Local Windows verification on 2026-10-07 found a remaining
+  portability gap: Slang 2026.18.2 is now installed under
+  `~/.local/opt/slang-2026.18.2`, but setting `CRCBL_SLANGC` to it makes
+  `cargo check -p crcbl-shaders` reject `atlas_view.wgsl`. The fresh output
+  equals the committed file after CRLF-to-LF normalization;
+  `build.rs::recompile` compares raw bytes. No artifact was regenerated and the
+  compiler override was not persisted. Define a shared canonical text-output
+  policy for generation and verification while retaining exact binary checks and
+  detection of real text changes. Other shader targets remain unchecked locally
+  with this pin. The log is `%TEMP%/crcbl-pinned-shader-byte-check.log`. The
+  existing Windows DXC also fails the manifest's version-string match and skips
+  its byte check; inspect its reported version before changing that contract.
 - **Held, with the reason:** `rand_core` and `rand_chacha` stay on 0.9, since
   `proptest` 1.11 (its latest) still depends on that line and 0.10 would put a
   second copy under `deny.toml`'s duplicate ban. Move when proptest does. Every
