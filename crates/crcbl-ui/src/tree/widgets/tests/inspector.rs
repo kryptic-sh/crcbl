@@ -10,6 +10,9 @@ use super::*;
 use crate::tree::widgets::inspector::{FieldEdit, Inspection, Overrides, VARIANT_LABEL};
 use crate::tree::{Content, NodeKey};
 
+#[path = "inspector/identity.rs"]
+mod identity;
+
 /// A component with one field of every shape a row is drawn for.
 ///
 /// Field for field it is `apps/puppet`'s `Surface` — a `String`, a `[f64; 3]`

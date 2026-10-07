@@ -854,6 +854,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Ui::collapsing_keyed` keeps a group's open state with its identity.**
+  Reordering groups preserves their state without tying it to sibling position
+  or displayed title. Inspector composite groups use field names as keys, so
+  switching an enum variant no longer opens a different field's group merely
+  because it occupies the same row.
+
 - **Non-mutating upright previews from `crcbl_phys::CharacterController`.**
   `preview_upright(world.overlap_queries(), &mut scratch, motion)` returns an
   `UprightPreview`: the `MoveOutcome`, the resulting `capsule`, the `ground` and
@@ -4386,9 +4392,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Ui::inspector` and `Ui::inspector_with` build one row per `Reflect::fields`
   entry over a `&mut dyn Reflect`: a checkbox for a `bool`, a text input for a
   `String`, a drag-value for a number bounded by `Field::range` and stepped by
-  `Field::step`, and a `Ui::collapsing` header for a struct, an enum or a list
-  whose body is reached through `Reflect::field_mut` and is not built while it
-  is shut. An enum's header carries its active variant, and a list's elements
+  `Field::step`, and a `Ui::collapsing_keyed` header for a struct, an enum or a
+  list whose body is reached through `Reflect::field_mut` and is not built while
+  it is shut. An enum's header carries its active variant, and a list's elements
   inherit the list's own range and step. **An edit is a command, not a write**:
   `Inspection::edits` is a `FieldEdit` per change — the dotted `set_path` path,
   the value the field held and the one it holds now — and undoing one is

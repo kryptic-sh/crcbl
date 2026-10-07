@@ -16,10 +16,10 @@
 //! | [`ValueKind::Text`] | [`Ui::text_input`] |
 //!
 //! A field that is not a leaf — a [`Kind::Struct`], a [`Kind::Enum`] or a
-//! [`Kind::List`] — is a [`Ui::collapsing`] classed `.inspector-group` whose
+//! [`Kind::List`] — is a [`Ui::collapsing_keyed`] classed `.inspector-group` whose
 //! body holds that value's own rows, reached through
 //! [`Reflect::field_mut`]. A struct's and an
-//! enum's rows are named by their fields and a list's by their indices, and an
+//! enum's groups are keyed by their fields and a list's by their indices, and an
 //! enum's header carries its active variant after its label, because
 //! [`Reflect::fields`] describes that variant
 //! alone. **Depth is styling, not machinery**: the nesting a reader sees is
@@ -707,7 +707,7 @@ impl Ui {
                         Some(variant) => format!("{}: {variant}", row.label),
                         None => row.label.to_owned(),
                     };
-                    self.collapsing(".inspector-group", &title, |ui| {
+                    self.collapsing_keyed(row.name, ".inspector-group", &title, |ui| {
                         if options.variants
                             && let Some(variant) = ui.variant_select(&*child)
                         {

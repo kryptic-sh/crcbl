@@ -12,6 +12,7 @@
 //! WAI-ARIA Authoring Practices' tree view pattern; `focus/mod.rs` has the
 //! rule, and [`Ui::tree_item_step`] is it.
 
+use std::hash::Hash;
 use std::panic::Location;
 
 use super::{Ui, WidgetState};
@@ -61,13 +62,35 @@ impl Ui {
         let selector = super::typed("collapsing", selector);
         let mut row = None;
         self.block_with(&selector, &[], Behavior::NONE, |ui| {
-            let (response, open) = ui.disclosure_row(Row::Header, title);
-            row = Some(response);
-            if open {
-                ui.block(".collapsing-body", &[], body);
-            }
+            row = Some(ui.collapsing_contents(title, body));
         });
         row.expect("the row is built inside the block")
+    }
+
+    /// [`Ui::collapsing`] keyed by the item's identity rather than its sibling
+    /// position. The open state follows `key` when items are reordered; an
+    /// `#id` in `selector` does not key the group, as with [`Ui::block_keyed`].
+    pub fn collapsing_keyed(
+        &mut self,
+        key: impl Hash,
+        selector: &str,
+        title: &str,
+        body: impl FnOnce(&mut Self),
+    ) -> Response {
+        let selector = super::typed("collapsing", selector);
+        let mut row = None;
+        self.block_keyed(key, &selector, &[], |ui| {
+            row = Some(ui.collapsing_contents(title, body));
+        });
+        row.expect("the row is built inside the block")
+    }
+
+    fn collapsing_contents(&mut self, title: &str, body: impl FnOnce(&mut Self)) -> Response {
+        let (response, open) = self.disclosure_row(Row::Header, title);
+        if open {
+            self.block(".collapsing-body", &[], body);
+        }
+        response
     }
 
     /// A tree node with children: a `tree-node` block holding a `.tree-row` —

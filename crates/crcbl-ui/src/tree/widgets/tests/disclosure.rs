@@ -5,6 +5,32 @@ use super::*;
 use crate::style::PseudoClasses;
 use crate::tree::Response;
 
+#[test]
+fn keyed_headers_keep_their_open_state_when_reordered() {
+    let mut ui = Ui::new();
+    let page = |ui: &mut Ui, pointer, names: &[&str]| {
+        frame(ui, pointer, NavInput::default(), |ui| {
+            names
+                .iter()
+                .map(|name| ui.collapsing_keyed(name, "#group", "Group", |_| {}))
+                .collect::<Vec<_>>()
+        })
+    };
+    let before = page(&mut ui, idle(), &["first", "second"]);
+    let on = centre(&ui, before[0].key);
+    page(&mut ui, press(on), &["first", "second"]);
+    let opened = page(&mut ui, release(on), &["first", "second"]);
+    assert!(opened[0].changed && ui.is_open(opened[0].key));
+    assert!(!ui.is_open(opened[1].key));
+
+    let reordered = page(&mut ui, idle(), &["second", "first"]);
+    assert_eq!(reordered[0].key, before[1].key);
+    assert_eq!(reordered[1].key, before[0].key);
+    assert!(!ui.is_open(reordered[0].key));
+    assert!(ui.is_open(reordered[1].key));
+    assert!(ui.duplicate_keys().is_empty());
+}
+
 /// What one frame of the header page built.
 struct HeaderPage {
     header: Response,

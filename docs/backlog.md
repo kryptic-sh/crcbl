@@ -13,6 +13,16 @@ UI behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
 coverage and the native CI matrix for each change. EW adoption remains
 game-owned and does not delay this phase.
 
+**Current UI slice awaiting CI:** inspector composite groups now use
+`Ui::collapsing_keyed`, so switching enum fields cannot transfer a previous
+field's open state. The variant-switch regression failed before the fix; the
+keyed-header reorder regression fails when its supplied key is discarded.
+Workspace formatting and all-feature Clippy pass. Full workspace tests fail only
+at the recorded Windows foreground-focus setup. The `ui_inspector` and
+`ui_widgets` goldens match their committed references on local Vulkan and D3D12;
+Vulkan validation is clean. Logs use `%TEMP%/crcbl-ui-group-identity-`. Native
+matrix and browser validation for this UI change remain pending.
+
 The audit through EW `71ae9135` found no additional proven feature to migrate or
 add. Put a reproduced engine limitation here before lower-priority feature work,
 with the game caller, required contract and a regression case. Existing game
@@ -4017,14 +4027,6 @@ in `crcbl_input::list`). Decisions, then what is left.
 
 `Ui::inspector` landed with the gaps below.
 
-- **Rows are keyed by position, not by field name.** `Ui::collapsing` has no
-  keyed variant, so a group's open state follows its index among its siblings. A
-  struct's `fields()` is `&'static` and cannot move, but **an enum's variant
-  switch (2026-10-03) can now trip it**: a nested group open at one position in
-  the variant left stays open at that position in the variant switched to, under
-  another field's header. No component in the workspace has a variant holding a
-  composite field, so nothing shows it yet. The fix is a `Ui::collapsing_keyed`,
-  or a keyed block per row — and either moves the inspector golden's tree.
 - **Only a `Kind::List` inherits its parent's range and step.** A
   `#[reflect(min, max)]` on a nested struct — a `glam::DVec3` position, say — is
   dropped, because that struct's own fields carry `range: None` and the widget
