@@ -370,6 +370,17 @@ same pin.
 
 **What is left:**
 
+- **Re-surveyed 2026-10-07:** the compatible lockfile refresh passed local
+  workspace formatting and Clippy, `cargo deny --all-features check` and
+  `cargo check --locked --manifest-path crates/crcbl-net/fuzz/Cargo.toml` and
+  the parsed-font UI tests. Full workspace tests completed with only the known
+  Windows foreground-focus setup failure in `crcbl-shell`; logs use
+  `%TEMP%/crcbl-deps-oct07-`. Native Unix and browser checks on these updated
+  locks remain pending CI. Cargo's verbose dry run also reports `glam` 0.34.1
+  and `skrifa` 0.48.0 beyond current constraints. Migrate these separately,
+  preserving simulation hashes and parsed-font output checks. EW was notified
+  that a future glam update requires aligning its direct dependency before
+  adopting that engine pin.
 - **Slang 2026.14 → 2026.18.2: done 2026-09-25** (`7c536496`, `42fd36b0`),
   through CI's `regenerated-shaders` artifact on branch `deps/slang-2026.18`,
   which passed CI whole. The WGSL and DXIL came out unchanged; 46 Metal files

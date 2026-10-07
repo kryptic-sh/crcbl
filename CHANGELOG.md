@@ -6481,6 +6481,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Refreshed the workspace and decoder-fuzz dependency locks**, including
+  `ctutils`, `libc`, `zerocopy` and `zeroize`, plus workspace font/Objective-C
+  dependencies and the fuzz build's `arbitrary` and `cc`. Dependency feature
+  selections and manifest constraints are unchanged.
+
 - **The editor's Reload on the changed-on-disk bar is one undoable entry**,
   through `Document::revert`, where it opened the scene again and started its
   history over: Ctrl+Z brings back the edits it replaced. A header changed on
