@@ -15,7 +15,7 @@ Work in this order before the lower-priority backlog:
   regressions green. This is a consumer migration, not another engine feature.
 
 Upstream review: pulled crcbl `origin/main` with `--ff-only` before this update;
-the checkout was already at `e858a5b0`. Reviewed against EW main `8e06e586`. The
+the checkout was already at `3c2275b7`. Reviewed against EW main `24d262cd`. The
 current `world/arc_sweep.rs` still exposes only closest accelerated contacts.
 EW's `src/controller_ballistic.rs` still uses `find_wall` and `hits_ceiling`
 forecast bisections, so this handoff remains open.
@@ -179,7 +179,15 @@ delayed death. `Game::draw_raid_quest_availability` in `src/game_map_quests.rs`
 derives remaining targets from credited kills and combatant life state. These
 are game combat and objective rules using existing engine capabilities. They add
 no engine prerequisite; selectable accelerated contacts remain the first
-implementation request.
+implementation request. The subsequent attack-source and required/forbidden
+armor conditions also stay in EW: `QuestKill::damage_source` and
+`QuestKill::worn_armor` retain game combat metadata, while
+`KillCondition::required_armor` and `KillCondition::forbidden_armor` apply game
+progression rules. Unknown equipment is distinct from recorded empty slots.
+These contracts do not demonstrate a missing engine API. The full-flight
+gear-change regression in `src/game_quest_forbidden_armor_tests.rs` exercises
+impact-time sampling with the existing physics path; it does not validate the
+requested accelerated-contact API.
 
 1. **Curved-path collision queries with contact times — delivered 2026-10-06,
    awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
