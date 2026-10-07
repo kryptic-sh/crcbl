@@ -140,7 +140,7 @@
 //! when [`Document::membership`] moves, which is an entity entering or leaving,
 //! and the flatten runs only when the widget says its model is stale.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crcbl::math::Vec2;
 use crcbl::registry::PlayControls;
@@ -1442,7 +1442,15 @@ impl Panels {
         }
         self.counted = document.membership();
         self.outline = document.outline();
-        self.outliner.invalidate();
+        let retained: HashSet<OutlinerId> = self
+            .outline
+            .iter()
+            .enumerate()
+            .flat_map(|(index, (_, ids))| {
+                std::iter::once(system_row(index)).chain(ids.iter().copied().map(entity_row))
+            })
+            .collect();
+        self.outliner.retain(|id| retained.contains(&id));
     }
 
     /// Carries a rename forward a frame: engages its input the first frame it

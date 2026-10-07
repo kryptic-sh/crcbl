@@ -859,6 +859,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_ui::OutlinerState::retain` removes state for deleted model items.**
+  Applications supply membership in their complete model, including rows hidden
+  under collapsed branches. Retained rows keep selection, expansion and click
+  history; the next build refreshes the visible rows.
+
 - **`Ui::collapsing_keyed` keeps a group's open state with its identity.**
   Reordering groups preserves their state without tying it to sibling position
   or displayed title. Inspector composite groups use field names as keys, so
@@ -5878,6 +5883,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   migration — everything here is v0.
 
 ### Fixed
+
+- **Deleting and undoing an editor entity no longer reuses its old click to
+  start renaming.** The outliner forgets removed rows when document membership
+  changes, while preserving selections hidden inside collapsed systems.
 
 - **Subdividing character movement preserves wall clearance.** Upright and lying
   character moves check their skin envelope when the physical sweep misses, so

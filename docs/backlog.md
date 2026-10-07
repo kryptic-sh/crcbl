@@ -3,70 +3,45 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## Top priority: new EW engine requirements
+## Current priority: UI and editor
 
-### P0: validate subdivided character wall clearance
+Continue the UI/editor phase after the EW-requested engine work. Keep shared UI
+behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
+coverage and the native Linux/macOS/Windows CI matrix for each change. Reconcile
+older entries with the implementation before choosing a slice.
 
-The implementation in `character/skin.rs`, `world/capsule_sweep.rs` and
-`mesh/query.rs` now checks the clearance envelope after a physical sweep miss.
-`character/skin_tests.rs` reproduces EW's original failure and covers oblique
-approach, corners, parallel/departing motion, lying bodies, mesh floor/wall
-selection, short step climbing, slopes and recorded/unrecorded equivalence. The
-original regression failed before the fix. Removing the envelope, incoming
-filter, grounded-slope exemption, mesh predicate or deferred step back-off
-independently makes its corresponding regression fail.
+### Validate outliner model cleanup
 
-The focused character suite, workspace formatting and final all-feature Clippy
-pass. The full workspace run completed with only the already recorded Windows
-foreground-focus setup failure in
-`hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`;
-`SetForegroundWindow` refused focus. The physics tests passed, including the new
-regressions. Logs are `%TEMP%/crcbl-wall-skin-workspace.log` and
-`%TEMP%/crcbl-wall-skin-clippy-final.log`. Native Linux/macOS/Windows CI for the
-new source revision remains pending. Do not close this requirement until the
-matrix passes. `SlideContact::clearance_only` distinguishes the added contacts
-from physical-hit fractions. EW owns adoption, blocked-waypoint and moving-stow
-game acceptance; no EW checkout was edited.
+`OutlinerState::retain` in `crates/crcbl-ui/src/tree/widgets/outliner/state.rs`
+removes state for items absent from the application's complete model, including
+click history, while retaining valid hidden rows. `Panels::refresh` calls it
+after document membership changes. The editor regression reproduced a click
+before deletion combining with a click after undo to start renaming. It fails
+before the fix and passes with it; outliner unit checks cover hidden
+selection/expansion and range/click retention, with each removal mechanism
+independently disabled to prove failure. Focused UI and editor tests, workspace
+formatting and all-feature Clippy pass. The full workspace run completed with
+only the existing Windows foreground-focus setup failure in
+`hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`. Logs use
+`%TEMP%/crcbl-outliner-retain-`. Native CI for this slice remains pending; close
+this entry once it passes.
 
-### Other EW audit findings and UI follow-up
+### Further editor scope
 
-**Next phase, after the EW-requested engine features pass their engine tests and
-native CI:** continue the UI and editor work. Reconcile the UI remainder below
-and `docs/plan/08-editor.md` with the implementation before selecting each
-slice; older entries can describe features that have since shipped. Keep shared
-UI behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
-coverage and the native CI matrix for each change. EW adoption remains
-game-owned and does not delay this phase.
+The scene-editor MVP exit criteria in `docs/plan/08-editor.md` are recorded as
+met headlessly. Pane dragging extends the current splitter-only docking
+decision; richer inspector editing may need new reflection contracts;
+scene/asset expansion should begin with a concrete authoring workflow. The
+optional scope question has no answer yet. Continue correcting existing UI and
+editor workflows without treating that question as a blocker.
 
-**UI validation:** Pages run `37624430936` at `ce03bd09` completed successfully
-and deployed. Tumble passed with its existing pinned hash and polling budget.
-The native disabled-outliner regression passed on macOS and Windows in CI
-`37624430912`; Linux first failed while downloading pinned viewer assets, then
-its retry was cancelled by the docs push. The following docs-only run
-`37630434174` passed the native Linux/macOS/Windows test jobs but failed the
-Metal e2e job. The failure was `Hal(DeviceLost)` while
-`grass_shells::shells_draw_strands_at_the_roots_a_card_field_leaves_open` waited
-for readback: the Apple Paravirtual device reported
-`kIOGPUCommandBufferCallbackErrorHang`, with its recorded encoders marked
-completed. It was not a pixel mismatch. Require the next source revision's full
-matrix to pass; do not weaken the rendering check. Logs for the first download
-failure and Metal failure are `%TEMP%/crcbl-ce03bd09-linux-failure.log` and
-`%TEMP%/crcbl-ff487-mtl-failure.log`.
+### EW engine requests
 
-**Next UI/editor scope:** the existing scene-editor MVP exit criteria in
-`docs/plan/08-editor.md` are recorded as met headlessly. The owner was offered a
-choice of pane dragging/layout customization, richer inspector editing, or
-scene/asset workflows for the next expansion. Pane dragging extends the current
-splitter-only docking decision; inspector expansion may need new reflection
-contracts; scene/asset work should start from a concrete authoring workflow. No
-choice has been received yet. Continue validating the current batch while
-keeping the existing docking boundary.
-
-The audit through EW `8d5f92dc` and the moving-AI draft found the wall-clearance
-requirement above. No other proven feature is ready for migration. Put a
-reproduced engine limitation here before lower-priority feature work, with the
-game caller, required contract and a regression case. Existing game acceptance
-tasks below do not establish a missing engine API.
+EW adopts engine revisions independently. Game acceptance, movement locks, gait
+changes and reachable-arrival scheduling remain in EW. New engine work needs a
+reproduced engine limitation, its caller, required contract and an engine
+regression. Existing game acceptance tasks below do not establish a missing
+engine API.
 
 The latest traversal checks in `src/controller_traversal_tests.rs` and ledge
 departure checks in `src/game_airborne_timing_tests.rs` exercise existing
@@ -4163,13 +4138,6 @@ in `crcbl_input::list`). Decisions, then what is left.
 - **`OutlinerState::select` with `Range` walks the model** to find the anchor,
   so a range click costs the model's length; `Replace` and `Toggle` are
   constant.
-- **The expansion and selection sets never shrink**: `OutlinerState` keeps an
-  `OutlinerId` for every item ever expanded or selected, including ones the tree
-  no longer holds. A `retain` against the last flatten would need the flatten to
-  report what it saw. The editor's outliner is rebuilt from the document's
-  selection whenever that changes (`Panels::follow_document`), so a deleted
-  entity's row does not stay selected there; the widget's own sets, and the
-  editor's expansion set, still keep every id.
 - **Reusable outliner row reveal is absent.** The editor already routes wheel
   scrolling with `panel::scroll` and reveals a selected scene entity with
   `Panels::reveal_row`, using the tree's scroll-offset API. A shared widget

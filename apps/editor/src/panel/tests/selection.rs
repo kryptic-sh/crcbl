@@ -64,6 +64,32 @@ fn outliner_clicks_replace_toggle_and_take_a_range() {
     assert_eq!(page.document.selection(), ids(&[3, 1, 2, 0]));
 }
 
+#[test]
+fn deleting_and_restoring_a_row_does_not_reuse_its_previous_click() {
+    let mut page = Page::built_in();
+    page.idle();
+    page.click_with(row_of(&page, 1), SelectMode::Replace);
+    assert!(page.panels.renaming.is_none());
+
+    page.document
+        .delete(&[SceneEntityId(1)])
+        .expect("held entity");
+    page.idle();
+    page.document.undo().expect("restore deleted entity");
+    page.idle();
+
+    page.click_with(row_of(&page, 1), SelectMode::Replace);
+    assert!(
+        page.panels.renaming.is_none(),
+        "a click before deletion completed a double-click"
+    );
+    page.click_with(row_of(&page, 1), SelectMode::Replace);
+    assert!(
+        page.panels.renaming.is_some(),
+        "a fresh double-click still renames"
+    );
+}
+
 /// **The outliner shows the document's whole selection, drops an entity a
 /// delete takes out of it, and keeps one whose system is collapsed.**
 #[test]
@@ -93,6 +119,20 @@ fn the_outliner_follows_the_selection_down_to_a_delete() {
         [SceneEntityId(1)],
         "collapsing its system deselected it",
     );
+
+    page.document
+        .delete(&[SceneEntityId(3)])
+        .expect("an unselected entity");
+    page.idle();
+    assert!(!page.panels.outliner.is_expanded(system_row(0)));
+    assert!(
+        page.panels
+            .outliner
+            .is_selected(entity_row(SceneEntityId(1)))
+    );
+    page.panels.outliner.set_expanded(system_row(0), true);
+    page.idle();
+    assert_eq!(page.panels.selected_rows(), [entity_row(SceneEntityId(1))]);
 }
 
 /// The colour the outliner drew `label` in, read off the draw list.
