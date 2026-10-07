@@ -555,9 +555,13 @@ serial `-j 1`), the 21 per-path tests' summed time went from 39.68 s to 32.86 s
 on Vulkan (four opens each, now three plus a device) and from 45.90 s to 38.61 s
 on D3D12 (three, now two plus a device). The family's run including the ring and
 call-per-range tests went from 93.6 s to 85.4 s on Vulkan and from 51.1 s to
-40.6 s on D3D12. **CI must confirm** the Metal render step's time: there is no
-Metal on the machine that made the change, and the saving there is a scene build
-per per-path test under Metal's validation, not measured.
+40.6 s on D3D12. **Native CI verified 2026-10-07:** run `37574438398` at
+`19d45fc3` contains the probe change and passed Metal's full job. Nextest
+reported render 104 tests in 927.301 s, forward 53 in 418.249 s, and mesh 120 in
+1020.481 s. Its log is `%TEMP%/crcbl-metal-37574438398.log`. This establishes
+native correctness, not the probe's speedup: the workload differs from the
+earlier baseline and runner variation is not controlled. A matched before/after
+run on the same Metal workload remains necessary to attribute a saving.
 
 **The render suite's failures at nextest's default concurrency, diagnosed
 2026-10-02:** AMD's Windows Vulkan driver keeps 20 devices alive per adapter and
