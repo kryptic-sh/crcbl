@@ -27,6 +27,8 @@
 # author's. The version pin is load-bearing: two Slang releases legitimately
 # emit different SPIR-V for identical source, so an unpinned byte comparison
 # would fail for a reason that is not drift.
+# Text targets use LF line endings, including when Windows Slang emits CRLF.
+# Only those newline pairs are canonicalized; binary targets stay byte-exact.
 #
 # # DXIL is compiled in two steps, and its compiler is pinned by path
 #
@@ -438,6 +440,19 @@ if [ ! -e "${SHADERS[0]}" ]; then
     exit 1
 fi
 
+# Windows Slang writes CRLF text; committed text targets use LF on every host.
+# Leave binary artifacts and any carriage return inside a line untouched.
+normalize_text_output() {
+    local line
+    {
+        while IFS= read -r line; do
+            printf '%s\n' "${line%$'\r'}"
+        done
+        printf '%s' "$line"
+    } <"$1" >"$1.lf"
+    mv "$1.lf" "$1"
+}
+
 for SOURCE in "${SHADERS[@]}"; do
     NAME="$(basename "$SOURCE" .slang)"
     read_declared_targets "$SOURCE"
@@ -474,6 +489,7 @@ for SOURCE in "${SHADERS[@]}"; do
             -profile "$SLANG_PROFILE" \
             -D CRCBL_TARGET_WGSL=1 \
             -o "$FRESH_WGSL"
+        normalize_text_output "$FRESH_WGSL"
     else
         require_undeclared_artifact_absent wgsl "$WGSL_ARTIFACT"
     fi
@@ -490,6 +506,7 @@ for SOURCE in "${SHADERS[@]}"; do
             -profile "$SLANG_PROFILE" \
             -D CRCBL_TARGET_MSL=1 \
             -o "$FRESH_MSL"
+        normalize_text_output "$FRESH_MSL"
     else
         require_undeclared_artifact_absent msl "$MSL_ARTIFACT"
     fi

@@ -476,18 +476,23 @@ same pin.
   changed, mostly `#line` directives, as did nine SPIR-V modules, and
   `crcbl-mtl`'s embedded copy of `indirect_count_args.metal` moved with them.
   dxc v1.9.2607 is already the latest. Main went green with it, and the branch
-  was deleted. Local Windows verification on 2026-10-07 found a remaining
-  portability gap: Slang 2026.18.2 is now installed under
-  `~/.local/opt/slang-2026.18.2`, but setting `CRCBL_SLANGC` to it makes
-  `cargo check -p crcbl-shaders` reject `atlas_view.wgsl`. The fresh output
-  equals the committed file after CRLF-to-LF normalization;
-  `build.rs::recompile` compares raw bytes. No artifact was regenerated and the
-  compiler override was not persisted. Define a shared canonical text-output
-  policy for generation and verification while retaining exact binary checks and
-  detection of real text changes. Other shader targets remain unchecked locally
-  with this pin. The log is `%TEMP%/crcbl-pinned-shader-byte-check.log`. The
-  existing Windows DXC also fails the manifest's version-string match and skips
-  its byte check; inspect its reported version before changing that contract.
+  was deleted. **Remaining local DXIL verification gap:** the installed Windows
+  DXC reports `1.9(5402-0d3ee6b5)(1.9.0.5402)` with a further build suffix,
+  while the manifest pins Linux's `1.9(1-0d3ee6b5)(1.9.0.1)`. The commit
+  identity agrees, but compiling `atlas_view.slang::vertexMain` through the
+  installed Windows tools produced a different DXIL artifact from the committed
+  Linux output. The reproduction is under `%TEMP%/crcbl-shader-newlines/` as
+  `atlas_view.vertex.hlsl` and `atlas_view.vertex.dxil`. `build.rs::pinned_dxc`
+  therefore skips local DXIL recompilation and `compile-shaders.sh --check`
+  refuses this compiler. Verify the Windows release asset and explain the DXIL
+  difference before defining a platform-specific pin; do not loosen the match
+  merely because the source commit agrees. Windows Slang's WGSL, MSL and SPIR-V
+  output passed after canonicalizing text CRLF to LF; the whole generator
+  remains unverified locally because of the DXC gate. Slang is installed at
+  `~/.local/opt/slang-2026.18.2/bin/slangc.exe` and was selected through
+  `CRCBL_SLANGC` for verification. A global override was not set: older
+  checkouts still reject its Windows text output. Select it per checkout after
+  adopting the fix.
 - **Held, with the reason:** `rand_core` and `rand_chacha` stay on 0.9, since
   `proptest` 1.11 (its latest) still depends on that line and 0.10 would put a
   second copy under `deny.toml`'s duplicate ban. Move when proptest does. Every

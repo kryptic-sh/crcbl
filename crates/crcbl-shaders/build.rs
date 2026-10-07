@@ -27,6 +27,8 @@
 //!    as well, because it is compiled in two steps — see
 //!    `tools/compile-shaders.sh` for why Slang's own `-target dxil` is not used
 //!    and why that variable never falls back to `PATH`.
+//!    Fresh WGSL and MSL use the generator's CRLF-to-LF canonicalization;
+//!    binary targets are compared without normalization.
 //! 5. Writes `$OUT_DIR/shaders.rs`, the static table `src/lib.rs` includes.
 
 use std::path::{Path, PathBuf};
@@ -529,6 +531,15 @@ fn recompile(
     }
     let (Ok(fresh), Ok(old)) = (std::fs::read(&out), std::fs::read(&committed)) else {
         return;
+    };
+    // Windows Slang writes CRLF text. Generation commits LF for textual
+    // targets; binary artifacts must retain every byte.
+    let fresh = match target {
+        Target::SpirV => fresh,
+        Target::Wgsl | Target::Msl => String::from_utf8(fresh)
+            .unwrap_or_else(|error| fail(&format!("{} is not UTF-8: {error}", out.display())))
+            .replace("\r\n", "\n")
+            .into_bytes(),
     };
     if fresh != old {
         fail(&format!(

@@ -5860,6 +5860,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Pinned Slang verification works with Windows text output.** Shader
+  generation and `crcbl-shaders`' build script canonicalize CRLF to LF for WGSL
+  and Metal source before comparing it with committed artifacts. Real text
+  changes still fail verification; SPIR-V and DXIL retain exact binary checks.
+
 - **A session faster than 60 Hz no longer refuses its own peers' traffic.**
   `crcbl_server::Server`, `Host` and `crcbl_client::Client` built their inbound
   budgets from `InboundRateLimitConfig::default()`, whose 120 messages a second
