@@ -139,9 +139,17 @@ impl OverlapQueries<'_> {
     ) {
         hits.clear();
         let capsule = Capsule::new(segment.start, radius, half_height);
-        sweep_capsule_hits(*self, &capsule, segment.end, filter, scratch, |id, hit| {
-            hits.push((id, hit));
-        });
+        sweep_capsule_hits(
+            *self,
+            &capsule,
+            segment.end,
+            filter,
+            scratch,
+            |_| true,
+            |id, hit| {
+                hits.push((id, hit));
+            },
+        );
         hits.sort_unstable_by(|a, b| sweep_order((a.0, a.1.part, a.1.t), (b.0, b.1.part, b.1.t)));
     }
 }

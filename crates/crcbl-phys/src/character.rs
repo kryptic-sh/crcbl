@@ -117,11 +117,12 @@ use crate::broadphase::Segment;
 use crate::collider::{Capsule, LyingCapsule};
 use crate::query::{Penetration, ShapeHit};
 use crate::world::{
-    ALL_LAYERS, ColliderId, OverlapQueries, PhysicsWorld, QueryFilter, QueryScratch, SweptContact,
+    ALL_LAYERS, ColliderId, OverlapQueries, PhysicsWorld, QueryFilter, QueryScratch,
 };
 
 mod lying;
 mod preview;
+mod skin;
 mod slide_contact;
 
 pub use lying::{LyingMoveOutcome, LyingTurnOutcome};
@@ -207,6 +208,9 @@ pub struct CharacterConfig {
     /// motion along it. Unity's `CharacterController`
     /// calls the same quantity `skinWidth`; Unreal spends it as
     /// `MAX_FLOOR_DIST`.
+    /// A move whose physical sweep misses also checks the skin envelope, so
+    /// subdividing an approach into sub-skin requests cannot consume the gap.
+    /// The envelope only blocks incoming motion, not parallel or departing moves.
     pub skin_width: f64,
     /// How many times one move may be clipped and redirected before it stops.
     ///
@@ -810,10 +814,11 @@ impl CharacterController {
             let direction = remaining / distance;
             let target = self.position + remaining;
 
-            let Some((collider, hit)) = self.sweep_body(world, body, remaining) else {
+            let Some(sweep) = self.sweep_body(world, body, remaining) else {
                 self.position = target;
                 return report;
             };
+            let (collider, hit) = (sweep.collider, sweep.hit);
             report.slides += 1;
             let mut contact = SlideContact {
                 collider,
@@ -821,6 +826,7 @@ impl CharacterController {
                 requested: remaining,
                 fraction: hit.t,
                 started_inside: hit.started_inside,
+                clearance_only: sweep.clearance.is_some(),
                 applied: DVec3::ZERO,
                 remaining: DVec3::ZERO,
                 stepped_up: false,
@@ -844,7 +850,13 @@ impl CharacterController {
             }
 
             let along = hit.t * distance;
-            if let Some(travel) = self.skin_short(along, direction, plane) {
+            let mut back_off = DVec3::ZERO;
+            let travel = if sweep.clearance.is_some() {
+                (!hit.started_inside).then_some(along)
+            } else {
+                self.skin_short(along, direction, plane)
+            };
+            if let Some(travel) = travel {
                 let travel = travel.min(distance);
                 let step = direction * travel;
                 self.position += step;
@@ -876,11 +888,9 @@ impl CharacterController {
                 // rounding size moved it an ulp along the normal each time
                 // it was asked to stand still.
                 let approach = (along * -direction.dot(plane)).max(0.0);
-                let short = self.config.skin_width - approach;
+                let short = sweep.clearance.unwrap_or(self.config.skin_width - approach);
                 if short > MIN_MOVE {
-                    let back_off = plane * short;
-                    self.position += back_off;
-                    contact.applied = back_off;
+                    back_off = plane * short;
                 }
             }
 
@@ -907,6 +917,12 @@ impl CharacterController {
                     continue;
                 }
             }
+
+            // A valid step can cross a riser's clearance envelope. Backing
+            // away before trying it would cancel a shorter forward move on
+            // every tick, preventing the capsule from reaching the landing.
+            self.position += back_off;
+            contact.applied += back_off;
 
             if plane_count == MAX_PLANES {
                 record(contact);
@@ -976,7 +992,13 @@ impl CharacterController {
         // all comes back as a sweep that ends exactly at contact and is
         // reported as a miss. Unreal spends the same two floor distances on it.
         let drop = rise + self.config.skin_width * GROUND_PROBE_SKINS;
-        let (_, landing) = self.sweep(world, over, over - UP * drop)?;
+        let (_, landing) = world.view.sweep_upright_where(
+            &Capsule::new(over, self.config.radius, self.config.half_height),
+            over - UP * drop,
+            self.filter(),
+            world.scratch,
+            |hit| hit.normal.dot(UP) > MIN_MOVE,
+        )?;
         if landing.started_inside || !self.is_walkable(landing.normal) {
             return None;
         }
@@ -1054,7 +1076,13 @@ impl CharacterController {
         from: DVec3,
         distance: f64,
     ) -> Option<GroundProbe> {
-        let found = self.sweep(world, from, from - UP * distance)?;
+        let found = world.view.sweep_upright_where(
+            &Capsule::new(from, self.config.radius, self.config.half_height),
+            from - UP * distance,
+            self.filter(),
+            world.scratch,
+            |hit| hit.normal.dot(UP) > MIN_MOVE,
+        )?;
         Some(self.ground_probe(found, distance))
     }
 
@@ -1073,20 +1101,27 @@ impl CharacterController {
 
     // ── Sweeping ───────────────────────────────────────────────────────
 
-    /// How far the capsule gets along `delta` before something stops it, a
-    /// skin width short of it across its normal, and never past `delta`
-    /// itself: see [`skin_short`](Self::skin_short).
+    /// How far along `delta` the skin envelope can go. Parallel and departing
+    /// surfaces do not obstruct the step's rise or forward travel.
     fn clear_travel(&self, world: &mut WorldReader<'_, '_>, from: DVec3, delta: DVec3) -> f64 {
         let distance = delta.length();
         if distance <= MIN_MOVE {
             return 0.0;
         }
-        match self.sweep(world, from, from + delta) {
-            None => distance,
-            Some((_, hit)) => self
-                .skin_short(hit.t * distance, delta / distance, hit.normal)
-                .map_or(0.0, |travel| travel.min(distance)),
-        }
+        world
+            .view
+            .sweep_upright_where(
+                &Capsule::new(
+                    from,
+                    self.config.radius + self.config.skin_width,
+                    self.config.half_height,
+                ),
+                from + delta,
+                self.filter(),
+                world.scratch,
+                |hit| delta.dot(hit.normal) < -MIN_MOVE,
+            )
+            .map_or(distance, |(_, hit)| hit.t * distance)
     }
 
     /// How far along `direction` the capsule can go toward a contact `along`
@@ -1104,30 +1139,6 @@ impl CharacterController {
     fn skin_short(&self, along: f64, direction: DVec3, normal: DVec3) -> Option<f64> {
         let closing = -direction.dot(normal);
         (along * closing > self.config.skin_width).then(|| along - self.config.skin_width / closing)
-    }
-
-    /// Sweep `body` from the controller's position by `delta`: the slide's one
-    /// sweep, whichever shape it is moving.
-    fn sweep_body(
-        &self,
-        world: &mut WorldReader<'_, '_>,
-        body: Body,
-        delta: DVec3,
-    ) -> Option<(ColliderId, SweptContact)> {
-        match body {
-            Body::Upright => self
-                .sweep(world, self.position, self.position + delta)
-                .map(|(collider, hit)| (collider, hit.into())),
-            Body::Lying(lying) => world.view.sweep_lying_capsule(
-                &LyingCapsule {
-                    head: self.position,
-                    ..lying
-                },
-                delta,
-                self.filter(),
-                world.scratch,
-            ),
-        }
     }
 
     /// The capsule's own sweep, with the character's body and every collider
@@ -1225,7 +1236,7 @@ mod tests {
 
     /// A dome whose summit is `y = 0`, so a character on it stands on a slope
     /// of whatever angle `on_dome` places it at.
-    fn dome_world() -> PhysicsWorld {
+    pub(super) fn dome_world() -> PhysicsWorld {
         let mut world = PhysicsWorld::new();
         world.add_sphere(Sphere::new(DVec3::new(0.0, -DOME_RADIUS, 0.0), DOME_RADIUS));
         world
@@ -1238,7 +1249,7 @@ mod tests {
     /// against that sphere grown along Y (see `query`'s swept-capsule note), so
     /// the contact normal is the radial direction from the grown shape's top
     /// cap, which is what this offsets from.
-    fn on_dome(config: &CharacterConfig, angle: f64) -> DVec3 {
+    pub(super) fn on_dome(config: &CharacterConfig, angle: f64) -> DVec3 {
         let normal = DVec3::new(
             crcbl_core::trig::sin(angle),
             crcbl_core::trig::cos(angle),
@@ -1250,7 +1261,7 @@ mod tests {
 
     /// A floor over `x < 0` whose top is `y = 0`, and a second one over
     /// `x > 0` whose top is `y = height`.
-    fn stepped_world(height: f64) -> PhysicsWorld {
+    pub(super) fn stepped_world(height: f64) -> PhysicsWorld {
         let mut world = PhysicsWorld::new();
         world.add_box(BoxCollider::new(
             DVec3::new(-25.0, -1.0, 0.0),
@@ -2060,6 +2071,10 @@ mod crease_tests;
 #[cfg(test)]
 #[path = "character/rest_tests.rs"]
 mod rest_tests;
+
+#[cfg(test)]
+#[path = "character/skin_tests.rs"]
+mod skin_tests;
 
 #[cfg(test)]
 #[path = "character/preview_tests.rs"]

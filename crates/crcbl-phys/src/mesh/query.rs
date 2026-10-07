@@ -128,6 +128,17 @@ impl TriangleMesh {
         half: DVec3,
         scratch: &mut MeshScratch,
     ) -> Option<MeshHit> {
+        self.sweep_where_with(segment, radius, half, scratch, |_| true)
+    }
+
+    fn sweep_where_with(
+        &self,
+        segment: &Segment,
+        radius: f64,
+        half: DVec3,
+        scratch: &mut MeshScratch,
+        accept: impl Fn(&ShapeHit) -> bool,
+    ) -> Option<MeshHit> {
         let (start, dir) = (segment.start, segment.end - segment.start);
         let reach = DVec3::splat(radius) + half.abs();
         let bounds = Aabb::new(
@@ -136,8 +147,7 @@ impl TriangleMesh {
         );
         self.bvh()
             .traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.found);
-        // (t, triangle, started inside)
-        let mut best: Option<(f64, u32, bool)> = None;
+        let mut best: Option<MeshHit> = None;
         for &index in &scratch.found {
             let corners = self.corners(index as usize);
             let normal = self.normal(index as usize);
@@ -148,30 +158,29 @@ impl TriangleMesh {
             } else {
                 sweep_into_triangle(start, dir, &corners, half, radius)
             };
-            if let Some(t) = t
-                && best.is_none_or(|(bt, bi, _)| t < bt || (t == bt && index < bi))
-            {
-                best = Some((t, index, inside));
+            let Some(t) = t else { continue };
+            if !best.is_none_or(|hit| t < hit.hit.t || (t == hit.hit.t && index < hit.triangle)) {
+                continue;
             }
-        }
-        let (t, triangle, started_inside) = best?;
-        let corners = self.corners(triangle as usize);
-        let normal = self.normal(triangle as usize);
-        let centre = start + dir * t;
-        let closest = segment_triangle(centre - half, centre + half, &corners, normal);
-        let away = closest.on_segment - closest.on_triangle.point;
-        let distance = away.length();
-        Some(MeshHit {
-            triangle,
-            barycentric: closest.on_triangle.barycentric,
-            hit: ShapeHit {
+            let centre = start + dir * t;
+            let closest = segment_triangle(centre - half, centre + half, &corners, normal);
+            let away = closest.on_segment - closest.on_triangle.point;
+            let hit = ShapeHit {
                 t,
                 point: closest.on_triangle.point,
-                normal: facing(away, distance, normal, centre - corners[0]),
-                started_inside,
+                normal: facing(away, away.length(), normal, centre - corners[0]),
+                started_inside: inside,
                 part: 0,
-            },
-        })
+            };
+            if accept(&hit) {
+                best = Some(MeshHit {
+                    triangle: index,
+                    barycentric: closest.on_triangle.barycentric,
+                    hit,
+                });
+            }
+        }
+        best
     }
 
     /// Whether a sphere in the mesh's frame touches any triangle.
@@ -374,9 +383,25 @@ impl PlacedMesh {
         half: DVec3,
         scratch: &mut MeshScratch,
     ) -> Option<ShapeHit> {
+        self.sweep_where(segment, radius, half, scratch, |_| true)
+    }
+
+    /// The first accepted triangle contact, with world-space geometry.
+    pub(crate) fn sweep_where(
+        &self,
+        segment: &Segment,
+        radius: f64,
+        half: DVec3,
+        scratch: &mut MeshScratch,
+        accept: impl Fn(&ShapeHit) -> bool,
+    ) -> Option<ShapeHit> {
         let local = Segment::new(self.to_local(segment.start), self.to_local(segment.end));
         let half = self.transform.rotation.inverse() * half;
-        let hit = self.mesh.sweep_with(&local, radius, half, scratch)?;
+        let hit = self
+            .mesh
+            .sweep_where_with(&local, radius, half, scratch, |hit| {
+                accept(&self.hit_to_world(*hit))
+            })?;
         Some(self.hit_to_world(hit.hit))
     }
 

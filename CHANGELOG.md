@@ -16,6 +16,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_phys::SlideContact` has a `clearance_only` field.** When set,
+  `fraction` and `started_inside` describe the skin envelope rather than the
+  physical capsule. Callers constructing contacts must provide the field;
+  recorded physical contacts retain their existing meaning.
+
 - **Public math types now use glam 0.34.** Applications that pass their own glam
   vectors, matrices or quaternions into engine APIs must align their glam
   dependency with the engine's version line.
@@ -5873,6 +5878,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   migration — everything here is v0.
 
 ### Fixed
+
+- **Subdividing character movement preserves wall clearance.** Upright and lying
+  character moves check their skin envelope when the physical sweep misses, so
+  short requests cannot consume the gap that a longer request preserves.
+  Parallel and departing motion remain free, and ground snapping continues to
+  own clearance on walkable slopes. Short moves can also climb valid steps: the
+  controller tries the step before backing away from its riser, and parallel
+  faces cannot hide its landing or ground support.
 
 - **Pinned Slang verification works with Windows text output.** Shader
   generation and `crcbl-shaders`' build script canonicalize CRLF to LF for WGSL

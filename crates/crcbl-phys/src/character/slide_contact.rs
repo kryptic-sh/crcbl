@@ -23,7 +23,9 @@ use crate::world::ColliderId;
 /// # Fractions are distance along one straight sweep, never time
 ///
 /// [`fraction`](Self::fraction) is the share of [`requested`](Self::requested)
-/// covered before the capsule touched the collider, in `[0, 1]`. It measures
+/// covered before the capsule touched the collider, in `[0, 1]`. For a
+/// [`clearance_only`](Self::clearance_only) contact, it is where the skin
+/// envelope touched instead. It measures
 /// distance along that one straight segment, from where the capsule stood when
 /// the sweep began.
 ///
@@ -50,7 +52,7 @@ use crate::world::ColliderId;
 ///
 /// # How the fields fit together
 ///
-/// The capsule keeps a [`skin_width`] off the surface it met, measured along
+/// For a physical contact, the capsule keeps a [`skin_width`] off the surface it met, measured along
 /// [`normal`](Self::normal). With `direction = requested.normalize()`,
 /// `along = fraction * |requested|` and `closing = -direction · normal`, a
 /// sweep that did not step up and touched from further than that
@@ -65,6 +67,12 @@ use crate::world::ColliderId;
 /// lying body measures both against a wall's normal made level, the plane its
 /// slide clips against, rather than the leaning one recorded here. The next
 /// contact's `requested` is this one's `remaining`, exactly.
+///
+/// A clearance-only contact already includes the skin in the swept radius.
+/// It advances by `requested * fraction`, without subtracting another skin,
+/// or backs out of the envelope's initial overlap. Only incoming clearance
+/// contacts are recorded; the envelope does not block motion along or away
+/// from a surface.
 ///
 /// [`move_and_slide_into`]: super::CharacterController::move_and_slide_into
 /// [`move_lying_into`]: super::CharacterController::move_lying_into
@@ -91,14 +99,22 @@ pub struct SlideContact {
     /// [`remaining`](Self::remaining).
     pub requested: DVec3,
     /// How much of [`requested`](Self::requested) the capsule covered before
-    /// touching, in `[0, 1]`. A distance share along that straight sweep, not
+    /// touching, in `[0, 1]`, or before its skin envelope touched when
+    /// [`clearance_only`](Self::clearance_only) is set. A distance share along that straight sweep, not
     /// a time: see [the type's notes](Self#fractions-are-distance-along-one-straight-sweep-never-time).
     pub fraction: f64,
-    /// Whether the capsule was already touching or inside the collider when
+    /// Whether the capsule (its skin envelope for a clearance-only contact)
+    /// was already touching or inside the collider when
     /// the sweep began. The fraction is then zero whichever way the capsule
     /// was moving, and the slide backed it off the surface by a skin width
-    /// instead of advancing it.
+    /// instead of advancing it. A clearance-only contact backs out by the
+    /// envelope's overlap depth instead.
     pub started_inside: bool,
+    /// Whether only the skin envelope met this collider. The physical body
+    /// sweep missed; `fraction` and `started_inside` describe the capsule
+    /// enlarged by the configured skin width instead. Parallel and departing
+    /// clearance contacts are ignored.
+    pub clearance_only: bool,
     /// How far this sweep moved the capsule: the advance to a skin width short
     /// of the contact, or the back-off to a skin width of one that touched
     /// nearer than that, and the whole step when

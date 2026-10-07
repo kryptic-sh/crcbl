@@ -5,53 +5,28 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ## Top priority: new EW engine requirements
 
-### P0: preserve character wall clearance across movement subdivisions
+### P0: validate subdivided character wall clearance
 
-**Required before lower-priority engine feature work.** EW's moving-AI
-revival/stow timing work needs constant-direction character motion against a
-static wall to preserve the same clearance when a movement interval is split at
-an arrival or equipment boundary. The missing contract is in
-`crates/crcbl-phys/src/character.rs::CharacterController::move_and_slide`, not a
-request to move EW's medical or waypoint scheduler into crcbl.
+The implementation in `character/skin.rs`, `world/capsule_sweep.rs` and
+`mesh/query.rs` now checks the clearance envelope after a physical sweep miss.
+`character/skin_tests.rs` reproduces EW's original failure and covers oblique
+approach, corners, parallel/departing motion, lying bodies, mesh floor/wall
+selection, short step climbing, slopes and recorded/unrecorded equivalence. The
+original regression failed before the fix. Removing the envelope, incoming
+filter, grounded-slope exemption, mesh predicate or deferred step back-off
+independently makes its corresponding regression fail.
 
-A direct physics-only regression,
-`wall_skin_is_independent_of_displacement_partition`, fails in EW's current
-`src/game_ai_medical_boundary.rs` unpublished draft on
-`wip/moving-ai-stow-timing`. The test uses no EW controller, AI, nutrition or
-scheduling code. Reproduce with `CharacterConfig::default()` and independent
-identical worlds/controllers:
-
-- Add a floor box at `(0, -0.5, 0)`, half-extents `(10, 0.5, 10)`.
-- Add a wall box at `(0, 1, -(radius + skin_width + 0.1))`, half-extents
-  `(5, 1, 0.1)`.
-- Start the controller at `Y * (radius + half_height + skin_width)` and call
-  `move_and_slide(world, -Y * 0.1)`; require the result to be grounded.
-- Set `increment = skin_width * 0.5`. Move one controller once by
-  `-Z * (increment * 15)`, and the other fifteen times by `-Z * increment`.
-- Require final positions to agree within `1e-9`. The reproduced result is
-  coarse `(0, 0.9099999999999999, -6.418476861114186e-17)` versus split
-  `(0, 0.9099999999999999, -0.005000000000000064)`, with `skin_width = 0.01`.
-
-The focused Windows run failed again during this audit; its log is
-`%TEMP%/ew-crcbl-update-review/engine-wall-skin-backlog-audit.log`. It ran
-against EW's pinned `cd66ad90`. After pulling engine `main` at `ce03bd09`,
-comparison confirmed no changes to `crcbl-phys`, `crcbl-core`, `crcbl-ecs`, the
-workspace manifest or lockfile between those revisions. This is not a native
-Linux/macOS validation or a claim that the engine fix already exists.
-
-**Implementation and acceptance:** investigate the short sweep that consumes
-clearance without reaching physical contact: `CharacterController::slide`
-accepts its full request on a sweep miss, whereas a sweep hit applies
-`skin_short` and may back away. The documented skin contract currently describes
-contact sweeps; make subdivided approach clearance explicit and enforce it
-without blocking valid motion away from or along a wall. Add the minimal
-regression to crcbl, prove it fails before the fix, and cover sub-skin requests,
-oblique approaches, corners, slopes, steps and lying-body motion. Preserve
-bounded query work and the `move_and_slide_into` equivalence contract. Engine
-workspace checks and native CI must pass; EW then adopts the revision and reruns
-its blocked-waypoint and moving-stow regressions. The game still owns movement
-locks, gait changes and reachable-arrival scheduling; the engine fix alone does
-not finish that work.
+The focused character suite, workspace formatting and final all-feature Clippy
+pass. The full workspace run completed with only the already recorded Windows
+foreground-focus setup failure in
+`hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`;
+`SetForegroundWindow` refused focus. The physics tests passed, including the new
+regressions. Logs are `%TEMP%/crcbl-wall-skin-workspace.log` and
+`%TEMP%/crcbl-wall-skin-clippy-final.log`. Native Linux/macOS/Windows CI for the
+new source revision remains pending. Do not close this requirement until the
+matrix passes. `SlideContact::clearance_only` distinguishes the added contacts
+from physical-hit fractions. EW owns adoption, blocked-waypoint and moving-stow
+game acceptance; no EW checkout was edited.
 
 ### Other EW audit findings and UI follow-up
 
@@ -63,32 +38,20 @@ UI behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
 coverage and the native CI matrix for each change. EW adoption remains
 game-owned and does not delay this phase.
 
-**UI validation remaining:** engine CI `37618134904` passed completely at
-`dfc47089`, covering the inspector identity, scrolling tabs and outliner range
-selection changes on Linux, macOS and Windows, including GPU and windowed
-checks. Pages run `37614793414` finished with only the Tumble timeout failing;
-its macOS seam probe and deployment were skipped. The browser timeout entry
-below retains the evidence. The next push includes the test-only outliner
-follow-up and reruns the unchanged Tumble check with the full browser suite;
-verify that run and its deployment before closing this gate.
-
-The outliner pointer regression in
-`crates/crcbl-ui/src/tree/widgets/tests/outliner/disabled.rs` covers disabled
-toggle and row clicks, disabling between press and release, and re-enabling
-without replaying the discarded input or counting it toward a double-click.
-Removing either production disabled guard makes it fail. Workspace formatting
-and all-feature Clippy pass; full workspace tests fail only at the recorded
-Windows foreground-focus setup. Logs use `%TEMP%/crcbl-outliner-disabled-`. This
-test-only follow-up still needs its native CI matrix after the push.
-
-At `ce03bd09`, CI run `37624430912` failed its Linux setup before tests ran:
-`tools/fetch-shelf.sh` received curl connection-reset errors while fetching
-`BarramundiFish_baseColor.png` and `BarramundiFish_normal.png` from the pinned
-upstream shelf. The missing assets correctly failed setup; no test result was
-produced. Retry that job after the active workflow finishes, retaining the asset
-hashes and test assertions. Evidence is
-`%TEMP%/crcbl-ce03bd09-linux-failure.log`. The existing watch processes also
-cover Pages run `37624430936`, which rechecks the prior Tumble timeout.
+**UI validation:** Pages run `37624430936` at `ce03bd09` completed successfully
+and deployed. Tumble passed with its existing pinned hash and polling budget.
+The native disabled-outliner regression passed on macOS and Windows in CI
+`37624430912`; Linux first failed while downloading pinned viewer assets, then
+its retry was cancelled by the docs push. The following docs-only run
+`37630434174` passed the native Linux/macOS/Windows test jobs but failed the
+Metal e2e job. The failure was `Hal(DeviceLost)` while
+`grass_shells::shells_draw_strands_at_the_roots_a_card_field_leaves_open` waited
+for readback: the Apple Paravirtual device reported
+`kIOGPUCommandBufferCallbackErrorHang`, with its recorded encoders marked
+completed. It was not a pixel mismatch. Require the next source revision's full
+matrix to pass; do not weaken the rendering check. Logs for the first download
+failure and Metal failure are `%TEMP%/crcbl-ce03bd09-linux-failure.log` and
+`%TEMP%/crcbl-ff487-mtl-failure.log`.
 
 **Next UI/editor scope:** the existing scene-editor MVP exit criteria in
 `docs/plan/08-editor.md` are recorded as met headlessly. The owner was offered a
@@ -6985,10 +6948,10 @@ The Tumble timeout recurred on UI batch `0b22817b` in Pages run `37614793414` on
 and pinned hash equal to `fc176a5d1a72f6c7`. The job log reports all other
 checks passing. This distinguishes a missed deadline from a hash mismatch; it
 does not make the failed gate pass. The run finished with every other browser
-demo passing; the macOS seam probe and deployment were skipped. The test-only
-outliner follow-up will start another full Pages run, including Tumble, so no
-separate retry of the superseded run is needed. Keep the assertion and polling
-budget unchanged while checking that run. Local evidence is
+demo passing; the macOS seam probe and deployment were skipped. The subsequent
+Pages run `37624430936` at `ce03bd09` passed Tumble and deployed, with the
+assertion and polling budget unchanged. No retry of the superseded run is
+needed; the intermittent timeout itself remains unexplained. Local evidence is
 `%TEMP%/crcbl-ui-tumble-failure.log` and
 `%TEMP%/crcbl-ui-tumble-0b22817b/tumble-swiftshader.log`.
 

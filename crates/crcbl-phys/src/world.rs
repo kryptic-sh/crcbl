@@ -13,12 +13,13 @@ use crate::components::Transform;
 use crate::compound_shape::CompoundShape;
 use crate::contact::manifold::gap;
 use crate::contact::shape::ContactShape;
-use crate::contact::sweep::time_of_contact;
 use crate::mesh::{MeshScratch, PlacedMesh, TriangleMesh};
 use crate::query::{self, OverlapHit, Penetration, ShapeHit, TurnedCapsule};
 
 mod arc_sweep;
 mod candidate_sweeps;
+mod capsule_sweep;
+pub(crate) use capsule_sweep::CapsuleSweepShape;
 mod entry;
 mod placement;
 
@@ -659,11 +660,7 @@ impl OverlapQueries<'_> {
         scratch: &mut QueryScratch,
     ) -> Option<(ColliderId, ShapeHit)> {
         let capsule = Capsule::new(segment.start, radius, half_height);
-        let mut closest = None;
-        sweep_capsule_hits(*self, &capsule, segment.end, filter, scratch, |id, hit| {
-            keep_closest(&mut closest, id, hit);
-        });
-        closest
+        self.sweep_upright_where(&capsule, segment.end, filter, scratch, |_| true)
     }
 
     /// [`PhysicsWorld::capsule_penetrations_into`] under a shared borrow,
@@ -725,7 +722,7 @@ impl OverlapQueries<'_> {
     /// What a [`LyingCapsule`] moved by `motion`, without turning, meets first
     /// among the solid colliders `filter` admits, and how far along the motion
     /// it gets: the sweep [`crate::CharacterController::move_lying`] slides
-    /// with. See [`sweep_lying_capsule_core`] for how each shape is met.
+    /// with. Uses the shared oriented-capsule sweep.
     pub(crate) fn sweep_lying_capsule(
         &self,
         capsule: &LyingCapsule,
@@ -733,15 +730,14 @@ impl OverlapQueries<'_> {
         filter: QueryFilter,
         scratch: &mut QueryScratch,
     ) -> Option<(ColliderId, SweptContact)> {
-        sweep_lying_capsule_core(
-            self.bvh,
-            self.colliders,
-            self.generations,
-            capsule,
+        self.sweep_capsule_shape(
+            CapsuleSweepShape::Lying(*capsule),
             motion,
             filter,
             scratch,
+            |_| true,
         )
+        .map(|(id, hit)| (id, hit.contact))
     }
 }
 
@@ -949,6 +945,7 @@ fn sweep_capsule_hits(
     end: DVec3,
     filter: QueryFilter,
     scratch: &mut QueryScratch,
+    accept: impl Fn(&ShapeHit) -> bool,
     visit: impl FnMut(ColliderId, ShapeHit),
 ) {
     let Capsule {
@@ -966,15 +963,24 @@ fn sweep_capsule_hits(
         view.generations,
         &scratch.candidates,
         filter,
-        |_, _, shape| match shape {
-            Primitive::Sphere(s) => query::swept_capsule_vs_sphere(segment, radius, half_height, s),
-            Primitive::Box(b) => query::swept_capsule_vs_box(segment, radius, half_height, b),
-            Primitive::Capsule(c) => {
-                query::swept_capsule_vs_turned_capsule(segment, radius, half_height, c)
-            }
-            Primitive::Mesh(m) => {
-                m.sweep(segment, radius, DVec3::Y * half_height, &mut scratch.mesh)
-            }
+        |_, _, shape| {
+            let hit = match shape {
+                Primitive::Sphere(s) => {
+                    query::swept_capsule_vs_sphere(segment, radius, half_height, s)
+                }
+                Primitive::Box(b) => query::swept_capsule_vs_box(segment, radius, half_height, b),
+                Primitive::Capsule(c) => {
+                    query::swept_capsule_vs_turned_capsule(segment, radius, half_height, c)
+                }
+                Primitive::Mesh(m) => m.sweep_where(
+                    segment,
+                    radius,
+                    DVec3::Y * half_height,
+                    &mut scratch.mesh,
+                    &accept,
+                ),
+            }?;
+            accept(&hit).then_some(hit)
         },
         visit,
     );
@@ -1120,81 +1126,6 @@ impl From<ShapeHit> for SweptContact {
             part: hit.part,
         }
     }
-}
-
-/// The one implementation of "what does this lying capsule, moved without
-/// turning, hit first": [`OverlapQueries::sweep_lying_capsule`].
-///
-/// A mesh sweeps it exactly, turned into the mesh's frame, as it sweeps an
-/// upright capsule. The parametric shapes are placed as in
-/// [`lying_capsule_blocker_core`] and swept by the contact pipeline's
-/// conservative advancement over [`gap`] ([`time_of_contact`]) — the query
-/// world has no closed form for a capsule that is not upright — which stops
-/// a little short of the contact rather than on it.
-///
-/// A capsule that begins touching or inside a collider meets it at once, with
-/// [`SweptContact::started_inside`], whichever way it is moving: the answer
-/// the upright sweeps give.
-fn sweep_lying_capsule_core(
-    bvh: &Bvh,
-    colliders: &[Option<ColliderSlot>],
-    generations: &[u32],
-    capsule: &LyingCapsule,
-    motion: DVec3,
-    filter: QueryFilter,
-    scratch: &mut QueryScratch,
-) -> Option<(ColliderId, SweptContact)> {
-    let filter = ResolvedFilter::solid(colliders, generations, filter);
-    let moved = LyingCapsule {
-        head: capsule.head + motion,
-        ..*capsule
-    };
-    let bounds = capsule.aabb().union(moved.aabb());
-    bvh.traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
-
-    let (head, feet, radius) = (capsule.head, capsule.feet(), capsule.radius);
-    let at = |t: f64| ContactShape::Capsule {
-        a: head + motion * t,
-        b: feet + motion * t,
-        radius,
-    };
-    let advance = |target: ContactShape| {
-        let start = gap(&target, &at(0.0));
-        if start.0 <= 0.0 {
-            return Some(SweptContact {
-                t: 0.0,
-                normal: start.1,
-                started_inside: true,
-                part: 0,
-            });
-        }
-        let t = time_of_contact(&target, at, motion, start)?;
-        Some(SweptContact {
-            t,
-            normal: gap(&target, &at(t)).1,
-            started_inside: false,
-            part: 0,
-        })
-    };
-    let centre = (head + feet) * 0.5;
-    let path = Segment::new(centre, centre + motion);
-    closest_swept_core(
-        colliders,
-        generations,
-        &scratch.candidates,
-        filter,
-        |shape| match shape {
-            Primitive::Sphere(s) => advance(ContactShape::Sphere {
-                centre: s.centre,
-                radius: s.radius,
-            }),
-            Primitive::Box(b) => advance(query::contact_box(b)),
-            Primitive::Capsule(c) => advance(c.contact_shape()),
-            Primitive::Mesh(m) => m
-                .sweep(&path, radius, (head - feet) * 0.5, &mut scratch.mesh)
-                .map(SweptContact::from),
-        },
-    )
 }
 
 /// The broadphase bounds of a sweep: the box the segment covers, grown by the
