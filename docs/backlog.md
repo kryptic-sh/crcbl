@@ -41,30 +41,6 @@ behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
 coverage and the native Linux/macOS/Windows CI matrix for each change. Reconcile
 older entries with the implementation before choosing a slice.
 
-### Validate host-requested UI scale
-
-`engine::confirm::WindowStage` now applies UI-scale requests from
-`HostedGame::take_pending_change` to the loop's multiplier. The current frame
-keeps its original drawing and hit-test scale; the next frame uses the new
-value. The regression in `engine/tests/ui_scale.rs` failed before the fix and
-passes with it, covering valid limits, rejected out-of-range requests, recorded
-menu geometry and pointer activation. Existing scale tests were moved unchanged
-out of `engine.rs`. Disabling the update or applying it during the request's
-frame makes the regression fail. Workspace formatting and all-feature Clippy
-pass. The full workspace run failed only in the known Windows foreground-focus
-setup test `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`.
-Native Linux, macOS and Windows test jobs passed at `67dcc00f`; each job log
-explicitly records the new scale regression passing. Local logs use
-`%TEMP%/crcbl-host-ui-scale-` and native job logs use `%TEMP%/crcbl-67dcc00f-`.
-Delete this entry when the remaining workflow checks complete.
-
-Published at `67dcc00f`. CI `37691030217` passed every job after retrying an
-Ubuntu package-download failure in `windowed swapchain e2e (Xvfb)`. Both real
-window test steps passed on the retry. Pages `37691030247` remains active;
-inspect its final result before closing this entry or publishing the next
-change. The successful CI watch log is
-`%TEMP%/crcbl-67dcc00f-ci-retry-watch.log`.
-
 ### Validate shared dock minimum sizes
 
 The shared stylesheet now lets dock and split containers shrink below oversized
