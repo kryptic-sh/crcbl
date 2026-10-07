@@ -3477,20 +3477,6 @@ suite's four pixel claims still read the fills they were written against.
 
 `crcbl_ui::tree`'s focus landed with the gaps below.
 
-- **The reserved `ui` context is declared and pushed by nobody.**
-  `crcbl_input::ui::declare` and `crcbl::ui_nav::nav_input` exist and are
-  exercised by `screenshot::ui_focus`'s test, which holds the golden's scripted
-  pad to what keys produce through them. `Loop` hosts no tree, and its `Menu`
-  reads raw keys through `MenuPump`, so the pause menu does not push `ui`: a
-  paused frame runs no game tick (`crcbl::engine::run_ticks` drains and
-  discards), so game actions already cannot fire under it, and pushing would
-  change nothing a sample does. Pushing lands when `Menu` moves onto the tree;
-  the samples then stop handling menu keys directly, per the reserved-action
-  rule in `docs/notes/tooling.md` (_What the deleted 07-ui-debug plan left
-  behind_).
-- **No gamepad bindings on the `ui` actions**: `Binding` has no gamepad member
-  and there is no backend, so the plan's dpad, stick, shoulder, South and East
-  column is undeclared.
 - **Focus history is kept and not drawn** by the overlay.
 - **A new modal or a newly built focusable node is seen a frame late**, because
   focus resolves against last frame's tree, as hover does.
