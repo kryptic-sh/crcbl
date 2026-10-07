@@ -5884,6 +5884,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Nested dock panes keep their allotted size with oversized content.** The
+  shared stylesheet lets dock and split containers shrink below their contents,
+  while retaining the explicit pane minimums supplied to `Ui::split` and
+  `Ui::dock`. The editor no longer needs its own container-size workaround.
+
 - **UI-scale requests from settings screens take effect without restarting.**
   `HostedGame::take_pending_change` applies `engine.video.ui_scale` to the
   loop's menus, console and overlay on the next frame, keeping the current

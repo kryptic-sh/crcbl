@@ -185,16 +185,8 @@ const UNTINTED: [f32; 4] = [1.0; 4];
 /// over each. The widgets' own look is the engine's, which is the point of
 /// having one.
 ///
-/// **`min-width: 0` and `min-height: 0` are load-bearing, and they are set on
-/// the dock's own blocks as well as this module's.** Flexbox gives an item
-/// `min-width: auto`, so every block from the split down to the panel refuses
-/// to shrink below the widest thing inside it — an inspector row, an outliner
-/// label — and a pane whose `overflow: hidden` then clips what it cannot fit.
-/// That is not only a look. A rectangle is a *hit test*: a panel wider than its
-/// pane reaches across the divider into the viewport's rectangle, and a click
-/// meant for a field is read as a click in the scene. `default.css` sets none
-/// of these, which is worth an upstream look — a dock whose panes grow past
-/// their dividers is a dock whose dividers lie.
+/// Panel and scrolling-widget minimum sizes let them shrink inside their
+/// assigned panes. The shared stylesheet owns the dock and split minimums.
 const EDITOR_CSS: &str = "
 #editor { flex-direction: column; }
 
@@ -270,13 +262,6 @@ const EDITOR_CSS: &str = "
 .play-game button { margin-right: 4px; }
 
 .play-status { padding: 0 6px; color: #9aa3b2; }
-
-#panes split,
-#panes .split-pane,
-#panes .dock-pane {
-  min-width: 0;
-  min-height: 0;
-}
 
 .editor-panel {
   flex-direction: column;

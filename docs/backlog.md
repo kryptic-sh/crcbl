@@ -52,9 +52,32 @@ menu geometry and pointer activation. Existing scale tests were moved unchanged
 out of `engine.rs`. Disabling the update or applying it during the request's
 frame makes the regression fail. Workspace formatting and all-feature Clippy
 pass. The full workspace run failed only in the known Windows foreground-focus
-setup test `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`;
-native CI remains pending. Logs use `%TEMP%/crcbl-host-ui-scale-`. Delete this
-entry when validation completes.
+setup test `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`.
+Native Linux, macOS and Windows test jobs passed at `67dcc00f`; each job log
+explicitly records the new scale regression passing. Local logs use
+`%TEMP%/crcbl-host-ui-scale-` and native job logs use `%TEMP%/crcbl-67dcc00f-`.
+Delete this entry when the remaining workflow checks complete.
+
+Published at `67dcc00f`. CI `37691030217` passed every job after retrying an
+Ubuntu package-download failure in `windowed swapchain e2e (Xvfb)`. Both real
+window test steps passed on the retry. Pages `37691030247` remains active;
+inspect its final result before closing this entry or publishing the next
+change. The successful CI watch log is
+`%TEMP%/crcbl-67dcc00f-ci-retry-watch.log`.
+
+### Validate shared dock minimum sizes
+
+The shared stylesheet now lets dock and split containers shrink below oversized
+content; the editor's duplicate container rules have been removed. The
+regression `oversized_content_stays_inside_the_nested_dock_layout` in
+`crates/crcbl-ui/src/tree/widgets/tests/dock.rs` failed against the old defaults
+and passes with the change. Existing widget tests, workspace formatting and
+all-feature Clippy pass. The full workspace run failed only at the known Windows
+foreground-focus setup in
+`hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`. The existing
+`ui_layout` image comparison passes exactly on Vulkan and Direct3D 12. Native CI
+remains pending. Logs use `%TEMP%/crcbl-dock-sizing-`. Delete this entry after
+validation.
 
 ### Further editor scope
 
@@ -14553,12 +14576,6 @@ says what that cleared and what it did not. The allow-list entry in
     null-backend tests and by `forward_e2e`'s view-in-a-rectangle readback; the
     editor itself was run headless on Vulkan (30 frames, validation silent) but
     its picture is not compared to anything.
-- **`default.css` sets no `min-width: 0` on `split`, `.split-pane` or
-  `.dock-pane`.** Flexbox's `min-width: auto` let a 240 px pane's content grow
-  to 348 px; `overflow: hidden` hid it, but a rectangle is a hit test, so the
-  panel reached across the divider and a click meant for a field was read as a
-  click in the scene. The editor's own sheet works around it; the engine sheet
-  is where the rule belongs.
 - **The editor rebinds `ui_move` to the arrows alone**, because the reserved
   context's default also binds W, A, S and D — so a pushed `ui` owns `s` and
   Ctrl+S would stop saving while a panel had the keyboard. That is the fifth

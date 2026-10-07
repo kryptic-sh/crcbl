@@ -196,6 +196,52 @@ fn a_nested_layout_builds_every_pane_where_its_splits_say() {
     assert_eq!(rect(&ui, outliner).1.x + DIVIDER, rect(&ui, viewport).0.x);
 }
 
+#[test]
+fn oversized_content_stays_inside_the_nested_dock_layout() {
+    let mut ui = Ui::new();
+    let mut layout = three_panes();
+    for _ in 0..2 {
+        let mut panes = Vec::new();
+        frame(&mut ui, idle(), NavInput::default(), |ui| {
+            ui.block(
+                "#container",
+                &[
+                    Declaration::Width(LengthAuto::Px(WIDTH)),
+                    Declaration::Height(LengthAuto::Px(HEIGHT)),
+                ],
+                |ui| {
+                    ui.dock("#docks", &mut layout, MIN, |ui, name| {
+                        let content = ui.block(
+                            "",
+                            &[
+                                Declaration::Width(LengthAuto::Px(PAGE)),
+                                Declaration::Height(LengthAuto::Px(PAGE)),
+                                Declaration::FlexShrink(0.0),
+                            ],
+                            |_| {},
+                        );
+                        panes.push((name.to_owned(), content.key));
+                    });
+                },
+            );
+        });
+        assert_eq!(panes.len(), layout.panes().len());
+        for (name, content) in panes {
+            let pane = pane_of(&ui, content);
+            let expected_height = if name == "outliner" {
+                HEIGHT
+            } else {
+                (HEIGHT - DIVIDER) / 2.0
+            };
+            assert_eq!(width(&ui, pane), (WIDTH - DIVIDER) / 2.0, "{name}");
+            assert_eq!(height(&ui, pane), expected_height, "{name}");
+            let (min, max) = rect(&ui, pane);
+            assert!(min.x >= 0.0 && min.y >= 0.0, "{name}: {min:?}");
+            assert!(max.x <= WIDTH && max.y <= HEIGHT, "{name}: {max:?}");
+        }
+    }
+}
+
 /// **Dragging a divider moves both panes and writes the new position into the
 /// layout value**, which is what makes the layout the thing a save writes; and
 /// a nested divider still clamps to both panes' minimums.
