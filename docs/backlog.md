@@ -23,6 +23,14 @@ at the recorded Windows foreground-focus setup. The `ui_inspector` and
 Vulkan validation is clean. Logs use `%TEMP%/crcbl-ui-group-identity-`. Native
 matrix and browser validation for this UI change remain pending.
 
+The tab pointer path now also checks disabling between press and release,
+clicking while disabled and clicking after re-enabling. Removing the tab's
+build-time disabled guard makes the regression fail on the release; production
+behavior is unchanged. Workspace formatting and all-feature Clippy pass; the
+full workspace test run fails only at the recorded Windows foreground-focus
+setup. Logs use `%TEMP%/crcbl-tabs-disabled-`. Native CI for this new test is
+pending.
+
 The audit through EW `71ae9135` found no additional proven feature to migrate or
 add. Put a reproduced engine limitation here before lower-priority feature work,
 with the game caller, required contract and a regression case. Existing game
@@ -58,12 +66,12 @@ physical desktop checks and residency measurements are not crcbl completion
 gates. Do not request EW hosts or require its migration before completing engine
 work.
 
-The Linux, macOS and Windows native workspace jobs in engine CI run
-`37604969501` passed at `cd66ad90`, covering the dependency migration and
-rotated-query regression. The full run still awaits its Metal end-to-end job;
-Pages run `37604969422` still awaits browser jobs. These results do not cover
-the subsequent inspector identity fix. The local Windows foreground-focus test
-limitation is tracked separately below.
+Engine CI run `37604969501` passed at `cd66ad90`, including the Linux, macOS and
+Windows native workspace jobs and Metal end-to-end checks. This covers the
+dependency migration and rotated-query regression. Pages run `37604969422` still
+awaits browser jobs. These results do not cover the subsequent inspector
+identity fix. The local Windows foreground-focus test limitation is tracked
+separately below.
 
 **Rotated accelerated-query coverage:**
 `world::arc_sweep_tests::rotated_targets_are_met_at_the_analytic_time` in
@@ -4164,10 +4172,10 @@ in `crcbl_input::list`). Decisions, then what is left.
   `default.css` grew 1795 bytes, which is the whole raw wasm growth of a 2D demo
   (+1800 B raw, +5.9 KB gzipped on breakout).
 - **Not tested**: an outliner inside a modal or nested scroll containers;
-  `Ui::enabled` on the outliner and tab pointer paths; a dock nested more than
-  two levels deep; duplicate pane names in a `DockLayout` (the editing methods
-  refuse to make one, a hand-built layout can); and a tab strip in a parsed font
-  — the `ui_layout` golden's labels are the bitmap font.
+  `Ui::enabled` on the outliner pointer path; a dock nested more than two levels
+  deep; duplicate pane names in a `DockLayout` (the editing methods refuse to
+  make one, a hand-built layout can); and a tab strip in a parsed font — the
+  `ui_layout` golden's labels are the bitmap font.
 
 ## What the reflection crate shipped without (2026-09-16)
 

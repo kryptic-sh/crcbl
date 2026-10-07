@@ -14,13 +14,29 @@ struct TabsPage {
 }
 
 fn tabs_page(ui: &mut Ui, titles: &[&str], pointer: PointerInput, nav: NavInput) -> TabsPage {
+    tabs_page_enabled(ui, titles, pointer, nav, true)
+}
+
+fn tabs_page_enabled(
+    ui: &mut Ui,
+    titles: &[&str],
+    pointer: PointerInput,
+    nav: NavInput,
+    enabled: bool,
+) -> TabsPage {
     frame(ui, pointer, nav, |ui| {
-        let (mut pane, mut body) = (None, None);
-        let tabs = ui.tabs("#views", titles, |ui, index| {
-            pane = Some(index);
-            body = Some(ui.block("#body", &[], |_| {}).key);
+        let (mut pane, mut body, mut tabs) = (None, None, None);
+        ui.enabled(enabled, |ui| {
+            tabs = Some(ui.tabs("#views", titles, |ui, index| {
+                pane = Some(index);
+                body = Some(ui.block("#body", &[], |_| {}).key);
+            }));
         });
-        TabsPage { tabs, pane, body }
+        TabsPage {
+            tabs: tabs.expect("built"),
+            pane,
+            body,
+        }
     })
 }
 
@@ -169,4 +185,29 @@ fn only_the_showing_tab_is_marked() {
         [tab_key(&ui, &shown, &TITLES, "Log")],
         "not exactly the showing tab marked"
     );
+}
+
+#[test]
+fn disabling_tabs_on_release_keeps_the_showing_pane() {
+    let mut ui = Ui::new();
+    let first = tabs_page(&mut ui, &TITLES, idle(), NavInput::default());
+    let log = centre(&ui, tab_key(&ui, &first, &TITLES, "Log"));
+    tabs_page(&mut ui, &TITLES, press(log), NavInput::default());
+    let disabled = tabs_page_enabled(&mut ui, &TITLES, release(log), NavInput::default(), false);
+    assert_eq!(disabled.pane, Some(0), "a disabled tab took the release");
+    assert!(!disabled.tabs.changed, "a disabled tab reported a switch");
+
+    tabs_page_enabled(&mut ui, &TITLES, press(log), NavInput::default(), false);
+    let still_disabled =
+        tabs_page_enabled(&mut ui, &TITLES, release(log), NavInput::default(), false);
+    assert_eq!(still_disabled.pane, Some(0));
+    assert!(!still_disabled.tabs.changed);
+
+    let enabled = tabs_page(&mut ui, &TITLES, idle(), NavInput::default());
+    assert_eq!(enabled.pane, Some(0), "the disabled click was deferred");
+    assert!(!enabled.tabs.changed);
+    tabs_page(&mut ui, &TITLES, press(log), NavInput::default());
+    let switched = tabs_page(&mut ui, &TITLES, release(log), NavInput::default());
+    assert_eq!(switched.pane, Some(2), "re-enabling did not restore clicks");
+    assert!(switched.tabs.changed);
 }
