@@ -13,23 +13,22 @@ UI behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
 coverage and the native CI matrix for each change. EW adoption remains
 game-owned and does not delay this phase.
 
-**Current UI slice awaiting CI:** inspector composite groups now use
-`Ui::collapsing_keyed`, so switching enum fields cannot transfer a previous
-field's open state. The variant-switch regression failed before the fix; the
-keyed-header reorder regression fails when its supplied key is discarded.
-Workspace formatting and all-feature Clippy pass. Full workspace tests fail only
-at the recorded Windows foreground-focus setup. The `ui_inspector` and
-`ui_widgets` goldens match their committed references on local Vulkan and D3D12;
-Vulkan validation is clean. Logs use `%TEMP%/crcbl-ui-group-identity-`. Native
-matrix and browser validation for this UI change remain pending.
+**Current UI batch awaiting GPU/browser completion:** inspector composite groups
+now use `Ui::collapsing_keyed`, so switching enum fields cannot transfer a
+previous field's open state. The variant-switch regression failed before the
+fix; the keyed-header reorder regression fails when its supplied key is
+discarded. Workspace formatting and all-feature Clippy pass. Full workspace
+tests fail only at the recorded Windows foreground-focus setup. The
+`ui_inspector` and `ui_widgets` goldens match their committed references on
+local Vulkan and D3D12; Vulkan validation is clean. Logs use
+`%TEMP%/crcbl-ui-group-identity-`.
 
 The tab pointer path now also checks disabling between press and release,
 clicking while disabled and clicking after re-enabling. Removing the tab's
 build-time disabled guard makes the regression fail on the release; production
 behavior is unchanged. Workspace formatting and all-feature Clippy pass; the
 full workspace test run fails only at the recorded Windows foreground-focus
-setup. Logs use `%TEMP%/crcbl-tabs-disabled-`. Native CI for this new test is
-pending.
+setup. Logs use `%TEMP%/crcbl-tabs-disabled-`.
 
 The tab strip now uses the existing scroll container behavior so focus reveals
 an overflowed tab and a horizontal wheel can expose it for pointer activation.
@@ -37,8 +36,7 @@ Both regressions fail when the scroll style is removed. Workspace formatting and
 all-feature Clippy pass. The existing `ui_layout` golden matches exactly on
 local Vulkan and D3D12, with Vulkan validation clean. Logs use
 `%TEMP%/crcbl-tabs-overflow-`. The full workspace test run fails only at the
-recorded Windows foreground-focus setup. Native CI for this change remains
-pending.
+recorded Windows foreground-focus setup.
 
 Outliner range mode now applies vertical focus movement within the same
 outliner. The editor's existing modifier routing supplies Shift+Up/Down;
@@ -48,7 +46,15 @@ without an anchor, disabled builds, crossing between outliners and clearing the
 movement each frame. Removing the relevant guards makes their regressions fail.
 Workspace formatting and all-feature Clippy pass. The full workspace test run
 fails only at the recorded Windows foreground-focus setup, with logs under
-`%TEMP%/crcbl-outliner-range-`. Native CI for this slice remains pending.
+`%TEMP%/crcbl-outliner-range-`.
+
+The Linux, macOS and Windows native workspace jobs in CI run `37614793336`
+passed at `0b22817b`. Passing records for every new inspector, tab and outliner
+regression, including the editor Shift+Arrow test, were verified in each job
+log. Those logs are `%TEMP%/crcbl-ui-0b22817b-linux.log`,
+`%TEMP%/crcbl-ui-0b22817b-macos.log` and `%TEMP%/crcbl-ui-0b22817b-windows.log`.
+The full CI run still awaits GPU jobs; Pages run `37614793414` still awaits
+browser jobs.
 
 The full editor's ignored GPU regression,
 `app::instances::tests::filtered_editor_images_match_eager_writes_through_history`,
