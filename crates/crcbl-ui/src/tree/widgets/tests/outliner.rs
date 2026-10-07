@@ -2,6 +2,8 @@
 //! bounded build whatever the tree's size, expand and collapse by pointer and
 //! by key, and selection by pointer and by key.
 
+#[path = "outliner/disabled.rs"]
+mod disabled;
 #[path = "outliner/range.rs"]
 mod range;
 

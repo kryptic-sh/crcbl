@@ -48,15 +48,26 @@ Workspace formatting and all-feature Clippy pass. The full workspace test run
 fails only at the recorded Windows foreground-focus setup, with logs under
 `%TEMP%/crcbl-outliner-range-`.
 
+The subsequent outliner pointer regression covers disabled toggle and row
+clicks, disabling between press and release, and re-enabling without replaying
+the discarded input or counting it toward a double-click. Removing either
+production disabled guard makes it fail. Workspace formatting and all-feature
+Clippy pass; full workspace tests fail only at the recorded Windows
+foreground-focus setup. Logs use `%TEMP%/crcbl-outliner-disabled-`. This
+test-only follow-up awaits a push and its native CI matrix after the active runs
+finish.
+
 The Linux, macOS and Windows native workspace jobs in CI run `37614793336`
 passed at `0b22817b`. Passing records for every new inspector, tab and outliner
 regression, including the editor Shift+Arrow test, were verified in each job
 log. Those logs are `%TEMP%/crcbl-ui-0b22817b-linux.log`,
 `%TEMP%/crcbl-ui-0b22817b-macos.log` and `%TEMP%/crcbl-ui-0b22817b-windows.log`.
-The full CI run still awaits Metal; Vulkan passed. Pages run `37614793414` still
-awaits browser jobs and has a Tumble timeout, detailed in the browser timeout
-entry below. Retry that failed job after the current run finishes; do not change
-the hash assertion or polling budget.
+Vulkan passed, but the documentation push `dfc47089` cancelled the remaining
+Metal job. CI run `37618134904` checks the same source with that documentation
+update. Pages run `37614793414` still awaits browser jobs and has a Tumble
+timeout, detailed in the browser timeout entry below. Retry that failed job
+after the current run finishes; do not change the hash assertion or polling
+budget.
 
 The full editor's ignored GPU regression,
 `app::instances::tests::filtered_editor_images_match_eager_writes_through_history`,
@@ -4199,11 +4210,10 @@ in `crcbl_input::list`). Decisions, then what is left.
   when the expansion moves, is 12.5 µs at 10 001 rows and 134.7 µs at 100 001.
   `default.css` grew 1795 bytes, which is the whole raw wasm growth of a 2D demo
   (+1800 B raw, +5.9 KB gzipped on breakout).
-- **Not tested**: an outliner inside a modal or nested scroll containers;
-  `Ui::enabled` on the outliner pointer path; a dock nested more than two levels
-  deep; duplicate pane names in a `DockLayout` (the editing methods refuse to
-  make one, a hand-built layout can); and a tab strip in a parsed font — the
-  `ui_layout` golden's labels are the bitmap font.
+- **Not tested**: an outliner inside a modal or nested scroll containers; a dock
+  nested more than two levels deep; duplicate pane names in a `DockLayout` (the
+  editing methods refuse to make one, a hand-built layout can); and a tab strip
+  in a parsed font — the `ui_layout` golden's labels are the bitmap font.
 
 ## What the reflection crate shipped without (2026-09-16)
 
