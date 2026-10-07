@@ -40,16 +40,14 @@ behavior in `crcbl-ui` and editor workflows in `apps/editor`, with regression
 coverage and the native Linux/macOS/Windows CI matrix for each change. Reconcile
 older entries with the implementation before choosing a slice.
 
-### Validate outliner input refresh
+### Finish published workflow checks
 
-The input follow-up in `tree/widgets/tests/outliner/retention.rs` reproduces a
-held expansion button restoring state after its row was removed. Expansion
-changes are now checked against the refreshed model; pointer and keyboard
-regressions also cover surviving branches and branches replaced by leaves. Both
-fail when that check is disabled, and pass with it. Formatting and all-feature
-Clippy pass. The follow-up's full workspace run failed only in the same Windows
-foreground-focus setup test named above; native CI remains pending. Its logs use
-`%TEMP%/crcbl-outliner-release-`.
+The published `e3f44f4c` clearance and outliner corrections passed the native
+Linux, macOS and Windows jobs in CI `37682659604`. Each new regression and the
+existing character skin cases explicitly passed in every native job log, saved
+under `%TEMP%/crcbl-e3f44f4c-`. Full CI and Pages `37682659597` remain in
+flight; keep their watches running and inspect their final results. Delete this
+entry when those workflows complete successfully.
 
 ### Further editor scope
 
