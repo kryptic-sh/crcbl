@@ -3,75 +3,30 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## Top priority: EW physics migration handoff (2026-10-07)
+## Top priority: EW integration acceptance (2026-10-07)
 
-**Game migration is the remaining handoff.** Adopt
-`PhysicsWorld::sweep_capsule_arc_where` in EW's applicable airborne contact
-forecasts in `src/controller_ballistic.rs::move_with_gravity`, then update its
-engine pin. The predicate receives collider identity and `ArcHit`, including
-world-space normal and absolute contact time, so EW retains its wall, ceiling
-and approaching-surface classification. Rejection preserves later compound
-parts, mesh triangles and re-entry into the same primitive after separation.
-Self-exclusion, masks and trigger rules still apply. The closest arc query
-continues to report starting overlaps; incoming overlaps remain selectable.
+The physics API handoff shipped in EW `1c5bee71`, pinned to engine `020051c2`.
+`src/controller_ballistic.rs::move_with_gravity` and
+`src/controller_contact_forecast.rs::forecast_airborne_wall` use selectable arc
+contacts. Preserve the game-owned air-control, landing and support-transition
+rules; the game reports no further engine feature gap from this migration.
 
-The previous closest-only trial failed because a departing time-zero floor hid
-the ceiling. Keep this handoff until EW's `find_wall` and `hits_ceiling`
-forecast bisections have been replaced and its game regressions pass:
-`ceiling_contact_uses_the_remaining_time_for_descent`,
-`wall_and_ceiling_contacts_preserve_jump_descent`,
-`ceiling_contact_does_not_delay_wall_steering`,
-`braking_near_a_wall_preserves_contact_before_reversal`, and the hidden-wall
-fixtures in `src/controller_contact_forecast_tests.rs`. Air control, landing
-rules, support-change forecasts and `projected_landing` stay in EW.
+Remaining acceptance needs suitable hosts: native EW linking and runtime on
+macOS/Linux, physical desktop input/IME and cursor behavior, and
+constrained-VRAM measurements. Cross Clippy and headless Windows captures do not
+establish those. EW's pinned workspace tests, release build and macOS/Linux
+cross Clippy passed; evidence is under `%TEMP%/ew-crcbl-update-review/` with the
+`selectable-arc-` prefix. Engine native CI and GPU validation must be checked
+independently of these game results. The local Windows foreground-focus test
+limitation is tracked separately below.
 
-Engine selection coverage is in
-`crates/crcbl-phys/src/world/arc_selection_tests.rs`: departing support followed
-by ceiling or finite wall, separate/compound/mesh geometry, incoming overlaps,
-same-primitive departure and return, rotated mesh coordinates, slope rejection,
-self-exclusion, masks, triggers, deterministic ties and unchanged world state.
-The focused suite passes; deliberately bypassing the predicate and disabling
-re-entry each made the relevant regressions fail before restoration. Workspace
-formatting and Clippy pass. The Windows workspace no-fail-fast run completed
-with only `crcbl-shell`'s cursor-visibility test failing because Windows refused
-foreground focus; its isolated rerun failed at the same setup assertion. The
-physics suites passed. Logs are under `%TEMP%` as
-`crcbl-selectable-arc-workspace-complete.log` and
-`crcbl-selectable-arc-final-test.log`; the final run completed with the same
-foreground-focus failure and no other failing target. EW's local migration
-controller suite passes in
-`%TEMP%/ew-crcbl-update-review/selectable-arc-reentry.log`, but its dependency
-pin and full integration checks remain open. CI run `37589563333` for `00996915`
-passed native Windows, Linux and macOS tests; its GPU checks are still running.
-
-EW's full suite exposed repeated rejected contacts while falling parallel to the
-equipment table in `game::m45a1_tests`. A positive signed gap rounded to a zero
-supporting-plane height, so continuation repeatedly treated roundoff as
-separation. The engine regression
-`a_rejected_roundoff_contact_is_not_repeated_during_parallel_fall` failed on the
-repeated callback before the fix; it now passes and also checks later return to
-the same wall. Continuation requires clearance beyond the rejected conservative
-gap and coordinate roundoff. EW's controller, M45A1 and full workspace suites
-pass with the candidate fix, recorded in
-`%TEMP%/ew-crcbl-update-review/selectable-arc-progress-full-test.log`; its
-published dependency pin remains outstanding. Engine workspace formatting and
-Clippy pass with this follow-up. The full test run completed with only the same
-Windows foreground-focus failure in `crcbl-shell`; the log is
-`%TEMP%/crcbl-roundoff-workspace-test.log`.
-
-The preview migration is no longer outstanding: EW `72f15ced` uses
-`CharacterController::preview_upright`. Its repeated-preview regression was
-observed failing with broadphase refits under the old move-and-restore path and
-passing with the new API. Windows workspace formatting, Clippy, tests, release
-build, macOS cross Clippy and release M4/ELCAN headless Vulkan/DX12 captures
-passed. EW Linux cross Clippy now also passes using a temporary ALSA sysroot and
-target-scoped pkgconf configuration, recorded in EW `82195df9`. This checks
-types and lints; it does not establish Linux linking, test execution or runtime
-validation, or a separate engine workspace pass. Native macOS/Linux, physical
-desktop input and constrained-VRAM checks remain unverified. Evidence is under
-`%TEMP%/ew-crcbl-update-review/` with the `engine-preview-` prefix and
-`preview-migration-negative.log`. The arc coverage report below belongs to its
-engine implementation, not a new verification run.
+**Engine feature audit:** no additional proven engine API requirement was found
+in EW main `1c5bee71`. Recent projectile scheduling in
+`src/game_projectile_schedule.rs` depends on combatant state, armor and door
+transitions. Body bounds in `src/body_target.rs` already use engine `Aabb`
+queries; region selection and damage attribution remain game rules. GPU
+residency needs measurements and a validated game-local policy before a reusable
+engine request can be specified.
 
 Do not port EW's current hip-fire convergence or prone weapon/terrain handling
 yet. `src/game_hip_convergence.rs` combines rendered weapon pose with gameplay
@@ -158,8 +113,8 @@ The subsequent warehouse survey and named-exit quests also stay in EW.
 from a single extracted raid; `QuestLog::record_exit` credits an authored
 `RaidExit` from `src/extraction.rs`. These are game progression and extraction
 rules, not a missing engine quest framework. This review found no additional
-engine prerequisite in those features. EW's contact-forecast migration remains
-the top integration priority.
+engine prerequisite in those features. EW's remaining integration acceptance is
+listed above.
 
 The subsequent body-part kill conditions and live target availability notices
 also stay in EW. `QuestKill::hit_part` and `KillCondition::hit_part` in
@@ -168,7 +123,7 @@ also stay in EW. `QuestKill::hit_part` and `KillCondition::hit_part` in
 delayed death. `Game::draw_raid_quest_availability` in `src/game_map_quests.rs`
 derives remaining targets from credited kills and combatant life state. These
 are game combat and objective rules using existing engine capabilities. They add
-no engine prerequisite; the contact-forecast migration remains open. The
+no engine prerequisite; the contact-forecast migration has shipped. The
 subsequent attack-source and required/forbidden armor conditions also stay in
 EW: `QuestKill::damage_source` and `QuestKill::worn_armor` retain game combat
 metadata, while `KillCondition::required_armor` and
@@ -211,69 +166,14 @@ prerequisite. `QuestKill::ammunition` and `KillCondition::ammunition` in EW's
 keep those rules in the game. `Game::draw_raid_map` in `src/game_map.rs` fits
 map scale to the available window and keeps labels readable using the existing
 `DrawList::scale` and `set_scale` APIs. This is game presentation policy, not a
-missing engine scaling API. Neither feature should delay the physics request.
+missing engine scaling API. Neither feature adds a physics request.
 
-The selectable query is available for the game migration above; game adoption
-and its regression checks remain open.
-
-1. **Curved-path collision queries with contact times — delivered 2026-10-06,
-   awaiting EW's migration.** Available on crcbl main in `e1c8f8ee`. EW's
-   `PlayerController::move_with_gravity` in `src/controller_ballistic.rs` bounds
-   chord error, expands candidate sweeps and bisects contact forecasts to retain
-   time after wall and ceiling hits, because `SlideContact::fraction` and
-   `sweep_capsule_all` describe straight displacement. The engine now answers
-   the time:
-   `PhysicsWorld::sweep_capsule_arc(&AcceleratedPath::new(start, velocity, acceleration, duration), radius, half_height, filter)`
-   returns `Option<(ColliderId, ArcHit)>`,
-   `ArcHit { time, point, normal, started_inside, part }`, with `time` in
-   `[0, duration]` and never later than the first touch.
-   `OverlapQueries::sweep_capsule_arc(.., &mut QueryScratch)` is the `&self`
-   form; there is no `PhysicsSystem` form, as there is none for the straight
-   capsule sweeps. Masks, triggers and the excluded collider apply as in
-   `sweep_capsule_filtered`; a capsule that starts touching or inside a collider
-   meets it at time zero with `started_inside`. The search is conservative
-   advancement against the plane bounding each shape, the path's exact quadratic
-   height above it as the step, stopping within `ARC_TIME_TOLERANCE` (the same
-   1e-9 s EW's bisection uses) and after at most `ARC_MAX_ITERATIONS` steps per
-   shape. The straight sweeps are unchanged.
-
-   Coverage, `crates/crcbl-phys/src/world/arc_sweep_tests.rs` and the unit tests
-   in `query/arc.rs`: analytic wall, ceiling (box and mesh) and floor times;
-   braking and jump paths that touch and leave a surface while the straight
-   sweep along their chord misses it (both halves asserted), and the same paths
-   turning back a hair short, which miss; a ceiling above both ends of a jump
-   met at its apex; zero acceleration against the straight sweep for a box face,
-   a sphere, a standing capsule and both sides of a mesh wall; an unturned box
-   edge at its analytic time; starting overlap; attached self-collider
-   exclusion; masks and triggers; coarse/fine agreement against a wall and a
-   sphere in 2, 7 and 64 pieces; bit-identical reruns; and EW's
-   `braking_near_a_wall_preserves_contact_before_reversal` ported as
-   `braking_near_a_wall_preserves_contact_before_reversal`, every axis, turn,
-   attachment and update length, coarse and 1 ms fine. Mutation-checked:
-   sweeping the chord instead of the arc fails the touch-and-leave, braking,
-   analytic, apex and coarse/fine tests; leaving the apex out of the broadphase
-   bounds fails the bounds, apex, touch-and-leave and braking tests; ignoring
-   the filter, the starting-overlap check or the root's curvature each fails its
-   own tests.
-
-   What EW can replace with it: the contact detection the chord-error cap
-   (`MAX_BALLISTIC_CHORD_ERROR_SKINS`) exists for, the braking probe widened by
-   the chord error through `sweep_capsule_all` with its turning-point split, and
-   the `find_wall` and `hits_ceiling` bisections, each reading `ArcHit::time`
-   and classifying `ArcHit::normal` itself. What it cannot: the
-   `changes_support` bisection, which needs `move_and_slide`'s and
-   `move_lying`'s grounding, steps and prone lying capsule; the movement itself,
-   which still goes through the straight `move_with_sidestep`, so a chord cap on
-   the moved step remains EW's choice; the post-move straight sweep that retains
-   a passed wall's normal; and wall response, air control, landing damage and
-   `projected_landing`, which stay gameplay.
-
-   Validation gaps, not covered and not claimed: tilted and curved walls, moving
-   geometry, continuous native playback, projectile and grenade flight
-   (`src/game_projectile_doors_tests.rs` checks contact planes, not curved
-   impact positions), lying-capsule paths, and zero-acceleration agreement for
-   turned boxes and capsules, whose straight sweep stops a little short by
-   design. EW's fixture proves the planar braking case only.
+Remaining accelerated-query coverage gaps: tilted and curved walls, moving
+geometry, continuous native playback, projectile and grenade flight,
+lying-capsule paths, and zero-acceleration agreement for turned boxes and
+capsules. These are verification gaps, not established missing APIs. Reproduce a
+game failure before requesting an extension; preserve the shipped wall, ceiling,
+same-surface return and parallel-fall regressions in EW.
 
 Current goal: complete the full codebase performance review, record actionable
 findings and verification gaps in this backlog, and implement supported
