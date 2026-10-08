@@ -150,7 +150,8 @@ undo, and an external rotation edit invalidates its retained angles. Removing
 the invalidation check makes the external-edit regression fail. Formatting and
 workspace Clippy passed. The full workspace test run completed with only the
 existing Win32 cursor test failing to retain foreground focus; the editor
-regressions passed. Native CI remains pending. Logs use
+regressions passed. At `94d6487d`, CI `37745645920` passed the Linux, macOS and
+Windows workspace jobs. Rendering jobs remain active. Logs use
 `%TEMP%/crcbl-editor-pitch-`.
 
 ### EW engine requests
@@ -13206,8 +13207,9 @@ completed with every job passing except the shell guard: Linux, macOS and
 Windows workspace tests and the native rendering jobs passed. The shell guard
 rejected the previously unqualified external EW plan citation. The reference now
 names the EW repository, and the unchanged local citation checker passes; that
-correction awaits the next CI run. Pages `37739371742` remains in progress.
-Local logs use `%TEMP%/crcbl-ragdoll-bridge-`.
+correction passed in CI `37744414766`. Pages `37739371742` completed
+successfully and deployed `46a4b615`; its macOS seam probe was intentionally
+skipped. Local logs use `%TEMP%/crcbl-ragdoll-bridge-`.
 
 `crates/crcbl/tests/ragdoll_pose.rs` also drives articulated bodies through the
 contact solver onto a plane and compares skinned vertex positions against the
