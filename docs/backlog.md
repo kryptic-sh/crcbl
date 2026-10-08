@@ -6,9 +6,17 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requirements
 
 Confirmed engine blockers for EW take priority over UI/editor expansion. The
-review of EW main `e1dfa97a` against upstream crcbl `f0b6fd72` found no new
-proven engine feature ready to add or migrate. Do not treat the candidates below
-as implementation requests until their game-side prerequisites are satisfied.
+review of EW main `ed342a77` and its uncommitted injury-movement work against
+upstream crcbl `13d8c0ad` found no new proven engine feature ready to add or
+migrate. Do not treat the candidates below as implementation requests until
+their game-side prerequisites are satisfied.
+
+- **Prone weapon collision is not ready to port.** Choose and validate the game
+  response to terrain contact (limit aim or retract/lift the weapon and leave
+  ADS) before specifying reusable pose support.
+- **GPU residency is not ready to port.** Measure constrained-memory pressure
+  and validate game-local ownership, eviction and fallback behavior before
+  requesting a shared residency API.
 
 - **Projectile and loose-item timing stays in EW.**
   `Game::advance_projectiles_and_world_items` in
@@ -38,27 +46,26 @@ as implementation requests until their game-side prerequisites are satisfied.
   endpoint handling in `src/grenade_hand.rs` likewise belongs to the existing
   game hand state machine; it does not justify a shared engine action framework.
 
-  Falling during cancelled player preparation remains unfinished. A temporary
-  game probe reproduces a live grenade drop when fatal landing damage is applied
-  before an earlier re-pin completion; subdivided updates drop the inert shell.
-  Inspect `Game::advance_tick_simulation`,
-  `Game::advance_revival_contact_interval` and `Game::resolve_actor_landing` in
-  EW. This is game event ordering, not evidence of a missing engine contact
-  query. Native release-pose playback also remains unverified. Finish these in
-  EW before proposing an engine API.
+  Keep cancelled-revival landing ordering in EW. Its committed regression in
+  `src/game_revival_landing_timing_tests.rs` covers handoff ownership, grenade
+  fuse time, death before extraction and surviving movement with settled
+  injuries. `Game::advance_revival_contact_interval` uses existing landing
+  forecasts to order damage with handoffs; this does not require another engine
+  contact query. AI falling during cancelled preparation and native release-pose
+  playback remain game validation gaps.
 
 - **Movement forecasting uses existing engine APIs.**
   `src/game_ai_route_arrival.rs` confirms waypoint arrival through the game
   controller; `src/controller_contact_forecast.rs` uses existing upright
   previews and selectable accelerated capsule contacts. Route reach, gait,
   stamina and landing policy stay in EW. No additional query contract was
-  demonstrated by these changes.
-- **Prone weapon collision is not ready to port.** Choose and validate the game
-  response to terrain contact (limit aim or retract/lift the weapon and leave
-  ADS) before specifying reusable pose support.
-- **GPU residency is not ready to port.** Measure constrained-memory pressure
-  and validate game-local ownership, eviction and fallback behavior before
-  requesting a shared residency API.
+  demonstrated by these changes. The uncommitted injury-movement work in
+  `src/impairment/movement.rs` and `src/controller_impairment_timing.rs`
+  integrates injury and medication transitions, sprint eligibility and stamina
+  timing. These depend on EW health and locomotion policy. Finish game-side
+  verification, including changing-speed airborne movement, before considering
+  any reusable numerical helper; no missing engine query is established by this
+  work.
 
 For a newly demonstrated engine gap, put its request here first, with the EW
 caller, reproduction, required API behavior and an engine regression. Keep
