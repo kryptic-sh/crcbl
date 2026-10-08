@@ -6,10 +6,9 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requirements
 
 Confirmed engine blockers for EW take priority over UI/editor expansion. The
-review of EW main `ed342a77` and its uncommitted injury-movement work against
-upstream crcbl `13d8c0ad` found no new proven engine feature ready to add or
-migrate. Do not treat the candidates below as implementation requests until
-their game-side prerequisites are satisfied.
+review of EW main `8c2c8176` against upstream crcbl `21e2cee9` found no new
+proven engine feature ready to add or migrate. Do not treat the candidates below
+as implementation requests until their game-side prerequisites are satisfied.
 
 - **Prone weapon collision is not ready to port.** Choose and validate the game
   response to terrain contact (limit aim or retract/lift the weapon and leave
@@ -59,8 +58,8 @@ their game-side prerequisites are satisfied.
   controller; `src/controller_contact_forecast.rs` uses existing upright
   previews and selectable accelerated capsule contacts. Route reach, gait,
   stamina and landing policy stay in EW. No additional query contract was
-  demonstrated by these changes. The uncommitted injury-movement work in
-  `src/impairment/movement.rs` and `src/controller_impairment_timing.rs`
+  demonstrated by these changes. The game-owned injury-movement implementation
+  in `src/impairment/movement.rs` and `src/controller_impairment_timing.rs`
   integrates injury and medication transitions, sprint eligibility and stamina
   timing. These depend on EW health and locomotion policy. Finish game-side
   verification, including changing-speed airborne movement, before considering
@@ -129,8 +128,9 @@ they do not demonstrate a missing crcbl scheduler API. Keep the remaining
 bleeding combinations, moving-AI stow/death checks, player handoffs and native
 revival playback in EW. The nearby-player perception/healing discrepancy was
 traced to EW refreshing `seriously_injured` only at the end of an outer update.
-Its fix and fixture decision remain on EW branch `wip/revival-injury-refresh`;
-this is game state ordering, not a missing engine requirement. EW
+The fix is now on EW main: health intervals refresh injury retreat state, and
+its cover regression uses actual persistent injury. Keep this game state
+ordering in EW; it does not establish a missing engine requirement. EW
 `PlayerController::projected_movement_heading` also keeps game recoil/free-look
 policy while using the existing engine `turn_lying` query for constrained turns;
 no additional turning API is needed.
@@ -183,16 +183,17 @@ engine request can be specified.
 
 Do not port EW's current hip-fire convergence or prone weapon/terrain handling
 yet. `src/game_hip_convergence.rs` combines rendered weapon pose with gameplay
-aim and ADS rules. Its stance-aware correction is preserved on EW branch
-`wip/stance-aware-hip-convergence` at `b0a7132b`, with a known failure in
-`grenade_quick_melee_hits_the_falling_target_at_delayed_contact`. The corrected
-pose places an arm ahead of the intended head contact; the fixture decision
-remains pending in EW's backlog. It is not ready for an engine port. The
-weapon/floor response in EW's `docs/backlog.md` still needs a choice between
-limiting weapon aim and retracting/lifting the weapon while leaving ADS. Prove
-the shared camera, weapon and hand behavior in the game before proposing a
-reusable engine API. These are game follow-ups, not additional implementation
-requests for crcbl.
+aim and ADS rules. Its stance-aware correction is now on EW main. The
+falling-target melee fixture exposes the head with an unarmed target while
+retaining exact damage and contact-time assertions; removing the contact
+boundary still fails it. Initial sway also matches the first animation snapshot,
+preserving the exact rendered-muzzle/projectile-launch assertion. Native
+transition acceptance remains in EW. These fixes do not demonstrate a reusable
+engine API gap. The weapon/floor response in EW's `docs/backlog.md` still needs
+a choice between limiting weapon aim and retracting/lifting the weapon while
+leaving ADS. Prove the shared camera, weapon and hand behavior in the game
+before proposing a reusable engine API. These are game follow-ups, not
+additional implementation requests for crcbl.
 
 Keep the recent inventory eligibility work in EW: `HideoutInventory`'s
 `can_fit_stashed_firearm_swap` and `firearm_swap_placement` in
