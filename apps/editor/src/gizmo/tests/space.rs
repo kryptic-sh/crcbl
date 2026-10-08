@@ -59,6 +59,7 @@ fn local_axes_and_planes_translate_and_snap_in_their_rotated_frame() {
             ],
         };
         let writes = drag.spread(&group, &pointer(delta), None).unwrap();
+        let mut seen = vec![[false; 3]; group.members.len()];
         for (member, write) in writes {
             let axis: usize = write
                 .path
@@ -66,9 +67,17 @@ fn local_axes_and_planes_translate_and_snap_in_their_rotated_frame() {
                 .unwrap()
                 .parse()
                 .unwrap();
+            let index = group
+                .members
+                .iter()
+                .position(|candidate| candidate.entity == member.entity)
+                .unwrap();
+            assert!(!seen[index][axis], "a position component was written twice");
+            seen[index][axis] = true;
             let expected = DVec3::from_array(member.start) + frame * delta;
             assert!((write.value - expected[axis]).abs() < 1e-5);
         }
+        assert!(seen.iter().all(|axes| axes.iter().all(|written| *written)));
     }
 }
 
