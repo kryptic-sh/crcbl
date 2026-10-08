@@ -6,7 +6,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requirements
 
 EW engine requirements take priority over UI/editor expansion. Reviewed EW main
-`46b69b95` against crcbl `2fcc9a35` after pulling upstream. Promote the existing
+`3f9906e6` against crcbl `06b551dd` after pulling upstream. Promote the existing
 ragdoll requirement below; the other port candidates still need game-side
 validation before an engine implementation can be specified.
 
@@ -85,6 +85,19 @@ validation before an engine implementation can be specified.
   `ai-post-handoff-projectile-probe.log`. This is game scheduling work, not
   evidence of a missing crcbl API. Native release-pose playback remains
   unverified.
+
+- **Weapon action chronology stays in EW.** The recent firing and reload changes
+  in `src/game_ai_weapon_actions.rs` and `src/game_ai_perception_timing.rs`
+  retain update-relative trigger offsets, advance automatic mechanisms before
+  trigger release, and bound firing by physical reload completion. Preserve the
+  contracts in `src/game_ai_projectile_emission_tests.rs`,
+  `src/game_ai_reload_fire_timing_tests.rs`,
+  `src/game_character_revolver_tests.rs` and
+  `src/game_toz34_reload_timing_tests.rs`. These depend on weapon mechanisms,
+  ammunition ownership and character action admission, not a missing engine API.
+  Coarse/split cadence across reload completion and contact-time death during
+  reload still need game-side verification before any reusable timing
+  requirement can be proposed.
 
 - **Movement forecasting uses existing engine APIs.**
   `src/game_ai_route_arrival.rs` confirms waypoint arrival through the game
