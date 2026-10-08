@@ -586,7 +586,7 @@ export const CDP_DEADLINE_MS = 300_000;
 /** How much of the command's own parameters that failure quotes back. */
 const CDP_PARAMS_REPORTED = 200;
 
-class Cdp {
+export class Cdp {
   #socket;
   #next = 0;
   #pending = new Map();
@@ -684,12 +684,14 @@ export async function openPage(browser) {
     url: 'about:blank',
   });
   control.close();
-  return Cdp.connect(
+  const page = await Cdp.connect(
     browser.endpoint.replace(
       /\/devtools\/browser\/.*$/,
       `/devtools/page/${created.targetId}`
     )
   );
+  page.targetId = created.targetId;
+  return page;
 }
 
 /**

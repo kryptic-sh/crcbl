@@ -1142,15 +1142,24 @@ prices were mixed and do not establish a latency or FPS gain. Backend
 command-pool reuse, wider graph caching and math changes need stronger workload
 evidence or carry more lifecycle risk.
 
-Browser queued-key regression coverage remains external: the held-key
-blur/resume, real tab switch and visibility-only isolation fixtures are not part
-of `web/tools/browser-e2e.mjs`. Its existing focus checks observe pause, focus
-and resumption; the external fixtures also observe stationary keyboard movement
-while resumed ticks advance and renewed movement on fresh input. Bring those
-proved observers and precise failure controls into the canonical browser gate,
-with a clear queued-input test seam instead of growing the driver monolith.
-Price added CI runtime under software rendering and preserve scaled waits and
-complete GPU cleanup receipts.
+Browser queued-key regression integration is under verification. The held-key
+blur/resume, real tab switch and visibility-only isolation checks now live in
+`web/tools/browser-queued-input.mjs`, called by the canonical puppet browser
+gate. They require stationary positions across advancing resumed HUD ticks and
+renewed movement on fresh input. The HUD cursor precedes Escape; displacement
+before the first resumed HUD sample is not measured. Recovery failures are
+reported and route to the existing Stop and GPU cleanup checks rather than
+abandoning teardown.
+
+On 2026-10-08, the headless hardware run passed 61/61 checks, including empty
+GPU handle tables and the stream-end receipt. Queued-input checks took 33314 ms
+on that run. The site was reused; the wrapper's stale-source warning named the
+Node driver and helper, which execute directly from source. Software-rendering
+runtime and isolated native matrix verification remain pending. All local tests
+must run headlessly without interfering with the user's desktop. The Windows
+workspace nextest gate includes foreground, cursor and clipboard tests and must
+run on an isolated runner, not the shared desktop; no filtered run counts as
+that full gate.
 
 Hash and authentication worker coverage gaps remain separate from shipped
 padding storage: native sampled aggregate stack and browser sentinel residue
