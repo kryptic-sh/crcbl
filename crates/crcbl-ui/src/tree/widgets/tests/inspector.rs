@@ -10,6 +10,8 @@ use super::*;
 use crate::tree::widgets::inspector::{FieldEdit, Inspection, Overrides, VARIANT_LABEL};
 use crate::tree::{Content, NodeKey};
 
+#[path = "inspector/composition.rs"]
+mod composition;
 #[path = "inspector/identity.rs"]
 mod identity;
 

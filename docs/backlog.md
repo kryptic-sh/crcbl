@@ -4311,9 +4311,12 @@ in `crcbl_input::list`). Decisions, then what is left.
   and 20–22 µs with `Overrides::vectors()`, against 0.5 µs for the same page
   with an empty block (release, median of 41 runs of 200 frames, 400 px page).
   `default.css` grew 1332 bytes and a 2D demo's wasm 2069 bytes raw.
-- **Not tested**: an inspector inside a modal or a scroll container;
-  `Ui::enabled` over it; a component deeper than three levels; a parsed font; a
-  `Kind::List` longer than a handful; an override that builds nothing.
+- **Not tested**: an inspector inside a scroll container; `Ui::enabled` over
+  non-boolean leaves or custom overrides; a component deeper than three levels;
+  a parsed font; a `Kind::List` longer than a handful; an override that builds
+  nothing. Modal focus trapping/restoration and boolean disabled-state pointer
+  and navigation transitions are covered by headless composition tests; native
+  matrix verification for those tests remains pending.
 
 ## What UI rung 8a shipped without (2026-09-16)
 
