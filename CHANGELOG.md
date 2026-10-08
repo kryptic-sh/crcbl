@@ -859,6 +859,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`RigidBody::apply_impulse_at` and `PhysicsSystem::apply_impulse_at` apply
+  impulses at world-space points.** Off-center hits change angular momentum
+  through the body's oriented inertia as well as linear velocity. Invalid inputs
+  and overflow leave the body unchanged; the system wakes a sleeping island only
+  after validation. `ImpulseError` reports rejected operations.
+
 - **`crcbl_anim::ragdoll::RagdollBinding` reconstructs a skeletal pose from
   rigid-body transforms.** Bind the last animated pose to bodies in world space,
   retaining bone/body offsets and imported skeleton scale. Unmapped children

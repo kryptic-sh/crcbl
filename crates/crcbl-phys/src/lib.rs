@@ -80,6 +80,7 @@ pub mod compound_shape;
 pub mod contact;
 pub mod forces;
 pub mod frames;
+pub mod impulse;
 pub mod integrator;
 pub mod joint;
 pub mod mass;
@@ -107,6 +108,7 @@ pub use contact::{
 };
 pub use forces::{DampingForce, DragForce, ForceProvider, GravityForce, PointGravity, ThrustForce};
 pub use frames::{FrameId, Frames, State, sphere_of_influence};
+pub use impulse::ImpulseError;
 pub use integrator::{
     GYROSCOPIC_ITERATIONS, Integrator, MAX_ROTATION_LENGTH_ERROR, SemiImplicitEuler, SpinStep,
     cayley_rotation, gyroscopic_step, integrate_rotation, rotation_from_scaled_axis,

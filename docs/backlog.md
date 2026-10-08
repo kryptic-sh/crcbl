@@ -13216,12 +13216,23 @@ server-simplified/client-detail split and settle snapshots, editor preview,
 budgets and the remaining delivery requirements in `docs/plan/35-ragdolls.md`.
 The pose bridge does not complete these items.
 
-For the impulse handoff, `KineticContact::impulse` already describes an impulse
-applied by the contact solver. `RigidBody::apply_impulse` only changes linear
-velocity; the point and oriented inertia must also contribute angular motion
-when initializing a new limb body. Reapplying the event to the existing struck
-body would double-count it. Keep body selection and the death decision with the
-caller, and test momentum transfer into newly created limbs.
+**Point impulses in progress:** `RigidBody::apply_impulse_at` and
+`PhysicsSystem::apply_impulse_at` now transfer linear and angular momentum at a
+world-space point, sharing the solver's oriented-inertia calculation. Focused
+tests cover centre hits, rotated inertia, kinematic bodies, finite-result
+validation and waking only after validation. Ignoring body orientation,
+partially writing rejected velocity or waking before validation each makes a
+regression fail. The articulated-body test applies a point impulse after the
+animation handoff and still settles with matching skinning positions. Workspace
+formatting and all-target, all-feature Clippy passed. The full workspace test
+run completed before the requested build-cache cleanup; only the existing Win32
+cursor test failed because its window could not retain keyboard focus. Native CI
+remains pending; logs use `%TEMP%/crcbl-ragdoll-impulse-`.
+
+`KineticContact::impulse` already describes an impulse applied by the contact
+solver. Reapplying it to the existing struck body would double-count it. Body
+selection and the death decision remain with the caller; the primitive does not
+automatically replay contact events.
 
 **Handoff investigation (2026-10-08):** the EW placeholder at
 `assets/models/characters/heist-male-swat.gltf` has a scaled skeleton frame;

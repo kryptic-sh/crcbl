@@ -168,12 +168,7 @@ pub(super) struct SolverBody {
 
 impl SolverBody {
     fn new(body: &RigidBody, transform: &Transform) -> Self {
-        let inverse_inertia = if body.has_rotational_inertia() {
-            let turn = DMat3::from_quat(transform.rotation);
-            turn * body.inverse_local_inertia * turn.transpose()
-        } else {
-            DMat3::ZERO
-        };
+        let inverse_inertia = body.inverse_world_inertia(transform.rotation);
         Self {
             inverse_mass: body.inverse_mass,
             inverse_inertia,

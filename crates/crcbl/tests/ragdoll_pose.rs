@@ -99,6 +99,21 @@ fn articulated_bodies_fall_to_terrain_and_drive_the_skinning_palette() {
         body.angular_velocity = initial.angular_velocity;
         physics.set_transform(*entity, Transform::new(initial.position, initial.rotation));
     }
+    let unstruck = *physics.body(entities[0]).unwrap();
+    let struck = *physics.body(entities[1]).unwrap();
+    let at = *physics.transform(entities[1]).unwrap();
+    physics
+        .apply_impulse_at(entities[1], DVec3::Z, at.position + DVec3::Y * 0.05)
+        .unwrap();
+    let after = physics.body(entities[1]).unwrap();
+    assert!(
+        (after.velocity - struck.velocity).abs_diff_eq(DVec3::Z, f64::from(POSITION_TOLERANCE))
+    );
+    assert!(
+        (after.angular_momentum(at.rotation) - struck.angular_momentum(at.rotation))
+            .abs_diff_eq(DVec3::X * 0.05, f64::from(POSITION_TOLERANCE))
+    );
+    assert_eq!(*physics.body(entities[0]).unwrap(), unstruck);
     let mut palette = Palette::new(&skeleton);
     for _ in 0..600 {
         physics.step(DT);

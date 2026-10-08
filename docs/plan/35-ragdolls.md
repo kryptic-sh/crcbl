@@ -20,12 +20,14 @@ CI validation are tracked in `docs/backlog.md`.
 (`SphericalJoint` with cone and twist limits, `RevoluteJoint` with limits,
 breakable joints) and `KineticContact`. `apps/tumble`'s Bridge room assembles
 capsule ragdolls pushed down stairs (`apps/tumble/src/bridge.rs`). Authored
-mapping assets, body generation and impulse transfer, skinned solver
-integration, the server/client split and settle blending below remain to be
-implemented; the pose bridge alone does not provide them. The bridge's
+mapping assets, body generation and the complete death-event handoff, skinned
+solver integration, the server/client split and settle blending below remain to
+be implemented; the pose bridge alone does not provide them. The bridge's
 `motion_from_previous_pose` derives initial world velocities from consecutive
 animated samples; its workspace and native validation are tracked alongside the
-pose bridge in the backlog.
+pose bridge in the backlog. `PhysicsSystem::apply_impulse_at` supplies the
+point-impulse primitive for newly created limb bodies; selecting those bodies
+and consuming the death event are still caller responsibilities.
 
 ## The split: server settles, client performs
 
