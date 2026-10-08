@@ -13222,8 +13222,10 @@ integration test now seeds its bodies from this handoff. Focused tests pass;
 removing translation transfer, shortest-arc handling or the earlier character
 placement each makes a regression fail. Formatting and workspace Clippy pass.
 The final full workspace run passes the new motion and solver tests and fails
-only at the known Win32 foreground-focus setup. Native CI for this addition
-remains pending. Logs use `%TEMP%/crcbl-ragdoll-motion-`.
+only at the known Win32 foreground-focus setup. The Linux, macOS and Windows
+workspace jobs passed in CI `37744414766` at `cc0e7cad`, including the point
+impulse changes below. The citation guard also passed; Vulkan and Metal
+rendering checks remain active. Logs use `%TEMP%/crcbl-ragdoll-motion-`.
 
 **Not built:** authored ragdoll assets and automatic body generation, the
 killing `KineticContact` handoff, solver integration with skinned rendering, the
@@ -13252,8 +13254,9 @@ regression fail. The articulated-body test applies a point impulse after the
 animation handoff and still settles with matching skinning positions. Workspace
 formatting and all-target, all-feature Clippy passed. The full workspace test
 run completed before the requested build-cache cleanup; only the existing Win32
-cursor test failed because its window could not retain keyboard focus. Native CI
-remains pending; logs use `%TEMP%/crcbl-ragdoll-impulse-`.
+cursor test failed because its window could not retain keyboard focus. Native
+workspace validation passed with the motion transfer above; the complete CI run
+is still being watched. Logs use `%TEMP%/crcbl-ragdoll-impulse-`.
 
 `KineticContact::impulse` already describes an impulse applied by the contact
 solver. Reapplying it to the existing struck body would double-count it. Body
