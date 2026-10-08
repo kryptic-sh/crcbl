@@ -22,9 +22,9 @@
 //!   base.
 //! * The ellipsis is `…` (U+2026) in a font that has the glyph, and `...` in
 //!   one that would draw `.notdef` for it — the bitmap font always.
-//! * **A line too narrow for even the ellipsis shows nothing**: the span does
-//!   not clip its own text, so a lone `…` would overflow the box it was cut to
-//!   fit.
+//! * **A line too narrow for even the ellipsis shows nothing**, rather than
+//!   drawing a partially clipped ellipsis. The span's own overflow clip applies
+//!   to its text at the padding box independently of this line-cutting rule.
 //!
 //! The cut is taken after layout from the width the box was given, so it never
 //! moves a box: the box is sized by the whole text, as CSS sizes it.

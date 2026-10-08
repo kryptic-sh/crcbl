@@ -206,8 +206,8 @@ fn each_line_is_cut_on_its_own() {
     );
 }
 
-/// **Text that fits is left whole**, and emits exactly what the same span
-/// without the rule does.
+/// **Text that fits is left whole**, and emits the same text command as the
+/// span without the rule, independently of its overflow clip.
 #[test]
 fn text_that_fits_is_untouched() {
     for family in Family::ALL {
@@ -225,10 +225,10 @@ fn text_that_fits_is_untouched() {
     }
 }
 
-/// **Without every part of the rule nothing is cut**: `clip`, the initial
-/// value, draws the whole line overflowing; so does an ellipsis on a span that
-/// wraps or does not clip; and `text-overflow` is not inherited while
-/// `white-space` is.
+/// **Without every part of the rule the string is not cut**: `clip`, the
+/// initial value, keeps the whole line, as does an ellipsis on a span that
+/// wraps or does not clip. Overflow clipping still applies independently;
+/// `text-overflow` is not inherited while `white-space` is.
 #[test]
 fn only_the_whole_rule_cuts() {
     for family in Family::ALL {

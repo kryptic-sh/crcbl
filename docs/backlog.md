@@ -4652,16 +4652,13 @@ No shader changed.
 landed in `crcbl_ui::tree` (`tree/ellipsis.rs` has the rule) for EW's
 interaction card, with the gaps below.
 
-- **A span's own `overflow: hidden` does not clip its own text.** `emit_node`
-  pushes a node's clip for its children only, so a `nowrap` span that is `clip`
-  (the initial `text-overflow`) draws its whole line past its box, where CSS
-  would clip it at the padding box. Left alone because clipping it changes the
-  draw list of every existing span with `overflow: hidden`; an ellipsised span
-  fits by construction and does not need it. Fixing it means pushing the span's
-  padding box around its text command.
-- **Declined: a lone `…` when not even the ellipsis fits.** Because of the point
-  above it would overflow the box it was cut for; the line shows nothing
-  instead. Revisit if spans come to clip their own text.
+Own-span clipping is covered by headless draw-command and clip-metadata tests;
+rendered-pixel acceptance and the native CI matrix for that correction remain
+pending.
+
+- **Declined: a lone `…` when not even the ellipsis fits.** The line still shows
+  nothing rather than a partially clipped ellipsis. Own-span clipping does not
+  change that line-cutting policy.
 - **`white-space` is two values, and `nowrap` is not CSS's.** The tree never
   collapses white space, so an explicit newline still breaks a `nowrap` span
   (CSS would fold it into a space) — closer to `pre`. No `pre`, `pre-wrap`,

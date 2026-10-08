@@ -5911,6 +5911,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Text spans honor their own `overflow: hidden` and `overflow: scroll`.**
+  Bitmap and parsed-font text are clipped to the span's padding box, intersected
+  with ancestor clips. Visible overflow, block decorations and sibling clips
+  retain their behavior; ellipsis selection is unchanged.
+
 - **Editor rotation drags preserve the untouched axes through a right-angle
   pitch.** The inspector retains its Euler representation during a gesture
   instead of decomposing the quaternion again on every frame. External rotation

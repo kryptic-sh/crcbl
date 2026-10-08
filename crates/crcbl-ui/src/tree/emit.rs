@@ -82,39 +82,7 @@ impl Ui {
                 let padding = padding_box(min, &node.layout);
                 paint_box(list, &node.style, (min, max), padding, &self.images);
             }
-            Content::Text { .. } => {
-                let (content_min, content_max) = content_box(min, &node.layout);
-                // What layout decided it shows: cut by `text-overflow`, or whole.
-                let text = self.shown_text(node).expect("a text span shows text");
-                let style = &node.style;
-                match node.font {
-                    None => list.text(content_min, text, style.color, style.font_size),
-                    Some(font) => {
-                        // Broken at the width the layout measured it under —
-                        // the unrounded one — unless it is `nowrap`, and
-                        // aligned in the box it is drawn in, the rounded one.
-                        let unrounded = &self.store.get(node.slot).unrounded;
-                        let wrap = (style.white_space == WhiteSpace::Normal)
-                            .then(|| content_width(unrounded));
-                        let mut layout = TextLayout::new(
-                            font,
-                            text,
-                            style.font_size,
-                            style.text_line_height(font),
-                            wrap,
-                        );
-                        layout.align(content_max.x - content_min.x, style.text_align);
-                        list.text_glyphs(
-                            content_min,
-                            font,
-                            style.font_size,
-                            style.color,
-                            layout.glyphs(),
-                            text,
-                        );
-                    }
-                }
-            }
+            Content::Text { .. } => {}
             Content::Image(image) => {
                 let (content_min, content_max) = content_box(min, &node.layout);
                 list.image(content_min, content_max, &image, node.style.color);
@@ -125,6 +93,39 @@ impl Ui {
         if clipped {
             let (clip_min, clip_max) = padding_box(min, &node.layout);
             list.push_clip(clip_min, clip_max);
+        }
+        if let Content::Text { .. } = node.content {
+            let (content_min, content_max) = content_box(min, &node.layout);
+            // What layout decided it shows: cut by `text-overflow`, or whole.
+            let text = self.shown_text(node).expect("a text span shows text");
+            let style = &node.style;
+            match node.font {
+                None => list.text(content_min, text, style.color, style.font_size),
+                Some(font) => {
+                    // Broken at the width the layout measured it under —
+                    // the unrounded one — unless it is `nowrap`, and
+                    // aligned in the box it is drawn in, the rounded one.
+                    let unrounded = &self.store.get(node.slot).unrounded;
+                    let wrap =
+                        (style.white_space == WhiteSpace::Normal).then(|| content_width(unrounded));
+                    let mut layout = TextLayout::new(
+                        font,
+                        text,
+                        style.font_size,
+                        style.text_line_height(font),
+                        wrap,
+                    );
+                    layout.align(content_max.x - content_min.x, style.text_align);
+                    list.text_glyphs(
+                        content_min,
+                        font,
+                        style.font_size,
+                        style.color,
+                        layout.glyphs(),
+                        text,
+                    );
+                }
+            }
         }
         for child in &self.children[node.child_start..node.child_start + node.child_count] {
             self.emit_node(usize::from(*child), list);

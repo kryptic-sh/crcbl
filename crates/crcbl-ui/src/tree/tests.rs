@@ -773,61 +773,8 @@ fn emitted(ui: &Ui) -> DrawList {
     list
 }
 
-/// **`overflow: hidden` clips exactly the block's children to its padding
-/// box**, and pops the clip after them.
-#[test]
-fn overflow_hidden_clips_the_children_to_the_padding_box() {
-    let mut ui = Ui::new();
-    frame(&mut ui, idle(), |ui| {
-        let clipper = NodeStyle {
-            overflow: Overflow::Hidden,
-            border: Edges::all(2.0),
-            padding: Edges::all(Length::Px(3.0)),
-            background: [1.0; 4],
-            ..sized(40.0, 40.0)
-        };
-        ui.block("", &[], |ui| {
-            ui.block("", &clipper.declarations(), |ui| {
-                ui.block(
-                    "",
-                    &NodeStyle {
-                        background: [0.5; 4],
-                        ..sized(100.0, 100.0)
-                    }
-                    .declarations(),
-                    |_| {},
-                );
-            });
-            ui.block(
-                "",
-                &NodeStyle {
-                    background: [0.25; 4],
-                    ..sized(10.0, 10.0)
-                }
-                .declarations(),
-                |_| {},
-            );
-        });
-    });
-    let list = emitted(&ui);
-    let clips = list.clips();
-    assert_eq!(list.len(), 3, "{:?}", list.commands());
-    assert_eq!(
-        clips[0],
-        ClipRect::NONE,
-        "the clipping block is not clipped itself"
-    );
-    assert_eq!(
-        clips[1],
-        ClipRect {
-            min: Vec2::splat(2.0),
-            max: Vec2::splat(38.0)
-        },
-        "the child is not clipped to the padding box"
-    );
-    assert_eq!(clips[2], ClipRect::NONE, "the clip outlived the block");
-    assert_eq!(list.clip(), ClipRect::NONE);
-}
+#[path = "clipping_tests.rs"]
+mod clipping;
 
 /// **A square block is a rect and an outline; a rounded one is one rounded
 /// rect; uneven borders are a band per side** — and a transparent block with
