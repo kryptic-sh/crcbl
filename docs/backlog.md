@@ -19,11 +19,12 @@ validation before an engine implementation can be specified.
 
   `apps/tumble/src/bridge.rs::build_ragdolls` already assembles physical limbs
   with spherical and revolute joints. That is a solver example, not a skeletal
-  animation handoff; `crcbl-anim` exposes poses and palettes but no ragdoll
-  integration. Prove the bone/body mapping and pose handoff with EW placeholder
-  assets first, then extract the reusable mapping, last-pose initialization and
-  physical-pose output into crcbl. Keep damage, item ownership, revival
-  progress, interaction admission and authored get-up behavior in EW.
+  animation handoff. The pose bridge in `crcbl-anim::ragdoll` is now being
+  verified with synthetic engine rigs and the ordinary physics solver; the
+  placeholder asset probe established the scale and palette-order constraints.
+  Last-pose body initialization and animated velocity transfer remain open. Keep
+  damage, item ownership, revival progress, interaction admission and authored
+  get-up behavior in EW.
 
   Acceptance must exercise death during motion, falling and settling on terrain,
   rendered limbs matching physical bodies, and revival from the settled pose
@@ -13179,11 +13180,28 @@ room already assembles them into capsule ragdolls pushed down a flight of stairs
 (`apps/tumble/src/bridge.rs`), so the solver is shown to hold an articulated
 body.
 
-**Not built:** the topic itself. No ragdoll type exists anywhere in the
-workspace; there is no bone-to-body mapping or authored ragdoll asset, no death
-handoff from the last animated pose and the killing `KineticContact`, no
-server-simplified / client-detail split with its settle snapshot, and no blend
-of the bodies back into the render pose.
+**Pose bridge in progress:** `crcbl-anim/src/ragdoll.rs::RagdollBinding`
+captures joint/body offsets at handoff and reconstructs local poses from rigid
+world transforms. The ordinary animation tests cover scaled skeletons,
+independent body motion, unmapped descendants, rejected inputs and atomic
+failure. Removing offsets, weakening rigid-body validation and allowing partial
+output writes each made the corresponding regression fail. Formatting and
+workspace all-target/all-feature Clippy pass. The final serial full workspace
+run passes the new animation and solver regressions and fails only at the known
+Win32 cursor test's foreground-window setup. Native CI validation remains
+pending. Local logs use `%TEMP%/crcbl-ragdoll-bridge-`.
+
+`crates/crcbl/tests/ragdoll_pose.rs` also drives articulated bodies through the
+contact solver onto a plane and compares skinned vertex positions against the
+physical transforms throughout the fall and settling. Omitting the physics step
+or leaving the palette stale makes this test fail. This verifies the
+solver-to-palette path, not GPU rendering or animated velocity transfer.
+
+**Not built:** authored ragdoll assets and automatic body generation, animated
+velocity transfer and the killing `KineticContact` handoff, solver integration
+with skinned rendering, the server-simplified/client-detail split and settle
+snapshots, editor preview, budgets and the remaining delivery requirements in
+`docs/plan/35-ragdolls.md`. The pose bridge does not complete these items.
 
 **Handoff investigation (2026-10-08):** the EW placeholder at
 `assets/models/characters/heist-male-swat.gltf` has a scaled skeleton frame;

@@ -859,6 +859,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_anim::ragdoll::RagdollBinding` reconstructs a skeletal pose from
+  rigid-body transforms.** Bind the last animated pose to bodies in world space,
+  retaining bone/body offsets and imported skeleton scale. Unmapped children
+  follow their posed parents. Invalid or unrepresentable transforms fail without
+  partially changing the output pose. Body creation, simulation and death policy
+  remain outside this pose bridge.
+
 - **`crcbl_ui::OutlinerState::retain` removes state for deleted model items.**
   Applications supply membership in their complete model, including rows hidden
   under collapsed branches. Retained rows keep selection, expansion and click

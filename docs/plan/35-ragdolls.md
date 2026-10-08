@@ -9,15 +9,20 @@ must land in the _same place_ for everyone.
 **Depends on** the contact solver (36, L2) for bodies-vs-world and L3 joints for
 the articulation — ragdolls are the flagship consumer of both.
 
-**Nothing here is built, but everything it depends on is**: there is no ragdoll
-type anywhere in the workspace, while `crcbl-phys` has the contact solver (36),
-rotational dynamics, joints (`SphericalJoint` with cone and twist limits,
-`RevoluteJoint` with limits, breakable joints) and `KineticContact` (28), which
-carries the impulse, point and normal the death handoff reads the killing blow
-from. `apps/tumble`'s Bridge room already assembles them into capsule ragdolls
-pushed down a flight of stairs (`apps/tumble/src/bridge.rs`), so the solver is
-shown to hold an articulated body; the bone mapping, the death handoff, the
-server/client split and the render-pose blend below are all unbuilt.
+**The pose bridge is in progress; the full ragdoll remains unbuilt.**
+`crcbl-anim::ragdoll::RagdollBinding` captures joint/body offsets from the last
+animated pose and reconstructs local transforms from rigid-body world poses. It
+retains skeleton scale and unmapped child transforms, and rejects an
+unrepresentable pose without partially changing the output. Workspace and native
+CI validation are tracked in `docs/backlog.md`.
+
+`crcbl-phys` already has the contact solver, rotational dynamics, joints
+(`SphericalJoint` with cone and twist limits, `RevoluteJoint` with limits,
+breakable joints) and `KineticContact`. `apps/tumble`'s Bridge room assembles
+capsule ragdolls pushed down stairs (`apps/tumble/src/bridge.rs`). Authored
+mapping assets, body generation, animated velocity and impulse transfer, skinned
+solver integration, the server/client split and settle blending below remain to
+be implemented; the pose bridge alone does not provide them.
 
 ## The split: server settles, client performs
 

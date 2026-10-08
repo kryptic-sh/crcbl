@@ -1,5 +1,6 @@
 //! Skeletal animation: clip sampling, joint palettes, and the state machine
-//! above them.
+//! above them. [`ragdoll`] reconstructs skeletal poses from rigid bodies at
+//! the animation-to-physics handoff.
 //!
 //! The animation evaluation stack recorded in `docs/notes/simulation.md` (_What
 //! the deleted 17-animation plan left behind_) — its clip-sampling step, the
@@ -97,6 +98,7 @@ pub mod clip;
 pub mod ik;
 pub mod machine;
 pub mod palette;
+pub mod ragdoll;
 pub mod sample;
 pub mod skeleton;
 pub mod trs;
