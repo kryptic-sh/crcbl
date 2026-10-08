@@ -13,11 +13,12 @@
 //!
 //! # The three modes
 //!
-//! [`Mode::Translate`] draws an arrow per world axis and a square per plane
+//! [`Mode::Translate`] draws an arrow per handle axis and a square per plane
 //! between two of them; [`Mode::Scale`] draws a box-tipped line along each of
 //! the box's **own** axes — a half extent is along them, so its handle is too —
 //! and a square at the centre that resizes evenly; [`Mode::Rotate`] draws a
-//! ring about each world axis ([`ring()`]).
+//! ring about each handle axis ([`ring()`]). [`Space`] chooses world axes or
+//! the primary selection's local axes for translation and rotation.
 //!
 //! # Which field a handle writes
 //!
@@ -147,14 +148,35 @@ impl Mode {
     }
 }
 
-/// One of the three world axes a handle moves along.
+/// The axes used by translate and rotate handles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Space {
+    /// Fixed world axes.
+    #[default]
+    World,
+    /// The primary selection's axes.
+    Local,
+}
+
+impl Space {
+    /// The handle frame for an object with this rotation.
+    #[must_use]
+    pub const fn frame(self, rotation: DQuat) -> DQuat {
+        match self {
+            Self::World => DQuat::IDENTITY,
+            Self::Local => rotation,
+        }
+    }
+}
+
+/// One of the handle frame's axes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Axis {
-    /// World X, drawn red.
+    /// X, drawn red.
     X,
-    /// World Y, drawn green.
+    /// Y, drawn green.
     Y,
-    /// World Z, drawn blue.
+    /// Z, drawn blue.
     Z,
 }
 
@@ -193,7 +215,7 @@ impl Axis {
     }
 }
 
-/// One of the three world planes a plane handle moves across, each spanned by
+/// A plane in the handle frame, spanned by
 /// two axes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plane {
@@ -243,7 +265,7 @@ pub enum Grip {
     Scale(Axis),
     /// Resize along all three in proportion.
     ScaleAll,
-    /// Turn about one world axis.
+    /// Turn about one handle axis.
     Rotate(Axis),
 }
 
@@ -308,15 +330,15 @@ pub struct Handle {
     pub shape: Shape,
 }
 
-/// The `mode` handles for a selection centred on `origin` whose box is turned
+/// The `mode` handles for a selection centred on `origin`, with axes turned
 /// by `frame`, seen through `camera` in a pane of `extent` physical pixels at
 /// `scale` physical pixels per logical one.
 ///
 /// Empty when the centre is behind the eye. An axis pointing along the view
 /// has no handle, since its direction on screen is not a direction, and a
 /// plane seen nearly edge-on has none, since a slip of the pointer would be a
-/// long move. Scale's lines run along the box's own axes, `frame` turning the
-/// world's; translate's arrows and rotate's rings are the world's.
+/// long move. Pass the object's rotation for scale; for translate and rotate,
+/// pass the frame chosen by [`Space::frame`].
 #[must_use]
 pub fn handles(
     camera: &Camera,
@@ -336,7 +358,7 @@ pub fn handles(
                 Some(Handle {
                     grip: Grip::Rotate(axis),
                     shape: Shape::Ring {
-                        points: Box::new(ring(camera, extent, origin, axis, scale)?),
+                        points: Box::new(ring(camera, extent, origin, frame, axis, scale)?),
                     },
                 })
             })
@@ -344,10 +366,7 @@ pub fn handles(
     }
     let view = (origin - camera.eye).normalize_or_zero();
     let directions = Axis::ALL.map(|axis| {
-        let unit = match mode {
-            Mode::Scale => narrow(frame * axis.unit()),
-            Mode::Translate | Mode::Rotate => narrow(axis.unit()),
-        };
+        let unit = narrow(frame * axis.unit());
         if view.dot(unit).abs() > HIDDEN_BEYOND {
             return None;
         }
@@ -379,7 +398,7 @@ pub fn handles(
         Mode::Translate => handles.extend(Plane::ALL.into_iter().filter_map(|plane| {
             let [a, b] = plane.axes();
             let (a, b) = (directions[a.index()]?, directions[b.index()]?);
-            if view.dot(narrow(plane.normal().unit())).abs() < EDGE_ON_BELOW {
+            if view.dot(narrow(frame * plane.normal().unit())).abs() < EDGE_ON_BELOW {
                 return None;
             }
             Some(Handle {

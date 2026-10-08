@@ -264,8 +264,9 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// The mesh asset a press on the asset browser took hold of, dropped
     /// where the button comes up — see the module docs.
     dragged: Option<String>,
-    /// Which handles the selection shows: W and R choose.
+    /// Which handles the selection shows: W, E and R choose.
     gizmo_mode: gizmo::Mode,
+    gizmo_space: gizmo::Space,
     /// The absolute grid a drag lands on while Ctrl is held, from the player's
     /// settings.
     snap: gizmo::Snap,
@@ -511,6 +512,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             drag: None,
             dragged: None,
             gizmo_mode: gizmo::Mode::default(),
+            gizmo_space: gizmo::Space::default(),
             snap,
             clock_source,
             budget: FrameBudget::new(options.common.frame_budget()),
@@ -877,13 +879,14 @@ impl<S: Shell + ?Sized> Editor<S> {
         )
     }
 
-    /// Where the handles stand, in render space, and the frame a scale
+    /// Where the handles stand, in render space, and the frame the
     /// handle's axes are turned by — or [`None`] where the current mode shows
     /// none (see [`handles`](Self::handles)).
     ///
     /// A lone entity's handles stand at the centre of its box, turned as it
     /// is; several selected share theirs at the selection's pivot
-    /// ([`Document::selection_pivot`]), on the world's axes.
+    /// ([`Document::selection_pivot`]). Local mode uses the primary entity's
+    /// axes, falling back to world axes when it has no placement.
     fn gizmo_centre(&mut self) -> Option<(Vec3, DQuat)> {
         let id = self.document.primary()?;
         if self.document.selection().len() > 1 {
@@ -891,14 +894,23 @@ impl<S: Shell + ?Sized> Editor<S> {
                 return None;
             }
             let pivot = self.document.selection_pivot()?;
-            return Some((pivot.as_vec3(), DQuat::IDENTITY));
+            let rotation = self
+                .document
+                .placement(id)
+                .map_or(DQuat::IDENTITY, |placed| placed.rotation);
+            return Some((pivot.as_vec3(), self.gizmo_space.frame(rotation)));
         }
         if !self.has_field(id, self.gizmo_mode) {
             return None;
         }
         let (min, max) = self.document.bounds(id)?;
         let placement = self.document.placement(id)?;
-        Some(((min + max) * 0.5, placement.rotation))
+        let frame = if self.gizmo_mode == gizmo::Mode::Scale {
+            placement.rotation
+        } else {
+            self.gizmo_space.frame(placement.rotation)
+        };
+        Some(((min + max) * 0.5, frame))
     }
 
     /// Every selected entity a translate moves — each one whose placing
@@ -1072,7 +1084,8 @@ impl<S: Shell + ?Sized> Editor<S> {
             .map(DVec3::from_array);
         let camera = self.camera.camera();
         let centre = camera.pixel_of(shown, self.panels.viewport_extent())?;
-        let toward_eye = axis.unit().dot(camera.eye.as_dvec3() - pivot);
+        let frame = self.gizmo_space.frame(rotation);
+        let toward_eye = (frame * axis.unit()).dot(camera.eye.as_dvec3() - pivot);
         let facing = if toward_eye < 0.0 { -1.0 } else { 1.0 };
         Some(gizmo::Drag::turn(
             id,
@@ -1086,6 +1099,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                 centre,
                 facing,
             },
+            self.gizmo_space,
         ))
     }
 
@@ -1189,7 +1203,15 @@ impl<S: Shell + ?Sized> Editor<S> {
                 "turn",
             ),
         };
-        self.panels.set_status(text, tone);
+        let axes = if mode == gizmo::Mode::Scale || self.gizmo_space == gizmo::Space::Local {
+            "Local"
+        } else {
+            "World"
+        };
+        self.panels.set_status(
+            format!("{text}. {axes} axes; X toggles translate/rotate axes"),
+            tone,
+        );
     }
 
     /// What the status line says when a mode whose handles need a field is
@@ -1449,6 +1471,17 @@ impl<S: Shell + ?Sized> Editor<S> {
             }
             Action::Rotate => {
                 self.choose_mode(gizmo::Mode::Rotate);
+                Ok(())
+            }
+            Action::ToggleSpace => {
+                if matches!(self.drag, Some(Drag::Gizmo(..))) {
+                    self.drag = None;
+                }
+                self.gizmo_space = match self.gizmo_space {
+                    gizmo::Space::World => gizmo::Space::Local,
+                    gizmo::Space::Local => gizmo::Space::World,
+                };
+                self.choose_mode(self.gizmo_mode);
                 Ok(())
             }
             Action::PlayStop => self.play_or_stop(),

@@ -1,4 +1,4 @@
-//! The rotate handles: a ring per world axis, drawn and hit tested as the
+//! The rotate handles: a ring per handle axis, drawn and hit tested as the
 //! polyline the axis's circle about the selection projects to.
 //!
 //! A ring is the circle square to its axis through the selection's centre,
@@ -10,7 +10,7 @@
 //! still a ring a press can take: the drag measures the angle swept about the
 //! centre on screen, which an edge-on ring has as well as a face-on one.
 
-use crcbl::math::{Vec2, Vec3};
+use crcbl::math::{DQuat, Vec2, Vec3};
 use crcbl::render::Camera;
 
 use super::{Axis, narrow};
@@ -24,7 +24,7 @@ pub const RING_SEGMENTS: usize = 48;
 /// the same ground.
 pub const RING_PX: f32 = super::HANDLE_PX;
 
-/// The ring about `axis` through `origin`, seen through `camera` in a pane of
+/// The ring about `axis` turned by `frame`, through `origin`, seen through `camera` in a pane of
 /// `extent` physical pixels at `scale` physical pixels per logical one: its
 /// [`RING_SEGMENTS`] points in the pane's physical pixels, in order round the
 /// circle.
@@ -36,6 +36,7 @@ pub fn ring(
     camera: &Camera,
     extent: (u32, u32),
     origin: Vec3,
+    frame: DQuat,
     axis: Axis,
     scale: f32,
 ) -> Option<[Vec2; RING_SEGMENTS]> {
@@ -44,7 +45,7 @@ pub fn ring(
     // enough to stay in front of the eye whenever the centre is, as the
     // arrows' step does — then scaled on screen to the ring's size.
     let step = origin.distance(camera.eye).max(f32::MIN_POSITIVE) * 0.1;
-    let unit = narrow(axis.unit());
+    let unit = narrow(frame * axis.unit());
     let (u, v) = unit.any_orthonormal_pair();
     let offsets: Vec<Vec2> = (0..RING_SEGMENTS)
         .map(|index| {

@@ -4,6 +4,8 @@ use crcbl::scene::scn::SceneEntityId;
 use super::*;
 use crate::command::Gesture;
 
+mod space;
+
 const EXTENT: (u32, u32) = (800, 600);
 
 /// A camera up and to the side of the origin, looking at it, so no axis
@@ -842,7 +844,15 @@ fn the_swept_angle_is_counter_clockwise_and_wraps() {
 /// A ring drag of `axis` from `from`, pressed to the right of its centre.
 fn ring_drag(axis: Axis, from: Turn) -> Drag {
     let at = from.centre + Vec2::new(60.0, 0.0);
-    Drag::turn(SceneEntityId(1), axis, Gesture(1), DVec3::ZERO, at, from)
+    Drag::turn(
+        SceneEntityId(1),
+        axis,
+        Gesture(1),
+        DVec3::ZERO,
+        at,
+        from,
+        Space::World,
+    )
 }
 
 /// The pointer at `at` on the pane; a turn does not read the ray.

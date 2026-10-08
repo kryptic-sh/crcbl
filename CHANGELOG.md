@@ -859,6 +859,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The editor's X key switches translate and rotate gizmos between World and
+  Local axes.** Local translation and snapping use the primary selection's
+  frame, including shared-pivot translation; local rings turn about the object's
+  axes. Scale handles remain local in either mode. Changing space ends an active
+  gizmo drag without discarding its undoable edits.
+
 - **`RigidBody::apply_impulse_at` and `PhysicsSystem::apply_impulse_at` apply
   impulses at world-space points.** Off-center hits change angular momentum
   through the body's oriented inertia as well as linear velocity. Invalid inputs

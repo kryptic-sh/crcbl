@@ -130,6 +130,9 @@ pub const SCALE: &str = "editor_scale";
 /// [`crate::gizmo::Mode`].
 pub const ROTATE: &str = "editor_rotate";
 
+/// Switch translate and rotate between world and local axes: X.
+pub const TOGGLE_SPACE: &str = "editor_toggle_space";
+
 /// Start play mode, or stop it and put the scene back: F5, the key every IDE
 /// starts a run with. See [`crate::document::Document::play`].
 pub const PLAY: &str = "editor_play";
@@ -209,6 +212,8 @@ pub enum Action {
     Scale,
     /// Show the rotate handles.
     Rotate,
+    /// Switch translate and rotate between world and local axes.
+    ToggleSpace,
     /// Start play mode from editing, or stop it from playing or paused.
     PlayStop,
     /// Pause a playing scene, or resume a paused one.
@@ -369,6 +374,7 @@ pub fn map() -> ActionMap {
     map.declare(button(TRANSLATE, vec![Binding::Key(KeyCode::KeyW)]));
     map.declare(button(SCALE, vec![Binding::Key(KeyCode::KeyR)]));
     map.declare(button(ROTATE, vec![Binding::Key(KeyCode::KeyE)]));
+    map.declare(button(TOGGLE_SPACE, vec![Binding::Key(KeyCode::KeyX)]));
     // Function keys, which neither reserved context binds: play and pause
     // reach the editor while a panel holds the keyboard, as a run key does in
     // every IDE, and only the editing rule in `actions` stops them.
@@ -483,6 +489,7 @@ pub fn release_keys(map: &mut ActionMap) {
         TRANSLATE,
         SCALE,
         ROTATE,
+        TOGGLE_SPACE,
         PLAY,
         PAUSE,
         RENAME,
@@ -586,6 +593,9 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
     }
     if map.just_pressed(ROTATE) {
         actions.push(Action::Rotate);
+    }
+    if map.just_pressed(TOGGLE_SPACE) {
+        actions.push(Action::ToggleSpace);
     }
     if map.just_pressed(PLAY) {
         actions.push(Action::PlayStop);
@@ -850,6 +860,11 @@ mod tests {
             [Action::Rotate]
         );
         assert_eq!(keys.tap(KeyCode::KeyR, Modifiers::CTRL), []);
+        assert_eq!(
+            keys.tap(KeyCode::KeyX, Modifiers::empty()),
+            [Action::ToggleSpace]
+        );
+        assert_eq!(keys.tap(KeyCode::KeyX, Modifiers::CTRL), []);
         assert_eq!(
             keys.tap(KeyCode::F5, Modifiers::empty()),
             [Action::PlayStop]

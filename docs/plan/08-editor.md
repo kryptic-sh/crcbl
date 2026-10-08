@@ -521,14 +521,16 @@ duplicated, copied and pasted as one.
   the outliner's whole selection, not the rows it shows.
 - **Shared-pivot translate**: with several selected the translate handles stand
   at `Document::selection_pivot`, the **bounds centre** (the centre of the box
-  around every selected entity's box), on the world's axes. A drag moves the
-  pivot as it moved a lone entity's centre, and `gizmo::Drag::spread` moves
-  every `gizmo::Member` of the drag's `gizmo::Group` — each selected entity
-  whose placing component has a `position` — by the same delta, one
-  `EditCommand::Batch` a frame that the log folds into one entry. Snapped, the
-  pivot lands on the absolute grid. A group of one is its own pivot, so a lone
-  entity snaps its own position to the bit as before. The arrow keys nudge every
-  selected entity, one entry too.
+  around every selected entity's box). World mode uses the world's axes; Local
+  mode uses the primary entity's placement axes, falling back to world axes if
+  it has no placement. A drag moves the pivot as it moved a lone entity's
+  centre, and `gizmo::Drag::spread` moves every `gizmo::Member` of the drag's
+  `gizmo::Group` — each selected entity whose placing component has a `position`
+  — by the same delta, one `EditCommand::Batch` a frame that the log folds into
+  one entry. Snapped, the pivot lands on the grid in the chosen frame about the
+  world origin. A group of one is its own pivot, so a lone entity snaps its own
+  position to the bit as before. The arrow keys nudge every selected entity, one
+  entry too.
 - **Scale and rotate stay single-entity**: with several selected R and E show no
   handles and say why on the status line.
 - **Delete, duplicate, copy and paste take the whole selection**, one entry
@@ -892,7 +894,7 @@ of the same day (below).
   no rings, and E says so on the status line.
 - **A drag turns by the angle swept round the centre on screen**
   (`gizmo::swept`), counter-clockwise as seen from the axis's tip, the other way
-  when the axis points away from the eye; about the ring's world axis through
+  when the axis points away from the eye; about the ring's chosen axis through
   the placement's centre, composed onto the rotation the press found. It writes
   the four `rotation` leaves and, where the component has a `position`, that
   position swung round the centre — unmoved for a block, whose position is its
@@ -903,8 +905,11 @@ of the same day (below).
   the grid and scale steps in `settings.toml`), measured from the press: an
   orientation has no absolute grid about one axis.
 - **Scale's lines follow the box's own axes**, since a half extent is along
-  them, so a turned block's scale handles point along its faces; translate's
-  arrows and the rings are the world's.
+  them, so a turned block's scale handles point along its faces. **X toggles
+  translate and rotate between World and Local axes**, reported in the status
+  line. A toggle ends an active gizmo drag at its current pose; the next press
+  captures the newly chosen frame. Scale always uses local axes. Validation is
+  tracked in `docs/backlog.md`.
 - **The inspector draws a rotation as three angles in degrees**
   (`EulerRot::XYZ`) over the quaternion, writing all four leaves when one angle
   is dragged; `Panels::apply_edits` makes a frame's edits to one section one

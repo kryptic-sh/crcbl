@@ -22,6 +22,7 @@ mod play_strip;
 mod recovery;
 mod scene_inspector;
 mod selection;
+mod space;
 mod towers_field;
 mod unsaved;
 mod watch;

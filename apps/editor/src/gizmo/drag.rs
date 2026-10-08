@@ -9,7 +9,7 @@ use crcbl::scene::scn::SceneEntityId;
 
 use crate::command::Gesture;
 
-use super::{Axis, Grip, HANDLE_PX, POSITION, Plane, ROTATION, Snap, widen};
+use super::{Axis, Grip, HANDLE_PX, POSITION, Plane, ROTATION, Snap, Space, widen};
 
 /// The least half extent a scale drag writes, in metres, so the smallest box
 /// a drag leaves is a centimetre across.
@@ -49,9 +49,12 @@ pub fn along(ray: &ViewRay, origin: DVec3, unit: DVec3) -> Option<f64> {
 /// A ray `o + s·d` meets the plane `(x - p)·n = 0` at `s = (p - o)·n / (d·n)`.
 #[must_use]
 pub fn on_plane(ray: &ViewRay, origin: DVec3, normal: Axis) -> Option<DVec3> {
+    on_oriented_plane(ray, origin, normal.unit())
+}
+
+fn on_oriented_plane(ray: &ViewRay, origin: DVec3, n: DVec3) -> Option<DVec3> {
     let direction = widen(ray.direction).normalize_or_zero();
     let start = widen(ray.origin);
-    let n = normal.unit();
     let facing = direction.dot(n);
     if facing.abs() <= PARALLEL_BELOW {
         return None;
@@ -142,9 +145,13 @@ pub struct Group {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Hold {
     /// An axis, `grab` metres along its line from the centre.
-    Move { axis: Axis, grab: f64 },
+    Move { axis: Axis, grab: f64, frame: DQuat },
     /// A plane, at the point `grab` on it.
-    MovePlane { plane: Plane, grab: DVec3 },
+    MovePlane {
+        plane: Plane,
+        grab: DVec3,
+        frame: DQuat,
+    },
     /// A scale axis, turned into the box's frame as `unit`, `grab` metres
     /// along its line from the centre.
     Scale { axis: Axis, unit: DVec3, grab: f64 },
@@ -152,7 +159,12 @@ enum Hold {
     /// long at the press's scale: what a uniform scale measures travel in.
     ScaleAll { at: Vec2, span: f32 },
     /// A ring, pressed at the pixel `at`, turning from `from`.
-    Rotate { axis: Axis, at: Vec2, from: Turn },
+    Rotate {
+        axis: Axis,
+        at: Vec2,
+        from: Turn,
+        space: Space,
+    },
 }
 
 /// A drag of one handle, from the press that took it.
@@ -177,11 +189,11 @@ pub struct Drag {
 impl Drag {
     /// A drag of `entity` through `grip` — an arrow, a plane or a scale
     /// handle — whose field holds `start` and whose centre is `origin`, its
-    /// box turned by `frame`, taken by a press at `pointer` with `scale`
+    /// handle axes turned by `frame`, taken by a press at `pointer` with `scale`
     /// physical pixels to a logical one.
     ///
-    /// A scale axis is measured along the box's own axis, `frame` turning the
-    /// world's: a half extent is along the box's axes, and so is its handle.
+    /// Scale uses the box's rotation. Translation uses the chosen world/local
+    /// frame; snapping measures coordinates in that frame about the world origin.
     ///
     /// [`None`] when the press's ray runs along the axis or the plane, which
     /// leaves it nothing to take hold of, and for a ring, which
@@ -202,11 +214,13 @@ impl Drag {
         let hold = match grip {
             Grip::Move(axis) => Hold::Move {
                 axis,
-                grab: along(ray, origin, axis.unit())?,
+                grab: along(ray, origin, frame * axis.unit())?,
+                frame,
             },
             Grip::MovePlane(plane) => Hold::MovePlane {
                 plane,
-                grab: on_plane(ray, origin, plane.normal())?,
+                grab: on_oriented_plane(ray, origin, frame * plane.normal().unit())?,
+                frame,
             },
             Grip::Scale(axis) => {
                 let unit = frame * axis.unit();
@@ -232,7 +246,7 @@ impl Drag {
     }
 
     /// A drag of `entity`'s ring about `axis`, through its centre `origin`,
-    /// taken by a press at `at` on the pane, turning from `from`.
+    /// taken by a press at `at` on the pane, turning from `from`, in `space`.
     #[must_use]
     pub const fn turn(
         entity: SceneEntityId,
@@ -241,12 +255,18 @@ impl Drag {
         origin: DVec3,
         at: Vec2,
         from: Turn,
+        space: Space,
     ) -> Self {
         Self {
             entity,
             gesture,
             start: [0.0; 3],
-            hold: Hold::Rotate { axis, at, from },
+            hold: Hold::Rotate {
+                axis,
+                at,
+                from,
+                space,
+            },
             origin,
         }
     }
@@ -266,11 +286,11 @@ impl Drag {
     /// What the pointer at `pointer` sets, leaf by leaf — on the absolute grid
     /// `snap` describes, while there is one.
     ///
-    /// - **An axis** moves its `position.N` by as far as the point on the axis
-    ///   line closest to the cursor's ray has moved since the press.
-    /// - **A plane** moves both its axes' leaves by as far as the ray's crossing
-    ///   of the plane has moved, and never the third: the movement is measured
-    ///   in the plane, so it has no part along the normal.
+    /// - **An axis** moves the position by as far as the point on its line
+    ///   closest to the cursor's ray has moved since the press.
+    /// - **A plane** moves the position by as far as the ray's crossing of the
+    ///   plane has moved, with no displacement along its normal. Local axes
+    ///   and planes may write every world-space position component.
     /// - **A scale axis** adds the same distance along the box's own axis to
     ///   that `half_extents.N`, so the face the handle points at follows the
     ///   cursor's travel metre for metre.
@@ -320,43 +340,64 @@ impl Drag {
                     .map(|axis| set(axis, half_extent(start(axis) * factor)))
                     .collect()
             }
-            Hold::Rotate { axis, at, from } => {
+            Hold::Rotate {
+                axis,
+                at,
+                from,
+                space,
+            } => {
                 let angle = swept(from.centre, at, pointer.at)? * from.facing;
                 let angle = snap.map_or(angle, |snap| snap.angle(angle));
-                self.turned(axis, angle, &from)
+                self.turned(axis, angle, &from, space)
             }
         })
     }
 
     /// Where an arrow or a plane drag puts the point it moves — the press's
-    /// [`start`](Self::begin) — axis by axis: each axis the grip moves along,
-    /// and the value it lands on, on the absolute grid `snap` describes while
-    /// there is one.
+    /// [`start`](Self::begin) — as world-space component writes. Snapping uses
+    /// the handle frame's grid about the world origin. An oriented frame may
+    /// change every world component even when only one local axis moves.
     ///
     /// [`None`] for a grip that does not translate, and when the ray runs
     /// along the axis or plane.
     #[must_use]
     pub fn translated(&self, pointer: &Pointer, snap: Option<Snap>) -> Option<Vec<(Axis, f64)>> {
+        let frame = match self.hold {
+            Hold::Move { frame, .. } | Hold::MovePlane { frame, .. } => frame,
+            _ => return None,
+        };
         let position = |value: f64| snap.map_or(value, |snap| snap.grid(value));
-        let start = |axis: Axis| self.start[axis.index()];
+        let world_start = DVec3::from_array(self.start);
+        let local_start = frame.conjugate() * world_start;
+        let start = |axis: Axis| local_start[axis.index()];
         let ray = &pointer.ray;
-        match self.hold {
-            Hold::Move { axis, grab } => {
-                let moved = along(ray, self.origin, axis.unit())? - grab;
+        let landed = match self.hold {
+            Hold::Move { axis, grab, .. } => {
+                let moved = along(ray, self.origin, frame * axis.unit())? - grab;
                 Some(vec![(axis, position(start(axis) + moved))])
             }
-            Hold::MovePlane { plane, grab } => {
-                let moved = on_plane(ray, self.origin, plane.normal())? - grab;
+            Hold::MovePlane { plane, grab, .. } => {
+                let moved =
+                    on_oriented_plane(ray, self.origin, frame * plane.normal().unit())? - grab;
                 Some(
                     plane
                         .axes()
                         .into_iter()
-                        .map(|axis| (axis, position(start(axis) + moved.dot(axis.unit()))))
+                        .map(|axis| (axis, position(start(axis) + moved.dot(frame * axis.unit()))))
                         .collect(),
                 )
             }
             Hold::Scale { .. } | Hold::ScaleAll { .. } | Hold::Rotate { .. } => None,
+        }?;
+        if frame == DQuat::IDENTITY {
+            return Some(landed);
         }
+        let mut delta = DVec3::ZERO;
+        for (axis, value) in landed {
+            delta += frame * axis.unit() * (value - start(axis));
+        }
+        let world = world_start + delta;
+        Some(Axis::ALL.map(|axis| (axis, world[axis.index()])).to_vec())
     }
 
     /// What an arrow or a plane drag of a [`Group`] sets, member by member:
@@ -400,8 +441,8 @@ impl Drag {
 
     /// The leaves that turn the entity `angle` radians about `axis` through
     /// the centre, from where `from` says it started.
-    fn turned(&self, axis: Axis, angle: f64, from: &Turn) -> Vec<Write> {
-        let turn = DQuat::from_axis_angle(axis.unit(), angle);
+    fn turned(&self, axis: Axis, angle: f64, from: &Turn, space: Space) -> Vec<Write> {
+        let turn = DQuat::from_axis_angle(space.frame(from.rotation) * axis.unit(), angle);
         let rotation = (turn * from.rotation).normalize();
         let mut writes: Vec<Write> = Rotation::LEAVES
             .into_iter()

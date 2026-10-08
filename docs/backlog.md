@@ -154,6 +154,21 @@ regressions passed. At `94d6487d`, CI `37745645920` passed the Linux, macOS and
 Windows workspace jobs. Rendering jobs remain active. Logs use
 `%TEMP%/crcbl-editor-pitch-`.
 
+**Local/world gizmos under verification:** X switches translate and rotate to
+the primary selection's axes; scale remains local. Local translation snaps in
+the selected frame about the world origin, including shared-pivot movement.
+Changing space ends an active gizmo drag at its current pose. Geometry tests in
+`apps/editor/src/gizmo/tests/space.rs` cover axes, planes, snapping, group
+deltas, drawn handles and local ring rotations;
+`apps/editor/src/app/tests/space.rs` drives the key and a real undoable drag.
+Ignoring the frame in translation, rotation or drawing, or removing the key
+binding, each made a regression fail. The active-drag test also fails if
+changing space leaves the old drag alive. Workspace Clippy passed after moving
+frame storage into the translation variants. The final full workspace run,
+including the active-drag regression, passed the new tests and failed only at
+the known Win32 foreground-focus setup. Native CI remains pending. Logs use
+`%TEMP%/crcbl-editor-space-`.
+
 ### EW engine requests
 
 The current audit and port prerequisites are at the top of this backlog.
@@ -13226,8 +13241,13 @@ placement each makes a regression fail. Formatting and workspace Clippy pass.
 The final full workspace run passes the new motion and solver tests and fails
 only at the known Win32 foreground-focus setup. The Linux, macOS and Windows
 workspace jobs passed in CI `37744414766` at `cc0e7cad`, including the point
-impulse changes below. The citation guard also passed; Vulkan and Metal
-rendering checks remain active. Logs use `%TEMP%/crcbl-ragdoll-motion-`.
+impulse changes below. The citation guard and Metal rendering also passed. The
+run ended cancelled because `vk e2e (lavapipe)` exceeded its job time limit
+while drawing sundial; GitHub also reported a cache-download timeout. Later
+rendering steps were skipped, so this is not a full green run. Main CI
+`37747463186` is validating the published changes. Logs use
+`%TEMP%/crcbl-ragdoll-motion-`; the cancelled job log is
+`%TEMP%/crcbl-ragdoll-handoff-vk.log`.
 
 **Not built:** authored ragdoll assets and automatic body generation, the
 killing `KineticContact` handoff, solver integration with skinned rendering, the
@@ -13257,8 +13277,9 @@ animation handoff and still settles with matching skinning positions. Workspace
 formatting and all-target, all-feature Clippy passed. The full workspace test
 run completed before the requested build-cache cleanup; only the existing Win32
 cursor test failed because its window could not retain keyboard focus. Native
-workspace validation passed with the motion transfer above; the complete CI run
-is still being watched. Logs use `%TEMP%/crcbl-ragdoll-impulse-`.
+workspace validation passed with the motion transfer above; the cancelled Vulkan
+job and the replacement main run are tracked there. Logs use
+`%TEMP%/crcbl-ragdoll-impulse-`.
 
 `KineticContact::impulse` already describes an impulse applied by the contact
 solver. Reapplying it to the existing struck body would double-count it. Body
@@ -14819,11 +14840,8 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
 - **Rotation on scene components and the rotate gizmo (landed 2026-10-01): what
   they leave.** `crcbl::registry::Rotation` is on the editor's `Block` and
   `scene_mesh::Mesh` only, and E's rings (`apps/editor/src/gizmo/ring.rs`) turn
-  about world axes. Deferred, each with what it takes:
-  - **Rings about the box's own axes.** The rings are the world's, as the arrows
-    are; scale's lines follow the box's own axes (a half extent is along them).
-    A local/world toggle for translate and rotate is a mode flag the handles and
-    `Drag::begin`/`Drag::turn` would take, and a key for it.
+  about world or local axes through the X toggle, whose validation is tracked
+  above. Deferred, each with what it takes:
   - **A turn snaps relative to the press**, not to an absolute angle — an
     orientation has no absolute grid about one axis unless turned about it
     alone. A block that starts unturned lands on the step's multiples anyway.
