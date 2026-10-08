@@ -6,7 +6,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requirements
 
 EW engine requirements take priority over UI/editor expansion. Reviewed EW main
-`3f9906e6` against crcbl `06b551dd` after pulling upstream. Promote the existing
+`c7ed777e` against crcbl `b5955514` after pulling upstream. Promote the existing
 ragdoll requirement below; the other port candidates still need game-side
 validation before an engine implementation can be specified.
 
@@ -95,9 +95,16 @@ validation before an engine implementation can be specified.
   `src/game_character_revolver_tests.rs` and
   `src/game_toz34_reload_timing_tests.rs`. These depend on weapon mechanisms,
   ammunition ownership and character action admission, not a missing engine API.
-  Coarse/split cadence across reload completion and contact-time death during
-  reload still need game-side verification before any reusable timing
-  requirement can be proposed.
+  EW now covers coarse/split cadence across reload completion, including held
+  automatic bursts, and preserves segment origins in reload adapters and the AI
+  reload coordinator. Contact-time death during an ordinary AI reload remains
+  unfinished: the saved `ai-reload-death-probe.rs` under
+  `%TEMP%/ew-crcbl-update-review/` reproduces a coarse update transferring the
+  replacement magazine before an earlier projectile death, while split updates
+  retain the original magazine. Integrate weapon deadlines with EW's contact
+  scheduler and preserve exact inventory ownership before proposing a reusable
+  engine timing API. Repeated magazine exhaustion/reload within a coarse update
+  and ejected-case/discarded-item motion timing remain unverified.
 
 - **Movement forecasting uses existing engine APIs.**
   `src/game_ai_route_arrival.rs` confirms waypoint arrival through the game
