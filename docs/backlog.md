@@ -6,7 +6,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requirements
 
 Confirmed engine blockers for EW take priority over UI/editor expansion. The
-review of EW main `02cf2a45` against upstream crcbl `2e5f9808` found no new
+review of EW main `e1dfa97a` against upstream crcbl `f0b6fd72` found no new
 proven engine feature ready to add or migrate. Do not treat the candidates below
 as implementation requests until their game-side prerequisites are satisfied.
 
@@ -29,10 +29,23 @@ as implementation requests until their game-side prerequisites are satisfied.
   nutrition and exact-item death drops using game state; it does not establish a
   reusable engine scheduler requirement.
 
-  Remaining game validation includes AI rescuer projectile death, overlapping
-  cancelled revival handoffs, falling during cancelled player preparation, AI
-  holstering before grenade access and native release-pose playback. Prove those
-  interactions in EW before proposing an engine API.
+  AI rescuer progress and grenade holstering now share those contact boundaries.
+  Keep `src/game_ai_revival_projectile_tests.rs`,
+  `src/game_ai_grenade_holster_death_tests.rs`,
+  `src/game_revival_overlap_tests.rs` and
+  `src/game_revival_overlap_death_tests.rs` in EW: they protect rescuer
+  identity, exact item ownership and cancellation/death ordering. The numerical
+  endpoint handling in `src/grenade_hand.rs` likewise belongs to the existing
+  game hand state machine; it does not justify a shared engine action framework.
+
+  Falling during cancelled player preparation remains unfinished. A temporary
+  game probe reproduces a live grenade drop when fatal landing damage is applied
+  before an earlier re-pin completion; subdivided updates drop the inert shell.
+  Inspect `Game::advance_tick_simulation`,
+  `Game::advance_revival_contact_interval` and `Game::resolve_actor_landing` in
+  EW. This is game event ordering, not evidence of a missing engine contact
+  query. Native release-pose playback also remains unverified. Finish these in
+  EW before proposing an engine API.
 
 - **Movement forecasting uses existing engine APIs.**
   `src/game_ai_route_arrival.rs` confirms waypoint arrival through the game
