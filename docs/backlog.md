@@ -6,7 +6,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requirements
 
 EW engine requirements take priority over UI/editor expansion. Reviewed EW main
-`12f77440` against crcbl `acfc67e0` after pulling upstream. Promote the existing
+`46b69b95` against crcbl `2fcc9a35` after pulling upstream. Promote the existing
 ragdoll requirement below; the other port candidates still need game-side
 validation before an engine implementation can be specified.
 
@@ -72,12 +72,19 @@ validation before an engine implementation can be specified.
   fuse time, death before extraction and surviving movement with settled
   injuries. `Game::advance_revival_contact_interval` uses existing landing
   forecasts to order damage with handoffs; this does not require another engine
-  contact query. AI falling during cancelled preparation now has a reproduced
-  game scheduling failure: nutrition can omit time before landing death or
-  advance beyond contact. EW's `src/game_ai_medical_timing.rs` advances movement
-  before the deferred conditions in `src/game_revival_contact_timing.rs`.
-  Coordinate those timelines in EW; this does not demonstrate a missing crcbl
-  API. Native release-pose playback remains unverified.
+  contact query. AI revival groups now retain their perception timeline at
+  contacts through `src/game_ai_revival_timeline.rs`; preserve the landing,
+  earlier projectile death and surviving movement regressions in
+  `src/game_ai_revival_landing_order_tests.rs`. Ordinary AI advancement after
+  the handoff still needs chronological integration in EW. A temporary
+  `post_handoff_projectile_death_preempts_ai_landing` probe reproduces a coarse
+  update resolving landing death before an earlier projectile, while split
+  updates retain projectile kill credit and suppress the later landing cue. The
+  probe source and log are saved under `%TEMP%/ew-crcbl-update-review/` as
+  `ai-post-handoff-projectile-probe.rs` and
+  `ai-post-handoff-projectile-probe.log`. This is game scheduling work, not
+  evidence of a missing crcbl API. Native release-pose playback remains
+  unverified.
 
 - **Movement forecasting uses existing engine APIs.**
   `src/game_ai_route_arrival.rs` confirms waypoint arrival through the game
