@@ -9,7 +9,7 @@ must land in the _same place_ for everyone.
 **Depends on** the contact solver (36, L2) for bodies-vs-world and L3 joints for
 the articulation — ragdolls are the flagship consumer of both.
 
-**The pose bridge is in progress; the full ragdoll remains unbuilt.**
+**The pose bridge is available; the full ragdoll remains unbuilt.**
 `crcbl-anim::ragdoll::RagdollBinding` captures joint/body offsets from the last
 animated pose and reconstructs local transforms from rigid-body world poses. It
 retains skeleton scale and unmapped child transforms, and rejects an

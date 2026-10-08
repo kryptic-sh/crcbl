@@ -3,35 +3,43 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## Top priority: EW engine requirements
+## HIGH PRIORITY: EW engine requirements
 
-EW engine requirements take priority over UI/editor expansion. Reviewed EW main
-`c7ed777e` against crcbl `b5955514` after pulling upstream. Promote the existing
-ragdoll requirement below; the other port candidates still need game-side
-validation before an engine implementation can be specified.
+EW engine requirements take priority over UI/editor expansion. EW adopts engine
+revisions independently; engine acceptance belongs in the ordinary engine test
+suite and the Linux/macOS/Windows CI matrix, using synthetic fixtures rather
+than EW assets or an EW checkout.
 
-- **Top priority: skeletal ragdoll support for EW corpses.** EW's death/revival
-  decision in `ew:docs/plan/13-open-work-and-post-mvp.md` explicitly waits for
-  crcbl ragdolls before replacing its baked supine corpse with falling and
-  settling bodies. The adoption caller is `WorldScene::sync_range` in
-  `src/rendering_world_sync.rs`. Track the engine scope in the existing
-  **Ragdolls** entry below rather than creating another implementation plan.
+- **Skeletal ragdoll support for EW corpses remains the highest priority.** The
+  adoption caller is EW's `WorldScene::sync_range` in
+  `ew:src/rendering_world_sync.rs`. Extend the existing **Ragdolls** entry and
+  `docs/plan/35-ragdolls.md`; do not duplicate the completed primitives.
 
-  `apps/tumble/src/bridge.rs::build_ragdolls` already assembles physical limbs
-  with spherical and revolute joints. That is a solver example, not a skeletal
-  animation handoff. The pose bridge in `crcbl-anim::ragdoll` is now being
-  verified with synthetic engine rigs and the ordinary physics solver; the
-  placeholder asset probe established the scale and palette-order constraints.
-  Authored body initialization remains open; animated velocity transfer is now
-  under verification with the pose bridge. Keep damage, item ownership, revival
-  progress, interaction admission and authored get-up behavior in EW.
+  Available primitives are `crcbl-anim::ragdoll::RagdollBinding`, its
+  `motion_from_previous_pose` velocity transfer, and
+  `PhysicsSystem::apply_impulse_at`. Main CI `37747463186` at `c0e79111`
+  completed successfully, including Linux, macOS and Windows. The synthetic
+  `crates/crcbl/tests/ragdoll_pose.rs` exercises animated motion transfer,
+  articulated falling/settling and matching skinning-palette positions. This is
+  not evidence of a complete runtime or GPU-rendered limbs.
 
-  Acceptance must exercise death during motion, falling and settling on terrain,
-  rendered limbs matching physical bodies, and revival from the settled pose
-  without moving the authoritative patient or duplicating dropped items. Rising
-  must respect clearance. The existing baked pose remains the fallback until
-  this workflow is validated; no game-side ragdoll prototype was verified in
-  this review.
+  Remaining engine work:
+  - Authored body/joint initialization and automatic fallback from a skeleton.
+  - A running instance that connects the existing pose/velocity primitives to
+    body creation and caller-supplied death/contact handoff without applying a
+    contact impulse twice to an already struck body.
+  - End-to-end terrain falling/settling with rendered limbs matching physical
+    bodies; server/detail-client ownership and settled-pose snapshots.
+  - A settled-pose handoff suitable for revival, with clearance checked before
+    rising and no unintended relocation of the authoritative character.
+  - The editor preview, budgets, distance LOD, forced settling and remaining
+    delivery requirements in `docs/plan/35-ragdolls.md`.
+
+  Damage, item/container ownership, revival progress, interaction admission and
+  authored get-up behavior remain in EW. EW must independently verify that its
+  revival flow does not duplicate dropped items. No game-side adoption or native
+  EW acceptance was verified here. The runtime placement decision is still
+  pending in the detailed entry below.
 
 - **Prone weapon collision is not ready to port.** Choose and validate the game
   response to terrain contact (limit aim or retract/lift the weapon and leave
@@ -140,20 +148,6 @@ scene/asset expansion should begin with a concrete authoring workflow. The
 optional scope question has no answer yet. Continue correcting existing UI and
 editor workflows without treating that question as a blocker.
 
-**Rotation-row correction under verification:**
-`apps/editor/src/panel/inspector.rs::rotation_row` now retains the active row's
-Euler representation. The prior right-angle-pitch note understated the defect:
-the real-widget regression in `apps/editor/src/panel/tests/rotation.rs` failed
-because decomposing the quaternion during a drag changed the untouched axes and
-the resulting orientation. The corrected row passes that regression, including
-undo, and an external rotation edit invalidates its retained angles. Removing
-the invalidation check makes the external-edit regression fail. Formatting and
-workspace Clippy passed. The full workspace test run completed with only the
-existing Win32 cursor test failing to retain foreground focus; the editor
-regressions passed. At `94d6487d`, CI `37745645920` passed the Linux, macOS and
-Windows workspace jobs. Rendering jobs remain active. Logs use
-`%TEMP%/crcbl-editor-pitch-`.
-
 **Local/world gizmos under verification:** X switches translate and rotate to
 the primary selection's axes; scale remains local. Local translation snaps in
 the selected frame about the world origin, including shared-pivot movement.
@@ -167,7 +161,59 @@ changing space leaves the old drag alive. Workspace Clippy passed after moving
 frame storage into the translation variants. The final full workspace run,
 including the active-drag regression, passed the new tests and failed only at
 the known Win32 foreground-focus setup. Native CI remains pending. Logs use
-`%TEMP%/crcbl-editor-space-`.
+`%TEMP%/crcbl-editor-space-`. The interaction methods now live in
+`apps/editor/src/app/gizmos.rs`; their bodies were compared with the committed
+originals. Formatting, workspace Clippy and documentation-path checks pass for
+the move. Its workspace test log reached doctests before the environment change
+removed the process handle; no terminal result was recovered. The offline
+workspace rerun completed with only the known Win32 foreground-focus failure.
+The group-write regression now requires every position component of every
+member: clearing the returned writes made its completeness assertion fail, and
+the restored implementation passed. Final formatting and workspace Clippy
+passed. The hidden-console full workspace run completed: the editor regressions
+passed, and its only failing target was `crcbl-shell --lib`. In addition to the
+known cursor-focus failure,
+`the_capabilities_are_exactly_what_this_backend_implements` failed because
+`warp_pointer` was refused. The log does not establish whether this additional
+failure was caused by the launcher or the desktop state. Move validation logs
+use `%TEMP%/crcbl-editor-gizmos-`; the final run and group regression logs use
+`%TEMP%/crcbl-editor-group-`.
+
+**Asset drag preview under verification:** `apps/editor/src/app/assets.rs` uses
+`Document::drop_point`, `Document::measure` and `Mesh::standing_on` to draw
+bounds before release, without spawning a row. Measured bounds are installed on
+the temporary mesh before reading its placement; missing assets use the same
+placeholder as a final drop. The preview is suppressed outside the viewport, in
+play mode and while an unsaved-edit dialog is open. Regressions in
+`apps/editor/src/app/tests/assets.rs` check the rendered draw count,
+preview/drop equality, unchanged scene files and history, and suppression.
+Focused tests passed. Removing the draw, changing the measured bounds, and
+removing either the play or modal guard each made a regression fail; the
+restored tests passed. Formatting, workspace Clippy and the documentation-path
+check pass. The full workspace test run completed; its only failing target was
+`crcbl-shell --lib`, where the cursor test could not retain foreground focus.
+The preview regressions passed. Logs use `%TEMP%/crcbl-editor-preview-`. Native
+matrix and device visuals remain unverified for the editor changes. After this
+session's push, resume the newest main CI and Pages runs with
+`gh run watch --exit-status --interval 60`, then enumerate their final jobs; do
+not treat the earlier green main run as validation of these new changes. The
+session is wrapping up at the user's request; no further feature slice has been
+started.
+
+**Windows local test launching:** use the installed Git Bash through the command
+tool's `bin/sh.exe` selector with `login: false`; the `bin/bash.exe` selector
+resolved to WindowsApps Bash/WSL instead. The working installation is
+`C:/Users/sitem/scoop/apps/git/current/bin/sh.exe`. Do not use PowerShell or add
+WSL ownership exceptions to work around the wrong launcher.
+
+Avoid console popups by launching the Git Bash test runner with a hidden console
+inherited by its child processes. The local helper is
+`%TEMP%/crcbl-hidden-bash.py`; it uses Python's `CREATE_NEW_CONSOLE` and
+`STARTF_USESHOWWINDOW` with `SW_HIDE`, forwarding stdout/stderr. The earlier
+probe established invisible parent/child console inheritance. The engine's
+`--headless` option does not control Windows console allocation. Native
+window/focus/clipboard tests still require a desktop; hidden console launching
+does not establish desktop isolation.
 
 ### EW engine requests
 
@@ -13209,45 +13255,11 @@ room already assembles them into capsule ragdolls pushed down a flight of stairs
 (`apps/tumble/src/bridge.rs`), so the solver is shown to hold an articulated
 body.
 
-**Pose bridge in progress:** `crcbl-anim/src/ragdoll.rs::RagdollBinding`
-captures joint/body offsets at handoff and reconstructs local poses from rigid
-world transforms. The ordinary animation tests cover scaled skeletons,
-independent body motion, unmapped descendants, rejected inputs and atomic
-failure. Removing offsets, weakening rigid-body validation and allowing partial
-output writes each made the corresponding regression fail. Formatting and
-workspace all-target/all-feature Clippy pass. The final serial full workspace
-run passes the new animation and solver regressions and fails only at the known
-Win32 cursor test's foreground-window setup. At `46a4b615`, CI `37739371774`
-completed with every job passing except the shell guard: Linux, macOS and
-Windows workspace tests and the native rendering jobs passed. The shell guard
-rejected the previously unqualified external EW plan citation. The reference now
-names the EW repository, and the unchanged local citation checker passes; that
-correction passed in CI `37744414766`. Pages `37739371742` completed
-successfully and deployed `46a4b615`; its macOS seam probe was intentionally
-skipped. Local logs use `%TEMP%/crcbl-ragdoll-bridge-`.
-
-`crates/crcbl/tests/ragdoll_pose.rs` also drives articulated bodies through the
-contact solver onto a plane and compares skinned vertex positions against the
-physical transforms throughout the fall and settling. Omitting the physics step
-or leaving the palette stale makes this test fail. This verifies the
-solver-to-palette path, not GPU rendering or animated velocity transfer.
-
-**Animated motion in progress:** `RagdollBinding::motion_from_previous_pose` now
-derives body-centre velocities and world angular velocities from successive
-poses, including character placement changes and body offsets. The solver
-integration test now seeds its bodies from this handoff. Focused tests pass;
-removing translation transfer, shortest-arc handling or the earlier character
-placement each makes a regression fail. Formatting and workspace Clippy pass.
-The final full workspace run passes the new motion and solver tests and fails
-only at the known Win32 foreground-focus setup. The Linux, macOS and Windows
-workspace jobs passed in CI `37744414766` at `cc0e7cad`, including the point
-impulse changes below. The citation guard and Metal rendering also passed. The
-run ended cancelled because `vk e2e (lavapipe)` exceeded its job time limit
-while drawing sundial; GitHub also reported a cache-download timeout. Later
-rendering steps were skipped, so this is not a full green run. Main CI
-`37747463186` is validating the published changes. Logs use
-`%TEMP%/crcbl-ragdoll-motion-`; the cancelled job log is
-`%TEMP%/crcbl-ragdoll-handoff-vk.log`.
+The pose/body bridge, animated velocity transfer and point-impulse primitives
+are available; the high-priority entry records their completed native CI run.
+`crates/crcbl/tests/ragdoll_pose.rs` uses synthetic data to compare skinned
+vertices against physical transforms during falling and settling. Runtime
+construction, GPU rendering and revival are not covered by that test.
 
 **Not built:** authored ragdoll assets and automatic body generation, the
 killing `KineticContact` handoff, solver integration with skinned rendering, the
@@ -13265,21 +13277,6 @@ animation to simulation. It would use dependencies already in the workspace.
 User approval was requested under the dependency rule; an existing-crate
 placement is the alternative, with that coupling as its trade-off. No crate or
 dependency has been added.
-
-**Point impulses in progress:** `RigidBody::apply_impulse_at` and
-`PhysicsSystem::apply_impulse_at` now transfer linear and angular momentum at a
-world-space point, sharing the solver's oriented-inertia calculation. Focused
-tests cover centre hits, rotated inertia, kinematic bodies, finite-result
-validation and waking only after validation. Ignoring body orientation,
-partially writing rejected velocity or waking before validation each makes a
-regression fail. The articulated-body test applies a point impulse after the
-animation handoff and still settles with matching skinning positions. Workspace
-formatting and all-target, all-feature Clippy passed. The full workspace test
-run completed before the requested build-cache cleanup; only the existing Win32
-cursor test failed because its window could not retain keyboard focus. Native
-workspace validation passed with the motion transfer above; the cancelled Vulkan
-job and the replacement main run are tracked there. Logs use
-`%TEMP%/crcbl-ragdoll-impulse-`.
 
 `KineticContact::impulse` already describes an impulse applied by the contact
 solver. Reapplying it to the existing struck body would double-count it. Body
@@ -13303,9 +13300,8 @@ This is only transform evidence: it does not prove animated velocity transfer,
 joint constraints, terrain settling, skinning, revival or cross-platform
 behavior. The engine regression must use redistributable synthetic rig data and
 run in ordinary CI; do not make EW's asset checkout or adoption an engine test
-prerequisite. Next implement and exercise the pose/body bridge with the existing
-solver, then continue the remaining delivery items in
-`docs/plan/35-ragdolls.md`.
+prerequisite. Continue the remaining authored-runtime and delivery items in
+`docs/plan/35-ragdolls.md`; the synthetic pose/body bridge is already present.
 
 ### Player kit — `30-player-kit.md` (2026-08-27, re-verified 2026-09-24)
 
@@ -14965,10 +14961,9 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     meanwhile. A changed asset on disk is not re-measured either, since a
     `MeshLibrary` remembers every result — a new library (as
     `Document::set_assets` makes) is the only way to read it again.
-  - **No thumbnails and no drag preview.** The rows are names; a drag shows
-    nothing until it is dropped. A thumbnail is a small offscreen render per
-    asset, cached; a preview is the asset's box drawn at the drop point while
-    the button is held.
+  - **No thumbnails.** The rows are names; a thumbnail needs a cached offscreen
+    render per asset. The drag's bounds preview is implemented in
+    `apps/editor/src/app/assets.rs`, with validation tracked above.
   - **No scale on a mesh.** `Mesh` is an asset, a position and (since
     2026-10-01) a rotation about the asset's origin; a scale field would be a
     fourth, multiplying the measured box and the drawn parts alike. Not tested:
