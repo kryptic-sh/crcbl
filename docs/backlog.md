@@ -13178,6 +13178,27 @@ handoff from the last animated pose and the killing `KineticContact`, no
 server-simplified / client-detail split with its settle snapshot, and no blend
 of the bodies back into the render pose.
 
+**Handoff investigation (2026-10-08):** the EW placeholder at
+`assets/models/characters/heist-male-swat.gltf` has a scaled skeleton frame;
+copying a rigid body's transform straight into a bone discards that frame.
+`src/asset_scene_character.rs::append` also remaps the imported skin into
+parent-first palette order before constructing the skeleton. Bind bodies to
+those resolved palette indices, not raw glTF node indices, and preserve each
+joint's transform relative to its body when converting physical poses back. Keep
+unmapped descendants attached through their existing local transforms.
+
+A local read-only matrix probe against that asset checked the rest-pose
+joint/body-offset round trip. Omitting the offset failed its negative control;
+retaining it reconstructed the joint world matrices within the probe's
+threshold. The executable reproduction is `%TEMP%/crcbl-ragdoll-rig-probe.ps1`.
+This is only transform evidence: it does not prove animated velocity transfer,
+joint constraints, terrain settling, skinning, revival or cross-platform
+behavior. The engine regression must use redistributable synthetic rig data and
+run in ordinary CI; do not make EW's asset checkout or adoption an engine test
+prerequisite. Next implement and exercise the pose/body bridge with the existing
+solver, then continue the remaining delivery items in
+`docs/plan/35-ragdolls.md`.
+
 ### Player kit — `30-player-kit.md` (2026-08-27, re-verified 2026-09-24)
 
 No `crcbl-player` crate. **The seam under it is proven, though, and that is
