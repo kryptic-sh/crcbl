@@ -5,10 +5,32 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ## Top priority: EW engine requirements
 
-Confirmed engine blockers for EW take priority over UI/editor expansion. The
-review of EW main `8c2c8176` against upstream crcbl `21e2cee9` found no new
-proven engine feature ready to add or migrate. Do not treat the candidates below
-as implementation requests until their game-side prerequisites are satisfied.
+EW engine requirements take priority over UI/editor expansion. Reviewed EW main
+`12f77440` against crcbl `acfc67e0` after pulling upstream. Promote the existing
+ragdoll requirement below; the other port candidates still need game-side
+validation before an engine implementation can be specified.
+
+- **Top priority: skeletal ragdoll support for EW corpses.** EW's death/revival
+  decision in `docs/plan/13-open-work-and-post-mvp.md` explicitly waits for
+  crcbl ragdolls before replacing its baked supine corpse with falling and
+  settling bodies. The adoption caller is `WorldScene::sync_range` in
+  `src/rendering_world_sync.rs`. Track the engine scope in the existing
+  **Ragdolls** entry below rather than creating another implementation plan.
+
+  `apps/tumble/src/bridge.rs::build_ragdolls` already assembles physical limbs
+  with spherical and revolute joints. That is a solver example, not a skeletal
+  animation handoff; `crcbl-anim` exposes poses and palettes but no ragdoll
+  integration. Prove the bone/body mapping and pose handoff with EW placeholder
+  assets first, then extract the reusable mapping, last-pose initialization and
+  physical-pose output into crcbl. Keep damage, item ownership, revival
+  progress, interaction admission and authored get-up behavior in EW.
+
+  Acceptance must exercise death during motion, falling and settling on terrain,
+  rendered limbs matching physical bodies, and revival from the settled pose
+  without moving the authoritative patient or duplicating dropped items. Rising
+  must respect clearance. The existing baked pose remains the fallback until
+  this workflow is validated; no game-side ragdoll prototype was verified in
+  this review.
 
 - **Prone weapon collision is not ready to port.** Choose and validate the game
   response to terrain contact (limit aim or retract/lift the weapon and leave
@@ -50,8 +72,12 @@ as implementation requests until their game-side prerequisites are satisfied.
   fuse time, death before extraction and surviving movement with settled
   injuries. `Game::advance_revival_contact_interval` uses existing landing
   forecasts to order damage with handoffs; this does not require another engine
-  contact query. AI falling during cancelled preparation and native release-pose
-  playback remain game validation gaps.
+  contact query. AI falling during cancelled preparation now has a reproduced
+  game scheduling failure: nutrition can omit time before landing death or
+  advance beyond contact. EW's `src/game_ai_medical_timing.rs` advances movement
+  before the deferred conditions in `src/game_revival_contact_timing.rs`.
+  Coordinate those timelines in EW; this does not demonstrate a missing crcbl
+  API. Native release-pose playback remains unverified.
 
 - **Movement forecasting uses existing engine APIs.**
   `src/game_ai_route_arrival.rs` confirms waypoint arrival through the game
