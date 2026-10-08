@@ -1142,24 +1142,24 @@ prices were mixed and do not establish a latency or FPS gain. Backend
 command-pool reuse, wider graph caching and math changes need stronger workload
 evidence or carry more lifecycle risk.
 
-Browser queued-key regression integration is under verification. The held-key
-blur/resume, real tab switch and visibility-only isolation checks now live in
-`web/tools/browser-queued-input.mjs`, called by the canonical puppet browser
-gate. They require stationary positions across advancing resumed HUD ticks and
-renewed movement on fresh input. The HUD cursor precedes Escape; displacement
-before the first resumed HUD sample is not measured. Recovery failures are
-reported and route to the existing Stop and GPU cleanup checks rather than
-abandoning teardown.
+Browser queued-key coverage has shipped; its software-rendering cost remains a
+follow-up. At `ee8da11c`, CI `37789017761` passed the native matrix and Pages
+`37789017851` passed and deployed. The puppet job passed 61/61 checks, including
+held-key blur/resume, real tab switching, visibility-only isolation, empty GPU
+handle tables and the stream-end receipt. The macOS seam probe was skipped, not
+verified by that Pages run.
 
-On 2026-10-08, the headless hardware run passed 61/61 checks, including empty
-GPU handle tables and the stream-end receipt. Queued-input checks took 33314 ms
-on that run. The site was reused; the wrapper's stale-source warning named the
-Node driver and helper, which execute directly from source. Software-rendering
-runtime and isolated native matrix verification remain pending. All local tests
-must run headlessly without interfering with the user's desktop. The Windows
-workspace nextest gate includes foreground, cursor and clipboard tests and must
-run on an isolated runner, not the shared desktop; no filtered run counts as
-that full gate.
+The software-rendered queued-input checks reported 1952721 ms; their individual
+checks reported 637.3s, 648.4s and 655.3s. Investigate reducing fixture cost
+without weakening the advancing-tick/stationary-position witnesses, fresh-key
+controls or cleanup receipts. The headless hardware run reported 33314 ms, which
+does not price the software CI workload. Displacement before the first resumed
+HUD sample is not measured by these fixtures.
+
+All local tests must run headlessly without interfering with the user's desktop.
+The Windows workspace nextest gate includes foreground, cursor and clipboard
+tests and must run on an isolated runner; no filtered run counts as that full
+gate.
 
 Hash and authentication worker coverage gaps remain separate from shipped
 padding storage: native sampled aggregate stack and browser sentinel residue
