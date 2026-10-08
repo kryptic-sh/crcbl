@@ -13188,11 +13188,13 @@ failure. Removing offsets, weakening rigid-body validation and allowing partial
 output writes each made the corresponding regression fail. Formatting and
 workspace all-target/all-feature Clippy pass. The final serial full workspace
 run passes the new animation and solver regressions and fails only at the known
-Win32 cursor test's foreground-window setup. Native CI validation remains
-pending. CI `37739371774` rejected the previously unqualified external EW plan
-citation in its shell guard. The reference now names the EW repository, and the
-unchanged local citation checker passes. The native test and rendering jobs are
-still being watched. Local logs use `%TEMP%/crcbl-ragdoll-bridge-`.
+Win32 cursor test's foreground-window setup. At `46a4b615`, CI `37739371774`
+completed with every job passing except the shell guard: Linux, macOS and
+Windows workspace tests and the native rendering jobs passed. The shell guard
+rejected the previously unqualified external EW plan citation. The reference now
+names the EW repository, and the unchanged local citation checker passes; that
+correction awaits the next CI run. Pages `37739371742` remains in progress.
+Local logs use `%TEMP%/crcbl-ragdoll-bridge-`.
 
 `crates/crcbl/tests/ragdoll_pose.rs` also drives articulated bodies through the
 contact solver onto a plane and compares skinned vertex positions against the
@@ -13215,6 +13217,17 @@ killing `KineticContact` handoff, solver integration with skinned rendering, the
 server-simplified/client-detail split and settle snapshots, editor preview,
 budgets and the remaining delivery requirements in `docs/plan/35-ragdolls.md`.
 The pose bridge does not complete these items.
+
+**Runtime placement decision pending:** the authored asset and running ragdoll
+need animation and physics together. `docs/notes/backends.md` reserves `crcbl`
+for re-exports and setup helpers, and `crates/crcbl-anim/Cargo.toml` currently
+keeps the animation runtime independent of physics. A dedicated internal
+`crcbl-ragdoll` crate would own asset validation, body creation and the running
+instance without putting this runtime into the umbrella or coupling ordinary
+animation to simulation. It would use dependencies already in the workspace.
+User approval was requested under the dependency rule; an existing-crate
+placement is the alternative, with that coupling as its trade-off. No crate or
+dependency has been added.
 
 **Point impulses in progress:** `RigidBody::apply_impulse_at` and
 `PhysicsSystem::apply_impulse_at` now transfer linear and angular momentum at a
