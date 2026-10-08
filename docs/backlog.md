@@ -6,7 +6,7 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 ## Top priority: EW engine requirements
 
 Confirmed engine blockers for EW take priority over UI/editor expansion. The
-review of EW main `5c2680f7` against upstream crcbl `582352ab` found no new
+review of EW main `02cf2a45` against upstream crcbl `2e5f9808` found no new
 proven engine feature ready to add or migrate. Do not treat the candidates below
 as implementation requests until their game-side prerequisites are satisfied.
 
@@ -21,12 +21,18 @@ as implementation requests until their game-side prerequisites are satisfied.
   `src/game_projectile_hand_death_tests.rs` and
   `src/game_ai_grenade_preparation_death_tests.rs` in EW.
 
-  The remaining held-holster defect is also game ordering: early
-  `Game::advance_holster_hold` can finish holstering before an earlier fatal
-  projectile is resolved, leaving the shell in corpse inventory instead of
-  dropping the state committed at death. Fix and validate that EW handoff;
-  revival handoffs, AI holstering before grenade access and native release-pose
-  acceptance remain unverified. None establishes a missing crcbl scheduler API.
+  Held holsters and player revival preparation now advance at projectile
+  boundaries in EW. Keep the ownership and timing contracts in
+  `src/game_projectile_holster_death_tests.rs` and
+  `src/game_revival_projectile_timing_tests.rs`. The player revival interval in
+  `src/game_revival_contact_timing.rs` orders patient progress, rescuer wounds,
+  nutrition and exact-item death drops using game state; it does not establish a
+  reusable engine scheduler requirement.
+
+  Remaining game validation includes AI rescuer projectile death, overlapping
+  cancelled revival handoffs, falling during cancelled player preparation, AI
+  holstering before grenade access and native release-pose playback. Prove those
+  interactions in EW before proposing an engine API.
 
 - **Movement forecasting uses existing engine APIs.**
   `src/game_ai_route_arrival.rs` confirms waypoint arrival through the game
