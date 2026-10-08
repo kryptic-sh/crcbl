@@ -70,6 +70,67 @@ fn dragging_a_rotation_angle_is_one_command_that_turns_the_block() {
     assert_eq!(page.document.files().expect("the scene saves"), before);
 }
 
+#[test]
+fn dragging_pitch_through_a_right_angle_keeps_the_requested_orientation() {
+    let mut page = Page::built_in();
+    let id = SceneEntityId(3);
+    let initial = crate::panel::inspector::quat_of([20.0, 80.0, 30.0]);
+    crate::document::rotation_tests::turn_block(&mut page.document, id, initial);
+    page.document.select(Some(id));
+    page.idle();
+    let before = page.document.files().unwrap();
+    let entries = page.document.log().len();
+    let at = page.centre(page.axis_field(ROTATION_ROW, Y));
+    page.drag_in_steps(at, Vec2::new(80.0, 0.0), 8);
+
+    let expected = crate::panel::inspector::quat_of([20.0, 120.0, 30.0]);
+    let actual = rotation(&mut page, id);
+    assert!(
+        actual.abs_diff_eq(expected, 1e-12) || actual.abs_diff_eq(-expected, 1e-12),
+        "pitch drag changed the other axes: {actual:?}, expected {expected:?}"
+    );
+    assert_eq!(page.document.log().len(), entries + 1);
+    assert!(page.document.undo().unwrap());
+    assert_eq!(page.document.files().unwrap(), before);
+}
+
+#[test]
+fn an_external_rotation_change_invalidates_the_dragged_rows_angles() {
+    let mut page = Page::built_in();
+    let id = SceneEntityId(3);
+    crate::document::rotation_tests::turn_block(
+        &mut page.document,
+        id,
+        crate::panel::inspector::quat_of([20.0, 80.0, 30.0]),
+    );
+    page.document.select(Some(id));
+    page.idle();
+    let at = page.centre(page.axis_field(ROTATION_ROW, Y));
+    let held = |pos| PointerInput {
+        pos,
+        down: true,
+        released: false,
+        secondary_pressed: false,
+    };
+    page.frame(held(at), 0.0);
+    page.frame(held(at + Vec2::new(30.0, 0.0)), 0.0);
+    crate::document::rotation_tests::turn_block(
+        &mut page.document,
+        id,
+        crate::panel::inspector::quat_of([60.0, 20.0, 10.0]),
+    );
+    page.frame(held(at + Vec2::new(80.0, 0.0)), 0.0);
+
+    // The dragged number still measures from its press; the other axes must
+    // come from the replacement value rather than the retained representation.
+    let expected = crate::panel::inspector::quat_of([60.0, 120.0, 10.0]);
+    let actual = rotation(&mut page, id);
+    assert!(
+        actual.abs_diff_eq(expected, 1e-12) || actual.abs_diff_eq(-expected, 1e-12),
+        "external rotation lost: {actual:?}, expected {expected:?}"
+    );
+}
+
 /// **The angles and the quaternion are one orientation both ways**, away
 /// from the right-angle pitch where Euler angles trade places.
 #[test]

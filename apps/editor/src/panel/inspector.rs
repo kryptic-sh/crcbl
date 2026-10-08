@@ -42,6 +42,8 @@
 //! `crcbl::registry::Rotation` holds is no row a person can drag, so its row
 //! shows degrees and writes all four leaves when one angle moves.
 
+use std::cell::RefCell;
+
 use crcbl::math::{DQuat, EulerRot};
 use crcbl::reflect::Value;
 use crcbl::registry::Rotation;
@@ -280,8 +282,17 @@ const DEGREE_RANGE: f64 = 360.0;
 /// [`Rotation`] drawn as three angles.
 pub(super) fn overrides() -> Overrides {
     let mut overrides = Overrides::vectors();
-    overrides.register::<Rotation>(rotation_row);
+    let editing = RefCell::new(None);
+    overrides.register::<Rotation>(move |ui, field| {
+        rotation_row(ui, field, &mut editing.borrow_mut());
+    });
     overrides
+}
+
+struct RotationEdit {
+    key: NodeKey,
+    value: [f64; 4],
+    degrees: [f64; 3],
 }
 
 /// A [`Rotation`] as three angles in degrees on one row — the view every
@@ -290,18 +301,27 @@ pub(super) fn overrides() -> Overrides {
 /// A dragged angle is composed back with the other two (in [`EULER`] order)
 /// and the quaternion's four leaves written at once, which
 /// [`super::Panels::apply_edits`] makes one command — never one leaf of the
-/// four alone. The angles are read back from the quaternion each frame, so
-/// near a right-angle pitch two of them trade places as Euler angles do; the
-/// orientation does not jump. The widgets name no leaf for the clipboard keys:
+/// four alone. An active row retains its angles across frames: decomposing the
+/// quaternion again at a right-angle pitch would change the untouched axes.
+/// A changed underlying value invalidates that retained representation.
+/// The widgets name no leaf for the clipboard keys:
 /// an angle is not a leaf the file holds.
-fn rotation_row(ui: &mut Ui, field: &mut FieldRow<'_>) {
+fn rotation_row(ui: &mut Ui, field: &mut FieldRow<'_>, editing: &mut Option<RotationEdit>) {
     let Some(rotation) = field.value.as_any().downcast_ref::<Rotation>() else {
         return;
     };
-    let degrees = degrees_of(rotation.quat());
+    let value = rotation.to_array();
+    let mut degrees = degrees_of(rotation.quat());
     let label = field.label;
     let mut turned = None;
-    ui.block(".inspector-row", &[], |ui| {
+    let mut active = false;
+    let row = ui.block(".inspector-row", &[], |ui| {
+        if let Some(held) = editing
+            && Some(held.key) == ui.current_key()
+            && held.value == value
+        {
+            degrees = held.degrees;
+        }
         ui.span(".inspector-label", label, &[]);
         for (index, axis) in AXES.iter().enumerate() {
             let mut number = degrees[index];
@@ -317,6 +337,7 @@ fn rotation_row(ui: &mut Ui, field: &mut FieldRow<'_>) {
                     DEGREE_STEP,
                 );
                 moved = response.changed;
+                active |= response.pressed || response.engagement.is_engaged();
             });
             if moved {
                 let mut angles = degrees;
@@ -325,6 +346,7 @@ fn rotation_row(ui: &mut Ui, field: &mut FieldRow<'_>) {
             }
         }
     });
+    let mut written = value;
     if let Some(angles) = turned {
         let quat = quat_of(angles);
         // `+ 0.0` turns a `-0.0` the composition produced into `+0.0`: a
@@ -334,6 +356,16 @@ fn rotation_row(ui: &mut Ui, field: &mut FieldRow<'_>) {
         for (leaf, value) in Rotation::LEAVES.into_iter().zip(quat.to_array()) {
             field.set(leaf, Value::Float(value + 0.0));
         }
+        written = quat.to_array();
+    }
+    if active {
+        *editing = Some(RotationEdit {
+            key: row.key,
+            value: written,
+            degrees: turned.unwrap_or(degrees),
+        });
+    } else if editing.as_ref().is_some_and(|held| held.key == row.key) {
+        *editing = None;
     }
 }
 

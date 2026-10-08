@@ -140,6 +140,19 @@ scene/asset expansion should begin with a concrete authoring workflow. The
 optional scope question has no answer yet. Continue correcting existing UI and
 editor workflows without treating that question as a blocker.
 
+**Rotation-row correction under verification:**
+`apps/editor/src/panel/inspector.rs::rotation_row` now retains the active row's
+Euler representation. The prior right-angle-pitch note understated the defect:
+the real-widget regression in `apps/editor/src/panel/tests/rotation.rs` failed
+because decomposing the quaternion during a drag changed the untouched axes and
+the resulting orientation. The corrected row passes that regression, including
+undo, and an external rotation edit invalidates its retained angles. Removing
+the invalidation check makes the external-edit regression fail. Formatting and
+workspace Clippy passed. The full workspace test run completed with only the
+existing Win32 cursor test failing to retain foreground focus; the editor
+regressions passed. Native CI remains pending. Logs use
+`%TEMP%/crcbl-editor-pitch-`.
+
 ### EW engine requests
 
 The current audit and port prerequisites are at the top of this backlog.
@@ -14806,11 +14819,6 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     are; scale's lines follow the box's own axes (a half extent is along them).
     A local/world toggle for translate and rotate is a mode flag the handles and
     `Drag::begin`/`Drag::turn` would take, and a key for it.
-  - **The rotation row's angles trade places near a right-angle pitch.** The
-    inspector shows a `Rotation` as three angles (`EulerRot::XYZ`), read back
-    from the quaternion each frame, so dragging the Y angle through ±90° flips
-    the other two; the orientation does not jump, the numbers do. Holding the
-    angles a drag started from for the whole gesture would hide it.
   - **A turn snaps relative to the press**, not to an absolute angle — an
     orientation has no absolute grid about one axis unless turned about it
     alone. A block that starts unturned lands on the step's multiples anyway.

@@ -5900,6 +5900,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Editor rotation drags preserve the untouched axes through a right-angle
+  pitch.** The inspector retains its Euler representation during a gesture
+  instead of decomposing the quaternion again on every frame. External rotation
+  edits invalidate that state, and a drag remains one undoable command.
+
 - **Nested dock panes keep their allotted size with oversized content.** The
   shared stylesheet lets dock and split containers shrink below their contents,
   while retaining the explicit pane minimums supplied to `Ui::split` and
