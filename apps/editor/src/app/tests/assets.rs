@@ -195,3 +195,114 @@ fn enter_on_a_row_places_the_asset_at_the_views_centre() {
     );
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
+
+#[test]
+fn the_drag_preview_is_drawn_without_editing_and_matches_the_drop() {
+    let mut editor = props_editor();
+    editor.document.select(None);
+    let before = editor.document.files().unwrap();
+    let entries = editor.document.log().len();
+    let grab = row_of(&editor, TRIANGLE);
+    let window = editor.window;
+    editor
+        .shell_mut()
+        .button(
+            window,
+            PointerButton::Left,
+            ButtonState::Pressed,
+            Some(physical(grab)),
+        )
+        .unwrap();
+    editor.frame().unwrap();
+    editor.frame().unwrap();
+    assert!(editor.asset_preview().is_none());
+    let quiet = editor.renderer.counters().draws;
+    let at = pixel_of(&editor, Vec3::new(10.5, 5.5, 0.0));
+    editor
+        .shell_mut()
+        .move_pointer(window, physical(at), (0.0, 0.0))
+        .unwrap();
+    editor.frame().unwrap();
+    let preview = editor.asset_preview().expect("a held asset over a surface");
+    assert_eq!(
+        editor.renderer.counters().draws,
+        quiet + 1,
+        "the preview was not drawn"
+    );
+    assert_eq!(editor.document.files().unwrap(), before);
+    assert_eq!(editor.document.log().len(), entries);
+
+    editor
+        .shell_mut()
+        .move_pointer(window, physical(grab), (0.0, 0.0))
+        .unwrap();
+    editor.frame().unwrap();
+    assert!(editor.asset_preview().is_none());
+    assert_eq!(editor.renderer.counters().draws, quiet);
+    editor
+        .shell_mut()
+        .move_pointer(window, physical(at), (0.0, 0.0))
+        .unwrap();
+    editor.frame().unwrap();
+    assert_eq!(editor.asset_preview(), Some(preview));
+    editor
+        .shell_mut()
+        .button(
+            window,
+            PointerButton::Left,
+            ButtonState::Released,
+            Some(physical(at)),
+        )
+        .unwrap();
+    editor.frame().unwrap();
+    assert!(editor.asset_preview().is_none());
+    let id = editor.document.primary().unwrap();
+    let placed = editor
+        .document
+        .placement(id)
+        .unwrap()
+        .corners()
+        .map(|corner| corner.as_vec3());
+    assert_eq!(placed, preview);
+    assert_eq!(editor.document.log().len(), entries + 1);
+    editor.act(&Action::Undo);
+    assert_eq!(editor.document.files().unwrap(), before);
+    editor.finish(ExitReason::FrameBudget).unwrap();
+}
+
+#[test]
+fn the_drag_preview_uses_placeholders_and_disappears_during_play_or_a_modal() {
+    let mut editor = props_editor();
+    let at = pixel_of(&editor, Vec3::new(3.0, 0.0, 3.0));
+    let window = editor.window;
+    editor
+        .shell_mut()
+        .move_pointer(window, physical(at), (0.0, 0.0))
+        .unwrap();
+    editor.frame().unwrap();
+    editor.dragged = Some("props/missing.glb".to_owned());
+    let before = editor.document.files().unwrap();
+    let preview = editor.asset_preview().expect("the placeholder has bounds");
+    assert_eq!(editor.document.files().unwrap(), before);
+    editor.document.play().unwrap();
+    assert!(editor.asset_preview().is_none());
+    editor.document.stop().unwrap();
+    editor.unsaved = Some(crate::app::unsaved::Guarded::New);
+    assert!(editor.asset_preview().is_none());
+    editor.unsaved = None;
+    let point = editor.document.drop_point(&editor.ray_at(at)).unwrap();
+    let id = editor
+        .document
+        .spawn_mesh("props/missing.glb", point)
+        .unwrap();
+    assert_eq!(
+        editor
+            .document
+            .placement(id)
+            .unwrap()
+            .corners()
+            .map(|corner| corner.as_vec3()),
+        preview
+    );
+    editor.finish(ExitReason::FrameBudget).unwrap();
+}

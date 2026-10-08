@@ -1318,6 +1318,11 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.instances
             .update(&mut self.renderer, &mut self.document, &self.shelf)
             .map_err(|error| GpuError::pools("the editor's entities", &error))?;
+        if let Some(corners) = self.asset_preview() {
+            self.renderer
+                .debug_draw()
+                .box_edges(&corners, PRIMARY_COLOR);
+        }
         for (corners, color) in selection_boxes(&mut self.document) {
             self.renderer.debug_draw().box_edges(&corners, color);
         }

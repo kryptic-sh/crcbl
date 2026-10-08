@@ -859,6 +859,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The editor previews an asset's bounds while dragging it into the viewport.**
+  The box follows the same surface or ground landing point as the final drop,
+  including the placeholder for a missing mesh. Previewing does not create an
+  entity or an undo entry; play mode and unsaved-edit dialogs suppress it.
+
 - **The editor's X key switches translate and rotate gizmos between World and
   Local axes.** Local translation and snapping use the primary selection's
   frame, including shared-pivot translation; local rings turn about the object's

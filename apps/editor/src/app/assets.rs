@@ -1,11 +1,13 @@
-//! Asset-browser drags and placement.
+//! Asset-browser drags, placement and the bounds shown before a drop.
 
 use crcbl::engine::Pending;
-use crcbl::math::DVec3;
+use crcbl::math::{DVec3, Vec3};
+use crcbl::registry::Placement;
+use crcbl::scene_mesh::Mesh;
 use crcbl::shell::Shell;
 
 use super::Editor;
-use crate::document::{Document, EditError};
+use crate::document::{Document, EditError, PlayState};
 use crate::panel::Tone;
 
 impl<S: Shell + ?Sized> Editor<S> {
@@ -66,5 +68,26 @@ impl<S: Shell + ?Sized> Editor<S> {
                 .panels
                 .set_status(format!("Placed `{asset}` as #{id}"), Tone::Info),
         }
+    }
+
+    /// The dragged asset's box at its landing point, without spawning a row.
+    pub(super) fn asset_preview(&mut self) -> Option<[Vec3; 8]> {
+        if self.unsaved.is_some() || self.document.play_state() != PlayState::Editing {
+            return None;
+        }
+        let at = self.pointer_state.at()?;
+        if !self.panels.in_viewport(at) {
+            return None;
+        }
+        let asset = self.dragged.as_ref()?;
+        let point = self.document.drop_point(&self.ray_at(at)).ok()?;
+        // A missing asset uses the same placeholder as the final spawn.
+        let local = self.document.measure(asset).ok();
+        let mut mesh = Mesh::standing_on(asset, point, local);
+        if let Some((min, max)) = local {
+            mesh.set_local_bounds(min, max);
+        }
+        mesh.placement()
+            .map(|placed| placed.corners().map(|corner| corner.as_vec3()))
     }
 }
