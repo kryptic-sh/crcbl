@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::FrameLimit;
+use crcbl::math::{DQuat, DVec3};
 use crcbl::shell::{HeadlessShell, PhysicalPoint, PhysicalSize};
 use crcbl::ui::tree::NodeKey;
 
