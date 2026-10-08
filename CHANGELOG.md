@@ -864,7 +864,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   retaining bone/body offsets and imported skeleton scale. Unmapped children
   follow their posed parents. Invalid or unrepresentable transforms fail without
   partially changing the output pose. Body creation, simulation and death policy
-  remain outside this pose bridge.
+  remain outside this pose bridge. `motion_from_previous_pose` derives initial
+  body positions, orientations, linear velocities and world angular velocities
+  from consecutive animated poses and character placements. Invalid time
+  intervals and non-rigid history fail explicitly.
 
 - **`crcbl_ui::OutlinerState::retain` removes state for deleted model items.**
   Applications supply membership in their complete model, including rows hidden

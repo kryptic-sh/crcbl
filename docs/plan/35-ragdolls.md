@@ -20,9 +20,12 @@ CI validation are tracked in `docs/backlog.md`.
 (`SphericalJoint` with cone and twist limits, `RevoluteJoint` with limits,
 breakable joints) and `KineticContact`. `apps/tumble`'s Bridge room assembles
 capsule ragdolls pushed down stairs (`apps/tumble/src/bridge.rs`). Authored
-mapping assets, body generation, animated velocity and impulse transfer, skinned
-solver integration, the server/client split and settle blending below remain to
-be implemented; the pose bridge alone does not provide them.
+mapping assets, body generation and impulse transfer, skinned solver
+integration, the server/client split and settle blending below remain to be
+implemented; the pose bridge alone does not provide them. The bridge's
+`motion_from_previous_pose` derives initial world velocities from consecutive
+animated samples; its workspace and native validation are tracked alongside the
+pose bridge in the backlog.
 
 ## The split: server settles, client performs
 

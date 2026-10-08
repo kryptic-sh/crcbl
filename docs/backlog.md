@@ -11,7 +11,7 @@ ragdoll requirement below; the other port candidates still need game-side
 validation before an engine implementation can be specified.
 
 - **Top priority: skeletal ragdoll support for EW corpses.** EW's death/revival
-  decision in `docs/plan/13-open-work-and-post-mvp.md` explicitly waits for
+  decision in `ew:docs/plan/13-open-work-and-post-mvp.md` explicitly waits for
   crcbl ragdolls before replacing its baked supine corpse with falling and
   settling bodies. The adoption caller is `WorldScene::sync_range` in
   `src/rendering_world_sync.rs`. Track the engine scope in the existing
@@ -22,9 +22,9 @@ validation before an engine implementation can be specified.
   animation handoff. The pose bridge in `crcbl-anim::ragdoll` is now being
   verified with synthetic engine rigs and the ordinary physics solver; the
   placeholder asset probe established the scale and palette-order constraints.
-  Last-pose body initialization and animated velocity transfer remain open. Keep
-  damage, item ownership, revival progress, interaction admission and authored
-  get-up behavior in EW.
+  Authored body initialization remains open; animated velocity transfer is now
+  under verification with the pose bridge. Keep damage, item ownership, revival
+  progress, interaction admission and authored get-up behavior in EW.
 
   Acceptance must exercise death during motion, falling and settling on terrain,
   rendered limbs matching physical bodies, and revival from the settled pose
@@ -13189,7 +13189,10 @@ output writes each made the corresponding regression fail. Formatting and
 workspace all-target/all-feature Clippy pass. The final serial full workspace
 run passes the new animation and solver regressions and fails only at the known
 Win32 cursor test's foreground-window setup. Native CI validation remains
-pending. Local logs use `%TEMP%/crcbl-ragdoll-bridge-`.
+pending. CI `37739371774` rejected the previously unqualified external EW plan
+citation in its shell guard. The reference now names the EW repository, and the
+unchanged local citation checker passes. The native test and rendering jobs are
+still being watched. Local logs use `%TEMP%/crcbl-ragdoll-bridge-`.
 
 `crates/crcbl/tests/ragdoll_pose.rs` also drives articulated bodies through the
 contact solver onto a plane and compares skinned vertex positions against the
@@ -13197,11 +13200,28 @@ physical transforms throughout the fall and settling. Omitting the physics step
 or leaving the palette stale makes this test fail. This verifies the
 solver-to-palette path, not GPU rendering or animated velocity transfer.
 
-**Not built:** authored ragdoll assets and automatic body generation, animated
-velocity transfer and the killing `KineticContact` handoff, solver integration
-with skinned rendering, the server-simplified/client-detail split and settle
-snapshots, editor preview, budgets and the remaining delivery requirements in
-`docs/plan/35-ragdolls.md`. The pose bridge does not complete these items.
+**Animated motion in progress:** `RagdollBinding::motion_from_previous_pose` now
+derives body-centre velocities and world angular velocities from successive
+poses, including character placement changes and body offsets. The solver
+integration test now seeds its bodies from this handoff. Focused tests pass;
+removing translation transfer, shortest-arc handling or the earlier character
+placement each makes a regression fail. Formatting and workspace Clippy pass.
+The final full workspace run passes the new motion and solver tests and fails
+only at the known Win32 foreground-focus setup. Native CI for this addition
+remains pending. Logs use `%TEMP%/crcbl-ragdoll-motion-`.
+
+**Not built:** authored ragdoll assets and automatic body generation, the
+killing `KineticContact` handoff, solver integration with skinned rendering, the
+server-simplified/client-detail split and settle snapshots, editor preview,
+budgets and the remaining delivery requirements in `docs/plan/35-ragdolls.md`.
+The pose bridge does not complete these items.
+
+For the impulse handoff, `KineticContact::impulse` already describes an impulse
+applied by the contact solver. `RigidBody::apply_impulse` only changes linear
+velocity; the point and oriented inertia must also contribute angular motion
+when initializing a new limb body. Reapplying the event to the existing struck
+body would double-count it. Keep body selection and the death decision with the
+caller, and test momentum transfer into newly created limbs.
 
 **Handoff investigation (2026-10-08):** the EW placeholder at
 `assets/models/characters/heist-male-swat.gltf` has a scaled skeleton frame;

@@ -3,7 +3,7 @@
 use crcbl::anim::ragdoll::{BodyJoint, RagdollBinding};
 use crcbl::anim::{Joint as Bone, Palette, Pose, Skeleton, Trs};
 use crcbl::ecs::Entity;
-use crcbl::math::{DVec3, Mat4, Vec3};
+use crcbl::math::{DVec3, Mat4, Quat, Vec3};
 use crcbl::phys::{
     ColliderComponent, ContactSettings, GravityForce, Joint, JointKind, MassProperties,
     PhysicsSystem, RigidBody, SphericalJoint, SurfaceMaterial, Transform,
@@ -25,10 +25,8 @@ fn articulated_bodies_fall_to_terrain_and_drive_the_skinning_palette() {
     let half = DVec3::new(0.3, 0.1, 0.1);
     let entities = [0_u32, 1].map(|index| {
         let entity = Entity::from_bits((1_u64 << 32) | u64::from(index)).unwrap();
-        let mut body = RigidBody::new_dynamic(1.0)
+        let body = RigidBody::new_dynamic(1.0)
             .with_inertia(MassProperties::cuboid(1.0, half, DVec3::ZERO).inertia);
-        body.velocity = DVec3::new(1.0, 0.0, 0.0);
-        body.angular_velocity = DVec3::new(0.0, 0.0, if index == 0 { 2.0 } else { -2.0 });
         physics.set_body(entity, body);
         let transform = Transform::from_position(DVec3::new(f64::from(index) * 0.6, 3.0, 0.0));
         physics.set_transform(entity, transform);
@@ -78,6 +76,29 @@ fn articulated_bodies_fall_to_terrain_and_drive_the_skinning_palette() {
         world: world(&physics, entities[joint]),
     });
     let mut binding = RagdollBinding::new(&skeleton, &pose, model, &bodies).unwrap();
+    let previous_globals = [0, 1].map(|joint| {
+        model.inverse()
+            * Mat4::from_rotation_translation(
+                Quat::from_rotation_z(if joint == 0 { -2.0 } else { 2.0 } * DT as f32),
+                Vec3::new(joint as f32 * 0.6 - DT as f32, 3.0, 0.0),
+            )
+            * model
+    });
+    let mut previous = pose.clone();
+    previous.locals_mut()[0] = Trs::from_mat4(previous_globals[0]);
+    previous.locals_mut()[1] = Trs::from_mat4(previous_globals[0].inverse() * previous_globals[1]);
+    let motion = binding
+        .motion_from_previous_pose(&previous, model, DT)
+        .unwrap();
+    for (joint, (entity, initial)) in entities.iter().zip(motion).enumerate() {
+        assert!(initial.linear_velocity.distance(DVec3::X) < f64::from(POSITION_TOLERANCE));
+        let expected_spin = DVec3::Z * if joint == 0 { 2.0 } else { -2.0 };
+        assert!(initial.angular_velocity.distance(expected_spin) < f64::from(POSITION_TOLERANCE));
+        let body = physics.body_mut(*entity).unwrap();
+        body.velocity = initial.linear_velocity;
+        body.angular_velocity = initial.angular_velocity;
+        physics.set_transform(*entity, Transform::new(initial.position, initial.rotation));
+    }
     let mut palette = Palette::new(&skeleton);
     for _ in 0..600 {
         physics.step(DT);

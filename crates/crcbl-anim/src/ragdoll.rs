@@ -11,6 +11,9 @@ use glam::{Mat4, Vec3, Vec4};
 
 use crate::{Palette, Pose, Skeleton, Trs};
 
+mod motion;
+pub use motion::BodyMotion;
+
 /// Relative tolerance when reconstructing a local TRS from a physical pose.
 pub const TRANSFORM_TOLERANCE: f32 = 1e-4;
 
@@ -42,6 +45,10 @@ pub enum RagdollError {
     InvalidBody { body: usize },
     /// A joint transform is invalid or cannot be represented without shear.
     InvalidJoint { joint: usize },
+    /// The pose sample interval is not finite and positive.
+    InvalidInterval,
+    /// A body's inferred velocity overflowed.
+    InvalidMotion { body: usize },
 }
 
 impl fmt::Display for RagdollError {
@@ -57,6 +64,10 @@ impl fmt::Display for RagdollError {
             Self::InvalidJoint { joint } => {
                 write!(f, "ragdoll joint {joint} is not representable as TRS")
             }
+            Self::InvalidInterval => {
+                f.write_str("ragdoll sample interval must be finite and positive")
+            }
+            Self::InvalidMotion { body } => write!(f, "ragdoll body {body} has non-finite motion"),
         }
     }
 }
@@ -72,6 +83,7 @@ impl std::error::Error for RagdollError {}
 pub struct RagdollBinding {
     skeleton: Skeleton,
     handoff: Pose,
+    handoff_model: Mat4,
     offsets: Vec<Mat4>,
     body_for_joint: Vec<Option<usize>>,
     scratch: Pose,
@@ -90,21 +102,11 @@ impl RagdollBinding {
         model: Mat4,
         bodies: &[BodyJoint],
     ) -> Result<Self, RagdollError> {
-        if pose.len() != skeleton.len() {
-            return Err(RagdollError::PoseSize);
-        }
+        validate_pose(skeleton, pose)?;
         if bodies.is_empty() {
             return Err(RagdollError::Empty);
         }
         affine_inverse(model).ok_or(RagdollError::InvalidModel)?;
-        for (joint, local) in pose.locals().iter().enumerate() {
-            if !local.rotation.is_finite()
-                || !local.rotation.is_normalized()
-                || affine_inverse(local.to_mat4()).is_none()
-            {
-                return Err(RagdollError::InvalidJoint { joint });
-            }
-        }
         let mut palette = Palette::new(skeleton);
         palette.compute(skeleton, pose);
         let mut body_for_joint = vec![None; skeleton.len()];
@@ -127,6 +129,7 @@ impl RagdollBinding {
         Ok(Self {
             skeleton: skeleton.clone(),
             handoff: pose.clone(),
+            handoff_model: model,
             offsets,
             body_for_joint,
             scratch: pose.clone(),
@@ -174,6 +177,21 @@ impl RagdollBinding {
         pose.locals_mut().copy_from_slice(self.scratch.locals());
         Ok(())
     }
+}
+
+fn validate_pose(skeleton: &Skeleton, pose: &Pose) -> Result<(), RagdollError> {
+    if pose.len() != skeleton.len() {
+        return Err(RagdollError::PoseSize);
+    }
+    for (joint, local) in pose.locals().iter().enumerate() {
+        if !local.rotation.is_finite()
+            || !local.rotation.is_normalized()
+            || affine_inverse(local.to_mat4()).is_none()
+        {
+            return Err(RagdollError::InvalidJoint { joint });
+        }
+    }
+    Ok(())
 }
 
 fn affine_inverse(matrix: Mat4) -> Option<Mat4> {
