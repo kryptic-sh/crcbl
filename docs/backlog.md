@@ -212,25 +212,21 @@ unblocks the ragdoll editor preview, and the inspector gains whatever reflection
 contracts the rig's fields need on the way. Pane dragging is deferred: nothing
 requested it.
 
-Scoped on 2026-10-12, in slices, after `apps/viewer`, which renders a skinned
-glTF end to end:
+Slices, scoped on 2026-10-12 after `apps/viewer`: a rigged asset already draws
+through the skinning pass at its rest pose (`apps/editor/src/app/skins.rs`, one
+posed region per deformed part shared by every entity of the asset), with the
+skin conversion shared as `crcbl::scene_rig`. Left:
 
-1. `apps/editor/src/app/meshes.rs` `Shelf::build` keeps what it drops today:
-   each asset's `GltfScene` skins, the `RenderScene::origins` bindings
-   (`MeshOrigin::bindings`) and a `crcbl::anim::Skeleton` per skin, built as
-   `apps/viewer/src/anim.rs` `skeleton_of` does. Data only, tested headlessly.
-2. Skinned parts render through `ForwardRenderer::reserve_skinned` /
-   `add_skinned_instance`, a `Skinning` built against the renderer's vertex
-   pool, and `begin_skinned_frame` / `add_skinned_passes`, at the rest pose.
-   Unlike the viewer, the editor merges many assets into one renderer, so the
-   palette is per range rather than one skeleton shared by all; and a shelf
-   rebuild replaces the `Skinning` with the renderer.
-3. A skeleton overlay on the selected skinned entity (debug draw).
-4. Ragdoll rig authoring on it: generate or load a `RagdollDesc`, draw its
+1. A skeleton overlay on the selected skinned entity (debug draw).
+2. Ragdoll rig authoring on it: generate or load a `RagdollDesc`, draw its
    bodies, and a play-mode drop that spawns a `Ragdoll` and poses the mesh with
-   `Ragdoll::pose_into`.
+   `Ragdoll::pose_into`. A per-entity pose needs regions of its own, beyond the
+   shared rest-pose ones: a fixed number reserved for live poses when the shelf
+   is built, since the renderer's pools cannot grow.
 
-Not started.
+Limits of what landed: only an asset's first skin deforms (the viewer's rule);
+no clip plays; and the drawing is checked on the null backend only — no frame
+has been looked at on a device.
 
 **Local/world gizmos and the asset drag preview** (`6fba0913`, `2cb6d9db`) have
 passed the native Linux/macOS/Windows CI matrix on main since; their on-device

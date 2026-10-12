@@ -14,6 +14,14 @@
 //! asset it already holds, so undoing and redoing a spawn does not rebuild
 //! twice.
 //!
+//! # Rigs
+//!
+//! An asset with a skin keeps its first skin's [`Rig`]: the skeleton
+//! ([`crcbl::scene_rig::skeleton_of`]) and the parts the skin deforms with
+//! their joint bindings ([`crcbl::scene_rig::skinned_of`]), and the scene
+//! reserves the room `super::skins` poses them in. What the skin conversion
+//! refuses is logged, and the asset is drawn as it always was.
+//!
 //! # Materials by their factors alone
 //!
 //! An asset's materials are appended with every page column set to
@@ -27,11 +35,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use crcbl::anim::Skeleton;
 use crcbl::assets::AssetSource;
 use crcbl::greybox::scene3d;
 use crcbl::math::Mat4;
 use crcbl::render::scene::SceneDesc;
 use crcbl::scene::{build_render_scene, import_gltf};
+use crcbl::scene_rig::{Skinned, reserve_for_skinning, skeleton_of, skinned_of};
 use crcbl::shaders::mesh::GpuMaterial;
 
 /// One instance an asset is drawn as: a (node, primitive) pair of its glTF,
@@ -46,11 +56,25 @@ pub(super) struct Part {
     pub(super) transform: Mat4,
 }
 
+/// An asset's first skin: its skeleton, and which of the asset's parts it
+/// deforms — see the [module docs](self).
+#[derive(Debug)]
+pub(super) struct Rig {
+    /// The skeleton, in the skin's own joint order.
+    pub(super) skeleton: Skeleton,
+    /// The parts the skin deforms: each [`SkinnedInstance::instance`] indexes
+    /// the asset's [`Shelf::parts`].
+    ///
+    /// [`SkinnedInstance::instance`]: crcbl::scene_rig::SkinnedInstance::instance
+    pub(super) skinned: Skinned,
+}
+
 /// The assets a renderer was built with, and how each is drawn — see the
 /// [module docs](self).
 #[derive(Debug, Default)]
 pub(super) struct Shelf {
     parts: BTreeMap<String, Vec<Part>>,
+    rigs: BTreeMap<String, Rig>,
 }
 
 impl Shelf {
@@ -67,6 +91,11 @@ impl Shelf {
     /// How `asset` is drawn, or [`None`] for one not on the shelf.
     pub(super) fn parts(&self, asset: &str) -> Option<&[Part]> {
         self.parts.get(asset).map(Vec::as_slice)
+    }
+
+    /// `asset`'s rig, or [`None`] for one with no skin, or not on the shelf.
+    pub(super) fn rig(&self, asset: &str) -> Option<&Rig> {
+        self.rigs.get(asset)
     }
 
     /// The scene a renderer holding the greybox pack and every asset in
@@ -90,6 +119,12 @@ impl Shelf {
                 }
             };
             let converted = build_render_scene(&imported, Path::new(asset));
+            if let Some(rig) = rig_of(asset, &imported, &converted) {
+                // Two mesh entries and two vertex regions per deformed part:
+                // what `Skins` reserves — see `reserve_for_skinning`.
+                reserve_for_skinning(&mut scene.capacities, &rig.skinned);
+                shelf.rigs.insert(asset.clone(), rig);
+            }
             let (meshes, materials) = (scene.meshes.len(), scene.materials.len());
             let room = converted.scene.capacities;
             scene.capacities.vertices = scene.capacities.vertices.saturating_add(room.vertices);
@@ -115,6 +150,33 @@ impl Shelf {
     }
 }
 
+/// `asset`'s first skin as a [`Rig`], or [`None`] for an asset with none or one
+/// whose skin the conversion refused, with the reasons logged.
+fn rig_of(
+    asset: &str,
+    imported: &crcbl::scene::GltfScene,
+    converted: &crcbl::scene::RenderScene,
+) -> Option<Rig> {
+    let skin = imported.skins().first()?;
+    let mut skips = Vec::new();
+    let skinned = skinned_of(imported, converted, &mut skips);
+    for skip in &skips {
+        crcbl::log::warn!(
+            "editor: `{asset}`: {} at {}: {}",
+            skip.feature,
+            skip.at,
+            skip.why
+        );
+    }
+    match skeleton_of(skin, imported.nodes()) {
+        Ok(skeleton) => Some(Rig { skeleton, skinned }),
+        Err(error) => {
+            crcbl::log::warn!("editor: `{asset}` keeps no rig: {error}");
+            None
+        }
+    }
+}
+
 /// `material` with no page: what it shades as by its factors — see the
 /// [module docs](self).
 fn by_factors(material: GpuMaterial) -> GpuMaterial {
@@ -126,3 +188,6 @@ fn by_factors(material: GpuMaterial) -> GpuMaterial {
         ..material
     }
 }
+
+#[cfg(test)]
+mod tests;

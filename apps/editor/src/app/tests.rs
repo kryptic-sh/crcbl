@@ -23,6 +23,7 @@ mod play_strip;
 mod recovery;
 mod scene_inspector;
 mod selection;
+mod skinned;
 mod space;
 mod towers_field;
 mod unsaved;

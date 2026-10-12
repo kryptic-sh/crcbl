@@ -859,6 +859,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The editor draws a rigged glTF mesh through the skinning pass**, at its rest
+  pose: each part the asset's first skin deforms is posed in one region every
+  entity of that asset draws under its own placement, so spawning or deleting a
+  rigged mesh rebuilds nothing. What the skin conversion refuses is logged and
+  the asset drawn as before.
+
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned
   vertices keep their indices, `parents_of` and `joint_of`; and `skinned_of`,

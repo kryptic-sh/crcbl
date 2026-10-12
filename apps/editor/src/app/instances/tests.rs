@@ -12,10 +12,19 @@ use crate::keys::Action;
 
 /// How a greybox entity is drawn: its one cube, or nothing for an entity with
 /// no box.
+/// The description an instance drawn from a mesh of the renderer's own was
+/// given; every instance these tests place is one.
+fn plain(desc: Desc) -> InstanceDesc {
+    match desc {
+        Desc::Plain(plain) => plain,
+        skinned @ Desc::Skinned { .. } => panic!("a skinned instance: {skinned:?}"),
+    }
+}
+
 fn instance_of(document: &mut Document, drawn: Drawn) -> Option<InstanceDesc> {
-    let descs = instances_of(document, &Shelf::default(), drawn);
+    let descs = instances_of(document, &Shelf::default(), &Skins::default(), drawn);
     assert!(descs.len() <= 1, "a greybox entity is drawn as one cube");
-    descs.into_iter().next()
+    descs.into_iter().next().map(plain)
 }
 
 fn step(editor: &mut Editor<HeadlessShell>, cached: bool) {
@@ -40,7 +49,8 @@ fn pose(
         .find(|placed| placed.drawn == Drawn::Scene(id))
         .expect("placed");
     assert_eq!(
-        placed.descs[0], *current,
+        placed.descs[0],
+        Desc::Plain(*current),
         "the mirror holds the last publication"
     );
     let (records, _) = editor.renderer.cull_records();
@@ -256,10 +266,10 @@ fn a_falling_body_moves_its_drawn_instance() {
         let index = usize::try_from(placed.handles[0].index()).expect("a host index");
         assert_eq!(
             records[index].transform,
-            placed.descs[0].transform.to_cols_array(),
+            plain(placed.descs[0]).transform.to_cols_array(),
             "the renderer holds another pose than the one published",
         );
-        placed.descs[0].transform.w_axis.y
+        plain(placed.descs[0]).transform.w_axis.y
     };
     let before = height(&editor);
     let half = ticks_in(&editor.document, 0.5);
@@ -428,8 +438,13 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
         crate::scene::vocabulary(),
     )
     .expect("greybox document");
-    let mut placed =
-        Placed::place(&mut renderer, &mut document, &Shelf::default()).expect("placed entities");
+    let mut placed = Placed::place(
+        &mut renderer,
+        &mut document,
+        &Shelf::default(),
+        &Skins::default(),
+    )
+    .expect("placed entities");
     let buffers: HashSet<_> = recorder
         .events()
         .windows(2)
@@ -450,7 +465,7 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
     let tick = |renderer: &mut ForwardRenderer, placed: &mut Placed, document: &mut Document| {
         let seen = recorder.events().len();
         placed
-            .update(renderer, document, &Shelf::default())
+            .update(renderer, document, &Shelf::default(), &Skins::default())
             .expect("no entity arrives");
         renderer
             .begin_frame(device.as_ref(), &camera, &light, (64, 64))
@@ -497,7 +512,7 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
     assert_eq!(moving.transform, moved.transform.to_cols_array());
     assert_eq!(
         moving.previous_transform,
-        original.transform.to_cols_array()
+        plain(original).transform.to_cols_array()
     );
     assert_eq!(
         tick(&mut renderer, &mut placed, &mut document),
@@ -565,11 +580,11 @@ fn a_mesh_is_drawn_as_its_asset_and_a_missing_one_as_its_box() {
     let part = Mat4::from_translation(Vec3::new(10.0, 5.0, 0.0));
     assert_eq!(
         triangle.descs,
-        [InstanceDesc {
+        [Desc::Plain(InstanceDesc {
             mesh: greybox.meshes.len(),
             material: greybox.materials.len() + 1,
             transform: part,
-        }],
+        })],
     );
     assert!(records_hold(&editor, triangle.handles[0], part));
 
@@ -580,7 +595,7 @@ fn a_mesh_is_drawn_as_its_asset_and_a_missing_one_as_its_box() {
     let missing = placed_of(&editor, MISSING_MESH);
     let cube = Mat4::from_scale_rotation_translation(max - min, Quat::IDENTITY, (min + max) * 0.5);
     assert_eq!(missing.descs.len(), 1);
-    assert_eq!(missing.descs[0].mesh, GREYBOX_CUBE);
+    assert_eq!(plain(missing.descs[0]).mesh, GREYBOX_CUBE);
     assert!(records_hold(&editor, missing.handles[0], cube));
 
     // Moving the mesh moves its part, through the ordinary publish.
@@ -596,7 +611,7 @@ fn a_mesh_is_drawn_as_its_asset_and_a_missing_one_as_its_box() {
     step_any(&mut editor);
     let moved = Mat4::from_translation(Vec3::new(3.0, 0.0, 0.0)) * part;
     let triangle = placed_of(&editor, TRIANGLE_MESH);
-    assert_eq!(triangle.descs[0].transform, moved);
+    assert_eq!(plain(triangle.descs[0]).transform, moved);
     assert!(records_hold(&editor, triangle.handles[0], moved));
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
@@ -615,7 +630,7 @@ fn a_newly_measured_asset_rebuilds_the_renderer_and_is_drawn() {
     step_any(&mut editor);
     assert!(editor.shelf.assets().is_empty());
     assert_eq!(
-        placed_of(&editor, TRIANGLE_MESH).descs[0].mesh,
+        plain(placed_of(&editor, TRIANGLE_MESH).descs[0]).mesh,
         GREYBOX_CUBE
     );
 
@@ -626,7 +641,7 @@ fn a_newly_measured_asset_rebuilds_the_renderer_and_is_drawn() {
         [TRIANGLE]
     );
     let triangle = placed_of(&editor, TRIANGLE_MESH);
-    assert_ne!(triangle.descs[0].mesh, GREYBOX_CUBE);
+    assert_ne!(plain(triangle.descs[0]).mesh, GREYBOX_CUBE);
     let live = editor
         .renderer
         .cull_records()
@@ -649,13 +664,15 @@ fn a_turned_block_is_drawn_turned() {
     let mut editor = headless(16);
     let id = SceneEntityId(2);
     step_any(&mut editor);
-    let unturned = placed_of(&editor, id).descs[0].transform;
+    let unturned = plain(placed_of(&editor, id).descs[0]).transform;
 
     let turn = crcbl::math::DQuat::from_rotation_z(0.4);
     crate::document::rotation_tests::turn_block(&mut editor.document, id, turn);
     step_any(&mut editor);
     let placed = placed_of(&editor, id);
-    let (scale, rotation, translation) = placed.descs[0].transform.to_scale_rotation_translation();
+    let (scale, rotation, translation) = plain(placed.descs[0])
+        .transform
+        .to_scale_rotation_translation();
     assert!(
         rotation.abs_diff_eq(turn.as_quat(), 1e-6),
         "the cube is turned {rotation:?}, not {turn:?}",
@@ -668,11 +685,11 @@ fn a_turned_block_is_drawn_turned() {
     assert!(records_hold(
         &editor,
         placed.handles[0],
-        placed.descs[0].transform
+        plain(placed.descs[0]).transform
     ));
 
     editor.act(&Action::Undo);
     step_any(&mut editor);
-    assert_eq!(placed_of(&editor, id).descs[0].transform, unturned);
+    assert_eq!(plain(placed_of(&editor, id).descs[0]).transform, unturned);
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }

@@ -146,11 +146,13 @@ mod instances;
 mod join;
 mod meshes;
 mod recovery;
+mod skins;
 mod unsaved;
 mod watch;
 
 use instances::Placed;
 use meshes::Shelf;
+use skins::Skins;
 
 /// How far one arrow key moves the selection, in metres.
 ///
@@ -218,6 +220,9 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     instances: Placed,
     /// The assets the renderer was built with — see `meshes`.
     shelf: Shelf,
+    /// The posed regions of the shelf's rigs and their pass, built against the
+    /// renderer's vertex pool and replaced with it — see `skins`.
+    skins: Skins,
     /// The document's [`Document::membership`] and [`Document::measures`] the
     /// shelf was last checked against: a mesh can only want a new asset when
     /// one of them moves.
@@ -466,7 +471,8 @@ impl<S: Shell + ?Sized> Editor<S> {
         let grid_extent = grid_extent(&bounds);
         let wanted = document.mesh_assets();
         let (shelf, scene) = Shelf::build(document.assets(), &wanted);
-        let (renderer, instances) = renderer_for(&gpu, &scene, grid_extent, &mut document, &shelf)?;
+        let (renderer, skins, instances) =
+            renderer_for(&gpu, &scene, grid_extent, &mut document, &shelf)?;
         let shelved = (document.membership(), document.measures());
         // Rolled back by hand: this type has no `Drop`, so a `?` would leak
         // the renderer's pipelines rather than release them — `apps/towers`
@@ -474,6 +480,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         let ui = match UiRenderer::new(gpu.device(), gpu.queue(), gpu.format()) {
             Ok(ui) => ui,
             Err(error) => {
+                skins.destroy(gpu.device());
                 renderer.destroy(gpu.device());
                 return Err(GpuError::Hal(error).into());
             }
@@ -494,6 +501,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             pool: TransientPool::new(),
             instances,
             shelf,
+            skins,
             shelved,
             grid_extent,
             document,
@@ -1316,7 +1324,12 @@ impl<S: Shell + ?Sized> Editor<S> {
 
         self.shelve()?;
         self.instances
-            .update(&mut self.renderer, &mut self.document, &self.shelf)
+            .update(
+                &mut self.renderer,
+                &mut self.document,
+                &self.shelf,
+                &self.skins,
+            )
             .map_err(|error| GpuError::pools("the editor's entities", &error))?;
         if let Some(corners) = self.asset_preview() {
             self.renderer
@@ -1331,9 +1344,26 @@ impl<S: Shell + ?Sized> Editor<S> {
         // out, which is the rectangle this frame's draw list samples it into.
         let viewport = self.panels.viewport_extent();
         let camera = self.camera.camera();
-        self.renderer
-            .begin_frame(self.gpu.device(), &camera, &sun(), viewport)
-            .map_err(GpuError::Hal)?;
+        // The skinned entry point re-points every skinned instance at the half
+        // of its region this frame's dispatch fills; the plain one would leave
+        // them on the frame before.
+        match self.skins.frame() {
+            Some((skinning, ranges)) => self
+                .renderer
+                .begin_skinned_frame(
+                    self.gpu.device(),
+                    skinning,
+                    &ranges,
+                    &camera,
+                    &sun(),
+                    viewport,
+                )
+                .map_err(|error| GpuError::Hal(skins::hal_error(error)))?,
+            None => self
+                .renderer
+                .begin_frame(self.gpu.device(), &camera, &sun(), viewport)
+                .map_err(GpuError::Hal)?,
+        }
         // 1.0, because every size in the draw list is already this frame's
         // pixels: the tree was laid out against `extent` and a second
         // multiplier is a second thing that can disagree with it.
@@ -1364,9 +1394,14 @@ impl<S: Shell + ?Sized> Editor<S> {
                     ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
                 ),
             );
-            let _hdr = self
-                .renderer
-                .add_passes(&mut graph, &self.pool, scene, viewport);
+            let _hdr = match self.skins.skinning() {
+                Some(skinning) => self
+                    .renderer
+                    .add_skinned_passes(&mut graph, &self.pool, scene, viewport, skinning),
+                None => self
+                    .renderer
+                    .add_passes(&mut graph, &self.pool, scene, viewport),
+            };
             // Nothing else covers the whole window any more: the panels and
             // the pane do, and whatever the dock leaves between them is this.
             graph
@@ -1447,7 +1482,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// As [`shelve`](Self::shelve).
     fn rebuild(&mut self, assets: &std::collections::BTreeSet<String>) -> Result<(), EditorError> {
         let (shelf, scene) = Shelf::build(self.document.assets(), assets);
-        let (renderer, instances) = renderer_for(
+        let (renderer, skins, instances) = renderer_for(
             &self.gpu,
             &scene,
             self.grid_extent,
@@ -1455,6 +1490,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             &shelf,
         )?;
         self.gpu.drain()?;
+        std::mem::replace(&mut self.skins, skins).destroy(self.gpu.device());
         let previous = std::mem::replace(&mut self.renderer, renderer);
         previous.destroy(self.gpu.device());
         self.instances = instances;
@@ -1512,6 +1548,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.save_layout();
         let gpu_result = self.gpu.drain().and_then(|()| {
             self.pool.destroy(self.gpu.device());
+            std::mem::take(&mut self.skins).destroy(self.gpu.device());
             self.renderer.destroy(self.gpu.device());
             self.ui.destroy(self.gpu.device());
             self.gpu.destroy()
@@ -1595,8 +1632,9 @@ const PICKED_COLOR: [f32; 4] = [0.45, 0.95, 0.55, 1.0];
 /// The mode this tool asks for. It never asks for anything else.
 pub const DISPLAY_MODE: DisplayMode = DisplayMode::Windowed;
 
-/// A renderer of `scene` with the ground grid reaching `grid_extent` and every
-/// entity of `document` placed in it, drawn from `shelf`.
+/// A renderer of `scene` with the ground grid reaching `grid_extent`, the
+/// posed regions of `shelf`'s rigs, and every entity of `document` placed in
+/// it, drawn from `shelf`.
 ///
 /// # Errors
 ///
@@ -1608,7 +1646,7 @@ fn renderer_for(
     grid_extent: f32,
     document: &mut Document,
     shelf: &Shelf,
-) -> Result<(ForwardRenderer, Placed), EditorError> {
+) -> Result<(ForwardRenderer, Skins, Placed), EditorError> {
     let mut renderer = ForwardRenderer::with_scene(gpu.device(), gpu.queue(), gpu.format(), scene)
         .map_err(GpuError::Hal)?;
     if let Err(error) =
@@ -1617,9 +1655,17 @@ fn renderer_for(
         renderer.destroy(gpu.device());
         return Err(GpuError::Hal(error).into());
     }
-    match Placed::place(&mut renderer, document, shelf) {
-        Ok(instances) => Ok((renderer, instances)),
+    let skins = match Skins::build(gpu.device(), &mut renderer, shelf) {
+        Ok(skins) => skins,
         Err(error) => {
+            renderer.destroy(gpu.device());
+            return Err(error.into());
+        }
+    };
+    match Placed::place(&mut renderer, document, shelf, &skins) {
+        Ok(instances) => Ok((renderer, skins, instances)),
+        Err(error) => {
+            skins.destroy(gpu.device());
             renderer.destroy(gpu.device());
             Err(GpuError::pools("the editor's entities", &error).into())
         }

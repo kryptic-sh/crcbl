@@ -11,7 +11,8 @@
 //! the renderer's [`Shelf`] is one instance per part of its glTF, each put
 //! where the row's `position` puts the asset's origin; one whose asset is
 //! missing, or not yet on the shelf, is the cube of its box — the placeholder
-//! the document picks it by.
+//! the document picks it by. A part its asset's rig deforms is drawn from that
+//! part's posed region ([`Skins`]) rather than from its rest mesh.
 
 use std::collections::HashSet;
 
@@ -21,10 +22,11 @@ use crcbl::math::{Mat4, Vec3};
 use crcbl::registry::OrientedBox;
 use crcbl::render::instance_pool::InstancePoolError;
 use crcbl::render::scene::InstanceDesc;
-use crcbl::render::{ForwardRenderer, InstanceHandle};
+use crcbl::render::{ForwardRenderer, InstanceHandle, SkinnedInstanceDesc};
 use crcbl::scene::scn::SceneEntityId;
 
 use super::meshes::Shelf;
+use super::skins::Skins;
 use crate::document::Document;
 
 /// Which entity an instance draws.
@@ -38,13 +40,37 @@ pub(super) enum Drawn {
     Spawned(Entity),
 }
 
+/// How one instance is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Desc {
+    /// From a mesh of the renderer's description.
+    Plain(InstanceDesc),
+    /// From a posed region of [`Skins`].
+    Skinned {
+        /// The region's draw.
+        draw: usize,
+        /// The material it shades through.
+        material: usize,
+        /// Skeleton space to the world.
+        transform: Mat4,
+    },
+}
+
 /// A placed entity, the instances it is drawn as, and the description last
 /// published for each: one for a cube, one per part for a mesh.
 #[derive(Debug)]
 pub(super) struct PlacedInstance {
     pub(super) drawn: Drawn,
     handles: Vec<InstanceHandle>,
-    descs: Vec<InstanceDesc>,
+    descs: Vec<Desc>,
+}
+
+impl PlacedInstance {
+    /// The description each of its instances was last published with.
+    #[cfg(test)]
+    pub(super) fn descs(&self) -> &[Desc] {
+        &self.descs
+    }
 }
 
 /// The instances drawn for a document, and the [`Document::membership`] they
@@ -65,12 +91,13 @@ impl Placed {
         renderer: &mut ForwardRenderer,
         document: &mut Document,
         shelf: &Shelf,
+        skins: &Skins,
     ) -> Result<Self, InstancePoolError> {
         let mut placed = Self {
             instances: Vec::new(),
             membership: document.membership(),
         };
-        placed.reconcile(renderer, document, shelf)?;
+        placed.reconcile(renderer, document, shelf, skins)?;
         Ok(placed)
     }
 
@@ -87,12 +114,13 @@ impl Placed {
         renderer: &mut ForwardRenderer,
         document: &mut Document,
         shelf: &Shelf,
+        skins: &Skins,
     ) -> Result<(), InstancePoolError> {
         if document.membership() != self.membership {
-            self.reconcile(renderer, document, shelf)?;
+            self.reconcile(renderer, document, shelf, skins)?;
             self.membership = document.membership();
         }
-        publish(&mut self.instances, renderer, document, shelf)
+        publish(&mut self.instances, renderer, document, shelf, skins)
     }
 
     /// Removes the instance of every entity the document no longer draws and
@@ -108,6 +136,7 @@ impl Placed {
         renderer: &mut ForwardRenderer,
         document: &mut Document,
         shelf: &Shelf,
+        skins: &Skins,
     ) -> Result<(), InstancePoolError> {
         let scene = document
             .outline()
@@ -116,9 +145,9 @@ impl Placed {
             .map(Drawn::Scene);
         let spawned = document.spawned().into_iter().map(Drawn::Spawned);
         let listed: Vec<Drawn> = scene.chain(spawned).collect();
-        let wanted: Vec<(Drawn, Vec<InstanceDesc>)> = listed
+        let wanted: Vec<(Drawn, Vec<Desc>)> = listed
             .into_iter()
-            .map(|drawn| (drawn, instances_of(document, shelf, drawn)))
+            .map(|drawn| (drawn, instances_of(document, shelf, skins, drawn)))
             .filter(|(_, descs)| !descs.is_empty())
             .collect();
         let held: HashSet<Drawn> = wanted.iter().map(|(drawn, _)| *drawn).collect();
@@ -136,7 +165,7 @@ impl Placed {
             .into_iter()
             .filter(|(drawn, _)| !placed.contains(drawn))
         {
-            let handles = add_all(renderer, &descs)?;
+            let handles = add_all(renderer, skins, &descs)?;
             self.instances.push(PlacedInstance {
                 drawn,
                 handles,
@@ -150,12 +179,43 @@ impl Placed {
 /// One instance per description, in order.
 fn add_all(
     renderer: &mut ForwardRenderer,
-    descs: &[InstanceDesc],
+    skins: &Skins,
+    descs: &[Desc],
 ) -> Result<Vec<InstanceHandle>, InstancePoolError> {
     descs
         .iter()
-        .map(|desc| renderer.add_instance(desc))
+        .map(|desc| match *desc {
+            Desc::Plain(plain) => renderer.add_instance(&plain),
+            Desc::Skinned {
+                draw,
+                material,
+                transform,
+            } => renderer.add_skinned_instance(&SkinnedInstanceDesc {
+                mesh: skins.mesh(draw),
+                material,
+                transform,
+            }),
+        })
         .collect()
+}
+
+/// Rewrites the instance `handle` names to `desc`.
+fn set(renderer: &mut ForwardRenderer, skins: &Skins, handle: InstanceHandle, desc: &Desc) {
+    match *desc {
+        Desc::Plain(plain) => renderer.set_instance(handle, &plain),
+        Desc::Skinned {
+            draw,
+            material,
+            transform,
+        } => renderer.set_skinned_instance(
+            handle,
+            &SkinnedInstanceDesc {
+                mesh: skins.mesh(draw),
+                material,
+                transform,
+            },
+        ),
+    }
 }
 
 /// Publishes changed descriptions before the renderer settles motion history.
@@ -172,9 +232,10 @@ fn publish(
     renderer: &mut ForwardRenderer,
     document: &mut Document,
     shelf: &Shelf,
+    skins: &Skins,
 ) -> Result<(), InstancePoolError> {
     for instance in placed {
-        let descs = instances_of(document, shelf, instance.drawn);
+        let descs = instances_of(document, shelf, skins, instance.drawn);
         // An entity with no box is one reconcile takes out when the membership
         // moves; until then it stays as it was last published.
         if descs.is_empty() || descs == instance.descs {
@@ -183,14 +244,14 @@ fn publish(
         if descs.len() == instance.handles.len() {
             for ((handle, desc), old) in instance.handles.iter().zip(&descs).zip(&instance.descs) {
                 if desc != old {
-                    renderer.set_instance(*handle, desc);
+                    set(renderer, skins, *handle, desc);
                 }
             }
         } else {
             for &handle in &instance.handles {
                 renderer.remove_instance(handle);
             }
-            instance.handles = add_all(renderer, &descs)?;
+            instance.handles = add_all(renderer, skins, &descs)?;
         }
         instance.descs = descs;
     }
@@ -200,7 +261,7 @@ fn publish(
 /// How one entity is drawn — see the [module docs](self): its mesh's parts,
 /// or the unit cube scaled to its own box, or nothing for an entity with no
 /// box.
-fn instances_of(document: &mut Document, shelf: &Shelf, drawn: Drawn) -> Vec<InstanceDesc> {
+fn instances_of(document: &mut Document, shelf: &Shelf, skins: &Skins, drawn: Drawn) -> Vec<Desc> {
     if let Drawn::Scene(id) = drawn
         && let Some(mesh) = document.mesh(id)
         && mesh.local_bounds().is_some()
@@ -212,10 +273,20 @@ fn instances_of(document: &mut Document, shelf: &Shelf, drawn: Drawn) -> Vec<Ins
             Mat4::from_rotation_translation(mesh.rotation.quat().as_quat(), narrow(mesh.position));
         return parts
             .iter()
-            .map(|part| InstanceDesc {
-                mesh: part.mesh,
-                material: part.material,
-                transform: origin * part.transform,
+            .enumerate()
+            .map(|(index, part)| match skins.draw_of(&mesh.asset, index) {
+                // A deformed vertex is placed by its joints, and the skeleton
+                // hangs where the rig says, not where the part's node stands.
+                Some(draw) => Desc::Skinned {
+                    draw,
+                    material: part.material,
+                    transform: origin * skins.transform(draw),
+                },
+                None => Desc::Plain(InstanceDesc {
+                    mesh: part.mesh,
+                    material: part.material,
+                    transform: origin * part.transform,
+                }),
             })
             .collect();
     }
@@ -226,11 +297,11 @@ fn instances_of(document: &mut Document, shelf: &Shelf, drawn: Drawn) -> Vec<Ins
     let Some(placement) = placement else {
         return Vec::new();
     };
-    vec![InstanceDesc {
+    vec![Desc::Plain(InstanceDesc {
         mesh: GREYBOX_CUBE,
         material: GREYBOX_GREY,
         transform: cube_transform(&placement),
-    }]
+    })]
 }
 
 /// The unit greybox cube scaled to `placement`'s box, turned as it is, and
