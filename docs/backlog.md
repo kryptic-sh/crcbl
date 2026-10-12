@@ -30,23 +30,28 @@ than EW assets or an EW checkout.
 
   Remaining engine work:
   - End-to-end terrain falling/settling with rendered (GPU-skinned) limbs
-    matching physical bodies; server/detail-client ownership. The settled pose
-    has a wire form and a client-side apply (`SettledPose`,
-    `Ragdoll::settle_to`), and `SettleBudget` is the timeout and the awake cap;
-    the client's soft pull is `Ragdoll::pull_towards` (an implicit critically
-    damped spring moving each joint origin towards the server's
-    `Ragdoll::joint_positions`), and the simplified server rig is an authored or
-    coarsely generated `RagdollRig` of the same skeleton.
-    `a_detailed_client_converges_on_a_simplified_server` runs the two side by
-    side: at 6 Hz the shared joints end 2 cm apart (0.61 m unpulled) but peak
-    0.62 m apart where the rigs land (1.26 m unpulled), because a pull applied
-    between steps does not overrule a step's contacts. The plan's "never more
-    than a body width" therefore holds after the landing and not through it;
-    holding it through impacts would need the pull inside the solver (a joint or
-    soft constraint to a target), which is not built. The cap settles the
-    longest-awake ragdolls rather than the plan's "excess deaths settle
-    instantly to a canned pose": a new death settled at once would hang in the
-    air, and no canned pose exists.
+    matching physical bodies — covered in two halves, not as one test: the
+    ragdoll tests check the skinning palette against the bodies on every tick on
+    the CPU, and `crates/crcbl/tests/mesh_e2e/skinned_motion.rs` checks that the
+    GPU draws whatever palette it is given. A ragdoll-specific GPU golden (a
+    falling humanoid's silhouette against its projected bodies) is not built; it
+    would take that harness's scale for little new coverage.
+    Server/detail-client ownership: The settled pose has a wire form and a
+    client-side apply (`SettledPose`, `Ragdoll::settle_to`), and `SettleBudget`
+    is the timeout and the awake cap; the client's soft pull is
+    `Ragdoll::pull_towards` (an implicit critically damped spring moving each
+    joint origin towards the server's `Ragdoll::joint_positions`), and the
+    simplified server rig is an authored or coarsely generated `RagdollRig` of
+    the same skeleton. `a_detailed_client_converges_on_a_simplified_server` runs
+    the two side by side: at 6 Hz the shared joints end 2 cm apart (0.61 m
+    unpulled) but peak 0.62 m apart where the rigs land (1.26 m unpulled),
+    because a pull applied between steps does not overrule a step's contacts.
+    The plan's "never more than a body width" therefore holds after the landing
+    and not through it; holding it through impacts would need the pull inside
+    the solver (a joint or soft constraint to a target), which is not built. The
+    cap settles the longest-awake ragdolls rather than the plan's "excess deaths
+    settle instantly to a canned pose": a new death settled at once would hang
+    in the air, and no canned pose exists.
   - A settled-pose handoff suitable for revival, with clearance checked before
     rising and no unintended relocation of the authoritative character. The
     parts exist — `Ragdoll::body_transforms` for where the body lies,
