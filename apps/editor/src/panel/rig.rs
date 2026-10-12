@@ -21,8 +21,11 @@
 //! **A shape switched keeps its size** ([`reshaped`]): the switch leaves every
 //! field of the new variant at zero, which no body may have, so a capsule
 //! turned into a sphere keeps its radius and a box is made to wrap the capsule
-//! the body was. A joint's kind switched starts at zero limits, which every
-//! kind allows: a joint locked until it is opened.
+//! the body was. **A joint's kind switched keeps its swing** ([`kind_desc`]):
+//! a ball's cone becomes a hinge's range either side of rest, and a hinge's
+//! farther limit a ball's cone, with no twist. Every other switch — to or from
+//! fixed — starts at zero limits, which every kind allows: a joint locked
+//! until it is opened.
 
 use crcbl::ragdoll::{JointKindDesc, RagdollDesc, ShapeDesc};
 use crcbl::reflect::Reflect;
@@ -276,7 +279,8 @@ fn kind_rows(kind: JointKindDesc) -> Kind {
 }
 
 /// `old`, drawn as `before`, after its rows moved to `after`: each angle that
-/// moved in radians, and each that did not exactly as it was.
+/// moved in radians, and each that did not exactly as it was. A switch keeps
+/// the swing — see the [module docs](self).
 fn kind_desc(old: JointKindDesc, before: Kind, after: Kind) -> JointKindDesc {
     let angle = |old: f64, before: f64, after: f64| {
         if after == before {
@@ -321,7 +325,17 @@ fn kind_desc(old: JointKindDesc, before: Kind, after: Kind) -> JointKindDesc {
             lower: angle(lower, lower_before, lower_after),
             upper: angle(upper, upper_before, upper_after),
         },
-        // A switch: the new kind, from its rows.
+        // A switch between the two that swing: the swing, in radians.
+        (JointKindDesc::Ball { cone, .. }, _, Kind::Hinge { .. }) => JointKindDesc::Hinge {
+            lower: -cone,
+            upper: cone,
+        },
+        (JointKindDesc::Hinge { lower, upper }, _, Kind::Ball { .. }) => JointKindDesc::Ball {
+            cone: lower.abs().max(upper.abs()),
+            twist_lower: 0.0,
+            twist_upper: 0.0,
+        },
+        // Any other switch: the new kind, from its rows.
         (
             _,
             _,
@@ -375,6 +389,56 @@ mod tests {
         assert_eq!(
             reshaped(capsule, Shape::Sphere { radius: 0.0 }),
             ShapeDesc::Sphere { radius: 0.07 }
+        );
+    }
+
+    /// **A switched kind keeps its swing**: a ball's cone is a hinge's range
+    /// either side of rest, and back again a ball with that cone and no twist;
+    /// a fixed joint switched to a ball starts locked.
+    #[test]
+    fn a_switched_kind_keeps_its_swing() {
+        let ball = JointKindDesc::Ball {
+            cone: 0.7,
+            twist_lower: -0.3,
+            twist_upper: 0.2,
+        };
+        let zero_hinge = Kind::Hinge {
+            lower: 0.0,
+            upper: 0.0,
+        };
+        let hinge = kind_desc(ball, kind_rows(ball), zero_hinge);
+        assert_eq!(
+            hinge,
+            JointKindDesc::Hinge {
+                lower: -0.7,
+                upper: 0.7,
+            }
+        );
+        let lopsided = JointKindDesc::Hinge {
+            lower: -2.4,
+            upper: 0.1,
+        };
+        let zero_ball = Kind::Ball {
+            cone: 0.0,
+            twist_lower: 0.0,
+            twist_upper: 0.0,
+        };
+        assert_eq!(
+            kind_desc(lopsided, kind_rows(lopsided), zero_ball),
+            JointKindDesc::Ball {
+                cone: 2.4,
+                twist_lower: 0.0,
+                twist_upper: 0.0,
+            }
+        );
+        let fixed = JointKindDesc::Fixed;
+        assert_eq!(
+            kind_desc(fixed, kind_rows(fixed), zero_ball),
+            JointKindDesc::Ball {
+                cone: 0.0,
+                twist_lower: 0.0,
+                twist_upper: 0.0,
+            }
         );
     }
 

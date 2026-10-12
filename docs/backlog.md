@@ -247,12 +247,6 @@ What rig editing still lacks, none of it requested yet:
   `ignore_rest_overlaps`, which the rig section switches; with the rule off, a
   body grown into a neighbour fights it at rest until the pair is listed by hand
   in the file.
-- **The first edit of a fitted rig resolves it from its file**, which drops a
-  box body's turn about its own axis (`to_desc`'s documented loss). The fitted
-  rig is drawn exactly until then.
-- A joint's kind switched starts at zero limits — locked until opened — where a
-  shape switched keeps its size (`reshaped`); carrying a ball's cone into a
-  hinge's range was not built, as nothing asked for it.
 
 G drops the selected rigged mesh as its fitted ragdoll in a physics world of its
 own (`apps/editor/src/app/drop.rs`), drawn from a second, preview region per
