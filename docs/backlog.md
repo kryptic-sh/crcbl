@@ -56,10 +56,13 @@ than EW assets or an EW checkout.
     standing capsule's centre under the hips (the body nearest the skeleton
     root), found by `CharacterController::preview_upright` and refused for no
     ground, a push past `RiseQuery::max_shift`, or a capsule that still overlaps
-    (a low ceiling). It moves nothing; placing the authoritative character there
-    and the get-up itself are the game's. Its mask must leave the corpse's
-    layers out, or the character is stood on its own body. Not built: searching
-    around the hips for room when the hips themselves have none.
+    (a low ceiling). When the hips have no room it searches rings around them
+    out to the cap, admitting only points a ray at the hips' height reaches. It
+    moves nothing; placing the authoritative character there and the get-up
+    itself are the game's. Its mask must leave the corpse's layers out, or the
+    character is stood on its own body. The reach ray is one line at the hips'
+    height: a low rail below it or a gap in a wall it threads is not seen, and
+    the search takes the first point that stands, not the nearest one.
   - The editor preview shipped: G drops a selected rigged mesh as its ragdoll
     (see "Further editor scope" below for what it does and does not do). The
     remaining delivery requirements are in `docs/plan/35-ragdolls.md`. Budgets,

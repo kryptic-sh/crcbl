@@ -185,3 +185,79 @@ fn a_low_ceiling_or_no_ground_refuses_the_rise() {
         Err(RiseError::NoGround)
     );
 }
+
+/// The low slab of these tests: a ceiling under a standing character's head,
+/// covering every point within `reach` metres of the hips except those past
+/// `edge` metres along +x, where it ends.
+fn low_slab_ending_at(physics: &mut PhysicsSystem, hips: DVec3, edge: f64, reach: f64) {
+    let near = hips.x - reach - 1.0;
+    let far = hips.x + edge;
+    block(
+        physics,
+        2,
+        DVec3::new(0.5 * (near + far), 1.2 + 0.5, hips.z),
+        DVec3::new(0.5 * (far - near), 0.5, reach + 1.0),
+    );
+}
+
+/// **A corpse half under a low slab rises beside it**: the hips have no
+/// room — the slab's edge is farther than its underside is low, so the solve
+/// pushes the capsule down, not out — so the search finds the open floor past
+/// the edge, within the cap, and stands the character clear of the slab.
+#[test]
+fn a_corpse_under_a_low_slab_rises_beside_it() {
+    let (mut physics, ragdoll) = corpse(true);
+    let hips = hips(&physics, &ragdoll);
+    let edge = 0.6;
+    low_slab_ending_at(&mut physics, hips, edge, 3.0);
+    assert_eq!(
+        ragdoll.rise_point(&mut physics, &QUERY),
+        Err(RiseError::Blocked),
+        "the hips themselves have no room"
+    );
+    let near = RiseQuery {
+        max_shift: 1.2,
+        ..QUERY
+    };
+
+    let centre = ragdoll
+        .rise_point(&mut physics, &near)
+        .expect("room past the edge");
+    assert!(
+        centre.x >= hips.x + edge + QUERY.character.radius - 1e-6,
+        "clear of the slab: {centre}"
+    );
+    let shift = (centre - hips).with_y(0.0).length();
+    assert!(shift <= near.max_shift, "within the cap: {shift}");
+    let standing = QUERY.character.radius + QUERY.character.half_height;
+    assert!(
+        (centre.y - standing).abs() <= 2.0 * QUERY.character.skin_width,
+        "feet on the floor: {centre}"
+    );
+}
+
+/// **Room behind a thin wall is not room to rise into.** The slab covers
+/// everything within reach but a strip past a wall a few centimetres thick;
+/// the hips cannot reach the strip, so the rise is refused for the hips' own
+/// reason.
+#[test]
+fn room_behind_a_thin_wall_is_refused() {
+    let (mut physics, ragdoll) = corpse(true);
+    let hips = hips(&physics, &ragdoll);
+    let edge = 0.6;
+    low_slab_ending_at(&mut physics, hips, edge, 3.0);
+    block(
+        &mut physics,
+        3,
+        DVec3::new(hips.x + edge - 0.02, 1.0, hips.z),
+        DVec3::new(0.02, 1.0, 3.0),
+    );
+    let far = RiseQuery {
+        max_shift: 1.5,
+        ..QUERY
+    };
+    assert_eq!(
+        ragdoll.rise_point(&mut physics, &far),
+        Err(RiseError::Blocked)
+    );
+}
