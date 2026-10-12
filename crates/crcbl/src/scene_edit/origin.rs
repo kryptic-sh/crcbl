@@ -123,6 +123,18 @@ pub(super) enum AssetRoot {
 }
 
 impl Document {
+    /// The directory the document's assets are read from when it derived it
+    /// from its origin ([`asset_root`]), or [`None`] when a source was named
+    /// by [`Document::set_assets`] — its namer knows where that is — or none
+    /// is set yet. What a tool writing beside an asset writes into.
+    #[must_use]
+    pub fn derived_asset_root(&self) -> Option<&Path> {
+        match &self.asset_root {
+            AssetRoot::Derived(root) => Some(root),
+            AssetRoot::Unset | AssetRoot::Named => None,
+        }
+    }
+
     /// Puts a new, empty scene in place of this one — see the module docs:
     /// no entity, no system listed, no origin, nothing to undo, and clean.
     ///

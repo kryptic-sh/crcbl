@@ -1035,6 +1035,10 @@ impl<S: Shell + ?Sized> Editor<S> {
                 self.toggle_drop();
                 Ok(())
             }
+            Action::WriteRig => {
+                self.write_rig();
+                Ok(())
+            }
             Action::PlayStop => self.play_or_stop(),
             Action::Pause => {
                 self.pause_or_resume();
@@ -1340,6 +1344,66 @@ impl<S: Shell + ?Sized> Editor<S> {
         if let Some(rig) = self.shelf.rig(&asset) {
             self.dropping = drop::DropPreview::start(id, &asset, rig, origin);
         }
+    }
+
+    /// Writes the primary selection's ragdoll rig beside its asset as
+    /// `<asset>.ragdoll.ron` — the fitted one, as a file to author from — and
+    /// says so on the status line. Refused, by name, for a selection that is
+    /// not a rigged mesh, an asset whose directory is not known, and an asset
+    /// that already has a rig file: an authored rig is never overwritten.
+    fn write_rig(&mut self) {
+        let outcome = self.try_write_rig();
+        let (text, tone) = match outcome {
+            Ok(path) => (format!("Wrote {}", path.display()), Tone::Info),
+            Err(why) => (why, Tone::Warning),
+        };
+        self.panels.set_status(text, tone);
+    }
+
+    /// [`write_rig`](Self::write_rig)'s work, the path written or why not.
+    fn try_write_rig(&mut self) -> Result<std::path::PathBuf, String> {
+        let id = self
+            .document
+            .primary()
+            .ok_or("Select a rigged mesh to write its rig")?;
+        let asset = self
+            .document
+            .mesh(id)
+            .map(|mesh| mesh.asset.clone())
+            .ok_or("Select a rigged mesh to write its rig")?;
+        let rig = self
+            .shelf
+            .rig(&asset)
+            .ok_or_else(|| format!("`{asset}` has no skin to rig"))?;
+        let ragdoll = rig
+            .ragdoll
+            .as_ref()
+            .ok_or_else(|| format!("`{asset}` has no ragdoll rig to write"))?;
+        let root = self
+            .assets
+            .clone()
+            .or_else(|| {
+                self.document
+                    .derived_asset_root()
+                    .map(std::path::Path::to_path_buf)
+            })
+            .ok_or("This scene's assets are not in a directory to write to")?;
+        let path = root.join(format!("{asset}{}", meshes::RAGDOLL_SUFFIX));
+        if path.exists() {
+            return Err(format!(
+                "{} is already authored; it is left alone",
+                path.display()
+            ));
+        }
+        let names: Vec<&str> = rig.names.iter().map(String::as_str).collect();
+        let text = ragdoll
+            .to_desc(&names)
+            .map_err(|error| format!("`{asset}`'s rig cannot be named: {error}"))?
+            .to_ron();
+        std::fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))?;
+        // The next draw reads it back as the authored rig.
+        self.rebuild_due = true;
+        Ok(path)
     }
 
     /// Steps the drop preview a frame and poses its region, or ends it when

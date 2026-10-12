@@ -859,6 +859,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`scene_edit::Document::derived_asset_root`** names the directory a document
+  reads its assets from when it derived it from its origin, for a tool that
+  writes beside an asset; `None` for a source named by `set_assets`.
+
 - **`RagdollRig::to_desc` writes a rig back as a named `RagdollDesc`** and
   `RagdollDesc::to_ron` gives its file text, LF-terminated on every platform: a
   fitted rig saved as the starting point of an authored one reads back as the
@@ -880,7 +884,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stay at rest; G again stops it, and the scene is never edited. A rig authored
   beside the asset as `<asset>.ragdoll.ron` (a `RagdollDesc`, resolved by joint
   name) replaces the fitted one; a file that will not read is logged and the
-  fitted rig stands in.
+  fitted rig stands in. Shift+G writes the selected mesh's fitted rig there as a
+  file to author from, and never overwrites one.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned

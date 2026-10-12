@@ -269,3 +269,60 @@ fn g_drops_a_selected_rigged_mesh_and_g_stops_it() {
         "the scene changed"
     );
 }
+
+/// **Shift+G writes the fitted rig beside the asset as a file to author
+/// from, and never overwrites one.** The file reads back as a rig for the
+/// asset and the shelf takes it up as the authored rig; a second press finds
+/// the file there and leaves it — even one a person has since edited.
+#[test]
+fn shift_g_writes_the_rig_once() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    std::fs::create_dir_all(dir.path().join("props")).expect("a props folder");
+    std::fs::write(
+        dir.path().join(RIG),
+        glb(&rigged_json(BIN_CHUNK_BUFFER), Some(&rigged_bin())),
+    )
+    .expect("the rig asset");
+    let mut editor = headless(64);
+    editor.document = props();
+    editor
+        .document
+        .set_assets(Box::new(crcbl::assets::DirSource::at(
+            dir.path().to_path_buf(),
+        )));
+    editor.assets = Some(dir.path().to_path_buf());
+    let rig = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(2.0, 0.0, 0.0))
+        .expect("spawned");
+    editor.frame().expect("a frame");
+    editor.document.select(Some(rig));
+
+    editor.act(&Action::WriteRig);
+    let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+    let written = std::fs::read_to_string(&path).expect("the rig was written");
+    assert!(
+        editor.panels.status().0.starts_with("Wrote"),
+        "{:?}",
+        editor.panels.status()
+    );
+    crcbl::ragdoll::RagdollDesc::from_ron(&written).expect("a rig file");
+    editor.frame().expect("a rebuild reading it back");
+    assert!(
+        editor
+            .shelf
+            .rig(RIG)
+            .and_then(|rig| rig.ragdoll.as_ref())
+            .is_some(),
+        "the shelf reads the written rig"
+    );
+
+    std::fs::write(&path, "an edit a person made").expect("an edit");
+    editor.act(&Action::WriteRig);
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("still there"),
+        "an edit a person made",
+        "an authored rig was overwritten"
+    );
+    assert!(editor.panels.status().0.contains("already authored"));
+}

@@ -298,8 +298,16 @@ fn the_asset_root_follows_save_as_unless_it_was_named() {
         document.measure(TRIANGLE).is_err(),
         "the fixture is visible already"
     );
+    assert_eq!(document.derived_asset_root(), None, "no origin, no root");
     let moved = document.save_as(&scene).expect("a new directory");
     assert!(moved, "the asset source did not move");
+    assert_eq!(
+        document
+            .derived_asset_root()
+            .map(|root| root.canonicalize().expect("a directory")),
+        Some(game.path().canonicalize().expect("a directory")),
+        "the root a tool writes beside an asset is the game's"
+    );
     assert!(
         document.measure(TRIANGLE).is_ok(),
         "the source is not the new directory's game"
@@ -311,6 +319,11 @@ fn the_asset_root_follows_save_as_unless_it_was_named() {
         .save_as(game.path().join("levels").join("two.scn"))
         .expect("a new directory");
     assert!(!moved, "a named source moved");
+    assert_eq!(
+        named.derived_asset_root(),
+        None,
+        "a named source's namer knows it"
+    );
     assert!(
         named.measure(TRIANGLE).is_err(),
         "a named source was replaced"

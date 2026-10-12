@@ -76,6 +76,9 @@ pub(super) struct Rig {
     ///
     /// [`SkinnedInstance::instance`]: crcbl::scene_rig::SkinnedInstance::instance
     pub(super) skinned: Skinned,
+    /// The skin's joint names, in palette order: what a rig file names bones
+    /// by.
+    pub(super) names: Vec<String>,
     /// The ragdoll rig authored beside the asset, or else the one fitted to
     /// the skeleton ([`RagdollRig::generate`]), or [`None`] where neither
     /// could be had.
@@ -237,12 +240,13 @@ fn rig_of(
                 .instances
                 .first()
                 .map_or(Mat4::IDENTITY, |part| part.transform);
-            let names: Vec<&str> = skin
+            let names: Vec<String> = skin
                 .joints()
                 .iter()
-                .map(|&node| imported.nodes()[node].name().unwrap_or(""))
+                .map(|&node| imported.nodes()[node].name().unwrap_or("").to_owned())
                 .collect();
-            let ragdoll = authored(source, asset, &skeleton, &names, hangs).or_else(|| {
+            let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+            let ragdoll = authored(source, asset, &skeleton, &borrowed, hangs).or_else(|| {
                 RagdollRig::generate(&skeleton, hangs, &GenerateSettings::DEFAULT)
                     .map_err(|error| {
                         crcbl::log::warn!("editor: `{asset}` fits no ragdoll rig: {error}");
@@ -252,6 +256,7 @@ fn rig_of(
             Some(Rig {
                 skeleton,
                 skinned,
+                names,
                 ragdoll,
             })
         }

@@ -137,6 +137,10 @@ pub const TOGGLE_SPACE: &str = "editor_toggle_space";
 /// See `crate::app::drop`.
 pub const DROP_RAGDOLL: &str = "editor_drop_ragdoll";
 
+/// Write the selected rigged mesh's ragdoll rig beside its asset as a file to
+/// author from, if it has none: Shift+G. See `crate::app::meshes::RAGDOLL_SUFFIX`.
+pub const WRITE_RIG: &str = "editor_write_rig";
+
 /// Start play mode, or stop it and put the scene back: F5, the key every IDE
 /// starts a run with. See [`crate::document::Document::play`].
 pub const PLAY: &str = "editor_play";
@@ -220,6 +224,8 @@ pub enum Action {
     ToggleSpace,
     /// Drop the selected rigged mesh as a ragdoll, or stop the one dropping.
     DropRagdoll,
+    /// Write the selected rigged mesh's ragdoll rig beside its asset.
+    WriteRig,
     /// Start play mode from editing, or stop it from playing or paused.
     PlayStop,
     /// Pause a playing scene, or resume a paused one.
@@ -382,6 +388,13 @@ pub fn map() -> ActionMap {
     map.declare(button(ROTATE, vec![Binding::Key(KeyCode::KeyE)]));
     map.declare(button(TOGGLE_SPACE, vec![Binding::Key(KeyCode::KeyX)]));
     map.declare(button(DROP_RAGDOLL, vec![Binding::Key(KeyCode::KeyG)]));
+    map.declare(button(
+        WRITE_RIG,
+        vec![Binding::Chord {
+            modifier: Modifier::Shift,
+            key: KeyCode::KeyG,
+        }],
+    ));
     // Function keys, which neither reserved context binds: play and pause
     // reach the editor while a panel holds the keyboard, as a run key does in
     // every IDE, and only the editing rule in `actions` stops them.
@@ -498,6 +511,7 @@ pub fn release_keys(map: &mut ActionMap) {
         ROTATE,
         TOGGLE_SPACE,
         DROP_RAGDOLL,
+        WRITE_RIG,
         PLAY,
         PAUSE,
         RENAME,
@@ -605,8 +619,13 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
     if map.just_pressed(TOGGLE_SPACE) {
         actions.push(Action::ToggleSpace);
     }
+    // The chord rule keeps the bare G from firing under Shift+G: the map
+    // gives a key held with a chord's modifier to the chord.
     if map.just_pressed(DROP_RAGDOLL) {
         actions.push(Action::DropRagdoll);
+    }
+    if map.just_pressed(WRITE_RIG) {
+        actions.push(Action::WriteRig);
     }
     if map.just_pressed(PLAY) {
         actions.push(Action::PlayStop);
@@ -846,6 +865,15 @@ mod tests {
         assert_eq!(keys.tap(KeyCode::KeyO, Modifiers::CTRL), [Action::Open]);
         assert_eq!(keys.tap(KeyCode::KeyO, Modifiers::empty()), []);
         assert_eq!(keys.tap(KeyCode::KeyF, Modifiers::empty()), [Action::Frame]);
+        assert_eq!(
+            keys.tap(KeyCode::KeyG, Modifiers::empty()),
+            [Action::DropRagdoll]
+        );
+        assert_eq!(
+            keys.tap(KeyCode::KeyG, Modifiers::SHIFT),
+            [Action::WriteRig],
+            "Shift+G writes the rig and drops nothing"
+        );
         assert_eq!(keys.tap(KeyCode::ArrowLeft, Modifiers::CTRL), []);
         assert_eq!(keys.tap(KeyCode::KeyF, Modifiers::CTRL), []);
         assert_eq!(
