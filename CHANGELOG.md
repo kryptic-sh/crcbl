@@ -859,6 +859,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_phys::dispersion::direction_in_cone` scatters a direction within a
+  cone** from two caller-drawn uniforms in `[0, 1)`, evenly over the disc the
+  cone cuts on a plane square to the aim — a shot group's spread. Zero spread is
+  the aim; a directionless aim, a draw outside `[0, 1)` or a half-angle outside
+  `[0, π/2)` is refused.
+
 - **`PhysicsSystem::farthest_clear_point` finds where a camera eye, spring arm
   or muzzle can stand.** It sweeps a sphere from a clear point towards the
   wanted one and returns the farthest point a skin's length short of the first

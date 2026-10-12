@@ -63,4 +63,7 @@ disallowed-methods = [
   { path = "glam::DMat3::from_rotation_y", reason = "platform sine and cosine" },
   { path = "glam::DMat3::from_rotation_z", reason = "platform sine and cosine" },
   { path = "glam::DMat3::from_euler", reason = "platform sine and cosine" },
+  # The workspace rule from the root `clippy.toml`, repeated because this file
+  # replaces it for this crate rather than adding to it.
+  { path = "std::process::Command::new", reason = "use crcbl_spawn::command, which opens no console window on Windows" },
 ]

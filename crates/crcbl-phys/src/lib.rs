@@ -78,6 +78,7 @@ pub mod components;
 pub mod compound;
 pub mod compound_shape;
 pub mod contact;
+pub mod dispersion;
 pub mod forces;
 pub mod frames;
 pub mod impulse;
