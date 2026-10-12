@@ -172,12 +172,20 @@ than EW assets or an EW checkout.
   would only rename it. The schema assertion is a RON test helper for EW's own
   snapshot discipline; crcbl has no strict-RON persistence that would share it.
 
-  Not accepted yet, needing a home-crate decision first: AI perception
-  accumulators (`src/ai_perception.rs`, `ai_hearing.rs`, `ai_target_memory.rs`),
-  positional voice re-aiming (`src/client_audio.rs`) and the multi-glTF scene
-  merge (`src/asset_scene.rs`). EW keeps its airborne forecast, grid inventory
-  geometry and leg/foot IK, and will itself move `projected_motion` onto
-  `preview_upright`.
+  **Decided 2026-10-12 (the three that needed a home first):**
+  - **AI perception stays in EW** (`src/ai_perception.rs`, `ai_hearing.rs`,
+    `ai_target_memory.rs`): vision cones, detection time and memory decay are
+    the game's AI policy, and no crcbl sample or second game would share them.
+    Revisit when one does.
+  - **Positional voice re-aiming: declined** (`src/client_audio.rs`).
+    `crcbl_audio::Mixer::cue` turns an emitter position into a cue and
+    `Mixer::set_mix` re-aims a playing voice, so following an emitter is a
+    per-frame composition; which voice tracks which entity is the game's.
+  - **Multi-glTF scene merge: waits on a stated gap** (`src/asset_scene.rs`).
+    EW's merge builds its own asset pages; it becomes a crcbl request once EW
+    names what `crcbl-scene` cannot do, with a reproduction. EW keeps its
+    airborne forecast, grid inventory geometry and leg/foot IK, and will itself
+    move `projected_motion` onto `preview_upright`.
 
 For a newly demonstrated engine gap, put its request here first, with the EW
 caller, reproduction, required API behavior and an engine regression. Keep
