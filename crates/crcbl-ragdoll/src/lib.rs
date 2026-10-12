@@ -14,19 +14,24 @@
 //!   [`Ragdoll::pose_into`] writes the pose the bodies stand in, through
 //!   [`crcbl_anim::ragdoll::RagdollBinding`].
 //!
-//! Not here yet: the server's simplified ragdoll and the settled-pose
-//! snapshot sent to clients, the soft pull between the two, editor preview,
-//! budgets and distance LOD. Deciding the death, choosing the killing
-//! contact and revival stay with the game.
+//! [`SettledPose`] is the settled corpse on the wire, which
+//! [`Ragdoll::settle_to`] puts a ragdoll into, and [`SettleBudget`] is the
+//! settle timeout and the cap on ragdolls awake at once.
+//!
+//! Not here yet: the server's simplified ragdoll, the soft pull between it and
+//! a client's detailed one, editor preview and distance LOD. Deciding the
+//! death, choosing the killing contact and revival stay with the game.
 
 mod desc;
 mod frames;
 mod generate;
 mod instance;
 mod rig;
+mod settle;
 
 pub use desc::{BodyDesc, DescError, JointDesc, JointKindDesc, RagdollDesc, ShapeDesc};
 pub use frames::REST_CLEARANCE;
 pub use generate::{GenerateError, GenerateSettings};
 pub use instance::{Handoff, PreviousPose, Ragdoll, SpawnError, StrikeError};
 pub use rig::{BodyShape, RagdollRig, RigBody, RigError, RigJoint, RigJointKind};
+pub use settle::{SettleBudget, SettleError, SettledPose};

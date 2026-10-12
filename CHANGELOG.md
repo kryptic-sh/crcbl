@@ -859,6 +859,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Ragdolls settle on the wire and within a budget.** `SettledPose` is a
+  ragdoll's body transforms in the quantized replication form, with `encode` and
+  a `decode` that refuses malformed bytes; `Ragdoll::settled_pose` reads one and
+  `Ragdoll::settle_to` puts a ragdoll into one, still and asleep — a client
+  taking the server's corpse. `SettleBudget::enforce` settles a ragdoll awake
+  past a timeout and, past a cap, the longest-awake ones.
+
 - **`crcbl::acoustic_path::loudest_path` picks the route a sound is heard
   along** from a game's candidate `SoundPath`s: each carries the range times its
   barriers' transmission, arrives with linear falloff over it, and the loudest

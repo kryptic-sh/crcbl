@@ -99,12 +99,14 @@ pub enum StrikeError {
 /// [`remove`](Self::remove).
 #[derive(Debug)]
 pub struct Ragdoll {
-    entities: Vec<Entity>,
+    pub(crate) entities: Vec<Entity>,
     joints: Vec<JointId>,
     shapes: Vec<crcbl_phys::ColliderComponent>,
     binding: RagdollBinding,
     model: Mat4,
     worlds: Vec<Mat4>,
+    /// Seconds awake without a break: see `SettleBudget`.
+    pub(crate) awake_for: f64,
 }
 
 impl Ragdoll {
@@ -218,6 +220,7 @@ impl Ragdoll {
             binding,
             model: handoff.model,
             worlds: vec![Mat4::IDENTITY; entities.len()],
+            awake_for: 0.0,
         })
     }
 
@@ -339,10 +342,10 @@ impl Ragdoll {
     /// a timeout asks for. Returns whether the ragdoll is settled afterwards,
     /// which is `false` in a system with sleep turned off.
     pub fn force_settle(&self, physics: &mut PhysicsSystem) -> bool {
+        // Every body: a rig whose bodies are not all jointed together is
+        // several islands, and a call on a body already asleep changes nothing.
         for &entity in &self.entities {
-            if !physics.is_sleeping(entity) {
-                physics.put_to_sleep(entity);
-            }
+            physics.put_to_sleep(entity);
         }
         self.is_settled(physics)
     }

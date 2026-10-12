@@ -30,8 +30,13 @@ than EW assets or an EW checkout.
 
   Remaining engine work:
   - End-to-end terrain falling/settling with rendered (GPU-skinned) limbs
-    matching physical bodies; server/detail-client ownership and settled-pose
-    snapshots (`body_transforms` is the raw data, with no quantized wire form).
+    matching physical bodies; server/detail-client ownership. The settled pose
+    has a wire form and a client-side apply (`SettledPose`,
+    `Ragdoll::settle_to`), and `SettleBudget` is the timeout and the awake cap;
+    the simplified server ragdoll and the client's soft pull towards it are not
+    built. The cap settles the longest-awake ragdolls rather than the plan's
+    "excess deaths settle instantly to a canned pose": a new death settled at
+    once would hang in the air, and no canned pose exists.
   - A settled-pose handoff suitable for revival, with clearance checked before
     rising and no unintended relocation of the authoritative character.
   - The editor preview, budgets, distance LOD, forced settling and remaining
