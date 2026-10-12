@@ -868,8 +868,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Ragdoll::set_substeps` is the distance LOD, leaving a settled ragdoll asleep.
   `Ragdoll::set_query_layers` puts a corpse on its own query layers, so whether
   it blocks a character or a revival's clearance check is decided by those
-  queries' masks. `Ragdoll::pull_towards` springs a client's detailed ragdoll
-  towards the server's simplified bodies by skeleton joint.
+  queries' masks. `Ragdoll::pull_towards` springs a client's detailed ragdoll's
+  joints towards the server ragdoll's `Ragdoll::joint_positions`, by skeleton
+  joint, implicitly so any stiffness is stable.
 
 - **`crcbl::acoustic_path::loudest_path` picks the route a sound is heard
   along** from a game's candidate `SoundPath`s: each carries the range times its

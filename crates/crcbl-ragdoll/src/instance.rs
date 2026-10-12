@@ -102,6 +102,9 @@ pub struct Ragdoll {
     pub(crate) entities: Vec<Entity>,
     /// Each body's skeleton joint, in rig order.
     skeleton_joints: Vec<usize>,
+    /// Where each body's joint origin sits in the body's frame: the inverse
+    /// of the rig body's offset, applied to the origin.
+    joint_in_body: Vec<DVec3>,
     joints: Vec<JointId>,
     shapes: Vec<crcbl_phys::ColliderComponent>,
     binding: RagdollBinding,
@@ -218,6 +221,11 @@ impl Ragdoll {
         Ok(Self {
             entities: entities.to_vec(),
             skeleton_joints: rig.bodies().iter().map(|body| body.joint).collect(),
+            joint_in_body: rig
+                .bodies()
+                .iter()
+                .map(|body| -(body.offset.rotation.inverse() * body.offset.position))
+                .collect(),
             joints,
             shapes,
             binding,
@@ -353,13 +361,32 @@ impl Ragdoll {
         self.is_settled(physics)
     }
 
-    /// Pulls each body whose skeleton joint has a target towards it, as a
-    /// critically damped spring of `hertz`: the plan's soft convergence of a
-    /// client's detailed ragdoll on the server's simplified one, which keeps
-    /// the two within a body's width before the settled pose arrives.
-    /// `targets` pairs skeleton joints with world positions — the server
-    /// rig's body centres, whose joints are some of this rig's. Call it once a
-    /// tick before the step. Returns how many bodies were pulled.
+    /// Where each body's skeleton joint origin stands in the world, by joint,
+    /// in rig order: what a server sends for [`pull_towards`](Self::pull_towards).
+    /// Joint origins rather than body centres, because two rigs of one
+    /// skeleton agree on where a joint is and not on the shape around it.
+    /// `None` if a body is gone.
+    #[must_use]
+    pub fn joint_positions(&self, physics: &PhysicsSystem) -> Option<Vec<(usize, DVec3)>> {
+        self.entities
+            .iter()
+            .zip(&self.skeleton_joints)
+            .zip(&self.joint_in_body)
+            .map(|((&entity, &joint), &local)| {
+                let at = physics.transform(entity)?;
+                Some((joint, at.position + at.rotation * local))
+            })
+            .collect()
+    }
+
+    /// Pulls each body whose skeleton joint has a target so that its joint
+    /// origin moves towards it, as a critically damped spring of `hertz`: the
+    /// plan's soft convergence of a client's detailed ragdoll on the server's
+    /// simplified one, which keeps the two within a body's width before the
+    /// settled pose arrives. `targets` are the server ragdoll's
+    /// [`joint_positions`](Self::joint_positions), whose joints are some of
+    /// this rig's. Call it once a tick before the step. Returns how many
+    /// bodies were pulled.
     ///
     /// The spring is against the world, so a pulled body also loses speed as
     /// the server's comes to rest; a target for a joint this rig gives no body
@@ -381,15 +408,22 @@ impl Ragdoll {
                 continue;
             };
             let entity = self.entities[index];
-            let Some(at) = physics.transform(entity).map(|t| t.position) else {
+            let Some(at) = physics
+                .transform(entity)
+                .map(|t| t.position + t.rotation * self.joint_in_body[index])
+            else {
                 continue;
             };
             if !target.is_finite() {
                 continue;
             }
             if let Some(body) = physics.body_mut(entity) {
-                let velocity = body.velocity;
-                body.velocity += (omega * omega * (target - at) - 2.0 * omega * velocity) * dt;
+                // The spring-damper solved implicitly over the tick, so it is
+                // stable at any frequency: the explicit step ran away once
+                // the frequency neared the tick rate.
+                let stiffness = omega * omega * dt;
+                body.velocity = (body.velocity + stiffness * (target - at))
+                    / (1.0 + 2.0 * omega * dt + stiffness * dt);
                 pulled += 1;
             }
         }

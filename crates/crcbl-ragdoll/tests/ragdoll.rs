@@ -368,3 +368,91 @@ fn force_settle_and_remove() {
         assert!(!physics.ignores_contacts(pair[0], pair[1]));
     }
 }
+
+/// **A client's detailed ragdoll pulled towards the server's simplified one
+/// converges on it, and diverges less on the way.** The server simulates a
+/// coarse rig of the same skeleton — no clavicles, no neck — and the client
+/// the full one; both take the same blow on the chest, and each tick the
+/// client pulls every joint the server has towards where the server's joint
+/// is.
+///
+/// Measured on 2026-10-12 with this pull at 6 Hz: the shared joints peak
+/// 0.62 m apart where the two land, against 1.26 m unpulled — the rigs meet
+/// the floor differently, and a pull applied between steps does not overrule
+/// a step's contacts — and end 2 cm apart,
+/// against 0.61 m. The plan's
+/// "never more than a body width" holds after the landing, not through it.
+#[test]
+fn a_detailed_client_converges_on_a_simplified_server() {
+    /// How far apart the shared joints may end, in metres.
+    const SETTLED_GAP: f64 = 0.05;
+    let skeleton = skeleton();
+    let coarse = RagdollRig::generate(
+        &skeleton,
+        model(0.0),
+        &GenerateSettings {
+            min_length: 0.2,
+            ..GenerateSettings::DEFAULT
+        },
+    )
+    .expect("a coarse rig");
+    let detailed = rig();
+    assert!(coarse.bodies().len() < detailed.bodies().len());
+    let run = |hertz: f64| {
+        let mut server = world();
+        let mut client = world();
+        let lead = spawn_running(&mut server, &coarse);
+        let follow = spawn_running(&mut client, &detailed);
+        for (ragdoll, rig, physics) in [
+            (&lead, &coarse, &mut server),
+            (&follow, &detailed, &mut client),
+        ] {
+            let chest = rig
+                .bodies()
+                .iter()
+                .position(|body| body.joint == index("chest"))
+                .expect("a chest");
+            let entity = ragdoll.entities()[chest];
+            let at = body_world(physics, entity).position;
+            physics
+                .apply_impulse_at(entity, DVec3::NEG_Z * 30.0, at)
+                .unwrap();
+        }
+        let gap = |server: &PhysicsSystem, client: &PhysicsSystem| {
+            let here = follow.joint_positions(client).unwrap();
+            lead.joint_positions(server)
+                .unwrap()
+                .into_iter()
+                .map(|(joint, there)| {
+                    let mine = here
+                        .iter()
+                        .find(|(j, _)| *j == joint)
+                        .expect("a shared joint");
+                    mine.1.distance(there)
+                })
+                .fold(0.0_f64, f64::max)
+        };
+        let mut peak: f64 = 0.0;
+        for _ in 0..600 {
+            if hertz > 0.0 {
+                let targets = lead.joint_positions(&server).unwrap();
+                follow.pull_towards(&mut client, &targets, hertz, DT);
+            }
+            server.step(DT);
+            client.step(DT);
+            peak = peak.max(gap(&server, &client));
+        }
+        (peak, gap(&server, &client))
+    };
+    let (loose_peak, loose_end) = run(0.0);
+    let (pulled_peak, pulled_end) = run(6.0);
+    assert!(pulled_end < SETTLED_GAP, "they ended {pulled_end} m apart");
+    assert!(
+        loose_end > 2.0 * SETTLED_GAP,
+        "the rigs agree unpulled: the test shows nothing"
+    );
+    assert!(
+        pulled_peak < loose_peak,
+        "the pull did not narrow the landing: {pulled_peak} vs {loose_peak}"
+    );
+}

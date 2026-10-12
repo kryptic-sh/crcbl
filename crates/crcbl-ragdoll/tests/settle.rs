@@ -236,24 +236,19 @@ fn a_corpse_on_its_own_layer_is_left_out_of_masked_queries() {
     );
 }
 
-/// **A detailed ragdoll pulled towards the server's bodies closes the gap**,
-/// and only the bodies with targets are pulled.
+/// **A detailed ragdoll pulled towards a joint target closes the gap**, and
+/// only bodies whose joint has a target are pulled.
 #[test]
-fn pulling_closes_the_gap_to_the_server_bodies() {
+fn pulling_closes_the_gap_to_a_joint_target() {
     let rig = rig();
     let mut physics = PhysicsSystem::with_contacts(crcbl_phys::ContactSettings {
         sleep: false,
         ..crcbl_phys::ContactSettings::DEFAULT
     });
     let ragdoll = spawn(&mut physics, &rig, 0.0, 100);
-    let hips = rig
-        .bodies()
-        .iter()
-        .position(|body| body.joint == common::index("hips"))
-        .unwrap();
-    let start = ragdoll.body_transforms(&physics).unwrap()[hips].position;
-    let target = start + DVec3::new(0.3, 0.0, 0.2);
     let joint = common::index("hips");
+    let start = joint_at(&ragdoll, &physics, joint);
+    let target = start + DVec3::new(0.3, 0.0, 0.2);
     assert_eq!(
         ragdoll.pull_towards(&mut physics, &[(joint, target), (999, target)], 2.0, DT),
         1
@@ -262,7 +257,7 @@ fn pulling_closes_the_gap_to_the_server_bodies() {
         physics.step(DT);
         ragdoll.pull_towards(&mut physics, &[(joint, target)], 2.0, DT);
     }
-    let now = ragdoll.body_transforms(&physics).unwrap()[hips].position;
+    let now = joint_at(&ragdoll, &physics, joint);
     assert!(
         now.distance(target) < 0.05,
         "still {} from the target",
@@ -272,4 +267,42 @@ fn pulling_closes_the_gap_to_the_server_bodies() {
         ragdoll.pull_towards(&mut physics, &[(joint, target)], 0.0, DT),
         0
     );
+
+    // Far stiffer than an explicit step at this tick rate survives, and still
+    // stable.
+    for _ in 0..90 {
+        ragdoll.pull_towards(&mut physics, &[(joint, start)], 120.0, DT);
+        physics.step(DT);
+    }
+    let back = joint_at(&ragdoll, &physics, joint);
+    assert!(back.distance(start) < 0.05, "a stiff pull ran away: {back}");
+}
+
+fn joint_at(ragdoll: &Ragdoll, physics: &PhysicsSystem, joint: usize) -> DVec3 {
+    ragdoll
+        .joint_positions(physics)
+        .expect("every body")
+        .into_iter()
+        .find(|&(j, _)| j == joint)
+        .expect("a body on that joint")
+        .1
+}
+
+/// **Joint positions are where the skeleton's joints are**, whatever shape
+/// the rig hangs around them: at spawn each matches the handoff pose's joint.
+#[test]
+fn joint_positions_are_the_skeletons_joints() {
+    let rig = rig();
+    let mut physics = world();
+    let ragdoll = spawn(&mut physics, &rig, 0.0, 100);
+    let skeleton = skeleton();
+    let placed = glam::Mat4::from_translation(glam::Vec3::ZERO) * model(0.5);
+    let want = common::joint_positions(&skeleton, &Pose::new(&skeleton), placed);
+    for (joint, at) in ragdoll.joint_positions(&physics).expect("every body") {
+        assert!(
+            at.distance(want[joint].as_dvec3()) < 1e-4,
+            "joint {joint}: {at} vs {}",
+            want[joint]
+        );
+    }
 }
