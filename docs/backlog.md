@@ -210,7 +210,27 @@ needs — showing a skinned mesh and its skeleton, then authoring a ragdoll rig
 It is the concrete authoring workflow scene/asset expansion was waiting for, it
 unblocks the ragdoll editor preview, and the inspector gains whatever reflection
 contracts the rig's fields need on the way. Pane dragging is deferred: nothing
-requested it. Not started.
+requested it.
+
+Scoped on 2026-10-12, in slices, after `apps/viewer`, which renders a skinned
+glTF end to end:
+
+1. `apps/editor/src/app/meshes.rs` `Shelf::build` keeps what it drops today:
+   each asset's `GltfScene` skins, the `RenderScene::origins` bindings
+   (`MeshOrigin::bindings`) and a `crcbl::anim::Skeleton` per skin, built as
+   `apps/viewer/src/anim.rs` `skeleton_of` does. Data only, tested headlessly.
+2. Skinned parts render through `ForwardRenderer::reserve_skinned` /
+   `add_skinned_instance`, a `Skinning` built against the renderer's vertex
+   pool, and `begin_skinned_frame` / `add_skinned_passes`, at the rest pose.
+   Unlike the viewer, the editor merges many assets into one renderer, so the
+   palette is per range rather than one skeleton shared by all; and a shelf
+   rebuild replaces the `Skinning` with the renderer.
+3. A skeleton overlay on the selected skinned entity (debug draw).
+4. Ragdoll rig authoring on it: generate or load a `RagdollDesc`, draw its
+   bodies, and a play-mode drop that spawns a `Ragdoll` and poses the mesh with
+   `Ragdoll::pose_into`.
+
+Not started.
 
 **Local/world gizmos and the asset drag preview** (`6fba0913`, `2cb6d9db`) have
 passed the native Linux/macOS/Windows CI matrix on main since; their on-device
