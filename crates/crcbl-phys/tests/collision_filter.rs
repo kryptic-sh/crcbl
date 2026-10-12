@@ -190,3 +190,23 @@ fn filters_are_checked_and_hashed() {
         "the category is not hashed"
     );
 }
+
+/// **One-sided filters follow the rule too.** An item that leaves out corpses
+/// still meets a body that kept the default filter: the default's category,
+/// the first, is in the item's mask, and the item's is in the default's.
+#[test]
+fn an_item_meets_a_body_on_the_default_filter() {
+    let mut phys = weightless();
+    let body = cube(&mut phys, 1, DVec3::ZERO);
+    let item = cube(&mut phys, 2, DVec3::new(0.6, 0.0, 0.0));
+    assert!(phys.set_collision_filter(item, ITEM));
+    assert!(ITEM.collides_with(CollisionFilter::DEFAULT));
+    for _ in 0..30 {
+        phys.step(DT);
+    }
+    assert!(
+        speed(&phys, item) > 0.1,
+        "the item passed through a default body"
+    );
+    assert!(speed(&phys, body) > 0.1);
+}
