@@ -199,57 +199,9 @@ scene/asset expansion should begin with a concrete authoring workflow. The
 optional scope question has no answer yet. Continue correcting existing UI and
 editor workflows without treating that question as a blocker.
 
-**Local/world gizmos under verification:** X switches translate and rotate to
-the primary selection's axes; scale remains local. Local translation snaps in
-the selected frame about the world origin, including shared-pivot movement.
-Changing space ends an active gizmo drag at its current pose. Geometry tests in
-`apps/editor/src/gizmo/tests/space.rs` cover axes, planes, snapping, group
-deltas, drawn handles and local ring rotations;
-`apps/editor/src/app/tests/space.rs` drives the key and a real undoable drag.
-Ignoring the frame in translation, rotation or drawing, or removing the key
-binding, each made a regression fail. The active-drag test also fails if
-changing space leaves the old drag alive. Workspace Clippy passed after moving
-frame storage into the translation variants. The final full workspace run,
-including the active-drag regression, passed the new tests and failed only at
-the known Win32 foreground-focus setup. Native CI remains pending. Logs use
-`%TEMP%/crcbl-editor-space-`. The interaction methods now live in
-`apps/editor/src/app/gizmos.rs`; their bodies were compared with the committed
-originals. Formatting, workspace Clippy and documentation-path checks pass for
-the move. Its workspace test log reached doctests before the environment change
-removed the process handle; no terminal result was recovered. The offline
-workspace rerun completed with only the known Win32 foreground-focus failure.
-The group-write regression now requires every position component of every
-member: clearing the returned writes made its completeness assertion fail, and
-the restored implementation passed. Final formatting and workspace Clippy
-passed. The hidden-console full workspace run completed: the editor regressions
-passed, and its only failing target was `crcbl-shell --lib`. In addition to the
-known cursor-focus failure,
-`the_capabilities_are_exactly_what_this_backend_implements` failed because
-`warp_pointer` was refused. The log does not establish whether this additional
-failure was caused by the launcher or the desktop state. Move validation logs
-use `%TEMP%/crcbl-editor-gizmos-`; the final run and group regression logs use
-`%TEMP%/crcbl-editor-group-`.
-
-**Asset drag preview under verification:** `apps/editor/src/app/assets.rs` uses
-`Document::drop_point`, `Document::measure` and `Mesh::standing_on` to draw
-bounds before release, without spawning a row. Measured bounds are installed on
-the temporary mesh before reading its placement; missing assets use the same
-placeholder as a final drop. The preview is suppressed outside the viewport, in
-play mode and while an unsaved-edit dialog is open. Regressions in
-`apps/editor/src/app/tests/assets.rs` check the rendered draw count,
-preview/drop equality, unchanged scene files and history, and suppression.
-Focused tests passed. Removing the draw, changing the measured bounds, and
-removing either the play or modal guard each made a regression fail; the
-restored tests passed. Formatting, workspace Clippy and the documentation-path
-check pass. The full workspace test run completed; its only failing target was
-`crcbl-shell --lib`, where the cursor test could not retain foreground focus.
-The preview regressions passed. Logs use `%TEMP%/crcbl-editor-preview-`. Native
-matrix and device visuals remain unverified for the editor changes. After this
-session's push, resume the newest main CI and Pages runs with
-`gh run watch --exit-status --interval 60`, then enumerate their final jobs; do
-not treat the earlier green main run as validation of these new changes. The
-session is wrapping up at the user's request; no further feature slice has been
-started.
+**Local/world gizmos and the asset drag preview** (`6fba0913`, `2cb6d9db`) have
+passed the native Linux/macOS/Windows CI matrix on main since; their on-device
+visuals have not been looked at.
 
 **Windows local test launching:** use the installed Git Bash through the command
 tool's `bin/sh.exe` selector with `login: false`; the `bin/bash.exe` selector
