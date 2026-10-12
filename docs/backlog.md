@@ -203,9 +203,14 @@ older entries with the implementation before choosing a slice.
 The scene-editor MVP exit criteria in `docs/plan/08-editor.md` are recorded as
 met headlessly. Pane dragging extends the current splitter-only docking
 decision; richer inspector editing may need new reflection contracts;
-scene/asset expansion should begin with a concrete authoring workflow. The
-optional scope question has no answer yet. Continue correcting existing UI and
-editor workflows without treating that question as a blocker.
+scene/asset expansion should begin with a concrete authoring workflow. **Scope
+decided (2026-10-12):** the next editor scope is the workflow the top priority
+needs — showing a skinned mesh and its skeleton, then authoring a ragdoll rig
+(`RagdollDesc`) on it with the plan's live "drop it and watch it fall" preview.
+It is the concrete authoring workflow scene/asset expansion was waiting for, it
+unblocks the ragdoll editor preview, and the inspector gains whatever reflection
+contracts the rig's fields need on the way. Pane dragging is deferred: nothing
+requested it. Not started.
 
 **Local/world gizmos and the asset drag preview** (`6fba0913`, `2cb6d9db`) have
 passed the native Linux/macOS/Windows CI matrix on main since; their on-device
