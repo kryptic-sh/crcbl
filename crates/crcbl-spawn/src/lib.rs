@@ -73,6 +73,7 @@ mod tests {
     use super::command;
 
     /// Set in the child [`a_child_opens_a_console_window_only_with_its_parent`] starts.
+    #[cfg(windows)]
     const PROBE: &str = "CRCBL_SPAWN_PROBE";
 
     /// The child still runs, and its exit code and captured output come back.
