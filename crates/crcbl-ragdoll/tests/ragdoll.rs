@@ -18,10 +18,6 @@ const DT: f64 = 1.0 / 60.0;
 const LIFT: f32 = 0.5;
 /// How fast it was running along `x`, in m/s.
 const RUN: f64 = 1.5;
-/// The most kinetic energy, in joules, a ragdoll may still carry when the
-/// settle timeout force-settles it: a limb trembling just above the solver's
-/// sleep speed, never a fall. Measured at 2e-4 J on 2026-10-12.
-const TREMBLE: f64 = 0.01;
 
 fn rig() -> RagdollRig {
     RagdollRig::generate(&skeleton(), model(0.0), &GenerateSettings::DEFAULT).expect("a rig")
@@ -76,9 +72,7 @@ fn spawn_running(physics: &mut PhysicsSystem, rig: &RagdollRig) -> Ragdoll {
 ///
 /// A point near each carrying joint, skinned through the pose the ragdoll
 /// writes, lands where that joint's body has carried it. The mechanical
-/// energy never rises above what the blow left it with. After this blow one
-/// limb can tremble just above the sleep speed indefinitely, so the run ends
-/// as the plan's settle timeout would: settled, or near rest and forced.
+/// energy never rises above what the blow left it with.
 #[test]
 fn a_struck_ragdoll_falls_settles_and_skins_where_its_bodies_are() {
     let skeleton = skeleton();
@@ -177,23 +171,11 @@ fn a_struck_ragdoll_falls_settles_and_skins_where_its_bodies_are() {
             break;
         }
     }
-    // The plan's settle timeout: a ragdoll still awake at the end is force-
-    // settled, which is only right if what keeps it awake is a tremble.
-    if let Some(tick) = settled_at {
-        assert!(tick > 30, "it settled at tick {tick}, before falling");
-    } else {
-        let kinetic: f64 = ragdoll
-            .entities()
-            .iter()
-            .map(|&entity| {
-                let body = physics.body(entity).expect("a body");
-                body.kinetic_energy(body_world(&physics, entity).rotation)
-            })
-            .sum();
-        assert!(kinetic < TREMBLE, "still moving after 20 s: {kinetic} J");
-        assert!(ragdoll.force_settle(&mut physics));
-    }
-    assert!(ragdoll.is_settled(&physics));
+    let settled_at = settled_at.expect("the ragdoll never settled in 20 seconds");
+    assert!(
+        settled_at > 30,
+        "it settled at tick {settled_at}, before falling"
+    );
     let hips = rig
         .bodies()
         .iter()

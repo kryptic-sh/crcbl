@@ -59,6 +59,12 @@ pub struct GenerateSettings {
 
 impl GenerateSettings {
     /// An adult's mass, slim limbs, and limits loose enough to fall in.
+    ///
+    /// Sixteen substeps, measured on 2026-10-12 over 24 head strikes of up to
+    /// 40 N·s in three directions on the test humanoid: at eight, a third
+    /// never came to rest in 40 s — a light limb held trembling at a joint
+    /// limit by the heavier one hanging off it — at twelve one did, and at
+    /// sixteen none, settling in half the time.
     pub const DEFAULT: Self = Self {
         total_mass: 80.0,
         radius_ratio: 0.2,
@@ -67,7 +73,7 @@ impl GenerateSettings {
         twist: 0.5,
         joint_friction: 0.1,
         max_mass_ratio: 4.0,
-        substeps: 8,
+        substeps: 16,
     };
 
     fn is_valid(&self) -> bool {

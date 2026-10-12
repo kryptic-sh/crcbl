@@ -13330,14 +13330,19 @@ the runtime in `crcbl-anim` or `crcbl-phys`, coupling one to the other.
   mechanical energy from 1.2 kJ to 43 kJ in eight ticks. The generator now evens
   jointed masses to `GenerateSettings::max_mass_ratio` (4) and sizes a branching
   joint's sphere at half its mean reach; the same strike then only loses energy.
-- **Without joint friction a corpse never sleeps.** Light limbs kept turning at
-  about 0.2 rad/s, twice `ContactSettings::sleep_angular_speed`. Joint friction
-  (a zero-speed motor, `RigJoint::friction`) fixes the unstruck case, but
-  settling is chaotic in the friction value: at 0.1 N·m/kg a 20 N·s head strike
-  still left one clavicle trembling at 0.13 rad/s after 40 s, carrying 2e-4 J.
-  The test applies the plan's settle timeout (force-settle once near rest). Not
-  investigated: whether the tremble is a contact/joint fight the solver could
-  resolve, which would make the timeout rarer.
+- **A corpse needs joint friction and sixteen substeps to come to rest.**
+  Without friction light limbs kept turning at about 0.2 rad/s, twice
+  `ContactSettings::sleep_angular_speed`; joint friction (a zero-speed motor,
+  `RigJoint::friction`) fixed the unstruck case. Struck ragdolls still failed to
+  sleep: at eight substeps a third of 24 head strikes (up to 40 N·s, three
+  directions) never settled in 40 s. The cause was not a contact — the trembling
+  clavicle touched nothing — but a light limb held at its cone limit by the
+  heavier limb hanging off it, the soft limit and the friction motor fighting at
+  the limit (0.003 rad past it, 1.7 N·m). Twelve substeps left one of 24
+  unsettled and sixteen none, in half the time, so `GenerateSettings::DEFAULT`
+  asks for sixteen. Measured on the test humanoid only; an authored rig with
+  other masses or limits should be checked the same way, and the settle timeout
+  stays the guard for what is not.
 - **The generated rig is a test fallback, not a tuned body.** Joint types are
   not inferred from names (every joint is a ball), limits are uniform, and leg
   capsules dominate the mass because the torso is fitted from its bones. An
