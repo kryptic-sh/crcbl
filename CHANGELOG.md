@@ -859,6 +859,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`PhysicsSystem::farthest_clear_point` finds where a camera eye, spring arm
+  or muzzle can stand.** It sweeps a sphere from a clear point towards the
+  wanted one and returns the farthest point a skin's length short of the first
+  collider, measured along the path, honouring a `QueryFilter`; the wanted point
+  when nothing is in the way or the path has no length, and the start when the
+  sweep begins touching or the skin is longer than the way.
+
 - **A host polling gamepads in its own loop can use the engine's pad backends.**
   `crcbl::engine::pads::for_run` is public: the same XInput, evdev,
   GameController or Web Gamepad source `Loop::new` picks, or none for a headless

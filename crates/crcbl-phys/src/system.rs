@@ -45,6 +45,7 @@
 //! and swap-remove; the id, the record and the (set, index) addressing do not
 //! change shape.
 
+mod clearance;
 mod ignored_contacts;
 mod joints;
 

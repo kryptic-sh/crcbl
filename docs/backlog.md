@@ -136,24 +136,23 @@ than EW assets or an EW checkout.
   regression tests; the engine regression is written with the port. The first
   requests shipped: no console windows during Windows builds and tests
   (`crcbl-spawn`), map-free binding text conversion (`ActionOverride::from_text`
-  / `texts`) and public pad backends with a device selection
-  (`crcbl::engine::pads::for_run`, `PadSelection`). Order:
-  1. **Camera clearance sweep** (`clear_eye(from, to, radius, skin, exclude)`)
-     in `crcbl-phys`. Caller: EW `src/game_camera.rs`, three copies.
-  2. **Uniform direction within a cone** from scalar randoms. Caller: EW
+  / `texts`), public pad backends with a device selection
+  (`crcbl::engine::pads::for_run`, `PadSelection`) and a camera clearance sweep
+  (`PhysicsSystem::farthest_clear_point`). Order:
+  1. **Uniform direction within a cone** from scalar randoms. Caller: EW
      `src/dispersion.rs::sample_launch_direction`.
-  3. **Radial stick dead zone, active-device latch, release-until-neutral and a
+  2. **Radial stick dead zone, active-device latch, release-until-neutral and a
      stick-driven virtual cursor** in `crcbl-input`/`crcbl-ui`. Callers: EW
      `src/gamepad_input.rs`, `src/app_inventory_cursor.rs`,
      `src/rendering_cursor.rs`.
-  4. **A required-`Option` serde helper and a strict-schema test helper.**
+  3. **A required-`Option` serde helper and a strict-schema test helper.**
      Caller: EW `src/inventory/item/persistence.rs::required_option`.
-  5. **Projectile flight core** in `crcbl-phys`, from EW `afe90bf3`
+  4. **Projectile flight core** in `crcbl-phys`, from EW `afe90bf3`
      `src/ballistics/flight.rs`: the integrator only (`FlightConfig`,
      `advance`/`advance_into`/`advance_one_segment`, `FlightSegment`, the
      analytic `integrate_segment`). Mass, penetration and traversal stay in EW;
      its regressions are `src/ballistics.rs`'s `mod tests`.
-  6. **Acoustic path evaluation** over `crcbl` `SoundPath` candidates with
+  5. **Acoustic path evaluation** over `crcbl` `SoundPath` candidates with
      caller-supplied range, surface and barrier tables. Caller: EW
      `src/sound.rs::evaluate_sound_paths`.
 
