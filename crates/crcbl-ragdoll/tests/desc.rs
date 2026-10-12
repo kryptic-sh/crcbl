@@ -197,3 +197,82 @@ fn bad_files_are_refused_by_name() {
     let typo = LEG.replace("substeps", "substep");
     assert!(matches!(resolve(&typo), Err(DescError::Parse { .. })));
 }
+
+/// **A rig written as a file and read back is the rig it was**: every body on
+/// the same joint, shape and mass, centred and pointed the same; every joint
+/// between the same bodies with the same kind and friction, standing at the
+/// same point with the same axis; the same ignored pairs.
+#[test]
+fn a_rig_round_trips_through_its_file() {
+    let skeleton = skeleton();
+    let names = names();
+    let fitted = crcbl_ragdoll::RagdollRig::generate(
+        &skeleton,
+        model(0.0),
+        &crcbl_ragdoll::GenerateSettings {
+            radius_ratio: 0.3,
+            ..crcbl_ragdoll::GenerateSettings::DEFAULT
+        },
+    )
+    .expect("a rig");
+    assert!(!fitted.ignored().is_empty(), "fat limbs, so pairs to carry");
+    let text = fitted.to_desc(&names).expect("named").to_ron();
+    assert!(!text.contains('\r'), "LF line ends");
+    let back = RagdollDesc::from_ron(&text)
+        .expect("reads")
+        .resolve(&skeleton, &names, model(0.0))
+        .expect("resolves");
+    let close = |a: glam::DVec3, b: glam::DVec3| a.distance(b) < 1e-9;
+    assert_eq!(back.bodies().len(), fitted.bodies().len());
+    for (a, b) in back.bodies().iter().zip(fitted.bodies()) {
+        assert_eq!((a.joint, a.shape), (b.joint, b.shape));
+        assert!((a.mass - b.mass).abs() < 1e-12);
+        assert!(close(a.offset.position, b.offset.position));
+        assert!(close(
+            a.offset.rotation * glam::DVec3::Y,
+            b.offset.rotation * glam::DVec3::Y
+        ));
+    }
+    assert_eq!(back.joints().len(), fitted.joints().len());
+    // A joint in its bones' frames — the body's offset, then the joint's frame
+    // on the body — which is what the file keeps: a body's turn about its own
+    // axis is not stored, and a sphere or capsule does not care.
+    let in_bone = |rig: &crcbl_ragdoll::RagdollRig, body: usize, frame: &crcbl_phys::Transform| {
+        let offset = rig.bodies()[body].offset;
+        (
+            offset.position + offset.rotation * frame.position,
+            offset.rotation * frame.rotation * glam::DVec3::Z,
+        )
+    };
+    for (a, b) in back.joints().iter().zip(fitted.joints()) {
+        assert_eq!((a.parent, a.child, a.kind), (b.parent, b.child, b.kind));
+        assert!((a.friction - b.friction).abs() < 1e-12);
+        for (side_a, side_b) in [
+            (
+                in_bone(&back, a.child, &a.frame_child),
+                in_bone(&fitted, b.child, &b.frame_child),
+            ),
+            (
+                in_bone(&back, a.parent, &a.frame_parent),
+                in_bone(&fitted, b.parent, &b.frame_parent),
+            ),
+        ] {
+            assert!(close(side_a.0, side_b.0), "{side_a:?} vs {side_b:?}");
+            assert!(close(side_a.1, side_b.1), "{side_a:?} vs {side_b:?}");
+        }
+    }
+    let pairs = |rig: &crcbl_ragdoll::RagdollRig| {
+        let mut pairs: Vec<(usize, usize)> = rig
+            .ignored()
+            .iter()
+            .map(|&(a, b)| (a.min(b), a.max(b)))
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    };
+    assert_eq!(pairs(&back), pairs(&fitted));
+    assert!(matches!(
+        fitted.to_desc(&names[1..]),
+        Err(DescError::NameCount { .. })
+    ));
+}

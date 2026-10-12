@@ -320,7 +320,120 @@ impl RagdollDesc {
     }
 }
 
+impl RagdollRig {
+    /// This rig as a file again: bodies and joints by the bone names in
+    /// `names` (one per skeleton joint), what an editor saves as the starting
+    /// point of an authored rig.
+    ///
+    /// Every pair the rig ignores is listed and `ignore_rest_overlaps` is off,
+    /// so the file resolves to the same pairs. **One thing does not survive**:
+    /// the file gives a body an axis and not a whole rotation, so a box turned
+    /// about its own axis comes back unturned; capsules and spheres, which a
+    /// turn about the axis does not change, come back as they were.
+    ///
+    /// # Errors
+    ///
+    /// [`DescError::NameCount`] for a names list not one per joint, and
+    /// [`DescError::AmbiguousBone`] for a body on a bone whose name another
+    /// joint shares, which the file could not name apart.
+    pub fn to_desc(&self, names: &[&str]) -> Result<RagdollDesc, DescError> {
+        if names.len() != self.joint_count() {
+            return Err(DescError::NameCount {
+                names: names.len(),
+                joints: self.joint_count(),
+            });
+        }
+        let name_of = |joint: usize| {
+            let name = names[joint];
+            if names.iter().filter(|&&other| other == name).count() > 1 {
+                return Err(DescError::AmbiguousBone(name.to_owned()));
+            }
+            Ok(name.to_owned())
+        };
+        let triple = |v: DVec3| (v.x, v.y, v.z);
+        let bodies = self
+            .bodies()
+            .iter()
+            .map(|body| {
+                Ok(BodyDesc {
+                    bone: name_of(body.joint)?,
+                    shape: ShapeDesc::of(body.shape),
+                    mass: body.mass,
+                    centre: triple(body.offset.position),
+                    axis: triple(body.offset.rotation * DVec3::Y),
+                })
+            })
+            .collect::<Result<Vec<_>, DescError>>()?;
+        let joints = self
+            .joints()
+            .iter()
+            .map(|joint| {
+                let child = &self.bodies()[joint.child];
+                // The joint in its child bone's frame: the child body's offset
+                // from that frame, then the joint's frame on the body.
+                let local = compose(&child.offset, &joint.frame_child);
+                Ok(JointDesc {
+                    parent: name_of(self.bodies()[joint.parent].joint)?,
+                    child: name_of(child.joint)?,
+                    kind: JointKindDesc::of(joint.kind),
+                    axis: triple(local.rotation * DVec3::Z),
+                    at: triple(local.position),
+                    friction: joint.friction,
+                })
+            })
+            .collect::<Result<Vec<_>, DescError>>()?;
+        let ignore = self
+            .ignored()
+            .iter()
+            .map(|&(a, b)| {
+                Ok((
+                    name_of(self.bodies()[a].joint)?,
+                    name_of(self.bodies()[b].joint)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, DescError>>()?;
+        Ok(RagdollDesc {
+            bodies,
+            joints,
+            ignore,
+            ignore_rest_overlaps: false,
+            substeps: self.substeps(),
+        })
+    }
+}
+
+impl RagdollDesc {
+    /// The file's text: pretty RON with `\n` line ends on every platform, so
+    /// a file saved on one machine diffs cleanly on another.
+    ///
+    /// # Panics
+    ///
+    /// Never for a desc built by this crate: every field is a number, a string
+    /// or a list of them, which RON always writes.
+    #[must_use]
+    pub fn to_ron(&self) -> String {
+        let config = ron::ser::PrettyConfig::new().new_line("\n".to_owned());
+        ron::ser::to_string_pretty(self, config).expect("a desc is plain data RON always writes")
+    }
+}
+
 impl ShapeDesc {
+    const fn of(shape: BodyShape) -> Self {
+        match shape {
+            BodyShape::Capsule {
+                radius,
+                half_height,
+            } => Self::Capsule {
+                radius,
+                half_height,
+            },
+            BodyShape::Sphere { radius } => Self::Sphere { radius },
+            BodyShape::Box { half_extents } => Self::Box {
+                half_extents: (half_extents.x, half_extents.y, half_extents.z),
+            },
+        }
+    }
+
     fn shape(self) -> BodyShape {
         match self {
             Self::Capsule {
@@ -341,6 +454,22 @@ impl ShapeDesc {
 }
 
 impl JointKindDesc {
+    const fn of(kind: RigJointKind) -> Self {
+        match kind {
+            RigJointKind::Ball {
+                cone,
+                twist_lower,
+                twist_upper,
+            } => Self::Ball {
+                cone,
+                twist_lower,
+                twist_upper,
+            },
+            RigJointKind::Hinge { lower, upper } => Self::Hinge { lower, upper },
+            RigJointKind::Fixed => Self::Fixed,
+        }
+    }
+
     const fn kind(self) -> RigJointKind {
         match self {
             Self::Ball {

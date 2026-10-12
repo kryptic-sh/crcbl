@@ -859,6 +859,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`RagdollRig::to_desc` writes a rig back as a named `RagdollDesc`** and
+  `RagdollDesc::to_ron` gives its file text, LF-terminated on every platform: a
+  fitted rig saved as the starting point of an authored one reads back as the
+  same rig, short of a box's turn about its own axis, which the file does not
+  store.
+
 - **`RagdollRig::bodies_at` places a rig's bodies on a skeleton in a pose**
   without simulating anything — what an editor draws a rig with, or a game
   checks a spawn against — and refuses a skeleton or pose of another size.
