@@ -100,6 +100,8 @@ pub enum StrikeError {
 #[derive(Debug)]
 pub struct Ragdoll {
     pub(crate) entities: Vec<Entity>,
+    /// Each body's skeleton joint, in rig order.
+    skeleton_joints: Vec<usize>,
     joints: Vec<JointId>,
     shapes: Vec<crcbl_phys::ColliderComponent>,
     binding: RagdollBinding,
@@ -215,6 +217,7 @@ impl Ragdoll {
         }
         Ok(Self {
             entities: entities.to_vec(),
+            skeleton_joints: rig.bodies().iter().map(|body| body.joint).collect(),
             joints,
             shapes,
             binding,
@@ -348,6 +351,49 @@ impl Ragdoll {
             physics.put_to_sleep(entity);
         }
         self.is_settled(physics)
+    }
+
+    /// Pulls each body whose skeleton joint has a target towards it, as a
+    /// critically damped spring of `hertz`: the plan's soft convergence of a
+    /// client's detailed ragdoll on the server's simplified one, which keeps
+    /// the two within a body's width before the settled pose arrives.
+    /// `targets` pairs skeleton joints with world positions — the server
+    /// rig's body centres, whose joints are some of this rig's. Call it once a
+    /// tick before the step. Returns how many bodies were pulled.
+    ///
+    /// The spring is against the world, so a pulled body also loses speed as
+    /// the server's comes to rest; a target for a joint this rig gives no body
+    /// is ignored, and so is a non-finite one.
+    pub fn pull_towards(
+        &self,
+        physics: &mut PhysicsSystem,
+        targets: &[(usize, DVec3)],
+        hertz: f64,
+        dt: f64,
+    ) -> usize {
+        if !(hertz.is_finite() && hertz > 0.0 && dt.is_finite() && dt > 0.0) {
+            return 0;
+        }
+        let omega = core::f64::consts::TAU * hertz;
+        let mut pulled = 0;
+        for &(joint, target) in targets {
+            let Some(index) = self.skeleton_joints.iter().position(|&j| j == joint) else {
+                continue;
+            };
+            let entity = self.entities[index];
+            let Some(at) = physics.transform(entity).map(|t| t.position) else {
+                continue;
+            };
+            if !target.is_finite() {
+                continue;
+            }
+            if let Some(body) = physics.body_mut(entity) {
+                let velocity = body.velocity;
+                body.velocity += (omega * omega * (target - at) - 2.0 * omega * velocity) * dt;
+                pulled += 1;
+            }
+        }
+        pulled
     }
 
     /// Puts every body's query collider on the layers in `bits` (see

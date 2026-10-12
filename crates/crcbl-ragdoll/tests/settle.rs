@@ -235,3 +235,41 @@ fn a_corpse_on_its_own_layer_is_left_out_of_masked_queries() {
         "the corpse layer saw nothing"
     );
 }
+
+/// **A detailed ragdoll pulled towards the server's bodies closes the gap**,
+/// and only the bodies with targets are pulled.
+#[test]
+fn pulling_closes_the_gap_to_the_server_bodies() {
+    let rig = rig();
+    let mut physics = PhysicsSystem::with_contacts(crcbl_phys::ContactSettings {
+        sleep: false,
+        ..crcbl_phys::ContactSettings::DEFAULT
+    });
+    let ragdoll = spawn(&mut physics, &rig, 0.0, 100);
+    let hips = rig
+        .bodies()
+        .iter()
+        .position(|body| body.joint == common::index("hips"))
+        .unwrap();
+    let start = ragdoll.body_transforms(&physics).unwrap()[hips].position;
+    let target = start + DVec3::new(0.3, 0.0, 0.2);
+    let joint = common::index("hips");
+    assert_eq!(
+        ragdoll.pull_towards(&mut physics, &[(joint, target), (999, target)], 2.0, DT),
+        1
+    );
+    for _ in 0..90 {
+        physics.step(DT);
+        ragdoll.pull_towards(&mut physics, &[(joint, target)], 2.0, DT);
+    }
+    let now = ragdoll.body_transforms(&physics).unwrap()[hips].position;
+    assert!(
+        now.distance(target) < 0.05,
+        "still {} from the target",
+        now.distance(target)
+    );
+    assert_eq!(
+        ragdoll.pull_towards(&mut physics, &[(joint, target)], 0.0, DT),
+        0
+    );
+}

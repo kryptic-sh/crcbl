@@ -33,10 +33,13 @@ than EW assets or an EW checkout.
     matching physical bodies; server/detail-client ownership. The settled pose
     has a wire form and a client-side apply (`SettledPose`,
     `Ragdoll::settle_to`), and `SettleBudget` is the timeout and the awake cap;
-    the simplified server ragdoll and the client's soft pull towards it are not
-    built. The cap settles the longest-awake ragdolls rather than the plan's
-    "excess deaths settle instantly to a canned pose": a new death settled at
-    once would hang in the air, and no canned pose exists.
+    the client's soft pull is `Ragdoll::pull_towards` (a critically damped
+    spring per body, by skeleton joint); the simplified server rig is an
+    authored or coarsely generated `RagdollRig` of the same skeleton, and no
+    test runs a server and a client ragdoll side by side yet. The cap settles
+    the longest-awake ragdolls rather than the plan's "excess deaths settle
+    instantly to a canned pose": a new death settled at once would hang in the
+    air, and no canned pose exists.
   - A settled-pose handoff suitable for revival, with clearance checked before
     rising and no unintended relocation of the authoritative character. The
     parts exist — `Ragdoll::body_transforms` for where the body lies,
@@ -44,7 +47,9 @@ than EW assets or an EW checkout.
     `CharacterController::preview_upright` for whether a standing capsule fits —
     but no test composes them into a rise, and choosing the rise point is
     unwritten.
-  - The editor preview and the remaining delivery requirements in
+  - The editor preview, which is blocked first on the editor itself: it shows no
+    skinned mesh or skeleton (`apps/editor` has physics but no animation), so a
+    ragdoll has nothing to preview on. The remaining delivery requirements in
     `docs/plan/35-ragdolls.md`. Budgets, forced settling and a substep distance
     LOD (`Ragdoll::set_substeps`) exist; LOD by body count or by skipping
     straight to the server's settled pose is the game's to compose from them.
