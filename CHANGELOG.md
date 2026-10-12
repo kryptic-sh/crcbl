@@ -859,6 +859,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Stick input for a game reading movement outside the `ActionMap`.**
+  `crcbl_input::radial_deadzone` is public. `ActivePad` gives the sticks to the
+  first pad that moves (or is activated by a button) until it disconnects,
+  filters them through a scaled radial dead zone, and after
+  `release_until_neutral` holds each stick of each pad at zero until it has
+  rested. `crcbl_ui::StickCursor` moves a caller-owned pointer at a fixed speed
+  in logical pixels, clamped to the screen, and draws a cross while the stick
+  drives it.
+
 - **`crcbl_phys::dispersion::direction_in_cone` scatters a direction within a
   cone** from two caller-drawn uniforms in `[0, 1)`, evenly over the disc the
   cone cuts on a plane square to the aim — a shot group's spread. Zero spread is

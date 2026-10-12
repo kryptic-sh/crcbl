@@ -397,7 +397,10 @@ pub const PAD_ACTIVITY_THRESHOLD: f32 = 0.5;
 /// Radial rather than per-axis, because a per-axis dead zone snaps a slightly
 /// diagonal push onto the nearest axis; rescaled rather than cut, because a cut
 /// jumps from 0 straight to `deadzone` the moment the stick leaves it.
-pub(crate) fn radial_deadzone((x, y): (f32, f32), deadzone: f32) -> (f32, f32) {
+///
+/// `deadzone` belongs in `0.0..1.0`; at or past 1.0 nothing gets through.
+#[must_use]
+pub fn radial_deadzone((x, y): (f32, f32), deadzone: f32) -> (f32, f32) {
     let magnitude = x.hypot(y);
     if !magnitude.is_finite() || magnitude <= deadzone {
         return (0.0, 0.0);

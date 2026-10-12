@@ -63,6 +63,7 @@ pub mod hud;
 pub mod image;
 pub mod menu;
 pub mod readout;
+pub mod stick_cursor;
 pub mod style;
 pub mod text;
 pub mod touch;
@@ -99,6 +100,7 @@ pub use menu::{
     Slider,
 };
 pub use readout::{NATURAL_SCALE, ReadoutPanel, ReadoutRow};
+pub use stick_cursor::StickCursor;
 pub use text::{
     ASCENDER, ASCII_GLYPH_COUNT, FIRST_CHAR, FontAtlas, GLYPH_ADVANCE, GLYPH_COUNT, GLYPH_HEIGHT,
     GLYPH_WIDTH, GlyphMetrics, LAST_CHAR, LINE_HEIGHT, NOTDEF_INDEX, glyph_index,

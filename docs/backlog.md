@@ -138,20 +138,17 @@ than EW assets or an EW checkout.
   (`crcbl-spawn`), map-free binding text conversion (`ActionOverride::from_text`
   / `texts`), public pad backends with a device selection
   (`crcbl::engine::pads::for_run`, `PadSelection`), a camera clearance sweep
-  (`PhysicsSystem::farthest_clear_point`) and cone sampling
-  (`crcbl_phys::dispersion::direction_in_cone`). Order:
-  1. **Radial stick dead zone, active-device latch, release-until-neutral and a
-     stick-driven virtual cursor** in `crcbl-input`/`crcbl-ui`. Callers: EW
-     `src/gamepad_input.rs`, `src/app_inventory_cursor.rs`,
-     `src/rendering_cursor.rs`.
-  2. **A required-`Option` serde helper and a strict-schema test helper.**
+  (`PhysicsSystem::farthest_clear_point`), cone sampling
+  (`crcbl_phys::dispersion::direction_in_cone`) and stick input (`ActivePad`,
+  `radial_deadzone`, `crcbl_ui::StickCursor`). Order:
+  1. **A required-`Option` serde helper and a strict-schema test helper.**
      Caller: EW `src/inventory/item/persistence.rs::required_option`.
-  3. **Projectile flight core** in `crcbl-phys`, from EW `afe90bf3`
+  2. **Projectile flight core** in `crcbl-phys`, from EW `afe90bf3`
      `src/ballistics/flight.rs`: the integrator only (`FlightConfig`,
      `advance`/`advance_into`/`advance_one_segment`, `FlightSegment`, the
      analytic `integrate_segment`). Mass, penetration and traversal stay in EW;
      its regressions are `src/ballistics.rs`'s `mod tests`.
-  4. **Acoustic path evaluation** over `crcbl` `SoundPath` candidates with
+  3. **Acoustic path evaluation** over `crcbl` `SoundPath` candidates with
      caller-supplied range, surface and barrier tables. Caller: EW
      `src/sound.rs::evaluate_sound_paths`.
 

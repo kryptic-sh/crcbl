@@ -51,6 +51,7 @@
 //! backend yet, and none has a stand-in that would report "no pads" as though
 //! it had looked.
 
+mod active_pad;
 pub mod binding_asset;
 pub mod binding_text;
 mod context;
@@ -100,6 +101,7 @@ pub mod web_gamepad;
 #[cfg(any(windows, test))]
 pub mod xinput;
 
+pub use active_pad::{ActivePad, StickUpdate};
 pub use binding_asset::{AssetRefusal, AssetWriteError, BindingAssetError};
 pub use binding_text::BindingParseError;
 pub use context::{GAMEPLAY_CONTEXT, GLOBAL_CONTEXT};
@@ -108,7 +110,7 @@ pub use eight_way::{EIGHT_WAY_SECTOR, eight_way};
 pub use emit::Pattern;
 pub use gamepad::{
     GamepadEvent, GamepadId, GamepadSnapshot, PAD_ACTIVITY_THRESHOLD, PadAxis, PadButton,
-    PadButtons, PadKind, Stick, Trigger,
+    PadButtons, PadKind, Stick, Trigger, radial_deadzone,
 };
 pub use hint::{DefaultLabels, Hint, HintLabels};
 pub use overrides::{ActionOverride, OverrideRefusal};
