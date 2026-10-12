@@ -58,6 +58,9 @@ crcbl-nav = { workspace = true }
 crcbl-net = { workspace = true }
 crcbl-reflect = { workspace = true }
 crcbl-phys = { workspace = true }
+# Ragdolls, reached as `crcbl::ragdoll`: `crcbl-anim`, `crcbl-phys`, `serde`,
+# `ron` and `thiserror`, all already in this crate's tree.
+crcbl-ragdoll = { workspace = true }
 crcbl-server = { workspace = true }
 crcbl-store = { workspace = true }
 # The bake half: glTF import, the meshlet builder and the cluster DAG, which is

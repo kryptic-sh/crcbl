@@ -870,6 +870,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   axes. Scale handles remain local in either mode. Changing space ends an active
   gizmo drag without discarding its undoable edits.
 
+- **`crcbl-ragdoll` (re-exported as `crcbl::ragdoll`) runs skeletal ragdolls.**
+  A `RagdollRig` names the skeleton joints that carry bodies, their shapes and
+  masses, ball, hinge or welded joints with limits and friction measured from
+  the rest pose, and the body pairs kept from colliding. It is read from an
+  authored RON file (`RagdollDesc::from_ron`, resolved against bone names) or
+  fitted to a skeleton by `RagdollRig::generate`, which keeps jointed masses
+  within a ratio and ignores pairs overlapping at rest. `Ragdoll::spawn` creates
+  the bodies at the last animated pose with velocities inferred from an earlier
+  one; `strike_with` carries a recorded contact's impulse to the nearest limb
+  once, refusing a contact on the ragdoll itself; `pose_into` writes the
+  skeletal pose the bodies stand in; and `is_settled`, `force_settle`,
+  `body_transforms` and `remove` cover rest and teardown.
+
 - **`PhysicsSystem::ignore_contacts` keeps two bodies from colliding with each
   other** without a joint between them; `restore_contacts` undoes it and
   `ignores_contacts` asks. Each body still collides with everything else.

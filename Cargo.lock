@@ -366,6 +366,7 @@ dependencies = [
  "crcbl-nav",
  "crcbl-net",
  "crcbl-phys",
+ "crcbl-ragdoll",
  "crcbl-reflect",
  "crcbl-render",
  "crcbl-scene",
@@ -577,6 +578,19 @@ dependencies = [
  "crcbl-core",
  "crcbl-ecs",
  "glam",
+]
+
+[[package]]
+name = "crcbl-ragdoll"
+version = "0.1.0"
+dependencies = [
+ "crcbl-anim",
+ "crcbl-ecs",
+ "crcbl-phys",
+ "glam",
+ "ron",
+ "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

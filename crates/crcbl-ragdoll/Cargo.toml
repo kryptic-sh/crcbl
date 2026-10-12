@@ -1,0 +1,27 @@
+[package]
+name = "crcbl-ragdoll"
+description = "Crucible ragdolls: authored and generated rigs, and the running ragdoll joining a skeleton to physics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A ragdoll needs the skeleton and the solver together, and neither of those
+# crates should need the other: `crcbl-anim` plays clips in builds with no
+# physics, and `crcbl-phys` simulates bodies with no skeleton. This crate is
+# where the two meet (`docs/backlog.md`, the Ragdolls entry, decided
+# 2026-10-12), rather than the umbrella, which `docs/notes/backends.md` keeps
+# to re-exports. Every dependency was already in the workspace graph.
+[dependencies]
+crcbl-anim = { workspace = true }
+crcbl-ecs = { workspace = true }
+crcbl-phys = { workspace = true }
+glam = { workspace = true }
+# The authored rig is a hand-edited RON file, read the way `crcbl-anim`'s
+# state machine and `crcbl-inventory`'s catalogue are.
+ron = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

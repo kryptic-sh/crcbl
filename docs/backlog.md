@@ -15,21 +15,23 @@ than EW assets or an EW checkout.
   `ew:src/rendering_world_sync.rs`. Extend the existing **Ragdolls** entry and
   `docs/plan/35-ragdolls.md`; do not duplicate the completed primitives.
 
-  Available primitives are `crcbl-anim::ragdoll::RagdollBinding`, its
-  `motion_from_previous_pose` velocity transfer, and
-  `PhysicsSystem::apply_impulse_at`. Main CI `37747463186` at `c0e79111`
-  completed successfully, including Linux, macOS and Windows. The synthetic
-  `crates/crcbl/tests/ragdoll_pose.rs` exercises animated motion transfer,
-  articulated falling/settling and matching skinning-palette positions. This is
-  not evidence of a complete runtime or GPU-rendered limbs.
+  The `crcbl-ragdoll` crate (`crcbl::ragdoll`, 2026-10-12) now provides the rig
+  and the running instance: `RagdollDesc` (authored RON, resolved against bone
+  names), `RagdollRig::generate` (fitted fallback), and `Ragdoll::spawn`,
+  `strike_with`, `pose_into`, `is_settled`, `force_settle`, `body_transforms`
+  and `remove`. `strike_with` refuses a `KineticContact` whose struck entity is
+  one of the ragdoll's own bodies, since the solver already applied it.
+  `PhysicsSystem::ignore_contacts` was added for limb pairs that overlap without
+  a joint. The synthetic humanoid in `crates/crcbl-ragdoll/tests/` covers spawn
+  velocity, joint anchors at a bent pose, a head strike, falling, skinning
+  against the bodies every tick, an energy bound and settling, with each
+  mechanism mutation-checked locally on Windows. Native CI for the crate is
+  pending at the time of writing. EW adoption is not verified.
 
   Remaining engine work:
-  - Authored body/joint initialization and automatic fallback from a skeleton.
-  - A running instance that connects the existing pose/velocity primitives to
-    body creation and caller-supplied death/contact handoff without applying a
-    contact impulse twice to an already struck body.
-  - End-to-end terrain falling/settling with rendered limbs matching physical
-    bodies; server/detail-client ownership and settled-pose snapshots.
+  - End-to-end terrain falling/settling with rendered (GPU-skinned) limbs
+    matching physical bodies; server/detail-client ownership and settled-pose
+    snapshots (`body_transforms` is the raw data, with no quantized wire form).
   - A settled-pose handoff suitable for revival, with clearance checked before
     rising and no unintended relocation of the authoritative character.
   - The editor preview, budgets, distance LOD, forced settling and remaining
@@ -38,8 +40,8 @@ than EW assets or an EW checkout.
   Damage, item/container ownership, revival progress, interaction admission and
   authored get-up behavior remain in EW. EW must independently verify that its
   revival flow does not duplicate dropped items. No game-side adoption or native
-  EW acceptance was verified here. The runtime placement decision is still
-  pending in the detailed entry below.
+  EW acceptance was verified here. The runtime placement was decided in the
+  detailed entry below.
 
 - **Prone weapon collision is not ready to port.** Choose and validate the game
   response to terrain contact (limit aim or retract/lift the weapon and leave
@@ -127,6 +129,48 @@ than EW assets or an EW checkout.
   verification, including changing-speed airborne movement, before considering
   any reusable numerical helper; no missing engine query is established by this
   work.
+
+- **EW port requests of 2026-10-12, accepted in this order.** EW (pin
+  `e3f44f4c`) asked for its hand-rolled engine features to move into crcbl,
+  deleting EW's copy as each lands. Each names a working EW caller and EW
+  regression tests; the engine regression is written with the port. Order:
+  1. **No console windows on Windows during builds and tests** (user-raised).
+     `crates/crcbl-shaders/build.rs` spawns `slangc`/`dxc` and several tests
+     re-spawn processes (`crcbl-core` `log/panic_hook.rs`, `log.rs`, `trace.rs`;
+     `crcbl-store` `tests/kill_during_write.rs`; `crcbl` `engine.rs`;
+     `crcbl-cli` `cargo.rs`); without an attached console each child gets a
+     conhost window. Fix: `CREATE_NO_WINDOW` on every spawned console child
+     through one shared helper, and desktop-needing tests made opt-in.
+  2. **Map-free binding text conversion** in `crcbl-input`
+     (`ActionOverride::from_text` / `texts`, with
+     `ActionMap::apply_override_text` and `override_text` built on them).
+     Caller: EW `src/key_bindings.rs`, read before its `ActionMap` exists.
+  3. **Public gamepad backend selection** with a selected-device filter
+     (`crcbl/src/engine/pads.rs` `PadSource` is `pub(super)`). Caller: EW
+     `src/app_gamepads.rs`, which also lacks the Steam virtual-pad skip.
+  4. **Camera clearance sweep** (`clear_eye(from, to, radius, skin, exclude)`)
+     in `crcbl-phys`. Caller: EW `src/game_camera.rs`, three copies.
+  5. **Uniform direction within a cone** from scalar randoms. Caller: EW
+     `src/dispersion.rs::sample_launch_direction`.
+  6. **Radial stick dead zone, active-device latch, release-until-neutral and a
+     stick-driven virtual cursor** in `crcbl-input`/`crcbl-ui`. Callers: EW
+     `src/gamepad_input.rs`, `src/app_inventory_cursor.rs`,
+     `src/rendering_cursor.rs`.
+  7. **A required-`Option` serde helper and a strict-schema test helper.**
+     Caller: EW `src/inventory/item/persistence.rs::required_option`.
+  8. **Projectile flight core** (quadratic drag, gravity, swept segments,
+     penetration loss) in `crcbl-phys`, once EW splits its ammo tables out of
+     `src/ballistics.rs` and sends the generic module.
+  9. **Acoustic path evaluation** over `crcbl` `SoundPath` candidates with
+     caller-supplied range, surface and barrier tables. Caller: EW
+     `src/sound.rs::evaluate_sound_paths`.
+
+  Not accepted yet, needing a home-crate decision first: AI perception
+  accumulators (`src/ai_perception.rs`, `ai_hearing.rs`, `ai_target_memory.rs`),
+  positional voice re-aiming (`src/client_audio.rs`) and the multi-glTF scene
+  merge (`src/asset_scene.rs`). EW keeps its airborne forecast, grid inventory
+  geometry and leg/foot IK, and will itself move `projected_motion` onto
+  `preview_upright`.
 
 For a newly demonstrated engine gap, put its request here first, with the EW
 caller, reproduction, required API behavior and an engine regression. Keep
@@ -13270,22 +13314,43 @@ are available; the high-priority entry records their completed native CI run.
 vertices against physical transforms during falling and settling. Runtime
 construction, GPU rendering and revival are not covered by that test.
 
-**Not built:** authored ragdoll assets and automatic body generation, the
-killing `KineticContact` handoff, solver integration with skinned rendering, the
+**Not built:** solver integration with GPU-skinned rendering, the
 server-simplified/client-detail split and settle snapshots, editor preview,
-budgets and the remaining delivery requirements in `docs/plan/35-ragdolls.md`.
-The pose bridge does not complete these items.
+budgets, distance LOD and the remaining delivery requirements in
+`docs/plan/35-ragdolls.md`. The rig, the running instance and the contact
+handoff are in `crcbl-ragdoll`.
 
-**Runtime placement decision pending:** the authored asset and running ragdoll
-need animation and physics together. `docs/notes/backends.md` reserves `crcbl`
-for re-exports and setup helpers, and `crates/crcbl-anim/Cargo.toml` currently
-keeps the animation runtime independent of physics. A dedicated internal
-`crcbl-ragdoll` crate would own asset validation, body creation and the running
-instance without putting this runtime into the umbrella or coupling ordinary
-animation to simulation. It would use dependencies already in the workspace.
-User approval was requested under the dependency rule; an existing-crate
-placement is the alternative, with that coupling as its trade-off. No crate or
-dependency has been added.
+**Runtime placement decided (2026-10-12): `crates/crcbl-ragdoll`.** The asked
+question went unanswered, and the long-term choice was taken under the standing
+instruction to pick one and record it: a dedicated crate keeps `crcbl-anim` free
+of physics (clips play in builds with no solver) and keeps the umbrella to
+re-exports, as `docs/notes/backends.md` asks. It adds no third-party dependency;
+`crcbl` re-exports it as `crcbl::ragdoll`. The declined alternative was putting
+the runtime in `crcbl-anim` or `crcbl-phys`, coupling one to the other.
+
+**What the first runtime slice found (2026-10-12):**
+
+- **Mass by volume alone throws a generated ragdoll apart.** The fitted pelvis
+  sphere weighed 0.09 kg against 13.7 kg thighs, and a 20 N·s head strike raised
+  mechanical energy from 1.2 kJ to 43 kJ in eight ticks. The generator now evens
+  jointed masses to `GenerateSettings::max_mass_ratio` (4) and sizes a branching
+  joint's sphere at half its mean reach; the same strike then only loses energy.
+- **Without joint friction a corpse never sleeps.** Light limbs kept turning at
+  about 0.2 rad/s, twice `ContactSettings::sleep_angular_speed`. Joint friction
+  (a zero-speed motor, `RigJoint::friction`) fixes the unstruck case, but
+  settling is chaotic in the friction value: at 0.1 N·m/kg a 20 N·s head strike
+  still left one clavicle trembling at 0.13 rad/s after 40 s, carrying 2e-4 J.
+  The test applies the plan's settle timeout (force-settle once near rest). Not
+  investigated: whether the tremble is a contact/joint fight the solver could
+  resolve, which would make the timeout rarer.
+- **The generated rig is a test fallback, not a tuned body.** Joint types are
+  not inferred from names (every joint is a ball), limits are uniform, and leg
+  capsules dominate the mass because the torso is fitted from its bones. An
+  authored `RagdollDesc` is the route to a convincing character.
+- **Not covered:** the spawn path that removes bodies again when the system
+  refuses a joint (unreachable with a validated rig), non-uniform skeleton
+  scale, and spawning at a scale different from the rig's (bodies are in metres
+  and do not follow it).
 
 `KineticContact::impulse` already describes an impulse applied by the contact
 solver. Reapplying it to the existing struck body would double-count it. Body

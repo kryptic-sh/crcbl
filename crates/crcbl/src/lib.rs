@@ -200,6 +200,10 @@ pub use crcbl_net as net;
 /// [`crcbl-phys`](crcbl_phys): rigid bodies, colliders, forces, the broadphase
 /// and the sweep queries.
 pub use crcbl_phys as phys;
+/// [`crcbl-ragdoll`](crcbl_ragdoll): authored and generated ragdoll rigs, and
+/// the running ragdoll that carries a skeleton's last pose into physics and
+/// reads its bodies back as a pose.
+pub use crcbl_ragdoll as ragdoll;
 /// [`crcbl-reflect`](crcbl_reflect): the field description an editor's property
 /// panel reads, and the `#[derive(Reflect)]` that writes it.
 ///
