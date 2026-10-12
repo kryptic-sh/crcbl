@@ -5,7 +5,7 @@ mod common;
 
 use common::{entities, model, skeleton, world};
 use crcbl_anim::Pose;
-use crcbl_phys::{PhysicsSystem, Transform};
+use crcbl_phys::{PhysicsSystem, QueryFilter, Transform};
 use crcbl_ragdoll::{
     GenerateSettings, Handoff, Ragdoll, RagdollRig, SettleBudget, SettleError, SettledPose,
 };
@@ -204,4 +204,34 @@ fn distance_lod_sets_substeps_on_an_awake_ragdoll_only() {
     assert!(!ragdoll.set_substeps(&mut physics, 8));
     assert!(ragdoll.is_settled(&physics), "the LOD change woke it");
     assert_eq!(physics.substeps(ragdoll.entities()[0]), Some(0));
+}
+
+/// **A corpse on its own query layer is invisible to queries that leave
+/// that layer out** — a revival's clearance check, a character walking over
+/// it — and seen by those that include it.
+#[test]
+fn a_corpse_on_its_own_layer_is_left_out_of_masked_queries() {
+    const CORPSES: u32 = 0b10;
+    const SCENERY: u32 = 0b01;
+    let rig = rig();
+    let mut physics = world();
+    let ragdoll = spawn(&mut physics, &rig, 0.0, 100);
+    ragdoll.set_query_layers(&mut physics, CORPSES);
+    let centre = ragdoll.body_transforms(&physics).expect("every body")[0].position;
+    let seen = |physics: &mut PhysicsSystem, mask: u32| {
+        physics
+            .overlap_sphere_filtered(centre, 0.3, QueryFilter::masked(mask))
+            .iter()
+            .filter(|(entity, _)| ragdoll.entities().contains(entity))
+            .count()
+    };
+    assert_eq!(
+        seen(&mut physics, SCENERY),
+        0,
+        "the corpse blocked a scenery query"
+    );
+    assert!(
+        seen(&mut physics, CORPSES) > 0,
+        "the corpse layer saw nothing"
+    );
 }

@@ -38,7 +38,12 @@ than EW assets or an EW checkout.
     "excess deaths settle instantly to a canned pose": a new death settled at
     once would hang in the air, and no canned pose exists.
   - A settled-pose handoff suitable for revival, with clearance checked before
-    rising and no unintended relocation of the authoritative character.
+    rising and no unintended relocation of the authoritative character. The
+    parts exist — `Ragdoll::body_transforms` for where the body lies,
+    `Ragdoll::set_query_layers` to leave the corpse out of a check, and
+    `CharacterController::preview_upright` for whether a standing capsule fits —
+    but no test composes them into a rise, and choosing the rise point is
+    unwritten.
   - The editor preview and the remaining delivery requirements in
     `docs/plan/35-ragdolls.md`. Budgets, forced settling and a substep distance
     LOD (`Ragdoll::set_substeps`) exist; LOD by body count or by skipping

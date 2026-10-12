@@ -866,6 +866,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   taking the server's corpse. `SettleBudget::enforce` settles a ragdoll awake
   past a timeout and, past a cap, the longest-awake ones.
   `Ragdoll::set_substeps` is the distance LOD, leaving a settled ragdoll asleep.
+  `Ragdoll::set_query_layers` puts a corpse on its own query layers, so whether
+  it blocks a character or a revival's clearance check is decided by those
+  queries' masks.
 
 - **`crcbl::acoustic_path::loudest_path` picks the route a sound is heard
   along** from a game's candidate `SoundPath`s: each carries the range times its

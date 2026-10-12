@@ -350,6 +350,17 @@ impl Ragdoll {
         self.is_settled(physics)
     }
 
+    /// Puts every body's query collider on the layers in `bits` (see
+    /// [`PhysicsSystem::set_collider_layers`]): whether a corpse blocks a
+    /// character's movement, a camera's sweep or a revival's clearance check
+    /// is the game's call, made by the masks those queries carry. Layers
+    /// filter queries only; the bodies still collide with other bodies.
+    pub fn set_query_layers(&self, physics: &mut PhysicsSystem, bits: u32) {
+        for &entity in &self.entities {
+            physics.set_collider_layers(entity, bits);
+        }
+    }
+
     /// Sets the solver substeps every body asks for — the plan's distance
     /// LOD: a ragdoll far from every camera steps coarser than one in view.
     /// Zero is the system's own count, below which no body goes (see
