@@ -905,11 +905,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   beside the asset as `<asset>.ragdoll.ron` (a `RagdollDesc`, resolved by joint
   name) replaces the fitted one; a file that will not read is logged and the
   fitted rig stands in. Shift+G writes the selected mesh's fitted rig there as a
-  file to author from, and never overwrites one. The inspector edits the rig
-  under the mesh's components — each body's shape, size and mass, each joint's
-  kind, limits (in degrees) and friction — resolving each edit at once and
-  writing the file when the pointer lets go; an edit the rig cannot resolve is
-  refused on the status line and not written.
+  file to author from, and never overwrites one; it leaves the pairs that never
+  collide to `ignore_rest_overlaps` rather than listing them, so a body later
+  grown into a neighbour stops colliding with it too. The inspector edits the
+  rig under the mesh's components — the rest-overlap rule and the substeps, each
+  body's shape, size and mass, each joint's kind, limits (in degrees) and
+  friction — resolving each edit at once and writing the file when the pointer
+  lets go; an edit the rig cannot resolve is refused on the status line and not
+  written.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned

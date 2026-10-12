@@ -201,7 +201,8 @@ fn bad_files_are_refused_by_name() {
 /// **A rig written as a file and read back is the rig it was**: every body on
 /// the same joint, shape and mass, centred and pointed the same; every joint
 /// between the same bodies with the same kind and friction, standing at the
-/// same point with the same axis; the same ignored pairs.
+/// same point with the same axis; the same ignored pairs, whether listed or
+/// left to the rule for rest overlaps.
 #[test]
 fn a_rig_round_trips_through_its_file() {
     let skeleton = skeleton();
@@ -271,6 +272,16 @@ fn a_rig_round_trips_through_its_file() {
         pairs
     };
     assert_eq!(pairs(&back), pairs(&fitted));
+    // The fitter ignores exactly the pairs overlapping at rest, so a file
+    // leaving them to the rule resolves to the same pairs: what an editor
+    // writes for a fitted rig, so a body grown later is covered too.
+    let mut by_rule = fitted.to_desc(&names).expect("named");
+    by_rule.ignore.clear();
+    by_rule.ignore_rest_overlaps = true;
+    let by_rule = by_rule
+        .resolve(&skeleton, &names, model(0.0))
+        .expect("resolves");
+    assert_eq!(pairs(&by_rule), pairs(&fitted));
     assert!(matches!(
         fitted.to_desc(&names[1..]),
         Err(DescError::NameCount { .. })

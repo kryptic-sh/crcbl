@@ -1,8 +1,11 @@
-//! The selected rigged mesh's ragdoll rig in the inspector: **a section per
-//! body and per joint**, under the entity's components.
+//! The selected rigged mesh's ragdoll rig in the inspector: **a section for
+//! the rig, then one per body and per joint**, under the entity's components.
 //!
-//! A body's rows are its shape and size and its mass; a joint's, its kind and
-//! limits and its friction — what is tuned on a rig once it is fitted. Where a
+//! The rig's rows are whether bodies overlapping at rest stop colliding and
+//! the solver substeps it asks for; a body's are its shape and size and its
+//! mass; a joint's, its kind and limits and its friction — what is tuned on a
+//! rig once it is fitted. The bone pairs the file names as never colliding
+//! have no rows: a list is not a thing [`crcbl::reflect`] reads. Where a
 //! body sits and which way it and a joint's axis point stay in the rig file
 //! (`<asset>.ragdoll.ron`): a direction is no row a person can drag, and the
 //! viewport has no handle for one yet.
@@ -24,6 +27,18 @@
 use crcbl::ragdoll::{JointKindDesc, RagdollDesc, ShapeDesc};
 use crcbl::reflect::Reflect;
 use crcbl::ui::tree::{InspectorOptions, NodeKey, Ui};
+
+/// The whole rig's rows.
+#[derive(Clone, Copy, Debug, PartialEq, Reflect)]
+#[reflect(crate = "crcbl::reflect")]
+struct RigRows {
+    #[reflect(name = "Ignore rest overlaps")]
+    ignore_rest_overlaps: bool,
+    /// Zero is the system's own; past the far end a rig is better split.
+    /// Advisory, as every range is.
+    #[reflect(name = "Substeps", min = 0, max = 32, step = 1)]
+    substeps: u32,
+}
 
 /// A body's rows.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
@@ -91,6 +106,8 @@ enum Kind {
 /// What [`build`] drew.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Built {
+    /// The whole rig's rows, once drawn.
+    pub(super) rig: Option<NodeKey>,
     /// Each body's rows — its inspector block — in the rig's order.
     pub(super) bodies: Vec<NodeKey>,
     /// Each joint's rows, in the rig's order.
@@ -103,6 +120,23 @@ pub(super) struct Built {
 /// [module docs](self).
 pub(super) fn build(ui: &mut Ui, rig: &mut RagdollDesc, options: &InspectorOptions<'_>) -> Built {
     let mut built = Built::default();
+    ui.block_keyed("ragdoll-rig", ".inspector-section", &[], |ui| {
+        ui.block(".section-head", &[], |ui| {
+            ui.span(".section-title", "Ragdoll rig", &[]);
+        });
+        let before = RigRows {
+            ignore_rest_overlaps: rig.ignore_rest_overlaps,
+            substeps: rig.substeps,
+        };
+        let mut rows = before;
+        let inspection = ui.inspector_with(".section-fields", &mut rows, options);
+        built.rig = Some(inspection.response.key);
+        if rows != before {
+            rig.ignore_rest_overlaps = rows.ignore_rest_overlaps;
+            rig.substeps = rows.substeps;
+            built.edited = true;
+        }
+    });
     for body in &mut rig.bodies {
         ui.block_keyed(&body.bone, ".inspector-section", &[], |ui| {
             let heading = format!("Ragdoll body · {}", body.bone);

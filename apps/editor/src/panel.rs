@@ -1032,6 +1032,12 @@ impl Panels {
             .map(|section| section.fields)
     }
 
+    /// The whole ragdoll rig's rows, if the last frame drew a rig.
+    #[cfg(test)]
+    pub(crate) fn rig_fields(&self) -> Option<NodeKey> {
+        self.inspector.rig.rig
+    }
+
     /// The rows of the `index`th body of the ragdoll rig the last frame drew,
     /// or [`None`] past the last.
     #[cfg(test)]

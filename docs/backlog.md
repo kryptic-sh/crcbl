@@ -224,11 +224,11 @@ every entity of the asset), with the skin conversion shared as
 — authored beside the asset as `<asset>.ragdoll.ron`, or else fitted
 (`RagdollRig::generate`) — and Shift+G writes the fitted rig there as a starting
 file (never over one). The inspector edits the rig under the mesh's components
-(`apps/editor/src/panel/rig.rs`): a section per body (shape and size, mass) and
-per joint (kind and limits in degrees, friction). Each edit is resolved at once,
-so the viewport and the next drop show it; the file is written when the pointer
-lets go, and an edit the rig cannot resolve is refused on the status line and
-never written.
+(`apps/editor/src/panel/rig.rs`): a section for the rig (the rest-overlap rule,
+substeps), per body (shape and size, mass) and per joint (kind and limits in
+degrees, friction). Each edit is resolved at once, so the viewport and the next
+drop show it; the file is written when the pointer lets go, and an edit the rig
+cannot resolve is refused on the status line and never written.
 
 What rig editing still lacks, none of it requested yet:
 
@@ -242,11 +242,11 @@ What rig editing still lacks, none of it requested yet:
   would have to say what undo means across the two.
 - **Writing rewrites the whole file** through `RagdollDesc::to_ron`, so a
   comment or layout a person gave it is lost on the first inspector edit.
-- **The ignored pairs, `ignore_rest_overlaps` and `substeps` have no rows.** A
-  fitted rig's file lists its pairs with `ignore_rest_overlaps: false`
-  (`RagdollRig::to_desc`), so a body grown into a neighbour it did not overlap
-  when fitted is not added to the pairs; it fights that neighbour at rest until
-  the pair is added by hand.
+- **The listed pairs (`ignore`) have no rows**: a list is not a thing
+  `crcbl::reflect` reads. A fitted rig's file leaves its pairs to
+  `ignore_rest_overlaps`, which the rig section switches; with the rule off, a
+  body grown into a neighbour fights it at rest until the pair is listed by hand
+  in the file.
 - **The first edit of a fitted rig resolves it from its file**, which drops a
   box body's turn about its own axis (`to_desc`'s documented loss). The fitted
   rig is drawn exactly until then.

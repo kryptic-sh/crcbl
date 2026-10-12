@@ -301,8 +301,10 @@ fn rig_on_disk() -> (tempfile::TempDir, Editor<HeadlessShell>) {
 
 /// **Shift+G writes the fitted rig beside the asset as a file to author
 /// from, and never overwrites one.** The file reads back as a rig for the
-/// asset and the shelf takes it up as the authored rig; a second press finds
-/// the file there and leaves it — even one a person has since edited.
+/// asset and the shelf takes it up as the authored rig; it lists no pairs and
+/// leaves them to the rule for rest overlaps, as the fitter did. A second
+/// press finds the file there and leaves it — even one a person has since
+/// edited.
 #[test]
 fn shift_g_writes_the_rig_once() {
     let (dir, mut editor) = rig_on_disk();
@@ -315,7 +317,9 @@ fn shift_g_writes_the_rig_once() {
         "{:?}",
         editor.panels.status()
     );
-    crcbl::ragdoll::RagdollDesc::from_ron(&written).expect("a rig file");
+    let file = crcbl::ragdoll::RagdollDesc::from_ron(&written).expect("a rig file");
+    assert!(file.ignore_rest_overlaps, "the pairs are frozen: {written}");
+    assert!(file.ignore.is_empty(), "the pairs are frozen: {written}");
     editor.frame().expect("a rebuild reading it back");
     assert!(
         editor
@@ -570,4 +574,42 @@ fn a_shape_picked_from_the_drop_down_keeps_its_size() {
     let written = std::fs::read_to_string(&path).expect("the pick wrote the rig");
     let file = crcbl::ragdoll::RagdollDesc::from_ron(&written).expect("a rig file");
     assert_eq!(file.bodies[0].shape, sphere);
+}
+
+/// **The rig's own rows switch the rule for rest overlaps and set the
+/// substeps**: each edit is taken by the rig drawn and dropped and written to
+/// the file.
+#[test]
+fn the_rig_rows_set_the_overlap_rule_and_the_substeps() {
+    let (dir, mut editor) = rig_on_disk();
+    editor.frame().expect("the inspector draws the rig");
+    let rows = |editor: &Editor<HeadlessShell>| {
+        editor
+            .panels
+            .rig_fields()
+            .expect("the inspector drew the rig's rows")
+    };
+    let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+    let file = || {
+        let written = std::fs::read_to_string(&path).expect("the rig was written");
+        crcbl::ragdoll::RagdollDesc::from_ron(&written).expect("a rig file")
+    };
+
+    let at = centre(
+        &editor,
+        widget_labelled(&editor, rows(&editor), "Ignore rest overlaps"),
+    );
+    click(&mut editor, at);
+    let rig = editor.shelf.rig(RIG).expect("the rig");
+    assert!(!rig.desc.as_ref().expect("a rig file").ignore_rest_overlaps);
+    assert!(!file().ignore_rest_overlaps, "the switch was not written");
+
+    let fitted = rig.desc.as_ref().expect("a rig file").substeps;
+    let at = centre(&editor, widget_labelled(&editor, rows(&editor), "Substeps"));
+    drag_through(&mut editor, at, &[12.0, 40.0]);
+    let rig = editor.shelf.rig(RIG).expect("the rig");
+    let substeps = rig.desc.as_ref().expect("a rig file").substeps;
+    assert!(substeps > fitted, "the drag set no substeps: {substeps}");
+    assert_eq!(rig.ragdoll.as_ref().expect("a rig").substeps(), substeps);
+    assert_eq!(file().substeps, substeps, "the substeps were not written");
 }

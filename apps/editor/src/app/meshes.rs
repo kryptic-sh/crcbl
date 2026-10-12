@@ -298,7 +298,8 @@ fn hangs_of(skinned: &Skinned) -> Mat4 {
 }
 
 /// The ragdoll rig fitted to `asset`'s skeleton at the scale it `hangs` at,
-/// and its file named by the joint `names`; what could not be had is logged.
+/// and its file named by the joint `names`, its pairs left to the rule for
+/// rest overlaps; what could not be had is logged.
 fn fitted(
     asset: &str,
     skeleton: &Skeleton,
@@ -314,6 +315,14 @@ fn fitted(
     };
     let desc = ragdoll
         .to_desc(names)
+        .map(|mut desc| {
+            // The fitter ignores exactly the pairs overlapping at rest, so the
+            // file says that rather than freezing today's list: a body later
+            // grown into a neighbour stops colliding with it too.
+            desc.ignore.clear();
+            desc.ignore_rest_overlaps = true;
+            desc
+        })
         .map_err(|error| {
             crcbl::log::warn!("editor: `{asset}`'s fitted rig cannot be named: {error}");
         })
