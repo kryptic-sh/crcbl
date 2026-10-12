@@ -112,14 +112,14 @@ pub struct Gpu {
     /// with no pass to fill it is a draw of whatever the vertex pool was
     /// holding. See [`Gpu::build_skinning`].
     skinning: Option<Skinning>,
-    /// One reservation per [`crate::model::Skinned::instances`] entry, in that
+    /// One reservation per [`crcbl::scene_rig::Skinned::instances`] entry, in that
     /// order — see [`SkinnedDraw`].
     skinned: Vec<SkinnedDraw>,
     /// This frame's joint palette, written by [`Gpu::set_palette`] before the
     /// frame is recorded.
     ///
     /// One palette for every skinned region, because this application poses one
-    /// skeleton: `crate::model::skinned_of` places an instance here only when
+    /// skeleton: `crcbl::scene_rig::skinned_of` places an instance here only when
     /// its node wears the skin `crate::anim::playable_of` converted, so every
     /// region in the list above is deformed by the same joints.
     ///
@@ -179,7 +179,7 @@ struct SkinnedDraw {
     /// [`ForwardRenderer::reserve_skinned`].
     mesh: SkinnedMesh,
     /// One per vertex of the bind-pose run, in the same order —
-    /// [`crate::model::SkinnedInstance::bindings`], owned because the pass
+    /// [`crcbl::scene_rig::SkinnedInstance::bindings`], owned because the pass
     /// uploads them every frame and the document is long gone.
     bindings: Vec<SkinBinding>,
 }
@@ -212,7 +212,7 @@ fn hal_error(error: SkinningError) -> HalError {
 /// If an entry names a row past `count`, which is one half of a
 /// [`crate::model::Model`] disagreeing with the other — see
 /// [`Gpu::build_skinning`].
-fn skinned_rows(count: usize, skinned: &crate::model::Skinned) -> Vec<bool> {
+fn skinned_rows(count: usize, skinned: &crcbl::scene_rig::Skinned) -> Vec<bool> {
     let mut mask = vec![false; count];
     for entry in &skinned.instances {
         mask[entry.instance] = true;
@@ -297,7 +297,7 @@ impl Gpu {
         ctx: GpuContext,
         scene: &crcbl::render::scene::SceneDesc<'_>,
         instances: &[InstanceDesc],
-        skinned: &crate::model::Skinned,
+        skinned: &crcbl::scene_rig::Skinned,
         grid_extent: f32,
         service: &mut dyn FnMut(),
     ) -> Result<Self, GpuError> {
@@ -358,7 +358,7 @@ impl Gpu {
         // every pipeline and buffer the renderer just made.
         //
         // **The rows a skin deforms are deliberately not placed here.**
-        // `crate::model::SkinnedInstance` replaces its row rather than joining
+        // `crcbl::scene_rig::SkinnedInstance` replaces its row rather than joining
         // it, and placing both would draw the mesh twice in one frame — once
         // deformed by the joints and once undeformed at the node's own
         // transform, which is the picture `crate::demo_model`'s `crate.far`
@@ -461,7 +461,7 @@ impl Gpu {
     ///
     /// # Panics
     ///
-    /// If a [`crate::model::SkinnedInstance`] names a row past the end of
+    /// If a [`crcbl::scene_rig::SkinnedInstance`] names a row past the end of
     /// `instances`. The two come from one [`crate::model::Model`], built by one
     /// walk over one document, so a mismatch is this application disagreeing
     /// with itself rather than anything a file can cause.
@@ -469,7 +469,7 @@ impl Gpu {
         device: &dyn Device,
         renderer: &mut ForwardRenderer,
         instances: &[InstanceDesc],
-        skinned: &crate::model::Skinned,
+        skinned: &crcbl::scene_rig::Skinned,
     ) -> Result<(Option<Skinning>, Vec<SkinnedDraw>), HalError> {
         if skinned.instances.is_empty() || skinned.joints == 0 {
             return Ok((None, Vec::new()));
@@ -578,7 +578,7 @@ impl Gpu {
         &mut self,
         scene: &crcbl::render::scene::SceneDesc<'_>,
         instances: &[InstanceDesc],
-        skinned: &crate::model::Skinned,
+        skinned: &crcbl::scene_rig::Skinned,
         grid_extent: f32,
     ) -> Result<(), HalError> {
         let device = self.ctx.device();
@@ -803,7 +803,7 @@ impl Gpu {
     /// Takes this frame's joint palette — [`crate::anim::Player::palette`].
     ///
     /// **Every skinned region in the frame is deformed by it**, because this
-    /// application poses one skeleton: `crate::model::skinned_of` places an
+    /// application poses one skeleton: `crcbl::scene_rig::skinned_of` places an
     /// instance in the frame only when its node wears the skin
     /// `crate::anim::playable_of` converted. A frame drawn
     /// without it deforms nothing new: the skinning pass would be handed the
@@ -1984,7 +1984,7 @@ mod tests {
         // `Skinned::default` is a document with no rig, which is what
         // `scene::demo()` is: this test is about the effect request reaching a
         // renderer, and the skinning seam is not on that path at all.
-        let nothing_skinned = crate::model::Skinned::default();
+        let nothing_skinned = crcbl::scene_rig::Skinned::default();
         let mut gpu = Gpu::from_context(
             ctx,
             &crcbl::render::scene::demo(),
@@ -2051,7 +2051,7 @@ mod tests {
             },
         )
         .expect("the null backend opens everywhere");
-        let nothing_skinned = crate::model::Skinned::default();
+        let nothing_skinned = crcbl::scene_rig::Skinned::default();
         let mut gpu = Gpu::from_context(
             ctx,
             &crcbl::render::scene::demo(),

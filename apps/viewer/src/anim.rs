@@ -438,7 +438,7 @@ impl Player {
     ///
     /// **It does not place the character in the world.** These matrices are in
     /// the space the skeleton's root joints hang in — see
-    /// [`crate::model::SkinnedInstance::transform`], which is what carries that
+    /// [`crcbl::scene_rig::SkinnedInstance::transform`], which is what carries that
     /// space into the world.
     #[must_use]
     pub fn palette(&self) -> &[Mat4] {
