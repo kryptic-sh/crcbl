@@ -13378,12 +13378,15 @@ automatically replay contact events.
 
 **Handoff investigation (2026-10-08):** the EW placeholder at
 `assets/models/characters/heist-male-swat.gltf` has a scaled skeleton frame;
-copying a rigid body's transform straight into a bone discards that frame.
-`src/asset_scene_character.rs::append` also remaps the imported skin into
-parent-first palette order before constructing the skeleton. Bind bodies to
-those resolved palette indices, not raw glTF node indices, and preserve each
-joint's transform relative to its body when converting physical poses back. Keep
-unmapped descendants attached through their existing local transforms.
+copying a rigid body's transform straight into a bone discards that frame. EW
+(pinned to `7666cffb`, 2026-10-13) builds its skeletons through
+`crcbl::scene_rig::skeleton_of` and maps palette indices with
+`SkinOrder::palette_of`; its own remap is deleted. That asset is already listed
+parents first, so its `SkinOrder` is the identity — EW's earlier report that it
+was not came from EW's unstable sort, not the file. Bind bodies to the palette
+indices, not raw glTF node indices, and preserve each joint's transform relative
+to its body when converting physical poses back. Keep unmapped descendants
+attached through their existing local transforms.
 
 A local read-only matrix probe against that asset checked the rest-pose
 joint/body-offset round trip. Omitting the offset failed its negative control;
