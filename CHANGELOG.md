@@ -888,7 +888,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `release_until_neutral` holds each stick of each pad at zero until it has
   rested. `crcbl_ui::StickCursor` moves a caller-owned pointer at a fixed speed
   in logical pixels, clamped to the screen, and draws a cross while the stick
-  drives it.
+  drives it or `show` is called — for a pad button acting on the pointer.
 
 - **`crcbl_phys::dispersion::direction_in_cone` scatters a direction within a
   cone** from two caller-drawn uniforms in `[0, 1)`, evenly over the disc the

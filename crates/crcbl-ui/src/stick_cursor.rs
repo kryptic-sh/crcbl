@@ -58,6 +58,12 @@ impl StickCursor {
         self.shown
     }
 
+    /// Shows it without moving the pointer — when a pad button acts on the
+    /// pointer while the stick rests, say.
+    pub const fn show(&mut self) {
+        self.shown = true;
+    }
+
     /// Hides it — when the mouse moves, say, and the system cursor is back.
     pub const fn hide(&mut self) {
         self.shown = false;
@@ -116,6 +122,12 @@ mod tests {
         let mut again = DrawList::new();
         cursor.draw(&mut again, pointer);
         assert!(again.commands().is_empty());
+        let before = pointer;
+        cursor.show();
+        assert_eq!(pointer, before, "showing does not move it");
+        let mut shown = DrawList::new();
+        cursor.draw(&mut shown, pointer);
+        assert_eq!(shown.commands().len(), 4, "a button can show it");
     }
 
     /// Bad speeds are refused, and a non-finite direction or step is ignored.
