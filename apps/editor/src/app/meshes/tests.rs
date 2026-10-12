@@ -81,3 +81,26 @@ fn a_rig_reserves_its_posed_region() {
         "two runs of the deformed triangle's vertices"
     );
 }
+
+/// **A rig's bones stand where its entity puts the asset.** `rigged_json`'s
+/// root joint sits at the asset's origin and its tip one unit up, so the one
+/// bone runs from the entity's origin to a unit above it.
+#[test]
+fn a_rigs_bones_stand_where_its_entity_puts_it() {
+    let assets: BTreeSet<String> = [RIG.to_owned()].into();
+    let (shelf, _) = Shelf::build(&source(), &assets);
+    let rig = shelf.rig(RIG).expect("a rig");
+    let origin = crcbl::math::Mat4::from_translation(crcbl::math::Vec3::new(2.0, 0.0, -1.0));
+    let bones = rig.bones(origin);
+    let [(from, to)] = bones.as_slice() else {
+        panic!("one bone: {bones:?}");
+    };
+    assert!(
+        from.distance(crcbl::math::Vec3::new(2.0, 0.0, -1.0)) < 1e-6,
+        "{from}"
+    );
+    assert!(
+        to.distance(crcbl::math::Vec3::new(2.0, 1.0, -1.0)) < 1e-6,
+        "{to}"
+    );
+}

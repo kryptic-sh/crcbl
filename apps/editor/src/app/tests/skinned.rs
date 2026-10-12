@@ -124,3 +124,26 @@ fn a_rigged_mesh_draws_from_one_shared_region() {
         "the frame skipped the skinning pass"
     );
 }
+
+/// **Selecting a rigged mesh shows its skeleton**, and selecting the triangle
+/// or nothing shows none.
+#[test]
+fn a_selected_rigged_mesh_shows_its_bones() {
+    let mut editor = headless(64);
+    editor.document = props();
+    editor.document.set_assets(Box::new(assets()));
+    let rig = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(2.0, 0.0, 0.0))
+        .expect("spawned");
+    editor.frame().expect("a frame");
+    editor.document.select(None);
+    assert!(selected_bones(&mut editor.document, &editor.shelf).is_empty());
+    editor.document.select(Some(rig));
+    let bones = selected_bones(&mut editor.document, &editor.shelf);
+    assert_eq!(bones.len(), 1, "the rig's one bone: {bones:?}");
+    assert!(
+        (bones[0].1.y - bones[0].0.y - 1.0).abs() < 1e-5,
+        "a unit long, upwards"
+    );
+}

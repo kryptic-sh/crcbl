@@ -35,10 +35,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crcbl::anim::Skeleton;
+use crcbl::anim::{Palette, Pose, Skeleton};
 use crcbl::assets::AssetSource;
 use crcbl::greybox::scene3d;
-use crcbl::math::Mat4;
+use crcbl::math::{Mat4, Vec3};
 use crcbl::render::scene::SceneDesc;
 use crcbl::scene::{build_render_scene, import_gltf};
 use crcbl::scene_rig::{Skinned, reserve_for_skinning, skeleton_of, skinned_of};
@@ -67,6 +67,28 @@ pub(super) struct Rig {
     ///
     /// [`SkinnedInstance::instance`]: crcbl::scene_rig::SkinnedInstance::instance
     pub(super) skinned: Skinned,
+}
+
+impl Rig {
+    /// Each bone of the skeleton at rest, joint to parent joint, in the world
+    /// of an entity whose mesh puts the asset's origin at `origin`. Empty for
+    /// a rig whose skin deforms no part, which has nowhere to hang.
+    pub(super) fn bones(&self, origin: Mat4) -> Vec<(Vec3, Vec3)> {
+        let Some(hangs) = self.skinned.instances.first().map(|part| part.transform) else {
+            return Vec::new();
+        };
+        let mut palette = Palette::new(&self.skeleton);
+        palette.compute(&self.skeleton, &Pose::new(&self.skeleton));
+        let to_world = origin * hangs;
+        let at =
+            |joint: usize| to_world.transform_point3(palette.globals()[joint].w_axis.truncate());
+        self.skeleton
+            .joints()
+            .iter()
+            .enumerate()
+            .filter_map(|(joint, bone)| bone.parent.map(|parent| (at(parent), at(joint))))
+            .collect()
+    }
 }
 
 /// The assets a renderer was built with, and how each is drawn — see the

@@ -267,10 +267,7 @@ fn instances_of(document: &mut Document, shelf: &Shelf, skins: &Skins, drawn: Dr
         && mesh.local_bounds().is_some()
         && let Some(parts) = shelf.parts(&mesh.asset)
     {
-        // Turned about the asset's origin, then stood on `position`: the
-        // frame the mesh's placement boxes it in.
-        let origin =
-            Mat4::from_rotation_translation(mesh.rotation.quat().as_quat(), narrow(mesh.position));
+        let origin = origin_of(mesh);
         return parts
             .iter()
             .enumerate()
@@ -302,6 +299,12 @@ fn instances_of(document: &mut Document, shelf: &Shelf, skins: &Skins, drawn: Dr
         material: GREYBOX_GREY,
         transform: cube_transform(&placement),
     })]
+}
+
+/// Where a mesh puts its asset's origin: turned about it, then stood on its
+/// `position` — the frame the mesh's placement boxes it in.
+pub(super) fn origin_of(mesh: &crcbl::scene_mesh::Mesh) -> Mat4 {
+    Mat4::from_rotation_translation(mesh.rotation.quat().as_quat(), narrow(mesh.position))
 }
 
 /// The unit greybox cube scaled to `placement`'s box, turned as it is, and

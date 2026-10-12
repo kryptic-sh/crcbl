@@ -215,10 +215,10 @@ requested it.
 Slices, scoped on 2026-10-12 after `apps/viewer`: a rigged asset already draws
 through the skinning pass at its rest pose (`apps/editor/src/app/skins.rs`, one
 posed region per deformed part shared by every entity of the asset), with the
-skin conversion shared as `crcbl::scene_rig`. Left:
+skin conversion shared as `crcbl::scene_rig`. Selecting a rigged mesh draws its
+bones. Left:
 
-1. A skeleton overlay on the selected skinned entity (debug draw).
-2. Ragdoll rig authoring on it: generate or load a `RagdollDesc`, draw its
+1. Ragdoll rig authoring on it: generate or load a `RagdollDesc`, draw its
    bodies, and a play-mode drop that spawns a `Ragdoll` and poses the mesh with
    `Ragdoll::pose_into`. A per-entity pose needs regions of its own, beyond the
    shared rest-pose ones: a fixed number reserved for live poses when the shelf

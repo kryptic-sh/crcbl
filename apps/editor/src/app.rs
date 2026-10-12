@@ -1339,6 +1339,9 @@ impl<S: Shell + ?Sized> Editor<S> {
         for (corners, color) in selection_boxes(&mut self.document) {
             self.renderer.debug_draw().box_edges(&corners, color);
         }
+        for (from, to) in selected_bones(&mut self.document, &self.shelf) {
+            self.renderer.debug_draw().line(from, to, BONE_COLOR);
+        }
 
         // The scene is drawn at the pane's extent — as the panels last laid it
         // out, which is the rectangle this frame's draw list samples it into.
@@ -1629,6 +1632,10 @@ const SELECTED_COLOR: [f32; 4] = [0.55, 0.78, 1.0, 1.0];
 /// can stand beside a selection.
 const PICKED_COLOR: [f32; 4] = [0.45, 0.95, 0.55, 1.0];
 
+/// The colour a selected rig's bones are drawn in: magenta, which no other
+/// overlay uses and the greybox grey never resembles.
+const BONE_COLOR: [f32; 4] = [0.95, 0.35, 0.85, 1.0];
+
 /// The mode this tool asks for. It never asks for anything else.
 pub const DISPLAY_MODE: DisplayMode = DisplayMode::Windowed;
 
@@ -1779,6 +1786,20 @@ fn wheel_pixels(pending: &Pending) -> f32 {
 /// The box itself, turned as it is drawn — not the world-axis box around it,
 /// which would outline a turned block loosely. Read afresh every frame, so a
 /// picked tower that grows a tier is outlined at its new size.
+/// The bones of every selected mesh whose asset is rigged, at rest, where the
+/// mesh stands — the skeleton a rig is authored on.
+fn selected_bones(document: &mut Document, shelf: &Shelf) -> Vec<(Vec3, Vec3)> {
+    let mut bones = Vec::new();
+    for id in document.selection().to_vec() {
+        if let Some(mesh) = document.mesh(id)
+            && let Some(rig) = shelf.rig(&mesh.asset)
+        {
+            bones.extend(rig.bones(instances::origin_of(mesh)));
+        }
+    }
+    bones
+}
+
 fn selection_boxes(document: &mut Document) -> Vec<([Vec3; 8], [f32; 4])> {
     let primary = document.primary();
     let mut boxes = Vec::with_capacity(document.selection().len());

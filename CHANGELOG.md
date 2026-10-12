@@ -863,7 +863,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   pose: each part the asset's first skin deforms is posed in one region every
   entity of that asset draws under its own placement, so spawning or deleting a
   rigged mesh rebuilds nothing. What the skin conversion refuses is logged and
-  the asset drawn as before.
+  the asset drawn as before. Selecting a rigged mesh draws its skeleton's bones.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned
