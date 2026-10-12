@@ -205,7 +205,7 @@ impl PhysicsSystem {
 
     /// Has the broadphase look again for pairs between `a` and `b`, which a
     /// joint no longer keeps apart.
-    fn let_collide(&mut self, a: BodyId, b: BodyId) {
+    pub(super) fn let_collide(&mut self, a: BodyId, b: BodyId) {
         let Some(pipeline) = self.contacts.as_mut() else {
             return;
         };

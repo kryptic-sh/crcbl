@@ -136,6 +136,7 @@
 
 pub(crate) mod broadphase;
 mod group;
+pub(crate) mod ignored;
 pub(crate) mod island;
 pub(crate) mod joint;
 pub mod manifold;
@@ -581,6 +582,8 @@ pub(crate) struct ContactPipeline {
     continuous: sweep::Scratch,
     /// The joints: see `joint/mod.rs`.
     pub(crate) joints: joint::Joints,
+    /// The pairs that never collide: see `ignored.rs`.
+    pub(crate) ignored: ignored::IgnoredPairs,
 }
 
 impl ContactPipeline {
@@ -602,6 +605,7 @@ impl ContactPipeline {
             solver: solver::Scratch::default(),
             continuous: sweep::Scratch::default(),
             joints: joint::Joints::default(),
+            ignored: ignored::IgnoredPairs::default(),
         }
     }
 
@@ -771,6 +775,7 @@ impl ContactPipeline {
             planes,
             new_pairs,
             joints,
+            ignored,
             ..
         } = self;
         new_pairs.clear();
@@ -785,9 +790,10 @@ impl ContactPipeline {
                 if body(a).is_some() && body(a) == body(b) {
                     return false;
                 }
-                // Nor do two bodies a joint keeps apart.
+                // Nor do two bodies a joint keeps apart, or that were told
+                // to ignore each other.
                 if let (Some(ba), Some(bb)) = (body(a), body(b))
-                    && joints.keeps_apart(ba, bb)
+                    && (joints.keeps_apart(ba, bb) || ignored.contains(ba, bb))
                 {
                     return false;
                 }
@@ -1165,6 +1171,7 @@ impl ContactPipeline {
             write(hasher, contact.impulses.twist);
         }
         self.joints.hash_state(records, hasher);
+        self.ignored.hash_state(records, hasher);
     }
 
     fn contact_body(&self, proxy: ProxyId, records: &Pool<BodyRecord>) -> Option<ContactBody> {

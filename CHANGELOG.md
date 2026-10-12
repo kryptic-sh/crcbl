@@ -870,6 +870,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   axes. Scale handles remain local in either mode. Changing space ends an active
   gizmo drag without discarding its undoable edits.
 
+- **`PhysicsSystem::ignore_contacts` keeps two bodies from colliding with each
+  other** without a joint between them; `restore_contacts` undoes it and
+  `ignores_contacts` asks. Each body still collides with everything else.
+  Ignoring a touching pair ends its contacts; removing either entity forgets the
+  pair, and the pairs are part of the state hash. `ContactPairError` reports an
+  unregistered entity or a pair naming one body twice.
+
 - **`RigidBody::apply_impulse_at` and `PhysicsSystem::apply_impulse_at` apply
   impulses at world-space points.** Off-center hits change angular momentum
   through the body's oriented inertia as well as linear velocity. Invalid inputs

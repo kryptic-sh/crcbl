@@ -45,7 +45,10 @@
 //! and swap-remove; the id, the record and the (set, index) addressing do not
 //! change shape.
 
+mod ignored_contacts;
 mod joints;
+
+pub use ignored_contacts::ContactPairError;
 
 use std::collections::HashMap;
 
@@ -873,7 +876,8 @@ impl PhysicsSystem {
         self.collider_to_entity[slot] = Some(entity);
     }
 
-    /// Remove the collider and dynamics data for `entity`.
+    /// Remove the collider and dynamics data for `entity`, its joints, and
+    /// the pairs [`ignore_contacts`](Self::ignore_contacts) kept it in.
     ///
     /// Its island wakes, and so does every sleeping island that touched it:
     /// see [`remove_collider`](Self::remove_collider).
@@ -885,6 +889,9 @@ impl PhysicsSystem {
         let Some(id) = self.entity_to_body.remove(&entity) else {
             return;
         };
+        if let Some(pipeline) = self.contacts.as_mut() {
+            pipeline.ignored.forget_body(id);
+        }
         let Some(record) = self.records.remove(id) else {
             return;
         };

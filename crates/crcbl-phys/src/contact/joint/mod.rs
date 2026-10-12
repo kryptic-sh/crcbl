@@ -294,7 +294,7 @@ pub(crate) struct Joints {
     pub(crate) broken: Vec<JointBreak>,
 }
 
-fn pair_key(a: BodyId, b: BodyId) -> (u64, u64) {
+pub(super) fn pair_key(a: BodyId, b: BodyId) -> (u64, u64) {
     let (a, b) = (a.to_bits(), b.to_bits());
     (a.min(b), a.max(b))
 }
