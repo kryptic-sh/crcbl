@@ -133,6 +133,10 @@ pub const ROTATE: &str = "editor_rotate";
 /// Switch translate and rotate between world and local axes: X.
 pub const TOGGLE_SPACE: &str = "editor_toggle_space";
 
+/// Drop the selected rigged mesh as a ragdoll and watch it fall, or stop: G.
+/// See `crate::app::drop`.
+pub const DROP_RAGDOLL: &str = "editor_drop_ragdoll";
+
 /// Start play mode, or stop it and put the scene back: F5, the key every IDE
 /// starts a run with. See [`crate::document::Document::play`].
 pub const PLAY: &str = "editor_play";
@@ -214,6 +218,8 @@ pub enum Action {
     Rotate,
     /// Switch translate and rotate between world and local axes.
     ToggleSpace,
+    /// Drop the selected rigged mesh as a ragdoll, or stop the one dropping.
+    DropRagdoll,
     /// Start play mode from editing, or stop it from playing or paused.
     PlayStop,
     /// Pause a playing scene, or resume a paused one.
@@ -375,6 +381,7 @@ pub fn map() -> ActionMap {
     map.declare(button(SCALE, vec![Binding::Key(KeyCode::KeyR)]));
     map.declare(button(ROTATE, vec![Binding::Key(KeyCode::KeyE)]));
     map.declare(button(TOGGLE_SPACE, vec![Binding::Key(KeyCode::KeyX)]));
+    map.declare(button(DROP_RAGDOLL, vec![Binding::Key(KeyCode::KeyG)]));
     // Function keys, which neither reserved context binds: play and pause
     // reach the editor while a panel holds the keyboard, as a run key does in
     // every IDE, and only the editing rule in `actions` stops them.
@@ -490,6 +497,7 @@ pub fn release_keys(map: &mut ActionMap) {
         SCALE,
         ROTATE,
         TOGGLE_SPACE,
+        DROP_RAGDOLL,
         PLAY,
         PAUSE,
         RENAME,
@@ -596,6 +604,9 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
     }
     if map.just_pressed(TOGGLE_SPACE) {
         actions.push(Action::ToggleSpace);
+    }
+    if map.just_pressed(DROP_RAGDOLL) {
+        actions.push(Action::DropRagdoll);
     }
     if map.just_pressed(PLAY) {
         actions.push(Action::PlayStop);

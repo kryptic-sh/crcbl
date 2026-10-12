@@ -271,20 +271,22 @@ fn instances_of(document: &mut Document, shelf: &Shelf, skins: &Skins, drawn: Dr
         return parts
             .iter()
             .enumerate()
-            .map(|(index, part)| match skins.draw_of(&mesh.asset, index) {
-                // A deformed vertex is placed by its joints, and the skeleton
-                // hangs where the rig says, not where the part's node stands.
-                Some(draw) => Desc::Skinned {
-                    draw,
-                    material: part.material,
-                    transform: origin * skins.transform(draw),
+            .map(
+                |(index, part)| match drawn_from(skins, id, &mesh.asset, index) {
+                    // A deformed vertex is placed by its joints, and the skeleton
+                    // hangs where the rig says, not where the part's node stands.
+                    Some(draw) => Desc::Skinned {
+                        draw,
+                        material: part.material,
+                        transform: origin * skins.transform(draw),
+                    },
+                    None => Desc::Plain(InstanceDesc {
+                        mesh: part.mesh,
+                        material: part.material,
+                        transform: origin * part.transform,
+                    }),
                 },
-                None => Desc::Plain(InstanceDesc {
-                    mesh: part.mesh,
-                    material: part.material,
-                    transform: origin * part.transform,
-                }),
-            })
+            )
             .collect();
     }
     let placement = match drawn {
@@ -299,6 +301,17 @@ fn instances_of(document: &mut Document, shelf: &Shelf, skins: &Skins, drawn: Dr
         material: GREYBOX_GREY,
         transform: cube_transform(&placement),
     })]
+}
+
+/// The region part `part` of entity `id`, a mesh of `asset`, draws from: the
+/// drop preview's for the entity dropping, the shared rest pose's otherwise,
+/// or [`None`] for a part no rig deforms.
+fn drawn_from(skins: &Skins, id: SceneEntityId, asset: &str, part: usize) -> Option<usize> {
+    if skins.previewed() == Some(id) {
+        skins.preview_of(asset, part)
+    } else {
+        skins.draw_of(asset, part)
+    }
 }
 
 /// Where a mesh puts its asset's origin: turned about it, then stood on its

@@ -72,13 +72,13 @@ fn a_rig_reserves_its_posed_region() {
     let (rig, triangle) = (converted(RIG), converted(TRIANGLE));
     assert_eq!(
         rigged.meshes - rig.meshes,
-        plain.meshes - triangle.meshes + 2,
-        "two mesh entries for the one deformed part"
+        plain.meshes - triangle.meshes + 2 * 2,
+        "two mesh entries for each of the deformed part's two regions"
     );
     assert_eq!(
         rigged.vertices - rig.vertices,
-        plain.vertices - triangle.vertices + 2 * 3,
-        "two runs of the deformed triangle's vertices"
+        plain.vertices - triangle.vertices + 2 * 2 * 3,
+        "two runs of the deformed triangle's vertices for each region"
     );
 }
 

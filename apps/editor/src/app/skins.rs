@@ -9,6 +9,11 @@
 //! an entity on its own (a ragdoll dropped in play) reserves regions of its
 //! own. `docs/backlog.md`'s editor entry has the slices.
 //!
+//! **And one more for the drop preview.** Each deformed part also has a
+//! preview region, posed by [`super::drop::DropPreview`] for the one entity
+//! being dropped while the rest of its asset stays at rest; it holds the rest
+//! pose when nothing is dropping.
+//!
 //! **A palette per range.** The editor merges many assets into one renderer,
 //! so unlike `apps/viewer`, whose ranges all share one skeleton, each range
 //! carries its own asset's rest palette.
@@ -27,6 +32,7 @@ use crcbl::render::forward::FRAMES_IN_FLIGHT;
 use crcbl::render::{
     ForwardRenderer, SkinRange, SkinnedMesh, Skinning, SkinningDesc, SkinningError,
 };
+use crcbl::scene::scn::SceneEntityId;
 use crcbl::shaders::skinning::SkinBinding;
 
 use super::meshes::Shelf;
@@ -49,6 +55,10 @@ pub(super) struct Skins {
     draws: Vec<Draw>,
     /// Which draw an (asset, part index) is posed in.
     by_part: BTreeMap<(String, usize), usize>,
+    /// Which draw an (asset, part index) is posed in for the drop preview.
+    preview_by_part: BTreeMap<(String, usize), usize>,
+    /// The entity the preview regions draw, if one is dropping.
+    previewed: Option<SceneEntityId>,
 }
 
 impl Skins {
@@ -77,21 +87,28 @@ impl Skins {
                 let Some(part) = parts.get(deformed.instance) else {
                     continue;
                 };
-                match renderer.reserve_skinned(part.mesh) {
-                    Ok(mesh) => {
-                        skins
-                            .by_part
-                            .insert((asset.clone(), deformed.instance), skins.draws.len());
-                        skins.draws.push(Draw {
-                            mesh,
-                            bindings: deformed.bindings.clone(),
-                            palette: palette.matrices().to_vec(),
-                            transform: deformed.transform,
-                        });
-                    }
-                    Err(error) => {
-                        skins.release(renderer);
-                        return Err(GpuError::pools("the editor's skinned meshes", &error));
+                // The shared rest-pose region, then the drop preview's.
+                for preview in [false, true] {
+                    match renderer.reserve_skinned(part.mesh) {
+                        Ok(mesh) => {
+                            let key = (asset.clone(), deformed.instance);
+                            let map = if preview {
+                                &mut skins.preview_by_part
+                            } else {
+                                &mut skins.by_part
+                            };
+                            map.insert(key, skins.draws.len());
+                            skins.draws.push(Draw {
+                                mesh,
+                                bindings: deformed.bindings.clone(),
+                                palette: palette.matrices().to_vec(),
+                                transform: deformed.transform,
+                            });
+                        }
+                        Err(error) => {
+                            skins.release(renderer);
+                            return Err(GpuError::pools("the editor's skinned meshes", &error));
+                        }
                     }
                 }
             }
@@ -132,9 +149,39 @@ impl Skins {
         self.by_part.get(&(asset.to_owned(), part)).copied()
     }
 
+    /// The draw `asset`'s part `part` is posed in for the drop preview.
+    pub(super) fn preview_of(&self, asset: &str, part: usize) -> Option<usize> {
+        self.preview_by_part.get(&(asset.to_owned(), part)).copied()
+    }
+
+    /// The entity the preview regions draw, if one is dropping.
+    pub(super) const fn previewed(&self) -> Option<SceneEntityId> {
+        self.previewed
+    }
+
+    /// Puts entity `id`, a mesh of `asset`, in the preview regions with
+    /// `palette` — its skin's joints posed — or nothing with [`None`].
+    pub(super) fn preview(&mut self, dropping: Option<(SceneEntityId, &str, &[Mat4])>) {
+        self.previewed = dropping.map(|(id, _, _)| id);
+        let Some((_, asset, palette)) = dropping else {
+            return;
+        };
+        for ((of, _), &draw) in &self.preview_by_part {
+            if of == asset && self.draws[draw].palette.len() == palette.len() {
+                self.draws[draw].palette.copy_from_slice(palette);
+            }
+        }
+    }
+
     /// Draw `draw`'s region.
     pub(super) fn mesh(&self, draw: usize) -> &SkinnedMesh {
         &self.draws[draw].mesh
+    }
+
+    /// Draw `draw`'s palette, for a test to see a pose arrive.
+    #[cfg(test)]
+    pub(super) fn palette(&self, draw: usize) -> &[Mat4] {
+        &self.draws[draw].palette
     }
 
     /// Where draw `draw`'s skeleton hangs in its asset's frame.

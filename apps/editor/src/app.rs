@@ -140,6 +140,7 @@ use crate::layout;
 use crate::panel::{FieldTarget, PanelInput, Panels, Tone, VIEWPORT_TEXTURE};
 
 mod assets;
+mod drop;
 mod files;
 mod gizmos;
 mod instances;
@@ -223,6 +224,8 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// The posed regions of the shelf's rigs and their pass, built against the
     /// renderer's vertex pool and replaced with it — see `skins`.
     skins: Skins,
+    /// The ragdoll falling in the drop preview, if one is — see `drop`.
+    dropping: Option<drop::DropPreview>,
     /// The document's [`Document::membership`] and [`Document::measures`] the
     /// shelf was last checked against: a mesh can only want a new asset when
     /// one of them moves.
@@ -502,6 +505,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             instances,
             shelf,
             skins,
+            dropping: None,
             shelved,
             grid_extent,
             document,
@@ -1027,6 +1031,10 @@ impl<S: Shell + ?Sized> Editor<S> {
                 self.choose_mode(self.gizmo_mode);
                 Ok(())
             }
+            Action::DropRagdoll => {
+                self.toggle_drop();
+                Ok(())
+            }
             Action::PlayStop => self.play_or_stop(),
             Action::Pause => {
                 self.pause_or_resume();
@@ -1315,6 +1323,46 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.title = title;
     }
 
+    /// Starts the drop preview on the primary selection, if it is a rigged
+    /// mesh, or stops the one running — see `drop`.
+    fn toggle_drop(&mut self) {
+        if self.dropping.take().is_some() {
+            self.skins.preview(None);
+            return;
+        }
+        let Some(id) = self.document.primary() else {
+            return;
+        };
+        let Some(mesh) = self.document.mesh(id) else {
+            return;
+        };
+        let (asset, origin) = (mesh.asset.clone(), instances::origin_of(mesh));
+        if let Some(rig) = self.shelf.rig(&asset) {
+            self.dropping = drop::DropPreview::start(id, &asset, rig, origin);
+        }
+    }
+
+    /// Steps the drop preview a frame and poses its region, or ends it when
+    /// its entity is gone or no longer a mesh of a rigged asset.
+    fn advance_drop(&mut self) {
+        let Some(dropping) = self.dropping.as_mut() else {
+            self.skins.preview(None);
+            return;
+        };
+        let still = self
+            .document
+            .mesh(dropping.id())
+            .is_some_and(|mesh| mesh.asset == dropping.asset());
+        let Some(rig) = still.then(|| self.shelf.rig(dropping.asset())).flatten() else {
+            self.dropping = None;
+            self.skins.preview(None);
+            return;
+        };
+        dropping.step(rig);
+        self.skins
+            .preview(Some((dropping.id(), dropping.asset(), dropping.palette())));
+    }
+
     /// Records and submits one frame.
     fn draw(&mut self) -> Result<FrameOutcome, EditorError> {
         let Some(acquired) = self.gpu.acquire()? else {
@@ -1323,6 +1371,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         let extent = acquired.extent;
 
         self.shelve()?;
+        self.advance_drop();
         self.instances
             .update(
                 &mut self.renderer,

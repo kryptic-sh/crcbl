@@ -170,8 +170,10 @@ impl Shelf {
             };
             let converted = build_render_scene(&imported, Path::new(asset));
             if let Some(rig) = rig_of(asset, &imported, &converted) {
-                // Two mesh entries and two vertex regions per deformed part:
-                // what `Skins` reserves — see `reserve_for_skinning`.
+                // Two mesh entries and two vertex regions per deformed part,
+                // twice: the shared rest-pose region and the drop preview's,
+                // which `Skins` reserves — see `reserve_for_skinning`.
+                reserve_for_skinning(&mut scene.capacities, &rig.skinned);
                 reserve_for_skinning(&mut scene.capacities, &rig.skinned);
                 shelf.rigs.insert(asset.clone(), rig);
             }

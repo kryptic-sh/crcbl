@@ -220,11 +220,14 @@ bones and the ragdoll rig fitted to it (`RagdollRig::generate`, drawn through
 `RagdollRig::bodies_at`). Left:
 
 1. Ragdoll rig authoring on it: load and save a `RagdollDesc` beside the asset
-   and edit its bodies and joints in the inspector; and a play-mode drop that
-   spawns a `Ragdoll` and poses the mesh with `Ragdoll::pose_into`. A per-entity
-   pose needs regions of its own, beyond the shared rest-pose ones: a fixed
-   number reserved for live poses when the shelf is built, since the renderer's
-   pools cannot grow.
+   and edit its bodies and joints in the inspector, so the preview drops the
+   authored rig rather than the fitted one.
+
+G drops the selected rigged mesh as its fitted ragdoll in a physics world of its
+own (`apps/editor/src/app/drop.rs`), drawn from a second, preview region per
+deformed part. It falls onto a ground plane only — the scene's blocks are not
+colliders there — steps a fixed sixtieth of a second a frame, and one entity
+drops at a time.
 
 Limits of what landed: only an asset's first skin deforms (the viewer's rule);
 no clip plays; and the drawing is checked on the null backend only — no frame

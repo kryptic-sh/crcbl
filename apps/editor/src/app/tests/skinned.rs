@@ -213,3 +213,59 @@ fn box_corners_follow_the_edge_order() {
         }
     }
 }
+
+/// **G drops the selected rigged mesh as a ragdoll, and G stops it.** The
+/// dropped entity draws from its preview region while the bodies fall; its
+/// twin of the same asset stays on the shared rest-pose region; and after G
+/// the dropped one is back on it too. Nothing in the scene changes.
+#[test]
+fn g_drops_a_selected_rigged_mesh_and_g_stops_it() {
+    let mut editor = headless(256);
+    editor.document = props();
+    editor.document.set_assets(Box::new(assets()));
+    let dropped = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(2.0, 3.0, 0.0))
+        .expect("spawned");
+    let twin = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(-2.0, 3.0, 0.0))
+        .expect("spawned");
+    editor.frame().expect("a frame");
+    let before = editor.document.files().expect("files");
+    editor.document.select(Some(dropped));
+    let shared = editor.skins.draw_of(RIG, 0).expect("a shared region");
+    let preview = editor.skins.preview_of(RIG, 0).expect("a preview region");
+    assert_ne!(shared, preview);
+
+    tap(&mut editor, KeyCode::KeyG);
+    let start = editor.dropping.as_ref().expect("dropping").heights();
+    for _ in 0..30 {
+        editor.frame().expect("a frame");
+    }
+    let fallen = editor.dropping.as_ref().expect("still dropping").heights();
+    assert!(
+        fallen.iter().zip(&start).all(|(now, then)| now < then),
+        "the bodies did not fall: {start:?} to {fallen:?}"
+    );
+    let drawn_from = |editor: &Editor<HeadlessShell>, id| match descs_of(editor, id).as_slice() {
+        [Desc::Skinned { draw, .. }] => *draw,
+        other => panic!("a rigged mesh drawn as {other:?}"),
+    };
+    assert_eq!(drawn_from(&editor, dropped), preview);
+    assert_eq!(drawn_from(&editor, twin), shared);
+    assert_ne!(
+        editor.skins.palette(preview),
+        editor.skins.palette(shared),
+        "the preview region still holds the rest pose"
+    );
+
+    tap(&mut editor, KeyCode::KeyG);
+    assert!(editor.dropping.is_none());
+    assert_eq!(drawn_from(&editor, dropped), shared);
+    assert_eq!(
+        editor.document.files().expect("files"),
+        before,
+        "the scene changed"
+    );
+}

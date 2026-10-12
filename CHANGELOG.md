@@ -869,7 +869,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   rigged mesh rebuilds nothing. What the skin conversion refuses is logged and
   the asset drawn as before. Selecting a rigged mesh draws its skeleton's bones
   and the ragdoll rig `RagdollRig::generate` fits to it, from which a rig is
-  authored.
+  authored. G drops the selected rigged mesh as that ragdoll onto the ground,
+  drawing it in the pose its bodies fall into while its asset's other entities
+  stay at rest; G again stops it, and the scene is never edited.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned
