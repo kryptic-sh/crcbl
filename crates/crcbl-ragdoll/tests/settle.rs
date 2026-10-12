@@ -187,3 +187,21 @@ fn the_cap_settles_the_longest_awake() {
         "the new one keeps falling"
     );
 }
+
+/// **A far ragdoll steps coarser, and a settled one is not woken to say
+/// so.**
+#[test]
+fn distance_lod_sets_substeps_on_an_awake_ragdoll_only() {
+    let rig = rig();
+    assert_eq!(rig.substeps(), GenerateSettings::DEFAULT.substeps);
+    let mut physics = world();
+    let ragdoll = spawn(&mut physics, &rig, 0.0, 100);
+    assert!(ragdoll.set_substeps(&mut physics, 0));
+    for &entity in ragdoll.entities() {
+        assert_eq!(physics.substeps(entity), Some(0));
+    }
+    assert!(ragdoll.force_settle(&mut physics));
+    assert!(!ragdoll.set_substeps(&mut physics, 8));
+    assert!(ragdoll.is_settled(&physics), "the LOD change woke it");
+    assert_eq!(physics.substeps(ragdoll.entities()[0]), Some(0));
+}

@@ -865,6 +865,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Ragdoll::settle_to` puts a ragdoll into one, still and asleep — a client
   taking the server's corpse. `SettleBudget::enforce` settles a ragdoll awake
   past a timeout and, past a cap, the longest-awake ones.
+  `Ragdoll::set_substeps` is the distance LOD, leaving a settled ragdoll asleep.
 
 - **`crcbl::acoustic_path::loudest_path` picks the route a sound is heard
   along** from a game's candidate `SoundPath`s: each carries the range times its

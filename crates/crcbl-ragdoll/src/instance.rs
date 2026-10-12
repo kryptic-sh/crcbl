@@ -350,6 +350,25 @@ impl Ragdoll {
         self.is_settled(physics)
     }
 
+    /// Sets the solver substeps every body asks for — the plan's distance
+    /// LOD: a ragdoll far from every camera steps coarser than one in view.
+    /// Zero is the system's own count, below which no body goes (see
+    /// [`PhysicsSystem::set_substeps`]); the rig's count is what it spawned
+    /// with.
+    ///
+    /// A settled ragdoll is left alone, since changing a body's substeps
+    /// wakes it and a sleeping one costs nothing to simulate. Returns whether
+    /// the substeps were set.
+    pub fn set_substeps(&self, physics: &mut PhysicsSystem, substeps: u32) -> bool {
+        if self.is_settled(physics) {
+            return false;
+        }
+        for &entity in &self.entities {
+            physics.set_substeps(entity, substeps);
+        }
+        true
+    }
+
     /// Every body's current transform, in rig order: the settled pose to
     /// keep or send. `None` if a body is gone.
     #[must_use]

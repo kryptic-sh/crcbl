@@ -39,8 +39,10 @@ than EW assets or an EW checkout.
     once would hang in the air, and no canned pose exists.
   - A settled-pose handoff suitable for revival, with clearance checked before
     rising and no unintended relocation of the authoritative character.
-  - The editor preview, budgets, distance LOD, forced settling and remaining
-    delivery requirements in `docs/plan/35-ragdolls.md`.
+  - The editor preview and the remaining delivery requirements in
+    `docs/plan/35-ragdolls.md`. Budgets, forced settling and a substep distance
+    LOD (`Ragdoll::set_substeps`) exist; LOD by body count or by skipping
+    straight to the server's settled pose is the game's to compose from them.
 
   Damage, item/container ownership, revival progress, interaction admission and
   authored get-up behavior remain in EW. EW must independently verify that its
