@@ -46,9 +46,11 @@
 //! change shape.
 
 mod clearance;
+mod collision_filter;
 mod ignored_contacts;
 mod joints;
 
+pub use collision_filter::CollisionFilter;
 pub use ignored_contacts::ContactPairError;
 
 use std::collections::HashMap;
@@ -119,6 +121,9 @@ pub(crate) struct BodyRecord {
     /// The substeps it asks the solver for, or 0 for the system's own: see
     /// [`PhysicsSystem::set_substeps`].
     pub(crate) substeps: u32,
+    /// Which bodies the solver lets it touch: see
+    /// [`PhysicsSystem::set_collision_filter`].
+    pub(crate) filter: CollisionFilter,
 }
 
 /// Transforms with no body: struct-of-arrays, dense, indexed alike.
@@ -1508,6 +1513,7 @@ impl PhysicsSystem {
             proxies: Vec::new(),
             island: None,
             substeps: 0,
+            filter: CollisionFilter::DEFAULT,
         });
         let index = self.statics.push(id, transform);
         self.records.get_mut(id).expect("just inserted").index = index;
@@ -1761,6 +1767,13 @@ impl SystemTrait for PhysicsSystem {
                     }
                 }
                 None => hasher.write(&[0]),
+            }
+            // Only a body given a filter writes it, so a state with none
+            // hashes as it did before filters.
+            if record.filter != CollisionFilter::DEFAULT {
+                hasher.write(&[7]);
+                hasher.write(&record.filter.category.to_le_bytes());
+                hasher.write(&record.filter.mask.to_le_bytes());
             }
         }
 

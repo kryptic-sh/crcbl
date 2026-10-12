@@ -154,14 +154,6 @@ than EW assets or an EW checkout.
   any reusable numerical helper; no missing engine query is established by this
   work.
 
-- **Collision filter for the solver (EW request, 2026-10-12, accepted).** EW
-  keeps corpse ragdoll bodies from colliding with loose item bodies by calling
-  `PhysicsSystem::ignore_contacts` for every ragdoll-body × item-body pair at
-  each spawn, O(n·m). Box2D-style category and mask bits per body, checked where
-  the broadphase already asks `keeps_apart` and the ignored pairs, would replace
-  that: a pair collides only when each body's category is in the other's mask.
-  Query layers stay a separate, query-only filter.
-
 - **EW port requests of 2026-10-12: what was not ported.** EW (pin `e3f44f4c`)
   asked for its hand-rolled engine features to move into crcbl; the accepted
   ones have shipped (see `CHANGELOG.md`) and EW deletes its copies as it

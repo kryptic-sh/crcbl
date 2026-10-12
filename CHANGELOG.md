@@ -953,6 +953,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   skeletal pose the bodies stand in; and `is_settled`, `force_settle`,
   `body_transforms` and `remove` cover rest and teardown.
 
+- **`PhysicsSystem::set_collision_filter` sorts bodies into categories the
+  solver lets touch**, as Box2D's filter does: a pair collides only when each
+  body's `CollisionFilter::category` is in the other's mask. Every body starts
+  in the first category colliding with all, so nothing changes until a filter is
+  set; a change ends the contacts it forbids at once and finds the pairs it
+  allows on the next step. Planes collide with everything, and the filter is
+  part of the state hash. Query layers remain the queries' own filter.
+
 - **`PhysicsSystem::ignore_contacts` keeps two bodies from colliding with each
   other** without a joint between them; `restore_contacts` undoes it and
   `ignores_contacts` asks. Each body still collides with everything else.

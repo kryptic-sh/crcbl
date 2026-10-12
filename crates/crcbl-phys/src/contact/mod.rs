@@ -158,6 +158,17 @@ use crate::collider::Aabb;
 use crate::material::SurfaceMaterial;
 use crate::system::{AwakeSet, BodyId, BodyRecord, BodySet, StaticSet, canonical_bits};
 
+/// Whether the collision filters of bodies `a` and `b` let them touch; a body
+/// with no record keeps the default and collides.
+fn filters_collide(records: &Pool<BodyRecord>, a: BodyId, b: BodyId) -> bool {
+    let filter = |id: BodyId| {
+        records
+            .get(id)
+            .map_or(crate::CollisionFilter::DEFAULT, |record| record.filter)
+    };
+    filter(a).collides_with(filter(b))
+}
+
 /// The contact pipeline's knobs, with the values
 /// contact-solver decision 1 and Box2D v3 settled on as
 /// defaults.
@@ -790,10 +801,12 @@ impl ContactPipeline {
                 if body(a).is_some() && body(a) == body(b) {
                     return false;
                 }
-                // Nor do two bodies a joint keeps apart, or that were told
-                // to ignore each other.
+                // Nor do two bodies a joint keeps apart, that were told to
+                // ignore each other, or whose collision filters part them.
                 if let (Some(ba), Some(bb)) = (body(a), body(b))
-                    && (joints.keeps_apart(ba, bb) || ignored.contains(ba, bb))
+                    && (joints.keeps_apart(ba, bb)
+                        || ignored.contains(ba, bb)
+                        || !filters_collide(bodies.records, ba, bb))
                 {
                     return false;
                 }
@@ -1041,6 +1054,30 @@ impl ContactPipeline {
             };
             let (p, q) = (body(&self.owners, contact.a), body(&self.owners, contact.b));
             if (p == Some(a) && q == Some(b)) || (p == Some(b) && q == Some(a)) {
+                self.ended_between_steps += u64::from(self.destroy_contact(slot));
+            }
+        }
+    }
+
+    /// Ends every contact between body `id` and a body its collision filter
+    /// no longer lets it touch, counting the touching ones as ended in the
+    /// next step's counters: what changing a filter does.
+    pub(crate) fn destroy_filtered_contacts_of(&mut self, id: BodyId, records: &Pool<BodyRecord>) {
+        let body = |owners: &[Option<Owner>], proxy: ProxyId| match owners.get(proxy as usize) {
+            Some(Some(Owner::Body(id, _))) => Some(*id),
+            _ => None,
+        };
+        for slot in 0..self.contacts.len() {
+            let Some(contact) = self.contacts[slot] else {
+                continue;
+            };
+            let (p, q) = (body(&self.owners, contact.a), body(&self.owners, contact.b));
+            let other = match (p, q) {
+                (Some(p), Some(q)) if p == id => q,
+                (Some(p), Some(q)) if q == id => p,
+                _ => continue,
+            };
+            if !filters_collide(records, id, other) {
                 self.ended_between_steps += u64::from(self.destroy_contact(slot));
             }
         }
