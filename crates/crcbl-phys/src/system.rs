@@ -612,7 +612,18 @@ impl PhysicsSystem {
         }
         let asleep = self.is_sleeping(entity);
         if asleep && let Some(pipeline) = self.contacts.as_mut() {
-            pipeline.body_restored_asleep(id);
+            // Every body the island took to sleep was put there by hand, not
+            // only this one: each finds its surroundings again on the next
+            // step, and none of those pairs may wake it.
+            let island = self.records.get(id).and_then(|record| record.island);
+            match island.map(|island| self.islands.members(island)) {
+                Some(members) if !members.is_empty() => {
+                    for &member in members {
+                        pipeline.body_restored_asleep(member);
+                    }
+                }
+                _ => pipeline.body_restored_asleep(id),
+            }
         }
         asleep
     }

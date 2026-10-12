@@ -85,6 +85,14 @@ fn sleep_time(records: &Pool<BodyRecord>, awake: &AwakeSet, id: BodyId) -> f64 {
 }
 
 impl Islands {
+    /// The bodies of `island`, or none for an island that is not there.
+    pub(crate) fn members(&self, island: IslandId) -> &[BodyId] {
+        match self.slots.get(island as usize) {
+            Some(Some(entry)) => &entry.bodies,
+            _ => &[],
+        }
+    }
+
     /// Bodies whose island sleeps.
     pub(crate) fn sleeping_bodies(&self) -> usize {
         self.sleeping_bodies

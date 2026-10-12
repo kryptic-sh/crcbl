@@ -767,6 +767,43 @@ fn a_column_restored_asleep_stays_exactly_where_it_slept() {
     assert_eq!(counters.sleeping, 3, "{counters:?}");
 }
 
+/// **Putting one body of a whole island to sleep keeps every body asleep.**
+/// A column stacked in the air steps once, which makes it one island; moved
+/// down to where it slept and put to sleep through its top box alone, all
+/// three sleep, and the bottom box is not woken by the new pair it finds with
+/// the floor on the next step.
+#[test]
+fn an_island_put_to_sleep_through_one_body_stays_asleep() {
+    /// How far above its resting place the column first stands.
+    const LIFT: DVec3 = DVec3::new(0.0, 3.0, 0.0);
+    let (_, _, saved) = saved_column(3);
+    let mut phys = system();
+    let boxes: Vec<Entity> = saved
+        .iter()
+        .enumerate()
+        .map(|(i, at)| {
+            let index = u32::try_from(i).expect("a few boxes");
+            crate_(&mut phys, index, at.position + LIFT, DVec3::splat(0.25))
+        })
+        .collect();
+    phys.step(DT);
+    for (&e, at) in boxes.iter().zip(&saved) {
+        phys.set_transform(e, *at);
+    }
+    assert!(phys.put_to_sleep(boxes[2]));
+    assert!(
+        boxes.iter().all(|&e| phys.is_sleeping(e)),
+        "the island sleeps whole"
+    );
+    for tick in 0..120 {
+        phys.step(DT);
+        assert!(
+            boxes.iter().all(|&e| phys.is_sleeping(e)),
+            "woke at tick {tick}"
+        );
+    }
+}
+
 /// **A body restored asleep wakes by the rules a sleeping body wakes by**, and
 /// a ball dropped on a restored column wakes the whole column once it lands on
 /// it: the islands it was restored as join on contact, as any others do.

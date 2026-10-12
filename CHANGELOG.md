@@ -5988,6 +5988,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`PhysicsSystem::put_to_sleep` keeps a whole island asleep.** Putting one
+  body to sleep sleeps its island, but only that body was protected from the
+  pairs found on the next step, so another member that had moved — a ragdoll
+  limb placed on the floor — woke the island at once. Every member is protected
+  now.
+
 - **No console windows flash up on Windows during builds and test runs.** A
   console program started by a process with no console of its own (cargo run
   from an IDE or an agent's shell, a test harness) was given a new console
