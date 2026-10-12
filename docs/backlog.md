@@ -141,16 +141,22 @@ than EW assets or an EW checkout.
   (`PhysicsSystem::farthest_clear_point`), cone sampling
   (`crcbl_phys::dispersion::direction_in_cone`) and stick input (`ActivePad`,
   `radial_deadzone`, `crcbl_ui::StickCursor`). Order:
-  1. **A required-`Option` serde helper and a strict-schema test helper.**
-     Caller: EW `src/inventory/item/persistence.rs::required_option`.
-  2. **Projectile flight core** in `crcbl-phys`, from EW `afe90bf3`
+  1. **Projectile flight core** in `crcbl-phys`, from EW `afe90bf3`
      `src/ballistics/flight.rs`: the integrator only (`FlightConfig`,
      `advance`/`advance_into`/`advance_one_segment`, `FlightSegment`, the
      analytic `integrate_segment`). Mass, penetration and traversal stay in EW;
      its regressions are `src/ballistics.rs`'s `mod tests`.
-  3. **Acoustic path evaluation** over `crcbl` `SoundPath` candidates with
+  2. **Acoustic path evaluation** over `crcbl` `SoundPath` candidates with
      caller-supplied range, surface and barrier tables. Caller: EW
      `src/sound.rs::evaluate_sound_paths`.
+
+  **Declined (2026-10-12): the required-`Option` serde helper and the
+  strict-schema test helper** (EW `required_option`, `assert_snapshot_schema`).
+  Serde already makes an `Option` field mandatory with
+  `#[serde(deserialize_with = "Option::deserialize")]` — checked against RON
+  0.12: `Some`/`None` read, a missing field is refused — so an engine helper
+  would only rename it. The schema assertion is a RON test helper for EW's own
+  snapshot discipline; crcbl has no strict-RON persistence that would share it.
 
   Not accepted yet, needing a home-crate decision first: AI perception
   accumulators (`src/ai_perception.rs`, `ai_hearing.rs`, `ai_target_memory.rs`),
