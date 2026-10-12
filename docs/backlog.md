@@ -839,16 +839,6 @@ deadline, and which no deadline changes. If it recurs, give the grass tests a
 smaller field on that runner (the `bucket_price` gate-scene pattern) or split
 the frame's submission so no one command buffer runs long.
 
-## Windows foreground focus unavailable locally
-
-`crcbl-shell`'s
-`win32::shell::tests::hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`
-failed in the selectable-arc workspace runs and in isolation before reaching its
-cursor assertions. `focus_and_confirm` in
-`crates/crcbl-shell/src/win32/shell/tests.rs` reported that
-`SetForegroundWindow` was refused. A desktop capable of granting focus is still
-required to validate this test; it was not skipped or weakened.
-
 ## Checks that fail without a defect (2026-10-06)
 
 Each of these has failed once and passed on a rerun with the code unchanged. A
