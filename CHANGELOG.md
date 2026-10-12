@@ -859,6 +859,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_phys::flight` steps a point mass through quadratic drag and gravity**
+  in bounded segments a caller sweeps for collisions. `Flight` (position,
+  velocity, drag per metre) has `advance`, `advance_into` and
+  `advance_one_segment`, each `FlightSegment` carrying both ends and their
+  velocities; `FlightConfig` sets gravity, the longest segment and a cap on
+  segments per call. Drag alone composes exactly across segments, and the step
+  uses the deterministic `ln_1p`, so host and client stay in step.
+
 - **`crcbl_core::logarithm::ln_1p` is `ln(1 + x)` with the same bits on every
   target**, transcribed from `fdlibm`'s `s_log1p.c` out of IEEE-exact
   operations, as `crcbl_core::trig` is for sine and cosine. It is within one

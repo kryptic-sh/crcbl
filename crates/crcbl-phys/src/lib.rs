@@ -79,6 +79,7 @@ pub mod compound;
 pub mod compound_shape;
 pub mod contact;
 pub mod dispersion;
+pub mod flight;
 pub mod forces;
 pub mod frames;
 pub mod impulse;
