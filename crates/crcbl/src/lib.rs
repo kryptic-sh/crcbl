@@ -429,6 +429,9 @@ pub mod scene_mesh;
 #[cfg(any(feature = "scene", feature = "scn"))]
 pub mod scene_physics;
 
+#[cfg(feature = "scene")]
+pub mod scene_rig;
+
 pub mod save;
 
 pub mod session;

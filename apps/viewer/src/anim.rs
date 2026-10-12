@@ -10,31 +10,20 @@
 //!                                  Palette::compute ──▶ globals ──▶ Player::draw
 //! ```
 //!
-//! # The conversion is this application's, and that is deliberate upstream
+//! # Where the conversion lives
 //!
 //! `crcbl-anim` depends on `glam` and nothing else — in particular not on
 //! `crcbl-scene`, so that a browser build which only plays cooked clips never
-//! links a glTF parser. Its module docs say the index bookkeeping between the
-//! two "belongs to whoever holds both", and this application is the first thing
-//! in the tree that does.
+//! links a glTF parser. The skin half of the bookkeeping between the two is
+//! [`crcbl::scene_rig`], shared with the editor; the clip half is here.
 //!
-//! # The two indices that are not the same index
-//!
-//! Both mistakes compile, draw something, and are wrong.
-//!
-//! * **A joint's palette index is its position in the skin's `joints` array**,
-//!   and that number is not this code's to choose: a skinned vertex's
-//!   `JOINTS_0` attribute indexes that same array, and the skin's
-//!   `inverseBindMatrices` are in that same order. So `skeleton_of` below walks
-//!   `skin.joints()` in order and renumbers nothing.
-//! * **A channel's target is a *node* index**, because a glTF animation drives
-//!   nodes rather than joints, and it has to be mapped through the skin's joint
-//!   list before it can name a [`Channel`]'s joint — see `joint_of` below.
-//!   Handing
-//!   the node index straight to [`Channel::new`] builds a clip whose channels
-//!   name joints that mostly do not exist, which
-//!   [`Clip::sample_into`](crcbl::anim::Clip::sample_into) then skips in
-//!   silence: the skeleton simply never moves.
+//! **A channel's target is a *node* index**, because a glTF animation drives
+//! nodes rather than joints, and it has to be mapped through the skin's joint
+//! list ([`crcbl::scene_rig::joint_of`]) before it can name a [`Channel`]'s
+//! joint. Handing the node index straight to [`Channel::new`] builds a clip
+//! whose channels name joints that mostly do not exist, which
+//! [`Clip::sample_into`](crcbl::anim::Clip::sample_into) then skips in silence:
+//! the skeleton simply never moves.
 //!
 //! # What is dropped without comment, and what is reported
 //!
@@ -63,13 +52,12 @@
 //! picture with nothing on screen to say so — where the [`Skip`] is a sentence
 //! naming the file, the skin and the joint that broke the order.
 
-use crcbl::anim::{
-    Channel, Clip, Interpolation, Joint, Palette, Pose, Skeleton, SkeletonError, Track, Trs,
-};
+use crcbl::anim::{Channel, Clip, Interpolation, Palette, Pose, Skeleton, Track};
 use crcbl::math::{Mat4, Quat, Vec2, Vec3};
 use crcbl::render::Camera;
 use crcbl::scene::gltf_render::Skip;
-use crcbl::scene::{GltfClip, GltfInterpolation, GltfNode, GltfSamples, GltfScene, GltfSkin};
+use crcbl::scene::{GltfClip, GltfInterpolation, GltfSamples, GltfScene};
+use crcbl::scene_rig::{joint_of, skeleton_of};
 use crcbl::ui::draw_list::DrawList;
 
 /// How long a joint's axis ticks are drawn, as a fraction of the document's
@@ -226,78 +214,6 @@ pub fn playable_of(scene: &GltfScene) -> (Option<Playable>, Vec<Skip>) {
         None => Clip::new(Vec::new()),
     };
     (Some(Playable { skeleton, clip }), skips)
-}
-
-/// Builds the skeleton a skin describes, in the skin's own joint order.
-///
-/// The hierarchy is not in the skin — a joint is a node like any other, so
-/// where it sits is [`GltfNode::local_transform`] and what hangs off it is
-/// [`GltfNode::children`] — which is why this takes the node array as well.
-///
-/// A joint whose parent node is not itself a joint of *this* skin is a root
-/// here, which is what [`Joint::parent`]'s docs describe: glTF's joints share a
-/// common root node and that node need not be a joint.
-///
-/// # Errors
-///
-/// Whatever [`Skeleton::new`] refused the joints with — see the [module
-/// docs](self) for why the refusal is reported rather than repaired.
-fn skeleton_of(skin: &GltfSkin, nodes: &[GltfNode]) -> Result<Skeleton, SkeletonError> {
-    let joints = skin.joints();
-    let parents = parents_of(nodes);
-    let built = joints
-        .iter()
-        .enumerate()
-        .map(|(index, &node)| Joint {
-            parent: parents[node].and_then(|parent| joint_of(joints, parent)),
-            // Exactly as long as `joints` by the importer's own contract; the
-            // identity fallback is the specification's meaning for a skin that
-            // declares no matrices at all, so it is also the only answer that
-            // is not an invention if the two arrays ever disagreed.
-            inverse_bind: skin
-                .inverse_binds()
-                .get(index)
-                .copied()
-                .unwrap_or(Mat4::IDENTITY),
-            // The *rest* pose, which is the joint node's own transform with no
-            // channel driving it — not the bind pose, which is the inverse
-            // matrix above. A joint no channel touches keeps this, and so does
-            // the translation of a joint only a rotation channel drives.
-            rest: Trs::from_mat4(nodes[node].local_transform()),
-        })
-        .collect();
-    Skeleton::new(built)
-}
-
-/// Which node is each node's parent, or `None` for a node nothing declares as a
-/// child.
-///
-/// Built by walking the children lists, because that is the only direction glTF
-/// stores the tree in. Every index is valid: `crcbl-scene`'s `gltf_check`
-/// refuses a document whose node names a child that does not exist, before
-/// [`import_gltf`](crcbl::scene::import_gltf) builds anything.
-///
-/// `pub(crate)` because [`crate::model`] wants the same walk: it composes a
-/// node's world transform by climbing this, and a second copy of the loop is
-/// where the two would come to disagree about what a root is.
-pub(crate) fn parents_of(nodes: &[GltfNode]) -> Vec<Option<usize>> {
-    let mut parents = vec![None; nodes.len()];
-    for (index, node) in nodes.iter().enumerate() {
-        for &child in node.children() {
-            parents[child] = Some(index);
-        }
-    }
-    parents
-}
-
-/// Which palette index of this skin `node` is, or `None` for a node the skin
-/// has not got.
-///
-/// A scan rather than a map: a skin's joint list is tens of entries, this is
-/// asked once per joint and once per channel at load, and a `HashMap` built for
-/// it would cost more to fill than the scans it saves.
-fn joint_of(joints: &[usize], node: usize) -> Option<usize> {
-    joints.iter().position(|&joint| joint == node)
 }
 
 /// Converts one animation onto a skin's joint order, appending a [`Skip`] for

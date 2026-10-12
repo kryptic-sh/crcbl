@@ -456,7 +456,7 @@ fn skinned_of(scene: &GltfScene, render: &RenderScene, skips: &mut Vec<Skip>) ->
     let Some(skin) = scene.skins().first() else {
         return Skinned::default();
     };
-    let parents = crate::anim::parents_of(scene.nodes());
+    let parents = crcbl::scene_rig::parents_of(scene.nodes());
     let Some(to_world) = skeleton_to_world(scene, &parents, skin.joints(), skips) else {
         return Skinned::default();
     };

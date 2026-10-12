@@ -859,6 +859,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
+  the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned
+  vertices keep their indices, `parents_of` and `joint_of`. Moved out of
+  `apps/viewer` for the editor to share.
+
 - **Ragdolls settle on the wire and within a budget.** `SettledPose` is a
   ragdoll's body transforms in the quantized replication form, with `encode` and
   a `decode` that refuses malformed bytes; `Ragdoll::settled_pose` reads one and
