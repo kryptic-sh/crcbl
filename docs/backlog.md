@@ -130,22 +130,10 @@ than EW assets or an EW checkout.
   any reusable numerical helper; no missing engine query is established by this
   work.
 
-- **EW port requests of 2026-10-12, accepted in this order.** EW (pin
-  `e3f44f4c`) asked for its hand-rolled engine features to move into crcbl,
-  deleting EW's copy as each lands. Each names a working EW caller and EW
-  regression tests; the engine regression is written with the port. The first
-  requests shipped: no console windows during Windows builds and tests
-  (`crcbl-spawn`), map-free binding text conversion (`ActionOverride::from_text`
-  / `texts`), public pad backends with a device selection
-  (`crcbl::engine::pads::for_run`, `PadSelection`), a camera clearance sweep
-  (`PhysicsSystem::farthest_clear_point`), cone sampling
-  (`crcbl_phys::dispersion::direction_in_cone`), stick input (`ActivePad`,
-  `radial_deadzone`, `crcbl_ui::StickCursor`) and the projectile flight core
-  (`crcbl_phys::flight`, on the new deterministic
-  `crcbl_core::logarithm::ln_1p`). Order:
-  1. **Acoustic path evaluation** over `crcbl` `SoundPath` candidates with
-     caller-supplied range, surface and barrier tables. Caller: EW
-     `src/sound.rs::evaluate_sound_paths`.
+- **EW port requests of 2026-10-12: what was not ported.** EW (pin `e3f44f4c`)
+  asked for its hand-rolled engine features to move into crcbl; the accepted
+  ones have shipped (see `CHANGELOG.md`) and EW deletes its copies as it
+  migrates.
 
   **Declined (2026-10-12): the required-`Option` serde helper and the
   strict-schema test helper** (EW `required_option`, `assert_snapshot_schema`).

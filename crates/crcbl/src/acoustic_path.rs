@@ -54,8 +54,9 @@
 //! crossing, so the one bound it asks for is `M: Clone`; every other type here
 //! carries `M` without asking anything of it.
 //!
-//! Transmission losses per material, sound kinds and who hears what stay with
-//! the game. This module answers only the geometric question.
+//! Sound kinds, ranges and per-material transmission stay with the game.
+//! This module answers the geometric question, and [`loudest_path`] then picks
+//! the route heard from the candidates with the game's numbers.
 //!
 //! # Obstruction, not loudness — and the distance counted once
 //!
@@ -99,6 +100,10 @@
 
 use crcbl_phys::Aabb;
 use glam::DVec3;
+
+mod audibility;
+
+pub use audibility::{AudibilityError, AudiblePath, loudest_path};
 
 /// [`AcousticPathConfig::default`]'s obstacle cap.
 pub const DEFAULT_MAXIMUM_OBSTACLES: usize = 64;

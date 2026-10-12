@@ -859,6 +859,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::acoustic_path::loudest_path` picks the route a sound is heard
+  along** from a game's candidate `SoundPath`s: each carries the range times its
+  barriers' transmission, arrives with linear falloff over it, and the loudest
+  wins, never summed with the others, ties keeping the caller's order. Gain,
+  range and per-material transmission are the caller's; `AudibilityError`
+  refuses values out of range before anything is chosen.
+
 - **`crcbl_phys::flight` steps a point mass through quadratic drag and gravity**
   in bounded segments a caller sweeps for collisions. `Flight` (position,
   velocity, drag per metre) has `advance`, `advance_into` and
