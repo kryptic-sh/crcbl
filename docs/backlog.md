@@ -216,13 +216,15 @@ Slices, scoped on 2026-10-12 after `apps/viewer`: a rigged asset already draws
 through the skinning pass at its rest pose (`apps/editor/src/app/skins.rs`, one
 posed region per deformed part shared by every entity of the asset), with the
 skin conversion shared as `crcbl::scene_rig`. Selecting a rigged mesh draws its
-bones. Left:
+bones and the ragdoll rig fitted to it (`RagdollRig::generate`, drawn through
+`RagdollRig::bodies_at`). Left:
 
-1. Ragdoll rig authoring on it: generate or load a `RagdollDesc`, draw its
-   bodies, and a play-mode drop that spawns a `Ragdoll` and poses the mesh with
-   `Ragdoll::pose_into`. A per-entity pose needs regions of its own, beyond the
-   shared rest-pose ones: a fixed number reserved for live poses when the shelf
-   is built, since the renderer's pools cannot grow.
+1. Ragdoll rig authoring on it: load and save a `RagdollDesc` beside the asset
+   and edit its bodies and joints in the inspector; and a play-mode drop that
+   spawns a `Ragdoll` and poses the mesh with `Ragdoll::pose_into`. A per-entity
+   pose needs regions of its own, beyond the shared rest-pose ones: a fixed
+   number reserved for live poses when the shelf is built, since the renderer's
+   pools cannot grow.
 
 Limits of what landed: only an asset's first skin deforms (the viewer's rule);
 no clip plays; and the drawing is checked on the null backend only — no frame

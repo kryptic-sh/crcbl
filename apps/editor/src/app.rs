@@ -1342,6 +1342,9 @@ impl<S: Shell + ?Sized> Editor<S> {
         for (from, to) in selected_bones(&mut self.document, &self.shelf) {
             self.renderer.debug_draw().line(from, to, BONE_COLOR);
         }
+        for (shape, at) in selected_ragdoll_bodies(&mut self.document, &self.shelf) {
+            draw_body(self.renderer.debug_draw(), shape, &at);
+        }
 
         // The scene is drawn at the pane's extent — as the panels last laid it
         // out, which is the rectangle this frame's draw list samples it into.
@@ -1636,6 +1639,10 @@ const PICKED_COLOR: [f32; 4] = [0.45, 0.95, 0.55, 1.0];
 /// overlay uses and the greybox grey never resembles.
 const BONE_COLOR: [f32; 4] = [0.95, 0.35, 0.85, 1.0];
 
+/// The colour a selected rig's ragdoll bodies are drawn in: a dimmer violet
+/// than the bones, so the skeleton reads through the bodies around it.
+const RAGDOLL_COLOR: [f32; 4] = [0.6, 0.45, 0.95, 1.0];
+
 /// The mode this tool asks for. It never asks for anything else.
 pub const DISPLAY_MODE: DisplayMode = DisplayMode::Windowed;
 
@@ -1798,6 +1805,76 @@ fn selected_bones(document: &mut Document, shelf: &Shelf) -> Vec<(Vec3, Vec3)> {
         }
     }
     bones
+}
+
+/// The fitted ragdoll bodies of every selected mesh whose asset is rigged, at
+/// rest, where the mesh stands.
+fn selected_ragdoll_bodies(
+    document: &mut Document,
+    shelf: &Shelf,
+) -> Vec<(crcbl::ragdoll::BodyShape, crcbl::phys::Transform)> {
+    let mut bodies = Vec::new();
+    for id in document.selection().to_vec() {
+        if let Some(mesh) = document.mesh(id)
+            && let Some(rig) = shelf.rig(&mesh.asset)
+        {
+            bodies.extend(rig.ragdoll_bodies(instances::origin_of(mesh)));
+        }
+    }
+    bodies
+}
+
+/// A box body's eight corners in [`crcbl::render::frustum_corners`]' order,
+/// which [`crcbl::render::DebugDraw::box_edges`] joins: bit 0 of the index is
+/// the body's x, bit 1 its y, bit 2 its z.
+#[allow(clippy::cast_possible_truncation)]
+fn box_corners(half_extents: crcbl::math::DVec3, at: &crcbl::phys::Transform) -> [Vec3; 8] {
+    let sign = |bit: bool| if bit { 1.0 } else { -1.0 };
+    std::array::from_fn(|corner: usize| {
+        let along = crcbl::math::DVec3::new(
+            sign(corner & 1 != 0),
+            sign(corner & 2 != 0),
+            sign(corner & 4 != 0),
+        );
+        (at.position + at.rotation * (half_extents * along)).as_vec3()
+    })
+}
+
+/// One ragdoll body as debug lines: a capsule's core with a sphere at each end,
+/// a sphere, or a box's edges, each turned as the body is.
+#[allow(clippy::cast_possible_truncation)]
+fn draw_body(
+    draw: &mut crcbl::render::DebugDraw,
+    shape: crcbl::ragdoll::BodyShape,
+    at: &crcbl::phys::Transform,
+) {
+    use crcbl::ragdoll::BodyShape;
+    let place = |local: crcbl::math::DVec3| (at.position + at.rotation * local).as_vec3();
+    match shape {
+        BodyShape::Capsule {
+            radius,
+            half_height,
+        } => {
+            let (top, bottom) = (
+                place(crcbl::math::DVec3::Y * half_height),
+                place(crcbl::math::DVec3::Y * -half_height),
+            );
+            draw.line(bottom, top, RAGDOLL_COLOR);
+            draw.sphere(top, radius as f32, RAGDOLL_COLOR);
+            draw.sphere(bottom, radius as f32, RAGDOLL_COLOR);
+        }
+        BodyShape::Sphere { radius } => {
+            draw.sphere(
+                place(crcbl::math::DVec3::ZERO),
+                radius as f32,
+                RAGDOLL_COLOR,
+            );
+        }
+        BodyShape::Box { half_extents } => {
+            let eight = box_corners(half_extents, at);
+            draw.box_edges(&eight, RAGDOLL_COLOR);
+        }
+    }
 }
 
 fn selection_boxes(document: &mut Document) -> Vec<([Vec3; 8], [f32; 4])> {

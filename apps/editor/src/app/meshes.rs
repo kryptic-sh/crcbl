@@ -39,6 +39,7 @@ use crcbl::anim::{Palette, Pose, Skeleton};
 use crcbl::assets::AssetSource;
 use crcbl::greybox::scene3d;
 use crcbl::math::{Mat4, Vec3};
+use crcbl::ragdoll::{BodyShape, GenerateSettings, RagdollRig};
 use crcbl::render::scene::SceneDesc;
 use crcbl::scene::{build_render_scene, import_gltf};
 use crcbl::scene_rig::{Skinned, reserve_for_skinning, skeleton_of, skinned_of};
@@ -67,6 +68,10 @@ pub(super) struct Rig {
     ///
     /// [`SkinnedInstance::instance`]: crcbl::scene_rig::SkinnedInstance::instance
     pub(super) skinned: Skinned,
+    /// The ragdoll rig fitted to the skeleton
+    /// ([`RagdollRig::generate`]), or [`None`] where it could not be: the
+    /// starting point a rig is authored from.
+    pub(super) ragdoll: Option<RagdollRig>,
 }
 
 impl Rig {
@@ -87,6 +92,29 @@ impl Rig {
             .iter()
             .enumerate()
             .filter_map(|(joint, bone)| bone.parent.map(|parent| (at(parent), at(joint))))
+            .collect()
+    }
+
+    /// Each body of the fitted ragdoll rig, its shape and where it stands at
+    /// rest, in the world of an entity whose mesh puts the asset's origin at
+    /// `origin`. Empty without a rig or a place to hang it.
+    pub(super) fn ragdoll_bodies(&self, origin: Mat4) -> Vec<(BodyShape, crcbl::phys::Transform)> {
+        let (Some(ragdoll), Some(hangs)) = (
+            self.ragdoll.as_ref(),
+            self.skinned.instances.first().map(|part| part.transform),
+        ) else {
+            return Vec::new();
+        };
+        let Some(worlds) =
+            ragdoll.bodies_at(&self.skeleton, &Pose::new(&self.skeleton), origin * hangs)
+        else {
+            return Vec::new();
+        };
+        ragdoll
+            .bodies()
+            .iter()
+            .zip(worlds)
+            .map(|(body, world)| (body.shape, world))
             .collect()
     }
 }
@@ -191,7 +219,26 @@ fn rig_of(
         );
     }
     match skeleton_of(skin, imported.nodes()) {
-        Ok(skeleton) => Some(Rig { skeleton, skinned }),
+        Ok(skeleton) => {
+            // Fitted at the scale the skeleton hangs at in its asset, which is
+            // the scale every entity of the asset draws it at.
+            let hangs = skinned
+                .instances
+                .first()
+                .map_or(Mat4::IDENTITY, |part| part.transform);
+            let ragdoll = match RagdollRig::generate(&skeleton, hangs, &GenerateSettings::DEFAULT) {
+                Ok(ragdoll) => Some(ragdoll),
+                Err(error) => {
+                    crcbl::log::warn!("editor: `{asset}` fits no ragdoll rig: {error}");
+                    None
+                }
+            };
+            Some(Rig {
+                skeleton,
+                skinned,
+                ragdoll,
+            })
+        }
         Err(error) => {
             crcbl::log::warn!("editor: `{asset}` keeps no rig: {error}");
             None

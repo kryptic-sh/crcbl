@@ -147,3 +147,69 @@ fn a_selected_rigged_mesh_shows_its_bones() {
         "a unit long, upwards"
     );
 }
+
+/// **Selecting a rigged mesh shows the ragdoll rig fitted to it**: the
+/// fixture's one bone carries a capsule along it and its tip a sphere, both
+/// standing where the mesh does.
+#[test]
+fn a_selected_rigged_mesh_shows_its_fitted_ragdoll() {
+    let mut editor = headless(64);
+    editor.document = props();
+    editor.document.set_assets(Box::new(assets()));
+    let rig = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(2.0, 0.0, 0.0))
+        .expect("spawned");
+    editor.frame().expect("a frame");
+    editor.document.select(Some(rig));
+    let bodies = selected_ragdoll_bodies(&mut editor.document, &editor.shelf);
+    let [(capsule, along), (sphere, tip)] = bodies.as_slice() else {
+        panic!("a capsule and a sphere: {bodies:?}");
+    };
+    assert!(matches!(capsule, crcbl::ragdoll::BodyShape::Capsule { .. }));
+    assert!(matches!(sphere, crcbl::ragdoll::BodyShape::Sphere { .. }));
+    // Where the mesh stands is where its bone does: the capsule is centred
+    // on the bone, and the sphere sits past its tip.
+    let [(root, tip_joint)] = selected_bones(&mut editor.document, &editor.shelf)[..] else {
+        panic!("one bone");
+    };
+    let middle = ((root + tip_joint) * 0.5).as_dvec3();
+    assert!(
+        along.position.distance(middle) < 1e-5,
+        "{along:?} vs {middle}"
+    );
+    assert!(
+        tip.position.y > 1.0,
+        "the sphere sits past the tip: {tip:?}"
+    );
+    editor.document.select(None);
+    assert!(selected_ragdoll_bodies(&mut editor.document, &editor.shelf).is_empty());
+}
+
+/// **A box body's corners are in the order `box_edges` joins**: corners whose
+/// indices differ in one bit differ along exactly one of the box's own axes,
+/// however the box is turned.
+#[test]
+fn box_corners_follow_the_edge_order() {
+    let half = DVec3::new(0.5, 1.0, 2.0);
+    let at = crcbl::phys::Transform::new(
+        DVec3::new(1.0, 2.0, 3.0),
+        crcbl::math::DQuat::from_rotation_y(0.7) * crcbl::math::DQuat::from_rotation_x(0.3),
+    );
+    let corners = box_corners(half, &at);
+    for i in 0..8_usize {
+        for bit in [1_usize, 2, 4] {
+            let j = i ^ bit;
+            let length = corners[i].distance(corners[j]);
+            let want = match bit {
+                1 => 2.0 * half.x,
+                2 => 2.0 * half.y,
+                _ => 2.0 * half.z,
+            };
+            assert!(
+                (f64::from(length) - want).abs() < 1e-5,
+                "corners {i} and {j}: {length} vs {want}"
+            );
+        }
+    }
+}
