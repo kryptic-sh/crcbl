@@ -5,6 +5,8 @@ use std::path::Path;
 
 use super::*;
 
+use super::scene_inspector::scrolled_to;
+
 use crcbl::assets::MemorySource;
 use crcbl::math::DVec3;
 use crcbl_scene::gltf_fixture::{
@@ -270,12 +272,9 @@ fn g_drops_a_selected_rigged_mesh_and_g_stops_it() {
     );
 }
 
-/// **Shift+G writes the fitted rig beside the asset as a file to author
-/// from, and never overwrites one.** The file reads back as a rig for the
-/// asset and the shelf takes it up as the authored rig; a second press finds
-/// the file there and leaves it — even one a person has since edited.
-#[test]
-fn shift_g_writes_the_rig_once() {
+/// An editor whose assets are a directory holding the rig, with the rig
+/// spawned, drawn once and selected.
+fn rig_on_disk() -> (tempfile::TempDir, Editor<HeadlessShell>) {
     let dir = tempfile::tempdir().expect("a temporary directory");
     std::fs::create_dir_all(dir.path().join("props")).expect("a props folder");
     std::fs::write(
@@ -297,6 +296,16 @@ fn shift_g_writes_the_rig_once() {
         .expect("spawned");
     editor.frame().expect("a frame");
     editor.document.select(Some(rig));
+    (dir, editor)
+}
+
+/// **Shift+G writes the fitted rig beside the asset as a file to author
+/// from, and never overwrites one.** The file reads back as a rig for the
+/// asset and the shelf takes it up as the authored rig; a second press finds
+/// the file there and leaves it — even one a person has since edited.
+#[test]
+fn shift_g_writes_the_rig_once() {
+    let (dir, mut editor) = rig_on_disk();
 
     editor.act(&Action::WriteRig);
     let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
@@ -325,4 +334,240 @@ fn shift_g_writes_the_rig_once() {
         "an authored rig was overwritten"
     );
     assert!(editor.panels.status().0.contains("already authored"));
+}
+
+/// The node under `at` holding the span that reads `text`, searched depth
+/// first: a scalar row for its label, a group's header for its title.
+fn holder_of(ui: &crcbl::ui::tree::Ui, at: NodeKey, text: &str) -> Option<NodeKey> {
+    let children = ui.child_keys(at);
+    if children.iter().any(|&child| ui.text(child) == Some(text)) {
+        return Some(at);
+    }
+    children
+        .into_iter()
+        .find_map(|child| holder_of(ui, child, text))
+}
+
+/// The widget of the row labelled `label` under `rows`: a scalar row is its
+/// label span and then its widget.
+fn widget_labelled(editor: &Editor<HeadlessShell>, rows: NodeKey, label: &str) -> NodeKey {
+    let ui = editor.panels.ui();
+    let row = holder_of(ui, rows, label).unwrap_or_else(|| panic!("no row labelled {label:?}"));
+    ui.child_keys(row)[1]
+}
+
+/// The selected rig's first body's mass, as the inspector's rows edit it and
+/// as the rig drawn and dropped holds it.
+fn first_mass(editor: &Editor<HeadlessShell>) -> (f64, f64) {
+    let rig = editor.shelf.rig(RIG).expect("the rig");
+    let edited = rig.desc.as_ref().expect("a rig file").bodies[0].mass;
+    let drawn = rig.ragdoll.as_ref().expect("a rig").bodies()[0].mass;
+    (edited, drawn)
+}
+
+/// **Dragging a body's mass in the inspector changes the rig at once and
+/// writes its file when the button lets go.** While the button is held the
+/// rig drawn and dropped already has the new mass and no file is written;
+/// the release writes `<asset>.ragdoll.ron` once, holding it.
+#[test]
+fn dragging_a_rig_row_changes_the_rig_and_writes_it_on_release() {
+    let (dir, mut editor) = rig_on_disk();
+    editor.frame().expect("the inspector draws the rig");
+    let (before, drawn) = first_mass(&editor);
+    assert_eq!(drawn, before);
+    let rows = editor
+        .panels
+        .rig_body_fields(0)
+        .expect("the inspector drew the rig's bodies");
+    let at = centre(&editor, widget_labelled(&editor, rows, "Mass (kg)"));
+    let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+
+    let window = editor.window;
+    let shell = editor.shell_mut();
+    shell.move_pointer(window, at, (0.0, 0.0)).expect("live");
+    shell
+        .button(window, PointerButton::Left, ButtonState::Pressed, Some(at))
+        .expect("live");
+    editor.frame().expect("a frame");
+    for step in 1..=4 {
+        let to = PhysicalPoint {
+            x: at.x + 10.0 * f64::from(step),
+            y: at.y,
+        };
+        editor
+            .shell_mut()
+            .move_pointer(window, to, (10.0, 0.0))
+            .expect("live");
+        editor.frame().expect("a frame");
+    }
+    let (held, drawn) = first_mass(&editor);
+    assert!(
+        held > before,
+        "the drag moved no mass: {held} from {before}"
+    );
+    assert_eq!(drawn, held, "the rig drawn is not the rig edited");
+    assert!(!path.exists(), "the file was written before the release");
+
+    let end = PhysicalPoint {
+        x: at.x + 40.0,
+        y: at.y,
+    };
+    editor
+        .shell_mut()
+        .button(
+            window,
+            PointerButton::Left,
+            ButtonState::Released,
+            Some(end),
+        )
+        .expect("live");
+    editor.frame().expect("a frame");
+    let written = std::fs::read_to_string(&path).expect("the release wrote the rig");
+    let file = crcbl::ragdoll::RagdollDesc::from_ron(&written).expect("a rig file");
+    assert_eq!(file.bodies[0].mass, held);
+    assert!(
+        editor.panels.status().0.starts_with("Wrote"),
+        "{:?}",
+        editor.panels.status()
+    );
+}
+
+/// Drags the widget at `at` across by each of `moves` in pixels, a frame
+/// each, and lets go.
+fn drag_through(editor: &mut Editor<HeadlessShell>, at: PhysicalPoint, moves: &[f64]) {
+    let window = editor.window;
+    let shell = editor.shell_mut();
+    shell.move_pointer(window, at, (0.0, 0.0)).expect("live");
+    shell
+        .button(window, PointerButton::Left, ButtonState::Pressed, Some(at))
+        .expect("live");
+    editor.frame().expect("a frame");
+    let mut to = at;
+    for &by in moves {
+        to.x += by;
+        editor
+            .shell_mut()
+            .move_pointer(window, to, (by, 0.0))
+            .expect("live");
+        editor.frame().expect("a frame");
+    }
+    editor
+        .shell_mut()
+        .button(window, PointerButton::Left, ButtonState::Released, Some(to))
+        .expect("live");
+    editor.frame().expect("a frame");
+}
+
+/// **A joint's limit dragged past the other is refused, by name, and
+/// nothing is written**: the status line says why, the rig drawn and dropped
+/// keeps the last limits it could take, and no file appears — not even the
+/// step it took before — since a rig file always resolves.
+#[test]
+fn a_limit_dragged_past_the_other_is_refused_and_not_written() {
+    let (dir, mut editor) = rig_on_disk();
+    editor.frame().expect("the inspector draws the rig");
+    let rig = editor.shelf.rig(RIG).expect("the rig");
+    let joints = rig.ragdoll.as_ref().expect("a rig").joints().to_vec();
+    let (group, label) = match rig.desc.as_ref().expect("a rig file").joints[0].kind {
+        crcbl::ragdoll::JointKindDesc::Ball { .. } => ("Kind: Ball", "Least twist (°)"),
+        crcbl::ragdoll::JointKindDesc::Hinge { .. } => ("Kind: Hinge", "Least angle (°)"),
+        crcbl::ragdoll::JointKindDesc::Fixed => panic!("the fitted joint has limits"),
+    };
+    let joint = |editor: &Editor<HeadlessShell>| {
+        editor
+            .panels
+            .rig_joint_fields(0)
+            .expect("the inspector drew the rig's joints")
+    };
+    // The wheel scrolls the pane under the pointer.
+    let pane = editor.panels.props_key().expect("the inspector was built");
+    let over = centre(&editor, pane);
+    let window = editor.window;
+    editor
+        .shell_mut()
+        .move_pointer(window, over, (0.0, 0.0))
+        .expect("live");
+    editor.frame().expect("a frame");
+    let at = scrolled_to(&mut editor, |editor| {
+        holder_of(editor.panels.ui(), joint(editor), group).expect("the kind's group")
+    });
+    click(&mut editor, at);
+    let at = scrolled_to(&mut editor, |editor| {
+        widget_labelled(editor, joint(editor), label)
+    });
+
+    // A step the rig can take, then one past the other limit: the change it
+    // took is not written under the one it refused.
+    drag_through(&mut editor, at, &[12.0, 720.0]);
+    let status = editor.panels.status();
+    assert!(status.0.contains("cannot take that"), "{status:?}");
+    let rig = editor.shelf.rig(RIG).expect("the rig");
+    assert_ne!(
+        rig.ragdoll.as_ref().expect("a rig").joints(),
+        joints,
+        "the first step was taken"
+    );
+    let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+    assert!(!path.exists(), "a rig that does not resolve was written");
+}
+
+/// **A body's shape picked from its drop-down keeps the body's size**: the
+/// fitted capsule turned into a sphere has the capsule's radius, the rig drawn
+/// and dropped is the sphere, and the file is written with it.
+#[test]
+fn a_shape_picked_from_the_drop_down_keeps_its_size() {
+    let (dir, mut editor) = rig_on_disk();
+    editor.frame().expect("the inspector draws the rig");
+    let crcbl::ragdoll::ShapeDesc::Capsule { radius, .. } = editor
+        .shelf
+        .rig(RIG)
+        .expect("the rig")
+        .desc
+        .as_ref()
+        .expect("a rig file")
+        .bodies[0]
+        .shape
+    else {
+        panic!("the fitted body is a capsule");
+    };
+    let body = |editor: &Editor<HeadlessShell>| {
+        editor
+            .panels
+            .rig_body_fields(0)
+            .expect("the inspector drew the rig's bodies")
+    };
+    let pick = |editor: &mut Editor<HeadlessShell>,
+                find: &dyn Fn(&Editor<HeadlessShell>) -> NodeKey| {
+        let at = centre(editor, find(editor));
+        click(editor, at);
+    };
+    pick(&mut editor, &|editor| {
+        holder_of(editor.panels.ui(), body(editor), "Shape: Capsule").expect("the shape's group")
+    });
+    let select = holder_of(editor.panels.ui(), body(&editor), "Capsule").expect("its drop-down");
+    pick(&mut editor, &|_| select);
+    pick(&mut editor, &|editor| {
+        holder_of(
+            editor.panels.ui(),
+            crcbl::ui::tree::Ui::popup_key(select),
+            "Sphere",
+        )
+        .expect("the drop-down lists the sphere")
+    });
+
+    let rig = editor.shelf.rig(RIG).expect("the rig");
+    let sphere = crcbl::ragdoll::ShapeDesc::Sphere { radius };
+    assert_eq!(
+        rig.desc.as_ref().expect("a rig file").bodies[0].shape,
+        sphere
+    );
+    assert_eq!(
+        rig.ragdoll.as_ref().expect("a rig").bodies()[0].shape,
+        crcbl::ragdoll::BodyShape::Sphere { radius },
+        "the rig drawn is not the sphere"
+    );
+    let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+    let written = std::fs::read_to_string(&path).expect("the pick wrote the rig");
+    let file = crcbl::ragdoll::RagdollDesc::from_ron(&written).expect("a rig file");
+    assert_eq!(file.bodies[0].shape, sphere);
 }

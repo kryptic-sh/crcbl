@@ -20,7 +20,8 @@
 //! ([`crcbl::scene_rig::skeleton_of`]) and the parts the skin deforms with
 //! their joint bindings ([`crcbl::scene_rig::skinned_of`]), its ragdoll rig —
 //! authored beside the asset as `<asset>.ragdoll.ron` ([`RAGDOLL_SUFFIX`]) or
-//! else fitted to the skeleton — and the scene
+//! else fitted to the skeleton, with the file it is resolved from, which the
+//! inspector edits ([`Rig::resolve`]) — and the scene
 //! reserves the room `super::skins` poses them in. What the skin conversion
 //! refuses is logged, and the asset is drawn as it always was.
 //!
@@ -83,9 +84,30 @@ pub(super) struct Rig {
     /// the skeleton ([`RagdollRig::generate`]), or [`None`] where neither
     /// could be had.
     pub(super) ragdoll: Option<RagdollRig>,
+    /// [`ragdoll`](Self::ragdoll) as its file spells it — the authored file,
+    /// or the fitted rig named by [`names`](Self::names) — which the
+    /// inspector edits and the rig is resolved from again. [`None`] without a
+    /// rig, or for a fitted one on a bone whose name another shares.
+    pub(super) desc: Option<RagdollDesc>,
 }
 
 impl Rig {
+    /// Resolves [`desc`](Self::desc) against the skeleton again, after an
+    /// edit, and makes it the rig drawn and dropped. A rig the file no longer
+    /// resolves to leaves the last one in place and says why.
+    pub(super) fn resolve(&mut self) -> Result<(), String> {
+        let desc = self
+            .desc
+            .as_ref()
+            .ok_or("this rig has no file to resolve")?;
+        let names: Vec<&str> = self.names.iter().map(String::as_str).collect();
+        let ragdoll = desc
+            .resolve(&self.skeleton, &names, hangs_of(&self.skinned))
+            .map_err(|error| error.to_string())?;
+        self.ragdoll = Some(ragdoll);
+        Ok(())
+    }
+
     /// Each bone of the skeleton at rest, joint to parent joint, in the world
     /// of an entity whose mesh puts the asset's origin at `origin`. Empty for
     /// a rig whose skin deforms no part, which has nowhere to hang.
@@ -157,6 +179,11 @@ impl Shelf {
     /// `asset`'s rig, or [`None`] for one with no skin, or not on the shelf.
     pub(super) fn rig(&self, asset: &str) -> Option<&Rig> {
         self.rigs.get(asset)
+    }
+
+    /// [`rig`](Self::rig), to edit.
+    pub(super) fn rig_mut(&mut self, asset: &str) -> Option<&mut Rig> {
+        self.rigs.get_mut(asset)
     }
 
     /// The scene a renderer holding the greybox pack and every asset in
@@ -234,30 +261,23 @@ fn rig_of(
     }
     match skeleton_of(skin, imported.nodes()) {
         Ok((skeleton, order)) => {
-            // Fitted at the scale the skeleton hangs at in its asset, which is
-            // the scale every entity of the asset draws it at.
-            let hangs = skinned
-                .instances
-                .first()
-                .map_or(Mat4::IDENTITY, |part| part.transform);
+            let hangs = hangs_of(&skinned);
             let names: Vec<String> = order
                 .nodes()
                 .iter()
                 .map(|&node| imported.nodes()[node].name().unwrap_or("").to_owned())
                 .collect();
             let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
-            let ragdoll = authored(source, asset, &skeleton, &borrowed, hangs).or_else(|| {
-                RagdollRig::generate(&skeleton, hangs, &GenerateSettings::DEFAULT)
-                    .map_err(|error| {
-                        crcbl::log::warn!("editor: `{asset}` fits no ragdoll rig: {error}");
-                    })
-                    .ok()
-            });
+            let (desc, ragdoll) = match authored(source, asset, &skeleton, &borrowed, hangs) {
+                Some((desc, ragdoll)) => (Some(desc), Some(ragdoll)),
+                None => fitted(asset, &skeleton, &borrowed, hangs),
+            };
             Some(Rig {
                 skeleton,
                 skinned,
                 names,
                 ragdoll,
+                desc,
             })
         }
         Err(error) => {
@@ -267,17 +287,51 @@ fn rig_of(
     }
 }
 
-/// `asset`'s authored ragdoll rig ([`RAGDOLL_SUFFIX`]), resolved against its
-/// skeleton's joint `names` at the scale the skeleton `hangs` at, or [`None`]
-/// for an asset with none. A file that is there and will not read or resolve
-/// is logged, and the fitted rig stands in for it.
+/// Where a skin's skeleton hangs in its asset: under its first deformed part.
+/// A rig is fitted and resolved at that scale, which is the scale every
+/// entity of the asset draws it at.
+fn hangs_of(skinned: &Skinned) -> Mat4 {
+    skinned
+        .instances
+        .first()
+        .map_or(Mat4::IDENTITY, |part| part.transform)
+}
+
+/// The ragdoll rig fitted to `asset`'s skeleton at the scale it `hangs` at,
+/// and its file named by the joint `names`; what could not be had is logged.
+fn fitted(
+    asset: &str,
+    skeleton: &Skeleton,
+    names: &[&str],
+    hangs: Mat4,
+) -> (Option<RagdollDesc>, Option<RagdollRig>) {
+    let ragdoll = match RagdollRig::generate(skeleton, hangs, &GenerateSettings::DEFAULT) {
+        Ok(ragdoll) => ragdoll,
+        Err(error) => {
+            crcbl::log::warn!("editor: `{asset}` fits no ragdoll rig: {error}");
+            return (None, None);
+        }
+    };
+    let desc = ragdoll
+        .to_desc(names)
+        .map_err(|error| {
+            crcbl::log::warn!("editor: `{asset}`'s fitted rig cannot be named: {error}");
+        })
+        .ok();
+    (desc, Some(ragdoll))
+}
+
+/// `asset`'s authored ragdoll rig ([`RAGDOLL_SUFFIX`]), read and resolved
+/// against its skeleton's joint `names` at the scale the skeleton `hangs` at,
+/// or [`None`] for an asset with none. A file that is there and will not read
+/// or resolve is logged, and the fitted rig stands in for it.
 fn authored(
     source: &dyn AssetSource,
     asset: &str,
     skeleton: &Skeleton,
     names: &[&str],
     hangs: Mat4,
-) -> Option<RagdollRig> {
+) -> Option<(RagdollDesc, RagdollRig)> {
     let key = format!("{asset}{RAGDOLL_SUFFIX}");
     let bytes = match source.read(Path::new(&key)) {
         Ok(bytes) => bytes,
@@ -291,8 +345,10 @@ fn authored(
         .map_err(|error| error.to_string())
         .and_then(|text| RagdollDesc::from_ron(&text).map_err(|error| error.to_string()))
         .and_then(|desc| {
-            desc.resolve(skeleton, names, hangs)
-                .map_err(|error| error.to_string())
+            let rig = desc
+                .resolve(skeleton, names, hangs)
+                .map_err(|error| error.to_string())?;
+            Ok((desc, rig))
         });
     match rig {
         Ok(rig) => Some(rig),

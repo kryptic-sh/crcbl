@@ -143,6 +143,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crcbl::math::Vec2;
+use crcbl::ragdoll::RagdollDesc;
 use crcbl::registry::PlayControls;
 use crcbl::scene::scn::SceneEntityId;
 use crcbl::ui::style::Declaration;
@@ -163,6 +164,7 @@ mod inspector;
 mod path_line;
 mod play;
 mod recovery;
+mod rig;
 mod unsaved;
 
 pub use path_line::Purpose;
@@ -447,6 +449,10 @@ pub struct PanelFrame {
     /// entity in this frame, for the caller to add and select — see
     /// `inspector`'s module docs.
     pub add: Option<String>,
+    /// Whether a row of the ragdoll rig handed to
+    /// [`Panels::frame_with_rig`] moved this frame, so the rig changed — for
+    /// the caller to resolve and write. See `rig`'s module docs.
+    pub rig_edited: bool,
 }
 
 /// The inspector's sections, add buttons and add-list headings, as a frame
@@ -461,6 +467,9 @@ struct Inspected {
     /// Each add-an-entity button and the system it adds in, in the order
     /// drawn.
     entity_adds: Vec<(String, NodeKey)>,
+    /// The selection's ragdoll rig's sections, which only a test reads.
+    #[cfg(test)]
+    rig: rig::Built,
 }
 
 /// The editor's panels, and everything they keep between frames.
@@ -1023,6 +1032,20 @@ impl Panels {
             .map(|section| section.fields)
     }
 
+    /// The rows of the `index`th body of the ragdoll rig the last frame drew,
+    /// or [`None`] past the last.
+    #[cfg(test)]
+    pub(crate) fn rig_body_fields(&self, index: usize) -> Option<NodeKey> {
+        self.inspector.rig.bodies.get(index).copied()
+    }
+
+    /// The rows of the `index`th joint of the ragdoll rig the last frame
+    /// drew, or [`None`] past the last.
+    #[cfg(test)]
+    pub(crate) fn rig_joint_fields(&self, index: usize) -> Option<NodeKey> {
+        self.inspector.rig.joints.get(index).copied()
+    }
+
     /// The remove button of the section the last frame drew for `system`, if
     /// it drew one — it draws none while the selection is in one system.
     #[must_use]
@@ -1144,7 +1167,19 @@ impl Panels {
     ///
     /// **Once a frame.** The tree resolves this frame's click when the frame
     /// begins, so a second build would latch it twice.
-    pub fn frame(&mut self, document: &mut Document, mut input: PanelInput) -> PanelFrame {
+    pub fn frame(&mut self, document: &mut Document, input: PanelInput) -> PanelFrame {
+        self.frame_with_rig(document, input, None)
+    }
+
+    /// [`frame`](Self::frame), with the selection's ragdoll `rig` drawn in the
+    /// inspector under its components and edited in place —
+    /// [`PanelFrame::rig_edited`] says when it was.
+    pub fn frame_with_rig(
+        &mut self,
+        document: &mut Document,
+        mut input: PanelInput,
+        mut rig: Option<&mut RagdollDesc>,
+    ) -> PanelFrame {
         self.hold_for_unsaved(&mut input);
         self.refresh(document);
         self.follow_document(document);
@@ -1245,8 +1280,14 @@ impl Panels {
                         double_clicked = outliner.double_clicked().and_then(entity_of);
                     }
                     layout::INSPECTOR => {
-                        built =
-                            inspector::build(ui, document, selected, &selected_label, overrides);
+                        built = inspector::build(
+                            ui,
+                            document,
+                            selected,
+                            &selected_label,
+                            overrides,
+                            rig.take(),
+                        );
                     }
                     layout::ASSETS => relist = browser.build(ui, &options),
                     other => {
@@ -1302,13 +1343,17 @@ impl Panels {
             environment,
             environment_edits,
             environment_field,
+            rig,
         } = built;
+        let rig_edited = rig.edited;
         self.props_key = props;
         self.inspector = Inspected {
             sections,
             adds,
             headings,
             entity_adds,
+            #[cfg(test)]
+            rig,
         };
         self.field = match selected {
             Some(entity) => field.map(|(system, path)| FieldTarget::Component {
@@ -1385,6 +1430,7 @@ impl Panels {
             recovery: recovered,
             menu: row_menu.picked,
             add,
+            rig_edited,
         }
     }
 

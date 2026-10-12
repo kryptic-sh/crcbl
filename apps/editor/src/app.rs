@@ -316,6 +316,10 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// the next draw: a document put in place by an open reads them from
     /// another root.
     rebuild_due: bool,
+    /// The asset whose ragdoll rig the inspector changed and whose file has
+    /// not been written since: written once the pointer lets go, so a drag
+    /// writes the file once and not every frame it moves.
+    rig_unwritten: Option<String>,
     /// The served scene this editor has joined, whose copy is the document,
     /// or [`None`] for a document of its own — see `join`.
     joined: Option<Box<join::Joined>>,
@@ -542,6 +546,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             autosave,
             closing: false,
             rebuild_due: false,
+            rig_unwritten: None,
             joined: None,
             disk,
         })
@@ -723,7 +728,21 @@ impl<S: Shell + ?Sized> Editor<S> {
                 wheel_pixels(&pending)
             },
         };
-        let panels = self.panels.frame(&mut self.document, input);
+        // The selection's rig, which the inspector edits in place.
+        let rigged = self.rigged_selection();
+        let rig = rigged
+            .as_deref()
+            .and_then(|asset| self.shelf.rig_mut(asset))
+            .and_then(|rig| rig.desc.as_mut());
+        let panels = self.panels.frame_with_rig(&mut self.document, input, rig);
+        if panels.rig_edited
+            && let Some(asset) = rigged
+        {
+            self.rig_edited(asset);
+        }
+        if !pointer.down {
+            self.write_edited_rig();
+        }
         asked.extend(panels.unsaved.map(Action::Unsaved));
         asked.extend(panels.toolbar);
         asked.extend(panels.menu);
@@ -1362,23 +1381,35 @@ impl<S: Shell + ?Sized> Editor<S> {
 
     /// [`write_rig`](Self::write_rig)'s work, the path written or why not.
     fn try_write_rig(&mut self) -> Result<std::path::PathBuf, String> {
-        let id = self
-            .document
-            .primary()
-            .ok_or("Select a rigged mesh to write its rig")?;
         let asset = self
             .document
-            .mesh(id)
+            .primary()
+            .and_then(|id| self.document.mesh(id))
             .map(|mesh| mesh.asset.clone())
             .ok_or("Select a rigged mesh to write its rig")?;
-        let rig = self
-            .shelf
-            .rig(&asset)
-            .ok_or_else(|| format!("`{asset}` has no skin to rig"))?;
-        let ragdoll = rig
-            .ragdoll
-            .as_ref()
-            .ok_or_else(|| format!("`{asset}` has no ragdoll rig to write"))?;
+        let path = self.rig_path(&asset)?;
+        if path.exists() {
+            return Err(format!(
+                "{} is already authored; it is left alone",
+                path.display()
+            ));
+        }
+        self.write_rig_file(&asset, &path)?;
+        // The next draw reads it back as the authored rig.
+        self.rebuild_due = true;
+        Ok(path)
+    }
+
+    /// The asset of the primary selection's mesh, if it is a rigged one.
+    fn rigged_selection(&mut self) -> Option<String> {
+        let id = self.document.primary()?;
+        let asset = &self.document.mesh(id)?.asset;
+        self.shelf.rig(asset).is_some().then(|| asset.clone())
+    }
+
+    /// Where `asset`'s rig file goes: beside it, under the editor's asset
+    /// directory or else the scene's own.
+    fn rig_path(&self, asset: &str) -> Result<std::path::PathBuf, String> {
         let root = self
             .assets
             .clone()
@@ -1388,22 +1419,59 @@ impl<S: Shell + ?Sized> Editor<S> {
                     .map(std::path::Path::to_path_buf)
             })
             .ok_or("This scene's assets are not in a directory to write to")?;
-        let path = root.join(format!("{asset}{}", meshes::RAGDOLL_SUFFIX));
-        if path.exists() {
-            return Err(format!(
-                "{} is already authored; it is left alone",
-                path.display()
-            ));
+        Ok(root.join(format!("{asset}{}", meshes::RAGDOLL_SUFFIX)))
+    }
+
+    /// Writes `asset`'s rig as its file spells it to `path`, over whatever is
+    /// there.
+    fn write_rig_file(&self, asset: &str, path: &std::path::Path) -> Result<(), String> {
+        let desc = self
+            .shelf
+            .rig(asset)
+            .ok_or_else(|| format!("`{asset}` has no skin to rig"))?
+            .desc
+            .as_ref()
+            .ok_or_else(|| format!("`{asset}` has no ragdoll rig to write"))?;
+        std::fs::write(path, desc.to_ron()).map_err(|error| format!("{}: {error}", path.display()))
+    }
+
+    /// Resolves `asset`'s rig again after the inspector changed it, so the
+    /// viewport and the next drop show the change, and marks its file to be
+    /// written. A change the rig cannot take is reported on the status line,
+    /// the last rig that resolved stays drawn, and nothing is written until a
+    /// change that resolves: the file always holds a rig that resolves.
+    fn rig_edited(&mut self, asset: String) {
+        let Some(rig) = self.shelf.rig_mut(&asset) else {
+            return;
+        };
+        match rig.resolve() {
+            Ok(()) => self.rig_unwritten = Some(asset),
+            Err(why) => {
+                self.rig_unwritten = None;
+                self.panels.set_status(
+                    format!("`{asset}`'s rig cannot take that: {why}"),
+                    Tone::Warning,
+                );
+            }
         }
-        let names: Vec<&str> = rig.names.iter().map(String::as_str).collect();
-        let text = ragdoll
-            .to_desc(&names)
-            .map_err(|error| format!("`{asset}`'s rig cannot be named: {error}"))?
-            .to_ron();
-        std::fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))?;
-        // The next draw reads it back as the authored rig.
-        self.rebuild_due = true;
-        Ok(path)
+    }
+
+    /// Writes the rig the inspector changed, if one waits to be — see
+    /// [`rig_unwritten`](Self::rig_unwritten) — and says so on the status
+    /// line.
+    fn write_edited_rig(&mut self) {
+        let Some(asset) = self.rig_unwritten.take() else {
+            return;
+        };
+        let outcome = self.rig_path(&asset).and_then(|path| {
+            self.write_rig_file(&asset, &path)?;
+            Ok(path)
+        });
+        let (text, tone) = match outcome {
+            Ok(path) => (format!("Wrote {}", path.display()), Tone::Info),
+            Err(why) => (why, Tone::Warning),
+        };
+        self.panels.set_status(text, tone);
     }
 
     /// Steps the drop preview a frame and poses its region, or ends it when

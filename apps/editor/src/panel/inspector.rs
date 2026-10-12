@@ -41,10 +41,15 @@
 //! **A rotation is drawn as three angles** ([`overrides`]): the quaternion a
 //! `crcbl::registry::Rotation` holds is no row a person can drag, so its row
 //! shows degrees and writes all four leaves when one angle moves.
+//!
+//! **A rigged mesh's ragdoll rig follows its components** (`super::rig`): a
+//! section per body and per joint, edited outside the scene's history because
+//! the rig is the asset's file, not the scene's.
 
 use std::cell::RefCell;
 
 use crcbl::math::{DQuat, EulerRot};
+use crcbl::ragdoll::RagdollDesc;
 use crcbl::reflect::Value;
 use crcbl::registry::Rotation;
 use crcbl::scene::scn::SceneEntityId;
@@ -110,15 +115,19 @@ pub(super) struct Built {
     /// The environment leaf a clipboard key means — its path — if there is
     /// one.
     pub(super) environment_field: Option<String>,
+    /// The selection's ragdoll rig's sections, empty without one.
+    pub(super) rig: super::rig::Built,
 }
 
-/// The inspector pane for `selected`, labelled `label`.
+/// The inspector pane for `selected`, labelled `label`, with `rig` — the
+/// selection's ragdoll rig, if it is a rigged mesh — under its components.
 pub(super) fn build(
     ui: &mut Ui,
     document: &mut Document,
     selected: Option<SceneEntityId>,
     label: &str,
     overrides: &Overrides,
+    rig: Option<&mut RagdollDesc>,
 ) -> Built {
     let mut built = Built::default();
     ui.block(".editor-panel", &[], |ui| {
@@ -192,6 +201,9 @@ pub(super) fn build(
                         hovered = Some((system.clone(), path));
                     }
                 });
+            }
+            if let Some(rig) = rig {
+                built.rig = super::rig::build(ui, rig, &options);
             }
             if !attachable.is_empty() {
                 ui.block(".inspector-add", &[], |ui| {

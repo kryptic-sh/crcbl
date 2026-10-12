@@ -213,18 +213,43 @@ unblocks the ragdoll editor preview, and the inspector gains whatever reflection
 contracts the rig's fields need on the way. Pane dragging is deferred: nothing
 requested it.
 
-Slices, scoped on 2026-10-12 after `apps/viewer`: a rigged asset already draws
-through the skinning pass at its rest pose (`apps/editor/src/app/skins.rs`, one
-posed region per deformed part shared by every entity of the asset), with the
-skin conversion shared as `crcbl::scene_rig`. Selecting a rigged mesh draws its
-bones and the ragdoll rig fitted to it (`RagdollRig::generate`, drawn through
-`RagdollRig::bodies_at`). Left:
+Slices, scoped on 2026-10-12 after `apps/viewer`, have landed: a rigged asset
+draws through the skinning pass at its rest pose
+(`apps/editor/src/app/skins.rs`, one posed region per deformed part shared by
+every entity of the asset), with the skin conversion shared as
+`crcbl::scene_rig`. Selecting a rigged mesh draws its bones and its ragdoll rig
+— authored beside the asset as `<asset>.ragdoll.ron`, or else fitted
+(`RagdollRig::generate`) — and Shift+G writes the fitted rig there as a starting
+file (never over one). The inspector edits the rig under the mesh's components
+(`apps/editor/src/panel/rig.rs`): a section per body (shape and size, mass) and
+per joint (kind and limits in degrees, friction). Each edit is resolved at once,
+so the viewport and the next drop show it; the file is written when the pointer
+lets go, and an edit the rig cannot resolve is refused on the status line and
+never written.
 
-1. Editing the rig in the editor's inspector: bodies (shape, size, mass) and
-   joints (kind, limits, friction). A rig authored beside the asset
-   (`<asset>.ragdoll.ron`) is read, drawn and dropped in place of the fitted
-   one, and Shift+G writes the fitted rig there as a starting file (never over
-   one); the file is edited by hand until the inspector can.
+What rig editing still lacks, none of it requested yet:
+
+- **Where a body sits and which way it and a joint point** (`centre`, `axis`,
+  `at`) are edited in the file only: a direction is no row a person can drag,
+  and the viewport has no handle for one. A gizmo on the selected body is the
+  likely shape.
+- **The rig's edits are outside the scene's history**: Ctrl+Z does not undo
+  them, because the rig is the asset's file and the history is the scene's. The
+  file is the record (and version control its history). An asset-side history
+  would have to say what undo means across the two.
+- **Writing rewrites the whole file** through `RagdollDesc::to_ron`, so a
+  comment or layout a person gave it is lost on the first inspector edit.
+- **The ignored pairs, `ignore_rest_overlaps` and `substeps` have no rows.** A
+  fitted rig's file lists its pairs with `ignore_rest_overlaps: false`
+  (`RagdollRig::to_desc`), so a body grown into a neighbour it did not overlap
+  when fitted is not added to the pairs; it fights that neighbour at rest until
+  the pair is added by hand.
+- **The first edit of a fitted rig resolves it from its file**, which drops a
+  box body's turn about its own axis (`to_desc`'s documented loss). The fitted
+  rig is drawn exactly until then.
+- A joint's kind switched starts at zero limits — locked until opened — where a
+  shape switched keeps its size (`reshaped`); carrying a ball's cone into a
+  hinge's range was not built, as nothing asked for it.
 
 G drops the selected rigged mesh as its fitted ragdoll in a physics world of its
 own (`apps/editor/src/app/drop.rs`), drawn from a second, preview region per
