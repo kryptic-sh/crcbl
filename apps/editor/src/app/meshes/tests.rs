@@ -104,3 +104,65 @@ fn a_rigs_bones_stand_where_its_entity_puts_it() {
         "{to}"
     );
 }
+
+/// An authored rig for `rigged_json`'s two joints: a sphere on each, a ball
+/// joint between.
+const AUTHORED: &str = r#"(
+    bodies: [
+        (bone: "joint-root", shape: Sphere(radius: 0.3), mass: 4.0),
+        (bone: "joint-tip", shape: Sphere(radius: 0.1), mass: 1.0),
+    ],
+    joints: [
+        (
+            parent: "joint-root",
+            child: "joint-tip",
+            kind: Ball(cone: 0.5, twist_lower: -0.2, twist_upper: 0.2),
+            axis: (0.0, 1.0, 0.0),
+        ),
+    ],
+)"#;
+
+/// **A rig authored beside the asset replaces the fitted one, and a broken
+/// one does not.** The authored rig's two spheres arrive by their joint names;
+/// a file that is not a rig leaves the fitted capsule and sphere.
+#[test]
+fn an_authored_rig_replaces_the_fitted_one() {
+    let shelf_with = |text: &str| {
+        let mut source = source();
+        source
+            .insert(
+                Path::new(&format!("{RIG}{}", super::RAGDOLL_SUFFIX)),
+                text.as_bytes().to_vec(),
+            )
+            .expect("a legal key");
+        let assets: BTreeSet<String> = [RIG.to_owned()].into();
+        Shelf::build(&source, &assets).0
+    };
+    let shapes = |shelf: &Shelf| {
+        shelf
+            .rig(RIG)
+            .and_then(|rig| rig.ragdoll.as_ref())
+            .expect("a ragdoll rig")
+            .bodies()
+            .iter()
+            .map(|body| body.shape)
+            .collect::<Vec<_>>()
+    };
+    use crcbl::ragdoll::BodyShape;
+    assert_eq!(
+        shapes(&shelf_with(AUTHORED)),
+        [
+            BodyShape::Sphere { radius: 0.3 },
+            BodyShape::Sphere { radius: 0.1 }
+        ],
+        "the authored rig"
+    );
+    let fitted = shapes(&shelf_with("not a rig"));
+    assert!(
+        matches!(
+            fitted.as_slice(),
+            [BodyShape::Capsule { .. }, BodyShape::Sphere { .. }]
+        ),
+        "a broken file leaves the fitted rig: {fitted:?}"
+    );
+}

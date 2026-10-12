@@ -18,7 +18,9 @@
 //!
 //! An asset with a skin keeps its first skin's [`Rig`]: the skeleton
 //! ([`crcbl::scene_rig::skeleton_of`]) and the parts the skin deforms with
-//! their joint bindings ([`crcbl::scene_rig::skinned_of`]), and the scene
+//! their joint bindings ([`crcbl::scene_rig::skinned_of`]), its ragdoll rig —
+//! authored beside the asset as `<asset>.ragdoll.ron` ([`RAGDOLL_SUFFIX`]) or
+//! else fitted to the skeleton — and the scene
 //! reserves the room `super::skins` poses them in. What the skin conversion
 //! refuses is logged, and the asset is drawn as it always was.
 //!
@@ -39,11 +41,17 @@ use crcbl::anim::{Palette, Pose, Skeleton};
 use crcbl::assets::AssetSource;
 use crcbl::greybox::scene3d;
 use crcbl::math::{Mat4, Vec3};
-use crcbl::ragdoll::{BodyShape, GenerateSettings, RagdollRig};
+use crcbl::ragdoll::{BodyShape, GenerateSettings, RagdollDesc, RagdollRig};
 use crcbl::render::scene::SceneDesc;
 use crcbl::scene::{build_render_scene, import_gltf};
 use crcbl::scene_rig::{Skinned, reserve_for_skinning, skeleton_of, skinned_of};
 use crcbl::shaders::mesh::GpuMaterial;
+
+/// What an asset's authored ragdoll rig is filed under, after the asset's own
+/// key: `props/guard.glb` has its rig in `props/guard.glb.ragdoll.ron`. A file
+/// of its own rather than a section of the planned `.meta.ron` sidecar, because
+/// a rig is an authored asset per skeleton, not metadata about a file.
+pub(super) const RAGDOLL_SUFFIX: &str = ".ragdoll.ron";
 
 /// One instance an asset is drawn as: a (node, primitive) pair of its glTF,
 /// as [`crcbl::scene::RenderScene::instances`] expands them.
@@ -68,9 +76,9 @@ pub(super) struct Rig {
     ///
     /// [`SkinnedInstance::instance`]: crcbl::scene_rig::SkinnedInstance::instance
     pub(super) skinned: Skinned,
-    /// The ragdoll rig fitted to the skeleton
-    /// ([`RagdollRig::generate`]), or [`None`] where it could not be: the
-    /// starting point a rig is authored from.
+    /// The ragdoll rig authored beside the asset, or else the one fitted to
+    /// the skeleton ([`RagdollRig::generate`]), or [`None`] where neither
+    /// could be had.
     pub(super) ragdoll: Option<RagdollRig>,
 }
 
@@ -169,7 +177,7 @@ impl Shelf {
                 }
             };
             let converted = build_render_scene(&imported, Path::new(asset));
-            if let Some(rig) = rig_of(asset, &imported, &converted) {
+            if let Some(rig) = rig_of(source, asset, &imported, &converted) {
                 // Two mesh entries and two vertex regions per deformed part,
                 // twice: the shared rest-pose region and the drop preview's,
                 // which `Skins` reserves — see `reserve_for_skinning`.
@@ -205,6 +213,7 @@ impl Shelf {
 /// `asset`'s first skin as a [`Rig`], or [`None`] for an asset with none or one
 /// whose skin the conversion refused, with the reasons logged.
 fn rig_of(
+    source: &dyn AssetSource,
     asset: &str,
     imported: &crcbl::scene::GltfScene,
     converted: &crcbl::scene::RenderScene,
@@ -228,13 +237,18 @@ fn rig_of(
                 .instances
                 .first()
                 .map_or(Mat4::IDENTITY, |part| part.transform);
-            let ragdoll = match RagdollRig::generate(&skeleton, hangs, &GenerateSettings::DEFAULT) {
-                Ok(ragdoll) => Some(ragdoll),
-                Err(error) => {
-                    crcbl::log::warn!("editor: `{asset}` fits no ragdoll rig: {error}");
-                    None
-                }
-            };
+            let names: Vec<&str> = skin
+                .joints()
+                .iter()
+                .map(|&node| imported.nodes()[node].name().unwrap_or(""))
+                .collect();
+            let ragdoll = authored(source, asset, &skeleton, &names, hangs).or_else(|| {
+                RagdollRig::generate(&skeleton, hangs, &GenerateSettings::DEFAULT)
+                    .map_err(|error| {
+                        crcbl::log::warn!("editor: `{asset}` fits no ragdoll rig: {error}");
+                    })
+                    .ok()
+            });
             Some(Rig {
                 skeleton,
                 skinned,
@@ -243,6 +257,44 @@ fn rig_of(
         }
         Err(error) => {
             crcbl::log::warn!("editor: `{asset}` keeps no rig: {error}");
+            None
+        }
+    }
+}
+
+/// `asset`'s authored ragdoll rig ([`RAGDOLL_SUFFIX`]), resolved against its
+/// skeleton's joint `names` at the scale the skeleton `hangs` at, or [`None`]
+/// for an asset with none. A file that is there and will not read or resolve
+/// is logged, and the fitted rig stands in for it.
+fn authored(
+    source: &dyn AssetSource,
+    asset: &str,
+    skeleton: &Skeleton,
+    names: &[&str],
+    hangs: Mat4,
+) -> Option<RagdollRig> {
+    let key = format!("{asset}{RAGDOLL_SUFFIX}");
+    let bytes = match source.read(Path::new(&key)) {
+        Ok(bytes) => bytes,
+        Err(crcbl::store::StorageError::NotFound(_)) => return None,
+        Err(error) => {
+            crcbl::log::warn!("editor: `{key}` will not read: {error}");
+            return None;
+        }
+    };
+    let rig = String::from_utf8(bytes)
+        .map_err(|error| error.to_string())
+        .and_then(|text| RagdollDesc::from_ron(&text).map_err(|error| error.to_string()))
+        .and_then(|desc| {
+            desc.resolve(skeleton, names, hangs)
+                .map_err(|error| error.to_string())
+        });
+    match rig {
+        Ok(rig) => Some(rig),
+        Err(error) => {
+            crcbl::log::warn!(
+                "editor: `{key}` is not a rig for `{asset}`, so it is fitted: {error}"
+            );
             None
         }
     }

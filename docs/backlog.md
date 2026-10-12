@@ -219,9 +219,11 @@ skin conversion shared as `crcbl::scene_rig`. Selecting a rigged mesh draws its
 bones and the ragdoll rig fitted to it (`RagdollRig::generate`, drawn through
 `RagdollRig::bodies_at`). Left:
 
-1. Ragdoll rig authoring on it: load and save a `RagdollDesc` beside the asset
-   and edit its bodies and joints in the inspector, so the preview drops the
-   authored rig rather than the fitted one.
+1. Editing the rig in the editor: a `RagdollDesc` authored beside the asset
+   (`<asset>.ragdoll.ron`) is already read, drawn and dropped in place of the
+   fitted one; what is left is writing it from the editor — saving the fitted
+   rig as a starting file, and editing bodies and joints in the inspector.
+   `crcbl-ragdoll` has no serializer for a resolved rig back to names yet.
 
 G drops the selected rigged mesh as its fitted ragdoll in a physics world of its
 own (`apps/editor/src/app/drop.rs`), drawn from a second, preview region per

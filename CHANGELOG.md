@@ -871,7 +871,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and the ragdoll rig `RagdollRig::generate` fits to it, from which a rig is
   authored. G drops the selected rigged mesh as that ragdoll onto the ground,
   drawing it in the pose its bodies fall into while its asset's other entities
-  stay at rest; G again stops it, and the scene is never edited.
+  stay at rest; G again stops it, and the scene is never edited. A rig authored
+  beside the asset as `<asset>.ragdoll.ron` (a `RagdollDesc`, resolved by joint
+  name) replaces the fitted one; a file that will not read is logged and the
+  fitted rig stands in.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned
