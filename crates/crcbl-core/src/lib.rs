@@ -51,6 +51,7 @@ pub mod bounds;
 pub mod handle;
 pub mod input;
 pub mod log;
+pub mod logarithm;
 pub mod player;
 pub mod rand;
 pub mod schedule;

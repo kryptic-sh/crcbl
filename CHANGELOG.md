@@ -859,6 +859,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_core::logarithm::ln_1p` is `ln(1 + x)` with the same bits on every
+  target**, transcribed from `fdlibm`'s `s_log1p.c` out of IEEE-exact
+  operations, as `crcbl_core::trig` is for sine and cosine. It is within one
+  unit in the last place of the correctly rounded value, which a golden table
+  computed to 800 digits checks, and a pinned digest catches a target that
+  differs in one bit.
+
 - **Stick input for a game reading movement outside the `ActionMap`.**
   `crcbl_input::radial_deadzone` is public. `ActivePad` gives the sticks to the
   first pad that moves (or is activated by a button) until it disconnects,
