@@ -13,7 +13,9 @@
 //!
 //! [`ActionMap::override_text`] and [`ActionMap::apply_override_text`] are the
 //! same pair over that text form, for a store that keeps strings and knows
-//! nothing of bindings — `crcbl_store::profile` is one. Reading text is where
+//! nothing of bindings — `crcbl_store::profile` is one. One entry converts on
+//! its own, without a map, through [`ActionOverride::from_text`] and
+//! [`ActionOverride::texts`], which the pair is built on. Reading text is where
 //! a file written by another build meets this one, so each entry that cannot
 //! apply is refused on its own and named ([`OverrideRefusal`]): an action this
 //! build does not declare is skipped, and a binding text this build cannot
@@ -68,6 +70,39 @@ impl fmt::Display for OverrideRefusal {
 }
 
 impl std::error::Error for OverrideRefusal {}
+
+impl ActionOverride {
+    /// One entry of a saved list in the bindings' text form, read without a
+    /// map: for a caller that loads its rebinds before its [`ActionMap`]
+    /// exists, or keeps the list itself. Whether `action` is declared is the
+    /// map's question, answered when the entry is applied.
+    ///
+    /// # Errors
+    ///
+    /// [`OverrideRefusal::BadBinding`] for the first text that does not parse:
+    /// the entry is refused whole, as [`ActionMap::apply_override_text`]
+    /// refuses it.
+    pub fn from_text(action: &str, texts: &[String]) -> Result<Self, OverrideRefusal> {
+        let bindings = texts
+            .iter()
+            .map(|text| text.parse::<Binding>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| OverrideRefusal::BadBinding {
+                action: action.to_owned(),
+                error,
+            })?;
+        Ok(Self {
+            action: action.to_owned(),
+            bindings,
+        })
+    }
+
+    /// The bindings' texts, in order: what [`Self::from_text`] reads back.
+    #[must_use]
+    pub fn texts(&self) -> Vec<String> {
+        self.bindings.iter().map(ToString::to_string).collect()
+    }
+}
 
 impl ActionMap {
     /// Every action whose bindings differ from the ones it was declared with,
@@ -132,7 +167,7 @@ impl ActionMap {
         self.overrides()
             .into_iter()
             .map(|entry| {
-                let texts = entry.bindings.iter().map(ToString::to_string).collect();
+                let texts = entry.texts();
                 (entry.action, texts)
             })
             .collect()
@@ -153,19 +188,9 @@ impl ActionMap {
         let mut refusals = Vec::new();
         let mut parsed = Vec::new();
         for (action, texts) in entries {
-            match texts
-                .iter()
-                .map(|text| text.parse::<Binding>())
-                .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(bindings) => parsed.push(ActionOverride {
-                    action: action.to_owned(),
-                    bindings,
-                }),
-                Err(error) => refusals.push(OverrideRefusal::BadBinding {
-                    action: action.to_owned(),
-                    error,
-                }),
+            match ActionOverride::from_text(action, texts) {
+                Ok(entry) => parsed.push(entry),
+                Err(refusal) => refusals.push(refusal),
             }
         }
         refusals.extend(
@@ -363,10 +388,7 @@ mod tests {
         let written: Vec<(String, Vec<String>)> = map
             .overrides()
             .into_iter()
-            .map(|entry| {
-                let texts = entry.bindings.iter().map(ToString::to_string).collect();
-                (entry.action, texts)
-            })
+            .map(|entry| (entry.action.clone(), entry.texts()))
             .collect();
         assert_eq!(
             written,
@@ -375,16 +397,42 @@ mod tests {
                 vec!["KeyF".to_owned(), "Pad:West".to_owned()]
             )]
         );
+        // Read back with no map in hand, as a game loading its settings
+        // before its map exists does.
         let read: Vec<ActionOverride> = written
             .iter()
-            .map(|(action, texts)| ActionOverride {
-                action: action.clone(),
-                bindings: texts.iter().map(|text| text.parse().unwrap()).collect(),
-            })
+            .map(|(action, texts)| ActionOverride::from_text(action, texts).unwrap())
             .collect();
         let mut fresh = self::tests::map();
         assert_eq!(fresh.apply_overrides(&read), []);
         assert_eq!(fresh.overrides(), map.overrides());
+    }
+
+    /// One entry read with no map: an action name is taken as given, and a
+    /// text that does not parse refuses the whole entry by name.
+    #[test]
+    fn one_entry_reads_without_a_map_and_a_bad_text_refuses_it() {
+        let entry =
+            ActionOverride::from_text("anything", &["KeyF".to_owned(), "Pad:West".to_owned()])
+                .unwrap();
+        assert_eq!(entry.action, "anything");
+        assert_eq!(
+            entry.bindings,
+            [
+                Binding::Key(KeyCode::KeyF),
+                Binding::PadButton(crate::PadButton::West)
+            ]
+        );
+        assert_eq!(entry.texts(), ["KeyF", "Pad:West"]);
+        let refused =
+            ActionOverride::from_text("use", &["KeyF".to_owned(), "NoSuchKey".to_owned()]);
+        assert!(
+            matches!(
+                &refused,
+                Err(OverrideRefusal::BadBinding { action, .. }) if action == "use"
+            ),
+            "{refused:?}"
+        );
     }
 
     /// A button chord saved as text comes back as the chord, and still takes

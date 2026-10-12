@@ -859,6 +859,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`ActionOverride::from_text` and `ActionOverride::texts` convert one saved
+  rebind without an `ActionMap`**, for a game that reads its bindings before its
+  map exists or keeps the override list itself. A text that does not parse
+  refuses the entry whole as `OverrideRefusal::BadBinding`;
+  `ActionMap::apply_override_text` and `override_text` are built on the pair.
+
 - **The editor previews an asset's bounds while dragging it into the viewport.**
   The box follows the same surface or ground landing point as the final drop,
   including the placeholder for a missing mesh. Previewing does not create an
