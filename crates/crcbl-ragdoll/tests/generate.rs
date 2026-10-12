@@ -256,3 +256,31 @@ fn a_coarse_rig_stays_one_tree() {
         "the rig is in pieces"
     );
 }
+
+/// **The rig's bodies stand where the rig says at any placement**: the
+/// forearm's body midway along the forearm under a turned, raised model, and a
+/// mismatched skeleton or pose is refused.
+#[test]
+fn bodies_at_places_the_rig_on_its_skeleton() {
+    let rig = rig();
+    let skeleton = skeleton();
+    let placed = Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0)) * model(0.0);
+    let bodies = rig
+        .bodies_at(&skeleton, &crcbl_anim::Pose::new(&skeleton), placed)
+        .expect("the rig fits its skeleton");
+    let forearm = body_at(&rig, "forearm_l").expect("a body");
+    let elbow = rest_world(index("forearm_l"), placed, &Transform::IDENTITY);
+    let wrist = rest_world(index("hand_l"), placed, &Transform::IDENTITY);
+    assert!(bodies[forearm].position.distance(0.5 * (elbow + wrist)) < TOLERANCE);
+    let chain = Skeleton::new(vec![Bone {
+        parent: None,
+        inverse_bind: Mat4::IDENTITY,
+        rest: Trs::IDENTITY,
+    }])
+    .expect("a joint");
+    assert!(
+        rig.bodies_at(&chain, &crcbl_anim::Pose::new(&chain), placed)
+            .is_none(),
+        "another skeleton"
+    );
+}

@@ -53,6 +53,28 @@ pub(crate) fn body_worlds(bodies: &[RigBody], frames: &[Transform]) -> Vec<Trans
         .collect()
 }
 
+impl crate::RagdollRig {
+    /// Where each body of this rig stands, in rig order, for `skeleton` in
+    /// `pose` placed by `model` — what an editor draws a rig with before
+    /// anything is simulated, or a game checks a spawn against.
+    ///
+    /// `None` for a skeleton of another size than the rig was made for, or a
+    /// pose leaving a joint with no usable frame.
+    #[must_use]
+    pub fn bodies_at(
+        &self,
+        skeleton: &Skeleton,
+        pose: &Pose,
+        model: Mat4,
+    ) -> Option<Vec<Transform>> {
+        if skeleton.len() != self.joint_count() || pose.len() != skeleton.len() {
+            return None;
+        }
+        let frames = rigid_frames(skeleton, pose, model).ok()?;
+        Some(body_worlds(self.bodies(), &frames))
+    }
+}
+
 /// The body pairs, lower index first, that no joint joins and whose shapes
 /// at `worlds` come within [`REST_CLEARANCE`] of each other: pairs that
 /// would push each other apart the moment they were simulated.
