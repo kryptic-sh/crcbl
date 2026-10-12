@@ -133,35 +133,32 @@ than EW assets or an EW checkout.
 - **EW port requests of 2026-10-12, accepted in this order.** EW (pin
   `e3f44f4c`) asked for its hand-rolled engine features to move into crcbl,
   deleting EW's copy as each lands. Each names a working EW caller and EW
-  regression tests; the engine regression is written with the port. Order:
-  1. **No console windows on Windows during builds and tests** (user-raised).
-     `crates/crcbl-shaders/build.rs` spawns `slangc`/`dxc` and several tests
-     re-spawn processes (`crcbl-core` `log/panic_hook.rs`, `log.rs`, `trace.rs`;
-     `crcbl-store` `tests/kill_during_write.rs`; `crcbl` `engine.rs`;
-     `crcbl-cli` `cargo.rs`); without an attached console each child gets a
-     conhost window. Fix: `CREATE_NO_WINDOW` on every spawned console child
-     through one shared helper, and desktop-needing tests made opt-in.
-  2. **Map-free binding text conversion** in `crcbl-input`
+  regression tests; the engine regression is written with the port. The first
+  request, no console windows during Windows builds and tests, shipped as
+  `crcbl-spawn`. Order:
+  1. **Map-free binding text conversion** in `crcbl-input`
      (`ActionOverride::from_text` / `texts`, with
      `ActionMap::apply_override_text` and `override_text` built on them).
      Caller: EW `src/key_bindings.rs`, read before its `ActionMap` exists.
-  3. **Public gamepad backend selection** with a selected-device filter
+  2. **Public gamepad backend selection** with a selected-device filter
      (`crcbl/src/engine/pads.rs` `PadSource` is `pub(super)`). Caller: EW
      `src/app_gamepads.rs`, which also lacks the Steam virtual-pad skip.
-  4. **Camera clearance sweep** (`clear_eye(from, to, radius, skin, exclude)`)
+  3. **Camera clearance sweep** (`clear_eye(from, to, radius, skin, exclude)`)
      in `crcbl-phys`. Caller: EW `src/game_camera.rs`, three copies.
-  5. **Uniform direction within a cone** from scalar randoms. Caller: EW
+  4. **Uniform direction within a cone** from scalar randoms. Caller: EW
      `src/dispersion.rs::sample_launch_direction`.
-  6. **Radial stick dead zone, active-device latch, release-until-neutral and a
+  5. **Radial stick dead zone, active-device latch, release-until-neutral and a
      stick-driven virtual cursor** in `crcbl-input`/`crcbl-ui`. Callers: EW
      `src/gamepad_input.rs`, `src/app_inventory_cursor.rs`,
      `src/rendering_cursor.rs`.
-  7. **A required-`Option` serde helper and a strict-schema test helper.**
+  6. **A required-`Option` serde helper and a strict-schema test helper.**
      Caller: EW `src/inventory/item/persistence.rs::required_option`.
-  8. **Projectile flight core** (quadratic drag, gravity, swept segments,
-     penetration loss) in `crcbl-phys`, once EW splits its ammo tables out of
-     `src/ballistics.rs` and sends the generic module.
-  9. **Acoustic path evaluation** over `crcbl` `SoundPath` candidates with
+  7. **Projectile flight core** in `crcbl-phys`, from EW `afe90bf3`
+     `src/ballistics/flight.rs`: the integrator only (`FlightConfig`,
+     `advance`/`advance_into`/`advance_one_segment`, `FlightSegment`, the
+     analytic `integrate_segment`). Mass, penetration and traversal stay in EW;
+     its regressions are `src/ballistics.rs`'s `mod tests`.
+  8. **Acoustic path evaluation** over `crcbl` `SoundPath` candidates with
      caller-supplied range, surface and barrier tables. Caller: EW
      `src/sound.rs::evaluate_sound_paths`.
 

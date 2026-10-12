@@ -76,7 +76,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -1253,7 +1253,7 @@ impl Sender {
     /// the binary that runs is the one that was built beside this file — with
     /// the same features and into the same profile.
     fn start() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_crcbl-e2e-win32-input"))
+        let mut child = crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl-e2e-win32-input"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1353,7 +1353,7 @@ fn drain<R: std::io::Read + Send + 'static>(
 /// Wayland that would deadlock, because there the copier *is* the server of the
 /// bytes; on Win32 the window station holds them and there is nobody to answer.
 fn clip(args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_crcbl-e2e-win32-clip"))
+    let output = crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl-e2e-win32-clip"))
         .args(args)
         .output()
         .expect("crcbl-e2e-win32-clip is a [[bin]] of this package under win32-e2e");
@@ -1385,7 +1385,7 @@ impl Holder {
     /// it is time the hold is running out, and a poll interval would be spent
     /// out of it for nothing.
     fn start(span: Duration) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_crcbl-e2e-win32-clip"))
+        let mut child = crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl-e2e-win32-clip"))
             .args(["hold", &span.as_millis().to_string()])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

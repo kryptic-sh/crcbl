@@ -228,6 +228,7 @@ png = { workspace = true }
 # fixture builder rather than vendored, on that module's argument: a checked-in
 # binary is a fixture nobody reviewing a change can read.
 crcbl-scene = { workspace = true, features = ["gltf-fixture"] }
+crcbl-spawn = { workspace = true }
 
 [lints]
 workspace = true

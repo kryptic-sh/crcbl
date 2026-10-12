@@ -1494,7 +1494,7 @@ mod macos {
     /// Everything `/usr/bin/pbpaste` prints, or a failure naming why it could
     /// not be asked.
     fn pbpaste() -> String {
-        let output = std::process::Command::new("/usr/bin/pbpaste")
+        let output = crcbl_spawn::command("/usr/bin/pbpaste")
             .output()
             .expect("pbpaste is part of a stock macOS");
         assert!(
@@ -1512,7 +1512,7 @@ mod macos {
     /// issued before it exits is a race rather than a test.
     fn pbcopy(text: &str) {
         use std::io::Write as _;
-        let mut child = std::process::Command::new("/usr/bin/pbcopy")
+        let mut child = crcbl_spawn::command("/usr/bin/pbcopy")
             .stdin(std::process::Stdio::piped())
             .spawn()
             .expect("pbcopy is part of a stock macOS");

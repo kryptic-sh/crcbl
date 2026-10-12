@@ -32,7 +32,6 @@
 //! 5. Writes `$OUT_DIR/shaders.rs`, the static table `src/lib.rs` includes.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 // `#[path]` rather than `include!`: both files open with `//!` module docs, and
 // an inner attribute spliced into the middle of a file is a parse error. This
@@ -330,7 +329,7 @@ fn strip_cr(bytes: &[u8]) -> Vec<u8> {
 /// because it is the state in which the byte check silently stops running.
 fn pinned_slangc(pinned: &str) -> Option<String> {
     let slangc = std::env::var("CRCBL_SLANGC").unwrap_or_else(|_| "slangc".to_string());
-    let output = Command::new(&slangc).arg("-v").output().ok()?;
+    let output = crcbl_spawn::command(&slangc).arg("-v").output().ok()?;
     // Slang prints its version on stderr.
     let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stdout));
@@ -370,7 +369,7 @@ fn pinned_dxc(pinned: &str) -> Option<String> {
         return None;
     }
     let dxc = std::env::var("CRCBL_DXC").ok()?;
-    let output = Command::new(&dxc).arg("--version").output().ok()?;
+    let output = crcbl_spawn::command(&dxc).arg("--version").output().ok()?;
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
 
@@ -488,7 +487,7 @@ fn recompile(
             None => format!("{}.check.{}", record.name, target.flag()),
         },
     );
-    let mut command = Command::new(slangc);
+    let mut command = crcbl_spawn::command(slangc);
     command
         // From the crate root, naming the source the way the manifest does —
         // which is the way `tools/compile-shaders.sh` names it. Slang copies the
@@ -601,7 +600,7 @@ fn recompile_dxil(
     // reason `recompile` gives: Slang copies the path it was given into the
     // `#line` directives of its HLSL, and an absolute one would differ per
     // machine.
-    let hlsl_status = Command::new(slangc)
+    let hlsl_status = crcbl_spawn::command(slangc)
         .current_dir(root)
         .arg(&record.source)
         .args(["-target", "hlsl"])
@@ -612,7 +611,7 @@ fn recompile_dxil(
         .arg(&hlsl)
         .status();
     let dxil_status = match hlsl_status {
-        Ok(status) if status.success() => Command::new(dxc)
+        Ok(status) if status.success() => crcbl_spawn::command(dxc)
             .args(["-T", &profile])
             .args(["-E", &artifact.entry_point])
             .arg("-Fo")

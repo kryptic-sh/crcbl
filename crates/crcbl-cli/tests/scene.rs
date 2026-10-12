@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use crcbl::reflect::Value;
 use crcbl::scene::edit::EditCommand;
@@ -126,7 +126,7 @@ fn collect(root: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
 
 /// Runs the binary.
 fn crcbl(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_crcbl"))
+    crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl"))
         .args(args)
         .output()
         .expect("the crcbl binary runs")
@@ -641,7 +641,7 @@ fn a_served_scene_is_fetched_from_another_process_and_locked_until_quit() {
     let dir = field_copy(&temp, "field.scn");
     let before = scene_files(&dir);
     let dir_text = dir.to_str().expect("a temporary path is text");
-    let mut server = Command::new(env!("CARGO_BIN_EXE_crcbl"))
+    let mut server = crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl"))
         .args(["edit", dir_text, "--serve"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

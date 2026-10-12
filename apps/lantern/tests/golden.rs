@@ -1594,7 +1594,7 @@ fn live_frame(backend: &str) -> Image {
         Err(error) => panic!("could not clear {}: {error}", path.display()),
     }
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lantern"))
+    let output = crcbl_spawn::command(env!("CARGO_BIN_EXE_lantern"))
         .args([
             "--backend",
             backend,

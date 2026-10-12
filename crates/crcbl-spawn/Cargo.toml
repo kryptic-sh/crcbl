@@ -1,0 +1,15 @@
+[package]
+name = "crcbl-spawn"
+description = "Crucible child processes: a Command that opens no console window on Windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No dependencies, so that every crate — `crcbl-core` and build scripts
+# included — can take it without a cycle or a host-side build of anything
+# else. The one Win32 call it makes is declared by hand.
+[dependencies]
+
+[lints]
+workspace = true

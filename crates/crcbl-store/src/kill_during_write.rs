@@ -26,7 +26,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -173,18 +173,19 @@ fn killed_at(name: &str, point: KillPoint) -> tempfile::TempDir {
         .write(&storage, Path::new(SLOT))
         .expect("writing the save the child overwrites");
 
-    let mut spawned = Command::new(env::current_exe().expect("a test binary knows its own path"))
-        .args([
-            "--exact",
-            &format!("kill_during_write::{name}"),
-            "--nocapture",
-        ])
-        .env(CHILD_DIR, dir.path())
-        .env(KILL_AT, point.name())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("re-running this test binary");
+    let mut spawned =
+        crcbl_spawn::command(env::current_exe().expect("a test binary knows its own path"))
+            .args([
+                "--exact",
+                &format!("kill_during_write::{name}"),
+                "--nocapture",
+            ])
+            .env(CHILD_DIR, dir.path())
+            .env(KILL_AT, point.name())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("re-running this test binary");
 
     // Read on threads of their own, so a child writing more than a pipe holds
     // cannot stall, and so the parent can wait on a line with a deadline.

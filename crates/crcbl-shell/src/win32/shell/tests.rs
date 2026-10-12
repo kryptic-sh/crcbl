@@ -1,3 +1,9 @@
+// Every test here takes the real desktop through `desktop::shell` and most open
+// visible windows, so each is `#[ignore]`d: an unattended `cargo test` or
+// nextest sweep opens none. `tests/run-win32-e2e.ps1`, which CI's `win32 e2e
+// (real desktop)` job runs, selects them with `--run-ignored all` beside the
+// e2e binary and fails a run that executed none.
+
 use super::*;
 use crate::{AspectRatio, LogicalSize, MimeType};
 use crcbl_core::KeyCode;
@@ -405,6 +411,7 @@ fn cursor_display_count() -> i32 {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_window_has_no_size_until_the_first_pump_and_exactly_one_is_enough() {
     // The P0.4 contract, and the Win32 shape of it: the system knew the
     // size before `create_window` returned, so the wait is one pump — not a
@@ -446,6 +453,7 @@ fn a_window_has_no_size_until_the_first_pump_and_exactly_one_is_enough() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_window_opens_flips_to_borderless_and_back_and_is_destroyed() {
     let mut shell = shell();
     let window = window(&mut shell);
@@ -518,6 +526,7 @@ fn a_window_opens_flips_to_borderless_and_back_and_is_destroyed() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_window_created_borderless_can_still_be_made_windowed() {
     // The case with no saved placement to restore: the window has never
     // had a windowed style, so one is built from the descriptor rather
@@ -563,6 +572,7 @@ fn a_window_created_borderless_can_still_be_made_windowed() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn the_capabilities_are_exactly_what_this_backend_implements() {
     let mut shell = shell();
     let window = window(&mut shell);
@@ -627,6 +637,7 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_key_press_carries_its_position_its_symbol_and_its_repeat_flag() {
     // The real window procedure, the real scan-code table, the real
     // `GetKeyboardState` and the real `MapVirtualKeyW` — driven by a
@@ -669,6 +680,7 @@ fn a_key_press_carries_its_position_its_symbol_and_its_repeat_flag() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn typing_commits_text_and_a_control_key_commits_nothing() {
     let mut shell = shell();
     let window = window(&mut shell);
@@ -703,6 +715,7 @@ fn typing_commits_text_and_a_control_key_commits_nothing() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn the_pointer_enters_moves_clicks_scrolls_and_leaves() {
     /// Where this test's **first** movement puts the pointer, and therefore
     /// the position the arrival derived from it carries.
@@ -1107,6 +1120,7 @@ fn minimizing_a_captured_window_releases_the_clip() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_second_window_takes_the_pointer_capture_from_the_first() {
     // One cursor, so one clip. A shell with two windows must not leave the
     // first one reporting `Locked` while the second holds the clip.
@@ -1139,6 +1153,7 @@ fn a_second_window_takes_the_pointer_capture_from_the_first() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for() {
     // The `ShowCursor` reference-count bug, observed through the count
     // itself: two hides and one show leave the cursor invisible for the
@@ -1185,6 +1200,7 @@ fn hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_cursor_shape_is_answered_from_the_window_procedure() {
     // `WM_SETCURSOR` is the only message allowed to set a shape, and the
     // system uses `DefWindowProc`'s answer — the class arrow — unless ours
@@ -1259,6 +1275,7 @@ fn warping_the_pointer_moves_it_to_a_position_in_the_window() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_decorated_window_really_is_decorated() {
     // What `SERVER_DECORATIONS` claims, observed rather than asserted from
     // the style word: a windowed window's outer rectangle is larger than
@@ -1291,6 +1308,7 @@ fn a_decorated_window_really_is_decorated() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn the_size_constraints_reach_the_window_procedure() {
     // `WM_GETMINMAXINFO` and `WM_SIZING` are otherwise only sent by a user
     // dragging a window edge. Sending them by hand runs the real procedure
@@ -1360,6 +1378,7 @@ fn the_size_constraints_reach_the_window_procedure() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_close_request_is_intercepted_and_can_be_refused_then_accepted() {
     let mut shell = shell();
     let window = window(&mut shell);
@@ -1407,6 +1426,7 @@ fn a_close_request_is_intercepted_and_can_be_refused_then_accepted() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn both_offered_formats_round_trip_and_the_reader_picks() {
     // What `CLIPBOARD` claims, against the real window station: text for
     // everything else on the desktop, a registered format for the engine's
@@ -1454,6 +1474,7 @@ fn both_offered_formats_round_trip_and_the_reader_picks() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn an_empty_offer_empties_the_clipboard_and_an_empty_payload_does_not() {
     // The two cases `ClipboardContent` exists to keep apart, and the one
     // place they are easy to conflate: releasing the clipboard and
@@ -1486,6 +1507,7 @@ fn an_empty_offer_empties_the_clipboard_and_an_empty_payload_does_not() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_read_is_answered_exactly_once_and_needs_no_second_pump() {
     // Obligation 4 in the form this backend takes: the read happens inside
     // `clipboard_request`, so the answer is queued before it returns and
@@ -1540,6 +1562,7 @@ fn a_read_is_answered_exactly_once_and_needs_no_second_pump() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_window_destroyed_before_the_pump_is_not_answered_at_all() {
     // Where obligation 4 meets obligation 1, and the stronger of the two
     // wins: an answer naming a handle the consumer has already been told is
@@ -1583,6 +1606,7 @@ fn a_window_destroyed_before_the_pump_is_not_answered_at_all() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_drop_becomes_one_event_per_file_at_the_position_it_landed() {
     // What `DRAG_DROP` claims, driven through the real `WM_DROPFILES` path:
     // shell32's `DragQueryFileW` reads a real `HDROP`, the procedure
@@ -1639,6 +1663,7 @@ fn a_drop_becomes_one_event_per_file_at_the_position_it_landed() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_window_that_did_not_ask_for_drops_reports_none() {
     // `accept_drops` is off by default and load-bearing rather than
     // advisory. The system enforces it — no `WS_EX_ACCEPTFILES`, no
@@ -1657,6 +1682,7 @@ fn a_window_that_did_not_ask_for_drops_reports_none() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn the_drop_registration_survives_a_trip_through_borderless() {
     // `DragAcceptFiles` sets `WS_EX_ACCEPTFILES`, and a mode change
     // *rewrites the extended style word*. Carrying the bit is what stops
@@ -1702,6 +1728,7 @@ fn the_drop_registration_survives_a_trip_through_borderless() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn opening_the_clipboard_reports_how_it_went_and_always_closes_it() {
     // The mechanism, not a wall clock: an open that took it first time and
     // one that retried seven times take indistinguishable amounts of time on
@@ -1740,6 +1767,7 @@ fn opening_the_clipboard_reports_how_it_went_and_always_closes_it() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn every_method_taking_a_window_rejects_a_stale_handle() {
     // Implementor obligation 1, method by method: a destroyed handle must
     // never act on whatever window took the slot.
@@ -1774,6 +1802,7 @@ fn every_method_taking_a_window_rejects_a_stale_handle() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn two_windows_coexist_and_are_told_apart() {
     // What `MULTI_WINDOW` claims.
     let mut shell = shell();
@@ -1805,6 +1834,7 @@ fn two_windows_coexist_and_are_told_apart() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn a_short_timed_wait_is_not_rounded_up_to_the_clock_tick() {
     // The frame loop's windowed idle is a few milliseconds; the default
     // system clock tick is 15.6 ms. A wait that ends on the tick instead of
@@ -1845,6 +1875,7 @@ fn a_short_timed_wait_is_not_rounded_up_to_the_clock_tick() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn wait_events_genuinely_blocks() {
     // What `EVENT_WAIT` claims, asserted as the *mechanism* it is rather
     // than as a duration. The first version of this measured three 50 ms
@@ -1967,6 +1998,7 @@ fn wait_events_genuinely_blocks() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn the_monitors_are_enumerated_with_one_primary_and_a_scale_factor() {
     let shell = shell();
     let monitors = shell.monitors();
@@ -2003,6 +2035,7 @@ fn the_monitors_are_enumerated_with_one_primary_and_a_scale_factor() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn hiding_a_window_is_real_and_reversible() {
     let mut shell = shell();
     let window = window(&mut shell);
@@ -2029,6 +2062,7 @@ fn hiding_a_window_is_real_and_reversible() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn the_title_round_trips_and_a_nul_is_refused() {
     let mut shell = shell();
     let window = window(&mut shell);
@@ -2049,6 +2083,7 @@ fn the_title_round_trips_and_a_nul_is_refused() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn the_surface_target_exists_before_the_window_is_configured() {
     // The seam's promise: the *handle* exists as soon as the window does,
     // so a HAL surface can be created immediately and only the swapchain
@@ -2071,6 +2106,7 @@ fn the_surface_target_exists_before_the_window_is_configured() {
 }
 
 #[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn the_backend_reports_itself_and_is_reachable_by_name() {
     let shell = shell();
     assert_eq!(shell.backend(), ShellBackend::Win32);

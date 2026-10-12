@@ -130,7 +130,7 @@ pub fn build(args: &BuildArgs) -> Result<Outcome, Failure> {
 /// a global-looking flag that is in fact per-subcommand.
 fn cargo(subcommand: &str, manifest: &Path) -> Command {
     let program = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut command = Command::new(program);
+    let mut command = crcbl_spawn::command(program);
     command.arg(subcommand).arg("--manifest-path").arg(manifest);
     command
 }

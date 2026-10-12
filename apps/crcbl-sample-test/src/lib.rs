@@ -56,7 +56,6 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::process::Command;
 use std::rc::Rc;
 
 use crcbl::args::Common;
@@ -704,7 +703,7 @@ impl SampleRun<'_> {
         }
 
         let frames = self.frames.to_string();
-        let output = Command::new(self.binary)
+        let output = crcbl_spawn::command(self.binary)
             .args(["--backend", backend, "--frames", &frames])
             .args(self.args)
             .args([

@@ -125,7 +125,7 @@ mod tests {
     use std::io::Read as _;
     use std::panic::Location;
     use std::path::Path;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::thread::ThreadId;
@@ -161,13 +161,14 @@ mod tests {
         }
 
         let temp = TempDir::new(&format!("panic-hook-{name}"));
-        let mut child = Command::new(env::current_exe().expect("a test binary knows its own path"))
-            .args(["--exact", &format!("log::panic_hook::tests::{name}")])
-            .env(CHILD_DIR, &temp.0)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("re-running this test binary");
+        let mut child =
+            crcbl_spawn::command(env::current_exe().expect("a test binary knows its own path"))
+                .args(["--exact", &format!("log::panic_hook::tests::{name}")])
+                .env(CHILD_DIR, &temp.0)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("re-running this test binary");
         // Drained on threads of their own, so a child writing more than a pipe
         // holds cannot stall on a parent that is only polling it.
         let drain = |pipe: Option<Box<dyn io::Read + Send>>| {

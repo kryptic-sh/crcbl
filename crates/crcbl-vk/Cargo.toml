@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 crcbl-golden = { workspace = true }
 crcbl-render = { workspace = true }
 crcbl-shaders = { workspace = true }
+crcbl-spawn = { workspace = true }
 # The reversed-Z control: the suite builds a *conventional* projection matrix to
 # compare against, which `crcbl-render` deliberately has no constructor for.
 glam = { workspace = true }

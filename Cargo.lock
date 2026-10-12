@@ -168,6 +168,7 @@ dependencies = [
  "crcbl",
  "crcbl-golden",
  "crcbl-sample-test",
+ "crcbl-spawn",
  "crcbl-sprite",
 ]
 
@@ -373,6 +374,7 @@ dependencies = [
  "crcbl-server",
  "crcbl-shaders",
  "crcbl-shell",
+ "crcbl-spawn",
  "crcbl-sprite",
  "crcbl-steam",
  "crcbl-store",
@@ -427,6 +429,7 @@ dependencies = [
  "crcbl-assets",
  "crcbl-golden",
  "crcbl-scene",
+ "crcbl-spawn",
  "crcbl-sprite",
  "crcbl-store",
  "editor",
@@ -453,6 +456,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "crcbl-console",
+ "crcbl-spawn",
  "glam",
  "log",
  "proptest",
@@ -646,6 +650,7 @@ version = "0.1.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
+ "crcbl-spawn",
 ]
 
 [[package]]
@@ -689,6 +694,7 @@ name = "crcbl-shaders"
 version = "0.1.0"
 dependencies = [
  "crcbl-scene",
+ "crcbl-spawn",
  "glam",
  "naga",
 ]
@@ -699,9 +705,14 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "crcbl-core",
+ "crcbl-spawn",
  "crcbl-wl-scanner",
  "thiserror 2.0.21",
 ]
+
+[[package]]
+name = "crcbl-spawn"
+version = "0.1.0"
 
 [[package]]
 name = "crcbl-sprite"
@@ -730,6 +741,7 @@ dependencies = [
  "crcbl-net",
  "crcbl-rand",
  "crcbl-shaders",
+ "crcbl-spawn",
  "dirs",
  "serde",
  "tempfile",
@@ -768,6 +780,7 @@ dependencies = [
  "crcbl-hal",
  "crcbl-render",
  "crcbl-shaders",
+ "crcbl-spawn",
  "glam",
  "thiserror 2.0.21",
 ]
@@ -1276,6 +1289,7 @@ dependencies = [
  "crcbl",
  "crcbl-golden",
  "crcbl-sample-test",
+ "crcbl-spawn",
 ]
 
 [[package]]
@@ -1892,6 +1906,7 @@ version = "0.1.0"
 dependencies = [
  "crcbl",
  "crcbl-sample-test",
+ "crcbl-spawn",
  "tempfile",
 ]
 

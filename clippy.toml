@@ -1,0 +1,6 @@
+# A console child started by a process with no console of its own gets a
+# window on Windows; `crcbl_spawn::command` decides per process whether to
+# suppress it. See `crates/crcbl-spawn/src/lib.rs`.
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "use crcbl_spawn::command, which opens no console window on Windows" },
+]

@@ -59,6 +59,7 @@ crcbl-sprite = { workspace = true, features = ["bake"] }
 [dev-dependencies]
 crcbl-golden = { workspace = true }
 crcbl-sample-test = { workspace = true }
+crcbl-spawn = { workspace = true }
 
 [lints]
 workspace = true

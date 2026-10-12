@@ -224,6 +224,13 @@ dependencies = [
 [[package]]
 name = "crcbl-shaders"
 version = "0.1.0"
+dependencies = [
+ "crcbl-spawn",
+]
+
+[[package]]
+name = "crcbl-spawn"
+version = "0.1.0"
 
 [[package]]
 name = "crcbl-store"

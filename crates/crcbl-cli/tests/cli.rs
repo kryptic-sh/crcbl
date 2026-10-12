@@ -24,7 +24,7 @@
 //! claim checkable.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// The engine checkout these tests run inside.
 fn engine_root() -> PathBuf {
@@ -68,7 +68,7 @@ impl Drop for TempDir {
 
 /// Runs the real binary in `cwd`.
 fn crcbl(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_crcbl"))
+    crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl"))
         .args(args)
         .current_dir(cwd)
         .output()
@@ -475,7 +475,7 @@ fn a_non_utf8_path_argument_is_not_a_panic() {
         "the argument under test has to be non-UTF-8: {weird:?}",
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_crcbl"))
+    let output = crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl"))
         .arg("new")
         .arg("mygame")
         .arg("--engine")
@@ -495,7 +495,7 @@ fn a_non_utf8_path_argument_is_not_a_panic() {
     assert!(stdout(&output).starts_with(r#"{"ok":false"#));
 
     // The same for `-o`, where the path is the whole point of the flag.
-    let output = Command::new(env!("CARGO_BIN_EXE_crcbl"))
+    let output = crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl"))
         .arg("replay")
         .arg(weird.join("missing.crpl"))
         .arg("--json")

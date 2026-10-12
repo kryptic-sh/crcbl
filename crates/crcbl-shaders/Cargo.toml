@@ -91,3 +91,6 @@ path = "tools/cook-ltc.rs"
 [[example]]
 name = "cook-atmosphere"
 path = "tools/cook-atmosphere.rs"
+
+[build-dependencies]
+crcbl-spawn = { workspace = true }

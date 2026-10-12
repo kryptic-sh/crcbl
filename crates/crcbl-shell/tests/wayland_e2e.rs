@@ -17,8 +17,6 @@
 //! named anywhere below, exactly as a consumer would have it.
 
 #![cfg(all(target_os = "linux", feature = "wayland-e2e"))]
-
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crcbl_shell::wayland_test_support::{
@@ -223,7 +221,7 @@ fn desc<'a>(title: &'a str, size: LogicalSize) -> WindowDesc<'a> {
 /// failed, which the callers turn into an explicit skip rather than a silent
 /// pass.
 fn swaymsg(args: &[&str]) -> bool {
-    Command::new("swaymsg")
+    crcbl_spawn::command("swaymsg")
         .args(args)
         .output()
         .is_ok_and(|output| output.status.success())
@@ -2011,7 +2009,7 @@ fn server_side_decorations_are_negotiated_rather_than_assumed() {
     // `"border": "csd"` for a client that decorates itself, and the configured
     // border otherwise. If the negotiation had silently failed, this would say
     // `csd` and the engine would have shipped an undecorated window.
-    let tree = Command::new("swaymsg")
+    let tree = crcbl_spawn::command("swaymsg")
         .args(["-t", "get_tree", "-r"])
         .output()
         .expect("swaymsg ships with sway");

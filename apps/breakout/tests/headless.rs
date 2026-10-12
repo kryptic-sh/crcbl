@@ -12,10 +12,10 @@
 //! Everything here runs on Linux, macOS and Windows with no window system
 //! present.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn breakout(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_breakout"))
+    crcbl_spawn::command(env!("CARGO_BIN_EXE_breakout"))
         .args(args)
         .output()
         .expect("the breakout binary runs")
@@ -179,7 +179,7 @@ fn a_screenshot_run_leaves_a_file_behind() {
         Err(error) => panic!("could not clear {}: {error}", path.display()),
     }
 
-    let output = Command::new(env!("CARGO_BIN_EXE_breakout"))
+    let output = crcbl_spawn::command(env!("CARGO_BIN_EXE_breakout"))
         .args(["--backend", "null", "--frames", "4", "--screenshot"])
         .arg(&path)
         .output()

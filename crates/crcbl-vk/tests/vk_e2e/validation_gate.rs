@@ -150,20 +150,19 @@ fn the_provocation_fires_at_the_first_present_and_the_layer_answers() {
         return;
     }
 
-    let output = std::process::Command::new(
-        std::env::current_exe().expect("a test binary knows its own path"),
-    )
-    .args([
-        "--exact",
-        "validation_gate::the_provocation_fires_at_the_first_present_and_the_layer_answers",
-        "--include-ignored",
-        "--test-threads",
-        "1",
-    ])
-    .env(crcbl_vk::debug::PROVOKE_VALIDATION_ENV_VAR, "1")
-    .env(crcbl_vk::debug::VALIDATION_ENV_VAR, "1")
-    .output()
-    .expect("the test binary re-executes");
+    let output =
+        crcbl_spawn::command(std::env::current_exe().expect("a test binary knows its own path"))
+            .args([
+                "--exact",
+                "validation_gate::the_provocation_fires_at_the_first_present_and_the_layer_answers",
+                "--include-ignored",
+                "--test-threads",
+                "1",
+            ])
+            .env(crcbl_vk::debug::PROVOKE_VALIDATION_ENV_VAR, "1")
+            .env(crcbl_vk::debug::VALIDATION_ENV_VAR, "1")
+            .output()
+            .expect("the test binary re-executes");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

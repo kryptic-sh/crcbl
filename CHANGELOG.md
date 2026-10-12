@@ -5931,6 +5931,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **No console windows flash up on Windows during builds and test runs.** A
+  console program started by a process with no console of its own (cargo run
+  from an IDE or an agent's shell, a test harness) was given a new console
+  window: one per `crcbl-shaders` build-script compiler call and per test that
+  re-runs itself. Every spawn now goes through `crcbl_spawn::command`, which
+  marks the child `CREATE_NO_WINDOW` only when this process has no console, so
+  `crcbl run` in a terminal still shows cargo's output there. The workspace
+  `clippy.toml` disallows `std::process::Command::new`.
+
 - **Text spans honor their own `overflow: hidden` and `overflow: scroll`.**
   Bitmap and parsed-font text are clipped to the span's padding box, intersected
   with ancestor clips. Visible overflow, block decorations and sibling clips

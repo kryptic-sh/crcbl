@@ -168,6 +168,10 @@ crcbl-anim = { path = "crates/crcbl-anim", version = "0.1.0" }
 # Ragdolls: where the skeleton and the solver meet, so that neither
 # `crcbl-anim` nor `crcbl-phys` has to depend on the other.
 crcbl-ragdoll = { path = "crates/crcbl-ragdoll", version = "0.1.0" }
+# `std::process::Command` that opens no console window on Windows. No
+# dependencies, so build scripts and `crcbl-core` can take it; `clippy.toml`
+# disallows the plain constructor.
+crcbl-spawn = { path = "crates/crcbl-spawn", version = "0.1.0" }
 # The particle simulation. Depends on `glam` alone, so the arrow into it costs
 # a browser build nothing beyond the simulation itself — there is no renderer,
 # no shader and no asset parser in it, by design.

@@ -10,10 +10,10 @@
 //! present, which is what makes the cross-platform CI leg meaningful rather
 //! than a compile check.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn sandbox(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_sandbox"))
+    crcbl_spawn::command(env!("CARGO_BIN_EXE_sandbox"))
         .args(args)
         .output()
         .expect("the sandbox binary runs")

@@ -65,6 +65,7 @@ crcbl-scene = { workspace = true, features = ["gltf"] }
 # 2026-10-04; `docs/backlog.md`'s `crcbl scene` entry has what a game's own
 # vocabulary would take.
 editor = { workspace = true }
+crcbl-spawn = { workspace = true }
 
 # `editor` is named through its `[lib]` name, `crcbl_editor`, and `cargo
 # machete` matches a dependency by its package name, so it cannot see the use —

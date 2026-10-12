@@ -182,7 +182,7 @@ fn self_test_the_validation_gate(crcbl: &str, project: &Path, target: &Path, bac
         return;
     }
     let injected = validating(
-        Command::new(crcbl)
+        crcbl_spawn::command(crcbl)
             .current_dir(project)
             .env("CARGO_TARGET_DIR", target),
     )
@@ -240,7 +240,7 @@ fn self_test_the_layer_is_checking(crcbl: &str, project: &Path, target: &Path, b
         return;
     }
     let provoked = validating(
-        Command::new(crcbl)
+        crcbl_spawn::command(crcbl)
             .current_dir(project)
             .env("CARGO_TARGET_DIR", target),
     )
@@ -294,7 +294,8 @@ fn windowed_pass() -> bool {
 /// build's target directory, where it would block on the same lock the test
 /// runner is already holding. That is a deadlock, not a slowdown.
 fn scaffold_cargo(project: &Path, target: &Path) -> Command {
-    let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    let mut command =
+        crcbl_spawn::command(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     command.current_dir(project);
     command.env("CARGO_TARGET_DIR", target);
     command
@@ -310,7 +311,7 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
     // 1. Scaffold.
     let created = run(
         "crcbl new",
-        Command::new(crcbl)
+        crcbl_spawn::command(crcbl)
             .current_dir(temporary.path())
             .args(["new", "mygame", "--engine"])
             .arg(&engine)
@@ -334,7 +335,7 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
     //    reformat the engine reached through the path dependency.
     run(
         "rustfmt --check",
-        Command::new("rustfmt")
+        crcbl_spawn::command("rustfmt")
             .args(["--check", "--edition", "2024"])
             .arg(project.join("src/main.rs")),
     );
@@ -362,7 +363,7 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
     let ran = run(
         "crcbl run --headless",
         validating(
-            Command::new(crcbl)
+            crcbl_spawn::command(crcbl)
                 .current_dir(&project)
                 .env("CARGO_TARGET_DIR", &target),
         )
@@ -400,7 +401,7 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
         let ran = run(
             "crcbl run (windowed)",
             validating(
-                Command::new(crcbl)
+                crcbl_spawn::command(crcbl)
                     .current_dir(&project)
                     .env("CARGO_TARGET_DIR", &target)
                     // The compositor the harness started, not whatever the
@@ -434,7 +435,7 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
     // 7. `crcbl build`, machine-readable.
     let built = run(
         "crcbl build --json",
-        Command::new(crcbl)
+        crcbl_spawn::command(crcbl)
             .current_dir(&project)
             .env("CARGO_TARGET_DIR", &target)
             .args(["build", "--json"]),

@@ -8,14 +8,14 @@
 //! tests pin them: without them the run opens a real window, and reads the
 //! settings file in whichever home directory it runs in.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// Lantern headless on the null backend for a few frames, with `args` after.
 ///
 /// `CRCBL_LOG=warn` is pinned so whether an unknown key's warning reaches
 /// stderr does not depend on the developer's environment.
 fn lantern(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_lantern"))
+    crcbl_spawn::command(env!("CARGO_BIN_EXE_lantern"))
         .args(["--backend", "null", "--headless", "--frames", "4"])
         .args(args)
         .env("CRCBL_LOG", "warn")

@@ -5,7 +5,7 @@
 //! in process — the text a game shows — rather than to a copy of it here.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use crcbl::core::TickId;
 use crcbl::net::types::SectorId;
@@ -50,7 +50,7 @@ impl Drop for TempDir {
 
 /// Runs the real binary in `cwd`.
 fn crcbl(cwd: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_crcbl"))
+    crcbl_spawn::command(env!("CARGO_BIN_EXE_crcbl"))
         .args(args)
         .current_dir(cwd)
         .output()

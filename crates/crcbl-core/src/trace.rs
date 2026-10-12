@@ -969,7 +969,7 @@ mod tests {
         assert!(!init_from_env(), "{ENV_VAR} is not set in this environment");
         assert!(!is_enabled(), "so the gate is left at DEFAULT_ENABLED");
 
-        let output = std::process::Command::new(
+        let output = crcbl_spawn::command(
             std::env::current_exe().expect("a test binary knows its own path"),
         )
         .args([

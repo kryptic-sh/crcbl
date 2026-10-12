@@ -25,6 +25,7 @@ publish = false
 crcbl = { workspace = true }
 # `Image`, which is what a caller gets back and what every claim reads.
 crcbl-golden = { workspace = true }
+crcbl-spawn = { workspace = true }
 
 [lints]
 workspace = true

@@ -1543,7 +1543,7 @@ mod tests {
             return;
         }
 
-        let output = std::process::Command::new(
+        let output = crcbl_spawn::command(
             std::env::current_exe().expect("a test binary knows its own path"),
         )
         .args([
