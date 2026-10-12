@@ -7,12 +7,16 @@
 //! `scene` feature, and `apps/viewer` and `apps/editor` both convert skins, so
 //! the conversion lives here rather than twice.
 //!
-//! **A joint's palette index is its position in the skin's `joints` array**,
-//! and that number is not this code's to choose: a skinned vertex's
-//! `JOINTS_0` attribute indexes that same array, and the skin's
-//! `inverseBindMatrices` are in that same order. So [`skeleton_of`] walks
-//! `skin.joints()` in order and renumbers nothing. A channel or a node names a
-//! glTF *node*, which [`joint_of`] maps to a palette index.
+//! **A joint's palette index is its place in [`SkinOrder`]**: the skin's
+//! `joints` array renumbered so every parent comes before its children, which
+//! [`Skeleton::new`] requires and a glTF file does not promise — Blender
+//! exports skins in whatever order it holds the bones. Three things index the
+//! skin's own order and so go through the same [`SkinOrder`]: the skin's
+//! `inverseBindMatrices` ([`skeleton_of`] reads them through it), a skinned
+//! vertex's `JOINTS_0` ([`skinned_of`] remaps the bindings through it), and a
+//! channel or a node, which names a glTF *node* that [`SkinOrder::joint_of`]
+//! maps to a palette index. A skin already listed parents first renumbers to
+//! itself.
 
 use crate::anim::{Joint, Skeleton, SkeletonError, Trs};
 use crate::math::Mat4;
@@ -20,7 +24,111 @@ use crate::scene::gltf_render::{RenderScene, Skip};
 use crate::scene::{GltfNode, GltfScene, GltfSkin};
 use crate::shaders::skinning::SkinBinding;
 
-/// Builds the skeleton a skin describes, in the skin's own joint order.
+/// A skin's joints in palette order: the skin's `joints` array with every
+/// parent moved before its children, and the map between the two numberings.
+///
+/// **Stable**: a joint moves only to follow an ancestor that came after it, so
+/// a skin already listed parents first keeps its own order
+/// ([`is_identity`](Self::is_identity)), and a reordered one keeps its
+/// siblings in the order the file listed them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkinOrder {
+    /// Palette index → the node that joint is.
+    nodes: Vec<usize>,
+    /// Palette index → the joint's index in the skin's `joints` array.
+    skin_index: Vec<usize>,
+    /// The skin's `joints` index → palette index.
+    palette: Vec<usize>,
+}
+
+impl SkinOrder {
+    /// The palette order of a skin whose `joints` array is `joints`, under the
+    /// node hierarchy `parents` ([`parents_of`]).
+    ///
+    /// Each joint is placed after the chain of its unplaced joint ancestors,
+    /// root-most first. A chain that loops back on itself — a `children` graph
+    /// with a cycle, which nothing before here rules out — is placed in the
+    /// order it was climbed, so [`Skeleton::new`] refuses it by name rather
+    /// than this looping.
+    #[must_use]
+    pub fn of(joints: &[usize], parents: &[Option<usize>]) -> Self {
+        let mut palette = vec![usize::MAX; joints.len()];
+        let mut skin_index = Vec::with_capacity(joints.len());
+        let mut chain = Vec::new();
+        for start in 0..joints.len() {
+            let mut at = Some(start);
+            while let Some(index) = at {
+                if palette[index] != usize::MAX || chain.contains(&index) {
+                    break;
+                }
+                chain.push(index);
+                at = parents[joints[index]].and_then(|parent| joint_of(joints, parent));
+            }
+            for &index in chain.iter().rev() {
+                palette[index] = skin_index.len();
+                skin_index.push(index);
+            }
+            chain.clear();
+        }
+        Self {
+            nodes: skin_index.iter().map(|&index| joints[index]).collect(),
+            skin_index,
+            palette,
+        }
+    }
+
+    /// The node each palette index is, in palette order: the list a channel's
+    /// node is looked up in, and what a joint's name is read from.
+    #[must_use]
+    pub fn nodes(&self) -> &[usize] {
+        &self.nodes
+    }
+
+    /// The palette index of the joint at `skin_index` in the skin's `joints`
+    /// array — where a `JOINTS_0` value or an inverse bind matrix of the file
+    /// lands — or [`None`] past the end of it.
+    #[must_use]
+    pub fn palette_of(&self, skin_index: usize) -> Option<usize> {
+        self.palette.get(skin_index).copied()
+    }
+
+    /// The palette index of `node`, or [`None`] for a node that is not a joint
+    /// of this skin: where a channel targeting `node` drives.
+    #[must_use]
+    pub fn joint_of(&self, node: usize) -> Option<usize> {
+        joint_of(&self.nodes, node)
+    }
+
+    /// Whether the palette order is the skin's own, as it is for a skin
+    /// listed parents first.
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        self.skin_index
+            .iter()
+            .enumerate()
+            .all(|(palette, &index)| palette == index)
+    }
+
+    /// `binding` with its joints renumbered into palette order. A joint index
+    /// past the skin's end is left as it is, as the file gave it: what the
+    /// skinning pass does with one is its own refusal, not a renumbering.
+    #[must_use]
+    pub fn binding(&self, binding: SkinBinding) -> SkinBinding {
+        SkinBinding {
+            joints: binding.joints.map(|joint| {
+                usize::try_from(joint)
+                    .ok()
+                    .and_then(|joint| self.palette_of(joint))
+                    .and_then(|palette| u32::try_from(palette).ok())
+                    .unwrap_or(joint)
+            }),
+            ..binding
+        }
+    }
+}
+
+/// Builds the skeleton a skin describes, in palette order ([`SkinOrder`]), and
+/// returns that order beside it.
 ///
 /// The hierarchy is not in the skin — a joint is a node like any other, so
 /// where it sits is [`GltfNode::local_transform`] and what hangs off it is
@@ -30,19 +138,26 @@ use crate::shaders::skinning::SkinBinding;
 /// here, which is what [`Joint::parent`]'s docs describe: glTF's joints share a
 /// common root node and that node need not be a joint.
 ///
+/// **The order is what keeps the rest of the file meaningful**: a caller that
+/// loads `JOINTS_0` or a clip itself renumbers through it —
+/// [`SkinOrder::binding`], [`SkinOrder::joint_of`] — as [`skinned_of`] does.
+///
 /// # Errors
 ///
-/// Whatever [`Skeleton::new`] refused the joints with — a skeleton whose
-/// joints are not parent-first cannot be renumbered without breaking every
-/// skinned vertex, so the refusal is reported rather than repaired.
-pub fn skeleton_of(skin: &GltfSkin, nodes: &[GltfNode]) -> Result<Skeleton, SkeletonError> {
-    let joints = skin.joints();
+/// Whatever [`Skeleton::new`] refused the joints with: after the reordering,
+/// only a joint hierarchy with a cycle in it.
+pub fn skeleton_of(
+    skin: &GltfSkin,
+    nodes: &[GltfNode],
+) -> Result<(Skeleton, SkinOrder), SkeletonError> {
     let parents = parents_of(nodes);
-    let built = joints
+    let order = SkinOrder::of(skin.joints(), &parents);
+    let built = order
+        .nodes
         .iter()
-        .enumerate()
-        .map(|(index, &node)| Joint {
-            parent: parents[node].and_then(|parent| joint_of(joints, parent)),
+        .zip(&order.skin_index)
+        .map(|(&node, &index)| Joint {
+            parent: parents[node].and_then(|parent| order.joint_of(parent)),
             // Exactly as long as `joints` by the importer's own contract; the
             // identity fallback is the specification's meaning for a skin that
             // declares no matrices at all, so it is also the only answer that
@@ -59,7 +174,7 @@ pub fn skeleton_of(skin: &GltfSkin, nodes: &[GltfNode]) -> Result<Skeleton, Skel
             rest: Trs::from_mat4(nodes[node].local_transform()),
         })
         .collect();
-    Skeleton::new(built)
+    Ok((Skeleton::new(built)?, order))
 }
 
 /// Which node is each node's parent, or `None` for a node nothing declares as a
@@ -138,7 +253,8 @@ pub struct SkinnedInstance {
     pub transform: Mat4,
     /// One [`SkinBinding`] per emitted vertex of the row's mesh, in the same
     /// order:
-    /// [`MeshOrigin::bindings`](crate::scene::gltf_render::MeshOrigin::bindings).
+    /// [`MeshOrigin::bindings`](crate::scene::gltf_render::MeshOrigin::bindings),
+    /// with their joints renumbered into palette order ([`SkinOrder`]).
     ///
     /// Owned rather than borrowed from the [`RenderScene`], because the frame
     /// uploads them every frame and the document they came from is dropped once
@@ -201,6 +317,7 @@ pub fn skinned_of(scene: &GltfScene, render: &RenderScene, skips: &mut Vec<Skip>
     let Some(to_world) = skeleton_to_world(scene, &parents, skin.joints(), skips) else {
         return Skinned::default();
     };
+    let order = SkinOrder::of(skin.joints(), &parents);
 
     // The converted rows each glTF mesh produced, in primitive order — the
     // half of `place_instances`' walk that lives in `origins`.
@@ -278,7 +395,10 @@ pub fn skinned_of(scene: &GltfScene, render: &RenderScene, skips: &mut Vec<Skip>
                 // this describes is the one before it.
                 instance: cursor - 1,
                 transform: to_world,
-                bindings: bindings.clone(),
+                bindings: bindings
+                    .iter()
+                    .map(|&binding| order.binding(binding))
+                    .collect(),
             });
         }
     }
@@ -377,3 +497,6 @@ fn world_transform(nodes: &[GltfNode], parents: &[Option<usize>], node: usize) -
     }
     None
 }
+
+#[cfg(test)]
+mod tests;

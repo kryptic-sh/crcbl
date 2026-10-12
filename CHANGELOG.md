@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl::scene_rig::skeleton_of` returns `(Skeleton, SkinOrder)`, and a skin
+  not listed parents first is renumbered rather than refused.** Blender exports
+  skins in bone order, which `Skeleton::new` refuses; the new `SkinOrder` moves
+  each joint after its ancestors (stable, so a parents-first skin keeps its
+  order) and carries the map: `skeleton_of` reads the inverse bind matrices
+  through it, `skinned_of` renumbers `JOINTS_0` through it, and a caller loading
+  a clip maps channel nodes with `SkinOrder::joint_of`. Callers that indexed
+  `skin.joints()` for channels or joint names use `SkinOrder::nodes()` instead.
+  The viewer and the editor now pose such skins.
+
 - **`crcbl_phys::SlideContact` has a `clearance_only` field.** When set,
   `fraction` and `started_inside` describe the skin envelope rather than the
   physical capsule. Callers constructing contacts must provide the field;

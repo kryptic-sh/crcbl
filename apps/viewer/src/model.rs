@@ -653,27 +653,37 @@ mod tests {
         assert_eq!(model.skipped(), [], "and nothing was lost converting it");
     }
 
-    /// **A rig this application cannot pose is reported the way a lost texture
-    /// is** — on the skip list `load_and_report` prints and the listing panel
-    /// draws — and the document still loads and still draws.
-    ///
-    /// The fixture's joints are listed child-first, which `Skeleton::new`
-    /// refuses; see [`crate::anim`] for why that is refused rather than sorted
-    /// out. Without this, the refusal would be a `None` nobody is told about.
+    /// **A rig listed child first loads posed, its vertices bound to the
+    /// renumbered joints.** The reversed fixture's `JOINTS_0` bytes are the
+    /// forward one's, so the same index names the other bone: its bindings,
+    /// renumbered, are the forward document's with joints 0 and 1 swapped.
     #[test]
-    fn a_rig_that_cannot_be_posed_is_on_the_skip_list_and_the_document_loads() {
+    fn a_rig_listed_child_first_loads_posed() {
+        let (_forward_dir, forward) = written("forward.glb", &fixture::skinned_glb(true));
         let (_dir, path) = written("reversed.glb", &fixture::skinned_glb(false));
-        let model = load(&path).expect("a document whose rig will not pose still draws");
+        let forward = load(&forward).expect("the forward rig loads");
+        let model = load(&path).expect("the reversed rig loads");
 
-        assert!(model.playable.is_none());
+        assert!(model.playable.is_some(), "renumbered, not refused");
+        assert_eq!(model.skipped(), [], "nothing lost renumbering it");
+        assert_eq!(model.rig.joints, 2);
+        let bindings = |model: &Model| model.skinned.instances[0].bindings.clone();
+        let swapped: Vec<_> = bindings(&forward)
+            .into_iter()
+            .map(|binding| crcbl::shaders::skinning::SkinBinding {
+                joints: binding.joints.map(|joint| match joint {
+                    0 => 1,
+                    1 => 0,
+                    other => other,
+                }),
+                ..binding
+            })
+            .collect();
+        assert_eq!(bindings(&model), swapped);
         assert!(
-            model.skipped().iter().any(|skip| skip.feature == "joints"),
-            "the refusal never reached the user: {:?}",
-            model.skipped(),
-        );
-        assert_eq!(
-            model.rig.joints, 2,
-            "the panel still reports the rig the file declares",
+            swapped.iter().any(|binding| binding.joints[0] == 0)
+                && swapped.iter().any(|binding| binding.joints[0] == 1),
+            "both joints bind a vertex, so the swap is seen"
         );
     }
 

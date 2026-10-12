@@ -196,10 +196,9 @@ const SKIN_TIP_Y: f32 = 1.0;
 ///   second channel is the one a converter has to drop rather than hand to a
 ///   joint index that means something else.
 /// * `parents_first` spells the joint array both ways. `true` is the ordinary
-///   document, root then tip. `false` lists the tip first, which is a hierarchy
-///   `Skeleton::new` refuses because its single forward pass would read a
-///   parent it has not reached — and the viewer's answer to that is a message
-///   rather than a renumbering, for the reason [`crate::anim`] gives.
+///   document, root then tip. `false` lists the tip first, as a Blender export
+///   may: a hierarchy `Skeleton::new` refuses as it stands, and which the
+///   conversion renumbers parents first ([`crcbl::scene_rig::SkinOrder`]).
 ///
 /// The inverse bind matrices follow the joint order in both spellings, so the
 /// document is a correct rig either way and the ordering is the only thing that

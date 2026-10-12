@@ -18,8 +18,8 @@
 //! [`crcbl::scene_rig`], shared with the editor; the clip half is here.
 //!
 //! **A channel's target is a *node* index**, because a glTF animation drives
-//! nodes rather than joints, and it has to be mapped through the skin's joint
-//! list ([`crcbl::scene_rig::joint_of`]) before it can name a [`Channel`]'s
+//! nodes rather than joints, and it has to be mapped through the skin's
+//! palette order ([`SkinOrder::joint_of`]) before it can name a [`Channel`]'s
 //! joint. Handing the node index straight to [`Channel::new`] builds a clip
 //! whose channels name joints that mostly do not exist, which
 //! [`Clip::sample_into`](crcbl::anim::Clip::sample_into) then skips in silence:
@@ -43,21 +43,20 @@
 //!
 //! # A skin whose joints are not in parent-before-child order
 //!
-//! [`Skeleton::new`] refuses it, and this module reports the refusal and poses
-//! nothing rather than repairing it. Repairing means renumbering the joints,
-//! and the first section is why that cannot be done here: the mesh's `JOINTS_0`
-//! attribute and the bind matrices already agree on the old numbers, and
-//! neither is something this application can rewrite. A viewer that sorted the
-//! array would draw a skeleton matching no vertex in the document — a wrong
-//! picture with nothing on screen to say so — where the [`Skip`] is a sentence
-//! naming the file, the skin and the joint that broke the order.
+//! [`Skeleton::new`] needs parents first and a Blender export need not list
+//! them so, so the joints are renumbered ([`SkinOrder`]) and everything that
+//! named the old numbers follows: the bind matrices in
+//! [`crcbl::scene_rig::skeleton_of`], `JOINTS_0` in
+//! [`crcbl::scene_rig::skinned_of`], and a channel's joint here. Only a joint
+//! hierarchy with a cycle has no such order; that is refused with a [`Skip`]
+//! naming the file, the skin and the joint.
 
 use crcbl::anim::{Channel, Clip, Interpolation, Palette, Pose, Skeleton, Track};
 use crcbl::math::{Mat4, Quat, Vec2, Vec3};
 use crcbl::render::Camera;
 use crcbl::scene::gltf_render::Skip;
 use crcbl::scene::{GltfClip, GltfInterpolation, GltfSamples, GltfScene};
-use crcbl::scene_rig::{joint_of, skeleton_of};
+use crcbl::scene_rig::{SkinOrder, skeleton_of};
 use crcbl::ui::draw_list::DrawList;
 
 /// How long a joint's axis ticks are drawn, as a fraction of the document's
@@ -178,17 +177,15 @@ pub fn playable_of(scene: &GltfScene) -> (Option<Playable>, Vec<Skip>) {
             ),
         });
     }
-    let skeleton = match skeleton_of(skin, scene.nodes()) {
-        Ok(skeleton) => skeleton,
+    let (skeleton, order) = match skeleton_of(skin, scene.nodes()) {
+        Ok(built) => built,
         Err(why) => {
             skips.push(Skip {
                 feature: "joints",
                 at: named,
                 why: format!(
-                    "{why}, so this skeleton cannot be posed and is not drawn — the joints \
-                     have to be listed parents first, and renumbering them here would leave \
-                     the mesh's JOINTS_0 attribute and the skin's inverseBindMatrices naming \
-                     different bones",
+                    "{why}, so this skeleton cannot be posed and is not drawn — its joint \
+                     hierarchy has no parents-first order"
                 ),
             });
             return (None, skips);
@@ -207,7 +204,7 @@ pub fn playable_of(scene: &GltfScene) -> (Option<Playable>, Vec<Skip>) {
                     ),
                 });
             }
-            clip_of(source, skin.joints(), &mut skips)
+            clip_of(source, &order, &mut skips)
         }
         // Not an absence worth reporting: a rigged document whose animations
         // live in a second file is an ordinary export, not a loss.
@@ -216,9 +213,9 @@ pub fn playable_of(scene: &GltfScene) -> (Option<Playable>, Vec<Skip>) {
     (Some(Playable { skeleton, clip }), skips)
 }
 
-/// Converts one animation onto a skin's joint order, appending a [`Skip`] for
-/// every channel that could not come with it.
-fn clip_of(source: &GltfClip, joints: &[usize], skips: &mut Vec<Skip>) -> Clip {
+/// Converts one animation onto a skin's palette order, appending a [`Skip`]
+/// for every channel that could not come with it.
+fn clip_of(source: &GltfClip, order: &SkinOrder, skips: &mut Vec<Skip>) -> Clip {
     let at = |index: usize| match source.name() {
         Some(name) => format!("animation 0 \"{name}\" channel {index}"),
         None => format!("animation 0 channel {index}"),
@@ -226,7 +223,7 @@ fn clip_of(source: &GltfClip, joints: &[usize], skips: &mut Vec<Skip>) -> Clip {
     let mut channels = Vec::with_capacity(source.channels().len());
     for (index, channel) in source.channels().iter().enumerate() {
         // The ordinary case, and silent: see the module docs.
-        let Some(joint) = joint_of(joints, channel.node()) else {
+        let Some(joint) = order.joint_of(channel.node()) else {
             continue;
         };
         let Some(track) = track_of(channel.samples()) else {
@@ -570,13 +567,14 @@ fn project(view_projection: Mat4, viewport: Vec2, point: Vec3) -> Option<Vec2> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Playable, Player, joint_of, playable_of, track_of, unit_quaternion};
+    use super::{Playable, Player, playable_of, track_of, unit_quaternion};
     use crate::{demo_model, fixture};
     use crcbl::anim::Track;
     use crcbl::assets::MemorySource;
     use crcbl::math::{Quat, Vec2, Vec3};
     use crcbl::render::{Camera, Projection};
     use crcbl::scene::{GltfSamples, GltfScene};
+    use crcbl::scene_rig::{joint_of, skeleton_of};
     use crcbl::ui::draw_list::{DrawCommand, DrawList};
     use std::path::Path;
 
@@ -595,15 +593,15 @@ mod tests {
         playable.expect("the demo document is rigged")
     }
 
-    /// **The skeleton is in the skin's own joint order, and the hierarchy comes
-    /// out of the node tree.**
+    /// **A parents-first skin's skeleton is in the skin's own joint order, and
+    /// the hierarchy comes out of the node tree.**
     ///
     /// The order is the load-bearing half: a skinned vertex's `JOINTS_0`
-    /// indexes the skin's `joints` array, so a converter that sorted or
-    /// renumbered would leave every weight in the document naming a different
-    /// bone. The bind matrices are asserted against the skin's own, in the same
-    /// order, because that is the observable that says so — two joints in the
-    /// wrong order still count two.
+    /// indexes the skin's `joints` array, so a renumbering this skin does not
+    /// need would leave every weight naming a different bone. The bind
+    /// matrices are asserted against the skin's own, in the same order,
+    /// because that is the observable that says so — two joints in the wrong
+    /// order still count two.
     #[test]
     fn the_skin_becomes_a_skeleton_in_the_skins_own_joint_order() {
         let scene = imported(demo_model::demo_glb());
@@ -665,7 +663,11 @@ mod tests {
         );
         assert_eq!(
             channel.joint(),
-            joint_of(scene.skins()[0].joints(), node).expect("the channel drives a joint"),
+            skeleton_of(&scene.skins()[0], scene.nodes())
+                .expect("a skeleton")
+                .1
+                .joint_of(node)
+                .expect("the channel drives a joint"),
         );
     }
 
@@ -709,30 +711,25 @@ mod tests {
         );
     }
 
-    /// **A skin whose joints are not parents-first is refused, and the refusal
-    /// is a sentence a person can act on.**
-    ///
-    /// `Skeleton::new` is what refuses it — the single forward pass in
-    /// `Palette::compute` is why — and this application's answer is to draw the
-    /// document without the overlay and put the reason where every other thing
-    /// it could not honour goes. See the module docs for why sorting the array
-    /// instead would be a wrong picture with nothing on screen to say so.
+    /// **A skin whose joints are listed child first plays as the same rig
+    /// listed parents first.** The fixture spells one rig both ways, its bind
+    /// matrices following the joints, so renumbering the reversed spelling has
+    /// to arrive at the forward one's skeleton — every parent, rest and bind
+    /// matrix — and its clip, the tip's channel on the tip's new number.
     #[test]
-    fn a_skin_out_of_hierarchy_order_is_refused_and_reported() {
-        let (playable, skips) = playable_of(&imported(fixture::skinned_glb(false)));
-
-        assert!(
-            playable.is_none(),
-            "a skeleton was built from joints Skeleton::new refuses",
+    fn a_skin_out_of_hierarchy_order_is_renumbered_and_plays() {
+        let (forward, forward_skips) = playable_of(&imported(fixture::skinned_glb(true)));
+        let (reversed, skips) = playable_of(&imported(fixture::skinned_glb(false)));
+        assert_eq!((forward_skips, skips), (vec![], vec![]));
+        let (forward, reversed) = (
+            forward.expect("the forward rig plays"),
+            reversed.expect("the reversed rig is renumbered, not refused"),
         );
-        let [skip] = skips.as_slice() else {
-            panic!("the refusal has to reach the skip list: {skips:?}");
-        };
-        assert_eq!(skip.feature, "joints");
-        assert!(skip.at.contains("skin 0"), "{skip}");
+        assert_eq!(reversed.skeleton(), forward.skeleton());
+        assert_eq!(reversed.clip(), forward.clip());
         assert!(
-            skip.why.contains("palette order") && skip.why.contains("JOINTS_0"),
-            "the message has to say what is wrong and why it is not repaired here: {skip}",
+            !reversed.clip().channels().is_empty(),
+            "a clip with a channel, so its joint is compared"
         );
     }
 

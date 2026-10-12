@@ -233,15 +233,15 @@ fn rig_of(
         );
     }
     match skeleton_of(skin, imported.nodes()) {
-        Ok(skeleton) => {
+        Ok((skeleton, order)) => {
             // Fitted at the scale the skeleton hangs at in its asset, which is
             // the scale every entity of the asset draws it at.
             let hangs = skinned
                 .instances
                 .first()
                 .map_or(Mat4::IDENTITY, |part| part.transform);
-            let names: Vec<String> = skin
-                .joints()
+            let names: Vec<String> = order
+                .nodes()
                 .iter()
                 .map(|&node| imported.nodes()[node].name().unwrap_or("").to_owned())
                 .collect();
