@@ -859,6 +859,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A host polling gamepads in its own loop can use the engine's pad backends.**
+  `crcbl::engine::pads::for_run` is public: the same XInput, evdev,
+  GameController or Web Gamepad source `Loop::new` picks, or none for a headless
+  run. `PadSelection` wraps any `PadSource` to list the connected pads and pass
+  on only a chosen pad's input, connections and disconnections always included;
+  `Box<dyn PadSource>` is itself a `PadSource`.
+
 - **`ActionOverride::from_text` and `ActionOverride::texts` convert one saved
   rebind without an `ActionMap`**, for a game that reads its bindings before its
   map exists or keeps the override list itself. A text that does not parse

@@ -135,27 +135,25 @@ than EW assets or an EW checkout.
   deleting EW's copy as each lands. Each names a working EW caller and EW
   regression tests; the engine regression is written with the port. The first
   requests shipped: no console windows during Windows builds and tests
-  (`crcbl-spawn`), and map-free binding text conversion
-  (`ActionOverride::from_text` / `texts`). Order:
-  1. **Public gamepad backend selection** with a selected-device filter
-     (`crcbl/src/engine/pads.rs` `PadSource` is `pub(super)`). Caller: EW
-     `src/app_gamepads.rs`, which also lacks the Steam virtual-pad skip.
-  2. **Camera clearance sweep** (`clear_eye(from, to, radius, skin, exclude)`)
+  (`crcbl-spawn`), map-free binding text conversion (`ActionOverride::from_text`
+  / `texts`) and public pad backends with a device selection
+  (`crcbl::engine::pads::for_run`, `PadSelection`). Order:
+  1. **Camera clearance sweep** (`clear_eye(from, to, radius, skin, exclude)`)
      in `crcbl-phys`. Caller: EW `src/game_camera.rs`, three copies.
-  3. **Uniform direction within a cone** from scalar randoms. Caller: EW
+  2. **Uniform direction within a cone** from scalar randoms. Caller: EW
      `src/dispersion.rs::sample_launch_direction`.
-  4. **Radial stick dead zone, active-device latch, release-until-neutral and a
+  3. **Radial stick dead zone, active-device latch, release-until-neutral and a
      stick-driven virtual cursor** in `crcbl-input`/`crcbl-ui`. Callers: EW
      `src/gamepad_input.rs`, `src/app_inventory_cursor.rs`,
      `src/rendering_cursor.rs`.
-  5. **A required-`Option` serde helper and a strict-schema test helper.**
+  4. **A required-`Option` serde helper and a strict-schema test helper.**
      Caller: EW `src/inventory/item/persistence.rs::required_option`.
-  6. **Projectile flight core** in `crcbl-phys`, from EW `afe90bf3`
+  5. **Projectile flight core** in `crcbl-phys`, from EW `afe90bf3`
      `src/ballistics/flight.rs`: the integrator only (`FlightConfig`,
      `advance`/`advance_into`/`advance_one_segment`, `FlightSegment`, the
      analytic `integrate_segment`). Mass, penetration and traversal stay in EW;
      its regressions are `src/ballistics.rs`'s `mod tests`.
-  7. **Acoustic path evaluation** over `crcbl` `SoundPath` candidates with
+  6. **Acoustic path evaluation** over `crcbl` `SoundPath` candidates with
      caller-supplied range, surface and barrier tables. Caller: EW
      `src/sound.rs::evaluate_sound_paths`.
 

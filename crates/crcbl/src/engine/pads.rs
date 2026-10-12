@@ -32,8 +32,18 @@
 //! - **A headless run, on every target**, gets no source at all: a scripted or
 //!   golden run must not be steered by whatever pad happens to be plugged into
 //!   the machine running it.
+//!
+//! # Outside the loop
+//!
+//! A host with a frame loop of its own takes the same source from
+//! [`for_run`] and polls it itself; on Steam,
+//! `steam::steam_input` builds the source with Steam's virtual pads skipped.
+//! [`PadSelection`] wraps any source to keep the list of connected pads and
+//! pass on one chosen pad's input.
 
-use crcbl_input::GamepadEvent;
+use std::collections::BTreeMap;
+
+use crcbl_input::{GamepadEvent, GamepadId, PadKind};
 
 /// A source of [`GamepadEvent`]s, polled once a frame.
 ///
@@ -50,9 +60,95 @@ pub trait PadSource {
     fn poll(&mut self, emit: &mut dyn FnMut(GamepadEvent));
 }
 
-/// The platform's pad source for a run, or `None` — see the module docs.
-pub(super) fn for_run(windowed: bool) -> Option<Box<dyn PadSource>> {
+/// The platform's pad source for a run, or `None` — see the module docs:
+/// what [`Loop::new`](super::Loop::new) picks, for a host polling pads in a
+/// loop of its own. A headless run (`windowed == false`) gets none.
+#[must_use]
+pub fn for_run(windowed: bool) -> Option<Box<dyn PadSource>> {
     if windowed { platform() } else { None }
+}
+
+/// A pad source that keeps the list of connected pads and passes on the
+/// input of one chosen pad — a settings screen's "use this controller".
+///
+/// Connections and disconnections always pass through, so a game still hears
+/// a pad arrive or leave; a pad's state passes through only while no pad is
+/// chosen or it is the chosen one. A pad is listed from its connection or its
+/// first state, whichever comes first, until it disconnects. The choice
+/// survives the chosen pad disconnecting: a backend that reuses an id for the
+/// same slot (XInput does) hands it straight back, and until then no other
+/// pad steers the game.
+#[derive(Debug)]
+pub struct PadSelection<S> {
+    source: S,
+    devices: BTreeMap<GamepadId, PadKind>,
+    selected: Option<GamepadId>,
+}
+
+impl<S: PadSource> PadSelection<S> {
+    /// `source` with no pad chosen: every pad's input passes.
+    pub const fn new(source: S) -> Self {
+        Self {
+            source,
+            devices: BTreeMap::new(),
+            selected: None,
+        }
+    }
+
+    /// The pads connected now, by id, with their kinds.
+    pub fn devices(&self) -> impl Iterator<Item = (GamepadId, PadKind)> + '_ {
+        self.devices.iter().map(|(&id, &kind)| (id, kind))
+    }
+
+    /// The chosen pad, or `None` when every pad's input passes.
+    #[must_use]
+    pub const fn selected(&self) -> Option<GamepadId> {
+        self.selected
+    }
+
+    /// Chooses the pad whose input passes, or every pad with `None`. Returns
+    /// `false`, changing nothing, if that is already the choice or the pad is
+    /// not connected.
+    pub fn select(&mut self, selected: Option<GamepadId>) -> bool {
+        if self.selected == selected || selected.is_some_and(|id| !self.devices.contains_key(&id)) {
+            return false;
+        }
+        self.selected = selected;
+        true
+    }
+}
+
+impl<S: PadSource> PadSource for PadSelection<S> {
+    fn poll(&mut self, emit: &mut dyn FnMut(GamepadEvent)) {
+        let Self {
+            source,
+            devices,
+            selected,
+        } = self;
+        source.poll(&mut |event| {
+            match event {
+                GamepadEvent::Connected { id, kind } => {
+                    devices.insert(id, kind);
+                }
+                GamepadEvent::Disconnected { id } => {
+                    devices.remove(&id);
+                }
+                GamepadEvent::State { id, snapshot } => {
+                    devices.insert(id, snapshot.kind);
+                    if selected.is_some_and(|chosen| chosen != id) {
+                        return;
+                    }
+                }
+            }
+            emit(event);
+        });
+    }
+}
+
+impl<S: PadSource + ?Sized> PadSource for Box<S> {
+    fn poll(&mut self, emit: &mut dyn FnMut(GamepadEvent)) {
+        (**self).poll(emit);
+    }
 }
 
 /// XInput, or `None` with the reason logged.
@@ -253,5 +349,80 @@ mod tests {
     #[test]
     fn a_headless_run_has_no_pad_source() {
         assert!(for_run(false).is_none());
+    }
+
+    /// A source that reports the next batch of events at each poll.
+    struct Script(Vec<Vec<GamepadEvent>>);
+
+    impl PadSource for Script {
+        fn poll(&mut self, emit: &mut dyn FnMut(GamepadEvent)) {
+            if !self.0.is_empty() {
+                for event in self.0.remove(0) {
+                    emit(event);
+                }
+            }
+        }
+    }
+
+    fn state(id: u32, kind: PadKind) -> GamepadEvent {
+        GamepadEvent::State {
+            id: GamepadId(id),
+            snapshot: crcbl_input::GamepadSnapshot::neutral(kind),
+        }
+    }
+
+    fn poll(pads: &mut impl PadSource) -> Vec<GamepadEvent> {
+        let mut events = Vec::new();
+        pads.poll(&mut |event| events.push(event));
+        events
+    }
+
+    /// **Every pad is listed, and only the chosen one's input passes.**
+    /// Connections and disconnections pass whatever is chosen; a pad first
+    /// seen by its state is listed too; the choice outlives a disconnect.
+    #[test]
+    fn a_selection_lists_every_pad_and_passes_the_chosen_ones_input() {
+        let connect = |id: u32| GamepadEvent::Connected {
+            id: GamepadId(id),
+            kind: PadKind::Xbox,
+        };
+        let source: Box<dyn PadSource> = Box::new(Script(vec![
+            vec![connect(1), state(2, PadKind::PlayStation)],
+            vec![state(1, PadKind::Xbox), state(2, PadKind::PlayStation)],
+            vec![
+                GamepadEvent::Disconnected { id: GamepadId(1) },
+                state(2, PadKind::PlayStation),
+                connect(3),
+            ],
+        ]));
+        let mut pads = PadSelection::new(source);
+        assert_eq!(
+            poll(&mut pads),
+            [connect(1), state(2, PadKind::PlayStation)],
+            "with none chosen everything passes"
+        );
+        assert_eq!(
+            pads.devices().collect::<Vec<_>>(),
+            [
+                (GamepadId(1), PadKind::Xbox),
+                (GamepadId(2), PadKind::PlayStation)
+            ]
+        );
+        assert!(!pads.select(Some(GamepadId(9))), "an absent pad is refused");
+        assert!(pads.select(Some(GamepadId(1))));
+        assert!(!pads.select(Some(GamepadId(1))), "already chosen");
+        assert_eq!(pads.selected(), Some(GamepadId(1)));
+        assert_eq!(poll(&mut pads), [state(1, PadKind::Xbox)]);
+        assert_eq!(
+            poll(&mut pads),
+            [GamepadEvent::Disconnected { id: GamepadId(1) }, connect(3)],
+            "pad 2 is still silenced after pad 1 leaves"
+        );
+        assert_eq!(pads.selected(), Some(GamepadId(1)));
+        assert_eq!(
+            pads.devices().map(|(id, _)| id).collect::<Vec<_>>(),
+            [GamepadId(2), GamepadId(3)]
+        );
+        assert!(pads.select(None));
     }
 }
