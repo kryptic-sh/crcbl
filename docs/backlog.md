@@ -52,19 +52,20 @@ than EW assets or an EW checkout.
     cap settles the longest-awake ragdolls rather than the plan's "excess deaths
     settle instantly to a canned pose": a new death settled at once would hang
     in the air, and no canned pose exists.
-  - A settled-pose handoff suitable for revival, with clearance checked before
-    rising and no unintended relocation of the authoritative character. The
-    parts exist — `Ragdoll::body_transforms` for where the body lies,
-    `Ragdoll::set_query_layers` to leave the corpse out of a check, and
-    `CharacterController::preview_upright` for whether a standing capsule fits —
-    but no test composes them into a rise, and choosing the rise point is
-    unwritten.
-  - The editor preview, which is blocked first on the editor itself: it shows no
-    skinned mesh or skeleton (`apps/editor` has physics but no animation), so a
-    ragdoll has nothing to preview on. The remaining delivery requirements in
-    `docs/plan/35-ragdolls.md`. Budgets, forced settling and a substep distance
-    LOD (`Ragdoll::set_substeps`) exist; LOD by body count or by skipping
-    straight to the server's settled pose is the game's to compose from them.
+  - A settled-pose handoff suitable for revival: `Ragdoll::rise_point` gives the
+    standing capsule's centre under the hips (the body nearest the skeleton
+    root), found by `CharacterController::preview_upright` and refused for no
+    ground, a push past `RiseQuery::max_shift`, or a capsule that still overlaps
+    (a low ceiling). It moves nothing; placing the authoritative character there
+    and the get-up itself are the game's. Its mask must leave the corpse's
+    layers out, or the character is stood on its own body. Not built: searching
+    around the hips for room when the hips themselves have none.
+  - The editor preview shipped: G drops a selected rigged mesh as its ragdoll
+    (see "Further editor scope" below for what it does and does not do). The
+    remaining delivery requirements are in `docs/plan/35-ragdolls.md`. Budgets,
+    forced settling and a substep distance LOD (`Ragdoll::set_substeps`) exist;
+    LOD by body count or by skipping straight to the server's settled pose is
+    the game's to compose from them.
 
   Damage, item/container ownership, revival progress, interaction admission and
   authored get-up behavior remain in EW. EW must independently verify that its

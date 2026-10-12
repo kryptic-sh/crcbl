@@ -869,6 +869,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Ragdoll::rise_point`** answers where a character standing up from a corpse
+  would stand: the capsule centre under the hips, found by the character
+  controller's own solve, or a `RiseError` for no ground, a push from a wall
+  past `RiseQuery::max_shift`, or no room under a ceiling. It moves nothing, so
+  the authoritative character is placed only when the game decides.
+
 - **`scene_edit::Document::derived_asset_root`** names the directory a document
   reads its assets from when it derived it from its origin, for a tool that
   writes beside an asset; `None` for a source named by `set_assets`.

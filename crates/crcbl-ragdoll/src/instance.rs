@@ -101,7 +101,7 @@ pub enum StrikeError {
 pub struct Ragdoll {
     pub(crate) entities: Vec<Entity>,
     /// Each body's skeleton joint, in rig order.
-    skeleton_joints: Vec<usize>,
+    pub(crate) skeleton_joints: Vec<usize>,
     /// Where each body's joint origin sits in the body's frame: the inverse
     /// of the rig body's offset, applied to the origin.
     joint_in_body: Vec<DVec3>,
