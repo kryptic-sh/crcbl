@@ -3,6 +3,7 @@
 mod common;
 
 use common::{index, model, skeleton};
+use crcbl_anim::{Joint as Bone, Skeleton, Trs};
 use crcbl_phys::Transform;
 use crcbl_ragdoll::{BodyShape, GenerateError, GenerateSettings, RagdollRig, RigJointKind};
 use glam::{DVec3, Mat4, Vec3};
@@ -178,13 +179,30 @@ fn bad_settings_and_a_degenerate_model_are_refused() {
         RagdollRig::generate(&skeleton, flat, &GenerateSettings::DEFAULT),
         Err(GenerateError::InvalidFrame { .. })
     ));
-    // Every bone shorter than the minimum: nothing carries a body.
+    // A chain with no branch, every bone shorter than the minimum: nothing
+    // carries a body. (A branching joint always does, so the fixture would.)
+    let chain = Skeleton::new(vec![
+        Bone {
+            parent: None,
+            inverse_bind: Mat4::IDENTITY,
+            rest: Trs::IDENTITY,
+        },
+        Bone {
+            parent: Some(0),
+            inverse_bind: Mat4::from_translation(Vec3::new(0.0, -1.0, 0.0)),
+            rest: Trs {
+                translation: Vec3::new(0.0, 1.0, 0.0),
+                ..Trs::IDENTITY
+            },
+        },
+    ])
+    .expect("a chain");
     let tiny = GenerateSettings {
         min_length: 10.0,
         ..GenerateSettings::DEFAULT
     };
     assert!(matches!(
-        RagdollRig::generate(&skeleton, model(0.0), &tiny),
+        RagdollRig::generate(&chain, model(0.0), &tiny),
         Err(GenerateError::Rig(_))
     ));
 }
@@ -213,5 +231,28 @@ fn jointed_masses_stay_within_the_ratio_and_set_the_friction() {
     assert!(
         hips.shape.volume() * settings.max_mass_ratio < thigh.shape.volume(),
         "the fixture must exercise the ratio"
+    );
+}
+
+/// **A coarse rig is still one body.** With bones under 0.2 m left out, the
+/// hips' three short children would leave it without a body and the legs
+/// hanging from nothing; a branching joint keeps its body, so the rig stays
+/// one tree.
+#[test]
+fn a_coarse_rig_stays_one_tree() {
+    let coarse = GenerateSettings {
+        min_length: 0.2,
+        ..GenerateSettings::DEFAULT
+    };
+    let rig = RagdollRig::generate(&skeleton(), model(0.0), &coarse).expect("a rig");
+    assert!(body_at(&rig, "hips").is_some(), "the hips carry no body");
+    assert!(
+        body_at(&rig, "clavicle_l").is_none(),
+        "a short clavicle carries none"
+    );
+    assert_eq!(
+        rig.joints().len(),
+        rig.bodies().len() - 1,
+        "the rig is in pieces"
     );
 }

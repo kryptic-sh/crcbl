@@ -7,9 +7,9 @@
 //!   away carries a capsule from itself to that child, its radius
 //!   [`GenerateSettings::radius_ratio`] of the bone's length (a sphere if the
 //!   bone is too short for the caps);
-//! - a joint with **several** such children — a pelvis, a chest — carries a
+//! - a joint with **several** children — a pelvis, a chest — carries a
 //!   sphere at the middle of itself and them, its radius half their mean
-//!   distance;
+//!   distance, however short they are, so the subtrees stay joined;
 //! - a joint with **none** — a hand, a foot, a head with no end bone — carries
 //!   a sphere just beyond itself, sized from its own bone;
 //! - a joint closer than that to its parent, and a childless root, carries
@@ -155,10 +155,17 @@ impl RagdollRig {
         let at = |joint: usize| frames[joint].position;
         let fitted: Vec<Fitted> = (0..joints.len())
             .filter_map(|joint| {
+                // A branching joint keeps every child however short: its body
+                // is what joins the subtrees, and without one a coarse rig's
+                // legs would hang from nothing.
+                let reaching = |child: usize| {
+                    let length = at(child).distance(at(joint));
+                    length >= settings.min_length || (children[joint].len() > 1 && length > 0.0)
+                };
                 let long: Vec<usize> = children[joint]
                     .iter()
                     .copied()
-                    .filter(|&child| at(child).distance(at(joint)) >= settings.min_length)
+                    .filter(|&child| reaching(child))
                     .collect();
                 let from_parent = joints[joint].parent.map(|parent| at(joint) - at(parent));
                 fit(joint, &long, from_parent, &at, settings)
