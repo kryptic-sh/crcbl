@@ -406,7 +406,8 @@ impl<S: Shell + ?Sized> Editor<S> {
         if self.held_body().is_some() {
             return (
                 format!(
-                    "{label}: a held rig body has translate's handles alone;                      {verb} it in the inspector"
+                    "{label}: a held rig body has translate's handles alone; \
+                     {verb} it in the inspector"
                 ),
                 Tone::Warning,
             );

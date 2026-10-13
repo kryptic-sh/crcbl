@@ -1052,10 +1052,10 @@ fn a_held_body_moves_along_its_arrow_and_is_written() {
     assert_eq!(editor.document.selection(), [id], "the click picked");
     assert!(editor.handles().is_empty(), "scale shows a body handles");
     editor.act(&Action::Scale);
-    assert!(
-        editor.panels.status().0.contains("held rig body"),
-        "{:?}",
-        editor.panels.status()
+    assert_eq!(
+        editor.panels.status().0,
+        "Scale: a held rig body has translate's handles alone; resize it in the inspector. \
+         Local axes; X toggles translate/rotate axes"
     );
     // A click on the mesh away from its bodies picks the mesh again, and lets
     // go of the body.
