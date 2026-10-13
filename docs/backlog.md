@@ -56,14 +56,27 @@ than EW assets or an EW checkout.
     `a_tethered_client_holds_within_a_body_width_of_the_server` measures a 0.14
     m peak at 45 Hz against the client's 0.17 m chest, where the pull at 60 Hz
     peaks at 0.26 m, so the plan's "never more than a body width" holds through
-    the landing for the torso's width, not a forearm's. A stiffer tether did
-    worse (0.29 m at 60 Hz); why is not looked into. The tether is measured on
-    this one scenario, two rigs of the synthetic skeleton struck alike. EW has
-    no networked detail clients yet and recorded the tether in its own backlog
-    for when it does (2026-10-14), so it is unused there. The cap settles the
-    longest-awake ragdolls rather than the plan's "excess deaths settle
-    instantly to a canned pose": a new death settled at once would hang in the
-    air, and no canned pose exists.
+    the landing for the torso's width, not a forearm's. A stiffer tether does
+    worse, from two causes measured on 2026-10-14 with a sweep of `chase` (a
+    probe, not kept). First, each target is where the server's joint stood
+    before the tick, so a stiff spring holds the client a tick behind the server
+    while the blow flings the coarse rig's limbs: from 30 Hz up the peak falls
+    in the first tick or two (0.18 m at 60 Hz, 0.44 m at 90 Hz). With the server
+    stepped first and its positions for the same tick as targets, 5 to 45 Hz all
+    improved (30 Hz 0.19 → 0.07 m, 45 Hz 0.14 → 0.09 m) and the first-tick peak
+    went away. Second, above about 45 Hz it is still worse with current targets
+    (0.21 m at 60 and 90 Hz, 0.43 m at 120 Hz, peaking mid-fall at ticks 13 to
+    29); a guess not checked is the stiff springs pulling the detailed rig's
+    limbs against its joint limits towards places only the coarse rig's joints
+    reach. A networked client's targets are always at least a tick old, so the
+    open option is extrapolating each target by a tick of the server's joint
+    velocity, which the snapshot would have to carry — not built, and not
+    requested. The tether is measured on this one scenario, two rigs of the
+    synthetic skeleton struck alike. EW has no networked detail clients yet and
+    recorded the tether in its own backlog for when it does (2026-10-14), so it
+    is unused there. The cap settles the longest-awake ragdolls rather than the
+    plan's "excess deaths settle instantly to a canned pose": a new death
+    settled at once would hang in the air, and no canned pose exists.
   - A settled-pose handoff suitable for revival: `Ragdoll::rise_point` gives the
     standing capsule's centre under the hips (the body nearest the skeleton
     root), found by `CharacterController::preview_upright` and refused for no

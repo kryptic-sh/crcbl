@@ -75,8 +75,14 @@ impl Ragdoll {
     /// alike and landing differently: tethered at 45 Hz the shared joints
     /// peak 0.14 m apart through the landing, against 0.26 m for
     /// [`pull_towards`](Self::pull_towards) at 60 Hz, the stiffest pull
-    /// tried. A stiffer tether did worse: at 60 Hz the joints peaked 0.29 m
-    /// apart.
+    /// tried. A stiffer tether did worse — 0.18 m at 60 Hz, 0.44 m at 90 Hz
+    /// (2026-10-14) — and mostly in the first tick after the blow: a target
+    /// is where the server's joint stood before the tick, and a stiffer
+    /// spring holds the client there harder while the server's limbs move
+    /// fastest. Given the server's positions for the tick being stepped
+    /// instead, every stiffness up to 45 Hz did better (0.07 m at 30 Hz), so
+    /// give it the newest positions there are; above that it still did worse,
+    /// for a reason not found.
     ///
     /// # Errors
     ///
