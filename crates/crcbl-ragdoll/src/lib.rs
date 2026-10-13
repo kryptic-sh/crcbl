@@ -18,8 +18,9 @@
 //! [`Ragdoll::settle_to`] puts a ragdoll into, and [`SettleBudget`] is the
 //! settle timeout and the cap on ragdolls awake at once.
 //!
-//! Not here yet: the server's simplified ragdoll, the soft pull between it and
-//! a client's detailed one, editor preview and distance LOD. Deciding the
+//! A client's detailed ragdoll follows the server's simplified one by
+//! [`Ragdoll::pull_towards`] between steps, or held inside the solver by a
+//! [`Tether`] of springs to anchors the server's joints move. Deciding the
 //! death, choosing the killing contact and revival stay with the game.
 
 mod desc;
@@ -29,6 +30,7 @@ mod instance;
 mod rig;
 mod rise;
 mod settle;
+mod tether;
 
 pub use desc::{BodyDesc, DescError, JointDesc, JointKindDesc, RagdollDesc, ShapeDesc};
 pub use frames::REST_CLEARANCE;
@@ -37,3 +39,4 @@ pub use instance::{Handoff, PreviousPose, Ragdoll, SpawnError, StrikeError};
 pub use rig::{BodyShape, RagdollRig, RigBody, RigError, RigJoint, RigJointKind};
 pub use rise::{RiseError, RiseQuery};
 pub use settle::{SettleBudget, SettleError, SettledPose};
+pub use tether::{Tether, TetherError};

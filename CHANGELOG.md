@@ -954,7 +954,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   it blocks a character or a revival's clearance check is decided by those
   queries' masks. `Ragdoll::pull_towards` springs a client's detailed ragdoll's
   joints towards the server ragdoll's `Ragdoll::joint_positions`, by skeleton
-  joint, implicitly so any stiffness is stable.
+  joint, implicitly so any stiffness is stable. `Ragdoll::tether` holds them
+  there inside the solver instead, a `Tether` of zero-length spring joints to
+  anchor entities that `Tether::follow` moves to the server's joints each tick,
+  so the spring and the contacts are solved together and the two rigs stay
+  closer through a landing; `Tether::remove` takes the anchors out again, and
+  `TetherError` names a bad frequency, too few anchors or one already in use.
 
 - **`crcbl::acoustic_path::loudest_path` picks the route a sound is heard
   along** from a game's candidate `SoundPath`s: each carries the range times its

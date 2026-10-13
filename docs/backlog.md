@@ -48,13 +48,20 @@ than EW assets or an EW checkout.
     the same skeleton. `a_detailed_client_converges_on_a_simplified_server` runs
     the two side by side: at 6 Hz the shared joints end 2 cm apart (0.61 m
     unpulled) but peak 0.62 m apart where the rigs land (1.26 m unpulled),
-    because a pull applied between steps does not overrule a step's contacts.
-    The plan's "never more than a body width" therefore holds after the landing
-    and not through it; holding it through impacts would need the pull inside
-    the solver (a joint or soft constraint to a target), which is not built. The
-    cap settles the longest-awake ragdolls rather than the plan's "excess deaths
-    settle instantly to a canned pose": a new death settled at once would hang
-    in the air, and no canned pose exists.
+    because a pull applied between steps does not overrule a step's contacts. A
+    `Tether` (`Ragdoll::tether`, `crates/crcbl-ragdoll/src/tether.rs`) puts the
+    same spring inside the solver, as a zero-length distance joint to an anchor
+    `Tether::follow` moves to the server's joint each tick:
+    `a_tethered_client_holds_within_a_body_width_of_the_server` measures a 0.14
+    m peak at 45 Hz against the client's 0.17 m chest, where the pull at 60 Hz
+    peaks at 0.26 m, so the plan's "never more than a body width" holds through
+    the landing for the torso's width, not a forearm's. A stiffer tether did
+    worse (0.29 m at 60 Hz); why is not looked into. The tether is measured on
+    this one scenario, two rigs of the synthetic skeleton struck alike; whether
+    a moved anchor wakes a client body that fell asleep is not checked. EW
+    adoption is not verified. The cap settles the longest-awake ragdolls rather
+    than the plan's "excess deaths settle instantly to a canned pose": a new
+    death settled at once would hang in the air, and no canned pose exists.
   - A settled-pose handoff suitable for revival: `Ragdoll::rise_point` gives the
     standing capsule's centre under the hips (the body nearest the skeleton
     root), found by `CharacterController::preview_upright` and refused for no

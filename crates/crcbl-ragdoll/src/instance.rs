@@ -104,7 +104,7 @@ pub struct Ragdoll {
     pub(crate) skeleton_joints: Vec<usize>,
     /// Where each body's joint origin sits in the body's frame: the inverse
     /// of the rig body's offset, applied to the origin.
-    joint_in_body: Vec<DVec3>,
+    pub(crate) joint_in_body: Vec<DVec3>,
     joints: Vec<JointId>,
     shapes: Vec<crcbl_phys::ColliderComponent>,
     binding: RagdollBinding,

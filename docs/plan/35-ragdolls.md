@@ -14,10 +14,11 @@ the articulation — ragdolls are the flagship consumer of both.
 (`RagdollRig::generate`), the death handoff from the last animated pose
 (`Ragdoll::spawn`, `strike_with`), skinning from the bodies (`pose_into`), the
 settled pose's wire form and the client's soft pull (`SettledPose`, `settle_to`,
-`pull_towards`), budgets and forced settling (`SettleBudget`, `force_settle`),
-substep LOD (`set_substeps`) and the rise point (`rise_point`) exist. What is
-left, and why, is in `docs/backlog.md` under "HIGH PRIORITY: EW engine
-requirements"; the sections below are the design those pieces follow.
+`pull_towards`, and inside the solver `tether`), budgets and forced settling
+(`SettleBudget`, `force_settle`), substep LOD (`set_substeps`) and the rise
+point (`rise_point`) exist. What is left, and why, is in `docs/backlog.md` under
+"HIGH PRIORITY: EW engine requirements"; the sections below are the design those
+pieces follow.
 
 ## The split: server settles, client performs
 

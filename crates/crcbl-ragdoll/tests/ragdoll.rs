@@ -7,9 +7,10 @@ mod common;
 use common::{entities, index, model, skeleton, world};
 use crcbl_anim::{Palette, Pose, Trs};
 use crcbl_ecs::Entity;
-use crcbl_phys::{KineticContact, KineticSource, PhysicsSystem, Transform};
+use crcbl_phys::{JointKind, KineticContact, KineticSource, PhysicsSystem, Spring, Transform};
 use crcbl_ragdoll::{
-    GenerateSettings, Handoff, PreviousPose, Ragdoll, RagdollRig, SpawnError, StrikeError,
+    BodyShape, GenerateSettings, Handoff, PreviousPose, Ragdoll, RagdollRig, SpawnError,
+    StrikeError, TetherError,
 };
 use glam::{DVec3, Mat4, Quat, Vec3};
 
@@ -369,23 +370,24 @@ fn force_settle_and_remove() {
     }
 }
 
-/// **A client's detailed ragdoll pulled towards the server's simplified one
-/// converges on it, and diverges less on the way.** The server simulates a
-/// coarse rig of the same skeleton — no clavicles, no neck — and the client
-/// the full one; both take the same blow on the chest, and each tick the
-/// client pulls every joint the server has towards where the server's joint
-/// is.
-///
-/// Measured on 2026-10-12 with this pull at 6 Hz: the shared joints peak
-/// 0.62 m apart where the two land, against 1.26 m unpulled — the rigs meet
-/// the floor differently, and a pull applied between steps does not overrule
-/// a step's contacts — and end 2 cm apart,
-/// against 0.61 m. The plan's
-/// "never more than a body width" holds after the landing, not through it.
-#[test]
-fn a_detailed_client_converges_on_a_simplified_server() {
-    /// How far apart the shared joints may end, in metres.
-    const SETTLED_GAP: f64 = 0.05;
+/// How a client's detailed ragdoll follows the server's in [`chase`].
+#[derive(Clone, Copy, Debug)]
+enum Follow {
+    /// Not at all.
+    Loose,
+    /// [`Ragdoll::pull_towards`] at this many hertz.
+    Pull(f64),
+    /// A [`Tether`] at this many hertz.
+    Tether(f64),
+}
+
+/// The server simulates a coarse rig of the synthetic skeleton — no
+/// clavicles, no neck — and the client the full one; both take the same blow
+/// on the chest and fall for ten seconds, the client following as `follow`
+/// says each tick. The farthest any joint the server has stands from the
+/// client's, at its peak and at the end, and the client's chest body's
+/// width.
+fn chase(follow: Follow) -> (f64, f64, f64) {
     let skeleton = skeleton();
     let coarse = RagdollRig::generate(
         &skeleton,
@@ -398,54 +400,89 @@ fn a_detailed_client_converges_on_a_simplified_server() {
     .expect("a coarse rig");
     let detailed = rig();
     assert!(coarse.bodies().len() < detailed.bodies().len());
-    let run = |hertz: f64| {
-        let mut server = world();
-        let mut client = world();
-        let lead = spawn_running(&mut server, &coarse);
-        let follow = spawn_running(&mut client, &detailed);
-        for (ragdoll, rig, physics) in [
-            (&lead, &coarse, &mut server),
-            (&follow, &detailed, &mut client),
-        ] {
-            let chest = rig
-                .bodies()
-                .iter()
-                .position(|body| body.joint == index("chest"))
-                .expect("a chest");
-            let entity = ragdoll.entities()[chest];
-            let at = body_world(physics, entity).position;
-            physics
-                .apply_impulse_at(entity, DVec3::NEG_Z * 30.0, at)
-                .unwrap();
-        }
-        let gap = |server: &PhysicsSystem, client: &PhysicsSystem| {
-            let here = follow.joint_positions(client).unwrap();
-            lead.joint_positions(server)
-                .unwrap()
-                .into_iter()
-                .map(|(joint, there)| {
-                    let mine = here
-                        .iter()
-                        .find(|(j, _)| *j == joint)
-                        .expect("a shared joint");
-                    mine.1.distance(there)
-                })
-                .fold(0.0_f64, f64::max)
-        };
-        let mut peak: f64 = 0.0;
-        for _ in 0..600 {
-            if hertz > 0.0 {
-                let targets = lead.joint_positions(&server).unwrap();
-                follow.pull_towards(&mut client, &targets, hertz, DT);
-            }
-            server.step(DT);
-            client.step(DT);
-            peak = peak.max(gap(&server, &client));
-        }
-        (peak, gap(&server, &client))
+    let mut server = world();
+    let mut client = world();
+    let lead = spawn_running(&mut server, &coarse);
+    let client_ragdoll = spawn_running(&mut client, &detailed);
+    let chest_of = |rig: &RagdollRig| {
+        rig.bodies()
+            .iter()
+            .position(|body| body.joint == index("chest"))
+            .expect("a chest")
     };
-    let (loose_peak, loose_end) = run(0.0);
-    let (pulled_peak, pulled_end) = run(6.0);
+    for (ragdoll, rig, physics) in [
+        (&lead, &coarse, &mut server),
+        (&client_ragdoll, &detailed, &mut client),
+    ] {
+        let entity = ragdoll.entities()[chest_of(rig)];
+        let at = body_world(physics, entity).position;
+        physics
+            .apply_impulse_at(entity, DVec3::NEG_Z * 30.0, at)
+            .unwrap();
+    }
+    let BodyShape::Sphere { radius } = detailed.bodies()[chest_of(&detailed)].shape else {
+        panic!("the chest has several children, so it is a sphere");
+    };
+    let tether = match follow {
+        Follow::Tether(hertz) => {
+            let targets = lead.joint_positions(&server).unwrap();
+            let anchors = entities(500, targets.len());
+            Some(
+                client_ragdoll
+                    .tether(&mut client, &targets, &anchors, hertz)
+                    .expect("tethered"),
+            )
+        }
+        Follow::Loose | Follow::Pull(_) => None,
+    };
+    let gap = |server: &PhysicsSystem, client: &PhysicsSystem| {
+        let here = client_ragdoll.joint_positions(client).unwrap();
+        lead.joint_positions(server)
+            .unwrap()
+            .into_iter()
+            .map(|(joint, there)| {
+                let mine = here
+                    .iter()
+                    .find(|(j, _)| *j == joint)
+                    .expect("a shared joint");
+                mine.1.distance(there)
+            })
+            .fold(0.0_f64, f64::max)
+    };
+    let mut peak: f64 = 0.0;
+    for _ in 0..600 {
+        let targets = lead.joint_positions(&server).unwrap();
+        match (follow, &tether) {
+            (Follow::Pull(hertz), _) => {
+                client_ragdoll.pull_towards(&mut client, &targets, hertz, DT);
+            }
+            (Follow::Tether(_), Some(tether)) => {
+                tether.follow(&mut client, &targets);
+            }
+            _ => {}
+        }
+        server.step(DT);
+        client.step(DT);
+        peak = peak.max(gap(&server, &client));
+    }
+    (peak, gap(&server, &client), 2.0 * radius)
+}
+
+/// **A client's detailed ragdoll pulled towards the server's simplified one
+/// converges on it, and diverges less on the way.** Each tick the client
+/// pulls every joint the server has towards where the server's joint is.
+///
+/// Measured on 2026-10-12 with this pull at 6 Hz: the shared joints peak
+/// 0.62 m apart where the two land, against 1.26 m unpulled — the rigs meet
+/// the floor differently, and a pull applied between steps does not overrule
+/// a step's contacts — and end 2 cm apart, against 0.61 m. Through the landing
+/// the plan's "never more than a body width" takes a [`Tether`].
+#[test]
+fn a_detailed_client_converges_on_a_simplified_server() {
+    /// How far apart the shared joints may end, in metres.
+    const SETTLED_GAP: f64 = 0.05;
+    let (loose_peak, loose_end, _) = chase(Follow::Loose);
+    let (pulled_peak, pulled_end, _) = chase(Follow::Pull(6.0));
     assert!(pulled_end < SETTLED_GAP, "they ended {pulled_end} m apart");
     assert!(
         loose_end > 2.0 * SETTLED_GAP,
@@ -454,6 +491,119 @@ fn a_detailed_client_converges_on_a_simplified_server() {
     assert!(
         pulled_peak < loose_peak,
         "the pull did not narrow the landing: {pulled_peak} vs {loose_peak}"
+    );
+}
+
+/// **Tethered inside the solver, the client stays within its chest's width
+/// of the server through the landing**, where the pull between steps at the
+/// same stiffness does not, and the two end together.
+///
+/// Measured on 2026-10-13: tethered at 45 Hz, the shared joints peak 0.14 m
+/// apart against a 0.17 m chest; pulled at 60 Hz, the stiffest pull tried,
+/// 0.26 m.
+#[test]
+fn a_tethered_client_holds_within_a_body_width_of_the_server() {
+    /// The tether's and the pull's stiffness, in hertz.
+    const HERTZ: f64 = 45.0;
+    /// How far apart the shared joints may end, in metres.
+    const SETTLED_GAP: f64 = 0.01;
+    let (tethered_peak, tethered_end, width) = chase(Follow::Tether(HERTZ));
+    let (pulled_peak, _, _) = chase(Follow::Pull(HERTZ));
+    assert!(
+        tethered_peak < width,
+        "tethered, they parted {tethered_peak} m, wider than the {width} m chest"
+    );
+    assert!(
+        pulled_peak > width,
+        "pulled, they kept within the chest: the test shows nothing"
+    );
+    assert!(
+        tethered_end < SETTLED_GAP,
+        "they ended {tethered_end} m apart"
+    );
+}
+
+/// **A tether refuses a bad spring, too few anchors and an anchor already
+/// in use, and takes its anchors and springs out again**: one anchor and
+/// spring per body with a target, each anchor moved by `follow`.
+#[test]
+fn a_tether_checks_its_anchors_and_removes_them() {
+    let rig = rig();
+    let mut physics = world();
+    let ragdoll = spawn_running(&mut physics, &rig);
+    let targets = ragdoll.joint_positions(&physics).unwrap();
+    let anchors = entities(500, targets.len());
+    let joints = physics.joint_count();
+    assert_eq!(
+        ragdoll.tether(&mut physics, &targets, &anchors, 0.0).err(),
+        Some(TetherError::Hertz(0.0))
+    );
+    assert_eq!(
+        ragdoll
+            .tether(&mut physics, &targets, &anchors[1..], 10.0)
+            .err(),
+        Some(TetherError::AnchorCount {
+            anchors: targets.len() - 1,
+            needed: targets.len()
+        })
+    );
+    let body = ragdoll.entities()[0];
+    let mut taken = anchors.clone();
+    taken[2] = body;
+    assert_eq!(
+        ragdoll.tether(&mut physics, &targets, &taken, 10.0).err(),
+        Some(TetherError::AnchorInUse(body))
+    );
+    assert_eq!(physics.joint_count(), joints, "a refusal left a spring");
+
+    // A target with no position is no tether.
+    let mut lost = targets.clone();
+    lost[1].1 = DVec3::NAN;
+    let short = ragdoll
+        .tether(&mut physics, &lost, &anchors, 10.0)
+        .expect("tethered");
+    assert_eq!(short.len(), targets.len() - 1);
+    short.remove(&mut physics);
+
+    let tether = ragdoll
+        .tether(&mut physics, &targets, &anchors, 10.0)
+        .expect("tethered");
+    assert_eq!(tether.len(), targets.len());
+    assert_eq!(physics.joint_count(), joints + targets.len());
+    let springs = physics
+        .joints()
+        .filter(|(_, joint)| anchors.contains(&joint.body_b))
+        .map(|(_, joint)| joint.kind)
+        .collect::<Vec<_>>();
+    assert_eq!(springs.len(), targets.len());
+    for kind in springs {
+        let JointKind::Distance(spring) = kind else {
+            panic!("a tether's spring is a distance joint: {kind:?}");
+        };
+        assert!(spring.enable_spring && spring.length == 0.0, "{spring:?}");
+        assert_eq!(
+            spring.spring,
+            Spring {
+                hertz: 10.0,
+                damping_ratio: 1.0
+            },
+            "not critically damped at the asked frequency"
+        );
+    }
+    let moved: Vec<(usize, DVec3)> = targets
+        .iter()
+        .map(|&(joint, at)| (joint, at + DVec3::Y))
+        .collect();
+    assert_eq!(tether.follow(&mut physics, &moved), targets.len());
+    let first = body_world(&physics, anchors[0]).position;
+    assert_eq!(first, moved[0].1, "the anchor did not follow");
+    tether.remove(&mut physics);
+    assert_eq!(physics.joint_count(), joints, "a spring stayed");
+    assert!(
+        anchors
+            .iter()
+            .all(|&anchor| physics.transform(anchor).is_none()),
+        "an anchor stayed"
     );
 }
 
