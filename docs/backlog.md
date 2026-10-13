@@ -225,17 +225,18 @@ every entity of the asset), with the skin conversion shared as
 (`RagdollRig::generate`) — and Shift+G writes the fitted rig there as a starting
 file (never over one). The inspector edits the rig under the mesh's components
 (`apps/editor/src/panel/rig.rs`): a section for the rig (the rest-overlap rule,
-substeps), per body (shape and size, mass) and per joint (kind and limits in
-degrees, friction). Each edit is resolved at once, so the viewport and the next
-drop show it; the file is written when the pointer lets go, and an edit the rig
-cannot resolve is refused on the status line and never written.
+substeps), per body (shape and size, mass, centre and axis) and per joint (kind
+and limits in degrees, friction, axis and offset). Each edit is resolved at
+once, so the viewport and the next drop show it; the file is written when the
+pointer lets go, and an edit the rig cannot resolve is refused on the status
+line and never written.
 
 What rig editing still lacks, none of it requested yet:
 
-- **Where a body sits and which way it and a joint point** (`centre`, `axis`,
-  `at`) are edited in the file only: a direction is no row a person can drag,
-  and the viewport has no handle for one. A gizmo on the selected body is the
-  likely shape.
+- **No viewport handle for a body or a joint**: `centre`, `axis` and `at` are
+  inspector rows of three numbers, and an axis row is the file's raw vector (the
+  rig normalises it; a zero one is refused). Dragging a body into place or
+  turning an axis in the viewport would take a gizmo on the selected body.
 - **The rig's edits are outside the scene's history**: Ctrl+Z does not undo
   them, because the rig is the asset's file and the history is the scene's. The
   file is the record (and version control its history). An asset-side history

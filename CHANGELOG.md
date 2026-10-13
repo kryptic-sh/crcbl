@@ -909,11 +909,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   collide to `ignore_rest_overlaps` rather than listing them, so a body later
   grown into a neighbour stops colliding with it too. The inspector edits the
   rig under the mesh's components — the rest-overlap rule and the substeps, each
-  body's shape, size and mass, each joint's kind, limits (in degrees) and
-  friction — resolving each edit at once and writing the file when the pointer
-  lets go; an edit the rig cannot resolve is refused on the status line and not
-  written. A shape switched keeps the body's size, and a joint switched between
-  ball and hinge keeps its swing.
+  body's shape, size, mass, centre and axis, each joint's kind, limits (in
+  degrees), friction, axis and offset — resolving each edit at once and writing
+  the file when the pointer lets go; an edit the rig cannot resolve is refused
+  on the status line and not written. A shape switched keeps the body's size,
+  and a joint switched between ball and hinge keeps its swing.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned

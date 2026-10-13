@@ -613,3 +613,118 @@ fn the_rig_rows_set_the_overlap_rule_and_the_substeps() {
     assert_eq!(rig.ragdoll.as_ref().expect("a rig").substeps(), substeps);
     assert_eq!(file().substeps, substeps, "the substeps were not written");
 }
+
+/// The drag-value of component `axis` (0 for x) of the three-number row
+/// labelled `label` under `rows`: a vector row is its label span and then a
+/// block per component, each its axis label and its widget.
+fn component_labelled(
+    editor: &Editor<HeadlessShell>,
+    rows: NodeKey,
+    label: &str,
+    axis: usize,
+) -> NodeKey {
+    let ui = editor.panels.ui();
+    let row = holder_of(ui, rows, label).unwrap_or_else(|| panic!("no row labelled {label:?}"));
+    let component = ui.child_keys(row)[1 + axis];
+    ui.child_keys(component)[1]
+}
+
+/// **Where a body sits and which way it points, and a joint's axis and
+/// offset, are rows**: dragging each one's x moves that component of the rig
+/// file alone, the rig drawn and dropped follows it, and the file is written
+/// holding it.
+#[test]
+fn placement_rows_move_the_bodies_and_joints() {
+    let (dir, mut editor) = rig_on_disk();
+    editor.frame().expect("the inspector draws the rig");
+    let body = |editor: &Editor<HeadlessShell>| {
+        editor
+            .panels
+            .rig_body_fields(0)
+            .expect("the inspector drew the rig's bodies")
+    };
+    let joint = |editor: &Editor<HeadlessShell>| {
+        editor
+            .panels
+            .rig_joint_fields(0)
+            .expect("the inspector drew the rig's joints")
+    };
+    let desc = |editor: &Editor<HeadlessShell>| {
+        editor
+            .shelf
+            .rig(RIG)
+            .and_then(|rig| rig.desc.clone())
+            .expect("a rig file")
+    };
+    let drawn = |editor: &Editor<HeadlessShell>| {
+        editor
+            .shelf
+            .rig(RIG)
+            .and_then(|rig| rig.ragdoll.clone())
+            .expect("a rig")
+    };
+    let drag = |editor: &mut Editor<HeadlessShell>,
+                rows: &dyn Fn(&Editor<HeadlessShell>) -> NodeKey,
+                label: &str| {
+        // The wheel scrolls the pane under the pointer, which the last drag
+        // left wherever it let go.
+        let pane = editor.panels.props_key().expect("the inspector was built");
+        let over = centre(editor, pane);
+        let window = editor.window;
+        editor
+            .shell_mut()
+            .move_pointer(window, over, (0.0, 0.0))
+            .expect("live");
+        editor.frame().expect("a frame");
+        let at = scrolled_to(editor, |editor| {
+            component_labelled(editor, rows(editor), label, 0)
+        });
+        drag_through(editor, at, &[12.0, 30.0]);
+    };
+
+    let (before, rig) = (desc(&editor), drawn(&editor));
+    drag(&mut editor, &body, "Centre (m)");
+    let (after, moved) = (desc(&editor), drawn(&editor));
+    let (from, to) = (before.bodies[0].centre, after.bodies[0].centre);
+    assert!(to.0 > from.0, "the drag moved no centre: {to:?}");
+    assert_eq!((to.1, to.2), (from.1, from.2), "only x moves");
+    assert_ne!(moved.bodies()[0].offset, rig.bodies()[0].offset);
+
+    let (before, rig) = (after, moved);
+    drag(&mut editor, &body, "Axis");
+    let (after, moved) = (desc(&editor), drawn(&editor));
+    let (from, to) = (before.bodies[0].axis, after.bodies[0].axis);
+    assert!(to.0 > from.0, "the drag turned no axis: {to:?}");
+    assert_eq!((to.1, to.2), (from.1, from.2), "only x moves");
+    assert_ne!(
+        moved.bodies()[0].offset.rotation,
+        rig.bodies()[0].offset.rotation
+    );
+
+    let (before, rig) = (after, moved);
+    drag(&mut editor, &joint, "Offset (m)");
+    let (after, moved) = (desc(&editor), drawn(&editor));
+    let (from, to) = (before.joints[0].at, after.joints[0].at);
+    assert!(to.0 > from.0, "the drag moved no joint: {to:?}");
+    assert_eq!((to.1, to.2), (from.1, from.2), "only x moves");
+    assert_ne!(
+        moved.joints()[0].frame_child.position,
+        rig.joints()[0].frame_child.position
+    );
+
+    let (before, rig) = (after, moved);
+    drag(&mut editor, &joint, "Axis");
+    let (after, moved) = (desc(&editor), drawn(&editor));
+    let (from, to) = (before.joints[0].axis, after.joints[0].axis);
+    assert!(to.0 > from.0, "the drag turned no joint axis: {to:?}");
+    assert_eq!((to.1, to.2), (from.1, from.2), "only x moves");
+    assert_ne!(
+        moved.joints()[0].frame_child.rotation,
+        rig.joints()[0].frame_child.rotation
+    );
+
+    let written = std::fs::read_to_string(dir.path().join(format!("{RIG}.ragdoll.ron")))
+        .expect("the rig was written");
+    let file = crcbl::ragdoll::RagdollDesc::from_ron(&written).expect("a rig file");
+    assert_eq!(file, after, "the file is not the rig edited");
+}

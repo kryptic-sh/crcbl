@@ -2,13 +2,13 @@
 //! the rig, then one per body and per joint**, under the entity's components.
 //!
 //! The rig's rows are whether bodies overlapping at rest stop colliding and
-//! the solver substeps it asks for; a body's are its shape and size and its
-//! mass; a joint's, its kind and limits and its friction — what is tuned on a
-//! rig once it is fitted. The bone pairs the file names as never colliding
-//! have no rows: a list is not a thing [`crcbl::reflect`] reads. Where a
-//! body sits and which way it and a joint's axis point stay in the rig file
-//! (`<asset>.ragdoll.ron`): a direction is no row a person can drag, and the
-//! viewport has no handle for one yet.
+//! the solver substeps it asks for; a body's are its shape and size, its mass,
+//! and where it sits and which way it points in its bone's frame; a joint's,
+//! its kind and limits, its friction, and its axis and offset from its child
+//! bone — the whole of the file (`<asset>.ragdoll.ron`) but the bone pairs it
+//! names as never colliding, which have no rows: a list is not a thing
+//! [`crcbl::reflect`] reads. An axis is three numbers, which the rig resolves
+//! to a direction (a zero one is refused); the viewport has no handle for it.
 //!
 //! The rows are a view of the file's [`RagdollDesc`], not the file's own types:
 //! [`crcbl::reflect`] reads neither a tuple nor a list, and a limit reads in
@@ -53,6 +53,10 @@ struct BodyRows {
     /// end. Advisory, as every range is.
     #[reflect(name = "Mass (kg)", min = 0.01, max = 200.0, step = 0.1)]
     mass: f64,
+    #[reflect(name = "Centre (m)", min = -2.0, max = 2.0, step = 0.002)]
+    centre: [f64; 3],
+    #[reflect(name = "Axis", min = -1.0, max = 1.0, step = 0.01)]
+    axis: [f64; 3],
 }
 
 /// [`ShapeDesc`], with an array where the file has a tuple.
@@ -83,6 +87,10 @@ struct JointRows {
     kind: Kind,
     #[reflect(name = "Friction (N·m)", min = 0.0, max = 500.0, step = 0.1)]
     friction: f64,
+    #[reflect(name = "Axis", min = -1.0, max = 1.0, step = 0.01)]
+    axis: [f64; 3],
+    #[reflect(name = "Offset (m)", min = -2.0, max = 2.0, step = 0.002)]
+    at: [f64; 3],
 }
 
 /// [`JointKindDesc`], its angles in degrees.
@@ -149,12 +157,22 @@ pub(super) fn build(ui: &mut Ui, rig: &mut RagdollDesc, options: &InspectorOptio
             let before = BodyRows {
                 shape: shape_rows(body.shape),
                 mass: body.mass,
+                centre: array(body.centre),
+                axis: array(body.axis),
             };
             let mut rows = before;
             let inspection = ui.inspector_with(".section-fields", &mut rows, options);
             built.bodies.push(inspection.response.key);
             if rows.mass != before.mass {
                 body.mass = rows.mass;
+                built.edited = true;
+            }
+            if rows.centre != before.centre {
+                body.centre = triple(rows.centre);
+                built.edited = true;
+            }
+            if rows.axis != before.axis {
+                body.axis = triple(rows.axis);
                 built.edited = true;
             }
             if rows.shape != before.shape {
@@ -177,12 +195,22 @@ pub(super) fn build(ui: &mut Ui, rig: &mut RagdollDesc, options: &InspectorOptio
             let before = JointRows {
                 kind: kind_rows(joint.kind),
                 friction: joint.friction,
+                axis: array(joint.axis),
+                at: array(joint.at),
             };
             let mut rows = before;
             let inspection = ui.inspector_with(".section-fields", &mut rows, options);
             built.joints.push(inspection.response.key);
             if rows.friction != before.friction {
                 joint.friction = rows.friction;
+                built.edited = true;
+            }
+            if rows.axis != before.axis {
+                joint.axis = triple(rows.axis);
+                built.edited = true;
+            }
+            if rows.at != before.at {
+                joint.at = triple(rows.at);
                 built.edited = true;
             }
             if rows.kind != before.kind {
@@ -192,6 +220,16 @@ pub(super) fn build(ui: &mut Ui, rig: &mut RagdollDesc, options: &InspectorOptio
         });
     }
     built
+}
+
+/// The file's tuple as a row's array, which [`crcbl::reflect`] reads.
+fn array((x, y, z): (f64, f64, f64)) -> [f64; 3] {
+    [x, y, z]
+}
+
+/// A row's array as the file's tuple.
+fn triple([x, y, z]: [f64; 3]) -> (f64, f64, f64) {
+    (x, y, z)
 }
 
 fn shape_rows(shape: ShapeDesc) -> Shape {
@@ -204,10 +242,8 @@ fn shape_rows(shape: ShapeDesc) -> Shape {
             half_height,
         },
         ShapeDesc::Sphere { radius } => Shape::Sphere { radius },
-        ShapeDesc::Box {
-            half_extents: (x, y, z),
-        } => Shape::Box {
-            half_extents: [x, y, z],
+        ShapeDesc::Box { half_extents } => Shape::Box {
+            half_extents: array(half_extents),
         },
     }
 }
@@ -222,10 +258,8 @@ fn shape_desc(shape: Shape) -> ShapeDesc {
             half_height,
         },
         Shape::Sphere { radius } => ShapeDesc::Sphere { radius },
-        Shape::Box {
-            half_extents: [x, y, z],
-        } => ShapeDesc::Box {
-            half_extents: (x, y, z),
+        Shape::Box { half_extents } => ShapeDesc::Box {
+            half_extents: triple(half_extents),
         },
     }
 }
