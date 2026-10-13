@@ -4,9 +4,10 @@
 //! G on a selected rigged mesh spawns the ragdoll rig fitted to it
 //! ([`super::meshes::Rig::ragdoll`]) at the mesh's rest pose in a physics
 //! world of its own, with a ground plane at the editor's ground and the
-//! scene's [solids](solids), and steps it a frame at a time; the mesh draws in the pose the bodies stand in, from a
-//! region of its own ([`super::skins::Skins`]), while every other entity of
-//! the asset stays at rest. G again, or the entity going away, ends it. The
+//! scene's [solids], and steps it a frame at a time; the mesh draws in the
+//! pose the bodies stand in, from a region of its own
+//! ([`super::skins::Skins`]), while every other entity of the asset stays at
+//! rest. G again, or the entity going away, ends it. The
 //! scene itself is never touched: nothing here is undoable because nothing
 //! here is an edit.
 //!
