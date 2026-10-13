@@ -1059,6 +1059,87 @@ fn a_held_joints_ring_turns_its_axis() {
     assert!(editor.rig_history.can_undo(RIG), "the turn is no step");
 }
 
+/// **Shift+click on another body pairs it with the held one, and again
+/// unpairs it**: the pair is listed in the rig and the file, then taken off
+/// both, and the first body stays held throughout.
+#[test]
+fn shift_clicking_a_body_pairs_it_with_the_held_one() {
+    let (dir, mut editor) = rig_on_disk();
+    let bodies = selected_ragdoll_bodies(&mut editor.document, &editor.shelf);
+    let (first, second) = (bodies[0].1.position, bodies[1].1.position);
+    let bones = {
+        let desc = editor
+            .shelf
+            .rig(RIG)
+            .and_then(|rig| rig.desc.as_ref())
+            .expect("a rig file");
+        (desc.bodies[0].bone.clone(), desc.bodies[1].bone.clone())
+    };
+    editor.act(&Action::Scale);
+    let on_first = physical(pixel_of(&editor, first.as_vec3()));
+    click(&mut editor, on_first);
+    assert_eq!(
+        editor.held.as_ref().map(|held| held.part),
+        Some(Part::Body(0))
+    );
+    // Rotate shows a held body no handles to be under the pointer.
+    editor.act(&Action::Rotate);
+    let on_second = physical(pixel_of(&editor, second.as_vec3()));
+    let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+    let listed = |editor: &Editor<HeadlessShell>| {
+        let written = crcbl::ragdoll::RagdollDesc::from_ron(
+            &std::fs::read_to_string(&path).expect("the rig was written"),
+        )
+        .expect("a rig file")
+        .ignore;
+        let in_rig = editor
+            .shelf
+            .rig(RIG)
+            .and_then(|rig| rig.desc.as_ref())
+            .expect("a rig file")
+            .ignore
+            .clone();
+        assert_eq!(written, in_rig, "the file is not the rig");
+        in_rig
+    };
+    let shift_click = |editor: &mut Editor<HeadlessShell>, at| {
+        let window = editor.window;
+        let shell = editor.shell_mut();
+        shell.set_modifiers(Modifiers::SHIFT);
+        shell.key_press(window, KeyCode::ShiftLeft).expect("live");
+        editor.frame().expect("a frame");
+        click(editor, at);
+        let shell = editor.shell_mut();
+        shell.set_modifiers(Modifiers::empty());
+        shell.key_release(window, KeyCode::ShiftLeft).expect("live");
+        // The click's frame writes before it picks, so the next one writes.
+        editor.frame().expect("a frame");
+    };
+
+    shift_click(&mut editor, on_second);
+    assert_eq!(listed(&editor), std::slice::from_ref(&bones));
+    assert!(
+        editor.panels.status().0.starts_with("Wrote"),
+        "{:?}",
+        editor.panels.status()
+    );
+    assert_eq!(
+        editor.held.as_ref().map(|held| held.part),
+        Some(Part::Body(0)),
+        "the pairing let go of the held body"
+    );
+    shift_click(&mut editor, on_second);
+    assert!(listed(&editor).is_empty(), "still listed");
+    // A Shift+click on the held body itself pairs it with nothing.
+    shift_click(&mut editor, on_first);
+    assert!(
+        listed(&editor).iter().all(|(a, b)| a != b),
+        "a body was paired with itself: {:?}",
+        listed(&editor)
+    );
+    assert!(editor.rig_history.can_undo(RIG), "the pairing is no step");
+}
+
 /// **A held capsule's boxes resize it**: its `y` box lengthens it, keeping its
 /// radius, and its `x` box widens it, keeping its length; each is written.
 #[test]

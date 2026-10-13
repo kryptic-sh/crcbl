@@ -967,12 +967,16 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// click on anything else clears that pick: one click, one thing picked.
     ///
     /// A plain click on a drawn joint or body of the lone selected rigged
-    /// mesh holds it and selects nothing else — see `rig_hold`.
+    /// mesh holds it and selects nothing else, and Shift+click with a body
+    /// held pairs another with it — see `rig_hold`.
     fn pick(&mut self, pending: &Pending) {
         let Some(at) = pending.pointer else {
             return;
         };
         let ray = self.ray_at(at);
+        if self.modifiers.contains(Modifiers::SHIFT) && self.pair_at(&ray) {
+            return;
+        }
         if !self.modifiers.contains(Modifiers::CTRL) && self.hold_rig_at(&ray) {
             return;
         }

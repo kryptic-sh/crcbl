@@ -12,6 +12,11 @@
 //! last, so a part another hides is reached by clicking on. A held part is
 //! drawn in the selection's colour.
 //!
+//! **Shift+click on another body lists it with the held one as a pair that
+//! never collides**, or takes the pair off the list if it is on it, and the
+//! held body stays held: picking a pair's two bodies where they are drawn
+//! rather than finding the pair in the inspector's list of every one.
+//!
 //! **Translate moves either; scale resizes a body; rotate turns a joint's
 //! axis**. Translate's handles stand at the part, and rotate's rings at a
 //! joint, turned by its own axes in local space. Scale's boxes stand at a held
@@ -136,6 +141,68 @@ impl<S: Shell + ?Sized> Editor<S> {
             }
             Part::Joint(index) => rig.ragdoll_joints(origin).get(index).copied(),
         }
+    }
+
+    /// Lists the held body with the nearest other body along `ray` as a pair
+    /// that never collides, or takes the pair off the list, as an edit the
+    /// inspector's pair section makes — or says why not on the status line
+    /// when no other body is met. Whether a body was held, so the click was
+    /// this — see the [module docs](self).
+    pub(super) fn pair_at(&mut self, ray: &ViewRay) -> bool {
+        let Some(held) = self.held.clone() else {
+            return false;
+        };
+        let Part::Body(first) = held.part else {
+            return false;
+        };
+        if self.placed(&held).is_none() {
+            self.held = None;
+            return false;
+        }
+        let Some(mesh) = self.document.mesh(held.entity) else {
+            return false;
+        };
+        let origin = instances::origin_of(mesh);
+        let Some(rig) = self.shelf.rig(&held.asset) else {
+            return false;
+        };
+        let ray = Ray::new(ray.origin.as_dvec3(), ray.direction.as_dvec3());
+        let other = rig
+            .ragdoll_bodies(origin)
+            .into_iter()
+            .enumerate()
+            .filter(|&(index, _)| index != first)
+            .filter_map(|(index, (shape, at))| Some((index, hit_body(&ray, shape, &at)?)))
+            .min_by(|(_, near), (_, far)| near.total_cmp(far));
+        let Some((second, _)) = other else {
+            self.panels.set_status(
+                "Shift+click another of the rig's bodies to pair it with the held one",
+                Tone::Warning,
+            );
+            return true;
+        };
+        let asset = held.asset;
+        let Some(desc) = self.shelf.rig_mut(&asset).and_then(|rig| rig.desc.as_mut()) else {
+            return true;
+        };
+        let (Some(a), Some(b)) = (desc.bodies.get(first), desc.bodies.get(second)) else {
+            return true;
+        };
+        let (a, b) = (a.bone.clone(), b.bone.clone());
+        let before = desc.clone();
+        let listed = desc
+            .ignore
+            .iter()
+            .position(|(x, y)| (*x == a && *y == b) || (*x == b && *y == a));
+        match listed {
+            Some(at) => {
+                desc.ignore.remove(at);
+            }
+            None => desc.ignore.push((a, b)),
+        }
+        self.rig_history.edited(&asset, &before);
+        self.rig_edited(asset);
+        true
     }
 
     /// Holds the joint or body of the lone selected rigged mesh first met

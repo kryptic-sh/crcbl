@@ -932,8 +932,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and scale's boxes resize a body (a box's half extents, a sphere's radius, a
   capsule's radius and its length to the cap's tip), Ctrl snapping the size to
   the scale step, and rotate's rings turn a joint's axis; a click on the held
-  part holds the next one behind it, and a click on the mesh away from every
-  part lets go of it.
+  part holds the next one behind it, Shift+click on another body lists the pair
+  as never colliding or takes it off the list, and a click on the mesh away from
+  every part lets go of it.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned

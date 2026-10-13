@@ -287,12 +287,13 @@ What rig editing still lacks, none of it requested yet:
   pair is a line with a Remove button and a drop-down offers every pair not
   listed, those touching at rest first (`Rig::rest_overlaps`, recomputed each
   frame the rig is drawn). The drop-down still holds every pair of bodies, which
-  for a full humanoid is a long list to scroll or type into; picking two bodies
-  one at a time was not built. The pointer over a listed pair's line draws its
-  two bodies in `PAIR_COLOR` (`Editor::hovered_pair_bodies`), with one rigged
-  mesh selected only; a drop-down option hovered shows nothing, the listed pairs
-  are never drawn all at once, and the colour is not covered by a test (the
-  headless draw is not read back).
+  for a full humanoid is a long list to scroll or type into; Shift+click on a
+  body with another held lists or unlists the pair in the viewport instead
+  (`Editor::pair_at`). The pointer over a listed pair's line draws its two
+  bodies in `PAIR_COLOR` (`Editor::hovered_pair_bodies`), with one rigged mesh
+  selected only; a drop-down option hovered shows nothing, the listed pairs are
+  never drawn all at once, and the colour is not covered by a test (the headless
+  draw is not read back).
 
 G drops the selected rigged mesh as its fitted ragdoll in a physics world of its
 own (`apps/editor/src/app/drop.rs`), drawn from a second, preview region per
