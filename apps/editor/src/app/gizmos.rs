@@ -384,10 +384,10 @@ impl<S: Shell + ?Sized> Editor<S> {
     }
 
     /// What the status line says when a mode whose handles need a field is
-    /// chosen: `none` with nothing selected, why it shows no handles with
-    /// several selected — it acts on one entity — `usage` when the selection
-    /// has the field, and why it shows no handles when it does not — it has
-    /// nothing to `verb`.
+    /// chosen: `none` with nothing selected, that a held rig body shows none,
+    /// why it shows no handles with several selected — it acts on one entity
+    /// — `usage` when the selection has the field, and why it shows no handles
+    /// when it does not — it has nothing to `verb`.
     fn field_status(
         &mut self,
         mode: gizmo::Mode,
@@ -403,6 +403,14 @@ impl<S: Shell + ?Sized> Editor<S> {
             gizmo::Mode::Scale => "Scale",
             gizmo::Mode::Rotate => "Rotate",
         };
+        if self.held_body().is_some() {
+            return (
+                format!(
+                    "{label}: a held rig body has translate's handles alone;                      {verb} it in the inspector"
+                ),
+                Tone::Warning,
+            );
+        }
         let count = self.document.selection().len();
         if count > 1 {
             return (
