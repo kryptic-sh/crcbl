@@ -273,6 +273,10 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     camera: OrbitCamera,
     /// Which drag, if any, the pointer is in the middle of.
     drag: Option<Drag>,
+    /// Where a gizmo drag was pressed, while the pointer has been nowhere else:
+    /// let go there, it was a click on what the handle stands over — see
+    /// `rig_hold`.
+    pressed_still: Option<Vec2>,
     /// The mesh asset a press on the asset browser took hold of, dropped
     /// where the button comes up — see the module docs.
     dragged: Option<String>,
@@ -539,6 +543,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             ticks: 0,
             camera: OrbitCamera::new(bounds.center(), 1.0, Projection::default()),
             drag: None,
+            pressed_still: None,
             dragged: None,
             gizmo_mode: gizmo::Mode::default(),
             gizmo_space: gizmo::Space::default(),
@@ -693,11 +698,16 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.drive_camera(&pending, in_viewport);
         if pending.pointer_pressed && in_viewport {
             self.panels.release_keyboard();
-            if !self.grab_handle(&pending) {
+            if self.grab_handle(&pending) {
+                self.pressed_still = pending.pointer;
+            } else {
                 self.pick(&pending);
             }
         }
         self.drag_asset(&pending, in_viewport);
+        if pending.pointer.is_some() && pending.pointer != self.pressed_still {
+            self.pressed_still = None;
+        }
         // Taken out while it writes, which borrows the editor whole, and put
         // back unless the button came up.
         match self.drag.take() {
@@ -707,7 +717,9 @@ impl<S: Shell + ?Sized> Editor<S> {
                 {
                     self.move_handle(&drag, &group, at);
                 }
-                if !pending.pointer_released {
+                if pending.pointer_released {
+                    self.click_through_handle();
+                } else {
                     self.drag = Some(Drag::Gizmo(drag, group));
                 }
             }
@@ -717,7 +729,9 @@ impl<S: Shell + ?Sized> Editor<S> {
                 {
                     self.move_rig(&drag, &part, at);
                 }
-                if !pending.pointer_released {
+                if pending.pointer_released {
+                    self.click_through_handle();
+                } else {
                     self.drag = Some(Drag::Rig(drag, part));
                 }
             }
@@ -1487,8 +1501,8 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.shelf.rig(asset).is_some().then(|| asset.clone())
     }
 
-    /// The bodies of the lone selected rigged mesh whose pair's line in the
-    /// inspector the pointer is over, by their place in its rig. Empty for
+    /// The bodies of the lone selected rigged mesh whose pair's line or
+    /// drop-down option in the inspector the pointer is over, by their place in its rig. Empty for
     /// any other selection, whose bodies the inspector's rig is not alone in.
     fn hovered_pair_bodies(&mut self) -> Vec<usize> {
         let Some((a, b)) = self.panels.rig_hovered_pair() else {

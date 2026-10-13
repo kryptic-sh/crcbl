@@ -58,11 +58,7 @@ impl Ui {
         // Which option a click landed on is resolved before anything is
         // built, so the button's label and the list agree in the frame the
         // click arrives, and a picked list is not drawn that frame at all.
-        let list = Self::popup_key(key);
-        let keys: Vec<NodeKey> = options
-            .iter()
-            .map(|&option| Self::key_under(list, KeySource::Keyed(hash_of(option))))
-            .collect();
+        let keys = Self::option_keys(key, options);
         let mut changed = false;
         if !enabled {
             self.close_popup(key);
@@ -133,5 +129,28 @@ impl Ui {
             self.typeahead(key, &items);
         }
         response
+    }
+
+    /// Which of `options` the pointer is over in the open list of the
+    /// drop-down `select` — the key [`select`](Self::select) responded with,
+    /// built from the same `options`, which key its list — as this frame
+    /// began; [`None`] while the list is closed or the pointer is over no
+    /// option. For a caller showing what an option would pick before it is
+    /// picked.
+    #[must_use]
+    pub fn select_hovered(&self, select: NodeKey, options: &[&str]) -> Option<usize> {
+        Self::option_keys(select, options)
+            .into_iter()
+            .position(|option| self.interaction_of(option).hovered)
+    }
+
+    /// The keys of the options in the list of the drop-down `select`, each
+    /// keyed by its text.
+    fn option_keys(select: NodeKey, options: &[&str]) -> Vec<NodeKey> {
+        let list = Self::popup_key(select);
+        options
+            .iter()
+            .map(|&option| Self::key_under(list, KeySource::Keyed(hash_of(option))))
+            .collect()
     }
 }

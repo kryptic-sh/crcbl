@@ -12,8 +12,9 @@
 //! own** rather than rows: a list is not a thing [`crcbl::reflect`] reads.
 //! Each listed pair is a line with a Remove button, and a drop-down below them
 //! offers every pair of bodies not listed — picking one lists it. The line
-//! the pointer is over names its pair to `crate::app`, which draws the two
-//! bodies apart from the rest. The pairs
+//! or the drop-down's option the pointer is over names its pair to
+//! `crate::app`, which draws the two bodies apart from the rest, so a pair is
+//! seen before it is picked. The pairs
 //! whose bodies touch at rest come first, marked so: they are the ones that
 //! would push apart the moment the rig falls. A pair the rest rule already
 //! leaves out may be listed too: the list is what the file says, and it still
@@ -164,7 +165,8 @@ pub(super) struct Built {
     pub(super) pair_removes: Vec<NodeKey>,
     /// The drop-down of the pairs not listed, once drawn.
     pub(super) pair_add: Option<NodeKey>,
-    /// The listed pair whose line the pointer was over, by bone.
+    /// The pair whose listed line or drop-down option the pointer was over,
+    /// by bone.
     pub(super) hovered_pair: Option<(String, String)>,
     /// Whether a row moved this frame, and so `rig` changed.
     pub(super) edited: bool,
@@ -324,6 +326,14 @@ fn pairs(ui: &mut Ui, rig: &mut RagdollDesc, touching: &[(String, String)], buil
         let mut chosen = 0;
         let select = ui.select(".rig-pair-add", &options, &mut chosen);
         built.pair_add = Some(select.key);
+        // The first option is the prompt, which names no pair.
+        if let Some((pair, _)) = ui
+            .select_hovered(select.key, &options)
+            .and_then(|index| index.checked_sub(1))
+            .and_then(|index| unlisted.get(index))
+        {
+            built.hovered_pair = Some(pair.clone());
+        }
         if let Some(index) = removed {
             rig.ignore.remove(index);
             built.edited = true;

@@ -28,8 +28,9 @@ than EW assets or an EW checkout.
   stepping to the same bits in two runs (`one_death_steps_to_the_same_bits`),
   with each mechanism mutation-checked locally on Windows. The plan's "stable
   across thread counts" holds by construction rather than by test: a
-  `PhysicsSystem` steps on one thread. Native CI for the crate is pending at the
-  time of writing. EW adoption is not verified.
+  `PhysicsSystem` steps on one thread. The crate runs in the native CI matrix.
+  EW calls `Ragdoll::rise_point` (pin `7666cffb`); its corpse adoption is EW's
+  to verify.
 
   Remaining engine work:
   - End-to-end terrain falling/settling with rendered (GPU-skinned) limbs
@@ -258,16 +259,18 @@ What rig editing still lacks, none of it requested yet:
   one is refused): turning it with rings would write the axis the ring leaves
   the body's `y` on, and lose the body's turn about it, as the file does, so
   rotate shows a held body nothing. A joint is drawn and clicked as a sphere of
-  `JOINT_RADIUS` metres, whatever the rig's size. A held part's handles stand at
-  it, so clicking on through it to the part behind is done off its centre, or
-  for a held body in rotate mode. Ctrl snaps a move's distance from the press
-  along each handle axis to the grid step rather than landing it on the scene's
-  grid, which means nothing in the bone's frame a place is measured in (decided
-  2026-10-13); the file's numbers are therefore only as round as they were
-  before the drag. A part under the mesh's own handles cannot be clicked to hold
-  it in translate or rotate mode until the view moves (scale shows a mesh no
-  handles). The held part's colour and the joints' drawing are not covered by a
-  test: the headless draw is not read back.
+  `JOINT_RADIUS` metres, whatever the rig's size. A press on the handles let go
+  without the pointer leaving its pixel is a click on the part behind them
+  (`Editor::click_through_handle`), so a part under the mesh's own handles or
+  behind the held one's is held without moving the view; a jitter of one pixel
+  makes it a drag. A few pixels' slop was declined: by the time the pointer has
+  moved, the drag has moved the part or mesh with it, and a click would have to
+  undo that. Ctrl snaps a move's distance from the press along each handle axis
+  to the grid step rather than landing it on the scene's grid, which means
+  nothing in the bone's frame a place is measured in (decided 2026-10-13); the
+  file's numbers are therefore only as round as they were before the drag. The
+  held part's colour and the joints' drawing are not covered by a test: the
+  headless draw is not read back.
 - **Decided (2026-10-13): rig edits have a history of their own, not Ctrl+Z's.**
   The rig section's Undo and Redo step it
   (`apps/editor/src/app/rig_history.rs`). Folding rig edits into the scene's
@@ -296,9 +299,10 @@ What rig editing still lacks, none of it requested yet:
   body with another held lists or unlists the pair in the viewport instead
   (`Editor::pair_at`). The pointer over a listed pair's line draws its two
   bodies in `PAIR_COLOR` (`Editor::hovered_pair_bodies`), with one rigged mesh
-  selected only; a drop-down option hovered shows nothing, the listed pairs are
-  never drawn all at once, and the colour is not covered by a test (the headless
-  draw is not read back).
+  selected only, and so does the pointer over an option of the open drop-down
+  (`Ui::select_hovered`); an option reached by the arrow keys rather than the
+  pointer shows nothing, the listed pairs are never drawn all at once, and the
+  colour is not covered by a test (the headless draw is not read back).
 
 G drops the selected rigged mesh as its fitted ragdoll in a physics world of its
 own (`apps/editor/src/app/drop.rs`), drawn from a second, preview region per

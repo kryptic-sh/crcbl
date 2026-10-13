@@ -1430,6 +1430,119 @@ fn clicking_again_holds_the_body_behind() {
     assert_eq!(editor.document.selection(), [id], "a click picked");
 }
 
+/// The centre of the handles shown, in window pixels.
+fn handles_centre(editor: &mut Editor<HeadlessShell>) -> Vec2 {
+    let (centre, _) = editor.gizmo_centre().expect("handles shown");
+    pixel_of(editor, centre)
+}
+
+/// The far end of the handles' longest arrow, in window pixels.
+fn arrow_tip(editor: &mut Editor<HeadlessShell>) -> Vec2 {
+    let centre = handles_centre(editor);
+    let (corner, _) = editor.panels.viewport_pixels();
+    editor
+        .handles()
+        .iter()
+        .filter_map(|handle| match handle.shape {
+            gizmo::Shape::Line { from, to } if matches!(handle.grip, gizmo::Grip::Move(_)) => {
+                Some([from, to])
+            }
+            _ => None,
+        })
+        .flatten()
+        .map(|end| corner + end)
+        .max_by(|a, b| a.distance(centre).total_cmp(&b.distance(centre)))
+        .expect("an arrow")
+}
+
+/// Presses the left button at `at`, checks the press took hold of a handle,
+/// and lets go — a pixel off the press if `off`.
+fn press_the_handles(editor: &mut Editor<HeadlessShell>, at: Vec2, off: bool) {
+    let at = physical(at);
+    let window = editor.window;
+    let shell = editor.shell_mut();
+    shell.move_pointer(window, at, (0.0, 0.0)).expect("live");
+    shell
+        .button(window, PointerButton::Left, ButtonState::Pressed, Some(at))
+        .expect("live");
+    editor.frame().expect("a frame");
+    assert!(
+        matches!(editor.drag, Some(Drag::Gizmo(..) | Drag::Rig(..))),
+        "the press missed the handles"
+    );
+    let to = if off {
+        PhysicalPoint {
+            x: at.x + 1.0,
+            ..at
+        }
+    } else {
+        at
+    };
+    let shell = editor.shell_mut();
+    shell.move_pointer(window, to, (1.0, 0.0)).expect("live");
+    shell
+        .button(window, PointerButton::Left, ButtonState::Released, Some(to))
+        .expect("live");
+    editor.frame().expect("a frame");
+    editor.frame().expect("a frame");
+}
+
+/// **A press on a handle let go where it was pressed holds the part behind
+/// it**: the mesh's own arrows stand over swollen bodies, and a click on them
+/// holds one and moves nothing; a click on the held body's arrows holds the
+/// next part behind them, and one on an arrow's tip that meets no part keeps
+/// it held. A pixel off the press is a drag, and holds nothing.
+#[test]
+fn a_still_click_on_the_handles_holds_the_part_behind_them() {
+    let (_dir, mut editor) = rig_on_disk();
+    let rig = editor.shelf.rig_mut(RIG).expect("the rig");
+    let desc = rig.desc.as_mut().expect("a rig file");
+    for body in &mut desc.bodies {
+        body.shape = crcbl::ragdoll::ShapeDesc::Sphere { radius: 1.0 };
+    }
+    rig.resolve().expect("swollen bodies resolve");
+    editor.act(&Action::Translate);
+    editor.frame().expect("a frame");
+    let at = handles_centre(&mut editor);
+    press_the_handles(&mut editor, at, true);
+    assert!(editor.held.is_none(), "a drag held a part");
+    let before = editor.document.files().expect("files");
+    let at = handles_centre(&mut editor);
+    press_the_handles(&mut editor, at, false);
+    let first = editor.held.as_ref().map(|held| held.part);
+    assert!(
+        first.is_some(),
+        "the click on the mesh's handles held no part"
+    );
+    assert_eq!(
+        editor.document.files().expect("files"),
+        before,
+        "the click moved the mesh"
+    );
+    let at = handles_centre(&mut editor);
+    press_the_handles(&mut editor, at, false);
+    let next = editor.held.as_ref().map(|held| held.part);
+    assert!(
+        next.is_some() && next != first,
+        "the click on the held body's handles held {next:?}"
+    );
+
+    let rig = editor.shelf.rig_mut(RIG).expect("the rig");
+    let desc = rig.desc.as_mut().expect("a rig file");
+    for body in &mut desc.bodies {
+        body.shape = crcbl::ragdoll::ShapeDesc::Sphere { radius: 0.01 };
+    }
+    rig.resolve().expect("shrunken bodies resolve");
+    editor.frame().expect("a frame");
+    let at = arrow_tip(&mut editor);
+    press_the_handles(&mut editor, at, false);
+    assert_eq!(
+        editor.held.as_ref().map(|held| held.part),
+        next,
+        "a click on an arrow's tip let go of the held part"
+    );
+}
+
 /// **The pointer over a listed pair's line marks the pair's two bodies** for
 /// the viewport to draw apart, and off the line marks none.
 #[test]
@@ -1481,6 +1594,41 @@ fn a_hovered_pair_marks_its_bodies() {
     let (corner, _) = editor.panels.viewport_pixels();
     point_at(&mut editor, physical(corner + Vec2::splat(4.0)));
     assert!(editor.hovered_pair_bodies().is_empty(), "off the line");
+}
+
+/// **The pointer over a pair's option in the open drop-down marks its
+/// bodies** before it is picked, and over the prompt marks none.
+#[test]
+fn a_hovered_drop_down_option_marks_its_pairs_bodies() {
+    let (_dir, mut editor) = rig_on_disk();
+    let desc = editor
+        .shelf
+        .rig(RIG)
+        .and_then(|rig| rig.desc.as_ref())
+        .expect("a rig file");
+    let label = format!("{} ↔ {}", desc.bodies[0].bone, desc.bodies[1].bone);
+    editor.frame().expect("the inspector draws the rig");
+    let select = editor.panels.rig_pairs().1.expect("the drop-down of pairs");
+    hover_the_inspector(&mut editor);
+    let at = scrolled_to(&mut editor, |_| select);
+    click(&mut editor, at);
+    let popup = crcbl::ui::tree::Ui::popup_key(select);
+    let window = editor.window;
+    let point_at = |editor: &mut Editor<HeadlessShell>, text: &str| {
+        let option = holder_of(editor.panels.ui(), popup, text)
+            .unwrap_or_else(|| panic!("the drop-down offers {text:?}"));
+        let at = centre(editor, option);
+        editor
+            .shell_mut()
+            .move_pointer(window, at, (0.0, 0.0))
+            .expect("live");
+        editor.frame().expect("a frame");
+        editor.frame().expect("a frame");
+    };
+    point_at(&mut editor, &label);
+    assert_eq!(editor.hovered_pair_bodies(), [0, 1], "over {label}");
+    point_at(&mut editor, "Add a pair...");
+    assert!(editor.hovered_pair_bodies().is_empty(), "over the prompt");
 }
 
 /// **The drop-down marks the pairs that touch at rest**: none do in the

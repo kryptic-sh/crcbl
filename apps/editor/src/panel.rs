@@ -475,7 +475,8 @@ struct Inspected {
     /// Each add-an-entity button and the system it adds in, in the order
     /// drawn.
     entity_adds: Vec<(String, NodeKey)>,
-    /// The listed rig pair whose line the pointer was over, by bone.
+    /// The rig pair whose listed line or drop-down option the pointer was
+    /// over, by bone.
     rig_hovered_pair: Option<(String, String)>,
     /// The selection's ragdoll rig's sections, which only a test reads.
     #[cfg(test)]
@@ -1067,8 +1068,8 @@ impl Panels {
         )
     }
 
-    /// The listed rig pair whose line the pointer was over as the last frame
-    /// drew the inspector, by bone.
+    /// The rig pair whose listed line or drop-down option the pointer was
+    /// over as the last frame drew the inspector, by bone.
     pub(crate) fn rig_hovered_pair(&self) -> Option<&(String, String)> {
         self.inspector.rig_hovered_pair.as_ref()
     }

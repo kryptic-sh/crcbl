@@ -12,6 +12,13 @@
 //! last, so a part another hides is reached by clicking on. A held part is
 //! drawn in the selection's colour.
 //!
+//! **A press on a handle let go with the pointer never off the pixel it was
+//! pressed on is a click on the part behind it**: the mesh's own handles, or
+//! the held part's, stand over the parts at them, and a drag that never left
+//! its press has moved nothing, so the click holds the part there as it
+//! would off the handles. One that meets no part changes nothing. The pointer
+//! anywhere else, even a pixel off, makes the press a drag.
+//!
 //! **Shift+click on another body lists it with the held one as a pair that
 //! never collides**, or takes the pair off the list if it is on it, and the
 //! held body stays held: picking a pair's two bodies where they are drawn
@@ -203,6 +210,22 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.rig_history.edited(&asset, &before);
         self.rig_edited(asset);
         true
+    }
+
+    /// Takes a press on a handle let go with the pointer never off where it
+    /// was pressed as a click on the rig part the handle stands over: holds it, or
+    /// the next past the one held, as [`hold_rig_at`](Self::hold_rig_at)
+    /// does. A click that meets no part leaves what is held as it was — see
+    /// the [module docs](self).
+    pub(super) fn click_through_handle(&mut self) {
+        let Some(at) = self.pressed_still.take() else {
+            return;
+        };
+        let ray = self.ray_at(at);
+        let was = self.held.clone();
+        if !self.hold_rig_at(&ray) {
+            self.held = was;
+        }
     }
 
     /// Holds the joint or body of the lone selected rigged mesh first met

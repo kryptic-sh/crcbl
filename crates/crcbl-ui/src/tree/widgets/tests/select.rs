@@ -125,6 +125,64 @@ fn a_click_opens_the_list_under_the_button_and_a_click_picks() {
     assert!(!ui.is_popup_open(select));
 }
 
+/// **The option under the pointer is reported while the list is open**, and
+/// none while it is closed — a pick closing it under the pointer too — or the
+/// pointer is off every option.
+#[test]
+fn the_option_under_the_pointer_is_reported_while_the_list_is_open() {
+    let mut ui = Ui::new();
+    let mut chosen = 0;
+    let select = page(&mut ui, idle(), NavInput::default(), &mut chosen, true).key;
+    let on = centre(&ui, select);
+    page(
+        &mut ui,
+        PointerInput::hovering(on),
+        NavInput::default(),
+        &mut chosen,
+        true,
+    );
+    assert_eq!(ui.select_hovered(select, &OPTIONS), None, "closed");
+    page(&mut ui, press(on), NavInput::default(), &mut chosen, true);
+    page(&mut ui, release(on), NavInput::default(), &mut chosen, true);
+    assert!(ui.is_popup_open(select), "the click did not open the list");
+    for (index, text) in OPTIONS.into_iter().enumerate() {
+        let over = centre(&ui, option_key(&ui, select, text));
+        page(
+            &mut ui,
+            PointerInput::hovering(over),
+            NavInput::default(),
+            &mut chosen,
+            true,
+        );
+        assert_eq!(
+            ui.select_hovered(select, &OPTIONS),
+            Some(index),
+            "over {text}"
+        );
+    }
+    let (_, list_max) = rect(&ui, Ui::popup_key(select));
+    let off = list_max + Vec2::splat(20.0);
+    page(
+        &mut ui,
+        PointerInput::hovering(off),
+        NavInput::default(),
+        &mut chosen,
+        true,
+    );
+    assert_eq!(
+        ui.select_hovered(select, &OPTIONS),
+        None,
+        "off every option"
+    );
+
+    // A pick closes the list under the pointer, in the frame it arrives.
+    let on = centre(&ui, option_key(&ui, select, "high"));
+    page(&mut ui, press(on), NavInput::default(), &mut chosen, true);
+    page(&mut ui, release(on), NavInput::default(), &mut chosen, true);
+    assert!(!ui.is_popup_open(select), "the click did not pick");
+    assert_eq!(ui.select_hovered(select, &OPTIONS), None, "picked");
+}
+
 /// **A disabled drop-down never opens — not even from a click that began
 /// while it was enabled — and one disabled while its list is open closes
 /// it.**

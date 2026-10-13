@@ -920,24 +920,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   size, mass, centre and axis, each joint's kind, limits (in degrees), friction,
   axis and offset, and the listed pairs that never collide (each with a Remove
   button, and a drop-down of the pairs not listed, those touching at rest first
-  and marked so; the pointer over a pair's line draws its two bodies in green) —
-  resolving each edit at once and writing the file when the pointer lets go; an
-  edit the rig cannot resolve is refused on the status line and not written. The
-  file is written whole, so a comment a person added is dropped, and the status
-  line warns when one was. A shape switched keeps the body's size, and a joint
-  switched between ball and hinge keeps its swing. The rig section's Undo and
-  Redo step the rig's own history — each written edit a step, written again when
-  stepped — apart from the scene's Ctrl+Z. The selected mesh's joints are drawn
-  beside its bodies, each a small sphere with a line along its axis. A click on
-  a drawn joint or body holds it, drawn in the selection's colour, and
-  translate's handles then move a body's centre or a joint's place in the rig,
-  as an inspector edit would, Ctrl snapping the distance moved to the grid step,
-  and scale's boxes resize a body (a box's half extents, a sphere's radius, a
-  capsule's radius and its length to the cap's tip), Ctrl snapping the size to
-  the scale step, and rotate's rings turn a joint's axis; a click on the held
-  part holds the next one behind it, Shift+click on another body lists the pair
-  as never colliding or takes it off the list, and a click on the mesh away from
-  every part lets go of it.
+  and marked so; the pointer over a pair's line, or over its option in the open
+  drop-down, draws its two bodies in green) — resolving each edit at once and
+  writing the file when the pointer lets go; an edit the rig cannot resolve is
+  refused on the status line and not written. The file is written whole, so a
+  comment a person added is dropped, and the status line warns when one was. A
+  shape switched keeps the body's size, and a joint switched between ball and
+  hinge keeps its swing. The rig section's Undo and Redo step the rig's own
+  history — each written edit a step, written again when stepped — apart from
+  the scene's Ctrl+Z. The selected mesh's joints are drawn beside its bodies,
+  each a small sphere with a line along its axis. A click on a drawn joint or
+  body holds it, drawn in the selection's colour, and translate's handles then
+  move a body's centre or a joint's place in the rig, as an inspector edit
+  would, Ctrl snapping the distance moved to the grid step, and scale's boxes
+  resize a body (a box's half extents, a sphere's radius, a capsule's radius and
+  its length to the cap's tip), Ctrl snapping the size to the scale step, and
+  rotate's rings turn a joint's axis; a click on the held part holds the next
+  one behind it, as does a press on the handles let go without the pointer
+  leaving its pixel — so a part under the mesh's own handles is reached without
+  moving the view — Shift+click on another body lists the pair as never
+  colliding or takes it off the list, and a click on the mesh away from every
+  part lets go of it.
+
+- **`Ui::select_hovered`** (`crcbl-ui`) says which option of an open drop-down
+  the pointer is over, so a caller can show what an option would pick before it
+  is picked.
 
 - **`Simulation::physics_mut`** (`crcbl::scene_physics`) hands a tool the
   playing scene's physics world to add bodies of its own to, such as a dropped
