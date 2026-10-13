@@ -914,6 +914,34 @@ fn rig_pairs_are_listed_and_removed() {
     assert!(file().is_empty(), "still listed in the file");
 }
 
+/// **Clicking on through the held body reaches the one behind it**: with the
+/// second body swollen around the first, a click on the first meets both,
+/// holds the swollen one, nearer though later in the rig, then the first,
+/// then the swollen one again.
+#[test]
+fn clicking_again_holds_the_body_behind() {
+    let (_dir, mut editor) = rig_on_disk();
+    let id = editor.document.selection()[0];
+    let rig = editor.shelf.rig_mut(RIG).expect("the rig");
+    let desc = rig.desc.as_mut().expect("a rig file");
+    desc.bodies[1].shape = crcbl::ragdoll::ShapeDesc::Sphere { radius: 1.0 };
+    rig.resolve().expect("a swollen body resolves");
+    // Scale shows a mesh no handles, so nothing stands in front of the bodies.
+    editor.act(&Action::Scale);
+    let behind = selected_ragdoll_bodies(&mut editor.document, &editor.shelf)[0]
+        .1
+        .position
+        .as_vec3();
+    let at = physical(pixel_of(&editor, behind));
+    let mut held = Vec::new();
+    for _ in 0..3 {
+        click(&mut editor, at);
+        held.push(editor.held.as_ref().expect("a body held").index);
+    }
+    assert_eq!(held, [1, 0, 1], "held in turn");
+    assert_eq!(editor.document.selection(), [id], "a click picked");
+}
+
 /// **The pointer over a listed pair's line marks the pair's two bodies** for
 /// the viewport to draw apart, and off the line marks none.
 #[test]

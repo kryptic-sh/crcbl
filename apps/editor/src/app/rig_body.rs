@@ -3,7 +3,9 @@
 //!
 //! With one rigged mesh selected, a click whose ray meets one of its drawn
 //! bodies holds the nearest one met rather than picking, and a click that
-//! meets none lets go of it and picks as ever. A held body is drawn in the
+//! meets none lets go of it and picks as ever. A click that meets the held
+//! body holds the next one farther along the ray instead, the nearest again
+//! after the farthest, so a body another hides is reached by clicking on. A held body is drawn in the
 //! selection's colour, and in translate mode the handles stand at its centre,
 //! turned by its own axes in local space. Scale and rotate show no handles for
 //! it.
@@ -92,11 +94,12 @@ impl<S: Shell + ?Sized> Editor<S> {
             .copied()
     }
 
-    /// Holds the body of the lone selected rigged mesh nearest along `ray`
-    /// and says so on the status line, or lets go of the one held and says
-    /// whether it held one — see the [module docs](self).
+    /// Holds the body of the lone selected rigged mesh nearest along `ray`,
+    /// or the next past the one held, and says so on the status line, or lets
+    /// go of the one held and says whether it held one — see the
+    /// [module docs](self).
     pub(super) fn hold_body_at(&mut self, ray: &ViewRay) -> bool {
-        self.held = None;
+        let was = self.held.take();
         let &[entity] = self.document.selection() else {
             return false;
         };
@@ -108,13 +111,18 @@ impl<S: Shell + ?Sized> Editor<S> {
             return false;
         };
         let ray = Ray::new(ray.origin.as_dvec3(), ray.direction.as_dvec3());
-        let nearest = rig
+        let mut hits: Vec<(usize, f64)> = rig
             .ragdoll_bodies(origin)
             .iter()
             .enumerate()
             .filter_map(|(index, (shape, at))| Some((index, hit_body(&ray, *shape, at)?)))
-            .min_by(|(_, near), (_, far)| near.total_cmp(far));
-        let Some((index, _)) = nearest else {
+            .collect();
+        hits.sort_by(|(_, near), (_, far)| near.total_cmp(far));
+        let held = was
+            .filter(|was| was.entity == entity && was.asset == asset)
+            .and_then(|was| hits.iter().position(|&(index, _)| index == was.index));
+        let next = held.map_or(0, |at| (at + 1) % hits.len());
+        let Some(&(index, _)) = hits.get(next) else {
             return false;
         };
         let bone = rig

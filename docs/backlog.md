@@ -246,11 +246,11 @@ What rig editing still lacks, none of it requested yet:
   Ctrl snaps a body drag's distance from the press along each handle axis to the
   grid step rather than landing it on the scene's grid, which means nothing in
   the bone's frame `centre` is measured in (decided 2026-10-13); the file's
-  numbers are therefore only as round as they were before the drag. A click
-  inside a body that a nearer body hides picks the nearer one, and a body under
-  the mesh's own handles cannot be clicked to hold it in translate or rotate
-  mode until the view moves (scale shows a mesh no handles). The held body's
-  colour is not covered by a test: the headless draw is not read back.
+  numbers are therefore only as round as they were before the drag. A body
+  another hides is reached by clicking on through the held one; a body under the
+  mesh's own handles cannot be clicked to hold it in translate or rotate mode
+  until the view moves (scale shows a mesh no handles). The held body's colour
+  is not covered by a test: the headless draw is not read back.
 - **Decided (2026-10-13): rig edits have a history of their own, not Ctrl+Z's.**
   The rig section's Undo and Redo step it
   (`apps/editor/src/app/rig_history.rs`). Folding rig edits into the scene's
