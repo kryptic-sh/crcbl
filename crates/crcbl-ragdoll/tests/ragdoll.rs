@@ -666,3 +666,64 @@ fn one_death_steps_to_the_same_bits() {
         "a harder blow changed nothing"
     );
 }
+
+/// **A client tethered to a server at rest falls asleep, and wakes when the
+/// server's joints move**: following its own joints the ragdoll comes to
+/// rest, and held to where it rests by targets that no longer change it falls
+/// asleep; anchors lifted a few centimetres wake it, and it rises after them.
+#[test]
+fn a_moved_tether_wakes_a_sleeping_ragdoll() {
+    /// The most ticks it may take to fall asleep.
+    const SETTLE_TICKS: usize = 3600;
+    /// How far the anchors are lifted, in metres.
+    const LIFT_BY: f64 = 0.05;
+    let rig = rig();
+    let mut physics = world();
+    let ragdoll = spawn_running(&mut physics, &rig);
+    let targets = ragdoll.joint_positions(&physics).unwrap();
+    let anchors = entities(500, targets.len());
+    let tether = ragdoll
+        .tether(&mut physics, &targets, &anchors, 10.0)
+        .expect("tethered");
+    let asleep = |physics: &PhysicsSystem| {
+        ragdoll
+            .entities()
+            .iter()
+            .all(|&entity| physics.is_sleeping(entity))
+    };
+    let mut ticks = 0;
+    while !asleep(&physics) {
+        assert!(ticks < SETTLE_TICKS, "it never came to rest");
+        let here = ragdoll.joint_positions(&physics).unwrap();
+        tether.follow(&mut physics, &here);
+        physics.step(DT);
+        ticks += 1;
+    }
+    // A server at rest: the same targets every tick, which move the anchors
+    // once, onto where it rests, and then never again.
+    let rest = ragdoll.joint_positions(&physics).unwrap();
+    for tick in 0..SETTLE_TICKS {
+        let moved = tether.follow(&mut physics, &rest);
+        assert!(tick == 0 || moved == 0, "a still anchor moved");
+        physics.step(DT);
+    }
+    assert!(
+        asleep(&physics),
+        "it never fell asleep under a still tether"
+    );
+
+    let lifted: Vec<(usize, DVec3)> = rest
+        .iter()
+        .map(|&(joint, at)| (joint, at + DVec3::Y * LIFT_BY))
+        .collect();
+    assert_eq!(tether.follow(&mut physics, &lifted), rest.len());
+    physics.step(DT);
+    assert!(!asleep(&physics), "the lifted tether left it asleep");
+    for _ in 0..60 {
+        tether.follow(&mut physics, &lifted);
+        physics.step(DT);
+    }
+    let risen = ragdoll.joint_positions(&physics).unwrap();
+    let rose = risen[0].1.y - rest[0].1.y;
+    assert!(rose > LIFT_BY / 2.0, "it rose {rose} m of {LIFT_BY}");
+}

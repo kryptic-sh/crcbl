@@ -32,10 +32,11 @@ pub struct Tether {
 }
 
 /// One tethered body: the skeleton joint whose server position its anchor
-/// follows, the anchor, and the spring between them.
+/// follows, the body, the anchor, and the spring between them.
 #[derive(Clone, Copy, Debug)]
 struct Link {
     joint: usize,
+    body: Entity,
     anchor: Entity,
     spring: JointId,
 }
@@ -139,6 +140,7 @@ impl Ragdoll {
             match physics.add_joint(held) {
                 Ok(spring) => links.push(Link {
                     joint,
+                    body: self.entities[body],
                     anchor,
                     spring,
                 }),
@@ -155,18 +157,33 @@ impl Ragdoll {
 
 impl Tether {
     /// Moves each anchor whose joint has a finite target in `targets` — the
-    /// server's [`Ragdoll::joint_positions`] this tick — to it. Call it once a
-    /// tick before the step. Returns how many anchors moved.
+    /// server's [`Ragdoll::joint_positions`] this tick — to it, waking the
+    /// body it pulls. Call it once a tick before the step. Returns how many
+    /// anchors moved.
+    ///
+    /// An anchor already at its target is left alone, so a client following
+    /// a server ragdoll at rest can fall asleep with it; one that moves wakes
+    /// its body, which moving an anchor would not do itself, since an anchor
+    /// has no collider for anything to touch.
     pub fn follow(&self, physics: &mut PhysicsSystem, targets: &[(usize, DVec3)]) -> usize {
         let mut moved = 0;
         for link in &self.links {
             let target = targets
                 .iter()
                 .find(|(joint, target)| *joint == link.joint && target.is_finite());
-            if let Some(&(_, target)) = target {
-                physics.set_transform(link.anchor, Transform::new(target, DQuat::IDENTITY));
-                moved += 1;
+            let Some(&(_, target)) = target else {
+                continue;
+            };
+            if physics
+                .transform(link.anchor)
+                .is_some_and(|at| at.position == target)
+            {
+                continue;
             }
+            physics.set_transform(link.anchor, Transform::new(target, DQuat::IDENTITY));
+            // Reaching the body for writing wakes its island.
+            let _ = physics.body_mut(link.body);
+            moved += 1;
         }
         moved
     }

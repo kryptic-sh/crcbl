@@ -57,8 +57,7 @@ than EW assets or an EW checkout.
     peaks at 0.26 m, so the plan's "never more than a body width" holds through
     the landing for the torso's width, not a forearm's. A stiffer tether did
     worse (0.29 m at 60 Hz); why is not looked into. The tether is measured on
-    this one scenario, two rigs of the synthetic skeleton struck alike; whether
-    a moved anchor wakes a client body that fell asleep is not checked. EW
+    this one scenario, two rigs of the synthetic skeleton struck alike. EW
     adoption is not verified. The cap settles the longest-awake ragdolls rather
     than the plan's "excess deaths settle instantly to a canned pose": a new
     death settled at once would hang in the air, and no canned pose exists.
