@@ -148,8 +148,8 @@ mod instances;
 mod join;
 mod meshes;
 mod recovery;
-mod rig_body;
 mod rig_history;
+mod rig_hold;
 mod skins;
 mod unsaved;
 mod watch;
@@ -327,8 +327,8 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// apart from the scene's history.
     rig_history: rig_history::RigHistory,
     /// The body of the selected rigged mesh's rig a click took hold of,
-    /// which translate's handles move — see `rig_body`.
-    held: Option<rig_body::Held>,
+    /// which translate's handles move — see `rig_hold`.
+    held: Option<rig_hold::Held>,
     /// The served scene this editor has joined, whose copy is the document,
     /// or [`None`] for a document of its own — see `join`.
     joined: Option<Box<join::Joined>>,
@@ -348,8 +348,8 @@ enum Drag {
     /// empty group never is, and the drag's own entity otherwise.
     Gizmo(gizmo::Drag, gizmo::Group),
     /// Left button on a held rig body's handle: move its centre in the rig —
-    /// see `rig_body`.
-    Body(gizmo::Drag, rig_body::BodyDrag),
+    /// see `rig_hold`.
+    Body(gizmo::Drag, rig_hold::BodyDrag),
 }
 
 impl Editor<dyn Shell> {
@@ -967,7 +967,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// click on anything else clears that pick: one click, one thing picked.
     ///
     /// A plain click on a drawn body of the lone selected rigged mesh holds
-    /// that body and selects nothing else — see `rig_body`.
+    /// that body and selects nothing else — see `rig_hold`.
     fn pick(&mut self, pending: &Pending) {
         let Some(at) = pending.pointer else {
             return;

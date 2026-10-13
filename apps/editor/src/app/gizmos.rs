@@ -44,7 +44,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// axes, falling back to world axes when it has no placement. A held rig
     /// body has translate's and scale's handles, at its centre and turned by
     /// its own axes in local mode, as scale's always are — see
-    /// `super::rig_body`.
+    /// `super::rig_hold`.
     pub(super) fn gizmo_centre(&mut self) -> Option<(Vec3, DQuat)> {
         if let Some((_, at)) = self.held_body() {
             let position = at.position.as_vec3();

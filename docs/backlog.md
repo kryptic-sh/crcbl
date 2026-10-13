@@ -237,7 +237,7 @@ resolve is refused on the status line and never written.
 What rig editing still lacks, none of it requested yet:
 
 - **A held body moves and resizes; its axis and the joints have no viewport
-  handle** (`apps/editor/src/app/rig_body.rs`). A click on a drawn body of the
+  handle** (`apps/editor/src/app/rig_hold.rs`). A click on a drawn body of the
   lone selected rigged mesh holds it; translate's handles move its `centre`, and
   scale's boxes resize it (a capsule's `y` box is its cap's tip). Still
   inspector rows only: a body's axis, and a joint's `at` and axis. An axis row
