@@ -299,6 +299,18 @@ is not there, as in play, so a greybox scene with no bodies chunk gives the
 ground plane only; and the solids are read when G is pressed, so an edit to the
 scene during a drop is not seen until the next one.
 
+**Decided (2026-10-13): dynamic solids are for a drop into a playing scene, not
+the preview's own world.** Making the preview's solids fall would mean a second
+copy of play's body simulation (`crcbl::scene_physics`'s `Simulation`) and a way
+to draw scene entities where that copy moved them without editing the document —
+two things play already does. The long-term shape is G during play spawning the
+ragdoll into play's own `Simulation`, so it lands among bodies exactly as a
+game's corpse would, and the world is thrown away when play stops; outside play
+the preview keeps standing solids. Not built: `Simulation` hands out its
+`PhysicsSystem` only by shared reference, and the editor's play world is the
+document's, so the spawn needs a mutable path into it and the drawing a palette
+from the play world rather than the preview's.
+
 Limits of what landed: only an asset's first skin deforms (the viewer's rule);
 no clip plays; and the drawing is checked on the null backend only — no frame
 has been looked at on a device.
