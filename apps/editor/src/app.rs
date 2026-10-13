@@ -1461,6 +1461,23 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.shelf.rig(asset).is_some().then(|| asset.clone())
     }
 
+    /// The bodies of the lone selected rigged mesh whose pair's line in the
+    /// inspector the pointer is over, by their place in its rig. Empty for
+    /// any other selection, whose bodies the inspector's rig is not alone in.
+    fn hovered_pair_bodies(&mut self) -> Vec<usize> {
+        let Some((a, b)) = self.panels.rig_hovered_pair() else {
+            return Vec::new();
+        };
+        let &[id] = self.document.selection() else {
+            return Vec::new();
+        };
+        self.document
+            .mesh(id)
+            .and_then(|mesh| self.shelf.rig(&mesh.asset))
+            .map(|rig| rig.bodies_on((a, b)))
+            .unwrap_or_default()
+    }
+
     /// Where `asset`'s rig file goes: beside it, under the editor's asset
     /// directory or else the scene's own.
     fn rig_path(&self, asset: &str) -> Result<std::path::PathBuf, String> {
@@ -1623,10 +1640,13 @@ impl<S: Shell + ?Sized> Editor<S> {
         let held = self
             .held_body()
             .and_then(|_| self.held.as_ref().map(|held| held.index));
+        let paired = self.hovered_pair_bodies();
         let bodies = selected_ragdoll_bodies(&mut self.document, &self.shelf);
         for (index, (shape, at)) in bodies.into_iter().enumerate() {
             let color = if held == Some(index) {
                 PRIMARY_COLOR
+            } else if paired.contains(&index) {
+                PAIR_COLOR
             } else {
                 RAGDOLL_COLOR
             };
@@ -1943,6 +1963,11 @@ const BONE_COLOR: [f32; 4] = [0.95, 0.35, 0.85, 1.0];
 /// The colour a selected rig's ragdoll bodies are drawn in: a dimmer violet
 /// than the bones, so the skeleton reads through the bodies around it.
 const RAGDOLL_COLOR: [f32; 4] = [0.6, 0.45, 0.95, 1.0];
+
+/// The colour the two bodies of the rig pair the pointer is over in the
+/// inspector are drawn in: the picked green, since no play runs while a rig
+/// is authored and the pair must stand out from the violet bodies around it.
+const PAIR_COLOR: [f32; 4] = PICKED_COLOR;
 
 /// The mode this tool asks for. It never asks for anything else.
 pub const DISPLAY_MODE: DisplayMode = DisplayMode::Windowed;

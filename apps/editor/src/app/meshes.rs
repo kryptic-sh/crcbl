@@ -151,6 +151,21 @@ impl Rig {
             .collect()
     }
 
+    /// The indices of the ragdoll rig's bodies on the bones `a` and `b`, in
+    /// rig order. Empty without a rig.
+    pub(super) fn bodies_on(&self, (a, b): (&str, &str)) -> Vec<usize> {
+        let Some(ragdoll) = &self.ragdoll else {
+            return Vec::new();
+        };
+        ragdoll
+            .bodies()
+            .iter()
+            .enumerate()
+            .filter(|(_, body)| [a, b].contains(&self.names[body.joint].as_str()))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     /// The pairs of the ragdoll rig's bodies that touch at rest unjointed
     /// ([`RagdollRig::rest_overlaps`]), by their bones' names. Empty without
     /// a rig.

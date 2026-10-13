@@ -11,7 +11,9 @@
 //! **The bone pairs the file names as never colliding have a section of their
 //! own** rather than rows: a list is not a thing [`crcbl::reflect`] reads.
 //! Each listed pair is a line with a Remove button, and a drop-down below them
-//! offers every pair of bodies not listed — picking one lists it. The pairs
+//! offers every pair of bodies not listed — picking one lists it. The line
+//! the pointer is over names its pair to `crate::app`, which draws the two
+//! bodies apart from the rest. The pairs
 //! whose bodies touch at rest come first, marked so: they are the ones that
 //! would push apart the moment the rig falls. A pair the rest rule already
 //! leaves out may be listed too: the list is what the file says, and it still
@@ -162,6 +164,8 @@ pub(super) struct Built {
     pub(super) pair_removes: Vec<NodeKey>,
     /// The drop-down of the pairs not listed, once drawn.
     pub(super) pair_add: Option<NodeKey>,
+    /// The listed pair whose line the pointer was over, by bone.
+    pub(super) hovered_pair: Option<(String, String)>,
     /// Whether a row moved this frame, and so `rig` changed.
     pub(super) edited: bool,
 }
@@ -289,7 +293,7 @@ fn pairs(ui: &mut Ui, rig: &mut RagdollDesc, touching: &[(String, String)], buil
         let mut removed = None;
         for (index, (a, b)) in rig.ignore.iter().enumerate() {
             let label = pair_label(a, b);
-            ui.block_keyed(label.as_str(), ".rig-pair", &[], |ui| {
+            let line = ui.block_keyed(label.as_str(), ".rig-pair", &[], |ui| {
                 ui.span(".rig-pair-label", label.as_str(), &[]);
                 let button = ui.button(".section-remove", "Remove");
                 ui.tooltip(&button, "Let these bodies collide again, and write it");
@@ -298,6 +302,9 @@ fn pairs(ui: &mut Ui, rig: &mut RagdollDesc, touching: &[(String, String)], buil
                 }
                 built.pair_removes.push(button.key);
             });
+            if line.hovered {
+                built.hovered_pair = Some((a.clone(), b.clone()));
+            }
         }
         let unlisted = unlisted_pairs(rig, touching);
         let labels: Vec<String> = unlisted

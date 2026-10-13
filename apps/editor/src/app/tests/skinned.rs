@@ -913,6 +913,59 @@ fn rig_pairs_are_listed_and_removed() {
     assert!(file().is_empty(), "still listed in the file");
 }
 
+/// **The pointer over a listed pair's line marks the pair's two bodies** for
+/// the viewport to draw apart, and off the line marks none.
+#[test]
+fn a_hovered_pair_marks_its_bodies() {
+    let (_dir, mut editor) = rig_on_disk();
+    let rig = editor.shelf.rig_mut(RIG).expect("the rig");
+    let desc = rig.desc.as_mut().expect("a rig file");
+    let pair = (desc.bodies[0].bone.clone(), desc.bodies[1].bone.clone());
+    desc.ignore.push(pair);
+    rig.resolve().expect("a listed pair resolves");
+    editor.frame().expect("the inspector draws the pair");
+    assert!(editor.hovered_pair_bodies().is_empty(), "marked unhovered");
+    hover_the_inspector(&mut editor);
+    let remove = |editor: &Editor<HeadlessShell>| {
+        *editor
+            .panels
+            .rig_pairs()
+            .0
+            .first()
+            .expect("a line for the listed pair")
+    };
+    let at = scrolled_to(&mut editor, remove);
+    let window = editor.window;
+    let point_at = |editor: &mut Editor<HeadlessShell>, at| {
+        editor
+            .shell_mut()
+            .move_pointer(window, at, (0.0, 0.0))
+            .expect("live");
+        editor.frame().expect("a frame");
+    };
+    point_at(&mut editor, at);
+    assert_eq!(editor.hovered_pair_bodies(), [0, 1], "over the line");
+    // With a second rigged mesh selected the bodies drawn are both meshes',
+    // so the pair's places in its own rig no longer name them.
+    let lone = editor.document.selection().to_vec();
+    let other = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(-2.0, 0.0, 0.0))
+        .expect("spawned");
+    editor.document.set_selection([other, lone[0]]);
+    editor.frame().expect("a frame of both");
+    assert!(
+        editor.panels.rig_hovered_pair().is_some(),
+        "the line is still under the pointer"
+    );
+    assert!(editor.hovered_pair_bodies().is_empty(), "marked for two");
+    editor.document.set_selection(lone);
+    editor.frame().expect("a frame of one");
+    let (corner, _) = editor.panels.viewport_pixels();
+    point_at(&mut editor, physical(corner + Vec2::splat(4.0)));
+    assert!(editor.hovered_pair_bodies().is_empty(), "off the line");
+}
+
 /// **The drop-down marks the pairs that touch at rest**: none do in the
 /// fitted rig, whose two bodies are jointed, but with the joint gone and the
 /// first body swollen to a sphere that reaches the other, the pair is offered
