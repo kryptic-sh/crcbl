@@ -913,6 +913,34 @@ fn rig_pairs_are_listed_and_removed() {
     assert!(file().is_empty(), "still listed in the file");
 }
 
+/// **The drop-down marks the pairs that touch at rest**: none do in the
+/// fitted rig, whose two bodies are jointed, but with the joint gone and the
+/// first body swollen to a sphere that reaches the other, the pair is offered
+/// as touching.
+#[test]
+fn pairs_touching_at_rest_are_marked() {
+    let (_dir, mut editor) = rig_on_disk();
+    let rig = editor.shelf.rig_mut(RIG).expect("the rig");
+    assert!(rig.rest_overlaps().is_empty(), "the fitted rig touches");
+    let desc = rig.desc.as_mut().expect("a rig file");
+    desc.joints.clear();
+    desc.bodies[0].shape = crcbl::ragdoll::ShapeDesc::Sphere { radius: 1.0 };
+    rig.resolve().expect("a swollen, unjointed body resolves");
+    let touching = rig.rest_overlaps();
+    let (a, b) = touching.first().expect("the swollen body touches").clone();
+    editor.frame().expect("the inspector draws the rig");
+    let select = editor.panels.rig_pairs().1.expect("the drop-down of pairs");
+    hover_the_inspector(&mut editor);
+    let at = scrolled_to(&mut editor, |_| select);
+    click(&mut editor, at);
+    let popup = crcbl::ui::tree::Ui::popup_key(select);
+    let marked = format!("{a} ↔ {b} (touching at rest)");
+    assert!(
+        holder_of(editor.panels.ui(), popup, &marked).is_some(),
+        "the drop-down marks {marked}"
+    );
+}
+
 /// **An edit over a file a person commented warns that the comments are
 /// gone**, since the rig is written whole; the next edit, over the file the
 /// editor wrote, says only that it wrote it.

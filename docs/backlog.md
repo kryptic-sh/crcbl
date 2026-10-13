@@ -271,10 +271,11 @@ What rig editing still lacks, none of it requested yet:
 - **The listed pairs are a section of their own, not reflected rows** (`pairs`
   in `apps/editor/src/panel/rig.rs`): `crcbl::reflect` reads no list, so each
   pair is a line with a Remove button and a drop-down offers every pair not
-  listed. The drop-down holds every pair of bodies, which for a full humanoid is
-  a long list to scroll or type into; picking two bodies one at a time, or
-  listing the pairs that overlap at rest first, was not built. A pair is not
-  shown on the bodies in the viewport.
+  listed, those touching at rest first (`Rig::rest_overlaps`, recomputed each
+  frame the rig is drawn). The drop-down still holds every pair of bodies, which
+  for a full humanoid is a long list to scroll or type into; picking two bodies
+  one at a time was not built. A pair is not shown on the bodies in the
+  viewport.
 
 G drops the selected rigged mesh as its fitted ragdoll in a physics world of its
 own (`apps/editor/src/app/drop.rs`), drawn from a second, preview region per

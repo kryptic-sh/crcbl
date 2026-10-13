@@ -11,9 +11,11 @@
 //! **The bone pairs the file names as never colliding have a section of their
 //! own** rather than rows: a list is not a thing [`crcbl::reflect`] reads.
 //! Each listed pair is a line with a Remove button, and a drop-down below them
-//! offers every pair of bodies not listed — picking one lists it. A pair the
-//! rest rule already leaves out may be listed too: the list is what the file
-//! says, and it still holds with the rule switched off.
+//! offers every pair of bodies not listed — picking one lists it. The pairs
+//! whose bodies touch at rest come first, marked so: they are the ones that
+//! would push apart the moment the rig falls. A pair the rest rule already
+//! leaves out may be listed too: the list is what the file says, and it still
+//! holds with the rule switched off.
 //!
 //! **The rig section's Undo and Redo step the rig's own history**, which
 //! `crate::app` keeps apart from the scene's: the rig is the asset's file,
@@ -134,6 +136,9 @@ pub struct RigEdit<'a> {
     pub can_undo: bool,
     /// Whether an undone edit can be redone: what draws the Redo button.
     pub can_redo: bool,
+    /// The pairs of bodies, by bone, that touch at rest with no joint
+    /// between them: what the pair drop-down offers first.
+    pub touching: Vec<(String, String)>,
 }
 
 /// What [`build`] drew.
@@ -195,7 +200,7 @@ pub(super) fn build(ui: &mut Ui, edit: RigEdit<'_>, options: &InspectorOptions<'
             built.edited = true;
         }
     });
-    pairs(ui, rig, &mut built);
+    pairs(ui, rig, &edit.touching, &mut built);
     for body in &mut rig.bodies {
         ui.block_keyed(&body.bone, ".inspector-section", &[], |ui| {
             let heading = format!("Ragdoll body · {}", body.bone);
@@ -274,8 +279,9 @@ pub(super) fn build(ui: &mut Ui, edit: RigEdit<'_>, options: &InspectorOptions<'
 const ADD_PAIR: &str = "Add a pair...";
 
 /// Draws `rig`'s section of listed pairs, removing the one whose button was
-/// clicked and listing the one picked — see the [module docs](self).
-fn pairs(ui: &mut Ui, rig: &mut RagdollDesc, built: &mut Built) {
+/// clicked and listing the one picked, `touching` offered first — see the
+/// [module docs](self).
+fn pairs(ui: &mut Ui, rig: &mut RagdollDesc, touching: &[(String, String)], built: &mut Built) {
     ui.block_keyed("ragdoll-pairs", ".inspector-section", &[], |ui| {
         ui.block(".section-head", &[], |ui| {
             ui.span(".section-title", "Ragdoll pairs that never collide", &[]);
@@ -293,8 +299,18 @@ fn pairs(ui: &mut Ui, rig: &mut RagdollDesc, built: &mut Built) {
                 built.pair_removes.push(button.key);
             });
         }
-        let unlisted = unlisted_pairs(rig);
-        let labels: Vec<String> = unlisted.iter().map(|(a, b)| pair_label(a, b)).collect();
+        let unlisted = unlisted_pairs(rig, touching);
+        let labels: Vec<String> = unlisted
+            .iter()
+            .map(|((a, b), touches)| {
+                let label = pair_label(a, b);
+                if *touches {
+                    format!("{label} (touching at rest)")
+                } else {
+                    label
+                }
+            })
+            .collect();
         let options: Vec<&str> = std::iter::once(ADD_PAIR)
             .chain(labels.iter().map(String::as_str))
             .collect();
@@ -304,7 +320,8 @@ fn pairs(ui: &mut Ui, rig: &mut RagdollDesc, built: &mut Built) {
         if let Some(index) = removed {
             rig.ignore.remove(index);
             built.edited = true;
-        } else if let Some(pair) = chosen.checked_sub(1).and_then(|index| unlisted.get(index)) {
+        } else if let Some((pair, _)) = chosen.checked_sub(1).and_then(|index| unlisted.get(index))
+        {
             rig.ignore.push(pair.clone());
             built.edited = true;
         }
@@ -316,22 +333,28 @@ fn pair_label(a: &str, b: &str) -> String {
     format!("{a} ↔ {b}")
 }
 
-/// Every pair of `rig`'s bodies its file does not list, either way round, in
-/// the bodies' order.
-fn unlisted_pairs(rig: &RagdollDesc) -> Vec<(String, String)> {
-    let listed = |a: &str, b: &str| {
-        rig.ignore
+/// Every pair of `rig`'s bodies its file does not list, either way round,
+/// each with whether it is among `touching`: those first, then the rest, each
+/// in the bodies' order.
+fn unlisted_pairs(
+    rig: &RagdollDesc,
+    touching: &[(String, String)],
+) -> Vec<((String, String), bool)> {
+    let among = |pairs: &[(String, String)], a: &str, b: &str| {
+        pairs
             .iter()
             .any(|(x, y)| (x == a && y == b) || (x == b && y == a))
     };
     let mut pairs = Vec::new();
     for (index, first) in rig.bodies.iter().enumerate() {
         for second in &rig.bodies[index + 1..] {
-            if !listed(&first.bone, &second.bone) {
-                pairs.push((first.bone.clone(), second.bone.clone()));
+            let (a, b) = (&first.bone, &second.bone);
+            if !among(&rig.ignore, a, b) {
+                pairs.push(((a.clone(), b.clone()), among(touching, a, b)));
             }
         }
     }
+    pairs.sort_by_key(|(_, touches)| !touches);
     pairs
 }
 
@@ -508,9 +531,9 @@ fn kind_desc(old: JointKindDesc, before: Kind, after: Kind) -> JointKindDesc {
 mod tests {
     use super::*;
 
-    /// **The drop-down offers each pair not listed, once, in the bodies'
-    /// order**: a pair the file lists the other way round is listed all the
-    /// same.
+    /// **The drop-down offers each pair not listed, once, those touching at
+    /// rest first and each part in the bodies' order**: a pair the file lists
+    /// or the rest names the other way round counts all the same.
     #[test]
     fn only_pairs_not_listed_are_offered() {
         let body = |bone: &str| crcbl::ragdoll::BodyDesc {
@@ -522,15 +545,22 @@ mod tests {
         };
         let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
         let rig = RagdollDesc {
-            bodies: vec![body("hips"), body("chest"), body("head")],
+            bodies: vec![body("hips"), body("chest"), body("head"), body("hand")],
             joints: Vec::new(),
             ignore: vec![pair("head", "hips")],
             ignore_rest_overlaps: true,
             substeps: 0,
         };
+        let touching = [pair("head", "chest"), pair("hips", "hand")];
         assert_eq!(
-            unlisted_pairs(&rig),
-            [pair("hips", "chest"), pair("chest", "head")]
+            unlisted_pairs(&rig, &touching),
+            [
+                (pair("hips", "hand"), true),
+                (pair("chest", "head"), true),
+                (pair("hips", "chest"), false),
+                (pair("chest", "hand"), false),
+                (pair("head", "hand"), false),
+            ]
         );
     }
 

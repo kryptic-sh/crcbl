@@ -150,6 +150,21 @@ impl Rig {
             .map(|(body, world)| (body.shape, world))
             .collect()
     }
+
+    /// The pairs of the ragdoll rig's bodies that touch at rest unjointed
+    /// ([`RagdollRig::rest_overlaps`]), by their bones' names. Empty without
+    /// a rig.
+    pub(super) fn rest_overlaps(&self) -> Vec<(String, String)> {
+        let Some(ragdoll) = &self.ragdoll else {
+            return Vec::new();
+        };
+        let pose = Pose::new(&self.skeleton);
+        let pairs = ragdoll
+            .rest_overlaps(&self.skeleton, &pose, hangs_of(&self.skinned))
+            .unwrap_or_default();
+        let bone = |body: usize| self.names[ragdoll.bodies()[body].joint].clone();
+        pairs.into_iter().map(|(a, b)| (bone(a), bone(b))).collect()
+    }
 }
 
 /// The assets a renderer was built with, and how each is drawn — see the

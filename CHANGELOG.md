@@ -892,6 +892,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`RagdollRig::bodies_at` places a rig's bodies on a skeleton in a pose**
   without simulating anything — what an editor draws a rig with, or a game
   checks a spawn against — and refuses a skeleton or pose of another size.
+  `RagdollRig::rest_overlaps` names the unjointed pairs that touch there, which
+  `ignore_rest_overlaps` would keep from colliding, whether or not the rig was
+  resolved with that rule.
 
 - **The editor draws a rigged glTF mesh through the skinning pass**, at its rest
   pose: each part the asset's first skin deforms is posed in one region every
@@ -913,17 +916,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   mesh's components — the rest-overlap rule and the substeps, each body's shape,
   size, mass, centre and axis, each joint's kind, limits (in degrees), friction,
   axis and offset, and the listed pairs that never collide (each with a Remove
-  button, and a drop-down of the pairs not listed) — resolving each edit at once
-  and writing the file when the pointer lets go; an edit the rig cannot resolve
-  is refused on the status line and not written. The file is written whole, so a
-  comment a person added is dropped, and the status line warns when one was. A
-  shape switched keeps the body's size, and a joint switched between ball and
-  hinge keeps its swing. The rig section's Undo and Redo step the rig's own
-  history — each written edit a step, written again when stepped — apart from
-  the scene's Ctrl+Z. A click on one of the selected mesh's drawn bodies holds
-  it, drawn in the selection's colour, and translate's handles then move its
-  centre in the rig, as an inspector edit would; a click on the mesh away from
-  every body lets go of it.
+  button, and a drop-down of the pairs not listed, those touching at rest first
+  and marked so) — resolving each edit at once and writing the file when the
+  pointer lets go; an edit the rig cannot resolve is refused on the status line
+  and not written. The file is written whole, so a comment a person added is
+  dropped, and the status line warns when one was. A shape switched keeps the
+  body's size, and a joint switched between ball and hinge keeps its swing. The
+  rig section's Undo and Redo step the rig's own history — each written edit a
+  step, written again when stepped — apart from the scene's Ctrl+Z. A click on
+  one of the selected mesh's drawn bodies holds it, drawn in the selection's
+  colour, and translate's handles then move its centre in the rig, as an
+  inspector edit would; a click on the mesh away from every body lets go of it.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned

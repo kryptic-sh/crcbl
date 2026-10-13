@@ -128,6 +128,14 @@ fn ignored_pairs_reach_the_physics_system() {
 
     let skeleton = skeleton();
     let pose = Pose::new(&skeleton);
+    // The overlap is there to be asked of either rig, and the listed calves,
+    // which never touch, are not part of it.
+    for rig in [&rig, &off] {
+        assert_eq!(
+            rig.rest_overlaps(&skeleton, &pose, model(0.0)),
+            Some(vec![(0, 1)])
+        );
+    }
     let mut physics = world();
     let handoff = Handoff {
         pose: &pose,

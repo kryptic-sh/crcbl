@@ -73,6 +73,24 @@ impl crate::RagdollRig {
         let frames = rigid_frames(skeleton, pose, model).ok()?;
         Some(body_worlds(self.bodies(), &frames))
     }
+
+    /// The body pairs, lower index first, that no joint joins and that come
+    /// within [`REST_CLEARANCE`] of each other for `skeleton` in `pose`
+    /// placed by `model` — what `ignore_rest_overlaps` keeps from colliding,
+    /// asked of the rig whether it was resolved with the rule or without.
+    /// An editor lists them to offer the pairs worth naming in a file.
+    ///
+    /// `None` where [`bodies_at`](Self::bodies_at) is.
+    #[must_use]
+    pub fn rest_overlaps(
+        &self,
+        skeleton: &Skeleton,
+        pose: &Pose,
+        model: Mat4,
+    ) -> Option<Vec<(usize, usize)>> {
+        let worlds = self.bodies_at(skeleton, pose, model)?;
+        Some(overlapping_pairs(self.bodies(), self.joints(), &worlds))
+    }
 }
 
 /// The body pairs, lower index first, that no joint joins and whose shapes

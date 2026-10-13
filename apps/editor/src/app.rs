@@ -761,6 +761,11 @@ impl<S: Shell + ?Sized> Editor<S> {
                 self.rig_history.can_redo(asset),
             )
         });
+        let touching = rigged
+            .as_deref()
+            .and_then(|asset| self.shelf.rig(asset))
+            .map(meshes::Rig::rest_overlaps)
+            .unwrap_or_default();
         let desc = rigged
             .as_deref()
             .and_then(|asset| self.shelf.rig_mut(asset))
@@ -770,6 +775,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             desc,
             can_undo,
             can_redo,
+            touching,
         });
         let panels = self.panels.frame_with_rig(&mut self.document, input, rig);
         if let (Some(asset), Some(before)) = (rigged, before) {
