@@ -8,6 +8,7 @@ use crcbl::registry::Rotation;
 use crcbl::scene::scn::SceneEntityId;
 use crcbl::shell::Shell;
 
+use super::rig_hold::Part;
 use super::{Drag, Editor};
 use crate::command::EditCommand;
 use crate::gizmo;
@@ -42,16 +43,18 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// is; several selected share theirs at the selection's pivot
     /// ([`crate::document::Document::selection_pivot`]). Local mode uses the primary entity's
     /// axes, falling back to world axes when it has no placement. A held rig
-    /// body has translate's and scale's handles, at its centre and turned by
-    /// its own axes in local mode, as scale's always are — see
+    /// part has translate's handles, and a held body scale's, at the part and
+    /// turned by its own axes in local mode, as scale's always are — see
     /// `super::rig_hold`.
     pub(super) fn gizmo_centre(&mut self) -> Option<(Vec3, DQuat)> {
-        if let Some((_, at)) = self.held_body() {
+        if let Some((part, at)) = self.held_part() {
             let position = at.position.as_vec3();
-            return match self.gizmo_mode {
-                gizmo::Mode::Translate => Some((position, self.gizmo_space.frame(at.rotation))),
-                gizmo::Mode::Scale => Some((position, at.rotation)),
-                gizmo::Mode::Rotate => None,
+            return match (self.gizmo_mode, part) {
+                (gizmo::Mode::Translate, _) => {
+                    Some((position, self.gizmo_space.frame(at.rotation)))
+                }
+                (gizmo::Mode::Scale, Part::Body(_)) => Some((position, at.rotation)),
+                (gizmo::Mode::Scale, Part::Joint(_)) | (gizmo::Mode::Rotate, _) => None,
             };
         }
         let id = self.document.primary()?;
@@ -170,11 +173,10 @@ impl<S: Shell + ?Sized> Editor<S> {
         };
         let gesture = self.document.begin_gesture();
         if self.held.is_some() {
-            let Some((drag, body)) = self.begin_body_drag(grip, gesture, (centre, frame), at)
-            else {
+            let Some((drag, part)) = self.begin_rig_drag(grip, gesture, (centre, frame), at) else {
                 return false;
             };
-            self.drag = Some(Drag::Body(drag, body));
+            self.drag = Some(Drag::Rig(drag, part));
             return true;
         }
         let grabbed = match grip {
@@ -337,7 +339,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
         let (corner, _) = self.panels.viewport_pixels();
         let hot = match &self.drag {
-            Some(Drag::Gizmo(drag, _) | Drag::Body(drag, _)) => Some(drag.grip()),
+            Some(Drag::Gizmo(drag, _) | Drag::Rig(drag, _)) => Some(drag.grip()),
             _ => gizmo::hit(&handles, pointer - corner, self.panels.scale()),
         };
         self.panels
@@ -390,7 +392,7 @@ impl<S: Shell + ?Sized> Editor<S> {
 
     /// What the status line says when a mode whose handles need a field is
     /// chosen: `none` with nothing selected, `usage` for a held rig body's
-    /// scale and that it has no rings,
+    /// scale and what a held part has not,
     /// why it shows no handles with several selected — it acts on one entity
     /// — `usage` when the selection has the field, and why it shows no handles
     /// when it does not — it has nothing to `verb`.
@@ -409,16 +411,23 @@ impl<S: Shell + ?Sized> Editor<S> {
             gizmo::Mode::Scale => "Scale",
             gizmo::Mode::Rotate => "Rotate",
         };
-        if self.held_body().is_some() {
-            return if mode == gizmo::Mode::Scale {
-                (usage, Tone::Info)
-            } else {
-                (
+        if let Some((part, _)) = self.held_part() {
+            let noun = match part {
+                Part::Body(_) => "body",
+                Part::Joint(_) => "joint",
+            };
+            return match (mode, part) {
+                (gizmo::Mode::Scale, Part::Body(_)) => (usage, Tone::Info),
+                (gizmo::Mode::Scale, Part::Joint(_)) => (
+                    format!("{label}: a held rig joint has no size; translate's arrows move it"),
+                    Tone::Warning,
+                ),
+                _ => (
                     format!(
-                        "{label}: a held rig body has no rings; {verb} its axis in the inspector"
+                        "{label}: a held rig {noun} has no rings; {verb} its axis in the inspector"
                     ),
                     Tone::Warning,
-                )
+                ),
             };
         }
         let count = self.document.selection().len();

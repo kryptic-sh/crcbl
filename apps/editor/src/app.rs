@@ -326,8 +326,8 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// Each rig's edits, stepped by its inspector section's Undo and Redo
     /// apart from the scene's history.
     rig_history: rig_history::RigHistory,
-    /// The body of the selected rigged mesh's rig a click took hold of,
-    /// which translate's handles move — see `rig_hold`.
+    /// The body or joint of the selected rigged mesh's rig a click took
+    /// hold of, which the handles move — see `rig_hold`.
     held: Option<rig_hold::Held>,
     /// The served scene this editor has joined, whose copy is the document,
     /// or [`None`] for a document of its own — see `join`.
@@ -347,9 +347,9 @@ enum Drag {
     /// through it — every entity of the group for a translate, which an
     /// empty group never is, and the drag's own entity otherwise.
     Gizmo(gizmo::Drag, gizmo::Group),
-    /// Left button on a held rig body's handle: move its centre in the rig —
-    /// see `rig_hold`.
-    Body(gizmo::Drag, rig_hold::BodyDrag),
+    /// Left button on a held rig part's handle: move or resize it in the
+    /// rig — see `rig_hold`.
+    Rig(gizmo::Drag, rig_hold::RigDrag),
 }
 
 impl Editor<dyn Shell> {
@@ -711,14 +711,14 @@ impl<S: Shell + ?Sized> Editor<S> {
                     self.drag = Some(Drag::Gizmo(drag, group));
                 }
             }
-            Some(Drag::Body(drag, body)) => {
+            Some(Drag::Rig(drag, part)) => {
                 if pending.motion.is_some()
                     && let Some(at) = pending.pointer
                 {
-                    self.move_body(&drag, &body, at);
+                    self.move_rig(&drag, &part, at);
                 }
                 if !pending.pointer_released {
-                    self.drag = Some(Drag::Body(drag, body));
+                    self.drag = Some(Drag::Rig(drag, part));
                 }
             }
             other => self.drag = other,
@@ -919,9 +919,9 @@ impl<S: Shell + ?Sized> Editor<S> {
                     let height = self.panels.viewport_extent().1 as f32;
                     self.camera.pan(-motion.x / height, motion.y / height);
                 }
-                // Moved by `move_handle` or `move_body`, which read where the
+                // Moved by `move_handle` or `move_rig`, which read where the
                 // pointer is rather than how far it went.
-                Drag::Gizmo(..) | Drag::Body(..) => {}
+                Drag::Gizmo(..) | Drag::Rig(..) => {}
             }
         }
 
@@ -966,14 +966,14 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// ([`Document::set_runtime_pick`]) and selects nothing, and a plain
     /// click on anything else clears that pick: one click, one thing picked.
     ///
-    /// A plain click on a drawn body of the lone selected rigged mesh holds
-    /// that body and selects nothing else — see `rig_hold`.
+    /// A plain click on a drawn joint or body of the lone selected rigged
+    /// mesh holds it and selects nothing else — see `rig_hold`.
     fn pick(&mut self, pending: &Pending) {
         let Some(at) = pending.pointer else {
             return;
         };
         let ray = self.ray_at(at);
-        if !self.modifiers.contains(Modifiers::CTRL) && self.hold_body_at(&ray) {
+        if !self.modifiers.contains(Modifiers::CTRL) && self.hold_rig_at(&ray) {
             return;
         }
         let hit = self.document.hit_ray(&ray);
@@ -1092,7 +1092,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                 Ok(())
             }
             Action::ToggleSpace => {
-                if matches!(self.drag, Some(Drag::Gizmo(..) | Drag::Body(..))) {
+                if matches!(self.drag, Some(Drag::Gizmo(..) | Drag::Rig(..))) {
                     self.drag = None;
                 }
                 self.gizmo_space = match self.gizmo_space {
@@ -1635,15 +1635,13 @@ impl<S: Shell + ?Sized> Editor<S> {
         for (from, to) in selected_bones(&mut self.document, &self.shelf) {
             self.renderer.debug_draw().line(from, to, BONE_COLOR);
         }
-        // A body is held only on a lone selection, so its index is its place
-        // in the selection's bodies.
-        let held = self
-            .held_body()
-            .and_then(|_| self.held.as_ref().map(|held| held.index));
+        // A part is held only on a lone selection, so its index is its place
+        // in the selection's bodies or joints.
+        let held = self.held_part().map(|(part, _)| part);
         let paired = self.hovered_pair_bodies();
         let bodies = selected_ragdoll_bodies(&mut self.document, &self.shelf);
         for (index, (shape, at)) in bodies.into_iter().enumerate() {
-            let color = if held == Some(index) {
+            let color = if held == Some(rig_hold::Part::Body(index)) {
                 PRIMARY_COLOR
             } else if paired.contains(&index) {
                 PAIR_COLOR
@@ -1651,6 +1649,15 @@ impl<S: Shell + ?Sized> Editor<S> {
                 RAGDOLL_COLOR
             };
             draw_body(self.renderer.debug_draw(), shape, &at, color);
+        }
+        let joints = selected_ragdoll_joints(&mut self.document, &self.shelf);
+        for (index, at) in joints.into_iter().enumerate() {
+            let color = if held == Some(rig_hold::Part::Joint(index)) {
+                PRIMARY_COLOR
+            } else {
+                JOINT_COLOR
+            };
+            draw_joint(self.renderer.debug_draw(), &at, color);
         }
 
         // The scene is drawn at the pane's extent — as the panels last laid it
@@ -1964,6 +1971,14 @@ const BONE_COLOR: [f32; 4] = [0.95, 0.35, 0.85, 1.0];
 /// than the bones, so the skeleton reads through the bodies around it.
 const RAGDOLL_COLOR: [f32; 4] = [0.6, 0.45, 0.95, 1.0];
 
+/// The colour a selected rig's joints are drawn in: the bones' magenta, since
+/// a joint sits on its child bone's origin, where the bones meet.
+const JOINT_COLOR: [f32; 4] = BONE_COLOR;
+
+/// How far out along its axis a joint's line is drawn, in metres: a few of
+/// its radii, so the axis reads past the sphere.
+const JOINT_AXIS_LENGTH: f64 = 0.1;
+
 /// The colour the two bodies of the rig pair the pointer is over in the
 /// inspector are drawn in: the picked green, since no play runs while a rig
 /// is authored and the pair must stand out from the violet bodies around it.
@@ -2150,6 +2165,21 @@ fn selected_ragdoll_bodies(
     bodies
 }
 
+/// Every ragdoll joint's frame at rest for each selected mesh whose asset is
+/// rigged, as [`selected_ragdoll_bodies`] places their bodies.
+fn selected_ragdoll_joints(document: &mut Document, shelf: &Shelf) -> Vec<crcbl::phys::Transform> {
+    let mut joints = Vec::new();
+    for id in document.selection().to_vec() {
+        if let Some(mesh) = document.mesh(id)
+            && let Some(rig) = shelf.rig(&mesh.asset)
+        {
+            let placed = rig.ragdoll_joints(instances::origin_of(mesh));
+            joints.extend(placed.into_iter().map(|(at, _)| at));
+        }
+    }
+    joints
+}
+
 /// A box body's eight corners in [`crcbl::render::frustum_corners`]' order,
 /// which [`crcbl::render::DebugDraw::box_edges`] joins: bit 0 of the index is
 /// the body's x, bit 1 its y, bit 2 its z.
@@ -2198,6 +2228,15 @@ fn draw_body(
             draw.box_edges(&eight, color);
         }
     }
+}
+
+/// One ragdoll joint as debug lines in `color`: a sphere where it sits, and a
+/// line out along its axis, its frame's `z`.
+#[allow(clippy::cast_possible_truncation)]
+fn draw_joint(draw: &mut crcbl::render::DebugDraw, at: &crcbl::phys::Transform, color: [f32; 4]) {
+    let tip = at.position + at.rotation * (crcbl::math::DVec3::Z * JOINT_AXIS_LENGTH);
+    draw.sphere(at.position.as_vec3(), rig_hold::JOINT_RADIUS as f32, color);
+    draw.line(at.position.as_vec3(), tip.as_vec3(), color);
 }
 
 fn selection_boxes(document: &mut Document) -> Vec<([Vec3; 8], [f32; 4])> {

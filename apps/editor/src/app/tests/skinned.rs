@@ -8,6 +8,7 @@ use super::*;
 use super::assets::pixel_of;
 use super::scene_inspector::scrolled_to;
 use super::selection::hold_ctrl;
+use crate::app::rig_hold::Part;
 
 use crcbl::assets::MemorySource;
 use crcbl::math::DVec3;
@@ -914,6 +915,85 @@ fn rig_pairs_are_listed_and_removed() {
     assert!(file().is_empty(), "still listed in the file");
 }
 
+/// **A click on a drawn joint holds it, and translate's arrow moves where it
+/// sits in the rig.** The joint is held though it sits inside the bodies it
+/// joins, and scale shows it no boxes. The mesh is turned, so the joint's
+/// child bone's frame is too: the joint moves along the world's x alone while
+/// its `at` in the file moves across the bone's x and z, written once the
+/// pointer lets go as one step of the rig's history.
+#[test]
+fn a_held_joint_moves_along_its_arrow_and_is_written() {
+    let (dir, mut editor) = rig_on_disk();
+    let id = editor.document.primary().expect("the rig is selected");
+    turn_about_y(&mut editor, id, 0.6);
+    // Bodies lying across their bones, so a body's turn is not its bone's.
+    let rig = editor.shelf.rig_mut(RIG).expect("the rig");
+    let desc = rig.desc.as_mut().expect("a rig file");
+    for body in &mut desc.bodies {
+        body.axis = (1.0, 0.0, 0.0);
+    }
+    rig.resolve().expect("tilted bodies resolve");
+    editor.frame().expect("a frame");
+    let joint = |editor: &mut Editor<HeadlessShell>| {
+        selected_ragdoll_joints(&mut editor.document, &editor.shelf)[0].position
+    };
+    let at_in_file = |editor: &Editor<HeadlessShell>| {
+        editor
+            .shelf
+            .rig(RIG)
+            .and_then(|rig| rig.desc.as_ref())
+            .expect("a rig file")
+            .joints[0]
+            .at
+    };
+    let before = joint(&mut editor);
+    let in_file = at_in_file(&editor);
+
+    editor.act(&Action::Scale);
+    let on_joint = physical(pixel_of(&editor, before.as_vec3()));
+    click(&mut editor, on_joint);
+    assert_eq!(
+        editor.held.as_ref().map(|held| held.part),
+        Some(Part::Joint(0)),
+        "{:?}",
+        editor.panels.status()
+    );
+    assert!(
+        editor.panels.status().0.starts_with("Holding the joint"),
+        "{:?}",
+        editor.panels.status()
+    );
+    assert!(editor.handles().is_empty(), "scale shows a joint boxes");
+    editor.act(&Action::Scale);
+    assert_eq!(
+        editor.panels.status().0,
+        "Scale: a held rig joint has no size; translate's arrows move it. \
+         Local axes; X toggles translate/rotate axes"
+    );
+
+    editor.act(&Action::Translate);
+    let (from, to) = handle_at(&mut editor, gizmo::Grip::Move(gizmo::Axis::X));
+    drag(&mut editor, (from + to) * 0.5, to + (to - from) * 0.5);
+    let after = joint(&mut editor);
+    assert!(after.x > before.x + 0.05, "{before} to {after}");
+    assert!(
+        (after.y - before.y).abs() < 1e-4 && (after.z - before.z).abs() < 1e-4,
+        "moved off x: {before} to {after}"
+    );
+    let moved = at_in_file(&editor);
+    assert!(
+        (moved.0 - in_file.0).abs() > 0.01 && (moved.2 - in_file.2).abs() > 0.01,
+        "the bone's frame is turned, so its x and z both move: {in_file:?} to {moved:?}"
+    );
+    let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+    let file = crcbl::ragdoll::RagdollDesc::from_ron(
+        &std::fs::read_to_string(&path).expect("the rig was written"),
+    )
+    .expect("a rig file");
+    assert_eq!(file.joints[0].at, moved, "the file holds another place");
+    assert!(editor.rig_history.can_undo(RIG), "the move is no step");
+}
+
 /// **A held capsule's boxes resize it**: its `y` box lengthens it, keeping its
 /// radius, and its `x` box widens it, keeping its length; each is written.
 #[test]
@@ -926,7 +1006,10 @@ fn a_held_body_resizes_by_its_boxes() {
         .as_vec3();
     let on_body = physical(pixel_of(&editor, first));
     click(&mut editor, on_body);
-    assert_eq!(editor.held.as_ref().map(|held| held.index), Some(0));
+    assert_eq!(
+        editor.held.as_ref().map(|held| held.part),
+        Some(Part::Body(0))
+    );
     let shape = || {
         let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
         let text = std::fs::read_to_string(&path).expect("the rig was written");
@@ -1003,12 +1086,16 @@ fn clicking_again_holds_the_body_behind() {
     let mut held = Vec::new();
     for turn in 0..3 {
         click(&mut editor, at);
-        held.push(editor.held.as_ref().expect("a body held").index);
+        held.push(editor.held.as_ref().expect("a body held").part);
         if turn == 0 {
             editor.act(&Action::Rotate);
         }
     }
-    assert_eq!(held, [1, 0, 1], "held in turn");
+    assert_eq!(
+        held,
+        [Part::Body(1), Part::Body(0), Part::Body(1)],
+        "held in turn"
+    );
     assert_eq!(editor.document.selection(), [id], "a click picked");
 }
 
@@ -1159,15 +1246,22 @@ fn turn_about_y(editor: &mut Editor<HeadlessShell>, id: SceneEntityId, angle: f6
 /// centre in the rig.** The mesh is turned, so its bone's frame is too: the
 /// body moves along the world's x alone while its `centre` in the file moves
 /// across the bone's x and z, and the file is written once the pointer lets
-/// go, as one step of the rig's history. Scale shows a held body no
-/// handles — it is chosen while clicking, as a mesh has none either, so no
-/// handle is under the pointer — and a click on its mesh away from every
-/// body, or on nothing, lets go of it.
+/// go, as one step of the rig's history. Scale is chosen while clicking, as
+/// it shows a mesh no handles to be under the pointer; rotate shows a held
+/// body none; and a click on its mesh away from every body, or on nothing,
+/// lets go of it.
 #[test]
 fn a_held_body_moves_along_its_arrow_and_is_written() {
     let (dir, mut editor) = rig_on_disk();
     let id = editor.document.primary().expect("the rig is selected");
     turn_about_y(&mut editor, id, 0.6);
+    // Bodies lying across their bones, so a body's turn is not its bone's.
+    let rig = editor.shelf.rig_mut(RIG).expect("the rig");
+    let desc = rig.desc.as_mut().expect("a rig file");
+    for body in &mut desc.bodies {
+        body.axis = (1.0, 0.0, 0.0);
+    }
+    rig.resolve().expect("tilted bodies resolve");
     editor.frame().expect("a frame");
     let capsule = |editor: &mut Editor<HeadlessShell>| {
         selected_ragdoll_bodies(&mut editor.document, &editor.shelf)[0]
@@ -1191,8 +1285,8 @@ fn a_held_body_moves_along_its_arrow_and_is_written() {
     let on_body = physical(pixel_of(&editor, before.as_vec3()));
     click(&mut editor, on_body);
     assert_eq!(
-        editor.held.as_ref().map(|held| held.index),
-        Some(0),
+        editor.held.as_ref().map(|held| held.part),
+        Some(Part::Body(0)),
         "{:?}",
         editor.panels.status()
     );

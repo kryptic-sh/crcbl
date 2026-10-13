@@ -924,14 +924,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   line warns when one was. A shape switched keeps the body's size, and a joint
   switched between ball and hinge keeps its swing. The rig section's Undo and
   Redo step the rig's own history — each written edit a step, written again when
-  stepped — apart from the scene's Ctrl+Z. A click on one of the selected mesh's
-  drawn bodies holds it, drawn in the selection's colour, and translate's
-  handles then move its centre in the rig, as an inspector edit would, Ctrl
-  snapping the distance moved to the grid step, and scale's boxes resize it (a
-  box's half extents, a sphere's radius, a capsule's radius and its length to
-  the cap's tip), Ctrl snapping the size to the scale step; a click on the held
-  body holds the next one behind it, and a click on the mesh away from every
-  body lets go of it.
+  stepped — apart from the scene's Ctrl+Z. The selected mesh's joints are drawn
+  beside its bodies, each a small sphere with a line along its axis. A click on
+  a drawn joint or body holds it, drawn in the selection's colour, and
+  translate's handles then move a body's centre or a joint's place in the rig,
+  as an inspector edit would, Ctrl snapping the distance moved to the grid step,
+  and scale's boxes resize a body (a box's half extents, a sphere's radius, a
+  capsule's radius and its length to the cap's tip), Ctrl snapping the size to
+  the scale step; a click on the held part holds the next one behind it, and a
+  click on the mesh away from every part lets go of it.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned

@@ -151,6 +151,35 @@ impl Rig {
             .collect()
     }
 
+    /// Each joint of the ragdoll rig, in rig order: its frame at rest — where
+    /// it sits, its `z` the cone or hinge axis — and how its child bone's
+    /// rigid frame is turned, which its `at` is measured in, in the world of
+    /// an entity whose mesh puts the asset's origin at `origin`. Empty without
+    /// a rig or a place to hang it.
+    pub(super) fn ragdoll_joints(
+        &self,
+        origin: Mat4,
+    ) -> Vec<(crcbl::phys::Transform, crcbl::math::DQuat)> {
+        let Some(ragdoll) = &self.ragdoll else {
+            return Vec::new();
+        };
+        let bodies = self.ragdoll_bodies(origin);
+        ragdoll
+            .joints()
+            .iter()
+            .filter_map(|joint| {
+                let (_, child) = bodies.get(joint.child)?;
+                let offset = ragdoll.bodies().get(joint.child)?.offset;
+                let frame = crcbl::phys::Transform::new(
+                    child.position + child.rotation * joint.frame_child.position,
+                    child.rotation * joint.frame_child.rotation,
+                );
+                // The child body stands at its offset in its bone's frame.
+                Some((frame, child.rotation * offset.rotation.conjugate()))
+            })
+            .collect()
+    }
+
     /// The indices of the ragdoll rig's bodies on the bones `a` and `b`, in
     /// rig order. Empty without a rig.
     pub(super) fn bodies_on(&self, (a, b): (&str, &str)) -> Vec<usize> {
