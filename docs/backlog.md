@@ -985,6 +985,12 @@ machine, or twice in CI, is real.
   37409100181 at `32e35110` timed out on it and on the line after it, which
   waits for the same console; a rerun of that job passed and deployed. Nothing
   in that push touched the console, touch input or breakout outside a test.
+- **The Pages job's "the wasm build's state hash at the check tick is the one
+  the native test pins"** (the tumble page) — on 2026-10-14, run 38443118752 at
+  `cfdeadd7` failed it with "no heartbeat reached the check tick in 9 line(s);
+  the last was tick 540": the page fell short of the tick, and no hash was
+  compared. A rerun of that job passed and deployed. That push changed only the
+  editor.
 - **`towers lan::tests::four_players_win_the_whole_table_on_a_dedicated_server`**
   — four players against a dedicated server over real sockets, judged by the
   game's outcome. On 2026-10-07, CI run 37540311343 at `e858a5b0` failed it on
