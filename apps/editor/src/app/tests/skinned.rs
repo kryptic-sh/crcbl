@@ -323,6 +323,19 @@ fn the_drop_lands_on_an_entity_with_a_body_row() {
     );
 }
 
+/// Puts the pointer over the inspector, so the wheel scrolls it: the wheel
+/// scrolls the pane under the pointer.
+fn hover_the_inspector(editor: &mut Editor<HeadlessShell>) {
+    let pane = editor.panels.props_key().expect("the inspector was built");
+    let over = centre(editor, pane);
+    let window = editor.window;
+    editor
+        .shell_mut()
+        .move_pointer(window, over, (0.0, 0.0))
+        .expect("live");
+    editor.frame().expect("a frame");
+}
+
 /// An editor whose assets are a directory holding the rig, with the rig
 /// spawned, drawn once and selected.
 fn rig_on_disk() -> (tempfile::TempDir, Editor<HeadlessShell>) {
@@ -430,11 +443,14 @@ fn dragging_a_rig_row_changes_the_rig_and_writes_it_on_release() {
     editor.frame().expect("the inspector draws the rig");
     let (before, drawn) = first_mass(&editor);
     assert_eq!(drawn, before);
-    let rows = editor
-        .panels
-        .rig_body_fields(0)
-        .expect("the inspector drew the rig's bodies");
-    let at = centre(&editor, widget_labelled(&editor, rows, "Mass (kg)"));
+    hover_the_inspector(&mut editor);
+    let at = scrolled_to(&mut editor, |editor| {
+        let rows = editor
+            .panels
+            .rig_body_fields(0)
+            .expect("the inspector drew the rig's bodies");
+        widget_labelled(editor, rows, "Mass (kg)")
+    });
     let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
 
     let window = editor.window;
@@ -596,6 +612,8 @@ fn a_shape_picked_from_the_drop_down_keeps_its_size() {
         let at = centre(editor, find(editor));
         click(editor, at);
     };
+    hover_the_inspector(&mut editor);
+    scrolled_to(&mut editor, |editor| body(editor));
     pick(&mut editor, &|editor| {
         holder_of(editor.panels.ui(), body(editor), "Shape: Capsule").expect("the shape's group")
     });
@@ -717,16 +735,8 @@ fn placement_rows_move_the_bodies_and_joints() {
     let drag = |editor: &mut Editor<HeadlessShell>,
                 rows: &dyn Fn(&Editor<HeadlessShell>) -> NodeKey,
                 label: &str| {
-        // The wheel scrolls the pane under the pointer, which the last drag
-        // left wherever it let go.
-        let pane = editor.panels.props_key().expect("the inspector was built");
-        let over = centre(editor, pane);
-        let window = editor.window;
-        editor
-            .shell_mut()
-            .move_pointer(window, over, (0.0, 0.0))
-            .expect("live");
-        editor.frame().expect("a frame");
+        // The last drag left the pointer wherever it let go.
+        hover_the_inspector(editor);
         let at = scrolled_to(editor, |editor| {
             component_labelled(editor, rows(editor), label, 0)
         });
@@ -794,11 +804,14 @@ fn the_rig_section_undoes_and_redoes_its_edits() {
         "nothing to step yet"
     );
     let (before, _) = first_mass(&editor);
-    let rows = editor
-        .panels
-        .rig_body_fields(0)
-        .expect("the inspector drew the rig's bodies");
-    let at = centre(&editor, widget_labelled(&editor, rows, "Mass (kg)"));
+    hover_the_inspector(&mut editor);
+    let at = scrolled_to(&mut editor, |editor| {
+        let rows = editor
+            .panels
+            .rig_body_fields(0)
+            .expect("the inspector drew the rig's bodies");
+        widget_labelled(editor, rows, "Mass (kg)")
+    });
     drag_through(&mut editor, at, &[12.0, 30.0]);
     // The release wrote the rig after the panels were built: the next frame
     // draws the step it made.
@@ -816,7 +829,9 @@ fn the_rig_section_undoes_and_redoes_its_edits() {
 
     let (undo, redo) = editor.panels.rig_history_buttons();
     assert!(redo.is_none(), "nothing undone yet");
-    let at = centre(&editor, undo.expect("a step back"));
+    let undo = undo.expect("a step back");
+    hover_the_inspector(&mut editor);
+    let at = scrolled_to(&mut editor, |_| undo);
     click(&mut editor, at);
     assert_eq!(first_mass(&editor), (before, before), "undone in the rig");
     assert_eq!(file_mass(), before, "undone in the file");
@@ -824,8 +839,75 @@ fn the_rig_section_undoes_and_redoes_its_edits() {
 
     let (undo, redo) = editor.panels.rig_history_buttons();
     assert!(undo.is_none(), "the one step is taken");
-    let at = centre(&editor, redo.expect("a step forward"));
+    let redo = redo.expect("a step forward");
+    hover_the_inspector(&mut editor);
+    let at = scrolled_to(&mut editor, |_| redo);
     click(&mut editor, at);
     assert_eq!(first_mass(&editor), (edited, edited), "redone in the rig");
     assert_eq!(file_mass(), edited, "redone in the file");
+}
+
+/// **A pair is listed from the drop-down and unlisted by its button**: the
+/// fitted file lists none; picking the first two bodies' pair lists it in the
+/// rig drawn and the file, and its Remove button takes it out of both.
+#[test]
+fn rig_pairs_are_listed_and_removed() {
+    let (dir, mut editor) = rig_on_disk();
+    editor.frame().expect("the inspector draws the rig");
+    let desc = |editor: &Editor<HeadlessShell>| {
+        editor
+            .shelf
+            .rig(RIG)
+            .expect("the rig")
+            .desc
+            .clone()
+            .expect("a rig file")
+    };
+    let fitted = desc(&editor);
+    assert!(fitted.ignore.is_empty(), "the fitted file lists pairs");
+    let pair = (fitted.bodies[0].bone.clone(), fitted.bodies[1].bone.clone());
+    let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+    let file = || {
+        let written = std::fs::read_to_string(&path).expect("the rig was written");
+        crcbl::ragdoll::RagdollDesc::from_ron(&written)
+            .expect("a rig file")
+            .ignore
+    };
+    let (removes, select) = editor.panels.rig_pairs();
+    assert!(removes.is_empty(), "a line for a pair not listed");
+    let select = select.expect("the drop-down of pairs");
+    hover_the_inspector(&mut editor);
+
+    let at = scrolled_to(&mut editor, |_| select);
+    click(&mut editor, at);
+    let label = format!("{} ↔ {}", pair.0, pair.1);
+    let option = holder_of(
+        editor.panels.ui(),
+        crcbl::ui::tree::Ui::popup_key(select),
+        &label,
+    )
+    .expect("the drop-down offers the pair");
+    let at = centre(&editor, option);
+    click(&mut editor, at);
+    assert_eq!(
+        desc(&editor).ignore,
+        std::slice::from_ref(&pair),
+        "listed in the rig"
+    );
+    assert_eq!(file(), [pair], "listed in the file");
+
+    // The frame also draws the listed pair's line.
+    hover_the_inspector(&mut editor);
+    let remove = |editor: &Editor<HeadlessShell>| {
+        *editor
+            .panels
+            .rig_pairs()
+            .0
+            .first()
+            .expect("a line for the listed pair")
+    };
+    let at = scrolled_to(&mut editor, remove);
+    click(&mut editor, at);
+    assert!(desc(&editor).ignore.is_empty(), "still listed in the rig");
+    assert!(file().is_empty(), "still listed in the file");
 }

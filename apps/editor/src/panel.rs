@@ -320,6 +320,10 @@ const EDITOR_CSS: &str = "
  * as `-14.00`.
  */
 .inspector-row { flex-wrap: wrap; }
+
+.rig-pair { align-items: center; padding: 2px 4px; }
+
+.rig-pair-label { flex-grow: 1; min-width: 0; }
 ";
 
 /// Where a system's row sits in an [`OutlinerId`], above every entity's.
@@ -1048,6 +1052,16 @@ impl Panels {
         (
             self.inspector.rig.undo_button,
             self.inspector.rig.redo_button,
+        )
+    }
+
+    /// The rig's listed pairs' Remove buttons, in the file's order, and the
+    /// drop-down of the pairs not listed, as the last frame drew them.
+    #[cfg(test)]
+    pub(crate) fn rig_pairs(&self) -> (&[NodeKey], Option<NodeKey>) {
+        (
+            &self.inspector.rig.pair_removes,
+            self.inspector.rig.pair_add,
         )
     }
 

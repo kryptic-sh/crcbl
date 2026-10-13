@@ -225,11 +225,11 @@ every entity of the asset), with the skin conversion shared as
 (`RagdollRig::generate`) — and Shift+G writes the fitted rig there as a starting
 file (never over one). The inspector edits the rig under the mesh's components
 (`apps/editor/src/panel/rig.rs`): a section for the rig (the rest-overlap rule,
-substeps), per body (shape and size, mass, centre and axis) and per joint (kind
-and limits in degrees, friction, axis and offset). Each edit is resolved at
-once, so the viewport and the next drop show it; the file is written when the
-pointer lets go, and an edit the rig cannot resolve is refused on the status
-line and never written.
+substeps), per body (shape and size, mass, centre and axis), per joint (kind and
+limits in degrees, friction, axis and offset), and the listed pairs that never
+collide. Each edit is resolved at once, so the viewport and the next drop show
+it; the file is written when the pointer lets go, and an edit the rig cannot
+resolve is refused on the status line and never written.
 
 What rig editing still lacks, none of it requested yet:
 
@@ -249,11 +249,13 @@ What rig editing still lacks, none of it requested yet:
   release writes after the panels are built.
 - **Writing rewrites the whole file** through `RagdollDesc::to_ron`, so a
   comment or layout a person gave it is lost on the first inspector edit.
-- **The listed pairs (`ignore`) have no rows**: a list is not a thing
-  `crcbl::reflect` reads. A fitted rig's file leaves its pairs to
-  `ignore_rest_overlaps`, which the rig section switches; with the rule off, a
-  body grown into a neighbour fights it at rest until the pair is listed by hand
-  in the file.
+- **The listed pairs are a section of their own, not reflected rows** (`pairs`
+  in `apps/editor/src/panel/rig.rs`): `crcbl::reflect` reads no list, so each
+  pair is a line with a Remove button and a drop-down offers every pair not
+  listed. The drop-down holds every pair of bodies, which for a full humanoid is
+  a long list to scroll or type into; picking two bodies one at a time, or
+  listing the pairs that overlap at rest first, was not built. A pair is not
+  shown on the bodies in the viewport.
 
 G drops the selected rigged mesh as its fitted ragdoll in a physics world of its
 own (`apps/editor/src/app/drop.rs`), drawn from a second, preview region per

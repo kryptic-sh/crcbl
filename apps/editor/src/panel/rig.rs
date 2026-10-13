@@ -5,10 +5,15 @@
 //! the solver substeps it asks for; a body's are its shape and size, its mass,
 //! and where it sits and which way it points in its bone's frame; a joint's,
 //! its kind and limits, its friction, and its axis and offset from its child
-//! bone — the whole of the file (`<asset>.ragdoll.ron`) but the bone pairs it
-//! names as never colliding, which have no rows: a list is not a thing
-//! [`crcbl::reflect`] reads. An axis is three numbers, which the rig resolves
-//! to a direction (a zero one is refused); the viewport has no handle for it.
+//! bone. An axis is three numbers, which the rig resolves to a direction (a
+//! zero one is refused); the viewport has no handle for it.
+//!
+//! **The bone pairs the file names as never colliding have a section of their
+//! own** rather than rows: a list is not a thing [`crcbl::reflect`] reads.
+//! Each listed pair is a line with a Remove button, and a drop-down below them
+//! offers every pair of bodies not listed — picking one lists it. A pair the
+//! rest rule already leaves out may be listed too: the list is what the file
+//! says, and it still holds with the rule switched off.
 //!
 //! **The rig section's Undo and Redo step the rig's own history**, which
 //! `crate::app` keeps apart from the scene's: the rig is the asset's file,
@@ -148,6 +153,10 @@ pub(super) struct Built {
     pub(super) bodies: Vec<NodeKey>,
     /// Each joint's rows, in the rig's order.
     pub(super) joints: Vec<NodeKey>,
+    /// Each listed pair's Remove button, in the file's order.
+    pub(super) pair_removes: Vec<NodeKey>,
+    /// The drop-down of the pairs not listed, once drawn.
+    pub(super) pair_add: Option<NodeKey>,
     /// Whether a row moved this frame, and so `rig` changed.
     pub(super) edited: bool,
 }
@@ -186,6 +195,7 @@ pub(super) fn build(ui: &mut Ui, edit: RigEdit<'_>, options: &InspectorOptions<'
             built.edited = true;
         }
     });
+    pairs(ui, rig, &mut built);
     for body in &mut rig.bodies {
         ui.block_keyed(&body.bone, ".inspector-section", &[], |ui| {
             let heading = format!("Ragdoll body · {}", body.bone);
@@ -258,6 +268,71 @@ pub(super) fn build(ui: &mut Ui, edit: RigEdit<'_>, options: &InspectorOptions<'
         });
     }
     built
+}
+
+/// The option a pair drop-down shows while nothing is picked.
+const ADD_PAIR: &str = "Add a pair...";
+
+/// Draws `rig`'s section of listed pairs, removing the one whose button was
+/// clicked and listing the one picked — see the [module docs](self).
+fn pairs(ui: &mut Ui, rig: &mut RagdollDesc, built: &mut Built) {
+    ui.block_keyed("ragdoll-pairs", ".inspector-section", &[], |ui| {
+        ui.block(".section-head", &[], |ui| {
+            ui.span(".section-title", "Ragdoll pairs that never collide", &[]);
+        });
+        let mut removed = None;
+        for (index, (a, b)) in rig.ignore.iter().enumerate() {
+            let label = pair_label(a, b);
+            ui.block_keyed(label.as_str(), ".rig-pair", &[], |ui| {
+                ui.span(".rig-pair-label", label.as_str(), &[]);
+                let button = ui.button(".section-remove", "Remove");
+                ui.tooltip(&button, "Let these bodies collide again, and write it");
+                if button.clicked {
+                    removed = Some(index);
+                }
+                built.pair_removes.push(button.key);
+            });
+        }
+        let unlisted = unlisted_pairs(rig);
+        let labels: Vec<String> = unlisted.iter().map(|(a, b)| pair_label(a, b)).collect();
+        let options: Vec<&str> = std::iter::once(ADD_PAIR)
+            .chain(labels.iter().map(String::as_str))
+            .collect();
+        let mut chosen = 0;
+        let select = ui.select(".rig-pair-add", &options, &mut chosen);
+        built.pair_add = Some(select.key);
+        if let Some(index) = removed {
+            rig.ignore.remove(index);
+            built.edited = true;
+        } else if let Some(pair) = chosen.checked_sub(1).and_then(|index| unlisted.get(index)) {
+            rig.ignore.push(pair.clone());
+            built.edited = true;
+        }
+    });
+}
+
+/// A pair as its line and its option read.
+fn pair_label(a: &str, b: &str) -> String {
+    format!("{a} ↔ {b}")
+}
+
+/// Every pair of `rig`'s bodies its file does not list, either way round, in
+/// the bodies' order.
+fn unlisted_pairs(rig: &RagdollDesc) -> Vec<(String, String)> {
+    let listed = |a: &str, b: &str| {
+        rig.ignore
+            .iter()
+            .any(|(x, y)| (x == a && y == b) || (x == b && y == a))
+    };
+    let mut pairs = Vec::new();
+    for (index, first) in rig.bodies.iter().enumerate() {
+        for second in &rig.bodies[index + 1..] {
+            if !listed(&first.bone, &second.bone) {
+                pairs.push((first.bone.clone(), second.bone.clone()));
+            }
+        }
+    }
+    pairs
 }
 
 /// The file's tuple as a row's array, which [`crcbl::reflect`] reads.
@@ -432,6 +507,32 @@ fn kind_desc(old: JointKindDesc, before: Kind, after: Kind) -> JointKindDesc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The drop-down offers each pair not listed, once, in the bodies'
+    /// order**: a pair the file lists the other way round is listed all the
+    /// same.
+    #[test]
+    fn only_pairs_not_listed_are_offered() {
+        let body = |bone: &str| crcbl::ragdoll::BodyDesc {
+            bone: bone.to_owned(),
+            shape: ShapeDesc::Sphere { radius: 0.1 },
+            mass: 1.0,
+            centre: (0.0, 0.0, 0.0),
+            axis: (0.0, 1.0, 0.0),
+        };
+        let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        let rig = RagdollDesc {
+            bodies: vec![body("hips"), body("chest"), body("head")],
+            joints: Vec::new(),
+            ignore: vec![pair("head", "hips")],
+            ignore_rest_overlaps: true,
+            substeps: 0,
+        };
+        assert_eq!(
+            unlisted_pairs(&rig),
+            [pair("hips", "chest"), pair("chest", "head")]
+        );
+    }
 
     /// **A switched shape keeps the body's size**, and switching back gives
     /// the body it was: a capsule's radius and half-height survive a box.
