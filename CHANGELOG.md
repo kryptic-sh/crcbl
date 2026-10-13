@@ -920,7 +920,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   shape switched keeps the body's size, and a joint switched between ball and
   hinge keeps its swing. The rig section's Undo and Redo step the rig's own
   history — each written edit a step, written again when stepped — apart from
-  the scene's Ctrl+Z.
+  the scene's Ctrl+Z. A click on one of the selected mesh's drawn bodies holds
+  it, drawn in the selection's colour, and translate's handles then move its
+  centre in the rig, as an inspector edit would; a click on the mesh away from
+  every body lets go of it.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned

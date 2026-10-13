@@ -148,6 +148,7 @@ mod instances;
 mod join;
 mod meshes;
 mod recovery;
+mod rig_body;
 mod rig_history;
 mod skins;
 mod unsaved;
@@ -325,6 +326,9 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// Each rig's edits, stepped by its inspector section's Undo and Redo
     /// apart from the scene's history.
     rig_history: rig_history::RigHistory,
+    /// The body of the selected rigged mesh's rig a click took hold of,
+    /// which translate's handles move — see `rig_body`.
+    held: Option<rig_body::Held>,
     /// The served scene this editor has joined, whose copy is the document,
     /// or [`None`] for a document of its own — see `join`.
     joined: Option<Box<join::Joined>>,
@@ -343,6 +347,9 @@ enum Drag {
     /// through it — every entity of the group for a translate, which an
     /// empty group never is, and the drag's own entity otherwise.
     Gizmo(gizmo::Drag, gizmo::Group),
+    /// Left button on a held rig body's handle: move its centre in the rig —
+    /// see `rig_body`.
+    Body(gizmo::Drag, rig_body::BodyDrag),
 }
 
 impl Editor<dyn Shell> {
@@ -552,6 +559,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             closing: false,
             rebuild_due: false,
             rig_unwritten: None,
+            held: None,
             rig_history: rig_history::RigHistory::default(),
             joined: None,
             disk,
@@ -701,6 +709,16 @@ impl<S: Shell + ?Sized> Editor<S> {
                 }
                 if !pending.pointer_released {
                     self.drag = Some(Drag::Gizmo(drag, group));
+                }
+            }
+            Some(Drag::Body(drag, body)) => {
+                if pending.motion.is_some()
+                    && let Some(at) = pending.pointer
+                {
+                    self.move_body(&drag, &body, at);
+                }
+                if !pending.pointer_released {
+                    self.drag = Some(Drag::Body(drag, body));
                 }
             }
             other => self.drag = other,
@@ -895,9 +913,9 @@ impl<S: Shell + ?Sized> Editor<S> {
                     let height = self.panels.viewport_extent().1 as f32;
                     self.camera.pan(-motion.x / height, motion.y / height);
                 }
-                // Moved by `move_handle`, which reads where the pointer is
-                // rather than how far it went.
-                Drag::Gizmo(..) => {}
+                // Moved by `move_handle` or `move_body`, which read where the
+                // pointer is rather than how far it went.
+                Drag::Gizmo(..) | Drag::Body(..) => {}
             }
         }
 
@@ -941,11 +959,17 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// from — towers' built towers — makes it the runtime pick
     /// ([`Document::set_runtime_pick`]) and selects nothing, and a plain
     /// click on anything else clears that pick: one click, one thing picked.
+    ///
+    /// A plain click on a drawn body of the lone selected rigged mesh holds
+    /// that body and selects nothing else — see `rig_body`.
     fn pick(&mut self, pending: &Pending) {
         let Some(at) = pending.pointer else {
             return;
         };
         let ray = self.ray_at(at);
+        if !self.modifiers.contains(Modifiers::CTRL) && self.hold_body_at(&ray) {
+            return;
+        }
         let hit = self.document.hit_ray(&ray);
         let spawned = match hit {
             Some(Hit::Spawned(entity)) => Some(entity),
@@ -1062,7 +1086,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                 Ok(())
             }
             Action::ToggleSpace => {
-                if matches!(self.drag, Some(Drag::Gizmo(..))) {
+                if matches!(self.drag, Some(Drag::Gizmo(..) | Drag::Body(..))) {
                     self.drag = None;
                 }
                 self.gizmo_space = match self.gizmo_space {
@@ -1588,8 +1612,19 @@ impl<S: Shell + ?Sized> Editor<S> {
         for (from, to) in selected_bones(&mut self.document, &self.shelf) {
             self.renderer.debug_draw().line(from, to, BONE_COLOR);
         }
-        for (shape, at) in selected_ragdoll_bodies(&mut self.document, &self.shelf) {
-            draw_body(self.renderer.debug_draw(), shape, &at);
+        // A body is held only on a lone selection, so its index is its place
+        // in the selection's bodies.
+        let held = self
+            .held_body()
+            .and_then(|_| self.held.as_ref().map(|held| held.index));
+        let bodies = selected_ragdoll_bodies(&mut self.document, &self.shelf);
+        for (index, (shape, at)) in bodies.into_iter().enumerate() {
+            let color = if held == Some(index) {
+                PRIMARY_COLOR
+            } else {
+                RAGDOLL_COLOR
+            };
+            draw_body(self.renderer.debug_draw(), shape, &at, color);
         }
 
         // The scene is drawn at the pane's extent — as the panels last laid it
@@ -2100,13 +2135,14 @@ fn box_corners(half_extents: crcbl::math::DVec3, at: &crcbl::phys::Transform) ->
     })
 }
 
-/// One ragdoll body as debug lines: a capsule's core with a sphere at each end,
-/// a sphere, or a box's edges, each turned as the body is.
+/// One ragdoll body as debug lines in `color`: a capsule's core with a sphere
+/// at each end, a sphere, or a box's edges, each turned as the body is.
 #[allow(clippy::cast_possible_truncation)]
 fn draw_body(
     draw: &mut crcbl::render::DebugDraw,
     shape: crcbl::ragdoll::BodyShape,
     at: &crcbl::phys::Transform,
+    color: [f32; 4],
 ) {
     use crcbl::ragdoll::BodyShape;
     let place = |local: crcbl::math::DVec3| (at.position + at.rotation * local).as_vec3();
@@ -2119,20 +2155,16 @@ fn draw_body(
                 place(crcbl::math::DVec3::Y * half_height),
                 place(crcbl::math::DVec3::Y * -half_height),
             );
-            draw.line(bottom, top, RAGDOLL_COLOR);
-            draw.sphere(top, radius as f32, RAGDOLL_COLOR);
-            draw.sphere(bottom, radius as f32, RAGDOLL_COLOR);
+            draw.line(bottom, top, color);
+            draw.sphere(top, radius as f32, color);
+            draw.sphere(bottom, radius as f32, color);
         }
         BodyShape::Sphere { radius } => {
-            draw.sphere(
-                place(crcbl::math::DVec3::ZERO),
-                radius as f32,
-                RAGDOLL_COLOR,
-            );
+            draw.sphere(place(crcbl::math::DVec3::ZERO), radius as f32, color);
         }
         BodyShape::Box { half_extents } => {
             let eight = box_corners(half_extents, at);
-            draw.box_edges(&eight, RAGDOLL_COLOR);
+            draw.box_edges(&eight, color);
         }
     }
 }

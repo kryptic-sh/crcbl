@@ -5,6 +5,7 @@ use std::path::Path;
 
 use super::*;
 
+use super::assets::pixel_of;
 use super::scene_inspector::scrolled_to;
 
 use crcbl::assets::MemorySource;
@@ -954,4 +955,120 @@ fn writing_over_a_commented_rig_file_warns() {
     let (text, tone) = switch(&mut editor);
     assert_eq!(tone, Tone::Info, "{text}");
     assert!(text.starts_with("Wrote"), "{text}");
+}
+
+/// Turns the mesh `id` by `angle` radians about the world's y.
+fn turn_about_y(editor: &mut Editor<HeadlessShell>, id: SceneEntityId, angle: f64) {
+    let half = angle / 2.0;
+    let leaves = [("x", 0.0), ("y", half.sin()), ("z", 0.0), ("w", half.cos())];
+    let commands = leaves
+        .map(|(leaf, value)| EditCommand::SetProperty {
+            entity: id,
+            system: crcbl::scene_mesh::MESHES.to_owned(),
+            path: format!("rotation.{leaf}"),
+            value: Value::Float(value),
+        })
+        .to_vec();
+    editor
+        .document
+        .apply(EditCommand::one_or_batch(commands))
+        .expect("a unit rotation");
+}
+
+/// **A click on a drawn body holds it, and translate's arrow moves its
+/// centre in the rig.** The mesh is turned, so its bone's frame is too: the
+/// body moves along the world's x alone while its `centre` in the file moves
+/// across the bone's x and z, and the file is written once the pointer lets
+/// go, as one step of the rig's history. Scale shows a held body no
+/// handles — it is chosen while clicking, as a mesh has none either, so no
+/// handle is under the pointer — and a click on its mesh away from every
+/// body, or on nothing, lets go of it.
+#[test]
+fn a_held_body_moves_along_its_arrow_and_is_written() {
+    let (dir, mut editor) = rig_on_disk();
+    let id = editor.document.primary().expect("the rig is selected");
+    turn_about_y(&mut editor, id, 0.6);
+    editor.frame().expect("a frame");
+    let capsule = |editor: &mut Editor<HeadlessShell>| {
+        selected_ragdoll_bodies(&mut editor.document, &editor.shelf)[0]
+            .1
+            .position
+    };
+    let centre_in_file = |editor: &Editor<HeadlessShell>| {
+        editor
+            .shelf
+            .rig(RIG)
+            .and_then(|rig| rig.desc.as_ref())
+            .expect("the rig has a file form")
+            .bodies[0]
+            .centre
+    };
+    let before = capsule(&mut editor);
+    let in_file = centre_in_file(&editor);
+
+    editor.act(&Action::Scale);
+    assert!(editor.handles().is_empty(), "a mesh has nothing to resize");
+    let on_body = physical(pixel_of(&editor, before.as_vec3()));
+    click(&mut editor, on_body);
+    assert_eq!(
+        editor.held.as_ref().map(|held| held.index),
+        Some(0),
+        "{:?}",
+        editor.panels.status()
+    );
+    assert!(
+        editor.panels.status().0.starts_with("Holding"),
+        "{:?}",
+        editor.panels.status()
+    );
+    assert_eq!(editor.document.selection(), [id], "the click picked");
+    assert!(editor.handles().is_empty(), "scale shows a body handles");
+    // A click on the mesh away from its bodies picks the mesh again, and lets
+    // go of the body.
+    let (_, max) = editor.document.bounds(id).expect("placed");
+    let off_body = physical(pixel_of(&editor, Vec3::new(max.x - 0.1, 0.5, max.z)));
+    click(&mut editor, off_body);
+    assert_eq!(editor.held, None, "a click on the mesh kept the body");
+    assert_eq!(editor.document.selection(), [id], "the mesh was not picked");
+    click(&mut editor, on_body);
+    assert!(editor.held.is_some(), "the body was not held again");
+
+    editor.act(&Action::Translate);
+    let (from, to) = handle_at(&mut editor, gizmo::Grip::Move(gizmo::Axis::X));
+    let shown = pixel_of(&editor, before.as_vec3());
+    assert!(
+        from.distance(shown) < 1.0,
+        "the handles stand at {from}, the body at {shown}"
+    );
+    drag(&mut editor, (from + to) * 0.5, to + (to - from) * 0.5);
+    let after = capsule(&mut editor);
+    assert!(after.x > before.x + 0.05, "{before} to {after}");
+    assert!(
+        (after.y - before.y).abs() < 1e-4 && (after.z - before.z).abs() < 1e-4,
+        "moved off x: {before} to {after}"
+    );
+    let moved = centre_in_file(&editor);
+    assert!(
+        (moved.0 - in_file.0).abs() > 0.01 && (moved.2 - in_file.2).abs() > 0.01,
+        "the bone's frame is turned, so its x and z both move: {in_file:?} to {moved:?}"
+    );
+    let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+    let file = crcbl::ragdoll::RagdollDesc::from_ron(
+        &std::fs::read_to_string(&path).expect("the rig was written"),
+    )
+    .expect("a rig file");
+    assert_eq!(
+        file.bodies[0].centre, moved,
+        "the file holds another centre"
+    );
+    assert!(
+        editor.panels.status().0.starts_with("Wrote"),
+        "{:?}",
+        editor.panels.status()
+    );
+    assert!(editor.rig_history.can_undo(RIG), "the move is no step");
+
+    let (corner, _) = editor.panels.viewport_pixels();
+    click(&mut editor, physical(corner + Vec2::splat(4.0)));
+    assert_eq!(editor.held, None, "a click on nothing kept the body");
 }

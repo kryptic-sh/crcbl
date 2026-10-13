@@ -41,8 +41,14 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// A lone entity's handles stand at the centre of its box, turned as it
     /// is; several selected share theirs at the selection's pivot
     /// ([`crate::document::Document::selection_pivot`]). Local mode uses the primary entity's
-    /// axes, falling back to world axes when it has no placement.
+    /// axes, falling back to world axes when it has no placement. A held rig
+    /// body has translate's handles alone, at its centre and turned by its
+    /// own axes in local mode — see `super::rig_body`.
     pub(super) fn gizmo_centre(&mut self) -> Option<(Vec3, DQuat)> {
+        if let Some((_, at)) = self.held_body() {
+            return (self.gizmo_mode == gizmo::Mode::Translate)
+                .then(|| (at.position.as_vec3(), self.gizmo_space.frame(at.rotation)));
+        }
         let id = self.document.primary()?;
         if self.document.selection().len() > 1 {
             if self.gizmo_mode != gizmo::Mode::Translate || self.group().members.is_empty() {
@@ -158,6 +164,14 @@ impl<S: Shell + ?Sized> Editor<S> {
             return false;
         };
         let gesture = self.document.begin_gesture();
+        if self.held.is_some() {
+            let Some((drag, body)) = self.begin_body_drag(grip, gesture, (centre, frame), at)
+            else {
+                return false;
+            };
+            self.drag = Some(Drag::Body(drag, body));
+            return true;
+        }
         let grabbed = match grip {
             gizmo::Grip::Rotate(axis) => self
                 .begin_turn(id, axis, gesture, centre, at - corner)
@@ -196,7 +210,7 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// or, for a translate, whose pivot — holds `start`, its handles standing
     /// at `shown`'s centre and turned by its frame, pressed at `at` in window
     /// pixels.
-    fn begin_drag(
+    pub(super) fn begin_drag(
         &self,
         id: SceneEntityId,
         grip: gizmo::Grip,
@@ -318,7 +332,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         }
         let (corner, _) = self.panels.viewport_pixels();
         let hot = match &self.drag {
-            Some(Drag::Gizmo(drag, _)) => Some(drag.grip()),
+            Some(Drag::Gizmo(drag, _) | Drag::Body(drag, _)) => Some(drag.grip()),
             _ => gizmo::hit(&handles, pointer - corner, self.panels.scale()),
         };
         self.panels
