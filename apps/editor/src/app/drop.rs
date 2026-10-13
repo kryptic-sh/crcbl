@@ -16,20 +16,32 @@
 //! the scene puts it, a dynamic one too — the preview simulates the ragdoll
 //! and nothing else — and an entity with no body row is not there to land on,
 //! as it is not in play. It steps at a fixed sixtieth of a second a frame.
+//!
+//! **G while the scene plays drops the ragdoll into play itself** rather than
+//! a world of its own: its bodies are spawned into the playing world's
+//! [`Simulation`], so it collides with the scene's bodies, the dynamic ones
+//! as they move, as a game's corpse would, and steps when the world ticks,
+//! so a paused scene holds it still. The mesh's own body, if it has a row,
+//! leaves the simulation, since the ragdoll takes its place; G again takes
+//! the ragdoll out and leaves the mesh's body out too, until stop puts the
+//! scene back, which ends the drop with the world it was spawned in. There
+//! is no ground plane in play: a scene with nothing under the mesh lets it
+//! fall, as it lets the scene's bodies.
 
+use crcbl::anim::ragdoll::RagdollError;
 use crcbl::anim::{Palette, Pose};
 use crcbl::ecs::Entity;
 use crcbl::math::{DVec3, Mat4};
 use crcbl::phys::{
     ColliderComponent, ContactSettings, GravityForce, PhysicsSystem, SurfaceMaterial, Transform,
 };
-use crcbl::ragdoll::{Handoff, Ragdoll};
+use crcbl::ragdoll::{Handoff, Ragdoll, RagdollRig, SpawnError};
 use crcbl::registry::OrientedBox;
 use crcbl::scene::scn::SceneEntityId;
-use crcbl::scene_physics::{BODIES, Body};
+use crcbl::scene_physics::{BODIES, Body, Simulation};
 
 use super::meshes::Rig;
-use crate::document::Document;
+use crate::document::{Document, PlayState};
 
 /// The step the preview advances by each frame, in seconds.
 pub(super) const STEP: f64 = 1.0 / 60.0;
@@ -71,12 +83,21 @@ pub(super) fn solids(document: &mut Document, dropped: SceneEntityId) -> Vec<Sol
     solids
 }
 
-/// A ragdoll falling in the preview's own world.
+/// Where a dropped ragdoll's bodies are simulated.
+#[derive(Debug)]
+enum Bodies {
+    /// A world of the preview's own, stepped a frame at a time.
+    Own(Box<PhysicsSystem>),
+    /// The playing scene's [`Simulation`], stepped when the world ticks.
+    Play,
+}
+
+/// A ragdoll falling, in the preview's own world or in play's.
 #[derive(Debug)]
 pub(super) struct DropPreview {
     id: SceneEntityId,
     asset: String,
-    physics: PhysicsSystem,
+    bodies: Bodies,
     ragdoll: Ragdoll,
     pose: Pose,
     palette: Palette,
@@ -94,9 +115,7 @@ impl DropPreview {
         origin: Mat4,
         solids: &[Solid],
     ) -> Option<Self> {
-        let ragdoll_rig = rig.ragdoll.as_ref()?;
-        let hangs = rig.skinned.instances.first()?.transform;
-        let model = origin * hangs;
+        let (ragdoll_rig, model) = hung(rig, origin)?;
         let mut physics = PhysicsSystem::with_contacts(ContactSettings::DEFAULT);
         physics.add_force_provider(Box::new(GravityForce::EARTH));
         physics.add_plane(DVec3::Y, 0.0, SurfaceMaterial::DEFAULT);
@@ -119,35 +138,116 @@ impl DropPreview {
             physics.set_material(entity, solid.material);
         }
         let entities: Vec<Entity> = entities.take(ragdoll_rig.bodies().len()).collect();
-        let handoff = Handoff {
-            pose: &pose,
-            model,
-            previous: None,
-        };
-        let ragdoll = match Ragdoll::spawn(
-            &mut physics,
-            ragdoll_rig,
-            &rig.skeleton,
-            &handoff,
-            &entities,
-        ) {
+        let ragdoll = match spawn(&mut physics, ragdoll_rig, rig, &pose, model, &entities) {
             Ok(ragdoll) => ragdoll,
             Err(error) => {
                 crcbl::log::warn!("editor: `{asset}` will not drop: {error}");
                 return None;
             }
         };
+        Some(Self::new(
+            id,
+            asset,
+            Bodies::Own(Box::new(physics)),
+            ragdoll,
+            rig,
+            pose,
+            model,
+        ))
+    }
+
+    /// The drop of entity `id`, a mesh of `asset` whose origin stands at
+    /// `origin`, into the scene `document` plays: its bodies spawned as
+    /// entities of the playing world into its [`Simulation`], and the mesh's
+    /// own body taken out of it — or why not, to say on the status line.
+    pub(super) fn start_in_play(
+        id: SceneEntityId,
+        asset: &str,
+        rig: &Rig,
+        origin: Mat4,
+        document: &mut Document,
+    ) -> Result<Self, String> {
+        let (ragdoll_rig, model) =
+            hung(rig, origin).ok_or_else(|| format!("`{asset}` has no ragdoll to drop"))?;
+        let own = document.ids().entity(id);
+        let world = document.world_mut();
+        if world.system_mut::<Simulation>().is_none() {
+            return Err(format!(
+                "`{asset}` cannot drop into play: nothing simulates bodies, since no entity \
+                 has a body row"
+            ));
+        }
+        let entities: Vec<Entity> = ragdoll_rig.bodies().iter().map(|_| world.spawn()).collect();
+        let Some(simulation) = world.system_mut::<Simulation>() else {
+            unreachable!("checked before the spawn");
+        };
+        let physics = simulation.physics_mut();
+        let pose = Pose::new(&rig.skeleton);
+        match spawn(physics, ragdoll_rig, rig, &pose, model, &entities) {
+            Ok(ragdoll) => {
+                if let Some(own) = own {
+                    physics.remove_entity(own);
+                }
+                Ok(Self::new(
+                    id,
+                    asset,
+                    Bodies::Play,
+                    ragdoll,
+                    rig,
+                    pose,
+                    model,
+                ))
+            }
+            Err(error) => {
+                for entity in entities {
+                    world.despawn(entity);
+                }
+                Err(format!("`{asset}` will not drop: {error}"))
+            }
+        }
+    }
+
+    /// The drop of `ragdoll`, spawned in `bodies` at `pose`.
+    fn new(
+        id: SceneEntityId,
+        asset: &str,
+        bodies: Bodies,
+        ragdoll: Ragdoll,
+        rig: &Rig,
+        pose: Pose,
+        model: Mat4,
+    ) -> Self {
         let mut palette = Palette::new(&rig.skeleton);
         palette.compute(&rig.skeleton, &pose);
-        Some(Self {
+        Self {
             id,
             asset: asset.to_owned(),
-            physics,
+            bodies,
             ragdoll,
             pose,
             palette,
             model,
-        })
+        }
+    }
+
+    /// Ends the drop: a ragdoll in play takes its bodies and its entities out
+    /// of the playing world; one in a world of its own goes with that world.
+    pub(super) fn end(self, document: &mut Document) {
+        let Bodies::Play = self.bodies else {
+            return;
+        };
+        if document.play_state() == PlayState::Editing {
+            // Stop threw the world away, and the bodies with it.
+            return;
+        }
+        let entities = self.ragdoll.entities().to_vec();
+        let world = document.world_mut();
+        if let Some(simulation) = world.system_mut::<Simulation>() {
+            self.ragdoll.remove(simulation.physics_mut());
+        }
+        for entity in entities {
+            world.despawn(entity);
+        }
     }
 
     /// The entity being previewed.
@@ -160,17 +260,27 @@ impl DropPreview {
         &self.asset
     }
 
-    /// Steps the world once and reads the pose the bodies stand in into the
-    /// palette. A pose the bodies cannot be read back into keeps the last one.
-    pub(super) fn step(&mut self, rig: &Rig) {
-        self.physics.step(STEP);
-        match self
-            .ragdoll
-            .pose_into(&self.physics, self.model, &mut self.pose)
-        {
+    /// Steps a world of its own once and reads the pose the bodies stand in
+    /// into the palette, or says the drop is over: its bodies went with the
+    /// world stop threw away. A pose the bodies cannot be read back into
+    /// keeps the last one.
+    pub(super) fn step(&mut self, rig: &Rig, document: &mut Document) -> bool {
+        let physics = match &mut self.bodies {
+            Bodies::Own(physics) => {
+                physics.step(STEP);
+                &*physics
+            }
+            Bodies::Play => match document.world_mut().system_mut::<Simulation>() {
+                Some(simulation) => simulation.physics(),
+                None => return false,
+            },
+        };
+        match self.ragdoll.pose_into(physics, self.model, &mut self.pose) {
             Ok(()) => self.palette.compute(&rig.skeleton, &self.pose),
+            Err(RagdollError::BodyCount) => return false,
             Err(error) => crcbl::log::warn!("editor: the drop preview kept its pose: {error}"),
         }
+        true
     }
 
     /// The skinning palette of the pose the bodies stand in.
@@ -178,14 +288,53 @@ impl DropPreview {
         self.palette.matrices()
     }
 
+    /// The entities its bodies are, for a test to take one away.
+    #[cfg(test)]
+    pub(super) fn entities(&self) -> &[Entity] {
+        self.ragdoll.entities()
+    }
+
     /// Where each body stands now, for a test to watch it fall.
     #[cfg(test)]
-    pub(super) fn heights(&self) -> Vec<f64> {
-        self.ragdoll
-            .body_transforms(&self.physics)
+    pub(super) fn heights(&self, document: &mut Document) -> Vec<f64> {
+        let physics = match &self.bodies {
+            Bodies::Own(physics) => Some(&**physics),
+            Bodies::Play => document
+                .world_mut()
+                .system_mut::<Simulation>()
+                .map(|simulation| simulation.physics()),
+        };
+        physics
+            .and_then(|physics| self.ragdoll.body_transforms(physics))
             .unwrap_or_default()
             .iter()
             .map(|transform| transform.position.y)
             .collect()
     }
+}
+
+/// The ragdoll of `rig` and where a mesh of it whose origin stands at
+/// `origin` hangs its skin, or [`None`] for a rig with no fitted ragdoll or
+/// nowhere to hang it.
+fn hung(rig: &Rig, origin: Mat4) -> Option<(&RagdollRig, Mat4)> {
+    let ragdoll = rig.ragdoll.as_ref()?;
+    Some((ragdoll, origin * rig.skinned.instances.first()?.transform))
+}
+
+/// `ragdoll`, fitted to `rig`, spawned into `physics` at `pose` placed by
+/// `model`, as `entities`.
+fn spawn(
+    physics: &mut PhysicsSystem,
+    ragdoll: &RagdollRig,
+    rig: &Rig,
+    pose: &Pose,
+    model: Mat4,
+    entities: &[Entity],
+) -> Result<Ragdoll, SpawnError> {
+    let handoff = Handoff {
+        pose,
+        model,
+        previous: None,
+    };
+    Ragdoll::spawn(physics, ragdoll, &rig.skeleton, &handoff, entities)
 }

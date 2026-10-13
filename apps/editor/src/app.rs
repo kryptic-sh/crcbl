@@ -1133,6 +1133,8 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// Starts play mode from editing, or stops it and puts the scene back, and
     /// says on the status line which it did.
     fn play_or_stop(&mut self) -> Result<(), EditError> {
+        // A drop belongs to the world it fell in, which play and stop swap.
+        self.end_drop();
         if self.document.play_state() == PlayState::Editing {
             self.document.play()?;
             let status = self.playing_status();
@@ -1403,10 +1405,10 @@ impl<S: Shell + ?Sized> Editor<S> {
     }
 
     /// Starts the drop preview on the primary selection, if it is a rigged
-    /// mesh, or stops the one running — see `drop`.
+    /// mesh — into play itself while the scene plays — or stops the one
+    /// running — see `drop`.
     fn toggle_drop(&mut self) {
-        if self.dropping.take().is_some() {
-            self.skins.preview(None);
+        if self.end_drop() {
             return;
         }
         let Some(id) = self.document.primary() else {
@@ -1416,10 +1418,30 @@ impl<S: Shell + ?Sized> Editor<S> {
             return;
         };
         let (asset, origin) = (mesh.asset.clone(), instances::origin_of(mesh));
+        if self.document.play_state() != PlayState::Editing {
+            let Some(rig) = self.shelf.rig(&asset) else {
+                return;
+            };
+            match drop::DropPreview::start_in_play(id, &asset, rig, origin, &mut self.document) {
+                Ok(dropping) => self.dropping = Some(dropping),
+                Err(why) => self.panels.set_status(why, Tone::Warning),
+            }
+            return;
+        }
         let solids = drop::solids(&mut self.document, id);
         if let Some(rig) = self.shelf.rig(&asset) {
             self.dropping = drop::DropPreview::start(id, &asset, rig, origin, &solids);
         }
+    }
+
+    /// Ends the drop running, if one is, and whether one was.
+    fn end_drop(&mut self) -> bool {
+        let Some(dropping) = self.dropping.take() else {
+            return false;
+        };
+        dropping.end(&mut self.document);
+        self.skins.preview(None);
+        true
     }
 
     /// Writes the primary selection's ragdoll rig beside its asset as
@@ -1602,11 +1624,14 @@ impl<S: Shell + ?Sized> Editor<S> {
             .mesh(dropping.id())
             .is_some_and(|mesh| mesh.asset == dropping.asset());
         let Some(rig) = still.then(|| self.shelf.rig(dropping.asset())).flatten() else {
+            self.end_drop();
+            return;
+        };
+        if !dropping.step(rig, &mut self.document) {
             self.dropping = None;
             self.skins.preview(None);
             return;
-        };
-        dropping.step(rig);
+        }
         self.skins
             .preview(Some((dropping.id(), dropping.asset(), dropping.palette())));
     }

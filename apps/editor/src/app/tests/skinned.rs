@@ -244,11 +244,19 @@ fn g_drops_a_selected_rigged_mesh_and_g_stops_it() {
     assert_ne!(shared, preview);
 
     tap(&mut editor, KeyCode::KeyG);
-    let start = editor.dropping.as_ref().expect("dropping").heights();
+    let start = editor
+        .dropping
+        .as_ref()
+        .expect("dropping")
+        .heights(&mut editor.document);
     for _ in 0..30 {
         editor.frame().expect("a frame");
     }
-    let fallen = editor.dropping.as_ref().expect("still dropping").heights();
+    let fallen = editor
+        .dropping
+        .as_ref()
+        .expect("still dropping")
+        .heights(&mut editor.document);
     assert!(
         fallen.iter().zip(&start).all(|(now, then)| now < then),
         "the bodies did not fall: {start:?} to {fallen:?}"
@@ -307,7 +315,7 @@ fn lowest_after_dropping_over_a_twin(solid: bool) -> (f64, f64) {
         .dropping
         .as_ref()
         .expect("still dropping")
-        .heights()
+        .heights(&mut editor.document)
         .into_iter()
         .fold(f64::INFINITY, f64::min);
     (lowest, 2.0 * placed.half_extents.y)
@@ -323,6 +331,183 @@ fn the_drop_lands_on_an_entity_with_a_body_row() {
     assert!(
         on_twin - on_ground > 0.5 * height,
         "the bodies rest at {on_twin} m on a {height} m box and at {on_ground} m without it"
+    );
+}
+
+/// An editor on a rigged mesh standing over a twin, each with a body row and
+/// the twin's a static one, whose frames are each one of the world's ticks
+/// long — and the twin's height.
+fn bodies_over_a_twin() -> (Editor<HeadlessShell>, SceneEntityId, f64) {
+    let mut editor = headless(256);
+    editor.document = props();
+    editor.document.set_assets(Box::new(assets()));
+    let twin = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(2.0, 0.0, 0.0))
+        .expect("spawned");
+    let height = 2.0
+        * editor
+            .document
+            .placement(twin)
+            .expect("placed")
+            .half_extents
+            .y;
+    let dropped = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(2.0, height, 0.0))
+        .expect("spawned");
+    for id in [twin, dropped] {
+        editor
+            .document
+            .attach(id, crcbl::scene_physics::BODIES)
+            .expect("a body row");
+    }
+    editor
+        .document
+        .component(twin, crcbl::scene_physics::BODIES)
+        .and_then(|row| {
+            row.as_any_mut()
+                .downcast_mut::<crcbl::scene_physics::Body>()
+        })
+        .expect("a body")
+        .kind = crcbl::scene_physics::BodyKind::Static;
+    let tick = Duration::from_secs_f64(editor.document.world().tick_dt());
+    editor.clock_source = Clock::manual(tick);
+    editor.frame().expect("a frame");
+    editor.document.select(Some(dropped));
+    (editor, dropped, height)
+}
+
+/// How many colliders the playing scene's simulation holds.
+fn simulated(editor: &mut Editor<HeadlessShell>) -> usize {
+    let simulation = editor
+        .document
+        .world_mut()
+        .system_mut::<crcbl::scene_physics::Simulation>()
+        .expect("a simulation");
+    crcbl::ecs::SystemTrait::entity_count(simulation.physics())
+}
+
+/// **G in play drops the ragdoll into play itself**: its bodies join the
+/// playing simulation in place of the mesh's own and land on the twin's,
+/// a pause holds them, and G again takes them out; one that loses a body is
+/// over. Play and stop each end a drop with the world it fell in, and leave
+/// the scene as it was.
+#[test]
+fn g_in_play_drops_the_ragdoll_among_the_scenes_bodies() {
+    let (mut editor, _, height) = bodies_over_a_twin();
+    let before = editor.document.files().expect("files");
+    tap(&mut editor, KeyCode::KeyG);
+    assert!(editor.dropping.is_some(), "a preview while editing");
+    tap(&mut editor, KeyCode::F5);
+    assert_eq!(editor.document.play_state(), PlayState::Playing);
+    assert!(editor.dropping.is_none(), "the preview outlived its world");
+    let bodies = simulated(&mut editor);
+    tap(&mut editor, KeyCode::KeyG);
+    let parts = editor
+        .dropping
+        .as_ref()
+        .expect("dropping into play")
+        .heights(&mut editor.document)
+        .len();
+    assert!(parts > 1, "{parts} bodies");
+    assert_eq!(
+        simulated(&mut editor),
+        bodies - 1 + parts,
+        "the ragdoll did not take the mesh's place in the simulation"
+    );
+    for _ in 0..90 {
+        editor.frame().expect("a frame");
+    }
+    let lowest = |editor: &mut Editor<HeadlessShell>| {
+        let dropping = editor.dropping.as_ref().expect("still dropping");
+        dropping
+            .heights(&mut editor.document)
+            .into_iter()
+            .fold(f64::INFINITY, f64::min)
+    };
+    let rested = lowest(&mut editor);
+    assert!(
+        rested > 0.5 * height,
+        "the bodies fell to {rested} m past the {height} m box under them"
+    );
+
+    tap(&mut editor, KeyCode::F6);
+    let held = editor
+        .dropping
+        .as_ref()
+        .expect("still dropping")
+        .heights(&mut editor.document);
+    for _ in 0..10 {
+        editor.frame().expect("a frame");
+    }
+    assert_eq!(
+        editor
+            .dropping
+            .as_ref()
+            .expect("still dropping")
+            .heights(&mut editor.document),
+        held,
+        "the bodies moved in a paused scene"
+    );
+    // Paused, so no tick sweeps a despawned entity's body out.
+    tap(&mut editor, KeyCode::KeyG);
+    assert!(editor.dropping.is_none());
+    assert_eq!(
+        simulated(&mut editor),
+        bodies - 1,
+        "the ragdoll stayed in play"
+    );
+    tap(&mut editor, KeyCode::F6);
+
+    // A drop whose bodies something else took out of play is over.
+    tap(&mut editor, KeyCode::KeyG);
+    let body = editor.dropping.as_ref().expect("a second drop").entities()[0];
+    editor
+        .document
+        .world_mut()
+        .system_mut::<crcbl::scene_physics::Simulation>()
+        .expect("a simulation")
+        .physics_mut()
+        .remove_entity(body);
+    editor.frame().expect("a frame");
+    assert!(editor.dropping.is_none(), "a drop with a body gone ran on");
+
+    tap(&mut editor, KeyCode::KeyG);
+    assert!(editor.dropping.is_some(), "a third drop");
+    tap(&mut editor, KeyCode::F5);
+    assert_eq!(editor.document.play_state(), PlayState::Editing);
+    assert!(editor.dropping.is_none(), "the drop outlived its world");
+    assert_eq!(
+        editor.document.files().expect("files"),
+        before,
+        "the scene changed"
+    );
+}
+
+/// **G in a scene that plays no bodies says so** and drops nothing: there is
+/// no simulation to drop into.
+#[test]
+fn g_in_play_with_no_bodies_is_refused_on_the_status_line() {
+    let mut editor = headless(64);
+    editor.document = props();
+    editor.document.set_assets(Box::new(assets()));
+    let dropped = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(2.0, 2.0, 0.0))
+        .expect("spawned");
+    editor.frame().expect("a frame");
+    editor.document.select(Some(dropped));
+    tap(&mut editor, KeyCode::F5);
+    tap(&mut editor, KeyCode::KeyG);
+    assert!(editor.dropping.is_none());
+    assert_eq!(editor.panels.status().1, Tone::Warning);
+    assert_eq!(
+        editor.panels.status().0,
+        (format!(
+            "`{RIG}` cannot drop into play: nothing simulates bodies, since no entity has a \
+                 body row"
+        ))
     );
 }
 

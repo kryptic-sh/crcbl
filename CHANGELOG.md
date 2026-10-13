@@ -906,11 +906,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   onto every entity with a physics `Body` row, which stand still as the boxes
   they are placed as, drawing it in the pose its bodies fall into while its
   asset's other entities stay at rest; G again stops it, and the scene is never
-  edited. A rig authored beside the asset as `<asset>.ragdoll.ron` (a
-  `RagdollDesc`, resolved by joint name) replaces the fitted one; a file that
-  will not read is logged and the fitted rig stands in. Shift+G writes the
-  selected mesh's fitted rig there as a file to author from, and never
-  overwrites one; it leaves the pairs that never collide to
+  edited. While the scene plays, G drops the ragdoll into play itself instead:
+  its bodies join the playing scene's `Simulation` in place of the mesh's own
+  body, colliding with the scene's bodies as they move, and pause, stop and G
+  again end or hold it as they do the scene. A rig authored beside the asset as
+  `<asset>.ragdoll.ron` (a `RagdollDesc`, resolved by joint name) replaces the
+  fitted one; a file that will not read is logged and the fitted rig stands in.
+  Shift+G writes the selected mesh's fitted rig there as a file to author from,
+  and never overwrites one; it leaves the pairs that never collide to
   `ignore_rest_overlaps` rather than listing them, so a body later grown into a
   neighbour stops colliding with it too. The inspector edits the rig under the
   mesh's components — the rest-overlap rule and the substeps, each body's shape,
@@ -935,6 +938,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   part holds the next one behind it, Shift+click on another body lists the pair
   as never colliding or takes it off the list, and a click on the mesh away from
   every part lets go of it.
+
+- **`Simulation::physics_mut`** (`crcbl::scene_physics`) hands a tool the
+  playing scene's physics world to add bodies of its own to, such as a dropped
+  ragdoll; they are simulated among the scene's bodies, never written back into
+  a component, and thrown away with the world at stop.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned

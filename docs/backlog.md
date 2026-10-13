@@ -57,10 +57,12 @@ than EW assets or an EW checkout.
     peaks at 0.26 m, so the plan's "never more than a body width" holds through
     the landing for the torso's width, not a forearm's. A stiffer tether did
     worse (0.29 m at 60 Hz); why is not looked into. The tether is measured on
-    this one scenario, two rigs of the synthetic skeleton struck alike. EW
-    adoption is not verified. The cap settles the longest-awake ragdolls rather
-    than the plan's "excess deaths settle instantly to a canned pose": a new
-    death settled at once would hang in the air, and no canned pose exists.
+    this one scenario, two rigs of the synthetic skeleton struck alike. EW has
+    no networked detail clients yet and recorded the tether in its own backlog
+    for when it does (2026-10-14), so it is unused there. The cap settles the
+    longest-awake ragdolls rather than the plan's "excess deaths settle
+    instantly to a canned pose": a new death settled at once would hang in the
+    air, and no canned pose exists.
   - A settled-pose handoff suitable for revival: `Ragdoll::rise_point` gives the
     standing capsule's centre under the hips (the body nearest the skeleton
     root), found by `CharacterController::preview_upright` and refused for no
@@ -71,13 +73,16 @@ than EW assets or an EW checkout.
     itself are the game's. Its mask must leave the corpse's layers out, or the
     character is stood on its own body. The reach ray is one line at the hips'
     height: a low rail below it or a gap in a wall it threads is not seen, and
-    the search takes the first point that stands, not the nearest one.
-  - The editor preview shipped: G drops a selected rigged mesh as its ragdoll
-    (see "Further editor scope" below for what it does and does not do). The
-    remaining delivery requirements are in `docs/plan/35-ragdolls.md`. Budgets,
-    forced settling and a substep distance LOD (`Ragdoll::set_substeps`) exist;
-    LOD by body count or by skipping straight to the server's settled pose is
-    the game's to compose from them.
+    the search takes the first point that stands, not the nearest one. EW (pin
+    `7666cffb`, 2026-10-14) stands a revived AI there, with its character query
+    mask and a 1.0 m shift, falling back to where the corpse lies on a
+    `RiseError`.
+  - The editor preview shipped: G drops a selected rigged mesh as its ragdoll,
+    into play itself while the scene plays (see "Further editor scope" below for
+    what it does and does not do). The remaining delivery requirements are in
+    `docs/plan/35-ragdolls.md`. Budgets, forced settling and a substep distance
+    LOD (`Ragdoll::set_substeps`) exist; LOD by body count or by skipping
+    straight to the server's settled pose is the game's to compose from them.
 
   Damage, item/container ownership, revival progress, interaction admission and
   authored get-up behavior remain in EW. EW must independently verify that its
@@ -306,17 +311,16 @@ is not there, as in play, so a greybox scene with no bodies chunk gives the
 ground plane only; and the solids are read when G is pressed, so an edit to the
 scene during a drop is not seen until the next one.
 
-**Decided (2026-10-13): dynamic solids are for a drop into a playing scene, not
-the preview's own world.** Making the preview's solids fall would mean a second
-copy of play's body simulation (`crcbl::scene_physics`'s `Simulation`) and a way
-to draw scene entities where that copy moved them without editing the document —
-two things play already does. The long-term shape is G during play spawning the
-ragdoll into play's own `Simulation`, so it lands among bodies exactly as a
-game's corpse would, and the world is thrown away when play stops; outside play
-the preview keeps standing solids. Not built: `Simulation` hands out its
-`PhysicsSystem` only by shared reference, and the editor's play world is the
-document's, so the spawn needs a mutable path into it and the drawing a palette
-from the play world rather than the preview's.
+**G during play drops into play itself** (`DropPreview::start_in_play`, decided
+2026-10-13 over making the preview's own solids fall, which would be a second
+copy of play's body simulation): the ragdoll's bodies are spawned as entities of
+the playing world into its `Simulation` (`Simulation::physics_mut`), so it lands
+among the scene's bodies as a game's corpse would, and the world is thrown away
+when play stops. The mesh's own body leaves the simulation while it does, and G
+again takes the ragdoll out without putting that body back — it is back at stop.
+Play has no ground plane, so a scene with nothing under the mesh lets it fall
+forever, as it does the scene's bodies. Not covered by a test: a dynamic scene
+body being pushed by the ragdoll; the test lands it on a static one.
 
 Limits of what landed: only an asset's first skin deforms (the viewer's rule);
 no clip plays; and the drawing is checked on the null backend only — no frame

@@ -471,6 +471,16 @@ impl Simulation {
         &self.physics
     }
 
+    /// [`physics`](Self::physics), to add to or take from: a tool spawning
+    /// bodies of its own into the playing scene, such as an editor dropping a
+    /// ragdoll among the scene's bodies. What it adds is simulated with them
+    /// and never written back into a component, since only the bodies built
+    /// from [`Body`] rows have [`poses`](Self::poses); stop throws it away
+    /// with the world.
+    pub const fn physics_mut(&mut self) -> &mut PhysicsSystem {
+        &mut self.physics
+    }
+
     /// Each dynamic body's pose — its centre and its orientation — as the last
     /// step left it, in the order the bodies were created.
     #[must_use]
