@@ -6,8 +6,13 @@
 //! meets none lets go of it and picks as ever. A held body is drawn in the
 //! selection's colour, and in translate mode the handles stand at its centre,
 //! turned by its own axes in local space. Scale and rotate show no handles for
-//! it, and a drag of it does not snap: the grid is the scene's, and a body's
-//! centre is measured in its bone's frame.
+//! it.
+//!
+//! **Ctrl snaps how far a body drag moves, not where it lands**: the distance
+//! along each of the handles' axes from the press is a multiple of the grid
+//! step, as a turn snaps the angle swept. The scene's grid has no meaning for
+//! a body, whose centre is measured in its bone's frame, so landing on it
+//! would leave the file's numbers no rounder.
 //!
 //! **A drag writes the body's `centre` in the rig file**, which is in its
 //! bone's rigid frame: where the drag puts the body in the world, less where
@@ -17,6 +22,7 @@
 //! moved, and written when the pointer lets go (`crate::app`'s
 //! `write_edited_rig`).
 
+use crcbl::core::input::Modifiers;
 use crcbl::math::{DQuat, DVec3, Vec2};
 use crcbl::phys::query::{ray_vs_box, ray_vs_capsule, ray_vs_sphere};
 use crcbl::phys::{BoxCollider, Capsule, Ray, Sphere, Transform};
@@ -51,6 +57,9 @@ pub(super) struct BodyDrag {
     centre: DVec3,
     /// How its bone's rigid frame is turned in the world.
     bone: DQuat,
+    /// How the handles are turned in the world: the axes a snapped move is
+    /// measured along.
+    frame: DQuat,
 }
 
 impl<S: Shell + ?Sized> Editor<S> {
@@ -161,13 +170,15 @@ impl<S: Shell + ?Sized> Editor<S> {
                 // The body stands at its offset in the bone's frame, so the
                 // frame is its turn less the offset's.
                 bone: standing.rotation * offset.rotation.conjugate(),
+                frame: shown.1,
             },
         ))
     }
 
-    /// Moves the dragged body to where the pointer at `at` puts it: its
-    /// `centre` set in the file, the rig resolved again, and the file marked
-    /// to be written when the pointer lets go.
+    /// Moves the dragged body to where the pointer at `at` puts it, by a
+    /// snapped distance with Ctrl held: its `centre` set in the file, the rig
+    /// resolved again, and the file marked to be written when the pointer
+    /// lets go.
     pub(super) fn move_body(&mut self, drag: &gizmo::Drag, body: &BodyDrag, at: Vec2) {
         let pointer = self.pointer_at(at);
         let Some(landed) = drag.translated(&pointer, None) else {
@@ -177,7 +188,12 @@ impl<S: Shell + ?Sized> Editor<S> {
         for (axis, value) in landed {
             world[axis.index()] = value;
         }
-        let centre = body.centre + body.bone.conjugate() * (world - body.world);
+        let mut moved = world - body.world;
+        if self.modifiers.contains(Modifiers::CTRL) {
+            let along = body.frame.conjugate() * moved;
+            moved = body.frame * DVec3::from_array(along.to_array().map(|by| self.snap.grid(by)));
+        }
+        let centre = body.centre + body.bone.conjugate() * moved;
         let asset = &body.held.asset;
         let Some(desc) = self.shelf.rig_mut(asset).and_then(|rig| rig.desc.as_mut()) else {
             return;

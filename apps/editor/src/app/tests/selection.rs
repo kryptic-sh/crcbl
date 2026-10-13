@@ -23,7 +23,7 @@ fn pixel_of(editor: &mut Editor<HeadlessShell>, id: SceneEntityId) -> PhysicalPo
 }
 
 /// Holds Ctrl down, or lets it go, a frame for the loop to see it.
-fn hold_ctrl(editor: &mut Editor<HeadlessShell>, held: bool) {
+pub(super) fn hold_ctrl(editor: &mut Editor<HeadlessShell>, held: bool) {
     let window = editor.window;
     let shell = editor.shell_mut();
     if held {

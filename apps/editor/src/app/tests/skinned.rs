@@ -7,6 +7,7 @@ use super::*;
 
 use super::assets::pixel_of;
 use super::scene_inspector::scrolled_to;
+use super::selection::hold_ctrl;
 
 use crcbl::assets::MemorySource;
 use crcbl::math::DVec3;
@@ -1154,6 +1155,19 @@ fn a_held_body_moves_along_its_arrow_and_is_written() {
         editor.panels.status()
     );
     assert!(editor.rig_history.can_undo(RIG), "the move is no step");
+
+    // With Ctrl held, the distance moved is a multiple of the grid step,
+    // wherever the drag began.
+    hold_ctrl(&mut editor, true);
+    let (from, to) = handle_at(&mut editor, gizmo::Grip::Move(gizmo::Axis::X));
+    drag(&mut editor, (from + to) * 0.5, to + (to - from) * 0.4);
+    hold_ctrl(&mut editor, false);
+    let snapped = capsule(&mut editor);
+    let steps = (snapped - after).length() / editor.snap.grid_step();
+    assert!(
+        steps > 0.5 && (steps - steps.round()).abs() < 1e-6,
+        "moved {steps} grid steps: {after} to {snapped}"
+    );
 
     let (corner, _) = editor.panels.viewport_pixels();
     click(&mut editor, physical(corner + Vec2::splat(4.0)));
