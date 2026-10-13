@@ -899,23 +899,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   rigged mesh rebuilds nothing. What the skin conversion refuses is logged and
   the asset drawn as before. Selecting a rigged mesh draws its skeleton's bones
   and the ragdoll rig `RagdollRig::generate` fits to it, from which a rig is
-  authored. G drops the selected rigged mesh as that ragdoll onto the ground,
-  drawing it in the pose its bodies fall into while its asset's other entities
-  stay at rest; G again stops it, and the scene is never edited. A rig authored
-  beside the asset as `<asset>.ragdoll.ron` (a `RagdollDesc`, resolved by joint
-  name) replaces the fitted one; a file that will not read is logged and the
-  fitted rig stands in. Shift+G writes the selected mesh's fitted rig there as a
-  file to author from, and never overwrites one; it leaves the pairs that never
-  collide to `ignore_rest_overlaps` rather than listing them, so a body later
-  grown into a neighbour stops colliding with it too. The inspector edits the
-  rig under the mesh's components — the rest-overlap rule and the substeps, each
-  body's shape, size, mass, centre and axis, each joint's kind, limits (in
-  degrees), friction, axis and offset — resolving each edit at once and writing
-  the file when the pointer lets go; an edit the rig cannot resolve is refused
-  on the status line and not written. A shape switched keeps the body's size,
-  and a joint switched between ball and hinge keeps its swing. The rig section's
-  Undo and Redo step the rig's own history — each written edit a step, written
-  again when stepped — apart from the scene's Ctrl+Z.
+  authored. G drops the selected rigged mesh as that ragdoll onto the ground and
+  onto every entity with a physics `Body` row, which stand still as the boxes
+  they are placed as, drawing it in the pose its bodies fall into while its
+  asset's other entities stay at rest; G again stops it, and the scene is never
+  edited. A rig authored beside the asset as `<asset>.ragdoll.ron` (a
+  `RagdollDesc`, resolved by joint name) replaces the fitted one; a file that
+  will not read is logged and the fitted rig stands in. Shift+G writes the
+  selected mesh's fitted rig there as a file to author from, and never
+  overwrites one; it leaves the pairs that never collide to
+  `ignore_rest_overlaps` rather than listing them, so a body later grown into a
+  neighbour stops colliding with it too. The inspector edits the rig under the
+  mesh's components — the rest-overlap rule and the substeps, each body's shape,
+  size, mass, centre and axis, each joint's kind, limits (in degrees), friction,
+  axis and offset — resolving each edit at once and writing the file when the
+  pointer lets go; an edit the rig cannot resolve is refused on the status line
+  and not written. A shape switched keeps the body's size, and a joint switched
+  between ball and hinge keeps its swing. The rig section's Undo and Redo step
+  the rig's own history — each written edit a step, written again when stepped —
+  apart from the scene's Ctrl+Z.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned

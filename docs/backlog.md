@@ -257,9 +257,14 @@ What rig editing still lacks, none of it requested yet:
 
 G drops the selected rigged mesh as its fitted ragdoll in a physics world of its
 own (`apps/editor/src/app/drop.rs`), drawn from a second, preview region per
-deformed part. It falls onto a ground plane only — the scene's blocks are not
-colliders there — steps a fixed sixtieth of a second a frame, and one entity
-drops at a time.
+deformed part. It lands on a ground plane and on what the scene collides as in
+play — every entity with a `Body` row (`drop::solids`), as its placement box —
+steps a fixed sixtieth of a second a frame, and one entity drops at a time. What
+it does not do: every solid stands still, a dynamic one too, so a drop onto a
+body that would fall in play does not knock it over; a block with no `Body` row
+is not there, as in play, so a greybox scene with no bodies chunk gives the
+ground plane only; and the solids are read when G is pressed, so an edit to the
+scene during a drop is not seen until the next one.
 
 Limits of what landed: only an asset's first skin deforms (the viewer's rule);
 no clip plays; and the drawing is checked on the null backend only — no frame

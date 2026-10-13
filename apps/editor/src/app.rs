@@ -1382,8 +1382,9 @@ impl<S: Shell + ?Sized> Editor<S> {
             return;
         };
         let (asset, origin) = (mesh.asset.clone(), instances::origin_of(mesh));
+        let solids = drop::solids(&mut self.document, id);
         if let Some(rig) = self.shelf.rig(&asset) {
-            self.dropping = drop::DropPreview::start(id, &asset, rig, origin);
+            self.dropping = drop::DropPreview::start(id, &asset, rig, origin, &solids);
         }
     }
 

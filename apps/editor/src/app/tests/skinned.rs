@@ -272,6 +272,57 @@ fn g_drops_a_selected_rigged_mesh_and_g_stops_it() {
     );
 }
 
+/// Where the lowest of the bodies of a rig dropped over a twin of it stands
+/// once it has fallen, with the twin given a body row (`solid`) or not, and
+/// how tall the twin's box is.
+fn lowest_after_dropping_over_a_twin(solid: bool) -> (f64, f64) {
+    let mut editor = headless(64);
+    editor.document = props();
+    editor.document.set_assets(Box::new(assets()));
+    let twin = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(2.0, 0.0, 0.0))
+        .expect("spawned");
+    let placed = editor.document.placement(twin).expect("the twin is placed");
+    let dropped = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(2.0, 2.0 * placed.half_extents.y, 0.0))
+        .expect("spawned");
+    if solid {
+        editor
+            .document
+            .attach(twin, crcbl::scene_physics::BODIES)
+            .expect("a body row");
+    }
+    editor.frame().expect("a frame");
+    editor.document.select(Some(dropped));
+    tap(&mut editor, KeyCode::KeyG);
+    for _ in 0..90 {
+        editor.frame().expect("a frame");
+    }
+    let lowest = editor
+        .dropping
+        .as_ref()
+        .expect("still dropping")
+        .heights()
+        .into_iter()
+        .fold(f64::INFINITY, f64::min);
+    (lowest, 2.0 * placed.half_extents.y)
+}
+
+/// **The drop lands on what the scene collides as**: over a twin with a body
+/// row it comes to rest on the twin's box, well above where it falls to with
+/// the row gone, when only the ground is under it.
+#[test]
+fn the_drop_lands_on_an_entity_with_a_body_row() {
+    let (on_ground, _) = lowest_after_dropping_over_a_twin(false);
+    let (on_twin, height) = lowest_after_dropping_over_a_twin(true);
+    assert!(
+        on_twin - on_ground > 0.5 * height,
+        "the bodies rest at {on_twin} m on a {height} m box and at {on_ground} m without it"
+    );
+}
+
 /// An editor whose assets are a directory holding the rig, with the rig
 /// spawned, drawn once and selected.
 fn rig_on_disk() -> (tempfile::TempDir, Editor<HeadlessShell>) {
