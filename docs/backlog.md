@@ -236,21 +236,24 @@ resolve is refused on the status line and never written.
 
 What rig editing still lacks, none of it requested yet:
 
-- **A held body moves; nothing else has a viewport handle**
-  (`apps/editor/src/app/rig_body.rs`). A click on a drawn body of the lone
-  selected rigged mesh holds it, and translate's handles move its `centre`.
-  Still inspector rows only: a body's axis and size, and a joint's `at` and
-  axis. An axis row is the file's raw vector (the rig normalises it; a zero one
-  is refused); turning one with rotate's rings would write the axis the ring
-  leaves the body's `y` on, and lose the body's turn about it, as the file does.
-  Ctrl snaps a body drag's distance from the press along each handle axis to the
-  grid step rather than landing it on the scene's grid, which means nothing in
-  the bone's frame `centre` is measured in (decided 2026-10-13); the file's
-  numbers are therefore only as round as they were before the drag. A body
-  another hides is reached by clicking on through the held one; a body under the
-  mesh's own handles cannot be clicked to hold it in translate or rotate mode
-  until the view moves (scale shows a mesh no handles). The held body's colour
-  is not covered by a test: the headless draw is not read back.
+- **A held body moves and resizes; its axis and the joints have no viewport
+  handle** (`apps/editor/src/app/rig_body.rs`). A click on a drawn body of the
+  lone selected rigged mesh holds it; translate's handles move its `centre`, and
+  scale's boxes resize it (a capsule's `y` box is its cap's tip). Still
+  inspector rows only: a body's axis, and a joint's `at` and axis. An axis row
+  is the file's raw vector (the rig normalises it; a zero one is refused);
+  turning one with rotate's rings would write the axis the ring leaves the
+  body's `y` on, and lose the body's turn about it, as the file does, so rotate
+  shows a held body nothing. A held body's handles stand at its centre, so
+  clicking on through it to the body behind is done in rotate mode or off its
+  centre. Ctrl snaps a body drag's distance from the press along each handle
+  axis to the grid step rather than landing it on the scene's grid, which means
+  nothing in the bone's frame `centre` is measured in (decided 2026-10-13); the
+  file's numbers are therefore only as round as they were before the drag. A
+  body another hides is reached by clicking on through the held one; a body
+  under the mesh's own handles cannot be clicked to hold it in translate or
+  rotate mode until the view moves (scale shows a mesh no handles). The held
+  body's colour is not covered by a test: the headless draw is not read back.
 - **Decided (2026-10-13): rig edits have a history of their own, not Ctrl+Z's.**
   The rig section's Undo and Redo step it
   (`apps/editor/src/app/rig_history.rs`). Folding rig edits into the scene's

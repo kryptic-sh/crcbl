@@ -42,12 +42,17 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// is; several selected share theirs at the selection's pivot
     /// ([`crate::document::Document::selection_pivot`]). Local mode uses the primary entity's
     /// axes, falling back to world axes when it has no placement. A held rig
-    /// body has translate's handles alone, at its centre and turned by its
-    /// own axes in local mode — see `super::rig_body`.
+    /// body has translate's and scale's handles, at its centre and turned by
+    /// its own axes in local mode, as scale's always are — see
+    /// `super::rig_body`.
     pub(super) fn gizmo_centre(&mut self) -> Option<(Vec3, DQuat)> {
         if let Some((_, at)) = self.held_body() {
-            return (self.gizmo_mode == gizmo::Mode::Translate)
-                .then(|| (at.position.as_vec3(), self.gizmo_space.frame(at.rotation)));
+            let position = at.position.as_vec3();
+            return match self.gizmo_mode {
+                gizmo::Mode::Translate => Some((position, self.gizmo_space.frame(at.rotation))),
+                gizmo::Mode::Scale => Some((position, at.rotation)),
+                gizmo::Mode::Rotate => None,
+            };
         }
         let id = self.document.primary()?;
         if self.document.selection().len() > 1 {
@@ -384,7 +389,8 @@ impl<S: Shell + ?Sized> Editor<S> {
     }
 
     /// What the status line says when a mode whose handles need a field is
-    /// chosen: `none` with nothing selected, that a held rig body shows none,
+    /// chosen: `none` with nothing selected, `usage` for a held rig body's
+    /// scale and that it has no rings,
     /// why it shows no handles with several selected — it acts on one entity
     /// — `usage` when the selection has the field, and why it shows no handles
     /// when it does not — it has nothing to `verb`.
@@ -404,13 +410,16 @@ impl<S: Shell + ?Sized> Editor<S> {
             gizmo::Mode::Rotate => "Rotate",
         };
         if self.held_body().is_some() {
-            return (
-                format!(
-                    "{label}: a held rig body has translate's handles alone; \
-                     {verb} it in the inspector"
-                ),
-                Tone::Warning,
-            );
+            return if mode == gizmo::Mode::Scale {
+                (usage, Tone::Info)
+            } else {
+                (
+                    format!(
+                        "{label}: a held rig body has no rings; {verb} its axis in the inspector"
+                    ),
+                    Tone::Warning,
+                )
+            };
         }
         let count = self.document.selection().len();
         if count > 1 {

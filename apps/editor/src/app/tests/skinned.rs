@@ -914,6 +914,71 @@ fn rig_pairs_are_listed_and_removed() {
     assert!(file().is_empty(), "still listed in the file");
 }
 
+/// **A held capsule's boxes resize it**: its `y` box lengthens it, keeping its
+/// radius, and its `x` box widens it, keeping its length; each is written.
+#[test]
+fn a_held_body_resizes_by_its_boxes() {
+    let (dir, mut editor) = rig_on_disk();
+    editor.act(&Action::Scale);
+    let first = selected_ragdoll_bodies(&mut editor.document, &editor.shelf)[0]
+        .1
+        .position
+        .as_vec3();
+    let on_body = physical(pixel_of(&editor, first));
+    click(&mut editor, on_body);
+    assert_eq!(editor.held.as_ref().map(|held| held.index), Some(0));
+    let shape = || {
+        let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+        let text = std::fs::read_to_string(&path).expect("the rig was written");
+        match crcbl::ragdoll::RagdollDesc::from_ron(&text)
+            .expect("a rig file")
+            .bodies[0]
+            .shape
+        {
+            crcbl::ragdoll::ShapeDesc::Capsule {
+                radius,
+                half_height,
+            } => (radius, half_height),
+            other => panic!("the first body is a capsule: {other:?}"),
+        }
+    };
+    let crcbl::ragdoll::ShapeDesc::Capsule {
+        radius,
+        half_height,
+    } = editor
+        .shelf
+        .rig(RIG)
+        .and_then(|rig| rig.desc.as_ref())
+        .expect("a rig file")
+        .bodies[0]
+        .shape
+    else {
+        panic!("the first body is a capsule");
+    };
+
+    let stretch = |editor: &mut Editor<HeadlessShell>, axis| {
+        let (from, to) = handle_at(editor, gizmo::Grip::Scale(axis));
+        drag(editor, to - (to - from) * 0.1, to + (to - from) * 0.5);
+    };
+    stretch(&mut editor, gizmo::Axis::Y);
+    let (long_radius, long) = shape();
+    assert_eq!(long_radius, radius, "the y box changed the radius");
+    assert!(long > half_height + 0.01, "{half_height} to {long}");
+    // With Ctrl held, a size lands on the scale step, as a half extent does.
+    hold_ctrl(&mut editor, true);
+    stretch(&mut editor, gizmo::Axis::X);
+    hold_ctrl(&mut editor, false);
+    let (wide, wide_length) = shape();
+    assert!(wide > radius + 0.01, "{radius} to {wide}");
+    let steps = wide / editor.snap.scale_step();
+    assert!(
+        (steps - steps.round()).abs() < 1e-9,
+        "{wide} is off the step"
+    );
+    assert_eq!(wide_length, long, "the x box changed the length");
+    assert!(editor.rig_history.can_undo(RIG), "the resize is no step");
+}
+
 /// **Clicking on through the held body reaches the one behind it**: with the
 /// second body swollen around the first, a click on the first meets both,
 /// holds the swollen one, nearer though later in the rig, then the first,
@@ -926,7 +991,9 @@ fn clicking_again_holds_the_body_behind() {
     let desc = rig.desc.as_mut().expect("a rig file");
     desc.bodies[1].shape = crcbl::ragdoll::ShapeDesc::Sphere { radius: 1.0 };
     rig.resolve().expect("a swollen body resolves");
-    // Scale shows a mesh no handles, so nothing stands in front of the bodies.
+    // Scale shows a mesh no handles, so nothing stands in front of the bodies
+    // for the first click; rotate shows a held body none, so nothing stands
+    // in front of them for the rest.
     editor.act(&Action::Scale);
     let behind = selected_ragdoll_bodies(&mut editor.document, &editor.shelf)[0]
         .1
@@ -934,9 +1001,12 @@ fn clicking_again_holds_the_body_behind() {
         .as_vec3();
     let at = physical(pixel_of(&editor, behind));
     let mut held = Vec::new();
-    for _ in 0..3 {
+    for turn in 0..3 {
         click(&mut editor, at);
         held.push(editor.held.as_ref().expect("a body held").index);
+        if turn == 0 {
+            editor.act(&Action::Rotate);
+        }
     }
     assert_eq!(held, [1, 0, 1], "held in turn");
     assert_eq!(editor.document.selection(), [id], "a click picked");
@@ -1132,20 +1202,29 @@ fn a_held_body_moves_along_its_arrow_and_is_written() {
         editor.panels.status()
     );
     assert_eq!(editor.document.selection(), [id], "the click picked");
-    assert!(editor.handles().is_empty(), "scale shows a body handles");
-    editor.act(&Action::Scale);
+    assert!(
+        !editor.handles().is_empty(),
+        "scale shows a held body no boxes"
+    );
+    editor.act(&Action::Rotate);
+    assert!(
+        editor.handles().is_empty(),
+        "rotate shows a held body rings"
+    );
     assert_eq!(
         editor.panels.status().0,
-        "Scale: a held rig body has translate's handles alone; resize it in the inspector. \
-         Local axes; X toggles translate/rotate axes"
+        "Rotate: a held rig body has no rings; turn its axis in the inspector. \
+         World axes; X toggles translate/rotate axes"
     );
     // A click on the mesh away from its bodies picks the mesh again, and lets
-    // go of the body.
+    // go of the body: in rotate, which shows the held body nothing to click.
     let (_, max) = editor.document.bounds(id).expect("placed");
     let off_body = physical(pixel_of(&editor, Vec3::new(max.x - 0.1, 0.5, max.z)));
     click(&mut editor, off_body);
     assert_eq!(editor.held, None, "a click on the mesh kept the body");
     assert_eq!(editor.document.selection(), [id], "the mesh was not picked");
+    // Back to scale, which shows the mesh itself no handles in the way.
+    editor.act(&Action::Scale);
     click(&mut editor, on_body);
     assert!(editor.held.is_some(), "the body was not held again");
 
