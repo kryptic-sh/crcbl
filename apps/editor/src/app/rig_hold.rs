@@ -12,15 +12,22 @@
 //! last, so a part another hides is reached by clicking on. A held part is
 //! drawn in the selection's colour.
 //!
-//! **Translate moves either; scale resizes a body; rotate shows neither**.
-//! Translate's handles stand at the part, turned by its own axes in local
-//! space. Scale's boxes stand at a held body, turned by its axes always, and
+//! **Translate moves either; scale resizes a body; rotate turns a joint's
+//! axis**. Translate's handles stand at the part, and rotate's rings at a
+//! joint, turned by its own axes in local space. Scale's boxes stand at a held
+//! body, turned by its axes always, and
 //! resize it as a box about them would be: a box's half extents, a sphere's
 //! radius whichever box is dragged, and a capsule's radius by its `x` or `z`
 //! box and its length by its `y` box, whose face is the cap's tip. Ctrl snaps
 //! a size to the scale step, as it does an entity's half extents: a size is
-//! the same in every frame. A body's axis turned by a ring would lose the
-//! body's turn about it, which the file does not keep.
+//! the same in every frame.
+//!
+//! **A ring turns a joint's axis and never a body's**: the file gives either
+//! an axis alone, with no turn about it. A joint is the same about its axis
+//! whatever that turn, so a ring writes exactly the axis it leaves the
+//! joint's `z` on — the ring about the axis itself changes nothing — while a
+//! body turned about its axis would lose the turn the moment it was written.
+//! Ctrl snaps the angle swept, as it does an entity's.
 //!
 //! **Ctrl snaps how far a move goes, not where it lands**: the distance along
 //! each of the handles' axes from the press is a multiple of the grid step,
@@ -180,10 +187,11 @@ impl<S: Shell + ?Sized> Editor<S> {
         true
     }
 
-    /// A drag of the held part through `grip`, an arrow, a plane or a body's
-    /// box, its handles standing at `shown`'s centre and turned by its frame,
-    /// pressed at `at` in window pixels — or [`None`] with nothing held, for
-    /// a ring or a joint's box, or a press whose ray runs along the handle.
+    /// A drag of the held part through `grip`, an arrow, a plane, a body's
+    /// box or a joint's ring, its handles standing at `shown`'s centre and
+    /// turned by its frame, pressed at `at` in window pixels — or [`None`]
+    /// with nothing held, for a joint's box or a body's ring, or a press
+    /// whose ray runs along the handle.
     pub(super) fn begin_rig_drag(
         &mut self,
         grip: gizmo::Grip,
@@ -204,12 +212,29 @@ impl<S: Shell + ?Sized> Editor<S> {
             }
             Part::Joint(index) => (DVec3::from(desc.joints.get(index)?.at), None),
         };
-        let start = match (grip.mode(), shape) {
-            (gizmo::Mode::Translate, _) => standing.position.to_array(),
-            (gizmo::Mode::Scale, Some(shape)) => extents(shape),
-            (gizmo::Mode::Scale, None) | (gizmo::Mode::Rotate, _) => return None,
+        let drag = match (grip, shape) {
+            (gizmo::Grip::Rotate(axis), None) => {
+                let (corner, _) = self.panels.viewport_pixels();
+                let standing = (standing.rotation, standing.position);
+                self.turn_from(
+                    held.entity,
+                    axis,
+                    gesture,
+                    (shown.0, at - corner),
+                    standing,
+                    None,
+                )?
+            }
+            (gizmo::Grip::Rotate(_), Some(_))
+            | (gizmo::Grip::Scale(_) | gizmo::Grip::ScaleAll, None) => return None,
+            (gizmo::Grip::Scale(_) | gizmo::Grip::ScaleAll, Some(shape)) => {
+                self.begin_drag(held.entity, grip, gesture, extents(shape), shown, at)?
+            }
+            (gizmo::Grip::Move(_) | gizmo::Grip::MovePlane(_), _) => {
+                let start = standing.position.to_array();
+                self.begin_drag(held.entity, grip, gesture, start, shown, at)?
+            }
         };
-        let drag = self.begin_drag(held.entity, grip, gesture, start, shown, at)?;
         Some((
             drag,
             RigDrag {
@@ -223,34 +248,50 @@ impl<S: Shell + ?Sized> Editor<S> {
         ))
     }
 
-    /// Moves the dragged part, or resizes the dragged body, to where the
-    /// pointer at `at` puts it, snapped with Ctrl held: its place or its
-    /// shape set in the file, the rig resolved again, and the file marked to
-    /// be written when the pointer lets go.
+    /// Moves the dragged part, resizes the dragged body or turns the dragged
+    /// joint to where the pointer at `at` puts it, snapped with Ctrl held: its
+    /// place, its shape or its axis set in the file, the rig resolved again,
+    /// and the file marked to be written when the pointer lets go.
     pub(super) fn move_rig(&mut self, drag: &gizmo::Drag, part: &RigDrag, at: Vec2) {
         let pointer = self.pointer_at(at);
-        let snapping = self.modifiers.contains(Modifiers::CTRL);
-        let (place, shape) = if drag.grip().mode() == gizmo::Mode::Scale {
-            let Some(writes) = drag.writes(&pointer, snapping.then_some(self.snap)) else {
-                return;
-            };
-            (part.place, part.shape.map(|shape| resized(shape, &writes)))
-        } else {
-            let Some(landed) = drag.translated(&pointer, None) else {
-                return;
-            };
-            let mut world = part.world;
-            for (axis, value) in landed {
-                world[axis.index()] = value;
+        let snap = self
+            .modifiers
+            .contains(Modifiers::CTRL)
+            .then_some(self.snap);
+        let (mut place, mut shape, mut axis) = (part.place, part.shape, None);
+        match drag.grip().mode() {
+            gizmo::Mode::Scale => {
+                let Some(writes) = drag.writes(&pointer, snap) else {
+                    return;
+                };
+                shape = part.shape.map(|shape| resized(shape, &writes));
             }
-            let mut moved = world - part.world;
-            if snapping {
-                let along = part.frame.conjugate() * moved;
-                moved =
-                    part.frame * DVec3::from_array(along.to_array().map(|by| self.snap.grid(by)));
+            gizmo::Mode::Rotate => {
+                let Some(writes) = drag.writes(&pointer, snap) else {
+                    return;
+                };
+                let Some(turned) = rotation_of(&writes) else {
+                    return;
+                };
+                axis = Some(part.bone.conjugate() * (turned * DVec3::Z));
             }
-            (part.place + part.bone.conjugate() * moved, part.shape)
-        };
+            gizmo::Mode::Translate => {
+                let Some(landed) = drag.translated(&pointer, None) else {
+                    return;
+                };
+                let mut world = part.world;
+                for (axis, value) in landed {
+                    world[axis.index()] = value;
+                }
+                let mut moved = world - part.world;
+                if let Some(snap) = snap {
+                    let along = part.frame.conjugate() * moved;
+                    moved =
+                        part.frame * DVec3::from_array(along.to_array().map(|by| snap.grid(by)));
+                }
+                place = part.place + part.bone.conjugate() * moved;
+            }
+        }
         let asset = &part.held.asset;
         let Some(desc) = self.shelf.rig_mut(asset).and_then(|rig| rig.desc.as_mut()) else {
             return;
@@ -271,6 +312,9 @@ impl<S: Shell + ?Sized> Editor<S> {
                     return;
                 };
                 joint.at = place.into();
+                if let Some(axis) = axis {
+                    joint.axis = axis.into();
+                }
             }
         }
         self.rig_history.edited(asset, &before);
@@ -300,6 +344,20 @@ fn holding(desc: Option<&RagdollDesc>, part: Part) -> String {
             format!("Holding the joint {bones}: translate's arrows move where it sits in the rig")
         }
     }
+}
+
+/// The rotation a ring drag's `writes` set, from their `rotation` leaves in
+/// [`crcbl::registry::Rotation::LEAVES`] order, or [`None`] without all four.
+fn rotation_of(writes: &[gizmo::Write]) -> Option<DQuat> {
+    let leaf = |name: &str| {
+        let path = format!("{}.{name}", gizmo::ROTATION);
+        writes
+            .iter()
+            .find(|write| write.path == path)
+            .map(|write| write.value)
+    };
+    let [x, y, z, w] = crcbl::registry::Rotation::LEAVES;
+    Some(DQuat::from_xyzw(leaf(x)?, leaf(y)?, leaf(z)?, leaf(w)?))
 }
 
 /// `shape`'s half extents along its own axes, as scale's handles size a box:

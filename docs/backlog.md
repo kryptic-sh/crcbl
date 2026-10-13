@@ -236,29 +236,27 @@ resolve is refused on the status line and never written.
 
 What rig editing still lacks, none of it requested yet:
 
-- **A held body moves and resizes and a held joint moves; no axis has a viewport
-  handle** (`apps/editor/src/app/rig_hold.rs`). A click on a drawn joint or body
-  of the lone selected rigged mesh holds it, a joint first since it sits inside
-  the bodies it joins; translate's handles move a body's `centre` or a joint's
-  `at`, and scale's boxes resize a body (a capsule's `y` box is its cap's tip).
-  Still inspector rows only: a body's axis and a joint's axis. An axis row is
-  the file's raw vector (the rig normalises it; a zero one is refused). Turning
-  a body's with rotate's rings would write the axis the ring leaves the body's
-  `y` on, and lose the body's turn about it, as the file does, so rotate shows a
-  held body nothing. A joint's axis has no such loss — the file keeps no turn
-  about it, so a ring about its own axis would change nothing and the others
-  would write the axis exactly — but rings for it are not built. A joint is
-  drawn and clicked as a sphere of `JOINT_RADIUS` metres, whatever the rig's
-  size. A held part's handles stand at it, so clicking on through it to the part
-  behind is done in rotate mode or off its centre. Ctrl snaps a body drag's
-  distance from the press along each handle axis to the grid step rather than
-  landing it on the scene's grid, which means nothing in the bone's frame
-  `centre` is measured in (decided 2026-10-13); the file's numbers are therefore
-  only as round as they were before the drag. A body another hides is reached by
-  clicking on through the held one; a body under the mesh's own handles cannot
-  be clicked to hold it in translate or rotate mode until the view moves (scale
-  shows a mesh no handles). The held body's colour is not covered by a test: the
-  headless draw is not read back.
+- **A held body moves and resizes, a held joint moves and turns; a body's axis
+  has no viewport handle** (`apps/editor/src/app/rig_hold.rs`). A click on a
+  drawn joint or body of the lone selected rigged mesh holds it, a joint first
+  since it sits inside the bodies it joins; translate's handles move a body's
+  `centre` or a joint's `at`, scale's boxes resize a body (a capsule's `y` box
+  is its cap's tip), and rotate's rings turn a joint's axis, which the file
+  keeps with no turn about it, so a ring loses nothing. A body's axis is still
+  an inspector row only, the file's raw vector (the rig normalises it; a zero
+  one is refused): turning it with rings would write the axis the ring leaves
+  the body's `y` on, and lose the body's turn about it, as the file does, so
+  rotate shows a held body nothing. A joint is drawn and clicked as a sphere of
+  `JOINT_RADIUS` metres, whatever the rig's size. A held part's handles stand at
+  it, so clicking on through it to the part behind is done off its centre, or
+  for a held body in rotate mode. Ctrl snaps a move's distance from the press
+  along each handle axis to the grid step rather than landing it on the scene's
+  grid, which means nothing in the bone's frame a place is measured in (decided
+  2026-10-13); the file's numbers are therefore only as round as they were
+  before the drag. A part under the mesh's own handles cannot be clicked to hold
+  it in translate or rotate mode until the view moves (scale shows a mesh no
+  handles). The held part's colour and the joints' drawing are not covered by a
+  test: the headless draw is not read back.
 - **Decided (2026-10-13): rig edits have a history of their own, not Ctrl+Z's.**
   The rig section's Undo and Redo step it
   (`apps/editor/src/app/rig_history.rs`). Folding rig edits into the scene's

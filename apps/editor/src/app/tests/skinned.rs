@@ -994,6 +994,71 @@ fn a_held_joint_moves_along_its_arrow_and_is_written() {
     assert!(editor.rig_history.can_undo(RIG), "the move is no step");
 }
 
+/// **A held joint's ring turns its axis about that ring's axis alone**, in
+/// its child bone's frame: with the mesh turned and the bodies lying across
+/// their bones, a
+/// quarter turn on the world axis the joint's axis is least along moves the
+/// axis far and keeps its part along the ring's, and the file's axis is the
+/// one the rig resolves to, as one step of the rig's history.
+#[test]
+fn a_held_joints_ring_turns_its_axis() {
+    let (dir, mut editor) = rig_on_disk();
+    let id = editor.document.primary().expect("the rig is selected");
+    turn_about_y(&mut editor, id, 0.6);
+    let rig = editor.shelf.rig_mut(RIG).expect("the rig");
+    let desc = rig.desc.as_mut().expect("a rig file");
+    for body in &mut desc.bodies {
+        body.axis = (1.0, 0.0, 0.0);
+    }
+    rig.resolve().expect("tilted bodies resolve");
+    editor.frame().expect("a frame");
+    let joint = |editor: &mut Editor<HeadlessShell>| {
+        selected_ragdoll_joints(&mut editor.document, &editor.shelf)[0]
+    };
+    let before = joint(&mut editor);
+    editor.act(&Action::Scale);
+    let on_joint = physical(pixel_of(&editor, before.position.as_vec3()));
+    click(&mut editor, on_joint);
+    assert_eq!(
+        editor.held.as_ref().map(|held| held.part),
+        Some(Part::Joint(0))
+    );
+
+    editor.act(&Action::Rotate);
+    assert!(
+        editor.panels.status().0.starts_with("Rotate: drag a ring"),
+        "{:?}",
+        editor.panels.status()
+    );
+    let was = before.rotation * DVec3::Z;
+    let ring = gizmo::Axis::ALL
+        .into_iter()
+        .min_by(|a, b| was[a.index()].abs().total_cmp(&was[b.index()].abs()))
+        .expect("three axes");
+    let (grab, release) = ring_quarter(&mut editor, ring);
+    drag(&mut editor, grab, release);
+    let now = joint(&mut editor).rotation * DVec3::Z;
+    assert!((now - was).length() > 0.5, "{was} to {now}");
+    assert!(
+        (now[ring.index()] - was[ring.index()]).abs() < 1e-6,
+        "turned off its {ring:?} ring: {was} to {now}"
+    );
+    let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+    let file = crcbl::ragdoll::RagdollDesc::from_ron(
+        &std::fs::read_to_string(&path).expect("the rig was written"),
+    )
+    .expect("a rig file");
+    let in_rig = editor
+        .shelf
+        .rig(RIG)
+        .and_then(|rig| rig.desc.as_ref())
+        .expect("a rig file")
+        .joints[0]
+        .axis;
+    assert_eq!(file.joints[0].axis, in_rig, "the file holds another axis");
+    assert!(editor.rig_history.can_undo(RIG), "the turn is no step");
+}
+
 /// **A held capsule's boxes resize it**: its `y` box lengthens it, keeping its
 /// radius, and its `x` box widens it, keeping its length; each is written.
 #[test]

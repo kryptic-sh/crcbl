@@ -43,18 +43,18 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// is; several selected share theirs at the selection's pivot
     /// ([`crate::document::Document::selection_pivot`]). Local mode uses the primary entity's
     /// axes, falling back to world axes when it has no placement. A held rig
-    /// part has translate's handles, and a held body scale's, at the part and
-    /// turned by its own axes in local mode, as scale's always are — see
-    /// `super::rig_hold`.
+    /// part has translate's handles, a held body scale's and a held joint
+    /// rotate's, at the part and turned by its own axes in local mode, as
+    /// scale's always are — see `super::rig_hold`.
     pub(super) fn gizmo_centre(&mut self) -> Option<(Vec3, DQuat)> {
         if let Some((part, at)) = self.held_part() {
             let position = at.position.as_vec3();
             return match (self.gizmo_mode, part) {
-                (gizmo::Mode::Translate, _) => {
+                (gizmo::Mode::Translate, _) | (gizmo::Mode::Rotate, Part::Joint(_)) => {
                     Some((position, self.gizmo_space.frame(at.rotation)))
                 }
                 (gizmo::Mode::Scale, Part::Body(_)) => Some((position, at.rotation)),
-                (gizmo::Mode::Scale, Part::Joint(_)) | (gizmo::Mode::Rotate, _) => None,
+                (gizmo::Mode::Scale, Part::Joint(_)) | (gizmo::Mode::Rotate, Part::Body(_)) => None,
             };
         }
         let id = self.document.primary()?;
@@ -258,6 +258,22 @@ impl<S: Shell + ?Sized> Editor<S> {
         let position = self
             .field_values(id, gizmo::POSITION)
             .map(DVec3::from_array);
+        self.turn_from(id, axis, gesture, (shown, at), (rotation, pivot), position)
+    }
+
+    /// A drag of `id`'s ring about `axis`, pressed at `pressed`'s pane pixel
+    /// with its handles drawn about its centre, turning a thing that stands
+    /// at `standing`'s rotation about its pivot, and swinging `position` round
+    /// it where there is one — or [`None`] for a centre behind the eye.
+    pub(super) fn turn_from(
+        &self,
+        id: SceneEntityId,
+        axis: gizmo::Axis,
+        gesture: crate::command::Gesture,
+        (shown, at): (Vec3, Vec2),
+        (rotation, pivot): (DQuat, DVec3),
+        position: Option<DVec3>,
+    ) -> Option<gizmo::Drag> {
         let camera = self.camera.camera();
         let centre = camera.pixel_of(shown, self.panels.viewport_extent())?;
         let frame = self.gizmo_space.frame(rotation);
@@ -392,7 +408,7 @@ impl<S: Shell + ?Sized> Editor<S> {
 
     /// What the status line says when a mode whose handles need a field is
     /// chosen: `none` with nothing selected, `usage` for a held rig body's
-    /// scale and what a held part has not,
+    /// scale and a held joint's rotate and what a held part has not,
     /// why it shows no handles with several selected — it acts on one entity
     /// — `usage` when the selection has the field, and why it shows no handles
     /// when it does not — it has nothing to `verb`.
@@ -412,22 +428,18 @@ impl<S: Shell + ?Sized> Editor<S> {
             gizmo::Mode::Rotate => "Rotate",
         };
         if let Some((part, _)) = self.held_part() {
-            let noun = match part {
-                Part::Body(_) => "body",
-                Part::Joint(_) => "joint",
-            };
             return match (mode, part) {
-                (gizmo::Mode::Scale, Part::Body(_)) => (usage, Tone::Info),
                 (gizmo::Mode::Scale, Part::Joint(_)) => (
                     format!("{label}: a held rig joint has no size; translate's arrows move it"),
                     Tone::Warning,
                 ),
-                _ => (
+                (gizmo::Mode::Rotate, Part::Body(_)) => (
                     format!(
-                        "{label}: a held rig {noun} has no rings; {verb} its axis in the inspector"
+                        "{label}: a held rig body has no rings; {verb} its axis in the inspector"
                     ),
                     Tone::Warning,
                 ),
+                _ => (usage, Tone::Info),
             };
         }
         let count = self.document.selection().len();
