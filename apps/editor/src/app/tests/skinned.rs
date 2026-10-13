@@ -728,3 +728,53 @@ fn placement_rows_move_the_bodies_and_joints() {
     let file = crcbl::ragdoll::RagdollDesc::from_ron(&written).expect("a rig file");
     assert_eq!(file, after, "the file is not the rig edited");
 }
+
+/// **The rig section's Undo and Redo step the rig's own history and write
+/// it**: a written drag is one step, Undo puts the mass back in the rig drawn
+/// and in the file, Redo puts the edit back, and each button is there only
+/// with a step to take.
+#[test]
+fn the_rig_section_undoes_and_redoes_its_edits() {
+    let (dir, mut editor) = rig_on_disk();
+    editor.frame().expect("the inspector draws the rig");
+    assert_eq!(
+        editor.panels.rig_history_buttons(),
+        (None, None),
+        "nothing to step yet"
+    );
+    let (before, _) = first_mass(&editor);
+    let rows = editor
+        .panels
+        .rig_body_fields(0)
+        .expect("the inspector drew the rig's bodies");
+    let at = centre(&editor, widget_labelled(&editor, rows, "Mass (kg)"));
+    drag_through(&mut editor, at, &[12.0, 30.0]);
+    // The release wrote the rig after the panels were built: the next frame
+    // draws the step it made.
+    editor.frame().expect("a frame");
+    let (edited, _) = first_mass(&editor);
+    assert!(edited > before, "the drag moved no mass");
+    let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+    let file_mass = || {
+        let written = std::fs::read_to_string(&path).expect("the rig was written");
+        crcbl::ragdoll::RagdollDesc::from_ron(&written)
+            .expect("a rig file")
+            .bodies[0]
+            .mass
+    };
+
+    let (undo, redo) = editor.panels.rig_history_buttons();
+    assert!(redo.is_none(), "nothing undone yet");
+    let at = centre(&editor, undo.expect("a step back"));
+    click(&mut editor, at);
+    assert_eq!(first_mass(&editor), (before, before), "undone in the rig");
+    assert_eq!(file_mass(), before, "undone in the file");
+    assert!(editor.panels.status().0.starts_with("Undid"));
+
+    let (undo, redo) = editor.panels.rig_history_buttons();
+    assert!(undo.is_none(), "the one step is taken");
+    let at = centre(&editor, redo.expect("a step forward"));
+    click(&mut editor, at);
+    assert_eq!(first_mass(&editor), (edited, edited), "redone in the rig");
+    assert_eq!(file_mass(), edited, "redone in the file");
+}

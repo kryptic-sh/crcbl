@@ -237,10 +237,16 @@ What rig editing still lacks, none of it requested yet:
   inspector rows of three numbers, and an axis row is the file's raw vector (the
   rig normalises it; a zero one is refused). Dragging a body into place or
   turning an axis in the viewport would take a gizmo on the selected body.
-- **The rig's edits are outside the scene's history**: Ctrl+Z does not undo
-  them, because the rig is the asset's file and the history is the scene's. The
-  file is the record (and version control its history). An asset-side history
-  would have to say what undo means across the two.
+- **Decided (2026-10-13): rig edits have a history of their own, not Ctrl+Z's.**
+  The rig section's Undo and Redo step it
+  (`apps/editor/src/app/rig_history.rs`). Folding rig edits into the scene's
+  history was declined: in a joined editor that history is the server's, so one
+  key would undo a shared scene one press and a local file the next, and the
+  document has no revision a combined timeline could order against. What the rig
+  history does not do: it lasts as long as the editor, not the file; an edit
+  made to the file outside the editor is stepped over rather than recorded; and
+  its buttons appear a frame after the write that makes a step, since the
+  release writes after the panels are built.
 - **Writing rewrites the whole file** through `RagdollDesc::to_ron`, so a
   comment or layout a person gave it is lost on the first inspector edit.
 - **The listed pairs (`ignore`) have no rows**: a list is not a thing

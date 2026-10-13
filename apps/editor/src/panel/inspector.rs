@@ -43,13 +43,13 @@
 //! shows degrees and writes all four leaves when one angle moves.
 //!
 //! **A rigged mesh's ragdoll rig follows its components** (`super::rig`): a
-//! section per body and per joint, edited outside the scene's history because
-//! the rig is the asset's file, not the scene's.
+//! section for the rig and one per body and per joint, edited outside the
+//! scene's history because the rig is the asset's file, not the scene's; the
+//! rig section's Undo and Redo step the rig's own.
 
 use std::cell::RefCell;
 
 use crcbl::math::{DQuat, EulerRot};
-use crcbl::ragdoll::RagdollDesc;
 use crcbl::reflect::Value;
 use crcbl::registry::Rotation;
 use crcbl::scene::scn::SceneEntityId;
@@ -127,7 +127,7 @@ pub(super) fn build(
     selected: Option<SceneEntityId>,
     label: &str,
     overrides: &Overrides,
-    rig: Option<&mut RagdollDesc>,
+    rig: Option<super::RigEdit<'_>>,
 ) -> Built {
     let mut built = Built::default();
     ui.block(".editor-panel", &[], |ui| {

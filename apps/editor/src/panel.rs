@@ -143,7 +143,6 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crcbl::math::Vec2;
-use crcbl::ragdoll::RagdollDesc;
 use crcbl::registry::PlayControls;
 use crcbl::scene::scn::SceneEntityId;
 use crcbl::ui::style::Declaration;
@@ -169,6 +168,7 @@ mod unsaved;
 
 pub use path_line::Purpose;
 pub use recovery::RecoveryAnswer;
+pub use rig::RigEdit;
 pub use unsaved::Asking;
 
 /// The name the viewport pane's picture goes by in the panels' draw list —
@@ -453,6 +453,10 @@ pub struct PanelFrame {
     /// [`Panels::frame_with_rig`] moved this frame, so the rig changed — for
     /// the caller to resolve and write. See `rig`'s module docs.
     pub rig_edited: bool,
+    /// Whether the rig section's Undo was clicked this frame.
+    pub rig_undo: bool,
+    /// Whether the rig section's Redo was clicked this frame.
+    pub rig_redo: bool,
 }
 
 /// The inspector's sections, add buttons and add-list headings, as a frame
@@ -1038,6 +1042,15 @@ impl Panels {
         self.inspector.rig.rig
     }
 
+    /// The rig section's Undo and Redo buttons, as the last frame drew them.
+    #[cfg(test)]
+    pub(crate) fn rig_history_buttons(&self) -> (Option<NodeKey>, Option<NodeKey>) {
+        (
+            self.inspector.rig.undo_button,
+            self.inspector.rig.redo_button,
+        )
+    }
+
     /// The rows of the `index`th body of the ragdoll rig the last frame drew,
     /// or [`None`] past the last.
     #[cfg(test)]
@@ -1179,12 +1192,14 @@ impl Panels {
 
     /// [`frame`](Self::frame), with the selection's ragdoll `rig` drawn in the
     /// inspector under its components and edited in place —
-    /// [`PanelFrame::rig_edited`] says when it was.
+    /// [`PanelFrame::rig_edited`] says when it was, and
+    /// [`PanelFrame::rig_undo`] and [`PanelFrame::rig_redo`] when its history
+    /// was asked to step.
     pub fn frame_with_rig(
         &mut self,
         document: &mut Document,
         mut input: PanelInput,
-        mut rig: Option<&mut RagdollDesc>,
+        mut rig: Option<RigEdit<'_>>,
     ) -> PanelFrame {
         self.hold_for_unsaved(&mut input);
         self.refresh(document);
@@ -1351,7 +1366,7 @@ impl Panels {
             environment_field,
             rig,
         } = built;
-        let rig_edited = rig.edited;
+        let (rig_edited, rig_undo, rig_redo) = (rig.edited, rig.undo, rig.redo);
         self.props_key = props;
         self.inspector = Inspected {
             sections,
@@ -1437,6 +1452,8 @@ impl Panels {
             menu: row_menu.picked,
             add,
             rig_edited,
+            rig_undo,
+            rig_redo,
         }
     }
 

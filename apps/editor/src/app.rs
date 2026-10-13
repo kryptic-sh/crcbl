@@ -113,6 +113,7 @@ use crcbl::engine::{
 use crcbl::hal::{CommandEncoderDesc, ImageUsage};
 use crcbl::input::ActionMap;
 use crcbl::math::{Vec2, Vec3};
+use crcbl::ragdoll::RagdollDesc;
 use crcbl::reflect::Value;
 use crcbl::render::grid::GridStyle;
 use crcbl::render::{
@@ -137,7 +138,7 @@ use crate::document::{
 use crate::gizmo;
 use crate::keys::Action;
 use crate::layout;
-use crate::panel::{FieldTarget, PanelInput, Panels, Tone, VIEWPORT_TEXTURE};
+use crate::panel::{FieldTarget, PanelInput, Panels, RigEdit, Tone, VIEWPORT_TEXTURE};
 
 mod assets;
 mod drop;
@@ -147,6 +148,7 @@ mod instances;
 mod join;
 mod meshes;
 mod recovery;
+mod rig_history;
 mod skins;
 mod unsaved;
 mod watch;
@@ -320,6 +322,9 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// not been written since: written once the pointer lets go, so a drag
     /// writes the file once and not every frame it moves.
     rig_unwritten: Option<String>,
+    /// Each rig's edits, stepped by its inspector section's Undo and Redo
+    /// apart from the scene's history.
+    rig_history: rig_history::RigHistory,
     /// The served scene this editor has joined, whose copy is the document,
     /// or [`None`] for a document of its own — see `join`.
     joined: Option<Box<join::Joined>>,
@@ -547,6 +552,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             closing: false,
             rebuild_due: false,
             rig_unwritten: None,
+            rig_history: rig_history::RigHistory::default(),
             joined: None,
             disk,
         })
@@ -728,17 +734,33 @@ impl<S: Shell + ?Sized> Editor<S> {
                 wheel_pixels(&pending)
             },
         };
-        // The selection's rig, which the inspector edits in place.
+        // The selection's rig, which the inspector edits in place, and the
+        // rig going into the frame, which an edit's step back starts from.
         let rigged = self.rigged_selection();
-        let rig = rigged
+        let (can_undo, can_redo) = rigged.as_deref().map_or((false, false), |asset| {
+            (
+                self.rig_history.can_undo(asset),
+                self.rig_history.can_redo(asset),
+            )
+        });
+        let desc = rigged
             .as_deref()
             .and_then(|asset| self.shelf.rig_mut(asset))
             .and_then(|rig| rig.desc.as_mut());
+        let before = desc.as_deref().cloned();
+        let rig = desc.map(|desc| RigEdit {
+            desc,
+            can_undo,
+            can_redo,
+        });
         let panels = self.panels.frame_with_rig(&mut self.document, input, rig);
-        if panels.rig_edited
-            && let Some(asset) = rigged
-        {
-            self.rig_edited(asset);
+        if let (Some(asset), Some(before)) = (rigged, before) {
+            if panels.rig_edited {
+                self.rig_history.edited(&asset, &before);
+                self.rig_edited(asset);
+            } else if panels.rig_undo || panels.rig_redo {
+                self.step_rig(&asset, &before, panels.rig_undo);
+            }
         }
         if !pointer.down {
             self.write_edited_rig();
@@ -1468,7 +1490,46 @@ impl<S: Shell + ?Sized> Editor<S> {
             Ok(path)
         });
         let (text, tone) = match outcome {
-            Ok(path) => (format!("Wrote {}", path.display()), Tone::Info),
+            Ok(path) => {
+                self.rig_history.written(&asset);
+                (format!("Wrote {}", path.display()), Tone::Info)
+            }
+            Err(why) => (why, Tone::Warning),
+        };
+        self.panels.set_status(text, tone);
+    }
+
+    /// Steps `asset`'s rig back (`undo`) or forward through its history from
+    /// `present`, the rig going into this frame: the step is put in place,
+    /// resolved — it was written once, so it resolves — and written, and the
+    /// status line says which step was taken.
+    fn step_rig(&mut self, asset: &str, present: &RagdollDesc, undo: bool) {
+        let step = if undo {
+            self.rig_history.undo(asset, present)
+        } else {
+            self.rig_history.redo(asset, present)
+        };
+        let Some(step) = step else {
+            return;
+        };
+        let Some(rig) = self.shelf.rig_mut(asset) else {
+            return;
+        };
+        rig.desc = Some(step);
+        let outcome = rig.resolve().and_then(|()| {
+            let path = self.rig_path(asset)?;
+            self.write_rig_file(asset, &path)?;
+            Ok(path)
+        });
+        self.rig_unwritten = None;
+        let (text, tone) = match outcome {
+            Ok(path) => {
+                let done = if undo { "Undid" } else { "Redid" };
+                (
+                    format!("{done} a rig edit; wrote {}", path.display()),
+                    Tone::Info,
+                )
+            }
             Err(why) => (why, Tone::Warning),
         };
         self.panels.set_status(text, tone);

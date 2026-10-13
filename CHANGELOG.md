@@ -913,7 +913,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   degrees), friction, axis and offset — resolving each edit at once and writing
   the file when the pointer lets go; an edit the rig cannot resolve is refused
   on the status line and not written. A shape switched keeps the body's size,
-  and a joint switched between ball and hinge keeps its swing.
+  and a joint switched between ball and hinge keeps its swing. The rig section's
+  Undo and Redo step the rig's own history — each written edit a step, written
+  again when stepped — apart from the scene's Ctrl+Z.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned

@@ -10,6 +10,11 @@
 //! [`crcbl::reflect`] reads. An axis is three numbers, which the rig resolves
 //! to a direction (a zero one is refused); the viewport has no handle for it.
 //!
+//! **The rig section's Undo and Redo step the rig's own history**, which
+//! `crate::app` keeps apart from the scene's: the rig is the asset's file,
+//! and Ctrl+Z is the scene's. Each button is drawn only when there is a step
+//! to take — the panels have no disabled button.
+//!
 //! The rows are a view of the file's [`RagdollDesc`], not the file's own types:
 //! [`crcbl::reflect`] reads neither a tuple nor a list, and a limit reads in
 //! degrees where the file holds radians. The view is made afresh each frame
@@ -114,11 +119,31 @@ enum Kind {
     Fixed,
 }
 
+/// The selection's rig as the inspector is handed it: the file to edit in
+/// place, and whether its history has a step back and a step forward.
+#[derive(Debug)]
+pub struct RigEdit<'a> {
+    /// The rig file, edited in place.
+    pub desc: &'a mut RagdollDesc,
+    /// Whether an edit can be undone: what draws the Undo button.
+    pub can_undo: bool,
+    /// Whether an undone edit can be redone: what draws the Redo button.
+    pub can_redo: bool,
+}
+
 /// What [`build`] drew.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Built {
     /// The whole rig's rows, once drawn.
     pub(super) rig: Option<NodeKey>,
+    /// The Undo button, when drawn.
+    pub(super) undo_button: Option<NodeKey>,
+    /// The Redo button, when drawn.
+    pub(super) redo_button: Option<NodeKey>,
+    /// Whether Undo was clicked this frame.
+    pub(super) undo: bool,
+    /// Whether Redo was clicked this frame.
+    pub(super) redo: bool,
     /// Each body's rows — its inspector block — in the rig's order.
     pub(super) bodies: Vec<NodeKey>,
     /// Each joint's rows, in the rig's order.
@@ -127,13 +152,26 @@ pub(super) struct Built {
     pub(super) edited: bool,
 }
 
-/// Draws `rig`'s sections and writes back what their rows moved — see the
+/// Draws `edit`'s sections and writes back what their rows moved — see the
 /// [module docs](self).
-pub(super) fn build(ui: &mut Ui, rig: &mut RagdollDesc, options: &InspectorOptions<'_>) -> Built {
+pub(super) fn build(ui: &mut Ui, edit: RigEdit<'_>, options: &InspectorOptions<'_>) -> Built {
     let mut built = Built::default();
+    let rig = edit.desc;
     ui.block_keyed("ragdoll-rig", ".inspector-section", &[], |ui| {
         ui.block(".section-head", &[], |ui| {
             ui.span(".section-title", "Ragdoll rig", &[]);
+            if edit.can_undo {
+                let button = ui.button(".section-remove", "Undo");
+                ui.tooltip(&button, "Undo the rig's last edit, and write it");
+                built.undo = button.clicked;
+                built.undo_button = Some(button.key);
+            }
+            if edit.can_redo {
+                let button = ui.button(".section-remove", "Redo");
+                ui.tooltip(&button, "Redo the rig's edit last undone, and write it");
+                built.redo = button.clicked;
+                built.redo_button = Some(button.key);
+            }
         });
         let before = RigRows {
             ignore_rest_overlaps: rig.ignore_rest_overlaps,
