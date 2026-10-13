@@ -2335,7 +2335,7 @@ jobs:
       # and exports the variable itself, so a registration that silently did not
       # happen is a failed step rather than a suite that runs with no layer.
       - name: Install the pinned LunarG Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@v1.6.0
+        uses: jakoch/install-vulkan-sdk-action@v1.7.0
         with:
           vulkan_version: ${{ env.VULKAN_SDK_VERSION }}
           install_runtime: true
