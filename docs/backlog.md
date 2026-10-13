@@ -250,8 +250,15 @@ What rig editing still lacks, none of it requested yet:
   made to the file outside the editor is stepped over rather than recorded; and
   its buttons appear a frame after the write that makes a step, since the
   release writes after the panels are built.
-- **Writing rewrites the whole file** through `RagdollDesc::to_ron`, so a
-  comment or layout a person gave it is lost on the first inspector edit.
+- **Decided (2026-10-13): an inspector edit rewrites the whole rig file**
+  through `RagdollDesc::to_ron`, so a comment or layout a person gave it is lost
+  on the first edit. Keeping them was declined: the `ron` crate reads to values
+  and writes them back with no record of comments or spacing, so preserving them
+  would mean a hand-written editor of RON text spans beside the parser — the
+  kind of code that is wrong in a case nobody tried, for files the editor now
+  authors whole (Shift+G starts one, and every field has a row). The status line
+  warns when the file a write replaced held a comment (`meshes::holds_comment`).
+  Revisit if a rig is found to need notes the file cannot carry another way.
 - **The listed pairs are a section of their own, not reflected rows** (`pairs`
   in `apps/editor/src/panel/rig.rs`): `crcbl::reflect` reads no list, so each
   pair is a line with a Remove button and a drop-down offers every pair not

@@ -370,6 +370,33 @@ fn authored(
     }
 }
 
+/// Whether a rig file's `text` holds a RON comment, `//` or `/*`, outside a
+/// string: what writing the rig whole would lose.
+///
+/// Plain strings are skipped, escapes and all; a raw string or a character
+/// literal is not told apart, so one holding a quote can be misread. A rig
+/// file has neither — its only text is bone names, in plain strings — and a
+/// misreading only warns.
+pub(super) fn holds_comment(text: &str) -> bool {
+    let mut chars = text.chars();
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if in_string => {
+                chars.next();
+            }
+            '"' => in_string = !in_string,
+            '/' if !in_string => {
+                if matches!(chars.clone().next(), Some('/' | '*')) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// `material` with no page: what it shades as by its factors — see the
 /// [module docs](self).
 fn by_factors(material: GpuMaterial) -> GpuMaterial {

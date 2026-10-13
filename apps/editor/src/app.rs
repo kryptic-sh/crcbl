@@ -1417,6 +1417,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                 path.display()
             ));
         }
+        // Nothing was there, so no comment was lost.
         self.write_rig_file(&asset, &path)?;
         // The next draw reads it back as the authored rig.
         self.rebuild_due = true;
@@ -1446,8 +1447,9 @@ impl<S: Shell + ?Sized> Editor<S> {
     }
 
     /// Writes `asset`'s rig as its file spells it to `path`, over whatever is
-    /// there.
-    fn write_rig_file(&self, asset: &str, path: &std::path::Path) -> Result<(), String> {
+    /// there, and says whether what was there held a comment: the file is
+    /// written whole from the rig, which keeps none.
+    fn write_rig_file(&self, asset: &str, path: &std::path::Path) -> Result<bool, String> {
         let desc = self
             .shelf
             .rig(asset)
@@ -1455,7 +1457,11 @@ impl<S: Shell + ?Sized> Editor<S> {
             .desc
             .as_ref()
             .ok_or_else(|| format!("`{asset}` has no ragdoll rig to write"))?;
-        std::fs::write(path, desc.to_ron()).map_err(|error| format!("{}: {error}", path.display()))
+        let held_comments =
+            std::fs::read_to_string(path).is_ok_and(|text| meshes::holds_comment(&text));
+        std::fs::write(path, desc.to_ron())
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        Ok(held_comments)
     }
 
     /// Resolves `asset`'s rig again after the inspector changed it, so the
@@ -1487,13 +1493,13 @@ impl<S: Shell + ?Sized> Editor<S> {
             return;
         };
         let outcome = self.rig_path(&asset).and_then(|path| {
-            self.write_rig_file(&asset, &path)?;
-            Ok(path)
+            let lost = self.write_rig_file(&asset, &path)?;
+            Ok((path, lost))
         });
         let (text, tone) = match outcome {
-            Ok(path) => {
+            Ok((path, lost)) => {
                 self.rig_history.written(&asset);
-                (format!("Wrote {}", path.display()), Tone::Info)
+                wrote(format!("Wrote {}", path.display()), lost)
             }
             Err(why) => (why, Tone::Warning),
         };
@@ -1519,17 +1525,14 @@ impl<S: Shell + ?Sized> Editor<S> {
         rig.desc = Some(step);
         let outcome = rig.resolve().and_then(|()| {
             let path = self.rig_path(asset)?;
-            self.write_rig_file(asset, &path)?;
-            Ok(path)
+            let lost = self.write_rig_file(asset, &path)?;
+            Ok((path, lost))
         });
         self.rig_unwritten = None;
         let (text, tone) = match outcome {
-            Ok(path) => {
+            Ok((path, lost)) => {
                 let done = if undo { "Undid" } else { "Redid" };
-                (
-                    format!("{done} a rig edit; wrote {}", path.display()),
-                    Tone::Info,
-                )
+                wrote(format!("{done} a rig edit; wrote {}", path.display()), lost)
             }
             Err(why) => (why, Tone::Warning),
         };
@@ -1824,6 +1827,20 @@ const REFUSAL_SEPARATOR: &str = "; ";
 /// the rest: enough that the usual one or two are each told, few enough that
 /// a burst stays one readable line.
 const REFUSALS_SHOWN: usize = 3;
+
+/// The status line after a rig file was written, `done` saying what was
+/// done: a warning when the file it replaced held a comment (`lost`), which
+/// the write did not keep.
+fn wrote(done: String, lost: bool) -> (String, Tone) {
+    if lost {
+        (
+            format!("{done}; the comments it held are gone, as the rig is written whole"),
+            Tone::Warning,
+        )
+    } else {
+        (done, Tone::Info)
+    }
+}
 
 /// What the status line says for the refusals one frame's ticks brought, in
 /// the order the game made them: the first [`REFUSALS_SHOWN`] reasons after

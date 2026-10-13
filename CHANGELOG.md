@@ -915,10 +915,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   axis and offset, and the listed pairs that never collide (each with a Remove
   button, and a drop-down of the pairs not listed) — resolving each edit at once
   and writing the file when the pointer lets go; an edit the rig cannot resolve
-  is refused on the status line and not written. A shape switched keeps the
-  body's size, and a joint switched between ball and hinge keeps its swing. The
-  rig section's Undo and Redo step the rig's own history — each written edit a
-  step, written again when stepped — apart from the scene's Ctrl+Z.
+  is refused on the status line and not written. The file is written whole, so a
+  comment a person added is dropped, and the status line warns when one was. A
+  shape switched keeps the body's size, and a joint switched between ball and
+  hinge keeps its swing. The rig section's Undo and Redo step the rig's own
+  history — each written edit a step, written again when stepped — apart from
+  the scene's Ctrl+Z.
 
 - **`crcbl::scene_rig` turns a glTF skin into an animation skeleton** (behind
   the `scene` feature): `skeleton_of`, in the skin's own joint order so skinned

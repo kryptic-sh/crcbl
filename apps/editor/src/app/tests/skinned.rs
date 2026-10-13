@@ -911,3 +911,47 @@ fn rig_pairs_are_listed_and_removed() {
     assert!(desc(&editor).ignore.is_empty(), "still listed in the rig");
     assert!(file().is_empty(), "still listed in the file");
 }
+
+/// **An edit over a file a person commented warns that the comments are
+/// gone**, since the rig is written whole; the next edit, over the file the
+/// editor wrote, says only that it wrote it.
+#[test]
+fn writing_over_a_commented_rig_file_warns() {
+    let (dir, mut editor) = rig_on_disk();
+    editor.act(&Action::WriteRig);
+    let path = dir.path().join(format!("{RIG}.ragdoll.ron"));
+    let written = std::fs::read_to_string(&path).expect("the rig was written");
+    std::fs::write(
+        &path,
+        format!(
+            "// tuned by hand
+{written}"
+        ),
+    )
+    .expect("commented");
+    editor
+        .frame()
+        .expect("the inspector draws the rig read back");
+    let rows = |editor: &Editor<HeadlessShell>| {
+        editor
+            .panels
+            .rig_fields()
+            .expect("the inspector drew the rig's rows")
+    };
+    let switch = |editor: &mut Editor<HeadlessShell>| {
+        let at = centre(
+            editor,
+            widget_labelled(editor, rows(editor), "Ignore rest overlaps"),
+        );
+        click(editor, at);
+        let (text, tone) = editor.panels.status();
+        (text.to_owned(), tone)
+    };
+
+    let (text, tone) = switch(&mut editor);
+    assert_eq!(tone, Tone::Warning, "{text}");
+    assert!(text.contains("comments"), "{text}");
+    let (text, tone) = switch(&mut editor);
+    assert_eq!(tone, Tone::Info, "{text}");
+    assert!(text.starts_with("Wrote"), "{text}");
+}

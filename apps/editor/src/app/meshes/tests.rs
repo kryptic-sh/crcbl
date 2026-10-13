@@ -166,3 +166,17 @@ fn an_authored_rig_replaces_the_fitted_one() {
         "a broken file leaves the fitted rig: {fitted:?}"
     );
 }
+
+/// **A comment is found outside a string and not inside one**: either form,
+/// at the end of a line or alone; a slash pair in a bone's name, or after an
+/// escaped quote inside one, is the name's.
+#[test]
+fn a_comment_is_told_from_a_string() {
+    use super::holds_comment;
+    assert!(holds_comment("(substeps: 4) // tuned by hand"));
+    assert!(holds_comment("/* the hips */ (bone: \"hips\")"));
+    assert!(!holds_comment("(bone: \"hips\", mass: 9.0)"));
+    assert!(!holds_comment("(bone: \"arm//left\")"));
+    assert!(!holds_comment(r#"(bone: "a\"//b")"#));
+    assert!(!holds_comment("(scale: 1.0 / 2.0)"));
+}
