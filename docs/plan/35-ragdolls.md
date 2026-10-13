@@ -9,25 +9,15 @@ must land in the _same place_ for everyone.
 **Depends on** the contact solver (36, L2) for bodies-vs-world and L3 joints for
 the articulation — ragdolls are the flagship consumer of both.
 
-**The pose bridge is available; the full ragdoll remains unbuilt.**
-`crcbl-anim::ragdoll::RagdollBinding` captures joint/body offsets from the last
-animated pose and reconstructs local transforms from rigid-body world poses. It
-retains skeleton scale and unmapped child transforms, and rejects an
-unrepresentable pose without partially changing the output. Workspace and native
-CI validation are tracked in `docs/backlog.md`.
-
-`crcbl-phys` already has the contact solver, rotational dynamics, joints
-(`SphericalJoint` with cone and twist limits, `RevoluteJoint` with limits,
-breakable joints) and `KineticContact`. `apps/tumble`'s Bridge room assembles
-capsule ragdolls pushed down stairs (`apps/tumble/src/bridge.rs`). Authored
-mapping assets, body generation and the complete death-event handoff, skinned
-solver integration, the server/client split and settle blending below remain to
-be implemented; the pose bridge alone does not provide them. The bridge's
-`motion_from_previous_pose` derives initial world velocities from consecutive
-animated samples; its workspace and native validation are tracked alongside the
-pose bridge in the backlog. `PhysicsSystem::apply_impulse_at` supplies the
-point-impulse primitive for newly created limb bodies; selecting those bodies
-and consuming the death event are still caller responsibilities.
+**Built in `crcbl-ragdoll` (`crcbl::ragdoll`), with the editor preview in
+`apps/editor`.** The authored rig (`RagdollDesc`) and its fitted fallback
+(`RagdollRig::generate`), the death handoff from the last animated pose
+(`Ragdoll::spawn`, `strike_with`), skinning from the bodies (`pose_into`), the
+settled pose's wire form and the client's soft pull (`SettledPose`, `settle_to`,
+`pull_towards`), budgets and forced settling (`SettleBudget`, `force_settle`),
+substep LOD (`set_substeps`) and the rise point (`rise_point`) exist. What is
+left, and why, is in `docs/backlog.md` under "HIGH PRIORITY: EW engine
+requirements"; the sections below are the design those pieces follow.
 
 ## The split: server settles, client performs
 

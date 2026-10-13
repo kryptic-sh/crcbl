@@ -456,3 +456,63 @@ fn a_detailed_client_converges_on_a_simplified_server() {
         "the pull did not narrow the landing: {pulled_peak} vs {loose_peak}"
     );
 }
+
+/// Every body's position and rotation, as bits, after each of `ticks` steps
+/// of a ragdoll spawned running and struck off-centre on the head, from a rig
+/// and a world of its own.
+fn struck_run(ticks: usize, blow: DVec3) -> Vec<Vec<[u64; 7]>> {
+    let rig = rig();
+    let mut physics = world();
+    let ragdoll = spawn_running(&mut physics, &rig);
+    let head = ragdoll.entities()[rig
+        .bodies()
+        .iter()
+        .position(|body| body.joint == index("head"))
+        .expect("a head")];
+    let point = body_world(&physics, head).position + DVec3::new(0.02, 0.03, 0.0);
+    physics
+        .apply_impulse_at(head, blow, point)
+        .expect("the head takes the blow");
+    (0..ticks)
+        .map(|_| {
+            physics.step(DT);
+            ragdoll
+                .entities()
+                .iter()
+                .map(|&entity| {
+                    let Transform {
+                        position: p,
+                        rotation: r,
+                        ..
+                    } = body_world(&physics, entity);
+                    [p.x, p.y, p.z, r.x, r.y, r.z, r.w].map(f64::to_bits)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// **One death steps to the same bits every time**: two runs, each with its
+/// rig generated and its world built afresh, agree on every body's pose at
+/// every tick to the last bit — what lets the server's ragdoll ride the tick
+/// hash. Each run's hash maps are seeded apart, so an order one leaked into
+/// the solve would show here. A blow one bit harder shows that the bits are
+/// what is compared.
+#[test]
+fn one_death_steps_to_the_same_bits() {
+    const TICKS: usize = 180;
+    let blow = DVec3::NEG_Z * 20.0;
+    let first = struck_run(TICKS, blow);
+    let second = struck_run(TICKS, blow);
+    assert_eq!(first.len(), TICKS);
+    assert_ne!(first[0], first[TICKS - 1], "the bodies never moved");
+    if let Some(tick) = (0..TICKS).find(|&tick| first[tick] != second[tick]) {
+        panic!("the runs part at tick {tick}");
+    }
+    let harder = DVec3::new(0.0, 0.0, f64::from_bits(blow.z.to_bits() + 1));
+    assert_ne!(
+        struck_run(TICKS, harder),
+        first,
+        "a harder blow changed nothing"
+    );
+}

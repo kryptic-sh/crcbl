@@ -24,9 +24,12 @@ than EW assets or an EW checkout.
   `PhysicsSystem::ignore_contacts` was added for limb pairs that overlap without
   a joint. The synthetic humanoid in `crates/crcbl-ragdoll/tests/` covers spawn
   velocity, joint anchors at a bent pose, a head strike, falling, skinning
-  against the bodies every tick, an energy bound and settling, with each
-  mechanism mutation-checked locally on Windows. Native CI for the crate is
-  pending at the time of writing. EW adoption is not verified.
+  against the bodies every tick, an energy bound, settling, and one death
+  stepping to the same bits in two runs (`one_death_steps_to_the_same_bits`),
+  with each mechanism mutation-checked locally on Windows. The plan's "stable
+  across thread counts" holds by construction rather than by test: a
+  `PhysicsSystem` steps on one thread. Native CI for the crate is pending at the
+  time of writing. EW adoption is not verified.
 
   Remaining engine work:
   - End-to-end terrain falling/settling with rendered (GPU-skinned) limbs
