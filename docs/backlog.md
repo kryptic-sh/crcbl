@@ -442,9 +442,11 @@ has ever run.
 
 Needed from the owner before the first tag:
 
-- The org secrets `CARGO_REGISTRY_TOKEN`, `AUR_SSH_KEY`, `BREW_SSH_KEY` and
-  `SCOOP_SSH_KEY` made available to this repository. Every crate name was
-  checked free on crates.io on 2026-10-15; nothing reserves them.
+- Nothing for the secrets: `CARGO_REGISTRY_TOKEN` and `SCOOP_SSH_KEY` are
+  visible to every org repository, and crcbl was added to `AUR_SSH_KEY`'s and
+  `BREW_SSH_KEY`'s selected repositories on 2026-10-15. Whether the token can
+  create crates under these names is unproven until the first publish. Every
+  crate name was checked free on crates.io that day; nothing reserves them.
 - Optionally, ask crates.io to raise the new-crate limit: the first publish
   creates every crate and can outlast the runner (`docs/notes/ci.md` has the
   numbers). Without it, re-run the timed-out `publish-crates` job; it resumes.
