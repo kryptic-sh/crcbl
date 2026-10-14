@@ -869,6 +869,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A release pipeline: a `v*` tag publishes the engine.** `ci.yml` builds the
+  `crcbl` binary for Linux (x86_64 and aarch64, with `.deb` and `.rpm`), Windows
+  and macOS (Apple silicon and Intel), publishes a GitHub Release with each
+  archive's `.sha256`, uploads every library crate to crates.io in dependency
+  order (`tools/publish-crates.sh`), and pushes the binary to the AUR
+  (`crcbl-bin`), the kryptic-sh Homebrew tap and the Scoop bucket, from the
+  templates in `pkg/`. Every publish job waits on every check job, and
+  `tag-release-status` fails a tag whose release did not complete. The library
+  crates now package cleanly: internal dev-dependencies are path-only, so
+  `cargo publish` strips them, and `crcbl-cli` is `publish = false` because it
+  depends on the editor. Two new jobs run on every push: `package` packs and
+  builds each crate from its own tarball and checks the publish order
+  (`tools/check-publish-order.sh`), and `build` makes the release binaries, so a
+  crate that stopped packaging fails main rather than a release. No tag has been
+  cut.
+
 - **`Ragdoll::rise_point`** answers where a character standing up from a corpse
   would stand: the capsule centre under the hips, found by the character
   controller's own solve, or a `RiseError` for no ground, a push from a wall

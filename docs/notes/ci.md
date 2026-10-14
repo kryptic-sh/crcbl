@@ -1155,3 +1155,23 @@ budget: `.config/nextest.toml` groups every `win32::shell::tests::` test into
 the entry above — is the same shared-desktop problem and is covered by the same
 group. What remains is contention from processes that are not ours, which the
 tests' retry budgets already exist for.
+
+## The release pipeline's first publish can outlast its runner (2026-10-15)
+
+`ci.yml`'s `publish-crates` uploads every library crate in
+`tools/check-publish-order.sh`'s order. crates.io's own defaults
+(`src/rate_limiter.rs` in rust-lang/crates.io, read 2026-10-15) let a _new_
+crate through at a burst of 5 and then one every 10 minutes, and a new version
+of an existing crate at a burst of 30 and then one a minute. The first release
+creates every crate, so all but the burst wait out the new-crate interval, and
+that total is close to the six hours a hosted runner allows: the job's
+`timeout-minutes` is that cap, and `tools/publish-crates.sh` skips a crate
+already on crates.io at this version, so a re-run of a timed-out job resumes
+where it stopped. Every later release publishes versions, not crates, and fits
+easily. crates.io raises a project's limits on request, which would make the
+first run fit in one go.
+
+`--no-verify` on the uploads is deliberate: `package`, which every publish job
+waits on, has already built each crate from its own tarball against the others'
+on the same commit. Verifying again would spend the rate-limited job's hours
+recompiling the engine one crate at a time.

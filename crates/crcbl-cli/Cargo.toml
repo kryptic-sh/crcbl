@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 # Not on crates.io: `editor` is a dependency, and the editor depends on the
 # games whose scenes it edits, none of which publish. The binary ships through
-# release archives instead, built from this repository.
+# release archives and the package channels instead (`ci.yml`'s `build`).
 publish = false
 
 # The package is `crcbl-cli` so it does not collide with the `crcbl` umbrella
@@ -19,6 +19,31 @@ path = "src/main.rs"
 # write `target/doc/crcbl/index.html` (rust-lang/cargo#6313). The library's docs
 # are the ones worth publishing; the CLI documents itself through `--help`.
 doc = false
+
+# The `.deb` and `.rpm` that `ci.yml`'s `build` makes from the release binary.
+# Their run-time dependencies are worked out from the binary's own links
+# (cargo-deb's `$auto`, cargo-generate-rpm's `auto-req`), which is what puts
+# ALSA in them; `install-packages` proves it by installing and running them.
+[package.metadata.deb]
+name = "crcbl"
+maintainer = "mxaddict <mxaddict@kryptic.sh>"
+copyright = "2026, mxaddict <mxaddict@kryptic.sh>"
+extended-description = "crcbl: the Crucible engine's headless control CLI. Scaffolds, runs and builds a game project, renders screenshots offscreen, and reads and edits scenes, saves and settings."
+section = "devel"
+priority = "optional"
+assets = [
+  ["target/release/crcbl", "usr/bin/", "755"],
+  ["../../README.md", "usr/share/doc/crcbl/README.md", "644"],
+  ["../../LICENSE", "usr/share/doc/crcbl/LICENSE", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "crcbl"
+assets = [
+  { source = "target/release/crcbl", dest = "/usr/bin/crcbl", mode = "755" },
+  { source = "README.md", dest = "/usr/share/doc/crcbl/README.md", mode = "644", doc = true },
+  { source = "LICENSE", dest = "/usr/share/licenses/crcbl/LICENSE", mode = "644", doc = true },
+]
 
 [features]
 # The scaffold end-to-end suite: `crcbl new` → the project compiles → it runs

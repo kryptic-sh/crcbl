@@ -430,6 +430,58 @@ validation before a reusable port can be specified. GPU residency likewise needs
 measured pressure and a proven game-local policy. Keep those decisions in EW's
 backlog; do not create speculative engine implementations for them.
 
+## The release pipeline: what a first tag still needs (2026-10-15)
+
+The owner asked, relayed by the lyr session, for a release pipeline matching
+tmxr's. `ci.yml` now carries it: the `package`, `build`, `install-packages`,
+`publish-github-release`, `publish-crates`, `aur-bin`, `brew-tap`,
+`scoop-bucket` and `tag-release-status` jobs, with `pkg/` and
+`tools/publish-crates.sh` and `tools/check-publish-order.sh`. lyr's release is
+blocked on crcbl being on crates.io. **No tag has been cut**, so no publish job
+has ever run.
+
+Needed from the owner before the first tag:
+
+- The org secrets `CARGO_REGISTRY_TOKEN`, `AUR_SSH_KEY`, `BREW_SSH_KEY` and
+  `SCOOP_SSH_KEY` made available to this repository. Every crate name was
+  checked free on crates.io on 2026-10-15; nothing reserves them.
+- Optionally, ask crates.io to raise the new-crate limit: the first publish
+  creates every crate and can outlast the runner (`docs/notes/ci.md` has the
+  numbers). Without it, re-run the timed-out `publish-crates` job; it resumes.
+- Cutting the tag, which BCTP does. The tag must equal the workspace version,
+  which `build` checks.
+
+Decided unasked, per the standing "pick the best long-term option" instruction:
+
+- **Every library member publishes; `crcbl-cli` does not.** Every library is
+  reachable from the `crcbl` umbrella, so a smaller set would leave the umbrella
+  unpublishable. The CLI depends on `editor`, which depends on the games. If the
+  owner wants `cargo install crcbl-cli`, the editor's scene vocabulary has to
+  move out of the games' reach first.
+- **The `crcbl` CLI is the only binary packaged.** The editor and the samples
+  are not. Packaging the editor is a separate call: it needs its assets beside
+  it and a desktop entry.
+- **Native Linux builds on Ubuntu 22.04, not zig cross-builds, and no musl or
+  Alpine.** The CLI links ALSA through cpal. A cross or musl build needs the
+  target's ALSA, and tmxr's `alpine` job has no counterpart here. 22.04 sets the
+  glibc floor.
+- `MACOSX_DEPLOYMENT_TARGET` is 11.0 for both macOS targets.
+
+Left open:
+
+- **Not verified until CI runs:** `package` on Linux (the local run was on
+  Windows, where every crate packaged and built from its tarball),
+  `ubuntu-22.04-arm`, the `.deb`/`.rpm` metadata in
+  `crates/crcbl-cli/ Cargo.toml`, and `install-packages`. The tag-only jobs are
+  unverified until a tag runs them.
+- **`crcbl new` scaffolds a path dependency** on an engine checkout
+  (`crates/crcbl-cli/src/new.rs`). Once the crates are on crates.io, a version
+  dependency is the natural default, and the packaged binary has no checkout.
+- **No crate sets `readme` or `rust-version`**, so each crates.io page has no
+  README, and older toolchains fail without naming the one they need. The
+  recommendation to lyr was `rust-version` equal to `rust-toolchain.toml`'s
+  channel.
+
 ## Requests from lyr and pikr: desktop-shell window kinds (2026-10-15)
 
 lyr (kryptic-sh/lyr, a status bar replacing waybar) and pikr (kryptic-sh/pikr, a
@@ -467,6 +519,27 @@ What they need that crcbl lacks, checked against 1db97a5b by reading the tree:
   `crcbl-render`, which pulls water, sprite (with png `load`), shaders, ron and
   serde. Recommended: split it into a small crate over hal, ui and shaders.
   Owner call.
+
+pikr's further needs are rows S16–S27 of lyr's joint table
+(`lyr/docs/plan/03-surfaces-and-input.md`), sent 2026-10-15. Missing from crcbl:
+
+- per-pixel alpha (S16)
+- focus events and first-key delivery on layer surfaces (S17)
+- a FreeBSD build (S18)
+- colour emoji with per-glyph font fallback (S22)
+- a GPU-less path (S26), with a documented failure the recommendation
+- a Win32 tool window that takes the foreground (S27)
+
+Partly present:
+
+- `wait_events` already takes a timeout (S19).
+- Cursor icons and the virtualised list exist; the scrollbar handle and wheel
+  path are unverified (S20).
+- Wayland has fractional-scale code (S21).
+- The stylesheet covers most of S23. Percent sizes and CSS-exact specificity are
+  unverified.
+- The image module (S24) and the Win32 clipboard read are unverified line by
+  line.
 
 Already present: clipboard on every backend (`ShellEvent::ClipboardData`), the
 virtualised fixed-height list (`widgets/list.rs`), caret and selection in

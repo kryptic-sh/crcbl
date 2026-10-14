@@ -4,10 +4,13 @@ on:
   pull_request:
   push:
     branches: [main]
+    # A `v*` tag is a release; the release jobs at the end of this file run
+    # only for one.
+    tags: ['v*']
   workflow_dispatch:
 
-# Least privilege by default; a future release job opts itself up to
-# `contents: write` at job level.
+# Least privilege by default; the release jobs that need it opt themselves up
+# to `contents: write` at job level.
 permissions:
   contents: read
 
@@ -39,7 +42,7 @@ concurrency:
     ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref
     }}
   # Never cancel a tag run mid-flight — a half-cancelled release is worse than a
-  # slow one. No tags exist yet; wiring it now costs nothing.
+  # slow one.
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 # Every job carries `timeout-minutes`. A wedged step otherwise burns the full
@@ -3152,3 +3155,472 @@ jobs:
           name: coverage-lcov
           path: lcov.info
           if-no-files-found: warn
+
+  # ── Release ───────────────────────────────────────────────────────────────
+  #
+  # The pipeline mirrors tmxr's (and through it hrdr's): a `v*` tag builds the
+  # `crcbl` binary for every target, publishes a GitHub Release, the library
+  # crates to crates.io, and the binary to AUR, Homebrew and Scoop. Every
+  # publish job waits on every check job above, and `tag-release-status` fails
+  # the tag's run if any of them did not succeed — a skipped publish otherwise
+  # reads as a green run. What a first tag still needs set up outside this
+  # repository is in `docs/backlog.md`, under the release pipeline.
+  #
+  # `package` and `build` also run on every push to main, so a manifest or a
+  # target that stopped packaging is a red main rather than a red release day.
+
+  package:
+    name: package (crates.io dry run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: package
+      - name: Install the ALSA headers cpal links against
+        timeout-minutes: 8
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: libasound2-dev
+      - name: Check the publish order
+        run: tools/check-publish-order.sh
+      # Packs every publishable crate and builds each one from its own
+      # tarball against the others' tarballs, which is what crates.io will
+      # see: a file outside a crate's directory, a dependency cycle or a
+      # dependency on an unpublished member all fail here.
+      - name: Package and verify every publishable crate
+        run: |
+          set -euo pipefail
+          args=()
+          for crate in $(tools/check-publish-order.sh --print); do
+            args+=(-p "$crate")
+          done
+          cargo package --locked "${args[@]}"
+
+  build:
+    name: build ${{ matrix.target }}
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native builds, not zig cross-builds: the binary links ALSA through
+          # cpal, whose headers and library come from the runner's own apt.
+          # Ubuntu 22.04 rather than `latest` sets the glibc floor the binary
+          # needs at run time.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify the tag matches Cargo.toml's version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$CARGO_VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME != Cargo.toml version $CARGO_VERSION"
+            exit 1
+          fi
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: ${{ matrix.target }}
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install the ALSA headers cpal links against
+        if: runner.os == 'Linux'
+        timeout-minutes: 8
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: libasound2-dev
+      - name: Build the binary
+        run:
+          cargo build --release --locked --target ${{ matrix.target }} -p
+          crcbl-cli --bin crcbl
+      - name: Smoke the binary
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/crcbl --version
+      # The archive name carries the ref: the tag on a release, `main` on a
+      # push, so a main build's artifacts are never mistaken for a release's.
+      - name: Package (Linux / macOS)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="crcbl-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/crcbl README.md LICENSE dist/
+          tar -czf "$ARCHIVE" -C dist .
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          else
+            shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+          fi
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $archive = "crcbl-$env:GITHUB_REF_NAME-${{ matrix.target }}.zip"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/crcbl.exe, README.md, LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          # An LF line, as sha256sum writes: Out-File's CRLF breaks
+          # `sha256sum -c` on the file name.
+          [IO.File]::WriteAllText("$PWD/$archive.sha256", "$hash  $archive`n")
+      - if: runner.os == 'Linux'
+        uses: ./.github/actions/cargo-tool
+        with:
+          tool: cargo-deb@3.8.0
+      - if: runner.os == 'Linux'
+        uses: ./.github/actions/cargo-tool
+        with:
+          tool: cargo-generate-rpm@0.21.0
+      - name: Build the .deb and .rpm
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo deb -p crcbl-cli --target ${{ matrix.target }} --no-build --no-strip
+          cargo generate-rpm -p crates/crcbl-cli --target ${{ matrix.target }} --payload-compress none
+          for f in target/${{ matrix.target }}/debian/crcbl_*.deb target/${{ matrix.target }}/generate-rpm/crcbl-*.rpm; do
+            cp "$f" .
+            sha256sum "$(basename "$f")" > "$(basename "$f").sha256"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: crcbl-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            crcbl-*.tar.gz
+            crcbl-*.tar.gz.sha256
+            crcbl-*.zip
+            crcbl-*.zip.sha256
+            crcbl_*.deb
+            crcbl_*.deb.sha256
+            crcbl-*.rpm
+            crcbl-*.rpm.sha256
+
+  install-packages:
+    name: install the ${{ matrix.image }} ${{ matrix.arch }} package
+    needs: [build]
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:stable-slim
+            arch: amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - image: fedora:latest
+            arch: x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - image: debian:stable-slim
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - image: fedora:latest
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: crcbl-${{ matrix.target }}
+          path: dist
+      # Installing through the package manager is what proves the declared
+      # dependencies are enough: a missing `libasound` is a failed launch.
+      - name: Install and run
+        run: |
+          cat > check.sh <<'EOF'
+          set -eu
+          if command -v apt-get >/dev/null; then
+            apt-get update -qq
+            apt-get install -y -qq /dist/crcbl_*.deb
+          else
+            dnf install -y -q /dist/crcbl-*.rpm
+          fi
+          crcbl --version
+          EOF
+          docker run --rm -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/check.sh:/check.sh:ro" ${{ matrix.image }} sh /check.sh
+
+  publish-github-release:
+    name: publish GitHub Release
+    needs:
+      [
+        fmt,
+        shell,
+        clippy,
+        docs,
+        machete,
+        prettier,
+        deny,
+        wasm32,
+        miri-jobs,
+        miri-steam,
+        jobs-worker-e2e,
+        test-linux,
+        test-cross-platform,
+        wayland-e2e,
+        x11-e2e,
+        samples-windowed,
+        windowed-e2e,
+        win32-e2e,
+        dx12-e2e,
+        cli-e2e,
+        vk-e2e,
+        vk-e2e-windows,
+        mtl-hardware-e2e,
+        mtl-e2e,
+        shaders,
+        decoder-fuzz,
+        coverage,
+        package,
+        build,
+        install-packages,
+      ]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: crcbl-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-crates:
+    name: publish to crates.io
+    needs: [publish-github-release]
+    runs-on: ubuntu-latest
+    # The longest a hosted runner allows. crates.io rate-limits *new* crates
+    # far harder than new versions, so the first release, which creates every
+    # crate, can outlast it; the job is idempotent, and a re-run picks up where
+    # the last one stopped. `docs/notes/ci.md` has the numbers.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: false
+      - name: Publish the library crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: tools/publish-crates.sh
+
+  aur-bin:
+    name: publish AUR (crcbl-bin)
+    needs: [publish-github-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: archlinux:latest
+    steps:
+      - name: Install deps
+        run: pacman -Sy --noconfirm --needed base-devel git openssh curl
+      - uses: actions/checkout@v7
+      - name: Resolve version
+        id: tag
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Render PKGBUILD
+        run: |
+          set -euo pipefail
+          VERSION=${{ steps.tag.outputs.version }}
+          BASE="https://github.com/kryptic-sh/crcbl/releases/download/v${VERSION}"
+          SHA_X86=$(curl -fsSL "$BASE/crcbl-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256" | awk '{print $1}')
+          SHA_A64=$(curl -fsSL "$BASE/crcbl-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz.sha256" | awk '{print $1}')
+          test -n "$SHA_X86" && test -n "$SHA_A64"
+          mkdir -p out
+          sed -e "s/{VERSION}/${VERSION}/g" \
+              -e "s/{SHA256_X86_64}/${SHA_X86}/g" \
+              -e "s/{SHA256_AARCH64}/${SHA_A64}/g" \
+              pkg/aur/PKGBUILD-bin.in > out/PKGBUILD
+      - name: Generate .SRCINFO
+        run: |
+          useradd -m builder
+          chown -R builder out
+          su -s /bin/bash builder -c 'cd out && makepkg --printsrcinfo > .SRCINFO'
+      - name: Push to AUR
+        run: |
+          set -euo pipefail
+          # Assigned here, not in an `env:` block: a `~` in an env value is
+          # never expanded, ssh does not expand one in a `-o` value either, and
+          # StrictHostKeyChecking=yes then fails with "No ED25519 host key is
+          # known" — how buffr's v0.14.7 AUR publish broke.
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          install -dm700 ~/.ssh
+          echo "${{ secrets.AUR_SSH_KEY }}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          # Pinned host keys. Source: ssh-keyscan aur.archlinux.org.
+          cat > ~/.ssh/known_hosts <<'KNOWN_HOSTS_EOF'
+          aur.archlinux.org ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLMiLrP8pVi5BFX2i3vepSUnpedeiewE5XptnUnau+ZoeUOPkpoCgZZuYfpaIQfhhJJI5qgnjJmr4hyJbe/zxow=
+          aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN
+          aur.archlinux.org ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDKF9vAFWdgm9Bi8uc+tYRBmXASBb5cB5iZsB7LOWWFeBrLp3r14w0/9S2vozjgqY5sJLDPONWoTTaVTbhe3vwO8CBKZTEt1AcWxuXNlRnk9FliR1/eNB9uz/7y1R0+c1Md+P98AJJSJWKN12nqIDIhjl2S1vOUvm7FNY43fU2knIhEbHybhwWeg+0wxpKwcAd/JeL5i92Uv03MYftOToUijd1pqyVFdJvQFhqD4v3M157jxS5FTOBrccAEjT+zYmFyD8WvKUa9vUclRddNllmBJdy4NyLB8SvVZULUPrP3QOlmzemeKracTlVOUG1wsDbxknF1BwSCU7CmU6UFP90kpWIyz66bP0bl67QAvlIc52Yix7pKJPbw85+zykvnfl2mdROsaT8p8R9nwCdFsBc9IiD0NhPEHcyHRwB8fokXTajk2QnGhL+zP5KnkmXnyQYOCUYo3EKMXIlVOVbPDgRYYT/XqvBuzq5S9rrU70KoI/S5lDnFfx/+lPLdtcnnEPk=
+          KNOWN_HOSTS_EOF
+          chmod 600 ~/.ssh/known_hosts
+          git config --global user.name  "crcbl-ci"
+          git config --global user.email "ci@kryptic.sh"
+          git clone ssh://aur@aur.archlinux.org/crcbl-bin.git aur-repo
+          cp out/PKGBUILD out/.SRCINFO aur-repo/
+          cp pkg/aur/LICENSE pkg/aur/.gitignore aur-repo/
+          cd aur-repo
+          git add PKGBUILD .SRCINFO LICENSE .gitignore
+          if git diff --cached --quiet; then echo "nothing to push"; exit 0; fi
+          git commit -m "crcbl-bin ${{ steps.tag.outputs.version }}-1"
+          git push origin master
+
+  brew-tap:
+    name: publish Homebrew formula
+    needs: [publish-github-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve version
+        id: tag
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Render formula
+        run: |
+          set -euo pipefail
+          VERSION=${{ steps.tag.outputs.version }}
+          BASE="https://github.com/kryptic-sh/crcbl/releases/download/v${VERSION}"
+          SHA_ARM=$(curl -fsSL "$BASE/crcbl-v${VERSION}-aarch64-apple-darwin.tar.gz.sha256" | awk '{print $1}')
+          SHA_X86=$(curl -fsSL "$BASE/crcbl-v${VERSION}-x86_64-apple-darwin.tar.gz.sha256" | awk '{print $1}')
+          test -n "$SHA_ARM" && test -n "$SHA_X86"
+          mkdir -p out
+          sed -e "s/{VERSION}/${VERSION}/g" \
+              -e "s/{SHA256_AARCH64_DARWIN}/${SHA_ARM}/g" \
+              -e "s/{SHA256_X86_64_DARWIN}/${SHA_X86}/g" \
+              pkg/homebrew/crcbl.rb.in > out/crcbl.rb
+      - name: Push to tap
+        run: |
+          set -euo pipefail
+          # Assigned here, not in an `env:` block — see `aur-bin`.
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/brew -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          install -dm700 ~/.ssh
+          echo "${{ secrets.BREW_SSH_KEY }}" > ~/.ssh/brew
+          chmod 600 ~/.ssh/brew
+          # Pinned host keys. Source: https://api.github.com/meta (.ssh_keys).
+          cat > ~/.ssh/known_hosts <<'KNOWN_HOSTS_EOF'
+          github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+          KNOWN_HOSTS_EOF
+          chmod 600 ~/.ssh/known_hosts
+          git config --global user.name  "crcbl-ci"
+          git config --global user.email "ci@kryptic.sh"
+          git clone git@github.com:kryptic-sh/homebrew-tap.git tap
+          mkdir -p tap/Formula
+          cp out/crcbl.rb tap/Formula/crcbl.rb
+          cd tap
+          git add Formula/crcbl.rb
+          if git diff --cached --quiet; then echo "nothing to push"; exit 0; fi
+          git commit -m "crcbl ${{ steps.tag.outputs.version }}"
+          git push origin HEAD:main
+
+  scoop-bucket:
+    name: publish Scoop manifest
+    needs: [publish-github-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve version
+        id: tag
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Render manifest
+        run: |
+          set -euo pipefail
+          VERSION=${{ steps.tag.outputs.version }}
+          BASE="https://github.com/kryptic-sh/crcbl/releases/download/v${VERSION}"
+          SHA_WIN=$(curl -fsSL "$BASE/crcbl-v${VERSION}-x86_64-pc-windows-msvc.zip.sha256" | awk '{print $1}')
+          test -n "$SHA_WIN"
+          mkdir -p out
+          sed -e "s/{VERSION}/${VERSION}/g" \
+              -e "s/{SHA256_X86_64_WINDOWS}/${SHA_WIN}/g" \
+              pkg/scoop/crcbl.json.in > out/crcbl.json
+      - name: Push to bucket
+        run: |
+          set -euo pipefail
+          # Assigned here, not in an `env:` block — see `aur-bin`.
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/scoop -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
+          install -dm700 ~/.ssh
+          echo "${{ secrets.SCOOP_SSH_KEY }}" > ~/.ssh/scoop
+          chmod 600 ~/.ssh/scoop
+          # Pinned host keys. Source: https://api.github.com/meta (.ssh_keys).
+          cat > ~/.ssh/known_hosts <<'KNOWN_HOSTS_EOF'
+          github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+          KNOWN_HOSTS_EOF
+          chmod 600 ~/.ssh/known_hosts
+          git config --global user.name  "crcbl-ci"
+          git config --global user.email "ci@kryptic.sh"
+          git clone git@github.com:kryptic-sh/scoop-bucket.git bucket
+          mkdir -p bucket/bucket
+          cp out/crcbl.json bucket/bucket/crcbl.json
+          cd bucket
+          git add bucket/crcbl.json
+          if git diff --cached --quiet; then echo "nothing to push"; exit 0; fi
+          git commit -m "crcbl ${{ steps.tag.outputs.version }}"
+          git push origin HEAD:main
+
+  # Fails a tag's run unless every publish job succeeded. A job whose gate
+  # failed is *skipped*, not failed, so a release that published nothing
+  # otherwise reads green. Every check job gates `publish-github-release`, so a
+  # failed check shows here as that job skipped.
+  tag-release-status:
+    name: tag-release status
+    needs:
+      [publish-github-release, publish-crates, aur-bin, brew-tap, scoop-bucket]
+    if:
+      always() && github.event_name == 'push' && startsWith(github.ref,
+      'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "Release job results: $RESULTS"
+          if ! jq -e 'all(. == "success")' <<<"$RESULTS" >/dev/null; then
+            echo "::error::every release job must succeed on a tag"
+            exit 1
+          fi
