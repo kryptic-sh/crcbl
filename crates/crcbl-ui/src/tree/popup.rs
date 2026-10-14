@@ -35,19 +35,22 @@
 //!   bottom right hangs up and to the left of the pointer.
 //!
 //! It is then shifted the least that keeps it inside the viewport on both
-//! axes — its top-left corner wins when it is wider than the viewport.
+//! axes — its top-left corner wins when it is larger than the viewport, as
+//! one built before the first layout can be.
 //! The viewport is the space [`Ui::layout`] was given, from its origin; an
 //! axis laid out under content-sized space bounds nothing. A pop-up's own
 //! margin and offsets do not move it.
 //!
-//! **A pop-up is never taller than the viewport less [`POPUP_MARGIN`]**: its
-//! root's `max-height` is that, and `default.css` makes every `popup`
-//! `overflow: scroll`, so a list longer than the viewport scrolls — under the
-//! wheel ([`Ui::scroll_wheel`]), and to keep the focused item in view — rather
-//! than running off the bottom. The cap is the viewport the last layout was
-//! given, as a drop-down's width is its button's as last laid out, so it is a
-//! frame late to follow a resize and absent in a tree's first frame; a
-//! caller's `inline` `max-height` overrides it.
+//! **A pop-up is never taller or wider than the viewport less
+//! [`POPUP_MARGIN`]**: its root's `max-height` and `max-width` are that, and
+//! `default.css` makes every `popup` `overflow: scroll`, so a list longer or
+//! wider than the viewport scrolls — under the wheel ([`Ui::scroll_wheel`]),
+//! and to keep the focused item in view — rather than running off the
+//! viewport's edge. The cap is the viewport the last layout was given, as a
+//! drop-down's width is its button's as last laid out, so it is a frame late
+//! to follow a resize and absent in a tree's first frame; a caller's `inline`
+//! `max-height` or `max-width` overrides it, and a `min-width` — a
+//! drop-down's button's — wins over the width cap, as CSS has it.
 //!
 //! **It is clipped to the viewport, and to nothing its anchor is under**: a
 //! list hanging out of a scrolled, clipped panel draws whole over it. Each
@@ -101,9 +104,9 @@ use crate::widget::PointerInput;
 /// before layout: never hit, focused or drawn.
 pub(super) const CLOSED_LAYER: usize = usize::MAX;
 
-/// How much of the viewport's height a pop-up taller than it leaves
-/// uncovered: its `max-height` is the viewport's height less this, in pixels,
-/// so some of what it hangs over always shows round it.
+/// How much of the viewport's height or width a pop-up larger than it leaves
+/// uncovered: its `max-height` and `max-width` are the viewport's less this,
+/// in pixels, so some of what it hangs over always shows round it.
 pub const POPUP_MARGIN: f32 = 16.0;
 
 /// What a press spent closing pop-ups is captured by: a key no node has, so
@@ -198,12 +201,21 @@ impl Ui {
         }
         let selector = typed("popup", selector);
         let viewport = self.viewport();
-        let room = viewport.max.y - viewport.min.y;
+        let room = viewport.max - viewport.min;
         // An axis laid out under content-sized space is unbounded: no cap.
-        let cap = room
-            .is_finite()
-            .then(|| Declaration::MaxHeight(LengthAuto::Px((room - POPUP_MARGIN).max(0.0))));
-        let inline: Vec<Declaration> = cap.into_iter().chain(inline.iter().copied()).collect();
+        let cap = |room: f32| {
+            room.is_finite()
+                .then(|| LengthAuto::Px((room - POPUP_MARGIN).max(0.0)))
+        };
+        let caps = [
+            cap(room.y).map(Declaration::MaxHeight),
+            cap(room.x).map(Declaration::MaxWidth),
+        ];
+        let inline: Vec<Declaration> = caps
+            .into_iter()
+            .flatten()
+            .chain(inline.iter().copied())
+            .collect();
         let (index, response) = self.open_root(
             Self::popup_key(anchor),
             &selector,

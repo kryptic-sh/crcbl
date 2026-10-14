@@ -4334,8 +4334,6 @@ in `crcbl_input::list`). Decisions, then what is left.
   its list to the room on the side it opens toward. That is a cap per placement
   in `Ui::popup` and `hang`, with `Placement::At` and `Beside` needing their own
   answer.
-- **Deferred: a pop-up wider than the viewport.** Only its height is capped; it
-  is still shifted to the viewport's left edge and clipped at its right.
 - **Deferred: Backspace editing the typeahead prefix, and a space inside one**
   (`New Y` for `New York`), which Windows' list views take; Space is accept
   here, and the `list` context leaves Backspace unbound.

@@ -542,3 +542,45 @@ fn an_open_popup_the_frame_does_not_build_is_closed() {
     let next = page(&mut ui, idle(), NavInput::default(), KEEP);
     assert!(next.menu.is_none());
 }
+
+/// One frame of a page whose anchor's pop-up holds a block far wider than
+/// [`VIEW`], the pop-up's own declarations `style`; the pop-up's rectangle.
+fn wide_popup(ui: &mut Ui, style: &[Declaration]) -> Option<(Vec2, Vec2)> {
+    ui.begin_frame(idle());
+    let mut menu = None;
+    ui.block("#page", &[Declaration::Width(px(VIEW.x))], |ui| {
+        let size = [Declaration::Width(px(60.0)), Declaration::Height(px(20.0))];
+        let anchor = ui.block_with("#anchor", &size, Behavior::BUTTON, |_| {});
+        ui.open_popup(anchor.key);
+        menu = ui.popup(anchor.key, "#menu", style, |ui| {
+            let wide = [
+                Declaration::Width(px(5.0 * VIEW.x)),
+                Declaration::Height(px(20.0)),
+                Declaration::FlexShrink(0.0),
+            ];
+            ui.block("#wide", &wide, |_| {});
+        });
+    });
+    ui.layout(
+        Vec2::ZERO,
+        AvailableSpace::definite(VIEW),
+        &FontAtlas::built_in(),
+    );
+    menu.and_then(|menu| ui.rect(menu.key))
+}
+
+/// **A pop-up wider than the viewport is capped at the viewport less
+/// [`POPUP_MARGIN`] and kept inside it**, from the frame after the first
+/// layout; a caller's own `max-width` wins over the cap.
+#[test]
+fn a_wide_popup_is_capped_to_the_viewport() {
+    let mut ui = Ui::new();
+    wide_popup(&mut ui, &[]);
+    let (min, max) = wide_popup(&mut ui, &[]).expect("built");
+    assert_eq!(max.x - min.x, VIEW.x - POPUP_MARGIN, "not capped");
+    assert!(min.x >= 0.0 && max.x <= VIEW.x, "outside the viewport");
+
+    let own = [Declaration::MaxWidth(px(50.0))];
+    let (min, max) = wide_popup(&mut ui, &own).expect("built");
+    assert_eq!(max.x - min.x, 50.0, "the caller's max-width lost");
+}

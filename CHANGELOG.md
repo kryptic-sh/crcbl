@@ -2114,31 +2114,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   into it and stays; back closes the topmost (and `Ui::back_requested` does not
   report that back), a press outside closes it and is spent there rather than
   reaching what it covered, and every close gives focus back to the anchor. One
-  the frame does not build closes. A pop-up is never taller than the viewport
-  less `POPUP_MARGIN`: `Ui::popup` caps its `max-height` and `default.css` makes
-  `popup` `overflow: scroll`, so a long list scrolls under the wheel and to keep
-  the focused item in view, and a node `Ui::set_focus` asks for is scrolled into
-  view at that frame's layout. Inside the topmost pop-up `NavInput::jump` — a
-  `Jump`: Home and End to the first and last item focus can rest on, Page Down
-  to the last item in view and then a view's height on, as a Windows list box
-  does, and Page Up likewise upwards — moves focus, and a drop-down's list or
-  any level of a context menu takes typeahead from the frame's `TextInput`:
-  typed letters focus the next enabled item they begin, ignoring case, one
-  letter typed again steps through the items it begins, and the prefix starts
-  afresh after `TYPEAHEAD_TIMEOUT` on the text clock. Those keys come through a
-  new reserved `list` context (`crcbl_input::list`: `list_first`, `list_last`,
-  `list_page_up`, `list_page_down`, and `list_type` on every key that types a
-  character), pushed over `ui` while `Ui::popup_list_open` says a list is open,
-  as `text` is while a field is engaged; `crcbl::ui_nav::nav_input` reads its
-  jumps, and `TextPump` collects the typing when told a list is open. The editor
-  pushes it, so its variant picker and outliner row menus take typeahead, Home,
-  End and the page keys, and a letter or Page Up there no longer switches a tool
-  or lifts the selection. `Ui::select(selector, options, &mut chosen)` is a
-  button showing the chosen option that opens the options in a pop-up at least
-  as wide as itself, scrolled to the chosen one, picked by click or by moves and
-  accept, reporting a pick through `Response::changed`; its arrows stop at the
-  list's ends, as a list box's do. `default.css` styles `popup`, `select` and
-  its `.select-label`, `.select-caret` (`SELECT_CARET`), `.select-list`,
+  the frame does not build closes. A pop-up is never taller or wider than the
+  viewport less `POPUP_MARGIN`: `Ui::popup` caps its `max-height` and
+  `max-width` and `default.css` makes `popup` `overflow: scroll`, so a long or
+  wide list scrolls under the wheel and to keep the focused item in view, and a
+  node `Ui::set_focus` asks for is scrolled into view at that frame's layout.
+  Inside the topmost pop-up `NavInput::jump` — a `Jump`: Home and End to the
+  first and last item focus can rest on, Page Down to the last item in view and
+  then a view's height on, as a Windows list box does, and Page Up likewise
+  upwards — moves focus, and a drop-down's list or any level of a context menu
+  takes typeahead from the frame's `TextInput`: typed letters focus the next
+  enabled item they begin, ignoring case, one letter typed again steps through
+  the items it begins, and the prefix starts afresh after `TYPEAHEAD_TIMEOUT` on
+  the text clock. Those keys come through a new reserved `list` context
+  (`crcbl_input::list`: `list_first`, `list_last`, `list_page_up`,
+  `list_page_down`, and `list_type` on every key that types a character), pushed
+  over `ui` while `Ui::popup_list_open` says a list is open, as `text` is while
+  a field is engaged; `crcbl::ui_nav::nav_input` reads its jumps, and `TextPump`
+  collects the typing when told a list is open. The editor pushes it, so its
+  variant picker and outliner row menus take typeahead, Home, End and the page
+  keys, and a letter or Page Up there no longer switches a tool or lifts the
+  selection. `Ui::select(selector, options, &mut chosen)` is a button showing
+  the chosen option that opens the options in a pop-up at least as wide as
+  itself, scrolled to the chosen one, picked by click or by moves and accept,
+  reporting a pick through `Response::changed`; its arrows stop at the list's
+  ends, as a list box's do. `default.css` styles `popup`, `select` and its
+  `.select-label`, `.select-caret` (`SELECT_CARET`), `.select-list`,
   `.select-option` and `.select-option-label` parts, `:open` while the list is.
 - **Towers has a dev fly/walk camera** (`docs/plan/sample/07-towers.md` slice 4,
   `crcbl_towers::dev_camera`). `C` (the `camera` action, in the action map's
