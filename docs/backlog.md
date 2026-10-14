@@ -95,9 +95,11 @@ than EW assets or an EW checkout.
     (`crates/crcbl-ragdoll/src/debug.rs`): body outlines marked asleep or awake,
     joint axes, a ball joint's cone and a hinge's arc, and the client-server
     gap. Not drawn: a ball joint's twist limits, contacts (the plan lists them;
-    `PhysicsSystem::debug_draw` draws nothing yet), and nothing calls the view —
-    no sample, game or the editor's drop preview shows it, so no frame of it has
-    been looked at.
+    `PhysicsSystem::debug_draw` draws nothing yet). Its one caller is the
+    editor's G drop preview (`drop_lines` in `apps/editor/src/app.rs`), where a
+    test reads the coloured segments but nothing reads the drawn frame back, and
+    no frame of it has been looked at by eye. The selected mesh's bodies still
+    draw at rest beside the falling ones, in the same violet as a moving body.
   - The editor preview shipped: G drops a selected rigged mesh as its ragdoll,
     into play itself while the scene plays (see "Further editor scope" below for
     what it does and does not do). The remaining delivery requirements are in

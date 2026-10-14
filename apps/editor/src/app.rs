@@ -1702,6 +1702,10 @@ impl<S: Shell + ?Sized> Editor<S> {
             };
             draw_joint(self.renderer.debug_draw(), &at, color);
         }
+        for (from, to, color) in drop_lines(self.dropping.as_ref(), &mut self.document, &self.shelf)
+        {
+            self.renderer.debug_draw().line(from, to, color);
+        }
 
         // The scene is drawn at the pane's extent — as the panels last laid it
         // out, which is the rectangle this frame's draw list samples it into.
@@ -2018,9 +2022,9 @@ const RAGDOLL_COLOR: [f32; 4] = [0.6, 0.45, 0.95, 1.0];
 /// a joint sits on its child bone's origin, where the bones meet.
 const JOINT_COLOR: [f32; 4] = BONE_COLOR;
 
-/// How far out along its axis a joint's line is drawn, in metres: a few of
-/// its radii, so the axis reads past the sphere.
-const JOINT_AXIS_LENGTH: f64 = 0.1;
+/// The colour a falling ragdoll's sleeping bodies are drawn in: a grey, so a
+/// body still moving reads in [`RAGDOLL_COLOR`] against the settled ones.
+const SLEEPING_COLOR: [f32; 4] = [0.55, 0.55, 0.62, 1.0];
 
 /// The colour the two bodies of the rig pair the pointer is over in the
 /// inspector are drawn in: the picked green, since no play runs while a rig
@@ -2223,6 +2227,35 @@ fn selected_ragdoll_joints(document: &mut Document, shelf: &Shelf) -> Vec<crcbl:
     joints
 }
 
+/// The falling ragdoll's debug view ([`drop::DropPreview::debug_lines`]), each
+/// segment in render space and coloured: a body in [`RAGDOLL_COLOR`] while it
+/// moves and [`SLEEPING_COLOR`] once it sleeps, a joint's axis and limit in
+/// [`JOINT_COLOR`]. Nothing while no drop runs.
+#[allow(clippy::cast_possible_truncation)]
+fn drop_lines(
+    dropping: Option<&drop::DropPreview>,
+    document: &mut Document,
+    shelf: &Shelf,
+) -> Vec<(Vec3, Vec3, [f32; 4])> {
+    use crcbl::ragdoll::DebugLine;
+    let mut lines = Vec::new();
+    let Some(dropping) = dropping else {
+        return lines;
+    };
+    let Some(rig) = shelf.rig(dropping.asset()) else {
+        return lines;
+    };
+    dropping.debug_lines(rig, document, &mut |from, to, kind| {
+        let color = match kind {
+            DebugLine::Body { sleeping: false } => RAGDOLL_COLOR,
+            DebugLine::Body { sleeping: true } => SLEEPING_COLOR,
+            DebugLine::JointAxis | DebugLine::Limit | DebugLine::Divergence { .. } => JOINT_COLOR,
+        };
+        lines.push((from.as_vec3(), to.as_vec3(), color));
+    });
+    lines
+}
+
 /// A box body's eight corners in [`crcbl::render::frustum_corners`]' order,
 /// which [`crcbl::render::DebugDraw::box_edges`] joins: bit 0 of the index is
 /// the body's x, bit 1 its y, bit 2 its z.
@@ -2277,7 +2310,8 @@ fn draw_body(
 /// line out along its axis, its frame's `z`.
 #[allow(clippy::cast_possible_truncation)]
 fn draw_joint(draw: &mut crcbl::render::DebugDraw, at: &crcbl::phys::Transform, color: [f32; 4]) {
-    let tip = at.position + at.rotation * (crcbl::math::DVec3::Z * JOINT_AXIS_LENGTH);
+    let tip =
+        at.position + at.rotation * (crcbl::math::DVec3::Z * crcbl::ragdoll::JOINT_AXIS_LENGTH);
     draw.sphere(at.position.as_vec3(), rig_hold::JOINT_RADIUS as f32, color);
     draw.line(at.position.as_vec3(), tip.as_vec3(), color);
 }

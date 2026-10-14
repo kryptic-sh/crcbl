@@ -16,6 +16,9 @@
 //! the scene puts it, a dynamic one too — the preview simulates the ragdoll
 //! and nothing else — and an entity with no body row is not there to land on,
 //! as it is not in play. It steps at a fixed sixtieth of a second a frame.
+//! While it falls the viewport draws its [debug view](DropPreview::debug_lines)
+//! over the skin: each body's outline, telling a moving body from a sleeping
+//! one, and each joint's axis and limit.
 //!
 //! **G while the scene plays drops the ragdoll into play itself** rather than
 //! a world of its own: its bodies are spawned into the playing world's
@@ -35,7 +38,7 @@ use crcbl::math::{DVec3, Mat4};
 use crcbl::phys::{
     ColliderComponent, ContactSettings, GravityForce, PhysicsSystem, SurfaceMaterial, Transform,
 };
-use crcbl::ragdoll::{Handoff, Ragdoll, RagdollRig, SpawnError};
+use crcbl::ragdoll::{DebugLine, Handoff, Ragdoll, RagdollRig, SpawnError};
 use crcbl::registry::OrientedBox;
 use crcbl::scene::scn::SceneEntityId;
 use crcbl::scene_physics::{BODIES, Body, Simulation};
@@ -294,17 +297,37 @@ impl DropPreview {
         self.ragdoll.entities()
     }
 
-    /// Where each body stands now, for a test to watch it fall.
-    #[cfg(test)]
-    pub(super) fn heights(&self, document: &mut Document) -> Vec<f64> {
-        let physics = match &self.bodies {
-            Bodies::Own(physics) => Some(&**physics),
+    /// Hands `line` every segment of the falling ragdoll's debug view
+    /// ([`Ragdoll::debug_lines`]) as its bodies stand now, `rig` being the
+    /// one it was dropped from; nothing once its bodies are gone.
+    pub(super) fn debug_lines(
+        &self,
+        rig: &Rig,
+        document: &mut Document,
+        line: &mut impl FnMut(DVec3, DVec3, DebugLine),
+    ) {
+        let (Some(physics), Some(ragdoll)) = (self.physics(document), rig.ragdoll.as_ref()) else {
+            return;
+        };
+        self.ragdoll.debug_lines(physics, ragdoll, line);
+    }
+
+    /// The world its bodies are in, or [`None`] once stop has thrown play's
+    /// away.
+    fn physics<'a>(&'a self, document: &'a mut Document) -> Option<&'a PhysicsSystem> {
+        match &self.bodies {
+            Bodies::Own(physics) => Some(physics),
             Bodies::Play => document
                 .world_mut()
                 .system_mut::<Simulation>()
                 .map(|simulation| simulation.physics()),
-        };
-        physics
+        }
+    }
+
+    /// Where each body stands now, for a test to watch it fall.
+    #[cfg(test)]
+    pub(super) fn heights(&self, document: &mut Document) -> Vec<f64> {
+        self.physics(document)
             .and_then(|physics| self.ragdoll.body_transforms(physics))
             .unwrap_or_default()
             .iter()

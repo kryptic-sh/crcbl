@@ -283,6 +283,60 @@ fn g_drops_a_selected_rigged_mesh_and_g_stops_it() {
     );
 }
 
+/// The falling ragdoll's coloured segments, as the frame draws them.
+fn drop_lines_of(editor: &mut Editor<HeadlessShell>) -> Vec<(Vec3, Vec3, [f32; 4])> {
+    drop_lines(
+        editor.dropping.as_ref(),
+        &mut editor.document,
+        &editor.shelf,
+    )
+}
+
+/// **A falling ragdoll draws its own bodies, violet while they move and grey
+/// once they sleep, with its joints' axes and limits**, and nothing before G
+/// or once G again ends the drop.
+#[test]
+fn a_dropped_ragdoll_draws_its_debug_view() {
+    let mut editor = headless(64);
+    editor.document = props();
+    editor.document.set_assets(Box::new(assets()));
+    let dropped = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(0.0, 1.0, 0.0))
+        .expect("spawned");
+    editor.frame().expect("a frame");
+    editor.document.select(Some(dropped));
+    assert!(drop_lines_of(&mut editor).is_empty(), "drawn before G");
+
+    tap(&mut editor, KeyCode::KeyG);
+    let has = |lines: &[(Vec3, Vec3, [f32; 4])], color| lines.iter().any(|line| line.2 == color);
+    let falling = drop_lines_of(&mut editor);
+    assert!(has(&falling, RAGDOLL_COLOR), "no moving body drawn");
+    assert!(has(&falling, JOINT_COLOR), "no joint drawn");
+    assert!(
+        !has(&falling, SLEEPING_COLOR),
+        "a falling body drawn asleep"
+    );
+    let settled = (0..SETTLE_FRAMES)
+        .find_map(|_| {
+            editor.frame().expect("a frame");
+            let lines = drop_lines_of(&mut editor);
+            (!has(&lines, RAGDOLL_COLOR)).then_some(lines)
+        })
+        .expect("the ragdoll never slept");
+    assert!(has(&settled, SLEEPING_COLOR), "no sleeping body drawn");
+    assert!(has(&settled, JOINT_COLOR), "the joints went with the sleep");
+
+    tap(&mut editor, KeyCode::KeyG);
+    assert!(
+        drop_lines_of(&mut editor).is_empty(),
+        "drawn after the drop"
+    );
+}
+
+/// How many frames a ragdoll dropped from a metre up is given to sleep.
+const SETTLE_FRAMES: usize = 600;
+
 /// Where the lowest of the bodies of a rig dropped over a twin of it stands
 /// once it has fallen, with the twin given a body row (`solid`) or not, and
 /// how tall the twin's box is.
