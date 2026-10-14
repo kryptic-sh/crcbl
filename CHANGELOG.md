@@ -2089,14 +2089,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   advances. It hides when the pointer leaves or focus moves, when the widget is
   not built, and on a press of either button, accept, `ui_menu` or a wheel
   (`Ui::scroll_wheel`, or `Ui::dismiss_tooltip` for a caller that scrolls its
-  own way), staying hidden until the pointer or focus moves to another widget. A
-  tooltip is a `tooltip` block (styled in `default.css`) on the pop-up layer:
-  placed as a pop-up is, below its anchor and flipped above at the bottom of the
-  viewport, drawn over every open pop-up, and **inert** — never hit or focused,
-  so a click on what it covers reaches it. `Ui::tooltip_key` names its root. In
-  the editor every toolbar button's tooltip says what it does and its key, and
-  each play-strip action's opens with the game's own description of it, then
-  says what it takes and its number key; the labels keep their keys.
+  own way), staying hidden until the pointer or focus moves to another widget.
+  As on Windows, the next widget's tooltip, taken up within one delay of the
+  last one shown, waits only a `TOOLTIP_RESHOW_DIVISOR`th of the delay, and a
+  shown tooltip goes after `TOOLTIP_AUTOPOP_FACTOR` delays; both scale with
+  `Ui::set_tooltip_delay`. A tooltip is a `tooltip` block (styled in
+  `default.css`) on the pop-up layer: placed as a pop-up is, below its anchor
+  and flipped above at the bottom of the viewport, drawn over every open pop-up,
+  and **inert** — never hit or focused, so a click on what it covers reaches it.
+  `Ui::tooltip_key` names its root. In the editor every toolbar button's tooltip
+  says what it does and its key, and each play-strip action's opens with the
+  game's own description of it, then says what it takes and its number key; the
+  labels keep their keys.
 - **`crcbl-ui` has a pop-up layer, and a drop-down built on it.** Any widget
   hangs a pop-up from a node: `Ui::open_popup` with the node's key, then
   `Ui::popup` every frame it is open with a closure that builds it (it builds

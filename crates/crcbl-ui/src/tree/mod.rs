@@ -233,7 +233,7 @@ pub use style::{
     Justify, Length, LengthAuto, LineHeight, NavId, NavTarget, NavWrap, NodeStyle, Overflow,
     Position, TextOverflow, WhiteSpace,
 };
-pub use tooltip::TOOLTIP_DELAY;
+pub use tooltip::{TOOLTIP_AUTOPOP_FACTOR, TOOLTIP_DELAY, TOOLTIP_RESHOW_DIVISOR};
 pub use widgets::{
     AXES, CONTEXT_ARROW, ClipboardAnswer, ClipboardReply, ClipboardRequest, ContextItem,
     ContextMenuResponse, DOUBLE_CLICK_TIME, DockLayout, DockSide, DragNumber, FieldEdit, FieldRow,

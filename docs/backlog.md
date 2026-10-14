@@ -4185,11 +4185,6 @@ in `crcbl_input::list`). Decisions, then what is left.
   next layout.** `close_popups_from` stops every layer above the closed one
   being hit or drawn, and `TOOLTIP_LAYER` is above them all; the next layout
   draws it again if it is still due.
-- **Deferred: Windows' reshow and auto-pop delays.** Moving from one toolbar
-  button to the next waits the whole delay again, where Windows' shorter
-  `TTDT_RESHOW` would show the next sooner, and a tooltip stays up for as long
-  as the pointer rests rather than going after `TTDT_AUTOPOP`. Either is a field
-  on `TooltipState` and a rule in `resolve_tooltip`.
 - **Deferred: a tooltip wider than the viewport wraps.** It is `nowrap`, shifted
   to the viewport's left edge and clipped at its right; a `max-width` with
   wrapping would need the span to wrap inside a content-sized root.
@@ -7297,6 +7292,12 @@ whole shard run on a slow runner, not one wait. What is unexplained is why a
 runner slow enough to miss them passed on retry, and that wants a reproduction
 on the runner rather than a change to the budgets — this entry's earlier
 suggestion of a per-check budget is already what the file does.
+
+**A passing shard job takes about 70 minutes, so one running that long is not
+hung.** On 2026-10-14 run 38530476371's shard job was cancelled at 71 minutes as
+hung, with every other Pages job green, and had to be run again whole; it was
+most likely minutes from passing. Let it reach the step's own end before calling
+it stuck.
 
 ## Native presentation is covered at the seam and not in the window (2026-09-11)
 

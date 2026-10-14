@@ -23,6 +23,15 @@
 //! on, so a frame that hands the tree no text input does not move it.
 //! [`Ui::set_tooltip_delay`] replaces the delay.
 //!
+//! **The next one shows sooner.** A subject taken up within one delay of a
+//! tooltip last being shown — the pointer moving along a toolbar, crossing
+//! the gaps between buttons — waits only a [`TOOLTIP_RESHOW_DIVISOR`]th of
+//! the delay, as Windows' `TTDT_RESHOW` does. **A shown tooltip goes** after
+//! [`TOOLTIP_AUTOPOP_FACTOR`] times the delay, as `TTDT_AUTOPOP` does, and
+//! stays hidden until the subject changes. Both follow the delay as Windows'
+//! `TTDT_AUTOMATIC` derives them, so [`Ui::set_tooltip_delay`] scales them
+//! with it.
+//!
 //! **It hides** when the subject changes — the pointer leaves, focus moves or
 //! blurs, the mode changes — and when the widget is not built: the call that
 //! builds it is the widget's. **A press of either button hides it**, as accept
@@ -56,6 +65,15 @@ use crate::widget::PointerInput;
 /// ([`DOUBLE_CLICK_TIME`](super::DOUBLE_CLICK_TIME)).
 pub const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 
+/// How many times shorter the wait is for a tooltip that follows one just
+/// shown: Windows' `TTDT_AUTOMATIC` sets `TTDT_RESHOW` to a fifth of
+/// `TTDT_INITIAL`.
+pub const TOOLTIP_RESHOW_DIVISOR: u32 = 5;
+
+/// How many delays a shown tooltip stays up: Windows' `TTDT_AUTOMATIC` sets
+/// `TTDT_AUTOPOP` to ten times `TTDT_INITIAL`.
+pub const TOOLTIP_AUTOPOP_FACTOR: u32 = 10;
+
 /// The layer a tooltip is drawn in: above every open pop-up's, whose layers
 /// count up from 1, and never hit.
 pub(super) const TOOLTIP_LAYER: usize = CLOSED_LAYER - 1;
@@ -68,8 +86,14 @@ pub(super) struct TooltipState {
     subject: Option<NodeKey>,
     /// The clock when the subject's call was first built, once it has been.
     since: Option<Duration>,
-    /// A press, accept or wheel hid it for as long as the subject lasts.
+    /// A press, accept or wheel hid it, or it stayed up its time, for as long
+    /// as the subject lasts.
     dismissed: bool,
+    /// The subject was taken up soon after a tooltip was shown, so it waits
+    /// the reshow delay rather than the whole one.
+    quick: bool,
+    /// The clock the last time a tooltip was built.
+    last_shown: Option<Duration>,
     /// This frame's tooltip root and its anchor, as indices into the frame's
     /// nodes, once built.
     pub built: Option<(usize, usize)>,
@@ -82,6 +106,8 @@ impl Default for TooltipState {
             subject: None,
             since: None,
             dismissed: false,
+            quick: false,
+            last_shown: None,
             built: None,
         }
     }
@@ -99,9 +125,20 @@ impl Ui {
             return None;
         }
         let since = *state.since.get_or_insert(self.text_clock);
-        if self.text_clock.saturating_sub(since) < state.delay {
+        let wait = if state.quick {
+            state.delay / TOOLTIP_RESHOW_DIVISOR
+        } else {
+            state.delay
+        };
+        let held = self.text_clock.saturating_sub(since);
+        if held < wait {
             return None;
         }
+        if held >= wait + state.delay * TOOLTIP_AUTOPOP_FACTOR {
+            state.dismissed = true;
+            return None;
+        }
+        state.last_shown = Some(self.text_clock);
         let anchor_index = self.nodes.iter().rposition(|node| node.key == anchor.key)?;
         let (index, response) = self.open_root(
             Self::tooltip_key(anchor.key),
@@ -124,7 +161,8 @@ impl Ui {
     }
 
     /// Replaces how long a subject is held before its tooltip shows, from
-    /// [`TOOLTIP_DELAY`].
+    /// [`TOOLTIP_DELAY`], and with it the reshow and auto-pop delays the
+    /// module docs derive from it.
     pub fn set_tooltip_delay(&mut self, delay: Duration) {
         self.tooltip.delay = delay;
     }
@@ -157,6 +195,9 @@ impl Ui {
             state.subject = subject;
             state.since = None;
             state.dismissed = false;
+            state.quick = state
+                .last_shown
+                .is_some_and(|shown| self.text_clock.saturating_sub(shown) <= state.delay);
         }
         if pointer.down || pointer.secondary_pressed || nav.accept || nav.menu {
             state.dismissed = true;

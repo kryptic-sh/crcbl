@@ -482,3 +482,73 @@ fn navigation_focus_shows_the_tooltip_after_the_delay_and_blur_hides_it() {
     assert!(moved.under.focused, "focus did not move off the anchor");
     assert!(moved.tip.is_none(), "still up once focus moved off");
 }
+
+/// **The next widget's tooltip follows sooner**: moving straight from a shown
+/// tooltip to another widget waits the reshow delay, not the whole one; after
+/// a rest away from every widget longer than the delay, the whole delay
+/// again.
+#[test]
+fn the_next_tooltip_waits_only_the_reshow_delay() {
+    let (mut ui, built) = laid_out();
+    let anchor = centre(&ui, built.anchor.expect("built").key);
+    let corner = centre(&ui, built.corner.key);
+    rest_until_shown(&mut ui, anchor);
+    let reshow = TOOLTIP_DELAY / TOOLTIP_RESHOW_DIVISOR;
+    assert!(
+        rest(&mut ui, corner, FRAME).corner_tip.is_none(),
+        "shown at once"
+    );
+    let short = reshow - Duration::from_millis(1);
+    assert!(
+        rest(&mut ui, corner, short).corner_tip.is_none(),
+        "shown before the reshow delay"
+    );
+    assert!(
+        rest(&mut ui, corner, Duration::from_millis(1))
+            .corner_tip
+            .is_some(),
+        "not shown at the reshow delay"
+    );
+
+    rest(&mut ui, Vec2::splat(-1.0), TOOLTIP_DELAY + FRAME);
+    rest(&mut ui, anchor, FRAME);
+    assert!(
+        rest(&mut ui, anchor, reshow).tip.is_none(),
+        "the reshow delay outlived a rest away"
+    );
+    assert!(
+        rest(&mut ui, anchor, TOOLTIP_DELAY - reshow).tip.is_some(),
+        "not shown at the whole delay"
+    );
+}
+
+/// **A shown tooltip goes after the auto-pop delay and stays gone** while
+/// the pointer rests; leaving and coming back shows it again.
+#[test]
+fn a_tooltip_goes_after_the_auto_pop_delay() {
+    let (mut ui, built) = laid_out();
+    let anchor = centre(&ui, built.anchor.expect("built").key);
+    rest_until_shown(&mut ui, anchor);
+    let autopop = TOOLTIP_DELAY * TOOLTIP_AUTOPOP_FACTOR;
+    assert!(
+        rest(&mut ui, anchor, autopop - Duration::from_millis(1))
+            .tip
+            .is_some(),
+        "gone before the auto-pop delay"
+    );
+    assert!(
+        rest(&mut ui, anchor, Duration::from_millis(1))
+            .tip
+            .is_none(),
+        "still up at the auto-pop delay"
+    );
+    assert!(
+        rest(&mut ui, anchor, FRAME).tip.is_none(),
+        "back while the pointer rests"
+    );
+    rest(&mut ui, Vec2::splat(-1.0), FRAME);
+    assert!(
+        rest_until_shown(&mut ui, anchor).tip.is_some(),
+        "not shown again on coming back"
+    );
+}
