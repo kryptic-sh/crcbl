@@ -4260,9 +4260,6 @@ in `crcbl_input::list`). Decisions, then what is left.
   Control-click binding still sees a left press.
 - **Deferred: a long press as the secondary press on touch**, and a pad button
   for `ui_menu` (above).
-- **Deferred: a shortcut column in context items.** The editor writes each key
-  into the label (`Delete (Del)`), as its toolbar does; a right-aligned column
-  needs a second span per item and a field on `ContextItem`.
 - **Decided: every pop-up is capped at the viewport's height less `POPUP_MARGIN`
   and scrolls**, not only a drop-down's list: `Ui::popup` puts the cap in front
   of the caller's `inline` (so a caller's own `max-height` wins) and

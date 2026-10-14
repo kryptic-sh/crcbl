@@ -99,7 +99,7 @@
 //!
 //! A secondary press on an entity's row, or the menu key while the row holds
 //! focus, opens its context menu ([`Ui::context_menu`]): Rename, Duplicate
-//! and Delete, each labelled with its key. A pick is not acted on here:
+//! and Delete, each with its key beside it. A pick is not acted on here:
 //! [`PanelFrame::menu`] hands back the [`Action`] that key asks for, which
 //! [`crate::app`] carries out as it carries out the key — so a menu delete is
 //! the same undoable command as Delete, and refused for the same reasons. All
@@ -1959,13 +1959,13 @@ struct RowMenu {
 }
 
 /// An entity row's context menu: each item the action its key asks for,
-/// labelled with that key, and disabled unless `editing` — play mode refuses
-/// all three. See the module docs.
+/// with that key shown beside it, and disabled unless `editing` — play mode
+/// refuses all three. See the module docs.
 fn row_menu_items(editing: bool) -> [ContextItem<'static, Action>; 3] {
     [
-        ContextItem::action("Rename (F2)", Action::Rename),
-        ContextItem::action("Duplicate (Ctrl+D)", Action::Duplicate),
-        ContextItem::action("Delete (Del)", Action::Delete),
+        ContextItem::action("Rename", Action::Rename).with_shortcut("F2"),
+        ContextItem::action("Duplicate", Action::Duplicate).with_shortcut("Ctrl+D"),
+        ContextItem::action("Delete", Action::Delete).with_shortcut("Del"),
     ]
     .map(|item| item.enabled(editing))
 }

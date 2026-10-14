@@ -550,7 +550,9 @@ select:disabled {
 /*
  * Context menu: a pop-up of items opened on a widget
  * (`widgets/context_menu.rs`). An item with a submenu ends in
- * `.context-item-arrow` and is `:open` while its submenu is; a separator is a
+ * `.context-item-arrow` and is `:open` while its submenu is; an action item
+ * given a shortcut shows it in `.context-item-shortcut`, pushed to the right
+ * by the label's growth and dimmed as the arrow is; a separator is a
  * rule between items. A disabled item keeps the menu's background under the
  * pointer, so only what can be picked lights up. Up and down wrap at the
  * menu's ends, as a Windows menu's arrows do; a drop-down's list, a list box,
@@ -582,7 +584,8 @@ select:disabled {
   flex-grow: 1;
 }
 
-.context-item-arrow {
+.context-item-arrow,
+.context-item-shortcut {
   color: #7a8190;
 }
 

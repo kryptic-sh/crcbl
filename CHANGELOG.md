@@ -2057,30 +2057,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`crcbl-ui` has context menus, and the editor's outliner rows use them.**
   `Ui::context_menu(anchor, &items)`, called after a widget every frame it is
   built, opens a list of `ContextItem`s — actions carrying a value of the
-  caller's type, separators, and submenus — on a secondary press over the
-  widget, with its corner at the pointer, or on `ui_menu` (the menu key or
-  Shift+F10) while the widget holds focus, below it. The innermost widget that
-  asked wins, so a row's menu opens over its panel's. Picking an item by click
-  or by arrows and accept reports its value once in `ContextMenuResponse` and
-  closes the whole chain; a disabled item is never focused or picked; a submenu
-  opens beside its item on a click, accept or the right arrow, and left closes
-  it again; back closes one level at a time, and a press outside closes them all
-  and is spent. Up and down wrap at a menu's ends, as a Windows menu's arrows do
-  (`nav-wrap: vertical` on `.context-menu`) — to its first item even when it is
-  scrolled out of view, since `nav-wrap` wraps to the far side of a container's
-  content rather than of its box. A secondary press elsewhere moves the menu
-  rather than only closing it. Its look is `default.css`'s `.context-menu`,
-  `.context-item`, `.context-item-arrow` and `.context-separator` rules.
-  Underneath: `PointerInput::secondary_pressed`, fed by the engine loop's
-  `PointerCapture` from every shell's right button; `NavInput::menu`, read from
-  the reserved `ui_menu` action; and `Ui::open_popup_at` with a `Placement` —
-  `Below` as before, `Beside` for a submenu, flipped left at the viewport's
-  right edge, or `At` a point, flipped up and left at the far edges. In the
-  editor a right-click on an entity's outliner row offers Rename, Duplicate and
-  Delete, each carried out exactly as its key is (so undoable the same way) and
-  disabled while a scene plays; a right-click on a row outside the selection
-  selects it first, and one inside a multi-selection acts on the whole
-  selection.
+  caller's type, each with an optional key shown after its label
+  (`ContextItem::with_shortcut`), separators, and submenus — on a secondary
+  press over the widget, with its corner at the pointer, or on `ui_menu` (the
+  menu key or Shift+F10) while the widget holds focus, below it. The innermost
+  widget that asked wins, so a row's menu opens over its panel's. Picking an
+  item by click or by arrows and accept reports its value once in
+  `ContextMenuResponse` and closes the whole chain; a disabled item is never
+  focused or picked; a submenu opens beside its item on a click, accept or the
+  right arrow, and left closes it again; back closes one level at a time, and a
+  press outside closes them all and is spent. Up and down wrap at a menu's ends,
+  as a Windows menu's arrows do (`nav-wrap: vertical` on `.context-menu`) — to
+  its first item even when it is scrolled out of view, since `nav-wrap` wraps to
+  the far side of a container's content rather than of its box. A secondary
+  press elsewhere moves the menu rather than only closing it. Its look is
+  `default.css`'s `.context-menu`, `.context-item`, `.context-item-arrow` and
+  `.context-separator` rules. Underneath: `PointerInput::secondary_pressed`, fed
+  by the engine loop's `PointerCapture` from every shell's right button;
+  `NavInput::menu`, read from the reserved `ui_menu` action; and
+  `Ui::open_popup_at` with a `Placement` — `Below` as before, `Beside` for a
+  submenu, flipped left at the viewport's right edge, or `At` a point, flipped
+  up and left at the far edges. In the editor a right-click on an entity's
+  outliner row offers Rename, Duplicate and Delete, each carried out exactly as
+  its key is (so undoable the same way) and disabled while a scene plays; a
+  right-click on a row outside the selection selects it first, and one inside a
+  multi-selection acts on the whole selection.
 - **`crcbl-ui` has tooltips, and the editor's toolbar and play strip use them.**
   `Ui::tooltip(&response, text)`, called after a widget every frame it is built,
   shows `text` once the pointer has rested on the widget — or, with a keyboard

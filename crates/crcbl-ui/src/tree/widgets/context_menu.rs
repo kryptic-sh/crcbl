@@ -78,6 +78,9 @@ pub enum ContextItem<'a, T> {
         value: T,
         /// Whether it can be picked; disabled, it is `:disabled`.
         enabled: bool,
+        /// The key that does the same, shown after the label as a
+        /// `.context-item-shortcut` span; it only says so and binds nothing.
+        shortcut: Option<&'a str>,
     },
     /// An item that opens `items` beside it.
     Submenu {
@@ -99,6 +102,27 @@ impl<'a, T> ContextItem<'a, T> {
             label,
             value,
             enabled: true,
+            shortcut: None,
+        }
+    }
+
+    /// This action item, showing `shortcut` — the key that does the same —
+    /// after its label; a submenu or separator as it is.
+    #[must_use]
+    pub fn with_shortcut(self, shortcut: &'a str) -> Self {
+        match self {
+            Self::Action {
+                label,
+                value,
+                enabled,
+                ..
+            } => Self::Action {
+                label,
+                value,
+                enabled,
+                shortcut: Some(shortcut),
+            },
+            other => other,
         }
     }
 
@@ -116,10 +140,16 @@ impl<'a, T> ContextItem<'a, T> {
     #[must_use]
     pub fn enabled(self, enabled: bool) -> Self {
         match self {
-            Self::Action { label, value, .. } => Self::Action {
+            Self::Action {
+                label,
+                value,
+                shortcut,
+                ..
+            } => Self::Action {
                 label,
                 value,
                 enabled,
+                shortcut,
             },
             Self::Submenu { label, items, .. } => Self::Submenu {
                 label,
@@ -262,6 +292,7 @@ impl Ui {
                     label,
                     value,
                     enabled,
+                    ..
                 } => {
                     let key = Self::context_item_key(root, label);
                     if enabled && self.interaction_of(key).clicked {
@@ -310,13 +341,18 @@ impl Ui {
         }
         self.popup(menu, ".context-menu", &[], |ui| {
             for (index, item) in items.iter().enumerate() {
-                let (label, enabled, submenu) = match *item {
-                    ContextItem::Action { label, enabled, .. } => (label, enabled, None),
+                let (label, enabled, submenu, shortcut) = match *item {
+                    ContextItem::Action {
+                        label,
+                        enabled,
+                        shortcut,
+                        ..
+                    } => (label, enabled, None, shortcut),
                     ContextItem::Submenu {
                         label,
                         items,
                         enabled,
-                    } => (label, enabled, Some(items)),
+                    } => (label, enabled, Some(items), None),
                     ContextItem::Separator => {
                         ui.block_keyed(index, ".context-separator", &[], |_| {});
                         continue;
@@ -335,6 +371,9 @@ impl Ui {
                 let parsed = ui.node_selector(".context-item");
                 ui.open_block(key, parsed, &[], behavior, state, |ui| {
                     ui.span(".context-item-label", label, &[]);
+                    if let Some(shortcut) = shortcut {
+                        ui.span(".context-item-shortcut", shortcut, &[]);
+                    }
                     if submenu.is_some() {
                         ui.span(".context-item-arrow", CONTEXT_ARROW, &[]);
                     }

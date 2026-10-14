@@ -141,9 +141,9 @@ fn an_open_row_menu_takes_typeahead_and_home() {
     };
 
     type_key(&mut editor, KeyCode::KeyD, "d");
-    assert_eq!(focused_label(&editor), "Duplicate (Ctrl+D)");
+    assert_eq!(focused_label(&editor), "Duplicate");
     tap(&mut editor, KeyCode::Home);
-    assert_eq!(focused_label(&editor), "Rename (F2)", "Home");
+    assert_eq!(focused_label(&editor), "Rename", "Home");
     type_key(&mut editor, KeyCode::KeyR, "r");
     assert_eq!(
         editor.gizmo_mode,

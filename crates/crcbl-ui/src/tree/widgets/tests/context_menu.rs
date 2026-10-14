@@ -29,16 +29,22 @@ const SIZES: [ContextItem<'static, Pick>; 2] = [
 /// The panel's own menu, under every target.
 const PANEL: [ContextItem<'static, Pick>; 1] = [ContextItem::action("Panel", Pick::Panel)];
 
-/// A target's menu: two actions, a disabled one, a separator and a submenu.
+/// A target's menu: two actions, the first with a shortcut, a disabled one
+/// with a shortcut too, a separator and a submenu.
 fn items() -> [ContextItem<'static, Pick>; 5] {
     [
-        ContextItem::action("Cut", Pick::Cut),
+        ContextItem::action("Cut", Pick::Cut).with_shortcut(CUT_KEY),
         ContextItem::action("Copy", Pick::Copy),
-        ContextItem::action("Locked", Pick::Locked).enabled(false),
+        ContextItem::action("Locked", Pick::Locked)
+            .with_shortcut(CUT_KEY)
+            .enabled(false),
         ContextItem::Separator,
         ContextItem::submenu("Size", &SIZES),
     ]
 }
+
+/// The shortcut the fixture's Cut item shows.
+const CUT_KEY: &str = "Ctrl+X";
 
 /// The targets' size.
 const TARGET: Vec2 = Vec2::new(100.0, 30.0);
@@ -672,4 +678,36 @@ fn a_submenu_takes_typeahead_and_still_picks() {
     });
     assert_eq!(picked, Some(Pick::Large));
     assert!(!ui.is_popup_open(target), "the pick left the menu open");
+}
+
+/// **An action given a shortcut shows it after its label, at the item's right
+/// end**, in a span of its own; one without shows its label alone.
+#[test]
+fn a_shortcut_is_shown_after_the_label() {
+    let mut ui = Ui::new();
+    let (built, _) = opened(&mut ui);
+    let cut = item(&ui, built.target, "Cut");
+    let [label, shortcut] = children_of(&ui, cut)[..] else {
+        panic!("Cut holds no label and shortcut");
+    };
+    assert_eq!(ui.text(shortcut), Some(CUT_KEY));
+    let (label_min, label_max) = rect(&ui, label);
+    let (shortcut_min, shortcut_max) = rect(&ui, shortcut);
+    assert!(
+        shortcut_min.x >= label_max.x,
+        "the shortcut is not after the label"
+    );
+    let copy = item(&ui, built.target, "Copy");
+    let (_, copy_max) = rect(&ui, copy);
+    assert!(
+        copy_max.x - shortcut_max.x < shortcut_min.x - label_min.x,
+        "the shortcut ends at {shortcut_max}, short of the item's end at {copy_max}"
+    );
+    assert_eq!(children_of(&ui, copy).len(), 1, "Copy shows a shortcut");
+    let locked = item(&ui, built.target, "Locked");
+    assert_eq!(
+        children_of(&ui, locked).len(),
+        2,
+        "disabling an item lost its shortcut"
+    );
 }
