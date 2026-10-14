@@ -3,6 +3,98 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## HIGH PRIORITY: lyr and pikr before the first release (2026-10-15)
+
+**The owner decided on 2026-10-15 that the first crates.io release waits for two
+things.** First, the features lyr (kryptic-sh/lyr, a status bar replacing
+waybar) and pikr (kryptic-sh/pikr, a rofi-style launcher leaving floem) need
+must be built. Second, the crate seam must be refactored so outside projects can
+use the shell, the UI and the UI's draw pass without the rest of the engine. The
+release pipeline is ready and waits on this; see the entry below.
+
+The requirements are rows S1–S27 of the joint table in lyr's
+`docs/plan/03-surfaces-and-input.md` (lyr commit f44f1b8). That table records
+what was asked and why, and is the reference for each row's detail. This entry
+is crcbl's order of work and live state. Delete a row here when it ships, and
+tell the lyr and pikr sessions.
+
+### Order of work
+
+Each step lands in the crate the later steps build on, so the seam goes first.
+
+1. **The seam.**
+   - S10: move `UiRenderer` and its UI pass out of `crcbl-render` into a leaf
+     crate over hal, ui and shaders, re-exported from `crcbl-render` so existing
+     callers keep compiling. Then audit what crcbl-shell, crcbl-ui and crcbl-hal
+     pull in for a caller that wants only a window and a UI.
+   - S15: give every published crate `rust-version`, equal to
+     `rust-toolchain.toml`'s channel.
+2. **The loop.**
+   - S6: a cross-thread wake proxy for `wait_events` on every backend (eventfd
+     on Wayland and X11, `PostMessageW` on Win32, a `CFRunLoop` source on
+     AppKit).
+   - S19: confirm that `wait_events`' existing timeout is honoured on every
+     backend.
+   - S25: a clean way out of the loop.
+3. **Window kinds in `WindowDesc`.** One general API, not one per app:
+   - a kind (toplevel, layer/panel, popup)
+   - a chosen output (S2)
+   - a parent and anchor rectangle for popups (S3)
+   - centred, borderless, topmost and focused toplevels (S8)
+   - per-pixel alpha (S16)
+4. **Wayland.**
+   - Vendor `wlr-layer-shell-unstable-v1` and build layer surfaces: layer,
+     anchors, exclusive zone, margins, keyboard interactivity (S1).
+   - `xdg_popup` on layer surfaces (S3).
+   - Focus events and first-key delivery (S17).
+   - Fractional scale on layer surfaces (S21).
+   - CI's `wayland-e2e` runs nested sway, which implements layer-shell, so these
+     get real end-to-end tests.
+5. **Win32.**
+   - Appbars (S4).
+   - Tool, topmost and no-activate styles, kept out of the taskbar and Alt-Tab,
+     taking the foreground on a hotkey launch (S27).
+   - Screen-positioned popups (S3).
+6. **AppKit.**
+   - Non-activating `NSPanel` with a window level and Spaces behaviour (S5).
+   - Child panels for popups (S3).
+7. **Outputs.** Hotplug events with name, scale and work area on every backend
+   (S7).
+8. **Text.**
+   - Fonts from bytes the app found (S11). `Font::parse` takes `&'static [u8]`
+     today.
+   - Rich per-span styling (S12).
+   - Colour emoji (COLR, CBDT, sbix) with per-glyph fallback (S22).
+   - Text measurement exists as `text_width`.
+9. **Input.**
+   - XKB compose and `text-input-v3` preedit and commit on Wayland (S9).
+   - Pointer hover, click, cursor shape, discrete and high-resolution wheel, and
+     a styleable scrollbar handle (S20).
+10. **UI fit.**
+    - Check pikr's stylesheet subset against crcbl-ui's parser (S23).
+    - Upload app-rasterised RGBA images (S24).
+11. **Start-up and failure.**
+    - Measure cold start to the first presented frame against 500 ms (S13).
+    - A clear failure, not a crash, with no usable GPU (S26).
+12. **FreeBSD** (S18): a compile-only CI job for crcbl-shell's Wayland path and
+    the UI path.
+13. **Accessibility (S14).** AccessKit is a new dependency, which is the owner's
+    call; ask before starting.
+
+### What exists already, verified by reading the tree at 1db97a5b
+
+- Monitor enumeration (`MonitorId`, `MonitorInfo`) on every backend.
+- Clipboard on every backend (`ShellEvent::ClipboardData`).
+- `ShellEvent::TextPreedit` on AppKit.
+- XKB keymaps and fractional-scale/viewporter code on Wayland.
+- `set_cursor(CursorIcon)`.
+- `wait_events(Option<Duration>)`.
+- crcbl-ui's virtualised fixed-height list (`widgets/list.rs`), caret and
+  selection in `text_input`, an image module, a cssparser and taffy stylesheet,
+  and `text_width`.
+- System font lookup by family name stays with the caller (fontdb), which hands
+  the bytes to crcbl-ui.
+
 ## HIGH PRIORITY: EW engine requirements
 
 EW engine requirements take priority over UI/editor expansion. EW adopts engine
@@ -438,7 +530,8 @@ tmxr's. `ci.yml` now carries it: the `package`, `build`, `install-packages`,
 `scoop-bucket` and `tag-release-status` jobs, with `pkg/` and
 `tools/publish-crates.sh` and `tools/check-publish-order.sh`. lyr's release is
 blocked on crcbl being on crates.io. **No tag has been cut**, so no publish job
-has ever run.
+has ever run, and **the first tag waits for the lyr and pikr program** at the
+top of this file, by the owner's decision of 2026-10-15.
 
 Needed from the owner before the first tag:
 
@@ -483,82 +576,6 @@ Left open:
   README, and older toolchains fail without naming the one they need. The
   recommendation to lyr was `rust-version` equal to `rust-toolchain.toml`'s
   channel.
-
-## Requests from lyr and pikr: desktop-shell window kinds (2026-10-15)
-
-lyr (kryptic-sh/lyr, a status bar replacing waybar) and pikr (kryptic-sh/pikr, a
-rofi-style launcher that wants to drop its floem/winit forks) asked, through
-their sessions, to build on `crcbl-shell`, `crcbl-hal` and `crcbl-ui`. The owner
-is coordinating. Nothing is scheduled; taking on this surface is the owner's
-call. lyr records the combined list in `lyr/docs/plan` and its backlog.
-
-What they need that crcbl lacks, checked against 1db97a5b by reading the tree:
-
-- **A cross-thread wake for `wait_events`.** No proxy exists. Wayland would use
-  an eventfd in the poll set, Win32 `PostMessageW`, AppKit a `CFRunLoop` source.
-  The engine would use it too (job-system and network completions).
-- **Window kinds and placement in `WindowDesc`:** position, parent, and a kind
-  enum, covering:
-  - Wayland `zwlr_layer_shell_v1` surfaces: anchor, exclusive zone, margin,
-    layer, and keyboard interactivity (none, on-demand, exclusive) on a chosen
-    `wl_output`, plus `xdg_popup` via `zwlr_layer_surface_v1.get_popup`.
-  - Win32 appbars: `SHAppBarMessage` on a `WS_POPUP` tool window that is topmost
-    and does not activate, plus screen-positioned popups.
-  - AppKit: a non-activating `NSPanel` per screen at status-bar level that joins
-    all spaces, with child panels for popups.
-  - A centred, borderless, topmost, focused toplevel on Windows and macOS.
-- **Monitor hotplug events on every backend.** Enumeration exists
-  (`MonitorId`/`MonitorInfo`); hotplug events are not verified on each backend.
-- **Wayland compose and `text-input-v3`.** Not found in
-  `crcbl-shell/src/wayland`. XKB keymaps are there, and preedit
-  (`ShellEvent::TextPreedit`) is on AppKit.
-- **Rich per-span text styling** for match highlighting. Not verified; treat it
-  as a gap.
-- **AccessKit integration.** Absent, and no plan names it.
-- **Cold start to the first focused frame under 500 ms.** Nothing measures cold
-  start; GPU device and pipeline initialisation is the risk.
-- **The UI draw path without the 3D renderer.** `UiRenderer` lives in
-  `crcbl-render`, which pulls water, sprite (with png `load`), shaders, ron and
-  serde. Recommended: split it into a small crate over hal, ui and shaders.
-  Owner call.
-
-pikr's further needs are rows S16–S27 of lyr's joint table
-(`lyr/docs/plan/03-surfaces-and-input.md`), sent 2026-10-15. Missing from crcbl:
-
-- per-pixel alpha (S16)
-- focus events and first-key delivery on layer surfaces (S17)
-- a FreeBSD build (S18)
-- colour emoji with per-glyph font fallback (S22)
-- a GPU-less path (S26), with a documented failure the recommendation
-- a Win32 tool window that takes the foreground (S27)
-
-Partly present:
-
-- `wait_events` already takes a timeout (S19).
-- Cursor icons and the virtualised list exist; the scrollbar handle and wheel
-  path are unverified (S20).
-- Wayland has fractional-scale code (S21).
-- The stylesheet covers most of S23. Percent sizes and CSS-exact specificity are
-  unverified.
-- The image module (S24) and the Win32 clipboard read are unverified line by
-  line.
-
-Already present: clipboard on every backend (`ShellEvent::ClipboardData`), the
-virtualised fixed-height list (`widgets/list.rs`), caret and selection in
-`text_input`, `crcbl-ui`'s image module, and the cssparser + taffy stylesheet.
-System font lookup stays with the caller (fontdb), which hands bytes to
-`crcbl-ui`'s `Font`.
-
-Recommendations given to lyr, each awaiting the owner:
-
-- Put these in `crcbl-shell` as general window kinds rather than in per-app
-  platform layers.
-- At first publish, declare `rust-version` equal to the pinned
-  `rust-toolchain.toml` channel.
-- Accept exact-version pins downstream; below 1.0 every breaking change bumps
-  the minor version.
-- Cutting the first release stays with the owner (see the `CHANGELOG.md`
-  `[Unreleased]` entry).
 
 ## Engine feature acceptance and EW ownership (2026-10-07)
 
