@@ -986,7 +986,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   contact point's normal, tagged touching or speculative with its last-substep
   normal impulse and its manifold feature id, so a feature that changes every
   frame on a still pile shows warm starting lost. `PhysicsDebugLine` is the tag
-  and `CONTACT_NORMAL_LENGTH` the drawn normal's length.
+  and `CONTACT_NORMAL_LENGTH` the drawn normal's length. Tumble's `D` key draws
+  it over the room on screen: boxes coloured by island, sleeping ones dimmed,
+  fixtures apart, and contact normals touching or speculative.
 
 - **A ragdoll's debug view, as line segments for a debug draw layer.**
   `Ragdoll::debug_lines` hands a caller's sink each body's outline in its

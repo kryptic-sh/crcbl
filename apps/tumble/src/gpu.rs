@@ -144,6 +144,9 @@ impl Gpu {
         if let Err(error) = self.drawn.update(&mut self.renderer, scenes) {
             crcbl::log::warn!("tumble: a body went undrawn: {error}");
         }
+        for (from, to, color) in stage::debug_segments(scenes) {
+            self.renderer.debug_draw().line(from, to, color);
+        }
     }
 
     /// Takes this frame's draw list, handing the previous frame's allocation

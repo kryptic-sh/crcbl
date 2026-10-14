@@ -27,8 +27,8 @@
 //!
 //! # It runs itself
 //!
-//! The one key it reads — `1` to `6` — picks the room on screen and never
-//! reaches the simulation. The rooms start the same way every run, which is
+//! The keys it reads — `1` to `6` to pick the room on screen, `D` to show its
+//! physics debug view — never reach the simulation. The rooms start the same way every run, which is
 //! what lets the browser gate hold the wasm build's hash to the constant the
 //! native test pins.
 //!

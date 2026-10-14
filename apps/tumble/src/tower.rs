@@ -45,8 +45,8 @@
 use crcbl::ecs::{Entity, SystemTrait as _};
 use crcbl::math::DVec3;
 use crcbl::phys::{
-    ColliderComponent, ContactSettings, GravityForce, MassProperties, PhysicsSystem, RigidBody,
-    SurfaceMaterial, Transform,
+    ColliderComponent, ContactSettings, GravityForce, MassProperties, PhysicsDebugLine,
+    PhysicsSystem, RigidBody, SurfaceMaterial, Transform,
 };
 
 use crate::scene::{Room, Shape, Tally, Tint, entity};
@@ -320,6 +320,13 @@ impl Room for Tower {
     fn hash(&self, hasher: &mut dyn std::hash::Hasher) {
         self.stack.hash_state(hasher);
         self.tall.hash_state(hasher);
+    }
+
+    fn debug_lines(&self, line: &mut dyn FnMut(DVec3, DVec3, PhysicsDebugLine)) {
+        self.stack
+            .debug_lines(&mut |from, to, kind| line(from, to, kind));
+        self.tall
+            .debug_lines(&mut |from, to, kind| line(from, to, kind));
     }
 
     fn bodies(&self, out: &mut Vec<Shape>) {

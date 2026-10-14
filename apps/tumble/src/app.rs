@@ -149,6 +149,9 @@ impl DebugModule for Stats<'_> {
 
 // ---- the hosted game ---------------------------------------------------------
 
+/// The key that shows or hides the physics debug view.
+pub const DEBUG_VIEW_KEY: KeyCode = KeyCode::KeyD;
+
 /// Tumble, as the engine's loop hosts it.
 #[derive(Debug)]
 pub struct Tumble {
@@ -354,12 +357,25 @@ impl HostedGame for Tumble {
         self.log_heartbeat();
     }
 
-    /// `1` to `6` pick the room on screen. That is the only key, and it
-    /// reaches the camera and the panel and not the simulation, so the hash
-    /// the gate pins is the same whatever is pressed.
+    /// `1` to `6` pick the room on screen and `D` shows or hides its physics
+    /// debug view. Those are the only keys, and they reach the camera and
+    /// what is drawn and not the simulation, so the hash the gate pins is the
+    /// same whatever is pressed.
     fn key_event(&mut self, key: KeyCode, pressed: bool) {
-        if pressed && let Some(view) = View::for_key(key) {
+        if !pressed {
+            return;
+        }
+        if let Some(view) = View::for_key(key) {
             self.scenes.set_view(view);
+        } else if key == DEBUG_VIEW_KEY {
+            self.scenes.toggle_debug_view();
+            if self.scenes.debug_view() {
+                // The view is drawn through the debug-draw layer, which is
+                // off by default, so asking for it switches the layer on.
+                crcbl::render::debug_draw::r_debug_draw
+                    .set(&crcbl::console::Value::Bool(true))
+                    .expect("`r_debug_draw` is a writable bool");
+            }
         }
     }
 

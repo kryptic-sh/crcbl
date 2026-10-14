@@ -5375,10 +5375,13 @@ base-100 figure is recorded anywhere (grepped `apps/tumble` and
 
 ### Tumble's debug view, page controls and server loopback (2026-09-25)
 
-- **The physics debug view**: contact points and normals, AABBs, islands
-  coloured and sleeping bodies dimmed. The engine hands the segments out as
-  `PhysicsSystem::debug_lines` (_Physics debug suite: draw, scrub, query
-  visualiser_); tumble does not draw them yet.
+- **The physics debug view is drawn, unchecked by eye.** `D` shows the room on
+  screen's `PhysicsSystem::debug_lines` (`stage::debug_segments`): boxes by
+  island, sleeping ones dimmed, fixtures apart, contact normals touching or
+  speculative. A test reads the coloured segments; nothing reads the drawn frame
+  back, no frame of it has been looked at, and the browser gate does not press
+  `D`. The rooms' hint lines still name only the keys `1` to `6`, and a
+  contact's impulse is not drawn as anything.
 - **Page controls.** The plan wanted the scene selector, the spawn rate, the
   body cap and the debug view as HTML controls on `/demos/tumble/`; the page has
   none, and `apps/tumble/src/menu.rs` says they arrive with the scenes that need
@@ -12004,13 +12007,13 @@ last-substep impulse and its manifold feature id; the caller colours them.
 a unit struct with nothing to draw into. Giving it a sink would touch every
 system in the workspace and put a render type in `crcbl-ecs`, so the segment
 method was taken instead, as `crcbl-ragdoll`'s debug view does; revisit if a
-schedule-wide debug pass is wanted. Nothing calls `debug_lines` yet — tumble is
-where it would be seen first — so no frame of it has been looked at. Not drawn:
-planes, swept paths, joint frames and their limits (a ragdoll draws its own),
-and impulse as anything but a number for the caller to colour by. There is no
-time scrub and no query visualiser anywhere in the workspace
-(`grep -rn scrub crates/ apps/ --include=*.rs` hits one unrelated line in
-`apps/puppet/src/menu.rs`).
+schedule-wide debug pass is wanted. Tumble draws it over the room on screen when
+`D` is pressed (_Tumble's debug view, page controls and server loopback_), and
+no frame of it has been looked at. Not drawn: planes, swept paths, joint frames
+and their limits (a ragdoll draws its own), and impulse as anything but a number
+for the caller to colour by. There is no time scrub and no query visualiser
+anywhere in the workspace (`grep -rn scrub crates/ apps/ --include=*.rs` hits
+one unrelated line in `apps/puppet/src/menu.rs`).
 
 The physics plan stated the rule "no query without a visualizer" as an exit
 criterion, beside a 1000-tick replay whose scrub UI works; the rule is in

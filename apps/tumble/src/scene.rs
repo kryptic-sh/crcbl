@@ -11,7 +11,8 @@
 //! ```
 //!
 //! **The view never reaches the simulation.** Keys `1` to `6` move the
-//! camera and change which room's counters the panel shows, and nothing else:
+//! camera and change which room's counters the panel shows, and `D` shows the
+//! room's physics debug view over it, and nothing else:
 //! every room steps every tick from the same start, so the hash at
 //! [`CHECK_TICK`] is a constant whatever was pressed. [`PINNED_HASH`] is it,
 //! taken natively and asserted by `the_hash_at_the_check_tick_is_the_pinned_one`,
@@ -32,7 +33,7 @@ use std::hash::Hasher;
 use crcbl::core::input::KeyCode;
 use crcbl::ecs::Entity;
 use crcbl::math::{DQuat, DVec3};
-use crcbl::phys::{ContactCounters, StageTimes};
+use crcbl::phys::{ContactCounters, PhysicsDebugLine, StageTimes};
 
 use crate::bridge::{Bridge, BridgeReading};
 use crate::bullets::{Bullets, BulletsReading};
@@ -153,6 +154,9 @@ pub trait Room {
     fn bodies(&self, out: &mut Vec<Shape>);
     /// The fixtures, which never move.
     fn fixtures(&self, out: &mut Vec<Shape>);
+    /// The physics debug view of every system the room steps
+    /// ([`crcbl::phys::PhysicsSystem::debug_lines`]).
+    fn debug_lines(&self, line: &mut dyn FnMut(DVec3, DVec3, PhysicsDebugLine));
 }
 
 /// A room's contact counters, over its run: the contact solver's rung 1 row,
@@ -364,6 +368,7 @@ pub struct Scenes {
     bullets: Bullets,
     bridge: Bridge,
     view: View,
+    debug_view: bool,
     tick: u64,
     step_micros: Option<f64>,
 }
@@ -414,6 +419,31 @@ impl Scenes {
     #[must_use]
     pub const fn view(&self) -> View {
         self.view
+    }
+
+    /// Shows the physics debug view over the room on screen, or hides it. The
+    /// simulation does not see it either.
+    pub const fn toggle_debug_view(&mut self) {
+        self.debug_view = !self.debug_view;
+    }
+
+    /// Whether the physics debug view is shown.
+    #[must_use]
+    pub const fn debug_view(&self) -> bool {
+        self.debug_view
+    }
+
+    /// The room on screen's physics debug view.
+    pub fn debug_lines(&self, line: &mut dyn FnMut(DVec3, DVec3, PhysicsDebugLine)) {
+        let room: &dyn Room = match self.view {
+            View::Spin => &self.spin,
+            View::Wall => &self.wall,
+            View::Pit => &self.pit,
+            View::Tower => &self.tower,
+            View::Bullets => &self.bullets,
+            View::Bridge => &self.bridge,
+        };
+        room.debug_lines(line);
     }
 
     /// Every room's physics state under FNV-1a — a digest that, unlike `std`'s

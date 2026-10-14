@@ -34,8 +34,8 @@
 use crcbl::ecs::SystemTrait as _;
 use crcbl::math::{DQuat, DVec3};
 use crcbl::phys::{
-    ColliderComponent, ContactSettings, MassProperties, PhysicsSystem, RigidBody, SurfaceMaterial,
-    Transform,
+    ColliderComponent, ContactSettings, MassProperties, PhysicsDebugLine, PhysicsSystem, RigidBody,
+    SurfaceMaterial, Transform,
 };
 
 use crate::scene::{GRAVITY, Room, Shape, Tally, Tint, entity};
@@ -330,6 +330,11 @@ impl Room for Spin {
 
     fn hash(&self, hasher: &mut dyn std::hash::Hasher) {
         self.phys.hash_state(hasher);
+    }
+
+    fn debug_lines(&self, line: &mut dyn FnMut(DVec3, DVec3, PhysicsDebugLine)) {
+        self.phys
+            .debug_lines(&mut |from, to, kind| line(from, to, kind));
     }
 
     fn bodies(&self, out: &mut Vec<Shape>) {

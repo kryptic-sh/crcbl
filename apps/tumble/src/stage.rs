@@ -18,6 +18,7 @@ use std::collections::HashMap;
 
 use crcbl::greybox::{GREYBOX_TILE_M, cube, cylinder, grid_material, grid_page, platform, sphere};
 use crcbl::math::{DQuat, DVec3, Mat4, Quat, Vec3};
+use crcbl::phys::PhysicsDebugLine;
 use crcbl::render::scene::{Capacities, Geometry, InstanceDesc, MeshDesc, ProbeGrid, SceneDesc};
 use crcbl::render::{
     Camera, DirectionalLight, ForwardRenderer, InstanceHandle, InstancePoolError, Projection,
@@ -358,6 +359,58 @@ pub fn camera(view: View) -> Camera {
     }
 }
 
+/// The colours an awake body's box cycles through by its island, so the
+/// bodies the solver steps together share one.
+const ISLAND_COLORS: [[f32; 4]; 6] = [
+    [0.35, 0.75, 1.0, 1.0],
+    [0.45, 0.95, 0.55, 1.0],
+    [1.0, 0.72, 0.2, 1.0],
+    [0.95, 0.35, 0.85, 1.0],
+    [0.6, 0.45, 0.95, 1.0],
+    [0.3, 0.9, 0.85, 1.0],
+];
+
+/// A box in no island: a fixture, or a body not yet stepped.
+const UNISLANDED_COLOR: [f32; 4] = [0.85, 0.85, 0.85, 1.0];
+
+/// A sleeping body's box: dimmed, so what still moves stands out.
+const SLEEPING_COLOR: [f32; 4] = [0.4, 0.4, 0.46, 1.0];
+
+/// A contact normal where the surfaces touch.
+const TOUCHING_COLOR: [f32; 4] = [1.0, 0.3, 0.2, 1.0];
+
+/// A contact normal the solver keeps before the surfaces meet.
+const SPECULATIVE_COLOR: [f32; 4] = [1.0, 0.9, 0.3, 1.0];
+
+/// The room on screen's physics debug view, each segment in render space and
+/// coloured, while [`Scenes::debug_view`] is on, and nothing while it is off:
+/// an awake body's box by its island, a sleeping one's dimmed, a box in no
+/// island apart, and each contact normal by whether its surfaces touch.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub fn debug_segments(scenes: &Scenes) -> Vec<(Vec3, Vec3, [f32; 4])> {
+    let mut segments = Vec::new();
+    if !scenes.debug_view() {
+        return segments;
+    }
+    scenes.debug_lines(&mut |from, to, kind| {
+        let color = match kind {
+            PhysicsDebugLine::Bounds { sleeping: true, .. } => SLEEPING_COLOR,
+            PhysicsDebugLine::Bounds {
+                island: Some(island),
+                ..
+            } => ISLAND_COLORS[island as usize % ISLAND_COLORS.len()],
+            PhysicsDebugLine::Bounds { island: None, .. } => UNISLANDED_COLOR,
+            PhysicsDebugLine::Contact { touching: true, .. } => TOUCHING_COLOR,
+            PhysicsDebugLine::Contact {
+                touching: false, ..
+            } => SPECULATIVE_COLOR,
+        };
+        segments.push((from.as_vec3(), to.as_vec3(), color));
+    });
+    segments
+}
+
 /// How high the sun sits, as the `Y` of a unit direction.
 const SUN_ELEVATION: f32 = 0.72;
 
@@ -452,5 +505,56 @@ mod tests {
         assert_eq!(count, 3);
         let top = parts[0].1.transform_point3(Vec3::new(0.0, 1.0, 0.0));
         assert!((top - Vec3::new(3.0, 1.0, 0.0)).length() < 1e-5, "{top:?}");
+    }
+
+    /// How many ticks the debug view's test runs before it looks: enough for
+    /// the Tower room's pyramid to sleep with its contacts still drawn.
+    const DEBUG_TICKS: u64 = 100;
+
+    /// **The debug view draws nothing until `D` asks for it, then the room on
+    /// screen and only that room**: sleeping boxes dimmed, awake ones by
+    /// island, touching and speculative contacts apart, and the wall's
+    /// fixtures, in no island, in a colour of their own.
+    #[test]
+    fn the_debug_view_draws_the_room_on_screen_once_asked() {
+        let mut scenes = Scenes::new();
+        for _ in 0..DEBUG_TICKS {
+            scenes.step(crate::scene::tests::tick_dt());
+        }
+        scenes.set_view(View::Tower);
+        assert!(debug_segments(&scenes).is_empty(), "drawn before asked");
+        scenes.toggle_debug_view();
+        // Each room's own stretch of the x axis, halfway to its neighbours.
+        let within = |segments: &[(Vec3, Vec3, [f32; 4])], (west, east): (f32, f32)| {
+            segments
+                .iter()
+                .all(|(from, to, _)| [from.x, to.x].iter().all(|x| (west..east).contains(x)))
+        };
+        let tower = debug_segments(&scenes);
+        assert!(
+            within(&tower, (35.0, 55.0)),
+            "a segment outside the Tower room"
+        );
+        let has = |segments: &[(Vec3, Vec3, [f32; 4])], color| {
+            segments.iter().any(|segment| segment.2 == color)
+        };
+        assert!(has(&tower, SLEEPING_COLOR), "no sleeping box");
+        assert!(has(&tower, TOUCHING_COLOR), "no touching contact");
+        assert!(has(&tower, SPECULATIVE_COLOR), "no speculative contact");
+        assert!(
+            ISLAND_COLORS.iter().any(|&color| has(&tower, color)),
+            "no awake box coloured by its island"
+        );
+
+        scenes.set_view(View::Wall);
+        let wall = debug_segments(&scenes);
+        assert!(
+            within(&wall, (6.0, 19.0)),
+            "a segment outside the wall's room"
+        );
+        assert!(has(&wall, UNISLANDED_COLOR), "no fixture drawn");
+
+        scenes.toggle_debug_view();
+        assert!(debug_segments(&scenes).is_empty(), "drawn once hidden");
     }
 }
