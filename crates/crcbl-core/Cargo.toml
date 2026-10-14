@@ -22,7 +22,7 @@ glam = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
-crcbl-spawn = { workspace = true }
+crcbl-spawn = { path = "../crcbl-spawn" }
 proptest = { workspace = true }
 
 [lints]

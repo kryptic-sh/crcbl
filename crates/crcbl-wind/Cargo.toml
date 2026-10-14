@@ -39,7 +39,7 @@ thiserror = { workspace = true }
 # dev-dependency because nothing at runtime writes a layer, and an example
 # rather than a binary because a binary cannot see one.
 [dev-dependencies]
-crcbl-sprite = { workspace = true, features = ["bake", "load"] }
+crcbl-sprite = { path = "../crcbl-sprite", features = ["bake", "load"] }
 
 # The committed layer pair's generator, in `tools/` beside the module it shares
 # with `tests/authored_layers.rs`. `crates/crcbl-shaders/tools/cook-dfg.rs` is

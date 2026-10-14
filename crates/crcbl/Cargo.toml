@@ -211,11 +211,11 @@ crcbl-dx12 = { workspace = true }
 # nothing. Dev-dependencies are visible to rustdoc on every target, so this line
 # is what keeps those links alive on the one target the crate is not linked for.
 [dev-dependencies]
-crcbl-golden = { workspace = true }
+crcbl-golden = { path = "../crcbl-golden" }
 # For `tests/tiling_e2e.rs`, which draws greybox floor quads under the physical
 # tiling material to prove a 2 m surface shows twice the grid cells of a 1 m one.
 # A dev-dependency because no shipped `crcbl` binary references the greybox pack.
-crcbl-greybox = { workspace = true }
+crcbl-greybox = { path = "../crcbl-greybox", default-features = false }
 # `tests/gltf_e2e.rs` builds a `.glb` and imports it through the real
 # `DirSource`, so it needs a real directory to put it in. The asset seam itself
 # is an ordinary dependency above — see there.
@@ -227,8 +227,8 @@ png = { workspace = true }
 # `src/scene_mesh/tests.rs` measures a real `.glb`, built by `crcbl-scene`'s
 # fixture builder rather than vendored, on that module's argument: a checked-in
 # binary is a fixture nobody reviewing a change can read.
-crcbl-scene = { workspace = true, features = ["gltf-fixture"] }
-crcbl-spawn = { workspace = true }
+crcbl-scene = { path = "../crcbl-scene", default-features = false, features = ["gltf-fixture"] }
+crcbl-spawn = { path = "../crcbl-spawn" }
 
 [lints]
 workspace = true

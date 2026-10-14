@@ -119,6 +119,16 @@ dirs = "7.0"
 # than once and the dependency direction is readable from one place. The
 # redundant-looking `version` is load-bearing: `cargo deny check bans` treats a
 # bare `{ path = … }` as a wildcard dependency and fails the build.
+#
+# **Internal dev-dependencies are the exception**: each member names them as
+# `{ path = "../crcbl-…" }` with no version, not through this table. `cargo
+# publish` strips a dev-dependency that has no version, and that strip is what
+# lets the crates publish at all: `crcbl-shaders` and `crcbl-scene` depend on
+# each other through a dev-dependency, which cargo allows in a workspace and
+# crates.io cannot resolve, and every other internal dev-dependency would
+# otherwise have to be published ahead of the crate whose tests use it.
+# `deny.toml`'s `allow-wildcard-paths` is what lets these through the wildcard
+# ban.
 crcbl = { path = "crates/crcbl", version = "0.1.0" }
 crcbl-core = { path = "crates/crcbl-core", version = "0.1.0" }
 crcbl-golden = { path = "crates/crcbl-golden", version = "0.1.0" }

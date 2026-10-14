@@ -23,7 +23,7 @@ crcbl-hal = { workspace = true }
 # engine's shaders, exactly as `crcbl-vk` states for the identical
 # dev-dependency.
 [dev-dependencies]
-crcbl-shaders = { workspace = true }
+crcbl-shaders = { path = "../crcbl-shaders" }
 
 # The Objective-C bindings, and only on the platform that has the framework
 # behind them. `docs/plan/09-backends-metal-dx12.md`'s FFI correction is the

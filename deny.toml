@@ -50,6 +50,11 @@ unused-allowed-license = "allow"
 # `cargo deny --all-features check bans`.
 multiple-versions = "deny"
 wildcards = "deny"
+# Except a path dependency that never reaches crates.io: a dev-dependency (which
+# `cargo publish` strips) or any dependency of a `publish = false` member. The
+# internal dev-dependencies are path-only for exactly that strip; the workspace
+# manifest says why.
+allow-wildcard-paths = true
 highlight = "all"
 skip = [
   # The `toml` 0.8-versus-1.x duplication and both `hashbrown`/`foldhash` pairs

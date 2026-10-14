@@ -20,7 +20,7 @@ dirs = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-crcbl-spawn = { workspace = true }
+crcbl-spawn = { path = "../crcbl-spawn" }
 tempfile = "3"
 
 [lints]

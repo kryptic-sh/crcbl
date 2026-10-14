@@ -53,7 +53,7 @@ proptest = { workspace = true }
 # The no-dupe property's command streams: seeded, so a failing sequence is
 # reproduced from the seed the assertion prints, and portable, so it is the
 # same sequence on every machine — `crcbl-rand`'s whole contract.
-crcbl-rand = { workspace = true }
+crcbl-rand = { path = "../crcbl-rand" }
 # A real directory for the stash's round trip through `NativeStorage`, whose
 # `write` is `write_atomic` — the path a server actually takes. As in
 # `crates/crcbl-store/Cargo.toml`.

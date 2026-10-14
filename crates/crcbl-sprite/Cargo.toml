@@ -28,5 +28,5 @@ workspace = true
 # the feature set — `dev-dependencies` cannot be optional.
 [dev-dependencies]
 # The workspace's one CRC-32 (`crcbl_store::crc32`), for the PNG fixtures.
-crcbl-store = { workspace = true }
+crcbl-store = { path = "../crcbl-store" }
 png = { workspace = true }

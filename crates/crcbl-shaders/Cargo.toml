@@ -51,7 +51,7 @@ naga = { version = "30", features = ["wgsl-in"] }
 # Topic 25's "How a DAG reaches the renderer" (`docs/notes/rendering.md`) is
 # what this implements: the artifact is committed, `--check` regenerates and
 # compares, and the consumer never sees the builder.
-crcbl-scene = { workspace = true }
+crcbl-scene = { path = "../crcbl-scene", default-features = false }
 # `crcbl_scene::ClusterGroup::projected_error` takes a `glam::Vec3`, and the
 # generator compares it against this crate's `[f32; 3]` spelling of the same
 # metric. One conversion, in the one target that has to speak both — the library

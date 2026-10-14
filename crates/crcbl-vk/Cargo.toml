@@ -27,10 +27,10 @@ thiserror = { workspace = true }
 # backend registry deliberately did **not** move into `crcbl-render` at P1.3;
 # see that crate's docs.
 [dev-dependencies]
-crcbl-golden = { workspace = true }
-crcbl-render = { workspace = true }
-crcbl-shaders = { workspace = true }
-crcbl-spawn = { workspace = true }
+crcbl-golden = { path = "../crcbl-golden" }
+crcbl-render = { path = "../crcbl-render" }
+crcbl-shaders = { path = "../crcbl-shaders" }
+crcbl-spawn = { path = "../crcbl-spawn" }
 # The reversed-Z control: the suite builds a *conventional* projection matrix to
 # compare against, which `crcbl-render` deliberately has no constructor for.
 glam = { workspace = true }

@@ -135,4 +135,4 @@ win32-ime-e2e = ["win32-e2e"]
 workspace = true
 
 [dev-dependencies]
-crcbl-spawn = { workspace = true }
+crcbl-spawn = { path = "../crcbl-spawn" }

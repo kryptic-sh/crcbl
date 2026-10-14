@@ -27,7 +27,7 @@ thiserror = { workspace = true }
 [dev-dependencies]
 # The transport conformance suite, run against `SteamTransport` over the fake
 # library.
-crcbl-net = { workspace = true, features = ["conformance"] }
+crcbl-net = { path = "../crcbl-net", features = ["conformance"] }
 
 [lints]
 workspace = true

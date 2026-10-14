@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# Not on crates.io: `editor` is a dependency, and the editor depends on the
+# games whose scenes it edits, none of which publish. The binary ships through
+# release archives instead, built from this repository.
+publish = false
 
 # The package is `crcbl-cli` so it does not collide with the `crcbl` umbrella
 # library package; the shipped binary is still `crcbl`.

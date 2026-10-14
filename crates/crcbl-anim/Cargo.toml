@@ -31,7 +31,7 @@ ron = { workspace = true }
 # The seeded parameter sequences the state machine's determinism property is
 # driven by: the workspace's own portable generator, so a seed is the same run
 # on every target.
-crcbl-rand = { workspace = true }
+crcbl-rand = { path = "../crcbl-rand" }
 
 [lints]
 workspace = true

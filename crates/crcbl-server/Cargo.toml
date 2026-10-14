@@ -24,13 +24,13 @@ crcbl-net = { workspace = true }
 crcbl-rand = { workspace = true }
 
 [dev-dependencies]
-crcbl-client = { workspace = true }
+crcbl-client = { path = "../crcbl-client" }
 # The pool a world's schedule ticks on, in `host::parallel_tests`.
-crcbl-jobs = { workspace = true }
-crcbl-phys = { workspace = true }
+crcbl-jobs = { path = "../crcbl-jobs" }
+crcbl-phys = { path = "../crcbl-phys" }
 # The `.crpl` file a recorded session is written to and re-simulated from, in
 # `host::sim_tests`.
-crcbl-store = { workspace = true }
+crcbl-store = { path = "../crcbl-store" }
 glam = { workspace = true }
 
 [lints]
