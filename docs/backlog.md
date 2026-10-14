@@ -1008,6 +1008,11 @@ machine, or twice in CI, is real.
   the last was tick 540": the page fell short of the tick, and no hash was
   compared. A rerun of that job passed and deployed. That push changed only the
   editor.
+- **The Pages job "probe the seam on Windows"** — on 2026-10-14, run 38479086250
+  at `49f92895` failed with "the probe page never became ready in 90000 ms" and
+  "ZERO CHECKS RAN", so no check failed. A rerun of that job passed and
+  deployed. That push changed the editor and `crcbl-ui`'s drop-down, not the
+  probe page.
 - **`towers lan::tests::four_players_win_the_whole_table_on_a_dedicated_server`**
   — four players against a dedicated server over real sockets, judged by the
   game's outcome. On 2026-10-07, CI run 37540311343 at `e858a5b0` failed it on
