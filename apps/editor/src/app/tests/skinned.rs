@@ -432,6 +432,102 @@ fn bodies_over_a_twin() -> (Editor<HeadlessShell>, SceneEntityId, f64) {
     (editor, dropped, height)
 }
 
+/// Where a dynamic twin standing on the props' ground block stands, the
+/// ground given a static body row, before and after play runs on with a
+/// rigged mesh hung above it dropped into play by G (`drop`) or left alone —
+/// and the twin's height.
+fn twin_on_the_ground(drop: bool) -> (DVec3, DVec3, f64) {
+    let mut editor = headless(256);
+    editor.document = props();
+    editor.document.set_assets(Box::new(assets()));
+    let ground = SceneEntityId(0);
+    let twin = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(2.0, 0.0, 0.0))
+        .expect("spawned");
+    let height = 2.0
+        * editor
+            .document
+            .placement(twin)
+            .expect("placed")
+            .half_extents
+            .y;
+    let dropped = editor
+        .document
+        .spawn_mesh(RIG, DVec3::new(2.0, 3.0 * height, 0.0))
+        .expect("spawned");
+    for id in [ground, twin] {
+        editor
+            .document
+            .attach(id, crcbl::scene_physics::BODIES)
+            .expect("a body row");
+    }
+    editor
+        .document
+        .component(ground, crcbl::scene_physics::BODIES)
+        .and_then(|row| {
+            row.as_any_mut()
+                .downcast_mut::<crcbl::scene_physics::Body>()
+        })
+        .expect("a body")
+        .kind = crcbl::scene_physics::BodyKind::Static;
+    let tick = Duration::from_secs_f64(editor.document.world().tick_dt());
+    editor.clock_source = Clock::manual(tick);
+    editor.frame().expect("a frame");
+    editor.document.select(Some(dropped));
+    tap(&mut editor, KeyCode::F5);
+    let at = |editor: &mut Editor<HeadlessShell>| {
+        let entity = editor
+            .document
+            .ids()
+            .entity(twin)
+            .expect("a playing entity");
+        let simulation = editor
+            .document
+            .world_mut()
+            .system_mut::<crcbl::scene_physics::Simulation>()
+            .expect("a simulation");
+        simulation
+            .physics()
+            .transform(entity)
+            .expect("a body")
+            .position
+    };
+    for _ in 0..STAND_FRAMES {
+        editor.frame().expect("a frame");
+    }
+    let standing = at(&mut editor);
+    if drop {
+        tap(&mut editor, KeyCode::KeyG);
+        assert!(editor.dropping.is_some(), "no drop into play");
+    }
+    for _ in 0..KNOCK_FRAMES {
+        editor.frame().expect("a frame");
+    }
+    (standing, at(&mut editor), height)
+}
+
+/// How many frames of play the twin is given to come to rest standing.
+const STAND_FRAMES: usize = 60;
+
+/// How many frames of play follow G: enough for the ragdoll to fall onto
+/// the twin and the twin to fall flat.
+const KNOCK_FRAMES: usize = 120;
+
+/// **A ragdoll dropped into play knocks over the dynamic body it lands on**:
+/// the twin, a flat plate standing on the ground, stands where it was with
+/// nothing dropped, and lies on the ground once the ragdoll lands on it.
+#[test]
+fn a_drop_in_play_knocks_over_a_dynamic_body() {
+    let (standing, left, _) = twin_on_the_ground(false);
+    assert_eq!(left, standing, "the twin moved with nothing dropped on it");
+    let (standing, struck, height) = twin_on_the_ground(true);
+    assert!(
+        standing.y - struck.y > 0.25 * height,
+        "the {height} m twin stood at {standing} and was left at {struck}"
+    );
+}
+
 /// How many colliders the playing scene's simulation holds.
 fn simulated(editor: &mut Editor<HeadlessShell>) -> usize {
     let simulation = editor

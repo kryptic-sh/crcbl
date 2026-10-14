@@ -348,8 +348,9 @@ among the scene's bodies as a game's corpse would, and the world is thrown away
 when play stops. The mesh's own body leaves the simulation while it does, and G
 again takes the ragdoll out without putting that body back — it is back at stop.
 Play has no ground plane, so a scene with nothing under the mesh lets it fall
-forever, as it does the scene's bodies. Not covered by a test: a dynamic scene
-body being pushed by the ragdoll; the test lands it on a static one.
+forever, as it does the scene's bodies. A test drops it onto a dynamic scene
+body standing on a static one and sees it knocked flat
+(`a_drop_in_play_knocks_over_a_dynamic_body`).
 
 Limits of what landed: only an asset's first skin deforms (the viewer's rule);
 no clip plays; and the drawing is checked on the null backend only — no frame
