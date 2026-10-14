@@ -430,6 +430,61 @@ validation before a reusable port can be specified. GPU residency likewise needs
 measured pressure and a proven game-local policy. Keep those decisions in EW's
 backlog; do not create speculative engine implementations for them.
 
+## Requests from lyr and pikr: desktop-shell window kinds (2026-10-15)
+
+lyr (kryptic-sh/lyr, a status bar replacing waybar) and pikr (kryptic-sh/pikr, a
+rofi-style launcher that wants to drop its floem/winit forks) asked, through
+their sessions, to build on `crcbl-shell`, `crcbl-hal` and `crcbl-ui`. The owner
+is coordinating. Nothing is scheduled; taking on this surface is the owner's
+call. lyr records the combined list in `lyr/docs/plan` and its backlog.
+
+What they need that crcbl lacks, checked against 1db97a5b by reading the tree:
+
+- **A cross-thread wake for `wait_events`.** No proxy exists. Wayland would use
+  an eventfd in the poll set, Win32 `PostMessageW`, AppKit a `CFRunLoop` source.
+  The engine would use it too (job-system and network completions).
+- **Window kinds and placement in `WindowDesc`:** position, parent, and a kind
+  enum, covering:
+  - Wayland `zwlr_layer_shell_v1` surfaces: anchor, exclusive zone, margin,
+    layer, and keyboard interactivity (none, on-demand, exclusive) on a chosen
+    `wl_output`, plus `xdg_popup` via `zwlr_layer_surface_v1.get_popup`.
+  - Win32 appbars: `SHAppBarMessage` on a `WS_POPUP` tool window that is topmost
+    and does not activate, plus screen-positioned popups.
+  - AppKit: a non-activating `NSPanel` per screen at status-bar level that joins
+    all spaces, with child panels for popups.
+  - A centred, borderless, topmost, focused toplevel on Windows and macOS.
+- **Monitor hotplug events on every backend.** Enumeration exists
+  (`MonitorId`/`MonitorInfo`); hotplug events are not verified on each backend.
+- **Wayland compose and `text-input-v3`.** Not found in
+  `crcbl-shell/src/wayland`. XKB keymaps are there, and preedit
+  (`ShellEvent::TextPreedit`) is on AppKit.
+- **Rich per-span text styling** for match highlighting. Not verified; treat it
+  as a gap.
+- **AccessKit integration.** Absent, and no plan names it.
+- **Cold start to the first focused frame under 500 ms.** Nothing measures cold
+  start; GPU device and pipeline initialisation is the risk.
+- **The UI draw path without the 3D renderer.** `UiRenderer` lives in
+  `crcbl-render`, which pulls water, sprite (with png `load`), shaders, ron and
+  serde. Recommended: split it into a small crate over hal, ui and shaders.
+  Owner call.
+
+Already present: clipboard on every backend (`ShellEvent::ClipboardData`), the
+virtualised fixed-height list (`widgets/list.rs`), caret and selection in
+`text_input`, `crcbl-ui`'s image module, and the cssparser + taffy stylesheet.
+System font lookup stays with the caller (fontdb), which hands bytes to
+`crcbl-ui`'s `Font`.
+
+Recommendations given to lyr, each awaiting the owner:
+
+- Put these in `crcbl-shell` as general window kinds rather than in per-app
+  platform layers.
+- At first publish, declare `rust-version` equal to the pinned
+  `rust-toolchain.toml` channel.
+- Accept exact-version pins downstream; below 1.0 every breaking change bumps
+  the minor version.
+- Cutting the first release stays with the owner (see the `CHANGELOG.md`
+  `[Unreleased]` entry).
+
 ## Engine feature acceptance and EW ownership (2026-10-07)
 
 The physics API handoff shipped in EW `1c5bee71`, pinned to engine `020051c2`.
