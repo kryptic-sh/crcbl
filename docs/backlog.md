@@ -293,8 +293,9 @@ What rig editing still lacks, none of it requested yet:
   to the grid step rather than landing it on the scene's grid, which means
   nothing in the bone's frame a place is measured in (decided 2026-10-13); the
   file's numbers are therefore only as round as they were before the drag. The
-  held part's colour and the joints' drawing are not covered by a test: the
-  headless draw is not read back.
+  held part's colour is tested through `Editor::rig_parts`, which hands out each
+  body and joint with the colour it is drawn in; the lines `draw_body` and
+  `draw_joint` make of them are not, since the headless draw is not read back.
 - **Decided (2026-10-13): rig edits have a history of their own, not Ctrl+Z's.**
   The rig section's Undo and Redo step it
   (`apps/editor/src/app/rig_history.rs`). Folding rig edits into the scene's
@@ -326,8 +327,8 @@ What rig editing still lacks, none of it requested yet:
   selected only, and so does the pointer over an option of the open drop-down
   (`Ui::select_hovered`), or an option the arrow keys reach
   (`Ui::select_focused`) while the pointer is over none; the listed pairs are
-  never drawn all at once, and the colour is not covered by a test (the headless
-  draw is not read back).
+  never drawn all at once. The pair colour is tested through
+  `Editor::rig_parts`, beside the held part's.
 
 G drops the selected rigged mesh as its fitted ragdoll in a physics world of its
 own (`apps/editor/src/app/drop.rs`), drawn from a second, preview region per

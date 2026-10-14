@@ -1746,6 +1746,84 @@ fn a_hovered_pair_marks_its_bodies() {
     assert!(editor.hovered_pair_bodies().is_empty(), "off the line");
 }
 
+/// The colours the selection's ragdoll bodies and joints are drawn in, in
+/// their order.
+fn part_colors(editor: &mut Editor<HeadlessShell>) -> (Vec<[f32; 4]>, Vec<[f32; 4]>) {
+    let (bodies, joints) = editor.rig_parts();
+    (
+        bodies.into_iter().map(|(_, _, color)| color).collect(),
+        joints.into_iter().map(|(_, color)| color).collect(),
+    )
+}
+
+/// **The held part is drawn in the primary colour and a hovered pair's
+/// bodies in the pair colour, the held one keeping its own**; every other
+/// body and joint is drawn in the rig's colours.
+#[test]
+fn the_held_part_and_a_hovered_pair_are_drawn_apart() {
+    let (_dir, mut editor) = rig_on_disk();
+    let rig = editor.shelf.rig_mut(RIG).expect("the rig");
+    let desc = rig.desc.as_mut().expect("a rig file");
+    let pair = (desc.bodies[0].bone.clone(), desc.bodies[1].bone.clone());
+    desc.ignore.push(pair);
+    rig.resolve().expect("a listed pair resolves");
+    editor.frame().expect("the inspector draws the pair");
+    let (bodies, joints) = part_colors(&mut editor);
+    assert_eq!(bodies, [RAGDOLL_COLOR; 2], "nothing held or hovered");
+    assert!(!joints.is_empty() && joints.iter().all(|&color| color == JOINT_COLOR));
+
+    // Scale shows a mesh no handles, so nothing stands in front of the body.
+    editor.act(&Action::Scale);
+    let body = selected_ragdoll_bodies(&mut editor.document, &editor.shelf)[1]
+        .1
+        .position
+        .as_vec3();
+    let at = physical(pixel_of(&editor, body));
+    click(&mut editor, at);
+    let Some(Part::Body(held)) = editor.held.as_ref().map(|held| held.part) else {
+        panic!("no body held");
+    };
+    let (bodies, joints) = part_colors(&mut editor);
+    let mut expected = [RAGDOLL_COLOR; 2];
+    expected[held] = PRIMARY_COLOR;
+    assert_eq!(bodies, expected, "the held body");
+    assert!(joints.iter().all(|&color| color == JOINT_COLOR));
+
+    hover_the_inspector(&mut editor);
+    let remove = |editor: &Editor<HeadlessShell>| {
+        *editor
+            .panels
+            .rig_pairs()
+            .0
+            .first()
+            .expect("a line for the listed pair")
+    };
+    let line = scrolled_to(&mut editor, remove);
+    let window = editor.window;
+    editor
+        .shell_mut()
+        .move_pointer(window, line, (0.0, 0.0))
+        .expect("live");
+    editor.frame().expect("a frame");
+    assert_eq!(editor.hovered_pair_bodies(), [0, 1], "over the line");
+    let mut expected = [PAIR_COLOR; 2];
+    expected[held] = PRIMARY_COLOR;
+    assert_eq!(part_colors(&mut editor).0, expected, "the hovered pair");
+
+    // A joint sits inside the bodies it joins, so a click on it holds it.
+    let joint = selected_ragdoll_joints(&mut editor.document, &editor.shelf)[0].position;
+    let on_joint = physical(pixel_of(&editor, joint.as_vec3()));
+    click(&mut editor, on_joint);
+    assert_eq!(
+        editor.held.as_ref().map(|held| held.part),
+        Some(Part::Joint(0))
+    );
+    let (bodies, joints) = part_colors(&mut editor);
+    assert_eq!(bodies, [RAGDOLL_COLOR; 2], "a body drawn held with a joint");
+    assert_eq!(joints[0], PRIMARY_COLOR, "the held joint");
+    assert!(joints[1..].iter().all(|&color| color == JOINT_COLOR));
+}
+
 /// **The pointer over a pair's option in the open drop-down marks its
 /// bodies** before it is picked, and over the prompt marks none.
 #[test]

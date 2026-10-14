@@ -1650,6 +1650,44 @@ impl<S: Shell + ?Sized> Editor<S> {
             .preview(Some((dropping.id(), dropping.asset(), dropping.palette())));
     }
 
+    /// The selection's ragdoll bodies and joints at rest, each with the colour
+    /// the viewport draws it in: the held part in [`PRIMARY_COLOR`], the two
+    /// bodies of the pair the pointer is over in [`PAIR_COLOR`], and the rest
+    /// in [`RAGDOLL_COLOR`] and [`JOINT_COLOR`].
+    fn rig_parts(&mut self) -> (Vec<RigBody>, Vec<(crcbl::phys::Transform, [f32; 4])>) {
+        // A part is held only on a lone selection, so its index is its place
+        // in the selection's bodies or joints.
+        let held = self.held_part().map(|(part, _)| part);
+        let paired = self.hovered_pair_bodies();
+        let bodies = selected_ragdoll_bodies(&mut self.document, &self.shelf)
+            .into_iter()
+            .enumerate()
+            .map(|(index, (shape, at))| {
+                let color = if held == Some(rig_hold::Part::Body(index)) {
+                    PRIMARY_COLOR
+                } else if paired.contains(&index) {
+                    PAIR_COLOR
+                } else {
+                    RAGDOLL_COLOR
+                };
+                (shape, at, color)
+            })
+            .collect();
+        let joints = selected_ragdoll_joints(&mut self.document, &self.shelf)
+            .into_iter()
+            .enumerate()
+            .map(|(index, at)| {
+                let color = if held == Some(rig_hold::Part::Joint(index)) {
+                    PRIMARY_COLOR
+                } else {
+                    JOINT_COLOR
+                };
+                (at, color)
+            })
+            .collect();
+        (bodies, joints)
+    }
+
     /// Records and submits one frame.
     fn draw(&mut self) -> Result<FrameOutcome, EditorError> {
         let Some(acquired) = self.gpu.acquire()? else {
@@ -1678,28 +1716,11 @@ impl<S: Shell + ?Sized> Editor<S> {
         for (from, to) in selected_bones(&mut self.document, &self.shelf) {
             self.renderer.debug_draw().line(from, to, BONE_COLOR);
         }
-        // A part is held only on a lone selection, so its index is its place
-        // in the selection's bodies or joints.
-        let held = self.held_part().map(|(part, _)| part);
-        let paired = self.hovered_pair_bodies();
-        let bodies = selected_ragdoll_bodies(&mut self.document, &self.shelf);
-        for (index, (shape, at)) in bodies.into_iter().enumerate() {
-            let color = if held == Some(rig_hold::Part::Body(index)) {
-                PRIMARY_COLOR
-            } else if paired.contains(&index) {
-                PAIR_COLOR
-            } else {
-                RAGDOLL_COLOR
-            };
+        let (bodies, joints) = self.rig_parts();
+        for (shape, at, color) in bodies {
             draw_body(self.renderer.debug_draw(), shape, &at, color);
         }
-        let joints = selected_ragdoll_joints(&mut self.document, &self.shelf);
-        for (index, at) in joints.into_iter().enumerate() {
-            let color = if held == Some(rig_hold::Part::Joint(index)) {
-                PRIMARY_COLOR
-            } else {
-                JOINT_COLOR
-            };
+        for (at, color) in joints {
             draw_joint(self.renderer.debug_draw(), &at, color);
         }
         for (from, to, color) in drop_lines(self.dropping.as_ref(), &mut self.document, &self.shelf)
@@ -2226,6 +2247,10 @@ fn selected_ragdoll_joints(document: &mut Document, shelf: &Shelf) -> Vec<crcbl:
     }
     joints
 }
+
+/// A ragdoll body as [`Editor::rig_parts`] hands it out: its shape, where it
+/// stands, and the colour it is drawn in.
+type RigBody = (crcbl::ragdoll::BodyShape, crcbl::phys::Transform, [f32; 4]);
 
 /// The falling ragdoll's debug view ([`drop::DropPreview::debug_lines`]), each
 /// segment in render space and coloured: a body in [`RAGDOLL_COLOR`] while it
