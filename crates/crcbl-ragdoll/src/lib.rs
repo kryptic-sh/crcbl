@@ -22,7 +22,11 @@
 //! [`Ragdoll::pull_towards`] between steps, or held inside the solver by a
 //! [`Tether`] of springs to anchors the server's joints move. Deciding the
 //! death, choosing the killing contact and revival stay with the game.
+//!
+//! [`Ragdoll::debug_lines`] and [`divergence_lines`] are the plan's debug
+//! view, as line segments for a debug draw layer.
 
+mod debug;
 mod desc;
 mod frames;
 mod generate;
@@ -32,6 +36,7 @@ mod rise;
 mod settle;
 mod tether;
 
+pub use debug::{CIRCLE_SEGMENTS, DebugLine, JOINT_AXIS_LENGTH, divergence_lines};
 pub use desc::{BodyDesc, DescError, JointDesc, JointKindDesc, RagdollDesc, ShapeDesc};
 pub use frames::REST_CLEARANCE;
 pub use generate::{GenerateError, GenerateSettings};

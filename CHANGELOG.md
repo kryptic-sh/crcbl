@@ -979,6 +979,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   takes the anchors out again, and `TetherError` names a bad frequency, too few
   anchors or one already in use.
 
+- **A ragdoll's debug view, as line segments for a debug draw layer.**
+  `Ragdoll::debug_lines` hands a caller's sink each body's outline in its
+  current pose, marked asleep or awake, and each joint's axis with its limit — a
+  ball joint's cone rim, a hinge's arc between its angles — each segment tagged
+  with a `DebugLine` for the caller to colour; `divergence_lines` joins each
+  joint a client's ragdoll shares with the server's, marked within a width or
+  not. The crate draws nothing itself: `DebugDraw::line` takes the segments as
+  they come.
+
 - **`crcbl::acoustic_path::loudest_path` picks the route a sound is heard
   along** from a game's candidate `SoundPath`s: each carries the range times its
   barriers' transmission, arrives with linear falloff over it, and the loudest

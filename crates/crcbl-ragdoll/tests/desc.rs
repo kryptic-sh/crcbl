@@ -2,49 +2,11 @@
 
 mod common;
 
-use common::{entities, index, model, names, skeleton, world};
+use common::{LEG, entities, index, model, names, skeleton, world};
 use crcbl_anim::Pose;
 use crcbl_phys::JointKind;
 use crcbl_ragdoll::{DescError, Handoff, Ragdoll, RagdollDesc, RigError, RigJointKind};
 use glam::Mat4;
-
-/// A leg: a sphere at the hips, a capsule thigh and calf hinged at the knee,
-/// and a box foot welded on. The thigh is fat enough to overlap the hips.
-const LEG: &str = r#"(
-    bodies: [
-        (bone: "hips", shape: Sphere(radius: 0.12), mass: 12.0),
-        (
-            bone: "thigh_l",
-            shape: Capsule(radius: 0.08, half_height: 0.14),
-            mass: 8.0,
-            centre: (0.0, -0.225, 0.0),
-        ),
-        (
-            bone: "calf_l",
-            shape: Capsule(radius: 0.06, half_height: 0.15),
-            mass: 4.0,
-            centre: (0.0, -0.225, 0.0),
-        ),
-        (bone: "foot_l", shape: Box(half_extents: (0.05, 0.04, 0.1)), mass: 1.0),
-    ],
-    joints: [
-        (
-            parent: "hips",
-            child: "thigh_l",
-            kind: Ball(cone: 1.2, twist_lower: -0.4, twist_upper: 0.4),
-            axis: (0.0, -1.0, 0.0),
-            friction: 0.5,
-        ),
-        (
-            parent: "thigh_l",
-            child: "calf_l",
-            kind: Hinge(lower: -2.4, upper: 0.0),
-            axis: (1.0, 0.0, 0.0),
-        ),
-        (parent: "calf_l", child: "foot_l", kind: Fixed, axis: (0.0, 0.0, 1.0)),
-    ],
-    substeps: 6,
-)"#;
 
 fn resolve(text: &str) -> Result<crcbl_ragdoll::RagdollRig, DescError> {
     RagdollDesc::from_ron(text)?.resolve(&skeleton(), &names(), model(0.0))

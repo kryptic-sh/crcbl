@@ -91,6 +91,13 @@ than EW assets or an EW checkout.
     `7666cffb`, 2026-10-14) stands a revived AI there, with its character query
     mask and a 1.0 m shift, falling back to where the corpse lies on a
     `RiseError`.
+  - The plan's debug view is `Ragdoll::debug_lines` and `divergence_lines`
+    (`crates/crcbl-ragdoll/src/debug.rs`): body outlines marked asleep or awake,
+    joint axes, a ball joint's cone and a hinge's arc, and the client-server
+    gap. Not drawn: a ball joint's twist limits, contacts (the plan lists them;
+    `PhysicsSystem::debug_draw` draws nothing yet), and nothing calls the view —
+    no sample, game or the editor's drop preview shows it, so no frame of it has
+    been looked at.
   - The editor preview shipped: G drops a selected rigged mesh as its ragdoll,
     into play itself while the scene plays (see "Further editor scope" below for
     what it does and does not do). The remaining delivery requirements are in
