@@ -8,7 +8,7 @@ use crcbl_anim::Pose;
 use crcbl_phys::{PhysicsSystem, Transform};
 use crcbl_ragdoll::{
     BodyShape, DebugLine, Handoff, JOINT_AXIS_LENGTH, Ragdoll, RagdollDesc, RagdollRig,
-    RigJointKind, divergence_lines,
+    RigJointKind, TWIST_RADIUS, divergence_lines,
 };
 use glam::DVec3;
 
@@ -112,8 +112,10 @@ fn the_debug_view_draws_bodies_joints_and_limits() {
         assert!((from.distance(to) - JOINT_AXIS_LENGTH).abs() < NEAR);
     }
     let mut on_cone = false;
-    // The least and greatest hinge angle an arc point was drawn at.
+    // The least and greatest hinge angle an arc point was drawn at, and the
+    // same of the ball's twist arc.
     let mut swept = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut twisted = (f64::INFINITY, f64::NEG_INFINITY);
     for &(from, to, kind) in &drawn {
         if kind != DebugLine::Limit {
             continue;
@@ -128,6 +130,12 @@ fn the_debug_view_draws_bodies_joints_and_limits() {
                     let reach = point - origin;
                     let at_length = (reach.length() - JOINT_AXIS_LENGTH).abs() < NEAR;
                     let angle = axis.angle_between(reach);
+                    let square = (angle - core::f64::consts::FRAC_PI_2).abs() < NEAR;
+                    // Measured from the parent's `x`, as the revolute and the
+                    // twist angle are.
+                    let zero =
+                        worlds[joint.parent].rotation * joint.frame_parent.rotation * DVec3::X;
+                    let turned = zero.cross(reach).dot(axis).atan2(zero.dot(reach));
                     match joint.kind {
                         RigJointKind::Ball { cone, .. }
                             if at_length && (angle - cone).abs() < NEAR =>
@@ -135,15 +143,13 @@ fn the_debug_view_draws_bodies_joints_and_limits() {
                             on_cone = true;
                             true
                         }
-                        RigJointKind::Hinge { .. }
-                            if at_length && (angle - core::f64::consts::FRAC_PI_2).abs() < NEAR =>
+                        RigJointKind::Ball { .. }
+                            if square && (reach.length() - TWIST_RADIUS).abs() < NEAR =>
                         {
-                            // Measured from the parent's `x`, as the revolute
-                            // angle is.
-                            let zero = worlds[joint.parent].rotation
-                                * joint.frame_parent.rotation
-                                * DVec3::X;
-                            let turned = zero.cross(reach).dot(axis).atan2(zero.dot(reach));
+                            twisted = (twisted.0.min(turned), twisted.1.max(turned));
+                            true
+                        }
+                        RigJointKind::Hinge { .. } if at_length && square => {
                             swept = (swept.0.min(turned), swept.1.max(turned));
                             true
                         }
@@ -165,6 +171,22 @@ fn the_debug_view_draws_bodies_joints_and_limits() {
     assert!(
         (swept.0 - lower).abs() < NEAR && (swept.1 - upper).abs() < NEAR,
         "the arc swept {swept:?}, not the limits {lower} to {upper}"
+    );
+    let Some(RigJointKind::Ball {
+        twist_lower,
+        twist_upper,
+        ..
+    }) = rig
+        .joints()
+        .iter()
+        .map(|joint| joint.kind)
+        .find(|kind| matches!(kind, RigJointKind::Ball { .. }))
+    else {
+        panic!("the leg has a ball joint");
+    };
+    assert!(
+        (twisted.0 - twist_lower).abs() < NEAR && (twisted.1 - twist_upper).abs() < NEAR,
+        "the twist arc swept {twisted:?}, not {twist_lower} to {twist_upper}"
     );
 
     assert!(ragdoll.force_settle(&mut physics), "settled");

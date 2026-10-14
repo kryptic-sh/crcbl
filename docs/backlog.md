@@ -93,9 +93,10 @@ than EW assets or an EW checkout.
     `RiseError`.
   - The plan's debug view is `Ragdoll::debug_lines` and `divergence_lines`
     (`crates/crcbl-ragdoll/src/debug.rs`): body outlines marked asleep or awake,
-    joint axes, a ball joint's cone and a hinge's arc, and the client-server
-    gap. Not drawn: a ball joint's twist limits and contacts, which
-    `PhysicsSystem::debug_lines` hands out for a caller to draw beside it. Its
+    joint axes, a ball joint's cone and twist arcs and a hinge's arc, and the
+    client-server gap. Not drawn: contacts, which `PhysicsSystem::debug_lines`
+    hands out for a caller to draw beside it; a twist arc stays in the parent's
+    plane, which is exact only while the child stands on the parent's axis. Its
     one caller is the editor's G drop preview (`drop_lines` in
     `apps/editor/src/app.rs`), where a test reads the coloured segments but
     nothing reads the drawn frame back, and no frame of it has been looked at by

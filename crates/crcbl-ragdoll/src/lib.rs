@@ -36,7 +36,7 @@ mod rise;
 mod settle;
 mod tether;
 
-pub use debug::{CIRCLE_SEGMENTS, DebugLine, JOINT_AXIS_LENGTH, divergence_lines};
+pub use debug::{CIRCLE_SEGMENTS, DebugLine, JOINT_AXIS_LENGTH, TWIST_RADIUS, divergence_lines};
 pub use desc::{BodyDesc, DescError, JointDesc, JointKindDesc, RagdollDesc, ShapeDesc};
 pub use frames::REST_CLEARANCE;
 pub use generate::{GenerateError, GenerateSettings};

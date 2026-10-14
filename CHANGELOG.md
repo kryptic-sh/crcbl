@@ -993,13 +993,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **A ragdoll's debug view, as line segments for a debug draw layer.**
   `Ragdoll::debug_lines` hands a caller's sink each body's outline in its
   current pose, marked asleep or awake, and each joint's axis with its limit — a
-  ball joint's cone rim, a hinge's arc between its angles — each segment tagged
-  with a `DebugLine` for the caller to colour; `divergence_lines` joins each
-  joint a client's ragdoll shares with the server's, marked within a width or
-  not. The crate draws nothing itself: `DebugDraw::line` takes the segments as
-  they come. The editor's G drop preview draws it over the falling ragdoll, its
-  bodies violet while they move and grey once they sleep, its joints' axes and
-  limits in the bones' magenta.
+  ball joint's cone rim and twist arc, a hinge's arc between its angles — each
+  segment tagged with a `DebugLine` for the caller to colour; `divergence_lines`
+  joins each joint a client's ragdoll shares with the server's, marked within a
+  width or not. The crate draws nothing itself: `DebugDraw::line` takes the
+  segments as they come. The editor's G drop preview draws it over the falling
+  ragdoll, its bodies violet while they move and grey once they sleep, its
+  joints' axes and limits in the bones' magenta.
 
 - **`crcbl::acoustic_path::loudest_path` picks the route a sound is heard
   along** from a game's candidate `SoundPath`s: each carries the range times its

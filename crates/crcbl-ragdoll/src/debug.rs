@@ -11,7 +11,11 @@
 //! A ball joint's limit is drawn as the rim of its cone about the parent's
 //! axis, and a hinge's as the arc its child's `x` sweeps between the limits,
 //! from the parent's `x`, as `crcbl_phys`'s revolute angle is measured. A
-//! ball joint's twist limits and a weld have nothing drawn beyond the axis.
+//! ball joint's twist is drawn the same way, a smaller arc
+//! ([`TWIST_RADIUS`]) between its twist limits. The twist is the child's turn
+//! about its own axis, but the arc stays in the parent's plane, so it is
+//! exact only while the child stands on the parent's axis. A weld has nothing
+//! drawn beyond the axis.
 
 use core::f64::consts::TAU;
 
@@ -48,13 +52,18 @@ pub const CIRCLE_SEGMENTS: usize = 16;
 /// How long a joint's drawn axis and limit are, in metres.
 pub const JOINT_AXIS_LENGTH: f64 = 0.1;
 
+/// The radius of a ball joint's drawn twist arc, in metres: inside a hinge's
+/// arc, so a twist limit never reads as a hinge's.
+pub const TWIST_RADIUS: f64 = JOINT_AXIS_LENGTH / 2.0;
+const _: () = assert!(TWIST_RADIUS < JOINT_AXIS_LENGTH);
+
 impl Ragdoll {
     /// Hands `line` every segment of this ragdoll's debug view, as `physics`
     /// holds its bodies now, each tagged with the [`DebugLine`] it is: each
     /// body's outline, marked asleep or awake, and each of `rig`'s joints'
-    /// axis and limit — a ball joint's cone rim about the parent's axis, a
-    /// hinge's arc from the parent's `x` between its angles, and nothing more
-    /// for a ball's twist or a weld. `rig` is the one the ragdoll was spawned
+    /// axis and limit — a ball joint's cone rim about the parent's axis and
+    /// its twist arc, a hinge's arc from the parent's `x` between its angles,
+    /// and nothing more for a weld. `rig` is the one the ragdoll was spawned
     /// from; a body gone from `physics` is left out, with its joints.
     pub fn debug_lines(
         &self,
@@ -91,15 +100,25 @@ impl Ragdoll {
                 DebugLine::JointAxis,
             );
             let mut limit = |from, to| line(from, to, DebugLine::Limit);
+            let (u, v) = (frame.rotation * DVec3::X, frame.rotation * DVec3::Y);
             match joint.kind {
-                RigJointKind::Ball { cone, .. } => {
-                    let (u, v) = (frame.rotation * DVec3::X, frame.rotation * DVec3::Y);
+                RigJointKind::Ball {
+                    cone,
+                    twist_lower,
+                    twist_upper,
+                } => {
                     let rim = origin + axis * (JOINT_AXIS_LENGTH * cone.cos());
                     let radius = JOINT_AXIS_LENGTH * cone.sin();
                     arc(rim, (u, v), radius, (0.0, TAU), &mut limit);
+                    arc(
+                        origin,
+                        (u, v),
+                        TWIST_RADIUS,
+                        (twist_lower, twist_upper),
+                        &mut limit,
+                    );
                 }
                 RigJointKind::Hinge { lower, upper } => {
-                    let (u, v) = (frame.rotation * DVec3::X, frame.rotation * DVec3::Y);
                     arc(
                         origin,
                         (u, v),
