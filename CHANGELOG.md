@@ -980,6 +980,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   takes the anchors out again, and `TetherError` names a bad frequency, too few
   anchors or one already in use.
 
+- **`PhysicsSystem::debug_lines`** (`crcbl-phys`) hands a caller the physics
+  debug view as segments for a debug draw layer: each collider's bounding box,
+  tagged with whether its body sleeps and which island it is in, and each
+  contact point's normal, tagged touching or speculative with its last-substep
+  normal impulse and its manifold feature id, so a feature that changes every
+  frame on a still pile shows warm starting lost. `PhysicsDebugLine` is the tag
+  and `CONTACT_NORMAL_LENGTH` the drawn normal's length.
+
 - **A ragdoll's debug view, as line segments for a debug draw layer.**
   `Ragdoll::debug_lines` hands a caller's sink each body's outline in its
   current pose, marked asleep or awake, and each joint's axis with its limit — a

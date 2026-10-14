@@ -133,7 +133,10 @@ pub use query::{
     swept_capsule_vs_capsule, swept_capsule_vs_sphere, swept_sphere_vs_aabb, swept_sphere_vs_box,
     swept_sphere_vs_capsule, swept_sphere_vs_sphere,
 };
-pub use system::{CollisionFilter, ContactPairError, EntityOverlapQueries, PhysicsSystem};
+pub use system::{
+    CONTACT_NORMAL_LENGTH, CollisionFilter, ContactPairError, EntityOverlapQueries,
+    PhysicsDebugLine, PhysicsSystem,
+};
 pub use wind::WindQuery;
 pub use world::{
     ALL_LAYERS, BroadphaseStats, ColliderId, OverlapQueries, PhysicsWorld, QueryFilter,

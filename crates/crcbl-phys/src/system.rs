@@ -47,10 +47,12 @@
 
 mod clearance;
 mod collision_filter;
+mod debug;
 mod ignored_contacts;
 mod joints;
 
 pub use collision_filter::CollisionFilter;
+pub use debug::{CONTACT_NORMAL_LENGTH, PhysicsDebugLine};
 pub use ignored_contacts::ContactPairError;
 
 use std::collections::HashMap;
@@ -1671,9 +1673,9 @@ impl SystemTrait for PhysicsSystem {
         }
     }
 
-    fn debug_draw(&mut self, _ctx: &DebugCtx) {
-        // Future: draw collider AABBs, contacts, swept paths.
-    }
+    /// Draws nothing: [`DebugCtx`] carries nothing to draw into, so the
+    /// view is [`debug_lines`](Self::debug_lines), for a caller to draw.
+    fn debug_draw(&mut self, _ctx: &DebugCtx) {}
 
     /// Feed transform and rigid-body state into the determinism hash.
     ///

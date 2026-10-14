@@ -94,12 +94,13 @@ than EW assets or an EW checkout.
   - The plan's debug view is `Ragdoll::debug_lines` and `divergence_lines`
     (`crates/crcbl-ragdoll/src/debug.rs`): body outlines marked asleep or awake,
     joint axes, a ball joint's cone and a hinge's arc, and the client-server
-    gap. Not drawn: a ball joint's twist limits, contacts (the plan lists them;
-    `PhysicsSystem::debug_draw` draws nothing yet). Its one caller is the
-    editor's G drop preview (`drop_lines` in `apps/editor/src/app.rs`), where a
-    test reads the coloured segments but nothing reads the drawn frame back, and
-    no frame of it has been looked at by eye. The selected mesh's bodies still
-    draw at rest beside the falling ones, in the same violet as a moving body.
+    gap. Not drawn: a ball joint's twist limits and contacts, which
+    `PhysicsSystem::debug_lines` hands out for a caller to draw beside it. Its
+    one caller is the editor's G drop preview (`drop_lines` in
+    `apps/editor/src/app.rs`), where a test reads the coloured segments but
+    nothing reads the drawn frame back, and no frame of it has been looked at by
+    eye. The selected mesh's bodies still draw at rest beside the falling ones,
+    in the same violet as a moving body.
   - The editor preview shipped: G drops a selected rigged mesh as its ragdoll,
     into play itself while the scene plays (see "Further editor scope" below for
     what it does and does not do). The remaining delivery requirements are in
@@ -5375,9 +5376,9 @@ base-100 figure is recorded anywhere (grepped `apps/tumble` and
 ### Tumble's debug view, page controls and server loopback (2026-09-25)
 
 - **The physics debug view**: contact points and normals, AABBs, islands
-  coloured and sleeping bodies dimmed. The draw is the engine's to provide —
-  _Physics debug suite: draw, scrub, query visualiser_ — and tumble is where it
-  would be seen first.
+  coloured and sleeping bodies dimmed. The engine hands the segments out as
+  `PhysicsSystem::debug_lines` (_Physics debug suite: draw, scrub, query
+  visualiser_); tumble does not draw them yet.
 - **Page controls.** The plan wanted the scene selector, the spawn rate, the
   body cap and the debug view as HTML controls on `/demos/tumble/`; the page has
   none, and `apps/tumble/src/menu.rs` says they arrive with the scenes that need
@@ -11994,10 +11995,20 @@ built; per-body medium properties are not.
 
 ### Physics debug suite: draw, scrub, query visualiser (2026-08-27)
 
-**Only the hash exists.** `PhysicsSystem`'s `hash_state` feeds transform and
-rigid-body state into the determinism hash; its `debug_draw` is an empty body
-carrying the comment "Future: draw collider AABBs, contacts, swept paths." There
-is no time scrub and no query visualiser anywhere in the workspace
+**The draw exists as segments; the scrub and the query visualiser do not.**
+`PhysicsSystem::debug_lines` (`crates/crcbl-phys/src/system/debug.rs`) hands a
+caller each collider's bounding box, tagged asleep or awake and with its island,
+and each contact point's normal, tagged touching or speculative with its
+last-substep impulse and its manifold feature id; the caller colours them.
+`SystemTrait::debug_draw` still draws nothing, because `crcbl_ecs::DebugCtx` is
+a unit struct with nothing to draw into. Giving it a sink would touch every
+system in the workspace and put a render type in `crcbl-ecs`, so the segment
+method was taken instead, as `crcbl-ragdoll`'s debug view does; revisit if a
+schedule-wide debug pass is wanted. Nothing calls `debug_lines` yet — tumble is
+where it would be seen first — so no frame of it has been looked at. Not drawn:
+planes, swept paths, joint frames and their limits (a ragdoll draws its own),
+and impulse as anything but a number for the caller to colour by. There is no
+time scrub and no query visualiser anywhere in the workspace
 (`grep -rn scrub crates/ apps/ --include=*.rs` hits one unrelated line in
 `apps/puppet/src/menu.rs`).
 
