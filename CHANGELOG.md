@@ -2119,13 +2119,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `popup` `overflow: scroll`, so a long list scrolls under the wheel and to keep
   the focused item in view, and a node `Ui::set_focus` asks for is scrolled into
   view at that frame's layout. Inside the topmost pop-up `NavInput::jump` — a
-  `Jump`: Home and End to the first and last item focus can rest on, Page Up and
-  Page Down a view's height — moves focus, and a drop-down's list or any level
-  of a context menu takes typeahead from the frame's `TextInput`: typed letters
-  focus the next enabled item they begin, ignoring case, one letter typed again
-  steps through the items it begins, and the prefix starts afresh after
-  `TYPEAHEAD_TIMEOUT` on the text clock. Those keys come through a new reserved
-  `list` context (`crcbl_input::list`: `list_first`, `list_last`,
+  `Jump`: Home and End to the first and last item focus can rest on, Page Down
+  to the last item in view and then a view's height on, as a Windows list box
+  does, and Page Up likewise upwards — moves focus, and a drop-down's list or
+  any level of a context menu takes typeahead from the frame's `TextInput`:
+  typed letters focus the next enabled item they begin, ignoring case, one
+  letter typed again steps through the items it begins, and the prefix starts
+  afresh after `TYPEAHEAD_TIMEOUT` on the text clock. Those keys come through a
+  new reserved `list` context (`crcbl_input::list`: `list_first`, `list_last`,
   `list_page_up`, `list_page_down`, and `list_type` on every key that types a
   character), pushed over `ui` while `Ui::popup_list_open` says a list is open,
   as `text` is while a field is engaged; `crcbl::ui_nav::nav_input` reads its

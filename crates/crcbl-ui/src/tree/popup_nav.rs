@@ -9,11 +9,12 @@
 //! * [`Jump::First`] and [`Jump::Last`] go to the first and last node in it
 //!   focus can rest on, in tree order — so past a disabled item, which focus
 //!   never rests on.
-//! * [`Jump::PageDown`] goes to the furthest node after the focused one whose
-//!   bottom edge is no more than the pop-up's content height below the focused
-//!   node's, and [`Jump::PageUp`] to the furthest before it whose top edge is no
-//!   more than that above — a view's worth, or one node when the next is taller
-//!   than the view.
+//! * [`Jump::PageDown`] goes first to the last node wholly in view, as a
+//!   Windows list box's does; from there, it goes to the furthest node after
+//!   the focused one whose bottom edge is no more than the pop-up's content
+//!   height below the focused node's — a view's worth, or one node when the
+//!   next is taller than the view. [`Jump::PageUp`] is the same upwards: first
+//!   to the first node wholly in view, then a view's worth above.
 //!
 //! Focus scrolls the node it lands on into view as every move does
 //! (`focus/mod.rs`). **Jumps are the pop-up's alone, not a panel's**: a
@@ -112,27 +113,41 @@ impl Ui {
                     .map_or((Vec2::ZERO, Vec2::ZERO), |node| node.rect)
             })
             .collect();
-        let page = self.store.by_key(root).map_or(0.0, |node| {
+        let (view_top, view_bottom) = self.store.by_key(root).map_or((0.0, 0.0), |node| {
             let (min, max) = node.content_box();
-            max.y - min.y
+            (min.y, max.y)
         });
+        let page = view_bottom - view_top;
         let target = match (jump, at) {
             (Jump::First, _) | (Jump::PageDown, None) => (!order.is_empty()).then_some(0),
             (Jump::Last, _) | (Jump::PageUp, None) => order.len().checked_sub(1),
             (Jump::PageDown, Some(at)) => {
-                let limit = rects[at].1.y + page;
-                (at + 1..order.len())
-                    .take_while(|&index| rects[index].1.y <= limit)
+                let last_in_view = (at..order.len())
+                    .take_while(|&index| rects[index].1.y <= view_bottom)
                     .last()
-                    .or_else(|| (at + 1 < order.len()).then_some(at + 1))
+                    .filter(|&last| last > at);
+                last_in_view.or_else(|| {
+                    let limit = rects[at].1.y + page;
+                    (at + 1..order.len())
+                        .take_while(|&index| rects[index].1.y <= limit)
+                        .last()
+                        .or_else(|| (at + 1 < order.len()).then_some(at + 1))
+                })
             }
             (Jump::PageUp, Some(at)) => {
-                let limit = rects[at].0.y - page;
-                (0..at)
+                let first_in_view = (0..=at)
                     .rev()
-                    .take_while(|&index| rects[index].0.y >= limit)
+                    .take_while(|&index| rects[index].0.y >= view_top)
                     .last()
-                    .or_else(|| at.checked_sub(1))
+                    .filter(|&first| first < at);
+                first_in_view.or_else(|| {
+                    let limit = rects[at].0.y - page;
+                    (0..at)
+                        .rev()
+                        .take_while(|&index| rects[index].0.y >= limit)
+                        .last()
+                        .or_else(|| at.checked_sub(1))
+                })
             }
         };
         if let Some(index) = target {

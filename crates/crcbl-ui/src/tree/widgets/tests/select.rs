@@ -438,8 +438,9 @@ fn the_chosen_option_is_shown_in_the_frame_the_list_opens() {
     );
 }
 
-/// **Home and End go to the first and last option, Page Down and Page Up a
-/// view's worth**, each scrolled into view, and none of them picks.
+/// **Home and End go to the first and last option; Page Down goes to the last
+/// option in view, then a view's worth on, and Page Up likewise upwards**, as
+/// a Windows list box's do, each scrolled into view, and none of them picks.
 #[test]
 fn home_end_and_the_page_keys_move_through_the_list() {
     let owned = long_options();
@@ -475,9 +476,19 @@ fn home_end_and_the_page_keys_move_through_the_list() {
     let per_page = ((view_max.y - view_min.y) / height).floor() as usize;
     assert!(per_page > 1, "the fixture's page holds one option");
 
-    assert_eq!(jump(&mut ui, Jump::PageDown), per_page);
-    assert_eq!(jump(&mut ui, Jump::PageDown), 2 * per_page);
-    assert_eq!(jump(&mut ui, Jump::PageUp), per_page);
+    let last_in_view = per_page - 1;
+    assert_eq!(
+        jump(&mut ui, Jump::PageDown),
+        last_in_view,
+        "to the view's end"
+    );
+    assert_eq!(
+        jump(&mut ui, Jump::PageDown),
+        last_in_view + per_page,
+        "a view's worth on"
+    );
+    assert_eq!(jump(&mut ui, Jump::PageUp), per_page, "to the view's start");
+    assert_eq!(jump(&mut ui, Jump::PageUp), 0, "a view's worth back");
     assert_eq!(jump(&mut ui, Jump::Last), LONG - 1);
     assert_eq!(jump(&mut ui, Jump::PageDown), LONG - 1);
     assert_eq!(jump(&mut ui, Jump::First), 0);

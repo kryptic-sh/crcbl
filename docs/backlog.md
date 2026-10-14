@@ -4336,8 +4336,6 @@ in `crcbl_input::list`). Decisions, then what is left.
   answer.
 - **Deferred: a pop-up wider than the viewport.** Only its height is capped; it
   is still shifted to the viewport's left edge and clipped at its right.
-- **Deferred: Page Down as Windows does it** — first to the last item in view,
-  then a page further — rather than a view's height from the focused item.
 - **Deferred: Backspace editing the typeahead prefix, and a space inside one**
   (`New Y` for `New York`), which Windows' list views take; Space is accept
   here, and the `list` context leaves Backspace unbound.
