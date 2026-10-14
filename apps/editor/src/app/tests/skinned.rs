@@ -1685,6 +1685,38 @@ fn a_hovered_drop_down_option_marks_its_pairs_bodies() {
     assert!(editor.hovered_pair_bodies().is_empty(), "over the prompt");
 }
 
+/// **An option the arrows reach in the open drop-down marks its pair's
+/// bodies** while the pointer is over no option, as one under the pointer
+/// does: the list opens on the prompt, which marks none, and a move down
+/// reaches the pair. The selection is not moved by the arrow.
+#[test]
+fn an_option_reached_by_the_arrows_marks_its_pairs_bodies() {
+    let (_dir, mut editor) = rig_on_disk();
+    editor.frame().expect("the inspector draws the rig");
+    let select = editor.panels.rig_pairs().1.expect("the drop-down of pairs");
+    hover_the_inspector(&mut editor);
+    let at = scrolled_to(&mut editor, |_| select);
+    click(&mut editor, at);
+    editor.frame().expect("a frame");
+    assert!(
+        editor.panels.ui().is_popup_open(select),
+        "the click did not open the list"
+    );
+    assert!(
+        editor.hovered_pair_bodies().is_empty(),
+        "the prompt marked a pair"
+    );
+    let files = editor.document.files().expect("files");
+    tap(&mut editor, KeyCode::ArrowDown);
+    editor.frame().expect("a frame");
+    assert_eq!(editor.hovered_pair_bodies(), [0, 1], "the arrow's option");
+    assert_eq!(
+        editor.document.files().expect("files"),
+        files,
+        "the arrow moved the scene"
+    );
+}
+
 /// **The drop-down marks the pairs that touch at rest**: none do in the
 /// fitted rig, whose two bodies are jointed, but with the joint gone and the
 /// first body swollen to a sphere that reaches the other, the pair is offered

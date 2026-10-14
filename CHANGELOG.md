@@ -942,9 +942,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   colliding or takes it off the list, and a click on the mesh away from every
   part lets go of it.
 
-- **`Ui::select_hovered`** (`crcbl-ui`) says which option of an open drop-down
-  the pointer is over, so a caller can show what an option would pick before it
-  is picked.
+- **`Ui::select_hovered` and `Ui::select_focused`** (`crcbl-ui`) say which
+  option of an open drop-down the pointer is over and which the arrows have
+  reached, so a caller can show what an option would pick before it is picked.
+  The editor's drop-down of rig pairs marks the pair either way.
 
 - **`Simulation::physics_mut`** (`crcbl::scene_physics`) hands a tool the
   playing scene's physics world to add bodies of its own to, such as a dropped

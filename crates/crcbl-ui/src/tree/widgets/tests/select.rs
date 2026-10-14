@@ -81,6 +81,28 @@ fn moves_and_accept_pick_one_option_reported_as_one_change() {
     assert_eq!(changes, 1, "one pick was not one change");
 }
 
+/// **The option the arrows reach is reported while the list is open**: none
+/// while the button has focus, the chosen one the list opens on, the next
+/// after a move, and none once a pick closes the list.
+#[test]
+fn the_focused_option_is_reported_while_the_list_is_open() {
+    let mut ui = Ui::new();
+    let mut chosen = 1;
+    page(&mut ui, idle(), NavInput::default(), &mut chosen, true);
+    let select = page(&mut ui, idle(), NavInput::NEXT, &mut chosen, true).key;
+    assert_eq!(ui.focused(), Some(select));
+    assert_eq!(ui.select_focused(select, &OPTIONS), None, "closed");
+    page(&mut ui, idle(), NavInput::ACCEPT, &mut chosen, true);
+    page(&mut ui, idle(), NavInput::NAVIGATION, &mut chosen, true);
+    assert_eq!(ui.select_focused(select, &OPTIONS), Some(1), "opened");
+    page(&mut ui, idle(), DOWN, &mut chosen, true);
+    assert_eq!(ui.select_focused(select, &OPTIONS), Some(2), "moved");
+    page(&mut ui, idle(), NavInput::ACCEPT, &mut chosen, true);
+    page(&mut ui, idle(), NavInput::NAVIGATION, &mut chosen, true);
+    assert!(!ui.is_popup_open(select), "the accept did not pick");
+    assert_eq!(ui.select_focused(select, &OPTIONS), None, "picked");
+}
+
 /// **Back closes the list with nothing picked**, focus back on the button.
 #[test]
 fn back_closes_the_list_with_nothing_picked() {

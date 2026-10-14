@@ -326,9 +326,11 @@ fn pairs(ui: &mut Ui, rig: &mut RagdollDesc, touching: &[(String, String)], buil
         let mut chosen = 0;
         let select = ui.select(".rig-pair-add", &options, &mut chosen);
         built.pair_add = Some(select.key);
-        // The first option is the prompt, which names no pair.
+        // The option under the pointer, else the one the arrows reached. The
+        // first option is the prompt, which names no pair.
         if let Some((pair, _)) = ui
             .select_hovered(select.key, &options)
+            .or_else(|| ui.select_focused(select.key, &options))
             .and_then(|index| index.checked_sub(1))
             .and_then(|index| unlisted.get(index))
         {

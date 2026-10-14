@@ -144,6 +144,19 @@ impl Ui {
             .position(|option| self.interaction_of(option).hovered)
     }
 
+    /// Which of `options` has focus in the open list of the drop-down
+    /// `select`, keyed as for [`select_hovered`](Self::select_hovered): the
+    /// option the arrows have reached, or the chosen one the list opened on;
+    /// [`None`] while the list is closed, since closing gives focus back to
+    /// the button.
+    #[must_use]
+    pub fn select_focused(&self, select: NodeKey, options: &[&str]) -> Option<usize> {
+        let focused = self.focused()?;
+        Self::option_keys(select, options)
+            .into_iter()
+            .position(|option| option == focused)
+    }
+
     /// The keys of the options in the list of the drop-down `select`, each
     /// keyed by its text.
     fn option_keys(select: NodeKey, options: &[&str]) -> Vec<NodeKey> {

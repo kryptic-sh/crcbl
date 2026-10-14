@@ -322,9 +322,10 @@ What rig editing still lacks, none of it requested yet:
   (`Editor::pair_at`). The pointer over a listed pair's line draws its two
   bodies in `PAIR_COLOR` (`Editor::hovered_pair_bodies`), with one rigged mesh
   selected only, and so does the pointer over an option of the open drop-down
-  (`Ui::select_hovered`); an option reached by the arrow keys rather than the
-  pointer shows nothing, the listed pairs are never drawn all at once, and the
-  colour is not covered by a test (the headless draw is not read back).
+  (`Ui::select_hovered`), or an option the arrow keys reach
+  (`Ui::select_focused`) while the pointer is over none; the listed pairs are
+  never drawn all at once, and the colour is not covered by a test (the headless
+  draw is not read back).
 
 G drops the selected rigged mesh as its fitted ragdoll in a physics world of its
 own (`apps/editor/src/app/drop.rs`), drawn from a second, preview region per
