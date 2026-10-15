@@ -1281,10 +1281,10 @@ impl Menu {
         &self,
         extent: (u32, u32),
         style: &MenuStyle,
-        font: &'static Font,
+        font: &Font,
     ) -> MenuLayout {
         let setup = Setup {
-            font: Some(font),
+            font: Some(font.clone()),
             ..Setup::default()
         };
         self.placed(extent_size(extent), style, &setup)
@@ -1328,7 +1328,7 @@ impl Menu {
         &self,
         extent: (u32, u32),
         style: &MenuStyle,
-        font: &'static Font,
+        font: &Font,
     ) -> Result<MenuLayout, MenuFitError> {
         let screen = extent_size(extent);
         let room = screen * FIT_FRACTION;
@@ -1336,7 +1336,7 @@ impl Menu {
         let measure = |item_size: f32| {
             let style = style.shrunk(item_size);
             let setup = Setup {
-                font: Some(font),
+                font: Some(font.clone()),
                 line: Some(row_line(font, &style)),
                 list: None,
             };
@@ -1637,7 +1637,7 @@ impl Menu {
         tree.with(|tree| {
             let mut ui = tree.borrow_mut();
             ui.begin_frame(PointerInput::hovering(OFF_SCREEN));
-            if let Some(font) = setup.font {
+            if let Some(font) = &setup.font {
                 ui.register_font(MENU_FONT, font)
                     .expect("the menu's family name is not reserved");
             }
@@ -2031,7 +2031,7 @@ fn contains(rect: (Vec2, Vec2), point: Vec2) -> bool {
 #[derive(Debug, Clone, PartialEq, Default)]
 struct Setup {
     /// The font the text is measured and drawn in; `None` for the bitmap font.
-    font: Option<&'static Font>,
+    font: Option<Font>,
     /// Every row's line pitch, in whole pixels; `None` for the font's own.
     line: Option<f32>,
     /// The item list capped and scrolled; `None` for a list as tall as its
@@ -3130,7 +3130,7 @@ mod tests {
         let panel_at = |size: f32| {
             let style = ceiling.shrunk(size);
             let setup = Setup {
-                font: Some(font),
+                font: Some(font.clone()),
                 line: Some(row_line(font, &style)),
                 list: None,
             };

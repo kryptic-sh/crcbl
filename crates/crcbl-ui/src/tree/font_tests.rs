@@ -42,17 +42,63 @@ fn span_in(ui: &mut Ui, css: &str, class: &str) -> (Vec2, DrawList) {
 }
 
 /// The one glyph run `list` holds: its font and glyphs.
-fn glyph_run(list: &DrawList) -> (&'static Font, Vec<crate::font::layout::PositionedGlyph>) {
+fn glyph_run(list: &DrawList) -> (Font, Vec<crate::font::layout::PositionedGlyph>) {
     let runs: Vec<_> = list
         .commands()
         .iter()
         .filter_map(|command| match command {
-            DrawCommand::Glyphs { font, glyphs, .. } => Some((*font, glyphs.clone())),
+            DrawCommand::Glyphs { font, glyphs, .. } => Some((font.clone(), glyphs.clone())),
             _ => None,
         })
         .collect();
     assert_eq!(runs.len(), 1, "not one glyph run: {}", runs.len());
     runs.into_iter().next().expect("one run")
+}
+
+/// **A font parsed at run time registers by value**, draws its span, and is
+/// let go with the tree: the registry holds a clone, not a leak.
+#[test]
+fn a_font_read_at_run_time_draws_and_is_let_go_with_the_tree() {
+    let bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(crate::font::SANS_TTF);
+    let font = Font::parse(std::sync::Arc::clone(&bytes)).expect("parses");
+    let id = font.id();
+    let mut ui = Ui::new();
+    ui.register_font("found on disk", font)
+        .expect("not reserved");
+    let (_, list) = span_in(
+        &mut ui,
+        ".a { font-family: \"found on disk\", bitmap; }",
+        ".a",
+    );
+    let (drawn, _) = glyph_run(&list);
+    assert_eq!(drawn.id(), id, "the run is not in the registered font");
+    assert_eq!(
+        std::sync::Arc::strong_count(&bytes),
+        2,
+        "the font holds the bytes it was given, not a copy"
+    );
+    drop((drawn, list, ui));
+    assert_eq!(
+        std::sync::Arc::strong_count(&bytes),
+        1,
+        "the tree and its draw list let the font go"
+    );
+}
+
+/// **A font registered by reference is that font**, not a parse of its bytes:
+/// the run it draws carries its identity, which is what the atlas keys on.
+#[test]
+fn a_font_registered_by_reference_is_the_same_font() {
+    let font = Font::parse(crate::font::SANS_TTF).expect("parses");
+    let mut ui = Ui::new();
+    ui.register_font("by reference", &font)
+        .expect("not reserved");
+    let (_, list) = span_in(
+        &mut ui,
+        ".a { font-family: \"by reference\", bitmap; }",
+        ".a",
+    );
+    assert_eq!(glyph_run(&list).0.id(), font.id());
 }
 
 /// **A registered font is what a span measures in**, by quoted name or bare

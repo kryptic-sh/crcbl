@@ -58,7 +58,10 @@ impl Ui {
             if !applies(style) {
                 continue;
             }
-            let measure = match node.font {
+            // A clone, so the measure borrows it rather than the node it is
+            // about to cut.
+            let font = node.font.clone();
+            let measure = match &font {
                 None => Measure::Bitmap {
                     atlas,
                     scale: style.font_size / NATURAL_FONT_SIZE,

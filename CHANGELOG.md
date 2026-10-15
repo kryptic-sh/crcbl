@@ -905,6 +905,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   a `CloseRequested`. The other window-system backends refuse them until each
   implements them. `LogicalRect` is new in `crcbl_shell`.
 
+- **Fonts from bytes read at run time.** `Font::parse` takes any `FontData`: an
+  `include_bytes!` as before, or a `Vec<u8>`, `Box<[u8]>` or `Arc<[u8]>` an
+  application read itself, such as a system font file. `Font` is now a
+  reference-counted handle, so its bytes are freed with its last clone instead
+  of having to live for the whole process. `Ui::register_font` takes a `Font` or
+  a `&Font`, and `DrawList::glyphs`, `DrawList::text_glyphs`,
+  `Menu::layout_with_font` and `Menu::layout_with_font_fitted` take a `&Font`. A
+  `&'static Font` still passes everywhere. `DrawCommand::Glyphs::font` is now a
+  `Font` (a clone) rather than a `&'static Font`, so compare runs by `Font::id`,
+  not by pointer. `Font::id`, `Font::data` and `Font::metrics` are no longer
+  `const`, and `Font::data` borrows from the font.
+
 - **`ShellEvent::MonitorRemoved`: which monitor was unplugged.** Every backend
   queues one for each monitor that leaves the list, before the `MonitorsChanged`
   that drops it, so a program can act on the id while it still knows what it

@@ -99,7 +99,7 @@ impl Ui {
             // What layout decided it shows: cut by `text-overflow`, or whole.
             let text = self.shown_text(node).expect("a text span shows text");
             let style = &node.style;
-            match node.font {
+            match &node.font {
                 None => list.text(content_min, text, style.color, style.font_size),
                 Some(font) => {
                     // Broken at the width the layout measured it under —

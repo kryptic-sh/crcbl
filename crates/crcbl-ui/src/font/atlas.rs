@@ -635,7 +635,7 @@ impl GlyphAtlas {
         reason = "the feature-on twin draws into `self`'s scratch buffers"
     )]
     fn rasterize(&mut self, font: &Font, _key: GlyphKey) -> Option<(u32, u32, i32, i32)> {
-        match font.never {}
+        match font.parsed.never {}
     }
 
     /// Draws `key`'s outline into the mask scratch, returning its extent and

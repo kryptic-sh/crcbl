@@ -386,7 +386,7 @@ struct FrameNode {
     /// The parsed font a text span measures and draws in — a registered one,
     /// else its built-in family's — or `None` for the bitmap font. Resolved
     /// when the span is built.
-    font: Option<&'static Font>,
+    font: Option<Font>,
     /// What a text span shows; [`Shown::Whole`] for every other node once
     /// laid out.
     shown: Shown,
@@ -481,7 +481,7 @@ pub struct Ui {
     /// The pictures a stylesheet's `url()` names, from [`Ui::set_image`].
     images: HashMap<ImageName, AtlasImage>,
     /// The fonts a `font-family` list names, from [`Ui::register_font`].
-    fonts: HashMap<FamilyName, &'static Font>,
+    fonts: HashMap<FamilyName, Font>,
     /// Family names a text span was built in with no font registered under
     /// them, already warned about, so each is reported once.
     unregistered: HashSet<FamilyName>,
@@ -866,7 +866,7 @@ impl Ui {
                     &self.text[start..end],
                     style.font_size.to_bits(),
                     style.font_family,
-                    font.map(Font::id),
+                    font.as_ref().map(Font::id),
                     style.line_height.bits(),
                     style.white_space,
                 ));
@@ -1343,6 +1343,10 @@ impl Ui {
     /// built in. See `crate::style`'s property notes for what a name nothing is
     /// registered under does.
     ///
+    /// `font` is a [`Font`] or a reference to one, which is cloned: a font
+    /// parsed at run time from bytes the application read registers as
+    /// readily as a compiled-in one.
+    ///
     /// # Errors
     ///
     /// [`ReservedFamilyName`] for an empty name, a built-in family's (`bitmap`,
@@ -1352,12 +1356,12 @@ impl Ui {
     pub fn register_font(
         &mut self,
         name: &str,
-        font: &'static Font,
+        font: impl Into<Font>,
     ) -> Result<(), ReservedFamilyName> {
         if is_reserved_family(name) {
             return Err(ReservedFamilyName(name.to_owned()));
         }
-        self.fonts.insert(FamilyName::new(name), font);
+        self.fonts.insert(FamilyName::new(name), font.into());
         Ok(())
     }
 
@@ -1365,10 +1369,10 @@ impl Ui {
     /// under its family name, else its built-in family's, `None` for the
     /// bitmap font. Warns once per name when the span names a family nothing is
     /// registered under; `selector` says which span.
-    fn font_for(&mut self, style: &NodeStyle, selector: &str) -> Option<&'static Font> {
+    fn font_for(&mut self, style: &NodeStyle, selector: &str) -> Option<Font> {
         if let Some(name) = style.family_name {
             if let Some(font) = self.fonts.get(&name) {
-                return Some(*font);
+                return Some(font.clone());
             }
             if self.unregistered.insert(name) {
                 crcbl_core::warn!(
@@ -1378,7 +1382,7 @@ impl Ui {
                 );
             }
         }
-        style.font_family.font()
+        style.font_family.font().cloned()
     }
 
     /// The keys two nodes shared this frame, each once.

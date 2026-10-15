@@ -396,7 +396,7 @@ pub enum DrawCommand {
         /// The top-left every glyph's offset is measured from.
         origin: Vec2,
         /// The font.
-        font: &'static Font,
+        font: Font,
         /// Pixels per em.
         size: f32,
         /// Text colour.
@@ -805,14 +805,14 @@ impl DrawList {
     pub fn glyphs(
         &mut self,
         origin: Vec2,
-        font: &'static Font,
+        font: &Font,
         size: f32,
         color: [f32; 4],
         glyphs: impl Into<Vec<PositionedGlyph>>,
     ) {
         self.push(DrawCommand::Glyphs {
             origin,
-            font,
+            font: font.clone(),
             size,
             color,
             glyphs: glyphs.into(),
@@ -825,7 +825,7 @@ impl DrawList {
     pub fn text_glyphs(
         &mut self,
         origin: Vec2,
-        font: &'static Font,
+        font: &Font,
         size: f32,
         color: [f32; 4],
         glyphs: impl Into<Vec<PositionedGlyph>>,
@@ -833,7 +833,7 @@ impl DrawList {
     ) {
         self.push(DrawCommand::Glyphs {
             origin,
-            font,
+            font: font.clone(),
             size,
             color,
             glyphs: glyphs.into(),

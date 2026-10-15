@@ -375,7 +375,7 @@ fn the_text_read_back_is_the_text_drawn() {
                         .iter()
                         .find_map(|command| match command {
                             DrawCommand::Glyphs { font, glyphs, .. } => {
-                                Some((*font, glyphs.clone()))
+                                Some((font.clone(), glyphs.clone()))
                             }
                             _ => None,
                         })

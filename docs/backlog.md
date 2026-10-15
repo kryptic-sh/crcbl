@@ -139,8 +139,6 @@ Each step lands in the crate the later steps build on, so the seam goes first.
 7. **Outputs.** Hotplug events with name, scale and work area on every backend
    (S7). The monitor-removed close requests in step 4 are part of this.
 8. **Text.**
-   - Fonts from bytes the app found (S11). `Font::parse` takes `&'static [u8]`
-     today.
    - Rich per-span styling (S12).
    - Colour emoji (COLR, CBDT, sbix) with per-glyph fallback (S22).
    - Text measurement exists as `text_width`.
@@ -5145,8 +5143,7 @@ scene menu with the gaps below.
   first decides is untested against a font where it matters.
 - **`ReadoutPanel` cannot take an application stylesheet**, so only
   `default.css` can move it onto the parsed font.
-- **`line-height` is ignored for bitmap-font spans** and takes no percentages,
-  and `Font::parse` wants `'static` bytes.
+- **`line-height` is ignored for bitmap-font spans** and takes no percentages.
 - **A shelf emptied by eviction keeps its height**, so a fragmented page can
   refuse a glyph; it is counted as unplaced.
 - **Latin text only.** There is no shaping and no bidi. The design waits for
@@ -5156,21 +5153,19 @@ scene menu with the gaps below.
   _first_ non-built-in name ahead of a list's first built-in family is kept
   (`NodeStyle::family_name`), so in `font-family: Roboto, Inter, sans-serif`
   `Inter` is never looked up; a list of names would need an interned list type,
-  since `NodeStyle` is `Copy`. A registered font must be `&'static` (as
-  `DrawList::glyphs` already requires). `Menu::layout_with_font` takes the
-  caller's `MenuStyle` as given — `Menu::layout`'s scale fit assumes the bitmap
-  font's advances scale exactly; the fit in a font is
-  `Menu::layout_with_font_fitted`, whose gaps are listed under _What the fitted,
-  scrolled menu left open_ — and there is no public font counterpart of
-  `Menu::panel_size`; a cycler's chevrons hold its caption still only in a font
-  whose `<`, `>` and space advance alike. The warning for a name nothing is
-  registered under names the span's selector, not the family (`FamilyName` is a
-  hash). **Untested**: a text input's caret stops in a registered font
-  (`text_input`'s `measure` takes the resolved font, but no test drives it), and
-  the pixels a registered real TTF rasterises to — the tests use a synthetic
-  fixed-pitch `Font` that has no outlines. EW's `ui_font.rs` still rewrites
-  `DrawCommand::Text` itself; moving it to `register_font` is EW's change, not
-  made.
+  since `NodeStyle` is `Copy`. `Menu::layout_with_font` takes the caller's
+  `MenuStyle` as given — `Menu::layout`'s scale fit assumes the bitmap font's
+  advances scale exactly; the fit in a font is `Menu::layout_with_font_fitted`,
+  whose gaps are listed under _What the fitted, scrolled menu left open_ — and
+  there is no public font counterpart of `Menu::panel_size`; a cycler's chevrons
+  hold its caption still only in a font whose `<`, `>` and space advance alike.
+  The warning for a name nothing is registered under names the span's selector,
+  not the family (`FamilyName` is a hash). **Untested**: a text input's caret
+  stops in a registered font (`text_input`'s `measure` takes the resolved font,
+  but no test drives it), and the pixels a registered real TTF rasterises to —
+  the tests use a synthetic fixed-pitch `Font` that has no outlines. EW's
+  `ui_font.rs` still rewrites `DrawCommand::Text` itself; moving it to
+  `register_font` is EW's change, not made.
 
 ## What UI rung 4 shipped without (2026-09-16)
 

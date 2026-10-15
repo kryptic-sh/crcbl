@@ -238,7 +238,7 @@ impl LayoutPartialTree for LayoutTree<'_> {
                                 // it may take: what a wrapped line breaks at.
                                 Content::Text { start, end } => measure.text(
                                     atlas,
-                                    frame.font,
+                                    frame.font.as_ref(),
                                     &text[start..end],
                                     frame.content_hash,
                                     &frame.style,

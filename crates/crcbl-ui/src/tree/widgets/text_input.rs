@@ -591,10 +591,16 @@ impl Ui {
                 shown,
                 style.font_size.to_bits(),
                 style.font_family,
-                span.font.map(Font::id),
+                span.font.as_ref().map(Font::id),
             ));
             if state.boundaries.is_empty() || state.measured != hash {
-                measure(atlas, span.font, shown, style, &mut state.boundaries);
+                measure(
+                    atlas,
+                    span.font.as_ref(),
+                    shown,
+                    style,
+                    &mut state.boundaries,
+                );
                 state.measured = hash;
             }
             let stops = &state.boundaries;

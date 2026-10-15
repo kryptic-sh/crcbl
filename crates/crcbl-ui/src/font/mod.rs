@@ -57,6 +57,11 @@
 //! [`DrawList::glyphs`](crate::draw_list::DrawList::glyphs) — so its glyphs
 //! reach the screen through the same [`atlas`] as the committed font's.
 //!
+//! A font need not be compiled in: [`Font::parse`] takes any [`FontData`],
+//! so bytes an application read at run time — a system font it looked up, a
+//! file a user picked — parse, register and draw like the committed font,
+//! and are freed with the last clone of the [`Font`] rather than leaked.
+//!
 //! # Latin-1 first
 //!
 //! Every codepoint goes through the font's cmap, and one the font has no glyph
@@ -72,6 +77,7 @@ pub mod raster;
 
 use core::fmt;
 use std::collections::HashMap;
+use std::sync::Arc;
 #[cfg(feature = "parsed-font")]
 use std::sync::OnceLock;
 #[cfg(feature = "parsed-font")]
@@ -265,6 +271,74 @@ impl FontMetrics {
 /// table built at parse time, everything from it on goes through the cmap.
 const LATIN1_END: u32 = 0x100;
 
+/// The bytes a [`Font`] is parsed from: compiled in, or found at run time.
+///
+/// Made with `From` from an `include_bytes!` (`&'static [u8; N]` or
+/// `&'static [u8]`), or from a `Vec<u8>`, `Box<[u8]>` or `Arc<[u8]>` an
+/// application read itself — a system font it looked up, a font file a user
+/// chose. The font keeps them alive for as long as any clone of it lives, so
+/// nothing has to be leaked to make them last.
+#[derive(Clone)]
+pub struct FontData(Bytes);
+
+/// Where [`FontData`]'s bytes live. Compiled-in bytes are borrowed rather
+/// than copied into a shared allocation.
+#[derive(Clone)]
+enum Bytes {
+    Static(&'static [u8]),
+    Shared(Arc<[u8]>),
+}
+
+impl FontData {
+    /// The bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        match &self.0 {
+            Bytes::Static(bytes) => bytes,
+            Bytes::Shared(bytes) => bytes,
+        }
+    }
+}
+
+impl fmt::Debug for FontData {
+    /// The length; not the bytes.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FontData")
+            .field("len", &self.as_bytes().len())
+            .finish()
+    }
+}
+
+impl From<&'static [u8]> for FontData {
+    fn from(bytes: &'static [u8]) -> Self {
+        Self(Bytes::Static(bytes))
+    }
+}
+
+impl<const N: usize> From<&'static [u8; N]> for FontData {
+    fn from(bytes: &'static [u8; N]) -> Self {
+        Self(Bytes::Static(bytes))
+    }
+}
+
+impl From<Arc<[u8]>> for FontData {
+    fn from(bytes: Arc<[u8]>) -> Self {
+        Self(Bytes::Shared(bytes))
+    }
+}
+
+impl From<Vec<u8>> for FontData {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(Bytes::Shared(bytes.into()))
+    }
+}
+
+impl From<Box<[u8]>> for FontData {
+    fn from(bytes: Box<[u8]>) -> Self {
+        Self(Bytes::Shared(bytes.into()))
+    }
+}
+
 /// One parsed font. See the module docs.
 ///
 /// Parsing reads everything layout needs per glyph up front — the Latin-1
@@ -272,17 +346,25 @@ const LATIN1_END: u32 = 0x100;
 /// and laying out text touches no table. Outlines are read when the atlas
 /// rasterises a glyph.
 ///
-/// Two fonts are equal when they are one parse: equality is [`Font::id`].
+/// A handle: cloning it is a reference count, and every clone is the same
+/// font. Two fonts are equal when they are one parse: equality is
+/// [`Font::id`].
 ///
 /// Without the `parsed-font` feature there is no value of this type: see the
 /// module docs.
+#[derive(Clone)]
 pub struct Font {
+    parsed: Arc<Parsed>,
+}
+
+/// What one parse read, shared by every clone of its [`Font`].
+struct Parsed {
     /// Uninhabited, so a build without the feature can name a `Font` and never
     /// hold one: a body that reads the font's bytes matches on this instead.
     #[cfg(not(feature = "parsed-font"))]
     never: NoParsedFont,
     id: FontId,
-    data: &'static [u8],
+    data: FontData,
     metrics: FontMetrics,
     /// Glyph ids of the codepoints below [`LATIN1_END`]; zero where the font
     /// has none.
@@ -298,21 +380,29 @@ impl fmt::Debug for Font {
     /// The id and the metrics; not the tables.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Font")
-            .field("id", &self.id)
-            .field("metrics", &self.metrics)
-            .field("glyphs", &self.advances.len())
-            .field("kerning_pairs", &self.kerning.len())
+            .field("id", &self.parsed.id)
+            .field("metrics", &self.parsed.metrics)
+            .field("glyphs", &self.parsed.advances.len())
+            .field("kerning_pairs", &self.parsed.kerning.len())
             .finish_non_exhaustive()
     }
 }
 
 impl PartialEq for Font {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.parsed.id == other.parsed.id
     }
 }
 
 impl Eq for Font {}
+
+/// A clone: what lets a caller holding a `&'static Font` pass it wherever a
+/// `Font` is taken.
+impl From<&Font> for Font {
+    fn from(font: &Font) -> Self {
+        font.clone()
+    }
+}
 
 /// No value: what makes [`Font`] uninhabited without the `parsed-font`
 /// feature.
@@ -347,11 +437,13 @@ impl Font {
     ///
     /// [`FontError::ParsedFontOff`], always.
     #[cfg(not(feature = "parsed-font"))]
-    pub const fn parse(_data: &'static [u8]) -> Result<Self, FontError> {
+    pub fn parse(data: impl Into<FontData>) -> Result<Self, FontError> {
+        drop(data.into());
         Err(FontError::ParsedFontOff)
     }
 
-    /// Parses `data`, which lives as long as the process.
+    /// Parses `data` — see [`FontData`] for what it can be made from — and
+    /// keeps it for the outlines the atlas reads later.
     ///
     /// A font whose GPOS table cannot be read parses with no kerning, and says
     /// so through `crcbl_core::warn!`: a font that draws unkerned is still a
@@ -362,8 +454,10 @@ impl Font {
     /// [`FontError`] when the table directory cannot be read or the font has
     /// no units per em.
     #[cfg(feature = "parsed-font")]
-    pub fn parse(data: &'static [u8]) -> Result<Self, FontError> {
-        let font = FontRef::new(data).map_err(|error| FontError::Unreadable(error.to_string()))?;
+    pub fn parse(data: impl Into<FontData>) -> Result<Self, FontError> {
+        let data = data.into();
+        let font = FontRef::new(data.as_bytes())
+            .map_err(|error| FontError::Unreadable(error.to_string()))?;
         let unscaled = font.metrics(Size::unscaled(), LocationRef::default());
         if unscaled.units_per_em == 0 {
             return Err(FontError::NoUnitsPerEm);
@@ -406,37 +500,39 @@ impl Font {
         };
 
         Ok(Self {
-            id: next_id(),
-            data,
-            metrics,
-            latin1,
-            advances,
-            kerning,
+            parsed: Arc::new(Parsed {
+                id: next_id(),
+                data,
+                metrics,
+                latin1,
+                advances,
+                kerning,
+            }),
         })
     }
 
     /// This font's identity.
     #[must_use]
-    pub const fn id(&self) -> FontId {
-        self.id
+    pub fn id(&self) -> FontId {
+        self.parsed.id
     }
 
     /// The bytes it was parsed from.
     #[must_use]
-    pub const fn data(&self) -> &'static [u8] {
-        self.data
+    pub fn data(&self) -> &[u8] {
+        self.parsed.data.as_bytes()
     }
 
     /// Its line metrics.
     #[must_use]
-    pub const fn metrics(&self) -> FontMetrics {
-        self.metrics
+    pub fn metrics(&self) -> FontMetrics {
+        self.parsed.metrics
     }
 
     /// How many glyphs it holds.
     #[must_use]
     pub fn glyph_count(&self) -> usize {
-        self.advances.len()
+        self.parsed.advances.len()
     }
 
     /// The glyph `c` draws as: through the cmap, or [`GlyphId::NOTDEF`] when
@@ -445,12 +541,12 @@ impl Font {
     pub fn glyph_id(&self, c: char) -> GlyphId {
         let codepoint = c as u32;
         if codepoint < LATIN1_END {
-            return GlyphId(self.latin1[codepoint as usize]);
+            return GlyphId(self.parsed.latin1[codepoint as usize]);
         }
         #[cfg(not(feature = "parsed-font"))]
-        match self.never {}
+        match self.parsed.never {}
         #[cfg(feature = "parsed-font")]
-        FontRef::new(self.data)
+        FontRef::new(self.data())
             .ok()
             .and_then(|font| font.charmap().map(codepoint))
             .map_or(GlyphId::NOTDEF, |glyph| GlyphId(glyph.to_u32()))
@@ -460,7 +556,11 @@ impl Font {
     /// have.
     #[must_use]
     pub fn advance(&self, glyph: GlyphId) -> f32 {
-        self.advances.get(glyph.0 as usize).copied().unwrap_or(0.0)
+        self.parsed
+            .advances
+            .get(glyph.0 as usize)
+            .copied()
+            .unwrap_or(0.0)
     }
 
     /// How far `right` moves when it follows `left`, in font units: the pair
@@ -468,13 +568,17 @@ impl Font {
     /// kern. Only pairs of glyphs Latin-1 maps to are read.
     #[must_use]
     pub fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
-        self.kerning.get(&(left.0, right.0)).copied().unwrap_or(0.0)
+        self.parsed
+            .kerning
+            .get(&(left.0, right.0))
+            .copied()
+            .unwrap_or(0.0)
     }
 
     /// How many glyph pairs the font kerns.
     #[must_use]
     pub fn kerning_pairs(&self) -> usize {
-        self.kerning.len()
+        self.parsed.kerning.len()
     }
 
     /// A font with `metrics` and no outlines, leaked for the process: every
@@ -484,12 +588,14 @@ impl Font {
     #[cfg(all(test, feature = "parsed-font"))]
     pub(crate) fn fixed_pitch(metrics: FontMetrics, advance: f32) -> &'static Self {
         Box::leak(Box::new(Self {
-            id: next_id(),
-            data: &[],
-            metrics,
-            latin1: [1; LATIN1_END as usize],
-            advances: Box::new([0.0, advance]),
-            kerning: HashMap::new(),
+            parsed: Arc::new(Parsed {
+                id: next_id(),
+                data: FontData::from(&[]),
+                metrics,
+                latin1: [1; LATIN1_END as usize],
+                advances: Box::new([0.0, advance]),
+                kerning: HashMap::new(),
+            }),
         }))
     }
 }
@@ -588,6 +694,27 @@ mod tests {
             );
         }
         assert_eq!(font.advance(GlyphId(u32::MAX)), 0.0);
+    }
+
+    /// **Bytes read at run time parse as the compiled-in ones do**, and the
+    /// font holds them once, however many clones of it there are, until the
+    /// last clone goes: nothing is leaked to make them last.
+    #[test]
+    fn a_font_from_run_time_bytes_holds_them_until_its_last_clone_goes() {
+        let bytes: Arc<[u8]> = Arc::from(SANS_TTF);
+        let font = Font::parse(Arc::clone(&bytes)).expect("parses");
+        assert_eq!(font.metrics(), Font::sans().metrics());
+        assert_eq!(font.glyph_id('A'), Font::sans().glyph_id('A'));
+        let copy = font.clone();
+        assert_eq!(copy, font, "a clone is the same font");
+        assert_eq!(Arc::strong_count(&bytes), 2);
+        drop(font);
+        assert_eq!(Arc::strong_count(&bytes), 2, "the clone still holds them");
+        drop(copy);
+        assert_eq!(Arc::strong_count(&bytes), 1, "freed with the last clone");
+
+        let owned = Font::parse(SANS_TTF.to_vec()).expect("parses");
+        assert_eq!(owned.data(), SANS_TTF);
     }
 
     /// Two parses are two identities, so an atlas never confuses their glyphs.
