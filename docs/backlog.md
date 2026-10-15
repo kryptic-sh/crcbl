@@ -167,8 +167,15 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      CI's `win32 e2e (real desktop)` job on 2026-10-15, the appbar test
      included: the work area gave up the bar's height and got it back. Those
      desktop tests were not mutation-run.
-   - Still to do: `ABN_FULLSCREENAPP` as an event (lyr item 7), which needs a
-     seam event; `ABM_ACTIVATE` and `ABM_WINDOWPOSCHANGED`, which the appbar
+   - `ABN_FULLSCREENAPP` arrives as `ShellEvent::FullScreenApp` for a reserving
+     bar (lyr item 7). Verified locally only by the decoder's unit test
+     (`appbar_notice`); the desktop test
+     `a_reserving_bar_is_told_when_a_full_screen_window_opens_and_closes` runs
+     in CI, and whether Explorer sends the notification on that runner is what
+     its first run answers. Only a reserving panel is an appbar, so a bar with
+     `Reserve::None` is not told; registering it with `ABM_NEW` and no
+     `ABM_SETPOS` would tell it without reserving, if one ever needs it.
+   - Still to do: `ABM_ACTIVATE` and `ABM_WINDOWPOSCHANGED`, which the appbar
      documentation asks for and which matter to auto-hide appbars; and a
      crash-safe `ABM_REMOVE`, because a process killed without it keeps the work
      area reserved until Explorer restarts (a panic is covered, through `Drop`).

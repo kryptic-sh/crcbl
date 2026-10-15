@@ -1088,6 +1088,7 @@ pub(super) unsafe extern "system" fn window_proc(
             shared.push(RawEvent::AppBar {
                 hwnd: window,
                 notification: w_param as u32,
+                param: l_param,
             });
             0
         }

@@ -389,3 +389,55 @@ impl Win32Shell {
         unsafe { ffi::SHAppBarMessage(appbar::REMOVE, &raw mut data) };
     }
 }
+
+/// What an `ABN_*` notification asks of the appbar it went to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AppBarNotice {
+    /// The taskbar or another appbar moved: ask for this one's place again.
+    Moved,
+    /// A full-screen window opened on the appbar's monitor (`true`) or the
+    /// last one closed (`false`).
+    FullScreenApp(bool),
+}
+
+/// Decodes the `ABN_*` code and `lParam` of an appbar's callback message, or
+/// `None` for one a panel does nothing with.
+pub(super) const fn appbar_notice(notification: u32, param: isize) -> Option<AppBarNotice> {
+    match notification {
+        appbar::POS_CHANGED => Some(AppBarNotice::Moved),
+        appbar::FULL_SCREEN_APP => Some(AppBarNotice::FullScreenApp(param != 0)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ABN_STATECHANGE` and `ABN_WINDOWARRANGE`, the codes a panel ignores.
+    const STATE_CHANGE: u32 = 0;
+    const WINDOW_ARRANGE: u32 = 3;
+
+    #[test]
+    fn an_appbar_notice_is_decoded_from_its_code_and_lparam() {
+        assert_eq!(
+            appbar_notice(appbar::POS_CHANGED, 0),
+            Some(AppBarNotice::Moved)
+        );
+        assert_eq!(
+            appbar_notice(appbar::FULL_SCREEN_APP, 1),
+            Some(AppBarNotice::FullScreenApp(true))
+        );
+        assert_eq!(
+            appbar_notice(appbar::FULL_SCREEN_APP, 0),
+            Some(AppBarNotice::FullScreenApp(false))
+        );
+        assert_eq!(
+            appbar_notice(appbar::FULL_SCREEN_APP, -1),
+            Some(AppBarNotice::FullScreenApp(true)),
+            "any nonzero BOOL is TRUE"
+        );
+        assert_eq!(appbar_notice(STATE_CHANGE, 1), None);
+        assert_eq!(appbar_notice(WINDOW_ARRANGE, 1), None);
+    }
+}

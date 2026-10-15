@@ -315,6 +315,8 @@ pub enum RawEvent {
         hwnd: isize,
         /// The `ABN_*` code.
         notification: u32,
+        /// The notification's `lParam`, which some codes carry a value in.
+        param: isize,
     },
 }
 
@@ -756,7 +758,8 @@ mod tests {
         assert_eq!(
             RawEvent::AppBar {
                 hwnd: B,
-                notification: 1
+                notification: 1,
+                param: 0,
             }
             .hwnd(),
             Some(B),

@@ -2404,6 +2404,85 @@ fn a_reserving_bar_is_an_appbar_that_takes_its_edge_and_gives_it_back() {
     assert_eq!(after, before, "destroying the bar gave the edge back");
 }
 
+/// Pumps until `shell` raises `FullScreenApp` for `bar` with `active`, or
+/// panics naming what did arrive.
+fn wait_for_full_screen_app(shell: &mut Win32Shell, bar: WindowId, active: bool) {
+    // Explorer notices a full-screen window on its own schedule, after the
+    // window takes the foreground; this is a generous ceiling, not a wait.
+    const PATIENCE: Duration = Duration::from_secs(10);
+    let deadline = Instant::now() + PATIENCE;
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        let mut found = false;
+        shell.pump(&mut |event| {
+            if let ShellEvent::FullScreenApp {
+                window,
+                active: now,
+            } = event
+            {
+                seen.push((window, now));
+                found |= window == bar && now == active;
+            }
+        });
+        if found {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("no FullScreenApp {{ active: {active} }} for the bar; saw {seen:?}");
+}
+
+#[test]
+#[ignore = "reserves part of the real desktop's work area: run-win32-e2e.ps1 runs it"]
+fn a_reserving_bar_is_told_when_a_full_screen_window_opens_and_closes() {
+    let mut shell = shell();
+    let primary = shell
+        .monitors()
+        .iter()
+        .find(|monitor| monitor.is_primary)
+        .cloned()
+        .expect("a primary monitor");
+    let before = work_area_until(&mut shell, |_| true);
+    let bar = shell
+        .create_window(&panel_desc(
+            "crcbl full-screen appbar",
+            LogicalSize::new(0.0, 30.0),
+            crate::PanelDesc {
+                monitor: Some(primary.id),
+                anchor: crate::PanelAnchor::TOP
+                    | crate::PanelAnchor::LEFT
+                    | crate::PanelAnchor::RIGHT,
+                reserve: crate::Reserve::OwnExtent,
+                ..crate::PanelDesc::default()
+            },
+        ))
+        .expect("a reserving panel");
+    work_area_until(&mut shell, |area| area.y != before.y);
+
+    let game = shell
+        .create_window(&WindowDesc {
+            title: "crcbl full-screen game",
+            mode: DisplayMode::Borderless {
+                monitor: Some(primary.id),
+            },
+            ..WindowDesc::default()
+        })
+        .expect("a borderless window over the monitor");
+    let game_hwnd = hwnd_of(&shell, game);
+    focus_and_confirm(&mut shell, game, game_hwnd);
+    wait_for_full_screen_app(&mut shell, bar, true);
+
+    shell.destroy_window(game).expect("destroy the game");
+    wait_for_full_screen_app(&mut shell, bar, false);
+
+    shell.destroy_window(bar).expect("destroy the bar");
+    assert_eq!(
+        work_area_until(&mut shell, |area| area == before),
+        before,
+        "the edge is given back"
+    );
+}
+
 /// A popup descriptor against `parent`.
 fn popup_desc(title: &str, size: LogicalSize, popup: crate::PopupDesc) -> WindowDesc<'_> {
     WindowDesc {

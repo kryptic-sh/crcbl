@@ -986,6 +986,9 @@ pub mod appbar {
     /// `ABN_POSCHANGED`: the taskbar or another appbar moved, so this one has
     /// to ask for its place again.
     pub const POS_CHANGED: u32 = 0x0000_0001;
+    /// `ABN_FULLSCREENAPP`: a full-screen window opened on this appbar's
+    /// monitor (`lParam` nonzero) or the last one closed (zero).
+    pub const FULL_SCREEN_APP: u32 = 0x0000_0002;
 }
 
 /// The messages the window procedure recognizes.

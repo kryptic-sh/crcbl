@@ -1019,13 +1019,20 @@ impl Win32Shell {
                     self.queue.push_back(ShellEvent::MonitorsChanged);
                 }
                 RawEvent::DeviceRemoved { device } => self.devices.remove(device),
-                RawEvent::AppBar { notification, .. } => {
-                    if let Some(window) = window
-                        && notification == super::ffi::appbar::POS_CHANGED
-                    {
+                RawEvent::AppBar {
+                    notification,
+                    param,
+                    ..
+                } => match (window, super::panel::appbar_notice(notification, param)) {
+                    (Some(window), Some(super::panel::AppBarNotice::Moved)) => {
                         self.place_panel(window);
                     }
-                }
+                    (Some(window), Some(super::panel::AppBarNotice::FullScreenApp(active))) => {
+                        self.queue
+                            .push_back(ShellEvent::FullScreenApp { window, active });
+                    }
+                    _ => {}
+                },
 
                 // The input half, which needs the layout, the modifier snapshot
                 // and this shell's own surrogate and raw-motion state — see

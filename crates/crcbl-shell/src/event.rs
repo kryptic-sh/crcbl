@@ -411,6 +411,23 @@ pub enum ShellEvent {
         window: WindowId,
     },
 
+    /// A full-screen window opened on this panel's monitor, or the last one
+    /// closed: `active` says which.
+    ///
+    /// For a bar that should step aside while a game or a video is full
+    /// screen. Raised on Win32, for a [panel](crate::WindowRole::Panel) that
+    /// reserves its edge ([`Reserve::OwnExtent`](crate::Reserve::OwnExtent)),
+    /// from the shell's `ABN_FULLSCREENAPP`. Wayland and AppKit do not need
+    /// it: their compositors already draw a full-screen window over a bar, or
+    /// in a space of its own. X11 does not raise it either, so a bar there
+    /// that cares watches `_NET_WM_STATE_FULLSCREEN` itself.
+    FullScreenApp {
+        /// The panel told.
+        window: WindowId,
+        /// Whether a full-screen window is now open on its monitor.
+        active: bool,
+    },
+
     /// A file was dropped on the window.
     ///
     /// One event per file: a multi-file drop produces several. Only delivered
@@ -487,6 +504,7 @@ impl ShellEvent {
             | Self::TextPreedit { window, .. }
             | Self::DroppedFile { window, .. }
             | Self::FocusRefused { window }
+            | Self::FullScreenApp { window, .. }
             | Self::ClipboardData { window, .. } => Some(*window),
             Self::MonitorsChanged | Self::MonitorRemoved { .. } => None,
         }
@@ -516,6 +534,7 @@ impl ShellEvent {
             | Self::MonitorsChanged
             | Self::MonitorRemoved { .. }
             | Self::FocusRefused { .. }
+            | Self::FullScreenApp { .. }
             | Self::ClipboardData { .. } => None,
         }
     }
@@ -555,6 +574,7 @@ impl ShellEvent {
             Self::MonitorsChanged => "MonitorsChanged",
             Self::MonitorRemoved { .. } => "MonitorRemoved",
             Self::FocusRefused { .. } => "FocusRefused",
+            Self::FullScreenApp { .. } => "FullScreenApp",
             Self::DroppedFile { .. } => "DroppedFile",
             Self::ClipboardData { .. } => "ClipboardData",
         }
@@ -728,6 +748,10 @@ mod tests {
                 monitor: MonitorId(2),
             },
             ShellEvent::FocusRefused { window },
+            ShellEvent::FullScreenApp {
+                window,
+                active: true,
+            },
         ];
 
         let mut names = Vec::new();

@@ -939,6 +939,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   not by pointer. `Font::id`, `Font::data` and `Font::metrics` are no longer
   `const`, and `Font::data` borrows from the font.
 
+- **`ShellEvent::FullScreenApp { window, active }`.** A Win32 bar that reserves
+  its edge is told when a full-screen window opens on its monitor and when the
+  last one closes, from the shell's `ABN_FULLSCREENAPP`, so it can step aside
+  for a game or a video. Wayland and AppKit compositors already keep a
+  full-screen window clear of bars, and X11 does not raise it.
+
 - **A `cursor` property in stylesheets, and `Ui::cursor`.** `cursor` takes
   `auto`, `none` or a shape keyword such as `pointer` or `ns-resize`, and is
   inherited as in CSS. `Ui::cursor` reports the shape for where the pointer is,
