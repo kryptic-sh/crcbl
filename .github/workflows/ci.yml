@@ -3196,8 +3196,10 @@ jobs:
           set -euo pipefail
           declared=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
           pinned=$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)
-          if [ -z "$declared" ] || [ "$declared" != "$pinned" ]; then
-            echo "::error::Cargo.toml rust-version '$declared' != rust-toolchain.toml channel '$pinned'"
+          # Major and minor: the workspace `Cargo.toml` says why the patch
+          # level is left off.
+          if [ -z "$declared" ] || [ "$declared" != "${pinned%.*}" ]; then
+            echo "::error::Cargo.toml rust-version '$declared' is not the release of rust-toolchain.toml channel '$pinned'"
             exit 1
           fi
           echo "rust-version $declared, toolchain $pinned"

@@ -897,11 +897,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   headless shell's `wait_events(None)` now sleeps until it rings rather than
   returning at once.
 
-- **Every published crate declares `rust-version = "1.98.1"`**, the toolchain
+- **Every published crate declares `rust-version = "1.98"`**, the release
   `rust-toolchain.toml` pins and the only one CI proves, so an older compiler
-  names the version it needs instead of failing on a newer API. The workspace
-  `Cargo.toml` holds the number and `ci.yml`'s `package` job fails when it and
-  the pinned channel disagree.
+  names the version it needs instead of failing on a newer API. Major and minor
+  only, because cargo reads a nightly as the `.0` of its release and a `1.98.1`
+  would refuse the pinned `1.98.0-nightly`. The workspace `Cargo.toml` holds the
+  number, and `ci.yml`'s `package` job fails when it and the pinned channel name
+  different releases.
 
 - **`crcbl-frame`: the render graph and the UI pass without the 3D renderer.**
   The render graph, the transient pool, the texture uploads, the mip chains, the

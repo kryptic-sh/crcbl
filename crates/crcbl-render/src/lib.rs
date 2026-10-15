@@ -114,7 +114,7 @@
 //! let mut pool = TransientPool::new();
 //!
 //! let mut graph = RenderGraph::new(queue);
-//! let scene = graph.create_image("scene", crate::targets::scene_color((64, 48)));
+//! let scene = graph.create_image("scene", crcbl_render::targets::scene_color((64, 48)));
 //! graph
 //!     .add_render_pass("clear")
 //!     .clear_color(scene, [0.0, 0.0, 0.0, 1.0])
