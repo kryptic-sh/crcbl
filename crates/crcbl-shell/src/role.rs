@@ -270,6 +270,68 @@ pub enum PopupPlacement {
     Right,
 }
 
+/// A rectangle in a backend's own Y-down space — desktop pixels on Win32,
+/// flipped screen points on AppKit — for [`place_popup`].
+///
+/// Compiled where its callers are: the two backends that place popups
+/// themselves.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Placed {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// Where a popup of `width × height` goes against `anchor`: on the
+/// `placement` side of it, flipped to the other side when it does not fit in
+/// `area` and the other side does, and slid along the side it is on to stay
+/// in `area`.
+///
+/// The placement `xdg_positioner` is asked for on Wayland, worked out here
+/// for the window systems that have no one to ask. Y grows downwards.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+pub(crate) fn place_popup(
+    anchor: Placed,
+    (width, height): (f64, f64),
+    placement: PopupPlacement,
+    area: Placed,
+) -> (f64, f64) {
+    let (left, top) = (anchor.x, anchor.y);
+    let (right, bottom) = (left + anchor.width, top + anchor.height);
+    let (area_right, area_bottom) = (area.x + area.width, area.y + area.height);
+    // The near start on the placement's axis, or the flip when only that fits.
+    let side = |near: f64, far: f64, extent: f64, low: f64, high: f64| {
+        if near >= low && near + extent <= high {
+            near
+        } else if far >= low && far + extent <= high {
+            far
+        } else {
+            near
+        }
+    };
+    let slide = |start: f64, extent: f64, low: f64, high: f64| start.min(high - extent).max(low);
+    match placement {
+        PopupPlacement::Below => (
+            slide(left, width, area.x, area_right),
+            side(bottom, top - height, height, area.y, area_bottom),
+        ),
+        PopupPlacement::Above => (
+            slide(left, width, area.x, area_right),
+            side(top - height, bottom, height, area.y, area_bottom),
+        ),
+        PopupPlacement::Left => (
+            side(left - width, right, width, area.x, area_right),
+            slide(top, height, area.y, area_bottom),
+        ),
+        PopupPlacement::Right => (
+            side(right, left - width, width, area.x, area_right),
+            slide(top, height, area.y, area_bottom),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

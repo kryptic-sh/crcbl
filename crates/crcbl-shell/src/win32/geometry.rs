@@ -200,10 +200,8 @@ pub fn with_depth(rect: Rect, edge: PanelAnchor, depth: i32) -> Rect {
 }
 
 /// Where a popup of `size` goes against `anchor`, both in desktop pixels:
-/// on the `placement` side of it, flipped to the other side when it does not
-/// fit in `area` and the other side does, and slid along the side it is on to
-/// stay in `area`. The placement `xdg_positioner` is asked for on Wayland,
-/// worked out here because Win32 has no one to ask.
+/// [`role::place_popup`](crate::role::place_popup)'s placement, flipped or
+/// slid to stay in `area`, in whole pixels.
 #[must_use]
 pub fn popup_rect(
     anchor: PhysicalRect,
@@ -211,49 +209,25 @@ pub fn popup_rect(
     placement: PopupPlacement,
     area: PhysicalRect,
 ) -> PhysicalRect {
-    let (width, height) = (i64::from(size.width), i64::from(size.height));
-    let (left, top) = (i64::from(anchor.x), i64::from(anchor.y));
-    let (right, bottom) = (
-        left + i64::from(anchor.width),
-        top + i64::from(anchor.height),
-    );
-    let (area_left, area_top) = (i64::from(area.x), i64::from(area.y));
-    let (area_right, area_bottom) = (
-        area_left + i64::from(area.width),
-        area_top + i64::from(area.height),
-    );
-    // The two candidate starts on the axis the placement is on, the second
-    // being the flip, and the free axis's start before sliding.
-    let side = |near: i64, far: i64, extent: i64, low: i64, high: i64| {
-        if near >= low && near + extent <= high {
-            near
-        } else if far >= low && far + extent <= high {
-            far
-        } else {
-            near
-        }
+    let placed = |rect: PhysicalRect| crate::role::Placed {
+        x: f64::from(rect.x),
+        y: f64::from(rect.y),
+        width: f64::from(rect.width),
+        height: f64::from(rect.height),
     };
-    let slide = |start: i64, extent: i64, low: i64, high: i64| start.min(high - extent).max(low);
-    let (x, y) = match placement {
-        PopupPlacement::Below => (
-            slide(left, width, area_left, area_right),
-            side(bottom, top - height, height, area_top, area_bottom),
-        ),
-        PopupPlacement::Above => (
-            slide(left, width, area_left, area_right),
-            side(top - height, bottom, height, area_top, area_bottom),
-        ),
-        PopupPlacement::Left => (
-            side(left - width, right, width, area_left, area_right),
-            slide(top, height, area_top, area_bottom),
-        ),
-        PopupPlacement::Right => (
-            side(right, left - width, width, area_left, area_right),
-            slide(top, height, area_top, area_bottom),
-        ),
-    };
-    let narrow =
-        |value: i64| i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX });
+    let (x, y) = crate::role::place_popup(
+        placed(anchor),
+        (f64::from(size.width), f64::from(size.height)),
+        placement,
+        placed(area),
+    );
+    // Whole pixels in, whole pixels out: every input is an integer, so the
+    // arithmetic is exact and the cast only narrows the range.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "clamped into i32's range before the cast"
+    )]
+    let narrow = |value: f64| value.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
     PhysicalRect::new(narrow(x), narrow(y), size.width, size.height)
 }
 
