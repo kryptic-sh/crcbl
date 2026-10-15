@@ -550,8 +550,24 @@ impl Shell for X11Shell {
         // Nothing is left in libxcb's queue — the early return above is what
         // makes that true — so the descriptor is the whole truth about whether
         // anything is pending. The answer is discarded on purpose:
-        // `wait_events` is advisory, and `pump` is what delivers.
-        let _ = ffi::poll_readable(self.conn.fd, timeout_ms);
+        // `wait_events` is advisory, and `pump` is what delivers. The wake
+        // pipe, when a waker is out, is polled beside it and unrung after.
+        match &self.wake {
+            Some(wake) => {
+                let _ = ffi::poll_readable_or(self.conn.fd, wake.fd(), timeout_ms);
+                wake.clear();
+            }
+            None => {
+                let _ = ffi::poll_readable(self.conn.fd, timeout_ms);
+            }
+        }
+    }
+
+    /// A pipe polled beside the connection — see
+    /// [`wake`](crate::linux::wake). `None` only if the process is out of
+    /// descriptors, which is logged.
+    fn waker(&mut self) -> Option<crate::ShellWaker> {
+        crate::waker::lazy_waker(&mut self.wake, "X11", crate::linux::wake::WakePipe::new)
     }
 
     fn align_event_clock(&mut self, elapsed: Duration) {

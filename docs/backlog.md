@@ -33,13 +33,25 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      are small for a window plus a UI: `crcbl-hal`, `crcbl-shell`, `crcbl-ui`
      and each backend reach only `crcbl-core`, `crcbl-console` and (for the
      shell) `crcbl-wl-scanner` inside the workspace.
-2. **The loop.**
-   - S6: a cross-thread wake proxy for `wait_events` on every backend (eventfd
-     on Wayland and X11, `PostMessageW` on Win32, a `CFRunLoop` source on
-     AppKit).
-   - S19: confirm that `wait_events`' existing timeout is honoured on every
-     backend.
-   - S25: a clean way out of the loop.
+2. **The loop: built, its CI verdict pending.**
+   - S6 (`Shell::waker`, `ShellWaker`), S19 and S25 are done.
+   - The wake's own tests are the unverified part. Each backend's wake check
+     runs only where that window system does:
+     - Wayland and X11: their `#[ignore]`d e2e suites under sway and Xvfb.
+     - Win32: the `run-win32-e2e.ps1` real-desktop job.
+     - AppKit: the `appkit_session` harness on the macOS runner.
+     - Linux: the pipe's unit tests in `crates/crcbl-shell/src/linux/wake.rs`
+       (cross-compiled under clippy here, not run).
+     - Only the headless backend's tests ran on this Windows machine.
+   - S19 was checked by reading: every blocking backend passes its timeout to
+     its wait (`poll`, `MsgWaitForMultipleObjectsEx` with a high-resolution
+     timer, `nextEventMatchingMask:untilDate:`, a condition variable).
+   - S25: the loop is the caller's, and each desktop backend's `Drop` destroys
+     its windows. The `Shell` trait docs now say so.
+   - Left over: the Wayland and X11 FFI modules each keep their own `poll`
+     declaration and helpers (`poll_readable`, Wayland's `poll_readable_with`,
+     X11's new `poll_readable_or`). A shared `linux` poll module would remove
+     the copies; not done here, to keep the wake change to the wait.
 3. **Window kinds in `WindowDesc`.** One general API, not one per app:
    - a kind (toplevel, layer/panel, popup)
    - a chosen output (S2)

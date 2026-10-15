@@ -758,6 +758,9 @@ pub struct X11Shell {
     /// readable on it. [`wait_events`](Shell::wait_events) reads this instead
     /// of sleeping on the poll; see [`input`].
     undrained_events: bool,
+    /// The doorbell [`waker`](Shell::waker) hands out, made on the first ask
+    /// and polled beside the connection from then on.
+    wake: Option<std::sync::Arc<crate::linux::wake::WakePipe>>,
     lost: Option<String>,
 }
 
@@ -915,6 +918,7 @@ impl X11Shell {
             caps: ShellCaps::empty(),
             has_window_manager,
             undrained_events: false,
+            wake: None,
             lost: None,
         };
         shell.monitors = shell.enumerate_monitors();

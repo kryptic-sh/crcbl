@@ -391,6 +391,7 @@ mod macos {
         }
         clipboard(&mut shell, window);
         clipboard_peer(&mut shell, window);
+        waker(&mut shell);
         resize(&mut shell, window, facts.backing_scale);
 
         // **The whole placement before the flip**, so the way back can be judged
@@ -693,6 +694,65 @@ mod macos {
     ///
     /// It ends by clearing the pasteboard, which is what an empty offer means
     /// on this platform and is also the state to leave a shared runner in.
+    /// How long the waking thread lets the wait settle before it rings.
+    const RING_AFTER: Duration = Duration::from_millis(50);
+
+    /// How long a wait sleeps to show the queue is quiet: one that sleeps it
+    /// out found nothing pending, so a quicker return after it is the ring's.
+    const QUIET: Duration = Duration::from_millis(100);
+
+    /// Pumps until a short wait sleeps out its timeout, so the queue holds
+    /// nothing that would end the next wait for reasons of its own.
+    fn settle(shell: &mut Box<dyn Shell>) {
+        let deadline = Instant::now() + DEADLINE;
+        while Instant::now() < deadline {
+            shell.pump(&mut |_| {});
+            let start = Instant::now();
+            shell.wait_events(Some(QUIET));
+            if start.elapsed() >= QUIET {
+                return;
+            }
+        }
+        println!("crcbl appkit session: the queue never went quiet; the waker checks run anyway");
+    }
+
+    /// **A [`ShellWaker`](crcbl_shell::ShellWaker) ends a wait from another
+    /// thread, and a ring a pump took still ends the next wait.** The second
+    /// is the case the AppKit wake has to handle by hand: the pump dequeues the
+    /// ring's event before the wait can see it.
+    fn waker(shell: &mut Box<dyn Shell>) {
+        let waker = shell.waker().expect("the AppKit backend has a waker");
+
+        settle(shell);
+        let ringer = waker.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(RING_AFTER);
+            ringer.wake();
+        });
+        let start = Instant::now();
+        shell.wait_events(Some(DEADLINE));
+        let slept = start.elapsed();
+        thread.join().expect("the ringing thread");
+        assert!(
+            slept < DEADLINE / 2,
+            "a ring from another thread did not end the wait: it slept {slept:?}"
+        );
+
+        settle(shell);
+        waker.wake();
+        shell.pump(&mut |_| {});
+        let start = Instant::now();
+        shell.wait_events(Some(DEADLINE));
+        let slept = start.elapsed();
+        assert!(
+            slept < DEADLINE / 2,
+            "a ring the pump took did not end the next wait: it slept {slept:?}"
+        );
+        println!(
+            "crcbl appkit session: the waker ended a wait from another thread and through a pump"
+        );
+    }
+
     fn clipboard(shell: &mut Box<dyn Shell>, window: WindowId) {
         const TEXT: &str = "crcbl M3 — clipboard 🎮";
         const RON: &str = "(kind:\"node\",id:7)";

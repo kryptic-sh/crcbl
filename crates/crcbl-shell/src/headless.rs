@@ -133,6 +133,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use core::time::Duration;
 
@@ -143,10 +144,11 @@ use crcbl_core::input::{
 use crcbl_core::time::{ManualTime, TimeSource};
 use crcbl_core::{EventTime, Pool, SurfaceTarget};
 
+use crate::waker::WakeSignal;
 use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
     KeyCode, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PhysicalSize,
-    PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
+    PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, ShellWaker,
     SizeConstraints, WindowConfiguration, WindowDesc, WindowId, WindowState,
 };
 
@@ -301,6 +303,44 @@ pub struct HeadlessShell {
     clipboard_deadline: u32,
     waits: u32,
     configure_delay: u32,
+    /// The doorbell [`waker`](Shell::waker) hands out, made on the first ask.
+    wake: Option<Arc<HeadlessWake>>,
+}
+
+/// The headless shell's doorbell: a flag and the condition variable a wait
+/// sleeps on.
+#[derive(Debug, Default)]
+struct HeadlessWake {
+    rung: Mutex<bool>,
+    bell: Condvar,
+}
+
+impl HeadlessWake {
+    /// Sleeps until rung or until `timeout` passes, then clears the bell. A
+    /// ring that came before the wait ends it at once.
+    fn wait(&self, timeout: Option<Duration>) {
+        let rung = self.rung.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut rung = match timeout {
+            Some(timeout) => {
+                self.bell
+                    .wait_timeout_while(rung, timeout, |rung| !*rung)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0
+            }
+            None => self
+                .bell
+                .wait_while(rung, |rung| !*rung)
+                .unwrap_or_else(PoisonError::into_inner),
+        };
+        *rung = false;
+    }
+}
+
+impl WakeSignal for HeadlessWake {
+    fn wake(&self) {
+        *self.rung.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.bell.notify_all();
+    }
 }
 
 impl Default for HeadlessShell {
@@ -349,6 +389,7 @@ impl HeadlessShell {
             clipboard_deadline: DEFAULT_CLIPBOARD_DEADLINE,
             waits: 0,
             configure_delay: DEFAULT_CONFIGURE_DELAY,
+            wake: None,
         }
     }
 
@@ -1488,18 +1529,32 @@ impl Shell for HeadlessShell {
     /// the capability it returns immediately, like every backend that cannot
     /// block.
     ///
-    /// `None` — "until something happens" — returns immediately whatever the
-    /// capability says, because the only thing that can make something happen
-    /// in a headless shell is the caller, on this thread. Blocking forever
-    /// there would be a deadlock by construction rather than a wait.
+    /// A [`waker`](Shell::waker) ends the sleep early, from any thread, and so
+    /// does a wake rung before the wait began.
+    ///
+    /// `None` — "until something happens" — returns immediately while no waker
+    /// has been handed out, because then the only thing that can make
+    /// something happen in a headless shell is the caller, on this thread, and
+    /// blocking forever would be a deadlock by construction rather than a
+    /// wait. Once a waker exists, another thread can, so `None` sleeps until it
+    /// rings.
     fn wait_events(&mut self, timeout: Option<Duration>) {
         self.waits += 1;
         if !self.caps.contains(ShellCaps::EVENT_WAIT) || !self.queue.is_empty() {
             return;
         }
-        if let Some(timeout) = timeout {
-            std::thread::sleep(timeout);
+        match (&self.wake, timeout) {
+            (Some(wake), timeout) => wake.wait(timeout),
+            (None, Some(timeout)) => std::thread::sleep(timeout),
+            (None, None) => {}
         }
+    }
+
+    /// The headless doorbell: a condition variable [`wait_events`](Shell::wait_events)
+    /// sleeps on, rung from any thread.
+    fn waker(&mut self) -> Option<ShellWaker> {
+        let wake = self.wake.get_or_insert_with(Arc::default);
+        Some(ShellWaker::new(Arc::clone(wake) as Arc<dyn WakeSignal>))
     }
 
     /// The seam-level spelling of [`set_time`](Self::set_time).
@@ -2604,6 +2659,72 @@ mod tests {
         assert!(shell.window_state(window).expect("state").focused);
         shell.set_focus(window, false).expect("unfocus");
         assert_eq!(names(&drain(&mut shell)), ["Focus", "Focus"]);
+    }
+
+    // ----------------------------------------------------------------- waker
+
+    /// Longer than any of these tests should take: a wait that runs this long
+    /// was not woken.
+    const LONG_WAIT: Duration = Duration::from_secs(60);
+    /// How long the waking thread lets the wait settle before it rings.
+    const RING_AFTER: Duration = Duration::from_millis(50);
+
+    /// Rings `waker` from another thread after [`RING_AFTER`].
+    fn ring_later(waker: ShellWaker) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            std::thread::sleep(RING_AFTER);
+            waker.wake();
+        })
+    }
+
+    #[test]
+    fn a_wake_from_another_thread_ends_a_long_wait() {
+        let mut shell = HeadlessShell::new();
+        let ringer = ring_later(shell.waker().expect("headless has a waker"));
+        let start = std::time::Instant::now();
+        shell.wait_events(Some(LONG_WAIT));
+        let slept = start.elapsed();
+        ringer.join().expect("the ringer");
+        assert!(slept < LONG_WAIT / 2, "the wait ran {slept:?}");
+    }
+
+    #[test]
+    fn a_wake_before_the_wait_ends_it_at_once_and_wakes_coalesce() {
+        let mut shell = HeadlessShell::new();
+        let waker = shell.waker().expect("headless has a waker");
+        for _ in 0..3 {
+            waker.wake();
+        }
+        let start = std::time::Instant::now();
+        shell.wait_events(Some(LONG_WAIT));
+        assert!(
+            start.elapsed() < LONG_WAIT / 2,
+            "a rung bell must end the wait"
+        );
+
+        // Three rings were one: the next wait sleeps out its timeout.
+        let timeout = Duration::from_millis(100);
+        let start = std::time::Instant::now();
+        shell.wait_events(Some(timeout));
+        assert!(
+            start.elapsed() >= timeout / 2,
+            "the bell was cleared, so this wait must sleep, but it took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn with_a_waker_out_an_untimed_wait_sleeps_until_it_rings() {
+        let mut shell = HeadlessShell::new();
+        let ringer = ring_later(shell.waker().expect("headless has a waker"));
+        let start = std::time::Instant::now();
+        shell.wait_events(None);
+        let slept = start.elapsed();
+        ringer.join().expect("the ringer");
+        assert!(
+            slept >= RING_AFTER / 2,
+            "an untimed wait returned after {slept:?}, before anything rang"
+        );
     }
 
     // ------------------------------------------------------------- clipboard

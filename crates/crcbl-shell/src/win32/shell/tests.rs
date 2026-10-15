@@ -1876,6 +1876,46 @@ fn a_short_timed_wait_is_not_rounded_up_to_the_clock_tick() {
 
 #[test]
 #[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_waker_ends_a_wait_from_another_thread_and_rings_coalesce() {
+    // No window, for the reason the clock-tick test gives: a thread with none
+    // gets no desktop traffic, so the waits below end by a ring or by their
+    // timeout and `Wake` says which.
+    const RING_AFTER: Duration = Duration::from_millis(50);
+    const LONG: Duration = Duration::from_secs(20);
+    let mut shell = shell();
+    let waker = shell.waker().expect("the Win32 backend has a waker");
+
+    let ringer = waker.clone();
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(RING_AFTER);
+        ringer.wake();
+    });
+    let woke = shell.wait(Some(LONG));
+    thread.join().expect("the ringing thread");
+    assert!(
+        matches!(woke, Wake::Woken),
+        "expected the ring, got {woke:?}"
+    );
+
+    // Rung with no wait running, three times: the next wait is woken, and the
+    // one after it is not — the event is auto-reset, so three rings were one.
+    for _ in 0..3 {
+        waker.wake();
+    }
+    let first = shell.wait(Some(LONG));
+    assert!(
+        matches!(first, Wake::Woken),
+        "expected the ring, got {first:?}"
+    );
+    let second = shell.wait(Some(RING_AFTER));
+    assert!(
+        matches!(second, Wake::TimedOut),
+        "three rings ended a second wait: {second:?}"
+    );
+}
+
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn wait_events_genuinely_blocks() {
     // What `EVENT_WAIT` claims, asserted as the *mechanism* it is rather
     // than as a duration. The first version of this measured three 50 ms

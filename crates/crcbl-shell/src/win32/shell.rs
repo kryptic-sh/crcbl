@@ -41,6 +41,8 @@ pub(super) enum Wake {
     /// The timeout elapsed with nothing to do: the wait slept, which is what
     /// [`ShellCaps::EVENT_WAIT`] promises is possible.
     TimedOut,
+    /// A [`ShellWaker`](crate::ShellWaker) rang, from this thread or another.
+    Woken,
     /// A message is available — either it arrived during the wait, or it was
     /// already queued when the wait started and `MWMO_INPUTAVAILABLE` reported
     /// it. Correct behaviour, and indistinguishable from a broken wait unless
@@ -186,6 +188,9 @@ pub struct Win32Shell {
     /// on, or `None` where the system refused one (before Windows 10 1803), in
     /// which case the wait falls back to its own millisecond timeout.
     wait_timer: Option<NonNull<c_void>>,
+    /// The doorbell [`waker`](Shell::waker) hands out, made on the first ask
+    /// and in the wait's handle set from then on — see `win32::wake`.
+    wake: Option<std::sync::Arc<super::wake::WakeEvent>>,
     /// The windows showing a pre-edit, so an input method that ends a
     /// composition twice over reports it once.
     pub(super) composing: Composing,
@@ -305,6 +310,7 @@ impl Win32Shell {
                     value::TIMER_SET_AND_WAIT,
                 )
             }),
+            wake: None,
             composing: Composing::default(),
             visibility: Visibility::default(),
             next_request: 1,
@@ -668,12 +674,21 @@ impl Win32Shell {
                 .unwrap_or(value::INFINITE - 1)
                 .min(value::INFINITE - 1),
         };
-        let handles = armed.map_or(0, |_| 1);
-        let handle_array = armed.as_ref().map_or(ptr::null(), core::ptr::from_ref);
-        // SAFETY: `handle_array` is null with a count of zero, or points at the
-        // one live timer handle with a count of one, for the length of the
-        // call. Zero flags is the documented "wait for a new message", which is
-        // what the drain above makes correct.
+        // The handle set: the armed timer, then the wake event, either of
+        // which may be absent. A message is the index one past the last.
+        let mut handle_array: [ffi::Handle; 2] = [ptr::null_mut(); 2];
+        let mut handles = 0;
+        let mut push = |handle: ffi::Handle| {
+            handle_array[handles as usize] = handle;
+            handles += 1;
+            handles - 1
+        };
+        let timer_index = armed.map(&mut push);
+        let wake_index = self.wake.as_ref().map(|wake| push(wake.handle()));
+        // SAFETY: `handle_array` holds `handles` live handles — the timer this
+        // shell owns and the wake event its `Arc` keeps alive — for the length
+        // of the call. Zero flags is the documented "wait for a new message",
+        // which is what the drain above makes correct.
         //
         // `QS_ALLEVENTS`, not `QS_ALLINPUT`: the difference is `QS_SENDMESSAGE`,
         // which `PeekMessageW` can neither return nor clear, so waiting on it is
@@ -681,18 +696,19 @@ impl Win32Shell {
         let outcome = unsafe {
             ffi::MsgWaitForMultipleObjectsEx(
                 handles,
-                handle_array,
+                handle_array.as_ptr(),
                 milliseconds,
                 value::QS_ALL_EVENTS,
                 0,
             )
         };
-        // With the timer armed, `WAIT_OBJECT_0` is the timer firing and
-        // `WAIT_OBJECT_0 + 1` a message; without it, `WAIT_OBJECT_0` is the
-        // message.
+        // `WAIT_OBJECT_0 + i` is handle `i` signalled, and `WAIT_OBJECT_0 +
+        // handles` a message.
+        let signalled = outcome.checked_sub(value::WAIT_OBJECT_0);
         match outcome {
             value::WAIT_TIMEOUT => Wake::TimedOut,
-            value::WAIT_OBJECT_0 if armed.is_some() => Wake::TimedOut,
+            _ if signalled.is_some() && signalled == timer_index => Wake::TimedOut,
+            _ if signalled.is_some() && signalled == wake_index => Wake::Woken,
             message if message == value::WAIT_OBJECT_0 + handles => Wake::Message,
             // SAFETY: reading the calling thread's last error, immediately
             // after the call that set it.
@@ -1376,7 +1392,7 @@ impl Shell for Win32Shell {
         // Nothing can be done about it here — the caller has no alternative to
         // offer — so it is reported and the loop continues.
         match self.wait(timeout) {
-            Wake::TimedOut | Wake::Message => {}
+            Wake::TimedOut | Wake::Woken | Wake::Message => {}
             Wake::Failed { error } => {
                 crcbl_core::log::warn!(
                     "MsgWaitForMultipleObjectsEx failed with error {error}; not sleeping"
@@ -1388,6 +1404,12 @@ impl Shell for Win32Shell {
                 );
             }
         }
+    }
+
+    /// An auto-reset event in the wait's handle set — see `win32::wake`.
+    /// `None` only if the system refused an event, which is logged.
+    fn waker(&mut self) -> Option<crate::ShellWaker> {
+        crate::waker::lazy_waker(&mut self.wake, "Win32", super::wake::WakeEvent::new)
     }
 
     fn align_event_clock(&mut self, elapsed: Duration) {

@@ -884,6 +884,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Shell::waker` and `ShellWaker`: wake a sleeping loop from another thread.**
+  A program whose work arrives off the loop thread (a D-Bus reply, a socket, a
+  timer) clones the handle into that thread and calls `wake()`, which ends the
+  loop's `wait_events` or makes the next one return at once. A wake carries no
+  data, so the program sends its data down its own channel and then rings. Rings
+  coalesce, and none is lost. Each backend uses its window system's own
+  mechanism: a pipe polled beside the Wayland or X11 socket, an auto-reset event
+  in Win32's `MsgWaitForMultipleObjectsEx` set, an application-defined `NSEvent`
+  posted to AppKit's queue, and a condition variable in the headless shell. The
+  browser has no blocking wait, so it returns `None`. With a waker out, the
+  headless shell's `wait_events(None)` now sleeps until it rings rather than
+  returning at once.
+
 - **Every published crate declares `rust-version = "1.98.1"`**, the toolchain
   `rust-toolchain.toml` pins and the only one CI proves, so an older compiler
   names the version it needs instead of failing on a newer API. The workspace

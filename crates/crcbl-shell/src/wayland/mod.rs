@@ -1896,6 +1896,9 @@ pub struct WaylandShell {
     time: TimeBase,
     /// Latched at [`open`](Self::open); see [`caps`](Shell::caps).
     caps: ShellCaps,
+    /// The doorbell [`waker`](Shell::waker) hands out, made on the first ask
+    /// and polled beside the connection from then on.
+    wake: Option<std::sync::Arc<crate::linux::wake::WakePipe>>,
     lost: Option<String>,
 }
 
@@ -1985,6 +1988,7 @@ impl WaylandShell {
             queue: VecDeque::new(),
             time: TimeBase::now(),
             caps: ShellCaps::empty(),
+            wake: None,
             lost: None,
         };
 
@@ -4952,17 +4956,32 @@ impl Shell for WaylandShell {
         // capped so that a peer which *never* writes still has its deadline
         // checked. Without the cap, an editor idling with `timeout: None` would
         // sleep through a stalled paste's timeout and answer nothing.
-        let aux = self.transfer_fds();
+        let mut aux = self.transfer_fds();
         if !aux.is_empty() || !self.writes.is_empty() || !self.held.is_empty() {
             deadline = Some(deadline.map_or(TRANSFER_POLL, |deadline| deadline.min(TRANSFER_POLL)));
         }
         let timeout_ms = deadline.map_or(-1, |deadline| {
             c_int::try_from(deadline.as_millis()).unwrap_or(c_int::MAX)
         });
+        // The wake pipe joins the transfers after the cap is decided: a
+        // waker that never rings must not turn an idle wait into a polling one.
+        if let Some(wake) = &self.wake {
+            aux.push(wake.fd());
+        }
         if let Err(error) = self.conn.drain(timeout_ms, &aux) {
             crcbl_core::log::error!("wayland connection lost: {error}");
             self.lost = Some(error.to_string());
         }
+        if let Some(wake) = &self.wake {
+            wake.clear();
+        }
+    }
+
+    /// A pipe polled beside the compositor connection — see
+    /// [`wake`](crate::linux::wake). `None` only if the process is out of
+    /// descriptors, which is logged.
+    fn waker(&mut self) -> Option<crate::ShellWaker> {
+        crate::waker::lazy_waker(&mut self.wake, "Wayland", crate::linux::wake::WakePipe::new)
     }
 
     /// The handles `crcbl-vk` needs for `vkCreateWaylandSurfaceKHR`.

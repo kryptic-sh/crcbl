@@ -3,9 +3,9 @@
 //! Not `pub`, like the backends themselves.
 //!
 //! Wayland (P0.5) and X11 (P0.6) are different protocols reached through
-//! different libraries, and almost nothing crosses between them. Two things do,
-//! because they are properties of **Linux** rather than of either window
-//! system:
+//! different libraries, and almost nothing crosses between them. What does
+//! cross does so because it is a property of **Linux** rather than of either
+//! window system:
 //!
 //! * [`keymap`] — the `linux/input-event-codes.h` table that turns a physical
 //!   key position into a [`KeyCode`](crcbl_core::KeyCode). Wayland delivers
@@ -18,6 +18,9 @@
 //!   and modifier state from. The keymap *source* differs (Wayland sends a
 //!   descriptor, X11 has the keymap on the server) and the compiled artefact
 //!   and every question asked of it are identical.
+//! * [`wake`] — the pipe a [`ShellWaker`](crate::ShellWaker) rings. Both
+//!   waits are a `poll`, so both are woken the same way: one more descriptor
+//!   in the poll set.
 //!
 //! What is **not** here is anything protocol-shaped. `wayland/fd.rs` stays
 //! where it is even though descriptors are a Linux concept, because what it
@@ -31,4 +34,5 @@
 //! is a Unix with neither of these libraries on it.
 
 pub mod keymap;
+pub mod wake;
 pub mod xkb;

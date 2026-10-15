@@ -240,6 +240,8 @@ mod shell;
 #[cfg(target_os = "macos")]
 mod view;
 #[cfg(target_os = "macos")]
+mod wake;
+#[cfg(target_os = "macos")]
 mod window;
 
 #[cfg(target_os = "macos")]

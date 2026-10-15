@@ -235,6 +235,8 @@ mod monitors;
 #[cfg(target_os = "windows")]
 mod shell;
 #[cfg(target_os = "windows")]
+mod wake;
+#[cfg(target_os = "windows")]
 mod window;
 
 #[cfg(target_os = "windows")]

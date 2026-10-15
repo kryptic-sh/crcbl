@@ -1752,6 +1752,15 @@ unsafe extern "system" {
         resume: Bool32,
     ) -> Bool32;
     pub fn CloseHandle(handle: Handle) -> Bool32;
+    // The doorbell a `ShellWaker` rings from another thread: an auto-reset
+    // event in the handle set `wait_events` waits on. See `win32::wake`.
+    pub fn CreateEventW(
+        attributes: *const c_void,
+        manual_reset: Bool32,
+        initial_state: Bool32,
+        name: *const u16,
+    ) -> Handle;
+    pub fn SetEvent(event: Handle) -> Bool32;
 }
 
 // ---------------------------------------------------------------------------

@@ -344,6 +344,12 @@ pub mod value {
     /// [`AppKitShell::drain_events`](crate::appkit::AppKitShell).
     pub const EVENT_TYPE_KEY_UP: NSUInteger = 11;
 
+    /// `NSEventTypeApplicationDefined`: the event a
+    /// [`ShellWaker`](crate::ShellWaker) posts to end a wait. Never inspected —
+    /// it exists to make `nextEventMatchingMask:` return, and `sendEvent:`
+    /// delivers it to nothing.
+    pub const EVENT_TYPE_APPLICATION_DEFINED: NSUInteger = 15;
+
     /// `NSDragOperationCopy` — the only operation this backend ever answers.
     ///
     /// The same choice the Wayland backend makes with its `ACTION_COPY` and for

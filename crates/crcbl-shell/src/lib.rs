@@ -271,6 +271,7 @@ pub mod event;
 pub mod geom;
 pub mod headless;
 pub mod monitor;
+pub mod waker;
 pub mod window;
 
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
@@ -327,6 +328,7 @@ pub use event::ShellEvent;
 pub use geom::{AspectRatio, LogicalPoint, LogicalSize, PhysicalPoint, PhysicalRect, PhysicalSize};
 pub use headless::HeadlessShell;
 pub use monitor::{MonitorId, MonitorInfo};
+pub use waker::ShellWaker;
 pub use window::{
     CloseReply, DisplayMode, SizeConstraints, Window, WindowConfiguration, WindowDesc, WindowId,
     WindowState,
@@ -350,6 +352,15 @@ use core::time::Duration;
 ///
 /// Object-safe by requirement; see the [crate docs](self) for why, and
 /// [`backend`] for how an implementation is selected at runtime.
+///
+/// # The loop is the caller's
+///
+/// There is no `run` that takes the program over: the caller loops on
+/// [`pump`](Self::pump) and [`wait_events`](Self::wait_events) itself, so
+/// ending the program is leaving that loop and dropping the shell. Each
+/// desktop backend's `Drop` destroys the windows it still holds, so nothing has
+/// to be torn down by hand first. Work that arrives
+/// on another thread reaches a sleeping loop through a [`ShellWaker`].
 ///
 /// # Implementing this
 ///
@@ -586,6 +597,17 @@ pub trait Shell: core::fmt::Debug {
     /// without the capability still means "immediately".
     fn wait_events(&mut self, timeout: Option<Duration>) {
         let _ = timeout;
+    }
+
+    /// A handle that wakes [`wait_events`](Self::wait_events) from another
+    /// thread — see [`ShellWaker`].
+    ///
+    /// Every call hands out a handle to the same doorbell, so a program can ask
+    /// once and clone, or ask wherever it needs one. `None` from a backend
+    /// whose wait never blocks, which is the browser: there, nothing sleeps and
+    /// there is nothing to wake.
+    fn waker(&mut self) -> Option<ShellWaker> {
+        None
     }
 
     /// Puts input timestamps on the engine's clock.

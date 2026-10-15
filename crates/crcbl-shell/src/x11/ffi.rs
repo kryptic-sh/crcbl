@@ -2130,6 +2130,24 @@ pub fn poll_readable(fd: c_int, timeout_ms: c_int) -> bool {
     result > 0 && fds.revents & POLLIN != 0
 }
 
+/// Waits until `primary` or `other` is readable or the timeout elapses;
+/// reports whether **`primary`** is readable.
+///
+/// `other` is the wake pipe: it ends the wait and changes nothing else, since
+/// only the connection's descriptor carries the protocol.
+#[must_use]
+pub fn poll_readable_or(primary: c_int, other: c_int, timeout_ms: c_int) -> bool {
+    let mut fds = [primary, other].map(|fd| PollFd {
+        fd,
+        events: POLLIN,
+        revents: 0,
+    });
+    let count = c_ulong::try_from(fds.len()).unwrap_or(1);
+    // SAFETY: `fds` is a live, initialised array of exactly `count` `pollfd`s.
+    let result = unsafe { poll(fds.as_mut_ptr(), count, timeout_ms) };
+    result > 0 && fds[0].revents & POLLIN != 0
+}
+
 /// `CLOCK_MONOTONIC` in nanoseconds.
 ///
 /// Returns zero if the call fails, which cannot happen for `CLOCK_MONOTONIC` on

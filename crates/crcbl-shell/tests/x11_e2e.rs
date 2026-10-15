@@ -3171,3 +3171,72 @@ impl Session {
         self.peer.has_answer()
     }
 }
+
+/// How long the waking thread lets the wait settle before it rings.
+const RING_AFTER: Duration = Duration::from_millis(50);
+
+/// How long a wait sleeps to show the queue is quiet: one that sleeps it out
+/// found nothing pending, so a quicker return after it is the ring's.
+const QUIET: Duration = Duration::from_millis(100);
+
+/// Pumps until a short wait sleeps out its timeout, so nothing queued ends the
+/// next wait for reasons of its own.
+fn settle(session: &mut Session) {
+    let deadline = Instant::now() + WAIT;
+    while Instant::now() < deadline {
+        session.pump();
+        let start = Instant::now();
+        session.shell.wait_events(Some(QUIET));
+        if start.elapsed() >= QUIET {
+            return;
+        }
+    }
+    panic!(
+        "the queue never went quiet in {WAIT:?}; events: {:?}",
+        session.names()
+    );
+}
+
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn a_waker_ends_a_wait_from_another_thread_and_rings_coalesce() {
+    let mut session = Session::open();
+    let waker = session.shell.waker().expect("X11 has a waker");
+
+    settle(&mut session);
+    let ringer = waker.clone();
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(RING_AFTER);
+        ringer.wake();
+    });
+    let start = Instant::now();
+    session.shell.wait_events(Some(WAIT));
+    let slept = start.elapsed();
+    thread.join().expect("the ringing thread");
+    assert!(
+        slept < WAIT / 2,
+        "a ring from another thread did not end the wait: it slept {slept:?}"
+    );
+
+    // A ring with no wait running ends the next one, and many are one: the
+    // wait after that sleeps out its timeout.
+    settle(&mut session);
+    for _ in 0..3 {
+        waker.wake();
+    }
+    session.pump();
+    let start = Instant::now();
+    session.shell.wait_events(Some(WAIT));
+    assert!(
+        start.elapsed() < WAIT / 2,
+        "a ring rung before the wait did not end it: it slept {:?}",
+        start.elapsed()
+    );
+    let start = Instant::now();
+    session.shell.wait_events(Some(QUIET));
+    assert!(
+        start.elapsed() >= QUIET / 2,
+        "three rings ended more than one wait: the next returned after {:?}",
+        start.elapsed()
+    );
+}

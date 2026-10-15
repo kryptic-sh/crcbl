@@ -43,6 +43,9 @@ pub(super) enum Wake {
     /// already there. Correct behaviour, and indistinguishable from a broken
     /// wait unless the queue is known to have been empty.
     Event,
+    /// A [`ShellWaker`](crate::ShellWaker) rang: its event arrived during the
+    /// wait, or a pump took it before the wait began.
+    Woken,
 }
 
 /// The windowed style mask and frame a borderless window will be restored to.
@@ -185,6 +188,11 @@ pub struct AppKitShell {
     /// presentation options are — see [`input`], which argues why losing focus
     /// releases it.
     pub(super) pointer_frozen: bool,
+    /// The doorbell [`waker`](Shell::waker) hands out, made on the first ask.
+    wake: Option<std::sync::Arc<super::wake::AppKitWake>>,
+    /// Whether a drain took a ring's event since the last wait, which ends
+    /// that wait at once — see [`wait`](Self::wait).
+    woken: bool,
     caps: ShellCaps,
 }
 
@@ -238,6 +246,8 @@ impl AppKitShell {
             visibility: Visibility::default(),
             next_request: 1,
             pointer_frozen: false,
+            wake: None,
+            woken: false,
             caps: super::caps(),
         };
         // SAFETY: the main thread, with a pool in scope.
@@ -626,6 +636,10 @@ impl AppKitShell {
             if event.is_null() {
                 break;
             }
+            // SAFETY: an event this call just dequeued.
+            if unsafe { self.take_wake(event) } {
+                continue;
+            }
             // SAFETY: an event this call just dequeued. This dispatches into the
             // delegate and the view re-entrantly, which is why nothing here
             // holds a borrow of `shared`.
@@ -661,6 +675,10 @@ impl AppKitShell {
         // SAFETY: the main thread — a `Shell` is not `Send` — with the pool
         // above in scope.
         unsafe { self.drain_events() };
+        // A ring the drain took — or a pump before it — ends the wait unslept.
+        if core::mem::take(&mut self.woken) {
+            return Wake::Woken;
+        }
         let Some(date_class) = ffi::class(c"NSDate") else {
             return Wake::TimedOut;
         };
@@ -684,10 +702,34 @@ impl AppKitShell {
         if event.is_null() {
             return Wake::TimedOut;
         }
+        // SAFETY: an event just dequeued.
+        if unsafe { self.take_wake(event) } {
+            self.woken = false;
+            return Wake::Woken;
+        }
         // SAFETY: an event just dequeued; dropping it would lose it, because
         // `dequeue: YES` already took it off the queue.
         unsafe { dispatch(self.app, event) };
         Wake::Event
+    }
+
+    /// Whether `event` is a ring's. If it is, the bell is unrung and the ring
+    /// recorded in [`woken`](Self::woken), and the event is not dispatched:
+    /// it is for the wait, not for any window.
+    ///
+    /// # Safety
+    ///
+    /// `event` is a live `NSEvent`.
+    unsafe fn take_wake(&mut self, event: Id) -> bool {
+        // SAFETY: the caller's.
+        if !unsafe { super::wake::is_wake(event) } {
+            return false;
+        }
+        if let Some(wake) = &self.wake {
+            wake.taken();
+        }
+        self.woken = true;
+        true
     }
 }
 
@@ -1230,8 +1272,16 @@ impl Shell for AppKitShell {
     /// reason it came back is a value rather than a duration.
     fn wait_events(&mut self, timeout: Option<Duration>) {
         match self.wait(timeout) {
-            Wake::TimedOut | Wake::Event => {}
+            Wake::TimedOut | Wake::Event | Wake::Woken => {}
         }
+    }
+
+    /// An application-defined event posted to `NSApp` — see `appkit::wake`.
+    /// Always `Some`: posting needs nothing made in advance.
+    fn waker(&mut self) -> Option<crate::ShellWaker> {
+        crate::waker::lazy_waker(&mut self.wake, "AppKit", || {
+            Ok(super::wake::AppKitWake::default())
+        })
     }
 
     /// The `CAMetalLayer` `crcbl-vk` needs for `VK_EXT_metal_surface`, and
