@@ -72,12 +72,19 @@ Each step lands in the crate the later steps build on, so the seam goes first.
    - `MonitorInfo::name` was already `wl_output.name` on Wayland, so S7's name
      is Win32's (`MONITORINFOEX::szDevice`) and AppKit's
      (`NSScreen.localizedName`) to check.
-   - **Verified so far:** the layer-shell mappings' unit tests ran on Linux (WSL
-     here) and every mutant of them was killed. The e2e tests in
-     `tests/wayland_e2e.rs` (`a_reserving_panel_takes_its_edge_…`,
+   - **Verified:** the layer-shell mappings' unit tests ran on Linux (WSL here)
+     and every mutant of them was killed. The panel e2e tests in
+     `tests/wayland_e2e.rs` were mutation-run under sway on 2026-10-15, in two
+     CI dispatches from a throwaway branch: with the exclusive zone sent as 0,
+     the keyboard interactivity as none, the `MonitorRemoved` diff dropped, and
+     `destroy_window` freeing client-side again, each of
+     `a_reserving_panel_takes_its_edge_…`,
      `an_exclusive_panel_takes_the_keyboard_when_it_maps`,
-     `a_destroyed_window_gives_its_tile_back`) run only under sway in CI; their
-     first run and a mutation run are still to come.
+     `an_on_demand_panel_takes_the_keyboard_on_a_click_…`,
+     `unplugging_a_monitor_names_it_and_asks_its_panels_to_close` and
+     `a_destroyed_window_gives_its_tile_back` failed with its own message, and
+     in the second run, which ran past failures, the other 41 passed. Their
+     unmutated run is main's CI.
    - Still to do on Wayland:
      - no flash on map: the first commit carries the first frame;
      - transparent surfaces (S16), which on Wayland is the swapchain's composite
@@ -86,10 +93,10 @@ Each step lands in the crate the later steps build on, so the seam goes first.
        input region for `Passthrough` and `xdg_popup.grab` for `Grab`;
      - repositioning a live popup through `xdg_popup.reposition` (needs
        `xdg_wm_base` v3), reported in caps where it is missing;
-   - S17 has e2e tests, unrun until CI: an exclusive panel takes the keyboard on
-     mapping and gets the first key typed after that, and a held key repeats on
-     it (`an_exclusive_panel_takes_the_keyboard_when_it_maps`); an on-demand
-     panel takes the keyboard on a click and loses it to a focused toplevel
+   - S17 has e2e tests: an exclusive panel takes the keyboard on mapping and
+     gets the first key typed after that, and a held key repeats on it
+     (`an_exclusive_panel_takes_the_keyboard_when_it_maps`); an on-demand panel
+     takes the keyboard on a click and loses it to a focused toplevel
      (`an_on_demand_panel_takes_the_keyboard_on_a_click_…`). Keys go to the
      focused surface from `wl_keyboard.enter` on, configured or not. Keys typed
      before the compositor gives the panel focus go to whatever had it; no
@@ -100,10 +107,9 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      AppKit build no panels yet, so their steps owe the panel half when they do.
      Close requests, rather than closing every window on that monitor: window
      managers move toplevels to another monitor, and only a panel has nowhere to
-     go. The e2e test
-     (`unplugging_a_monitor_names_it_and_asks_its_panels_to_close`) assumes
-     `swaymsg output HEADLESS-2 disable` withdraws that `wl_output`; its first
-     CI run says whether it does.
+     go. `swaymsg output HEADLESS-2 disable` does withdraw that `wl_output`,
+     which the mutation run above showed: the test reached the new monitor list
+     and failed only on the missing `MonitorRemoved`.
    - Decided for panels, 2026-10-15: `set_title`, `set_mode` and
      `set_constraints` on a Wayland panel record the request and send nothing,
      as the headless shell accepts them on any role. A panel's effective mode is
