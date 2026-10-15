@@ -33,6 +33,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use crcbl_core::input::CursorIcon;
+
 use super::selector::{Bucket, Element, PseudoClasses, Selector};
 use super::sheet::{Decl, Stylesheet, WideKeyword};
 use super::var::{CustomProperties, resolve_custom, substitute};
@@ -187,6 +189,7 @@ struct Inherited {
     line_height: (u8, u32),
     text_align: TextAlign,
     white_space: WhiteSpace,
+    cursor: Option<CursorIcon>,
     custom: Arc<CustomProperties>,
 }
 
@@ -200,6 +203,7 @@ impl Inherited {
             line_height: style.line_height.bits(),
             text_align: style.text_align,
             white_space: style.white_space,
+            cursor: style.cursor,
             custom,
         }
     }
@@ -327,6 +331,7 @@ fn compute(index: &RuleIndex, matched: &[u32], parent: &Inherited) -> Definition
         line_height: LineHeight::from_bits(parent.line_height),
         text_align: parent.text_align,
         white_space: parent.white_space,
+        cursor: parent.cursor,
         ..NodeStyle::DEFAULT
     };
 

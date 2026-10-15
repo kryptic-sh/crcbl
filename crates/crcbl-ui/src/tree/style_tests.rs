@@ -856,3 +856,67 @@ fn a_row_of_spans_draws_each_run_in_its_own_style_edge_to_edge() {
     assert_eq!(matched.x, right(keys[0]), "{runs:?}");
     assert_eq!(after.x, right(keys[1]), "{runs:?}");
 }
+
+// ---------------------------------------------------------------------------
+// The cursor
+// ---------------------------------------------------------------------------
+
+/// **The cursor is the topmost node's, inherited, held through a drag.** A
+/// span with no `cursor` of its own takes its link's; a `none` hides the
+/// pointer; the root's shape shows between its children, and the arrow
+/// outside every node. A press on the link keeps its shape while the pointer
+/// is dragged off it.
+#[test]
+fn the_cursor_is_the_topmost_nodes_inherited_and_held_through_a_drag() {
+    use crcbl_core::input::CursorIcon;
+
+    let mut ui = Ui::new();
+    ui.add_stylesheet(
+        "cursor.css",
+        "#root { width: 100px; height: 100px; cursor: crosshair; }
+         #link { width: 50px; height: 20px; cursor: pointer; }
+         #hidden { width: 50px; height: 20px; cursor: none; }",
+    );
+    let build = |ui: &mut Ui| {
+        ui.block("#root", &[], |ui| {
+            ui.block("#link", &[], |ui| {
+                ui.span("#label", "go", &[]);
+            });
+            ui.block("#hidden", &[], |_| {});
+        });
+    };
+    let at = |x: f32, y: f32| PointerInput::hovering(Vec2::new(x, y));
+    frame(&mut ui, idle(), build);
+
+    let mut cursor_at = |pointer: PointerInput| {
+        frame(&mut ui, pointer, build);
+        ui.cursor()
+    };
+    assert_eq!(
+        cursor_at(at(2.0, 2.0)),
+        Some(CursorIcon::Pointer),
+        "the label inherits"
+    );
+    assert_eq!(cursor_at(at(60.0, 5.0)), None, "cursor: none hides it");
+    assert_eq!(cursor_at(at(2.0, 60.0)), Some(CursorIcon::Crosshair));
+    assert_eq!(cursor_at(at(500.0, 500.0)), Some(CursorIcon::Default));
+
+    let held = |x, y| PointerInput {
+        down: true,
+        ..at(x, y)
+    };
+    assert_eq!(cursor_at(held(2.0, 2.0)), Some(CursorIcon::Pointer));
+    assert_eq!(
+        cursor_at(held(2.0, 60.0)),
+        Some(CursorIcon::Pointer),
+        "dragged off the link, the press still holds it"
+    );
+    assert_eq!(
+        cursor_at(PointerInput {
+            released: true,
+            ..at(2.0, 60.0)
+        }),
+        Some(CursorIcon::Crosshair),
+        "released, the root's again"
+    );
+}

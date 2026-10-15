@@ -240,8 +240,19 @@ Each step lands in the crate the later steps build on, so the seam goes first.
    - Text measurement exists as `text_width`.
 9. **Input.**
    - XKB compose and `text-input-v3` preedit and commit on Wayland (S9).
-   - Pointer hover, click, cursor shape, discrete and high-resolution wheel, and
-     a styleable scrollbar handle (S20).
+   - S20, checked 2026-10-15. There already: hover and click as pseudo-classes
+     and responses, `Shell::set_cursor` with `CursorIcon`, `ShellEvent::Wheel`
+     keeping detents (`ScrollDelta::Lines`) apart from pixels, and
+     `Ui::scroll_wheel`. Added: the CSS `cursor` property and `Ui::cursor`. Not
+     there: a scrollbar of any kind. Nothing draws one, and `overflow: scroll`
+     reserves no gutter (Taffy's `scrollbar_width` is left at zero), so a
+     styleable handle needs a drawn thumb, a drag on it, and
+     `::-webkit-scrollbar`-style selectors or plain classes to style it.
+   - Decided 2026-10-15: `CursorIcon` moved to `crcbl_core::input` so crcbl-ui
+     can name a shape, and lost `#[non_exhaustive]`. The other choice was a
+     wildcard arm in each backend's mapping, which turns a newly added shape
+     into a silent arrow; the code had been written to make that a compile
+     error. Adding a shape is now a breaking change, accepted for that.
 10. **UI fit.**
     - S23 checked 2026-10-15: pikr's `default.css`, with its `{placeholder}`
       values filled in as `ui/css.rs` fills them, parses with no diagnostics

@@ -939,6 +939,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   not by pointer. `Font::id`, `Font::data` and `Font::metrics` are no longer
   `const`, and `Font::data` borrows from the font.
 
+- **A `cursor` property in stylesheets, and `Ui::cursor`.** `cursor` takes
+  `auto`, `none` or a shape keyword such as `pointer` or `ns-resize`, and is
+  inherited as in CSS. `Ui::cursor` reports the shape for where the pointer is,
+  ready for `Shell::set_cursor`: the topmost node's, or while a press is held
+  the pressed node's, so a drag off a resize handle keeps its arrow. `auto` is
+  the default arrow; the subset does not guess an I-beam over text as a browser
+  does. `CursorIcon::from_css_name` and `CursorIcon::ALL` are new in
+  `crcbl_core::input`.
+
 - **`ImageAtlas::unregister` gives an image's space back.** A program that draws
   pictures it rasterised itself — a launcher's result icons, a tray's status
   icons — can now replace them without filling the 1024² page: the freed span of

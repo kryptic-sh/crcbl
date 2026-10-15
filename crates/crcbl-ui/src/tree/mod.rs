@@ -203,6 +203,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::panic::Location;
 
+use crcbl_core::input::CursorIcon;
 use glam::Vec2;
 use taffy::{NodeId, compute_root_layout, round_layout};
 
@@ -487,6 +488,9 @@ pub struct Ui {
     unregistered: HashSet<FamilyName>,
     /// The node this frame's pointer clicked, resolved when the frame began.
     clicked: Option<NodeKey>,
+    /// The node whose `cursor` [`Ui::cursor`] reports: the one a press holds,
+    /// or else the topmost under the pointer. Resolved when the frame began.
+    cursor_node: Option<NodeKey>,
     /// The tree row [`Ui::tree_item_step`] opened or closed when this frame
     /// began, if it opened or closed one.
     tree_toggled: Option<NodeKey>,
@@ -621,6 +625,11 @@ impl Ui {
                 .is_some_and(|node| !node.behavior.disabled)
         });
         let captured = self.store.ancestry(self.capture.active().map(NodeKey));
+        self.cursor_node = self
+            .capture
+            .active()
+            .map(NodeKey)
+            .or_else(|| over.first().copied());
         for node in self.store.iter_mut() {
             node.interaction = Interaction {
                 hovered: over.contains(&node.key)
@@ -1307,6 +1316,22 @@ impl Ui {
             }
         }
         moved
+    }
+
+    /// The cursor for where the pointer is, as `crcbl_shell`'s
+    /// `Shell::set_cursor` takes it: the `cursor` of the node a press is holding while a drag lasts, or
+    /// else of the topmost node under the pointer, which inherits it from the
+    /// nodes around it. `None` is `cursor: none`, a hidden pointer, and over no
+    /// node at all it is the default arrow.
+    ///
+    /// Call it once the frame is built, since the node's style is this
+    /// frame's, and hand it to the shell only when it changes: setting a
+    /// cursor is a platform call, not free.
+    #[must_use]
+    pub fn cursor(&self) -> Option<CursorIcon> {
+        self.cursor_node
+            .and_then(|key| self.nodes.iter().find(|node| node.key == key))
+            .map_or(Some(CursorIcon::Default), |node| node.style.cursor)
     }
 
     /// Last layout's border box for `key`, in screen pixels.

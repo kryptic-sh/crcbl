@@ -4,6 +4,8 @@
 //! declaration becomes once parsed, and what a builder's inline override is
 //! written in. The CSS each one parses from is [`super::property`]'s.
 
+use crcbl_core::input::CursorIcon;
+
 use crate::draw_list::CornerRadii;
 use crate::tree::{
     Align, BorderImageWidth, Direction, Display, Edges, FamilyName, FlexDirection, FlexWrap,
@@ -116,6 +118,8 @@ pub enum Declaration {
     TextAlign(TextAlign),
     /// `white-space`. Inherited.
     WhiteSpace(WhiteSpace),
+    /// `cursor`: a shape, or `None` for `none`. Inherited.
+    Cursor(Option<CursorIcon>),
     /// `text-overflow`.
     TextOverflow(TextOverflow),
     /// `outline-width`, in pixels.
@@ -196,6 +200,7 @@ impl Declaration {
             Self::LineHeight(value) => style.line_height = value,
             Self::TextAlign(value) => style.text_align = value,
             Self::WhiteSpace(value) => style.white_space = value,
+            Self::Cursor(value) => style.cursor = value,
             Self::TextOverflow(value) => style.text_overflow = value,
             Self::OutlineWidth(value) => style.outline_width = value,
             Self::OutlineColor(value) => style.outline_color = value,
@@ -255,6 +260,7 @@ impl NodeStyle {
             D::LineHeight(self.line_height),
             D::TextAlign(self.text_align),
             D::WhiteSpace(self.white_space),
+            D::Cursor(self.cursor),
             D::TextOverflow(self.text_overflow),
             D::OutlineWidth(self.outline_width),
             D::OutlineColor(self.outline_color),
@@ -354,6 +360,7 @@ mod tests {
             line_height: LineHeight::Multiple(1.5),
             text_align: TextAlign::Center,
             white_space: WhiteSpace::NoWrap,
+            cursor: Some(CursorIcon::Pointer),
             text_overflow: TextOverflow::Ellipsis,
             align_self: Some(Align::Center),
             outline_width: 2.0,

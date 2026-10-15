@@ -545,79 +545,90 @@ impl fmt::Display for KeyCode {
     }
 }
 
-/// A standard cursor shape.
-///
-/// Names rather than pixels, because every platform already has themed,
-/// correctly scaled, user-configured cursors; `crcbl_shell::cursor` explains
-/// the rest.
-///
-/// **Exhaustive on purpose.** Every shell backend maps each shape to its own
-/// stock cursor, and a shape added later must fail to compile in each of them
-/// rather than fall to an arrow through a wildcard arm. That makes adding a
-/// shape a breaking change, which is the price.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum CursorIcon {
-    /// The platform's normal arrow.
-    #[default]
-    Default,
-    /// The "this is clickable" hand.
-    Pointer,
-    /// I-beam, for text.
-    Text,
-    /// Crosshair, for precise placement.
-    Crosshair,
-    /// Something is happening and input is blocked.
-    Wait,
-    /// Something is happening but input still works.
-    Progress,
-    /// This action is not allowed here.
-    NotAllowed,
-    /// The thing under the pointer can be picked up.
-    Grab,
-    /// The thing under the pointer is being dragged.
-    Grabbing,
-    /// Move in any direction.
-    Move,
-    /// Resize vertically.
-    ResizeNorthSouth,
-    /// Resize horizontally.
-    ResizeEastWest,
-    /// Resize along the ↗↙ diagonal.
-    ResizeNorthEastSouthWest,
-    /// Resize along the ↖↘ diagonal.
-    ResizeNorthWestSouthEast,
-    /// Split pane, vertical divider.
-    ResizeColumn,
-    /// Split pane, horizontal divider.
-    ResizeRow,
+/// Generates [`CursorIcon`], [`CursorIcon::ALL`] and both directions of its
+/// keyword table from one list, so a shape cannot be added without its CSS
+/// keyword or left out of the list a parser searches.
+macro_rules! cursor_icons {
+    ($($(#[$meta:meta])* $variant:ident => $name:literal),+ $(,)?) => {
+        /// A standard cursor shape.
+        ///
+        /// Names rather than pixels, because every platform already has themed,
+        /// correctly scaled, user-configured cursors; `crcbl_shell::cursor`
+        /// explains the rest.
+        ///
+        /// **Exhaustive on purpose.** Every shell backend maps each shape to its
+        /// own stock cursor, and a shape added later must fail to compile in
+        /// each of them rather than fall to an arrow through a wildcard arm.
+        /// That makes adding a shape a breaking change, which is the price.
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+        pub enum CursorIcon {
+            $($(#[$meta])* $variant,)+
+        }
+
+        impl CursorIcon {
+            /// Every shape, in declaration order.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            /// The CSS/`cursor-shape-v1` keyword for this shape.
+            ///
+            /// Backends map from this rather than from the variant name, because
+            /// the keyword is the string X11 cursor themes and the browser both
+            /// index by.
+            #[must_use]
+            pub const fn as_css_name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+
+            /// The shape a CSS `cursor` keyword names, matched as CSS matches
+            /// keywords: ignoring ASCII case. `None` for a keyword with no shape
+            /// here, `auto` and `none` among them, which are not shapes.
+            #[must_use]
+            pub fn from_css_name(name: &str) -> Option<Self> {
+                Self::ALL
+                    .iter()
+                    .copied()
+                    .find(|shape| shape.as_css_name().eq_ignore_ascii_case(name))
+            }
+        }
+    };
 }
 
-impl CursorIcon {
-    /// The CSS/`cursor-shape-v1` keyword for this shape.
-    ///
-    /// Backends map from this rather than from the variant name, because the
-    /// keyword is the string X11 cursor themes and the browser both index by.
-    #[must_use]
-    pub const fn as_css_name(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Pointer => "pointer",
-            Self::Text => "text",
-            Self::Crosshair => "crosshair",
-            Self::Wait => "wait",
-            Self::Progress => "progress",
-            Self::NotAllowed => "not-allowed",
-            Self::Grab => "grab",
-            Self::Grabbing => "grabbing",
-            Self::Move => "move",
-            Self::ResizeNorthSouth => "ns-resize",
-            Self::ResizeEastWest => "ew-resize",
-            Self::ResizeNorthEastSouthWest => "nesw-resize",
-            Self::ResizeNorthWestSouthEast => "nwse-resize",
-            Self::ResizeColumn => "col-resize",
-            Self::ResizeRow => "row-resize",
-        }
-    }
+cursor_icons! {
+    /// The platform's normal arrow.
+    #[default]
+    Default => "default",
+    /// The "this is clickable" hand.
+    Pointer => "pointer",
+    /// I-beam, for text.
+    Text => "text",
+    /// Crosshair, for precise placement.
+    Crosshair => "crosshair",
+    /// Something is happening and input is blocked.
+    Wait => "wait",
+    /// Something is happening but input still works.
+    Progress => "progress",
+    /// This action is not allowed here.
+    NotAllowed => "not-allowed",
+    /// The thing under the pointer can be picked up.
+    Grab => "grab",
+    /// The thing under the pointer is being dragged.
+    Grabbing => "grabbing",
+    /// Move in any direction.
+    Move => "move",
+    /// Resize vertically.
+    ResizeNorthSouth => "ns-resize",
+    /// Resize horizontally.
+    ResizeEastWest => "ew-resize",
+    /// Resize along the ↗↙ diagonal.
+    ResizeNorthEastSouthWest => "nesw-resize",
+    /// Resize along the ↖↘ diagonal.
+    ResizeNorthWestSouthEast => "nwse-resize",
+    /// Split pane, vertical divider.
+    ResizeColumn => "col-resize",
+    /// Split pane, horizontal divider.
+    ResizeRow => "row-resize",
 }
 
 #[cfg(test)]
@@ -625,25 +636,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cursor_keywords_are_unique_and_css_shaped() {
-        let shapes = [
-            CursorIcon::Default,
-            CursorIcon::Pointer,
-            CursorIcon::Text,
-            CursorIcon::Crosshair,
-            CursorIcon::Wait,
-            CursorIcon::Progress,
-            CursorIcon::NotAllowed,
-            CursorIcon::Grab,
-            CursorIcon::Grabbing,
-            CursorIcon::Move,
-            CursorIcon::ResizeNorthSouth,
-            CursorIcon::ResizeEastWest,
-            CursorIcon::ResizeNorthEastSouthWest,
-            CursorIcon::ResizeNorthWestSouthEast,
-            CursorIcon::ResizeColumn,
-            CursorIcon::ResizeRow,
-        ];
+    fn cursor_keywords_are_unique_css_shaped_and_parse_back() {
+        let shapes = CursorIcon::ALL;
         let mut names: Vec<&str> = shapes.iter().map(|shape| shape.as_css_name()).collect();
         let count = names.len();
         names.sort_unstable();
@@ -656,6 +650,21 @@ mod tests {
             "keywords are CSS identifiers"
         );
         assert_eq!(CursorIcon::default().as_css_name(), "default");
+        for &shape in shapes {
+            assert_eq!(CursorIcon::from_css_name(shape.as_css_name()), Some(shape));
+        }
+        assert_eq!(
+            CursorIcon::from_css_name("Not-Allowed"),
+            Some(CursorIcon::NotAllowed),
+            "keywords ignore ASCII case"
+        );
+        for not_a_shape in ["auto", "none", "", "pointer ", "hand"] {
+            assert_eq!(
+                CursorIcon::from_css_name(not_a_shape),
+                None,
+                "{not_a_shape:?}"
+            );
+        }
     }
 
     #[test]

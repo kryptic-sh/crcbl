@@ -29,6 +29,7 @@
 //! | `line-height` | `normal` \| number \| px |
 //! | `text-align` | `left` \| `start` \| `center` \| `right` \| `end` |
 //! | `white-space` | `normal` \| `nowrap` |
+//! | `cursor` | `auto` \| `none` \| a shape keyword, as [`CursorIcon::as_css_name`] spells it |
 //! | `text-overflow` | `clip` \| `ellipsis` |
 //! | `outline-width` | px |
 //! | `outline-offset` | px, either sign |
@@ -112,6 +113,7 @@
 //! it, and multiplying each command's alpha is not what `opacity` means where
 //! children overlap — `inherit`, `!important`, `em` and every other unit.
 
+use crcbl_core::input::CursorIcon;
 use cssparser::color::{parse_hash_color, parse_named_color};
 use cssparser::{ParseError, Parser, Token, match_ignore_ascii_case};
 
@@ -166,6 +168,7 @@ pub(crate) enum Property {
     LineHeight,
     TextAlign,
     WhiteSpace,
+    Cursor,
     TextOverflow,
     Outline,
     OutlineWidth,
@@ -248,6 +251,7 @@ impl Property {
             "line-height" => Self::LineHeight,
             "text-align" => Self::TextAlign,
             "white-space" => Self::WhiteSpace,
+            "cursor" => Self::Cursor,
             "text-overflow" => Self::TextOverflow,
             "outline" => Self::Outline,
             "outline-width" => Self::OutlineWidth,
@@ -436,6 +440,17 @@ impl Property {
                         _ => return None,
                     })
                 })?)),
+                // `auto` is `default`: the subset does not guess a shape from
+                // what is under the pointer, as a browser's text I-beam does.
+                Self::Cursor => out.push(D::Cursor(keyword(input, |name| {
+                    if name.eq_ignore_ascii_case("auto") {
+                        Some(Some(CursorIcon::Default))
+                    } else if name.eq_ignore_ascii_case("none") {
+                        Some(None)
+                    } else {
+                        CursorIcon::from_css_name(name).map(Some)
+                    }
+                })?)),
                 Self::TextOverflow => out.push(D::TextOverflow(keyword(input, |name| {
                     Some(match_ignore_ascii_case! { name,
                         "clip" => TextOverflow::Clip,
@@ -544,6 +559,7 @@ impl Property {
             Self::LineHeight => to.line_height = from.line_height,
             Self::TextAlign => to.text_align = from.text_align,
             Self::WhiteSpace => to.white_space = from.white_space,
+            Self::Cursor => to.cursor = from.cursor,
             Self::TextOverflow => to.text_overflow = from.text_overflow,
             Self::Outline => {
                 to.outline_width = from.outline_width;
@@ -1383,6 +1399,15 @@ mod tests {
         assert_eq!(style.line_height, LineHeight::Multiple(1.25));
         assert_eq!(style.text_align, TextAlign::Center);
         assert_eq!(style.white_space, WhiteSpace::NoWrap);
+        for (css, shape) in [
+            ("pointer", Some(CursorIcon::Pointer)),
+            ("Not-Allowed", Some(CursorIcon::NotAllowed)),
+            ("auto", Some(CursorIcon::Default)),
+            ("none", None),
+        ] {
+            assert_eq!(style_of(&[("cursor", css)]).cursor, shape, "cursor: {css}");
+        }
+        assert_eq!(NodeStyle::DEFAULT.cursor, Some(CursorIcon::Default));
         assert_eq!(style.text_overflow, TextOverflow::Ellipsis);
         assert_eq!(
             style_of(&[("white-space", "nowrap"), ("white-space", "normal")]).white_space,
@@ -1455,6 +1480,9 @@ mod tests {
             ("padding", "-2px"),
             ("padding", "1px 2px 3px 4px 5px"),
             ("border-width", "10%"),
+            ("cursor", "hand"),
+            ("cursor", "pointer text"),
+            ("cursor", "url(x.png), auto"),
             ("border", "1px dashed red"),
             ("border", "1px 2px solid"),
             ("border", "solid solid"),

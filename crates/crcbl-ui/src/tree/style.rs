@@ -19,6 +19,8 @@
 
 use core::hash::Hasher;
 
+use crcbl_core::input::CursorIcon;
+
 use taffy::{
     AlignContent, AlignItems, BoxGenerationMode, CoreStyle, Dimension, FlexboxContainerStyle,
     FlexboxItemStyle, LengthPercentage, LengthPercentageAuto, Point, Rect, Size,
@@ -495,6 +497,9 @@ pub struct NodeStyle {
     pub text_align: TextAlign,
     /// `white-space`: whether a text span's lines break at spaces. Inherited.
     pub white_space: WhiteSpace,
+    /// `cursor`: the shape the pointer takes over this node, or `None` to hide
+    /// it. Inherited. [`Ui::cursor`](super::Ui::cursor) reads it.
+    pub cursor: Option<CursorIcon>,
     /// `text-overflow`: what a text span shows of a line too long for its
     /// box.
     pub text_overflow: TextOverflow,
@@ -562,6 +567,7 @@ impl NodeStyle {
         line_height: LineHeight::Normal,
         text_align: TextAlign::Left,
         white_space: WhiteSpace::Normal,
+        cursor: Some(CursorIcon::Default),
         text_overflow: TextOverflow::Clip,
         outline_width: 0.0,
         outline_color: [0.0; 4],
