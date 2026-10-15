@@ -220,3 +220,33 @@ fn a_headers_row_is_named_by_its_title_and_expanded_while_open() {
     let update = ui.accessibility_update();
     assert_eq!(node(&update, row.key).is_expanded(), Some(true));
 }
+
+/// **A paragraph is a paragraph of labels, one per run**, each holding its
+/// run's text as built, so a reader hears the markup's words in order.
+#[test]
+fn a_paragraph_reads_as_its_runs_in_order() {
+    let mut ui = Ui::new();
+    let mut runs = Vec::new();
+    let paragraph = frame(&mut ui, idle(), NavInput::default(), |ui| {
+        ui.paragraph(".body", &[], |p| {
+            runs.push(p.run("", "Build finished in ", &[]).key);
+            runs.push(p.run("b", "4 minutes", &[]).key);
+        })
+    });
+    let update = ui.accessibility_update();
+    let body = node(&update, paragraph.key);
+    assert_eq!(body.role(), Role::Paragraph);
+    assert_eq!(
+        body.children(),
+        runs.iter().map(|key| NodeId(key.0)).collect::<Vec<_>>()
+    );
+    let words: Vec<_> = runs
+        .iter()
+        .map(|&key| {
+            let run = node(&update, key);
+            assert_eq!(run.role(), Role::Label);
+            run.value().expect("a run holds its text").to_owned()
+        })
+        .collect();
+    assert_eq!(words, ["Build finished in ", "4 minutes"]);
+}

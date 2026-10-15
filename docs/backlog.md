@@ -470,7 +470,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       input exposes its value but no text runs, caret or selection
       (`SetTextSelection`, `SetValue`, `Increment`/`Decrement`, `Expand` and
       `ScrollIntoView` are not acted on). Every update is the whole tree, not a
-      diff, and its cost on a large outliner has not been measured.
+      diff, and its cost on a large outliner has not been measured. A paragraph
+      (S12) is a `Paragraph` of `Label`s, one per run, checked by
+      `a_paragraph_reads_as_its_runs_in_order`; a run used as a link is not a
+      `Link`, because a run cannot say it is one (any run reports clicks), so
+      exposing links waits on a link builder in `ParagraphBuilder`.
     - Win32 is in, behind the same feature: `win32::access` keeps one
       `accesskit_windows::Adapter` per window in `Shared`, created after
       `CreateWindowExW` and dropped by `Shared::forget`; the window procedure

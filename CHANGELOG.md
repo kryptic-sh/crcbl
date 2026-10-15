@@ -88,7 +88,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   text inside it, with its bounds, checked, expanded, selected and disabled
   state and the focused node. `Ui::accessibility_action(&request)` acts on a
   screen reader's focus, blur and click; a click makes the node report `clicked`
-  on the next frame, as a pointer's would.
+  on the next frame, as a pointer's would. A `Ui::paragraph` reads as an
+  AccessKit paragraph of labels, one per run, each holding its run's text.
 - **`font-weight` and `font-style` in `crcbl-ui` stylesheets**, inherited:
   `normal`, `bold` or a weight from 1 to 1000, and `normal` or `italic`. A text
   span draws in the face of its family they select, by CSS's font-matching rule,

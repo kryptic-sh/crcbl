@@ -171,7 +171,7 @@ impl Ui {
         if clickable(stored.behavior) {
             node.add_action(Action::Click);
         }
-        if let Content::Text { start, end } = frame.content {
+        if let Content::Text { start, end } | Content::Run { start, end } = frame.content {
             node.set_value(&self.text[start..end]);
         }
 
@@ -267,7 +267,7 @@ impl Ui {
         while let Some(child) = next {
             let node = &self.nodes[child];
             if self.store.get(node.slot).kind != WidgetKind::Decoration {
-                if let Content::Text { start, end } = node.content {
+                if let Content::Text { start, end } | Content::Run { start, end } = node.content {
                     let text = self.text[start..end].trim();
                     if !text.is_empty() {
                         if !out.is_empty() {
@@ -294,7 +294,8 @@ const fn role_of(content: Content, kind: WidgetKind) -> Role {
     match kind {
         WidgetKind::None | WidgetKind::Decoration => match content {
             Content::Block => Role::GenericContainer,
-            Content::Text { .. } => Role::Label,
+            Content::Text { .. } | Content::Run { .. } => Role::Label,
+            Content::Paragraph => Role::Paragraph,
             Content::Image(_) => Role::Image,
         },
         WidgetKind::Button | WidgetKind::Disclosure => Role::Button,
