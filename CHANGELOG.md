@@ -939,6 +939,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   not by pointer. `Font::id`, `Font::data` and `Font::metrics` are no longer
   `const`, and `Font::data` borrows from the font.
 
+- **`ImageAtlas::unregister` gives an image's space back.** A program that draws
+  pictures it rasterised itself — a launcher's result icons, a tray's status
+  icons — can now replace them without filling the 1024² page: the freed span of
+  its shelf takes the next image that fits, neighbouring free spans join, and an
+  emptied last shelf closes so its rows can hold a taller image. An unregistered
+  `ImageId` is never reused, so `ImageAtlas::image` answers `None` for it rather
+  than naming whatever took its space.
+
 - **The `border` shorthand in stylesheets.** A width, a style and a colour in
   any order, as CSS has it: `solid` draws, `none` and `hidden` do not, a border
   with no style has none, and a solid one with no width is 3px (`medium`). Other

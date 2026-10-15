@@ -247,10 +247,6 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       values filled in as `ui/css.rs` fills them, parses with no diagnostics
       once the `border` shorthand was added. Checked by running it through
       `Stylesheet::parse`, not by rendering it.
-    - S24 is half there: `ImageAtlas::register` uploads straight-alpha RGBA, but
-      nothing removes or replaces an image, so a launcher showing changing
-      result icons fills its page (`AtlasError::Full`). Needs an unregister that
-      frees the shelf space, or an eviction policy.
 11. **Start-up and failure.**
     - Measure cold start to the first presented frame against 500 ms (S13).
     - A clear failure, not a crash, with no usable GPU (S26).
@@ -5376,11 +5372,15 @@ and `push_clip`, and the menu drawn through the UI pass — left these:
   sprite pass went away; radv's frame went from 0.024 to 0.027 ms. Not yet
   tried: skipping the distance field and the second sample for solid and glyph
   fragments without breaking WGSL's uniform-control-flow rule.
-- **One image-atlas page and no eviction.** A full page is `AtlasError::Full`.
-  Rung 5 gave the _glyph_ atlas its pages and eviction; the RGBA image atlas
-  still has one 1024² page (`crcbl_ui::image`), so a second page, eviction and
-  the design's batching by stacking context and then by texture, keeping CSS
-  paint order, are all still owed. Re-checked 2026-09-24.
+- **One image-atlas page, freed only by the caller.** A full page is
+  `AtlasError::Full`. Rung 5 gave the _glyph_ atlas its pages and eviction; the
+  RGBA image atlas still has one 1024² page (`crcbl_ui::image`). Since
+  2026-10-15 `ImageAtlas::unregister` frees an image's shelf span (lyr and
+  pikr's S24), but the atlas never evicts on its own, and a shelf keeps the
+  height of the image that opened it until it is the last and empties, so a page
+  churned through very different sizes fragments. A second page and the design's
+  batching by stacking context and then by texture, keeping CSS paint order, are
+  still owed.
 - **The lavapipe 1-level deltas in the menu sample goldens are unattributed.**
   Breakout, flappy, asteroids and hud match radv exactly and differ by at most
   one level on lavapipe, inside tolerance and outside the panel. Hud's golden

@@ -23,9 +23,19 @@
 //! is as tall as the first image that opened it. That packs a set of similar
 //! sizes — which is what a UI's frames and icons are — well, and is the simplest
 //! allocator that never moves an image once placed, so a registered
-//! [`AtlasImage`] stays valid for the atlas's whole life. There is no eviction
-//! and no second page yet (`docs/backlog.md`, _What UI rung 1 shipped
-//! without_): an image that does not fit is [`AtlasError::Full`], never a panic.
+//! [`AtlasImage`] stays valid until it is unregistered. There is no second page
+//! yet (`docs/backlog.md`, _What UI rung 1 shipped without_): an image that does
+//! not fit is [`AtlasError::Full`], never a panic.
+//!
+//! # Giving space back
+//!
+//! [`unregister`](ImageAtlas::unregister) frees an image's span of its shelf for
+//! the next image that fits it, so a launcher whose result icons change every
+//! keystroke registers the new ones in the space the old ones held instead of
+//! filling the page. Neighbouring free spans join, a free span at a shelf's end
+//! returns to the shelf, and an emptied last shelf is closed, so its rows can
+//! open a shelf of another height. The atlas does not decide what to evict: the
+//! caller knows which pictures it still draws, and nothing here does.
 //!
 //! The page is [`PAGE_SIZE`] texels square, a power of two so every UV this
 //! module hands out is exact in `f32`, and inside the 4096 WebGPU's
@@ -71,7 +81,9 @@ const TEXEL_BYTES: usize = 4;
 pub struct ImageId(u32);
 
 impl ImageId {
-    /// The order the image was registered in, from zero.
+    /// The order the image was registered in, from zero. Never reused, so an
+    /// id kept past [`ImageAtlas::unregister`] names nothing rather than the
+    /// image that took its space.
     #[must_use]
     pub const fn index(self) -> u32 {
         self.0
@@ -307,15 +319,61 @@ impl fmt::Display for AtlasError {
 impl std::error::Error for AtlasError {}
 
 /// One row of the page that images are placed along, left to right.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Shelf {
     /// The shelf's top row, gutter included.
     y: u32,
     /// Its height, gutters included: the first image's, which is what opened
     /// it.
     height: u32,
-    /// The first free column.
+    /// The first column past every image on it.
     cursor: u32,
+    /// Spans left of `cursor` that unregistered images gave back, as `(x,
+    /// width)` gutters included: sorted, and never touching each other or
+    /// `cursor`, because [`Shelf::free`] joins them.
+    free: Vec<(u32, u32)>,
+}
+
+impl Shelf {
+    /// Claims `width` columns, from a free span if one is wide enough and else
+    /// at the cursor, and returns the first.
+    fn claim(&mut self, width: u32) -> Option<u32> {
+        if let Some(at) = self.free.iter().position(|&(_, span)| span >= width) {
+            let (x, span) = self.free[at];
+            if span == width {
+                self.free.remove(at);
+            } else {
+                self.free[at] = (x + width, span - width);
+            }
+            return Some(x);
+        }
+        (PAGE_SIZE - self.cursor >= width).then(|| {
+            let x = self.cursor;
+            self.cursor += width;
+            x
+        })
+    }
+
+    /// Gives `width` columns from `x` back, joined to the free spans beside
+    /// them, or to the cursor when they end there.
+    fn free(&mut self, x: u32, width: u32) {
+        let at = self.free.partition_point(|&(start, _)| start < x);
+        let (mut x, mut width) = (x, width);
+        if at < self.free.len() && x + width == self.free[at].0 {
+            width += self.free.remove(at).1;
+        }
+        if at > 0 && self.free[at - 1].0 + self.free[at - 1].1 == x {
+            let (start, span) = self.free.remove(at - 1);
+            x = start;
+            width += span;
+        }
+        if x + width == self.cursor {
+            self.cursor = x;
+        } else {
+            let at = self.free.partition_point(|&(start, _)| start < x);
+            self.free.insert(at, (x, width));
+        }
+    }
 }
 
 /// The page, the images on it, and what has changed since it was last taken.
@@ -324,7 +382,11 @@ struct Shelf {
 #[derive(Clone)]
 pub struct ImageAtlas {
     pixels: Vec<u8>,
+    /// The registered images, in id order: unregistering removes without
+    /// reordering, so [`ImageAtlas::image`] can binary-search it.
     images: Vec<AtlasImage>,
+    /// The id the next image gets.
+    next_id: u32,
     shelves: Vec<Shelf>,
     dirty: Option<TexelRect>,
 }
@@ -356,6 +418,7 @@ impl ImageAtlas {
         Self {
             pixels: vec![0; PAGE_SIZE as usize * PAGE_SIZE as usize * TEXEL_BYTES],
             images: Vec::new(),
+            next_id: 0,
             shelves: Vec::new(),
             dirty: None,
         }
@@ -391,10 +454,13 @@ impl ImageAtlas {
         let full = AtlasError::Full { width, height };
         let padded_width = width.checked_add(2 * GUTTER).ok_or(full)?;
         let padded_height = height.checked_add(2 * GUTTER).ok_or(full)?;
+        let id = ImageId(self.next_id);
+        let next_id = self.next_id.checked_add(1).ok_or(full)?;
         let (shelf_x, shelf_y) = self.place(padded_width, padded_height).ok_or(full)?;
+        self.next_id = next_id;
 
         let image = AtlasImage {
-            id: ImageId(u32::try_from(self.images.len()).map_err(|_| full)?),
+            id,
             x: shelf_x + GUTTER,
             y: shelf_y + GUTTER,
             width,
@@ -417,14 +483,14 @@ impl ImageAtlas {
         if width > PAGE_SIZE || height > PAGE_SIZE {
             return None;
         }
-        if let Some(shelf) = self
+        for shelf in self
             .shelves
             .iter_mut()
-            .find(|shelf| shelf.height >= height && PAGE_SIZE - shelf.cursor >= width)
+            .filter(|shelf| shelf.height >= height)
         {
-            let x = shelf.cursor;
-            shelf.cursor += width;
-            return Some((x, shelf.y));
+            if let Some(x) = shelf.claim(width) {
+                return Some((x, shelf.y));
+            }
         }
         let top = self
             .shelves
@@ -437,8 +503,35 @@ impl ImageAtlas {
             y: top,
             height,
             cursor: width,
+            free: Vec::new(),
         });
         Some((0, top))
+    }
+
+    /// Removes the image registered as `id` and frees its space, gutter
+    /// included, for later images. Returns where it was, or `None` for an id
+    /// this atlas does not hold — another atlas's, or one already
+    /// unregistered — which changes nothing.
+    ///
+    /// The page's texels are left as they were and nothing turns dirty: a
+    /// draw that still holds the removed [`AtlasImage`] samples the old picture
+    /// until a new image is registered over it, and then the new one.
+    pub fn unregister(&mut self, id: ImageId) -> Option<AtlasImage> {
+        let at = self
+            .images
+            .binary_search_by_key(&id.0, |image| image.id.0)
+            .ok()?;
+        let image = self.images.remove(at);
+        let shelf = self
+            .shelves
+            .iter_mut()
+            .find(|shelf| shelf.y == image.y - GUTTER)
+            .expect("every image sits on the shelf it was placed on");
+        shelf.free(image.x - GUTTER, image.width + 2 * GUTTER);
+        while self.shelves.last().is_some_and(|shelf| shelf.cursor == 0) {
+            self.shelves.pop();
+        }
+        Some(image)
     }
 
     /// Copies `pixels` onto the page at `image`, then extends its edges into
@@ -464,13 +557,17 @@ impl ImageAtlas {
         }
     }
 
-    /// The image registered as `id`, or `None` for an id from another atlas.
+    /// The image registered as `id`, or `None` for an id from another atlas
+    /// or one unregistered.
     #[must_use]
     pub fn image(&self, id: ImageId) -> Option<AtlasImage> {
-        self.images.get(id.0 as usize).copied()
+        self.images
+            .binary_search_by_key(&id.0, |image| image.id.0)
+            .ok()
+            .map(|at| self.images[at])
     }
 
-    /// Every registered image, in registration order.
+    /// Every registered image still held, in registration order.
     #[must_use]
     pub fn images(&self) -> &[AtlasImage] {
         &self.images
@@ -672,6 +769,124 @@ mod tests {
         );
         assert!(atlas.images().is_empty());
         assert_eq!(atlas.dirty(), None);
+    }
+
+    /// A page filled with `side`-square images, `side` plus the gutters
+    /// dividing the page exactly, so not one more fits.
+    fn filled(side: u32) -> (ImageAtlas, Vec<AtlasImage>) {
+        let padded = side + 2 * GUTTER;
+        assert_eq!(PAGE_SIZE % padded, 0, "the images tile the page");
+        let mut atlas = ImageAtlas::new();
+        let count = (PAGE_SIZE / padded).pow(2);
+        let images = (0..count)
+            .map(|_| {
+                atlas
+                    .register(side, side, &numbered(side, side))
+                    .expect("fits")
+            })
+            .collect();
+        assert!(matches!(
+            atlas.register(1, 1, &[0; 4]),
+            Err(AtlasError::Full { .. })
+        ));
+        (atlas, images)
+    }
+
+    /// **An unregistered image's space takes the next image that fits, and its
+    /// id names nothing after.** The launcher case: a full page of icons, one
+    /// replaced.
+    #[test]
+    fn an_unregistered_image_gives_its_space_to_the_next_and_its_id_to_none() {
+        let side = 62;
+        let (mut atlas, images) = filled(side);
+        let gone = images[images.len() / 2];
+        let kept = images[images.len() / 2 + 1];
+
+        assert_eq!(atlas.unregister(gone.id), Some(gone));
+        assert_eq!(atlas.image(gone.id), None);
+        assert_eq!(atlas.unregister(gone.id), None, "only once");
+        assert_eq!(atlas.image(kept.id), Some(kept), "the rest are still found");
+        assert_eq!(atlas.images().len(), images.len() - 1);
+        assert!(!atlas.images().contains(&gone));
+
+        let new = atlas
+            .register(side, side, &numbered(side, side))
+            .expect("the freed space");
+        assert_eq!((new.x, new.y), (gone.x, gone.y));
+        assert!(new.id.index() > images.last().expect("filled").id.index());
+        assert_eq!(atlas.image(new.id), Some(new));
+        assert_eq!(
+            atlas.image(gone.id),
+            None,
+            "the new image took the space, not the id"
+        );
+    }
+
+    /// **Free spans beside each other join**, so two small images given back
+    /// make room for one twice as wide; and the join reaches back to the
+    /// shelf's cursor when the span ends there.
+    #[test]
+    fn neighbouring_free_spans_join_into_room_for_a_wider_image() {
+        let side = 62;
+        let padded = side + 2 * GUTTER;
+        let (mut atlas, images) = filled(side);
+        // The first and second of the first shelf.
+        atlas.unregister(images[1].id).expect("held");
+        atlas.unregister(images[0].id).expect("held");
+        let wide = 2 * padded - 2 * GUTTER;
+        let joined = atlas
+            .register(wide, side, &numbered(wide, side))
+            .expect("the two spans as one");
+        assert_eq!((joined.x, joined.y), (images[0].x, images[0].y));
+
+        // Given back again, the span holds two narrow images side by side: the
+        // first takes its left end and the second what remains.
+        atlas.unregister(joined.id).expect("held");
+        let left = atlas
+            .register(side, side, &numbered(side, side))
+            .expect("fits");
+        let right = atlas
+            .register(side, side, &numbered(side, side))
+            .expect("fits");
+        assert_eq!(
+            [(left.x, left.y), (right.x, right.y)],
+            [(images[0].x, images[0].y), (images[1].x, images[1].y)]
+        );
+
+        // The last two of the first shelf: the second one freed joins the first
+        // and both go back to the cursor, which the next wide image uses.
+        let per_shelf = (PAGE_SIZE / padded) as usize;
+        atlas.unregister(images[per_shelf - 2].id).expect("held");
+        atlas.unregister(images[per_shelf - 1].id).expect("held");
+        let at_end = atlas
+            .register(wide, side, &numbered(wide, side))
+            .expect("the shelf's end");
+        assert_eq!((at_end.x, at_end.y), (images[per_shelf - 2].x, images[0].y));
+    }
+
+    /// **An emptied last shelf closes**, so its rows can take an image taller
+    /// than the shelf was.
+    #[test]
+    fn emptying_the_last_shelf_frees_its_rows_for_a_taller_image() {
+        let mut atlas = ImageAtlas::new();
+        let rest = PAGE_SIZE - 2 * GUTTER;
+        let top = atlas
+            .register(rest, rest - 10, &vec![9; (rest * (rest - 10) * 4) as usize])
+            .expect("fits");
+        let low = atlas.register(4, 4, &numbered(4, 4)).expect("fits below");
+        assert!(
+            matches!(
+                atlas.register(4, 7, &numbered(4, 7)),
+                Err(AtlasError::Full { .. })
+            ),
+            "taller than the low shelf, and no rows left under it"
+        );
+
+        atlas.unregister(low.id).expect("held");
+        let tall = atlas
+            .register(4, 7, &numbered(4, 7))
+            .expect("the closed shelf's rows");
+        assert_eq!(tall.y, top.y + top.height + 2 * GUTTER);
     }
 
     /// The dirty rectangle covers exactly what registration wrote, and taking
