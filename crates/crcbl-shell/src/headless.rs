@@ -985,9 +985,9 @@ impl HeadlessShell {
             self.monitors.len() > 1,
             "a shell needs at least one monitor"
         );
+        let previous = self.monitors.clone();
         self.monitors.remove(index);
-        self.queue
-            .push_back(ShellEvent::MonitorRemoved { monitor: id });
+        crate::monitor::queue_removed(&previous, &self.monitors, &mut self.queue);
         let panels: Vec<WindowId> = self
             .windows
             .iter()
