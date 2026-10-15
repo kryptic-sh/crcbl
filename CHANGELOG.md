@@ -13,6 +13,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`crcbl_ui::font::raster` moved to `crcbl_image::raster`**, still reachable
+  at the old path through a re-export, so the coverage rasteriser can fill
+  shapes for image decoders without a UI dependency. Its `Rasterizer` now takes
+  `raster::Point` rather than `glam::Vec2`, since `crcbl-image` depends on no
+  maths crate: a caller converts with `Point::new(v.x, v.y)`.
+
 ### Added
 
 - **`crcbl-image`, a new crate: image assets to the straight-alpha RGBA8

@@ -73,7 +73,7 @@ pub mod atlas;
 #[cfg(feature = "parsed-font")]
 mod kern;
 pub mod layout;
-pub mod raster;
+pub use crcbl_image::raster;
 
 use core::fmt;
 use std::collections::HashMap;

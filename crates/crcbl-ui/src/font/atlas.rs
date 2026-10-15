@@ -79,7 +79,7 @@ use skrifa::outline::{
 use skrifa::{FontRef, MetadataProvider};
 
 #[cfg(feature = "parsed-font")]
-use super::raster::Rasterizer;
+use super::raster::{Point, Rasterizer};
 use super::{Font, FontId, GlyphId};
 use crate::image::TexelRect;
 
@@ -330,6 +330,12 @@ enum Segment {
     Line(Vec2, Vec2),
     Quadratic(Vec2, Vec2, Vec2),
     Cubic(Vec2, Vec2, Vec2, Vec2),
+}
+
+/// A point in mask pixels as the rasteriser takes it.
+#[cfg(feature = "parsed-font")]
+const fn mask_point(point: Vec2) -> Point {
+    Point::new(point.x, point.y)
 }
 
 /// Collects a drawn outline as [`Segment`]s, flipped to y down and shifted
@@ -691,17 +697,12 @@ impl GlyphAtlas {
         }
 
         self.rasterizer.reset(width, height);
+        let at = |point: Vec2| mask_point(point - origin);
         for segment in &self.segments {
             match *segment {
-                Segment::Line(a, b) => self.rasterizer.line(a - origin, b - origin),
-                Segment::Quadratic(a, b, c) => {
-                    self.rasterizer
-                        .quadratic(a - origin, b - origin, c - origin);
-                }
-                Segment::Cubic(a, b, c, d) => {
-                    self.rasterizer
-                        .cubic(a - origin, b - origin, c - origin, d - origin);
-                }
+                Segment::Line(a, b) => self.rasterizer.line(at(a), at(b)),
+                Segment::Quadratic(a, b, c) => self.rasterizer.quadratic(at(a), at(b), at(c)),
+                Segment::Cubic(a, b, c, d) => self.rasterizer.cubic(at(a), at(b), at(c), at(d)),
             }
         }
         self.mask.clear();
@@ -916,14 +917,13 @@ mod tests {
         ));
         let origin = Vec2::new(at.left as f32, at.top as f32);
         let mut rasterizer = Rasterizer::new(at.width, at.height);
+        let local = |point: Vec2| mask_point(point - origin);
         for segment in segments {
             match segment {
-                Segment::Line(a, b) => rasterizer.line(a - origin, b - origin),
-                Segment::Quadratic(a, b, c) => {
-                    rasterizer.quadratic(a - origin, b - origin, c - origin)
-                }
+                Segment::Line(a, b) => rasterizer.line(local(a), local(b)),
+                Segment::Quadratic(a, b, c) => rasterizer.quadratic(local(a), local(b), local(c)),
                 Segment::Cubic(a, b, c, d) => {
-                    rasterizer.cubic(a - origin, b - origin, c - origin, d - origin);
+                    rasterizer.cubic(local(a), local(b), local(c), local(d));
                 }
             }
         }

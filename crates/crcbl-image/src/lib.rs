@@ -22,12 +22,16 @@
 //!
 //! # Formats
 //!
-//! Each file format is a cargo feature: `png`, `jpeg`, `bmp`, `ico` and
-//! `webp` (lossless) today
-//! (`ico` brings `bmp` and `png`, the two forms an icon's frames take). The raw conversions and
-//! the resize need none. The `theme` feature adds the freedesktop.org icon-theme
+//! Each file format is a cargo feature: `png`, `jpeg`, `bmp`, `ico` (which
+//! brings `bmp` and `png`, the two forms an icon's frames take), `webp`
+//! (lossless) and `svg` for icons (rendered by this crate, refusing what it
+//! does not draw rather than drawing part of it). The raw conversions, the
+//! resize and the coverage rasteriser need none. The `theme` feature adds the
+//! freedesktop.org icon-theme lookup, which finds an icon's file by name;
+//! decoding it is the format's.
 //! lookup, which finds an icon's file by name; decoding it is the format's.
 
+pub mod raster;
 pub mod raw;
 pub mod resize;
 

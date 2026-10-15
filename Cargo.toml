@@ -139,6 +139,7 @@ dirs = "7.0"
 crcbl = { path = "crates/crcbl", version = "0.1.0" }
 crcbl-core = { path = "crates/crcbl-core", version = "0.1.0" }
 crcbl-golden = { path = "crates/crcbl-golden", version = "0.1.0" }
+crcbl-image = { path = "crates/crcbl-image", version = "0.1.0" }
 # `default-features = false`, which is the 3D half of the pack: the primitives,
 # the materials and the grid page, without the `.crpix` sprites and the sheet
 # loader its `bake` feature carries. Neither consumer wants those —
