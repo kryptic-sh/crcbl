@@ -908,9 +908,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   on the top two layers, never activated by a click when they take no keyboard,
   and placed by their anchors and margins on the monitor asked for or the one
   under the pointer. A panel that takes the keyboard asks for the foreground
-  when shown. Win32 does not reserve an edge yet. The other window-system
-  backends refuse panels and popups until each implements them. `LogicalRect` is
-  new in `crcbl_shell`.
+  when shown. A reserving panel is an appbar, so maximised windows stop at it
+  and the space comes back when it is destroyed or the shell is dropped. AppKit
+  refuses panels until it implements them, and only the headless shell builds
+  popups so far. `LogicalRect` is new in `crcbl_shell`.
 
 - **Fonts from bytes read at run time.** `Font::parse` takes any `FontData`: an
   `include_bytes!` as before, or a `Vec<u8>`, `Box<[u8]>` or `Arc<[u8]>` an

@@ -592,16 +592,13 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
         ShellCaps::TEXT_IME,
         ShellCaps::TOUCH,
         ShellCaps::PANEL,
+        ShellCaps::PANEL_RESERVE,
     ] {
         assert!(caps.contains(present), "{present:?} is implemented");
     }
-    // Not yet: appbars, popups and per-pixel alpha are the rest of this
-    // backend's panel work.
-    for absent in [
-        ShellCaps::PANEL_RESERVE,
-        ShellCaps::POPUP,
-        ShellCaps::TRANSPARENT,
-    ] {
+    // Not yet: popups and per-pixel alpha are the rest of this backend's
+    // panel work.
+    for absent in [ShellCaps::POPUP, ShellCaps::TRANSPARENT] {
         assert!(!caps.contains(absent), "{absent:?} is not implemented yet");
     }
     // Latched from the registration rather than assumed — the one bit on
@@ -2337,4 +2334,71 @@ fn a_bottom_layer_panel_is_not_topmost() {
     assert_eq!(ex_style & style::EX_TOPMOST, 0);
     assert_ne!(ex_style & style::EX_TOOL_WINDOW, 0);
     shell.destroy_window(widget).expect("destroy");
+}
+
+/// The primary monitor's work area, asked for again rather than read from the
+/// shell's cached list, until `settled` holds or a few seconds pass.
+fn work_area_until(shell: &mut Win32Shell, settled: impl Fn(PhysicalRect) -> bool) -> PhysicalRect {
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let area = shell
+            .enumerate_monitors()
+            .into_iter()
+            .find(|monitor| monitor.is_primary)
+            .expect("a primary monitor")
+            .work_area;
+        if settled(area) || Instant::now() >= deadline {
+            return area;
+        }
+        shell.pump(&mut |_| {});
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+#[ignore = "reserves part of the real desktop's work area: run-win32-e2e.ps1 runs it"]
+fn a_reserving_bar_is_an_appbar_that_takes_its_edge_and_gives_it_back() {
+    const HEIGHT: f64 = 30.0;
+    let mut shell = shell();
+    let primary = shell
+        .monitors()
+        .iter()
+        .find(|monitor| monitor.is_primary)
+        .cloned()
+        .expect("a primary monitor");
+    let before = work_area_until(&mut shell, |_| true);
+    let depth = LogicalSize::new(0.0, HEIGHT)
+        .to_physical(primary.scale_factor)
+        .height;
+    let bar = shell
+        .create_window(&panel_desc(
+            "crcbl appbar",
+            LogicalSize::new(0.0, HEIGHT),
+            crate::PanelDesc {
+                monitor: Some(primary.id),
+                anchor: crate::PanelAnchor::TOP
+                    | crate::PanelAnchor::LEFT
+                    | crate::PanelAnchor::RIGHT,
+                reserve: crate::Reserve::OwnExtent,
+                ..crate::PanelDesc::default()
+            },
+        ))
+        .expect("a reserving panel");
+    shell.pump(&mut |_| {});
+    let reserved = work_area_until(&mut shell, |area| area.y != before.y);
+    assert_eq!(
+        (reserved.y, reserved.height),
+        (before.y + depth as i32, before.height - depth),
+        "the work area gave up the bar's height at the top"
+    );
+    let (_, _, rect) = styles_and_rect(hwnd_of(&shell, bar));
+    assert_eq!(
+        (rect.top, rect.bottom - rect.top),
+        (before.y, depth as i32),
+        "the bar sits in the strip it reserved"
+    );
+
+    shell.destroy_window(bar).expect("destroy");
+    let after = work_area_until(&mut shell, |area| area == before);
+    assert_eq!(after, before, "destroying the bar gave the edge back");
 }

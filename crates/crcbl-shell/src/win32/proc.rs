@@ -1057,6 +1057,27 @@ pub(super) unsafe extern "system" fn window_proc(
             default()
         }
 
+        // A work area is part of a monitor's description, and a panel placed
+        // in one has to move with it: the taskbar moved, or an appbar came or
+        // went. Every other parameter is somebody else's.
+        msg::SETTING_CHANGE => {
+            if w_param == value::SPI_SET_WORK_AREA {
+                shared.push(RawEvent::MonitorsChanged);
+            }
+            default()
+        }
+
+        // The shell's notification to an appbar, registered by
+        // `register_appbar`. Recorded, because answering it moves the window,
+        // which re-enters this procedure.
+        msg::APP_BAR => {
+            shared.push(RawEvent::AppBar {
+                hwnd: window,
+                notification: w_param as u32,
+            });
+            0
+        }
+
         _ => default(),
     }
 }

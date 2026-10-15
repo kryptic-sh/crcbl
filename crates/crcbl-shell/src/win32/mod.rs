@@ -42,7 +42,7 @@
 //! | Cursor shapes and hiding | complete — stock `IDC_*` cursors through `WM_SETCURSOR`, hiding through a balanced `ShowCursor` |
 //! | Clipboard, both directions: `CF_UNICODETEXT` plus a registered format per mime | complete — [`CLIPBOARD`](crate::ShellCaps::CLIPBOARD), see [`clipboard`] |
 //! | File drops in: `DragAcceptFiles`, `WM_DROPFILES`, the `accept_drops` gate | complete — [`DRAG_DROP`](crate::ShellCaps::DRAG_DROP), see [`dnd`] |
-//! | Panels: frameless tool windows placed by their anchors on a monitor | complete — [`PANEL`](crate::ShellCaps::PANEL), see [`panel`]; reserving an edge (appbars), popups and per-pixel alpha are not yet |
+//! | Panels: frameless tool windows placed by their anchors on a monitor, and appbars for the ones that reserve an edge | complete — [`PANEL`](crate::ShellCaps::PANEL) and [`PANEL_RESERVE`](crate::ShellCaps::PANEL_RESERVE), see [`panel`]; popups and per-pixel alpha are not yet |
 //! | Drag *feedback* — a drop cursor, hover highlighting, non-file formats | **not implemented**: it is `IDropTarget`, which is COM. [`dnd`] gives the argument |
 //!
 //! Two things input needs that no other area of this backend does are worth

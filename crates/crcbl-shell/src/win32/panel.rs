@@ -6,7 +6,7 @@
 //! | --- | --- |
 //! | `layer` | `WS_EX_TOPMOST` for `Top` and `Overlay`, which share the one topmost band; the bottom of the z-order for `Bottom` and `Background`, which is above the desktop and no lower |
 //! | `anchor`, `margins`, the size | a rectangle on the monitor, from [`geometry::panel_rect`] |
-//! | `reserve` | `None` places the panel inside the monitor's work area, clear of the taskbar and every appbar; `IgnoreOthers` places it on the whole monitor. `OwnExtent` reserves nothing yet, which [`ShellCaps::PANEL_RESERVE`](crate::ShellCaps::PANEL_RESERVE) being clear says, and is placed as `None` is |
+//! | `reserve` | `None` places the panel inside the monitor's work area, clear of the taskbar and every appbar; `IgnoreOthers` places it on the whole monitor; `OwnExtent` makes it an appbar — see below |
 //! | `keyboard` | `None` is `WS_EX_NOACTIVATE`, and the panel is shown without activating, so clicking and hovering it leave the keyboard where it was. `OnDemand` activates on a click. `Exclusive` takes the foreground when shown |
 //! | `monitor` | the one asked for, else the one under the pointer |
 //! | `namespace` | nothing: Win32 has no rules keyed by one |
@@ -14,15 +14,33 @@
 //! Every panel is `WS_EX_TOOLWINDOW`, which keeps it out of the taskbar and
 //! Alt-Tab.
 //!
+//! # A reserving panel is an appbar
+//!
+//! `SHAppBarMessage` is how Windows reserves an edge: the taskbar is one, and
+//! a maximised window stops at every one. [`Reserve::OwnExtent`] registers the
+//! panel with `ABM_NEW`, proposes a strip of its monitor as deep as the
+//! panel's extent across the edge plus its margin on it, lets `ABM_QUERYPOS`
+//! move that strip clear of the taskbar and the other appbars, and reserves
+//! the result with `ABM_SETPOS`. The window goes inside the strip, its margins
+//! from the strip's sides. When the shell sends `ABN_POSCHANGED` — the
+//! taskbar moved, another appbar came, the display changed — the panel asks
+//! again. `ABM_REMOVE` gives the space back when the panel is destroyed and
+//! when the shell is dropped.
+//!
+//! **A process that dies without `ABM_REMOVE` leaves the space reserved**
+//! until Explorer restarts, and nothing here can run after a hard crash. A
+//! panic unwinds through [`Drop`](Win32Shell), which removes it.
+//! `docs/backlog.md` carries the crash-safe path. If the shell refuses
+//! `ABM_NEW`, the panel is placed as `Reserve::None` and a warning says so.
+//!
 //! # Placed again when the desktop moves
 //!
 //! A panel's rectangle comes from its monitor's geometry, so it is computed
-//! again after `WM_DISPLAYCHANGE` and after a DPI change, and a panel whose
-//! monitor was unplugged is asked to close; see
-//! [`ShellEvent::MonitorRemoved`](crate::ShellEvent::MonitorRemoved). A work
-//! area that changes without a display change (the taskbar moved, an appbar
-//! appeared) arrives as `WM_SETTINGCHANGE`, which this backend does not read
-//! yet; `docs/backlog.md` carries it.
+//! again after `WM_DISPLAYCHANGE`, after a DPI change, and after a work area
+//! moves without a display change (the taskbar moved, an appbar came or went),
+//! which arrives as `WM_SETTINGCHANGE`. A panel whose monitor was unplugged is
+//! asked to close; see
+//! [`ShellEvent::MonitorRemoved`](crate::ShellEvent::MonitorRemoved).
 
 use core::ptr;
 
@@ -31,7 +49,7 @@ use crate::{
     PanelLayer, PhysicalRect, Reserve, ShellError, WindowDesc, WindowId,
 };
 
-use super::ffi::{self, Handle, Point, value};
+use super::ffi::{self, AppBarData, Handle, Point, appbar, msg, value};
 use super::geometry::{self, Insets};
 use super::shell::Win32Shell;
 use super::window::{Created, class_name};
@@ -50,10 +68,15 @@ pub(super) struct Panel {
     /// [`WindowDesc::size`]: the size along every axis that is not
     /// stretched.
     pub size: LogicalSize,
+    /// The edge [`Reserve::OwnExtent`] reserves, or `None` for a panel that
+    /// reserves nothing.
+    pub edge: Option<PanelAnchor>,
+    /// Whether the shell accepted the panel as an appbar.
+    pub appbar: bool,
 }
 
 impl Panel {
-    pub(super) const fn new(desc: &PanelDesc<'_>, size: LogicalSize) -> Self {
+    pub(super) fn new(desc: &PanelDesc<'_>, size: LogicalSize) -> Self {
         Self {
             monitor: desc.monitor,
             layer: desc.layer,
@@ -62,6 +85,33 @@ impl Panel {
             margins: desc.margins,
             keyboard: desc.keyboard,
             size,
+            edge: match desc.reserve {
+                Reserve::OwnExtent => desc.reserved_edge(),
+                Reserve::None | Reserve::IgnoreOthers => None,
+            },
+            appbar: false,
+        }
+    }
+
+    /// How deep its appbar strip is, in pixels at `scale`: its extent across
+    /// the reserved edge, plus its margin on that edge.
+    fn depth(&self, edge: PanelAnchor, scale: f64) -> i32 {
+        let (extent, margin) = match edge {
+            PanelAnchor::BOTTOM => (self.size.height, self.margins.bottom),
+            PanelAnchor::LEFT => (self.size.width, self.margins.left),
+            PanelAnchor::RIGHT => (self.size.width, self.margins.right),
+            _ => (self.size.height, self.margins.top),
+        };
+        geometry::pixels(extent, scale).saturating_add(geometry::pixels(margin, scale))
+    }
+
+    /// The insets its margins are at `scale`.
+    fn insets(&self, scale: f64) -> Insets {
+        Insets {
+            top: geometry::pixels(self.margins.top, scale),
+            right: geometry::pixels(self.margins.right, scale),
+            bottom: geometry::pixels(self.margins.bottom, scale),
+            left: geometry::pixels(self.margins.left, scale),
         }
     }
 
@@ -72,13 +122,12 @@ impl Panel {
             Reserve::None | Reserve::OwnExtent => monitor.work_area,
         };
         let scale = monitor.scale_factor;
-        let insets = Insets {
-            top: geometry::pixels(self.margins.top, scale),
-            right: geometry::pixels(self.margins.right, scale),
-            bottom: geometry::pixels(self.margins.bottom, scale),
-            left: geometry::pixels(self.margins.left, scale),
-        };
-        geometry::panel_rect(area, self.anchor, self.size.to_physical(scale), insets)
+        geometry::panel_rect(
+            area,
+            self.anchor,
+            self.size.to_physical(scale),
+            self.insets(scale),
+        )
     }
 }
 
@@ -119,7 +168,7 @@ impl Win32Shell {
     pub(super) fn create_panel(
         &self,
         desc: &WindowDesc<'_>,
-        panel: &Panel,
+        panel: &mut Panel,
     ) -> Result<Created, ShellError> {
         let title = ffi::wide(desc.title).ok_or_else(|| {
             ShellError::InvalidDescriptor("title contains a NUL byte".to_string())
@@ -157,6 +206,12 @@ impl Win32Shell {
             return Err(ShellError::WindowCreation(format!(
                 "CreateWindowExW failed with Win32 error {error}"
             )));
+        }
+        if let Some(edge) = panel.edge {
+            panel.appbar = Self::register_appbar(hwnd);
+            if panel.appbar {
+                Self::place_appbar(hwnd, panel, &monitor, edge);
+            }
         }
         if matches!(panel.layer, PanelLayer::Bottom | PanelLayer::Background) {
             // SAFETY: this shell's own window; `HWND_BOTTOM` is the documented
@@ -212,6 +267,11 @@ impl Win32Shell {
 
     /// Places every panel again after the monitors changed, and asks each
     /// panel created for a monitor in `removed` to close.
+    ///
+    /// Except appbars, which the shell tells to move itself, with
+    /// `ABN_POSCHANGED`. Reserving moves the work area, which arrives here as
+    /// a monitor change, so an appbar placed again from here would reserve
+    /// again in answer to its own reservation.
     pub(super) fn place_panels(&mut self, removed: &[MonitorId]) {
         let panels: Vec<WindowId> = self
             .windows_iter()
@@ -230,7 +290,9 @@ impl Win32Shell {
                 self.close_requested(window);
                 continue;
             }
-            self.place_panel(window);
+            if !panel.appbar {
+                self.place_panel(window);
+            }
         }
     }
 
@@ -249,6 +311,10 @@ impl Win32Shell {
                 .and_then(|id| self.monitors.iter().find(|m| m.id == id).cloned()),
         };
         let Some(monitor) = monitor else { return };
+        if let (true, Some(edge)) = (panel.appbar, panel.edge) {
+            Self::place_appbar(hwnd, &panel, &monitor, edge);
+            return;
+        }
         let rect = panel.rect_on(&monitor);
         // SAFETY: this shell's own window; the z-order is left alone, and the
         // panel is not activated by being moved.
@@ -263,5 +329,69 @@ impl Win32Shell {
                 value::SWP_NO_Z_ORDER | value::SWP_NO_ACTIVATE,
             );
         }
+    }
+
+    /// Registers `hwnd` as an appbar, with [`msg::APP_BAR`] for its
+    /// notifications. `false`, with a warning, if the shell refuses.
+    fn register_appbar(hwnd: Handle) -> bool {
+        let mut data = AppBarData::new(hwnd);
+        data.callback_message = msg::APP_BAR;
+        // SAFETY: `data` is a live, self-describing `APPBARDATA` for this
+        // shell's own window.
+        let registered = unsafe { ffi::SHAppBarMessage(appbar::NEW, &raw mut data) } != 0;
+        if !registered {
+            crcbl_core::log::warn!(
+                "win32: the shell refused a reserving panel as an appbar; it reserves nothing"
+            );
+        }
+        registered
+    }
+
+    /// Reserves an appbar's strip of `monitor` and moves the window into it;
+    /// see the [module docs](self).
+    fn place_appbar(hwnd: Handle, panel: &Panel, monitor: &MonitorInfo, edge: PanelAnchor) {
+        let scale = monitor.scale_factor;
+        let depth = panel.depth(edge, scale);
+        let mut data = AppBarData::new(hwnd);
+        data.edge = match edge {
+            PanelAnchor::BOTTOM => appbar::EDGE_BOTTOM,
+            PanelAnchor::LEFT => appbar::EDGE_LEFT,
+            PanelAnchor::RIGHT => appbar::EDGE_RIGHT,
+            _ => appbar::EDGE_TOP,
+        };
+        data.rc = geometry::with_depth(geometry::rect_from(monitor.bounds), edge, depth);
+        // SAFETY: `data` is a live, self-describing `APPBARDATA` for this
+        // shell's registered appbar; each call writes `data.rc`.
+        unsafe {
+            ffi::SHAppBarMessage(appbar::QUERY_POS, &raw mut data);
+            data.rc = geometry::with_depth(data.rc, edge, depth);
+            ffi::SHAppBarMessage(appbar::SET_POS, &raw mut data);
+        }
+        let rect = geometry::panel_rect(
+            geometry::desktop_rect(data.rc),
+            panel.anchor,
+            panel.size.to_physical(scale),
+            panel.insets(scale),
+        );
+        // SAFETY: this shell's own window; the z-order is left alone.
+        unsafe {
+            ffi::SetWindowPos(
+                hwnd,
+                ptr::null_mut(),
+                rect.x,
+                rect.y,
+                i32::try_from(rect.width).unwrap_or(i32::MAX),
+                i32::try_from(rect.height).unwrap_or(i32::MAX),
+                value::SWP_NO_Z_ORDER | value::SWP_NO_ACTIVATE,
+            );
+        }
+    }
+
+    /// Gives an appbar's space back.
+    pub(super) fn remove_appbar(hwnd: Handle) {
+        let mut data = AppBarData::new(hwnd);
+        // SAFETY: `data` is a live, self-describing `APPBARDATA` for this
+        // shell's own appbar.
+        unsafe { ffi::SHAppBarMessage(appbar::REMOVE, &raw mut data) };
     }
 }

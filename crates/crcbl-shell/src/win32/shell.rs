@@ -347,7 +347,8 @@ impl Win32Shell {
             .union(ShellCaps::DRAG_DROP)
             .union(ShellCaps::TEXT_IME)
             .union(ShellCaps::TOUCH)
-            .union(ShellCaps::PANEL);
+            .union(ShellCaps::PANEL)
+            .union(ShellCaps::PANEL_RESERVE);
         if raw_motion {
             caps.union(ShellCaps::RAW_POINTER_MOTION)
         } else {
@@ -969,6 +970,13 @@ impl Win32Shell {
                     self.queue.push_back(ShellEvent::MonitorsChanged);
                 }
                 RawEvent::DeviceRemoved { device } => self.devices.remove(device),
+                RawEvent::AppBar { notification, .. } => {
+                    if let Some(window) = window
+                        && notification == super::ffi::appbar::POS_CHANGED
+                    {
+                        self.place_panel(window);
+                    }
+                }
 
                 // The input half, which needs the layout, the modifier snapshot
                 // and this shell's own surrogate and raw-motion state — see
@@ -1108,9 +1116,8 @@ impl Shell for Win32Shell {
     ///   never asked for them, so there is nothing to latch on.
     /// * [`PANEL`](ShellCaps::PANEL) — a frameless tool window placed by its
     ///   anchors; see [`panel`](super::panel).
-    ///   [`PANEL_RESERVE`](ShellCaps::PANEL_RESERVE) is clear until reserving
-    ///   panels are appbars, so an `OwnExtent` panel is built and reserves
-    ///   nothing, as on macOS.
+    /// * [`PANEL_RESERVE`](ShellCaps::PANEL_RESERVE) — a reserving panel is an
+    ///   appbar, which is how the taskbar reserves its edge too.
     ///
     /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) is clear for a reason rather than
     /// for want of work — a plain `HWND` presents at its own size, and the
@@ -1179,11 +1186,11 @@ impl Shell for Win32Shell {
                 .or_else(|| self.monitors.first())
                 .cloned(),
         };
-        let panel = match desc.role {
+        let mut panel = match desc.role {
             crate::WindowRole::Panel(panel) => Some(Panel::new(&panel, desc.size)),
             _ => None,
         };
-        let created = match &panel {
+        let created = match &mut panel {
             Some(panel) => self.create_panel(desc, panel)?,
             None => self.create_native_window(desc, target.as_ref())?,
         };
@@ -1243,6 +1250,9 @@ impl Shell for Win32Shell {
         self.shared.forget(removed.key);
         self.drop_clipboard_answers(window);
         self.forget_input(window);
+        if removed.panel.is_some_and(|panel| panel.appbar) {
+            Self::remove_appbar(removed.raw());
+        }
         // The pool entry is gone **before** the system call, deliberately:
         // `DestroyWindow` dispatches `WM_DESTROY` into the window procedure
         // synchronously, and the `RawEvent::Destroyed` that produces must not
@@ -1879,6 +1889,12 @@ impl Drop for Win32Shell {
             .iter()
             .map(|(_, window)| window.raw())
             .collect();
+        // The work area an appbar reserved outlives its window otherwise.
+        for (_, window) in self.windows.iter() {
+            if window.panel.is_some_and(|panel| panel.appbar) {
+                Self::remove_appbar(window.raw());
+            }
+        }
         for hwnd in windows {
             // SAFETY: destroying this shell's own windows from the thread that
             // created them — a `Shell` is not `Send`, so this is that thread.

@@ -741,6 +741,7 @@ impl Win32Shell {
             | RawEvent::FilesDropped { .. }
             | RawEvent::MonitorsChanged
             | RawEvent::Preedit { .. }
+            | RawEvent::AppBar { .. }
             | RawEvent::DeviceRemoved { .. } => {}
         }
     }

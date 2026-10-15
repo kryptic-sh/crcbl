@@ -129,7 +129,12 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      in the monitor's work area (`Reserve::None`) or its bounds
      (`IgnoreOthers`), on the monitor asked for or the one under the pointer
      (S8's centred launcher is an unanchored panel). It is placed again after a
-     display or DPI change, and closed when its monitor is unplugged.
+     display, DPI or work-area change (`WM_SETTINGCHANGE` with
+     `SPI_SETWORKAREA`), and closed when its monitor is unplugged.
+     `Reserve::OwnExtent` is an appbar (S4): `ABM_NEW`, then
+     `ABM_QUERYPOS`/`ABM_SETPOS` on a strip as deep as the extent plus the
+     margin on that edge, again on `ABN_POSCHANGED`, and `ABM_REMOVE` on destroy
+     and on drop.
    - Decided: hover without activation (lyr item 9) is `WS_EX_NOACTIVATE` plus
      showing with `SW_SHOWNOACTIVATE`, not a `WM_MOUSEACTIVATE` answer. Mouse
      messages reach a window that is not active anyway, and the style also
@@ -137,20 +142,20 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      `SetForegroundWindow` when shown, and a refusal is logged and visible to
      the program as a `Focus` that never arrives (pikr item 9). Whether a richer
      report is wanted is pikr's call.
-   - **Verified so far:** `panel_styles`, `panel_rect` and `pixels` unit tests
-     on the Windows host. The real-desktop tests in `win32/shell/tests.rs`
-     (`a_bar_is_a_topmost_tool_window_…`, `a_launcher_is_centred_…`,
-     `a_bottom_layer_panel_is_not_topmost`) are `#[ignore]`d like the rest of
-     that file and run only in CI's `win32 e2e (real desktop)` job.
-   - Still to do: appbars for `OwnExtent` (S4), which sets `PANEL_RESERVE`:
-     `ABE_TOP` for `TOP | LEFT | RIGHT`, `ABN_POSCHANGED` kept internal,
-     `ABN_FULLSCREENAPP` as an event (lyr item 7), and `ABM_REMOVE` on drop and
-     from a crash-safe path, because a skipped `ABM_REMOVE` keeps the work area
-     reserved until Explorer restarts. A work area that changes without a
-     display change (`WM_SETTINGCHANGE` with `SPI_SETWORKAREA`) does not move
-     panels yet. `PanelLayer::Overlay` and `Top` share the topmost band, and
-     `Background` cannot go below the desktop icons; both are platform limits,
-     written down in `win32/panel.rs`.
+   - **Verified so far:** `panel_styles`, `panel_rect`, `pixels` and
+     `with_depth` unit tests on the Windows host. The real-desktop tests in
+     `win32/shell/tests.rs` (`a_bar_is_a_topmost_tool_window_…`,
+     `a_launcher_is_centred_…`, `a_bottom_layer_panel_is_not_topmost`,
+     `a_reserving_bar_is_an_appbar_…`) are `#[ignore]`d like the rest of that
+     file and run only in CI's `win32 e2e (real desktop)` job.
+   - Still to do: `ABN_FULLSCREENAPP` as an event (lyr item 7), which needs a
+     seam event; `ABM_ACTIVATE` and `ABM_WINDOWPOSCHANGED`, which the appbar
+     documentation asks for and which matter to auto-hide appbars; and a
+     crash-safe `ABM_REMOVE`, because a process killed without it keeps the work
+     area reserved until Explorer restarts (a panic is covered, through `Drop`).
+     `PanelLayer::Overlay` and `Top` share the topmost band, and `Background`
+     cannot go below the desktop icons; both are platform limits, written down
+     in `win32/panel.rs`.
    - Transparency: per-pixel alpha with a Vulkan or D3D12 swapchain likely means
      DirectComposition (lyr item 11), with no DWM border, shadow or rounded
      corner fighting the app's own (pikr item 7).

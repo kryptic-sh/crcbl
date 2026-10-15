@@ -164,6 +164,24 @@ pub fn pixels(logical: f64, scale: f64) -> i32 {
     (logical * scale).round().clamp(0.0, f64::from(i32::MAX)) as i32
 }
 
+/// `rect` cut to `depth` from its `edge`: the far side is moved and the side
+/// against the edge is kept.
+///
+/// What an appbar does twice: once to propose a strip of its monitor, and
+/// again after `ABM_QUERYPOS`, which may have moved the near side off the
+/// taskbar or another appbar and left the far side wherever it put it.
+#[must_use]
+pub fn with_depth(rect: Rect, edge: PanelAnchor, depth: i32) -> Rect {
+    let mut rect = rect;
+    match edge {
+        PanelAnchor::BOTTOM => rect.top = rect.bottom.saturating_sub(depth),
+        PanelAnchor::LEFT => rect.right = rect.left.saturating_add(depth),
+        PanelAnchor::RIGHT => rect.left = rect.right.saturating_sub(depth),
+        _ => rect.bottom = rect.top.saturating_add(depth),
+    }
+    rect
+}
+
 /// Where a panel of `size` goes in `area`: `insets` away from each edge it is
 /// anchored to, stretched between two opposite anchored edges, and centred on
 /// an axis anchored to neither. That is `wlr-layer-shell`'s placement, which
@@ -446,6 +464,24 @@ mod tests {
             let styles = panel_styles(PanelLayer::Top, keyboard);
             assert_eq!(styles.ex_style & style::EX_NO_ACTIVATE, 0, "{keyboard:?}");
         }
+    }
+
+    #[test]
+    fn a_depth_moves_the_far_side_and_keeps_the_edge() {
+        let monitor = Rect {
+            left: -1920,
+            top: 40,
+            right: 0,
+            bottom: 1080,
+        };
+        let cut = |edge, depth| {
+            let rect = with_depth(monitor, edge, depth);
+            (rect.left, rect.top, rect.right, rect.bottom)
+        };
+        assert_eq!(cut(PanelAnchor::TOP, 30), (-1920, 40, 0, 70));
+        assert_eq!(cut(PanelAnchor::BOTTOM, 30), (-1920, 1050, 0, 1080));
+        assert_eq!(cut(PanelAnchor::LEFT, 48), (-1920, 40, -1872, 1080));
+        assert_eq!(cut(PanelAnchor::RIGHT, 48), (-48, 40, 0, 1080));
     }
 
     #[test]

@@ -305,8 +305,17 @@ pub enum RawEvent {
         /// `GetMessageTime` milliseconds.
         millis: u32,
     },
-    /// `WM_DISPLAYCHANGE` — a monitor was plugged, unplugged or reconfigured.
+    /// `WM_DISPLAYCHANGE` — a monitor was plugged, unplugged or reconfigured
+    /// — or `WM_SETTINGCHANGE` for a work area that moved.
     MonitorsChanged,
+    /// An `ABN_*` notification to an appbar, in the callback message it was
+    /// registered with.
+    AppBar {
+        /// `HWND` as an integer.
+        hwnd: isize,
+        /// The `ABN_*` code.
+        notification: u32,
+    },
 }
 
 impl RawEvent {
@@ -330,6 +339,7 @@ impl RawEvent {
             | Self::RawMotion { hwnd, .. }
             | Self::RawKey { hwnd, .. }
             | Self::Preedit { hwnd, .. }
+            | Self::AppBar { hwnd, .. }
             | Self::FilesDropped { hwnd, .. } => Some(hwnd),
             Self::MonitorsChanged | Self::DeviceRemoved { .. } => None,
         }
@@ -742,6 +752,15 @@ mod tests {
             Some(B),
             "a drop's marker has to name its window, because that is what the \
              payload is matched by"
+        );
+        assert_eq!(
+            RawEvent::AppBar {
+                hwnd: B,
+                notification: 1
+            }
+            .hwnd(),
+            Some(B),
+            "an appbar notification is placed against its own window"
         );
         assert_eq!(RawEvent::MonitorsChanged.hwnd(), None);
     }

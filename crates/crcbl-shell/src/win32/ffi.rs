@@ -176,6 +176,38 @@ impl Rect {
     }
 }
 
+/// `APPBARDATA`: what every `SHAppBarMessage` call reads and writes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct AppBarData {
+    /// The structure's own size, which the shell checks.
+    pub cb_size: u32,
+    /// The appbar's window.
+    pub hwnd: Handle,
+    /// The message the shell sends the appbar its `ABN_*` notifications in.
+    pub callback_message: u32,
+    /// An `ABE_*` edge.
+    pub edge: u32,
+    /// The appbar's rectangle, in desktop pixels.
+    pub rc: Rect,
+    /// Message-specific.
+    pub l_param: Lparam,
+}
+
+impl AppBarData {
+    /// One for `hwnd`, with every other field zero.
+    pub fn new(hwnd: Handle) -> Self {
+        Self {
+            cb_size: size_of::<Self>() as u32,
+            hwnd,
+            callback_message: 0,
+            edge: 0,
+            rc: Rect::default(),
+            l_param: 0,
+        }
+    }
+}
+
 /// `POINT`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -930,6 +962,32 @@ pub mod style {
     pub const EX_ACCEPT_FILES: u32 = 0x0000_0010;
 }
 
+/// `SHAppBarMessage`'s messages, edges and notifications.
+pub mod appbar {
+    /// `ABM_NEW`: registers an appbar and its callback message.
+    pub const NEW: u32 = 0x0000_0000;
+    /// `ABM_REMOVE`: gives the appbar's space back.
+    pub const REMOVE: u32 = 0x0000_0001;
+    /// `ABM_QUERYPOS`: asks where a proposed rectangle may go, which moves it
+    /// clear of the taskbar and every other appbar on that edge.
+    pub const QUERY_POS: u32 = 0x0000_0002;
+    /// `ABM_SETPOS`: reserves the rectangle.
+    pub const SET_POS: u32 = 0x0000_0003;
+
+    /// `ABE_LEFT`.
+    pub const EDGE_LEFT: u32 = 0;
+    /// `ABE_TOP`.
+    pub const EDGE_TOP: u32 = 1;
+    /// `ABE_RIGHT`.
+    pub const EDGE_RIGHT: u32 = 2;
+    /// `ABE_BOTTOM`.
+    pub const EDGE_BOTTOM: u32 = 3;
+
+    /// `ABN_POSCHANGED`: the taskbar or another appbar moved, so this one has
+    /// to ask for its place again.
+    pub const POS_CHANGED: u32 = 0x0000_0001;
+}
+
 /// The messages the window procedure recognizes.
 pub mod msg {
     /// `WM_DESTROY`.
@@ -952,6 +1010,14 @@ pub mod msg {
     pub const GET_MIN_MAX_INFO: u32 = 0x0024;
     /// `WM_DISPLAYCHANGE`.
     pub const DISPLAY_CHANGE: u32 = 0x007E;
+    /// `WM_SETTINGCHANGE` — a system parameter changed. With
+    /// [`SPI_SET_WORK_AREA`](super::value::SPI_SET_WORK_AREA) it is a monitor's
+    /// work area moving: the taskbar, or an appbar coming or going.
+    pub const SETTING_CHANGE: u32 = 0x001A;
+    /// `WM_APP + 1`: what this backend registers appbars with, so the shell's
+    /// `ABN_*` notifications arrive as this message, with the notification in
+    /// `wParam`.
+    pub const APP_BAR: u32 = 0x8001;
     /// `WM_NCCREATE`.
     pub const NC_CREATE: u32 = 0x0081;
     /// `WM_NCDESTROY`.
@@ -1097,6 +1163,9 @@ pub mod value {
     pub const MONITOR_PRIMARY: u32 = 0x0000_0001;
     /// `MONITOR_DEFAULTTONEAREST`.
     pub const MONITOR_DEFAULT_TO_NEAREST: u32 = 0x0000_0002;
+
+    /// `SPI_SETWORKAREA`, as `WM_SETTINGCHANGE`'s `wParam`.
+    pub const SPI_SET_WORK_AREA: usize = 0x002F;
 
     /// `MDT_EFFECTIVE_DPI` — the scale the *user* chose, which is the one every
     /// other window on the desktop is laid out at.
@@ -1673,6 +1742,9 @@ unsafe extern "system" {
     // Sets or clears `WS_EX_ACCEPTFILES`; see `style::EX_ACCEPT_FILES` for why
     // that matters to anything that rewrites the extended style word.
     pub fn DragAcceptFiles(hwnd: Handle, accept: Bool32);
+    // Returns a message-specific value; `ABM_NEW` and `ABM_REMOVE` answer
+    // `TRUE` on success, and `ABM_QUERYPOS` and `ABM_SETPOS` write `data.rc`.
+    pub fn SHAppBarMessage(message: u32, data: *mut AppBarData) -> usize;
     // With `DRAG_QUERY_COUNT` it answers the number of files and writes
     // nothing; with an index and a null buffer it answers the length in
     // characters, excluding the terminator; with an index and a buffer it
