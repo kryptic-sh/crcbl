@@ -104,7 +104,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      input region; `Grab` is `xdg_popup.grab` with the seat's latest input
      serial, and `NeedsUserInteraction` when no seat has one; `popup_done` is a
      `CloseRequested`. Popups are destroyed before their parent, in
-     `destroy_window` and in `Drop`. Its e2e tests
+     `destroy_window` and in `Drop`. A click on the program's own window does
+     not end a Wayland grab (wlroots ends it only outside every surface of the
+     client), while Win32 and AppKit dismiss a grab on such a click because the
+     keyboard moves; programs close their menus on their own clicks, and a seam
+     rule that made the backends agree is not decided. Its e2e tests
      (`a_menu_opens_at_its_size_…`, `a_panel_opens_a_popup`,
      `a_grabbing_popup_is_dismissed_…`) run only under sway in CI. Not checked:
      where the compositor put the popup (`xdg_popup.configure`'s position is not

@@ -3477,7 +3477,15 @@ fn a_grabbing_popup_is_dismissed_by_a_click_outside_it() {
     session.settle(Duration::from_millis(200));
     session.take_names();
 
-    input.move_to(1500, 900, LAYOUT_SIZE);
+    // On the empty second output: a grab ends on a click outside **every**
+    // surface of the client. A click on the program's own window reaches that
+    // window and leaves the grab alone, which is wlroots' rule and the
+    // protocol's intent.
+    input.move_to(
+        OUTPUT_SIZE.width + SECOND_OUTPUT_SIZE.width / 2,
+        SECOND_OUTPUT_SIZE.height / 2,
+        LAYOUT_SIZE,
+    );
     input.button(evdev::BTN_LEFT, true);
     input.button(evdev::BTN_LEFT, false);
     session.pump_until("the menu's dismissal", |session| {

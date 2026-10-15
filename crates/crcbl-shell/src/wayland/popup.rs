@@ -17,8 +17,12 @@
 //! surface's default; `Grab` sends `xdg_popup.grab` with the serial of the
 //! seat's latest input, which the compositor checks, and which is why a grab
 //! needs a user's input to have happened first. A grabbing popup is dismissed
-//! by a click outside it, and the compositor's `popup_done` arrives as a
-//! [`CloseRequested`](crate::ShellEvent::CloseRequested).
+//! by a click outside every surface of this program, and the compositor's
+//! `popup_done` arrives as a
+//! [`CloseRequested`](crate::ShellEvent::CloseRequested). **A click on the
+//! program's own window is that window's**, delivered to it with the grab left
+//! in place: a program closes its menu on that click itself. Win32 and AppKit
+//! dismiss on it, because there the click moves the keyboard.
 
 use crate::{
     LogicalRect, PointerMode, PopupDesc, PopupInput, PopupPlacement, ShellBackend, ShellError,
