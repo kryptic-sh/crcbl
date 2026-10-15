@@ -8,19 +8,17 @@
 //! allowed to know a render pass exists, so the module is contributed by the
 //! system it reports on.
 //!
-//! Every renderer in this crate says what it recorded —
-//! [`SpriteRenderer::counters`](crate::sprite_pass::SpriteRenderer::counters),
-//! [`UiRenderer::counters`](crate::ui_pass::UiRenderer::counters) and
-//! [`ForwardRenderer::counters`](crate::forward::ForwardRenderer::counters) —
-//! and a caller [`plus`](FrameCounters::plus)es them into one, exactly as it
-//! sums their `MAX_PASSES` into
-//! [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES). A number is produced
-//! once, by whichever renderer wrote the draw.
+//! Every renderer says what it recorded —
+//! [`UiRenderer::counters`](crate::ui_pass::UiRenderer::counters) here, and
+//! `crcbl_render`'s `SpriteRenderer::counters` and `ForwardRenderer::counters`
+//! — and a caller [`plus`](FrameCounters::plus)es them into one, exactly as it
+//! sums their `MAX_PASSES` for [`PassTimers`](crate::timing::PassTimers). A
+//! number is produced once, by whichever renderer wrote the draw.
 //!
 //! # A counter is either a number the frame has or nothing at all
 //!
 //! Three of the five are [`Option`], and that is the whole design. A pass that
-//! draws **indirectly** — every pass a [`ForwardRenderer`](crate::ForwardRenderer)
+//! draws **indirectly** — every pass a `ForwardRenderer`
 //! adds — has its instance count and its index count in a buffer
 //! `draw_gen.slang` wrote on the GPU; the CPU records the call and does not know
 //! what it covers. So those counters report [`None`] and the row says
@@ -38,8 +36,8 @@
 //!
 //! [`drawn`](FrameCounters::drawn) is a number on the GPU-driven path now, and
 //! it is the plan's culling win: `cull.slang`'s survivor count, copied out of
-//! [`DrawGen::visible_count`](crate::draw_gen::DrawGen::visible_count) by a pass
-//! the render graph schedules and read off [`crate::cull_stats`]'s delayed ring.
+//! `DrawGen::visible_count` by a pass
+//! the render graph schedules and read off `crcbl_render::cull_stats`'s delayed ring.
 //! **It is about an older frame than everything beside it**, and
 //! [`cull_frame`](FrameCounters::cull_frame) is how a reader can tell: it is the
 //! frame the readback came from, and it is [`None`] on a frame whose counters
@@ -52,7 +50,7 @@
 //!   previous frame's, uniformly — see below.
 //! - `instances drawn` and `clusters drawn` carry the GPU's answer from the
 //!   frame named in `cull frame`, which is a few frames older again — how many
-//!   is the device's to decide, since [`crate::cull_stats`] reports a readback
+//!   is the device's to decide, since `crcbl_render::cull_stats` reports a readback
 //!   when it answers rather than on a fixed schedule, and `cull frame` is what
 //!   says which frame it really was.
 //!
@@ -92,7 +90,7 @@ pub struct FrameCounters {
     /// Instances the frame submitted to be drawn or culled.
     ///
     /// Also always known: a sprite pass uploads its instances and a
-    /// [`ForwardRenderer`](crate::ForwardRenderer) knows how many live
+    /// `ForwardRenderer` knows how many live
     /// instances its pool holds, which is what the cull dispatch is given.
     pub instances: u64,
     /// Instances the recorded draws actually cover, or [`None`] where nothing
@@ -103,7 +101,7 @@ pub struct FrameCounters {
     /// deliberately so — that is the true answer, not a placeholder.
     ///
     /// On the GPU-driven path this is what the cull kept, off
-    /// [`crate::cull_stats`]'s ring, and therefore a number about the frame
+    /// `crcbl_render::cull_stats`'s ring, and therefore a number about the frame
     /// [`cull_frame`](Self::cull_frame) names. [`None`] there means the ring has
     /// not come round yet, or the device would not give one — see the module
     /// docs.
@@ -132,7 +130,7 @@ pub struct FrameCounters {
     /// back from, where either came off the GPU.
     ///
     /// [`None`] on a frame whose counters are entirely the CPU's own, which is
-    /// every frame with no [`ForwardRenderer`](crate::ForwardRenderer) in it —
+    /// every frame with no `ForwardRenderer` in it —
     /// there is no second lag to declare, so there is no row.
     pub cull_frame: Option<u64>,
 }

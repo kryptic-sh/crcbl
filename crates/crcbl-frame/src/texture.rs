@@ -39,9 +39,9 @@
 //! This is a **startup** path, not a frame path: it records its own barriers
 //! and blocks on [`Device::wait_idle`], which is only legal because no graph
 //! is being recorded while it runs. See this crate's docs on the one rule — the
-//! two staging uploads ([`crate::forward`]'s cube and this) are its named
+//! two staging uploads (`crcbl_render::forward`'s cube and this) are its named
 //! exceptions. Its barriers name only the image it creates, so a caller between
-//! two frames — [`ForwardRenderer::replace_page`](crate::forward::ForwardRenderer::replace_page)
+//! two frames — `ForwardRenderer::replace_page`
 //! reloading a page — touches nothing a frame in flight reads, and the wait
 //! means no frame can bind the image before its copy has landed.
 //!
@@ -143,7 +143,7 @@ pub fn upload_texture(
 /// than one descriptor per texture is what makes the lookup need no
 /// [`Features::DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING),
 /// and therefore run on every backend the engine has — see
-/// [`crate::forward`], which builds the page this crate's only caller binds.
+/// `crcbl_render::forward`, which builds the page this crate's only caller binds.
 ///
 /// Every slice in `layers` must be exactly one tightly packed
 /// `width * height * texel_size` image, and they become layers 0, 1, … in the
@@ -673,8 +673,9 @@ fn create_staging(
 /// The frame-time half of what [`upload_texture`] does at start-up, without the
 /// image, the barriers or the wait: the caller records the copy inside a
 /// [`RenderGraph`](crate::graph::RenderGraph) copy pass, which is where a
-/// barrier recorded during a frame belongs. `crate::ui_pass`'s image atlas is
-/// the caller, and it owns the buffer's lifetime.
+/// barrier recorded during a frame belongs. [`ui_pass`](crate::ui_pass)'s image
+/// atlas and `crcbl_render`'s sprite atlas are the callers, and each owns the
+/// buffer's lifetime.
 ///
 /// # Errors
 ///
@@ -682,7 +683,7 @@ fn create_staging(
 /// the region is empty or if `pixels` is not exactly `width * height` texels;
 /// [`HalError`] from creating or writing the buffer, which is destroyed again
 /// if the write fails.
-pub(crate) fn stage_region(
+pub fn stage_region(
     device: &dyn Device,
     label: &str,
     format: Format,

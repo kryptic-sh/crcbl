@@ -134,7 +134,7 @@ impl TextureGroups {
     /// The group binding `view` for a frame in `slot`, built on first use.
     ///
     /// [`None`] when the device refused it, logged: the draw is skipped, as
-    /// [`crate::bind_group_cache`]'s groups skip theirs.
+    /// `crcbl_render::bind_group_cache`'s groups skip theirs.
     pub(super) fn group(
         &self,
         device: &dyn Device,

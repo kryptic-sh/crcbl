@@ -1116,7 +1116,7 @@ impl Passes {
 
 /// One `Rgba8Unorm` target of `extent`, sampled by the pass after it.
 ///
-/// `crcbl_render::TransientImageDesc::ambient_occlusion`'s format: `r` the
+/// `crcbl::render::targets::ambient_occlusion`'s format: `r` the
 /// visibility scalar and `gba` the bent direction. The extent is a parameter
 /// because the chain has two: the gather and the blur write
 /// [`OCCLUSION_EXTENT`] and the reconstruction writes [`EXTENT`].
@@ -1242,7 +1242,7 @@ struct Measured {
 
 /// Bytes one texel of the occlusion channel holds.
 ///
-/// `crcbl_render::TransientImageDesc::ambient_occlusion` is `Rgba8Unorm`: `r`
+/// `crcbl::render::targets::ambient_occlusion` is `Rgba8Unorm`: `r`
 /// the visibility scalar and `gba` the bent direction. Named because it is the
 /// stride of every readback below and the divisor of every row pitch, and a
 /// four spelled at each of those is four places to miss when the channel next
@@ -1431,7 +1431,7 @@ fn run_passes(
             format: Format::D32Float,
             mip_levels: 1,
             samples: 1,
-            // `crcbl_render::TransientImageDesc::scene_depth`'s pair, plus the
+            // `crcbl::render::targets::scene_depth`'s pair, plus the
             // transfer this fills it through. The attachment usage is carried
             // even though nothing renders into it here: it is what the shipping
             // image is created with, and an image created with a different

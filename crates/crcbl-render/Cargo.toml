@@ -1,6 +1,6 @@
 [package]
 name = "crcbl-render"
-description = "Crucible renderer: render graph, frame loop, meshes, materials"
+description = "Crucible renderer: the 3D frame on crcbl-frame — meshes, materials, lights, effects"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,6 +19,9 @@ crcbl-core = { workspace = true }
 # at all.
 crcbl-console = { workspace = true }
 crcbl-hal = { workspace = true }
+# The render graph, the transient pool, the texture uploads, the pass timers
+# and the UI pass, which this crate's 3D frame is built on and re-exports.
+crcbl-frame = { workspace = true }
 # The camera's projection matrices, and nothing else. §1.1 already lists glam as
 # a workspace dependency for exactly this.
 glam = { workspace = true }
@@ -76,10 +79,11 @@ crcbl-sprite = { workspace = true, features = ["bake"] }
 # by default** for the reason that crate's manifest gives: a browser build pays
 # for it whether or not it draws a parsed glyph. The UI pass owns a `GlyphAtlas`
 # either way; without the feature nothing can reach it with a font, so it stays
-# empty. This crate draws no parsed text of its own, so
-# what turns on here is `ui_pass`'s glyph-page tests; `crcbl`'s `parsed-font`
-# forwards through this one as well as to `crcbl-ui` directly.
-parsed-font = ["crcbl-ui/parsed-font"]
+# empty. This crate draws no parsed text of its own; it forwards to
+# `crcbl-frame`, whose UI pass's glyph-page tests are what the feature turns on,
+# and `crcbl`'s `parsed-font` forwards through this one as well as to
+# `crcbl-ui` directly.
+parsed-font = ["crcbl-frame/parsed-font", "crcbl-ui/parsed-font"]
 
 [lints]
 workspace = true

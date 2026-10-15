@@ -1512,7 +1512,7 @@ fn render_probe(
         );
         let depth = graph.create_image(
             "probe-depth",
-            crcbl::render::TransientImageDesc::scene_depth(MESH_EXTENT),
+            crcbl::render::targets::scene_depth(MESH_EXTENT),
         );
         // Declared so the graph gives the placeholder atlas a shader-read
         // layout before the set is bound. Nothing samples it — see the field —
@@ -1554,17 +1554,15 @@ fn render_probe(
         // is the real transient rather than a lookalike declared here.
         let reflectivity = graph.create_image(
             "probe-reflectivity",
-            crcbl::render::TransientImageDesc::reflectivity(MESH_EXTENT),
+            crcbl::render::targets::reflectivity(MESH_EXTENT),
         );
         // `mesh.slang`'s third output, on the second's terms exactly: the
         // pipeline above names a target for it, so the pass has to attach one.
         // Nothing here reads it back — the block above says why every texel of
         // it is zero — but an attachment the pipeline declares and the pass does
         // not provide is the validation error this file exists to not have.
-        let motion = graph.create_image(
-            "probe-motion",
-            crcbl::render::TransientImageDesc::motion(MESH_EXTENT),
-        );
+        let motion =
+            graph.create_image("probe-motion", crcbl::render::targets::motion(MESH_EXTENT));
         graph
             .add_render_pass("probe")
             .clear_color(target, PROBE_CLEAR)
@@ -1681,7 +1679,7 @@ fn render_probe(
         color: crcbl_golden::Image::from_readback(width, height, &pixels, order)
             .expect("one image"),
         // `Rgba` whatever the swapchain carries: this attachment's format is
-        // `TransientImageDesc::reflectivity`'s, not the presentation surface's.
+        // `crcbl::render::targets::reflectivity`'s, not the presentation surface's.
         reflectivity: crcbl_golden::Image::from_readback(
             width,
             height,

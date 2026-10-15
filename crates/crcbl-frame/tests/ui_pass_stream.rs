@@ -19,14 +19,14 @@
 // `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
 #![cfg(not(target_arch = "wasm32"))]
 
+use crcbl_frame::UiRenderer;
+use crcbl_frame::graph::{ImportedImage, InitialClaim, RenderGraph};
+use crcbl_frame::transient::TransientPool;
 use crcbl_hal::null::{Command, NullInstance, Recorder};
 use crcbl_hal::{
     CommandEncoderDesc, Device, DeviceDesc, Features, Format, ImageUsage, Instance, QueueHandle,
     QueueKind, ResourceState,
 };
-use crcbl_render::UiRenderer;
-use crcbl_render::graph::{ImportedImage, InitialClaim, RenderGraph};
-use crcbl_render::transient::TransientPool;
 use crcbl_ui::draw_list::DrawList;
 use crcbl_ui::text::FontAtlas;
 
@@ -157,7 +157,7 @@ fn record_one_frame(preset: Preset) -> Vec<Command> {
     let swap = graph.import_image("swapchain", target);
     // This file is about the command stream one segment records, and an uncut
     // draw list is one segment. A paused frame's two halves are asserted in
-    // `crcbl_render::ui_pass`'s own tests.
+    // `crcbl_frame::ui_pass`'s own tests.
     renderer.add_passes(&mut graph, swap, EXTENT);
     let compiled = graph.compile(&pool).expect("a legal frame");
 
@@ -199,7 +199,7 @@ fn the_pass_records_no_push_constant_even_where_they_exist() {
         vec![
             // The graph's own transition into the colour-attachment state, and
             // the one back to `Present` at the end. Both are the graph's, not
-            // this pass's; see `crcbl_render`'s "one rule".
+            // this pass's; see `crcbl_frame`'s "one rule".
             "Barrier",
             "BeginRenderPass",
             "SetViewport",
@@ -225,7 +225,7 @@ fn the_pass_records_no_push_constant_even_where_they_exist() {
 ///
 /// The bind is identical too — same slot, no dynamic offsets. The uniform buffer
 /// is bound whole, which is why `dynamic_offsets` is empty rather than `[0]`;
-/// see `crcbl_render::ui_pass`'s docs.
+/// see `crcbl_frame::ui_pass`'s docs.
 #[test]
 fn a_device_without_push_constants_records_the_same_frame() {
     let with = record_one_frame(Preset::WithPushConstants);

@@ -2147,10 +2147,8 @@ impl View {
         let color_partitions = passes.color_partitions.clone();
         let group = self.mesh_groups[frame];
 
-        let scene_color =
-            graph.create_image("scene-color", TransientImageDesc::scene_color(extent));
-        let scene_depth =
-            graph.create_image("scene-depth", TransientImageDesc::scene_depth(extent));
+        let scene_color = graph.create_image("scene-color", crate::targets::scene_color(extent));
+        let scene_depth = graph.create_image("scene-depth", crate::targets::scene_depth(extent));
         // The occlusion chain's transients, and **every one of them is
         // conditional**: a transient nothing reads or writes is a physical image
         // taken out of the pool for a pass that does not exist. What the forward
@@ -2168,11 +2166,9 @@ impl View {
         // frame it was before this became a chain.
         let occlusion_chain = effects.contains(RenderEffects::AMBIENT_OCCLUSION).then(|| {
             let gathered = crate::ssao::half_extent(extent);
-            let blurred = graph.create_image(
-                "ssao-blurred",
-                TransientImageDesc::ambient_occlusion(gathered),
-            );
-            let raw = graph.create_image("ssao", TransientImageDesc::ambient_occlusion(gathered));
+            let blurred =
+                graph.create_image("ssao-blurred", crate::targets::ambient_occlusion(gathered));
+            let raw = graph.create_image("ssao", crate::targets::ambient_occlusion(gathered));
             // The second blur's target, and requested **last of the small ones**
             // so the two above keep the physical images they had before this one
             // could be asked for — the pool hands them out in request order, and
@@ -2180,7 +2176,7 @@ impl View {
             let again = (passes.ssao_blurs > 1).then(|| {
                 graph.create_image(
                     "ssao-blurred-2",
-                    TransientImageDesc::ambient_occlusion(gathered),
+                    crate::targets::ambient_occlusion(gathered),
                 )
             });
             // The reconstruction's target, and the only one of these at the
@@ -2188,10 +2184,8 @@ impl View {
             // inverted: it is a different description, so it could not have
             // aliased them whatever the order, and asking for it last leaves
             // every request before it where it was.
-            let upsampled = graph.create_image(
-                "ssao-upsampled",
-                TransientImageDesc::ambient_occlusion(extent),
-            );
+            let upsampled =
+                graph.create_image("ssao-upsampled", crate::targets::ambient_occlusion(extent));
             crate::ssao::OcclusionImages {
                 raw,
                 blurred,
@@ -2206,24 +2200,20 @@ impl View {
         // images it had before this rung existed — the pool hands them out in
         // request order.
         let contact_mask = effects.contains(RenderEffects::CONTACT_SHADOWS).then(|| {
-            graph.create_image(
-                "contact-shadows",
-                TransientImageDesc::contact_shadows(extent),
-            )
+            graph.create_image("contact-shadows", crate::targets::contact_shadows(extent))
         });
         // **Created whatever the reflections are doing**, unlike the pair above.
         // It is one of the forward pass's colour attachments, which is in that
         // pipeline whether or not anything reads what it wrote — see the
         // `clear_color` on it below.
-        let reflectivity =
-            graph.create_image("reflectivity", TransientImageDesc::reflectivity(extent));
+        let reflectivity = graph.create_image("reflectivity", crate::targets::reflectivity(extent));
         // **Created whatever else the frame is doing**, on the reflectivity
         // attachment's terms exactly: it is the forward pass's third colour
         // attachment, which is in that pipeline whether or not anything reads
         // what it wrote. Nothing does yet — TAA (`docs/backlog.md`) is the
         // first pass that will, and until then `DebugView::Motion`
         // is what observes the subtraction.
-        let motion = graph.create_image("motion", TransientImageDesc::motion(extent));
+        let motion = graph.create_image("motion", crate::targets::motion(extent));
         // The march's output and the blur's, and both are the scene target's
         // description exactly. The blur writes the scene colour plus a term, so
         // a narrower image there would tonemap a truncated frame; the march
@@ -2233,8 +2223,8 @@ impl View {
         // see `TransientPool::image`.
         let reflected = effects.contains(RenderEffects::REFLECTIONS).then(|| {
             (
-                graph.create_image("reflection", TransientImageDesc::scene_color(extent)),
-                graph.create_image("scene-reflected", TransientImageDesc::scene_color(extent)),
+                graph.create_image("reflection", crate::targets::scene_color(extent)),
+                graph.create_image("scene-reflected", crate::targets::scene_color(extent)),
             )
         });
         // Where the froxel volume's composite writes, conditional on the effect
@@ -2247,7 +2237,7 @@ impl View {
         // the air in front of the scene — see [`crate::volumetric`] — so a
         // frame with an atmosphere composites whether or not its fog does.
         let fogged = (effects.contains(RenderEffects::VOLUMETRIC_FOG) || self.frame_aerial)
-            .then(|| graph.create_image("scene-fogged", TransientImageDesc::scene_color(extent)));
+            .then(|| graph.create_image("scene-fogged", crate::targets::scene_color(extent)));
         // The Hi-Z pyramid's levels, **conditional on the march** that is the
         // only thing that reads them: an image nobody samples is a physical
         // image out of the pool for a pass that does not exist. Level 0 is the
@@ -2261,7 +2251,7 @@ impl View {
                 .map(|level| {
                     graph.create_image(
                         format!("hiz-{level}"),
-                        TransientImageDesc::hiz_level(crate::hiz::level_extent(extent, level)),
+                        crate::targets::hiz_level(crate::hiz::level_extent(extent, level)),
                     )
                 })
                 .collect()
@@ -2295,13 +2285,13 @@ impl View {
                     .map(|level| {
                         graph.create_image(
                             format!("bloom-mip-{level}"),
-                            TransientImageDesc::bloom_mip(crate::bloom::mip_extent(extent, level)),
+                            crate::targets::bloom_mip(crate::bloom::mip_extent(extent, level)),
                         )
                     })
                     .collect();
                 (
                     mips,
-                    graph.create_image("bloom-color", TransientImageDesc::scene_color(extent)),
+                    graph.create_image("bloom-color", crate::targets::scene_color(extent)),
                 )
             });
         // Where the tonemap writes, and it is the caller's `target` on every
@@ -2330,7 +2320,7 @@ impl View {
         let present = if upscaling {
             graph.create_image(
                 "render-scale-color",
-                TransientImageDesc::display_color(extent, passes.target_format),
+                crate::targets::display_color(extent, passes.target_format),
             )
         } else {
             target
@@ -2348,7 +2338,7 @@ impl View {
         let display = if resolving {
             graph.create_image(
                 "display-color",
-                TransientImageDesc::display_color(extent, passes.target_format),
+                crate::targets::display_color(extent, passes.target_format),
             )
         } else {
             present
@@ -2369,7 +2359,7 @@ impl View {
         //
         // **Stored, unlike the depth the forward pass writes.** This is what the
         // occlusion pass samples, and it is the only reason
-        // `TransientImageDesc::scene_depth` carries `SAMPLED`.
+        // `crate::targets::scene_depth` carries `SAMPLED`.
         //
         // # The overdraw win, and what it rests on
         //
@@ -2893,10 +2883,8 @@ impl View {
         // other image this view asks for, so the pool hands each of those the
         // physical image it had before water existed.
         if let Some(mesh) = passes.water.clone() {
-            let color_copy =
-                graph.create_image("water-color", TransientImageDesc::scene_color(extent));
-            let depth_copy =
-                graph.create_image("water-depth", TransientImageDesc::hiz_level(extent));
+            let color_copy = graph.create_image("water-color", crate::targets::scene_color(extent));
+            let depth_copy = graph.create_image("water-depth", crate::targets::hiz_level(extent));
             let (frame_block, reflection_block, sky_prefilter, froxels, sky_view) = water_reads;
             let inputs = WaterInputs {
                 frame_block,

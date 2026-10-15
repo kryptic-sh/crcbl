@@ -12,21 +12,27 @@ must be built. Second, the crate seam must be refactored so outside projects can
 use the shell, the UI and the UI's draw pass without the rest of the engine. The
 release pipeline is ready and waits on this; see the entry below.
 
-The requirements are rows S1–S27 of the joint table in lyr's
-`docs/plan/03-surfaces-and-input.md` (lyr commit f44f1b8). That table records
-what was asked and why, and is the reference for each row's detail. This entry
-is crcbl's order of work and live state. Delete a row here when it ships, and
-tell the lyr and pikr sessions.
+The requirements are rows S1–S27 of the joint table in
+`lyr/docs/plan/03-surfaces-and-input.md` (lyr commit f44f1b8). That table
+records what was asked and why, and is the reference for each row's detail. This
+entry is crcbl's order of work and live state. Delete a row here when it ships,
+and tell the lyr and pikr sessions.
 
 ### Order of work
 
 Each step lands in the crate the later steps build on, so the seam goes first.
+**When a step lands, tell EW as well as lyr and pikr**, the owner asked on
+2026-10-15, with what EW's own code would change to use it.
 
 1. **The seam.**
-   - S10: move `UiRenderer` and its UI pass out of `crcbl-render` into a leaf
-     crate over hal, ui and shaders, re-exported from `crcbl-render` so existing
-     callers keep compiling. Then audit what crcbl-shell, crcbl-ui and crcbl-hal
-     pull in for a caller that wants only a window and a UI.
+   - S10 is done except one piece: the UI pass and the render graph are in
+     `crcbl-frame`. What a UI-only caller still pulls in that it does not use is
+     all of `crcbl-shaders`, every shader artifact the engine has, for the one
+     `ui.slang`. Splitting the UI shader out is the follow-up, if lyr or pikr
+     find the size matters. The dependency closures checked on 2026-10-15, which
+     are small for a window plus a UI: `crcbl-hal`, `crcbl-shell`, `crcbl-ui`
+     and each backend reach only `crcbl-core`, `crcbl-console` and (for the
+     shell) `crcbl-wl-scanner` inside the workspace.
    - S15: give every published crate `rust-version`, equal to
      `rust-toolchain.toml`'s channel.
 2. **The loop.**
@@ -80,6 +86,18 @@ Each step lands in the crate the later steps build on, so the seam goes first.
     the UI path.
 13. **Accessibility (S14).** AccessKit is a new dependency, which is the owner's
     call; ask before starting.
+
+### Left behind by the seam split
+
+- `crates/crcbl-shaders/shaders/mesh.slang`'s comment on `FragmentOutput`'s
+  motion target still names `crcbl_render::TransientImageDesc::motion`, which is
+  now `crcbl_render::targets::motion`. The shader sources are pinned by sha256
+  (`crcbl-shaders/build.rs`), so a comment edit fails every build until the
+  artifacts are regenerated. Fix it in the next commit that regenerates them.
+- EW (`src/rendering.rs`, read 2026-10-15) calls
+  `crcbl::render::menu_skin(ui.images_mut())` after `UiRenderer::new`, which has
+  always registered that art itself. The menu art therefore sits on EW's image
+  page twice; `ui.menu_skin()` is the fix, which is EW's to make. EW was told.
 
 ### What exists already, verified by reading the tree at 1db97a5b
 

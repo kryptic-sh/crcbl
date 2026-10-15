@@ -302,7 +302,7 @@ impl Ssr {
                     view_type: ImageViewType::D2,
                     // The `Rgba8Unorm` reflectivity attachment, on the scene
                     // colour's terms: `SAMPLED` is on
-                    // `TransientImageDesc::reflectivity` because *this* pass is
+                    // `crate::targets::reflectivity` because *this* pass is
                     // the thing that reads it.
                     sample_type: SampleType::Float,
                 },

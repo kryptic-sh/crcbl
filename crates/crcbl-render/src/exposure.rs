@@ -549,7 +549,7 @@ impl Exposure {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use crate::{TransientImageDesc, TransientPool};
+    use crate::TransientPool;
     use crcbl_hal::{
         ClearValue, CommandEncoderDesc, DeviceDesc, Features, Instance, Limits, LoadOp, QueueKind,
         StoreOp,
@@ -585,7 +585,7 @@ mod tests {
                 .expect("parameters");
             let mut pool = TransientPool::new();
             let mut graph = RenderGraph::new(queue);
-            let scene = graph.create_image("scene", TransientImageDesc::scene_color(normalized));
+            let scene = graph.create_image("scene", crate::targets::scene_color(normalized));
             graph
                 .add_render_pass("scene-clear")
                 .color(scene, LoadOp::Clear, StoreOp::Store, ClearValue::default())

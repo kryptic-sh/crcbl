@@ -161,11 +161,11 @@ impl Harness {
 }
 
 fn scene_color() -> TransientImageDesc {
-    TransientImageDesc::scene_color(EXTENT)
+    crcbl_render::targets::scene_color(EXTENT)
 }
 
 fn scene_depth() -> TransientImageDesc {
-    TransientImageDesc::scene_depth(EXTENT)
+    crcbl_render::targets::scene_depth(EXTENT)
 }
 
 /// The frame `apps/sandbox` actually draws, compiled and recorded.
@@ -495,7 +495,7 @@ fn a_resize_starts_the_new_targets_from_undefined_again() {
     let mut graph = harness.graph();
     let color = graph.create_image(
         "scene-color",
-        TransientImageDesc::scene_color((320, 200)), // A different size.
+        crcbl_render::targets::scene_color((320, 200)), // A different size.
     );
     graph
         .add_render_pass("forward")
@@ -2077,7 +2077,7 @@ fn attachments_of_different_sizes_are_refused() {
     let color = graph.create_image("scene-color", scene_color());
     let depth = graph.create_image(
         "scene-depth",
-        TransientImageDesc::scene_depth((EXTENT.0 / 2, EXTENT.1)),
+        crcbl_render::targets::scene_depth((EXTENT.0 / 2, EXTENT.1)),
     );
     graph
         .add_render_pass("mismatched")

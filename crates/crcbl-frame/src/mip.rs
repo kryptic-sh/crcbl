@@ -5,7 +5,7 @@
 //! ```
 //!
 //! Topic 43's filtering rung: every layer of a
-//! [`PageDesc`](crate::scene::PageDesc) reaches the device with its whole chain,
+//! `PageDesc` reaches the device with its whole chain,
 //! and [`crate::texture`] uploads one copy per level. The chain is built here
 //! rather than by a compute pass because the page's `Rgba8UnormSrgb` format is
 //! what decodes its texels, WebGPU refuses to reinterpret an sRGB image as a

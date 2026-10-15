@@ -201,7 +201,7 @@ pub fn world_target(extent: (u32, u32)) -> TransientImageDesc {
 /// The map's own depth attachment, which resolves which surface a texel keeps
 /// and is read by nothing.
 ///
-/// Not [`TransientImageDesc::scene_depth`], which carries `SAMPLED` for the
+/// Not [`crate::targets::scene_depth`], which carries `SAMPLED` for the
 /// occlusion pass: a usage flag is a claim about what an image may be bound as,
 /// and nothing binds this one.
 #[must_use]

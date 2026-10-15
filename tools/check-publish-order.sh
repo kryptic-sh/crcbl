@@ -40,6 +40,7 @@ crcbl-hal
 crcbl-shell
 crcbl-input
 crcbl-ui
+crcbl-frame
 crcbl-ecs
 crcbl-phys
 crcbl-render

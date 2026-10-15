@@ -1,0 +1,37 @@
+[package]
+name = "crcbl-frame"
+description = "Crucible frame core: render graph, transient pool, texture uploads and the UI pass"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The part of the renderer a program that draws only a UI needs: a window's
+# frame of `crcbl-ui` draw lists on `crcbl-hal`, with no scene, no meshes and
+# no water. `crcbl-render` builds its 3D frame on it and re-exports every
+# module, so a caller of `crcbl_render::graph` or `crcbl_render::UiRenderer`
+# sees no move.
+[dependencies]
+# `crcbl_core::log`, which the graph, the timers and the UI pass report through.
+crcbl-core = { workspace = true }
+crcbl-hal = { workspace = true }
+# The UI pass's compiled `ui.slang`, and nothing else of it.
+crcbl-shaders = { workspace = true }
+# The draw lists, atlases and debug-overlay modules the UI pass and the frame
+# counters speak.
+crcbl-ui = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+glam = { workspace = true }
+
+[features]
+# `crcbl-ui`'s parsed font — `skrifa` and the committed TTF — forwarded, off by
+# default for the reason that crate's manifest gives: a browser build pays for
+# it whether or not it draws a parsed glyph. The UI pass owns a `GlyphAtlas`
+# either way; what turns on here is `ui_pass`'s glyph-page tests.
+parsed-font = ["crcbl-ui/parsed-font"]
+
+[lints]
+workspace = true

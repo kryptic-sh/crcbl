@@ -201,7 +201,7 @@ use crate::stack::CameraStack;
 use crate::texture::{
     UploadedTexture, upload_texture, upload_texture_layers, upload_texture_mip_layers,
 };
-use crate::transient::{TransientImageDesc, TransientPool};
+use crate::transient::TransientPool;
 use crate::upscale::Upscale;
 use crate::volumetric::{FroxelBuffers, Medium, Volumetric, VolumetricImages, VolumetricReads};
 use crate::water::{Water, WaterBodies, WaterFrame, WaterImages, WaterInputs};
@@ -268,16 +268,16 @@ const _: () = assert!(
 /// Read by [`ForwardRenderer::set_ground_grid`], whose pipeline is built for a
 /// depth attachment before there is a frame to ask. The extent is irrelevant to
 /// a format, which is why any is passed.
-pub(crate) const SCENE_DEPTH_FORMAT: Format = TransientImageDesc::scene_depth((1, 1)).format;
+pub(crate) const SCENE_DEPTH_FORMAT: Format = crate::targets::scene_depth((1, 1)).format;
 
 /// The format the frame's HDR scene target is created with, taken from the
 /// description that creates it rather than written down a second time.
 ///
 /// Read by [`crate::debug_draw`], whose pipeline blends into whichever image the
 /// chain of HDR passes ended with — every one of them is a
-/// [`TransientImageDesc::scene_color`]. The extent is irrelevant to a format,
+/// [`crate::targets::scene_color`]. The extent is irrelevant to a format,
 /// which is why any is passed.
-pub(crate) const SCENE_COLOR_FORMAT: Format = TransientImageDesc::scene_color((1, 1)).format;
+pub(crate) const SCENE_COLOR_FORMAT: Format = crate::targets::scene_color((1, 1)).format;
 
 /// The format §3.2's base-colour page is created with.
 ///
@@ -412,7 +412,7 @@ const PAGE_PLACEHOLDER_TEXEL: [u8; 4] = [0xFF, 0x00, 0xFF, 0xFF];
 /// The format the motion-vector target is created with: two channels of half
 /// float, topic 43 §9's third colour attachment.
 ///
-/// **Named here rather than in [`TransientImageDesc::motion`]**, on
+/// **Named here rather than in [`crate::targets::motion`]**, on
 /// [`crate::graph`]'s other format-owning descriptions' terms: the description
 /// and
 /// [`MeshModules::COLOR_TARGETS`] have to agree, and the pass that builds the
@@ -10060,7 +10060,7 @@ impl ForwardRenderer {
     /// # It is the motion-vector target's only reader today
     ///
     /// The forward pass writes a motion vector into a third colour attachment on
-    /// every frame — see [`TransientImageDesc::motion`] — and no pass reads it
+    /// every frame — see [`crate::targets::motion`] — and no pass reads it
     /// yet; TAA (`docs/backlog.md`) is the first that will. This
     /// view is therefore what says the subtraction behind it is the right one,
     /// which is why it exists ahead of a consumer.
@@ -17728,7 +17728,7 @@ mod tests {
             let mut graph = crate::RenderGraph::new(queue);
             let target = graph.import_image("target", imported);
             renderer.add_passes(&mut graph, &pool, target, (64, 48));
-            graph.create_image("orphan", TransientImageDesc::scene_color((64, 48)));
+            graph.create_image("orphan", crate::targets::scene_color((64, 48)));
             let refused = graph
                 .compile(&pool)
                 .expect_err("a transient no pass declares");
@@ -19140,16 +19140,13 @@ mod tests {
 
         let one = {
             let mut graph = crate::RenderGraph::new(queue);
-            let depth =
-                graph.create_image("scene-depth", TransientImageDesc::scene_depth(TEST_EXTENT));
-            let raw = graph.create_image("ssao", TransientImageDesc::ambient_occlusion(gathered));
-            let blurred = graph.create_image(
-                "ssao-blurred",
-                TransientImageDesc::ambient_occlusion(gathered),
-            );
+            let depth = graph.create_image("scene-depth", crate::targets::scene_depth(TEST_EXTENT));
+            let raw = graph.create_image("ssao", crate::targets::ambient_occlusion(gathered));
+            let blurred =
+                graph.create_image("ssao-blurred", crate::targets::ambient_occlusion(gathered));
             let upsampled = graph.create_image(
                 "ssao-upsampled",
-                TransientImageDesc::ambient_occlusion(TEST_EXTENT),
+                crate::targets::ambient_occlusion(TEST_EXTENT),
             );
             let got = ssao.add_passes(
                 &mut graph,
@@ -19173,20 +19170,17 @@ mod tests {
 
         let two = {
             let mut graph = crate::RenderGraph::new(queue);
-            let depth =
-                graph.create_image("scene-depth", TransientImageDesc::scene_depth(TEST_EXTENT));
-            let raw = graph.create_image("ssao", TransientImageDesc::ambient_occlusion(gathered));
-            let blurred = graph.create_image(
-                "ssao-blurred",
-                TransientImageDesc::ambient_occlusion(gathered),
-            );
+            let depth = graph.create_image("scene-depth", crate::targets::scene_depth(TEST_EXTENT));
+            let raw = graph.create_image("ssao", crate::targets::ambient_occlusion(gathered));
+            let blurred =
+                graph.create_image("ssao-blurred", crate::targets::ambient_occlusion(gathered));
             let again = graph.create_image(
                 "ssao-blurred-2",
-                TransientImageDesc::ambient_occlusion(gathered),
+                crate::targets::ambient_occlusion(gathered),
             );
             let upsampled = graph.create_image(
                 "ssao-upsampled",
-                TransientImageDesc::ambient_occlusion(TEST_EXTENT),
+                crate::targets::ambient_occlusion(TEST_EXTENT),
             );
             let got = ssao.add_passes(
                 &mut graph,
@@ -22410,12 +22404,12 @@ mod tests {
     /// reversed-Z format. Both are locked decisions and both are cheap to pin.
     #[test]
     fn the_scene_targets_are_hdr_and_reversed_z() {
-        let color = TransientImageDesc::scene_color((64, 48));
+        let color = crate::targets::scene_color((64, 48));
         assert_eq!(color.format, Format::Rgba16Float);
         assert!(color.format.is_hdr_capable());
         assert!(color.usage.contains(crcbl_hal::ImageUsage::SAMPLED));
 
-        let depth = TransientImageDesc::scene_depth((64, 48));
+        let depth = crate::targets::scene_depth((64, 48));
         assert_eq!(depth.format, Format::D32Float);
         assert_eq!(
             DepthStencilState::default().depth_compare,

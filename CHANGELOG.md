@@ -16,6 +16,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`TransientImageDesc`'s scene presets are free functions in
+  `crcbl_render::targets`.** `TransientImageDesc::scene_color`, `display_color`,
+  `bloom_mip`, `scene_depth`, `hiz_level`, `ambient_occlusion`,
+  `contact_shadows`, `reflectivity` and `motion` are now
+  `crcbl_render::targets::scene_color(extent)` and so on, with the same
+  descriptions. `TransientImageDesc` moved to `crcbl-frame`, and a crate cannot
+  give another crate's type inherent methods; the presets describe the 3D
+  frame's targets, so they stay with `crcbl-render`. `TransientImageDesc::new`
+  and `with_mip_levels` are unchanged.
+- **The UI pass no longer registers the engine's menu art itself.**
+  `crcbl_frame::UiRenderer::new` starts with an empty image atlas, and a caller
+  registers its own pictures or passes a filled atlas to
+  `UiRenderer::with_images`. `crcbl_render::UiRenderer` is that pass plus the
+  menu skin, with the same methods as before, so engine callers see no change.
+
 - **`crcbl::scene_rig::skeleton_of` returns `(Skeleton, SkinOrder)`, and a skin
   not listed parents first is renumbered rather than refused.** Blender exports
   skins in bone order, which `Skeleton::new` refuses; the new `SkinOrder` moves
@@ -868,6 +883,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **`crcbl-frame`: the render graph and the UI pass without the 3D renderer.**
+  The render graph, the transient pool, the texture uploads, the mip chains, the
+  pass timers, the frame counters and the UI pass moved out of `crcbl-render`
+  into a crate that depends only on `crcbl-hal`, `crcbl-core`, `crcbl-shaders`
+  and `crcbl-ui`. A program that draws only a UI (lyr's status bar, pikr's
+  launcher) builds on it without meshes, materials, sprites or water.
+  `crcbl-render` re-exports every moved module under its old path
+  (`crcbl_render::graph`, `transient`, `texture`, `mip`, `counters`, `timing`,
+  `ui_pass`), so engine callers keep compiling.
+  `crcbl_frame::UiRenderer:: with_images` uploads a caller's start-up art with
+  the page, and `CompiledPass::reads_buffer`, `RenderGraph::image_facts` and
+  `texture::stage_region` are public, since `crcbl-render` calls them across the
+  new boundary.
 
 - **A release pipeline: a `v*` tag publishes the engine.** `ci.yml` builds the
   `crcbl` binary for Linux (x86_64 and aarch64, with `.deb` and `.rpm`), Windows

@@ -285,7 +285,8 @@ crates/crcbl-hal        the backend seam: traits and POD descriptors
 crates/crcbl-vk         Vulkan            crates/crcbl-mtl     Metal
 crates/crcbl-dx12       D3D12             crates/crcbl-webgpu  WebGPU
 crates/crcbl-shell      Wayland, X11, AppKit, Win32, canvas, headless
-crates/crcbl-render     render graph, frame loop, meshes, materials
+crates/crcbl-frame      render graph, transient pool, texture uploads, the UI pass
+crates/crcbl-render     the 3D frame on top of it: meshes, materials, lights, effects
 crates/crcbl-scene      the `.scn/` scene directory, glTF import, meshlets, the cluster DAG
 crates/crcbl-anim       skeletons, clips, pose sampling, joint palettes
 crates/crcbl-ecs        crates/crcbl-phys     crates/crcbl-input

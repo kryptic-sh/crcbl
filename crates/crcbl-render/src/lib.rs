@@ -1,5 +1,10 @@
-//! Renderer: render graph, frame loop, meshes, materials — everything above the
-//! HAL seam.
+//! Renderer: the 3D frame — meshes, materials, lights, effects — built on
+//! `crcbl-frame`'s render graph and UI pass, everything above the HAL seam.
+//!
+//! The graph, the transient pool, the texture uploads, the pass timers and the
+//! UI pass are [`crcbl_frame`]'s, re-exported here under the paths they have
+//! always had ([`graph`], [`transient`], [`texture`], [`timing`], [`ui_pass`]),
+//! so a program that draws only a UI can depend on that crate alone.
 //!
 //! ```text
 //! camera + light ──▶ ForwardRenderer ──adds passes──▶ RenderGraph
@@ -38,8 +43,8 @@
 //!
 //! # Nothing here knows a backend
 //!
-//! This crate depends on `crcbl-hal`, `crcbl-core`, `crcbl-shaders`, `glam`, and
-//! the two description-only crates whose data it turns into pixels — `crcbl-ui`
+//! This crate depends on `crcbl-hal`, `crcbl-core`, `crcbl-frame`,
+//! `crcbl-shaders`, `glam`, and the two description-only crates whose data it turns into pixels — `crcbl-ui`
 //! for [`ui_pass`]'s draw list and `crcbl-sprite` for [`sprite_pass`]'s sample
 //! modes, neither of which depends on a backend or on this crate.
 //! It contains no `ash`, no `crcbl-vk`, and no `#[cfg(target_os = …)]`, per
@@ -109,7 +114,7 @@
 //! let mut pool = TransientPool::new();
 //!
 //! let mut graph = RenderGraph::new(queue);
-//! let scene = graph.create_image("scene", TransientImageDesc::scene_color((64, 48)));
+//! let scene = graph.create_image("scene", crate::targets::scene_color((64, 48)));
 //! graph
 //!     .add_render_pass("clear")
 //!     .clear_color(scene, [0.0, 0.0, 0.0, 1.0])
@@ -127,13 +132,18 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+// The frame core's modules, under the paths this crate has always given them:
+// the graph, the transient pool, the texture uploads, the mip chains and the
+// frame counters live in `crcbl-frame`, which a program that draws only a UI
+// depends on without the rest of this crate.
+pub use crcbl_frame::{counters, graph, mip, texture, transient};
+
 mod atlas_view;
 mod bind_group_cache;
 mod bloom;
 pub mod camera;
 pub mod cluster_pool;
 mod contact_shadows;
-pub mod counters;
 pub mod cull;
 pub mod cull_stats;
 pub mod debug_draw;
@@ -143,7 +153,6 @@ mod exposure;
 pub mod fly;
 pub mod forward;
 mod fxaa;
-pub mod graph;
 pub mod grass;
 pub mod grid;
 pub mod hiz;
@@ -154,7 +163,6 @@ pub mod light_grid;
 pub mod material_table;
 pub mod menu;
 pub mod mesh_pool;
-pub mod mip;
 pub mod nine_slice;
 pub mod occlusion_cull;
 pub mod orbit;
@@ -186,9 +194,8 @@ pub mod sprite_pass;
 mod ssao;
 mod ssr;
 pub mod stack;
-pub mod texture;
+pub mod targets;
 pub mod timing;
-pub mod transient;
 pub mod ui_pass;
 mod upscale;
 mod volumetric;

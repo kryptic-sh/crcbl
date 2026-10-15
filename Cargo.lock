@@ -483,6 +483,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-frame"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "crcbl-core",
+ "crcbl-hal",
+ "crcbl-shaders",
+ "crcbl-ui",
+ "glam",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "crcbl-golden"
 version = "0.1.0"
 dependencies = [
@@ -632,6 +645,7 @@ dependencies = [
  "bytemuck",
  "crcbl-console",
  "crcbl-core",
+ "crcbl-frame",
  "crcbl-hal",
  "crcbl-phys",
  "crcbl-shaders",

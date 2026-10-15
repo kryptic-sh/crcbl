@@ -546,10 +546,57 @@ fn pause_menu() -> crcbl_ui::menu::Menu {
     )
 }
 
+/// The side of each of [`test_skin`]'s square pictures, in texels.
+const TEST_ART_SIDE: u32 = 8;
+
+/// A menu skin of five solid squares, registered in `images` as a caller's
+/// start-up art is: the engine's own skin is `crcbl_render`'s, and this crate
+/// draws whatever a caller registered.
+fn test_skin(images: &mut ImageAtlas) -> crcbl_ui::menu::MenuSkin {
+    use crcbl_ui::menu::MenuSkin;
+    use crcbl_ui::{ButtonSkin, NineSliceImage, SkinInsets};
+
+    let pixels = vec![0xff; (TEST_ART_SIDE * TEST_ART_SIDE * 4) as usize];
+    let mut register = || {
+        images
+            .register(TEST_ART_SIDE, TEST_ART_SIDE, &pixels)
+            .expect("a square fits an empty page")
+    };
+    let insets = SkinInsets::new(2.0, 2.0, 2.0, 2.0);
+    let mut sliced = || NineSliceImage {
+        image: register(),
+        insets,
+    };
+    let panel = sliced();
+    let buttons = ButtonSkin {
+        idle: sliced(),
+        hovered: sliced(),
+        pressed: sliced(),
+    };
+    MenuSkin {
+        panel,
+        buttons,
+        scrim: register(),
+    }
+}
+
+/// A renderer whose image atlas starts with [`test_skin`] registered, and the
+/// skin.
+fn with_test_skin(
+    device: &dyn Device,
+    queue: QueueHandle,
+) -> (UiRenderer, crcbl_ui::menu::MenuSkin) {
+    let mut images = ImageAtlas::new();
+    let skin = test_skin(&mut images);
+    let renderer =
+        UiRenderer::with_images(device, queue, Format::Bgra8UnormSrgb, images).expect("built");
+    (renderer, skin)
+}
+
 /// A draw list shaped like a paused frame, as the engine's loop builds one: a
 /// HUD bar, the cut, then the whole menu — its art and its text — drawn with
-/// the renderer's own skin.
-fn paused_list(ui: &UiRenderer, extent: (u32, u32), atlas: &FontAtlas) -> DrawList {
+/// `skin`.
+fn paused_list(skin: &crcbl_ui::menu::MenuSkin, extent: (u32, u32), atlas: &FontAtlas) -> DrawList {
     let mut list = DrawList::new();
     list.rect(
         glam::Vec2::new(0.0, 0.0),
@@ -558,7 +605,7 @@ fn paused_list(ui: &UiRenderer, extent: (u32, u32), atlas: &FontAtlas) -> DrawLi
     );
     list.begin_overlay();
     let panel = pause_menu();
-    panel.render(&mut list, &panel.layout(extent, atlas), ui.menu_skin());
+    panel.render(&mut list, &panel.layout(extent, atlas), skin);
     list
 }
 
@@ -584,10 +631,10 @@ fn a_paused_frame_draws_both_halves_of_one_upload_with_the_menu_art_above_the_cu
 
     let (recorder, device, queue) = open_recorded();
     let mut pool = TransientPool::new();
-    let mut ui = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+    let (mut ui, skin) = with_test_skin(device.as_ref(), queue);
 
     let atlas = FontAtlas::built_in();
-    let list = paused_list(&ui, EXTENT, &atlas);
+    let list = paused_list(&skin, EXTENT, &atlas);
     ui.begin_frame(device.as_ref(), &list, &atlas, 1.0)
         .expect("upload");
 
@@ -845,14 +892,14 @@ fn buffer_writes(recorder: &crcbl_hal::null::Recorder) -> Vec<(BufferHandle, usi
         .collect()
 }
 
-/// The rectangle the menu art dirties on an empty page: what start-up has to
+/// The rectangle [`test_skin`] dirties on an empty page: what start-up has to
 /// put on the image atlas and nothing more.
-fn menu_art_rect() -> crcbl_ui::image::TexelRect {
+fn test_art_rect() -> crcbl_ui::image::TexelRect {
     let mut images = ImageAtlas::new();
-    crate::menu::menu_skin(&mut images).expect("the menu art fits an empty page");
+    test_skin(&mut images);
     images
         .dirty()
-        .expect("registering the menu art dirtied the page")
+        .expect("registering the test art dirtied the page")
 }
 
 /// Whether `buffer` is zeroed across at least `bytes` by a recorded clear
@@ -875,19 +922,19 @@ fn cleared_before_copied(
 }
 
 /// **The page is created whole at start-up, zeroed on the GPU, and only the
-/// menu art crosses from the host** — as four bytes a texel, into the
-/// rectangle it was registered at.
+/// art registered before it crosses from the host** — as four bytes a texel,
+/// into the rectangle it was registered at.
 #[test]
 fn the_image_atlas_page_is_zeroed_on_the_gpu_and_only_the_art_is_staged() {
     let (recorder, device, queue) = open_recorded();
-    let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+    let (renderer, _) = with_test_skin(device.as_ref(), queue);
 
     let commands = recorder.commands();
     let copies: Vec<_> = image_copies(&commands)
         .into_iter()
         .filter(|copy| copy.image == renderer.image_page.image)
         .collect();
-    let rect = menu_art_rect();
+    let rect = test_art_rect();
     let [.., art] = copies[..] else {
         panic!("expected the zeroed page and then the art, got {copies:?}");
     };
@@ -945,8 +992,8 @@ fn the_image_atlas_page_is_zeroed_on_the_gpu_and_only_the_art_is_staged() {
 }
 
 /// **Construction writes nothing the GPU could zero itself**: the built-in
-/// font's bitmap and the menu art's rectangle, and not a byte of either
-/// empty page.
+/// font's bitmap and the rectangle of the art registered before it, and not a
+/// byte of either empty page.
 ///
 /// What it guards is the wasm heap. On `crcbl-webgpu` every byte written
 /// here is a byte of the start-up frame's command stream, which the heap
@@ -955,18 +1002,37 @@ fn the_image_atlas_page_is_zeroed_on_the_gpu_and_only_the_art_is_staged() {
 /// 41.0 MiB when the image atlas landed, over the browser gate's
 /// `WASM_HEAP_CEILING`.
 #[test]
-fn construction_writes_only_the_font_bitmap_and_the_menu_art() {
+fn construction_writes_only_the_font_bitmap_and_the_registered_art() {
     let (recorder, device, queue) = open_recorded();
-    let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+    let (renderer, _) = with_test_skin(device.as_ref(), queue);
 
     let (_, _, font) = FontAtlas::built_in().glyph_bitmap();
-    let rect = menu_art_rect();
+    let rect = test_art_rect();
     let art = rect.width as usize * rect.height as usize * 4;
     let writes = buffer_writes(&recorder);
     assert_eq!(
         writes.iter().map(|(_, len)| *len).sum::<usize>(),
         font.len() + art,
-        "construction wrote {writes:?}; the font bitmap is {} bytes and the menu art {art}",
+        "construction wrote {writes:?}; the font bitmap is {} bytes and the art {art}",
+        font.len()
+    );
+    renderer.destroy(device.as_ref());
+    recorder.assert_valid();
+}
+
+/// **With nothing registered, construction writes the font bitmap alone**: an
+/// empty image atlas stages no rectangle at all.
+#[test]
+fn construction_with_no_art_writes_only_the_font_bitmap() {
+    let (recorder, device, queue) = open_recorded();
+    let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+
+    let (_, _, font) = FontAtlas::built_in().glyph_bitmap();
+    let writes = buffer_writes(&recorder);
+    assert_eq!(
+        writes.iter().map(|(_, len)| *len).sum::<usize>(),
+        font.len(),
+        "construction wrote {writes:?}; the font bitmap is {} bytes",
         font.len()
     );
     renderer.destroy(device.as_ref());
