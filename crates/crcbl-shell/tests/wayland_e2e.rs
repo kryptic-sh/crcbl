@@ -3180,8 +3180,75 @@ fn an_exclusive_panel_takes_the_keyboard_when_it_maps() {
         })
     });
 
+    // A held key repeats on a panel exactly as on a toplevel.
+    input.key(evdev::KEY_A, true);
+    session.pump_until("a repeat on the panel", |session| {
+        session.events.iter().any(|event| {
+            matches!(
+                event,
+                ShellEvent::Key {
+                    window,
+                    repeat: true,
+                    ..
+                } if *window == launcher
+            )
+        })
+    });
+    input.key(evdev::KEY_A, false);
+
     drop(input);
     session.shell.destroy_window(launcher).expect("destroy");
+}
+
+/// An on-demand panel takes the keyboard when clicked, like a window, and
+/// gives it up when the user focuses one: pikr's focus gained and lost.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn an_on_demand_panel_takes_the_keyboard_on_a_click_and_gives_it_back() {
+    let mut session = Session::open();
+    let window = session.create_mapped(&tiled("crcbl e2e under the panel"));
+    let panel_window = session.create(&panel(
+        "crcbl e2e on-demand panel",
+        LogicalSize::new(400.0, 300.0),
+        PanelDesc {
+            keyboard: PanelKeyboard::OnDemand,
+            ..PanelDesc::default()
+        },
+    ));
+    session.pump_until("the panel's first configure", |session| {
+        session.size(panel_window).is_some()
+    });
+    crcbl_shell::wayland_test_support::map_window(&*session.shell, panel_window).expect("map");
+    let input = VirtualInput::attach(&*session.shell, panel_window).expect("virtual devices");
+    let focused = |session: &Session, which: WindowId| {
+        session
+            .shell
+            .window_state(which)
+            .is_ok_and(|state| state.focused)
+    };
+    session.pump_until("the tiled window to have the keyboard", |session| {
+        focused(session, window)
+    });
+
+    // The panel is centred on the first output, so its middle is the output's.
+    input.move_to(OUTPUT_SIZE.width / 2, OUTPUT_SIZE.height / 2, LAYOUT_SIZE);
+    input.button(evdev::BTN_LEFT, true);
+    input.button(evdev::BTN_LEFT, false);
+    session.pump_until("the clicked panel to take the keyboard", |session| {
+        focused(session, panel_window) && !focused(session, window)
+    });
+
+    assert!(
+        swaymsg(&[&format!("[app_id=\"{TILED_APP_ID}\"]"), "focus"]),
+        "sway focuses a window through IPC"
+    );
+    session.pump_until("the panel to give the keyboard back", |session| {
+        !focused(session, panel_window) && focused(session, window)
+    });
+
+    drop(input);
+    session.shell.destroy_window(panel_window).expect("destroy");
+    session.shell.destroy_window(window).expect("destroy");
 }
 
 /// Turns the second output back on when dropped, so a failure part-way through the

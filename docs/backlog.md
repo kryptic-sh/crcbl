@@ -79,9 +79,6 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      `a_destroyed_window_gives_its_tile_back`) run only under sway in CI; their
      first run and a mutation run are still to come.
    - Still to do on Wayland:
-     - keys typed before the first configure delivered rather than dropped, and
-       focus lost and key repeat on a panel (S17, pikr's cases a and c–d; case
-       b, focus on mapping, is the exclusive-panel test above);
      - no flash on map: the first commit carries the first frame;
      - transparent surfaces (S16), which on Wayland is the swapchain's composite
        alpha rather than anything the shell sends;
@@ -89,6 +86,14 @@ Each step lands in the crate the later steps build on, so the seam goes first.
        input region for `Passthrough` and `xdg_popup.grab` for `Grab`;
      - repositioning a live popup through `xdg_popup.reposition` (needs
        `xdg_wm_base` v3), reported in caps where it is missing;
+   - S17 has e2e tests, unrun until CI: an exclusive panel takes the keyboard on
+     mapping and gets the first key typed after that, and a held key repeats on
+     it (`an_exclusive_panel_takes_the_keyboard_when_it_maps`); an on-demand
+     panel takes the keyboard on a click and loses it to a focused toplevel
+     (`an_on_demand_panel_takes_the_keyboard_on_a_click_…`). Keys go to the
+     focused surface from `wl_keyboard.enter` on, configured or not. Keys typed
+     before the compositor gives the panel focus go to whatever had it; no
+     client can claim those, so pikr's "no keys dropped" holds from focus on.
    - Monitor removal (lyr item 6) is built: `ShellEvent::MonitorRemoved` on
      every backend, from `monitor::queue_removed`, and a `CloseRequested` for
      each panel created for that monitor on Wayland and headless. Win32 and
