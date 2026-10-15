@@ -2405,12 +2405,50 @@ fn a_reserving_bar_is_an_appbar_that_takes_its_edge_and_gives_it_back() {
     assert_eq!(after, before, "destroying the bar gave the edge back");
 }
 
+/// Explorer notices a full-screen window on its own schedule, after the
+/// window takes the foreground; this is a generous ceiling, not a wait.
+const FULL_SCREEN_PATIENCE: Duration = Duration::from_secs(10);
+
+/// `QUNS_BUSY`: Explorer believes a full-screen application has the
+/// foreground.
+const QUNS_BUSY: i32 = 2;
+/// `QUNS_RUNNING_D3D_FULL_SCREEN`: the same, for an exclusive Direct3D one.
+const QUNS_RUNNING_D3D_FULL_SCREEN: i32 = 3;
+
+/// What Explorer says of the user's state, from
+/// `SHQueryUserNotificationState`, or `None` if it will not say.
+fn notification_state() -> Option<i32> {
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn SHQueryUserNotificationState(state: *mut i32) -> i32;
+    }
+    let mut state = 0;
+    // SAFETY: a live out-pointer, which the call fills with one
+    // `QUERY_USER_NOTIFICATION_STATE`; zero is `S_OK`.
+    (unsafe { SHQueryUserNotificationState(&raw mut state) } == 0).then_some(state)
+}
+
+/// Waits until Explorer no longer believes a full-screen application is up,
+/// or panics saying it still does. An appbar is told only of a **change**:
+/// one left over from an earlier window would swallow the notice a test
+/// waits for.
+fn wait_for_no_full_screen_app() {
+    let deadline = Instant::now() + FULL_SCREEN_PATIENCE;
+    let mut state = notification_state();
+    while matches!(state, Some(QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN)) {
+        assert!(
+            Instant::now() < deadline,
+            "Explorer still believes a full-screen application is up (state {state:?})"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        state = notification_state();
+    }
+}
+
 /// Pumps until `shell` raises `FullScreenApp` for `bar` with `active`, or
-/// panics naming what did arrive.
+/// panics naming what did arrive and what Explorer believes.
 fn wait_for_full_screen_app(shell: &mut Win32Shell, bar: WindowId, active: bool) {
-    // Explorer notices a full-screen window on its own schedule, after the
-    // window takes the foreground; this is a generous ceiling, not a wait.
-    const PATIENCE: Duration = Duration::from_secs(10);
+    const PATIENCE: Duration = FULL_SCREEN_PATIENCE;
     let deadline = Instant::now() + PATIENCE;
     let mut seen = Vec::new();
     while Instant::now() < deadline {
@@ -2430,7 +2468,11 @@ fn wait_for_full_screen_app(shell: &mut Win32Shell, bar: WindowId, active: bool)
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    panic!("no FullScreenApp {{ active: {active} }} for the bar; saw {seen:?}");
+    panic!(
+        "no FullScreenApp {{ active: {active} }} for the bar; saw {seen:?}; Explorer's \
+         notification state is {:?}",
+        notification_state()
+    );
 }
 
 #[test]
@@ -2459,6 +2501,7 @@ fn a_reserving_bar_is_told_when_a_full_screen_window_opens_and_closes() {
         ))
         .expect("a reserving panel");
     work_area_until(&mut shell, |area| area.y != before.y);
+    wait_for_no_full_screen_app();
 
     let game = shell
         .create_window(&WindowDesc {

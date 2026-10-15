@@ -225,6 +225,15 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      window of this process. Only a reserving panel is an appbar, so a bar with
      `Reserve::None` is not told; registering it with `ABM_NEW` and no
      `ABM_SETPOS` would tell it without reserving, if one ever needs it.
+   - **That test is flaky in CI**: on 2026-10-16 it failed in
+     `win32 e2e (real desktop)` on run 38774521915 (a branch) and on the
+     `v0.1.0` tag's run 38778340864, seeing no `FullScreenApp` at all within its
+     ceiling, and passed on the other runs that day. Unverified guess: an appbar
+     is told only of a change, so if Explorer still believed an earlier
+     full-screen window was up, the test's own window changed nothing. The test
+     now waits, before opening its window, until `SHQueryUserNotificationState`
+     no longer reports a full-screen application, and its failure names that
+     state, so the next failure says whether the guess holds.
    - Still to do: `ABM_ACTIVATE` and `ABM_WINDOWPOSCHANGED`, which the appbar
      documentation asks for and which matter to auto-hide appbars; and a
      crash-safe `ABM_REMOVE`, because a process killed without it keeps the work
