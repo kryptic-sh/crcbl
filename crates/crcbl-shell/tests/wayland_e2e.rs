@@ -3389,6 +3389,7 @@ fn a_menu_opens_at_its_size_and_goes_with_its_window() {
 
     session.take_names();
     session.shell.destroy_window(window).expect("destroy");
+    session.pump();
     let destroyed: Vec<WindowId> = session
         .events
         .iter()
