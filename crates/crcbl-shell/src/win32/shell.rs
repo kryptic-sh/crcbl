@@ -1121,6 +1121,9 @@ impl Shell for Win32Shell {
     /// [`ShellError::WindowCreation`] carrying the `GetLastError` code if the
     /// system refused.
     fn create_window(&mut self, desc: &WindowDesc<'_>) -> Result<WindowId, ShellError> {
+        crate::role::check(desc, self.caps(), self.backend(), |monitor| {
+            self.monitor(monitor).is_some()
+        })?;
         if let DisplayMode::Borderless {
             monitor: Some(monitor),
         } = desc.mode

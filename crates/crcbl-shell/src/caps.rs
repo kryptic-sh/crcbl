@@ -209,6 +209,28 @@ bitflags::bitflags! {
         /// says why, and that obligation is what stops a backend turning this on
         /// from breaking every game that binds only the pointer.
         const TOUCH = 1 << 14;
+
+        /// [`WindowRole::Panel`](crate::WindowRole::Panel) can be created:
+        /// desktop furniture held against a monitor's edges.
+        const PANEL = 1 << 15;
+
+        /// A panel's [`Reserve::OwnExtent`](crate::Reserve::OwnExtent) is
+        /// honoured: maximised windows stop at the panel.
+        ///
+        /// Separate from [`PANEL`](Self::PANEL) because a window system can
+        /// have panels and still give nothing but its own furniture reserved
+        /// space — macOS, where the panel is created and overlaps what is
+        /// behind it.
+        const PANEL_RESERVE = 1 << 16;
+
+        /// [`WindowRole::Popup`](crate::WindowRole::Popup) can be created:
+        /// a window anchored to another's rectangle.
+        const POPUP = 1 << 17;
+
+        /// [`WindowDesc::transparent`](crate::WindowDesc::transparent) is
+        /// honoured: where the frame's alpha is below one, the desktop shows
+        /// through.
+        const TRANSPARENT = 1 << 18;
     }
 }
 

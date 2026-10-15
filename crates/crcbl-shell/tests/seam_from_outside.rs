@@ -34,7 +34,7 @@ use crcbl_shell::{
     CursorIcon, DisplayMode, HeadlessShell, KeyCode, LogicalSize, MimeType, MonitorId, MonitorInfo,
     PhysicalPoint, PhysicalSize, PointerButton, PointerMode, ReceivedMime, ScrollDelta, Shell,
     ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints, WindowDesc, WindowId,
-    WindowState,
+    WindowRole, WindowState,
 };
 
 /// The window a sample or the sandbox would ask for.
@@ -48,6 +48,8 @@ fn sandbox_window() -> WindowDesc<'static> {
         resizable: true,
         visible: true,
         accept_drops: true,
+        role: WindowRole::Toplevel,
+        transparent: false,
     }
 }
 

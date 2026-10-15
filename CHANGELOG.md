@@ -16,6 +16,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`WindowDesc` has two new fields, `role` and `transparent`.** A
+  `WindowDesc { .. }` written out field by field needs
+  `role: WindowRole::Toplevel, transparent: false`, or
+  `..WindowDesc::default()`.
+
 - **`TransientImageDesc`'s scene presets are free functions in
   `crcbl_render::targets`.** `TransientImageDesc::scene_color`, `display_color`,
   `bloom_mip`, `scene_depth`, `hiz_level`, `ambient_occlusion`,
@@ -883,6 +888,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **`WindowDesc::role` and `WindowDesc::transparent`: panels, popups and
+  per-pixel alpha, as an API.** `WindowRole::Panel(PanelDesc)` describes desktop
+  furniture held against a monitor's edges: a monitor, a layer, an anchor, a
+  reservation, margins, a keyboard mode and a namespace, in `wlr-layer-shell`'s
+  terms. `WindowRole::Popup(PopupDesc)` is a window anchored to a rectangle of a
+  parent, with a placement and an input mode. `ShellCaps::PANEL`,
+  `PANEL_RESERVE`, `POPUP` and `TRANSPARENT` say which a backend builds, and
+  asking for one it cannot build is `ShellError::Unsupported`, never a toplevel
+  in its place. The headless shell builds them all, and destroys a popup with
+  its parent. The window-system backends refuse them until each implements them.
+  `LogicalRect` is new in `crcbl_shell`.
 
 - **`Shell::waker` and `ShellWaker`: wake a sleeping loop from another thread.**
   A program whose work arrives off the loop thread (a D-Bus reply, a socket, a

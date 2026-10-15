@@ -226,6 +226,8 @@ struct HeadlessWindow {
     cursor: Option<CursorIcon>,
     close_pending: bool,
     accept_drops: bool,
+    /// The window a popup belongs to, which takes it along when destroyed.
+    parent: Option<WindowId>,
 }
 
 impl HeadlessWindow {
@@ -1317,6 +1319,9 @@ impl Shell for HeadlessShell {
     }
 
     fn create_window(&mut self, desc: &WindowDesc<'_>) -> Result<WindowId, ShellError> {
+        crate::role::check(desc, self.caps(), self.backend(), |monitor| {
+            self.monitor(monitor).is_some()
+        })?;
         if !self.windows.is_empty() && !self.caps.contains(ShellCaps::MULTI_WINDOW) {
             return Err(self.unsupported("a second window"));
         }
@@ -1356,6 +1361,13 @@ impl Shell for HeadlessShell {
             }
         };
 
+        let parent = match desc.role {
+            crate::WindowRole::Popup(popup) => {
+                self.window(popup.parent)?;
+                Some(popup.parent)
+            }
+            _ => None,
+        };
         let countdown = self.configure_delay;
         let window: WindowId = self
             .windows
@@ -1378,12 +1390,26 @@ impl Shell for HeadlessShell {
                 cursor: Some(CursorIcon::Default),
                 close_pending: false,
                 accept_drops: desc.accept_drops,
+                parent,
             })
             .cast();
         Ok(window)
     }
 
+    /// Destroys the window and, first, every popup that belongs to it — each
+    /// with its own [`ShellEvent::WindowDestroyed`] — as every window system
+    /// destroys a popup with its parent.
     fn destroy_window(&mut self, window: WindowId) -> Result<(), ShellError> {
+        self.window(window)?;
+        let popups: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, state)| state.parent == Some(window))
+            .map(|(id, _)| id.cast())
+            .collect();
+        for popup in popups {
+            self.destroy_window(popup)?;
+        }
         self.windows
             .remove(window.cast())
             .ok_or_else(|| ShellError::invalid_window(window))?;

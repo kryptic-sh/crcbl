@@ -210,7 +210,7 @@ mod macos {
         ButtonState, ClipboardContent, ClipboardOffer, CursorIcon, DisplayMode, KeyCode, Keysym,
         LogicalSize, MimeType, MonitorId, PhysicalPoint, PhysicalSize, PointerButton, PointerMode,
         ReceivedMime, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
-        SizeConstraints, WindowDesc, WindowId, open_backend, session_support,
+        SizeConstraints, WindowDesc, WindowId, WindowRole, open_backend, session_support,
     };
 
     /// The window's title, which is **how this session finds its own window**.
@@ -343,6 +343,8 @@ mod macos {
                 resizable: true,
                 visible: true,
                 accept_drops: true,
+                role: WindowRole::Toplevel,
+                transparent: false,
             })
             .expect("create_window");
 
@@ -1821,6 +1823,8 @@ mod macos {
                 resizable: true,
                 visible: false,
                 accept_drops: false,
+                role: WindowRole::Toplevel,
+                transparent: false,
             })
             .expect("create_window");
 
@@ -1879,6 +1883,8 @@ mod macos {
                 resizable: true,
                 visible: false,
                 accept_drops: false,
+                role: WindowRole::Toplevel,
+                transparent: false,
             })
             .expect("create_window");
 
@@ -2012,6 +2018,8 @@ mod macos {
             resizable: true,
             visible: false,
             accept_drops: false,
+            role: WindowRole::Toplevel,
+            transparent: false,
         });
         assert!(
             matches!(refused, Err(ShellError::NoSuchMonitor(id)) if id == absent.0),
@@ -2031,6 +2039,8 @@ mod macos {
                 resizable: true,
                 visible: false,
                 accept_drops: false,
+                role: WindowRole::Toplevel,
+                transparent: false,
             })
             .expect("create_window on an attached monitor");
         assert!(

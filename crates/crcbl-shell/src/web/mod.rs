@@ -1191,6 +1191,9 @@ impl Shell for WebShell {
     /// [`ShellError::Unsupported`] for a second window: this backend clears
     /// [`ShellCaps::MULTI_WINDOW`] and there is one canvas.
     fn create_window(&mut self, desc: &WindowDesc<'_>) -> Result<WindowId, ShellError> {
+        crate::role::check(desc, self.caps(), self.backend(), |monitor| {
+            self.monitor(monitor).is_some()
+        })?;
         if self.window.is_some() {
             return Err(Self::unsupported("a second window"));
         }

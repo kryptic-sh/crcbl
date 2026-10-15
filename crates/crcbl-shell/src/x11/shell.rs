@@ -260,6 +260,9 @@ impl Shell for X11Shell {
     /// containing a NUL byte, and [`ShellError::WindowCreation`] if the server
     /// refused.
     fn create_window(&mut self, desc: &WindowDesc<'_>) -> Result<WindowId, ShellError> {
+        crate::role::check(desc, self.caps(), self.backend(), |monitor| {
+            self.monitor(monitor).is_some()
+        })?;
         if let DisplayMode::Borderless {
             monitor: Some(monitor),
         } = desc.mode

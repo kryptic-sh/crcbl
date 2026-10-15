@@ -52,30 +52,73 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      declaration and helpers (`poll_readable`, Wayland's `poll_readable_with`,
      X11's new `poll_readable_or`). A shared `linux` poll module would remove
      the copies; not done here, to keep the wake change to the wait.
-3. **Window kinds in `WindowDesc`.** One general API, not one per app:
-   - a kind (toplevel, layer/panel, popup)
-   - a chosen output (S2)
-   - a parent and anchor rectangle for popups (S3)
-   - centred, borderless, topmost and focused toplevels (S8)
-   - per-pixel alpha (S16)
-4. **Wayland.**
-   - Vendor `wlr-layer-shell-unstable-v1` and build layer surfaces: layer,
-     anchors, exclusive zone, margins, keyboard interactivity (S1).
-   - `xdg_popup` on layer surfaces (S3).
-   - Focus events and first-key delivery (S17).
-   - Fractional scale on layer surfaces (S21).
-   - CI's `wayland-e2e` runs nested sway, which implements layer-shell, so these
-     get real end-to-end tests.
-5. **Win32.**
-   - Appbars (S4).
-   - Tool, topmost and no-activate styles, kept out of the taskbar and Alt-Tab,
-     taking the foreground on a hotkey launch (S27).
-   - Screen-positioned popups (S3).
-6. **AppKit.**
-   - Non-activating `NSPanel` with a window level and Spaces behaviour (S5).
-   - Child panels for popups (S3).
+3. **Window kinds: the API is in.**
+   - `WindowDesc::role` (`WindowRole::{Toplevel, Panel, Popup}` in
+     `crates/crcbl-shell/src/role.rs`) and `WindowDesc::transparent` are on
+     main, along with the caps `PANEL`, `PANEL_RESERVE`, `POPUP` and
+     `TRANSPARENT`.
+   - The headless shell builds every role. Every other backend refuses roles and
+     transparency through `role::check` until its step lands.
+   - Shaped with lyr's and pikr's feedback, 2026-10-15:
+     - A panel's size along a stretched axis is ignored, and `Resized` is the
+       authority.
+     - `Reserve::OwnExtent` needs one edge (`PanelDesc::reserved_edge`) and is
+       `Unsupported` otherwise. `Reserve::None` is exclusive zone 0, and
+       `IgnoreOthers` is -1.
+     - Reserving is a capability (`PANEL_RESERVE`), so macOS builds the panel
+       and only reports that the reservation was not honoured.
+     - `PanelDesc::namespace` is the layer-shell namespace.
+     - `monitor: None` is where the user is, not the primary monitor.
+     - `PopupInput::{Passthrough, Pointer, Grab}` replaces a grab flag, so
+       tooltips can pass input through.
+     - S8 and S27 are pikr's launcher as a panel: unanchored, with an
+       `Exclusive` keyboard, at the `Overlay` layer.
+4. **Wayland**, which lyr's M1 waits on:
+   - layer surfaces (S1, S2 by output, S21), with the configured size reported
+     as `Resized`;
+   - focus events, and keys typed before the first configure delivered rather
+     than dropped (S17, pikr's cases a–d: early keys, focus gained, focus lost,
+     key repeat);
+   - no flash on map: the first commit carries the first frame;
+   - transparent surfaces (S16);
+   - `xdg_popup` (S3), on layer surfaces through `get_popup`, with an empty
+     input region for `Passthrough` and `xdg_popup.grab` for `Grab`;
+   - repositioning a live popup through `xdg_popup.reposition` (needs
+     `xdg_wm_base` v3), reported in caps where it is missing;
+   - a monitor-removed event plus a close request for every window on that
+     monitor, on every backend (lyr item 6), so a panel's output being unplugged
+     reads the same everywhere;
+   - `MonitorInfo` carrying the platform's own output name (S7, lyr item 10):
+     `wl_output.name`, `MONITORINFOEX::szDevice`, `NSScreen.localizedName`. The
+     CI test is `wayland-e2e` under sway, which implements layer-shell.
+5. **Win32**:
+   - Appbars for `OwnExtent` (S4): `ABE_TOP` for `TOP | LEFT | RIGHT`.
+     `ABN_POSCHANGED` stays internal. `ABN_FULLSCREENAPP` becomes an event (lyr
+     item 7). `ABM_REMOVE` runs on drop and from a crash-safe path, because a
+     skipped `ABM_REMOVE` keeps the work area reserved until Explorer restarts.
+   - Tool, topmost and no-activate styles, kept out of the taskbar and Alt-Tab
+     (S27).
+   - `WM_MOUSEACTIVATE` answered with `MA_NOACTIVATE`, so hover works on a panel
+     that never activates (lyr item 9).
+   - Foreground focus on a hotkey launch, and what happens when
+     `SetForegroundWindow` is refused, reported rather than silent (pikr item
+     9).
+   - Transparency: per-pixel alpha with a Vulkan or D3D12 swapchain likely means
+     DirectComposition (lyr item 11), with no DWM border, shadow or rounded
+     corner fighting the app's own (pikr item 7).
+   - Screen-positioned popups (S3), activating for `Grab` and closing on
+     `WA_INACTIVE`.
+6. **AppKit**:
+   - Non-activating `NSPanel` (S5), with the per-layer window levels written
+     down. `Top` sits above the menu bar, at `NSStatusWindowLevel` (lyr item 8).
+   - `acceptsMouseMovedEvents` plus a tracking area, so hover arrives without
+     the panel becoming key (lyr item 9).
+   - `opaque = NO`, `hasShadow = NO` and a clear background for transparency
+     (pikr item 7).
+   - Child panels for popups (S3), with `ignoresMouseEvents` for `Passthrough`.
+   - `orderFront` after the first frame.
 7. **Outputs.** Hotplug events with name, scale and work area on every backend
-   (S7).
+   (S7). The monitor-removed close requests in step 4 are part of this.
 8. **Text.**
    - Fonts from bytes the app found (S11). `Font::parse` takes `&'static [u8]`
      today.

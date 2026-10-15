@@ -978,6 +978,9 @@ impl Shell for AppKitShell {
     /// [`ShellError::WindowCreation`] if AppKit refused.
     fn create_window(&mut self, desc: &WindowDesc<'_>) -> Result<WindowId, ShellError> {
         let _pool = AutoreleasePool::push();
+        crate::role::check(desc, self.caps(), self.backend(), |monitor| {
+            self.monitor(monitor).is_some()
+        })?;
         if let DisplayMode::Borderless {
             monitor: Some(monitor),
         } = desc.mode

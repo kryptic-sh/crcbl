@@ -209,6 +209,25 @@ impl LogicalPoint {
     }
 }
 
+/// An axis-aligned rectangle in scale-independent units, relative to a
+/// window's top-left corner.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LogicalRect {
+    /// The top-left corner.
+    pub origin: LogicalPoint,
+    /// Width and height.
+    pub size: LogicalSize,
+}
+
+impl LogicalRect {
+    /// A rectangle at `origin` of `size`.
+    #[inline]
+    #[must_use]
+    pub const fn new(origin: LogicalPoint, size: LogicalSize) -> Self {
+        Self { origin, size }
+    }
+}
+
 /// An axis-aligned rectangle in device pixels.
 ///
 /// Each use names its space. Monitor geometry is in the desktop's, where the

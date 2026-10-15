@@ -271,6 +271,7 @@ pub mod event;
 pub mod geom;
 pub mod headless;
 pub mod monitor;
+pub mod role;
 pub mod waker;
 pub mod window;
 
@@ -325,9 +326,15 @@ pub use clipboard::{
 pub use cursor::{CursorIcon, PointerMode};
 pub use error::ShellError;
 pub use event::ShellEvent;
-pub use geom::{AspectRatio, LogicalPoint, LogicalSize, PhysicalPoint, PhysicalRect, PhysicalSize};
+pub use geom::{
+    AspectRatio, LogicalPoint, LogicalRect, LogicalSize, PhysicalPoint, PhysicalRect, PhysicalSize,
+};
 pub use headless::HeadlessShell;
 pub use monitor::{MonitorId, MonitorInfo};
+pub use role::{
+    Margins, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer, PopupDesc, PopupInput,
+    PopupPlacement, Reserve, WindowRole,
+};
 pub use waker::ShellWaker;
 pub use window::{
     CloseReply, DisplayMode, SizeConstraints, Window, WindowConfiguration, WindowDesc, WindowId,

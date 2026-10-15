@@ -279,6 +279,20 @@ pub struct WindowDesc<'a> {
     /// window system, and a game that ignores drops should not show a
     /// drop cursor.
     pub accept_drops: bool,
+
+    /// What kind of window: an application window, a panel or a popup. See
+    /// [`WindowRole`](crate::WindowRole).
+    pub role: crate::WindowRole<'a>,
+
+    /// Whether the desktop shows through where the frame's alpha is below one:
+    /// a bar with no background, a launcher with rounded corners.
+    ///
+    /// Asked for at creation because every window system decides it then —
+    /// the visual, the swapchain, the window's own background. A backend that
+    /// cannot do it refuses the window
+    /// ([`ShellCaps::TRANSPARENT`](crate::ShellCaps::TRANSPARENT)) rather
+    /// than draw it opaque. The frame's alpha is premultiplied.
+    pub transparent: bool,
 }
 
 impl Default for WindowDesc<'_> {
@@ -292,6 +306,8 @@ impl Default for WindowDesc<'_> {
             resizable: true,
             visible: true,
             accept_drops: false,
+            role: crate::WindowRole::Toplevel,
+            transparent: false,
         }
     }
 }
