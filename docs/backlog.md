@@ -97,15 +97,16 @@ Each step lands in the crate the later steps build on, so the seam goes first.
    - `Shell::reposition_popup` moves and resizes a live popup on Wayland
      (`xdg_popup.reposition`, so `xdg_wm_base` is now bound up to 3 and
      `ShellCaps::POPUP_REPOSITION` follows the version bound), Win32
-     (`SetWindowPos`), AppKit (`setFrame:display:`) and headless. Verified
-     locally by the headless test only; the sway, Win32 desktop and AppKit
-     session tests that cover it run in CI. Position is checked on Win32 and
-     AppKit; on Wayland only the size is, since a client cannot see where its
-     popup went. **The Wayland success path has run nowhere**: CI's sway
-     (wlroots 0.17.1) offers `xdg_wm_base` below 3, so the capability is clear
-     there and the sway test checks the `Unsupported` refusal instead. Covering
-     it needs a compositor offering 3 or later in CI (a newer sway, or a second
-     compositor job).
+     (`SetWindowPos`), AppKit (`setFrame:display:`) and headless. Verified by
+     the headless test locally, and in CI (run 38721854558, 2026-10-15) by the
+     Win32 desktop test and the macOS session's popups step, which both check
+     the new position and size. Position is checked on Win32 and AppKit; on
+     Wayland only the size is, since a client cannot see where its popup went.
+     **The Wayland success path has run nowhere**: CI's sway (wlroots 0.17.1)
+     offers `xdg_wm_base` below 3, so the capability is clear there and the sway
+     test checks the `Unsupported` refusal instead. Covering it needs a
+     compositor offering 3 or later in CI (a newer sway, or a second compositor
+     job).
    - Popups (S3) are built (`crates/crcbl-shell/src/wayland/popup.rs`): an
      `xdg_popup` from an `xdg_positioner` whose anchor and gravity come from the
      placement, with flip and slide but never resize, on a toplevel, a popup or
@@ -177,11 +178,12 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      included: the work area gave up the bar's height and got it back. Those
      desktop tests were not mutation-run.
    - `ABN_FULLSCREENAPP` arrives as `ShellEvent::FullScreenApp` for a reserving
-     bar (lyr item 7). Verified locally only by the decoder's unit test
-     (`appbar_notice`); the desktop test
-     `a_reserving_bar_is_told_when_a_full_screen_window_opens_and_closes` runs
-     in CI, and whether Explorer sends the notification on that runner is what
-     its first run answers. Only a reserving panel is an appbar, so a bar with
+     bar (lyr item 7). Verified by the decoder's unit test (`appbar_notice`),
+     and on a real desktop by
+     `a_reserving_bar_is_told_when_a_full_screen_window_opens_and_closes`, which
+     passed in CI's `win32 e2e (real desktop)` job (run 38721854558,
+     2026-10-15): Explorer sent the notification both ways for a borderless
+     window of this process. Only a reserving panel is an appbar, so a bar with
      `Reserve::None` is not told; registering it with `ABM_NEW` and no
      `ABM_SETPOS` would tell it without reserving, if one ever needs it.
    - Still to do: `ABM_ACTIVATE` and `ABM_WINDOWPOSCHANGED`, which the appbar
