@@ -372,6 +372,96 @@ Each step lands in the crate the later steps build on, so the seam goes first.
 13. **Accessibility (S14).** AccessKit was approved as a new dependency on
     2026-10-16; not started.
 
+14. **Image assets to RGBA (S28), asked by lyr for lyr and pikr on 2026-10-16**,
+    relaying the owner: one crcbl crate that turns image files and raw buffers
+    into the straight-alpha RGBA8 `ImageAtlas::register` takes, so neither app
+    adds `image`, `resvg` and `freedesktop-icons` itself. lyr's first use is its
+    M6 (notifications); its M8 (tray) needs the rest; pikr's move needs
+    everything but ICO and XPM. Not started.
+    - What it needs: PNG and JPEG (first frame only, no animation) and SVG
+      rasterised at a size times a scale, from bytes or a path, with errors and
+      never a panic; ICO and XPM as nice-to-haves. Conversion of the raw buffers
+      the apps receive: StatusNotifierItem `IconPixmap` (ARGB32, network byte
+      order), the notification `image-data` struct (width, height, rowstride,
+      has_alpha, bits per sample, channels; RGB or RGBA with row padding), and a
+      Win32 `GetDIBits` BGRA DIB. Resizing with a real filter: fit inside a box
+      keeping the aspect, a square icon size times a scale, and the nearest of
+      several offered sizes. XDG icon-theme lookup by name, size, scale and
+      theme, following `Inherits`, then hicolor, then `/usr/share/pixmaps`,
+      extra directories first (SNI's `IconThemePath`), an absolute path accepted
+      in place of a name, with a cache of hits and misses (misses retried after
+      a while) and file bytes keyed by mtime and length; Linux and the BSDs
+      only. Caps on decoded dimensions and memory against decompression bombs,
+      and a fuzz target as `crcbl-net/fuzz` has. CPU only, no GPU or shell
+      dependency, `Send` types so decoding runs on worker threads. A feature per
+      format and one for the theme lookup.
+    - **pikr's additions, 2026-10-16** (checked against pikr's code; the first
+      two would otherwise be regressions): BMP, ICO and WebP as well, since
+      pikr's `Icon=` paths decode today through floem's `image` features (PNG,
+      JPEG, BMP, ICO, WebP); for a multi-size ICO, the frame nearest the asked
+      size; XPM stays optional. **PNG encoding** of RGBA8, for pikr's Windows
+      icon cache on disk. The DIB conversion takes explicit flags: premultiplied
+      or straight alpha, bottom-up or top-down rows, and an all-zero alpha
+      channel (old icons) treated as opaque or masked by an AND mask;
+      `width * height * 4` overflow-checked. SVG rendered into a square of the
+      target size with the aspect kept, and an error, not garbage, for a zero or
+      non-finite size. The theme lookup's fallback-theme chain, its generic-app
+      fallback names and the miss-retry delay supplied by the caller (pikr's are
+      Adwaita, Papirus, breeze, hicolor; `GENERIC_FALLBACK_NAMES`;
+      `MISS_RELOOKUP`). No `.icns`: macOS icons will arrive from `NSWorkspace`
+      as a raw buffer, which the RGBA/BGRA import covers. Icon paths come from
+      user-writable `.desktop` files, so every input is untrusted.
+    - **Direction 2026-10-16: crcbl writes its own decoders.** Offered
+      `zune-jpeg` and `resvg`, the owner asked "could we not build our own?";
+      this is the plan for that, with no new dependency. The other choice was
+      `zune-jpeg` and `resvg` (and `image` for WebP). In-house is the repo's way
+      (its own Wayland and X11 bindings, its own glyph rasteriser), and safe
+      Rust makes a hand-written decoder's worst case a refused file or a capped
+      allocation, not memory corruption, provided the fuzz target and the
+      dimension and memory caps are there from the first format. PNG stays on
+      the `png` crate the workspace already depends on, for decoding and for
+      encoding (`crcbl-sprite`'s `encode_png` is the existing writer). Rough
+      sizes, so the order can be chosen: BMP, ICO, XPM, the raw conversions and
+      the resize are each small; the theme lookup is small to medium; JPEG
+      (baseline and progressive, Huffman, IDCT, chroma upsampling) is medium;
+      WebP lossless is medium and WebP lossy (VP8) medium to large; SVG is the
+      largest, a subset aimed at icon themes (paths and shapes, fill and stroke
+      with joins, caps and dashes, linear and radial gradients, transforms,
+      groups and opacity, `<use>`, `clipPath`, the `style` attribute and a
+      `<style>` sheet of class rules as breeze uses), with fills through
+      `crcbl-ui/src/font/raster.rs`'s coverage rasteriser moved somewhere both
+      crates can reach (it does non-zero today; SVG also needs even-odd). Each
+      decoder is checked against files whose decoded pixels are known, generated
+      once with an outside tool and committed, never against a dependency at
+      test time.
+    - **pikr's condition on the SVG subset, 2026-10-16:** it must render real
+      icon themes correctly, because a subset is what burned pikr before:
+      floem's vello `svg()` silently dropped markers and complex clip paths, and
+      app icons drew only their background plate (recorded on pikr's
+      `IconCache::rasterise_svg`). So an unsupported element or attribute is a
+      decode error, never a partial image, and the caller falls back to its
+      generic icon. It is judged against a corpus of real themes — Adwaita,
+      Papirus, breeze and hicolor app icons — compared pixel by pixel with
+      resvg's output, reporting per theme what fraction renders and what
+      fraction is refused; that number decides whether pikr drops resvg, which
+      it keeps at its port boundary until then. pikr's unmeasured guess at what
+      the corpus needs: breeze's embedded `<style>` with
+      `class="ColorScheme-Text"` and `currentColor`, gradients inheriting
+      through `xlink:href`, `clipPath` and `mask`, `<use>` and `<defs>`,
+      transforms, group opacity, and Inkscape and sodipodi namespaces ignored.
+      **The corpus cannot be committed**: Papirus is GPL-3.0 and Adwaita's icons
+      CC-BY-SA, neither in `deny.toml`'s allow list, so the comparison runs in a
+      CI job that downloads the themes and renders the references with the resvg
+      command-line tool there — a tool on the runner, not a dependency of any
+      crate.
+    - lyr's M6 needs the theme lookup too (a notification's `app_icon` and
+      `desktop-entry` hint name a theme icon), which the order below already
+      puts before JPEG.
+    - Order: the crate with its caps and fuzz target, PNG, the raw conversions
+      and the resize (lyr's M6 needs these first), then the theme lookup with
+      SVG (pikr's port and lyr's tray), then JPEG (album art), then ICO, BMP and
+      WebP (pikr's parity), then XPM.
+
 ### Left behind by the seam split
 
 - `crates/crcbl-shaders/shaders/mesh.slang`'s comment on `FragmentOutput`'s
