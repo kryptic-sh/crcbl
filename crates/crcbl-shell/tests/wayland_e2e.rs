@@ -3440,6 +3440,15 @@ fn a_panel_opens_a_popup() {
     assert!(session.shell.window_state(calendar).is_err());
 }
 
+/// Focuses workspace 1, the first output's, when dropped.
+struct FirstOutputFocused;
+
+impl Drop for FirstOutputFocused {
+    fn drop(&mut self) {
+        swaymsg(&["workspace", "1"]);
+    }
+}
+
 /// A grabbing popup — a menu — is dismissed by a click outside it, and the
 /// dismissal is a close request the program answers.
 #[test]
@@ -3477,6 +3486,10 @@ fn a_grabbing_popup_is_dismissed_by_a_click_outside_it() {
     session.settle(Duration::from_millis(200));
     session.take_names();
 
+    // A click on an empty output focuses it, and the suite opens every window
+    // on the focused workspace; the guard puts the focus back however this
+    // test ends.
+    let _refocus = FirstOutputFocused;
     // On the empty second output: a grab ends on a click outside **every**
     // surface of the client. A click on the program's own window reaches that
     // window and leaves the grab alone, which is wlroots' rule and the
