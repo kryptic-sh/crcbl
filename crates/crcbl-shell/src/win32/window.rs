@@ -296,6 +296,11 @@ impl Win32Shell {
             // `WM_DROPFILES` to no window without it. See `dnd`.
             super::dnd::accept_files(hwnd, true);
         }
+        // The input method stays out until a text field asks for it, as
+        // `Shell::set_text_input_enabled` says of every window.
+        if let Err(error) = super::input::enable_ime(hwnd, false) {
+            crcbl_core::log::warn!("{error}; the input method stays on for this window");
+        }
 
         let real_dpi = Self::dpi_of(hwnd);
         let real_frame = Self::frame_for(styles, real_dpi);

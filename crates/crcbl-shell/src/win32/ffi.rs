@@ -1413,6 +1413,8 @@ pub mod value {
     pub const GCS_COMP_STR: u32 = 0x0008;
     /// `GCS_CURSORPOS` — the index that reads the cursor within it.
     pub const GCS_CURSOR_POS: u32 = 0x0080;
+    /// `IACE_DEFAULT` — give a window back its default input context.
+    pub const IACE_DEFAULT: u32 = 0x0010;
     /// `CFS_DEFAULT` — the input method places its window itself.
     pub const CFS_DEFAULT: u32 = 0x0000;
     /// `CFS_POINT` — the composition window starts at `ptCurrentPos`.
@@ -1788,6 +1790,10 @@ unsafe extern "system" {
     ) -> i32;
     pub fn ImmSetCompositionWindow(context: Handle, form: *const CompositionForm) -> Bool32;
     pub fn ImmSetCandidateWindow(context: Handle, form: *const CandidateForm) -> Bool32;
+    // With a null context and no flags it leaves the window with no input
+    // context, which keeps the input method out of it; `IACE_DEFAULT` gives
+    // the window back its thread's default context.
+    pub fn ImmAssociateContextEx(hwnd: Handle, context: Handle, flags: u32) -> Bool32;
 }
 
 // The `gdi32` surface: one call, for the class background brush.

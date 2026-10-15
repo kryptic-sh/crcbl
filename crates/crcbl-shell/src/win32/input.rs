@@ -305,6 +305,28 @@ pub(super) fn composition(hwnd: Handle) -> (Vec<u16>, Option<usize>) {
     .unwrap_or_default()
 }
 
+/// Turns the input method on or off for `hwnd`: its thread's default input
+/// context back, or no context at all, which is how a window keeps the input
+/// method out of its keys. See
+/// [`Shell::set_text_input_enabled`](crate::Shell::set_text_input_enabled).
+///
+/// # Errors
+///
+/// [`ShellError::Backend`] if the system refuses, which it does only for a
+/// window that is not this thread's.
+pub(super) fn enable_ime(hwnd: Handle, enabled: bool) -> Result<(), ShellError> {
+    let flags = if enabled { value::IACE_DEFAULT } else { 0 };
+    // SAFETY: a live window of this shell, on its own thread; a null context
+    // is what the call takes with either flag.
+    if unsafe { ffi::ImmAssociateContextEx(hwnd, ptr::null_mut(), flags) } == 0 {
+        return Err(ShellError::Backend(format!(
+            "ImmAssociateContextEx refused to turn the input method {}",
+            if enabled { "on" } else { "off" }
+        )));
+    }
+    Ok(())
+}
+
 /// Puts the input method's composition window at `area`'s top-left and opens
 /// its candidate list beside `area` without covering it, or hands placement
 /// back to the input method with `None`.

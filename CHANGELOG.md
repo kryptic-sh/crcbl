@@ -35,6 +35,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Off by default, so an input method in its native mode no longer turns a game's
   keys into a candidate list.
 
+### Changed
+
+- **On Win32 a window's input method is off until a text field asks for it.** A
+  window is created with no input context and gets its default one back from
+  `Shell::set_text_input_enabled(window, true)`, as on Wayland. Dead keys still
+  type, since they never went through the input method; a CJK input method no
+  longer composes in a window whose caller never turns it on, which includes a
+  game's own text entry until the engine can ask for one.
+
 ### Fixed
 
 - **A held key types repeatedly on Wayland.** The shell synthesizes Wayland's

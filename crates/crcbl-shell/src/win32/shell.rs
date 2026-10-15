@@ -1946,6 +1946,17 @@ impl Shell for Win32Shell {
         input::place_ime(hwnd, area);
         Ok(())
     }
+
+    /// The window's default input context, given back or taken away. A
+    /// composition's start restates the caret area on whichever context it
+    /// runs in, so nothing is placed here.
+    fn set_text_input_enabled(
+        &mut self,
+        window: WindowId,
+        enabled: bool,
+    ) -> Result<(), ShellError> {
+        input::enable_ime(self.window(window)?.raw(), enabled)
+    }
 }
 
 impl Drop for Win32Shell {

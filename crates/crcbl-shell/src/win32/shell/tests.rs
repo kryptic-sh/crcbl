@@ -2484,6 +2484,42 @@ fn a_reserving_bar_is_told_when_a_full_screen_window_opens_and_closes() {
     );
 }
 
+/// Whether `hwnd` has an input context, which is what an input method needs
+/// to compose in it.
+fn has_input_context(hwnd: Handle) -> bool {
+    // SAFETY: a live window of this test's shell, on its own thread; a context
+    // taken is released once.
+    unsafe {
+        let context = ffi::ImmGetContext(hwnd);
+        if !context.is_null() {
+            ffi::ImmReleaseContext(hwnd, context);
+        }
+        !context.is_null()
+    }
+}
+
+/// **A window has no input context until a text field asks for one**, and
+/// loses it again when the field lets go.
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_window_has_no_input_context_until_a_field_asks_for_one() {
+    let mut shell = shell();
+    let window = shell
+        .create_window(&WindowDesc::default())
+        .expect("a window");
+    let hwnd = hwnd_of(&shell, window);
+    assert!(!has_input_context(hwnd), "off as it is created");
+    shell
+        .set_text_input_enabled(window, true)
+        .expect("turn the input method on");
+    assert!(has_input_context(hwnd), "the default context is back");
+    shell
+        .set_text_input_enabled(window, false)
+        .expect("turn the input method off");
+    assert!(!has_input_context(hwnd), "and gone again");
+    shell.destroy_window(window).expect("destroy");
+}
+
 /// A popup descriptor against `parent`.
 fn popup_desc(title: &str, size: LogicalSize, popup: crate::PopupDesc) -> WindowDesc<'_> {
     WindowDesc {

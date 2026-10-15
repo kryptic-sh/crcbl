@@ -2107,6 +2107,10 @@ fn an_input_method_composition_is_a_pre_edit_and_its_result_a_commit() {
     let _layout = desktop::ThreadLayout::activate("00000411")
         .expect("the Japanese layout loads where the Japanese IME is installed");
     let hwnd = session.hwnd(window);
+    session
+        .shell
+        .set_text_input_enabled(window, true)
+        .expect("a live window asks for the input method");
     assert!(
         desktop::open_hiragana(hwnd),
         "the Japanese IME opened in hiragana mode on this window's input context"

@@ -898,9 +898,9 @@ pub trait Shell: core::fmt::Debug {
     /// # A provided method
     ///
     /// The default validates the handle and does nothing else. Wayland acts on
-    /// it, with `text-input-v3`'s `enable` and `disable`. Win32 and AppKit take
-    /// the default, and their input methods compose in every window whatever
-    /// this says.
+    /// it with `text-input-v3`'s `enable` and `disable`, and Win32 by giving the
+    /// window its input context or none. AppKit takes the default, and its
+    /// input method composes in every window whatever this says.
     ///
     /// # Errors
     ///

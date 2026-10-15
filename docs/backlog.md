@@ -287,11 +287,15 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      `Shell::set_text_input_enabled` is a new provided method rather than
      reading `set_text_input_area(None)` as "off". The area's `None` already
      means "default placement" on Win32, and an input method left on in every
-     window takes a game's keys. Win32 and AppKit still take the default, so
-     their input methods compose in every window as before; turning IMM off with
-     `ImmAssociateContextEx` while no field is engaged is the Win32 half, not
-     done. A game's own text entry (what reaches `HostedGame::text_event`) has
-     no way to ask for the input method through the engine yet.
+     window takes a game's keys. Win32 acts on it too: a window is created with
+     no input context (`ImmAssociateContextEx`) and gets its default one back
+     when a field asks, checked by
+     `a_window_has_no_input_context_until_a_field_asks_for_one` on CI's real
+     desktop; the Japanese IME test that would show a composition after the ask
+     is behind `win32-ime-e2e`, which CI does not run. AppKit still takes the
+     default, so its input method composes in every window. A game's own text
+     entry (what reaches `HostedGame::text_event`) has no way to ask for the
+     input method through the engine yet.
    - S20, checked 2026-10-15. There already: hover and click as pseudo-classes
      and responses, `Shell::set_cursor` with `CursorIcon`, `ShellEvent::Wheel`
      keeping detents (`ScrollDelta::Lines`) apart from pixels, and
