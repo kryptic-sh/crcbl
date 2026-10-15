@@ -94,10 +94,21 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      unmutated run is main's CI.
    - Still to do on Wayland:
      - no flash on map: the first commit carries the first frame;
-     - `xdg_popup` (S3), on layer surfaces through `get_popup`, with an empty
-       input region for `Passthrough` and `xdg_popup.grab` for `Grab`;
      - repositioning a live popup through `xdg_popup.reposition` (needs
-       `xdg_wm_base` v3), reported in caps where it is missing;
+       `xdg_wm_base` v3), which needs a seam request to move a popup first, and
+       caps for the compositors without it;
+   - Popups (S3) are built (`crates/crcbl-shell/src/wayland/popup.rs`): an
+     `xdg_popup` from an `xdg_positioner` whose anchor and gravity come from the
+     placement, with flip and slide but never resize, on a toplevel, a popup or
+     a panel (`zwlr_layer_surface_v1.get_popup`). `Passthrough` is an empty
+     input region; `Grab` is `xdg_popup.grab` with the seat's latest input
+     serial, and `NeedsUserInteraction` when no seat has one; `popup_done` is a
+     `CloseRequested`. Popups are destroyed before their parent, in
+     `destroy_window` and in `Drop`. Its e2e tests
+     (`a_menu_opens_at_its_size_…`, `a_panel_opens_a_popup`,
+     `a_grabbing_popup_is_dismissed_…`) run only under sway in CI. Not checked:
+     where the compositor put the popup (`xdg_popup.configure`'s position is not
+     kept), since the seam has no way to report it.
    - S17 has e2e tests: an exclusive panel takes the keyboard on mapping and
      gets the first key typed after that, and a held key repeats on it
      (`an_exclusive_panel_takes_the_keyboard_when_it_maps`); an on-demand panel

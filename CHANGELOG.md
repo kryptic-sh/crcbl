@@ -913,8 +913,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   builds panels as non-activating `NSPanel`s at a level per layer, above the
   menu bar for `Top`, on every space, placed in the screen's visible frame or
   its whole frame, and honours `transparent`; it reserves no edge, which macOS
-  keeps for the menu bar and the Dock. Only the headless shell builds popups so
-  far. `LogicalRect` is new in `crcbl_shell`.
+  keeps for the menu bar and the Dock. Wayland builds popups as `xdg_popup`s
+  placed by an `xdg_positioner` against the anchor rectangle, flipped or slid to
+  stay on screen, on a toplevel, another popup or a panel (through layer-shell's
+  `get_popup`); `Passthrough` has an empty input region, `Grab` grabs with the
+  seat's latest input serial, and the compositor's `popup_done` is a
+  `CloseRequested`. A popup is destroyed before its parent. Win32 and AppKit do
+  not build popups yet. `LogicalRect` is new in `crcbl_shell`.
 
 - **Fonts from bytes read at run time.** `Font::parse` takes any `FontData`: an
   `include_bytes!` as before, or a `Vec<u8>`, `Box<[u8]>` or `Arc<[u8]>` an

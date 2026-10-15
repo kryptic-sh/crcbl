@@ -47,6 +47,7 @@
 //! | Protocol | What it gives the engine |
 //! | --- | --- |
 //! | `zwlr_layer_shell_v1` + `zwlr_layer_surface_v1` | [`WindowRole::Panel`] — see [`layer`] |
+//! | `xdg_popup` + `xdg_positioner` | [`WindowRole::Popup`] — see [`popup`] |
 //!
 //! Still deliberately absent: touch, tablet, IME pre-edit, the *primary*
 //! selection (`wp_primary_selection_v1` — middle-click paste, which the seam
@@ -163,6 +164,7 @@ mod fd;
 pub mod ffi;
 mod input;
 mod layer;
+mod popup;
 pub mod protocol;
 
 /// The evdev table and libxkbcommon, which are Linux facts rather than Wayland
@@ -211,7 +213,7 @@ use protocol::wayland::{
 };
 use protocol::xdg_decoration::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1};
 use protocol::xdg_output::{zxdg_output_manager_v1, zxdg_output_v1};
-use protocol::xdg_shell::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use protocol::xdg_shell::{xdg_popup, xdg_surface, xdg_toplevel, xdg_wm_base};
 
 /// Versions this backend binds globals at.
 ///
@@ -391,6 +393,7 @@ enum ObjectKind {
     Surface,
     XdgSurface,
     XdgToplevel,
+    XdgPopup,
     LayerSurface,
     Decoration,
     FractionalScale,
@@ -481,6 +484,18 @@ enum RawEvent {
     },
     ToplevelClose {
         toplevel: usize,
+    },
+    /// The size and place the compositor gave a popup; completed by the
+    /// `xdg_surface.configure` that follows, as a toplevel's is.
+    PopupConfigure {
+        popup: usize,
+        width: i32,
+        height: i32,
+    },
+    /// The compositor dismissed a popup: a click outside a grabbing one, or its
+    /// parent going.
+    PopupDone {
+        popup: usize,
     },
     LayerConfigure {
         layer_surface: usize,
@@ -923,6 +938,25 @@ unsafe extern "C" fn dispatch(
                         states: decode_state_array(states),
                     }),
                     xdg_toplevel::Event::Close => Some(RawEvent::ToplevelClose { toplevel: proxy }),
+                    _ => None,
+                };
+                sink.events.extend(raw);
+            }
+        }
+        ObjectKind::XdgPopup => {
+            // SAFETY: see the note above the `match`.
+            if let Some(event) = unsafe { xdg_popup::decode_event(opcode, args) } {
+                let raw = match event {
+                    xdg_popup::Event::Configure { width, height, .. } => {
+                        Some(RawEvent::PopupConfigure {
+                            popup: proxy,
+                            width,
+                            height,
+                        })
+                    }
+                    xdg_popup::Event::PopupDone => Some(RawEvent::PopupDone { popup: proxy }),
+                    // `repositioned` answers `xdg_popup.reposition`, which
+                    // this backend does not send.
                     _ => None,
                 };
                 sink.events.extend(raw);
@@ -1841,6 +1875,10 @@ struct WlWindow {
     toplevel: *mut WlProxy,
     /// The `zwlr_layer_surface_v1` of a panel.
     layer_surface: *mut WlProxy,
+    /// The `xdg_popup` of a popup.
+    popup: *mut WlProxy,
+    /// The window a popup belongs to, which destroys it when it goes.
+    parent: Option<WindowId>,
     /// The monitor a panel was created for, whose removal asks it to close.
     panel_monitor: Option<MonitorId>,
     decoration: *mut WlProxy,
@@ -2142,6 +2180,8 @@ impl WaylandShell {
         // client declares a region opaque, which this backend never does, so a
         // swapchain with premultiplied alpha is all a transparent window needs.
         caps.insert(ShellCaps::TRANSPARENT);
+        // `xdg_wm_base`, which `open` requires, has had popups from version 1.
+        caps.insert(ShellCaps::POPUP);
         caps
     }
 
@@ -2722,6 +2762,23 @@ impl WaylandShell {
                     width,
                     height,
                 } => self.layer_configured(layer_surface, serial, width, height),
+                RawEvent::PopupConfigure {
+                    popup,
+                    width,
+                    height,
+                } => {
+                    if let Some(id) = self.window_by_proxy(popup, |w| w.popup as usize)
+                        && let Ok(window) = self.window_mut(id)
+                    {
+                        window.pending.size = (width > 0 && height > 0)
+                            .then(|| LogicalSize::new(f64::from(width), f64::from(height)));
+                    }
+                }
+                RawEvent::PopupDone { popup } => {
+                    if let Some(id) = self.window_by_proxy(popup, |w| w.popup as usize) {
+                        self.close_requested(id);
+                    }
+                }
                 RawEvent::ToplevelClose { toplevel } => {
                     if let Some(id) = self.window_by_proxy(toplevel, |w| w.toplevel as usize) {
                         self.close_requested(id);
@@ -3005,6 +3062,7 @@ impl WaylandShell {
             .contains(&xdg_toplevel::state::ACTIVATED);
         let xdg = window.xdg_surface;
         let layer = window.layer_surface;
+        let toplevel = window.toplevel;
         let surface = window.surface;
         let viewport = window.viewport;
 
@@ -3038,10 +3096,10 @@ impl WaylandShell {
                 scale_factor,
             });
         }
-        // `activated` is a toplevel state. A layer surface has none, and
-        // reading its empty set as "not activated" would undo the focus its
-        // `wl_keyboard.enter` gave it on every configure.
-        if layer.is_null() {
+        // `activated` is a toplevel state. A layer surface or a popup has none,
+        // and reading its empty set as "not activated" would undo the focus
+        // its `wl_keyboard.enter` gave it on every configure.
+        if !toplevel.is_null() {
             self.set_focus(id, focused);
         }
     }
@@ -3231,6 +3289,7 @@ impl WaylandShell {
         unsafe {
             self.conn
                 .release(window.layer_surface, zwlr_layer_surface_v1::destroy);
+            self.conn.release(window.popup, xdg_popup::destroy);
             self.conn.release(window.toplevel, xdg_toplevel::destroy);
             self.conn.release(window.xdg_surface, xdg_surface::destroy);
             self.conn.release(window.surface, wl_surface::destroy);
@@ -3342,14 +3401,26 @@ unsafe fn set_viewport(viewport: *mut WlProxy, logical: LogicalSize) {
 
 impl Drop for WaylandShell {
     fn drop(&mut self) {
-        let windows: Vec<WindowId> = self
-            .windows
-            .iter()
-            .map(|(handle, _)| handle.cast())
-            .collect();
-        for id in windows {
-            if let Some(window) = self.windows.remove(id.cast()) {
-                self.destroy_objects(id, &window);
+        // Popups before the windows they belong to, at every depth: a surface
+        // destroyed under a live popup is a protocol error. Each pass takes
+        // the windows nothing names as a parent.
+        while !self.windows.is_empty() {
+            let leaves: Vec<WindowId> = self
+                .windows
+                .iter()
+                .filter(|(handle, _)| {
+                    let id: WindowId = handle.cast();
+                    !self
+                        .windows
+                        .iter()
+                        .any(|(_, window)| window.parent == Some(id))
+                })
+                .map(|(handle, _)| handle.cast())
+                .collect();
+            for id in leaves {
+                if let Some(window) = self.windows.remove(id.cast()) {
+                    self.destroy_objects(id, &window);
+                }
             }
         }
         for index in (0..self.seats.len()).rev() {
@@ -3437,9 +3508,7 @@ impl Shell for WaylandShell {
         let panel = match desc.role {
             WindowRole::Toplevel => None,
             WindowRole::Panel(panel) => Some(panel),
-            // `role::check` refuses it first, because `POPUP` is not in this
-            // backend's caps yet.
-            WindowRole::Popup(_) => return Err(Self::unsupported("popup windows")),
+            WindowRole::Popup(popup) => return self.create_popup(desc, &popup),
         };
         if let DisplayMode::Borderless {
             monitor: Some(monitor),
@@ -3578,6 +3647,8 @@ impl Shell for WaylandShell {
                 xdg_surface: xdg,
                 toplevel,
                 layer_surface,
+                popup: ptr::null_mut(),
+                parent: None,
                 panel_monitor: panel.and_then(|panel| panel.monitor),
                 decoration,
                 fractional_scale,
@@ -3607,7 +3678,21 @@ impl Shell for WaylandShell {
         Ok(handle)
     }
 
+    /// Destroys the window and, first, every popup that belongs to it — each
+    /// with its own [`ShellEvent::WindowDestroyed`]. Destroying a surface whose
+    /// popups are still alive is a protocol error, and the seam promises a
+    /// popup goes with its parent.
     fn destroy_window(&mut self, window: WindowId) -> Result<(), ShellError> {
+        self.window(window)?;
+        let popups: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, state)| state.parent == Some(window))
+            .map(|(handle, _)| handle.cast())
+            .collect();
+        for popup in popups {
+            self.destroy_window(popup)?;
+        }
         let removed = self
             .windows
             .remove(window.cast())
@@ -4830,6 +4915,8 @@ mod tests {
             xdg_surface: ptr::null_mut(),
             toplevel: ptr::null_mut(),
             layer_surface: ptr::null_mut(),
+            popup: ptr::null_mut(),
+            parent: None,
             panel_monitor: None,
             decoration: ptr::null_mut(),
             fractional_scale: ptr::null_mut(),

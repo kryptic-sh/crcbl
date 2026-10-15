@@ -23,10 +23,11 @@ use crcbl_shell::wayland_test_support::{
     DragSource, GlobalHotplug, MAX_PENDING_CLIPBOARD_WRITES, VirtualInput,
 };
 use crcbl_shell::{
-    ButtonState, CloseReply, CursorIcon, DisplayMode, KeyCode, Keysym, LogicalSize, Modifiers,
-    MonitorInfo, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer, PhysicalSize, PointerButton,
-    PointerMode, Reserve, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
-    SizeConstraints, SurfaceTarget, WindowDesc, WindowId, WindowRole,
+    ButtonState, CloseReply, CursorIcon, DisplayMode, KeyCode, Keysym, LogicalPoint, LogicalRect,
+    LogicalSize, Modifiers, MonitorInfo, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer,
+    PhysicalSize, PointerButton, PointerMode, PopupDesc, PopupInput, PopupPlacement, Reserve,
+    ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints,
+    SurfaceTarget, WindowDesc, WindowId, WindowRole,
 };
 
 /// evdev codes, from `linux/input-event-codes.h`. Spelled out rather than
@@ -3336,4 +3337,158 @@ fn unplugging_a_monitor_names_it_and_asks_its_panels_to_close() {
         .shell
         .reply_close_request(bar, CloseReply::Close)
         .expect("close");
+}
+
+// ---------------------------------------------------------------------------
+// Popups — xdg_popup
+// ---------------------------------------------------------------------------
+
+/// A popup descriptor against `parent`, with everything else at its default.
+fn popup<'a>(title: &'a str, size: LogicalSize, popup: PopupDesc) -> WindowDesc<'a> {
+    WindowDesc {
+        title,
+        app_id: APP_ID,
+        size,
+        role: WindowRole::Popup(popup),
+        ..WindowDesc::default()
+    }
+}
+
+/// A menu below a button: the compositor configures it at the size it asked
+/// for, and it goes when its window goes, before the window.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_menu_opens_at_its_size_and_goes_with_its_window() {
+    let mut session = Session::open();
+    assert!(session.shell.caps().contains(ShellCaps::POPUP));
+    let window = session.create_mapped(&desc(
+        "crcbl e2e menu owner",
+        LogicalSize::new(500.0, 400.0),
+    ));
+    let size = LogicalSize::new(200.0, 150.0);
+    let menu = session.create(&popup(
+        "crcbl e2e menu",
+        size,
+        PopupDesc {
+            parent: window,
+            anchor: LogicalRect::new(LogicalPoint::new(10.0, 10.0), LogicalSize::new(100.0, 20.0)),
+            placement: PopupPlacement::Below,
+            input: PopupInput::Pointer,
+        },
+    ));
+    session.pump_until("the menu's first configure", |session| {
+        session.size(menu).is_some()
+    });
+    let scale = session
+        .shell
+        .window_state(menu)
+        .expect("live menu")
+        .scale_factor()
+        .expect("configured");
+    assert_eq!(session.size(menu), Some(size.to_physical(scale)));
+
+    session.take_names();
+    session.shell.destroy_window(window).expect("destroy");
+    let destroyed: Vec<WindowId> = session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::WindowDestroyed { window } => Some(*window),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        destroyed,
+        [menu, window],
+        "the popup first, then its window"
+    );
+    assert!(session.shell.window_state(menu).is_err());
+}
+
+/// The calendar a bar opens: a popup whose parent is a layer surface, which
+/// layer-shell adopts with `get_popup`.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_panel_opens_a_popup() {
+    let mut session = Session::open();
+    let bar = session.create(&panel(
+        "crcbl e2e bar with a popup",
+        LogicalSize::new(0.0, 30.0),
+        PanelDesc {
+            anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+            ..PanelDesc::default()
+        },
+    ));
+    session.pump_until("the bar's first configure", |session| {
+        session.size(bar).is_some()
+    });
+    crcbl_shell::wayland_test_support::map_window(&*session.shell, bar).expect("map");
+    let calendar = session.create(&popup(
+        "crcbl e2e calendar",
+        LogicalSize::new(300.0, 250.0),
+        PopupDesc {
+            parent: bar,
+            anchor: LogicalRect::new(LogicalPoint::new(800.0, 0.0), LogicalSize::new(120.0, 30.0)),
+            placement: PopupPlacement::Below,
+            input: PopupInput::Passthrough,
+        },
+    ));
+    session.pump_until("the calendar's first configure", |session| {
+        session.size(calendar).is_some()
+    });
+    session.shell.destroy_window(bar).expect("destroy");
+    assert!(session.shell.window_state(calendar).is_err());
+}
+
+/// A grabbing popup — a menu — is dismissed by a click outside it, and the
+/// dismissal is a close request the program answers.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_grabbing_popup_is_dismissed_by_a_click_outside_it() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e grab owner");
+    // A click inside the window: the input serial the grab quotes.
+    input.move_to(100, 100, LAYOUT_SIZE);
+    input.button(evdev::BTN_LEFT, true);
+    input.button(evdev::BTN_LEFT, false);
+    session.pump_until("the click", |session| {
+        session
+            .events
+            .iter()
+            .filter(|event| event.name() == "Button")
+            .count()
+            >= 2
+    });
+
+    let menu = session.create(&popup(
+        "crcbl e2e grabbing menu",
+        LogicalSize::new(200.0, 100.0),
+        PopupDesc {
+            parent: window,
+            anchor: LogicalRect::new(LogicalPoint::new(90.0, 90.0), LogicalSize::new(20.0, 20.0)),
+            placement: PopupPlacement::Below,
+            input: PopupInput::Grab,
+        },
+    ));
+    session.pump_until("the menu's first configure", |session| {
+        session.size(menu).is_some()
+    });
+    crcbl_shell::wayland_test_support::map_window(&*session.shell, menu).expect("map");
+    session.settle(Duration::from_millis(200));
+    session.take_names();
+
+    input.move_to(1500, 900, LAYOUT_SIZE);
+    input.button(evdev::BTN_LEFT, true);
+    input.button(evdev::BTN_LEFT, false);
+    session.pump_until("the menu's dismissal", |session| {
+        session
+            .events
+            .contains(&ShellEvent::CloseRequested { window: menu })
+    });
+    session
+        .shell
+        .reply_close_request(menu, CloseReply::Close)
+        .expect("close");
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
 }
