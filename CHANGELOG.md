@@ -30,7 +30,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   greyscale, YCbCr or RGB, any whole-number chroma sampling, restart intervals,
   to the same pixels libjpeg-turbo produces (its integer IDCT, its chroma
   upsampling, its colour tables); arithmetic coding, 12-bit samples and CMYK are
-  refused. Behind the `theme` feature,
+  refused. Behind the `bmp` feature, `bmp::decode`: Windows bitmaps at 1, 4, 8,
+  16, 24 and 32 bits, palettes, channel masks and run-length coding; a 32-bit
+  bitmap's fourth byte is alpha unless it is zero everywhere, as Chrome reads
+  it. Behind the `ico` feature, `ico::decode(bytes, size, limits)` and
+  `ico::sizes`: the icon frame nearest a size, whether stored as PNG or as a
+  bitmap with an AND mask. Behind the `theme` feature,
   `theme::IconThemes::lookup(name, size, scale)`: the freedesktop.org Icon Theme
   Specification's lookup (the theme, what it `Inherits`, caller-chosen fallback
   themes, `hicolor`, then bare files in `/usr/share/pixmaps`; PNG before SVG

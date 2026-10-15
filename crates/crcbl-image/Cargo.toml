@@ -15,6 +15,10 @@ rust-version.workspace = true
 # No GPU, shell or UI dependency: decoding runs on whatever thread the caller
 # likes, and only the finished pixels need cross to the one that draws.
 [features]
+# Windows bitmaps, decoded by this crate's own code.
+bmp = []
+# Windows icons and cursors: a directory of frames, each a PNG or a bitmap.
+ico = ["bmp", "png"]
 # Baseline and progressive JPEG, decoded by this crate's own code.
 jpeg = []
 png = ["dep:png"]
