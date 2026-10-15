@@ -164,7 +164,10 @@
 //! `text-overflow: ellipsis`, `white-space: nowrap` and `overflow: hidden` (or
 //! `scroll`) draws each line too long for its content box cut to fit and ending
 //! in `…` — `...` in a font without that glyph — and [`Ui::text`] reads back
-//! what it drew; `ellipsis.rs` has the rule. An image span
+//! what it drew; `ellipsis.rs` has the rule. A span or a paragraph's run that
+//! is `text-decoration: underline` draws a rectangle under each line it lies
+//! on, before its text, where its font's `post` table says or — for a font
+//! that does not, and the bitmap font — `emit.rs`'s fallback. An image span
 //! stretches its picture over its content box. Outlines are drawn after the
 //! whole tree, in build order, each under the clip its node was drawn under,
 //! so a later sibling never covers a focus ring: a ring `outline-offset`

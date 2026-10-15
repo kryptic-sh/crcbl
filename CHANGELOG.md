@@ -81,6 +81,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   node whose `Response` reports a click on either line, styled by `:hover` and
   answering `Ui::cursor` there. `text-overflow: ellipsis` does not apply to a
   paragraph.
+- **`text-decoration: underline` in `crcbl-ui` stylesheets** (and `none`),
+  inherited: a text span or a paragraph's run is underlined under each line it
+  lies on, in its colour, where its font's `post` table says — a fixed fraction
+  of an em below the baseline for a font that does not say and for the bitmap
+  font — and never thinner than a pixel.
 
 ### Changed
 

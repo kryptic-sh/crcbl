@@ -6,12 +6,73 @@ use std::collections::HashMap;
 
 use glam::Vec2;
 
-use super::style::{Display, ImageName, NodeStyle, WhiteSpace};
+use super::style::{Display, ImageName, NodeStyle, TextDecoration, WhiteSpace};
 use super::{Content, Ui, padding_box};
 use crate::draw_list::{Border, CornerRadii, DrawList};
+use crate::font::Font;
 use crate::font::layout::TextLayout;
 use crate::image::{AtlasImage, NineSliceImage};
-use crate::widget::SkinInsets;
+use crate::text::{ASCENDER, GLYPH_ADVANCE, LINE_HEIGHT};
+use crate::widget::{NATURAL_FONT_SIZE, SkinInsets};
+
+/// How far below the baseline an underline's top is, in ems, for a font whose
+/// `post` table does not say and for the bitmap font: about where a text
+/// face's own table puts it.
+pub(super) const FALLBACK_UNDERLINE_OFFSET_EM: f32 = 0.1;
+
+/// How thick that underline is, in ems.
+pub(super) const FALLBACK_UNDERLINE_THICKNESS_EM: f32 = 1.0 / 16.0;
+
+/// The thinnest underline drawn, in pixels: what keeps one at a small size
+/// covering a row of pixels rather than falling between two.
+pub(super) const MIN_UNDERLINE_THICKNESS: f32 = 1.0;
+
+/// The rectangle underlining `width` pixels of text from `left`, on the
+/// baseline at `baseline`, in `font` — the bitmap font for `None` — at `size`
+/// pixels per em: where the font's `post` table says, else the fallback above.
+pub(super) fn underline(
+    font: Option<&Font>,
+    size: f32,
+    baseline: f32,
+    left: f32,
+    width: f32,
+) -> (Vec2, Vec2) {
+    let (top, thickness) = match font.and_then(|font| Some((font, font.underline()?))) {
+        Some((font, line)) => {
+            let scale = font.metrics().scale(size);
+            (baseline - line.offset * scale, line.thickness * scale)
+        }
+        None => (
+            baseline + size * FALLBACK_UNDERLINE_OFFSET_EM,
+            size * FALLBACK_UNDERLINE_THICKNESS_EM,
+        ),
+    };
+    let thickness = thickness.max(MIN_UNDERLINE_THICKNESS);
+    (
+        Vec2::new(left, top),
+        Vec2::new(left + width, top + thickness),
+    )
+}
+
+/// Underlines each of a text span's `lines`, `(left, baseline, width)` from
+/// `origin`, when its style says to.
+fn underline_lines(
+    list: &mut DrawList,
+    style: &NodeStyle,
+    font: Option<&Font>,
+    origin: Vec2,
+    lines: impl Iterator<Item = (f32, f32, f32)>,
+) {
+    if style.text_decoration != TextDecoration::Underline {
+        return;
+    }
+    for (left, baseline, width) in lines {
+        if width > 0.0 {
+            let (min, max) = underline(font, style.font_size, baseline, left, width);
+            list.rect(origin + min, origin + max, style.color);
+        }
+    }
+}
 
 /// Whether a colour draws anything.
 fn visible(color: [f32; 4]) -> bool {
@@ -100,7 +161,18 @@ impl Ui {
             let text = self.shown_text(node).expect("a text span shows text");
             let style = &node.style;
             match &node.font {
-                None => list.text(content_min, text, style.color, style.font_size),
+                None => {
+                    // The bitmap font's lines: one per newline, its fixed
+                    // pitch apart, every glyph its fixed advance.
+                    let scale = style.font_size / NATURAL_FONT_SIZE;
+                    let lines = text.split('\n').enumerate().map(|(at, line)| {
+                        let top = at as f32 * LINE_HEIGHT * scale;
+                        let width = line.chars().count() as f32 * GLYPH_ADVANCE * scale;
+                        (0.0, top + ASCENDER as f32 * scale, width)
+                    });
+                    underline_lines(list, style, None, content_min, lines);
+                    list.text(content_min, text, style.color, style.font_size);
+                }
                 Some(font) => {
                     // Broken at the width the layout measured it under —
                     // the unrounded one — unless it is `nowrap`, and
@@ -116,6 +188,11 @@ impl Ui {
                         wrap,
                     );
                     layout.align(content_max.x - content_min.x, style.text_align);
+                    let lines = layout
+                        .lines()
+                        .iter()
+                        .map(|line| (line.offset, line.baseline, line.width));
+                    underline_lines(list, style, Some(font), content_min, lines);
                     list.text_glyphs(
                         content_min,
                         font,

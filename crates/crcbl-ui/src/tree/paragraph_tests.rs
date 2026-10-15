@@ -79,6 +79,9 @@ fn a_bitmap_paragraph_wraps_its_runs_together() {
 mod parsed {
     use super::*;
     use crate::font::{Font, FontMetrics};
+    use crate::tree::emit::{
+        FALLBACK_UNDERLINE_OFFSET_EM, FALLBACK_UNDERLINE_THICKNESS_EM, MIN_UNDERLINE_THICKNESS,
+    };
     use crcbl_core::input::CursorIcon;
 
     /// Every glyph [`ADVANCE`] wide at [`SIZE`], on a line exactly one em
@@ -431,5 +434,150 @@ mod parsed {
         let advance = sans.advance(a) * scale;
         assert_eq!(second_pen(SIZE), advance + sans.kerning(a, v) * scale);
         assert_eq!(second_pen(BIG), advance);
+    }
+
+    /// Every filled rectangle `list` draws: an underline, here.
+    fn rects(list: &DrawList) -> Vec<(Vec2, Vec2, [f32; 4])> {
+        list.commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Rect { min, max, color } => Some((*min, *max, *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **An underlined run is underlined under each of its fragments**, from
+    /// its left to its right on each line, the fallback distance below that
+    /// line's baseline for a font that does not say — and the runs beside it
+    /// are not.
+    #[test]
+    fn an_underlined_run_is_underlined_under_each_fragment() {
+        let blue = [0.0, 0.0, 1.0, 1.0];
+        let mut ui = ui_with("a { text-decoration: underline; color: #0000ff; }");
+        paragraph(&mut ui, idle(), Some(9.5 * ADVANCE), |p| {
+            p.run("", "see ", &[]);
+            p.run("a", "the full log", &[]);
+            p.run("", " now", &[]);
+        });
+        let mut list = DrawList::new();
+        ui.emit(&mut list);
+        let below = SIZE * FALLBACK_UNDERLINE_OFFSET_EM;
+        let thick = SIZE * FALLBACK_UNDERLINE_THICKNESS_EM;
+        assert!(
+            thick > MIN_UNDERLINE_THICKNESS,
+            "the fixture's line is clamped"
+        );
+        let line = |left: f32, right: f32, baseline: f32| {
+            (
+                Vec2::new(left * ADVANCE, baseline + below),
+                Vec2::new(right * ADVANCE, baseline + below + thick),
+                blue,
+            )
+        };
+        assert_eq!(
+            rects(&list),
+            [line(4.0, 7.0, ABOVE), line(0.0, 8.0, LINE + ABOVE)]
+        );
+    }
+
+    /// **A font's own underline is where its `post` table says**, scaled to
+    /// the run's size and measured from the baseline its glyphs sit on; a run
+    /// inherits the paragraph's underline, and one that says `none` has
+    /// none.
+    #[test]
+    fn a_fonts_own_underline_is_drawn_where_its_post_table_says() {
+        let sans = Font::sans();
+        let line = sans.underline().expect("the committed font says");
+        assert!(line.offset < 0.0, "the committed underline is not below");
+        let scale = sans.metrics().scale(BIG);
+        let mut ui = Ui::new();
+        ui.add_stylesheet(
+            "underline.css",
+            ".p { font-family: sans-serif; text-decoration: underline; } .plain {              text-decoration: none; }",
+        );
+        paragraph(&mut ui, idle(), None, |p| {
+            p.run("", "Hello", &[Declaration::FontSize(BIG)]);
+            p.run(".plain", " world", &[Declaration::FontSize(BIG)]);
+        });
+        let mut list = DrawList::new();
+        ui.emit(&mut list);
+        let baseline = glyph_runs(&list)[0].1.y;
+        let drawn = rects(&list);
+        assert_eq!(drawn.len(), 1, "the plain run was underlined: {drawn:?}");
+        let (min, max, _) = drawn[0];
+        assert_eq!(min.y, baseline - line.offset * scale);
+        let thickness = (line.thickness * scale).max(MIN_UNDERLINE_THICKNESS);
+        assert!(
+            (max.y - min.y - thickness).abs() < 1e-4,
+            "the underline is {} thick rather than {thickness}",
+            max.y - min.y
+        );
+        let hello: f32 = "Hello"
+            .chars()
+            .map(|c| sans.advance(sans.glyph_id(c)) * scale)
+            .sum();
+        assert_eq!(min.x, 0.0);
+        assert!(
+            (max.x - hello).abs() < 1.0,
+            "the underline ends at {} rather than under `Hello`'s {hello}",
+            max.x
+        );
+    }
+
+    /// **A text span is underlined line by line too**: under each line its
+    /// text breaks into, in a parsed font and in the bitmap font.
+    #[test]
+    fn a_text_span_is_underlined_under_each_line() {
+        let mut ui = ui_with(".u { text-decoration: underline; } .bitmap { font-family: bitmap; }");
+        frame(&mut ui, idle(), |ui| {
+            ui.block(
+                "",
+                &[Declaration::FlexDirection(FlexDirection::Column)],
+                |ui| {
+                    ui.span(
+                        ".p.u",
+                        "ab
+cde",
+                        &[],
+                    );
+                    ui.span(".u.bitmap", "xy", &[]);
+                },
+            );
+        });
+        let mut list = DrawList::new();
+        ui.emit(&mut list);
+        let below = SIZE * FALLBACK_UNDERLINE_OFFSET_EM;
+        let thick = SIZE * FALLBACK_UNDERLINE_THICKNESS_EM;
+        let white = [1.0; 4];
+        let bitmap_top = 2.0 * LINE;
+        let bitmap_size = NodeStyle::DEFAULT.font_size;
+        let bitmap_baseline = bitmap_top + crate::text::ASCENDER as f32;
+        let bitmap_below = bitmap_size * FALLBACK_UNDERLINE_OFFSET_EM;
+        let bitmap_thick =
+            (bitmap_size * FALLBACK_UNDERLINE_THICKNESS_EM).max(MIN_UNDERLINE_THICKNESS);
+        assert_eq!(
+            rects(&list),
+            [
+                (
+                    Vec2::new(0.0, ABOVE + below),
+                    Vec2::new(2.0 * ADVANCE, ABOVE + below + thick),
+                    white
+                ),
+                (
+                    Vec2::new(0.0, LINE + ABOVE + below),
+                    Vec2::new(3.0 * ADVANCE, LINE + ABOVE + below + thick),
+                    white
+                ),
+                (
+                    Vec2::new(0.0, bitmap_baseline + bitmap_below),
+                    Vec2::new(
+                        2.0 * GLYPH_ADVANCE,
+                        bitmap_baseline + bitmap_below + bitmap_thick
+                    ),
+                    white
+                ),
+            ]
+        );
     }
 }

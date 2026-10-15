@@ -44,6 +44,10 @@
 //! **`text-overflow: ellipsis` does not apply to a paragraph**: a cut that
 //! respects every run's font is not built.
 //!
+//! An underlined run (`text-decoration: underline`) is underlined fragment by
+//! fragment, the spaces between its words included, in its own colour and
+//! where its own font says — see `emit.rs`'s `underline` for the fallback.
+//!
 //! # Interaction
 //!
 //! Each run is hit on its **fragments** — one rectangle per line it lies on,
@@ -61,9 +65,9 @@ use std::panic::Location;
 use glam::Vec2;
 use taffy::{AvailableSpace, Size};
 
-use super::emit::content_width;
+use super::emit::{content_width, underline};
 use super::inline::{InlineLayout, InlineRun, RunFont, Wrap};
-use super::style::{Display, WhiteSpace};
+use super::style::{Display, TextDecoration, WhiteSpace};
 use super::{Behavior, Content, FrameNode, KeySource, Response, Ui, hash_of};
 use crate::draw_list::DrawList;
 use crate::style::{Declaration, NodeSelector, PseudoClasses};
@@ -253,6 +257,17 @@ impl Ui {
             };
             let text = &self.text[start..end][fragment.text.clone()];
             let style = &run.style;
+            let line = &laid.layout.lines()[fragment.line];
+            if style.text_decoration == TextDecoration::Underline {
+                let (min, max) = underline(
+                    run.font.as_ref(),
+                    style.font_size,
+                    line.baseline,
+                    fragment.x,
+                    fragment.width,
+                );
+                list.rect(origin + min, origin + max, style.color);
+            }
             match &run.font {
                 Some(font) => {
                     let glyphs = laid.layout.positioned(fragment);
@@ -261,7 +276,6 @@ impl Ui {
                     }
                 }
                 None => {
-                    let line = &laid.layout.lines()[fragment.line];
                     let scale = style.font_size / NATURAL_FONT_SIZE;
                     let top = line.baseline - ASCENDER as f32 * scale;
                     list.text(
