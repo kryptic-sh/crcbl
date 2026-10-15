@@ -228,7 +228,7 @@ impl X11Shell {
             .map_or(Keysym::NONE, |keymap| keymap.keysym(scancode));
         let text = if pressed {
             self.keymap
-                .as_ref()
+                .as_mut()
                 .and_then(|keymap| keymap.text(scancode))
         } else {
             None
@@ -403,6 +403,10 @@ impl X11Shell {
             self.resync_modifiers();
         } else {
             self.held.clear();
+        }
+        // A compose sequence begun in one window is not finished in another.
+        if let Some(keymap) = self.keymap.as_mut() {
+            keymap.reset_compose();
         }
         self.queue.push_back(ShellEvent::Focus { window, focused });
     }

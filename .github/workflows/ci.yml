@@ -728,12 +728,15 @@ jobs:
       - uses: ./.github/actions/cargo-tool
         with:
           tool: cargo-nextest@0.9.146
-      # ALSA headers for `cpal`; see the action for why it retries.
-      - name: Install the ALSA headers cpal links against
+      # ALSA headers for `cpal`; see the action for why it retries. And the
+      # libxkbcommon runtime, which crcbl-shell's compose unit tests open with
+      # `dlopen` and fail without: a test that skipped itself would pass
+      # whether compose works or not.
+      - name: Install the ALSA headers and libxkbcommon
         timeout-minutes: 8
         uses: ./.github/actions/apt-packages
         with:
-          packages: libasound2-dev
+          packages: libasound2-dev libxkbcommon0
       # THE VIEWER'S MODEL SHELF, and this is the only job that fetches it.
       #
       # `apps/viewer` ships a shelf of Khronos CC0 models — about 138 MB, of
@@ -3141,12 +3144,15 @@ jobs:
       # 78.12%, and the workspace total 72.06% against 77.57%.
       # A coverage number that says how much of the *backend* code a runner
       # happens to be able to reach is not measuring the test suite.
-      - name: Install the ALSA headers, the Vulkan loader and lavapipe
+      # libxkbcommon for crcbl-shell's compose unit tests, as `test-linux`
+      # installs it.
+      - name:
+          Install the ALSA headers, the Vulkan loader, lavapipe and libxkbcommon
         timeout-minutes: 10
         uses: ./.github/actions/apt-packages
         with:
           packages: >-
-            libasound2-dev libvulkan1 mesa-vulkan-drivers
+            libasound2-dev libvulkan1 mesa-vulkan-drivers libxkbcommon0
       # Pinned to the software ICD for the reason `vk-e2e` pins it: a runner
       # that grew a GPU tomorrow would otherwise change what this job measures
       # without a commit.

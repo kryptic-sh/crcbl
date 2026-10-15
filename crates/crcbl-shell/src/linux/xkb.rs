@@ -57,7 +57,7 @@
 //! | [`KeyCode`] | our evdev table | our evdev table — **unchanged** |
 //! | [`Scancode`](crcbl_core::input::Scancode) | the evdev code | the evdev code — **unchanged** |
 //! | [`Keysym`] | the layout's symbol | [`Keysym::NONE`](crcbl_core::input::Keysym::NONE) |
-//! | `TextCommit` | committed UTF-8 | never emitted |
+//! | `TextCommit` | committed UTF-8, with dead keys and Compose sequences | never emitted |
 //! | [`Modifiers`] | XKB's effective state | derived from held [`KeyCode`]s |
 //! | key repeats at all | `xkb_keymap_key_repeats` | every key repeats |
 //!
@@ -65,6 +65,21 @@
 //! libxkbcommon at all; only text and rebind-menu labels are lost.
 //! [`ShellCaps::TEXT_IME`](crate::ShellCaps) is cleared in that case, which is
 //! how a consumer finds out without guessing.
+//!
+//! # Compose
+//!
+//! Dead keys (`´` then `e` is `é`) and the Compose key's sequences are
+//! libxkbcommon's compose module, fed every pressed keysym by
+//! [`Keymap::text`]. Its table is the user's locale's, found as libxkbcommon
+//! documents: `$XCOMPOSEFILE`, then `~/.XCompose`, then the system's file for
+//! the locale named by `LC_ALL`, `LC_CTYPE` or `LANG`. A key mid-sequence
+//! commits nothing, the key that ends one commits the sequence's text, and a
+//! key that breaks one commits nothing either, as libxkbcommon's own example
+//! client does. No pre-edit is shown while a sequence is in progress. Losing
+//! the keyboard abandons a sequence ([`Keymap::reset_compose`]).
+//!
+//! A library too old to have the compose module, or a locale with no compose
+//! file, leaves dead keys typing nothing and every other key as before.
 
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr;
@@ -73,6 +88,10 @@ use std::sync::OnceLock;
 
 use crcbl_core::KeyCode;
 use crcbl_core::input::{Keysym, Modifiers};
+
+mod compose;
+
+use compose::{Compose, ComposeLib, Composed, load_compose};
 
 // `mmap`/`munmap` are how the keymap gets out of the file descriptor the
 // compositor sent. Declared here rather than pulled from a crate for the same
@@ -133,6 +152,11 @@ struct XkbKeymap {
 struct XkbState {
     _opaque: [u8; 0],
 }
+/// Big enough for anything one key or one compose sequence commits; XKB's own
+/// examples use 32. Each `*_get_utf8` call NUL-terminates and returns the
+/// length it *wanted*, so a longer result is detected rather than truncated
+/// silently.
+const TEXT_BUFFER: usize = 64;
 
 /// The C prototypes this module asserts about libxkbcommon.
 ///
@@ -220,7 +244,7 @@ mod x11_prototype {
 
 /// Every libxkbcommon entry point these backends use.
 ///
-/// Thirteen functions, all of them used; the same "audited by use" rule
+/// Every one of them is used; the same "audited by use" rule
 /// [`ffi::Lib`](crate::wayland::ffi::Lib) states.
 struct Lib {
     context_new: prototype::ContextNew,
@@ -236,6 +260,8 @@ struct Lib {
     state_key_get_one_sym: prototype::StateKeyGetOneSym,
     state_key_get_utf8: prototype::StateKeyGetUtf8,
     state_mod_index_is_active: prototype::StateModIndexIsActive,
+    /// The compose module, or `None` in a libxkbcommon without one.
+    compose: Option<ComposeLib>,
 }
 
 /// Every libxkbcommon-x11 entry point the X11 backend uses.
@@ -337,6 +363,7 @@ fn load_uncached() -> Option<Lib> {
             "xkb_state_mod_index_is_active",
             prototype::StateModIndexIsActive
         ),
+        compose: load_compose(handle),
     })
 }
 
@@ -430,12 +457,16 @@ pub struct Keymap {
     /// A modifier the keymap does not define is absent rather than always-off,
     /// which is the same thing here but costs one fewer call per event.
     modifiers: Vec<(u32, Modifiers)>,
+    /// The sequence being composed, or `None` with no compose table; see the
+    /// [module docs](self#compose).
+    compose: Option<Compose>,
 }
 
 impl core::fmt::Debug for Keymap {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Keymap")
             .field("modifiers", &self.modifiers.len())
+            .field("compose", &self.compose.is_some())
             .finish()
     }
 }
@@ -578,6 +609,7 @@ impl Keymap {
                 keymap,
                 state,
                 modifiers: Self::modifier_indices(lib, keymap),
+                compose: Compose::for_locale(lib, context),
             })
         }
     }
@@ -661,6 +693,7 @@ impl Keymap {
                 keymap,
                 state,
                 modifiers: Self::modifier_indices(lib, keymap),
+                compose: Compose::for_locale(lib, context),
             }
         };
         Self::unmap(mapped, size, Some(compiled))
@@ -776,40 +809,40 @@ impl Keymap {
         Keysym(unsafe { (self.lib.state_key_get_one_sym)(self.state, scancode + EVDEV_OFFSET) })
     }
 
-    /// The text `scancode` commits in the current layout, or `None` when it
-    /// commits nothing a text field should receive.
+    /// The text pressing `scancode` commits in the current layout, or `None`
+    /// when it commits nothing a text field should receive.
+    ///
+    /// Takes `&mut self` because the press is fed to the compose sequence: a
+    /// dead key commits nothing, and the key after it commits what the two
+    /// compose to (see the [module docs](self#compose)). So it is called once
+    /// per press, and never for a release.
     ///
     /// Control characters are filtered out — Enter, Tab, Escape and Backspace
     /// all produce one, and a text field wants those as
     /// [`ShellEvent::Key`](crate::ShellEvent::Key) so it can move a cursor,
-    /// not as a literal `\r` in its buffer. Everything printable, including
-    /// whatever a dead-key sequence resolves to, is passed through.
+    /// not as a literal `\r` in its buffer.
     #[must_use]
-    pub fn text(&self, scancode: u32) -> Option<String> {
-        // Big enough for anything a single key commits; XKB's own examples use
-        // 32. The call NUL-terminates and returns the length it *wanted*, so a
-        // longer result is detected rather than truncated silently.
-        let mut buffer = [0u8; 64];
-        // SAFETY: `self.state` is live and `buffer` is a writable array of
-        // exactly the length passed, which is `xkb_state_key_get_utf8`'s
-        // contract.
-        let written = unsafe {
-            (self.lib.state_key_get_utf8)(
-                self.state,
-                scancode + EVDEV_OFFSET,
-                buffer.as_mut_ptr().cast::<c_char>(),
-                buffer.len(),
-            )
-        };
-        let written = usize::try_from(written).ok()?;
-        if written == 0 || written >= buffer.len() {
-            return None;
+    pub fn text(&mut self, scancode: u32) -> Option<String> {
+        let keysym = self.keysym(scancode);
+        match self.compose.as_mut().map(|compose| compose.feed(keysym)) {
+            Some(Composed::Swallowed) => return None,
+            Some(Composed::Text(text)) => return text,
+            Some(Composed::Passed) | None => {}
         }
-        let text = core::str::from_utf8(&buffer[..written]).ok()?;
-        if text.is_empty() || text.chars().all(char::is_control) {
-            return None;
+        // SAFETY: `self.state` is live, and `printable` passes a writable
+        // buffer of exactly the length it names, which is
+        // `xkb_state_key_get_utf8`'s contract.
+        printable(|buffer, length| unsafe {
+            (self.lib.state_key_get_utf8)(self.state, scancode + EVDEV_OFFSET, buffer, length)
+        })
+    }
+
+    /// Abandons a compose sequence in progress, for a backend whose window
+    /// lost the keyboard: the keys that would finish it go elsewhere.
+    pub fn reset_compose(&mut self) {
+        if let Some(compose) = &mut self.compose {
+            compose.reset();
         }
-        Some(text.to_string())
     }
 
     /// Whether the keymap says this key auto-repeats.
@@ -835,6 +868,21 @@ impl Drop for Keymap {
             (self.lib.context_unref)(self.context);
         }
     }
+}
+
+/// Reads UTF-8 through one of libxkbcommon's `*_get_utf8` calls, which `read`
+/// makes with a buffer and its length, keeping it only if it is printable.
+fn printable(read: impl FnOnce(*mut c_char, usize) -> c_int) -> Option<String> {
+    let mut buffer = [0u8; TEXT_BUFFER];
+    let written = usize::try_from(read(buffer.as_mut_ptr().cast(), buffer.len())).ok()?;
+    if written == 0 || written >= buffer.len() {
+        return None;
+    }
+    let text = core::str::from_utf8(&buffer[..written]).ok()?;
+    if text.chars().all(char::is_control) {
+        return None;
+    }
+    Some(text.to_string())
 }
 
 /// The modifiers implied by a set of held keys, for the no-libxkbcommon path.

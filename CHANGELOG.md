@@ -13,6 +13,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **Dead keys and Compose sequences type on Wayland and X11.** A dead key
+  commits nothing and the key after it commits what the two compose to (`´` then
+  `e` is `é`), through libxkbcommon's compose module and the user's locale's
+  table (`$XCOMPOSEFILE`, `~/.XCompose`, then the system's file for `LC_ALL`,
+  `LC_CTYPE` or `LANG`). Before, a dead key typed nothing and the key after it
+  typed itself. A key that breaks a sequence commits nothing, and losing the
+  keyboard abandons a sequence. No pre-edit is shown mid-sequence.
+
 ## [0.1.0] - 2026-10-16
 
 ### Breaking

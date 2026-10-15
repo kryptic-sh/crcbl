@@ -378,6 +378,9 @@ impl WaylandShell {
                 self.seats[index].repeat.key = None;
                 self.seats[index].held.clear();
                 self.seats[index].keyboard_focus = None;
+                if let Some(keymap) = self.seats[index].keymap.as_mut() {
+                    keymap.reset_compose();
+                }
                 if let Some(window) = self.window_by_proxy(surface, |w| w.surface as usize) {
                     self.set_focus(window, false);
                 }
@@ -488,14 +491,19 @@ impl WaylandShell {
             self.refresh_modifiers(index);
         }
 
+        let text = pressed
+            .then(|| {
+                self.seats[index]
+                    .keymap
+                    .as_mut()
+                    .and_then(|keymap| keymap.text(key))
+            })
+            .flatten();
         let seat = &self.seats[index];
         let keysym = seat
             .keymap
             .as_ref()
             .map_or(Keysym::NONE, |keymap| keymap.keysym(key));
-        let text = pressed
-            .then(|| seat.keymap.as_ref().and_then(|keymap| keymap.text(key)))
-            .flatten();
         let event_time = self.time.event_time(time);
         self.queue.push_back(ShellEvent::Key {
             window,
