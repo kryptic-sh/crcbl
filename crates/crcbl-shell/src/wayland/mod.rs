@@ -1,5 +1,6 @@
 //! The Wayland backend: connection, registry, `xdg-shell` window lifecycle,
-//! `wl_seat` input, pointer constraints, fractional scale and decorations.
+//! `wl_seat` input, pointer constraints, fractional scale, decorations and
+//! layer-shell panels.
 //!
 //! Not `pub`: [`backend`](crate::backend) is the only way to reach a real
 //! shell, because `WaylandShell::new()` in a consumer's source is the platform
@@ -40,6 +41,12 @@
 //! | --- | --- |
 //! | `wl_data_device` + `wl_data_offer` | [`Shell::clipboard_request`] → [`ClipboardData`](ShellEvent::ClipboardData), and drops → [`DroppedFile`](ShellEvent::DroppedFile) |
 //! | `wl_data_source` | [`Shell::clipboard_offer`] — we own the selection and produce the bytes on demand |
+//!
+//! Panels came with `wlr-layer-shell`:
+//!
+//! | Protocol | What it gives the engine |
+//! | --- | --- |
+//! | `zwlr_layer_shell_v1` + `zwlr_layer_surface_v1` | [`WindowRole::Panel`] — see [`layer`] |
 //!
 //! Still deliberately absent: touch, tablet, IME pre-edit, the *primary*
 //! selection (`wp_primary_selection_v1` — middle-click paste, which the seam
@@ -155,6 +162,7 @@ mod data_device;
 mod fd;
 pub mod ffi;
 mod input;
+mod layer;
 pub mod protocol;
 
 /// The evdev table and libxkbcommon, which are Linux facts rather than Wayland
@@ -187,12 +195,13 @@ use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
     LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PointerMode,
     ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints,
-    WindowConfiguration, WindowDesc, WindowId, WindowState,
+    WindowConfiguration, WindowDesc, WindowId, WindowRole, WindowState,
 };
 
 use data::{Delivery, HeldRead, Resolution, Transfer};
 use ffi::{Lib, WlArgument, WlDisplay, WlMessage, WlProxy};
 use protocol::fractional_scale::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1};
+use protocol::layer_shell::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 use protocol::pointer_constraints::{zwp_locked_pointer_v1, zwp_pointer_constraints_v1};
 use protocol::relative_pointer::{zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1};
 use protocol::viewporter::{wp_viewport, wp_viewporter};
@@ -382,6 +391,7 @@ enum ObjectKind {
     Surface,
     XdgSurface,
     XdgToplevel,
+    LayerSurface,
     Decoration,
     FractionalScale,
     Seat,
@@ -471,6 +481,17 @@ enum RawEvent {
     },
     ToplevelClose {
         toplevel: usize,
+    },
+    LayerConfigure {
+        layer_surface: usize,
+        serial: u32,
+        width: u32,
+        height: u32,
+    },
+    /// The compositor will not show the panel again: its output went, or the
+    /// user removed it.
+    LayerClosed {
+        layer_surface: usize,
     },
     DecorationConfigure {
         decoration: usize,
@@ -907,6 +928,26 @@ unsafe extern "C" fn dispatch(
                 sink.events.extend(raw);
             }
         }
+        ObjectKind::LayerSurface => {
+            // SAFETY: see the note above the `match`.
+            if let Some(event) = unsafe { zwlr_layer_surface_v1::decode_event(opcode, args) } {
+                sink.events.push(match event {
+                    zwlr_layer_surface_v1::Event::Configure {
+                        serial,
+                        width,
+                        height,
+                    } => RawEvent::LayerConfigure {
+                        layer_surface: proxy,
+                        serial,
+                        width,
+                        height,
+                    },
+                    zwlr_layer_surface_v1::Event::Closed => RawEvent::LayerClosed {
+                        layer_surface: proxy,
+                    },
+                });
+            }
+        }
         ObjectKind::Decoration => {
             // SAFETY: see the note above the `match`.
             if let Some(zxdg_toplevel_decoration_v1::Event::Configure { mode }) =
@@ -1227,6 +1268,7 @@ struct Conn {
     relative_pointer_manager: *mut WlProxy,
     pointer_constraints: *mut WlProxy,
     data_device_manager: *mut WlProxy,
+    layer_shell: *mut WlProxy,
     /// Owned by the connection, reached only as a raw pointer; see [`Sink`].
     sink: *mut Sink,
 }
@@ -1252,6 +1294,7 @@ enum Singleton {
     RelativePointerManager,
     PointerConstraints,
     DataDeviceManager,
+    LayerShell,
 }
 
 impl Singleton {
@@ -1267,6 +1310,7 @@ impl Singleton {
             Self::RelativePointerManager => &mut conn.relative_pointer_manager,
             Self::PointerConstraints => &mut conn.pointer_constraints,
             Self::DataDeviceManager => &mut conn.data_device_manager,
+            Self::LayerShell => &mut conn.layer_shell,
         }
     }
 
@@ -1283,6 +1327,7 @@ impl Singleton {
             Self::RelativePointerManager => zwp_relative_pointer_manager_v1::NAME,
             Self::PointerConstraints => zwp_pointer_constraints_v1::NAME,
             Self::DataDeviceManager => wl_data_device_manager::NAME,
+            Self::LayerShell => zwlr_layer_shell_v1::NAME,
         }
     }
 }
@@ -1783,12 +1828,19 @@ struct PendingConfigure {
     states: Vec<u32>,
 }
 
-/// One `xdg_toplevel` and its surface stack.
+/// One window and its surface stack: an `xdg_toplevel`, or a layer surface
+/// for a panel.
+///
+/// The role objects of the other role are null, which every request on them
+/// is guarded against: a request marshalled on a null proxy is a crash inside
+/// libwayland.
 #[derive(Debug)]
 struct WlWindow {
     surface: *mut WlProxy,
     xdg_surface: *mut WlProxy,
     toplevel: *mut WlProxy,
+    /// The `zwlr_layer_surface_v1` of a panel.
+    layer_surface: *mut WlProxy,
     decoration: *mut WlProxy,
     fractional_scale: *mut WlProxy,
     viewport: *mut WlProxy,
@@ -1970,6 +2022,7 @@ impl WaylandShell {
             relative_pointer_manager: ptr::null_mut(),
             pointer_constraints: ptr::null_mut(),
             data_device_manager: ptr::null_mut(),
+            layer_shell: ptr::null_mut(),
             sink: Sink::boxed(lib),
         };
 
@@ -2078,6 +2131,11 @@ impl WaylandShell {
         // `text-input-v3` pre-edit is post-MVP; a compositor-side IME that
         // commits through the keyboard still works today.
         caps.set(ShellCaps::TEXT_IME, xkb::available());
+        // A layer surface's exclusive zone is how it reserves an edge, so the
+        // one global gives both.
+        let layer_shell = !self.conn.layer_shell.is_null();
+        caps.set(ShellCaps::PANEL, layer_shell);
+        caps.set(ShellCaps::PANEL_RESERVE, layer_shell);
         caps
     }
 
@@ -2212,6 +2270,14 @@ impl WaylandShell {
                     wl_data_device_manager,
                     DATA_DEVICE_VERSION,
                     Singleton::DataDeviceManager
+                );
+            }
+            "zwlr_layer_shell_v1" => {
+                bind!(
+                    layer_shell,
+                    zwlr_layer_shell_v1,
+                    layer::LAYER_SHELL_VERSION,
+                    Singleton::LayerShell
                 );
             }
             "wl_output" => {
@@ -2374,6 +2440,11 @@ impl WaylandShell {
             Singleton::PointerConstraints => unsafe {
                 self.conn
                     .release(proxy, zwp_pointer_constraints_v1::destroy);
+            },
+            // `zwlr_layer_shell_v1.destroy` arrived in version 3.
+            Singleton::LayerShell => unsafe {
+                self.conn
+                    .release_since(proxy, 3, zwlr_layer_shell_v1::destroy);
             },
         }
         self.conn.flush();
@@ -2618,16 +2689,29 @@ impl WaylandShell {
                 RawEvent::XdgSurfaceConfigure {
                     xdg_surface,
                     serial,
-                } => self.apply_configure(xdg_surface, serial),
-                RawEvent::ToplevelClose { toplevel } => {
-                    let Some(id) = self.window_by_proxy(toplevel, |w| w.toplevel as usize) else {
-                        continue;
-                    };
-                    if let Ok(window) = self.window_mut(id) {
-                        window.close_pending = true;
+                } => {
+                    if let Some(id) = self.window_by_proxy(xdg_surface, |w| w.xdg_surface as usize)
+                    {
+                        self.apply_configure(id, serial);
                     }
-                    self.queue
-                        .push_back(ShellEvent::CloseRequested { window: id });
+                }
+                RawEvent::LayerConfigure {
+                    layer_surface,
+                    serial,
+                    width,
+                    height,
+                } => self.layer_configured(layer_surface, serial, width, height),
+                RawEvent::ToplevelClose { toplevel } => {
+                    if let Some(id) = self.window_by_proxy(toplevel, |w| w.toplevel as usize) {
+                        self.close_requested(id);
+                    }
+                }
+                RawEvent::LayerClosed { layer_surface } => {
+                    if let Some(id) =
+                        self.window_by_proxy(layer_surface, |w| w.layer_surface as usize)
+                    {
+                        self.close_requested(id);
+                    }
                 }
                 RawEvent::DecorationConfigure { decoration, mode } => {
                     self.decoration_configured(decoration, mode);
@@ -2660,6 +2744,16 @@ impl WaylandShell {
         // event at all. Flushing here as well means a motion is never held back
         // to the next pump.
         self.flush_pointer_frames();
+    }
+
+    /// The compositor asked for a window to go: an `xdg_toplevel.close`, or
+    /// a layer surface's `closed`.
+    fn close_requested(&mut self, id: WindowId) {
+        if let Ok(window) = self.window_mut(id) {
+            window.close_pending = true;
+        }
+        self.queue
+            .push_back(ShellEvent::CloseRequested { window: id });
     }
 
     fn output_by_xdg(&mut self, xdg: usize) -> Option<&mut Output> {
@@ -2816,10 +2910,11 @@ impl WaylandShell {
 
     /// Completes a configure: acknowledge it, publish the new configuration,
     /// and commit.
-    fn apply_configure(&mut self, xdg_surface_proxy: usize, serial: u32) {
-        let Some(id) = self.window_by_proxy(xdg_surface_proxy, |w| w.xdg_surface as usize) else {
-            return;
-        };
+    ///
+    /// For either role. A layer surface has no states, so it is always
+    /// [`DisplayMode::Windowed`], and its focus comes from `wl_keyboard`
+    /// alone.
+    fn apply_configure(&mut self, id: WindowId, serial: u32) {
         // **Which monitor a fullscreen surface ended up on is observable, even
         // though asking for one is only a hint.** `wl_surface.enter` names the
         // outputs the surface is on, and a fullscreen surface is on exactly
@@ -2880,16 +2975,22 @@ impl WaylandShell {
             .states
             .contains(&xdg_toplevel::state::ACTIVATED);
         let xdg = window.xdg_surface;
+        let layer = window.layer_surface;
         let surface = window.surface;
         let viewport = window.viewport;
 
-        // SAFETY: every proxy is live. `ack_configure` must precede the commit,
-        // and the commit is what makes the acknowledged state current. The
-        // viewport destination is the logical size the compositor just asked
-        // for, which is exactly what `wp_viewport` wants.
+        // SAFETY: every proxy is live, and the configure came from whichever
+        // of the two role objects is not null. `ack_configure` must precede
+        // the commit, and the commit is what makes the acknowledged state
+        // current. The viewport destination is the logical size the compositor
+        // just asked for, which is exactly what `wp_viewport` wants.
         unsafe {
             set_viewport(viewport, logical);
-            xdg_surface::ack_configure(xdg, serial);
+            if layer.is_null() {
+                xdg_surface::ack_configure(xdg, serial);
+            } else {
+                zwlr_layer_surface_v1::ack_configure(layer, serial);
+            }
             wl_surface::commit(surface);
         }
         self.conn.flush();
@@ -2908,7 +3009,12 @@ impl WaylandShell {
                 scale_factor,
             });
         }
-        self.set_focus(id, focused);
+        // `activated` is a toplevel state. A layer surface has none, and
+        // reading its empty set as "not activated" would undo the focus its
+        // `wl_keyboard.enter` gave it on every configure.
+        if layer.is_null() {
+            self.set_focus(id, focused);
+        }
     }
 
     /// Sends the cursor a window asked for on a seat that has just entered it.
@@ -3084,12 +3190,22 @@ impl WaylandShell {
                 .release(window.fractional_scale, wp_fractional_scale_v1::destroy);
             self.conn.release(window.viewport, wp_viewport::destroy);
         }
-        // Order matters: `xdg_toplevel` before `xdg_surface` before
-        // `wl_surface`. Destroying a `wl_surface` that still has a role object
-        // is a protocol error and disconnects the client.
-        self.conn.destroy(window.toplevel);
-        self.conn.destroy(window.xdg_surface);
-        self.conn.destroy(window.surface);
+        // Protocol destructors, not client-side frees: a `wl_surface` the
+        // compositor was never told about stays on screen, with its last
+        // buffer, until the connection closes. Order matters: the role object
+        // before `xdg_surface` before `wl_surface`. Destroying a `wl_surface`
+        // that still has a role object is a protocol error and disconnects the
+        // client, and so is destroying an `xdg_toplevel` before its decoration,
+        // which went above.
+        // SAFETY: each proxy is null or live, and each destructor is its own
+        // interface's.
+        unsafe {
+            self.conn
+                .release(window.layer_surface, zwlr_layer_surface_v1::destroy);
+            self.conn.release(window.toplevel, xdg_toplevel::destroy);
+            self.conn.release(window.xdg_surface, xdg_surface::destroy);
+            self.conn.release(window.surface, wl_surface::destroy);
+        }
         // A seat pointing at a window that no longer exists would keep
         // reporting motion into a stale handle. Only *this* window's focus is
         // cleared: destroying one window must not make a seat forget that it is
@@ -3167,6 +3283,16 @@ const fn axis_slot(axis: u32) -> Option<usize> {
     }
 }
 
+/// A logical length as the whole number the protocols take: rounded, and
+/// clamped into `0..=i32::MAX`, with a non-finite value read as zero.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "clamped into i32's range before the cast, and a NaN casts to 0"
+)]
+fn round_logical(value: f64) -> i32 {
+    value.round().clamp(0.0, f64::from(i32::MAX)) as i32
+}
+
 /// Sets a viewport's destination to a logical size, if there is a viewport.
 ///
 /// # Safety
@@ -3179,19 +3305,7 @@ unsafe fn set_viewport(viewport: *mut WlProxy, logical: LogicalSize) {
     // `wp_viewport` rejects a non-positive destination with `bad_value`, and a
     // window can legitimately be asked to be zero-sized before its first real
     // configure.
-    let round = |value: f64| {
-        let rounded = value.round();
-        if rounded.is_finite() && rounded >= 1.0 {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "clamped to i32::MAX on the line above"
-            )]
-            let clamped = rounded.min(f64::from(i32::MAX)) as i32;
-            clamped
-        } else {
-            1
-        }
-    };
+    let round = |value: f64| round_logical(value).max(1);
     // SAFETY: the caller guarantees the proxy is live; both arguments are
     // positive integers, which is what the protocol requires.
     unsafe { wp_viewport::set_destination(viewport, round(logical.width), round(logical.height)) };
@@ -3227,6 +3341,7 @@ impl Drop for WaylandShell {
             }
         }
         let globals = [
+            self.conn.layer_shell,
             self.conn.data_device_manager,
             self.conn.pointer_constraints,
             self.conn.relative_pointer_manager,
@@ -3290,6 +3405,13 @@ impl Shell for WaylandShell {
         crate::role::check(desc, self.caps(), self.backend(), |monitor| {
             self.monitor(monitor).is_some()
         })?;
+        let panel = match desc.role {
+            WindowRole::Toplevel => None,
+            WindowRole::Panel(panel) => Some(panel),
+            // `role::check` refuses it first, because `POPUP` is not in this
+            // backend's caps yet.
+            WindowRole::Popup(_) => return Err(Self::unsupported("popup windows")),
+        };
         if let DisplayMode::Borderless {
             monitor: Some(monitor),
         } = desc.mode
@@ -3301,65 +3423,77 @@ impl Shell for WaylandShell {
             .map_err(|_| ShellError::InvalidDescriptor("title contains a NUL byte".to_string()))?;
         let app_id = CString::new(desc.app_id)
             .map_err(|_| ShellError::InvalidDescriptor("app_id contains a NUL byte".to_string()))?;
+        let namespace = match panel {
+            Some(panel) if !panel.namespace.is_empty() => {
+                CString::new(panel.namespace).map_err(|_| {
+                    ShellError::InvalidDescriptor("namespace contains a NUL byte".to_string())
+                })?
+            }
+            _ => app_id.clone(),
+        };
 
         // `open` refuses a compositor that has neither, but a global can also
         // be **withdrawn** mid-session — see
         // [`withdraw_singleton`](Self::withdraw_singleton). Marshalling a
-        // request on a null proxy is a segfault inside libwayland, so the two
-        // this window is built out of are read for null here rather than
-        // assumed.
+        // request on a null proxy is a segfault inside libwayland, so the
+        // globals this window is built out of are read for null here rather
+        // than assumed. A panel's is checked where it is made.
         if self.conn.compositor.is_null() {
             return Err(ShellError::WindowCreation(
                 "the compositor withdrew wl_compositor".to_string(),
             ));
         }
-        if self.conn.wm_base.is_null() {
+        if panel.is_none() && self.conn.wm_base.is_null() {
             return Err(ShellError::WindowCreation(
                 "the compositor withdrew xdg_wm_base".to_string(),
             ));
         }
-        // SAFETY: both globals were just checked non-null. Each request creates
-        // the next object in the stack, and every pointer is checked before
-        // use.
-        let (surface, xdg, toplevel) = unsafe {
-            let surface = wl_compositor::create_surface(self.conn.compositor);
-            if surface.is_null() {
-                return Err(ShellError::WindowCreation(
-                    "wl_compositor.create_surface failed".to_string(),
-                ));
+        // SAFETY: `compositor` was just checked non-null.
+        let surface = unsafe { wl_compositor::create_surface(self.conn.compositor) };
+        if surface.is_null() {
+            return Err(ShellError::WindowCreation(
+                "wl_compositor.create_surface failed".to_string(),
+            ));
+        }
+        let roles = match panel {
+            Some(panel) => self
+                .create_layer_surface(surface, &panel, &namespace, desc.size)
+                .map(|layer| (ptr::null_mut(), ptr::null_mut(), layer)),
+            // SAFETY: `wm_base` was checked non-null above, and `surface` was
+            // just created with no role.
+            None => unsafe { self.create_toplevel(surface) }
+                .map(|(xdg, toplevel)| (xdg, toplevel, ptr::null_mut())),
+        };
+        let (xdg, toplevel, layer_surface) = match roles {
+            Ok(roles) => roles,
+            Err(error) => {
+                // SAFETY: `surface` is live and has no role object, so its own
+                // destructor is the whole of it.
+                unsafe { self.conn.release(surface, wl_surface::destroy) };
+                return Err(error);
             }
-            let xdg = xdg_wm_base::get_xdg_surface(self.conn.wm_base, surface);
-            if xdg.is_null() {
-                self.conn.destroy(surface);
-                return Err(ShellError::WindowCreation(
-                    "xdg_wm_base.get_xdg_surface failed".to_string(),
-                ));
-            }
-            let toplevel = xdg_surface::get_toplevel(xdg);
-            if toplevel.is_null() {
-                self.conn.destroy(xdg);
-                self.conn.destroy(surface);
-                return Err(ShellError::WindowCreation(
-                    "xdg_surface.get_toplevel failed".to_string(),
-                ));
-            }
-            (surface, xdg, toplevel)
         };
         self.conn.watch(surface, ObjectKind::Surface);
         self.conn.watch(xdg, ObjectKind::XdgSurface);
         self.conn.watch(toplevel, ObjectKind::XdgToplevel);
+        self.conn.watch(layer_surface, ObjectKind::LayerSurface);
 
         // Every add-on object has to exist before the initial commit:
         // `xdg-decoration` says so explicitly, and a `wp_viewport` or
         // `wp_fractional_scale_v1` created afterwards would miss the first
         // configure — which is the one a swapchain is built from.
         // SAFETY: every manager is either null (checked inside each helper) or
-        // a live global, and `surface`/`toplevel` were just created.
+        // a live global, and `surface`/`toplevel` were just created. A panel
+        // has no toplevel and so no decoration.
         let (decoration, fractional_scale, viewport) = unsafe {
             (
-                optional(self.conn.decoration_manager, |manager| {
-                    zxdg_decoration_manager_v1::get_toplevel_decoration(manager, toplevel)
-                }),
+                if toplevel.is_null() {
+                    ptr::null_mut()
+                } else {
+                    optional(self.conn.decoration_manager, |manager| {
+                        zxdg_decoration_manager_v1::get_toplevel_decoration(manager, toplevel)
+                    })
+                },
                 optional(self.conn.fractional_scale_manager, |manager| {
                     wp_fractional_scale_manager_v1::get_fractional_scale(manager, surface)
                 }),
@@ -3382,9 +3516,14 @@ impl Shell for WaylandShell {
         // SAFETY: every proxy above is live on this connection, and the strings
         // outlive the marshalling call.
         unsafe {
-            xdg_toplevel::set_title(toplevel, &title);
-            xdg_toplevel::set_app_id(toplevel, &app_id);
-            apply_constraints(toplevel, desc.constraints, desc.resizable, desc.size);
+            if !toplevel.is_null() {
+                xdg_toplevel::set_title(toplevel, &title);
+                xdg_toplevel::set_app_id(toplevel, &app_id);
+                apply_constraints(toplevel, desc.constraints, desc.resizable, desc.size);
+                if let Some(output) = fullscreen_output {
+                    xdg_toplevel::set_fullscreen(toplevel, output);
+                }
+            }
             if !decoration.is_null() {
                 // Always ask for server side. The seam has no per-window
                 // decoration request, the engine has no renderer to draw
@@ -3396,11 +3535,9 @@ impl Shell for WaylandShell {
                     zxdg_toplevel_decoration_v1::mode::SERVER_SIDE,
                 );
             }
-            if let Some(output) = fullscreen_output {
-                xdg_toplevel::set_fullscreen(toplevel, output);
-            }
-            // The initial commit with **no buffer**: xdg-shell requires it, and
-            // it is what makes the compositor answer with the first configure.
+            // The initial commit with **no buffer**: xdg-shell and layer-shell
+            // both require it, and it is what makes the compositor answer with
+            // the first configure.
             wl_surface::commit(surface);
         }
         self.conn.flush();
@@ -3411,6 +3548,7 @@ impl Shell for WaylandShell {
                 surface,
                 xdg_surface: xdg,
                 toplevel,
+                layer_surface,
                 decoration,
                 fractional_scale,
                 viewport,
@@ -3468,6 +3606,10 @@ impl Shell for WaylandShell {
         let state = self.window_mut(window)?;
         state.title = title.to_string();
         let toplevel = state.toplevel;
+        // A panel has no title to send; the one recorded is all it has.
+        if toplevel.is_null() {
+            return Ok(());
+        }
         // SAFETY: the toplevel is live and the string outlives the call.
         unsafe { xdg_toplevel::set_title(toplevel, &encoded) };
         self.conn.flush();
@@ -3514,6 +3656,11 @@ impl Shell for WaylandShell {
         state.requested_mode = mode;
         let toplevel = state.toplevel;
         let surface = state.surface;
+        // A panel has no full-screen state, so the request stays one: its
+        // effective mode is always windowed.
+        if toplevel.is_null() {
+            return Ok(());
+        }
         // SAFETY: both proxies are live; a null output means "the compositor
         // chooses", which is the only thing a Wayland client may ask for.
         unsafe {
@@ -3538,6 +3685,11 @@ impl Shell for WaylandShell {
         let surface = state.surface;
         let requested = state.requested_size;
         let resizable = state.resizable;
+        // A panel's size is the layer surface's; the constraints recorded are
+        // applied to each configure, as for any window.
+        if toplevel.is_null() {
+            return Ok(());
+        }
         // SAFETY: both proxies are live; the sizes are plain integers.
         unsafe {
             apply_constraints(toplevel, constraints, resizable, requested);
@@ -4048,6 +4200,36 @@ impl WaylandShell {
     /// output *by design*, and `DisplayMode::Borderless { monitor: None }`
     /// exists because that is the only thing a Wayland client can reliably ask
     /// for.
+    /// Gives `surface` the `xdg_surface` and `xdg_toplevel` of an
+    /// application window.
+    ///
+    /// # Safety
+    ///
+    /// `wm_base` must be live, and `surface` live with no role.
+    unsafe fn create_toplevel(
+        &mut self,
+        surface: *mut WlProxy,
+    ) -> Result<(*mut WlProxy, *mut WlProxy), ShellError> {
+        // SAFETY: the caller guarantees both proxies; each request creates the
+        // next object in the stack, and each is checked before use.
+        unsafe {
+            let xdg = xdg_wm_base::get_xdg_surface(self.conn.wm_base, surface);
+            if xdg.is_null() {
+                return Err(ShellError::WindowCreation(
+                    "xdg_wm_base.get_xdg_surface failed".to_string(),
+                ));
+            }
+            let toplevel = xdg_surface::get_toplevel(xdg);
+            if toplevel.is_null() {
+                self.conn.release(xdg, xdg_surface::destroy);
+                return Err(ShellError::WindowCreation(
+                    "xdg_surface.get_toplevel failed".to_string(),
+                ));
+            }
+            Ok((xdg, toplevel))
+        }
+    }
+
     fn output_proxy_for(&self, monitor: Option<MonitorId>) -> *mut WlProxy {
         let Some(id) = monitor else {
             return ptr::null_mut();
@@ -4124,14 +4306,7 @@ unsafe fn apply_constraints(
     // xdg-shell takes these in logical units, and zero means "no limit".
     let to_pair = |size: Option<LogicalSize>| {
         size.map_or((0, 0), |size| {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "clamped into i32's range on the line above the cast"
-            )]
-            (
-                size.width.round().clamp(0.0, f64::from(i32::MAX)) as i32,
-                size.height.round().clamp(0.0, f64::from(i32::MAX)) as i32,
-            )
+            (round_logical(size.width), round_logical(size.height))
         })
     };
     let (min, max) = if resizable {
@@ -4584,6 +4759,7 @@ mod tests {
             zwp_pointer_constraints_v1::NAME,
             c"zwp_pointer_constraints_v1"
         );
+        assert_eq!(zwlr_layer_shell_v1::NAME, c"zwlr_layer_shell_v1");
         assert_eq!(xdg_toplevel::state::FULLSCREEN, 2);
         assert_eq!(wl_output::mode::CURRENT, 1);
         assert_eq!(wl_seat::capability::POINTER, 1);
@@ -4623,6 +4799,7 @@ mod tests {
             surface: ptr::null_mut(),
             xdg_surface: ptr::null_mut(),
             toplevel: ptr::null_mut(),
+            layer_surface: ptr::null_mut(),
             decoration: ptr::null_mut(),
             fractional_scale: ptr::null_mut(),
             viewport: ptr::null_mut(),

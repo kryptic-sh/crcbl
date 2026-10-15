@@ -60,6 +60,10 @@ const PROTOCOLS: &[(&str, &str)] = &[
         "pointer_constraints",
         "wayland-protocols/pointer-constraints-unstable-v1.xml",
     ),
+    (
+        "layer_shell",
+        "wayland-protocols/wlr-layer-shell-unstable-v1.xml",
+    ),
 ];
 
 /// Protocols only `tests/run-wayland-e2e.sh` needs, generated only under the

@@ -898,8 +898,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `PANEL_RESERVE`, `POPUP` and `TRANSPARENT` say which a backend builds, and
   asking for one it cannot build is `ShellError::Unsupported`, never a toplevel
   in its place. The headless shell builds them all, and destroys a popup with
-  its parent. The window-system backends refuse them until each implements them.
-  `LogicalRect` is new in `crcbl_shell`.
+  its parent. The Wayland backend builds panels as `wlr-layer-shell` surfaces
+  wherever the compositor has `zwlr_layer_shell_v1`, version 4 for an on-demand
+  keyboard: the compositor sizes a stretched axis and reports it as `Resized`,
+  `Reserve::OwnExtent` is the exclusive zone, and a layer surface's `closed` is
+  a `CloseRequested`. The other window-system backends refuse them until each
+  implements them. `LogicalRect` is new in `crcbl_shell`.
 
 - **`Shell::waker` and `ShellWaker`: wake a sleeping loop from another thread.**
   A program whose work arrives off the loop thread (a D-Bus reply, a socket, a
@@ -6227,6 +6231,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   migration — everything here is v0.
 
 ### Fixed
+
+- **A destroyed Wayland window leaves the screen.** `destroy_window` freed the
+  `xdg_toplevel`, `xdg_surface` and `wl_surface` on the client only, so the
+  compositor kept the window, with its last frame and its place in a tiling
+  layout, until the connection closed. It now sends each object's protocol
+  destructor.
 
 - **`PhysicsSystem::put_to_sleep` keeps a whole island asleep.** Putting one
   body to sleep sleeps its island, but only that body was protected from the

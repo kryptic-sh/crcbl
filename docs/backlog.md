@@ -62,24 +62,42 @@ Each step lands in the crate the later steps build on, so the seam goes first.
        tooltips can pass input through.
      - S8 and S27 are pikr's launcher as a panel: unanchored, with an
        `Exclusive` keyboard, at the `Overlay` layer.
-4. **Wayland**, which lyr's M1 waits on:
-   - layer surfaces (S1, S2 by output, S21), with the configured size reported
-     as `Resized`;
-   - focus events, and keys typed before the first configure delivered rather
-     than dropped (S17, pikr's cases a–d: early keys, focus gained, focus lost,
-     key repeat);
-   - no flash on map: the first commit carries the first frame;
-   - transparent surfaces (S16);
-   - `xdg_popup` (S3), on layer surfaces through `get_popup`, with an empty
-     input region for `Passthrough` and `xdg_popup.grab` for `Grab`;
-   - repositioning a live popup through `xdg_popup.reposition` (needs
-     `xdg_wm_base` v3), reported in caps where it is missing;
-   - a monitor-removed event plus a close request for every window on that
-     monitor, on every backend (lyr item 6), so a panel's output being unplugged
-     reads the same everywhere;
-   - `MonitorInfo` carrying the platform's own output name (S7, lyr item 10):
-     `wl_output.name`, `MONITORINFOEX::szDevice`, `NSScreen.localizedName`. The
-     CI test is `wayland-e2e` under sway, which implements layer-shell.
+4. **Wayland**, which lyr's M1 waits on.
+   - Panels are built (`crates/crcbl-shell/src/wayland/layer.rs`): a panel is a
+     `zwlr_layer_surface_v1` on the monitor asked for, a stretched axis is the
+     compositor's and arrives as `Resized`, `OwnExtent` is the exclusive zone,
+     and `closed` is a `CloseRequested`. That is S1 and S2 (by output), and S21,
+     because the fractional-scale and viewport objects are made for every
+     surface; no e2e test runs a panel at a fractional scale yet.
+   - `MonitorInfo::name` was already `wl_output.name` on Wayland, so S7's name
+     is Win32's (`MONITORINFOEX::szDevice`) and AppKit's
+     (`NSScreen.localizedName`) to check.
+   - **Verified so far:** the layer-shell mappings' unit tests ran on Linux (WSL
+     here) and every mutant of them was killed. The e2e tests in
+     `tests/wayland_e2e.rs` (`a_reserving_panel_takes_its_edge_…`,
+     `an_exclusive_panel_takes_the_keyboard_when_it_maps`,
+     `a_destroyed_window_gives_its_tile_back`) run only under sway in CI; their
+     first run and a mutation run are still to come.
+   - Still to do on Wayland:
+     - keys typed before the first configure delivered rather than dropped, and
+       focus lost and key repeat on a panel (S17, pikr's cases a and c–d; case
+       b, focus on mapping, is the exclusive-panel test above);
+     - no flash on map: the first commit carries the first frame;
+     - transparent surfaces (S16), which on Wayland is the swapchain's composite
+       alpha rather than anything the shell sends;
+     - `xdg_popup` (S3), on layer surfaces through `get_popup`, with an empty
+       input region for `Passthrough` and `xdg_popup.grab` for `Grab`;
+     - repositioning a live popup through `xdg_popup.reposition` (needs
+       `xdg_wm_base` v3), reported in caps where it is missing;
+     - a monitor-removed event plus a close request for every window on that
+       monitor, on every backend (lyr item 6). On Wayland a layer surface
+       already gets `closed` when its output goes; the seam event is the rest.
+   - Decided for panels, 2026-10-15: `set_title`, `set_mode` and
+     `set_constraints` on a Wayland panel record the request and send nothing,
+     as the headless shell accepts them on any role. A panel's effective mode is
+     always windowed, so a full-screen request on one reads as not honoured.
+     `PanelKeyboard::OnDemand` on a compositor below layer-shell version 4 is
+     `Unsupported`, because both other interactivities are a different panel.
 5. **Win32**:
    - Appbars for `OwnExtent` (S4): `ABE_TOP` for `TOP | LEFT | RIGHT`.
      `ABN_POSCHANGED` stays internal. `ABN_FULLSCREENAPP` becomes an event (lyr
@@ -136,10 +154,6 @@ Each step lands in the crate the later steps build on, so the seam goes first.
   now `crcbl_render::targets::motion`. The shader sources are pinned by sha256
   (`crcbl-shaders/build.rs`), so a comment edit fails every build until the
   artifacts are regenerated. Fix it in the next commit that regenerates them.
-- EW (`src/rendering.rs`, read 2026-10-15) calls
-  `crcbl::render::menu_skin(ui.images_mut())` after `UiRenderer::new`, which has
-  always registered that art itself. The menu art therefore sits on EW's image
-  page twice; `ui.menu_skin()` is the fix, which is EW's to make. EW was told.
 
 ### What exists already, verified by reading the tree at 1db97a5b
 

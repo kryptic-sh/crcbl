@@ -24,8 +24,9 @@ use crcbl_shell::wayland_test_support::{
 };
 use crcbl_shell::{
     ButtonState, CloseReply, CursorIcon, DisplayMode, KeyCode, Keysym, LogicalSize, Modifiers,
-    MonitorInfo, PhysicalSize, PointerButton, PointerMode, ScrollDelta, Shell, ShellBackend,
-    ShellCaps, ShellError, ShellEvent, SizeConstraints, SurfaceTarget, WindowDesc, WindowId,
+    MonitorInfo, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer, PhysicalSize, PointerButton,
+    PointerMode, Reserve, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
+    SizeConstraints, SurfaceTarget, WindowDesc, WindowId, WindowRole,
 };
 
 /// evdev codes, from `linux/input-event-codes.h`. Spelled out rather than
@@ -3014,4 +3015,171 @@ fn a_waker_ends_a_wait_from_another_thread_and_rings_coalesce() {
         "three rings ended more than one wait: the next returned after {:?}",
         start.elapsed()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Panels — wlr-layer-shell
+// ---------------------------------------------------------------------------
+
+/// An `app_id` the sway config does **not** float, so the window tiles and its
+/// size is the workspace's usable area: the one place a client can see another
+/// surface's exclusive zone, and whether a destroyed window really left.
+///
+/// Not a suffix of [`APP_ID`]: sway's criteria are unanchored regular
+/// expressions, so anything containing `sh.kryptic.crcbl.e2e` would float too.
+const TILED_APP_ID: &str = "sh.kryptic.crcbl.tiled-e2e";
+
+fn tiled(title: &str) -> WindowDesc<'_> {
+    WindowDesc {
+        title,
+        app_id: TILED_APP_ID,
+        size: LogicalSize::new(640.0, 360.0),
+        ..WindowDesc::default()
+    }
+}
+
+/// A panel descriptor, with everything else at its default.
+fn panel<'a>(title: &'a str, size: LogicalSize, panel: PanelDesc<'a>) -> WindowDesc<'a> {
+    WindowDesc {
+        title,
+        app_id: APP_ID,
+        size,
+        role: WindowRole::Panel(panel),
+        ..WindowDesc::default()
+    }
+}
+
+/// Destroying a window takes it off the screen, which only the compositor
+/// can say: a window freed on the client alone stays in sway's tree, still
+/// holding its tile, until the connection closes.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_destroyed_window_gives_its_tile_back() {
+    let mut session = Session::open();
+    let first = session.create_mapped(&tiled("crcbl e2e tile one"));
+    let second = session.create_mapped(&tiled("crcbl e2e tile two"));
+    let half = PhysicalSize::new(OUTPUT_SIZE.width / 2, OUTPUT_SIZE.height);
+    session.pump_until("two tiles side by side", |session| {
+        session.size(first) == Some(half) && session.size(second) == Some(half)
+    });
+
+    session.shell.destroy_window(first).expect("destroy");
+    session.pump_until("the survivor to take the whole output", |session| {
+        session.size(second) == Some(OUTPUT_SIZE)
+    });
+    session.shell.destroy_window(second).expect("destroy");
+}
+
+/// The bar lyr is: a panel across the top that reserves its height, so tiled
+/// windows stop below it, and gives the height back when it goes.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_reserving_panel_takes_its_edge_from_tiled_windows_and_gives_it_back() {
+    const HEIGHT: u32 = 30;
+    let mut session = Session::open();
+    assert!(
+        session
+            .shell
+            .caps()
+            .contains(ShellCaps::PANEL | ShellCaps::PANEL_RESERVE),
+        "sway implements wlr-layer-shell"
+    );
+    let window = session.create_mapped(&tiled("crcbl e2e beside the bar"));
+    session.pump_until("the tiled window to fill the output", |session| {
+        session.size(window) == Some(OUTPUT_SIZE)
+    });
+
+    let monitor = session.monitor_named(OUTPUT_NAME).id;
+    let bar = session.create(&panel(
+        "crcbl e2e bar",
+        LogicalSize::new(0.0, f64::from(HEIGHT)),
+        PanelDesc {
+            namespace: "crcbl-e2e-bar",
+            monitor: Some(monitor),
+            anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+            reserve: Reserve::OwnExtent,
+            ..PanelDesc::default()
+        },
+    ));
+    session.pump_until("the panel's first configure", |session| {
+        session.size(bar).is_some()
+    });
+    assert_eq!(
+        session.size(bar),
+        Some(PhysicalSize::new(OUTPUT_SIZE.width, HEIGHT)),
+        "stretched across the output by the compositor, at the height asked for"
+    );
+    let state = session.shell.window_state(bar).expect("live panel");
+    assert_eq!(state.effective_mode(), Some(DisplayMode::Windowed));
+
+    crcbl_shell::wayland_test_support::map_window(&*session.shell, bar).expect("map");
+    let below = PhysicalSize::new(OUTPUT_SIZE.width, OUTPUT_SIZE.height - HEIGHT);
+    session.pump_until("tiled windows to give up the bar's height", |session| {
+        session.size(window) == Some(below)
+    });
+
+    session.shell.destroy_window(bar).expect("destroy");
+    session.pump_until("the edge to come back", |session| {
+        session.size(window) == Some(OUTPUT_SIZE)
+    });
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// The launcher pikr is: an unanchored overlay that takes the keyboard when it
+/// maps, so the keys typed the moment it appears are its own.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn an_exclusive_panel_takes_the_keyboard_when_it_maps() {
+    let mut session = Session::open();
+    let size = LogicalSize::new(400.0, 300.0);
+    let launcher = session.create(&panel(
+        "crcbl e2e launcher",
+        size,
+        PanelDesc {
+            layer: PanelLayer::Overlay,
+            keyboard: PanelKeyboard::Exclusive,
+            ..PanelDesc::default()
+        },
+    ));
+    session.pump_until("the panel's first configure", |session| {
+        session.size(launcher).is_some()
+    });
+    let scale = session
+        .shell
+        .window_state(launcher)
+        .expect("live panel")
+        .scale_factor()
+        .expect("configured");
+    assert_eq!(
+        session.size(launcher),
+        Some(size.to_physical(scale)),
+        "an unanchored panel is the size it asked for"
+    );
+
+    crcbl_shell::wayland_test_support::map_window(&*session.shell, launcher).expect("map");
+    let input = VirtualInput::attach(&*session.shell, launcher).expect("virtual devices");
+    session.pump_until("the panel to take the keyboard", |session| {
+        session
+            .shell
+            .window_state(launcher)
+            .is_ok_and(|state| state.focused)
+    });
+
+    session.take_names();
+    input.tap(evdev::KEY_A);
+    session.pump_until("the key, delivered to the panel", |session| {
+        session.events.iter().any(|event| {
+            matches!(
+                event,
+                ShellEvent::Key {
+                    window,
+                    state: ButtonState::Pressed,
+                    ..
+                } if *window == launcher
+            )
+        })
+    });
+
+    drop(input);
+    session.shell.destroy_window(launcher).expect("destroy");
 }
