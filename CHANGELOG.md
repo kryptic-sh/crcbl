@@ -25,7 +25,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   mask), with `raw::from_argb32_be` for a StatusNotifierItem pixmap and
   `raw::from_image_data` for a notification's `image-data`; and `resize::resize`
   (Lanczos, in premultiplied light so transparent pixels lend no colour),
-  `fit_within`, `shrink_to_fit` and `nearest_size`.
+  `fit_within`, `shrink_to_fit` and `nearest_size`. Behind the `theme` feature,
+  `theme::IconThemes::lookup(name, size, scale)`: the freedesktop.org Icon Theme
+  Specification's lookup (the theme, what it `Inherits`, caller-chosen fallback
+  themes, `hicolor`, then bare files in `/usr/share/pixmaps`; PNG before SVG
+  before XPM; an exact size and scale before the nearest), generic fallback
+  names for a name that misses, absolute paths passed through,
+  `theme::SearchPath` from the XDG environment with extra roots first (a tray's
+  `IconThemePath`), hits kept and misses retried after a caller-set delay, and
+  `theme::FileVersion` (mtime and length) to key what a caller makes of a file.
 - **Dead keys and Compose sequences type on Wayland and X11.** A dead key
   commits nothing and the key after it commits what the two compose to (`´` then
   `e` is `é`), through libxkbcommon's compose module and the user's locale's
