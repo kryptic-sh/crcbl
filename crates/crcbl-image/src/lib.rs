@@ -22,7 +22,8 @@
 //!
 //! # Formats
 //!
-//! Each file format is a cargo feature: `png`, `jpeg`, `bmp` and `ico` today
+//! Each file format is a cargo feature: `png`, `jpeg`, `bmp`, `ico` and
+//! `webp` (lossless) today
 //! (`ico` brings `bmp` and `png`, the two forms an icon's frames take). The raw conversions and
 //! the resize need none. The `theme` feature adds the freedesktop.org icon-theme
 //! lookup, which finds an icon's file by name; decoding it is the format's.
@@ -41,6 +42,9 @@ pub mod jpeg;
 
 #[cfg(feature = "png")]
 pub mod png;
+
+#[cfg(feature = "webp")]
+pub mod webp;
 
 #[cfg(feature = "theme")]
 pub mod theme;
