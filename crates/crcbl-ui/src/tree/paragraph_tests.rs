@@ -436,6 +436,55 @@ mod parsed {
         assert_eq!(second_pen(BIG), advance);
     }
 
+    /// **`text-align` on the paragraph moves each line across its box**, and
+    /// a run's fragments — where it is drawn and where it is hit — move with
+    /// it.
+    #[test]
+    fn text_align_moves_each_line_and_its_fragments() {
+        let mut ui = ui_with(".p { text-align: right; }");
+        let build = |p: &mut ParagraphBuilder<'_>| {
+            p.run("", "aaa ", &[]);
+            p.run("#tail", "bb cc", &[])
+        };
+        let tail = paragraph(&mut ui, idle(), Some(7.0 * ADVANCE), build);
+        // `aaa bb` is six advances, a short of the seven; `cc` is two.
+        assert_eq!(
+            texts_and_pens(&ui),
+            [
+                ("aaa ".to_owned(), at(1.0, 0)),
+                ("bb".to_owned(), at(5.0, 0)),
+                ("cc".to_owned(), at(5.0, 1)),
+            ]
+        );
+        assert_eq!(
+            ui.rect(tail.key),
+            Some((
+                Vec2::ZERO.with_x(5.0 * ADVANCE),
+                Vec2::new(7.0 * ADVANCE, 2.0 * LINE)
+            )),
+        );
+        let on_cc = Vec2::new(6.0 * ADVANCE, 1.5 * LINE);
+        let left_of_cc = Vec2::new(ADVANCE, 1.5 * LINE);
+        assert!(
+            paragraph(
+                &mut ui,
+                PointerInput::hovering(on_cc),
+                Some(7.0 * ADVANCE),
+                build
+            )
+            .hovered
+        );
+        assert!(
+            !paragraph(
+                &mut ui,
+                PointerInput::hovering(left_of_cc),
+                Some(7.0 * ADVANCE),
+                build
+            )
+            .hovered
+        );
+    }
+
     /// Every filled rectangle `list` draws: an underline, here.
     fn rects(list: &DrawList) -> Vec<(Vec2, Vec2, [f32; 4])> {
         list.commands()

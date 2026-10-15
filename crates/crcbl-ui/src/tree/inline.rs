@@ -3,7 +3,7 @@
 //!
 //! # The line breaker's rules
 //!
-//! [`crate::font::layout`]'s rules, carried across runs, with two additions:
+//! [`crate::font::layout`]'s rules, carried across runs and added to:
 //!
 //! * **A run boundary is not a break.** Words are what lies between spaces,
 //!   whichever runs they are in, so `un` in one run and `known` in the next is
@@ -242,7 +242,8 @@ impl InlineLayout {
             Wrap::MinContent => Some(0.0),
             Wrap::Width(width) => Some(wrap_width(width)),
         };
-        let break_words = matches!(wrap, Wrap::Width(_));
+        // Only a definite width breaks inside a word.
+        let word_limit = limit.filter(|_| matches!(wrap, Wrap::Width(_)));
         // Each finished line's glyphs and the run its metrics fall back to.
         let mut finished: Vec<(Range<usize>, usize)> = Vec::new();
         let mut line = Line::new(0);
@@ -276,11 +277,10 @@ impl InlineLayout {
                     // characters, at the last that fits, until what is left
                     // fits.
                     let mut word_start = start;
-                    while break_words
-                        && limit.is_some_and(|limit| right > limit)
+                    while let Some(limit) = word_limit
+                        && right > limit
                         && layout.glyphs.len() - word_start > 1
                     {
-                        let limit = limit.unwrap_or(f32::INFINITY);
                         let fits = (word_start + 1..layout.glyphs.len())
                             .take_while(|&at| {
                                 let glyph = &layout.glyphs[at];
@@ -288,9 +288,6 @@ impl InlineLayout {
                             })
                             .last()
                             .map_or(word_start + 1, |at| at + 1);
-                        if fits == layout.glyphs.len() {
-                            break;
-                        }
                         finished.push((line.first..fits, last_run));
                         line = Line::new(fits);
                         word_start = fits;

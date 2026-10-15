@@ -310,12 +310,50 @@ Each step lands in the crate the later steps build on, so the seam goes first.
 7. **Outputs.** Hotplug events with name, scale and work area on every backend
    (S7). The monitor-removed close requests in step 4 are part of this.
 8. **Text.**
-   - Rich per-span styling (S12) is there for one line: a row block of spans,
-     one per run, each in its own colour, size and family, laid out edge to edge
-     (`a_row_of_spans_draws_each_run_in_its_own_style_edge_to_edge`), and the
-     pattern is written on `Ui::span`. Not there: runs that wrap together as one
-     paragraph, and font weight — there is no `font-weight` at all, so a bold
-     match needs a bold font registered as its own family.
+   - S12 is in, in lyr's order (2026-10-16): `Ui::paragraph` with runs that wrap
+     together (`tree/paragraph.rs`, breaker in `tree/inline.rs`), `font-weight`
+     and `font-style` choosing a family's face or synthesising one
+     (`font/face.rs`), `text-decoration: underline` on spans and runs, and a run
+     hit on its line fragments, so a wrapped link is one node clicked and
+     hovered on either line
+     (`a_link_wrapping_onto_two_lines_is_hit_on_both_fragments`). Every
+     mechanism was mutation-checked by hand: the run-boundary break, the shared
+     baseline, the empty line's metrics, word breaking, the hyphen break,
+     cross-run kerning, alignment, the measure hash, the face matcher's weight
+     rule and style preference, the bold threshold, both syntheses and the
+     widened advance, the face registry, the fragment hit test, and the
+     underline's position, fallback, fragment width and per-line baseline.
+   - Decided 2026-10-16: **a family with no bold or italic face is
+     synthesised**, not drawn regular — markup that says `<b>` has lost its
+     meaning in regular, families are often one file, and browsers synthesise by
+     default. It is done in the glyph atlas on the outline (drawn twice for
+     bold, sheared for italic), each synthesis its own `FontId`, so the draw
+     list keeps one quad per glyph at one texel per pixel; shearing the quad
+     would sample between texels. **The bitmap font ignores weight and style**:
+     smearing or shearing a pixel font breaks its glyphs. **`text-decoration` is
+     inherited** rather than propagated, so a descendant can set `none`, which
+     CSS does not allow. **`Ui::register_font` keeps one face per weight and
+     style**, read from the font's `OS/2` table; re-registering a face of the
+     same weight and style still replaces it.
+   - Not there, each needing only a caller to ask: `text-overflow: ellipsis` on
+     a paragraph (a cut that respects each run's font); a run's `background`
+     (pikr's highlight may want it; one rectangle per fragment, as the underline
+     is); keyboard focus on a link run (runs take `Behavior::NONE`, so Tab and
+     `ui_accept` never reach one, and no focus ring draws round fragments);
+     `bolder`, `lighter`, `oblique` and fractional weights; a `font-synthesis`
+     switch; registering a face under a weight or style other than its tables'
+     (a font whose `OS/2` table is wrong); inline images in a paragraph;
+     underline colour, style and `line-through`. A paragraph has no strut, so a
+     line's height is only its runs', a paragraph with no runs is zero tall, and
+     two runs of different fonts on one line each draw their own font's
+     underline position rather than one shared one. `Ui::text` answers a run's
+     text and `None` for a paragraph.
+   - Not tested: a paragraph inside a clipping or scrolled block (the fragment
+     hit test intersects each fragment with the run's clip, which no test
+     drives), centred lines, a bitmap run beside a parsed one on one line, and a
+     real bold or italic TTF registered beside a regular one — the face tests
+     use fixed-pitch fixtures labelled with a weight, and the synthesis tests
+     rasterise the committed regular face.
    - Colour emoji (COLR, CBDT, sbix) with per-glyph fallback (S22).
    - Text measurement exists as `text_width`.
 9. **Input.**

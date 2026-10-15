@@ -5,7 +5,7 @@
 //! # Matching
 //!
 //! A family is every [`Font`] registered under one name. [`select_face`] is
-//! CSS Fonts 4's font-matching algorithm (§5.2) cut down to the two properties
+//! CSS Fonts 4's font-matching algorithm (§5.2) cut down to the properties
 //! the subset has:
 //!
 //! * **Style first.** `italic` takes the family's slanted faces — italic or
@@ -124,7 +124,8 @@ impl Synthesis {
         italic: false,
     };
 
-    /// Which of the four combinations this is, `0..4`.
+    /// Which combination this is: its index in a table of one entry per
+    /// combination.
     pub(crate) const fn index(self) -> usize {
         self.bold as usize | (self.italic as usize) << 1
     }
