@@ -235,14 +235,19 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      no longer reports a full-screen application, and its failure names that
      state, so the next failure says whether the guess holds.
    - **It did not hold the next time.** The flake branch's own run 38795912556
-     failed the same way with the state at 6, `QUNS_QUIET_TIME` ("OOBE quiet
-     period" in `shellapi.h`, the stretch after a profile's first sign-in), not
-     a full-screen one. New unverified guess: Explorer sends no
-     `ABN_FULLSCREENAPP` during the quiet period, and a fresh runner profile is
-     sometimes still in it. Not acted on: waiting it out could take as long as
-     the period lasts, and skipping the test then would turn a real regression
-     on such a runner into a pass. The next failures' states decide it; if each
-     is 6, the choice is between those two.
+     failed the same way, twice, with the state at 6, `QUNS_QUIET_TIME` ("OOBE
+     quiet period" in `shellapi.h`, the stretch after a profile's first
+     sign-in), not a full-screen one — read while the test's full-screen window
+     was up, so Explorer did not see it as full screen at all. **Decided
+     2026-10-16, per the standing instruction:** in its quiet period Explorer's
+     full-screen detection does not run, so when the state is `QUNS_QUIET_TIME`
+     after the game window takes the foreground, the test delivers
+     `ABN_FULLSCREENAPP` to the bar's callback message itself and still requires
+     both `FullScreenApp` events, and logs that Explorer's half went
+     unexercised. The other choice, skipping the test there, would have turned a
+     regression in the shell's half into a pass on those runners. Unverified:
+     that the quiet period is the whole cause; a failure with any other state
+     would say otherwise.
    - Still to do: `ABM_ACTIVATE` and `ABM_WINDOWPOSCHANGED`, which the appbar
      documentation asks for and which matter to auto-hide appbars; and a
      crash-safe `ABM_REMOVE`, because a process killed without it keeps the work
