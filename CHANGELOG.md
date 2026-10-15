@@ -6990,6 +6990,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **On Windows, `crcbl::backend::open` falls back to D3D12 when Vulkan will not
+  open.** A virtual machine, a remote session or an ARM64 laptop with no Vulkan
+  driver used to fail with `GpuError::NoBackend`; it now opens D3D12, on WARP
+  (the software rasteriser) if there is no GPU at all. Vulkan is still tried
+  first, so a machine it opens on is unchanged, and `CRCBL_GPU` still names one
+  backend outright.
+
 - **`CursorIcon` is defined in `crcbl_core::input`** and re-exported from
   `crcbl_shell` and `crcbl_shell::cursor` as before, so a UI can name a cursor
   shape without depending on the shell. It is no longer `#[non_exhaustive]`:

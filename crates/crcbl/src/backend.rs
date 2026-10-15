@@ -32,6 +32,12 @@
 //! [`GpuError::NoBackend`] names the actual problem. Null is reachable only by
 //! asking for it.
 //!
+//! On Windows the auto-selectable backends are Vulkan and then D3D12, so a
+//! machine with no Vulkan driver opens D3D12 — on WARP, the software
+//! rasteriser, if it has no GPU at all — rather than failing. Order is what
+//! keeps that a fallback: an entry is tried only once every one before it has
+//! refused.
+//!
 //! The same rule is why [`GpuBackend::WebGpu`] is **registered on native and
 //! refuses there** rather than being absent. Leaving the name unregistered
 //! would report it as unknown, which reads as a typo rather than as a backend
@@ -88,15 +94,17 @@
 //! all. So the Vulkan entry is registered on macOS but **not automatic**: an
 //! `open()` there tries Metal and stops, while `CRCBL_GPU=vk` still reaches the
 //! Vulkan backend by name for whoever has a loader and means it. Elsewhere on
-//! native the order is unchanged — Vulkan, and nothing else automatically.
+//! native Vulkan comes first, and on Linux and FreeBSD it is the only automatic
+//! entry.
 //!
 //! **Windows is the case where two backends are registered and neither
 //! displaces the other.** `crcbl-dx12`'s own crate docs say D3D12 is not a
 //! replacement for `crcbl-vk` there — it is the same engine reaching a different
-//! loader — so the D3D12 entry is registered and **not** automatic, and
-//! `CRCBL_GPU=dx12` is the only thing that selects it. Making it automatic would
-//! silently move every existing Windows run onto a backend whose feature set is
-//! the smaller of the two.
+//! loader — so the D3D12 entry comes **after** Vulkan: automatic, but tried only
+//! when Vulkan refuses, which is a machine with no Vulkan driver. Ahead of
+//! Vulkan it would silently move every Windows run onto the backend whose
+//! feature set is the smaller of the two; `CRCBL_GPU=dx12` still selects it
+//! outright.
 //!
 //! The blocking wrappers `open` and `open_backend` do not exist on `wasm32`
 //! either, for the reason `Instance::create_device` does not: the browser's
@@ -384,11 +392,13 @@ static REGISTRY: &[Registration] = &[
     #[cfg(target_os = "windows")]
     Registration {
         backend: GpuBackend::Dx12,
-        // Registered and never automatic. Windows already reaches a GPU through
-        // `crcbl-vk`, and `crcbl-dx12`'s crate docs say D3D12 is not a
-        // replacement for it: auto-selecting it would move every Windows run
-        // onto the backend with the smaller feature set without anyone asking.
-        auto: false,
+        // Automatic, and after Vulkan, so it is only ever reached when Vulkan
+        // would not open: a Windows virtual machine, a remote session or an
+        // ARM64 laptop with no Vulkan driver, where D3D12 is still there and
+        // has WARP, Microsoft's software rasteriser, when nothing else is.
+        // `crcbl-dx12`'s crate docs say D3D12 is not a replacement for Vulkan,
+        // and the order keeps it that: a machine Vulkan opens on never sees it.
+        auto: true,
         open: || {
             ready(
                 crcbl_dx12::Dx12Instance::open()
@@ -850,10 +860,11 @@ mod tests {
         assert!(!null.auto, "a game must never silently render nothing");
     }
 
-    /// Auto-selection differs by target *on purpose*, and there is exactly one
-    /// automatic entry everywhere: Metal on macOS, because Apple platforms are
-    /// Metal only; Vulkan on the rest of native; and `webgpu` in a browser,
-    /// which is the only GPU backend a browser build links at all.
+    /// Auto-selection differs by target *on purpose*: Metal on macOS, because
+    /// Apple platforms are Metal only; Vulkan and then D3D12 on Windows, the
+    /// second reached only when the first refuses; Vulkan alone on the rest of
+    /// native; and `webgpu` in a browser, which is the only GPU backend a
+    /// browser build links at all.
     /// Asserting it here is what stops a later edit from quietly making wgpu
     /// automatic on native — which would change which GPU path every existing
     /// game takes — or from leaving Vulkan
@@ -861,11 +872,11 @@ mod tests {
     /// successful start-up.
     ///
     /// Windows is the target where this says the most, because it is the one
-    /// with two native backends registered: the answer there is still Vulkan
-    /// alone, so adding D3D12 changed which backends can be *asked for* and not
-    /// which one an unconfigured game gets.
+    /// with two native backends registered, and the order is the assertion
+    /// there: D3D12 ahead of Vulkan would move every Windows run onto the
+    /// backend with the smaller feature set.
     #[test]
-    fn exactly_one_backend_is_auto_selectable_and_it_depends_on_the_target() {
+    fn the_automatic_backends_depend_on_the_target_and_come_in_order() {
         let auto: Vec<GpuBackend> = REGISTRY
             .iter()
             .filter(|entry| entry.auto)
@@ -873,7 +884,13 @@ mod tests {
             .collect();
         #[cfg(target_os = "macos")]
         assert_eq!(auto, [GpuBackend::Metal]);
-        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
+        #[cfg(target_os = "windows")]
+        assert_eq!(auto, [GpuBackend::Vulkan, GpuBackend::Dx12]);
+        #[cfg(all(
+            not(target_arch = "wasm32"),
+            not(target_os = "macos"),
+            not(target_os = "windows")
+        ))]
         assert_eq!(auto, [GpuBackend::Vulkan]);
         // A browser has one GPU backend and it is `crcbl-webgpu`. No feature
         // decides this any more: `crcbl-wgpu` was deleted on 2026-08-21, so
@@ -1006,15 +1023,19 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn automatic_selection_reports_what_it_tried() {
-        let expected = REGISTRY
+        let expected: Vec<GpuBackend> = REGISTRY
             .iter()
-            .find(|entry| entry.auto)
-            .expect("every native target has one automatic backend")
-            .backend;
+            .filter(|entry| entry.auto)
+            .map(|entry| entry.backend)
+            .collect();
+        assert!(
+            !expected.is_empty(),
+            "every native target has an automatic backend"
+        );
         // Exhaustive on purpose: the two enums are separate types — one is the
         // registry's, one is the seam's — and a new backend must be taught the
         // correspondence rather than defaulted into one.
-        let expected_kind = match expected {
+        let kind = |backend| match backend {
             GpuBackend::Vulkan => crcbl_hal::BackendKind::Vulkan,
             GpuBackend::Metal => crcbl_hal::BackendKind::Metal,
             GpuBackend::Dx12 => crcbl_hal::BackendKind::Dx12,
@@ -1022,13 +1043,19 @@ mod tests {
             GpuBackend::Null => crcbl_hal::BackendKind::Null,
         };
         match request_open_auto(REGISTRY).block() {
-            Ok(instance) => assert_eq!(
-                instance.backend(),
-                expected_kind,
-                "the auto-selectable backend is the one that opened"
+            Ok(instance) => assert!(
+                expected
+                    .iter()
+                    .any(|&backend| kind(backend) == instance.backend()),
+                "an auto-selectable backend is the one that opened: {:?} of {expected:?}",
+                instance.backend()
             ),
             Err(GpuError::NoBackend { tried, last }) => {
-                assert_eq!(tried, expected.as_str(), "every attempt is named, in order");
+                assert_eq!(
+                    tried,
+                    registry_names(expected.iter().copied()),
+                    "every attempt is named, in order"
+                );
                 assert!(!last.is_empty(), "and the last failure explains itself");
             }
             Err(error) => panic!("unexpected error: {error}"),
@@ -1103,6 +1130,47 @@ mod tests {
             }
             other => panic!("wrong error: {other}"),
         }
+    }
+
+    /// **An auto entry that refuses falls through to the next one that opens**,
+    /// which is the whole of Windows' D3D12 fallback: Vulkan refusing on a
+    /// machine with no driver, and the entry after it answering. A
+    /// non-automatic entry between them is skipped, not tried.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_refused_auto_entry_falls_through_to_the_next_that_opens() {
+        static VK_REFUSES: &[Registration] = &[
+            Registration {
+                backend: GpuBackend::Vulkan,
+                auto: true,
+                open: || {
+                    ready(Err(HalError::Unsupported {
+                        backend: crcbl_hal::BackendKind::Vulkan,
+                        what: "no driver in this test",
+                    }))
+                },
+            },
+            // Not auto: it would refuse too, and it must never be tried.
+            Registration {
+                backend: GpuBackend::WebGpu,
+                auto: false,
+                open: || panic!("a non-automatic entry was tried"),
+            },
+            Registration {
+                backend: GpuBackend::Null,
+                auto: true,
+                open: || ready(Ok(Box::new(crcbl_hal::null::NullInstance::gpu_driven()))),
+            },
+        ];
+
+        let mut pending = request_open_auto(VK_REFUSES);
+        let instance = loop {
+            if let Some(instance) = pending.poll().expect("the second auto entry opens") {
+                break instance;
+            }
+        };
+        assert_eq!(instance.backend(), crcbl_hal::BackendKind::Null);
+        assert_eq!(pending.tried, [GpuBackend::Vulkan, GpuBackend::Null]);
     }
 
     /// A backend asked for **by name** does not fall back — that is the whole

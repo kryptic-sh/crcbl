@@ -260,7 +260,16 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `Stylesheet::parse`, not by rendering it.
 11. **Start-up and failure.**
     - Measure cold start to the first presented frame against 500 ms (S13).
-    - A clear failure, not a crash, with no usable GPU (S26).
+    - S26, checked 2026-10-15. With no usable GPU, `crcbl::backend::open`
+      returns `GpuError::NoBackend` naming every backend it tried and the last
+      error, not a panic, and never falls to the Null backend. Windows now falls
+      back to D3D12 after Vulkan, which reaches WARP with no GPU at all; the
+      `dx12 e2e (software adapter)` CI job is the evidence that the D3D12
+      backend works on WARP. Not done: Linux has no software fallback of its own
+      (lavapipe is a Vulkan driver, so it is found when Mesa installed it, and
+      not otherwise), and nothing has run a whole app on WARP. Decided: D3D12 is
+      automatic but after Vulkan; ahead of it, every Windows run would move to
+      the backend with the smaller feature set.
 12. **FreeBSD** (S18) compiles: `crcbl-shell`'s `build.rs` sets a `desktop_unix`
     cfg for Linux and FreeBSD, which gates the `linux`, `wayland` and `x11`
     modules and their registrations, and the two libc numbers the systems
