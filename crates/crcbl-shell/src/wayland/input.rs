@@ -575,11 +575,19 @@ impl WaylandShell {
             }
             let mut emitted = 0;
             while key.next_nanos <= now && emitted < 8 {
-                let seat = &self.seats[index];
+                let seat = &mut self.seats[index];
+                // A repeat types as a press does, through the compose
+                // sequence and with the modifiers held now, which is what an
+                // X server's repeats are: presses.
+                let text = seat
+                    .keymap
+                    .as_mut()
+                    .and_then(|keymap| keymap.text(key.scancode));
+                let time = self.time.event_time_nanos(key.next_nanos);
                 self.queue.push_back(ShellEvent::Key {
                     window: key.window,
                     device: seat.device,
-                    time: self.time.event_time_nanos(key.next_nanos),
+                    time,
                     scancode: Scancode(key.scancode),
                     key_code: key.key_code,
                     keysym: key.keysym,
@@ -587,6 +595,13 @@ impl WaylandShell {
                     repeat: true,
                     modifiers: seat.modifiers,
                 });
+                if let Some(text) = text {
+                    self.queue.push_back(ShellEvent::TextCommit {
+                        window: key.window,
+                        time,
+                        text,
+                    });
+                }
                 key.next_nanos = key.next_nanos.saturating_add(key.interval_nanos);
                 emitted += 1;
             }

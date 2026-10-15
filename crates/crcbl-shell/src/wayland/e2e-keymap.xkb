@@ -19,6 +19,7 @@ xkb_keycodes "crcbl" {
     <RTRN> = 36;
     <BKSP> = 22;
     <LEFT> = 113;
+    <AC11> = 48;
 };
 xkb_types "crcbl" {
     virtual_modifiers NumLock,Alt,LevelThree;
@@ -68,6 +69,7 @@ xkb_symbols "crcbl" {
     key <RTRN> { [ Return ] };
     key <BKSP> { [ BackSpace ] };
     key <LEFT> { [ Left ] };
+    key <AC11> { [ dead_acute ] };
     key <LFSH> { repeat = False, [ Shift_L ] };
     key <RTSH> { repeat = False, [ Shift_R ] };
     key <LCTL> { repeat = False, [ Control_L ] };

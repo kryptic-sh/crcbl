@@ -23,6 +23,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   typed itself. A key that breaks a sequence commits nothing, and losing the
   keyboard abandons a sequence. No pre-edit is shown mid-sequence.
 
+### Fixed
+
+- **A held key types repeatedly on Wayland.** The shell synthesizes Wayland's
+  key repeats, and each was a `Key` with `repeat: true` and no `TextCommit`, so
+  holding a letter typed it once. Each repeat now commits text as a press does,
+  as X11's server repeats already did.
+
 ## [0.1.0] - 2026-10-16
 
 ### Breaking

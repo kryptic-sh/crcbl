@@ -266,11 +266,12 @@ Each step lands in the crate the later steps build on, so the seam goes first.
 9. **Input.**
    - S9: XKB compose is in (`crates/crcbl-shell/src/linux/xkb/compose.rs`, fed
      from `Keymap::text` on both Wayland and X11). Its unit tests drive a table
-     built from text, through the real libxkbcommon, and every hand mutant of
-     the feed, the reset and the locale order was killed (WSL, 2026-10-16). Not
-     tested: the backends' wiring, that a press feeds the sequence and that
-     losing the keyboard resets it, which no e2e test types a dead key for. Not
-     there: a pre-edit while a sequence is in progress (GTK shows the dead key
+     built from text through the real libxkbcommon, every hand mutant of the
+     feed, the reset and the locale order was killed (WSL, 2026-10-16), and the
+     sway suite types a dead key through a table named in `XCOMPOSEFILE`
+     (`a_dead_key_composes_with_the_key_after_it`). Not tested: losing the
+     keyboard mid-sequence, and X11 compose through a real server. Not there: a
+     pre-edit while a sequence is in progress (GTK shows the dead key
      underlined), and `text-input-v3` pre-edit and commit on Wayland, which is
      the other half of S9.
    - S20, checked 2026-10-15. There already: hover and click as pseudo-classes

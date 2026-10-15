@@ -34,6 +34,8 @@ use crcbl_shell::{
 /// imported so the test states the number the wire actually carries.
 mod evdev {
     pub const KEY_A: u32 = 30;
+    pub const KEY_E: u32 = 18;
+    pub const KEY_APOSTROPHE: u32 = 40;
     pub const KEY_LEFTSHIFT: u32 = 42;
     pub const KEY_ESC: u32 = 1;
     pub const BTN_LEFT: u32 = 0x110;
@@ -1278,6 +1280,42 @@ fn modifiers_ride_on_each_event_and_shift_changes_the_keysym() {
     session.shell.destroy_window(window).expect("destroy");
 }
 
+/// A dead key commits nothing and composes with the key after it, by the
+/// table `run-wayland-e2e.sh` names in `XCOMPOSEFILE`; a key with no sequence
+/// after the dead key cancels it and commits nothing.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_dead_key_composes_with_the_key_after_it() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e compose");
+
+    for key in [
+        evdev::KEY_APOSTROPHE,
+        evdev::KEY_E,
+        evdev::KEY_APOSTROPHE,
+        evdev::KEY_A,
+        evdev::KEY_A,
+    ] {
+        input.tap(key);
+    }
+    session.pump_until("every key's release", |session| {
+        session
+            .keys()
+            .iter()
+            .filter(|key| key.3 == ButtonState::Released)
+            .count()
+            == 5
+    });
+    assert_eq!(
+        session.text(),
+        vec!["é".to_string(), "a".to_string()],
+        "the dead key and `e` compose, and `a` after a dead key cancels it"
+    );
+
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
 /// The shell synthesizes repeats from `repeat_info`, and flags every one.
 #[test]
 #[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
@@ -1345,6 +1383,25 @@ fn a_held_key_repeats_and_the_repeats_are_flagged() {
     assert!(
         times.windows(2).all(|pair| pair[1] >= pair[0]),
         "timestamps never go backwards: {times:?}"
+    );
+
+    // Each repeat types as its press did, and after it.
+    assert_eq!(
+        session.text(),
+        vec!["a".to_string(); repeats.len() + 1],
+        "the press and every repeat commit the key's text"
+    );
+    let order: Vec<&'static str> = session
+        .events
+        .iter()
+        .map(ShellEvent::name)
+        .filter(|name| *name == "Key" || *name == "TextCommit")
+        .collect();
+    assert!(
+        order
+            .windows(2)
+            .all(|pair| pair != ["TextCommit", "TextCommit"]),
+        "text follows its key, one commit per press: {order:?}"
     );
 
     // And repeats stop on release rather than running forever.

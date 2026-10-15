@@ -49,6 +49,9 @@ trap cleanup EXIT INT TERM
 sway_session_start "$CONF"
 
 cd "$REPO_ROOT"
+# The compose table the dead-key test types through, named the way a user
+# names their own, so the test does not depend on the runner's locale files.
+export XCOMPOSEFILE="${REPO_ROOT}/crates/crcbl-shell/tests/e2e.XCompose"
 OUTPUT="${SWAY_RUNTIME_DIR}/nextest.log"
 set +e
 cargo nextest run \
