@@ -918,8 +918,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stay on screen, on a toplevel, another popup or a panel (through layer-shell's
   `get_popup`); `Passthrough` has an empty input region, `Grab` grabs with the
   seat's latest input serial, and the compositor's `popup_done` is a
-  `CloseRequested`. A popup is destroyed before its parent. Win32 and AppKit do
-  not build popups yet. `LogicalRect` is new in `crcbl_shell`.
+  `CloseRequested`. A popup is destroyed before its parent. Win32 builds popups
+  as owned `WS_POPUP` tool windows placed against the anchor at the parent's
+  scale and flipped or slid to stay in the monitor's work area: `Passthrough`
+  answers `HTTRANSPARENT`, `Pointer` never activates, and `Grab` activates and
+  is asked to close when it loses the keyboard. AppKit does not build popups
+  yet. `LogicalRect` is new in `crcbl_shell`.
 
 - **Fonts from bytes read at run time.** `Font::parse` takes any `FontData`: an
   `include_bytes!` as before, or a `Vec<u8>`, `Box<[u8]>` or `Arc<[u8]>` an

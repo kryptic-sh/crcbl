@@ -38,7 +38,7 @@
 use super::ffi::{Point, Rect, style, value};
 use crate::{
     AspectRatio, DisplayMode, PanelAnchor, PanelKeyboard, PanelLayer, PhysicalRect, PhysicalSize,
-    SizeConstraints,
+    PopupInput, PopupPlacement, SizeConstraints,
 };
 
 /// On every window this backend makes: without them the system may draw over
@@ -137,6 +137,23 @@ pub fn panel_styles(layer: PanelLayer, keyboard: PanelKeyboard) -> Styles {
     }
 }
 
+/// The styles of a [popup](crate::WindowRole::Popup): no frame, out of the
+/// taskbar, topmost when its parent is, and never activated unless it grabs.
+#[must_use]
+pub fn popup_styles(input: PopupInput, topmost: bool) -> Styles {
+    let mut ex_style = style::EX_TOOL_WINDOW;
+    if topmost {
+        ex_style |= style::EX_TOPMOST;
+    }
+    if input != PopupInput::Grab {
+        ex_style |= style::EX_NO_ACTIVATE;
+    }
+    Styles {
+        style: style::POPUP | COMMON,
+        ex_style,
+    }
+}
+
 /// Space around a panel, in physical pixels: [`Margins`](crate::Margins)
 /// scaled to the monitor.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -180,6 +197,64 @@ pub fn with_depth(rect: Rect, edge: PanelAnchor, depth: i32) -> Rect {
         _ => rect.bottom = rect.top.saturating_add(depth),
     }
     rect
+}
+
+/// Where a popup of `size` goes against `anchor`, both in desktop pixels:
+/// on the `placement` side of it, flipped to the other side when it does not
+/// fit in `area` and the other side does, and slid along the side it is on to
+/// stay in `area`. The placement `xdg_positioner` is asked for on Wayland,
+/// worked out here because Win32 has no one to ask.
+#[must_use]
+pub fn popup_rect(
+    anchor: PhysicalRect,
+    size: PhysicalSize,
+    placement: PopupPlacement,
+    area: PhysicalRect,
+) -> PhysicalRect {
+    let (width, height) = (i64::from(size.width), i64::from(size.height));
+    let (left, top) = (i64::from(anchor.x), i64::from(anchor.y));
+    let (right, bottom) = (
+        left + i64::from(anchor.width),
+        top + i64::from(anchor.height),
+    );
+    let (area_left, area_top) = (i64::from(area.x), i64::from(area.y));
+    let (area_right, area_bottom) = (
+        area_left + i64::from(area.width),
+        area_top + i64::from(area.height),
+    );
+    // The two candidate starts on the axis the placement is on, the second
+    // being the flip, and the free axis's start before sliding.
+    let side = |near: i64, far: i64, extent: i64, low: i64, high: i64| {
+        if near >= low && near + extent <= high {
+            near
+        } else if far >= low && far + extent <= high {
+            far
+        } else {
+            near
+        }
+    };
+    let slide = |start: i64, extent: i64, low: i64, high: i64| start.min(high - extent).max(low);
+    let (x, y) = match placement {
+        PopupPlacement::Below => (
+            slide(left, width, area_left, area_right),
+            side(bottom, top - height, height, area_top, area_bottom),
+        ),
+        PopupPlacement::Above => (
+            slide(left, width, area_left, area_right),
+            side(top - height, bottom, height, area_top, area_bottom),
+        ),
+        PopupPlacement::Left => (
+            side(left - width, right, width, area_left, area_right),
+            slide(top, height, area_top, area_bottom),
+        ),
+        PopupPlacement::Right => (
+            side(right, left - width, width, area_left, area_right),
+            slide(top, height, area_top, area_bottom),
+        ),
+    };
+    let narrow =
+        |value: i64| i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX });
+    PhysicalRect::new(narrow(x), narrow(y), size.width, size.height)
 }
 
 /// Where a panel of `size` goes in `area`: `insets` away from each edge it is
@@ -482,6 +557,63 @@ mod tests {
         assert_eq!(cut(PanelAnchor::BOTTOM, 30), (-1920, 1050, 0, 1080));
         assert_eq!(cut(PanelAnchor::LEFT, 48), (-1920, 40, -1872, 1080));
         assert_eq!(cut(PanelAnchor::RIGHT, 48), (-48, 40, 0, 1080));
+    }
+
+    #[test]
+    fn a_popup_is_activated_only_when_it_grabs_and_is_topmost_with_its_parent() {
+        for input in [PopupInput::Passthrough, PopupInput::Pointer] {
+            let styles = popup_styles(input, false);
+            assert_ne!(styles.ex_style & style::EX_NO_ACTIVATE, 0, "{input:?}");
+        }
+        let menu = popup_styles(PopupInput::Grab, false);
+        assert_eq!(menu.ex_style & style::EX_NO_ACTIVATE, 0);
+        assert_ne!(menu.ex_style & style::EX_TOOL_WINDOW, 0);
+        assert_eq!(menu.ex_style & style::EX_TOPMOST, 0);
+        assert_ne!(menu.style & style::POPUP, 0);
+        assert_ne!(
+            popup_styles(PopupInput::Grab, true).ex_style & style::EX_TOPMOST,
+            0,
+            "above the topmost bar that opened it"
+        );
+    }
+
+    #[test]
+    fn a_popup_opens_on_its_side_and_flips_or_slides_to_stay_on_screen() {
+        let area = PhysicalRect::new(0, 0, 1920, 1040);
+        let button = PhysicalRect::new(100, 100, 80, 30);
+        let menu = PhysicalSize::new(200, 300);
+        assert_eq!(
+            popup_rect(button, menu, PopupPlacement::Below, area),
+            PhysicalRect::new(100, 130, 200, 300),
+            "below, left edges aligned"
+        );
+        assert_eq!(
+            popup_rect(button, menu, PopupPlacement::Above, area),
+            PhysicalRect::new(100, 130, 200, 300),
+            "no room above, so flipped below"
+        );
+        assert_eq!(
+            popup_rect(button, menu, PopupPlacement::Right, area),
+            PhysicalRect::new(180, 100, 200, 300),
+            "a submenu, top edges aligned"
+        );
+        assert_eq!(
+            popup_rect(button, menu, PopupPlacement::Left, area),
+            PhysicalRect::new(180, 100, 200, 300),
+            "no room to the left, so flipped right"
+        );
+        let low = PhysicalRect::new(1850, 1000, 60, 30);
+        assert_eq!(
+            popup_rect(low, menu, PopupPlacement::Below, area),
+            PhysicalRect::new(1720, 700, 200, 300),
+            "flipped above, and slid back onto the screen"
+        );
+        let tall = PhysicalSize::new(200, 2000);
+        assert_eq!(
+            popup_rect(button, tall, PopupPlacement::Below, area).y,
+            130,
+            "fits neither side, so it stays on its own"
+        );
     }
 
     #[test]

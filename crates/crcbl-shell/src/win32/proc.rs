@@ -221,6 +221,9 @@ pub(super) struct Shared {
     /// Re-applied when a composition starts, because an input method is free
     /// to forget a placement between compositions.
     input_areas: RefCell<Vec<(isize, Rect)>>,
+    /// The popups the pointer passes through, answered `HTTRANSPARENT` in
+    /// `WM_NCHITTEST`.
+    passthrough: RefCell<Vec<isize>>,
     /// The window `TrackMouseEvent` is currently armed for, or zero.
     ///
     /// Also the answer to "is the pointer inside?", which is the only way to
@@ -297,6 +300,7 @@ impl Shared {
         self.input_areas
             .borrow_mut()
             .retain(|&(known, _)| known != hwnd);
+        self.passthrough.borrow_mut().retain(|&known| known != hwnd);
         if self.tracked.get() == hwnd {
             self.tracked.set(0);
         }
@@ -306,6 +310,11 @@ impl Shared {
         if self.clipped.get() == hwnd {
             self.clipped.set(0);
         }
+    }
+
+    /// Makes the pointer pass through `hwnd`; see [`passthrough`](Self).
+    pub(super) fn set_passthrough(&self, hwnd: isize) {
+        self.passthrough.borrow_mut().push(hwnd);
     }
 
     /// A window's limits, by value so no borrow outlives the lookup.
@@ -1057,6 +1066,11 @@ pub(super) unsafe extern "system" fn window_proc(
             default()
         }
 
+        // A tooltip the pointer passes through to the bar beneath it, which
+        // `HTTRANSPARENT` does for a window on the same thread — and a popup's
+        // parent always is.
+        msg::NC_HIT_TEST if shared.passthrough.borrow().contains(&window) => value::HT_TRANSPARENT,
+
         // A work area is part of a monitor's description, and a panel placed
         // in one has to move with it: the taskbar moved, or an appbar came or
         // went. Every other parameter is somebody else's.
@@ -1085,6 +1099,16 @@ pub(super) unsafe extern "system" fn window_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_passthrough_popup_is_forgotten_with_its_window() {
+        let shared = Shared::default();
+        shared.set_passthrough(0x10);
+        shared.set_passthrough(0x20);
+        assert!(shared.passthrough.borrow().contains(&0x10));
+        shared.forget(0x10);
+        assert_eq!(*shared.passthrough.borrow(), [0x20]);
+    }
     use crate::{LogicalSize, SizeConstraints};
 
     const FRAME: Frame = Frame {

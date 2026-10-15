@@ -132,6 +132,12 @@ pub(super) struct WinWindow {
     /// What a panel was created with, so it can be placed again; `None` for
     /// every other window. See [`panel`](super::panel).
     pub(super) panel: Option<Panel>,
+    /// A popup's input, which decides how it is shown and whether losing the
+    /// keyboard dismisses it; `None` for every other window. See
+    /// [`popup`](super::popup).
+    pub(super) popup: Option<crate::PopupInput>,
+    /// The window a popup belongs to, which destroys it when it goes.
+    pub(super) parent: Option<WindowId>,
 }
 
 impl WinWindow {
@@ -348,7 +354,8 @@ impl Win32Shell {
             .union(ShellCaps::TEXT_IME)
             .union(ShellCaps::TOUCH)
             .union(ShellCaps::PANEL)
-            .union(ShellCaps::PANEL_RESERVE);
+            .union(ShellCaps::PANEL_RESERVE)
+            .union(ShellCaps::POPUP);
         if raw_motion {
             caps.union(ShellCaps::RAW_POINTER_MOTION)
         } else {
@@ -507,6 +514,22 @@ impl Win32Shell {
         }
         state.close_pending = true;
         self.queue.push_back(ShellEvent::CloseRequested { window });
+    }
+
+    /// How a panel or a popup is shown: whether it takes the keyboard when it
+    /// appears. `None` for every other window, which `set_visible` shows the
+    /// ordinary way. A grabbing popup takes the keyboard as an exclusive
+    /// panel does; every other popup is shown as a panel that takes none.
+    fn furniture_keyboard(
+        panel: Option<&Panel>,
+        popup: Option<crate::PopupInput>,
+    ) -> Option<crate::PanelKeyboard> {
+        match (panel, popup) {
+            (Some(panel), _) => Some(panel.keyboard),
+            (None, Some(crate::PopupInput::Grab)) => Some(crate::PanelKeyboard::Exclusive),
+            (None, Some(_)) => Some(crate::PanelKeyboard::None),
+            (None, None) => None,
+        }
     }
 
     /// Shows a panel through [`show_panel`](Self::show_panel), records
@@ -902,6 +925,14 @@ impl Win32Shell {
                     self.refresh_clip();
                     self.refresh_cursor_visibility();
                     self.queue.push_back(ShellEvent::Focus { window, focused });
+                    // A grabbing popup is dismissed by losing the keyboard:
+                    // a click outside it activated what was clicked.
+                    let grabbing = self
+                        .window(window)
+                        .is_ok_and(|state| state.popup == Some(crate::PopupInput::Grab));
+                    if !focused && grabbing {
+                        self.close_requested(window);
+                    }
                 }
                 RawEvent::CloseRequested { .. } => {
                     let Some(window) = window else { continue };
@@ -1136,6 +1167,8 @@ impl Shell for Win32Shell {
     ///   anchors; see [`panel`](super::panel).
     /// * [`PANEL_RESERVE`](ShellCaps::PANEL_RESERVE) — a reserving panel is an
     ///   appbar, which is how the taskbar reserves its edge too.
+    /// * [`POPUP`](ShellCaps::POPUP) — an owned `WS_POPUP` placed against its
+    ///   parent and kept on its monitor; see [`popup`](super::popup).
     ///
     /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) is clear for a reason rather than
     /// for want of work — a plain `HWND` presents at its own size, and the
@@ -1208,9 +1241,14 @@ impl Shell for Win32Shell {
             crate::WindowRole::Panel(panel) => Some(Panel::new(&panel, desc.size)),
             _ => None,
         };
-        let created = match &mut panel {
-            Some(panel) => self.create_panel(desc, panel)?,
-            None => self.create_native_window(desc, target.as_ref())?,
+        let popup = match desc.role {
+            crate::WindowRole::Popup(popup) => Some(popup),
+            _ => None,
+        };
+        let created = match (&mut panel, &popup) {
+            (Some(panel), _) => self.create_panel(desc, panel)?,
+            (None, Some(popup)) => self.create_popup(desc, popup)?,
+            (None, None) => self.create_native_window(desc, target.as_ref())?,
         };
         let Some(hwnd) = NonNull::new(created.hwnd) else {
             return Err(ShellError::WindowCreation(
@@ -1219,8 +1257,9 @@ impl Shell for Win32Shell {
         };
         let scale_factor = geometry::scale_from_dpi(created.dpi);
         let effective_mode = match desc.mode {
-            // A panel has no full-screen state: see `set_mode`.
-            _ if panel.is_some() => DisplayMode::Windowed,
+            // Neither a panel nor a popup has a full-screen state: see
+            // `set_mode`.
+            _ if panel.is_some() || popup.is_some() => DisplayMode::Windowed,
             DisplayMode::Windowed => DisplayMode::Windowed,
             DisplayMode::Borderless { .. } => DisplayMode::Borderless {
                 monitor: self.monitor_of(created.hwnd),
@@ -1253,17 +1292,32 @@ impl Shell for Win32Shell {
             close_pending: false,
             accept_drops: desc.accept_drops,
             panel,
+            popup: popup.map(|popup| popup.input),
+            parent: popup.map(|popup| popup.parent),
         };
         let window = self.windows.insert(window).cast();
         let state = self.window(window)?;
         self.refresh_limits(state);
-        if let (true, Some(panel)) = (desc.visible, panel) {
-            self.show_panel_window(window, panel.keyboard)?;
+        if desc.visible
+            && let Some(keyboard) = Self::furniture_keyboard(panel.as_ref(), popup.map(|p| p.input))
+        {
+            self.show_panel_window(window, keyboard)?;
         }
         Ok(window)
     }
 
     fn destroy_window(&mut self, window: WindowId) -> Result<(), ShellError> {
+        // Its popups first, each with its own `WindowDestroyed`, as every
+        // backend destroys a popup with its parent. The system would take
+        // owned windows down with their owner anyway, but report nothing.
+        let popups: Vec<WindowId> = self
+            .windows_iter()
+            .filter(|(_, state)| state.parent == Some(window))
+            .map(|(id, _)| id)
+            .collect();
+        for popup in popups {
+            self.destroy_window(popup)?;
+        }
         let removed = self
             .windows
             .remove(window.cast())
@@ -1333,8 +1387,10 @@ impl Shell for Win32Shell {
     fn set_visible(&mut self, window: WindowId, visible: bool) -> Result<(), ShellError> {
         let state = self.window(window)?;
         let hwnd = state.raw();
-        if let (true, Some(panel)) = (visible, state.panel) {
-            return self.show_panel_window(window, panel.keyboard);
+        if visible
+            && let Some(keyboard) = Self::furniture_keyboard(state.panel.as_ref(), state.popup)
+        {
+            return self.show_panel_window(window, keyboard);
         }
         let command = if visible {
             // `SW_SHOWNORMAL` rather than `SW_SHOW`: it also restores a window
@@ -1377,9 +1433,9 @@ impl Shell for Win32Shell {
         }
         let state = self.window_mut(window)?;
         state.requested_mode = mode;
-        // A panel has no full-screen state, so the request stays one: its
-        // effective mode is always windowed, as on Wayland.
-        if state.panel.is_some() {
+        // Neither a panel nor a popup has a full-screen state, so the request
+        // stays one: its effective mode is always windowed, as on Wayland.
+        if state.panel.is_some() || state.popup.is_some() {
             return Ok(());
         }
         self.apply_mode(window, mode)?;
@@ -1902,11 +1958,23 @@ impl Drop for Win32Shell {
     fn drop(&mut self) {
         input::release_clip();
         Self::show_cursor(self.visibility.want(false));
-        let windows: Vec<Handle> = self
+        // Popups before the windows they belong to, deepest first, so each is
+        // destroyed by this shell rather than taken down with its owner.
+        fn depth<'a>(windows: &'a Pool<WinWindow>, mut window: &'a WinWindow) -> usize {
+            let mut depth = 0;
+            while let Some(parent) = window.parent.and_then(|id| windows.get(id.cast())) {
+                depth += 1;
+                window = parent;
+            }
+            depth
+        }
+        let mut windows: Vec<(usize, Handle)> = self
             .windows
             .iter()
-            .map(|(_, window)| window.raw())
+            .map(|(_, window)| (depth(&self.windows, window), window.raw()))
             .collect();
+        windows.sort_by_key(|&(depth, _)| core::cmp::Reverse(depth));
+        let windows: Vec<Handle> = windows.into_iter().map(|(_, hwnd)| hwnd).collect();
         // The work area an appbar reserved outlives its window otherwise.
         for (_, window) in self.windows.iter() {
             if window.panel.is_some_and(|panel| panel.appbar) {

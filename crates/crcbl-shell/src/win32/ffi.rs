@@ -1006,6 +1006,9 @@ pub mod msg {
     /// `WM_SETCURSOR` — asked on every pointer movement over the window, and
     /// the **only** place a cursor shape may be set.
     pub const SET_CURSOR: u32 = 0x0020;
+    /// `WM_NCHITTEST` — which part of the window a point is over, and whether
+    /// the window is there at all for the pointer.
+    pub const NC_HIT_TEST: u32 = 0x0084;
     /// `WM_GETMINMAXINFO`.
     pub const GET_MIN_MAX_INFO: u32 = 0x0024;
     /// `WM_DISPLAYCHANGE`.
@@ -1163,6 +1166,10 @@ pub mod value {
     pub const MONITOR_PRIMARY: u32 = 0x0000_0001;
     /// `MONITOR_DEFAULTTONEAREST`.
     pub const MONITOR_DEFAULT_TO_NEAREST: u32 = 0x0000_0002;
+
+    /// `HTTRANSPARENT`, as `WM_NCHITTEST`'s answer: the window is not there
+    /// for the pointer, which goes to the window beneath it on this thread.
+    pub const HT_TRANSPARENT: isize = -1;
 
     /// `SPI_SETWORKAREA`, as `WM_SETTINGCHANGE`'s `wParam`.
     pub const SPI_SET_WORK_AREA: usize = 0x002F;

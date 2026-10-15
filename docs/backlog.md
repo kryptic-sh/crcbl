@@ -173,8 +173,20 @@ Each step lands in the crate the later steps build on, so the seam goes first.
    - Transparency: per-pixel alpha with a Vulkan or D3D12 swapchain likely means
      DirectComposition (lyr item 11), with no DWM border, shadow or rounded
      corner fighting the app's own (pikr item 7).
-   - Screen-positioned popups (S3), activating for `Grab` and closing on
-     `WA_INACTIVE`.
+   - Popups (S3) are built (`crates/crcbl-shell/src/win32/popup.rs`, placement
+     in `geometry::popup_rect`): an owned `WS_POPUP` tool window, topmost when
+     its parent is, placed against the anchor at the parent's scale, flipped to
+     the other side or slid along its own to stay in the parent's monitor's work
+     area. `Passthrough` answers `WM_NCHITTEST` with `HTTRANSPARENT` (decided
+     over `WS_EX_TRANSPARENT | WS_EX_LAYERED`, which a flip-model swapchain
+     cannot present into); `Pointer` is `WS_EX_NOACTIVATE`; `Grab` activates
+     when shown (a refusal is `FocusRefused`) and is asked to close on
+     `WM_KILLFOCUS`, which closes it on a click outside rather than on
+     `WA_INACTIVE` as first planned. Popups are destroyed before their parent,
+     in `destroy_window` and in `Drop`. `HTTRANSPARENT` passes the pointer only
+     to windows of this thread, so a passthrough popup over another program's
+     window is not click-through; a tooltip over its own bar is. The
+     real-desktop tests run only in CI's Win32 job.
 6. **AppKit**:
    - Panels are built (`crates/crcbl-shell/src/appkit/panel.rs`, levels and
      placement in `appkit/geometry.rs`): a `CrcblPanel` (can become key) or

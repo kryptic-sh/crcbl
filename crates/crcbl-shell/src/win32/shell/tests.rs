@@ -593,14 +593,15 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
         ShellCaps::TOUCH,
         ShellCaps::PANEL,
         ShellCaps::PANEL_RESERVE,
+        ShellCaps::POPUP,
     ] {
         assert!(caps.contains(present), "{present:?} is implemented");
     }
-    // Not yet: popups and per-pixel alpha are the rest of this backend's
-    // panel work.
-    for absent in [ShellCaps::POPUP, ShellCaps::TRANSPARENT] {
-        assert!(!caps.contains(absent), "{absent:?} is not implemented yet");
-    }
+    // Not yet: per-pixel alpha, which needs DirectComposition.
+    assert!(
+        !caps.contains(ShellCaps::TRANSPARENT),
+        "per-pixel alpha is not implemented yet"
+    );
     // Latched from the registration rather than assumed — the one bit on
     // this backend that is not a constant.
     assert!(
@@ -2401,4 +2402,151 @@ fn a_reserving_bar_is_an_appbar_that_takes_its_edge_and_gives_it_back() {
     shell.destroy_window(bar).expect("destroy");
     let after = work_area_until(&mut shell, |area| area == before);
     assert_eq!(after, before, "destroying the bar gave the edge back");
+}
+
+/// A popup descriptor against `parent`.
+fn popup_desc(title: &str, size: LogicalSize, popup: crate::PopupDesc) -> WindowDesc<'_> {
+    WindowDesc {
+        title,
+        size,
+        role: crate::WindowRole::Popup(popup),
+        ..WindowDesc::default()
+    }
+}
+
+/// A menu against a 100×20 button at (10, 10) of `parent`'s client area.
+fn menu_against(parent: WindowId, input: crate::PopupInput) -> crate::PopupDesc {
+    crate::PopupDesc {
+        parent,
+        anchor: crate::LogicalRect::new(
+            crate::LogicalPoint::new(10.0, 10.0),
+            LogicalSize::new(100.0, 20.0),
+        ),
+        placement: crate::PopupPlacement::Below,
+        input,
+    }
+}
+
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_menu_opens_below_its_button_and_goes_with_its_window() {
+    use super::super::ffi::style;
+    let mut shell = shell();
+    let parent = window(&mut shell);
+    shell.pump(&mut |_| {});
+    let parent_hwnd = hwnd_of(&shell, parent);
+    let scale = shell
+        .window_state(parent)
+        .expect("live")
+        .scale_factor()
+        .expect("configured");
+    let menu = shell
+        .create_window(&popup_desc(
+            "crcbl popup menu",
+            LogicalSize::new(200.0, 150.0),
+            menu_against(parent, crate::PopupInput::Pointer),
+        ))
+        .expect("a popup");
+    shell.pump(&mut |_| {});
+    let mut origin = Point::default();
+    // SAFETY: the parent's client origin, converted in place.
+    unsafe { ffi::ClientToScreen(parent_hwnd, &raw mut origin) };
+    let px = |logical: f64| (logical * scale).round() as i32;
+    let (_, ex_style, rect) = styles_and_rect(hwnd_of(&shell, menu));
+    assert_eq!(
+        (rect.left, rect.top),
+        (origin.x + px(10.0), origin.y + px(30.0)),
+        "below the button, left edges aligned"
+    );
+    assert_eq!(
+        shell.window_state(menu).expect("live").size(),
+        Some(LogicalSize::new(200.0, 150.0).to_physical(scale))
+    );
+    assert_ne!(
+        ex_style & style::EX_NO_ACTIVATE,
+        0,
+        "a pointer popup takes no keyboard"
+    );
+
+    let mut destroyed = Vec::new();
+    shell.pump(&mut |_| {});
+    shell.destroy_window(parent).expect("destroy");
+    shell.pump(&mut |event| {
+        if let ShellEvent::WindowDestroyed { window } = event {
+            destroyed.push(window);
+        }
+    });
+    assert_eq!(
+        destroyed,
+        [menu, parent],
+        "the popup first, then its window"
+    );
+}
+
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_grabbing_popup_closes_when_it_loses_the_keyboard_and_a_pointer_one_does_not() {
+    let mut shell = shell();
+    let parent = window(&mut shell);
+    shell.pump(&mut |_| {});
+    let grab = shell
+        .create_window(&popup_desc(
+            "crcbl popup grab",
+            LogicalSize::new(200.0, 150.0),
+            menu_against(parent, crate::PopupInput::Grab),
+        ))
+        .expect("a popup");
+    let pointer = shell
+        .create_window(&popup_desc(
+            "crcbl popup pointer",
+            LogicalSize::new(200.0, 150.0),
+            menu_against(parent, crate::PopupInput::Pointer),
+        ))
+        .expect("a popup");
+    shell.pump(&mut |_| {});
+    send_focus(hwnd_of(&shell, grab), false);
+    send_focus(hwnd_of(&shell, pointer), false);
+    let mut asked = Vec::new();
+    shell.pump(&mut |event| {
+        if let ShellEvent::CloseRequested { window } = event {
+            asked.push(window);
+        }
+    });
+    assert_eq!(asked, [grab], "only the grabbing popup is dismissed");
+    shell.destroy_window(parent).expect("destroy");
+}
+
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_passthrough_popup_is_not_there_for_the_pointer() {
+    let mut shell = shell();
+    let parent = window(&mut shell);
+    shell.pump(&mut |_| {});
+    let hit = |shell: &mut Win32Shell, input| {
+        let popup = shell
+            .create_window(&popup_desc(
+                "crcbl popup hit test",
+                LogicalSize::new(200.0, 150.0),
+                menu_against(parent, input),
+            ))
+            .expect("a popup");
+        shell.pump(&mut |_| {});
+        let hwnd = hwnd_of(shell, popup);
+        let (_, _, rect) = styles_and_rect(hwnd);
+        let inside = ((rect.top + 5) << 16) as isize | (rect.left + 5) as isize;
+        // SAFETY: a hit-test message to this shell's own window, with a point
+        // inside it in the packed screen coordinates `WM_NCHITTEST` takes.
+        let answer = unsafe { ffi::SendMessageW(hwnd, msg::NC_HIT_TEST, 0, inside) };
+        shell.destroy_window(popup).expect("destroy");
+        answer
+    };
+    assert_eq!(
+        hit(&mut shell, crate::PopupInput::Passthrough),
+        value::HT_TRANSPARENT
+    );
+    assert_ne!(
+        hit(&mut shell, crate::PopupInput::Pointer),
+        value::HT_TRANSPARENT
+    );
+    shell.destroy_window(parent).expect("destroy");
 }
