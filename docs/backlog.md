@@ -160,12 +160,13 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      had focus, which a program could not tell from an ordinary focus loss.
      Untested: no test can make the system refuse this process the foreground,
      so the refusal path has run only in review.
-   - **Verified so far:** `panel_styles`, `panel_rect`, `pixels` and
-     `with_depth` unit tests on the Windows host. The real-desktop tests in
-     `win32/shell/tests.rs` (`a_bar_is_a_topmost_tool_window_…`,
-     `a_launcher_is_centred_…`, `a_bottom_layer_panel_is_not_topmost`,
-     `a_reserving_bar_is_an_appbar_…`) are `#[ignore]`d like the rest of that
-     file and run only in CI's `win32 e2e (real desktop)` job.
+   - **Verified:** `panel_styles`, `panel_rect`, `pixels`, `with_depth`,
+     `popup_styles` and `popup_rect` unit tests on the Windows host, each
+     mutation-checked locally. The real-desktop tests in `win32/shell/tests.rs`
+     (the four panel tests, the appbar test and the three popup tests) passed in
+     CI's `win32 e2e (real desktop)` job on 2026-10-15, the appbar test
+     included: the work area gave up the bar's height and got it back. Those
+     desktop tests were not mutation-run.
    - Still to do: `ABN_FULLSCREENAPP` as an event (lyr item 7), which needs a
      seam event; `ABM_ACTIVATE` and `ABM_WINDOWPOSCHANGED`, which the appbar
      documentation asks for and which matter to auto-hide appbars; and a
@@ -211,11 +212,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      Hover without the keyboard (lyr item 9) is the never-key panel class plus
      the existing `acceptsMouseMovedEvents` and tracking area every window
      already had.
-   - **Verified so far:** the `panel_level`, `panel_collection` and
-     `panel_frame` unit tests on any host, and macOS clippy by cross-compiling.
-     The macOS session (`tests/appkit_session.rs`, `panels`) checks the class,
-     level, collection behaviour, `hidesOnDeactivate`, opacity and frame of a
-     hidden bar and launcher, and runs only on CI's macOS runner.
+   - **Verified:** the `panel_level`, `panel_collection`, `panel_frame` and
+     `popup_frame` unit tests on any host, mutation-checked locally. The macOS
+     session's `panels` and `popups` steps passed on CI's macOS runner on
+     2026-10-15. Their first run caught a real defect, a centred launcher on a
+     half point growing to 301 points, fixed by rounding each panel origin.
    - Popups (S3) are built (`crates/crcbl-shell/src/appkit/popup.rs`, placement
      in `geometry::popup_frame` over the shared `role::place_popup`): a panel
      class added to its parent with `addChildWindow:ordered:` when shown,
@@ -260,6 +261,17 @@ Each step lands in the crate the later steps build on, so the seam goes first.
     above, which were compared against FreeBSD's headers by reading.
 13. **Accessibility (S14).** AccessKit is a new dependency, which is the owner's
     call; ask before starting.
+
+### Flaky, seen while landing the panel work
+
+- `towers`
+  `lan::tests::a_tower_one_joiner_builds_is_validated_by_the_host_and_seen_by_the_other`
+  failed once on CI's macOS `build + test` (run 38700192499, 2026-10-15): the
+  host's gold right after the build was 80 where the purse minus the tower's
+  cost was 50. A rerun of the job passed, and no change in that run touched
+  `towers`. A guess, not checked: gold also moves for another reason (a wave's
+  bounty, or income) between reading the purse and the build landing, so the
+  assertion reads two moments as one.
 
 ### Left behind by the seam split
 
