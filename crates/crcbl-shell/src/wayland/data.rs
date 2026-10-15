@@ -1,9 +1,10 @@
 //! `data-device` state: the offers a peer made us, the selection we published,
 //! and the drag currently over a window.
 //!
-//! The *protocol calls* stay in [`super`], next to the connection that owns
-//! every proxy. What lives here is the bookkeeping between them — which is the
-//! half that can be reasoned about, and tested, without a compositor.
+//! The *protocol calls* are in [`super::data_device`], on the shell that owns
+//! the connection and every proxy. What lives here is the bookkeeping between
+//! them — which is the half that can be reasoned about, and tested, without a
+//! compositor.
 //!
 //! # One implementation, two triggers
 //!
