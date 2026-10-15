@@ -37,6 +37,13 @@ path = "../../crcbl-store"
 path = "../../crcbl-scene"
 default-features = false
 
+# Image files and raw pixel buffers, `crcbl_image::png::decode` and
+# `crcbl_image::raw::convert`: what a notification, a tray icon or a
+# `.desktop` file hands a desktop program from anywhere.
+[dependencies.crcbl-image]
+path = "../../crcbl-image"
+features = ["png"]
+
 [[bin]]
 name = "decoder"
 path = "fuzz_targets/decoder.rs"

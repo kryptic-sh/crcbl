@@ -1,0 +1,29 @@
+[package]
+name = "crcbl-image"
+description = "Crucible image assets: decode, convert and resize to straight RGBA8"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# **CPU only, and no codec unless you ask for one.** The default build is the
+# image type, the raw-buffer conversions and the resize: what turns pixels an
+# application was handed (a tray's ARGB32, a notification's `image-data`, a
+# Windows DIB) into what `crcbl_ui::image::ImageAtlas::register` takes. Each
+# file format is a feature, so lyr and pikr link only the decoders they call.
+# No GPU, shell or UI dependency: decoding runs on whatever thread the caller
+# likes, and only the finished pixels need cross to the one that draws.
+[features]
+png = ["dep:png"]
+
+[dependencies]
+# PNG through the crate the workspace already uses for it (`crcbl-sprite`,
+# `crcbl-golden`, `crcbl-scene`). Every other format this crate grows is
+# written here: the owner's direction of 2026-10-16, recorded in
+# `docs/backlog.md` under S28.
+png = { workspace = true, optional = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

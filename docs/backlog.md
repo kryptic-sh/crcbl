@@ -377,7 +377,29 @@ Each step lands in the crate the later steps build on, so the seam goes first.
     into the straight-alpha RGBA8 `ImageAtlas::register` takes, so neither app
     adds `image`, `resvg` and `freedesktop-icons` itself. lyr's first use is its
     M6 (notifications); its M8 (tray) needs the rest; pikr's move needs
-    everything but ICO and XPM. Not started.
+    everything but ICO and XPM.
+    - **Step one is in: `crates/crcbl-image`.** `Rgba8Image` (straight RGBA8,
+      sized when built) and `Limits` (`DEFAULT_MAX_SIDE` and
+      `DEFAULT_MAX_BYTES`, checked before any allocation for an image);
+      `png::decode` and `png::encode` behind the `png` feature, over the
+      workspace's `png` crate with its own allocation cap set from the limits;
+      `raw::convert` over a `RawPixels` description (channel order RGBA, BGRA,
+      ARGB or RGB, stride, row order, straight or premultiplied alpha, and an
+      all-zero alpha channel left transparent, made opaque or masked by a
+      Windows AND mask), with `raw::from_argb32_be` for a tray pixmap and
+      `raw::from_image_data` for a notification's hint; `resize::resize`
+      (separable three-lobe Lanczos in premultiplied light),
+      `resize::fit_within`, `resize::shrink_to_fit` and `resize::nearest_size`.
+      Verified: the crate's unit tests, whose resize values were computed from
+      the kernel's definition outside this code, and thirteen hand mutants, one
+      per mechanism, each failing its own test. `crcbl-net/fuzz`'s decoder
+      target now feeds every input to `png::decode` and to `raw::convert` with a
+      layout read from its first bytes; that fuzz run happens in CI's
+      `decoder fuzz` job, not here.
+    - Not in step one: decoding from a path (a caller reads the file; the theme
+      lookup will own file reading and its mtime cache), and moving
+      `crcbl-sprite`'s and `crcbl-golden`'s own PNG loaders onto this one, which
+      would leave the workspace one PNG reader instead of three.
     - What it needs: PNG and JPEG (first frame only, no animation) and SVG
       rasterised at a size times a scale, from bytes or a path, with errors and
       never a panic; ICO and XPM as nice-to-haves. Conversion of the raw buffers
@@ -457,10 +479,9 @@ Each step lands in the crate the later steps build on, so the seam goes first.
     - lyr's M6 needs the theme lookup too (a notification's `app_icon` and
       `desktop-entry` hint name a theme icon), which the order below already
       puts before JPEG.
-    - Order: the crate with its caps and fuzz target, PNG, the raw conversions
-      and the resize (lyr's M6 needs these first), then the theme lookup with
-      SVG (pikr's port and lyr's tray), then JPEG (album art), then ICO, BMP and
-      WebP (pikr's parity), then XPM.
+    - Order from here: the theme lookup with SVG (lyr's M6 named icons, pikr's
+      port, lyr's tray), then JPEG (album art), then ICO, BMP and WebP (pikr's
+      parity), then XPM.
 
 ### Left behind by the seam split
 
