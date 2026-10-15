@@ -922,8 +922,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   as owned `WS_POPUP` tool windows placed against the anchor at the parent's
   scale and flipped or slid to stay in the monitor's work area: `Passthrough`
   answers `HTTRANSPARENT`, `Pointer` never activates, and `Grab` activates and
-  is asked to close when it loses the keyboard. AppKit does not build popups
-  yet. `LogicalRect` is new in `crcbl_shell`.
+  is asked to close when it loses the keyboard. AppKit builds popups as child
+  panels at the same placement: `Passthrough` ignores mouse events, `Pointer`
+  never becomes key, and `Grab` becomes key and is asked to close when it stops
+  being key. `LogicalRect` is new in `crcbl_shell`.
 
 - **Fonts from bytes read at run time.** `Font::parse` takes any `FontData`: an
   `include_bytes!` as before, or a `Vec<u8>`, `Box<[u8]>` or `Arc<[u8]>` an

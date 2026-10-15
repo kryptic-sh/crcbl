@@ -208,10 +208,11 @@ mod macos {
     use crcbl_core::log::Filter;
     use crcbl_shell::{
         ButtonState, ClipboardContent, ClipboardOffer, CursorIcon, DisplayMode, KeyCode, Keysym,
-        LogicalSize, MimeType, MonitorId, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer,
-        PhysicalPoint, PhysicalSize, PointerButton, PointerMode, ReceivedMime, ScrollDelta, Shell,
-        ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints, WindowDesc, WindowId,
-        WindowRole, open_backend, session_support,
+        LogicalPoint, LogicalRect, LogicalSize, MimeType, MonitorId, PanelAnchor, PanelDesc,
+        PanelKeyboard, PanelLayer, PhysicalPoint, PhysicalSize, PointerButton, PointerMode,
+        PopupDesc, PopupInput, PopupPlacement, ReceivedMime, ScrollDelta, Shell, ShellBackend,
+        ShellCaps, ShellError, ShellEvent, SizeConstraints, WindowDesc, WindowId, WindowRole,
+        open_backend, session_support,
     };
 
     /// The window's title, which is **how this session finds its own window**.
@@ -557,6 +558,10 @@ mod macos {
 
         // And the two panels lyr and pikr are: a bar and a launcher.
         panels(&mut shell);
+
+        // And the popups a bar opens: placed against their parent, and gone
+        // before it.
+        popups(&mut shell);
 
         shell.destroy_window(window).expect("destroy_window");
         assert!(
@@ -2204,6 +2209,96 @@ mod macos {
             .destroy_window(launcher)
             .expect("destroy the launcher");
         println!("crcbl appkit session: a bar and a launcher are panels at their levels");
+    }
+
+    /// A hidden window and three hidden popups below a 100×20 button at (10,
+    /// 10) of it, one per input: AppKit reports their frames, classes and
+    /// mouse handling for hidden windows as for shown ones.
+    fn popups(shell: &mut Box<dyn Shell>) {
+        const OWNER: &str = "crcbl appkit session — popup owner";
+        let owner = shell
+            .create_window(&WindowDesc {
+                title: OWNER,
+                size: LogicalSize::new(500.0, 400.0),
+                visible: false,
+                ..WindowDesc::default()
+            })
+            .expect("a window");
+        wait_for(shell, "the owner's first configure", |shell| {
+            shell.window_state(owner).ok()?.size()
+        });
+        let owner_facts = session_support::window_facts(OWNER).expect("the owner is readable");
+        let made = [
+            ("crcbl appkit session — tooltip", PopupInput::Passthrough),
+            ("crcbl appkit session — hover card", PopupInput::Pointer),
+            ("crcbl appkit session — menu", PopupInput::Grab),
+        ]
+        .map(|(title, input)| {
+            let popup = shell
+                .create_window(&WindowDesc {
+                    title,
+                    size: LogicalSize::new(200.0, 150.0),
+                    visible: false,
+                    role: WindowRole::Popup(PopupDesc {
+                        parent: owner,
+                        anchor: LogicalRect::new(
+                            LogicalPoint::new(10.0, 10.0),
+                            LogicalSize::new(100.0, 20.0),
+                        ),
+                        placement: PopupPlacement::Below,
+                        input,
+                    }),
+                    ..WindowDesc::default()
+                })
+                .expect("a popup");
+            (popup, title, input)
+        });
+        // The content sits at the bottom of a titled frame, under the title
+        // bar, so its top is the frame's origin plus its own height.
+        let content_top = owner_facts.frame[1] + owner_facts.content_points[1];
+        for (_, title, input) in made {
+            let facts = session_support::window_facts(title).expect("the popup is readable");
+            assert_eq!(
+                facts.frame,
+                [
+                    owner_facts.frame[0] + 10.0,
+                    content_top - 30.0 - 150.0,
+                    200.0,
+                    150.0
+                ],
+                "below the button, left edges aligned: {facts:?}"
+            );
+            assert!(!facts.titled, "{facts:?}");
+            assert_eq!(
+                facts.ignores_mouse_events,
+                input == PopupInput::Passthrough,
+                "{input:?}: {facts:?}"
+            );
+            assert_eq!(
+                facts.can_become_key,
+                input == PopupInput::Grab,
+                "{input:?}: {facts:?}"
+            );
+        }
+
+        let mut destroyed = Vec::new();
+        shell.pump(&mut |_| {});
+        shell.destroy_window(owner).expect("destroy the owner");
+        shell.pump(&mut |event| {
+            if let ShellEvent::WindowDestroyed { window } = event {
+                destroyed.push(window);
+            }
+        });
+        assert_eq!(
+            destroyed.last(),
+            Some(&owner),
+            "the owner last: {destroyed:?}"
+        );
+        assert_eq!(destroyed.len(), made.len() + 1, "{destroyed:?}");
+        for (popup, _, _) in made {
+            assert!(destroyed.contains(&popup), "{destroyed:?}");
+        }
+        println!("crcbl appkit session: three popups opened below their button and went first");
     }
 
     fn wait_for<T>(

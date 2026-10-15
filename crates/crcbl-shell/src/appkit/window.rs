@@ -164,7 +164,7 @@ use super::monitors::Screen;
 use super::panel::Panel;
 use super::shell::{AppKitShell, AppWindow};
 use super::view;
-use crate::PanelKeyboard;
+use crate::{PanelKeyboard, PopupInput};
 
 /// The name of the `NSWindow` subclass this module builds at runtime.
 const WINDOW_CLASS: &CStr = c"CrcblWindow";
@@ -384,6 +384,15 @@ unsafe fn make_transparent(window: Id, layer: Id) {
     }
 }
 
+/// What [`create_native_window`](AppKitShell::create_native_window) builds:
+/// an ordinary window, a panel, or a popup at a frame its parent decided.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Kind<'a> {
+    Window,
+    Panel(&'a Panel),
+    Popup { frame: NSRect, input: PopupInput },
+}
+
 /// The objects one window is made of, and its geometry at creation.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Created {
@@ -524,11 +533,16 @@ impl AppKitShell {
         &self,
         desc: &WindowDesc<'_>,
         target: Option<&Screen>,
-        panel: Option<&Panel>,
+        kind: Kind<'_>,
     ) -> Result<Created, ShellError> {
-        let class = match panel {
-            Some(panel) => panel_class(panel.keyboard != PanelKeyboard::None)?,
-            None => window_class()?,
+        let panel = match kind {
+            Kind::Panel(panel) => Some(panel),
+            Kind::Window | Kind::Popup { .. } => None,
+        };
+        let class = match kind {
+            Kind::Panel(panel) => panel_class(panel.keyboard != PanelKeyboard::None)?,
+            Kind::Popup { input, .. } => panel_class(input == PopupInput::Grab)?,
+            Kind::Window => window_class()?,
         };
         // **`CrcblView`, not `NSView`.** A plain view answers `NO` to
         // `acceptsFirstResponder`, implements none of the responder methods
@@ -545,17 +559,18 @@ impl AppKitShell {
             });
         };
 
-        let mask = match panel {
-            Some(_) => geometry::PANEL_STYLE_MASK,
-            None => geometry::style_mask(desc.mode, desc.resizable),
+        let mask = match kind {
+            Kind::Panel(_) | Kind::Popup { .. } => geometry::PANEL_STYLE_MASK,
+            Kind::Window => geometry::style_mask(desc.mode, desc.resizable),
         };
         // A borderless window is the screen's size, not the requested one:
         // `WindowDesc::size` is the *windowed* size and is remembered for the
         // trip back. In points, because that is the space `initWithContentRect:`
         // is in — and, on this platform, the seam's logical space too.
-        let content = match (panel, desc.mode, target) {
-            (Some(panel), _, Some(screen)) => panel.frame_on(screen),
-            (None, DisplayMode::Borderless { .. }, Some(screen)) => screen.frame,
+        let content = match (kind, desc.mode, target) {
+            (Kind::Popup { frame, .. }, _, _) => frame,
+            (Kind::Panel(panel), _, Some(screen)) => panel.frame_on(screen),
+            (Kind::Window, DisplayMode::Borderless { .. }, Some(screen)) => screen.frame,
             (_, _, Some(screen)) => geometry::centred(screen.visible, geometry::points(desc.size)),
             // No screen to place against — a Mac with no display attached.
             // AppKit puts the window where it likes rather than this backend
@@ -762,6 +777,10 @@ impl AppKitShell {
             // SAFETY: a live window of a panel class, on the main thread.
             unsafe { Self::configure_panel(window, panel) };
         }
+        if let Kind::Popup { input, .. } = kind {
+            // SAFETY: a live window of a panel class, on the main thread.
+            unsafe { Self::configure_popup(window, input) };
+        }
         if desc.transparent {
             // SAFETY: a live window and its live layer; see `make_transparent`.
             unsafe { make_transparent(window, layer) };
@@ -772,7 +791,9 @@ impl AppKitShell {
         // SAFETY: a live layer and its live host view.
         unsafe { size_layer(layer, view, scale) };
 
-        if desc.visible {
+        // A popup is shown by the shell, which makes it its parent's child
+        // window as it does.
+        if desc.visible && !matches!(kind, Kind::Popup { .. }) {
             match panel {
                 // SAFETY: a live panel of this shell, on the main thread.
                 Some(panel) => unsafe { Self::show_panel(window, panel.keyboard) },

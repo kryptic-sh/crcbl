@@ -236,6 +236,8 @@ mod monitors;
 #[cfg(target_os = "macos")]
 mod panel;
 #[cfg(target_os = "macos")]
+mod popup;
+#[cfg(target_os = "macos")]
 pub mod session_support;
 #[cfg(target_os = "macos")]
 mod shell;
@@ -384,6 +386,7 @@ pub(crate) const fn caps() -> ShellCaps {
         .union(ShellCaps::CLIPBOARD)
         .union(ShellCaps::DRAG_DROP)
         .union(ShellCaps::PANEL)
+        .union(ShellCaps::POPUP)
         .union(ShellCaps::TRANSPARENT)
 }
 
@@ -408,6 +411,7 @@ mod tests {
             ShellCaps::CLIPBOARD,
             ShellCaps::DRAG_DROP,
             ShellCaps::PANEL,
+            ShellCaps::POPUP,
             ShellCaps::TRANSPARENT,
         ] {
             assert!(caps.contains(present), "{present:?} is implemented");
@@ -419,13 +423,12 @@ mod tests {
         // and the alternatives are warp-based approximations. A capability that
         // overstates itself is worse than one that is missing.
         // `PANEL_RESERVE` because macOS lets nothing but the menu bar and the
-        // Dock reserve space, and `POPUP` because child panels are not built yet.
+        // Dock reserve space.
         for absent in [
             ShellCaps::FRACTIONAL_SCALE,
             ShellCaps::HW_UPSCALE,
             ShellCaps::POINTER_CONFINE,
             ShellCaps::PANEL_RESERVE,
-            ShellCaps::POPUP,
         ] {
             assert!(!caps.contains(absent), "{absent:?} is not implemented");
         }

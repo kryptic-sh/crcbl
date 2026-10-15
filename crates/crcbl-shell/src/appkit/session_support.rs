@@ -504,6 +504,8 @@ pub struct WindowFacts {
     /// `-[NSWindow canBecomeKeyWindow]`, which this backend's window classes
     /// answer.
     pub can_become_key: bool,
+    /// `-[NSWindow ignoresMouseEvents]`.
+    pub ignores_mouse_events: bool,
 }
 
 /// `-[[NSScreen screens][0] visibleFrame]` — the menu-bar screen's, which is
@@ -745,6 +747,8 @@ unsafe fn facts_of(window: Id, app_active: bool) -> WindowFacts {
             ffi::msg_bool(window, ffi::sel(c"canBecomeKeyWindow")),
         )
     };
+    // SAFETY: as above.
+    let ignores_mouse_events = unsafe { ffi::msg_bool(window, ffi::sel(c"ignoresMouseEvents")) };
     let (is_key, accepts_mouse_moved, responder, content, style_mask, frame, backing_scale, screen) = unsafe {
         (
             ffi::msg_bool(window, ffi::sel(c"isKeyWindow")),
@@ -801,6 +805,7 @@ unsafe fn facts_of(window: Id, app_active: bool) -> WindowFacts {
         hides_on_deactivate,
         opaque,
         can_become_key,
+        ignores_mouse_events,
     }
 }
 

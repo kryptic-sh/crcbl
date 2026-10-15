@@ -121,6 +121,12 @@ pub(super) struct AppWindow {
     /// What a panel was created with, so it can be placed again; `None` for
     /// every other window. See [`panel`](super::panel).
     pub(super) panel: Option<Panel>,
+    /// A popup's input, which decides how it is shown and whether losing the
+    /// keyboard dismisses it; `None` for every other window. See
+    /// [`popup`](super::popup).
+    pub(super) popup: Option<crate::PopupInput>,
+    /// The window a popup belongs to, which destroys it when it goes.
+    pub(super) parent: Option<WindowId>,
 }
 
 impl AppWindow {
@@ -541,6 +547,14 @@ impl AppKitShell {
                         window: handle,
                         focused,
                     });
+                    // A grabbing popup is dismissed by no longer being key: a
+                    // click outside it made something else key.
+                    let grabbing = self
+                        .window(handle)
+                        .is_ok_and(|state| state.popup == Some(crate::PopupInput::Grab));
+                    if !focused && grabbing {
+                        self.close_requested(handle);
+                    }
                 }
                 RawEvent::CloseRequested { .. } => {
                     let Some(handle) = handle else { continue };
@@ -939,6 +953,8 @@ impl Shell for AppKitShell {
     ///   receive a drop even in principle.
     /// * [`PANEL`](ShellCaps::PANEL) — a non-activating `NSPanel` at its
     ///   layer's level; see [`panel`](super::panel).
+    /// * [`POPUP`](ShellCaps::POPUP) — a child panel placed against its
+    ///   parent and kept on its screen; see [`popup`](super::popup).
     /// * [`TRANSPARENT`](ShellCaps::TRANSPARENT) — a window that is not opaque,
     ///   with a clear background, no shadow and a layer composited by its
     ///   alpha.
@@ -1040,10 +1056,23 @@ impl Shell for AppKitShell {
             _ => self.screens.first().copied(),
         };
 
-        let created = self.create_native_window(desc, target.as_ref(), panel.as_ref())?;
+        let popup = match desc.role {
+            crate::WindowRole::Popup(popup) => Some(popup),
+            _ => None,
+        };
+        let kind = match (&panel, &popup) {
+            (Some(panel), _) => window::Kind::Panel(panel),
+            (None, Some(popup)) => window::Kind::Popup {
+                frame: self.popup_frame_for(popup, geometry::points(desc.size))?,
+                input: popup.input,
+            },
+            (None, None) => window::Kind::Window,
+        };
+        let created = self.create_native_window(desc, target.as_ref(), kind)?;
         let effective_mode = match desc.mode {
-            // A panel has no full-screen state: see `set_mode`.
-            _ if panel.is_some() => DisplayMode::Windowed,
+            // Neither a panel nor a popup has a full-screen state: see
+            // `set_mode`.
+            _ if panel.is_some() || popup.is_some() => DisplayMode::Windowed,
             DisplayMode::Windowed => DisplayMode::Windowed,
             DisplayMode::Borderless { .. } => DisplayMode::Borderless {
                 monitor: self.screen_of(created.window),
@@ -1077,8 +1106,18 @@ impl Shell for AppKitShell {
             focused: false,
             close_pending: false,
             panel,
+            popup: popup.map(|popup| popup.input),
+            parent: popup.map(|popup| popup.parent),
         };
         let handle: WindowId = self.windows.insert(state).cast();
+        if desc.visible
+            && let Some(popup) = popup
+        {
+            let parent = self.window(popup.parent)?.window;
+            // SAFETY: the parent and the popup just created, both live windows
+            // of this shell, on the main thread.
+            unsafe { Self::show_popup(parent, created.window, popup.input) };
+        }
 
         // **After the pool entry exists**, so that a delegate callback fired by
         // `setDelegate:` — AppKit sends nothing here today, but the ordering is
@@ -1097,6 +1136,16 @@ impl Shell for AppKitShell {
 
     fn destroy_window(&mut self, handle: WindowId) -> Result<(), ShellError> {
         let _pool = AutoreleasePool::push();
+        // Its popups first, each with its own `WindowDestroyed`, as every
+        // backend destroys a popup with its parent.
+        let popups: Vec<WindowId> = self
+            .windows_iter()
+            .filter(|(_, state)| state.parent == Some(handle))
+            .map(|(id, _)| id)
+            .collect();
+        for popup in popups {
+            self.destroy_window(popup)?;
+        }
         let removed = self
             .windows
             .remove(handle.cast())
@@ -1185,6 +1234,12 @@ impl Shell for AppKitShell {
             unsafe { Self::show_panel(window, panel.keyboard) };
             return Ok(());
         }
+        if let (true, Some(input), Some(parent)) = (visible, state.popup, state.parent) {
+            let parent = self.window(parent)?.window;
+            // SAFETY: both are live windows of this shell, on the main thread.
+            unsafe { Self::show_popup(parent, window, input) };
+            return Ok(());
+        }
         // SAFETY: a live window; `nil` is the documented sender for both.
         unsafe {
             let selector = if visible {
@@ -1225,9 +1280,10 @@ impl Shell for AppKitShell {
         }
         let state = self.window_mut(handle)?;
         state.requested_mode = mode;
-        // A panel has no full-screen state, so the request stays one: its
-        // effective mode is always windowed, as on the other backends.
-        if state.panel.is_some() {
+        // Neither a panel nor a popup has a full-screen state, so the request
+        // stays one: its effective mode is always windowed, as on the other
+        // backends.
+        if state.panel.is_some() || state.popup.is_some() {
             return Ok(());
         }
         self.apply_mode(handle, mode)?;
@@ -1775,12 +1831,22 @@ impl Drop for AppKitShell {
                 );
             }
         }
-        let windows: Vec<(Id, Id)> = self
+        // Popups before the windows they belong to, deepest first.
+        fn depth<'a>(windows: &'a Pool<AppWindow>, mut window: &'a AppWindow) -> usize {
+            let mut depth = 0;
+            while let Some(parent) = window.parent.and_then(|id| windows.get(id.cast())) {
+                depth += 1;
+                window = parent;
+            }
+            depth
+        }
+        let mut windows: Vec<(usize, Id, Id)> = self
             .windows
             .iter()
-            .map(|(_, state)| (state.window, state.layer))
+            .map(|(_, state)| (depth(&self.windows, state), state.window, state.layer))
             .collect();
-        for (window, layer) in windows {
+        windows.sort_by_key(|&(depth, _, _)| core::cmp::Reverse(depth));
+        for (_, window, layer) in windows {
             // SAFETY: this shell's own windows, on the thread that created them
             // — a `Shell` is not `Send`, so this is that thread.
             unsafe { release_window(window, layer, true) };

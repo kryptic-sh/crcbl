@@ -212,8 +212,14 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      The macOS session (`tests/appkit_session.rs`, `panels`) checks the class,
      level, collection behaviour, `hidesOnDeactivate`, opacity and frame of a
      hidden bar and launcher, and runs only on CI's macOS runner.
-   - Still to do: child panels for popups (S3), with `ignoresMouseEvents` for
-     `Passthrough`; `orderFront` after the first frame (no flash on map); and
+   - Popups (S3) are built (`crates/crcbl-shell/src/appkit/popup.rs`, placement
+     in `geometry::popup_frame` over the shared `role::place_popup`): a panel
+     class added to its parent with `addChildWindow:ordered:` when shown,
+     `ignoresMouseEvents` for `Passthrough`, never key for `Pointer`, key for
+     `Grab` and asked to close when it resigns key. The macOS session checks
+     three hidden popups' frames against their owner's content, their classes
+     and mouse handling, and that they go before their owner.
+   - Still to do: `orderFront` after the first frame (no flash on map); and
      whether `orderFrontRegardless` keeps a never-key bar visible over other
      applications in every case, which the hidden-window session does not show.
 7. **Outputs.** Hotplug events with name, scale and work area on every backend

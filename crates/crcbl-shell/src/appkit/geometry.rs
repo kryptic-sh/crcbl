@@ -49,7 +49,7 @@
 
 use crate::{
     AspectRatio, DisplayMode, LogicalSize, Margins, PanelAnchor, PanelLayer, PhysicalRect,
-    PhysicalSize, SizeConstraints,
+    PhysicalSize, PopupPlacement, SizeConstraints,
 };
 
 use super::ffi::{
@@ -316,6 +316,42 @@ fn place_on_axis(
         (false, false) => (area_start + (area_length - length) / 2.0, length),
     };
     (start.round(), length)
+}
+
+/// Where a popup of `size` goes against `anchor`, all in AppKit points with Y
+/// up: [`role::place_popup`](crate::role::place_popup)'s placement, flipped
+/// or slid to stay in `visible`, with its origin on a whole point for the
+/// reason [`panel_frame`] gives.
+///
+/// The placement is worked in Y-down, so each rectangle is reflected about
+/// `y = 0` on the way in and back on the way out: a reflection is its own
+/// inverse, and which line it is about does not matter so long as both ways
+/// use the same one.
+#[must_use]
+pub fn popup_frame(
+    anchor: NSRect,
+    size: NSSize,
+    placement: PopupPlacement,
+    visible: NSRect,
+) -> NSRect {
+    let down = |rect: NSRect| crate::role::Placed {
+        x: rect.origin.x,
+        y: -rect.max_y(),
+        width: rect.size.width,
+        height: rect.size.height,
+    };
+    let (x, y_down) = crate::role::place_popup(
+        down(anchor),
+        (size.width, size.height),
+        placement,
+        down(visible),
+    );
+    NSRect::new(
+        x.round(),
+        (-y_down - size.height).round(),
+        size.width,
+        size.height,
+    )
 }
 
 /// The presentation options a mode wants from `NSApplication`.
@@ -608,6 +644,25 @@ mod tests {
         );
         assert_eq!(panel_collection(PanelLayer::Top), 0b101_0001);
         assert_eq!(panel_collection(PanelLayer::Overlay), 0b1_0101_0001);
+    }
+
+    #[test]
+    fn a_popup_frame_is_below_its_anchor_with_y_up_and_flips_at_the_bottom() {
+        let visible = NSRect::new(0.0, 0.0, 1440.0, 875.0);
+        let menu = NSSize::new(200.0, 300.0);
+        // A button near the top of the screen: 30 high, its top 25 below it.
+        let button = NSRect::new(100.0, 820.0, 80.0, 30.0);
+        assert_eq!(
+            popup_frame(button, menu, PopupPlacement::Below, visible),
+            NSRect::new(100.0, 520.0, 200.0, 300.0),
+            "below the button is lower Y, top edge at the button's bottom"
+        );
+        let low = NSRect::new(1400.0, 10.0, 30.0, 20.0);
+        assert_eq!(
+            popup_frame(low, menu, PopupPlacement::Below, visible),
+            NSRect::new(1240.0, 30.0, 200.0, 300.0),
+            "no room below, so flipped above, and slid back onto the screen"
+        );
     }
 
     #[test]
