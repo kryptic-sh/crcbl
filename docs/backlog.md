@@ -532,6 +532,26 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       its own test. Not tested against an installed theme: CI's Linux runner has
       `hicolor` at most, and the real-theme corpus job (below) is where Adwaita,
       Papirus and breeze get looked up.
+    - **JPEG is in**, `jpeg::decode` behind the `jpeg` feature, written here:
+      sequential and progressive Huffman frames with successive approximation,
+      restart intervals, grey, YCbCr and RGB (by libjpeg's JFIF, Adobe and
+      component-id rule), any sampling factors that divide the largest. Its
+      pixels are libjpeg-turbo's: the IJG islow IDCT, IJG fancy upsampling for
+      2:1 and 2:2 (replication for components at most two samples wide, as
+      libjpeg-turbo does), and the IJG fixed-point colour tables. Verified by
+      exact equality with libjpeg-turbo's decode (Pillow 12.3) of committed
+      fixtures — 4:4:4, 4:2:2, 4:2:0, grey, optimised tables, progressive 4:2:0,
+      4:4:4 and grey, a smooth progressive image with long end-of-band runs,
+      restart markers, an RGB-coded file and a three-pixel-wide one — and by
+      hand mutants of every stage, each failing a test; an off-by-one in the red
+      colour constant is an equivalent mutant (the test runs every Cr, and no
+      8-bit output moves). The fixtures are synthetic images made by a script
+      that saves them with Pillow; it is not committed, and the test module's
+      docs say how each was made. Refused: arithmetic coding, lossless and
+      hierarchical frames, 12-bit samples, `DNL` heights, and CMYK/YCCK
+      (decoders disagree on its RGB, and icons and album art do not use it). Not
+      matched exactly: 4:4:0, which libjpeg-turbo filters vertically and this
+      replicates. EXIF orientation is not applied.
     - Not done yet: decoding from a path (a caller reads the file
       `IconThemes::lookup` found, and keys its cache with `FileVersion`), and
       moving `crcbl-sprite`'s and `crcbl-golden`'s own PNG loaders onto this
@@ -616,8 +636,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `desktop-entry` hint name a theme icon), which the order below already
       puts before JPEG.
     - Order from here: SVG (theme icons are mostly SVG: lyr's M6 named icons,
-      pikr's port, lyr's tray), then JPEG (album art), then ICO, BMP and WebP
-      (pikr's parity), then XPM.
+      pikr's port, lyr's tray), then ICO, BMP and WebP (pikr's parity), then
+      XPM.
 
 ### Left behind by the seam split
 

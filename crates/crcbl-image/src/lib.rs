@@ -22,12 +22,15 @@
 //!
 //! # Formats
 //!
-//! Each file format is a cargo feature: `png` today. The raw conversions and
+//! Each file format is a cargo feature: `png` and `jpeg` today. The raw conversions and
 //! the resize need none. The `theme` feature adds the freedesktop.org icon-theme
 //! lookup, which finds an icon's file by name; decoding it is the format's.
 
 pub mod raw;
 pub mod resize;
+
+#[cfg(feature = "jpeg")]
+pub mod jpeg;
 
 #[cfg(feature = "png")]
 pub mod png;

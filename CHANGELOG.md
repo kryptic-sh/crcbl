@@ -25,7 +25,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   mask), with `raw::from_argb32_be` for a StatusNotifierItem pixmap and
   `raw::from_image_data` for a notification's `image-data`; and `resize::resize`
   (Lanczos, in premultiplied light so transparent pixels lend no colour),
-  `fit_within`, `shrink_to_fit` and `nearest_size`. Behind the `theme` feature,
+  `fit_within`, `shrink_to_fit` and `nearest_size`. Behind the `jpeg` feature,
+  `jpeg::decode`, written in this crate: baseline and progressive Huffman JPEG,
+  greyscale, YCbCr or RGB, any whole-number chroma sampling, restart intervals,
+  to the same pixels libjpeg-turbo produces (its integer IDCT, its chroma
+  upsampling, its colour tables); arithmetic coding, 12-bit samples and CMYK are
+  refused. Behind the `theme` feature,
   `theme::IconThemes::lookup(name, size, scale)`: the freedesktop.org Icon Theme
   Specification's lookup (the theme, what it `Inherits`, caller-chosen fallback
   themes, `hicolor`, then bare files in `/usr/share/pixmaps`; PNG before SVG
