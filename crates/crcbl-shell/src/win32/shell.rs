@@ -13,7 +13,7 @@ use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
     LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PhysicalSize,
     PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
-    SizeConstraints, WindowConfiguration, WindowDesc, WindowId, WindowState,
+    SizeConstraints, TextPurpose, WindowConfiguration, WindowDesc, WindowId, WindowState,
 };
 
 use super::TimeBase;
@@ -2015,15 +2015,18 @@ impl Shell for Win32Shell {
         Ok(())
     }
 
-    /// The window's default input context, given back or taken away. A
-    /// composition's start restates the caret area on whichever context it
-    /// runs in, so nothing is placed here.
-    fn set_text_input_enabled(
+    /// The window's default input context, given back for an ordinary field
+    /// and taken away otherwise: a password or a PIN keeps the input method
+    /// out, as a Windows password box does, so nothing typed into it reaches
+    /// an input method's dictionary. A composition's start restates the caret
+    /// area on whichever context it runs in, so nothing is placed here.
+    fn set_text_input(
         &mut self,
         window: WindowId,
-        enabled: bool,
+        field: Option<TextPurpose>,
     ) -> Result<(), ShellError> {
-        input::enable_ime(self.window(window)?.raw(), enabled)
+        let composes = field.is_some_and(|purpose| !purpose.is_sensitive());
+        input::enable_ime(self.window(window)?.raw(), composes)
     }
 }
 

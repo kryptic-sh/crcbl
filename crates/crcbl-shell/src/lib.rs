@@ -347,6 +347,9 @@ pub use window::{
     WindowState,
 };
 
+/// Cross-seam vocabulary from `crcbl-core`: the input-event clock, the key
+/// names, and the one sanctioned platform leak.
+pub use crcbl_core::input::TextPurpose;
 /// Input vocabulary, defined in [`crcbl_core::input`] and re-exported so a
 /// consumer of the event stream needs one `use` rather than two.
 ///
@@ -355,8 +358,6 @@ pub use crcbl_core::input::{
     ButtonState, ContactId, DeviceId, Keysym, Modifiers, PointerButton, Scancode, ScrollDelta,
     TouchPhase,
 };
-/// Cross-seam vocabulary from `crcbl-core`: the input-event clock, the key
-/// names, and the one sanctioned platform leak.
 pub use crcbl_core::{EventTime, KeyCode, SurfaceTarget};
 
 use core::time::Duration;
@@ -875,8 +876,8 @@ pub trait Shell: core::fmt::Debug {
     /// The default validates the handle and does nothing else, which is exactly
     /// right for the rest. Win32 and Wayland override it; AppKit takes the
     /// default and leaves its input method to place itself. Wayland sends the
-    /// area only while [`set_text_input_enabled`](Self::set_text_input_enabled)
-    /// is on, since `text-input-v3` has nowhere to put it otherwise.
+    /// area only while [`set_text_input`](Self::set_text_input) names a field,
+    /// since `text-input-v3` has nowhere to put it otherwise.
     ///
     /// # Errors
     ///
@@ -890,33 +891,40 @@ pub trait Shell: core::fmt::Debug {
         self.window_state(window).map(|_| ())
     }
 
-    /// Tells the input method whether a text field in `window` is taking
-    /// typing: on as a field gains the keyboard focus, off as it loses it.
+    /// Tells the input method what text field in `window` is taking typing:
+    /// `Some(purpose)` as a field gains the keyboard focus, `None` as it loses
+    /// it.
     ///
-    /// While it is on, a platform input method composes what is typed in the
-    /// window, reporting the composition as
+    /// While a field is taking typing, a platform input method composes what
+    /// is typed in the window, reporting the composition as
     /// [`TextPreedit`](ShellEvent::TextPreedit) and the result as
-    /// [`TextCommit`](ShellEvent::TextCommit). While it is off the input method
+    /// [`TextCommit`](ShellEvent::TextCommit). While none is, the input method
     /// keeps out of the way and keys reach the window as keys: one in its
     /// native mode would otherwise turn a game's WASD into a candidate list. A
-    /// window starts with it off.
+    /// window starts with none.
+    ///
+    /// The [`TextPurpose`] says what the field is for. A password or a PIN is
+    /// [sensitive](TextPurpose::is_sensitive): nothing typed into it may be
+    /// learned, stored or suggested back.
     ///
     /// # A provided method
     ///
     /// The default validates the handle and does nothing else. Wayland acts on
-    /// it with `text-input-v3`'s `enable` and `disable`, and Win32 by giving the
-    /// window its input context or none. AppKit takes the default, and its
-    /// input method composes in every window whatever this says.
+    /// it with `text-input-v3`'s `enable`, `set_content_type` and `disable`;
+    /// Win32 associates the window's input context only for a
+    /// [`Normal`](TextPurpose::Normal) field, keeping it off for a password or
+    /// a PIN as a Windows password box does. AppKit takes the default, and its
+    /// input methods compose in every window whatever this says.
     ///
     /// # Errors
     ///
     /// [`ShellError::InvalidWindow`] if the handle is stale.
-    fn set_text_input_enabled(
+    fn set_text_input(
         &mut self,
         window: WindowId,
-        enabled: bool,
+        field: Option<TextPurpose>,
     ) -> Result<(), ShellError> {
-        let _ = enabled;
+        let _ = field;
         self.window_state(window).map(|_| ())
     }
 

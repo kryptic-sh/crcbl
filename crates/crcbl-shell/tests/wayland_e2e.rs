@@ -27,7 +27,7 @@ use crcbl_shell::{
     LogicalSize, Modifiers, MonitorInfo, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer,
     PhysicalSize, PointerButton, PointerMode, PopupDesc, PopupInput, PopupPlacement, Reserve,
     ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints,
-    SurfaceTarget, WindowDesc, WindowId, WindowRole,
+    SurfaceTarget, TextPurpose, WindowDesc, WindowId, WindowRole,
 };
 
 /// evdev codes, from `linux/input-event-codes.h`. Spelled out rather than
@@ -1309,7 +1309,7 @@ fn an_input_method_composes_for_a_window_that_asks_and_only_then() {
 
     session
         .shell
-        .set_text_input_enabled(window, true)
+        .set_text_input(window, Some(TextPurpose::Normal))
         .expect("enable text input");
     session.pump_until("the input method to activate", |_| method.is_active());
 
@@ -1331,9 +1331,49 @@ fn an_input_method_composes_for_a_window_that_asks_and_only_then() {
 
     session
         .shell
-        .set_text_input_enabled(window, false)
+        .set_text_input(window, None)
         .expect("disable text input");
     session.pump_until("the input method to deactivate", |_| !method.is_active());
+
+    drop(method);
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// A password field reaches the input method as one: `text-input-v3`'s
+/// `password` purpose with the `hidden_text` and `sensitive_data` hints, the
+/// values the protocol XML gives them, and an ordinary field as `normal` with
+/// none.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_password_field_tells_the_input_method_to_keep_nothing() {
+    const HIDDEN_TEXT: u32 = 0x40;
+    const SENSITIVE_DATA: u32 = 0x80;
+    const PURPOSE_NORMAL: u32 = 0;
+    const PURPOSE_PASSWORD: u32 = 8;
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e password");
+    let method = InputMethod::attach(&*session.shell, window).expect("an input method");
+
+    session
+        .shell
+        .set_text_input(window, Some(TextPurpose::Normal))
+        .expect("an ordinary field");
+    session.pump_until("the input method to activate", |_| method.is_active());
+    assert_eq!(method.content_type(), (0, PURPOSE_NORMAL));
+
+    session
+        .shell
+        .set_text_input(window, Some(TextPurpose::Password))
+        .expect("a password field");
+    session.pump_until("the password's content type", |_| {
+        method.content_type().1 == PURPOSE_PASSWORD
+    });
+    assert_eq!(
+        method.content_type(),
+        (HIDDEN_TEXT | SENSITIVE_DATA, PURPOSE_PASSWORD)
+    );
+    assert!(method.is_active(), "still composing, as a password field");
 
     drop(method);
     drop(input);

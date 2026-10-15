@@ -919,3 +919,23 @@ fn an_outside_value_with_a_line_break_draws_on_one_line() {
     let steady = page(&mut ui, idle(), NavInput::default(), quiet(), &mut values);
     assert!(!steady.name.changed, "a stripped value changed again");
 }
+
+/// **What the input method is told follows the field**: nothing while no
+/// field is typed into, ordinary text for a plain input, and a password for a
+/// masked one, so a platform input method learns nothing typed there.
+#[test]
+fn a_masked_input_is_a_password_to_the_input_method_and_nothing_is_none() {
+    use crcbl_core::input::TextPurpose;
+    let (mut ui, mut values) = engaged_on("ada");
+    assert_eq!(ui.text_editing_purpose(), Some(TextPurpose::Normal));
+    page(&mut ui, idle(), NavInput::ACCEPT, quiet(), &mut values);
+    assert_eq!(
+        ui.text_editing_purpose(),
+        None,
+        "committed, so nothing types"
+    );
+    page(&mut ui, idle(), DOWN, quiet(), &mut values);
+    let engaged = page(&mut ui, idle(), NavInput::ACCEPT, quiet(), &mut values);
+    assert_eq!(engaged.pass.engagement, Engagement::Began);
+    assert_eq!(ui.text_editing_purpose(), Some(TextPurpose::Password));
+}

@@ -5,7 +5,7 @@
 // e2e binary and fails a run that executed none.
 
 use super::*;
-use crate::{AspectRatio, LogicalSize, MimeType};
+use crate::{AspectRatio, LogicalSize, MimeType, TextPurpose};
 use crcbl_core::KeyCode;
 use crcbl_core::input::{ButtonState, Keysym, PointerButton, Scancode, ScrollDelta};
 use std::path::PathBuf;
@@ -2588,11 +2588,25 @@ fn a_window_has_no_input_context_until_a_field_asks_for_one() {
     let hwnd = hwnd_of(&shell, window);
     assert!(!has_input_context(hwnd), "off as it is created");
     shell
-        .set_text_input_enabled(window, true)
+        .set_text_input(window, Some(TextPurpose::Normal))
         .expect("turn the input method on");
     assert!(has_input_context(hwnd), "the default context is back");
     shell
-        .set_text_input_enabled(window, false)
+        .set_text_input(window, Some(TextPurpose::Password))
+        .expect("a password field");
+    assert!(
+        !has_input_context(hwnd),
+        "a password keeps the input method out"
+    );
+    shell
+        .set_text_input(window, Some(TextPurpose::Normal))
+        .expect("an ordinary field again");
+    assert!(
+        has_input_context(hwnd),
+        "and an ordinary field lets it back"
+    );
+    shell
+        .set_text_input(window, None)
         .expect("turn the input method off");
     assert!(!has_input_context(hwnd), "and gone again");
     shell.destroy_window(window).expect("destroy");

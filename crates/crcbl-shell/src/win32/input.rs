@@ -308,7 +308,7 @@ pub(super) fn composition(hwnd: Handle) -> (Vec<u16>, Option<usize>) {
 /// Turns the input method on or off for `hwnd`: its thread's default input
 /// context back, or no context at all, which is how a window keeps the input
 /// method out of its keys. See
-/// [`Shell::set_text_input_enabled`](crate::Shell::set_text_input_enabled).
+/// [`Shell::set_text_input`](crate::Shell::set_text_input).
 ///
 /// # Errors
 ///

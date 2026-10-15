@@ -38,16 +38,27 @@ cannot be grabbing popups. **Open, nothing asked yet:** closing a panel when the
 user clicks the empty desktop, which focus loss does not cover; lyr measures
 what Hyprland does in its M5 before asking.
 
-**Asked by lyr on 2026-10-16, needed before its M7 (the native menus):** a
-password content type on the text-input seam, so a Wi-Fi password field tells
-the input method not to learn from or suggest on what is typed. On Wayland that
-is `text-input-v3`'s `set_content_type` with the `sensitive_data` hint and the
-`password` purpose; `wayland/text_input.rs` always sends `normal` today. The
-seam has nowhere to say it yet: it needs a field kind beside
-`Shell::set_text_input_enabled` (Win32's matching lever is an input scope,
-AppKit's a secure text field), and crcbl-ui's masked text input is what would
-ask for it. **S12's order for lyr's M6** (notification markup): paragraphs whose
-runs wrap together, then bold, italic, underline and a link's hit area.
+**Done 2026-10-16 for lyr's M7: a password content type on the text-input
+seam.** `Shell::set_text_input(window, Option<TextPurpose>)` replaced
+`set_text_input_enabled` (unreleased, so free to change), with
+`crcbl_core::input::TextPurpose` (`Normal`, `Password`, `Pin`; exhaustive, so a
+new purpose fails to compile in every backend's mapping rather than reading as
+ordinary text). Wayland sends `password` or `pin` with `hidden_text` and
+`sensitive_data`; Win32 keeps the input context off for a password or PIN, as a
+Windows password box does; AppKit takes the default (no secure input yet).
+crcbl-ui's masked text input reports `TextPurpose::Password` through
+`Ui::text_editing_purpose`, which the engine's `TextPump::engage` passes on.
+Verified: unit tests for the Wayland mapping (against the protocol XML's
+numbers, run in WSL), the UI's purpose and the pump's change detection, each
+failed by a hand mutant; the sway suite's
+`a_password_field_tells_the_input_method_to_keep_nothing` and the Win32 desktop
+test `a_window_has_no_input_context_until_a_field_asks_for_one` run only in CI.
+Decided, per the standing instruction: one call naming the field rather than a
+second `set_text_input_purpose`, because two calls can disagree about order and
+a field's purpose is part of turning it on. Not done: AppKit's secure input for
+a password field, and content types beyond these three. **S12's order for lyr's
+M6** (notification markup): paragraphs whose runs wrap together, then bold,
+italic, underline and a link's hit area.
 
 The requirements are rows S1–S27 of the joint table in
 `lyr/docs/plan/03-surfaces-and-input.md` (lyr commit f44f1b8). That table
@@ -364,7 +375,7 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      sway suite types a dead key through a table named in `XCOMPOSEFILE`
      (`a_dead_key_composes_with_the_key_after_it`). `text-input-v3`
      (`crates/crcbl-shell/src/wayland/text_input.rs`), on only for a window that
-     called `Shell::set_text_input_enabled`: the sway suite plays the input
+     named a field with `Shell::set_text_input`: the sway suite plays the input
      method with `input-method-unstable-v2`
      (`an_input_method_composes_for_a_window_that_asks_and_only_then`). A mutant
      run of the sway suite on 2026-10-16 (run 38785253836) failed each of the
@@ -375,9 +386,9 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      real server. Not there: a pre-edit while a compose sequence is in progress
      (GTK shows the dead key underlined), surrounding text (the seam has no way
      to say what is around a caret, so `delete_surrounding_text` is ignored),
-     and content types (always `normal`).
-   - Decided 2026-10-16, per the standing instruction:
-     `Shell::set_text_input_enabled` is a new provided method rather than
+     and content types beyond normal, password and PIN.
+   - Decided 2026-10-16, per the standing instruction: `Shell::set_text_input`
+     (first `set_text_input_enabled`) is a new provided method rather than
      reading `set_text_input_area(None)` as "off". The area's `None` already
      means "default placement" on Win32, and an input method left on in every
      window takes a game's keys. Win32 acts on it too: a window is created with
@@ -5379,8 +5390,8 @@ the gaps below.
   the pre-edit underlined at the caret, and telling the shell the caret's
   rectangle, are the field's half. AppKit still records only the marked text's
   length (`appkit/view.rs`). Wayland sends both through `text-input-v3`, but
-  only for a window that called `Shell::set_text_input_enabled`, which
-  `crcbl::text_input` does not call yet either.
+  only for a window that has named a field with `Shell::set_text_input`, which
+  `crcbl::text_input::TextPump::engage` does each frame the field changes.
 - **The web clipboard refuses copy and paste**, shown by the field's `:refused`
   border. Options: implement the web backend's clipboard, or keep an in-process
   fallback so copy and paste work within one page.

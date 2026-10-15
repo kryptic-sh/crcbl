@@ -813,8 +813,11 @@ impl<S: Shell + ?Sized> Editor<S> {
         let requests = self.panels.take_clipboard_requests();
         self.text_pump
             .serve(requests, self.shell.as_mut(), self.window);
-        self.text_pump
-            .engage(self.panels.text_editing(), self.shell.as_mut(), self.window);
+        self.text_pump.engage(
+            self.panels.text_editing_purpose(),
+            self.shell.as_mut(),
+            self.window,
+        );
         self.sync_contexts();
 
         // Before this frame's actions: the time the frame covers passed before

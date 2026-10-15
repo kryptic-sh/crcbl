@@ -4,7 +4,7 @@
 //! One `zwp_text_input_v3` per seat, made once the compositor offers
 //! `zwp_text_input_manager_v3`. Its `enter` and `leave` follow the keyboard
 //! focus; what turns the input method on is the window's own request,
-//! [`Shell::set_text_input_enabled`](crate::Shell::set_text_input_enabled),
+//! [`Shell::set_text_input`](crate::Shell::set_text_input),
 //! which this backend answers with `enable` while the window has the text
 //! input focus and `disable` once it asks to stop. A `done` turns what the
 //! input method sent into a [`ShellEvent::TextCommit`] and a
@@ -31,7 +31,7 @@
 //!   state after the input method acts, which this backend never does; the
 //!   protocol applies the events whatever the serial.
 
-use crate::{PhysicalRect, ShellError, ShellEvent, WindowId};
+use crate::{PhysicalRect, ShellError, ShellEvent, TextPurpose, WindowId};
 
 use super::ffi::{WlArgument, WlProxy};
 use super::protocol::text_input::{zwp_text_input_manager_v3, zwp_text_input_v3};
@@ -44,8 +44,9 @@ pub(super) const TEXT_INPUT_VERSION: u32 = 1;
 /// What a window asked of the input method.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Field {
-    /// [`Shell::set_text_input_enabled`](crate::Shell::set_text_input_enabled).
-    enabled: bool,
+    /// [`Shell::set_text_input`](crate::Shell::set_text_input): the field
+    /// taking typing, if one is.
+    field: Option<TextPurpose>,
     /// [`Shell::set_text_input_area`](crate::Shell::set_text_input_area), in
     /// the window's device pixels.
     area: Option<PhysicalRect>,
@@ -126,6 +127,24 @@ pub(super) unsafe fn decode(opcode: u32, args: &WlArgument) -> Option<Event> {
 fn caret(text: &str, cursor_begin: i32) -> Option<usize> {
     let offset = usize::try_from(cursor_begin).ok()?;
     (!text.is_empty() && text.is_char_boundary(offset)).then_some(offset)
+}
+
+/// The `content_hint` and `content_purpose` a field of `purpose` sends. A
+/// sensitive field is `hidden_text` and `sensitive_data` as well, which is
+/// what tells an input method not to learn from or suggest on what is typed.
+fn content_type(purpose: TextPurpose) -> (u32, u32) {
+    use zwp_text_input_v3::{content_hint, content_purpose};
+    let hint = if purpose.is_sensitive() {
+        content_hint::HIDDEN_TEXT | content_hint::SENSITIVE_DATA
+    } else {
+        content_hint::NONE
+    };
+    let purpose = match purpose {
+        TextPurpose::Normal => content_purpose::NORMAL,
+        TextPurpose::Password => content_purpose::PASSWORD,
+        TextPurpose::Pin => content_purpose::PIN,
+    };
+    (hint, purpose)
 }
 
 /// `area`, in device pixels at `scale`, as the surface-local logical
@@ -287,19 +306,16 @@ impl WaylandShell {
             let state = self.window(window).ok()?;
             state
                 .text_input
-                .enabled
-                .then(|| (state.text_input.area, state.scale_factor()))
+                .field
+                .map(|purpose| (purpose, state.text_input.area, state.scale_factor()))
         });
         // SAFETY: the proxy is live; every argument is a plain integer.
         unsafe {
             match wanted {
-                Some((area, scale)) => {
+                Some((purpose, area, scale)) => {
+                    let (hint, purpose) = content_type(purpose);
                     zwp_text_input_v3::enable(proxy);
-                    zwp_text_input_v3::set_content_type(
-                        proxy,
-                        zwp_text_input_v3::content_hint::NONE,
-                        zwp_text_input_v3::content_purpose::NORMAL,
-                    );
+                    zwp_text_input_v3::set_content_type(proxy, hint, purpose);
                     if let Some(area) = area {
                         let [x, y, width, height] = logical_rect(area, scale);
                         zwp_text_input_v3::set_cursor_rectangle(proxy, x, y, width, height);
@@ -319,17 +335,19 @@ impl WaylandShell {
         self.conn.flush();
     }
 
-    /// [`Shell::set_text_input_enabled`](crate::Shell::set_text_input_enabled).
+    /// [`Shell::set_text_input`](crate::Shell::set_text_input). A field
+    /// whose purpose changes is enabled again, since its content type is part
+    /// of the state `enable` resets.
     pub(super) fn enable_text_input(
         &mut self,
         window: WindowId,
-        enabled: bool,
+        field: Option<TextPurpose>,
     ) -> Result<(), ShellError> {
-        let field = &mut self.window_mut(window)?.text_input;
-        if field.enabled == enabled {
+        let state = &mut self.window_mut(window)?.text_input;
+        if state.field == field {
             return Ok(());
         }
-        field.enabled = enabled;
+        state.field = field;
         self.sync_focused(window);
         Ok(())
     }
@@ -405,6 +423,17 @@ impl WaylandShell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each purpose's hint and purpose, by the numbers the protocol XML gives
+    /// `hidden_text` (0x40), `sensitive_data` (0x80) and the `normal`,
+    /// `password` and `pin` purposes, not by the generated constants this
+    /// code names.
+    #[test]
+    fn a_sensitive_field_is_hidden_and_sensitive_with_its_purpose() {
+        assert_eq!(content_type(TextPurpose::Normal), (0, 0));
+        assert_eq!(content_type(TextPurpose::Password), (0x40 | 0x80, 8));
+        assert_eq!(content_type(TextPurpose::Pin), (0x40 | 0x80, 9));
+    }
 
     /// The pre-edit cursor is `cursor_begin` where it is a real position in
     /// the text, and nothing where the input method hid it or named a byte

@@ -28,6 +28,10 @@ struct State {
     pending_active: bool,
     /// Whether a text input is enabled, as of the last `done`.
     active: bool,
+    /// `content_type`'s hint and purpose, until the `done` that applies it.
+    pending_content: (u32, u32),
+    /// The enabled text input's hint and purpose, as of the last `done`.
+    content: (u32, u32),
     /// How many `done` events have arrived: the serial `commit` must quote.
     done: u32,
     /// The compositor already has an input method.
@@ -85,9 +89,13 @@ unsafe extern "C" fn follow(
     match unsafe { zwp_input_method_v2::decode_event(opcode, &*args.cast_const()) } {
         Some(zwp_input_method_v2::Event::Activate) => state.pending_active = true,
         Some(zwp_input_method_v2::Event::Deactivate) => state.pending_active = false,
+        Some(zwp_input_method_v2::Event::ContentType { hint, purpose }) => {
+            state.pending_content = (hint, purpose);
+        }
         Some(zwp_input_method_v2::Event::Done) => {
             state.done = state.done.wrapping_add(1);
             state.active = state.pending_active;
+            state.content = state.pending_content;
         }
         Some(zwp_input_method_v2::Event::Unavailable) => state.unavailable = true,
         _ => {}
@@ -134,6 +142,8 @@ impl InputMethod {
             method: ptr::null_mut(),
             pending_active: false,
             active: false,
+            pending_content: (0, 0),
+            content: (0, 0),
             done: 0,
             unavailable: false,
         });
@@ -191,6 +201,13 @@ impl InputMethod {
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.state.active
+    }
+
+    /// The enabled text input's `content_type`, hint and purpose, as of the
+    /// last `done` the shell's pump dispatched.
+    #[must_use]
+    pub fn content_type(&self) -> (u32, u32) {
+        self.state.content
     }
 
     /// Sends a pre-edit with its cursor at `cursor` bytes in.

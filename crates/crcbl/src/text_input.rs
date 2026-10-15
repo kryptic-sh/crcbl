@@ -61,13 +61,13 @@
 //! caret or call `Shell::set_text_input_area`. **The input method follows the
 //! field**: [`TextPump::engage`] turns it on while the tree is editing and off
 //! otherwise, which is what lets a Wayland input method compose at all (see
-//! `Shell::set_text_input_enabled`).
+//! `Shell::set_text_input`).
 
 use std::time::Duration;
 
 use crate::shell::{
     ButtonState, ClipboardContent, ClipboardOffer, ClipboardRequestId, MimeType, Shell, ShellEvent,
-    WindowId,
+    TextPurpose, WindowId,
 };
 use crate::ui::edit::{ClipboardOp, Edit};
 use crate::ui::tree::{ClipboardAnswer, ClipboardReply, ClipboardRequest, NodeKey, TextInput};
@@ -83,8 +83,8 @@ pub struct TextPump {
     /// person is waiting on.
     awaiting: Option<(ClipboardRequestId, NodeKey)>,
     /// What [`engage`](Self::engage) last told the shell, so it asks only on a
-    /// change.
-    engaged: Option<bool>,
+    /// change; `None` until it has told it anything.
+    engaged: Option<Option<TextPurpose>>,
 }
 
 impl TextPump {
@@ -193,20 +193,26 @@ impl TextPump {
         }
     }
 
-    /// Turns the platform input method on for `window` while `editing` and
-    /// off otherwise, with [`Shell::set_text_input_enabled`], asking the shell
-    /// only when that changes. `editing` is the same word
-    /// [`observe`](Self::observe) is given, so an input method composes into
-    /// the field that is taking the keys and keeps out of a game's way.
-    pub fn engage<S: Shell + ?Sized>(&mut self, editing: bool, shell: &mut S, window: WindowId) {
-        if self.engaged == Some(editing) {
+    /// Tells the platform input method what field of `window` is taking
+    /// typing, with [`Shell::set_text_input`]: `field` is
+    /// [`Ui::text_editing_purpose`](crate::ui::tree::Ui::text_editing_purpose)
+    /// or the like, `None` while nothing is being typed into. The shell is
+    /// asked only when that changes, so an input method composes into the
+    /// field that is taking the keys, keeps out of a game's way, and is told
+    /// when a field is a password.
+    pub fn engage<S: Shell + ?Sized>(
+        &mut self,
+        field: Option<TextPurpose>,
+        shell: &mut S,
+        window: WindowId,
+    ) {
+        if self.engaged == Some(field) {
             return;
         }
-        match shell.set_text_input_enabled(window, editing) {
-            Ok(()) => self.engaged = Some(editing),
+        match shell.set_text_input(window, field) {
+            Ok(()) => self.engaged = Some(field),
             Err(error) => crcbl_core::warn!(
-                "text input: the shell refused to turn the input method {} — {error}",
-                if editing { "on" } else { "off" }
+                "text input: the shell refused to set the input method to {field:?} — {error}"
             ),
         }
     }
@@ -564,31 +570,38 @@ mod tests {
         );
     }
 
-    /// **The input method follows the field**: on while the tree is editing,
-    /// off once it stops, and the shell is asked only when that changes — a
-    /// state set behind the pump's back is left alone until it does.
+    /// **The input method follows the field**: told while the tree is
+    /// editing, and what for, cleared once it stops, and the shell is asked
+    /// only when that changes — a state set behind the pump's back is left
+    /// alone until it does.
     #[test]
-    fn the_input_method_is_on_only_while_a_field_is_editing() {
+    fn the_input_method_is_told_of_the_field_only_while_one_is_editing() {
         let mut shell = HeadlessShell::new();
         let window = shell
             .create_window(&WindowDesc::default())
             .expect("a headless window");
         let mut pump = TextPump::new();
-        let enabled = |shell: &HeadlessShell| shell.text_input_enabled(window).expect("live");
-        assert!(!enabled(&shell), "a window starts with it off");
+        let field = |shell: &HeadlessShell| shell.text_input(window).expect("live");
+        assert_eq!(field(&shell), None, "a window starts with no field");
 
-        pump.engage(true, &mut shell, window);
-        assert!(enabled(&shell));
-        pump.engage(false, &mut shell, window);
-        assert!(!enabled(&shell));
+        pump.engage(Some(TextPurpose::Normal), &mut shell, window);
+        assert_eq!(field(&shell), Some(TextPurpose::Normal));
+        pump.engage(Some(TextPurpose::Password), &mut shell, window);
+        assert_eq!(field(&shell), Some(TextPurpose::Password));
+        pump.engage(None, &mut shell, window);
+        assert_eq!(field(&shell), None);
 
         shell
-            .set_text_input_enabled(window, true)
+            .set_text_input(window, Some(TextPurpose::Pin))
             .expect("set behind the pump's back");
-        pump.engage(false, &mut shell, window);
-        assert!(enabled(&shell), "no change, so nothing was asked");
-        pump.engage(true, &mut shell, window);
-        pump.engage(false, &mut shell, window);
-        assert!(!enabled(&shell));
+        pump.engage(None, &mut shell, window);
+        assert_eq!(
+            field(&shell),
+            Some(TextPurpose::Pin),
+            "no change, so nothing was asked"
+        );
+        pump.engage(Some(TextPurpose::Normal), &mut shell, window);
+        pump.engage(None, &mut shell, window);
+        assert_eq!(field(&shell), None);
     }
 }

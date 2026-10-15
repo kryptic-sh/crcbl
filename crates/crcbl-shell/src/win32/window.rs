@@ -297,7 +297,7 @@ impl Win32Shell {
             super::dnd::accept_files(hwnd, true);
         }
         // The input method stays out until a text field asks for it, as
-        // `Shell::set_text_input_enabled` says of every window.
+        // `Shell::set_text_input` says of every window.
         if let Err(error) = super::input::enable_ime(hwnd, false) {
             crcbl_core::log::warn!("{error}; the input method stays on for this window");
         }

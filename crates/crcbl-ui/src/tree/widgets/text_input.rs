@@ -78,6 +78,7 @@
 use std::panic::Location;
 use std::time::Duration;
 
+use crcbl_core::input::TextPurpose;
 use glam::Vec2;
 
 use super::super::store::Interaction;
@@ -183,6 +184,8 @@ pub(crate) struct EditState {
     /// first frame reports [`Engagement::Engaged`], not
     /// [`Engagement::Began`].
     engaged: bool,
+    /// Whether it was built masked last, as a password field is.
+    masked: bool,
 }
 
 impl EditState {
@@ -376,6 +379,7 @@ impl Ui {
             state
         });
         let mut moved = state.line.sync(value);
+        state.masked = options.masked;
         if interaction.engagement == Engagement::Cancelled {
             moved |= state.line.place(usize::MAX, false);
         }
@@ -558,6 +562,23 @@ impl Ui {
         self.engaged()
             .and_then(|key| self.store.by_key(key))
             .is_some_and(|node| node.widget.types())
+    }
+
+    /// What the field being typed into is for, as the platform input method
+    /// should be told with `crcbl_shell::Shell::set_text_input`: `None` while
+    /// [`text_editing`](Self::text_editing) is false, a password for a masked
+    /// text input, and ordinary text otherwise.
+    #[must_use]
+    pub fn text_editing_purpose(&self) -> Option<TextPurpose> {
+        let key = self.engaged()?;
+        let node = self.store.by_key(key)?;
+        node.widget.types().then(|| {
+            if self.edits.get(&key).is_some_and(|state| state.masked) {
+                TextPurpose::Password
+            } else {
+                TextPurpose::Normal
+            }
+        })
     }
 
     /// The text input `key`'s caret and selection anchor, as `char` counts;

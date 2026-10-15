@@ -2109,7 +2109,7 @@ fn an_input_method_composition_is_a_pre_edit_and_its_result_a_commit() {
     let hwnd = session.hwnd(window);
     session
         .shell
-        .set_text_input_enabled(window, true)
+        .set_text_input(window, Some(crcbl_shell::TextPurpose::Normal))
         .expect("a live window asks for the input method");
     assert!(
         desktop::open_hiragana(hwnd),

@@ -51,18 +51,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `LC_CTYPE` or `LANG`). Before, a dead key typed nothing and the key after it
   typed itself. A key that breaks a sequence commits nothing, and losing the
   keyboard abandons a sequence. No pre-edit is shown mid-sequence.
-- **`Shell::set_text_input_enabled(window, enabled)`**, a provided method: a
-  text field asks for the platform input method while it has focus, and lets it
-  go after. The default only validates the handle. `HeadlessShell` records it
-  (`HeadlessShell::text_input_enabled`), and `crcbl::text_input::TextPump`'s new
-  `engage` calls it whenever the tree starts or stops editing; the engine's
-  console and the editor call `engage` each frame.
+- **`Shell::set_text_input(window, field)`**, a provided method: a text field
+  tells the platform input method it is taking typing, and what for, while it
+  has focus (`Some(TextPurpose)`), and lets it go after (`None`).
+  `crcbl_core::input::TextPurpose` (re-exported from `crcbl-shell`) is `Normal`,
+  `Password` or `Pin`; a password or a PIN is sensitive, so an input method
+  learns and suggests nothing from it. The default only validates the handle.
+  `HeadlessShell` records it (`HeadlessShell::text_input`),
+  `crcbl_ui::tree::Ui::text_editing_purpose` says what the field being typed
+  into is for (a masked text input is a password), and
+  `crcbl::text_input::TextPump`'s new `engage` passes that on whenever it
+  changes; the engine's console and the editor call `engage` each frame.
 - **Input methods compose on Wayland**, through `text-input-v3`: for a window
-  that has called `set_text_input_enabled(window, true)`, an input method's
-  composition arrives as `ShellEvent::TextPreedit` and its result as
-  `TextCommit`, and `Shell::set_text_input_area` places its candidate window.
-  Off by default, so an input method in its native mode no longer turns a game's
-  keys into a candidate list.
+  that has named a field with `set_text_input`, an input method's composition
+  arrives as `ShellEvent::TextPreedit` and its result as `TextCommit`, and
+  `Shell::set_text_input_area` places its candidate window. A password or PIN
+  field is sent as `text-input-v3`'s `password` or `pin` purpose with the
+  `hidden_text` and `sensitive_data` hints. Off by default, so an input method
+  in its native mode no longer turns a game's keys into a candidate list.
 - **An accessibility seam in `crcbl-shell`, behind its new `accesskit` feature**
   (off by default). `Shell::update_accessibility(window, update)` hands a
   window's `accesskit::TreeUpdate` to the platform's assistive technologies, and
@@ -127,11 +133,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   second, differently weighted font under a name to replace the first now gets
   both, and selects between them with `font-weight` and `font-style`.
 - **On Win32 a window's input method is off until a text field asks for it.** A
-  window is created with no input context and gets its default one back from
-  `Shell::set_text_input_enabled(window, true)`, as on Wayland. Dead keys still
-  type, since they never went through the input method; a CJK input method no
-  longer composes in a window whose caller never turns it on, which includes a
-  game's own text entry until the engine can ask for one.
+  window is created with no input context and gets its default one back when
+  `Shell::set_text_input` names an ordinary field, as on Wayland; a password or
+  PIN field keeps it off, as a Windows password box does. Dead keys still type,
+  since they never went through the input method; a CJK input method no longer
+  composes in a window whose caller never turns it on, which includes a game's
+  own text entry until the engine can ask for one.
 
 ### Fixed
 

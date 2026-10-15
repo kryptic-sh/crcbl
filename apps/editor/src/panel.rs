@@ -685,6 +685,13 @@ impl Panels {
         self.ui.text_editing()
     }
 
+    /// What the field being typed into is for, for the platform input method;
+    /// see [`Ui::text_editing_purpose`](crcbl::ui::tree::Ui::text_editing_purpose).
+    #[must_use]
+    pub fn text_editing_purpose(&self) -> Option<crcbl::shell::TextPurpose> {
+        self.ui.text_editing_purpose()
+    }
+
     /// Whether a drop-down's list or a context menu is open and takes the
     /// keyboard's typing and jump keys: what the reserved `list` context is
     /// pushed on.

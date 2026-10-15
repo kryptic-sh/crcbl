@@ -631,6 +631,40 @@ cursor_icons! {
     ResizeRow => "row-resize",
 }
 
+/// What a text field taking typing is for, as an input method needs to know
+/// it.
+///
+/// Here rather than in `crcbl-shell` for the reason [`CursorIcon`] is: a UI
+/// names it for its field, and a UI crate depends on this one, not on the
+/// shell.
+///
+/// **Exhaustive on purpose**, as [`CursorIcon`] is: a purpose added later
+/// must fail to compile in every backend's mapping rather than fall to
+/// [`Normal`](Self::Normal) through a wildcard arm, because a password read
+/// as ordinary text is one an input method may learn and suggest back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TextPurpose {
+    /// Ordinary text: the input method may complete, correct and remember.
+    #[default]
+    Normal,
+    /// A password: hidden as typed, and nothing typed may be stored, learned
+    /// or offered back as a suggestion.
+    Password,
+    /// A PIN: digits, hidden, and not stored, as a password.
+    Pin,
+}
+
+impl TextPurpose {
+    /// Whether what is typed must not be stored, learned or suggested.
+    #[must_use]
+    pub const fn is_sensitive(self) -> bool {
+        match self {
+            Self::Normal => false,
+            Self::Password | Self::Pin => true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

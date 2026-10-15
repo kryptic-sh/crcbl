@@ -53,7 +53,7 @@
 //!
 //! | Protocol | What it gives the engine |
 //! | --- | --- |
-//! | `zwp_text_input_v3` | [`TextPreedit`](ShellEvent::TextPreedit) and composed [`TextCommit`](ShellEvent::TextCommit), for a window that turned it on with [`Shell::set_text_input_enabled`] — see [`text_input`] |
+//! | `zwp_text_input_v3` | [`TextPreedit`](ShellEvent::TextPreedit) and composed [`TextCommit`](ShellEvent::TextCommit), for a window that named a field with [`Shell::set_text_input`] — see [`text_input`] |
 //!
 //! Still deliberately absent: touch, tablet, the *primary*
 //! selection (`wp_primary_selection_v1` — middle-click paste, which the seam
@@ -204,7 +204,7 @@ use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
     LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PointerMode,
     ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints,
-    WindowConfiguration, WindowDesc, WindowId, WindowRole, WindowState,
+    TextPurpose, WindowConfiguration, WindowDesc, WindowId, WindowRole, WindowState,
 };
 
 use data::{Delivery, HeldRead, Resolution, Transfer};
@@ -3888,12 +3888,12 @@ impl Shell for WaylandShell {
         self.move_popup(popup, anchor, size)
     }
 
-    fn set_text_input_enabled(
+    fn set_text_input(
         &mut self,
         window: WindowId,
-        enabled: bool,
+        field: Option<TextPurpose>,
     ) -> Result<(), ShellError> {
-        self.enable_text_input(window, enabled)
+        self.enable_text_input(window, field)
     }
 
     fn set_text_input_area(

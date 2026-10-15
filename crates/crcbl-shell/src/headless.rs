@@ -149,8 +149,8 @@ use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
     KeyCode, LogicalRect, LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint,
     PhysicalRect, PhysicalSize, PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps,
-    ShellError, ShellEvent, ShellWaker, SizeConstraints, WindowConfiguration, WindowDesc, WindowId,
-    WindowState,
+    ShellError, ShellEvent, ShellWaker, SizeConstraints, TextPurpose, WindowConfiguration,
+    WindowDesc, WindowId, WindowState,
 };
 
 /// Resolution of the virtual monitor [`HeadlessShell::new`] creates.
@@ -231,8 +231,8 @@ struct HeadlessWindow {
     parent: Option<WindowId>,
     /// The monitor a panel was created for, whose unplugging asks it to close.
     panel_monitor: Option<MonitorId>,
-    /// [`Shell::set_text_input_enabled`]'s last word.
-    text_input: bool,
+    /// [`Shell::set_text_input`]'s last word.
+    text_input: Option<TextPurpose>,
     /// Whether a pretend assistive technology is reading the window, and what
     /// it has been sent since it started.
     #[cfg(feature = "accesskit")]
@@ -1033,15 +1033,15 @@ impl HeadlessShell {
         Ok(self.window(window)?.cursor)
     }
 
-    /// Whether the window has asked for the input method, with
-    /// [`Shell::set_text_input_enabled`].
+    /// The text field the window last said is taking typing, with
+    /// [`Shell::set_text_input`]; `None` while none is.
     ///
     /// Headless-only, for the same reason as [`title`](Self::title).
     ///
     /// # Errors
     ///
     /// [`ShellError::InvalidWindow`] if the handle is stale.
-    pub fn text_input_enabled(&self, window: WindowId) -> Result<bool, ShellError> {
+    pub fn text_input(&self, window: WindowId) -> Result<Option<TextPurpose>, ShellError> {
         Ok(self.window(window)?.text_input)
     }
 
@@ -1509,7 +1509,7 @@ impl Shell for HeadlessShell {
                 accept_drops: desc.accept_drops,
                 parent,
                 panel_monitor,
-                text_input: false,
+                text_input: None,
                 #[cfg(feature = "accesskit")]
                 accessibility: None,
             })
@@ -1761,14 +1761,14 @@ impl Shell for HeadlessShell {
     }
 
     /// Records the request, which
-    /// [`text_input_enabled`](HeadlessShell::text_input_enabled) reads back;
-    /// there is no input method to turn on.
-    fn set_text_input_enabled(
+    /// [`text_input`](HeadlessShell::text_input) reads back; there is no
+    /// input method to tell.
+    fn set_text_input(
         &mut self,
         window: WindowId,
-        enabled: bool,
+        field: Option<TextPurpose>,
     ) -> Result<(), ShellError> {
-        self.window_mut(window)?.text_input = enabled;
+        self.window_mut(window)?.text_input = field;
         Ok(())
     }
 
