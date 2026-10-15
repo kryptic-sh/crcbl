@@ -25,6 +25,7 @@ use super::geometry;
 use super::input;
 use super::input::Contact;
 use super::keys::{self, Composing, Utf16};
+use super::panel::Panel;
 use super::pointer::{RawMotion, Visibility};
 use super::proc::{self, Shared};
 use super::window;
@@ -128,6 +129,9 @@ pub(super) struct WinWindow {
     /// `WM_DROPFILES` — so this is the second half of the gate rather than the
     /// gate, and [`dnd`](super::dnd) says why a second half is worth having.
     accept_drops: bool,
+    /// What a panel was created with, so it can be placed again; `None` for
+    /// every other window. See [`panel`](super::panel).
+    pub(super) panel: Option<Panel>,
 }
 
 impl WinWindow {
@@ -342,7 +346,8 @@ impl Win32Shell {
             .union(ShellCaps::CLIPBOARD)
             .union(ShellCaps::DRAG_DROP)
             .union(ShellCaps::TEXT_IME)
-            .union(ShellCaps::TOUCH);
+            .union(ShellCaps::TOUCH)
+            .union(ShellCaps::PANEL);
         if raw_motion {
             caps.union(ShellCaps::RAW_POINTER_MOTION)
         } else {
@@ -488,6 +493,21 @@ impl Win32Shell {
     }
 
     /// The [`WindowId`] owning an `HWND`, for routing a raw event.
+    /// The system or the shell asked for a window to go: `WM_CLOSE`, or a
+    /// panel's monitor being unplugged.
+    ///
+    /// One request until it is answered, as on Wayland.
+    pub(super) fn close_requested(&mut self, window: WindowId) {
+        let Ok(state) = self.window_mut(window) else {
+            return;
+        };
+        if state.close_pending {
+            return;
+        }
+        state.close_pending = true;
+        self.queue.push_back(ShellEvent::CloseRequested { window });
+    }
+
     fn window_by_key(&self, key: isize) -> Option<WindowId> {
         self.windows
             .iter()
@@ -843,6 +863,9 @@ impl Win32Shell {
                     if let Ok(state) = self.window(window) {
                         self.refresh_limits(state);
                     }
+                    // A panel's size and margins are logical, so its place on
+                    // its monitor moved with the scale.
+                    self.place_panel(window);
                 }
                 RawEvent::Focus { focused, .. } => {
                     let Some(window) = window else { continue };
@@ -863,10 +886,7 @@ impl Win32Shell {
                 }
                 RawEvent::CloseRequested { .. } => {
                     let Some(window) = window else { continue };
-                    if let Ok(state) = self.window_mut(window) {
-                        state.close_pending = true;
-                    }
-                    self.queue.push_back(ShellEvent::CloseRequested { window });
+                    self.close_requested(window);
                 }
                 RawEvent::Destroyed { .. } => {
                     // Only reachable when the window went away without this
@@ -942,8 +962,10 @@ impl Win32Shell {
                 }
                 RawEvent::MonitorsChanged => {
                     let monitors = self.enumerate_monitors();
-                    crate::monitor::queue_removed(&self.monitors, &monitors, &mut self.queue);
+                    let removed =
+                        crate::monitor::queue_removed(&self.monitors, &monitors, &mut self.queue);
                     self.monitors = monitors;
+                    self.place_panels(&removed);
                     self.queue.push_back(ShellEvent::MonitorsChanged);
                 }
                 RawEvent::DeviceRemoved { device } => self.devices.remove(device),
@@ -1084,6 +1106,11 @@ impl Shell for Win32Shell {
     ///   synthesized Ctrl press. A constant, like the rest: a touchscreen
     ///   plugged in mid-session delivers pointer messages to a window that
     ///   never asked for them, so there is nothing to latch on.
+    /// * [`PANEL`](ShellCaps::PANEL) — a frameless tool window placed by its
+    ///   anchors; see [`panel`](super::panel).
+    ///   [`PANEL_RESERVE`](ShellCaps::PANEL_RESERVE) is clear until reserving
+    ///   panels are appbars, so an `OwnExtent` panel is built and reserves
+    ///   nothing, as on macOS.
     ///
     /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) is clear for a reason rather than
     /// for want of work — a plain `HWND` presents at its own size, and the
@@ -1152,7 +1179,14 @@ impl Shell for Win32Shell {
                 .or_else(|| self.monitors.first())
                 .cloned(),
         };
-        let created = self.create_native_window(desc, target.as_ref())?;
+        let panel = match desc.role {
+            crate::WindowRole::Panel(panel) => Some(Panel::new(&panel, desc.size)),
+            _ => None,
+        };
+        let created = match &panel {
+            Some(panel) => self.create_panel(desc, panel)?,
+            None => self.create_native_window(desc, target.as_ref())?,
+        };
         let Some(hwnd) = NonNull::new(created.hwnd) else {
             return Err(ShellError::WindowCreation(
                 "CreateWindowExW returned null".to_string(),
@@ -1160,6 +1194,8 @@ impl Shell for Win32Shell {
         };
         let scale_factor = geometry::scale_from_dpi(created.dpi);
         let effective_mode = match desc.mode {
+            // A panel has no full-screen state: see `set_mode`.
+            _ if panel.is_some() => DisplayMode::Windowed,
             DisplayMode::Windowed => DisplayMode::Windowed,
             DisplayMode::Borderless { .. } => DisplayMode::Borderless {
                 monitor: self.monitor_of(created.hwnd),
@@ -1191,6 +1227,7 @@ impl Shell for Win32Shell {
             visible: Self::is_showing(created.hwnd),
             close_pending: false,
             accept_drops: desc.accept_drops,
+            panel,
         };
         let window = self.windows.insert(window).cast();
         let state = self.window(window)?;
@@ -1263,7 +1300,14 @@ impl Shell for Win32Shell {
     /// from the request, so a `SW_SHOWNORMAL` that was overruled — by a policy,
     /// or by the window being minimized — reports what happened.
     fn set_visible(&mut self, window: WindowId, visible: bool) -> Result<(), ShellError> {
-        let hwnd = self.window(window)?.raw();
+        let state = self.window(window)?;
+        let hwnd = state.raw();
+        if let (true, Some(panel)) = (visible, state.panel) {
+            Self::show_panel(hwnd, panel.keyboard);
+            let showing = Self::is_showing(hwnd);
+            self.window_mut(window)?.visible = showing;
+            return Ok(());
+        }
         let command = if visible {
             // `SW_SHOWNORMAL` rather than `SW_SHOW`: it also restores a window
             // that the user minimized, which is what "make it visible" means.
@@ -1303,7 +1347,13 @@ impl Shell for Win32Shell {
         {
             return Err(ShellError::NoSuchMonitor(monitor.0));
         }
-        self.window_mut(window)?.requested_mode = mode;
+        let state = self.window_mut(window)?;
+        state.requested_mode = mode;
+        // A panel has no full-screen state, so the request stays one: its
+        // effective mode is always windowed, as on Wayland.
+        if state.panel.is_some() {
+            return Ok(());
+        }
         self.apply_mode(window, mode)?;
 
         // The `WM_SIZE` the style change produced is already in the raw queue,

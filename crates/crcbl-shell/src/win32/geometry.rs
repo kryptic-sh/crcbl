@@ -36,7 +36,14 @@
 //! style, the DPI and the user's theme.
 
 use super::ffi::{Point, Rect, style, value};
-use crate::{AspectRatio, DisplayMode, PhysicalRect, PhysicalSize, SizeConstraints};
+use crate::{
+    AspectRatio, DisplayMode, PanelAnchor, PanelKeyboard, PanelLayer, PhysicalRect, PhysicalSize,
+    SizeConstraints,
+};
+
+/// On every window this backend makes: without them the system may draw over
+/// the client area while a swapchain is presenting into it.
+const COMMON: u32 = style::CLIP_SIBLINGS | style::CLIP_CHILDREN;
 
 /// The pixels a window rectangle has that its client rectangle does not.
 ///
@@ -79,9 +86,7 @@ pub struct Styles {
 /// account for: there is no window manager to refuse, so the effective mode is
 /// known the moment the call returns.
 ///
-/// `WS_CLIPSIBLINGS | WS_CLIPCHILDREN` are on both, as every rendering window
-/// sets them: without them the system may draw over the client area while a
-/// swapchain is presenting into it.
+/// [`COMMON`] is on both, as every rendering window sets it.
 ///
 /// A non-resizable window loses `WS_THICKFRAME` and `WS_MAXIMIZEBOX` rather
 /// than being clamped by a constraint — [`WindowDesc::resizable`](crate::WindowDesc::resizable)
@@ -89,7 +94,6 @@ pub struct Styles {
 /// handles and the maximize button disappear.
 #[must_use]
 pub fn styles(mode: DisplayMode, resizable: bool) -> Styles {
-    const COMMON: u32 = style::CLIP_SIBLINGS | style::CLIP_CHILDREN;
     match mode {
         DisplayMode::Windowed => {
             let mut window = style::OVERLAPPED_WINDOW;
@@ -109,6 +113,114 @@ pub fn styles(mode: DisplayMode, resizable: bool) -> Styles {
             ex_style: style::EX_APP_WINDOW,
         },
     }
+}
+
+/// The styles of a [panel](crate::WindowRole::Panel).
+///
+/// No frame, and a tool window, so no taskbar button and no place in Alt-Tab.
+/// The top two layers are topmost, which is as high as Win32 goes, so
+/// [`PanelLayer::Overlay`] and [`PanelLayer::Top`] share one band. A panel
+/// that takes no keyboard is never activated by a click, so hovering and
+/// clicking it leave the keyboard where it was.
+#[must_use]
+pub fn panel_styles(layer: PanelLayer, keyboard: PanelKeyboard) -> Styles {
+    let mut ex_style = style::EX_TOOL_WINDOW;
+    if matches!(layer, PanelLayer::Top | PanelLayer::Overlay) {
+        ex_style |= style::EX_TOPMOST;
+    }
+    if keyboard == PanelKeyboard::None {
+        ex_style |= style::EX_NO_ACTIVATE;
+    }
+    Styles {
+        style: style::POPUP | COMMON,
+        ex_style,
+    }
+}
+
+/// Space around a panel, in physical pixels: [`Margins`](crate::Margins)
+/// scaled to the monitor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Insets {
+    /// From the top edge.
+    pub top: i32,
+    /// From the right edge.
+    pub right: i32,
+    /// From the bottom edge.
+    pub bottom: i32,
+    /// From the left edge.
+    pub left: i32,
+}
+
+/// A logical length in whole pixels at `scale`: rounded, and clamped into
+/// `0..=i32::MAX`, with a non-finite length read as zero. Unlike
+/// [`LogicalSize::to_physical`](crate::LogicalSize::to_physical), zero stays
+/// zero, which a margin needs.
+#[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "clamped into i32's range before the cast, and a NaN casts to 0"
+)]
+pub fn pixels(logical: f64, scale: f64) -> i32 {
+    (logical * scale).round().clamp(0.0, f64::from(i32::MAX)) as i32
+}
+
+/// Where a panel of `size` goes in `area`: `insets` away from each edge it is
+/// anchored to, stretched between two opposite anchored edges, and centred on
+/// an axis anchored to neither. That is `wlr-layer-shell`'s placement, which
+/// [`PanelDesc`](crate::PanelDesc) is written in.
+#[must_use]
+pub fn panel_rect(
+    area: PhysicalRect,
+    anchor: PanelAnchor,
+    size: PhysicalSize,
+    insets: Insets,
+) -> PhysicalRect {
+    let (x, width) = place_on_axis(
+        (area.x, area.width),
+        (
+            anchor.contains(PanelAnchor::LEFT),
+            anchor.contains(PanelAnchor::RIGHT),
+        ),
+        (insets.left, insets.right),
+        size.width,
+    );
+    let (y, height) = place_on_axis(
+        (area.y, area.height),
+        (
+            anchor.contains(PanelAnchor::TOP),
+            anchor.contains(PanelAnchor::BOTTOM),
+        ),
+        (insets.top, insets.bottom),
+        size.height,
+    );
+    PhysicalRect::new(x, y, width, height)
+}
+
+/// One axis of [`panel_rect`]: where a panel of `length` starts along an
+/// area's `(start, length)`, and how long it is, given which ends it is
+/// anchored to and its insets from them.
+fn place_on_axis(
+    (area_start, area_length): (i32, u32),
+    (at_start, at_end): (bool, bool),
+    (inset_start, inset_end): (i32, i32),
+    length: u32,
+) -> (i32, u32) {
+    let area_length = i64::from(area_length);
+    let length = i64::from(length);
+    let (offset, length) = match (at_start, at_end) {
+        (true, true) => (
+            i64::from(inset_start),
+            (area_length - i64::from(inset_start) - i64::from(inset_end)).max(1),
+        ),
+        (true, false) => (i64::from(inset_start), length),
+        (false, true) => (area_length - i64::from(inset_end) - length, length),
+        (false, false) => ((area_length - length) / 2, length),
+    };
+    let start = i64::from(area_start) + offset;
+    (
+        i32::try_from(start).unwrap_or(if start < 0 { i32::MIN } else { i32::MAX }),
+        u32::try_from(length).unwrap_or(u32::MAX),
+    )
 }
 
 /// The interactive resize limits a `WM_GETMINMAXINFO` reports, in **window**
@@ -305,6 +417,89 @@ mod tests {
         width: 16,
         height: 39,
     };
+
+    #[test]
+    fn a_panel_is_a_frameless_tool_window_topmost_on_the_top_layers() {
+        for layer in [PanelLayer::Top, PanelLayer::Overlay] {
+            let styles = panel_styles(layer, PanelKeyboard::Exclusive);
+            assert_ne!(styles.ex_style & style::EX_TOPMOST, 0, "{layer:?}");
+        }
+        for layer in [PanelLayer::Background, PanelLayer::Bottom] {
+            let styles = panel_styles(layer, PanelKeyboard::Exclusive);
+            assert_eq!(styles.ex_style & style::EX_TOPMOST, 0, "{layer:?}");
+        }
+        let bar = panel_styles(PanelLayer::Top, PanelKeyboard::None);
+        assert_ne!(
+            bar.ex_style & style::EX_TOOL_WINDOW,
+            0,
+            "kept out of the taskbar"
+        );
+        assert_eq!(bar.ex_style & style::EX_APP_WINDOW, 0);
+        assert_ne!(bar.style & style::POPUP, 0);
+        assert_eq!(bar.style & style::CAPTION, 0, "no title bar");
+        assert_ne!(
+            bar.ex_style & style::EX_NO_ACTIVATE,
+            0,
+            "a click keeps the keyboard"
+        );
+        for keyboard in [PanelKeyboard::OnDemand, PanelKeyboard::Exclusive] {
+            let styles = panel_styles(PanelLayer::Top, keyboard);
+            assert_eq!(styles.ex_style & style::EX_NO_ACTIVATE, 0, "{keyboard:?}");
+        }
+    }
+
+    #[test]
+    fn a_margin_in_pixels_rounds_and_keeps_zero() {
+        assert_eq!(pixels(0.0, 1.5), 0);
+        assert_eq!(pixels(3.0, 1.5), 5);
+        assert_eq!(pixels(8.0, 1.25), 10);
+        assert_eq!(pixels(-4.0, 1.0), 0);
+        assert_eq!(pixels(f64::NAN, 1.0), 0);
+        assert_eq!(pixels(f64::INFINITY, 1.0), i32::MAX);
+    }
+
+    #[test]
+    fn a_panel_is_placed_as_layer_shell_places_one() {
+        let area = PhysicalRect::new(100, 40, 1920, 1040);
+        let bar = PhysicalSize::new(0, 30);
+        let insets = Insets {
+            top: 4,
+            right: 8,
+            bottom: 12,
+            left: 16,
+        };
+        let across_the_top = PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT;
+        assert_eq!(
+            panel_rect(area, across_the_top, bar, Insets::default()),
+            PhysicalRect::new(100, 40, 1920, 30),
+            "stretched between the sides, at its own height"
+        );
+        assert_eq!(
+            panel_rect(area, across_the_top, bar, insets),
+            PhysicalRect::new(116, 44, 1920 - 16 - 8, 30),
+        );
+        let dock = PhysicalSize::new(64, 500);
+        assert_eq!(
+            panel_rect(area, PanelAnchor::RIGHT, dock, insets),
+            PhysicalRect::new(100 + 1920 - 8 - 64, 40 + (1040 - 500) / 2, 64, 500),
+            "held off the right edge, centred down it"
+        );
+        assert_eq!(
+            panel_rect(area, PanelAnchor::BOTTOM | PanelAnchor::LEFT, dock, insets),
+            PhysicalRect::new(116, 40 + 1040 - 12 - 500, 64, 500),
+            "in the corner"
+        );
+        let launcher = PhysicalSize::new(600, 400);
+        assert_eq!(
+            panel_rect(area, PanelAnchor::empty(), launcher, insets),
+            PhysicalRect::new(100 + (1920 - 600) / 2, 40 + (1040 - 400) / 2, 600, 400),
+            "centred, and an unanchored panel's insets do nothing"
+        );
+        assert_eq!(
+            panel_rect(area, PanelAnchor::all(), launcher, insets),
+            PhysicalRect::new(116, 44, 1920 - 24, 1040 - 16),
+        );
+    }
 
     #[test]
     fn a_windowed_style_has_a_caption_and_a_borderless_one_has_nothing() {

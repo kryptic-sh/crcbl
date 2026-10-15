@@ -42,6 +42,7 @@
 //! | Cursor shapes and hiding | complete — stock `IDC_*` cursors through `WM_SETCURSOR`, hiding through a balanced `ShowCursor` |
 //! | Clipboard, both directions: `CF_UNICODETEXT` plus a registered format per mime | complete — [`CLIPBOARD`](crate::ShellCaps::CLIPBOARD), see [`clipboard`] |
 //! | File drops in: `DragAcceptFiles`, `WM_DROPFILES`, the `accept_drops` gate | complete — [`DRAG_DROP`](crate::ShellCaps::DRAG_DROP), see [`dnd`] |
+//! | Panels: frameless tool windows placed by their anchors on a monitor | complete — [`PANEL`](crate::ShellCaps::PANEL), see [`panel`]; reserving an edge (appbars), popups and per-pixel alpha are not yet |
 //! | Drag *feedback* — a drop cursor, hover highlighting, non-file formats | **not implemented**: it is `IDropTarget`, which is COM. [`dnd`] gives the argument |
 //!
 //! Two things input needs that no other area of this backend does are worth
@@ -232,6 +233,8 @@ pub mod ffi;
 mod input;
 #[cfg(target_os = "windows")]
 mod monitors;
+#[cfg(target_os = "windows")]
+mod panel;
 #[cfg(target_os = "windows")]
 mod shell;
 #[cfg(target_os = "windows")]

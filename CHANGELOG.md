@@ -903,9 +903,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   keyboard: the compositor sizes a stretched axis and reports it as `Resized`,
   `Reserve::OwnExtent` is the exclusive zone, and a layer surface's `closed` is
   a `CloseRequested`. Wayland also honours `transparent` on every window: a
-  swapchain with premultiplied alpha shows the desktop through. The other
-  window-system backends refuse panels and popups until each implements them.
-  `LogicalRect` is new in `crcbl_shell`.
+  swapchain with premultiplied alpha shows the desktop through. Win32 builds
+  panels as frameless tool windows, kept out of the taskbar and Alt-Tab, topmost
+  on the top two layers, never activated by a click when they take no keyboard,
+  and placed by their anchors and margins on the monitor asked for or the one
+  under the pointer. A panel that takes the keyboard asks for the foreground
+  when shown. Win32 does not reserve an edge yet. The other window-system
+  backends refuse panels and popups until each implements them. `LogicalRect` is
+  new in `crcbl_shell`.
 
 - **Fonts from bytes read at run time.** `Font::parse` takes any `FontData`: an
   `include_bytes!` as before, or a `Vec<u8>`, `Box<[u8]>` or `Arc<[u8]>` an

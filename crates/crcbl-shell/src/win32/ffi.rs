@@ -911,6 +911,14 @@ pub mod style {
     pub const EX_APP_WINDOW: u32 = 0x0004_0000;
     /// `WS_EX_WINDOWEDGE`.
     pub const EX_WINDOW_EDGE: u32 = 0x0000_0100;
+    /// `WS_EX_TOOLWINDOW` — no taskbar button and no place in Alt-Tab: what
+    /// a panel is.
+    pub const EX_TOOL_WINDOW: u32 = 0x0000_0080;
+    /// `WS_EX_TOPMOST` — above every window without it.
+    pub const EX_TOPMOST: u32 = 0x0000_0008;
+    /// `WS_EX_NOACTIVATE` — a click does not make the window the foreground
+    /// one, so the keyboard stays where it was. Mouse messages still arrive.
+    pub const EX_NO_ACTIVATE: u32 = 0x0800_0000;
     /// `WS_EX_ACCEPTFILES` — **what `DragAcceptFiles` sets**, and therefore
     /// state rather than style.
     ///
@@ -1039,6 +1047,9 @@ pub mod value {
     pub const SW_HIDE: i32 = 0;
     /// `SW_SHOWNORMAL`.
     pub const SW_SHOW_NORMAL: i32 = 1;
+    /// `SW_SHOWNOACTIVATE` — shown at its last size and position, and not
+    /// activated: how a panel that takes no keyboard is shown.
+    pub const SW_SHOW_NO_ACTIVATE: i32 = 4;
     /// `SW_MINIMIZE`: `ShowWindow` command that iconifies the window.
     ///
     /// Test-only, like [`PM_NOREMOVE`]: the backend never minimizes a window,
@@ -1064,6 +1075,9 @@ pub mod value {
     pub const SWP_FRAME_CHANGED: u32 = 0x0020;
     /// `SWP_NOOWNERZORDER`.
     pub const SWP_NO_OWNER_Z_ORDER: u32 = 0x0200;
+    /// `HWND_BOTTOM`, as `SetWindowPos`'s insert-after: the bottom of the
+    /// z-order.
+    pub const HWND_BOTTOM: isize = 1;
 
     /// `PM_REMOVE`.
     pub const PM_REMOVE: u32 = 0x0001;
@@ -1526,6 +1540,11 @@ unsafe extern "system" {
     #[cfg(test)]
     pub fn GetQueueStatus(flags: u32) -> u32;
     pub fn MonitorFromWindow(hwnd: Handle, flags: u32) -> Handle;
+    pub fn MonitorFromPoint(point: Point, flags: u32) -> Handle;
+    // Test-only: where a panel landed, in desktop pixels, read back from the
+    // system rather than from the rectangle this backend computed.
+    #[cfg(test)]
+    pub fn GetWindowRect(hwnd: Handle, rect: *mut Rect) -> Bool32;
     pub fn EnumDisplayMonitors(
         hdc: Handle,
         clip: *const Rect,
@@ -1573,10 +1592,10 @@ unsafe extern "system" {
     // what makes the confinement tests able to fail.
     #[cfg(test)]
     pub fn GetClipCursor(rect: *mut Rect) -> Bool32;
-    // Test-only, and for one reason: `ClipCursor` and `SetCursorPos` are
-    // restricted to the process that owns the foreground window, and CI has
-    // nobody to click on ours. This is the click.
-    #[cfg(test)]
+    // A panel that takes the keyboard asks for the foreground with this. The
+    // tests use it too: `ClipCursor` and `SetCursorPos` are restricted to the
+    // process that owns the foreground window, and CI has nobody to click on
+    // ours. This is the click.
     pub fn SetForegroundWindow(hwnd: Handle) -> Bool32;
     // Test-only, as the other half of that click: `SetForegroundWindow` can be
     // refused, or honoured and then overtaken by another process, and neither

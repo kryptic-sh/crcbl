@@ -122,17 +122,35 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      `PanelKeyboard::OnDemand` on a compositor below layer-shell version 4 is
      `Unsupported`, because both other interactivities are a different panel.
 5. **Win32**:
-   - Appbars for `OwnExtent` (S4): `ABE_TOP` for `TOP | LEFT | RIGHT`.
-     `ABN_POSCHANGED` stays internal. `ABN_FULLSCREENAPP` becomes an event (lyr
-     item 7). `ABM_REMOVE` runs on drop and from a crash-safe path, because a
-     skipped `ABM_REMOVE` keeps the work area reserved until Explorer restarts.
-   - Tool, topmost and no-activate styles, kept out of the taskbar and Alt-Tab
-     (S27).
-   - `WM_MOUSEACTIVATE` answered with `MA_NOACTIVATE`, so hover works on a panel
-     that never activates (lyr item 9).
-   - Foreground focus on a hotkey launch, and what happens when
-     `SetForegroundWindow` is refused, reported rather than silent (pikr item
-     9).
+   - Panels are built (`crates/crcbl-shell/src/win32/panel.rs`, styles and
+     placement in `win32/geometry.rs`): a `WS_EX_TOOLWINDOW` popup, out of the
+     taskbar and Alt-Tab (S27), topmost for `Top` and `Overlay`, at the bottom
+     of the z-order for `Bottom` and `Background`. It is placed by `panel_rect`
+     in the monitor's work area (`Reserve::None`) or its bounds
+     (`IgnoreOthers`), on the monitor asked for or the one under the pointer
+     (S8's centred launcher is an unanchored panel). It is placed again after a
+     display or DPI change, and closed when its monitor is unplugged.
+   - Decided: hover without activation (lyr item 9) is `WS_EX_NOACTIVATE` plus
+     showing with `SW_SHOWNOACTIVATE`, not a `WM_MOUSEACTIVATE` answer. Mouse
+     messages reach a window that is not active anyway, and the style also
+     covers activation by means other than a click. An `Exclusive` panel calls
+     `SetForegroundWindow` when shown, and a refusal is logged and visible to
+     the program as a `Focus` that never arrives (pikr item 9). Whether a richer
+     report is wanted is pikr's call.
+   - **Verified so far:** `panel_styles`, `panel_rect` and `pixels` unit tests
+     on the Windows host. The real-desktop tests in `win32/shell/tests.rs`
+     (`a_bar_is_a_topmost_tool_window_…`, `a_launcher_is_centred_…`,
+     `a_bottom_layer_panel_is_not_topmost`) are `#[ignore]`d like the rest of
+     that file and run only in CI's `win32 e2e (real desktop)` job.
+   - Still to do: appbars for `OwnExtent` (S4), which sets `PANEL_RESERVE`:
+     `ABE_TOP` for `TOP | LEFT | RIGHT`, `ABN_POSCHANGED` kept internal,
+     `ABN_FULLSCREENAPP` as an event (lyr item 7), and `ABM_REMOVE` on drop and
+     from a crash-safe path, because a skipped `ABM_REMOVE` keeps the work area
+     reserved until Explorer restarts. A work area that changes without a
+     display change (`WM_SETTINGCHANGE` with `SPI_SETWORKAREA`) does not move
+     panels yet. `PanelLayer::Overlay` and `Top` share the topmost band, and
+     `Background` cannot go below the desktop icons; both are platform limits,
+     written down in `win32/panel.rs`.
    - Transparency: per-pixel alpha with a Vulkan or D3D12 swapchain likely means
      DirectComposition (lyr item 11), with no DWM border, shadow or rounded
      corner fighting the app's own (pikr item 7).

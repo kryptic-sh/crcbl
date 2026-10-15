@@ -591,8 +591,18 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
         ShellCaps::DRAG_DROP,
         ShellCaps::TEXT_IME,
         ShellCaps::TOUCH,
+        ShellCaps::PANEL,
     ] {
         assert!(caps.contains(present), "{present:?} is implemented");
+    }
+    // Not yet: appbars, popups and per-pixel alpha are the rest of this
+    // backend's panel work.
+    for absent in [
+        ShellCaps::PANEL_RESERVE,
+        ShellCaps::POPUP,
+        ShellCaps::TRANSPARENT,
+    ] {
+        assert!(!caps.contains(absent), "{absent:?} is not implemented yet");
     }
     // Latched from the registration rather than assumed — the one bit on
     // this backend that is not a constant.
@@ -2160,4 +2170,171 @@ fn the_backend_reports_itself_and_is_reachable_by_name() {
         let automatic = crate::open().expect("auto-selection has one candidate here");
         assert_eq!(automatic.backend(), ShellBackend::Win32);
     }
+}
+
+/// A panel descriptor on `monitor`, with everything else at its default.
+fn panel_desc<'a>(
+    title: &'a str,
+    size: LogicalSize,
+    panel: crate::PanelDesc<'a>,
+) -> WindowDesc<'a> {
+    WindowDesc {
+        title,
+        size,
+        role: crate::WindowRole::Panel(panel),
+        ..WindowDesc::default()
+    }
+}
+
+/// A window's styles and its rectangle on the desktop, as the system has them.
+fn styles_and_rect(hwnd: Handle) -> (u32, u32, Rect) {
+    // SAFETY: reading this shell's own window's two style words.
+    let (window_style, ex_style) = unsafe {
+        (
+            ffi::GetWindowLongPtrW(hwnd, value::GWL_STYLE) as u32,
+            ffi::GetWindowLongPtrW(hwnd, value::GWL_EX_STYLE) as u32,
+        )
+    };
+    let mut rect = Rect::default();
+    // SAFETY: `rect` is a live `RECT` the call writes into.
+    unsafe { ffi::GetWindowRect(hwnd, &raw mut rect) };
+    (window_style, ex_style, rect)
+}
+
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_bar_is_a_topmost_tool_window_across_the_top_of_its_monitors_work_area() {
+    use super::super::ffi::style;
+    const HEIGHT: f64 = 30.0;
+    let mut shell = shell();
+    let primary = shell
+        .monitors()
+        .iter()
+        .find(|monitor| monitor.is_primary)
+        .cloned()
+        .expect("a primary monitor");
+    let bar = shell
+        .create_window(&panel_desc(
+            "crcbl panel bar",
+            LogicalSize::new(0.0, HEIGHT),
+            crate::PanelDesc {
+                monitor: Some(primary.id),
+                anchor: crate::PanelAnchor::TOP
+                    | crate::PanelAnchor::LEFT
+                    | crate::PanelAnchor::RIGHT,
+                ..crate::PanelDesc::default()
+            },
+        ))
+        .expect("a panel");
+    shell.pump(&mut |_| {});
+    let hwnd = hwnd_of(&shell, bar);
+    let (window_style, ex_style, rect) = styles_and_rect(hwnd);
+    assert_ne!(ex_style & style::EX_TOOL_WINDOW, 0, "out of the taskbar");
+    assert_eq!(ex_style & style::EX_APP_WINDOW, 0);
+    assert_ne!(ex_style & style::EX_TOPMOST, 0, "above application windows");
+    assert_ne!(
+        ex_style & style::EX_NO_ACTIVATE,
+        0,
+        "a bar takes no keyboard"
+    );
+    assert_ne!(window_style & style::POPUP, 0);
+    assert_eq!(window_style & style::CAPTION, 0, "no title bar");
+
+    let height = LogicalSize::new(0.0, HEIGHT)
+        .to_physical(primary.scale_factor)
+        .height;
+    let area = primary.work_area;
+    assert_eq!(
+        shell.window_state(bar).expect("live").size(),
+        Some(PhysicalSize::new(area.width, height)),
+        "stretched across the work area, at its own height"
+    );
+    assert_eq!(
+        (rect.left, rect.top, rect.right - rect.left),
+        (area.x, area.y, area.width as i32),
+        "held against the top of the work area"
+    );
+    let state = shell.window_state(bar).expect("live");
+    assert_eq!(state.effective_mode(), Some(DisplayMode::Windowed));
+
+    // A full-screen request on a panel stays a request.
+    shell
+        .set_mode(bar, DisplayMode::Borderless { monitor: None })
+        .expect("recorded");
+    shell.pump(&mut |_| {});
+    let state = shell.window_state(bar).expect("live");
+    assert_eq!(state.effective_mode(), Some(DisplayMode::Windowed));
+    assert!(!state.mode_request_honoured());
+    let (_, ex_style, _) = styles_and_rect(hwnd);
+    assert_ne!(ex_style & style::EX_TOOL_WINDOW, 0, "still a panel");
+    shell.destroy_window(bar).expect("destroy");
+}
+
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_launcher_is_centred_on_the_monitor_it_opens_on_and_can_take_the_keyboard() {
+    use super::super::ffi::style;
+    let mut shell = shell();
+    let launcher = shell
+        .create_window(&panel_desc(
+            "crcbl panel launcher",
+            LogicalSize::new(400.0, 300.0),
+            crate::PanelDesc {
+                layer: crate::PanelLayer::Overlay,
+                keyboard: crate::PanelKeyboard::Exclusive,
+                ..crate::PanelDesc::default()
+            },
+        ))
+        .expect("a panel");
+    shell.pump(&mut |_| {});
+    let hwnd = hwnd_of(&shell, launcher);
+    let (_, ex_style, rect) = styles_and_rect(hwnd);
+    assert_eq!(
+        ex_style & style::EX_NO_ACTIVATE,
+        0,
+        "a panel that takes the keyboard can be activated"
+    );
+    assert_ne!(ex_style & style::EX_TOPMOST, 0);
+
+    let on = shell.monitor_of(hwnd).expect("on a monitor");
+    let monitor = shell.monitor(on).cloned().expect("a known monitor");
+    let size = LogicalSize::new(400.0, 300.0).to_physical(monitor.scale_factor);
+    assert_eq!(
+        shell.window_state(launcher).expect("live").size(),
+        Some(size),
+        "an unanchored panel is the size it asked for"
+    );
+    let area = monitor.work_area;
+    assert_eq!(
+        (rect.left, rect.top),
+        (
+            area.x + (area.width as i32 - size.width as i32) / 2,
+            area.y + (area.height as i32 - size.height as i32) / 2,
+        ),
+        "centred in the work area"
+    );
+    shell.destroy_window(launcher).expect("destroy");
+}
+
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_bottom_layer_panel_is_not_topmost() {
+    use super::super::ffi::style;
+    let mut shell = shell();
+    let widget = shell
+        .create_window(&panel_desc(
+            "crcbl panel widget",
+            LogicalSize::new(200.0, 200.0),
+            crate::PanelDesc {
+                layer: crate::PanelLayer::Bottom,
+                anchor: crate::PanelAnchor::TOP | crate::PanelAnchor::RIGHT,
+                ..crate::PanelDesc::default()
+            },
+        ))
+        .expect("a panel");
+    shell.pump(&mut |_| {});
+    let (_, ex_style, _) = styles_and_rect(hwnd_of(&shell, widget));
+    assert_eq!(ex_style & style::EX_TOPMOST, 0);
+    assert_ne!(ex_style & style::EX_TOOL_WINDOW, 0);
+    shell.destroy_window(widget).expect("destroy");
 }

@@ -57,7 +57,7 @@ const CLASS_NAME: &str = "crcbl_window";
 static CLASS: OnceLock<Result<(), u32>> = OnceLock::new();
 
 /// The class name as the NUL-terminated UTF-16 every `*W` entry point wants.
-fn class_name() -> Vec<u16> {
+pub(super) fn class_name() -> Vec<u16> {
     ffi::wide(CLASS_NAME).expect("the class name is a literal with no interior NUL")
 }
 
@@ -336,7 +336,10 @@ impl Win32Shell {
     /// (a mode change), or the DPI. Forgetting one of the three is a window
     /// that enforces last week's minimum size.
     pub(super) fn refresh_limits(&self, window: &WinWindow) {
-        let styles = geometry::styles(window.effective_mode, window.resizable);
+        let styles = match &window.panel {
+            Some(panel) => geometry::panel_styles(panel.layer, panel.keyboard),
+            None => geometry::styles(window.effective_mode, window.resizable),
+        };
         let frame = Self::frame_for(styles, window.dpi);
         self.shared().set_limits(Limits {
             hwnd: window.key,
