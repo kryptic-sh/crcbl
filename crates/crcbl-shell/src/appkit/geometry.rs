@@ -296,13 +296,17 @@ pub fn panel_frame(area: NSRect, anchor: PanelAnchor, size: NSSize, margins: Mar
 /// One axis of [`panel_frame`]: where a panel of `length` starts along an
 /// area's `(start, length)`, and how long it is, given which ends it is
 /// anchored to and its margins from them.
+///
+/// **The start is a whole point.** Centring an even length in an odd one
+/// lands on a half point, and AppKit snaps a frame to whole pixels by growing
+/// it, so a 300-point panel came out 301 points tall.
 fn place_on_axis(
     (area_start, area_length): (f64, f64),
     (at_start, at_end): (bool, bool),
     (margin_start, margin_end): (f64, f64),
     length: f64,
 ) -> (f64, f64) {
-    match (at_start, at_end) {
+    let (start, length) = match (at_start, at_end) {
         (true, true) => (
             area_start + margin_start,
             (area_length - margin_start - margin_end).max(1.0),
@@ -310,7 +314,8 @@ fn place_on_axis(
         (true, false) => (area_start + margin_start, length),
         (false, true) => (area_start + area_length - margin_end - length, length),
         (false, false) => (area_start + (area_length - length) / 2.0, length),
-    }
+    };
+    (start.round(), length)
 }
 
 /// The presentation options a mode wants from `NSApplication`.
@@ -647,8 +652,8 @@ mod tests {
                 NSSize::new(600.0, 400.0),
                 margins
             ),
-            NSRect::new(420.0, 237.5, 600.0, 400.0),
-            "centred, and an unanchored panel's margins do nothing"
+            NSRect::new(420.0, 238.0, 600.0, 400.0),
+            "centred on a whole point, and an unanchored panel's margins do nothing"
         );
     }
 
