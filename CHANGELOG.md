@@ -6,13 +6,14 @@ All notable changes to this workspace are recorded here, in
 change bumps the minor.
 
 Started partway through the project, so it covers changes from this point on
-rather than the whole history — `git log` is the record before it. There are no
-tags yet, so everything so far is unreleased.
+rather than the whole history — `git log` is the record before it.
 
 Internal churn a release note would not mention — refactors with no outward
 effect, test-only and docs-only changes, CI repairs — is deliberately left out.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-10-16
 
 ### Breaking
 
@@ -20105,4 +20106,5 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked for. The frame is now converted for the windowed mask with
   `+[NSWindow frameRectForContentRect:styleMask:]`.
 
-[Unreleased]: https://github.com/kryptic-sh/crcbl/commits/main
+[Unreleased]: https://github.com/kryptic-sh/crcbl/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/kryptic-sh/crcbl/releases/tag/v0.1.0

@@ -3,14 +3,21 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-## HIGH PRIORITY: lyr and pikr before the first release (2026-10-15)
+## HIGH PRIORITY: what lyr and pikr still need (2026-10-15)
 
-**The owner decided on 2026-10-15 that the first crates.io release waits for two
-things.** First, the features lyr (kryptic-sh/lyr, a status bar replacing
-waybar) and pikr (kryptic-sh/pikr, a rofi-style launcher leaving floem) need
-must be built. Second, the crate seam must be refactored so outside projects can
-use the shell, the UI and the UI's draw pass without the rest of the engine. The
-release pipeline is ready and waits on this; see the entry below.
+**The owner decided on 2026-10-15 that the first crates.io release would wait
+for two things.** First, the features lyr (kryptic-sh/lyr, a status bar
+replacing waybar) and pikr (kryptic-sh/pikr, a rofi-style launcher leaving
+floem) need must be built. Second, the crate seam must be refactored so outside
+projects can use the shell, the UI and the UI's draw pass without the rest of
+the engine. **On 2026-10-16 the owner released 0.1.0 with the rows below still
+open**: what is left ships in later releases.
+
+**Decided 2026-10-16, taking the recommendations offered:** AccessKit (S14) is
+approved as a dependency of `crcbl-shell` and goes ahead after the release;
+`ShellCaps::HW_UPSCALE` stays as a documented fact (removing it is now a
+breaking change, so a minor bump); `crcbl-cli` stays unpublished; the `notify`
+watcher and a grapheme crate stay declined until a caller needs them.
 
 The requirements are rows S1–S27 of the joint table in
 `lyr/docs/plan/03-surfaces-and-input.md` (lyr commit f44f1b8). That table
@@ -299,8 +306,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
     `.so` names as Linux, which FreeBSD's packages use), evdev keycodes from the
     compositor and the X server, and every other numeric constant beside the two
     above, which were compared against FreeBSD's headers by reading.
-13. **Accessibility (S14).** AccessKit is a new dependency, which is the owner's
-    call; ask before starting.
+13. **Accessibility (S14).** AccessKit was approved as a new dependency on
+    2026-10-16; not started.
 
 ### Left behind by the seam split
 
@@ -751,29 +758,24 @@ validation before a reusable port can be specified. GPU residency likewise needs
 measured pressure and a proven game-local policy. Keep those decisions in EW's
 backlog; do not create speculative engine implementations for them.
 
-## The release pipeline: what a first tag still needs (2026-10-15)
+## The release pipeline: what 0.1.0 left open (2026-10-16)
 
 The owner asked, relayed by the lyr session, for a release pipeline matching
 tmxr's. `ci.yml` now carries it: the `package`, `build`, `install-packages`,
 `publish-github-release`, `publish-crates`, `aur-bin`, `brew-tap`,
 `scoop-bucket` and `tag-release-status` jobs, with `pkg/` and
 `tools/publish-crates.sh` and `tools/check-publish-order.sh`. lyr's release is
-blocked on crcbl being on crates.io. **No tag has been cut**, so no publish job
-has ever run, and **the first tag waits for the lyr and pikr program** at the
-top of this file, by the owner's decision of 2026-10-15.
+blocked on crcbl being on crates.io. **0.1.0, cut 2026-10-16, is the first
+tag**, released as the version the workspace already carried rather than a
+bumped 0.1.1, since no 0.1.0 had ever shipped.
 
-Needed from the owner before the first tag:
-
-- Nothing for the secrets: `CARGO_REGISTRY_TOKEN` and `SCOOP_SSH_KEY` are
-  visible to every org repository, and crcbl was added to `AUR_SSH_KEY`'s and
-  `BREW_SSH_KEY`'s selected repositories on 2026-10-15. Whether the token can
-  create crates under these names is unproven until the first publish. Every
-  crate name was checked free on crates.io that day; nothing reserves them.
-- Optionally, ask crates.io to raise the new-crate limit: the first publish
-  creates every crate and can outlast the runner (`docs/notes/ci.md` has the
-  numbers). Without it, re-run the timed-out `publish-crates` job; it resumes.
-- Cutting the tag, which BCTP does. The tag must equal the workspace version,
-  which `build` checks.
+- The secrets: `CARGO_REGISTRY_TOKEN` and `SCOOP_SSH_KEY` are visible to every
+  org repository, and crcbl was added to `AUR_SSH_KEY`'s and `BREW_SSH_KEY`'s
+  selected repositories on 2026-10-15.
+- **Decided 2026-10-16: no request to crates.io for a higher new-crate limit.**
+  The first publish creates every crate and can outlast the runner
+  (`docs/notes/ci.md` has the numbers); a timed-out `publish-crates` job is
+  re-run, and resumes.
 
 Decided unasked, per the standing "pick the best long-term option" instruction:
 
@@ -793,11 +795,10 @@ Decided unasked, per the standing "pick the best long-term option" instruction:
 
 Left open:
 
-- **Not verified until CI runs:** `package` on Linux (the local run was on
-  Windows, where every crate packaged and built from its tarball),
-  `ubuntu-22.04-arm`, the `.deb`/`.rpm` metadata in
-  `crates/crcbl-cli/ Cargo.toml`, and `install-packages`. The tag-only jobs are
-  unverified until a tag runs them.
+- **Verified on main before the tag** (run 38745362807): `package`, every
+  `build` target including `ubuntu-22.04-arm`, and `install-packages` for the
+  `.deb` and `.rpm` on both architectures. The tag-only publish jobs first ran
+  on `v0.1.0`.
 - **`crcbl new` scaffolds a path dependency** on an engine checkout
   (`crates/crcbl-cli/src/new.rs`). Once the crates are on crates.io, a version
   dependency is the natural default, and the packaged binary has no checkout.
@@ -7342,10 +7343,10 @@ pixel tests on vk (radv/lavapipe) and a row in CI's Metal, dx12 (WARP) and
 browser cross-backend gates for each new filter. Which of those gates run
 `mesh_e2e::render_scale` today was not checked.
 
-**Open decision:** what happens to `ShellCaps::HW_UPSCALE` itself. Either keep
-it as a documented fact that nothing branches on, or remove it from the seam,
-which is a breaking change to `crcbl-shell` that every backend's caps and tests
-would follow.
+**Decided 2026-10-16:** `ShellCaps::HW_UPSCALE` stays, as a documented fact that
+nothing branches on. Removing it from the seam is a breaking change to the
+released `crcbl-shell`, which every backend's caps and tests would follow, for
+no caller's gain.
 
 ## CI's Windows jobs do not get the 8 MiB main stack (2026-09-22)
 
@@ -25026,22 +25027,6 @@ is exercised only against the stub. Nothing verifies what a real Dawn does with
 `maxAnisotropy: 16`. Deliberate — the probe exists for the `lod_max` sentinel,
 and an anisotropy probe would be measuring the machine rather than the seam.
 
-### `CHANGELOG.md`'s `[Unreleased]` is 13,390 lines, because no tag has been cut
-
-Measured 2026-09-06 (12,090 on 2026-09-03). The file's own header says why —
-"There are no tags yet, so everything so far is unreleased" — so this is the
-design working, not a defect. It is recorded because of what it costs: the
-section is past the point where a reader can find anything in it, and **BCTP
-step 2 assumes `[Unreleased]` is small enough to audit by eye** before moving it
-under a version heading. Cutting `v0.1.0` would move all of it under one heading
-and leave the next release's entries readable again.
-
-That is the user's call, not one to make unasked: a first tag starts the release
-pipeline, and the link block at the bottom of the file has never been exercised.
-**Left to the owner on 2026-09-25**, when the other open decisions were taken: a
-tag cannot be taken back, so this is the one decision here not made unasked. Not
-a blocker for anything.
-
 ### The counted-claims sweep is done for `apps/*`; the wider one is not
 
 `CLAUDE.md`'s rule is that a count of code elements — "four impls", "the three
@@ -27595,10 +27580,9 @@ it left are under _Netgraph HUD, LAN discovery_). What is left:
   rectangle at full white. What is still open is the picture over _live art_ in
   a sample golden, which is what the horde capture above buys.
 
-- **The changelog starts mid-project.** `CHANGELOG.md` covers changes from
-  2026-08-01 onward; everything before it is in `git log` only. Worth doing at
-  the first tagged release, or not at all — there are no releases yet for a
-  reader to be missing entries from.
+- **Declined: backfilling the changelog before 2026-08-01.** `CHANGELOG.md`
+  starts mid-project and says so; 0.1.0 is the first release, so no reader of a
+  release is missing entries, and `git log` is the record before it.
 
 ## What `crcbl-phys` owes, found by writing asteroids
 
