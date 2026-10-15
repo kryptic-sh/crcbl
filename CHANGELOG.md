@@ -22,6 +22,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `LC_CTYPE` or `LANG`). Before, a dead key typed nothing and the key after it
   typed itself. A key that breaks a sequence commits nothing, and losing the
   keyboard abandons a sequence. No pre-edit is shown mid-sequence.
+- **`Shell::set_text_input_enabled(window, enabled)`**, a provided method: a
+  text field asks for the platform input method while it has focus, and lets it
+  go after. The default only validates the handle. `HeadlessShell` records it
+  (`HeadlessShell::text_input_enabled`), and `crcbl::text_input::TextPump`'s new
+  `engage` calls it whenever the tree starts or stops editing; the engine's
+  console and the editor call `engage` each frame.
+- **Input methods compose on Wayland**, through `text-input-v3`: for a window
+  that has called `set_text_input_enabled(window, true)`, an input method's
+  composition arrives as `ShellEvent::TextPreedit` and its result as
+  `TextCommit`, and `Shell::set_text_input_area` places its candidate window.
+  Off by default, so an input method in its native mode no longer turns a game's
+  keys into a candidate list.
 
 ### Fixed
 

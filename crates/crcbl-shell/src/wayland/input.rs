@@ -138,6 +138,7 @@ impl WaylandShell {
             self.remove_keyboard(index);
         }
         self.remove_data_device(index);
+        self.remove_text_input(index);
         let proxy = self.seats[index].proxy;
         // `wl_seat.release` since version 5, and this binds 8. See the output
         // case in `process_raw` for why a client-side destroy is wrong here.

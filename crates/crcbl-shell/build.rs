@@ -64,6 +64,7 @@ const PROTOCOLS: &[(&str, &str)] = &[
         "layer_shell",
         "wayland-protocols/wlr-layer-shell-unstable-v1.xml",
     ),
+    ("text_input", "wayland-protocols/text-input-unstable-v3.xml"),
 ];
 
 /// Protocols only `tests/run-wayland-e2e.sh` needs, generated only under the
@@ -76,6 +77,10 @@ const E2E_PROTOCOLS: &[(&str, &str)] = &[
     (
         "virtual_pointer",
         "wayland-protocols/wlr-virtual-pointer-unstable-v1.xml",
+    ),
+    (
+        "input_method",
+        "wayland-protocols/input-method-unstable-v2.xml",
     ),
 ];
 

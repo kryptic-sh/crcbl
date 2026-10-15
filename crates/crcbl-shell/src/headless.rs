@@ -231,6 +231,8 @@ struct HeadlessWindow {
     parent: Option<WindowId>,
     /// The monitor a panel was created for, whose unplugging asks it to close.
     panel_monitor: Option<MonitorId>,
+    /// [`Shell::set_text_input_enabled`]'s last word.
+    text_input: bool,
 }
 
 impl HeadlessWindow {
@@ -1027,6 +1029,18 @@ impl HeadlessShell {
         Ok(self.window(window)?.cursor)
     }
 
+    /// Whether the window has asked for the input method, with
+    /// [`Shell::set_text_input_enabled`].
+    ///
+    /// Headless-only, for the same reason as [`title`](Self::title).
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    pub fn text_input_enabled(&self, window: WindowId) -> Result<bool, ShellError> {
+        Ok(self.window(window)?.text_input)
+    }
+
     /// The bytes currently offered on the in-process clipboard for `mime`.
     ///
     /// Headless-only.
@@ -1410,6 +1424,7 @@ impl Shell for HeadlessShell {
                 accept_drops: desc.accept_drops,
                 parent,
                 panel_monitor,
+                text_input: false,
             })
             .cast();
         Ok(window)
@@ -1655,6 +1670,18 @@ impl Shell for HeadlessShell {
             return Err(self.unsupported(mode.as_str()));
         }
         self.window_mut(window)?.pointer_mode = mode;
+        Ok(())
+    }
+
+    /// Records the request, which
+    /// [`text_input_enabled`](HeadlessShell::text_input_enabled) reads back;
+    /// there is no input method to turn on.
+    fn set_text_input_enabled(
+        &mut self,
+        window: WindowId,
+        enabled: bool,
+    ) -> Result<(), ShellError> {
+        self.window_mut(window)?.text_input = enabled;
         Ok(())
     }
 

@@ -264,16 +264,34 @@ Each step lands in the crate the later steps build on, so the seam goes first.
    - Colour emoji (COLR, CBDT, sbix) with per-glyph fallback (S22).
    - Text measurement exists as `text_width`.
 9. **Input.**
-   - S9: XKB compose is in (`crates/crcbl-shell/src/linux/xkb/compose.rs`, fed
-     from `Keymap::text` on both Wayland and X11). Its unit tests drive a table
+   - S9 is in. XKB compose (`crates/crcbl-shell/src/linux/xkb/compose.rs`, fed
+     from `Keymap::text` on both Wayland and X11): its unit tests drive a table
      built from text through the real libxkbcommon, every hand mutant of the
      feed, the reset and the locale order was killed (WSL, 2026-10-16), and the
      sway suite types a dead key through a table named in `XCOMPOSEFILE`
-     (`a_dead_key_composes_with_the_key_after_it`). Not tested: losing the
-     keyboard mid-sequence, and X11 compose through a real server. Not there: a
-     pre-edit while a sequence is in progress (GTK shows the dead key
-     underlined), and `text-input-v3` pre-edit and commit on Wayland, which is
-     the other half of S9.
+     (`a_dead_key_composes_with_the_key_after_it`). `text-input-v3`
+     (`crates/crcbl-shell/src/wayland/text_input.rs`), on only for a window that
+     called `Shell::set_text_input_enabled`: the sway suite plays the input
+     method with `input-method-unstable-v2`
+     (`an_input_method_composes_for_a_window_that_asks_and_only_then`). A mutant
+     run of the sway suite on 2026-10-16 (run 38785253836) failed each of the
+     three new e2e tests with its own message: text-input enabled whether or not
+     the window asked, a repeat that commits no text, and a compose key passed
+     through instead of swallowed. Not tested: losing the keyboard mid-sequence,
+     the cursor rectangle reaching the input method, and X11 compose through a
+     real server. Not there: a pre-edit while a compose sequence is in progress
+     (GTK shows the dead key underlined), surrounding text (the seam has no way
+     to say what is around a caret, so `delete_surrounding_text` is ignored),
+     and content types (always `normal`).
+   - Decided 2026-10-16, per the standing instruction:
+     `Shell::set_text_input_enabled` is a new provided method rather than
+     reading `set_text_input_area(None)` as "off". The area's `None` already
+     means "default placement" on Win32, and an input method left on in every
+     window takes a game's keys. Win32 and AppKit still take the default, so
+     their input methods compose in every window as before; turning IMM off with
+     `ImmAssociateContextEx` while no field is engaged is the Win32 half, not
+     done. A game's own text entry (what reaches `HostedGame::text_event`) has
+     no way to ask for the input method through the engine yet.
    - S20, checked 2026-10-15. There already: hover and click as pseudo-classes
      and responses, `Shell::set_cursor` with `CursorIcon`, `ShellEvent::Wheel`
      keeping detents (`ScrollDelta::Lines`) apart from pixels, and
@@ -5035,7 +5053,9 @@ the gaps below.
   pre-edit_ under Win32 below). `crcbl::text_input` does neither yet: drawing
   the pre-edit underlined at the caret, and telling the shell the caret's
   rectangle, are the field's half. AppKit still records only the marked text's
-  length (`appkit/view.rs`), and Wayland's `text-input-v3` pre-edit is unbound.
+  length (`appkit/view.rs`). Wayland sends both through `text-input-v3`, but
+  only for a window that called `Shell::set_text_input_enabled`, which
+  `crcbl::text_input` does not call yet either.
 - **The web clipboard refuses copy and paste**, shown by the field's `:refused`
   border. Options: implement the web backend's clipboard, or keep an in-process
   fallback so copy and paste work within one page.

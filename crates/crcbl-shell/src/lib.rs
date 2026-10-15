@@ -867,8 +867,10 @@ pub trait Shell: core::fmt::Debug {
     /// anything to do here — Win32's IMM and TSF, a Wayland compositor's
     /// `text-input-v3` cursor rectangle, AppKit's `firstRectForCharacterRange:`.
     /// The default validates the handle and does nothing else, which is exactly
-    /// right for the rest. Only Win32 overrides it so far; Wayland and AppKit
-    /// take the default and leave their input methods to place themselves.
+    /// right for the rest. Win32 and Wayland override it; AppKit takes the
+    /// default and leaves its input method to place itself. Wayland sends the
+    /// area only while [`set_text_input_enabled`](Self::set_text_input_enabled)
+    /// is on, since `text-input-v3` has nowhere to put it otherwise.
     ///
     /// # Errors
     ///
@@ -879,6 +881,36 @@ pub trait Shell: core::fmt::Debug {
         area: Option<PhysicalRect>,
     ) -> Result<(), ShellError> {
         let _ = area;
+        self.window_state(window).map(|_| ())
+    }
+
+    /// Tells the input method whether a text field in `window` is taking
+    /// typing: on as a field gains the keyboard focus, off as it loses it.
+    ///
+    /// While it is on, a platform input method composes what is typed in the
+    /// window, reporting the composition as
+    /// [`TextPreedit`](ShellEvent::TextPreedit) and the result as
+    /// [`TextCommit`](ShellEvent::TextCommit). While it is off the input method
+    /// keeps out of the way and keys reach the window as keys: one in its
+    /// native mode would otherwise turn a game's WASD into a candidate list. A
+    /// window starts with it off.
+    ///
+    /// # A provided method
+    ///
+    /// The default validates the handle and does nothing else. Wayland acts on
+    /// it, with `text-input-v3`'s `enable` and `disable`. Win32 and AppKit take
+    /// the default, and their input methods compose in every window whatever
+    /// this says.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    fn set_text_input_enabled(
+        &mut self,
+        window: WindowId,
+        enabled: bool,
+    ) -> Result<(), ShellError> {
+        let _ = enabled;
         self.window_state(window).map(|_| ())
     }
 }

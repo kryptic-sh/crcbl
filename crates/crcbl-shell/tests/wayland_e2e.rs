@@ -20,7 +20,7 @@
 use std::time::{Duration, Instant};
 
 use crcbl_shell::wayland_test_support::{
-    DragSource, GlobalHotplug, MAX_PENDING_CLIPBOARD_WRITES, VirtualInput,
+    DragSource, GlobalHotplug, InputMethod, MAX_PENDING_CLIPBOARD_WRITES, VirtualInput,
 };
 use crcbl_shell::{
     ButtonState, CloseReply, CursorIcon, DisplayMode, KeyCode, Keysym, LogicalPoint, LogicalRect,
@@ -1118,6 +1118,17 @@ impl Session {
             .collect()
     }
 
+    /// Every pre-edit so far, with its cursor.
+    fn preedits(&self) -> Vec<(String, Option<usize>)> {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                ShellEvent::TextPreedit { text, cursor, .. } => Some((text.clone(), *cursor)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Pumps for a fixed wall-clock period, which is the only way to observe
     /// something that must *not* happen.
     fn settle(&mut self, duration: Duration) {
@@ -1276,6 +1287,55 @@ fn modifiers_ride_on_each_event_and_shift_changes_the_keysym() {
         "the modifier key is reported too: {:?}",
         session.keys()
     );
+    drop(input);
+    session.shell.destroy_window(window).expect("destroy");
+}
+
+/// **An input method composes only for a window that asks for one**, and
+/// what it composes arrives as the seam's pre-edit and commit: the pre-edit
+/// while it is in progress, then the commit with the pre-edit cleared.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn an_input_method_composes_for_a_window_that_asks_and_only_then() {
+    let mut session = Session::open();
+    let (window, input) = session.with_input("crcbl e2e text input");
+    let method = InputMethod::attach(&*session.shell, window).expect("an input method");
+
+    session.settle(Duration::from_millis(200));
+    assert!(
+        !method.is_active(),
+        "a window that has not asked has no input method"
+    );
+
+    session
+        .shell
+        .set_text_input_enabled(window, true)
+        .expect("enable text input");
+    session.pump_until("the input method to activate", |_| method.is_active());
+
+    method.preedit(c"ka", 2);
+    session.pump_until("the pre-edit", |session| !session.preedits().is_empty());
+    assert_eq!(session.preedits(), vec![("ka".to_string(), Some(2))]);
+
+    method.commit(c"か");
+    session.pump_until("the commit", |session| !session.text().is_empty());
+    session.pump_until("the pre-edit to clear", |session| {
+        session.preedits().len() == 2
+    });
+    assert_eq!(session.text(), vec!["か".to_string()]);
+    assert_eq!(
+        session.preedits(),
+        vec![("ka".to_string(), Some(2)), (String::new(), None)],
+        "a commit sent without a pre-edit ends the pre-edit"
+    );
+
+    session
+        .shell
+        .set_text_input_enabled(window, false)
+        .expect("disable text input");
+    session.pump_until("the input method to deactivate", |_| !method.is_active());
+
+    drop(method);
     drop(input);
     session.shell.destroy_window(window).expect("destroy");
 }

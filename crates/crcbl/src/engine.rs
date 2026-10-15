@@ -7642,6 +7642,8 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         let requests = self.console.take_clipboard_requests();
         self.text_pump
             .serve(requests, self.shell.as_mut(), self.window);
+        self.text_pump
+            .engage(self.console.is_editing(), self.shell.as_mut(), self.window);
         // Where a console write reaches the frame. `Binding`s record into a
         // `settings::Deferred` because they are handed their host as
         // `&mut dyn Any` and cannot hold a borrow of the renderer; this is the

@@ -267,6 +267,7 @@ impl WaylandShell {
                 constraints: Vec::new(),
                 cursor: None,
                 accept_drops: desc.accept_drops,
+                text_input: super::text_input::Field::default(),
                 focused: false,
                 visible: desc.visible,
                 close_pending: false,

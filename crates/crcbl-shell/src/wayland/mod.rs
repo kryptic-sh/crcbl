@@ -49,7 +49,13 @@
 //! | `zwlr_layer_shell_v1` + `zwlr_layer_surface_v1` | [`WindowRole::Panel`] — see [`layer`] |
 //! | `xdg_popup` + `xdg_positioner` | [`WindowRole::Popup`] — see [`popup`] |
 //!
-//! Still deliberately absent: touch, tablet, IME pre-edit, the *primary*
+//! And input methods with `text-input-v3`:
+//!
+//! | Protocol | What it gives the engine |
+//! | --- | --- |
+//! | `zwp_text_input_v3` | [`TextPreedit`](ShellEvent::TextPreedit) and composed [`TextCommit`](ShellEvent::TextCommit), for a window that turned it on with [`Shell::set_text_input_enabled`] — see [`text_input`] |
+//!
+//! Still deliberately absent: touch, tablet, the *primary*
 //! selection (`wp_primary_selection_v1` — middle-click paste, which the seam
 //! has no vocabulary for) and starting a drag from one of our own windows. That
 //! last one is a real gap and is stated as one: the destination half is here,
@@ -166,6 +172,7 @@ mod input;
 mod layer;
 mod popup;
 pub mod protocol;
+mod text_input;
 
 /// The evdev table and libxkbcommon, which are Linux facts rather than Wayland
 /// ones and are therefore shared with the X11 backend.
@@ -206,6 +213,7 @@ use protocol::fractional_scale::{wp_fractional_scale_manager_v1, wp_fractional_s
 use protocol::layer_shell::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 use protocol::pointer_constraints::{zwp_locked_pointer_v1, zwp_pointer_constraints_v1};
 use protocol::relative_pointer::{zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1};
+use protocol::text_input::zwp_text_input_manager_v3;
 use protocol::viewporter::{wp_viewport, wp_viewporter};
 use protocol::wayland::{
     wl_compositor, wl_data_device, wl_data_device_manager, wl_data_offer, wl_data_source,
@@ -403,6 +411,7 @@ enum ObjectKind {
     Pointer,
     Keyboard,
     RelativePointer,
+    TextInput,
     DataDevice,
     DataOffer,
     DataSource,
@@ -576,6 +585,10 @@ enum RawEvent {
         utime_lo: u32,
         dx_unaccel: i32,
         dy_unaccel: i32,
+    },
+    TextInput {
+        text_input: usize,
+        event: text_input::Event,
     },
     KeyboardKeymap {
         keyboard: usize,
@@ -1096,6 +1109,15 @@ unsafe extern "C" fn dispatch(
                 });
             }
         }
+        ObjectKind::TextInput => {
+            // SAFETY: see the note above the `match`.
+            if let Some(event) = unsafe { text_input::decode(opcode, args) } {
+                sink.events.push(RawEvent::TextInput {
+                    text_input: proxy,
+                    event,
+                });
+            }
+        }
     }
     0
 }
@@ -1306,6 +1328,7 @@ struct Conn {
     pointer_constraints: *mut WlProxy,
     data_device_manager: *mut WlProxy,
     layer_shell: *mut WlProxy,
+    text_input_manager: *mut WlProxy,
     /// Owned by the connection, reached only as a raw pointer; see [`Sink`].
     sink: *mut Sink,
 }
@@ -1332,6 +1355,7 @@ enum Singleton {
     PointerConstraints,
     DataDeviceManager,
     LayerShell,
+    TextInputManager,
 }
 
 impl Singleton {
@@ -1348,6 +1372,7 @@ impl Singleton {
             Self::PointerConstraints => &mut conn.pointer_constraints,
             Self::DataDeviceManager => &mut conn.data_device_manager,
             Self::LayerShell => &mut conn.layer_shell,
+            Self::TextInputManager => &mut conn.text_input_manager,
         }
     }
 
@@ -1365,6 +1390,7 @@ impl Singleton {
             Self::PointerConstraints => zwp_pointer_constraints_v1::NAME,
             Self::DataDeviceManager => wl_data_device_manager::NAME,
             Self::LayerShell => zwlr_layer_shell_v1::NAME,
+            Self::TextInputManager => zwp_text_input_manager_v3::NAME,
         }
     }
 }
@@ -1684,6 +1710,8 @@ struct Seat {
     /// Held keys, for the degraded modifier path only; see [`xkb`].
     held: Vec<KeyCode>,
     repeat: Repeat,
+    /// This seat's `zwp_text_input_v3`, once the manager global exists.
+    text_input: Option<text_input::TextInput>,
 }
 
 impl core::fmt::Debug for Seat {
@@ -1925,6 +1953,9 @@ struct WlWindow {
     /// records: a window that did not ask for drops answers
     /// `wl_data_offer.accept(null)` and never reads the dropped data.
     accept_drops: bool,
+    /// What a text field in the window asked of the input method; see
+    /// [`text_input`].
+    text_input: text_input::Field,
     focused: bool,
     visible: bool,
     close_pending: bool,
@@ -2069,6 +2100,7 @@ impl WaylandShell {
             pointer_constraints: ptr::null_mut(),
             data_device_manager: ptr::null_mut(),
             layer_shell: ptr::null_mut(),
+            text_input_manager: ptr::null_mut(),
             sink: Sink::boxed(lib),
         };
 
@@ -2173,9 +2205,10 @@ impl WaylandShell {
         // Not "there is an input method": the seam's own wording is that this
         // bit "says only that the commit path is wired to an input method".
         // What it is really asserting here is that composed text can reach the
-        // engine at all, which on Wayland means libxkbcommon resolved. Full
-        // `text-input-v3` pre-edit is post-MVP; a compositor-side IME that
-        // commits through the keyboard still works today.
+        // engine at all, which on Wayland means libxkbcommon resolved: an input
+        // method's commits also come through `text-input-v3` where the
+        // compositor relays one (see `text_input`), and keys it lets through
+        // type through XKB.
         caps.set(ShellCaps::TEXT_IME, xkb::available());
         // A layer surface's exclusive zone is how it reserves an edge, so the
         // one global gives both.
@@ -2339,6 +2372,14 @@ impl WaylandShell {
                     Singleton::LayerShell
                 );
             }
+            "zwp_text_input_manager_v3" => {
+                bind!(
+                    text_input_manager,
+                    zwp_text_input_manager_v3,
+                    text_input::TEXT_INPUT_VERSION,
+                    Singleton::TextInputManager
+                );
+            }
             "wl_output" => {
                 // SAFETY: `registry` is live; see the macro above.
                 let proxy = unsafe {
@@ -2412,6 +2453,7 @@ impl WaylandShell {
                     modifiers: Modifiers::empty(),
                     held: Vec::new(),
                     repeat: Repeat::default(),
+                    text_input: None,
                 });
             }
             _ => {}
@@ -2504,6 +2546,9 @@ impl WaylandShell {
             Singleton::LayerShell => unsafe {
                 self.conn
                     .release_since(proxy, 3, zwlr_layer_shell_v1::destroy);
+            },
+            Singleton::TextInputManager => unsafe {
+                self.conn.release(proxy, zwp_text_input_manager_v3::destroy);
             },
         }
         self.conn.flush();
@@ -2822,11 +2867,15 @@ impl WaylandShell {
                 | RawEvent::DragDrop { .. }
                 | RawEvent::SourceSend { .. }
                 | RawEvent::SourceCancelled { .. }) => self.process_data(event),
+                RawEvent::TextInput { text_input, event } => {
+                    self.text_input_event(text_input, event);
+                }
                 other => self.process_input(other),
             }
         }
         self.ensure_xdg_outputs();
         self.ensure_data_devices();
+        self.ensure_text_inputs();
         if monitors_dirty {
             self.republish_monitors();
         }
@@ -3356,6 +3405,7 @@ impl WaylandShell {
                 seat.repeat.key = None;
             }
         }
+        self.forget_text_input_focus(id);
         self.conn.flush();
     }
 }
@@ -3684,6 +3734,7 @@ impl Shell for WaylandShell {
                 constraints: Vec::new(),
                 cursor: None,
                 accept_drops: desc.accept_drops,
+                text_input: text_input::Field::default(),
                 focused: false,
                 visible: desc.visible,
                 close_pending: false,
@@ -3835,6 +3886,22 @@ impl Shell for WaylandShell {
         size: LogicalSize,
     ) -> Result<(), ShellError> {
         self.move_popup(popup, anchor, size)
+    }
+
+    fn set_text_input_enabled(
+        &mut self,
+        window: WindowId,
+        enabled: bool,
+    ) -> Result<(), ShellError> {
+        self.enable_text_input(window, enabled)
+    }
+
+    fn set_text_input_area(
+        &mut self,
+        window: WindowId,
+        area: Option<PhysicalRect>,
+    ) -> Result<(), ShellError> {
+        self.place_text_input(window, area)
     }
 
     fn monitors(&self) -> &[MonitorInfo] {
@@ -4898,6 +4965,10 @@ mod tests {
             c"zwp_pointer_constraints_v1"
         );
         assert_eq!(zwlr_layer_shell_v1::NAME, c"zwlr_layer_shell_v1");
+        assert_eq!(
+            zwp_text_input_manager_v3::NAME,
+            c"zwp_text_input_manager_v3"
+        );
         assert_eq!(xdg_toplevel::state::FULLSCREEN, 2);
         assert_eq!(wl_output::mode::CURRENT, 1);
         assert_eq!(wl_seat::capability::POINTER, 1);
@@ -4959,6 +5030,7 @@ mod tests {
             constraints: Vec::new(),
             cursor: None,
             accept_drops: false,
+            text_input: text_input::Field::default(),
             focused: false,
             visible: true,
             close_pending: false,

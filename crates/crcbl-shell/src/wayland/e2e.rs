@@ -73,6 +73,10 @@ use super::protocol::wayland::{
 use super::{RawEvent, WaylandShell};
 use crate::{PhysicalSize, Shell, ShellError, WindowId};
 
+mod input_method;
+
+pub use input_method::InputMethod;
+
 unsafe extern "C" {
     fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
     fn ftruncate(fd: c_int, length: i64) -> c_int;

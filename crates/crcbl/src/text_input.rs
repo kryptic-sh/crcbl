@@ -58,7 +58,10 @@
 //! a composition in progress as [`ShellEvent::TextPreedit`] (the Win32 backend
 //! does; the AppKit backend records how much marked text an input method holds
 //! and surfaces none of it), and this field does not yet underline it at the
-//! caret or call `Shell::set_text_input_area`.
+//! caret or call `Shell::set_text_input_area`. **The input method follows the
+//! field**: [`TextPump::engage`] turns it on while the tree is editing and off
+//! otherwise, which is what lets a Wayland input method compose at all (see
+//! `Shell::set_text_input_enabled`).
 
 use std::time::Duration;
 
@@ -79,6 +82,9 @@ pub struct TextPump {
     /// that asked. A newer paste replaces it: the newer press is the one the
     /// person is waiting on.
     awaiting: Option<(ClipboardRequestId, NodeKey)>,
+    /// What [`engage`](Self::engage) last told the shell, so it asks only on a
+    /// change.
+    engaged: Option<bool>,
 }
 
 impl TextPump {
@@ -184,6 +190,24 @@ impl TextPump {
                     reply: ClipboardReply::Refused,
                 });
             }
+        }
+    }
+
+    /// Turns the platform input method on for `window` while `editing` and
+    /// off otherwise, with [`Shell::set_text_input_enabled`], asking the shell
+    /// only when that changes. `editing` is the same word
+    /// [`observe`](Self::observe) is given, so an input method composes into
+    /// the field that is taking the keys and keeps out of a game's way.
+    pub fn engage<S: Shell + ?Sized>(&mut self, editing: bool, shell: &mut S, window: WindowId) {
+        if self.engaged == Some(editing) {
+            return;
+        }
+        match shell.set_text_input_enabled(window, editing) {
+            Ok(()) => self.engaged = Some(editing),
+            Err(error) => crcbl_core::warn!(
+                "text input: the shell refused to turn the input method {} — {error}",
+                if editing { "on" } else { "off" }
+            ),
         }
     }
 }
@@ -538,5 +562,33 @@ mod tests {
                 .any(|event| matches!(event, ShellEvent::ClipboardData { request, .. } if *request == theirs)),
             "the other caller's answer never arrived, so the check proves nothing"
         );
+    }
+
+    /// **The input method follows the field**: on while the tree is editing,
+    /// off once it stops, and the shell is asked only when that changes — a
+    /// state set behind the pump's back is left alone until it does.
+    #[test]
+    fn the_input_method_is_on_only_while_a_field_is_editing() {
+        let mut shell = HeadlessShell::new();
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("a headless window");
+        let mut pump = TextPump::new();
+        let enabled = |shell: &HeadlessShell| shell.text_input_enabled(window).expect("live");
+        assert!(!enabled(&shell), "a window starts with it off");
+
+        pump.engage(true, &mut shell, window);
+        assert!(enabled(&shell));
+        pump.engage(false, &mut shell, window);
+        assert!(!enabled(&shell));
+
+        shell
+            .set_text_input_enabled(window, true)
+            .expect("set behind the pump's back");
+        pump.engage(false, &mut shell, window);
+        assert!(enabled(&shell), "no change, so nothing was asked");
+        pump.engage(true, &mut shell, window);
+        pump.engage(false, &mut shell, window);
+        assert!(!enabled(&shell));
     }
 }
