@@ -448,6 +448,21 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       one with masks after its header), with hand mutants of every mechanism
       each failing a test. Refused: JPEG- and PNG-compressed bitmaps and the
       OS/2 2.x header.
+    - **Lossless WebP is in**, `webp::decode` behind the `webp` feature, written
+      from RFC 9649: the RIFF container, simple and extended (`VP8X`), an
+      animation's first frame on a transparent canvas (its background colour is
+      a hint the RFC lets a reader ignore, as libwebp's animation decoder does),
+      and the whole `VP8L` bitstream — the four transforms with pixel bundling,
+      both code-length forms, meta prefix codes, LZ77 with the distance map, and
+      the colour cache. Verified by exact equality with libwebp's decode (Pillow
+      12.3) of committed fixtures (noise at two encoder settings, opaque, a
+      gradient, 2/4/16/200 colours, one pixel, a near-grey image that takes the
+      subtract-green transform, an offset animation) and unit tests of `Select`,
+      the half predictor's truncation and the rightmost column's top-right,
+      worked from the RFC; hand mutants of every stage each failed a test.
+      **Lossy WebP (`VP8 `, with `ALPH`) is refused**: it is RFC 6386's VP8
+      codec, a decoder as large as the rest of this crate, and the next format
+      to write for pikr's parity.
     - Not done yet: decoding from a path (a caller reads the file
       `IconThemes::lookup` found, and keys its cache with `FileVersion`), and
       moving `crcbl-sprite`'s and `crcbl-golden`'s own PNG loaders onto this
@@ -532,7 +547,7 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `desktop-entry` hint name a theme icon), which the order below already
       puts before JPEG.
     - Order from here: SVG (theme icons are mostly SVG: lyr's M6 named icons,
-      pikr's port, lyr's tray), then WebP (pikr's parity), then XPM.
+      pikr's port, lyr's tray), then lossy WebP (VP8, pikr's parity), then XPM.
 
 ### Left behind by the seam split
 

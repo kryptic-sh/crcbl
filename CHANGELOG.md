@@ -35,15 +35,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   bitmap's fourth byte is alpha unless it is zero everywhere, as Chrome reads
   it. Behind the `ico` feature, `ico::decode(bytes, size, limits)` and
   `ico::sizes`: the icon frame nearest a size, whether stored as PNG or as a
-  bitmap with an AND mask. Behind the `theme` feature,
-  `theme::IconThemes::lookup(name, size, scale)`: the freedesktop.org Icon Theme
-  Specification's lookup (the theme, what it `Inherits`, caller-chosen fallback
-  themes, `hicolor`, then bare files in `/usr/share/pixmaps`; PNG before SVG
-  before XPM; an exact size and scale before the nearest), generic fallback
-  names for a name that misses, absolute paths passed through,
-  `theme::SearchPath` from the XDG environment with extra roots first (a tray's
-  `IconThemePath`), hits kept and misses retried after a caller-set delay, and
-  `theme::FileVersion` (mtime and length) to key what a caller makes of a file.
+  bitmap with an AND mask. Behind the `webp` feature, `webp::decode`: lossless
+  WebP (every transform, the colour cache, LZ77 and meta prefix codes) in a
+  simple or extended file, and an animation's first frame on its canvas, to the
+  pixels libwebp produces; lossy WebP is refused for now. Behind the `theme`
+  feature, `theme::IconThemes::lookup(name, size, scale)`: the freedesktop.org
+  Icon Theme Specification's lookup (the theme, what it `Inherits`,
+  caller-chosen fallback themes, `hicolor`, then bare files in
+  `/usr/share/pixmaps`; PNG before SVG before XPM; an exact size and scale
+  before the nearest), generic fallback names for a name that misses, absolute
+  paths passed through, `theme::SearchPath` from the XDG environment with extra
+  roots first (a tray's `IconThemePath`), hits kept and misses retried after a
+  caller-set delay, and `theme::FileVersion` (mtime and length) to key what a
+  caller makes of a file.
 - **Dead keys and Compose sequences type on Wayland and X11.** A dead key
   commits nothing and the key after it commits what the two compose to (`´` then
   `e` is `é`), through libxkbcommon's compose module and the user's locale's

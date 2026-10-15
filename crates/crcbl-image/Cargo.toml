@@ -22,6 +22,8 @@ ico = ["bmp", "png"]
 # Baseline and progressive JPEG, decoded by this crate's own code.
 jpeg = []
 png = ["dep:png"]
+# Lossless WebP and its container, decoded by this crate's own code.
+webp = []
 # The freedesktop.org icon-theme lookup: a name, a size and a scale to a file.
 # Filesystem work only, no decoding, so it needs no codec.
 theme = []
