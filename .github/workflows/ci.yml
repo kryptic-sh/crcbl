@@ -3312,12 +3312,14 @@ jobs:
         run: ./target/${{ matrix.target }}/release/crcbl --version
       # The archive name carries the ref: the tag on a release, `main` on a
       # push, so a main build's artifacts are never mistaken for a release's.
+      # A dispatched branch's name can hold a `/`, which would make the name a
+      # path, so each slash becomes a `-`.
       - name: Package (Linux / macOS)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           set -euo pipefail
-          ARCHIVE="crcbl-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          ARCHIVE="crcbl-${GITHUB_REF_NAME//\//-}-${{ matrix.target }}.tar.gz"
           mkdir -p dist
           cp target/${{ matrix.target }}/release/crcbl README.md LICENSE dist/
           tar -czf "$ARCHIVE" -C dist .
@@ -3330,7 +3332,8 @@ jobs:
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $archive = "crcbl-$env:GITHUB_REF_NAME-${{ matrix.target }}.zip"
+          $ref = $env:GITHUB_REF_NAME -replace '/', '-'
+          $archive = "crcbl-$ref-${{ matrix.target }}.zip"
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/${{ matrix.target }}/release/crcbl.exe, README.md, LICENSE dist/
           Compress-Archive -Path dist/* -DestinationPath $archive
