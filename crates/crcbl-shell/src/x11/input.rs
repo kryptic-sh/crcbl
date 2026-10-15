@@ -590,6 +590,7 @@ impl X11Shell {
             // physical event, and a consumer told twice re-queries twice.
             return;
         }
+        crate::monitor::queue_removed(&self.monitors, &monitors, &mut self.queue);
         self.monitors = monitors;
         self.queue.push_back(ShellEvent::MonitorsChanged);
     }

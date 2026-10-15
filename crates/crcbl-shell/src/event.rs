@@ -66,8 +66,8 @@ use crcbl_core::input::{
 };
 
 use crate::{
-    ClipboardContent, ClipboardRequestId, KeyCode, PhysicalPoint, PhysicalSize, ReceivedMime,
-    WindowId,
+    ClipboardContent, ClipboardRequestId, KeyCode, MonitorId, PhysicalPoint, PhysicalSize,
+    ReceivedMime, WindowId,
 };
 
 /// Something the window system reported.
@@ -379,6 +379,24 @@ pub enum ShellEvent {
     /// [`ScaleFactorChanged`](ShellEvent::ScaleFactorChanged).
     MonitorsChanged,
 
+    /// A monitor was disconnected.
+    ///
+    /// Arrives before the [`MonitorsChanged`](ShellEvent::MonitorsChanged)
+    /// after which [`Shell::monitors`](crate::Shell::monitors) no longer lists
+    /// it, so a consumer can act on the id while it still knows what the id
+    /// named. After that the id names nothing, and it is never reused.
+    ///
+    /// By the time that `MonitorsChanged` arrives, every
+    /// [panel](crate::WindowRole::Panel) created for this monitor has been sent
+    /// a [`CloseRequested`](ShellEvent::CloseRequested): a bar on an unplugged
+    /// display has nowhere to be. A window system that closes the panel itself
+    /// may send that request before this event. Other windows stay wherever
+    /// the window system moves them.
+    MonitorRemoved {
+        /// The monitor that went.
+        monitor: MonitorId,
+    },
+
     /// A file was dropped on the window.
     ///
     /// One event per file: a multi-file drop produces several. Only delivered
@@ -433,9 +451,10 @@ pub enum ShellEvent {
 impl ShellEvent {
     /// Which window this event concerns, if any.
     ///
-    /// `None` only for [`MonitorsChanged`](ShellEvent::MonitorsChanged), which
-    /// is a property of the session rather than of a window. A multi-window
-    /// consumer routes on this.
+    /// `None` only for [`MonitorsChanged`](ShellEvent::MonitorsChanged) and
+    /// [`MonitorRemoved`](ShellEvent::MonitorRemoved), which are properties of
+    /// the session rather than of a window. A multi-window consumer routes on
+    /// this.
     #[must_use]
     pub const fn window(&self) -> Option<WindowId> {
         match self {
@@ -454,7 +473,7 @@ impl ShellEvent {
             | Self::TextPreedit { window, .. }
             | Self::DroppedFile { window, .. }
             | Self::ClipboardData { window, .. } => Some(*window),
-            Self::MonitorsChanged => None,
+            Self::MonitorsChanged | Self::MonitorRemoved { .. } => None,
         }
     }
 
@@ -480,6 +499,7 @@ impl ShellEvent {
             | Self::WindowDestroyed { .. }
             | Self::Focus { .. }
             | Self::MonitorsChanged
+            | Self::MonitorRemoved { .. }
             | Self::ClipboardData { .. } => None,
         }
     }
@@ -517,6 +537,7 @@ impl ShellEvent {
             Self::TextCommit { .. } => "TextCommit",
             Self::TextPreedit { .. } => "TextPreedit",
             Self::MonitorsChanged => "MonitorsChanged",
+            Self::MonitorRemoved { .. } => "MonitorRemoved",
             Self::DroppedFile { .. } => "DroppedFile",
             Self::ClipboardData { .. } => "ClipboardData",
         }
@@ -686,13 +707,18 @@ mod tests {
                 content: ClipboardContent::Empty,
             },
             ShellEvent::MonitorsChanged,
+            ShellEvent::MonitorRemoved {
+                monitor: MonitorId(2),
+            },
         ];
 
         let mut names = Vec::new();
         for event in &events {
             names.push(event.name());
             match event {
-                ShellEvent::MonitorsChanged => assert_eq!(event.window(), None),
+                ShellEvent::MonitorsChanged | ShellEvent::MonitorRemoved { .. } => {
+                    assert_eq!(event.window(), None);
+                }
                 _ => assert_eq!(event.window(), Some(window), "{}", event.name()),
             }
         }

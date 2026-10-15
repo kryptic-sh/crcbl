@@ -555,6 +555,7 @@ impl AppKitShell {
                         unsafe { monitors::enumerate(self) }
                     };
                     self.screens = screens;
+                    crate::monitor::queue_removed(&self.monitors, &monitors, &mut self.queue);
                     self.monitors = monitors;
                     self.queue.push_back(ShellEvent::MonitorsChanged);
                 }

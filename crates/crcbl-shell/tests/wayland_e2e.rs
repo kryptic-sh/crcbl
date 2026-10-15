@@ -3183,3 +3183,83 @@ fn an_exclusive_panel_takes_the_keyboard_when_it_maps() {
     drop(input);
     session.shell.destroy_window(launcher).expect("destroy");
 }
+
+/// Turns the second output back on when dropped, so a failure part-way through the
+/// unplug test does not leave every later test with one output.
+struct OutputEnabled;
+
+impl Drop for OutputEnabled {
+    fn drop(&mut self) {
+        swaymsg(&["output", SECOND_OUTPUT_NAME, "enable"]);
+        // An output coming back can take the focus with it, and the suite
+        // opens every window on the focused workspace; see the sway config.
+        swaymsg(&["workspace", "1"]);
+    }
+}
+
+/// A bar on a monitor that goes away is asked to close, and the monitor's
+/// removal is an event naming it before the list that no longer has it.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn unplugging_a_monitor_names_it_and_asks_its_panels_to_close() {
+    let mut session = Session::open();
+    let monitor = session.monitor_named(SECOND_OUTPUT_NAME).id;
+    let bar = session.create(&panel(
+        "crcbl e2e bar on the second output",
+        LogicalSize::new(0.0, 30.0),
+        PanelDesc {
+            monitor: Some(monitor),
+            anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+            ..PanelDesc::default()
+        },
+    ));
+    session.pump_until("the panel's first configure", |session| {
+        session.size(bar).is_some()
+    });
+    assert_eq!(
+        session.size(bar).map(|size| size.width),
+        Some(SECOND_OUTPUT_SIZE.width),
+        "the panel is on the output it asked for"
+    );
+    crcbl_shell::wayland_test_support::map_window(&*session.shell, bar).expect("map");
+    session.settle(Duration::from_millis(200));
+    session.take_names();
+
+    let _restore = OutputEnabled;
+    assert!(
+        swaymsg(&["output", SECOND_OUTPUT_NAME, "disable"]),
+        "sway disables an output through IPC, which withdraws its wl_output"
+    );
+    session.pump_until("the monitor list without the second output", |session| {
+        session.names().contains(&"MonitorsChanged") && session.shell.monitor(monitor).is_none()
+    });
+    let removed = session
+        .events
+        .iter()
+        .position(|event| *event == ShellEvent::MonitorRemoved { monitor })
+        .expect("a MonitorRemoved named the output");
+    let changed = session
+        .events
+        .iter()
+        .rposition(|event| *event == ShellEvent::MonitorsChanged)
+        .expect("a MonitorsChanged");
+    assert!(removed < changed, "the removal comes before the new list");
+    let closes = session
+        .events
+        .iter()
+        .take(changed)
+        .filter(|event| **event == ShellEvent::CloseRequested { window: bar })
+        .count();
+    assert_eq!(
+        closes,
+        1,
+        "one close request by the new list, though the compositor and the \
+         monitor list both say so: {:?}",
+        session.names()
+    );
+
+    session
+        .shell
+        .reply_close_request(bar, CloseReply::Close)
+        .expect("close");
+}

@@ -941,7 +941,9 @@ impl Win32Shell {
                     });
                 }
                 RawEvent::MonitorsChanged => {
-                    self.monitors = self.enumerate_monitors();
+                    let monitors = self.enumerate_monitors();
+                    crate::monitor::queue_removed(&self.monitors, &monitors, &mut self.queue);
+                    self.monitors = monitors;
                     self.queue.push_back(ShellEvent::MonitorsChanged);
                 }
                 RawEvent::DeviceRemoved { device } => self.devices.remove(device),

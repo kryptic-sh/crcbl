@@ -228,6 +228,8 @@ struct HeadlessWindow {
     accept_drops: bool,
     /// The window a popup belongs to, which takes it along when destroyed.
     parent: Option<WindowId>,
+    /// The monitor a panel was created for, whose unplugging asks it to close.
+    panel_monitor: Option<MonitorId>,
 }
 
 impl HeadlessWindow {
@@ -960,7 +962,10 @@ impl HeadlessShell {
         id
     }
 
-    /// Removes a monitor and queues a
+    /// Removes a monitor: queues a
+    /// [`MonitorRemoved`](ShellEvent::MonitorRemoved), a
+    /// [`CloseRequested`](ShellEvent::CloseRequested) for every panel created
+    /// for it that has none outstanding, and a
     /// [`MonitorsChanged`](ShellEvent::MonitorsChanged).
     ///
     /// # Errors
@@ -981,6 +986,17 @@ impl HeadlessShell {
             "a shell needs at least one monitor"
         );
         self.monitors.remove(index);
+        self.queue
+            .push_back(ShellEvent::MonitorRemoved { monitor: id });
+        let panels: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|(_, state)| state.panel_monitor == Some(id) && !state.close_pending)
+            .map(|(window, _)| window.cast())
+            .collect();
+        for panel in panels {
+            self.request_close(panel)?;
+        }
         self.queue.push_back(ShellEvent::MonitorsChanged);
         Ok(())
     }
@@ -1361,12 +1377,13 @@ impl Shell for HeadlessShell {
             }
         };
 
-        let parent = match desc.role {
+        let (parent, panel_monitor) = match desc.role {
             crate::WindowRole::Popup(popup) => {
                 self.window(popup.parent)?;
-                Some(popup.parent)
+                (Some(popup.parent), None)
             }
-            _ => None,
+            crate::WindowRole::Panel(panel) => (None, panel.monitor),
+            crate::WindowRole::Toplevel => (None, None),
         };
         let countdown = self.configure_delay;
         let window: WindowId = self
@@ -1391,6 +1408,7 @@ impl Shell for HeadlessShell {
                 close_pending: false,
                 accept_drops: desc.accept_drops,
                 parent,
+                panel_monitor,
             })
             .cast();
         Ok(window)
@@ -2610,7 +2628,13 @@ mod tests {
 
         shell.unplug_monitor(extra).expect("unplug");
         assert_eq!(shell.monitors().len(), 1);
-        assert_eq!(drain(&mut shell), vec![ShellEvent::MonitorsChanged]);
+        assert_eq!(
+            drain(&mut shell),
+            vec![
+                ShellEvent::MonitorRemoved { monitor: extra },
+                ShellEvent::MonitorsChanged
+            ]
+        );
         assert!(matches!(
             shell.unplug_monitor(extra),
             Err(ShellError::NoSuchMonitor(_))
@@ -2620,6 +2644,53 @@ mod tests {
             Some("HEADLESS-1")
         );
         assert!(shell.monitor(extra).is_none());
+    }
+
+    #[test]
+    fn unplugging_a_monitor_asks_its_panels_and_only_its_panels_to_close() {
+        let mut shell = HeadlessShell::new();
+        let second = shell.plug_monitor(MonitorInfo {
+            id: MonitorId(0),
+            name: "HEADLESS-2".to_string(),
+            bounds: PhysicalRect::new(1920, 0, 1920, 1080),
+            work_area: PhysicalRect::new(1920, 0, 1920, 1080),
+            scale_factor: 1.0,
+            refresh_millihertz: 60_000,
+            is_primary: false,
+        });
+        let first = shell.monitors()[0].id;
+        let panel_on = |shell: &mut HeadlessShell, monitor| {
+            shell
+                .create_window(&WindowDesc {
+                    role: crate::WindowRole::Panel(crate::PanelDesc {
+                        monitor,
+                        ..crate::PanelDesc::default()
+                    }),
+                    ..WindowDesc::default()
+                })
+                .expect("panel")
+        };
+        let doomed = panel_on(&mut shell, Some(second));
+        let already_asked = panel_on(&mut shell, Some(second));
+        let elsewhere = panel_on(&mut shell, Some(first));
+        let anywhere = panel_on(&mut shell, None);
+        let toplevel = shell.create_window(&WindowDesc::default()).expect("window");
+        shell.request_close(already_asked).expect("close");
+        settle(&mut shell);
+        drain(&mut shell);
+
+        shell.unplug_monitor(second).expect("unplug");
+        assert_eq!(
+            drain(&mut shell),
+            vec![
+                ShellEvent::MonitorRemoved { monitor: second },
+                ShellEvent::CloseRequested { window: doomed },
+                ShellEvent::MonitorsChanged,
+            ]
+        );
+        for window in [elsewhere, anywhere, toplevel] {
+            assert!(!shell.window_state(window).expect("open").close_pending);
+        }
     }
 
     #[test]

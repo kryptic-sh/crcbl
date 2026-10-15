@@ -89,9 +89,16 @@ Each step lands in the crate the later steps build on, so the seam goes first.
        input region for `Passthrough` and `xdg_popup.grab` for `Grab`;
      - repositioning a live popup through `xdg_popup.reposition` (needs
        `xdg_wm_base` v3), reported in caps where it is missing;
-     - a monitor-removed event plus a close request for every window on that
-       monitor, on every backend (lyr item 6). On Wayland a layer surface
-       already gets `closed` when its output goes; the seam event is the rest.
+   - Monitor removal (lyr item 6) is built: `ShellEvent::MonitorRemoved` on
+     every backend, from `monitor::queue_removed`, and a `CloseRequested` for
+     each panel created for that monitor on Wayland and headless. Win32 and
+     AppKit build no panels yet, so their steps owe the panel half when they do.
+     Close requests, rather than closing every window on that monitor: window
+     managers move toplevels to another monitor, and only a panel has nowhere to
+     go. The e2e test
+     (`unplugging_a_monitor_names_it_and_asks_its_panels_to_close`) assumes
+     `swaymsg output HEADLESS-2 disable` withdraws that `wl_output`; its first
+     CI run says whether it does.
    - Decided for panels, 2026-10-15: `set_title`, `set_mode` and
      `set_constraints` on a Wayland panel record the request and send nothing,
      as the headless shell accepts them on any role. A panel's effective mode is

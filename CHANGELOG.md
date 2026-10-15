@@ -905,6 +905,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   a `CloseRequested`. The other window-system backends refuse them until each
   implements them. `LogicalRect` is new in `crcbl_shell`.
 
+- **`ShellEvent::MonitorRemoved`: which monitor was unplugged.** Every backend
+  queues one for each monitor that leaves the list, before the `MonitorsChanged`
+  that drops it, so a program can act on the id while it still knows what it
+  named. By that `MonitorsChanged`, every panel created for the monitor has had
+  a `CloseRequested`. The headless shell's `unplug_monitor` does the same. On
+  Wayland a close request now stays one request until it is answered, since a
+  panel on an unplugged output is told by the compositor and by the monitor
+  list.
+
 - **`Shell::waker` and `ShellWaker`: wake a sleeping loop from another thread.**
   A program whose work arrives off the loop thread (a D-Bus reply, a socket, a
   timer) clones the handle into that thread and calls `wake()`, which ends the

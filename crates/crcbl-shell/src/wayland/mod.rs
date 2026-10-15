@@ -1841,6 +1841,8 @@ struct WlWindow {
     toplevel: *mut WlProxy,
     /// The `zwlr_layer_surface_v1` of a panel.
     layer_surface: *mut WlProxy,
+    /// The monitor a panel was created for, whose removal asks it to close.
+    panel_monitor: Option<MonitorId>,
     decoration: *mut WlProxy,
     fractional_scale: *mut WlProxy,
     viewport: *mut WlProxy,
@@ -2531,6 +2533,21 @@ impl WaylandShell {
             .map(|(index, output)| output.info(index == 0))
             .collect();
         if monitors != self.monitors {
+            for monitor in crate::monitor::queue_removed(&self.monitors, &monitors, &mut self.queue)
+            {
+                // The compositor sends a layer surface on a removed output its
+                // own `closed`, usually first; this covers one that does not,
+                // and `close_requested` makes the two one request.
+                let panels: Vec<WindowId> = self
+                    .windows
+                    .iter()
+                    .filter(|(_, window)| window.panel_monitor == Some(monitor))
+                    .map(|(handle, _)| handle.cast())
+                    .collect();
+                for panel in panels {
+                    self.close_requested(panel);
+                }
+            }
             self.monitors = monitors;
             self.queue.push_back(ShellEvent::MonitorsChanged);
         }
@@ -2746,12 +2763,20 @@ impl WaylandShell {
         self.flush_pointer_frames();
     }
 
-    /// The compositor asked for a window to go: an `xdg_toplevel.close`, or
-    /// a layer surface's `closed`.
+    /// The compositor asked for a window to go: an `xdg_toplevel.close`, a
+    /// layer surface's `closed`, or a panel's monitor being removed.
+    ///
+    /// One request until it is answered: a panel whose output is unplugged is
+    /// told by the compositor and by the monitor list, and a consumer must see
+    /// one question, not two.
     fn close_requested(&mut self, id: WindowId) {
-        if let Ok(window) = self.window_mut(id) {
-            window.close_pending = true;
+        let Ok(window) = self.window_mut(id) else {
+            return;
+        };
+        if window.close_pending {
+            return;
         }
+        window.close_pending = true;
         self.queue
             .push_back(ShellEvent::CloseRequested { window: id });
     }
@@ -3549,6 +3574,7 @@ impl Shell for WaylandShell {
                 xdg_surface: xdg,
                 toplevel,
                 layer_surface,
+                panel_monitor: panel.and_then(|panel| panel.monitor),
                 decoration,
                 fractional_scale,
                 viewport,
@@ -4800,6 +4826,7 @@ mod tests {
             xdg_surface: ptr::null_mut(),
             toplevel: ptr::null_mut(),
             layer_surface: ptr::null_mut(),
+            panel_monitor: None,
             decoration: ptr::null_mut(),
             fractional_scale: ptr::null_mut(),
             viewport: ptr::null_mut(),

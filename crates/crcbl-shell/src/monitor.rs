@@ -26,6 +26,7 @@
 //! in a `PartialEq`-compared struct that a settings screen will diff.
 
 use core::fmt;
+use std::collections::VecDeque;
 
 use crate::PhysicalRect;
 
@@ -149,6 +150,32 @@ impl MonitorInfo {
     }
 }
 
+/// Queues a [`MonitorRemoved`](crate::ShellEvent::MonitorRemoved) for every
+/// monitor in `old` that `new` no longer lists, in `old`'s order, and returns
+/// their ids.
+///
+/// By id, which every backend keeps for as long as a display stays connected
+/// and never hands out again. The caller publishes `new` and its
+/// [`MonitorsChanged`](crate::ShellEvent::MonitorsChanged) afterwards, and
+/// closes its panels on the returned monitors in between.
+pub(crate) fn queue_removed(
+    old: &[MonitorInfo],
+    new: &[MonitorInfo],
+    queue: &mut VecDeque<crate::ShellEvent>,
+) -> Vec<MonitorId> {
+    let removed: Vec<MonitorId> = old
+        .iter()
+        .map(|monitor| monitor.id)
+        .filter(|id| !new.iter().any(|monitor| monitor.id == *id))
+        .collect();
+    queue.extend(
+        removed
+            .iter()
+            .map(|&monitor| crate::ShellEvent::MonitorRemoved { monitor }),
+    );
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +211,34 @@ mod tests {
         info.refresh_millihertz = 0;
         assert_eq!(info.frame_period(), None);
         assert_eq!(info.refresh_hz(), 0.0);
+    }
+
+    #[test]
+    fn a_removal_is_an_id_the_new_list_lacks() {
+        let with_id = |id| MonitorInfo {
+            id: MonitorId(id),
+            ..monitor()
+        };
+        let mut queue = VecDeque::new();
+        let removed = queue_removed(
+            &[with_id(1), with_id(2), with_id(3)],
+            &[with_id(2), with_id(4)],
+            &mut queue,
+        );
+        assert_eq!(removed, [MonitorId(1), MonitorId(3)]);
+        assert_eq!(
+            Vec::from(queue),
+            [1, 3].map(|id| crate::ShellEvent::MonitorRemoved {
+                monitor: MonitorId(id)
+            })
+        );
+
+        // A monitor whose geometry changed is the same monitor.
+        let mut queue = VecDeque::new();
+        let mut moved = with_id(1);
+        moved.bounds = PhysicalRect::new(100, 0, 3840, 2160);
+        assert!(queue_removed(&[with_id(1)], &[moved], &mut queue).is_empty());
+        assert!(queue.is_empty());
     }
 
     #[test]
