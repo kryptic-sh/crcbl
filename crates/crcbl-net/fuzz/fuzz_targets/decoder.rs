@@ -132,4 +132,47 @@ fuzz_target!(|data: &[u8]| {
     let _ = endpoint.receive_datagram(data);
     while endpoint.poll_outgoing().is_some() {}
     while endpoint.recv().is_some() {}
+    // An image file a notification or a `.desktop` file points at, and a raw
+    // buffer another program sent, its layout read from the input's first
+    // bytes so the fuzzer chooses sizes, strides, orders and masks too.
+    let limits = crcbl_image::Limits::DEFAULT;
+    let _ = crcbl_image::png::decode(data, &limits);
+    if let [width, height, stride, flags, pixels @ ..] = data {
+        use crcbl_image::raw::{AllZeroAlpha, Alpha, ChannelOrder, RawPixels, RowOrder, convert};
+        let order = [
+            ChannelOrder::Rgba,
+            ChannelOrder::Bgra,
+            ChannelOrder::Argb,
+            ChannelOrder::Rgb,
+        ][usize::from(flags & 3)];
+        let all_zero_alpha = match flags >> 4 & 3 {
+            0 => AllZeroAlpha::Transparent,
+            1 => AllZeroAlpha::Opaque,
+            _ => AllZeroAlpha::AndMask {
+                bits: pixels,
+                stride: usize::from(flags >> 6),
+            },
+        };
+        let _ = convert(
+            &RawPixels {
+                width: u32::from(*width),
+                height: u32::from(*height),
+                stride: usize::from(*stride),
+                order,
+                rows: if flags & 4 == 0 {
+                    RowOrder::TopDown
+                } else {
+                    RowOrder::BottomUp
+                },
+                alpha: if flags & 8 == 0 {
+                    Alpha::Straight
+                } else {
+                    Alpha::Premultiplied
+                },
+                all_zero_alpha,
+                data: pixels,
+            },
+            &limits,
+        );
+    }
 });

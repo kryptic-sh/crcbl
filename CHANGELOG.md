@@ -15,6 +15,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-image`, a new crate: image assets to the straight-alpha RGBA8
+  `ImageAtlas::register` takes**, CPU only, with every input treated as
+  untrusted. `Rgba8Image` and `Limits` (size and memory caps checked before
+  anything is allocated for an image); `png::decode` and `png::encode` behind
+  the `png` feature; `raw::convert` for buffers other programs send (RGBA, BGRA,
+  ARGB or RGB, any stride, either row order, straight or premultiplied alpha,
+  and an all-zero alpha channel as transparent, opaque or masked by an AND
+  mask), with `raw::from_argb32_be` for a StatusNotifierItem pixmap and
+  `raw::from_image_data` for a notification's `image-data`; and `resize::resize`
+  (Lanczos, in premultiplied light so transparent pixels lend no colour),
+  `fit_within`, `shrink_to_fit` and `nearest_size`.
 - **Dead keys and Compose sequences type on Wayland and X11.** A dead key
   commits nothing and the key after it commits what the two compose to (`´` then
   `e` is `é`), through libxkbcommon's compose module and the user's locale's

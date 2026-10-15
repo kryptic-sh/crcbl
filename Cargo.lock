@@ -556,6 +556,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-image"
+version = "0.1.0"
+dependencies = [
+ "png",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "crcbl-input"
 version = "0.1.0"
 dependencies = [
