@@ -939,6 +939,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   not by pointer. `Font::id`, `Font::data` and `Font::metrics` are no longer
   `const`, and `Font::data` borrows from the font.
 
+- **The `border` shorthand in stylesheets.** A width, a style and a colour in
+  any order, as CSS has it: `solid` draws, `none` and `hidden` do not, a border
+  with no style has none, and a solid one with no width is 3px (`medium`). Other
+  styles are refused rather than drawn solid, and an omitted colour leaves
+  `border-color` as it was, since the subset has no `currentcolor`. pikr's
+  stylesheet now parses with no warnings.
+
 - **`crcbl-shell` on FreeBSD.** The Wayland and X11 backends now compile for
   FreeBSD as well as Linux, behind a `desktop_unix` cfg the build script sets
   for both, with the libc numbers the two systems number differently

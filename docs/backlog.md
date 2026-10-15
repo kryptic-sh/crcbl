@@ -237,8 +237,14 @@ Each step lands in the crate the later steps build on, so the seam goes first.
    - Pointer hover, click, cursor shape, discrete and high-resolution wheel, and
      a styleable scrollbar handle (S20).
 10. **UI fit.**
-    - Check pikr's stylesheet subset against crcbl-ui's parser (S23).
-    - Upload app-rasterised RGBA images (S24).
+    - S23 checked 2026-10-15: pikr's `default.css`, with its `{placeholder}`
+      values filled in as `ui/css.rs` fills them, parses with no diagnostics
+      once the `border` shorthand was added. Checked by running it through
+      `Stylesheet::parse`, not by rendering it.
+    - S24 is half there: `ImageAtlas::register` uploads straight-alpha RGBA, but
+      nothing removes or replaces an image, so a launcher showing changing
+      result icons fills its page (`AtlasError::Full`). Needs an unregister that
+      frees the shelf space, or an eviction policy.
 11. **Start-up and failure.**
     - Measure cold start to the first presented frame against 500 ms (S13).
     - A clear failure, not a crash, with no usable GPU (S26).

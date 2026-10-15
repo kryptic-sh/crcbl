@@ -12,6 +12,7 @@
 //! | `margin` (1–4), `margin-*` | length, `auto` |
 //! | `padding` (1–4), `padding-*` | length |
 //! | `border-width` (1–4), `border-*-width` | px |
+//! | `border` | px, `solid` \| `none` \| `hidden`, colour — any order, each at most once |
 //! | `overflow` | `visible` \| `hidden` \| `scroll` |
 //! | `flex-direction` | `row` \| `column` \| `row-reverse` \| `column-reverse` |
 //! | `flex-wrap` | `nowrap` \| `wrap` \| `wrap-reverse` |
@@ -156,6 +157,7 @@ pub(crate) enum Property {
     RowGap,
     ColumnGap,
     Background,
+    Border,
     BorderColor,
     BorderRadius(Corners),
     Color,
@@ -233,6 +235,7 @@ impl Property {
             "row-gap" => Self::RowGap,
             "column-gap" => Self::ColumnGap,
             "background" | "background-color" => Self::Background,
+            "border" => Self::Border,
             "border-color" => Self::BorderColor,
             "border-radius" => Self::BorderRadius(Corners::All),
             "border-top-left-radius" => Self::BorderRadius(Corners::TopLeft),
@@ -388,6 +391,7 @@ impl Property {
                 Self::RowGap => out.push(D::RowGap(length(input)?)),
                 Self::ColumnGap => out.push(D::ColumnGap(length(input)?)),
                 Self::Background => out.push(D::Background(color(input)?)),
+                Self::Border => border(input, out)?,
                 Self::BorderColor => out.push(D::BorderColor(color(input)?)),
                 Self::BorderRadius(Corners::All) => {
                     let [top_left, top_right, bottom_right, bottom_left] =
@@ -519,6 +523,10 @@ impl Property {
             Self::RowGap => to.row_gap = from.row_gap,
             Self::ColumnGap => to.column_gap = from.column_gap,
             Self::Background => to.background = from.background,
+            Self::Border => {
+                to.border = from.border;
+                to.border_color = from.border_color;
+            }
             Self::BorderColor => to.border_color = from.border_color,
             Self::BorderRadius(corners) => match corners {
                 Corners::All => to.radii = from.radii,
@@ -837,6 +845,58 @@ const fn parsed_family() -> Result<FontFamily, Invalid> {
 #[cfg(not(feature = "parsed-font"))]
 fn parsed_family() -> Result<FontFamily, Invalid> {
     invalid()
+}
+
+/// CSS's `medium`: the border width `border` gives a solid border that names
+/// none.
+const MEDIUM_BORDER: f32 = 3.0;
+
+/// `border`: a width, a style and a colour, in any order, each at most once
+/// and at least one of them.
+///
+/// The styles are what this subset draws: `solid`, and `none` or `hidden`,
+/// which draw nothing. Every other style is refused rather than drawn solid.
+/// As in CSS, a border with no style has none, so `border: 2px red` draws
+/// nothing, and a solid one with no width is `medium`.
+///
+/// **An omitted colour leaves `border-color` as it was.** CSS resets it to
+/// `currentcolor`, which this subset does not have.
+fn border(input: &mut Parser<'_>, out: &mut Vec<Declaration>) -> Result<(), Invalid> {
+    use Declaration as D;
+    let (mut width, mut solid, mut colour) = (None, None, None);
+    while !input.is_exhausted() {
+        if width.is_none()
+            && let Ok(value) = input.try_parse(|input| px(input, Sign::NonNegative))
+        {
+            width = Some(value);
+        } else if solid.is_none()
+            && let Ok(style) = input.try_parse(|input| {
+                keyword(input, |name| {
+                    Some(match_ignore_ascii_case! { name,
+                        "solid" => true,
+                        "none" | "hidden" => false,
+                        _ => return None,
+                    })
+                })
+            })
+        {
+            solid = Some(style);
+        } else if colour.is_none() {
+            colour = Some(color(input)?);
+        } else {
+            return invalid();
+        }
+    }
+    if width.is_none() && solid.is_none() && colour.is_none() {
+        return invalid();
+    }
+    let width = match solid {
+        Some(true) => width.unwrap_or(MEDIUM_BORDER),
+        Some(false) | None => 0.0,
+    };
+    out.push(D::BorderWidth(Sides::All, width));
+    out.extend(colour.map(D::BorderColor));
+    Ok(())
 }
 
 /// `outline`: `none`, or a width and a colour in either order.
@@ -1350,6 +1410,40 @@ mod tests {
                 "outline: {css}"
             );
         }
+        for css in [
+            "1.5px solid #ff0000",
+            "solid #ff0000 1.5px",
+            "#ff0000 1.5px solid",
+        ] {
+            let edge = style_of(&[("border", css)]);
+            assert_eq!(
+                (edge.border.top, edge.border.left, edge.border_color),
+                (1.5, 1.5, [1.0, 0.0, 0.0, 1.0]),
+                "border: {css}"
+            );
+        }
+        assert_eq!(
+            style_of(&[("border", "solid")]).border.right,
+            MEDIUM_BORDER,
+            "a solid border with no width is medium"
+        );
+        assert_eq!(
+            style_of(&[("border", "2px #ff0000")]).border.bottom,
+            0.0,
+            "a border with no style has none"
+        );
+        let kept = style_of(&[("border-color", "#00ff00"), ("border", "1px solid")]);
+        assert_eq!(
+            kept.border_color,
+            [0.0, 1.0, 0.0, 1.0],
+            "no colour, so it stays"
+        );
+        assert_eq!(
+            style_of(&[("border", "4px solid red"), ("border", "none")])
+                .border
+                .top,
+            0.0
+        );
         let none = style_of(&[("outline", "2px red"), ("outline", "none")]);
         assert_eq!((none.outline_width, none.outline_color), (0.0, [0.0; 4]));
 
@@ -1361,6 +1455,10 @@ mod tests {
             ("padding", "-2px"),
             ("padding", "1px 2px 3px 4px 5px"),
             ("border-width", "10%"),
+            ("border", "1px dashed red"),
+            ("border", "1px 2px solid"),
+            ("border", "solid solid"),
+            ("border", "red blue"),
             ("display", "block"),
             ("overflow", "auto"),
             ("align-self", "normal"),
