@@ -28,7 +28,7 @@
 
 use std::panic::Location;
 
-use super::{Ui, typed};
+use super::{Ui, WidgetKind, typed};
 use crate::style::PseudoClasses;
 use crate::tree::{Behavior, Response, SplitAxis};
 
@@ -256,9 +256,14 @@ impl Ui {
         match layout {
             DockLayout::Pane(name) => {
                 let name = name.clone();
-                self.block_keyed_with(name.as_str(), ".dock-pane", &[], Behavior::SCOPE, |ui| {
-                    pane(ui, &name)
-                });
+                let built = self.block_keyed_with(
+                    name.as_str(),
+                    ".dock-pane",
+                    &[],
+                    Behavior::SCOPE,
+                    |ui| pane(ui, &name),
+                );
+                self.mark(built.key, WidgetKind::Pane);
             }
             DockLayout::Split {
                 axis,

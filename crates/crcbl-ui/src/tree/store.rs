@@ -13,7 +13,7 @@ use taffy::{Cache, Layout};
 
 use super::focus::{Behavior, Engagement, NavStep};
 use super::style::{NavId, NodeStyle};
-use super::widgets::WidgetState;
+use super::widgets::{WidgetKind, WidgetState};
 use crate::draw_list::ClipRect;
 use crate::style::{Candidates, Declaration, InheritedId, PseudoClasses};
 
@@ -101,6 +101,8 @@ pub(crate) struct StoredNode {
     /// What a widget keeps on this node between frames; see
     /// [`super::widgets`].
     pub widget: WidgetState,
+    /// What its builder built it as this frame, for the accessibility tree.
+    pub kind: WidgetKind,
     /// Its selector's `#id`, hashed, for a `nav-*` property to find.
     pub id: Option<NavId>,
     /// The node focused inside it last, for a scope root.
@@ -157,6 +159,7 @@ impl StoredNode {
             behavior: Behavior::NONE,
             state: PseudoClasses::NONE,
             widget: WidgetState::None,
+            kind: WidgetKind::None,
             id: None,
             remembered: None,
             scroll_offset: Vec2::ZERO,

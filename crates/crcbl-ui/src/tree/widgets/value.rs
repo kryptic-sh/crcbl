@@ -21,7 +21,7 @@ use std::panic::Location;
 
 use self::sealed::Sealed;
 use super::number_entry::NumberEntry;
-use super::{Ui, WidgetState, clamp_to, typed};
+use super::{Ui, WidgetKind, WidgetState, clamp_to, typed};
 use crate::style::{Declaration, PseudoClasses};
 use crate::tree::{Behavior, Direction, Engagement, LengthAuto, NavStep, Response};
 
@@ -304,6 +304,7 @@ impl Ui {
                 ui.block(".slider-fill", &fill, |_| {});
             },
         );
+        self.mark(key, WidgetKind::Slider);
         response.changed = value.to_bits() != before;
         response
     }
@@ -355,6 +356,7 @@ impl Ui {
                 if let Some(original) = N::from_anchor(original)
                     && let Some(mut response) = self.typed_number(entry, value, original)
                 {
+                    self.mark(key, WidgetKind::DragValue);
                     response.changed = !value.same(before);
                     return response;
                 }
@@ -372,6 +374,7 @@ impl Ui {
             && !self.building_disabled();
         if double || accepted {
             let mut response = self.begin_typing(entry, value, double);
+            self.mark(key, WidgetKind::DragValue);
             response.changed = !value.same(before);
             return response;
         }
@@ -409,6 +412,7 @@ impl Ui {
                 ui.span(".drag-value-text", text.as_str(), &[]);
             },
         );
+        self.mark(key, WidgetKind::DragValue);
         // A captured press still reports pressed on the frame it is released,
         // so only a button still down carries the anchor into the next frame —
         // and a press after it is one that starts.

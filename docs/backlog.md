@@ -405,14 +405,38 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `zbus` with an async executor, and a game has no tree to offer; lyr and
       pikr turn it on. The other choice, on by default, would give every program
       a screen-reader path at the price of the shell's small dependency set.
-    - Still to do, in this order: crcbl-ui building a `TreeUpdate` from its tree
-      (a `NodeKey` is stable across frames, so it is the `NodeId`; roles come
-      from the widget type `widgets::typed` prefixes, states from
-      `PseudoClasses`, text from the spans) and acting on an `ActionRequest`
-      (focus through `Ui::set_focus`, click through a new click-by-key); Win32
-      through `accesskit_windows::Adapter` answering `WM_GETOBJECT` in the
-      shell's window procedure; Wayland and X11 through `accesskit_unix` (AT-SPI
-      over D-Bus); AppKit through `accesskit_macos`.
+    - crcbl-ui's half is in, behind its own `accesskit` feature:
+      `Ui::accessibility_update` builds a whole-tree `TreeUpdate` (a `NodeKey`
+      is the `NodeId`; a synthetic `Role::Window` keyed by `ROOT_KEY` holds the
+      frame's roots, pop-ups and tooltip included) and
+      `Ui::accessibility_action` acts on Focus, Blur and Click, the click
+      through a pending click `begin_frame_with` applies as a pointer's. Roles
+      come from `widgets::WidgetKind`, which every builder records explicitly on
+      its nodes whatever the feature (the selector's type is not reliable: a
+      caller-named type replaces it). Verified by the tests in
+      `crates/crcbl-ui/src/tree/widgets/tests/accessibility.rs` and
+      `crates/crcbl-ui/src/tree/widgets/tests/kind.rs`, which hand mutants fail
+      one at a time: a button mapped to a generic container, text not gathered
+      into a label, decorations not skipped while gathering, the checkbox box
+      not marked a decoration, toggled always true, expanded always false, the
+      pending click never marking the node or never applied, a disabled node's
+      click accepted, Focus not forwarded to `set_focus`, and the update's focus
+      always the window.
+    - Gaps in crcbl-ui's tree. Values the tree never stores: a slider has no
+      numeric value, range or step, and a drag-value only the text it shows
+      (both are the caller's `&mut`); a checkbox-like block built without
+      `Ui::checkbox` has no toggled state. Not modelled yet: a widget's caption
+      drawn beside it (a text input's or a select's label) is not tied to it
+      with `labelled_by`; tree rows are flat siblings of their parent row's
+      container rather than nested `TreeItem`s, so no level or set size; a text
+      input exposes its value but no text runs, caret or selection
+      (`SetTextSelection`, `SetValue`, `Increment`/`Decrement`, `Expand` and
+      `ScrollIntoView` are not acted on). Every update is the whole tree, not a
+      diff, and its cost on a large outliner has not been measured.
+    - Still to do, in this order: Win32 through `accesskit_windows::Adapter`
+      answering `WM_GETOBJECT` in the shell's window procedure; Wayland and X11
+      through `accesskit_unix` (AT-SPI over D-Bus); AppKit through
+      `accesskit_macos`.
 
 14. **Image assets to RGBA (S28), asked by lyr for lyr and pikr on 2026-10-16**,
     relaying the owner: one crcbl crate that turns image files and raw buffers

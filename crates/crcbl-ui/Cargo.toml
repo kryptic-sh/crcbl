@@ -8,6 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# The node tree a screen reader reads and the actions it asks for, which
+# `Ui::accessibility_update` builds and `Ui::accessibility_action` answers.
+# Only the types crate, behind the `accesskit` feature below; the owner
+# approved AccessKit on 2026-10-16.
+accesskit = { workspace = true, optional = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
 # `ContactId` and `TouchPhase`, for the on-screen controls in `touch`. The
@@ -67,6 +72,14 @@ skrifa ={ version = "0.48.0", default-features = false, features = ["std"], opti
 # naming `sans-serif` or `"Atkinson Hyperlegible"` is refused with a warning
 # rather than drawn in the bitmap font.
 parsed-font = ["dep:skrifa"]
+
+# `Ui::accessibility_update` and `Ui::accessibility_action`: the tree as an
+# AccessKit `TreeUpdate`, and a screen reader's focus and click acted on.
+# **Off by default**: a game has no screen-reader tree to offer, and a desktop
+# program turns it on beside `crcbl-shell`'s feature of the same name, which
+# carries the tree to the platform. What each widget is gets recorded whether
+# or not it is on; only the conversion is behind it.
+accesskit = ["dep:accesskit"]
 
 [lints]
 workspace = true

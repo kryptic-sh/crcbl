@@ -129,7 +129,7 @@ use crcbl_reflect::{
     snapshot_path,
 };
 
-use super::{Ui, typed};
+use super::{Ui, WidgetKind, typed};
 use crate::tree::Response;
 
 /// The step a [`ValueKind::Float`] field with no `#[reflect(step)]` is dragged
@@ -608,6 +608,7 @@ impl Ui {
                 ui.inspect_children(value, root, &mut path, options, &mut report);
             }
         });
+        self.mark(response.key, WidgetKind::Inspector);
         let switches = switch_picked(value, &report.picked);
         Inspection {
             response,

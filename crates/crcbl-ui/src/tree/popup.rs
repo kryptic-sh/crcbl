@@ -94,7 +94,7 @@ use glam::Vec2;
 
 use super::store::NodeKey;
 use super::tooltip::TOOLTIP_LAYER;
-use super::widgets::typed;
+use super::widgets::{WidgetKind, typed};
 use super::{Behavior, KeySource, LengthAuto, ROOT_KEY, Response, Ui};
 use crate::draw_list::ClipRect;
 use crate::style::{Declaration, PseudoClasses};
@@ -224,6 +224,7 @@ impl Ui {
             build,
         );
         self.popup_roots.push((index, anchor));
+        self.mark(response.key, WidgetKind::Popup);
         Some(response)
     }
 

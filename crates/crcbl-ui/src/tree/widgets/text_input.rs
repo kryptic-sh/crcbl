@@ -81,7 +81,7 @@ use std::time::Duration;
 use glam::Vec2;
 
 use super::super::store::Interaction;
-use super::{Ui, WidgetState, typed};
+use super::{Ui, WidgetKind, WidgetState, typed};
 use crate::console::caret_shown;
 use crate::edit::{ClipboardOp, Edit, LineEdit, run_at};
 use crate::font::Font;
@@ -199,7 +199,7 @@ impl EditState {
     }
 
     /// The line's text.
-    pub(super) fn text(&self) -> &str {
+    pub(in crate::tree) fn text(&self) -> &str {
         self.line.text()
     }
 
@@ -344,7 +344,9 @@ impl Ui {
             inline: &[],
             widget: WidgetState::TextInput,
         };
+        let masked = options.masked;
         let mut response = self.line_block(line, interaction, value, options);
+        self.mark(key, WidgetKind::TextInput { masked });
         response.changed = *value != before;
         response
     }

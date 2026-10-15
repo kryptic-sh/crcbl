@@ -54,7 +54,7 @@
 //! Items are keyed by their label, as a drop-down's options are, so two items
 //! of one label in one menu are a duplicate key.
 
-use super::{Ui, WidgetState};
+use super::{Ui, WidgetKind, WidgetState};
 use crate::style::PseudoClasses;
 use crate::tree::popup_nav::ListItem;
 use crate::tree::{
@@ -339,7 +339,7 @@ impl Ui {
                 .collect();
             self.typeahead(menu, &listed);
         }
-        self.popup(menu, ".context-menu", &[], |ui| {
+        let built = self.popup(menu, ".context-menu", &[], |ui| {
             for (index, item) in items.iter().enumerate() {
                 let (label, enabled, submenu, shortcut) = match *item {
                     ContextItem::Action {
@@ -354,7 +354,8 @@ impl Ui {
                         enabled,
                     } => (label, enabled, Some(items), None),
                     ContextItem::Separator => {
-                        ui.block_keyed(index, ".context-separator", &[], |_| {});
+                        let separator = ui.block_keyed(index, ".context-separator", &[], |_| {});
+                        ui.mark(separator.key, WidgetKind::Decoration);
                         continue;
                     }
                 };
@@ -375,9 +376,11 @@ impl Ui {
                         ui.span(".context-item-shortcut", shortcut, &[]);
                     }
                     if submenu.is_some() {
-                        ui.span(".context-item-arrow", CONTEXT_ARROW, &[]);
+                        let arrow = ui.span(".context-item-arrow", CONTEXT_ARROW, &[]);
+                        ui.mark(arrow.key, WidgetKind::Decoration);
                     }
                 });
+                ui.mark(key, WidgetKind::MenuItem);
                 // Kept either way: a label can name a submenu one frame and an
                 // action the next.
                 let branch = submenu.map_or(WidgetState::None, |_| WidgetState::MenuBranch);
@@ -387,5 +390,8 @@ impl Ui {
                 }
             }
         });
+        if let Some(built) = built {
+            self.mark(built.key, WidgetKind::Menu);
+        }
     }
 }

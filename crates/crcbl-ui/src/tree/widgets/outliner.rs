@@ -56,7 +56,7 @@ use std::panic::Location;
 
 use super::list::{row_inline, row_span};
 use super::text_input::DOUBLE_CLICK_TIME;
-use super::{Ui, WidgetState, typed};
+use super::{Ui, WidgetKind, WidgetState, typed};
 use crate::style::{Declaration, PseudoClasses, Sides};
 use crate::tree::{
     Behavior, DRAG_THRESHOLD, KeySource, Length, LengthAuto, NodeKey, Overflow, Response, Role,
@@ -279,6 +279,7 @@ impl Ui {
             },
         );
         self.set_widget_state(key, WidgetState::Rows(focused));
+        self.mark(key, WidgetKind::Outliner);
         response.changed = changed;
         response
     }
@@ -467,6 +468,7 @@ impl Ui {
                 item: Some(item.id),
             },
         );
+        self.mark(key, WidgetKind::OutlinerRow);
         (key, response.clicked)
     }
 
@@ -490,10 +492,15 @@ impl Ui {
             Behavior::NONE
         };
         let toggle = self.block_with(".outliner-toggle", &[], behavior, |ui| {
-            ui.span(".outliner-toggle-glyph", glyph, &[]);
+            let glyph = ui.span(".outliner-toggle-glyph", glyph, &[]);
+            ui.mark(glyph.key, WidgetKind::Decoration);
         });
         if item.branch {
             self.set_widget_state(toggle.key, WidgetState::OutlinerToggle(item.id));
+            self.mark(toggle.key, WidgetKind::OutlinerToggle);
+        } else {
+            // A leaf's toggle is a space that takes no press.
+            self.mark(toggle.key, WidgetKind::Decoration);
         }
     }
 }

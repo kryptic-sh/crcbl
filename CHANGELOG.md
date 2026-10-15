@@ -45,6 +45,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   clear there. `HeadlessShell` plays the reader (`activate_accessibility`,
   `request_accessibility_action`, `accessibility_updates`,
   `deactivate_accessibility`).
+- **`crcbl-ui` builds an AccessKit tree, behind its new `accesskit` feature**
+  (off by default). `Ui::accessibility_update()` turns the laid-out frame into a
+  whole-tree `accesskit::TreeUpdate` for `Shell::update_accessibility`: each
+  node keyed by its stable `NodeKey`, its role from what its widget builder
+  recorded it as (button, checkbox, slider, drag-value, text input, select, tab,
+  tree row, menu item and the rest) rather than from its selector, named by the
+  text inside it, with its bounds, checked, expanded, selected and disabled
+  state and the focused node. `Ui::accessibility_action(&request)` acts on a
+  screen reader's focus, blur and click; a click makes the node report `clicked`
+  on the next frame, as a pointer's would.
 
 ### Changed
 

@@ -207,6 +207,77 @@ impl WidgetState {
     }
 }
 
+/// What a widget builder built a node as, recorded by the builder itself for
+/// the frame: the role an accessibility tree gives the node. It cannot be read
+/// off the selector, because a caller-named type replaces the one [`typed`]
+/// puts there. Cleared each time the node is built, so a node no builder
+/// marked this frame is [`WidgetKind::None`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WidgetKind {
+    /// A plain block or span: no widget built it as anything.
+    #[default]
+    None,
+    /// Drawn for looks alone — a checkbox's box, a toggle's glyph, a caret,
+    /// a separator — and left out of the accessibility tree with everything
+    /// inside it.
+    Decoration,
+    /// [`Ui::button`].
+    Button,
+    /// [`Ui::checkbox`]'s block, `:checked` while its value is true.
+    Checkbox,
+    /// [`Ui::slider`].
+    Slider,
+    /// [`Ui::drag_value`], whether or not it is being typed into.
+    DragValue,
+    /// [`Ui::text_input_with`]'s block.
+    TextInput {
+        /// Whether it draws its text masked, as a password field does.
+        masked: bool,
+    },
+    /// [`Ui::select`]'s button, `:open` while its list is.
+    Select,
+    /// The pop-up holding a [`Ui::select`]'s options.
+    SelectList,
+    /// One option of a [`Ui::select`], `:checked` while it is the chosen one.
+    SelectOption,
+    /// A [`Ui::collapsing`] header's row, `:open` while its body is built.
+    Disclosure,
+    /// The row of a [`Ui::tree_node`] or a [`Ui::tree_leaf`].
+    TreeRow,
+    /// [`Ui::outliner`]'s block.
+    Outliner,
+    /// One row of an outliner, which holds what the caller built in it.
+    OutlinerRow,
+    /// A branch row's toggle in an outliner, which a click opens or closes.
+    OutlinerToggle,
+    /// [`Ui::list`]'s block.
+    List,
+    /// One row of a list, which holds what the caller built in it.
+    ListRow,
+    /// The strip of a [`Ui::tabs`].
+    TabStrip,
+    /// One tab, `:checked` while it is the one showing.
+    Tab,
+    /// The pane showing the chosen tab.
+    TabPanel,
+    /// The divider of a split or a dock.
+    Splitter,
+    /// One pane of a [`Ui::dock`].
+    Pane,
+    /// [`Ui::scrollbar`]'s track.
+    ScrollBar,
+    /// A pop-up's root, unless the widget that opened it says more.
+    Popup,
+    /// A context menu's pop-up.
+    Menu,
+    /// A context menu's item, `:open` while a submenu it opens is.
+    MenuItem,
+    /// A tooltip's root.
+    Tooltip,
+    /// [`Ui::inspector_with`]'s block.
+    Inspector,
+}
+
 /// `selector` with the widget type `kind` in front, unless it names a type.
 pub(super) fn typed<'s>(kind: &'static str, selector: &'s str) -> Cow<'s, str> {
     if selector.is_empty() {
@@ -253,6 +324,13 @@ impl Ui {
     fn set_widget_state(&mut self, key: NodeKey, state: WidgetState) {
         if let Some(slot) = self.store.find(key) {
             self.store.get_mut(slot).widget = state;
+        }
+    }
+
+    /// Records that this frame's builder built `key` as `kind`.
+    pub(in crate::tree) fn mark(&mut self, key: NodeKey, kind: WidgetKind) {
+        if let Some(slot) = self.store.find(key) {
+            self.store.get_mut(slot).kind = kind;
         }
     }
 

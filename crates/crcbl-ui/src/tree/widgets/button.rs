@@ -6,7 +6,7 @@
 
 use std::panic::Location;
 
-use super::{Ui, typed};
+use super::{Ui, WidgetKind, typed};
 use crate::style::PseudoClasses;
 use crate::tree::{Behavior, Response};
 
@@ -18,9 +18,11 @@ impl Ui {
     #[track_caller]
     pub fn button(&mut self, selector: &str, label: &str) -> Response {
         let selector = typed("button", selector);
-        self.block_with(&selector, &[], Behavior::BUTTON, |ui| {
+        let response = self.block_with(&selector, &[], Behavior::BUTTON, |ui| {
             ui.span(".button-label", label, &[]);
-        })
+        });
+        self.mark(response.key, WidgetKind::Button);
+        response
     }
 
     /// A checkbox editing `value`: a `checkbox` block holding a
@@ -43,11 +45,13 @@ impl Ui {
             PseudoClasses::NONE
         };
         let mut response = self.open_block(key, parsed, &[], Behavior::BUTTON, state, |ui| {
-            ui.block(".checkbox-box", &[], |ui| {
+            let check = ui.block(".checkbox-box", &[], |ui| {
                 ui.block(".checkbox-mark", &[], |_| {});
             });
+            ui.mark(check.key, WidgetKind::Decoration);
             ui.span(".checkbox-label", label, &[]);
         });
+        self.mark(key, WidgetKind::Checkbox);
         response.changed = flipped;
         response
     }

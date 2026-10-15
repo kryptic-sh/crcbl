@@ -57,6 +57,7 @@ use std::time::Duration;
 
 use super::popup::CLOSED_LAYER;
 use super::store::NodeKey;
+use super::widgets::WidgetKind;
 use super::{Behavior, InputMode, KeySource, NavInput, ROOT_KEY, Response, Ui};
 use crate::widget::PointerInput;
 
@@ -150,6 +151,7 @@ impl Ui {
             },
         );
         self.tooltip.built = Some((index, anchor_index));
+        self.mark(response.key, WidgetKind::Tooltip);
         Some(response)
     }
 

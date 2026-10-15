@@ -15,7 +15,7 @@
 use std::hash::Hash;
 use std::panic::Location;
 
-use super::{Ui, WidgetState};
+use super::{Ui, WidgetKind, WidgetState};
 use crate::style::PseudoClasses;
 use crate::tree::{Behavior, Direction, NodeKey, Response};
 
@@ -159,10 +159,16 @@ impl Ui {
             (_, false) => "+",
         };
         let mut response = self.open_block(key, parsed, &[], Behavior::BUTTON, state, |ui| {
-            ui.span(toggle, glyph, &[]);
+            let glyph = ui.span(toggle, glyph, &[]);
+            ui.mark(glyph.key, WidgetKind::Decoration);
             ui.span(label, title, &[]);
         });
         response.changed = open != shown;
+        let built = match kind {
+            Row::Header => WidgetKind::Disclosure,
+            Row::Branch | Row::Leaf => WidgetKind::TreeRow,
+        };
+        self.mark(key, built);
 
         let state = match kind {
             Row::Header => WidgetState::Header { open },

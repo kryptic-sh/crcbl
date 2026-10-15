@@ -19,7 +19,7 @@ use std::panic::Location;
 
 use glam::Vec2;
 
-use super::{Ui, WidgetState, typed};
+use super::{Ui, WidgetKind, WidgetState, typed};
 use crate::style::{Declaration, PseudoClasses, Sides};
 use crate::tree::{Behavior, LengthAuto, NodeKey, Position, Response};
 
@@ -46,6 +46,7 @@ impl Ui {
             PseudoClasses::NONE,
             |ui| handle = ui.scroll_handle(key, target),
         );
+        self.mark(key, WidgetKind::ScrollBar);
         handle.unwrap_or(track)
     }
 

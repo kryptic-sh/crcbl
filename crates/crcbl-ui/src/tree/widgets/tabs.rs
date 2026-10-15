@@ -17,7 +17,7 @@
 
 use std::panic::Location;
 
-use super::{Ui, WidgetState, typed};
+use super::{Ui, WidgetKind, WidgetState, typed};
 use crate::style::{Declaration, PseudoClasses};
 use crate::tree::{Behavior, FlexDirection, KeySource, NodeKey, Response, hash_of};
 
@@ -60,7 +60,7 @@ impl Ui {
             Behavior::NONE,
             PseudoClasses::NONE,
             |ui| {
-                ui.block(".tab-strip", &[], |ui| {
+                let strip = ui.block(".tab-strip", &[], |ui| {
                     // Which tab a click landed on is resolved before any of
                     // them is built, so the strip and the pane agree in the
                     // frame the click arrives rather than a frame later.
@@ -84,8 +84,10 @@ impl Ui {
                         ui.tab(key, title, state);
                     }
                 });
+                ui.mark(strip.key, WidgetKind::TabStrip);
                 if let Some(&title) = titles.get(chosen) {
-                    ui.block_keyed(title, ".tab-pane", &[], |ui| pane(ui, chosen));
+                    let panel = ui.block_keyed(title, ".tab-pane", &[], |ui| pane(ui, chosen));
+                    ui.mark(panel.key, WidgetKind::TabPanel);
                 }
             },
         );
@@ -105,5 +107,6 @@ impl Ui {
         self.open_block(key, parsed, &[], Behavior::BUTTON, state, |ui| {
             ui.span(".tab-label", title, &[]);
         });
+        self.mark(key, WidgetKind::Tab);
     }
 }

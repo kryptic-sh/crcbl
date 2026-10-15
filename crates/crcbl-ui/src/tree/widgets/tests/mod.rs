@@ -1,11 +1,14 @@
 //! The widget set through the tree: each widget held to what it promises by
 //! pointer and by navigation, with the engine's own stylesheet in force.
 
+#[cfg(feature = "accesskit")]
+mod accessibility;
 mod button;
 mod context_menu;
 mod disclosure;
 mod dock;
 mod inspector;
+mod kind;
 mod list;
 mod number_entry;
 mod outliner;

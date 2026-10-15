@@ -18,7 +18,7 @@ use std::panic::Location;
 
 use glam::Vec2;
 
-use super::{Ui, WidgetState, typed};
+use super::{Ui, WidgetKind, WidgetState, typed};
 use crate::style::{Declaration, NodeSelector, PseudoClasses};
 #[cfg(doc)]
 use crate::tree::DockLayout;
@@ -299,6 +299,7 @@ impl Ui {
             |ui| panes(ui, 1),
         );
         self.set_widget_state(divider_key, WidgetState::Anchor(anchor));
+        self.mark(divider_key, WidgetKind::Splitter);
         divider.changed = position.is_some() && position.map(f32::to_bits) != was.map(f32::to_bits);
         (divider, position)
     }

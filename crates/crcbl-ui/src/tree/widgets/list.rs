@@ -17,7 +17,7 @@
 //! kept, and built even when the offset has moved away from it, so scrolling
 //! never takes focus away.
 
-use super::{Ui, WidgetState, typed};
+use super::{Ui, WidgetKind, WidgetState, typed};
 use crate::style::{Declaration, Sides};
 use crate::tree::{Behavior, KeySource, LengthAuto, Overflow, Position, Response, hash_of};
 
@@ -50,6 +50,7 @@ impl Ui {
             |ui| focused = ui.list_rows(rows, height, &mut row),
         );
         self.set_widget_state(response.key, WidgetState::Rows(focused));
+        self.mark(response.key, WidgetKind::List);
         response
     }
 
@@ -88,6 +89,7 @@ impl Ui {
                     ui.block_keyed_with(index, ".list-row", &inline, Behavior::BUTTON, |ui| {
                         row(ui, index);
                     });
+                ui.mark(response.key, WidgetKind::ListRow);
                 if response.focused {
                     focused = Some(index);
                 }

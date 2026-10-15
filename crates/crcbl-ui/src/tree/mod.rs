@@ -83,6 +83,14 @@
 //! inert — the pointer passes through it, and a press only hides it.
 //! `tooltip.rs` has the rules.
 //!
+//! # Accessibility
+//!
+//! With the `accesskit` feature, `Ui::accessibility_update` turns the laid-out
+//! frame into an AccessKit tree update — each node keyed by its [`NodeKey`],
+//! its role from what its widget builder recorded it as — and
+//! `Ui::accessibility_action` acts on the focus and click a screen reader asks
+//! for. `accessibility.rs` has the rules.
+//!
 //! # Identity
 //!
 //! Every node has a [`NodeKey`]: `hash(parent key, id)`, where the id is
@@ -175,6 +183,8 @@
 //! rounding are comparisons, the four operations and `floor` — no `sqrt`,
 //! `powf` or `mul_add` — so the result does not depend on a platform's libm.
 
+#[cfg(feature = "accesskit")]
+mod accessibility;
 mod ellipsis;
 #[cfg(all(test, feature = "parsed-font"))]
 mod ellipsis_tests;
@@ -219,6 +229,7 @@ use crate::widget::{ButtonState, PointerInput, UiState};
 use focus::FocusState;
 use layout::{LayoutTree, MeasureCache};
 use store::{Interaction, NodeStore};
+use widgets::WidgetKind;
 
 pub use crate::font::layout::TextAlign;
 pub use crate::font::{FamilyName, FontFamily};
@@ -512,6 +523,10 @@ pub struct Ui {
     context_request: Option<(NodeKey, Placement)>,
     /// What has been typed into the topmost list; see `popup_nav.rs`.
     typeahead: popup_nav::Typeahead,
+    /// The node a screen reader asked to click, for the next frame to report
+    /// clicked, as [`Ui::set_focus`] waits for it; see `accessibility.rs`.
+    #[cfg(feature = "accesskit")]
+    requested_click: Option<NodeKey>,
 }
 
 impl Ui {
@@ -554,6 +569,8 @@ impl Ui {
         self.popup_roots.clear();
         self.typeahead.built = None;
         let clicked = self.resolve_pointer(pointer);
+        #[cfg(feature = "accesskit")]
+        let clicked = self.resolve_requested_click().or(clicked);
         self.clicked = clicked;
         self.resolve_navigation(nav, clicked, self.dragged);
         self.resolve_tooltip(pointer, nav);
@@ -856,6 +873,8 @@ impl Ui {
         stored.parent = parent.map(|parent| self.nodes[parent].key);
         stored.behavior = behavior;
         stored.state = state;
+        // Until this frame's builder says what it built.
+        stored.kind = WidgetKind::None;
         // Until this frame's `Ui::tooltip` and `Ui::context_menu` ask again.
         stored.tooltip = false;
         stored.context_menu = false;

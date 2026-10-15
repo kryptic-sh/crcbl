@@ -777,6 +777,7 @@ dependencies = [
 name = "crcbl-ui"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
  "bytemuck",
  "crcbl-core",
  "crcbl-reflect",

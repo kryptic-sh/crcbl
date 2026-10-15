@@ -21,7 +21,7 @@
 
 use std::panic::Location;
 
-use super::{Ui, typed};
+use super::{Ui, WidgetKind, typed};
 use crate::style::{Declaration, PseudoClasses};
 use crate::tree::popup_nav::ListItem;
 use crate::tree::{Behavior, KeySource, LengthAuto, NodeKey, Response, hash_of};
@@ -86,8 +86,10 @@ impl Ui {
         };
         let mut response = self.open_block(key, parsed, &[], Behavior::BUTTON, state, |ui| {
             ui.span(".select-label", label, &[]);
-            ui.span(".select-caret", SELECT_CARET, &[]);
+            let caret = ui.span(".select-caret", SELECT_CARET, &[]);
+            ui.mark(caret.key, WidgetKind::Decoration);
         });
+        self.mark(key, WidgetKind::Select);
         response.changed = changed;
 
         // As wide as the button at least, as last frame laid the button out.
@@ -97,7 +99,7 @@ impl Ui {
             .into_iter()
             .collect();
         let chosen = *chosen;
-        self.popup(key, ".select-list", &inline, |ui| {
+        let list = self.popup(key, ".select-list", &inline, |ui| {
             let parsed = ui.node_selector(".select-option");
             for (index, (&option, &option_key)) in options.iter().zip(&keys).enumerate() {
                 let state = if index == chosen {
@@ -108,6 +110,7 @@ impl Ui {
                 let built = ui.open_block(option_key, parsed, &[], Behavior::BUTTON, state, |ui| {
                     ui.span(".select-option-label", option, &[]);
                 });
+                ui.mark(built.key, WidgetKind::SelectOption);
                 // Focus moves into the list on the chosen option, rather than
                 // wherever the landing rule would put it, and the list opens
                 // scrolled to it.
@@ -116,6 +119,9 @@ impl Ui {
                 }
             }
         });
+        if let Some(list) = list {
+            self.mark(list.key, WidgetKind::SelectList);
+        }
         if self.is_popup_open(key) {
             let items: Vec<ListItem<'_>> = options
                 .iter()
