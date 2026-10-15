@@ -305,6 +305,13 @@ Each step lands in the crate the later steps build on, so the seam goes first.
   `towers`. A guess, not checked: gold also moves for another reason (a wave's
   bounty, or income) between reading the purse and the build landing, so the
   assertion reads two moments as one.
+- `towers`
+  `lan::tests::presentation::a_joiners_bars_are_the_hosts_and_it_hears_the_hosts_wave`
+  failed once on the same runner (run 38717888458, 2026-10-15): "317 ticks
+  compared, 187 wounded bars, 0 held", so the bars matched and no creep was
+  slowed in the compared ticks. Two different `towers` LAN tests failing on
+  macOS in one day, each passing on rerun, points at the LAN rig's timing under
+  a loaded runner rather than at either assertion. Not investigated.
 
 ### Left behind by the seam split
 
