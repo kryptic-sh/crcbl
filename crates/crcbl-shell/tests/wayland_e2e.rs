@@ -3406,17 +3406,18 @@ fn a_menu_opens_at_its_size_and_goes_with_its_window() {
     assert!(session.shell.window_state(menu).is_err());
 }
 
-/// A menu moved to a new anchor at a new size: sway's `xdg_wm_base` is new
-/// enough to reposition, and the compositor answers with a configure at the
-/// size asked for. Where it went is the compositor's to know, not a client's.
+/// A menu moved to a new anchor at a new size: the compositor answers with a
+/// configure at the size asked for. Where it went is the compositor's to
+/// know, not a client's.
+///
+/// **Only where the compositor's `xdg_wm_base` reaches 3.** CI's sway, on
+/// wlroots 0.17, offers less, so there this test holds the other half: the
+/// capability is clear and the request is refused as `Unsupported` rather
+/// than sent to a compositor that would kill the connection over it.
 #[test]
 #[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
-fn a_repositioned_menu_is_configured_at_its_new_size() {
+fn a_repositioned_menu_is_configured_at_its_new_size_or_refused_without_v3() {
     let mut session = Session::open();
-    assert!(
-        session.shell.caps().contains(ShellCaps::POPUP_REPOSITION),
-        "sway's xdg_wm_base is past version 3"
-    );
     let window = session.create_mapped(&desc(
         "crcbl e2e repositioned menu owner",
         LogicalSize::new(500.0, 400.0),
@@ -3442,14 +3443,21 @@ fn a_repositioned_menu_is_configured_at_its_new_size() {
         .expect("configured");
 
     let moved = LogicalSize::new(240.0, 90.0);
-    session
-        .shell
-        .reposition_popup(
-            menu,
-            LogicalRect::new(LogicalPoint::new(60.0, 10.0), LogicalSize::new(100.0, 20.0)),
-            moved,
-        )
-        .expect("reposition");
+    let result = session.shell.reposition_popup(
+        menu,
+        LogicalRect::new(LogicalPoint::new(60.0, 10.0), LogicalSize::new(100.0, 20.0)),
+        moved,
+    );
+    if !session.shell.caps().contains(ShellCaps::POPUP_REPOSITION) {
+        assert!(
+            matches!(result, Err(ShellError::Unsupported { .. })),
+            "without xdg_wm_base 3 the request is refused: {result:?}"
+        );
+        println!("crcbl wayland e2e: this compositor cannot reposition a popup; refused");
+        session.shell.destroy_window(window).expect("destroy");
+        return;
+    }
+    result.expect("reposition");
     session.pump_until("the menu's configure at its new size", |session| {
         session.size(menu) == Some(moved.to_physical(scale))
     });

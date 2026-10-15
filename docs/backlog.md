@@ -101,7 +101,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      locally by the headless test only; the sway, Win32 desktop and AppKit
      session tests that cover it run in CI. Position is checked on Win32 and
      AppKit; on Wayland only the size is, since a client cannot see where its
-     popup went.
+     popup went. **The Wayland success path has run nowhere**: CI's sway
+     (wlroots 0.17.1) offers `xdg_wm_base` below 3, so the capability is clear
+     there and the sway test checks the `Unsupported` refusal instead. Covering
+     it needs a compositor offering 3 or later in CI (a newer sway, or a second
+     compositor job).
    - Popups (S3) are built (`crates/crcbl-shell/src/wayland/popup.rs`): an
      `xdg_popup` from an `xdg_positioner` whose anchor and gravity come from the
      placement, with flip and slide but never resize, on a toplevel, a popup or
