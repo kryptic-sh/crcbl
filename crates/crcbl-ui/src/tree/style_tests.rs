@@ -801,3 +801,58 @@ fn a_border_image_draws_a_nine_slice_over_the_border_box_in_place_of_the_border(
         "the border was not drawn for an unbound frame"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Rich text
+// ---------------------------------------------------------------------------
+
+/// **Rich text is a row of spans.** A launcher's result with its match
+/// highlighted is three runs in one row block, and each draws in its own
+/// colour, on one line, edge to edge: the second run starts where the first
+/// ends, and the third where the second does.
+#[test]
+fn a_row_of_spans_draws_each_run_in_its_own_style_edge_to_edge() {
+    let mut ui = Ui::new();
+    ui.add_stylesheet(
+        "rich.css",
+        ".line { flex-direction: row; } .hit { color: #ff0000; } .rest { color: #0000ff; }",
+    );
+    let mut keys = Vec::new();
+    frame(&mut ui, idle(), |ui| {
+        ui.block(".line", &[], |ui| {
+            keys.push(ui.span("#before.rest", "fi", &[]).key);
+            keys.push(ui.span("#match.hit", "re", &[]).key);
+            keys.push(ui.span("#after.rest", "fox", &[]).key);
+        });
+    });
+    let mut list = DrawList::new();
+    ui.emit(&mut list);
+    let runs: Vec<(&str, Vec2, [f32; 4])> = list
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            crate::draw_list::DrawCommand::Text {
+                pos, text, color, ..
+            } => Some((text.as_str(), *pos, *color)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        runs.iter().map(|run| (run.0, run.2)).collect::<Vec<_>>(),
+        [("fi", BLUE), ("re", RED), ("fox", BLUE)]
+    );
+    let [before, matched, after] = [runs[0].1, runs[1].1, runs[2].1];
+    assert!(
+        before.y == matched.y && matched.y == after.y,
+        "one line: {runs:?}"
+    );
+    // Each run starts at the far edge of the one before it, as laid out.
+    let right = |key| {
+        let (min, max) = ui.rect(key).expect("laid out");
+        assert!(max.x > min.x, "a run with no width");
+        max.x
+    };
+    assert!(matched.x > before.x, "{runs:?}");
+    assert_eq!(matched.x, right(keys[0]), "{runs:?}");
+    assert_eq!(after.x, right(keys[1]), "{runs:?}");
+}

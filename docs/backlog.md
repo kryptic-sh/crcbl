@@ -230,7 +230,12 @@ Each step lands in the crate the later steps build on, so the seam goes first.
 7. **Outputs.** Hotplug events with name, scale and work area on every backend
    (S7). The monitor-removed close requests in step 4 are part of this.
 8. **Text.**
-   - Rich per-span styling (S12).
+   - Rich per-span styling (S12) is there for one line: a row block of spans,
+     one per run, each in its own colour, size and family, laid out edge to edge
+     (`a_row_of_spans_draws_each_run_in_its_own_style_edge_to_edge`), and the
+     pattern is written on `Ui::span`. Not there: runs that wrap together as one
+     paragraph, and font weight — there is no `font-weight` at all, so a bold
+     match needs a bold font registered as its own family.
    - Colour emoji (COLR, CBDT, sbix) with per-glyph fallback (S22).
    - Text measurement exists as `text_width`.
 9. **Input.**

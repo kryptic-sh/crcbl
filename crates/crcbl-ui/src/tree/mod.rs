@@ -711,6 +711,12 @@ impl Ui {
     /// A span: text or a picture, keyed by its selector's `#id` or else by
     /// this call site. `selector` and `inline` are [`Ui::block`]'s; a span's
     /// type is `span` unless the selector names one.
+    ///
+    /// **Rich text is a row of spans**: a line whose runs differ in colour,
+    /// size or family — a search result with its match highlighted — is a
+    /// `flex-direction: row` block with one span per run, each starting where
+    /// the last ends. Spans do not wrap into each other, so a paragraph whose
+    /// differently styled runs reflow together is not expressible this way.
     #[track_caller]
     pub fn span<'a>(
         &mut self,
