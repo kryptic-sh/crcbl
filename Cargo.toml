@@ -7,6 +7,10 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/kryptic-sh/crcbl"
+# The oldest toolchain a published crate promises to build on: the one
+# `rust-toolchain.toml` pins, because that is the only one CI proves. The two
+# move together, and `ci.yml`'s `package` job fails when they disagree.
+rust-version = "1.98.1"
 
 # Shared dependency versions. Add a crate here only in the slice that first uses
 # it — `ash`, `objc2`, `windows-rs` and friends land with their backends.

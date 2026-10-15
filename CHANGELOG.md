@@ -884,6 +884,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Every published crate declares `rust-version = "1.98.1"`**, the toolchain
+  `rust-toolchain.toml` pins and the only one CI proves, so an older compiler
+  names the version it needs instead of failing on a newer API. The workspace
+  `Cargo.toml` holds the number and `ci.yml`'s `package` job fails when it and
+  the pinned channel disagree.
+
 - **`crcbl-frame`: the render graph and the UI pass without the 3D renderer.**
   The render graph, the transient pool, the texture uploads, the mip chains, the
   pass timers, the frame counters and the UI pass moved out of `crcbl-render`

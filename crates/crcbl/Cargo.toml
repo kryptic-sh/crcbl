@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # The umbrella exists so a *game* names one dependency, not four. It therefore
 # depends on every crate a game needs at the current phase and re-exports them;

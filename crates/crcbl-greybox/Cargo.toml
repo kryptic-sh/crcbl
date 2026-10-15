@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # The 2D half of the pack, on by default. `bake` gates the sprite primitives:
 # the build script bakes `assets/*.crpix` and `src/sprite.rs` reads the result

@@ -33,8 +33,6 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      are small for a window plus a UI: `crcbl-hal`, `crcbl-shell`, `crcbl-ui`
      and each backend reach only `crcbl-core`, `crcbl-console` and (for the
      shell) `crcbl-wl-scanner` inside the workspace.
-   - S15: give every published crate `rust-version`, equal to
-     `rust-toolchain.toml`'s channel.
 2. **The loop.**
    - S6: a cross-thread wake proxy for `wait_events` on every backend (eventfd
      on Wayland and X11, `PostMessageW` on Win32, a `CFRunLoop` source on
@@ -590,10 +588,7 @@ Left open:
 - **`crcbl new` scaffolds a path dependency** on an engine checkout
   (`crates/crcbl-cli/src/new.rs`). Once the crates are on crates.io, a version
   dependency is the natural default, and the packaged binary has no checkout.
-- **No crate sets `readme` or `rust-version`**, so each crates.io page has no
-  README, and older toolchains fail without naming the one they need. The
-  recommendation to lyr was `rust-version` equal to `rust-toolchain.toml`'s
-  channel.
+- **No crate sets `readme`**, so each crates.io page has no README.
 
 ## Engine feature acceptance and EW ownership (2026-10-07)
 

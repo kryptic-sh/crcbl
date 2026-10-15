@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # **No GPU, and no image codec unless you ask for one.** The default build is
 # the *description* of a sprite sheet plus the `.crpix` parser: no dependencies

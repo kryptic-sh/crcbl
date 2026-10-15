@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # Three dependencies, and the charter is that a component can reach this crate
 # without dragging anything behind it: an arrow into it from `crcbl-ecs`, from a

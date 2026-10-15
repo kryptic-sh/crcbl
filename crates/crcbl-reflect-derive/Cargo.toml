@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # A crate of its own rather than a module of `crcbl-reflect`, because a
 # `proc-macro = true` crate can export nothing but macros — and because the

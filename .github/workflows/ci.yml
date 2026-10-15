@@ -3188,6 +3188,19 @@ jobs:
           packages: libasound2-dev
       - name: Check the publish order
         run: tools/check-publish-order.sh
+      # The published crates promise the toolchain CI proves, and no older:
+      # `rust-version` and `rust-toolchain.toml`'s channel are one number kept
+      # in two files.
+      - name: Check rust-version matches the pinned toolchain
+        run: |
+          set -euo pipefail
+          declared=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          pinned=$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)
+          if [ -z "$declared" ] || [ "$declared" != "$pinned" ]; then
+            echo "::error::Cargo.toml rust-version '$declared' != rust-toolchain.toml channel '$pinned'"
+            exit 1
+          fi
+          echo "rust-version $declared, toolchain $pinned"
       # Packs every publishable crate and builds each one from its own
       # tarball against the others' tarballs, which is what crates.io will
       # see: a file outside a crate's directory, a dependency cycle or a

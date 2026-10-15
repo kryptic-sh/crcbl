@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # The placement half — `Grid`, `Catalog`, `Shape` — needs three dependencies,
 # and every one of them is a *format* or an *error*, not a runtime. There is no

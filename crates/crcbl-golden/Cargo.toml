@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # `png` is the one dependency, and it is here rather than hand-rolled on
 # purpose. A golden image has to be a file a human opens from a CI artifact —

@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # `ash` is the only binding in the engine and this is the only crate allowed to
 # name it (the HAL rules in `docs/notes/backends.md`). Nothing above the seam may learn

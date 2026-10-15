@@ -13,7 +13,8 @@
 #
 # Bumping it is a deliberate act: change the version here, run
 # `cargo clippy --all-targets -- -D warnings` and fix whatever the new release
-# found, in the same commit.
+# found, in the same commit — and move `rust-version` in the workspace
+# `Cargo.toml` with it, which `ci.yml`'s `package` job checks.
 [toolchain]
 channel = "1.98.1"
 components = ["rustfmt", "clippy"]

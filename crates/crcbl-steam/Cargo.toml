@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # No binding crate. `docs/notes/backends.md` rules out every one — the SDK
 # cannot be vendored, and a link-time dependency on `steam_api` kills the

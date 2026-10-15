@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # Deliberately empty of anything browser-shaped. This slice is the encoding and
 # nothing else: no `wasm-bindgen`, no `web-sys`, no `js-sys`. The decision that

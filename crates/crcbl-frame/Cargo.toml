@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # The part of the renderer a program that draws only a UI needs: a window's
 # frame of `crcbl-ui` draw lists on `crcbl-hal`, with no scene, no meshes and

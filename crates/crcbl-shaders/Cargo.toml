@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # **No dependencies, on purpose — not even `crcbl-hal`.** This crate hands out
 # `&[u32]` and entry-point names, which is exactly what `ShaderModuleDesc` takes,

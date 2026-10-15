@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
 
 # One dependency, and it is an *error*, not a runtime. `docs/plan/55-water.md`'s
 # first decision is that this crate is pure data and CPU arithmetic that links
