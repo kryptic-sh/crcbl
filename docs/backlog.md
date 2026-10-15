@@ -33,21 +33,10 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      are small for a window plus a UI: `crcbl-hal`, `crcbl-shell`, `crcbl-ui`
      and each backend reach only `crcbl-core`, `crcbl-console` and (for the
      shell) `crcbl-wl-scanner` inside the workspace.
-2. **The loop: built, its CI verdict pending.**
-   - S6 (`Shell::waker`, `ShellWaker`), S19 and S25 are done.
-   - The wake's own tests are the unverified part. Each backend's wake check
-     runs only where that window system does:
-     - Wayland and X11: their `#[ignore]`d e2e suites under sway and Xvfb.
-     - Win32: the `run-win32-e2e.ps1` real-desktop job.
-     - AppKit: the `appkit_session` harness on the macOS runner.
-     - Linux: the pipe's unit tests in `crates/crcbl-shell/src/linux/wake.rs`
-       (cross-compiled under clippy here, not run).
-     - Only the headless backend's tests ran on this Windows machine.
-   - S19 was checked by reading: every blocking backend passes its timeout to
-     its wait (`poll`, `MsgWaitForMultipleObjectsEx` with a high-resolution
-     timer, `nextEventMatchingMask:untilDate:`, a condition variable).
-   - S25: the loop is the caller's, and each desktop backend's `Drop` destroys
-     its windows. The `Shell` trait docs now say so.
+2. **The loop: done.** S6 (`Shell::waker`, `ShellWaker`), S19 and S25 are on
+   main. CI on 5e669fc4 ran each backend's wake check: Wayland under sway, X11
+   under Xvfb, the Win32 real-desktop job, the AppKit session and the Linux
+   pipe's unit tests.
    - Left over: the Wayland and X11 FFI modules each keep their own `poll`
      declaration and helpers (`poll_readable`, Wayland's `poll_readable_with`,
      X11's new `poll_readable_or`). A shared `linux` poll module would remove
