@@ -16,6 +16,9 @@ rust-version.workspace = true
 # likes, and only the finished pixels need cross to the one that draws.
 [features]
 png = ["dep:png"]
+# The freedesktop.org icon-theme lookup: a name, a size and a scale to a file.
+# Filesystem work only, no decoding, so it needs no codec.
+theme = []
 
 [dependencies]
 # PNG through the crate the workspace already uses for it (`crcbl-sprite`,
