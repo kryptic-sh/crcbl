@@ -28,8 +28,17 @@
 //! column; `font-rs` writes the same quantity as special cases for one, two
 //! and many columns.
 //!
-//! Coverage is `min(|sum|, 1)`: the non-zero rule, with two overlapping
-//! contours of one winding saturating at full coverage.
+//! The running sum is the winding number integrated over the pixel, and a
+//! [`FillRule`] turns it into coverage. Non-zero takes `min(|sum|, 1)`, so two
+//! overlapping contours of one winding saturate at full coverage; even-odd
+//! folds the sum into `0..=1` with a period of two, so a pixel wound twice is
+//! empty and one wound three times is full.
+//!
+//! Both are exact wherever a pixel's winding number is constant except across
+//! one edge. Where two edges cross one pixel, the area integral cannot tell a
+//! pixel half covered twice from one fully covered once, and the rules read it
+//! as the latter: an antialiasing error on that pixel only, the one every
+//! signed-area rasteriser shares.
 //!
 //! # Curves: Wang's formula
 //!
@@ -169,6 +178,31 @@ pub fn wang_segments(degree: u32, max_second_difference: f32, tolerance: f32) ->
 pub fn coverage_byte(coverage: f32) -> u8 {
     // `as` saturates and sends NaN to zero.
     (coverage.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
+/// Which points a set of outlines covers, from their winding number: SVG's
+/// `fill-rule`, and the rule a font's glyphs are drawn with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FillRule {
+    /// Inside wherever the winding number is not zero.
+    #[default]
+    NonZero,
+    /// Inside wherever the winding number is odd.
+    EvenOdd,
+}
+
+impl FillRule {
+    /// A pixel's coverage from its integrated winding number `sum`.
+    #[must_use]
+    pub fn coverage(self, sum: f32) -> f32 {
+        match self {
+            Self::NonZero => sum.abs().min(1.0),
+            Self::EvenOdd => {
+                let folded = sum.abs() % 2.0;
+                if folded > 1.0 { 2.0 - folded } else { folded }
+            }
+        }
+    }
 }
 
 /// An accumulation buffer one outline is drawn into. See the module docs.
@@ -313,15 +347,22 @@ impl Rasterizer {
         }
     }
 
-    /// Each pixel's coverage in `0..=1`, rows top to bottom.
+    /// Each pixel's coverage in `0..=1` under the non-zero rule, rows top to
+    /// bottom.
     #[must_use]
     pub fn coverage(&self) -> Vec<f32> {
+        self.coverage_by(FillRule::NonZero)
+    }
+
+    /// Each pixel's coverage in `0..=1` under `rule`, rows top to bottom.
+    #[must_use]
+    pub fn coverage_by(&self, rule: FillRule) -> Vec<f32> {
         let mut out = Vec::with_capacity(self.width * self.height);
         for row in self.cells.chunks_exact(self.width + 1) {
             let mut sum = 0.0f32;
             for cell in &row[..self.width] {
                 sum += cell;
-                out.push(sum.abs().min(1.0));
+                out.push(rule.coverage(sum));
             }
         }
         out
@@ -669,6 +710,65 @@ mod tests {
         let mut want = [1.0; 9];
         want[4] = 0.0;
         assert_close(&hole.coverage(), &want, 1e-6, "hole");
+    }
+
+    /// **Even-odd empties what is wound twice and fills what is wound three
+    /// times**, where non-zero fills both; a half-covered pixel at the edge
+    /// is half covered under either rule.
+    #[test]
+    fn even_odd_alternates_with_the_winding_number() {
+        let square = |left: f32, top: f32, side: f32| {
+            [
+                Point::new(left, top),
+                Point::new(left + side, top),
+                Point::new(left + side, top + side),
+                Point::new(left, top + side),
+            ]
+        };
+        // Wound once across a 4x1 strip, twice over its second pixel, three
+        // times over its third, and once over half of its fourth.
+        let mut rasterizer = Rasterizer::new(4, 1);
+        polygon(
+            &mut rasterizer,
+            &[
+                Point::new(0.0, 0.0),
+                Point::new(3.5, 0.0),
+                Point::new(3.5, 1.0),
+                Point::new(0.0, 1.0),
+            ],
+        );
+        polygon(&mut rasterizer, &square(1.0, 0.0, 1.0));
+        polygon(&mut rasterizer, &square(2.0, 0.0, 1.0));
+        polygon(&mut rasterizer, &square(2.0, 0.0, 1.0));
+        assert_close(
+            &rasterizer.coverage_by(FillRule::EvenOdd),
+            &[1.0, 0.0, 1.0, 0.5],
+            1e-6,
+            "even-odd",
+        );
+        assert_close(
+            &rasterizer.coverage_by(FillRule::NonZero),
+            &[1.0, 1.0, 1.0, 0.5],
+            1e-6,
+            "non-zero",
+        );
+        assert_eq!(
+            rasterizer.coverage(),
+            rasterizer.coverage_by(FillRule::NonZero)
+        );
+        // The fold itself, across two periods and both signs.
+        for (sum, want) in [
+            (0.25, 0.25),
+            (1.25, 0.75),
+            (-2.25, 0.25),
+            (3.0, 1.0),
+            (4.0, 0.0),
+        ] {
+            assert!(
+                (FillRule::EvenOdd.coverage(sum) - want).abs() < 1e-6,
+                "{sum}"
+            );
+        }
     }
 
     /// **Geometry past the mask's edges clips cleanly**: a square hanging off
