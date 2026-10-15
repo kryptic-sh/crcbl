@@ -99,8 +99,10 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      `a_destroyed_window_gives_its_tile_back` failed with its own message, and
      in the second run, which ran past failures, the other 41 passed. Their
      unmutated run is main's CI.
-   - Still to do on Wayland:
-     - no flash on map: the first commit carries the first frame;
+   - No flash on map holds on Wayland by construction: the backend never
+     attaches a buffer (the only `wl_surface::attach` is the e2e helper's
+     `attach_shm_buffer`), so a surface maps with the renderer's first swapchain
+     present, which is the first frame.
    - `Shell::reposition_popup` moves and resizes a live popup on Wayland
      (`xdg_popup.reposition`, so `xdg_wm_base` is now bound up to 3 and
      `ShellCaps::POPUP_REPOSITION` follows the version bound), Win32
