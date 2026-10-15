@@ -393,7 +393,26 @@ Each step lands in the crate the later steps build on, so the seam goes first.
     compositor and the X server, and every other numeric constant beside the two
     above, which were compared against FreeBSD's headers by reading.
 13. **Accessibility (S14).** AccessKit was approved as a new dependency on
-    2026-10-16; not started.
+    2026-10-16.
+    - The seam is in, behind `crcbl-shell`'s `accesskit` feature:
+      `Shell::update_accessibility`, the `Accessibility*` events,
+      `ShellCaps::ACCESSIBILITY` and the headless reader. Verified by the
+      headless test `a_tree_reaches_the_reader_only_while_it_reads`, which two
+      hand mutants (activation raised twice, deactivation keeping the reader)
+      fail.
+    - Decided 2026-10-16, per the standing instruction: the feature is off by
+      default. The adapters bring the `windows` crate, `objc2` and, on Linux,
+      `zbus` with an async executor, and a game has no tree to offer; lyr and
+      pikr turn it on. The other choice, on by default, would give every program
+      a screen-reader path at the price of the shell's small dependency set.
+    - Still to do, in this order: crcbl-ui building a `TreeUpdate` from its tree
+      (a `NodeKey` is stable across frames, so it is the `NodeId`; roles come
+      from the widget type `widgets::typed` prefixes, states from
+      `PseudoClasses`, text from the spans) and acting on an `ActionRequest`
+      (focus through `Ui::set_focus`, click through a new click-by-key); Win32
+      through `accesskit_windows::Adapter` answering `WM_GETOBJECT` in the
+      shell's window procedure; Wayland and X11 through `accesskit_unix` (AT-SPI
+      over D-Bus); AppKit through `accesskit_macos`.
 
 14. **Image assets to RGBA (S28), asked by lyr for lyr and pikr on 2026-10-16**,
     relaying the owner: one crcbl crate that turns image files and raw buffers

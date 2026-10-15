@@ -18,6 +18,12 @@ rust-version = "1.98"
 # Shared dependency versions. Add a crate here only in the slice that first uses
 # it — `ash`, `objc2`, `windows-rs` and friends land with their backends.
 [workspace.dependencies]
+# Accessibility's vocabulary: the node tree a screen reader reads and the
+# actions it asks for. Only the types crate here; each platform's adapter is
+# a dependency of the `crcbl-shell` backend that speaks to it. Behind the
+# `accesskit` feature of `crcbl-shell` and `crcbl-ui`, approved by the owner
+# on 2026-10-16.
+accesskit = "0.25.1"
 # The one sanctioned binding, per the HAL rules in `docs/notes/backends.md`:
 # `crcbl-vk` is the only crate that may name it. Default features keep
 # `loaded`, which is `Entry::load()` — a `dlopen` of `libvulkan.so.1` at

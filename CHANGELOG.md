@@ -34,6 +34,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `TextCommit`, and `Shell::set_text_input_area` places its candidate window.
   Off by default, so an input method in its native mode no longer turns a game's
   keys into a candidate list.
+- **An accessibility seam in `crcbl-shell`, behind its new `accesskit` feature**
+  (off by default). `Shell::update_accessibility(window, update)` hands a
+  window's `accesskit::TreeUpdate` to the platform's assistive technologies, and
+  `ShellEvent::AccessibilityActivated`, `AccessibilityAction` and
+  `AccessibilityDeactivated` say when a screen reader starts reading, what it
+  asks for, and when it stops. `crcbl_shell::accesskit` re-exports the crate,
+  and `ShellCaps::ACCESSIBILITY` says whether a backend passes trees on. No
+  desktop backend does yet: the provided method drops the update, so the cap is
+  clear there. `HeadlessShell` plays the reader (`activate_accessibility`,
+  `request_accessibility_action`, `accessibility_updates`,
+  `deactivate_accessibility`).
 
 ### Changed
 

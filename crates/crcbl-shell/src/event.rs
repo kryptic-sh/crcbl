@@ -477,6 +477,47 @@ pub enum ShellEvent {
         /// case.
         content: ClipboardContent,
     },
+
+    /// An assistive technology — a screen reader, a magnifier, voice control
+    /// — started reading `window`.
+    ///
+    /// From here until
+    /// [`AccessibilityDeactivated`](ShellEvent::AccessibilityDeactivated), the
+    /// program sends the window's accessibility tree with
+    /// [`update_accessibility`](crate::Shell::update_accessibility): a whole
+    /// tree first, then what changed. Before it nobody is reading, and building
+    /// a tree is wasted work.
+    #[cfg(feature = "accesskit")]
+    AccessibilityActivated {
+        /// The window being read.
+        window: WindowId,
+    },
+
+    /// An assistive technology asked for something done to a node of
+    /// `window`'s accessibility tree: focus it, click it, scroll it into view,
+    /// set its value.
+    ///
+    /// `request.target_node` is the node, by the
+    /// [`NodeId`](accesskit::NodeId) the program gave it. Act on it as the
+    /// matching input would have; the result shows in the next tree update,
+    /// and nothing else answers the request.
+    #[cfg(feature = "accesskit")]
+    AccessibilityAction {
+        /// The window the node is in.
+        window: WindowId,
+        /// What was asked, and of which node.
+        request: accesskit::ActionRequest,
+    },
+
+    /// The last assistive technology reading `window` stopped. Trees sent from
+    /// here on are dropped until the next
+    /// [`AccessibilityActivated`](ShellEvent::AccessibilityActivated), which
+    /// wants a whole tree again.
+    #[cfg(feature = "accesskit")]
+    AccessibilityDeactivated {
+        /// The window no longer read.
+        window: WindowId,
+    },
 }
 
 impl ShellEvent {
@@ -506,6 +547,10 @@ impl ShellEvent {
             | Self::FocusRefused { window }
             | Self::FullScreenApp { window, .. }
             | Self::ClipboardData { window, .. } => Some(*window),
+            #[cfg(feature = "accesskit")]
+            Self::AccessibilityActivated { window }
+            | Self::AccessibilityAction { window, .. }
+            | Self::AccessibilityDeactivated { window } => Some(*window),
             Self::MonitorsChanged | Self::MonitorRemoved { .. } => None,
         }
     }
@@ -536,6 +581,10 @@ impl ShellEvent {
             | Self::FocusRefused { .. }
             | Self::FullScreenApp { .. }
             | Self::ClipboardData { .. } => None,
+            #[cfg(feature = "accesskit")]
+            Self::AccessibilityActivated { .. }
+            | Self::AccessibilityAction { .. }
+            | Self::AccessibilityDeactivated { .. } => None,
         }
     }
 
@@ -577,6 +626,12 @@ impl ShellEvent {
             Self::FullScreenApp { .. } => "FullScreenApp",
             Self::DroppedFile { .. } => "DroppedFile",
             Self::ClipboardData { .. } => "ClipboardData",
+            #[cfg(feature = "accesskit")]
+            Self::AccessibilityActivated { .. } => "AccessibilityActivated",
+            #[cfg(feature = "accesskit")]
+            Self::AccessibilityAction { .. } => "AccessibilityAction",
+            #[cfg(feature = "accesskit")]
+            Self::AccessibilityDeactivated { .. } => "AccessibilityDeactivated",
         }
     }
 }
@@ -753,6 +808,24 @@ mod tests {
                 active: true,
             },
         ];
+        #[cfg(feature = "accesskit")]
+        let events = {
+            let mut events = events.to_vec();
+            events.extend([
+                ShellEvent::AccessibilityActivated { window },
+                ShellEvent::AccessibilityAction {
+                    window,
+                    request: accesskit::ActionRequest {
+                        action: accesskit::Action::Click,
+                        target_tree: accesskit::TreeId::ROOT,
+                        target_node: accesskit::NodeId(1),
+                        data: None,
+                    },
+                },
+                ShellEvent::AccessibilityDeactivated { window },
+            ]);
+            events
+        };
 
         let mut names = Vec::new();
         for event in &events {

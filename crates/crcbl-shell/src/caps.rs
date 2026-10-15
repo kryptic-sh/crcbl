@@ -244,6 +244,14 @@ bitflags::bitflags! {
         /// `xdg_popup.reposition` arrived in `xdg_wm_base` 3, and a compositor
         /// offering only 1 or 2 has popups that stay where they opened.
         const POPUP_REPOSITION = 1 << 19;
+
+        /// `Shell::update_accessibility` reaches the platform's assistive
+        /// technologies, and the `Accessibility*` events are raised.
+        ///
+        /// Set only by a backend built with the `accesskit` feature, which is
+        /// where that method and those events are, and an adapter for its
+        /// platform.
+        const ACCESSIBILITY = 1 << 20;
     }
 }
 

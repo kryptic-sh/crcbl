@@ -233,6 +233,10 @@ struct HeadlessWindow {
     panel_monitor: Option<MonitorId>,
     /// [`Shell::set_text_input_enabled`]'s last word.
     text_input: bool,
+    /// Whether a pretend assistive technology is reading the window, and what
+    /// it has been sent since it started.
+    #[cfg(feature = "accesskit")]
+    accessibility: Option<Vec<accesskit::TreeUpdate>>,
 }
 
 impl HeadlessWindow {
@@ -1041,6 +1045,87 @@ impl HeadlessShell {
         Ok(self.window(window)?.text_input)
     }
 
+    /// Starts a pretend assistive technology reading `window`, raising
+    /// [`ShellEvent::AccessibilityActivated`]. Does nothing if one already is.
+    ///
+    /// Headless-only.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    #[cfg(feature = "accesskit")]
+    pub fn activate_accessibility(&mut self, window: WindowId) -> Result<(), ShellError> {
+        let state = &mut self.window_mut(window)?.accessibility;
+        if state.is_none() {
+            *state = Some(Vec::new());
+            self.queue
+                .push_back(ShellEvent::AccessibilityActivated { window });
+        }
+        Ok(())
+    }
+
+    /// Stops the pretend assistive technology, raising
+    /// [`ShellEvent::AccessibilityDeactivated`] and forgetting what it was
+    /// sent. Does nothing if none was reading.
+    ///
+    /// Headless-only.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    #[cfg(feature = "accesskit")]
+    pub fn deactivate_accessibility(&mut self, window: WindowId) -> Result<(), ShellError> {
+        if self.window_mut(window)?.accessibility.take().is_some() {
+            self.queue
+                .push_back(ShellEvent::AccessibilityDeactivated { window });
+        }
+        Ok(())
+    }
+
+    /// Has the pretend assistive technology ask for `request`, raising
+    /// [`ShellEvent::AccessibilityAction`].
+    ///
+    /// Headless-only.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    ///
+    /// # Panics
+    ///
+    /// If nothing is reading `window`: an assistive technology that never
+    /// started has no tree to act on.
+    #[cfg(feature = "accesskit")]
+    pub fn request_accessibility_action(
+        &mut self,
+        window: WindowId,
+        request: accesskit::ActionRequest,
+    ) -> Result<(), ShellError> {
+        assert!(
+            self.window(window)?.accessibility.is_some(),
+            "no assistive technology is reading the window"
+        );
+        self.queue
+            .push_back(ShellEvent::AccessibilityAction { window, request });
+        Ok(())
+    }
+
+    /// The tree updates the pretend assistive technology has been sent since
+    /// it started, oldest first; `None` while none is reading.
+    ///
+    /// Headless-only.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    #[cfg(feature = "accesskit")]
+    pub fn accessibility_updates(
+        &self,
+        window: WindowId,
+    ) -> Result<Option<&[accesskit::TreeUpdate]>, ShellError> {
+        Ok(self.window(window)?.accessibility.as_deref())
+    }
+
     /// The bytes currently offered on the in-process clipboard for `mime`.
     ///
     /// Headless-only.
@@ -1425,6 +1510,8 @@ impl Shell for HeadlessShell {
                 parent,
                 panel_monitor,
                 text_input: false,
+                #[cfg(feature = "accesskit")]
+                accessibility: None,
             })
             .cast();
         Ok(window)
@@ -1685,6 +1772,18 @@ impl Shell for HeadlessShell {
         Ok(())
     }
 
+    #[cfg(feature = "accesskit")]
+    fn update_accessibility(
+        &mut self,
+        window: WindowId,
+        update: accesskit::TreeUpdate,
+    ) -> Result<(), ShellError> {
+        if let Some(updates) = &mut self.window_mut(window)?.accessibility {
+            updates.push(update);
+        }
+        Ok(())
+    }
+
     fn set_cursor(
         &mut self,
         window: WindowId,
@@ -1867,6 +1966,76 @@ mod tests {
             return Err("zero-extent swapchain");
         }
         Ok(size)
+    }
+
+    // ------------------------------------------------------------ accessibility
+
+    /// A tree reaches the pretend reader only while it reads, and each start
+    /// and stop is one event: what a program that sends every frame relies on.
+    #[cfg(feature = "accesskit")]
+    #[test]
+    fn a_tree_reaches_the_reader_only_while_it_reads() {
+        use accesskit::{Action, ActionRequest, Node, NodeId, Role, TreeId, TreeInfo, TreeUpdate};
+
+        let (mut shell, window) = shell_with_configured_window();
+        let update = |label: &str| TreeUpdate {
+            nodes: vec![(NodeId(1), {
+                let mut node = Node::new(Role::Window);
+                node.set_label(label);
+                node
+            })],
+            tree: Some(TreeInfo::new(NodeId(1))),
+            tree_id: TreeId::ROOT,
+            focus: NodeId(1),
+        };
+
+        shell
+            .update_accessibility(window, update("unread"))
+            .expect("update");
+        assert_eq!(shell.accessibility_updates(window).expect("updates"), None);
+
+        shell.activate_accessibility(window).expect("activate");
+        shell
+            .activate_accessibility(window)
+            .expect("activate twice");
+        shell
+            .update_accessibility(window, update("read"))
+            .expect("update");
+        let click = ActionRequest {
+            action: Action::Click,
+            target_tree: TreeId::ROOT,
+            target_node: NodeId(1),
+            data: None,
+        };
+        shell
+            .request_accessibility_action(window, click.clone())
+            .expect("action");
+        assert_eq!(
+            shell.accessibility_updates(window).expect("updates"),
+            Some(&[update("read")][..])
+        );
+        let events = drain(&mut shell);
+        assert_eq!(
+            names(&events),
+            ["AccessibilityActivated", "AccessibilityAction"]
+        );
+        assert_eq!(
+            events[1],
+            ShellEvent::AccessibilityAction {
+                window,
+                request: click
+            }
+        );
+
+        shell.deactivate_accessibility(window).expect("deactivate");
+        shell
+            .deactivate_accessibility(window)
+            .expect("deactivate twice");
+        shell
+            .update_accessibility(window, update("gone"))
+            .expect("update");
+        assert_eq!(shell.accessibility_updates(window).expect("updates"), None);
+        assert_eq!(names(&drain(&mut shell)), ["AccessibilityDeactivated"]);
     }
 
     // ---------------------------------------------------------------- configure

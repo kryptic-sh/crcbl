@@ -10,6 +10,8 @@ rust-version.workspace = true
 # Still tiny. `crcbl-core` supplies handles, the input vocabulary and
 # `SurfaceTarget`; `bitflags` and `thiserror` are vocabulary; `log` is how
 # backend selection and a lost compositor connection explain themselves.
+# `accesskit` is optional, behind the feature of the same name, for the programs
+# that offer a screen reader a tree.
 #
 # There is deliberately **no** `wayland-client`, `wayland-sys`,
 # `wayland-scanner` or `smithay-client-toolkit`: the windowing rules in
@@ -19,6 +21,7 @@ rust-version.workspace = true
 # that module for why not `#[link]`), and the protocol layer above it is
 # generated at build time from the vendored XML.
 [dependencies]
+accesskit = { workspace = true, optional = true }
 bitflags = { workspace = true }
 crcbl-core = { workspace = true }
 thiserror = { workspace = true }
@@ -131,6 +134,11 @@ win32-e2e = []
 #   cargo nextest run -p crcbl-shell --features win32-e2e,win32-ime-e2e \
 #     --test win32_e2e --run-ignored all -E 'test(/input_method/)'
 win32-ime-e2e = ["win32-e2e"]
+
+# Accessibility: `Shell::update_accessibility` and the events a screen reader
+# raises. Off by default, so a game that has no use for it keeps the shell's
+# small dependency set; a desktop program turns it on. See `accessibility`.
+accesskit = ["dep:accesskit"]
 
 [lints]
 workspace = true

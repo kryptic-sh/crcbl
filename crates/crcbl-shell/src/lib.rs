@@ -318,6 +318,12 @@ pub use x11::e2e as x11_test_support;
 #[cfg(target_os = "macos")]
 pub use appkit::session_support;
 
+/// The accessibility vocabulary [`Shell::update_accessibility`] and the
+/// `Accessibility*` events speak, re-exported so a caller builds its tree with
+/// the version the shell was built against. Behind the `accesskit` feature.
+#[cfg(feature = "accesskit")]
+pub use accesskit;
+
 pub use backend::{BACKEND_ENV_VAR, ShellBackend, open, open_backend};
 pub use caps::ShellCaps;
 pub use clipboard::{
@@ -911,6 +917,37 @@ pub trait Shell: core::fmt::Debug {
         enabled: bool,
     ) -> Result<(), ShellError> {
         let _ = enabled;
+        self.window_state(window).map(|_| ())
+    }
+
+    /// Hands `window`'s accessibility tree, or what changed in it, to the
+    /// platform's assistive technologies.
+    ///
+    /// Send a whole tree (with [`TreeUpdate::tree`](accesskit::TreeUpdate::tree)
+    /// set) after each
+    /// [`AccessibilityActivated`](ShellEvent::AccessibilityActivated), then
+    /// only what changed, each frame something did. An update sent while
+    /// nobody is reading — before the activation, or after
+    /// [`AccessibilityDeactivated`](ShellEvent::AccessibilityDeactivated) — is
+    /// dropped, so a program may also send unconditionally and skip tracking
+    /// the two events.
+    ///
+    /// # A provided method
+    ///
+    /// The default validates the handle and drops the update, which is right
+    /// for a backend with no adapter: it never raises the activation either.
+    /// [`ShellCaps::ACCESSIBILITY`] says whether the trees go anywhere.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    #[cfg(feature = "accesskit")]
+    fn update_accessibility(
+        &mut self,
+        window: WindowId,
+        update: accesskit::TreeUpdate,
+    ) -> Result<(), ShellError> {
+        let _ = update;
         self.window_state(window).map(|_| ())
     }
 }
