@@ -6325,6 +6325,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A towers LAN joiner sometimes built a bolt tower whatever kind it chose.**
+  When two of a joiner's command frames reached the host in one tick, the merge
+  took the plot from the build frame and the kind from the frame after it, which
+  carries the default kind. The kind now goes with its plot. This was also the
+  cause of two `towers` LAN tests failing now and then on CI's macOS runner.
+
 - **A destroyed Wayland window leaves the screen.** `destroy_window` freed the
   `xdg_toplevel`, `xdg_surface` and `wl_surface` on the client only, so the
   compositor kept the window, with its last frame and its place in a tiling

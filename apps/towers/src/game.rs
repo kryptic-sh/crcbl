@@ -278,8 +278,9 @@ impl Intent {
     /// not a retraction, and the **last** plot named wins — a player who
     /// pressed build twice inside one tick asked for the second plot, and
     /// merging two builds into one tick would drop a command rather than a
-    /// keystroke. The kind is a state rather than an edge, so the last frame's
-    /// is simply the current one.
+    /// keystroke. The kind goes with the plot it was sent beside: a client
+    /// empties its command once it is sent, so a later frame that names no
+    /// plot carries the default kind, not the one the build asked for.
     fn from_inputs(inputs: ClientInputs<'_>) -> Self {
         let mut merged = Self::default();
         for (_tick, data) in inputs.iter() {
@@ -290,9 +291,9 @@ impl Intent {
             };
             merged.start_wave |= frame.start_wave;
             merged.restart |= frame.restart;
-            merged.kind = frame.kind;
             if frame.place.is_some() {
                 merged.place = frame.place;
+                merged.kind = frame.kind;
             }
             if frame.upgrade.is_some() {
                 merged.upgrade = frame.upgrade;
@@ -2174,6 +2175,46 @@ mod tests {
             None,
             "a kind byte past the table was read",
         );
+    }
+
+    /// **A build's kind travels with its plot**, when the frames of a client
+    /// that ran ahead are merged into one tick. The client empties its
+    /// command once sent, so the frame after a build names no plot and the
+    /// default kind; taking that frame's kind built a bolt where a splash
+    /// was asked for, whenever the two shared a tick.
+    #[test]
+    fn a_merged_tick_builds_the_kind_its_plot_was_sent_with() {
+        use crcbl::core::TickId;
+        let build = Intent {
+            place: Some(3),
+            kind: Splash,
+            ..Intent::default()
+        };
+        let after = Intent::default();
+        assert_ne!(
+            after.kind, build.kind,
+            "the case needs the default to differ"
+        );
+        let frames = [
+            (TickId::from_raw(1), build.to_wire()),
+            (TickId::from_raw(1), after.to_wire()),
+        ];
+        let merged = Intent::from_inputs(ClientInputs::new(&frames, 0));
+        assert_eq!((merged.place, merged.kind), (Some(3), Splash));
+
+        // The last plot still wins, with its own kind.
+        let second = Intent {
+            place: Some(4),
+            kind: Slow,
+            ..Intent::default()
+        };
+        let frames = [
+            (TickId::from_raw(1), build.to_wire()),
+            (TickId::from_raw(1), second.to_wire()),
+            (TickId::from_raw(1), after.to_wire()),
+        ];
+        let merged = Intent::from_inputs(ClientInputs::new(&frames, 0));
+        assert_eq!((merged.place, merged.kind), (Some(4), Slow));
     }
 
     /// **The sentinel is not a plot**, which is what lets one byte carry both

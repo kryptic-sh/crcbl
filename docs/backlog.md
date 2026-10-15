@@ -299,24 +299,6 @@ Each step lands in the crate the later steps build on, so the seam goes first.
 13. **Accessibility (S14).** AccessKit is a new dependency, which is the owner's
     call; ask before starting.
 
-### Flaky, seen while landing the panel work
-
-- `towers`
-  `lan::tests::a_tower_one_joiner_builds_is_validated_by_the_host_and_seen_by_the_other`
-  failed once on CI's macOS `build + test` (run 38700192499, 2026-10-15): the
-  host's gold right after the build was 80 where the purse minus the tower's
-  cost was 50. A rerun of the job passed, and no change in that run touched
-  `towers`. A guess, not checked: gold also moves for another reason (a wave's
-  bounty, or income) between reading the purse and the build landing, so the
-  assertion reads two moments as one.
-- `towers`
-  `lan::tests::presentation::a_joiners_bars_are_the_hosts_and_it_hears_the_hosts_wave`
-  failed once on the same runner (run 38717888458, 2026-10-15): "317 ticks
-  compared, 187 wounded bars, 0 held", so the bars matched and no creep was
-  slowed in the compared ticks. Two different `towers` LAN tests failing on
-  macOS in one day, each passing on rerun, points at the LAN rig's timing under
-  a loaded runner rather than at either assertion. Not investigated.
-
 ### Left behind by the seam split
 
 - `crates/crcbl-shaders/shaders/mesh.slang`'s comment on `FragmentOutput`'s
