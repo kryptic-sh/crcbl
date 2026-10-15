@@ -261,11 +261,12 @@ Each step lands in the crate the later steps build on, so the seam goes first.
    - S20, checked 2026-10-15. There already: hover and click as pseudo-classes
      and responses, `Shell::set_cursor` with `CursorIcon`, `ShellEvent::Wheel`
      keeping detents (`ScrollDelta::Lines`) apart from pixels, and
-     `Ui::scroll_wheel`. Added: the CSS `cursor` property and `Ui::cursor`. Not
-     there: a scrollbar of any kind. Nothing draws one, and `overflow: scroll`
-     reserves no gutter (Taffy's `scrollbar_width` is left at zero), so a
-     styleable handle needs a drawn thumb, a drag on it, and
-     `::-webkit-scrollbar`-style selectors or plain classes to style it.
+     `Ui::scroll_wheel`. Added: the CSS `cursor` property and `Ui::cursor`, and
+     `Ui::scrollbar(selector, target)`: a `scrollbar` track holding a
+     `.scroll-handle` sized and placed from the target's view, offset and reach,
+     which a drag moves. Not there: a horizontal scrollbar, a click on the track
+     to page, and a scrollbar that appears by itself on every `overflow: scroll`
+     block (a caller builds one beside what it scrolls).
    - Decided 2026-10-15: `CursorIcon` moved to `crcbl_core::input` so crcbl-ui
      can name a shape, and lost `#[non_exhaustive]`. The other choice was a
      wildcard arm in each backend's mapping, which turns a newly added shape

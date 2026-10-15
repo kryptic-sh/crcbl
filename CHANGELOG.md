@@ -939,6 +939,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   not by pointer. `Font::id`, `Font::data` and `Font::metrics` are no longer
   `const`, and `Font::data` borrows from the font.
 
+- **`Ui::scrollbar(selector, target)`.** A vertical scrollbar for a scroll
+  container such as a `list`: a `scrollbar` track the stylesheet places and
+  sizes, holding a `.scroll-handle` as long as the view's share of the content
+  (never under `MIN_SCROLL_HANDLE`) and as far down as the offset is down its
+  reach. Dragging the handle scrolls the container, the handle staying under the
+  pointer. The default stylesheet gives both a look; a container with nothing to
+  scroll has no handle.
+
 - **`Shell::reposition_popup` and `ShellCaps::POPUP_REPOSITION`.** A live popup
   can follow an anchor that moved, or take a new size, placed by the
   `PopupPlacement` it was created with. Wayland sends `xdg_popup.reposition`, so

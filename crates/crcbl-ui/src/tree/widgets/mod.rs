@@ -86,6 +86,7 @@ mod inspector;
 mod list;
 mod number_entry;
 mod outliner;
+mod scrollbar;
 mod select;
 mod split;
 mod tabs;
@@ -118,6 +119,7 @@ pub use outliner::{
     OUTLINER_INDENT, OUTLINER_ROW_HEIGHT, OutlinerBuilder, OutlinerId, OutlinerOptions,
     OutlinerRow, OutlinerState, SelectMode,
 };
+pub use scrollbar::MIN_SCROLL_HANDLE;
 pub use select::SELECT_CARET;
 pub use split::{SPLIT_NAV_STEP, SplitAxis};
 pub use text_input::{

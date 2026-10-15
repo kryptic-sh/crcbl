@@ -334,6 +334,22 @@ list .list-row:hover {
   background: #353d4c;
 }
 
+/* Scrollbar: a narrow track beside what it scrolls, and a handle to take. */
+scrollbar {
+  width: 8px;
+  flex-shrink: 0;
+  background: #171a20;
+}
+
+.scroll-handle {
+  background: #4a5468;
+  border-radius: 3px;
+}
+
+scrollbar > .scroll-handle:hover {
+  background: #e6e9ef;
+}
+
 /*
  * Text input: a well holding one line. The text never wraps or shrinks, so
  * a long line overflows the well and the tree scrolls it to the caret. The

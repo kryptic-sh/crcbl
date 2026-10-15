@@ -9,6 +9,7 @@ mod inspector;
 mod list;
 mod number_entry;
 mod outliner;
+mod scrollbar;
 mod select;
 mod split;
 mod style;
