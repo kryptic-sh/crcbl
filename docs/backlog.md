@@ -234,6 +234,15 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      now waits, before opening its window, until `SHQueryUserNotificationState`
      no longer reports a full-screen application, and its failure names that
      state, so the next failure says whether the guess holds.
+   - **It did not hold the next time.** The flake branch's own run 38795912556
+     failed the same way with the state at 6, `QUNS_QUIET_TIME` ("OOBE quiet
+     period" in `shellapi.h`, the stretch after a profile's first sign-in), not
+     a full-screen one. New unverified guess: Explorer sends no
+     `ABN_FULLSCREENAPP` during the quiet period, and a fresh runner profile is
+     sometimes still in it. Not acted on: waiting it out could take as long as
+     the period lasts, and skipping the test then would turn a real regression
+     on such a runner into a pass. The next failures' states decide it; if each
+     is 6, the choice is between those two.
    - Still to do: `ABM_ACTIVATE` and `ABM_WINDOWPOSCHANGED`, which the appbar
      documentation asks for and which matter to auto-hide appbars; and a
      crash-safe `ABM_REMOVE`, because a process killed without it keeps the work
