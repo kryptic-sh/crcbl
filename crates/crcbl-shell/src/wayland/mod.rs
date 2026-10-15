@@ -4,9 +4,9 @@
 //!
 //! Not `pub`: [`backend`](crate::backend) is the only way to reach a real
 //! shell, because `WaylandShell::new()` in a consumer's source is the platform
-//! leak this whole seam exists to prevent. `#[cfg(target_os = "linux")]` rather
-//! than `#[cfg(unix)]` — macOS is a Unix with no Wayland, and the BSDs are not
-//! a target this engine claims.
+//! leak this whole seam exists to prevent. `#[cfg(desktop_unix)]` — Linux and
+//! FreeBSD, which `build.rs` sets it for — rather than `#[cfg(unix)]`, because
+//! macOS is a Unix with no Wayland.
 //!
 //! The windowing rules' Linux policy (`docs/notes/backends.md`) in one sentence:
 //! **libwayland-client owns the connection and the proxy objects; the protocol

@@ -455,7 +455,7 @@ fn the_factory_selects_a_backend_at_runtime() {
     // candidate to promote. Which backends are absent is a fact about the
     // platform, so that is what this names. (`Headless` and `Web` are
     // registered on every target and so are never in this list.)
-    let absent: &[ShellBackend] = if cfg!(target_os = "linux") {
+    let absent: &[ShellBackend] = if cfg!(desktop_unix) {
         &[ShellBackend::Win32, ShellBackend::AppKit]
     } else if cfg!(target_os = "windows") {
         &[
@@ -512,7 +512,7 @@ fn the_factory_selects_a_backend_at_runtime() {
         ),
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(desktop_unix)]
     for backend in [ShellBackend::Wayland, ShellBackend::X11] {
         match crcbl_shell::open_backend(backend) {
             Ok(shell) => assert_eq!(shell.backend(), backend),

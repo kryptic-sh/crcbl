@@ -16,7 +16,7 @@
 //! through [`crcbl_shell::open_backend`] and `dyn Shell` — no backend type is
 //! named anywhere below, exactly as a consumer would have it.
 
-#![cfg(all(target_os = "linux", feature = "wayland-e2e"))]
+#![cfg(all(desktop_unix, feature = "wayland-e2e"))]
 use std::time::{Duration, Instant};
 
 use crcbl_shell::wayland_test_support::{

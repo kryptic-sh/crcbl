@@ -515,6 +515,32 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  # FreeBSD (lyr and pikr's S18): the Wayland and X11 paths of `crcbl-shell` and
+  # the UI path compile for it. Compile-only — there is no FreeBSD runner and no
+  # compositor to run them against — so this says the hand-written libc
+  # declarations and the `desktop_unix` gates hold there, and nothing about
+  # behaviour. `cargo clippy` checks without linking, so no FreeBSD sysroot is
+  # needed beyond the target's `rust-std`.
+  freebsd:
+    name: check (freebsd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: x86_64-unknown-freebsd
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: freebsd
+      - run: >-
+          cargo clippy --locked --all-features --all-targets -p crcbl-shell
+          --target x86_64-unknown-freebsd -- -D warnings
+      - run: >-
+          cargo clippy --locked --all-features -p crcbl-ui -p crcbl-frame -p
+          crcbl-vk --target x86_64-unknown-freebsd -- -D warnings
+
   # The one job in this file that builds a *worker-capable* wasm artifact, and
   # the reason it did not exist until now is a rustup component: `web/build.sh
   # --threads` refuses by name without `rust-src`, because `-Z build-std` has
@@ -3399,6 +3425,7 @@ jobs:
         prettier,
         deny,
         wasm32,
+        freebsd,
         miri-jobs,
         miri-steam,
         jobs-worker-e2e,

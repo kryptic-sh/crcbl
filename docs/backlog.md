@@ -242,8 +242,16 @@ Each step lands in the crate the later steps build on, so the seam goes first.
 11. **Start-up and failure.**
     - Measure cold start to the first presented frame against 500 ms (S13).
     - A clear failure, not a crash, with no usable GPU (S26).
-12. **FreeBSD** (S18): a compile-only CI job for crcbl-shell's Wayland path and
-    the UI path.
+12. **FreeBSD** (S18) compiles: `crcbl-shell`'s `build.rs` sets a `desktop_unix`
+    cfg for Linux and FreeBSD, which gates the `linux`, `wayland` and `x11`
+    modules and their registrations, and the two libc numbers the systems
+    disagree on (`CLOCK_MONOTONIC`, `nfds_t`) are defined once in
+    `crate::linux`. CI's `check (freebsd)` job runs clippy for crcbl-shell and
+    for crcbl-ui, crcbl-frame and crcbl-vk. **Compile-only:** nothing has run on
+    FreeBSD. Unchecked there: the library names `dlopen` asks for (the same
+    `.so` names as Linux, which FreeBSD's packages use), evdev keycodes from the
+    compositor and the X server, and every other numeric constant beside the two
+    above, which were compared against FreeBSD's headers by reading.
 13. **Accessibility (S14).** AccessKit is a new dependency, which is the owner's
     call; ask before starting.
 

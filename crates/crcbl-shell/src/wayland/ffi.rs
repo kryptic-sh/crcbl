@@ -50,7 +50,9 @@
 //! to build anyway — and has no variadic ABI in it at all. It is the entry
 //! point libwayland's own non-inline path uses.
 
-use core::ffi::{CStr, c_char, c_int, c_long, c_ulong, c_void};
+use core::ffi::{CStr, c_char, c_int, c_long, c_void};
+
+use crate::linux::{CLOCK_MONOTONIC, Nfds};
 use core::ptr;
 use std::sync::OnceLock;
 
@@ -249,7 +251,7 @@ unsafe extern "C" {
     fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn dlerror() -> *const c_char;
-    fn poll(fds: *mut PollFd, nfds: c_ulong, timeout: c_int) -> c_int;
+    fn poll(fds: *mut PollFd, nfds: Nfds, timeout: c_int) -> c_int;
     fn clock_gettime(clock_id: c_int, tp: *mut Timespec) -> c_int;
 }
 
@@ -275,8 +277,6 @@ const RTLD_NOW: c_int = 2;
 const POLLIN: i16 = 0x001;
 /// `POLLOUT`.
 const POLLOUT: i16 = 0x004;
-/// `CLOCK_MONOTONIC` — the clock Wayland stamps input events with.
-const CLOCK_MONOTONIC: c_int = 1;
 
 /// The C prototypes this backend asserts about libwayland-client.
 ///
@@ -629,7 +629,7 @@ pub fn poll_readable_with(primary: c_int, aux: &[c_int], timeout_ms: c_int) -> b
         revents: 0,
     }))
     .collect();
-    let count = c_ulong::try_from(fds.len()).unwrap_or(1);
+    let count = Nfds::try_from(fds.len()).unwrap_or(1);
     // SAFETY: `fds` is a live, initialised array of exactly `count` `pollfd`s.
     let result = unsafe { poll(fds.as_mut_ptr(), count, timeout_ms) };
     result > 0 && fds[0].revents & POLLIN != 0

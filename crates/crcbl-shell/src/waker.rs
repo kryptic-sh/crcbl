@@ -61,7 +61,7 @@ impl ShellWaker {
 /// `None`, logged, if `make` fails — the process out of descriptors or
 /// handles — and asked again next time, since that can pass.
 #[cfg_attr(
-    not(any(target_os = "linux", target_os = "macos", target_os = "windows")),
+    not(any(desktop_unix, target_os = "macos", target_os = "windows")),
     allow(dead_code, reason = "only the native window-system backends make one")
 )]
 pub(crate) fn lazy_waker<S: WakeSignal + 'static>(

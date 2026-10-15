@@ -939,6 +939,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   not by pointer. `Font::id`, `Font::data` and `Font::metrics` are no longer
   `const`, and `Font::data` borrows from the font.
 
+- **`crcbl-shell` on FreeBSD.** The Wayland and X11 backends now compile for
+  FreeBSD as well as Linux, behind a `desktop_unix` cfg the build script sets
+  for both, with the libc numbers the two systems number differently
+  (`CLOCK_MONOTONIC`, `nfds_t`) defined per system. CI checks that FreeBSD
+  compiles; nothing has run there yet.
+
 - **`ShellEvent::FocusRefused`: the window system said no to the keyboard.** A
   panel that takes the keyboard asks for the foreground when shown, and Win32
   refuses it to a process the user is not working in. The refusal now arrives as

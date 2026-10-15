@@ -57,18 +57,18 @@
 //!
 //! # Linux only, and it says so out loud
 //!
-//! `x11_test_support` is `#[cfg(target_os = "linux")]` and `--all-features`
+//! `x11_test_support` is `#[cfg(desktop_unix)]` and `--all-features`
 //! turns `x11-e2e` on everywhere, so this target is built on macOS, Windows and
 //! `wasm32` by CI's `--all-targets --all-features` lint jobs. They get a `main`
 //! that fails and names the reason rather than a `cfg` that quietly compiles to
 //! nothing: a helper reporting success on a platform where it cannot have typed
 //! anything is the failure this harness exists to avoid.
 
-#[cfg(target_os = "linux")]
+#[cfg(desktop_unix)]
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(desktop_unix))]
 fn main() -> ExitCode {
     eprintln!(
         "crcbl-e2e-x11-key: X11 is a Linux window system here; there is no display to type at"
@@ -76,7 +76,7 @@ fn main() -> ExitCode {
     ExitCode::FAILURE
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(desktop_unix)]
 fn main() -> ExitCode {
     crcbl_core::log::init_logging();
 
@@ -142,7 +142,7 @@ fn main() -> ExitCode {
 }
 
 /// Says something the harness may be blocked waiting to read.
-#[cfg(target_os = "linux")]
+#[cfg(desktop_unix)]
 fn say(what: &str) {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "crcbl-e2e-x11-key: {what}");

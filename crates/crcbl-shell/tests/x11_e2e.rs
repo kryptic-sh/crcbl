@@ -32,7 +32,7 @@
 //! `CRCBL_E2E_X11_WM`; the tests read [`Session::has_window_manager`] rather
 //! than assuming either way.
 
-#![cfg(all(target_os = "linux", feature = "x11-e2e"))]
+#![cfg(all(desktop_unix, feature = "x11-e2e"))]
 
 use std::time::{Duration, Instant};
 

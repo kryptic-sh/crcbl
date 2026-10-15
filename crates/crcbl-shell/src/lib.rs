@@ -278,13 +278,13 @@ pub mod window;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) mod keysym;
 
-#[cfg(target_os = "linux")]
+#[cfg(desktop_unix)]
 pub(crate) mod linux;
 
-#[cfg(target_os = "linux")]
+#[cfg(desktop_unix)]
 pub(crate) mod wayland;
 
-#[cfg(target_os = "linux")]
+#[cfg(desktop_unix)]
 pub(crate) mod x11;
 
 #[cfg(any(target_os = "windows", test))]
@@ -303,7 +303,7 @@ pub(crate) mod web;
 /// surface is only managed by the compositor once it has a *buffer*, and
 /// attaching one is the renderer's job — which does not exist until P1. See
 /// the module's docs for the full finding.
-#[cfg(all(target_os = "linux", feature = "wayland-e2e"))]
+#[cfg(all(desktop_unix, feature = "wayland-e2e"))]
 pub use wayland::e2e as wayland_test_support;
 
 /// Scaffolding for the Xvfb end-to-end suite, behind the `x11-e2e` feature.
@@ -312,7 +312,7 @@ pub use wayland::e2e as wayland_test_support;
 /// because a surface needs a buffer, this one exists because on X11 the window
 /// manager, the input devices and the clipboard owner are all *other programs* —
 /// see the module's docs.
-#[cfg(all(target_os = "linux", feature = "x11-e2e"))]
+#[cfg(all(desktop_unix, feature = "x11-e2e"))]
 pub use x11::e2e as x11_test_support;
 
 #[cfg(target_os = "macos")]

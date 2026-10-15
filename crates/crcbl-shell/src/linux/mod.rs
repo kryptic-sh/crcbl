@@ -29,9 +29,33 @@
 //! has no pipe anywhere. Moving it here to look symmetrical would put a module
 //! with one caller behind a name that suggests two.
 //!
-//! This module is compiled only on Linux, for the same reason the backends
-//! are: `#[cfg(target_os = "linux")]` rather than `#[cfg(unix)]`, because macOS
-//! is a Unix with neither of these libraries on it.
+//! This module is compiled where the backends are: under `desktop_unix`,
+//! which `build.rs` sets for Linux and FreeBSD, rather than `#[cfg(unix)]`,
+//! because macOS is a Unix with neither of these libraries on it. The name
+//! stays `linux` because Linux is where it is run and tested; FreeBSD is
+//! checked to compile, by CI.
+//!
+//! The two systems agree on every number this crate's hand-written libc
+//! declarations use but the two below, which are defined once here so neither
+//! backend can carry Linux's value onto FreeBSD.
+
+use core::ffi::c_int;
+
+/// `CLOCK_MONOTONIC`, the clock Wayland and X11 stamp input with: 1 on Linux,
+/// 4 on FreeBSD (`sys/_clock_id.h`).
+#[cfg(target_os = "linux")]
+pub(crate) const CLOCK_MONOTONIC: c_int = 1;
+/// See the Linux definition.
+#[cfg(target_os = "freebsd")]
+pub(crate) const CLOCK_MONOTONIC: c_int = 4;
+
+/// `nfds_t`, `poll`'s descriptor count: `unsigned long` on Linux, `unsigned
+/// int` on FreeBSD.
+#[cfg(target_os = "linux")]
+pub(crate) type Nfds = core::ffi::c_ulong;
+/// See the Linux definition.
+#[cfg(target_os = "freebsd")]
+pub(crate) type Nfds = core::ffi::c_uint;
 
 pub mod keymap;
 pub mod wake;

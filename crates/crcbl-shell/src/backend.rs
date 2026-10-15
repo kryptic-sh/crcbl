@@ -153,13 +153,13 @@ static REGISTRY: &[Registration] = &[
     // `#[cfg]` on the element, not on the whole table: on macOS and Windows
     // the entry simply is not there, so nothing else in this file mentions a
     // platform and `open_auto` needs no conditional compilation of its own.
-    #[cfg(target_os = "linux")]
+    #[cfg(desktop_unix)]
     Registration {
         backend: ShellBackend::Wayland,
         auto: true,
         open: || Ok(Box::new(crate::wayland::WaylandShell::open()?)),
     },
-    #[cfg(target_os = "linux")]
+    #[cfg(desktop_unix)]
     Registration {
         backend: ShellBackend::X11,
         auto: true,
@@ -348,7 +348,7 @@ mod tests {
         // The tripwire for every backend slice: adding a registration must be a
         // deliberate edit here too.
         let backends: Vec<ShellBackend> = REGISTRY.iter().map(|entry| entry.backend).collect();
-        if cfg!(target_os = "linux") {
+        if cfg!(desktop_unix) {
             assert_eq!(
                 backends,
                 [
@@ -492,7 +492,7 @@ mod tests {
                 shell.backend()
             ),
             Err(ShellError::NoBackend { tried }) => {
-                let expected = if cfg!(target_os = "linux") {
+                let expected = if cfg!(desktop_unix) {
                     "wayland, x11"
                 } else if cfg!(target_os = "windows") {
                     "win32"

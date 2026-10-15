@@ -69,7 +69,9 @@
 //! decision rather than a keymap one. See
 //! [`setup_detectable_auto_repeat`](super::Conn::setup_detectable_auto_repeat).
 
-use core::ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void};
+use core::ffi::{CStr, c_char, c_int, c_long, c_uint, c_void};
+
+use crate::linux::{CLOCK_MONOTONIC, Nfds};
 use core::ptr;
 use std::sync::OnceLock;
 
@@ -1232,7 +1234,7 @@ unsafe extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn dlerror() -> *const c_char;
     fn free(ptr: *mut c_void);
-    fn poll(fds: *mut PollFd, nfds: c_ulong, timeout: c_int) -> c_int;
+    fn poll(fds: *mut PollFd, nfds: Nfds, timeout: c_int) -> c_int;
     fn clock_gettime(clock_id: c_int, tp: *mut Timespec) -> c_int;
 }
 
@@ -1255,8 +1257,6 @@ struct Timespec {
 const RTLD_NOW: c_int = 2;
 /// `POLLIN`.
 const POLLIN: i16 = 0x001;
-/// `CLOCK_MONOTONIC` — the clock the X server stamps events from.
-const CLOCK_MONOTONIC: c_int = 1;
 
 /// The C prototypes this backend asserts about libxcb.
 ///
@@ -2142,7 +2142,7 @@ pub fn poll_readable_or(primary: c_int, other: c_int, timeout_ms: c_int) -> bool
         events: POLLIN,
         revents: 0,
     });
-    let count = c_ulong::try_from(fds.len()).unwrap_or(1);
+    let count = Nfds::try_from(fds.len()).unwrap_or(1);
     // SAFETY: `fds` is a live, initialised array of exactly `count` `pollfd`s.
     let result = unsafe { poll(fds.as_mut_ptr(), count, timeout_ms) };
     result > 0 && fds[0].revents & POLLIN != 0

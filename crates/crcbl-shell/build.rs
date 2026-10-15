@@ -25,8 +25,8 @@
 //!
 //! The generated file is pure text and costs a few milliseconds, so it is
 //! produced unconditionally rather than under `CARGO_CFG_TARGET_OS`. The
-//! `include!` that consumes it lives behind `#[cfg(target_os = "linux")]`, so
-//! on Windows and macOS the output is simply never compiled — and a mistake in
+//! `include!` that consumes it lives behind `#[cfg(desktop_unix)]`, so on
+//! Windows and macOS the output is simply never compiled — and a mistake in
 //! the generator still fails the build on those runners, where it would
 //! otherwise hide until someone tried a Linux build.
 
@@ -81,6 +81,16 @@ const E2E_PROTOCOLS: &[(&str, &str)] = &[
 
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
+
+    // `desktop_unix`: the Unixes whose desktops are Wayland or X11, which is
+    // where `linux`, `wayland` and `x11` are compiled. A cfg rather than
+    // `any(target_os = "linux", target_os = "freebsd")` at every site, so a
+    // third such system is one line here.
+    println!("cargo::rustc-check-cfg=cfg(desktop_unix)");
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if matches!(os.as_str(), "linux" | "freebsd") {
+        println!("cargo::rustc-cfg=desktop_unix");
+    }
 
     let e2e = std::env::var_os("CARGO_FEATURE_WAYLAND_E2E").is_some();
     let protocols: Vec<(&str, &str)> = PROTOCOLS

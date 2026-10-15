@@ -55,7 +55,7 @@
 //!
 //! # Linux only, and it says so out loud
 //!
-//! `wayland_test_support` is `#[cfg(target_os = "linux")]`, and `--all-features`
+//! `wayland_test_support` is `#[cfg(desktop_unix)]`, and `--all-features`
 //! turns `wayland-e2e` on everywhere — so this target is built on macOS,
 //! Windows and `wasm32` by CI's `--all-targets --all-features` lint jobs, which
 //! is how it first went red on three of them at once. The other platforms get a
@@ -64,16 +64,16 @@
 //! cannot possibly have typed anything is the failure this whole harness is
 //! trying to avoid.
 
-#[cfg(target_os = "linux")]
+#[cfg(desktop_unix)]
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
-#[cfg(target_os = "linux")]
+#[cfg(desktop_unix)]
 use crcbl_shell::wayland_test_support::VirtualInput;
-#[cfg(target_os = "linux")]
+#[cfg(desktop_unix)]
 use crcbl_shell::{LogicalSize, ShellBackend, WindowDesc, open_backend};
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(desktop_unix))]
 fn main() -> ExitCode {
     eprintln!(
         "crcbl-e2e-wayland-key: Wayland is a Linux window system; there is no seat here to plug \
@@ -82,7 +82,7 @@ fn main() -> ExitCode {
     ExitCode::FAILURE
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(desktop_unix)]
 fn main() -> ExitCode {
     crcbl_core::log::init_logging();
 
@@ -154,7 +154,7 @@ fn main() -> ExitCode {
 }
 
 /// Says something the harness may be blocked waiting to read.
-#[cfg(target_os = "linux")]
+#[cfg(desktop_unix)]
 fn say(what: &str) {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "crcbl-e2e-wayland-key: {what}");
