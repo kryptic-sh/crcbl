@@ -59,6 +59,14 @@
 //! [`Ui::dock`] are builders over blocks and spans, each styled by
 //! `default.css`; `widgets/mod.rs` has what each builds and the rules it keeps.
 //!
+//! # Paragraphs
+//!
+//! [`Ui::paragraph`] is a block whose content is runs of text, each a node
+//! styled by its own selector — `<b>`, a highlighted match, a link — broken
+//! into lines together and laid out as one leaf; each run is hit on the line
+//! fragments it lies on. `paragraph.rs` has the rules and `inline.rs` the line
+//! breaker.
+//!
 //! # Pop-ups
 //!
 //! [`Ui::open_popup`] and [`Ui::popup`] hang a block from any node: a root of
@@ -192,7 +200,11 @@ mod emit;
 pub mod focus;
 #[cfg(all(test, feature = "parsed-font"))]
 mod font_tests;
+mod inline;
 mod layout;
+mod paragraph;
+#[cfg(test)]
+mod paragraph_tests;
 mod popup;
 mod popup_nav;
 #[cfg(test)]
@@ -239,6 +251,7 @@ pub use focus::{
     Behavior, Direction, Engagement, FOCUS_HISTORY, InputMode, Jump, NavInput, NavScore, NavStep,
     Role, Scope,
 };
+pub use paragraph::ParagraphBuilder;
 pub use popup::{POPUP_MARGIN, Placement};
 pub use popup_nav::TYPEAHEAD_TIMEOUT;
 pub use store::NodeKey;
@@ -367,6 +380,19 @@ enum Content {
     Text { start: usize, end: usize },
     /// A picture.
     Image(AtlasImage),
+    /// A paragraph: a block whose children are its runs, laid out as one
+    /// leaf; see `paragraph.rs`.
+    Paragraph,
+    /// One run of a paragraph: `Ui::text[start..end]`.
+    Run { start: usize, end: usize },
+}
+
+impl Content {
+    /// Whether a node of this content is styled as a span — a leaf that
+    /// passes nothing down — rather than as a block.
+    const fn is_span(self) -> bool {
+        !matches!(self, Self::Block | Self::Paragraph)
+    }
 }
 
 /// What a text span shows, decided at layout.
@@ -530,6 +556,9 @@ pub struct Ui {
     /// clicked, as [`Ui::set_focus`] waits for it; see `accessibility.rs`.
     #[cfg(feature = "accesskit")]
     requested_click: Option<NodeKey>,
+    /// Every paragraph as the last layout broke it into lines; see
+    /// `paragraph.rs`.
+    paragraphs: Vec<paragraph::LaidOut>,
 }
 
 impl Ui {
@@ -570,6 +599,7 @@ impl Ui {
         self.tree_toggled = None;
         self.vertical_focus_move = None;
         self.popup_roots.clear();
+        self.paragraphs.clear();
         self.typeahead.built = None;
         let clicked = self.resolve_pointer(pointer);
         #[cfg(feature = "accesskit")]
@@ -741,11 +771,11 @@ impl Ui {
     /// this call site. `selector` and `inline` are [`Ui::block`]'s; a span's
     /// type is `span` unless the selector names one.
     ///
-    /// **Rich text is a row of spans**: a line whose runs differ in colour,
-    /// size or family — a search result with its match highlighted — is a
-    /// `flex-direction: row` block with one span per run, each starting where
-    /// the last ends. Spans do not wrap into each other, so a paragraph whose
-    /// differently styled runs reflow together is not expressible this way.
+    /// **Rich text that wraps is a [`Ui::paragraph`]**: its runs, each styled
+    /// as its own node, break into lines together. A single line whose runs
+    /// differ in colour, size or family can also be a `flex-direction: row`
+    /// block with one span per run, each starting where the last ends — but
+    /// spans do not wrap into each other.
     #[track_caller]
     pub fn span<'a>(
         &mut self,
@@ -882,20 +912,25 @@ impl Ui {
         stored.tooltip = false;
         stored.context_menu = false;
         stored.id = selector.id.map(NavId::new);
+        // A run's, until this frame's layout places it again.
+        stored.fragments.clear();
 
-        let span = !matches!(content, Content::Block);
+        let span = content.is_span();
         let start = self.selectors.len();
         self.selectors.push_str(selector.text());
         let text = (start, self.selectors.len());
         let resolved = self.resolve_style(slot, fresh, parent, selector, span, inline);
 
         let font = match content {
-            Content::Text { .. } => self.font_for(&resolved.style, selector.text()),
-            Content::Block | Content::Image(_) => None,
+            Content::Text { .. } | Content::Run { .. } => {
+                self.font_for(&resolved.style, selector.text())
+            }
+            Content::Block | Content::Image(_) | Content::Paragraph => None,
         };
         let content_hash = match content {
-            Content::Block => 0,
-            Content::Text { start, end } => {
+            // A paragraph's is its runs', folded once they are built.
+            Content::Block | Content::Paragraph => 0,
+            Content::Text { start, end } | Content::Run { start, end } => {
                 let style = &resolved.style;
                 // The resolved font's identity too: registering a font under
                 // the span's family name, or replacing it, re-measures it.
@@ -907,7 +942,11 @@ impl Ui {
                     style.line_height.bits(),
                     style.white_space,
                 ));
-                self.live_text.insert(hash);
+                // A run is measured as part of its paragraph, under the
+                // paragraph's hash.
+                if matches!(content, Content::Text { .. }) {
+                    self.live_text.insert(hash);
+                }
                 hash
             }
             Content::Image(image) => hash_of((image.width, image.height)),
@@ -1105,6 +1144,7 @@ impl Ui {
             compute_root_layout(&mut tree, NodeId::from(root), space);
             round_layout(&mut tree, NodeId::from(root));
         }
+        self.lay_out_paragraphs(atlas);
         self.cut_text(atlas);
         self.fit_text_inputs(atlas);
         self.clamp_scroll();
@@ -1118,8 +1158,10 @@ impl Ui {
     fn shown_text(&self, node: &FrameNode) -> Option<&str> {
         match (node.content, node.shown) {
             (Content::Text { .. }, Shown::Cut { start, end }) => Some(&self.cut[start..end]),
-            (Content::Text { start, end }, _) => Some(&self.text[start..end]),
-            (Content::Block | Content::Image(_), _) => None,
+            (Content::Text { start, end } | Content::Run { start, end }, _) => {
+                Some(&self.text[start..end])
+            }
+            (Content::Block | Content::Image(_) | Content::Paragraph, _) => None,
         }
     }
 
@@ -1162,12 +1204,16 @@ impl Ui {
         }
     }
 
-    /// Writes each node's children into `children` in build order.
+    /// Writes each node's children into `children` in build order — none for
+    /// a paragraph, which Taffy lays out as a leaf.
     fn flatten_children(&mut self) {
         self.children.clear();
         for index in 0..self.nodes.len() {
             let start = self.children.len();
-            let mut next = self.nodes[index].first_child;
+            let mut next = match self.nodes[index].content {
+                Content::Paragraph => None,
+                _ => self.nodes[index].first_child,
+            };
             while let Some(child) = next {
                 self.children.push(NodeId::from(child));
                 next = self.nodes[child].next_sibling;
@@ -1215,6 +1261,7 @@ impl Ui {
         self.place_layer(popup::CLOSED_LAYER, &layers, &mut placed, |_, _| {
             (Vec2::ZERO, ClipRect::NONE, true)
         });
+        self.place_runs();
     }
 
     /// Places every node of `layer`, in build order: a root where `root` says,

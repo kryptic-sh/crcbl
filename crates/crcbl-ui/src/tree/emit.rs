@@ -78,11 +78,11 @@ impl Ui {
         }
         let (min, max) = self.store.get(node.slot).rect;
         match node.content {
-            Content::Block => {
+            Content::Block | Content::Paragraph => {
                 let padding = padding_box(min, &node.layout);
                 paint_box(list, &node.style, (min, max), padding, &self.images);
             }
-            Content::Text { .. } => {}
+            Content::Text { .. } | Content::Run { .. } => {}
             Content::Image(image) => {
                 let (content_min, content_max) = content_box(min, &node.layout);
                 list.image(content_min, content_max, &image, node.style.color);
@@ -126,6 +126,9 @@ impl Ui {
                     );
                 }
             }
+        }
+        if node.content == Content::Paragraph {
+            self.emit_paragraph(index, list);
         }
         for child in &self.children[node.child_start..node.child_start + node.child_count] {
             self.emit_node(usize::from(*child), list);

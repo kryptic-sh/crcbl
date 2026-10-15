@@ -19,6 +19,7 @@ use taffy::{
     compute_cached_layout, compute_flexbox_layout, compute_hidden_layout, compute_leaf_layout,
 };
 
+use super::paragraph::{inline_runs, measure_runs};
 use super::store::NodeStore;
 use super::style::{Display, NodeStyle, WhiteSpace};
 use super::{Content, FrameNode};
@@ -56,7 +57,8 @@ struct MeasureKey {
 /// bucket. Text in a parsed font is laid out by [`TextLayout`]: its max-content
 /// size unbroken, its min-content size broken at every space, and at a definite
 /// width broken to fit it — unless it is `white-space: nowrap`, which measures
-/// unbroken under every width.
+/// unbroken under every width. A paragraph is measured the same way, under
+/// the hash of its runs, by its line breaker in `inline.rs`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MeasureCache {
     entries: HashMap<MeasureKey, Size<f32>>,
@@ -78,22 +80,7 @@ impl MeasureCache {
         style: &NodeStyle,
         width: AvailableSpace,
     ) -> Size<f32> {
-        let key = MeasureKey {
-            text: content_hash,
-            width: match width {
-                AvailableSpace::MinContent => WidthBucket::MinContent,
-                AvailableSpace::MaxContent => WidthBucket::MaxContent,
-                AvailableSpace::Definite(width) => {
-                    WidthBucket::Definite(wrap_width(width).to_bits())
-                }
-            },
-        };
-        if let Some(size) = self.entries.get(&key) {
-            self.hits += 1;
-            return *size;
-        }
-        self.misses += 1;
-        let size = match font {
+        self.cached(content_hash, width, || match font {
             None => {
                 let scale = style.font_size / NATURAL_FONT_SIZE;
                 Size {
@@ -120,7 +107,33 @@ impl MeasureCache {
                     height: measured.y,
                 }
             }
+        })
+    }
+
+    /// The measurement held for content `content_hash` under `width`, or
+    /// `measure`'s, held from now on.
+    pub fn cached(
+        &mut self,
+        content_hash: u64,
+        width: AvailableSpace,
+        measure: impl FnOnce() -> Size<f32>,
+    ) -> Size<f32> {
+        let key = MeasureKey {
+            text: content_hash,
+            width: match width {
+                AvailableSpace::MinContent => WidthBucket::MinContent,
+                AvailableSpace::MaxContent => WidthBucket::MaxContent,
+                AvailableSpace::Definite(width) => {
+                    WidthBucket::Definite(wrap_width(width).to_bits())
+                }
+            },
         };
+        if let Some(size) = self.entries.get(&key) {
+            self.hits += 1;
+            return *size;
+        }
+        self.misses += 1;
+        let size = measure();
         self.entries.insert(key, size);
         size
     }
@@ -232,20 +245,28 @@ impl LayoutPartialTree for LayoutTree<'_> {
                         // Nothing in the subset is a `calc()`.
                         |_, _| 0.0,
                         |known, available| {
+                            // The width the node is given, else the space it
+                            // may take: what a wrapped line breaks at.
+                            let width = known
+                                .width
+                                .map_or(available.width, AvailableSpace::Definite);
                             let natural = match frame.content {
-                                Content::Block => Size::ZERO,
-                                // The width the span is given, else the space
-                                // it may take: what a wrapped line breaks at.
+                                // A run is laid out by its paragraph.
+                                Content::Block | Content::Run { .. } => Size::ZERO,
                                 Content::Text { start, end } => measure.text(
                                     atlas,
                                     frame.font.as_ref(),
                                     &text[start..end],
                                     frame.content_hash,
                                     &frame.style,
-                                    known
-                                        .width
-                                        .map_or(available.width, AvailableSpace::Definite),
+                                    width,
                                 ),
+                                Content::Paragraph => {
+                                    measure.cached(frame.content_hash, width, || {
+                                        let (_, runs) = inline_runs(nodes, text, index);
+                                        measure_runs(&runs, frame.style.white_space, width, atlas)
+                                    })
+                                }
                                 Content::Image(image) => Size {
                                     width: image.width as f32,
                                     height: image.height as f32,

@@ -68,8 +68,12 @@ pub(crate) struct StoredNode {
     /// Taffy's layout before rounding, relative to the parent. Kept here rather
     /// than in the frame because a cache hit on an ancestor skips writing it.
     pub unrounded: Layout,
-    /// Last layout's border box, in screen pixels.
+    /// Last layout's border box, in screen pixels; a paragraph's run's, the
+    /// box round its fragments.
     pub rect: (Vec2, Vec2),
+    /// A paragraph's run's line fragments, in screen pixels, as last laid
+    /// out: what it is hit on in place of `rect`. Empty for every other node.
+    pub fragments: Vec<(Vec2, Vec2)>,
     /// The clip its ancestors' `overflow: hidden` put it under.
     pub clip: ClipRect,
     /// Its place in last frame's build order: within one layer, a higher one
@@ -148,6 +152,7 @@ impl StoredNode {
             cache: Cache::new(),
             unrounded: Layout::new(),
             rect: (Vec2::ZERO, Vec2::ZERO),
+            fragments: Vec::new(),
             clip: ClipRect::NONE,
             paint_order: 0,
             layer: 0,
@@ -188,15 +193,20 @@ impl StoredNode {
         (self.layer, self.paint_order)
     }
 
-    /// Whether `pos` is inside the part of last frame's box its clip let
-    /// through. Half-open, so two boxes that share an edge never both claim
-    /// the pixel on it.
+    /// Whether `pos` is inside the part of last frame's box — or of one of a
+    /// run's fragments — its clip let through. Half-open, so two boxes that
+    /// share an edge never both claim the pixel on it.
     pub fn contains(&self, pos: Vec2) -> bool {
-        let visible = self.clip.intersect(ClipRect {
-            min: self.rect.0,
-            max: self.rect.1,
-        });
-        self.hittable && !self.inert && pos.cmpge(visible.min).all() && pos.cmplt(visible.max).all()
+        let inside = |&(min, max): &(Vec2, Vec2)| {
+            let visible = self.clip.intersect(ClipRect { min, max });
+            pos.cmpge(visible.min).all() && pos.cmplt(visible.max).all()
+        };
+        let hit = if self.fragments.is_empty() {
+            inside(&self.rect)
+        } else {
+            self.fragments.iter().any(inside)
+        };
+        self.hittable && !self.inert && hit
     }
 }
 

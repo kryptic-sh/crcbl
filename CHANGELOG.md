@@ -70,6 +70,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Font::underline`, `Font::synthesized` and `crcbl_ui::font::face` describe a
   face.
 
+- **`Ui::paragraph`: rich text that wraps.** A paragraph's runs —
+  `ParagraphBuilder::run(selector, text, inline)`, or `run_keyed` in a loop —
+  are nodes styled by their own selectors (`p.run("b", …)` matches `b { … }`),
+  broken into lines together at the paragraph's width as one Taffy leaf: breaks
+  at spaces, after hyphens and at every newline, never at a run boundary inside
+  a word, and between characters for a word wider than the line
+  (`overflow-wrap: break-word`). Runs of different sizes share each line's
+  baseline. Each run is hit on its line fragments, so a link that wraps is one
+  node whose `Response` reports a click on either line, styled by `:hover` and
+  answering `Ui::cursor` there. `text-overflow: ellipsis` does not apply to a
+  paragraph.
+
 ### Changed
 
 - **`Ui::register_font` registers a face of a family** rather than the family's

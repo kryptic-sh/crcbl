@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use super::focus::InputMode;
 use super::store::StoredCandidates;
-use super::{Content, FrameNode, NodeStyle, Ui};
+use super::{FrameNode, NodeStyle, Ui};
 use crate::style::{
     Declaration, Diagnostic, Element, InheritedId, NodeSelector, PseudoClasses, SheetId, StyleStats,
 };
@@ -81,7 +81,7 @@ impl Element for FrameElement<'_> {
     fn type_name(&self) -> &str {
         let span = match self.node {
             Node::Building { span, .. } => span,
-            Node::Built(at) => !matches!(self.nodes[at].content, Content::Block),
+            Node::Built(at) => self.nodes[at].content.is_span(),
         };
         self.selector().type_name.unwrap_or(default_type(span))
     }
@@ -186,7 +186,7 @@ impl Ui {
                 let (start, end) = node.selector;
                 (
                     &self.selectors[start..end],
-                    matches!(node.content, Content::Block),
+                    !node.content.is_span(),
                     node.pseudo & candidates.ancestor_pseudo,
                 )
                     .hash(&mut key);
