@@ -19,6 +19,36 @@ approved as a dependency of `crcbl-shell` and goes ahead after the release;
 breaking change, so a minor bump); `crcbl-cli` stays unpublished; the `notify`
 watcher and a grapheme crate stay declined until a caller needs them.
 
+**lyr needs S9, S12, S17, S19 and S22 as well, from 2026-10-16** (the owner's
+decision, lyr main 75d302a; before, only pikr needed them). lyr is becoming the
+Linux notification daemon in place of swaync, with the calendar and the
+notification history in one panel and its own Wi-Fi, Bluetooth and audio menus,
+all before it replaces waybar (lyr M5–M7). For lyr: S9 is Wi-Fi passwords and
+Bluetooth PINs typed into an on-demand layer-shell panel (in, both compose and
+`text-input-v3`); S12 is notification markup (bold, italic, underline, links),
+notification images and album art; S17 is closing a panel when it loses the
+keyboard (in: an on-demand panel's `WindowState::focused` goes false when the
+user focuses another window, under sway; the test reads the state, not the
+`Focus` event that sets it); S19 is the password caret's blink (in); S22 is
+emoji in notification text. So the S12 gaps (runs that wrap together, weight,
+italic, underline, a link's hit area) and S22 are now what both callers wait on.
+lyr's new panels are ordinary S1 layer surfaces (overlay, exclusive zone 0, a
+chosen output) opened from its control socket with no input serial, so they
+cannot be grabbing popups. **Open, nothing asked yet:** closing a panel when the
+user clicks the empty desktop, which focus loss does not cover; lyr measures
+what Hyprland does in its M5 before asking.
+
+**Asked by lyr on 2026-10-16, needed before its M7 (the native menus):** a
+password content type on the text-input seam, so a Wi-Fi password field tells
+the input method not to learn from or suggest on what is typed. On Wayland that
+is `text-input-v3`'s `set_content_type` with the `sensitive_data` hint and the
+`password` purpose; `wayland/text_input.rs` always sends `normal` today. The
+seam has nowhere to say it yet: it needs a field kind beside
+`Shell::set_text_input_enabled` (Win32's matching lever is an input scope,
+AppKit's a secure text field), and crcbl-ui's masked text input is what would
+ask for it. **S12's order for lyr's M6** (notification markup): paragraphs whose
+runs wrap together, then bold, italic, underline and a link's hit area.
+
 The requirements are rows S1–S27 of the joint table in
 `lyr/docs/plan/03-surfaces-and-input.md` (lyr commit f44f1b8). That table
 records what was asked and why, and is the reference for each row's detail. This
