@@ -325,9 +325,8 @@ impl Visibility {
 /// | [`ResizeColumn`](CursorIcon::ResizeColumn) | `IDC_SIZEWE` | a split-pane divider is a horizontal resize with a different decoration, and the decoration is the part Windows does not have |
 /// | [`ResizeRow`](CursorIcon::ResizeRow) | `IDC_SIZENS` | the same, the other way round |
 ///
-/// Exhaustive despite [`CursorIcon`] being `#[non_exhaustive]`, because this
-/// crate defines it: a shape added later fails to compile here rather than
-/// silently becoming an arrow.
+/// Exhaustive, as [`CursorIcon`] is: a shape added later fails to compile here
+/// rather than silently becoming an arrow.
 #[must_use]
 pub const fn cursor_id(icon: CursorIcon) -> usize {
     match icon {

@@ -18,7 +18,7 @@
 //! ```text
 //! crcbl-core::input   vocabulary — KeyCode, Keysym, PointerButton, Modifiers,
 //!                                  ButtonState, ScrollDelta, DeviceId,
-//!                                  ContactId, TouchPhase
+//!                                  ContactId, TouchPhase, CursorIcon
 //! crcbl-shell         events     — ShellEvent, which names windows and is only
 //!                                  ever produced by a shell backend
 //! ```
@@ -545,9 +545,118 @@ impl fmt::Display for KeyCode {
     }
 }
 
+/// A standard cursor shape.
+///
+/// Names rather than pixels, because every platform already has themed,
+/// correctly scaled, user-configured cursors; `crcbl_shell::cursor` explains
+/// the rest.
+///
+/// **Exhaustive on purpose.** Every shell backend maps each shape to its own
+/// stock cursor, and a shape added later must fail to compile in each of them
+/// rather than fall to an arrow through a wildcard arm. That makes adding a
+/// shape a breaking change, which is the price.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CursorIcon {
+    /// The platform's normal arrow.
+    #[default]
+    Default,
+    /// The "this is clickable" hand.
+    Pointer,
+    /// I-beam, for text.
+    Text,
+    /// Crosshair, for precise placement.
+    Crosshair,
+    /// Something is happening and input is blocked.
+    Wait,
+    /// Something is happening but input still works.
+    Progress,
+    /// This action is not allowed here.
+    NotAllowed,
+    /// The thing under the pointer can be picked up.
+    Grab,
+    /// The thing under the pointer is being dragged.
+    Grabbing,
+    /// Move in any direction.
+    Move,
+    /// Resize vertically.
+    ResizeNorthSouth,
+    /// Resize horizontally.
+    ResizeEastWest,
+    /// Resize along the ↗↙ diagonal.
+    ResizeNorthEastSouthWest,
+    /// Resize along the ↖↘ diagonal.
+    ResizeNorthWestSouthEast,
+    /// Split pane, vertical divider.
+    ResizeColumn,
+    /// Split pane, horizontal divider.
+    ResizeRow,
+}
+
+impl CursorIcon {
+    /// The CSS/`cursor-shape-v1` keyword for this shape.
+    ///
+    /// Backends map from this rather than from the variant name, because the
+    /// keyword is the string X11 cursor themes and the browser both index by.
+    #[must_use]
+    pub const fn as_css_name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Pointer => "pointer",
+            Self::Text => "text",
+            Self::Crosshair => "crosshair",
+            Self::Wait => "wait",
+            Self::Progress => "progress",
+            Self::NotAllowed => "not-allowed",
+            Self::Grab => "grab",
+            Self::Grabbing => "grabbing",
+            Self::Move => "move",
+            Self::ResizeNorthSouth => "ns-resize",
+            Self::ResizeEastWest => "ew-resize",
+            Self::ResizeNorthEastSouthWest => "nesw-resize",
+            Self::ResizeNorthWestSouthEast => "nwse-resize",
+            Self::ResizeColumn => "col-resize",
+            Self::ResizeRow => "row-resize",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_keywords_are_unique_and_css_shaped() {
+        let shapes = [
+            CursorIcon::Default,
+            CursorIcon::Pointer,
+            CursorIcon::Text,
+            CursorIcon::Crosshair,
+            CursorIcon::Wait,
+            CursorIcon::Progress,
+            CursorIcon::NotAllowed,
+            CursorIcon::Grab,
+            CursorIcon::Grabbing,
+            CursorIcon::Move,
+            CursorIcon::ResizeNorthSouth,
+            CursorIcon::ResizeEastWest,
+            CursorIcon::ResizeNorthEastSouthWest,
+            CursorIcon::ResizeNorthWestSouthEast,
+            CursorIcon::ResizeColumn,
+            CursorIcon::ResizeRow,
+        ];
+        let mut names: Vec<&str> = shapes.iter().map(|shape| shape.as_css_name()).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "cursor keywords must be unique");
+        assert!(
+            names
+                .iter()
+                .all(|name| name.chars().all(|c| c.is_ascii_lowercase() || c == '-')),
+            "keywords are CSS identifiers"
+        );
+        assert_eq!(CursorIcon::default().as_css_name(), "default");
+    }
 
     #[test]
     fn key_names_round_trip_and_are_unique() {

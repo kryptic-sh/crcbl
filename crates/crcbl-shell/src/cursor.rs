@@ -94,75 +94,9 @@ impl PointerMode {
     }
 }
 
-/// A standard cursor shape.
-///
-/// Non-exhaustive: adding a shape must not break a consumer's `match`. See the
-/// [module docs](self) for why this is an enum of names rather than an image.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum CursorIcon {
-    /// The platform's normal arrow.
-    #[default]
-    Default,
-    /// The "this is clickable" hand.
-    Pointer,
-    /// I-beam, for text.
-    Text,
-    /// Crosshair, for precise placement.
-    Crosshair,
-    /// Something is happening and input is blocked.
-    Wait,
-    /// Something is happening but input still works.
-    Progress,
-    /// This action is not allowed here.
-    NotAllowed,
-    /// The thing under the pointer can be picked up.
-    Grab,
-    /// The thing under the pointer is being dragged.
-    Grabbing,
-    /// Move in any direction.
-    Move,
-    /// Resize vertically.
-    ResizeNorthSouth,
-    /// Resize horizontally.
-    ResizeEastWest,
-    /// Resize along the ↗↙ diagonal.
-    ResizeNorthEastSouthWest,
-    /// Resize along the ↖↘ diagonal.
-    ResizeNorthWestSouthEast,
-    /// Split pane, vertical divider.
-    ResizeColumn,
-    /// Split pane, horizontal divider.
-    ResizeRow,
-}
-
-impl CursorIcon {
-    /// The CSS/`cursor-shape-v1` keyword for this shape.
-    ///
-    /// Backends map from this rather than from the variant name, because the
-    /// keyword is the string X11 cursor themes and the browser both index by.
-    #[must_use]
-    pub const fn as_css_name(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Pointer => "pointer",
-            Self::Text => "text",
-            Self::Crosshair => "crosshair",
-            Self::Wait => "wait",
-            Self::Progress => "progress",
-            Self::NotAllowed => "not-allowed",
-            Self::Grab => "grab",
-            Self::Grabbing => "grabbing",
-            Self::Move => "move",
-            Self::ResizeNorthSouth => "ns-resize",
-            Self::ResizeEastWest => "ew-resize",
-            Self::ResizeNorthEastSouthWest => "nesw-resize",
-            Self::ResizeNorthWestSouthEast => "nwse-resize",
-            Self::ResizeColumn => "col-resize",
-            Self::ResizeRow => "row-resize",
-        }
-    }
-}
+/// A standard cursor shape, defined in [`crcbl_core::input`] so the UI can name
+/// one without depending on the shell.
+pub use crcbl_core::input::CursorIcon;
 
 #[cfg(test)]
 mod tests {
@@ -186,39 +120,5 @@ mod tests {
         assert!(ShellCaps::empty().contains(PointerMode::Free.required_cap()));
         assert!(!ShellCaps::POINTER_CONFINE.contains(PointerMode::Locked.required_cap()));
         assert_eq!(PointerMode::default(), PointerMode::Free);
-    }
-
-    #[test]
-    fn cursor_keywords_are_unique_and_css_shaped() {
-        let shapes = [
-            CursorIcon::Default,
-            CursorIcon::Pointer,
-            CursorIcon::Text,
-            CursorIcon::Crosshair,
-            CursorIcon::Wait,
-            CursorIcon::Progress,
-            CursorIcon::NotAllowed,
-            CursorIcon::Grab,
-            CursorIcon::Grabbing,
-            CursorIcon::Move,
-            CursorIcon::ResizeNorthSouth,
-            CursorIcon::ResizeEastWest,
-            CursorIcon::ResizeNorthEastSouthWest,
-            CursorIcon::ResizeNorthWestSouthEast,
-            CursorIcon::ResizeColumn,
-            CursorIcon::ResizeRow,
-        ];
-        let mut names: Vec<&str> = shapes.iter().map(|shape| shape.as_css_name()).collect();
-        let count = names.len();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), count, "cursor keywords must be unique");
-        assert!(
-            names
-                .iter()
-                .all(|name| name.chars().all(|c| c.is_ascii_lowercase() || c == '-')),
-            "keywords are CSS identifiers"
-        );
-        assert_eq!(CursorIcon::default().as_css_name(), "default");
     }
 }

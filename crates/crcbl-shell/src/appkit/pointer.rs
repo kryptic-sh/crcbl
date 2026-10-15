@@ -224,9 +224,8 @@ impl Visibility {
 /// shows while something is being dragged — the platforms disagree about the
 /// picture, not about the meaning.
 ///
-/// Exhaustive despite [`CursorIcon`] being `#[non_exhaustive]`, because this
-/// crate defines it: a shape added later fails to compile here rather than
-/// silently becoming an arrow.
+/// Exhaustive, as [`CursorIcon`] is: a shape added later fails to compile here
+/// rather than silently becoming an arrow.
 #[must_use]
 pub const fn cursor_selector(icon: CursorIcon) -> &'static CStr {
     match icon {

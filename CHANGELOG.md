@@ -6981,6 +6981,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`CursorIcon` is defined in `crcbl_core::input`** and re-exported from
+  `crcbl_shell` and `crcbl_shell::cursor` as before, so a UI can name a cursor
+  shape without depending on the shell. It is no longer `#[non_exhaustive]`:
+  each backend maps every shape, and a shape added later should fail to compile
+  in each of them rather than fall to an arrow, so adding one is a breaking
+  change.
+
 - **Refreshed the workspace and decoder-fuzz dependency locks**, including
   `ctutils`, `libc`, `zerocopy` and `zeroize`, plus workspace font/Objective-C
   dependencies and the fuzz build's `arbitrary` and `cc`. The optional parsed
