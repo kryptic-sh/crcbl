@@ -19,6 +19,10 @@ bytemuck = { workspace = true }
 # vocabulary a finger arrives in belongs to the shell's seam, and a widget that
 # invented its own copy would be a second answer to "which finger is this".
 crcbl-core = { workspace = true }
+# The coverage rasteriser the glyph atlas draws with, `crcbl_image::raster`,
+# re-exported as `font::raster`. It moved there so the SVG renderer can fill
+# shapes without a UI dependency; no feature, so no codec comes with it.
+crcbl-image = { workspace = true }
 # `Reflect`, `Value` and `get_path`/`set_path` for `tree::widgets::inspector` —
 # UI rung 8's property panel. The arrow points this way
 # because the panel is a widget and a widget needs `Ui`; the reverse would put

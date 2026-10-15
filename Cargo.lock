@@ -814,6 +814,7 @@ dependencies = [
  "accesskit",
  "bytemuck",
  "crcbl-core",
+ "crcbl-image",
  "crcbl-reflect",
  "cssparser",
  "glam",

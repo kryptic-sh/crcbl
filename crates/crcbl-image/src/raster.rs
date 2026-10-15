@@ -1,6 +1,9 @@
 //! This engine's coverage rasteriser: outlines in, an exact-area coverage mask
 //! out.
 //!
+//! It lives here rather than in `crcbl-ui`, whose glyph atlas draws with it, so
+//! that filling a shape needs no UI dependency.
+//!
 //! # The algorithm: signed-area accumulation
 //!
 //! The technique of Raph Levien's `font-rs` ("Inside the fastest font renderer
@@ -57,7 +60,83 @@
 //! a gamma of one, with no contrast curve — and the shader multiplies it into
 //! alpha unchanged.
 
-use glam::Vec2;
+use core::ops::{Add, Mul, Neg, Sub};
+
+/// A point, or a vector between two, in mask pixels.
+///
+/// Its own two-float type rather than a maths crate's, so this crate depends
+/// on no maths library and a caller converts at its edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Point {
+    /// Rightwards.
+    pub x: f32,
+    /// Downwards.
+    pub y: f32,
+}
+
+impl Point {
+    /// The origin.
+    pub const ZERO: Self = Self::new(0.0, 0.0);
+
+    /// The point `(x, y)`.
+    #[must_use]
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+
+    /// Whether neither coordinate is infinite or NaN.
+    #[must_use]
+    pub const fn is_finite(self) -> bool {
+        self.x.is_finite() && self.y.is_finite()
+    }
+
+    /// The dot product with `other`.
+    #[must_use]
+    pub fn dot(self, other: Self) -> f32 {
+        self.x * other.x + self.y * other.y
+    }
+
+    /// The length, as a vector.
+    #[must_use]
+    pub fn length(self) -> f32 {
+        self.dot(self).sqrt()
+    }
+}
+
+impl Add for Point {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        Self::new(self.x + other.x, self.y + other.y)
+    }
+}
+
+impl Sub for Point {
+    type Output = Self;
+    fn sub(self, other: Self) -> Self {
+        Self::new(self.x - other.x, self.y - other.y)
+    }
+}
+
+impl Neg for Point {
+    type Output = Self;
+    fn neg(self) -> Self {
+        Self::new(-self.x, -self.y)
+    }
+}
+
+impl Mul<f32> for Point {
+    type Output = Self;
+    fn mul(self, scale: f32) -> Self {
+        Self::new(self.x * scale, self.y * scale)
+    }
+}
+
+impl Mul<Point> for f32 {
+    type Output = Point;
+    fn mul(self, point: Point) -> Point {
+        point * self
+    }
+}
 
 /// How far a flattened curve may stray from the true one, in pixels.
 pub const FLATTEN_TOLERANCE: f32 = 1.0 / 32.0;
@@ -136,7 +215,7 @@ impl Rasterizer {
     }
 
     /// Accumulates one edge from `from` to `to`.
-    pub fn line(&mut self, from: Vec2, to: Vec2) {
+    pub fn line(&mut self, from: Point, to: Point) {
         if !(from.is_finite() && to.is_finite()) || from.y == to.y || self.width == 0 {
             return;
         }
@@ -194,7 +273,7 @@ impl Rasterizer {
     }
 
     /// Accumulates a quadratic Bézier, flattened by [`wang_segments`].
-    pub fn quadratic(&mut self, from: Vec2, control: Vec2, to: Vec2) {
+    pub fn quadratic(&mut self, from: Point, control: Point, to: Point) {
         let second = (from - 2.0 * control + to).length();
         let steps = wang_segments(2, second, FLATTEN_TOLERANCE);
         let mut previous = from;
@@ -212,7 +291,7 @@ impl Rasterizer {
     }
 
     /// Accumulates a cubic Bézier, flattened by [`wang_segments`].
-    pub fn cubic(&mut self, from: Vec2, control0: Vec2, control1: Vec2, to: Vec2) {
+    pub fn cubic(&mut self, from: Point, control0: Point, control1: Point, to: Point) {
         let second = (from - 2.0 * control0 + control1)
             .length()
             .max((control0 - 2.0 * control1 + to).length());
@@ -287,14 +366,14 @@ mod tests {
     use super::*;
 
     /// Draws a closed polygon.
-    fn polygon(rasterizer: &mut Rasterizer, points: &[Vec2]) {
+    fn polygon(rasterizer: &mut Rasterizer, points: &[Point]) {
         for (index, &point) in points.iter().enumerate() {
             rasterizer.line(point, points[(index + 1) % points.len()]);
         }
     }
 
     /// A polygon's area by the shoelace formula.
-    fn area(points: &[Vec2]) -> f32 {
+    fn area(points: &[Point]) -> f32 {
         let mut twice = 0.0f64;
         for (index, a) in points.iter().enumerate() {
             let b = points[(index + 1) % points.len()];
@@ -304,7 +383,7 @@ mod tests {
     }
 
     /// `points` clipped to the half-plane `keep`, by Sutherland–Hodgman.
-    fn clip(points: &[Vec2], keep: impl Fn(Vec2) -> f32) -> Vec<Vec2> {
+    fn clip(points: &[Point], keep: impl Fn(Point) -> f32) -> Vec<Point> {
         let mut out = Vec::new();
         for (index, &a) in points.iter().enumerate() {
             let b = points[(index + 1) % points.len()];
@@ -322,7 +401,7 @@ mod tests {
     /// The exact coverage of every pixel of a `width` by `height` mask by a
     /// convex-or-not polygon: the polygon clipped to each pixel square, its
     /// area by the shoelace formula. Nothing in common with the rasteriser.
-    fn clipped_coverage(points: &[Vec2], width: u32, height: u32) -> Vec<f32> {
+    fn clipped_coverage(points: &[Point], width: u32, height: u32) -> Vec<f32> {
         let mut out = Vec::new();
         for y in 0..height {
             for x in 0..width {
@@ -352,10 +431,10 @@ mod tests {
     #[test]
     fn a_unit_square_covers_exactly_its_pixel() {
         let square = [
-            Vec2::new(1.0, 1.0),
-            Vec2::new(2.0, 1.0),
-            Vec2::new(2.0, 2.0),
-            Vec2::new(1.0, 2.0),
+            Point::new(1.0, 1.0),
+            Point::new(2.0, 1.0),
+            Point::new(2.0, 2.0),
+            Point::new(1.0, 2.0),
         ];
         let mut want = vec![0.0; 16];
         want[5] = 1.0;
@@ -373,10 +452,10 @@ mod tests {
         polygon(
             &mut rasterizer,
             &[
-                Vec2::new(0.5, 0.0),
-                Vec2::new(1.5, 0.0),
-                Vec2::new(1.5, 1.0),
-                Vec2::new(0.5, 1.0),
+                Point::new(0.5, 0.0),
+                Point::new(1.5, 0.0),
+                Point::new(1.5, 1.0),
+                Point::new(0.5, 1.0),
             ],
         );
         assert_close(&rasterizer.coverage(), &[0.5, 0.5, 0.0], 1e-6, "half");
@@ -390,7 +469,7 @@ mod tests {
     /// with no edge on the grid.
     #[test]
     fn triangles_cover_their_exact_area_per_pixel() {
-        let right = [Vec2::ZERO, Vec2::new(3.0, 0.0), Vec2::new(0.0, 3.0)];
+        let right = [Point::ZERO, Point::new(3.0, 0.0), Point::new(0.0, 3.0)];
         let mut rasterizer = Rasterizer::new(3, 3);
         polygon(&mut rasterizer, &right);
         let want = clipped_coverage(&right, 3, 3);
@@ -399,9 +478,9 @@ mod tests {
         assert_close(&rasterizer.coverage(), &want, 1e-5, "right triangle");
 
         let skewed = [
-            Vec2::new(0.3, 0.2),
-            Vec2::new(3.7, 1.1),
-            Vec2::new(1.4, 3.6),
+            Point::new(0.3, 0.2),
+            Point::new(3.7, 1.1),
+            Point::new(1.4, 3.6),
         ];
         let mut rasterizer = Rasterizer::new(4, 4);
         polygon(&mut rasterizer, &skewed);
@@ -414,7 +493,7 @@ mod tests {
     /// A circle's outline as a 256-gon of **exactly rational points on it**:
     /// `((1 - t²)/(1 + t²), 2t/(1 + t²))` is on the unit circle for every `t`,
     /// so no sine or cosine goes into the test either.
-    fn circle(centre: Vec2, radius: f32) -> Vec<Vec2> {
+    fn circle(centre: Point, radius: f32) -> Vec<Point> {
         const QUARTER: usize = 64;
         let mut first = Vec::new();
         // The tangent half-angle substitution: `t` in `0..1` sweeps the first
@@ -433,7 +512,7 @@ mod tests {
         ] {
             for &(x, y) in &first {
                 let (x, y) = if swap { (y, x) } else { (x, y) };
-                points.push(Vec2::new(
+                points.push(Point::new(
                     centre.x + radius * (sx * x) as f32,
                     centre.y + radius * (sy * y) as f32,
                 ));
@@ -447,7 +526,7 @@ mod tests {
     /// cuts off.
     #[test]
     fn a_circle_outline_covers_its_exact_area_per_pixel() {
-        let (centre, radius) = (Vec2::new(6.1, 5.7), 5.3);
+        let (centre, radius) = (Point::new(6.1, 5.7), 5.3);
         let points = circle(centre, radius);
         for point in &points {
             assert!(((*point - centre).length() - radius).abs() < 1e-4);
@@ -506,9 +585,9 @@ mod tests {
         // (0,4) → control (0,0) → (4,0) is x = 4t², y = 4(1 - t)², the curve
         // √x + √y = 2. Closed through (4,4), the region is √x + √y ≥ 2.
         let mut rasterizer = Rasterizer::new(4, 4);
-        rasterizer.quadratic(Vec2::new(0.0, 4.0), Vec2::ZERO, Vec2::new(4.0, 0.0));
-        rasterizer.line(Vec2::new(4.0, 0.0), Vec2::new(4.0, 4.0));
-        rasterizer.line(Vec2::new(4.0, 4.0), Vec2::new(0.0, 4.0));
+        rasterizer.quadratic(Point::new(0.0, 4.0), Point::ZERO, Point::new(4.0, 0.0));
+        rasterizer.line(Point::new(4.0, 0.0), Point::new(4.0, 4.0));
+        rasterizer.line(Point::new(4.0, 4.0), Point::new(0.0, 4.0));
         let want = sampled(4, 4, SAMPLES, |x, y| x.sqrt() + y.sqrt() >= 2.0);
         assert_close(&rasterizer.coverage(), &want, within, "quadratic");
 
@@ -517,13 +596,13 @@ mod tests {
         // region is y ≤ x³/9.
         let mut rasterizer = Rasterizer::new(3, 3);
         rasterizer.cubic(
-            Vec2::ZERO,
-            Vec2::new(1.0, 0.0),
-            Vec2::new(2.0, 0.0),
-            Vec2::new(3.0, 3.0),
+            Point::ZERO,
+            Point::new(1.0, 0.0),
+            Point::new(2.0, 0.0),
+            Point::new(3.0, 3.0),
         );
-        rasterizer.line(Vec2::new(3.0, 3.0), Vec2::new(3.0, 0.0));
-        rasterizer.line(Vec2::new(3.0, 0.0), Vec2::ZERO);
+        rasterizer.line(Point::new(3.0, 3.0), Point::new(3.0, 0.0));
+        rasterizer.line(Point::new(3.0, 0.0), Point::ZERO);
         let want = sampled(3, 3, SAMPLES, |x, y| y <= x * x * x / 9.0);
         assert_close(&rasterizer.coverage(), &want, within, "cubic");
     }
@@ -544,7 +623,7 @@ mod tests {
         assert_eq!(wang_segments(3, 1.0e9, 0.001), MAX_CURVE_SEGMENTS);
         assert_eq!(wang_segments(2, f32::NAN, 0.5), 1);
 
-        let (p0, p1, p2) = (Vec2::ZERO, Vec2::new(10.0, 30.0), Vec2::new(40.0, 0.0));
+        let (p0, p1, p2) = (Point::ZERO, Point::new(10.0, 30.0), Point::new(40.0, 0.0));
         let steps = wang_segments(2, (p0 - 2.0 * p1 + p2).length(), FLATTEN_TOLERANCE);
         let at = |t: f32| p0 * ((1.0 - t) * (1.0 - t)) + p1 * (2.0 * t * (1.0 - t)) + p2 * (t * t);
         let mut worst = 0.0f32;
@@ -554,7 +633,7 @@ mod tests {
             for sample in 1..32 {
                 let t = t0 + (t1 - t0) * sample as f32 / 32.0;
                 let point = at(t);
-                let along = (b - a).normalize();
+                let along = (b - a) * (b - a).length().recip();
                 let off = (point - a) - along * (point - a).dot(along);
                 worst = worst.max(off.length());
             }
@@ -567,16 +646,16 @@ mod tests {
     #[test]
     fn overlaps_saturate_and_opposite_windings_cut_holes() {
         let outer = [
-            Vec2::ZERO,
-            Vec2::new(3.0, 0.0),
-            Vec2::new(3.0, 3.0),
-            Vec2::new(0.0, 3.0),
+            Point::ZERO,
+            Point::new(3.0, 0.0),
+            Point::new(3.0, 3.0),
+            Point::new(0.0, 3.0),
         ];
         let inner = [
-            Vec2::new(1.0, 1.0),
-            Vec2::new(2.0, 1.0),
-            Vec2::new(2.0, 2.0),
-            Vec2::new(1.0, 2.0),
+            Point::new(1.0, 1.0),
+            Point::new(2.0, 1.0),
+            Point::new(2.0, 2.0),
+            Point::new(1.0, 2.0),
         ];
         let mut same = Rasterizer::new(3, 3);
         polygon(&mut same, &outer);
@@ -585,7 +664,7 @@ mod tests {
 
         let mut hole = Rasterizer::new(3, 3);
         polygon(&mut hole, &outer);
-        let reversed: Vec<Vec2> = inner.iter().rev().copied().collect();
+        let reversed: Vec<Point> = inner.iter().rev().copied().collect();
         polygon(&mut hole, &reversed);
         let mut want = [1.0; 9];
         want[4] = 0.0;
@@ -600,10 +679,10 @@ mod tests {
         polygon(
             &mut rasterizer,
             &[
-                Vec2::new(-3.0, -1.5),
-                Vec2::new(4.5, -2.0),
-                Vec2::new(5.0, 6.0),
-                Vec2::new(-2.0, 4.0),
+                Point::new(-3.0, -1.5),
+                Point::new(4.5, -2.0),
+                Point::new(5.0, 6.0),
+                Point::new(-2.0, 4.0),
             ],
         );
         assert_close(&rasterizer.coverage(), &[1.0; 4], 1e-5, "overhang");
@@ -612,10 +691,10 @@ mod tests {
         polygon(
             &mut rasterizer,
             &[
-                Vec2::new(5.0, 0.0),
-                Vec2::new(6.0, 0.0),
-                Vec2::new(6.0, 1.0),
-                Vec2::new(5.0, 1.0),
+                Point::new(5.0, 0.0),
+                Point::new(6.0, 0.0),
+                Point::new(6.0, 1.0),
+                Point::new(5.0, 1.0),
             ],
         );
         assert_close(&rasterizer.coverage(), &[0.0; 4], 0.0, "outside");
