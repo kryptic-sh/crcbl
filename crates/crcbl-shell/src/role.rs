@@ -291,6 +291,12 @@ pub(crate) struct Placed {
 ///
 /// The placement `xdg_positioner` is asked for on Wayland, worked out here
 /// for the window systems that have no one to ask. Y grows downwards.
+/// What [`Shell::reposition_popup`](crate::Shell::reposition_popup) answers
+/// for a window that is not a popup, in every backend's words alike.
+pub(crate) fn not_a_popup(window: WindowId) -> ShellError {
+    ShellError::InvalidDescriptor(format!("reposition_popup: {window:?} is not a popup"))
+}
+
 #[cfg(any(target_os = "windows", target_os = "macos", test))]
 pub(crate) fn place_popup(
     anchor: Placed,

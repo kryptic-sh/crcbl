@@ -939,6 +939,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   not by pointer. `Font::id`, `Font::data` and `Font::metrics` are no longer
   `const`, and `Font::data` borrows from the font.
 
+- **`Shell::reposition_popup` and `ShellCaps::POPUP_REPOSITION`.** A live popup
+  can follow an anchor that moved, or take a new size, placed by the
+  `PopupPlacement` it was created with. Wayland sends `xdg_popup.reposition`, so
+  the backend now binds `xdg_wm_base` up to version 3 and reports the capability
+  only when the compositor offers that; Win32 and AppKit work the placement out
+  again and move the window. The trait method has a default that answers
+  `Unsupported`, so an implementation outside this crate still compiles.
+
 - **`ShellEvent::FullScreenApp { window, active }`.** A Win32 bar that reserves
   its edge is told when a full-screen window opens on its monitor and when the
   last one closes, from the shell's `ABN_FULLSCREENAPP`, so it can step aside

@@ -528,6 +528,36 @@ pub trait Shell: core::fmt::Debug {
         constraints: SizeConstraints,
     ) -> Result<(), ShellError>;
 
+    /// Moves a live popup against a new `anchor` in its parent and gives it
+    /// `size`, placed by the [`PopupPlacement`] it was created with: flipped
+    /// or slid to stay on screen, as when it opened.
+    ///
+    /// For a popup whose anchor moved — a bar's clock grew and its calendar
+    /// should follow — or whose content changed size. A request, like the
+    /// rest of a window's geometry: the new size arrives as the next
+    /// [`ShellEvent::Resized`], once the window system has placed it.
+    ///
+    /// Requires [`ShellCaps::POPUP_REPOSITION`]. Without it, close the popup
+    /// and open another.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Unsupported`] without the capability,
+    /// [`ShellError::InvalidWindow`] for a stale handle, and
+    /// [`ShellError::InvalidDescriptor`] for a window that is not a popup.
+    fn reposition_popup(
+        &mut self,
+        popup: WindowId,
+        anchor: LogicalRect,
+        size: LogicalSize,
+    ) -> Result<(), ShellError> {
+        let _ = (popup, anchor, size);
+        Err(ShellError::Unsupported {
+            backend: self.backend(),
+            what: "repositioning a popup",
+        })
+    }
+
     /// Every connected monitor.
     ///
     /// Invalidated by [`ShellEvent::MonitorsChanged`]; call again rather than

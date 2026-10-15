@@ -224,9 +224,11 @@ use protocol::xdg_shell::{xdg_popup, xdg_surface, xdg_toplevel, xdg_wm_base};
 /// identifier a monitor has.
 const COMPOSITOR_VERSION: u32 = 4;
 /// See [`COMPOSITOR_VERSION`]. `xdg_wm_base` 1 is all the window lifecycle
-/// needs; 4 and 5 add `configure_bounds` and `wm_capabilities`, which this
-/// backend does not act on.
-const WM_BASE_VERSION: u32 = 1;
+/// needs, and 3 adds `xdg_popup.reposition`, which
+/// [`ShellCaps::POPUP_REPOSITION`] reports; 4 and 5 add `configure_bounds` and
+/// `wm_capabilities`, which this backend does not act on. Neither 2 nor 3
+/// sends an event a client did not ask for.
+const WM_BASE_VERSION: u32 = 3;
 /// See [`COMPOSITOR_VERSION`].
 const OUTPUT_VERSION: u32 = 4;
 /// `wl_seat` 8 is the lowest version whose `wl_pointer` sends
@@ -955,8 +957,9 @@ unsafe extern "C" fn dispatch(
                         })
                     }
                     xdg_popup::Event::PopupDone => Some(RawEvent::PopupDone { popup: proxy }),
-                    // `repositioned` answers `xdg_popup.reposition`, which
-                    // this backend does not send.
+                    // `repositioned` answers `xdg_popup.reposition` with the
+                    // token it was sent; the configure that follows it is what
+                    // carries the new geometry, so nothing waits on this.
                     _ => None,
                 };
                 sink.events.extend(raw);
@@ -1879,6 +1882,9 @@ struct WlWindow {
     popup: *mut WlProxy,
     /// The window a popup belongs to, which destroys it when it goes.
     parent: Option<WindowId>,
+    /// Where a popup is placed against its anchor, kept so it can be placed
+    /// again when it is repositioned.
+    placement: Option<crate::PopupPlacement>,
     /// The monitor a panel was created for, whose removal asks it to close.
     panel_monitor: Option<MonitorId>,
     decoration: *mut WlProxy,
@@ -2180,8 +2186,15 @@ impl WaylandShell {
         // client declares a region opaque, which this backend never does, so a
         // swapchain with premultiplied alpha is all a transparent window needs.
         caps.insert(ShellCaps::TRANSPARENT);
-        // `xdg_wm_base`, which `open` requires, has had popups from version 1.
+        // `xdg_wm_base`, which `open` requires, has had popups from version 1,
+        // and moves them from version 3.
         caps.insert(ShellCaps::POPUP);
+        caps.set(
+            ShellCaps::POPUP_REPOSITION,
+            !self.conn.wm_base.is_null()
+                // SAFETY: a live proxy, checked non-null just above.
+                && unsafe { ffi::proxy_version(self.conn.wm_base) } >= popup::REPOSITION_SINCE,
+        );
         caps
     }
 
@@ -3649,6 +3662,7 @@ impl Shell for WaylandShell {
                 layer_surface,
                 popup: ptr::null_mut(),
                 parent: None,
+                placement: None,
                 panel_monitor: panel.and_then(|panel| panel.monitor),
                 decoration,
                 fractional_scale,
@@ -3812,6 +3826,15 @@ impl Shell for WaylandShell {
         }
         self.conn.flush();
         Ok(())
+    }
+
+    fn reposition_popup(
+        &mut self,
+        popup: WindowId,
+        anchor: crate::LogicalRect,
+        size: LogicalSize,
+    ) -> Result<(), ShellError> {
+        self.move_popup(popup, anchor, size)
     }
 
     fn monitors(&self) -> &[MonitorInfo] {
@@ -4917,6 +4940,7 @@ mod tests {
             layer_surface: ptr::null_mut(),
             popup: ptr::null_mut(),
             parent: None,
+            placement: None,
             panel_monitor: None,
             decoration: ptr::null_mut(),
             fractional_scale: ptr::null_mut(),

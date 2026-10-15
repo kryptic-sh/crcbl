@@ -25,8 +25,8 @@
 //! dismiss on it, because there the click moves the keyboard.
 
 use crate::{
-    LogicalRect, PointerMode, PopupDesc, PopupInput, PopupPlacement, ShellBackend, ShellError,
-    WindowConfiguration, WindowDesc, WindowId,
+    LogicalRect, LogicalSize, PointerMode, PopupDesc, PopupInput, PopupPlacement, ShellBackend,
+    ShellError, WindowConfiguration, WindowDesc, WindowId,
 };
 use core::ptr;
 
@@ -71,6 +71,55 @@ const fn positioner_of(placement: PopupPlacement) -> (u32, u32, u32) {
     }
 }
 
+/// The `xdg_wm_base` version that brought `xdg_popup.reposition`.
+pub(super) const REPOSITION_SINCE: u32 = 3;
+
+/// The token a reposition is sent with. The compositor echoes it in
+/// `repositioned`, for a client that has several in flight to tell them
+/// apart; the configure after it is what this backend reads, so one constant
+/// serves.
+const REPOSITION_TOKEN: u32 = 0;
+
+/// A positioner for a popup of `size` against `anchor`, placed by
+/// `placement`, or null if the compositor would not make one.
+///
+/// # Safety
+///
+/// `wm_base` must be a live `xdg_wm_base`. The caller destroys the
+/// positioner once the request that takes it has been sent.
+unsafe fn positioner(
+    wm_base: *mut WlProxy,
+    size: LogicalSize,
+    anchor_rect: LogicalRect,
+    placement: PopupPlacement,
+) -> *mut WlProxy {
+    let (anchor, gravity, adjustment) = positioner_of(placement);
+    let LogicalRect {
+        origin,
+        size: extent_of,
+    } = anchor_rect;
+    // SAFETY: the caller guarantees a live `xdg_wm_base`, and every request
+    // after the first goes to the positioner it made, checked non-null.
+    unsafe {
+        let positioner = xdg_wm_base::create_positioner(wm_base);
+        if positioner.is_null() {
+            return positioner;
+        }
+        xdg_positioner::set_size(positioner, extent(size.width), extent(size.height));
+        xdg_positioner::set_anchor_rect(
+            positioner,
+            round_logical(origin.x),
+            round_logical(origin.y),
+            extent(extent_of.width),
+            extent(extent_of.height),
+        );
+        xdg_positioner::set_anchor(positioner, anchor);
+        xdg_positioner::set_gravity(positioner, gravity);
+        xdg_positioner::set_constraint_adjustment(positioner, adjustment);
+        positioner
+    }
+}
+
 /// A logical length as a positioner extent: rounded, and at least one, which
 /// the protocol requires of every size and anchor rectangle it takes.
 fn extent(value: f64) -> i32 {
@@ -104,8 +153,6 @@ impl WaylandShell {
         };
         let wm_base = self.conn.wm_base;
         let compositor = self.conn.compositor;
-        let (anchor, gravity, adjustment) = positioner_of(popup.placement);
-        let LogicalRect { origin, size } = popup.anchor;
         // SAFETY: both globals were just checked non-null; every object is
         // created by the request before it and checked before use, and a
         // failure releases what this function made, innermost first.
@@ -116,28 +163,13 @@ impl WaylandShell {
                     "wl_compositor.create_surface failed".to_string(),
                 ));
             }
-            let positioner = xdg_wm_base::create_positioner(wm_base);
+            let positioner = positioner(wm_base, desc.size, popup.anchor, popup.placement);
             if positioner.is_null() {
                 self.conn.release(surface, wl_surface::destroy);
                 return Err(ShellError::WindowCreation(
                     "xdg_wm_base.create_positioner failed".to_string(),
                 ));
             }
-            xdg_positioner::set_size(
-                positioner,
-                extent(desc.size.width),
-                extent(desc.size.height),
-            );
-            xdg_positioner::set_anchor_rect(
-                positioner,
-                round_logical(origin.x),
-                round_logical(origin.y),
-                extent(size.width),
-                extent(size.height),
-            );
-            xdg_positioner::set_anchor(positioner, anchor);
-            xdg_positioner::set_gravity(positioner, gravity);
-            xdg_positioner::set_constraint_adjustment(positioner, adjustment);
 
             let xdg = xdg_wm_base::get_xdg_surface(wm_base, surface);
             if xdg.is_null() {
@@ -216,6 +248,7 @@ impl WaylandShell {
                 layer_surface: ptr::null_mut(),
                 popup: popup_proxy,
                 parent: Some(popup.parent),
+                placement: Some(popup.placement),
                 panel_monitor: None,
                 decoration: ptr::null_mut(),
                 fractional_scale,
@@ -240,6 +273,52 @@ impl WaylandShell {
             })
             .cast();
         Ok(handle)
+    }
+
+    /// Moves a popup against `anchor` and gives it `size`, with
+    /// `xdg_popup.reposition` and a positioner built as at creation. The
+    /// compositor answers with a configure, which brings the new size as any
+    /// other.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::Unsupported`] when the compositor's `xdg_wm_base` is older
+    /// than [`REPOSITION_SINCE`], [`ShellError::InvalidWindow`] for a stale
+    /// handle, [`ShellError::InvalidDescriptor`] for a window that is not a
+    /// popup, and [`ShellError::Backend`] if the positioner cannot be made.
+    pub(super) fn move_popup(
+        &mut self,
+        window: WindowId,
+        anchor: LogicalRect,
+        size: LogicalSize,
+    ) -> Result<(), ShellError> {
+        if !self.caps.contains(crate::ShellCaps::POPUP_REPOSITION) {
+            return Err(ShellError::Unsupported {
+                backend: ShellBackend::Wayland,
+                what: "repositioning a popup, which needs xdg_wm_base 3",
+            });
+        }
+        let state = self.window(window)?;
+        let (proxy, placement) = match state.placement {
+            Some(placement) if !state.popup.is_null() => (state.popup, placement),
+            _ => return Err(crate::role::not_a_popup(window)),
+        };
+        // SAFETY: `wm_base` is live, since the capability needs it; the
+        // positioner is checked, sent with the popup's own live proxy, and
+        // destroyed once the request has taken it.
+        unsafe {
+            let positioner = positioner(self.conn.wm_base, size, anchor, placement);
+            if positioner.is_null() {
+                return Err(ShellError::Backend(
+                    "xdg_wm_base.create_positioner failed".to_string(),
+                ));
+            }
+            xdg_popup::reposition(proxy, positioner, REPOSITION_TOKEN);
+            xdg_positioner::destroy(positioner);
+        }
+        self.conn.flush();
+        self.window_mut(window)?.requested_size = size;
+        Ok(())
     }
 
     /// The seat and serial a popup grab quotes: the seat with the latest input

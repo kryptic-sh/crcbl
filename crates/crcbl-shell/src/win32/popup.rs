@@ -24,7 +24,9 @@
 
 use core::ptr;
 
-use crate::{PhysicalRect, PopupDesc, PopupInput, ShellError, WindowDesc};
+use crate::{
+    LogicalRect, LogicalSize, PhysicalRect, PopupDesc, PopupInput, ShellError, WindowDesc, WindowId,
+};
 
 use super::ffi::{self, Point, style, value};
 use super::geometry;
@@ -37,24 +39,19 @@ use super::window::{Created, class_name};
 const WHOLE_DESKTOP: PhysicalRect = PhysicalRect::new(i32::MIN, i32::MIN, u32::MAX, u32::MAX);
 
 impl Win32Shell {
-    /// Creates a popup's window, placed as the [module docs](self) say.
+    /// Where a popup of logical `size` goes against `popup`'s anchor, in
+    /// desktop pixels; see the [module docs](self).
     ///
     /// # Errors
     ///
-    /// [`ShellError::InvalidWindow`] for a parent that is not a live window,
-    /// [`ShellError::InvalidDescriptor`] for a title with a NUL in it, and
-    /// [`ShellError::WindowCreation`] if the system refused the window.
-    pub(super) fn create_popup(
+    /// [`ShellError::InvalidWindow`] for a parent that is not a live window.
+    fn popup_rect_for(
         &self,
-        desc: &WindowDesc<'_>,
         popup: &PopupDesc,
-    ) -> Result<Created, ShellError> {
+        size: LogicalSize,
+    ) -> Result<PhysicalRect, ShellError> {
         let parent = self.window(popup.parent)?;
         let (parent_hwnd, scale) = (parent.raw(), parent.scale_factor);
-        let title = ffi::wide(desc.title).ok_or_else(|| {
-            ShellError::InvalidDescriptor("title contains a NUL byte".to_string())
-        })?;
-
         let mut origin = Point::default();
         // SAFETY: a live window of this shell, and a live `POINT` the call
         // converts in place from its client space to the desktop's.
@@ -73,14 +70,85 @@ impl Win32Shell {
                 .max(1)
                 .unsigned_abs(),
         );
-        let size = desc.size.to_physical(scale);
         let area = self
             .monitor_of(parent_hwnd)
             .and_then(|id| self.monitors.iter().find(|monitor| monitor.id == id))
             .or_else(|| self.monitors.iter().find(|monitor| monitor.is_primary))
             .or_else(|| self.monitors.first())
             .map_or(WHOLE_DESKTOP, |monitor| monitor.work_area);
-        let rect = geometry::popup_rect(anchor, size, popup.placement, area);
+        Ok(geometry::popup_rect(
+            anchor,
+            size.to_physical(scale),
+            popup.placement,
+            area,
+        ))
+    }
+
+    /// Moves a popup against `anchor` and gives it `size`: the rectangle
+    /// worked out as at creation, and the window moved there without
+    /// activating it or changing its place in the z-order. The resize it
+    /// causes is reported as any other, through `WM_SIZE`.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] for a stale handle or a parent gone, and
+    /// [`ShellError::InvalidDescriptor`] for a window that is not a popup.
+    pub(super) fn move_popup(
+        &mut self,
+        window: WindowId,
+        anchor: LogicalRect,
+        size: LogicalSize,
+    ) -> Result<(), ShellError> {
+        let state = self.window(window)?;
+        let hwnd = state.raw();
+        let mut popup = state
+            .popup
+            .ok_or_else(|| crate::role::not_a_popup(window))?;
+        popup.anchor = anchor;
+        let rect = self.popup_rect_for(&popup, size)?;
+        // SAFETY: a live window of this shell, moved and sized in desktop
+        // pixels; the null insert-after is ignored under `SWP_NOZORDER`.
+        let moved = unsafe {
+            ffi::SetWindowPos(
+                hwnd,
+                ptr::null_mut(),
+                rect.x,
+                rect.y,
+                i32::try_from(rect.width).unwrap_or(i32::MAX),
+                i32::try_from(rect.height).unwrap_or(i32::MAX),
+                value::SWP_NO_Z_ORDER | value::SWP_NO_ACTIVATE,
+            )
+        };
+        if moved == 0 {
+            // SAFETY: reads this thread's last error code.
+            let error = unsafe { ffi::GetLastError() };
+            return Err(ShellError::Backend(format!(
+                "SetWindowPos failed with Win32 error {error}"
+            )));
+        }
+        let state = self.window_mut(window)?;
+        state.popup = Some(popup);
+        state.requested_size = size;
+        Ok(())
+    }
+
+    /// Creates a popup's window, placed as the [module docs](self) say.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] for a parent that is not a live window,
+    /// [`ShellError::InvalidDescriptor`] for a title with a NUL in it, and
+    /// [`ShellError::WindowCreation`] if the system refused the window.
+    pub(super) fn create_popup(
+        &self,
+        desc: &WindowDesc<'_>,
+        popup: &PopupDesc,
+    ) -> Result<Created, ShellError> {
+        let parent_hwnd = self.window(popup.parent)?.raw();
+        let title = ffi::wide(desc.title).ok_or_else(|| {
+            ShellError::InvalidDescriptor("title contains a NUL byte".to_string())
+        })?;
+        let rect = self.popup_rect_for(popup, desc.size)?;
 
         // SAFETY: reading this shell's own window's extended style.
         let parent_ex_style =

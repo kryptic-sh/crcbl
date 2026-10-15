@@ -18,7 +18,7 @@
 
 use core::ptr;
 
-use crate::{PopupDesc, PopupInput, ShellError};
+use crate::{LogicalRect, LogicalSize, PopupDesc, PopupInput, ShellError, WindowId};
 
 use super::ffi::{self, Id, NSRect, NSSize, Sel};
 use super::geometry;
@@ -66,6 +66,39 @@ impl AppKitShell {
             popup.placement,
             visible,
         ))
+    }
+
+    /// Moves a popup against `anchor` and gives it `size`: the frame worked
+    /// out as at creation, and set on the window, which reports the resize
+    /// as any other.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] for a stale handle or a parent gone, and
+    /// [`ShellError::InvalidDescriptor`] for a window that is not a popup.
+    pub(super) fn move_popup(
+        &mut self,
+        window: WindowId,
+        anchor: LogicalRect,
+        size: LogicalSize,
+    ) -> Result<(), ShellError> {
+        let state = self.window(window)?;
+        let ns_window = state.window;
+        let mut popup = state
+            .popup
+            .ok_or_else(|| crate::role::not_a_popup(window))?;
+        popup.anchor = anchor;
+        let frame = self.popup_frame_for(&popup, geometry::points(size))?;
+        // SAFETY: a live window of this shell, on the main thread;
+        // `setFrame:display:` takes an `NSRect` and a `BOOL`.
+        unsafe {
+            let set: unsafe extern "C" fn(Id, Sel, NSRect, ffi::ObjcBool) = ffi::msg_send();
+            set(ns_window, ffi::sel(c"setFrame:display:"), frame, ffi::YES);
+        }
+        let state = self.window_mut(window)?;
+        state.popup = Some(popup);
+        state.requested_size = size;
+        Ok(())
     }
 
     /// The one `NSPanel` default a popup must not keep, and the pointer for a

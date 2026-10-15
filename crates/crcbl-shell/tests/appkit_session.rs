@@ -2281,6 +2281,33 @@ mod macos {
             );
         }
 
+        // The hover card follows a button that moved right, at a new size.
+        let (card, card_title, _) = made[1];
+        shell
+            .reposition_popup(
+                card,
+                LogicalRect::new(LogicalPoint::new(60.0, 10.0), LogicalSize::new(100.0, 20.0)),
+                LogicalSize::new(240.0, 90.0),
+            )
+            .expect("reposition the hover card");
+        wait_for(shell, "the hover card's resize", |shell| {
+            (shell.window_state(card).ok()?.size()?
+                == LogicalSize::new(240.0, 90.0)
+                    .to_physical(shell.window_state(card).ok()?.scale_factor()?))
+            .then_some(())
+        });
+        let facts = session_support::window_facts(card_title).expect("the card is readable");
+        assert_eq!(
+            facts.frame,
+            [
+                owner_facts.frame[0] + 60.0,
+                content_top - 30.0 - 90.0,
+                240.0,
+                90.0
+            ],
+            "below the moved button, at its new size: {facts:?}"
+        );
+
         let mut destroyed = Vec::new();
         shell.pump(&mut |_| {});
         shell.destroy_window(owner).expect("destroy the owner");

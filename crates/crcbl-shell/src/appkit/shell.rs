@@ -121,12 +121,11 @@ pub(super) struct AppWindow {
     /// What a panel was created with, so it can be placed again; `None` for
     /// every other window. See [`panel`](super::panel).
     pub(super) panel: Option<Panel>,
-    /// A popup's input, which decides how it is shown and whether losing the
-    /// keyboard dismisses it; `None` for every other window. See
-    /// [`popup`](super::popup).
-    pub(super) popup: Option<crate::PopupInput>,
-    /// The window a popup belongs to, which destroys it when it goes.
-    pub(super) parent: Option<WindowId>,
+    /// What a popup was created with, or last repositioned to: its input,
+    /// which decides how it is shown and whether losing the keyboard
+    /// dismisses it, and its parent, which destroys it when it goes. `None`
+    /// for every other window. See [`popup`](super::popup).
+    pub(super) popup: Option<crate::PopupDesc>,
 }
 
 impl AppWindow {
@@ -549,9 +548,11 @@ impl AppKitShell {
                     });
                     // A grabbing popup is dismissed by no longer being key: a
                     // click outside it made something else key.
-                    let grabbing = self
-                        .window(handle)
-                        .is_ok_and(|state| state.popup == Some(crate::PopupInput::Grab));
+                    let grabbing = self.window(handle).is_ok_and(|state| {
+                        state
+                            .popup
+                            .is_some_and(|popup| popup.input == crate::PopupInput::Grab)
+                    });
                     if !focused && grabbing {
                         self.close_requested(handle);
                     }
@@ -955,6 +956,8 @@ impl Shell for AppKitShell {
     ///   layer's level; see [`panel`](super::panel).
     /// * [`POPUP`](ShellCaps::POPUP) — a child panel placed against its
     ///   parent and kept on its screen; see [`popup`](super::popup).
+    /// * [`POPUP_REPOSITION`](ShellCaps::POPUP_REPOSITION) — the same frame
+    ///   worked out again, and set with `setFrame:display:`.
     /// * [`TRANSPARENT`](ShellCaps::TRANSPARENT) — a window that is not opaque,
     ///   with a clear background, no shadow and a layer composited by its
     ///   alpha.
@@ -1106,8 +1109,7 @@ impl Shell for AppKitShell {
             focused: false,
             close_pending: false,
             panel,
-            popup: popup.map(|popup| popup.input),
-            parent: popup.map(|popup| popup.parent),
+            popup,
         };
         let handle: WindowId = self.windows.insert(state).cast();
         if desc.visible
@@ -1140,7 +1142,7 @@ impl Shell for AppKitShell {
         // backend destroys a popup with its parent.
         let popups: Vec<WindowId> = self
             .windows_iter()
-            .filter(|(_, state)| state.parent == Some(handle))
+            .filter(|(_, state)| state.popup.is_some_and(|popup| popup.parent == handle))
             .map(|(id, _)| id)
             .collect();
         for popup in popups {
@@ -1234,10 +1236,10 @@ impl Shell for AppKitShell {
             unsafe { Self::show_panel(window, panel.keyboard) };
             return Ok(());
         }
-        if let (true, Some(input), Some(parent)) = (visible, state.popup, state.parent) {
-            let parent = self.window(parent)?.window;
+        if let (true, Some(popup)) = (visible, state.popup) {
+            let parent = self.window(popup.parent)?.window;
             // SAFETY: both are live windows of this shell, on the main thread.
-            unsafe { Self::show_popup(parent, window, input) };
+            unsafe { Self::show_popup(parent, window, popup.input) };
             return Ok(());
         }
         // SAFETY: a live window; `nil` is the documented sender for both.
@@ -1329,6 +1331,15 @@ impl Shell for AppKitShell {
         // SAFETY: a live window of this shell.
         unsafe { window::apply_constraints(window, constraints) };
         Ok(())
+    }
+
+    fn reposition_popup(
+        &mut self,
+        popup: WindowId,
+        anchor: crate::LogicalRect,
+        size: LogicalSize,
+    ) -> Result<(), ShellError> {
+        self.move_popup(popup, anchor, size)
     }
 
     fn monitors(&self) -> &[MonitorInfo] {
@@ -1834,7 +1845,10 @@ impl Drop for AppKitShell {
         // Popups before the windows they belong to, deepest first.
         fn depth<'a>(windows: &'a Pool<AppWindow>, mut window: &'a AppWindow) -> usize {
             let mut depth = 0;
-            while let Some(parent) = window.parent.and_then(|id| windows.get(id.cast())) {
+            while let Some(parent) = window
+                .popup
+                .and_then(|popup| windows.get(popup.parent.cast()))
+            {
                 depth += 1;
                 window = parent;
             }

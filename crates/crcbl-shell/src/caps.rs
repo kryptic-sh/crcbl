@@ -236,6 +236,14 @@ bitflags::bitflags! {
         /// whether the driver offers — and a renderer that clears to alpha
         /// zero.
         const TRANSPARENT = 1 << 18;
+
+        /// [`Shell::reposition_popup`](crate::Shell::reposition_popup) moves
+        /// and resizes a live popup.
+        ///
+        /// Separate from [`POPUP`](Self::POPUP) because Wayland's
+        /// `xdg_popup.reposition` arrived in `xdg_wm_base` 3, and a compositor
+        /// offering only 1 or 2 has popups that stay where they opened.
+        const POPUP_REPOSITION = 1 << 19;
     }
 }
 

@@ -94,9 +94,14 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      unmutated run is main's CI.
    - Still to do on Wayland:
      - no flash on map: the first commit carries the first frame;
-     - repositioning a live popup through `xdg_popup.reposition` (needs
-       `xdg_wm_base` v3), which needs a seam request to move a popup first, and
-       caps for the compositors without it;
+   - `Shell::reposition_popup` moves and resizes a live popup on Wayland
+     (`xdg_popup.reposition`, so `xdg_wm_base` is now bound up to 3 and
+     `ShellCaps::POPUP_REPOSITION` follows the version bound), Win32
+     (`SetWindowPos`), AppKit (`setFrame:display:`) and headless. Verified
+     locally by the headless test only; the sway, Win32 desktop and AppKit
+     session tests that cover it run in CI. Position is checked on Win32 and
+     AppKit; on Wayland only the size is, since a client cannot see where its
+     popup went.
    - Popups (S3) are built (`crates/crcbl-shell/src/wayland/popup.rs`): an
      `xdg_popup` from an `xdg_positioner` whose anchor and gravity come from the
      placement, with flip and slide but never resize, on a toplevel, a popup or

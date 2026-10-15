@@ -3406,6 +3406,67 @@ fn a_menu_opens_at_its_size_and_goes_with_its_window() {
     assert!(session.shell.window_state(menu).is_err());
 }
 
+/// A menu moved to a new anchor at a new size: sway's `xdg_wm_base` is new
+/// enough to reposition, and the compositor answers with a configure at the
+/// size asked for. Where it went is the compositor's to know, not a client's.
+#[test]
+#[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]
+fn a_repositioned_menu_is_configured_at_its_new_size() {
+    let mut session = Session::open();
+    assert!(
+        session.shell.caps().contains(ShellCaps::POPUP_REPOSITION),
+        "sway's xdg_wm_base is past version 3"
+    );
+    let window = session.create_mapped(&desc(
+        "crcbl e2e repositioned menu owner",
+        LogicalSize::new(500.0, 400.0),
+    ));
+    let menu = session.create(&popup(
+        "crcbl e2e repositioned menu",
+        LogicalSize::new(200.0, 150.0),
+        PopupDesc {
+            parent: window,
+            anchor: LogicalRect::new(LogicalPoint::new(10.0, 10.0), LogicalSize::new(100.0, 20.0)),
+            placement: PopupPlacement::Below,
+            input: PopupInput::Pointer,
+        },
+    ));
+    session.pump_until("the menu's first configure", |session| {
+        session.size(menu).is_some()
+    });
+    let scale = session
+        .shell
+        .window_state(menu)
+        .expect("live menu")
+        .scale_factor()
+        .expect("configured");
+
+    let moved = LogicalSize::new(240.0, 90.0);
+    session
+        .shell
+        .reposition_popup(
+            menu,
+            LogicalRect::new(LogicalPoint::new(60.0, 10.0), LogicalSize::new(100.0, 20.0)),
+            moved,
+        )
+        .expect("reposition");
+    session.pump_until("the menu's configure at its new size", |session| {
+        session.size(menu) == Some(moved.to_physical(scale))
+    });
+    assert!(
+        matches!(
+            session.shell.reposition_popup(
+                window,
+                LogicalRect::new(LogicalPoint::new(0.0, 0.0), LogicalSize::new(1.0, 1.0)),
+                moved,
+            ),
+            Err(ShellError::InvalidDescriptor(_))
+        ),
+        "a toplevel is not a popup"
+    );
+    session.shell.destroy_window(window).expect("destroy");
+}
+
 /// The calendar a bar opens: a popup whose parent is a layer surface, which
 /// layer-shell adopts with `get_popup`.
 #[test]

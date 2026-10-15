@@ -336,7 +336,7 @@ impl Win32Shell {
     /// (a mode change), or the DPI. Forgetting one of the three is a window
     /// that enforces last week's minimum size.
     pub(super) fn refresh_limits(&self, window: &WinWindow) {
-        let styles = match (&window.panel, window.popup) {
+        let styles = match (&window.panel, window.popup.map(|popup| popup.input)) {
             (Some(panel), _) => geometry::panel_styles(panel.layer, panel.keyboard),
             // The topmost bit does not change the frame, which is all this is
             // read for.

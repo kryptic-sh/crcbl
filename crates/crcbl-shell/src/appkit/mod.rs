@@ -387,6 +387,7 @@ pub(crate) const fn caps() -> ShellCaps {
         .union(ShellCaps::DRAG_DROP)
         .union(ShellCaps::PANEL)
         .union(ShellCaps::POPUP)
+        .union(ShellCaps::POPUP_REPOSITION)
         .union(ShellCaps::TRANSPARENT)
 }
 
@@ -412,6 +413,7 @@ mod tests {
             ShellCaps::DRAG_DROP,
             ShellCaps::PANEL,
             ShellCaps::POPUP,
+            ShellCaps::POPUP_REPOSITION,
             ShellCaps::TRANSPARENT,
         ] {
             assert!(caps.contains(present), "{present:?} is implemented");

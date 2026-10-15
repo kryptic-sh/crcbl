@@ -594,6 +594,7 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
         ShellCaps::PANEL,
         ShellCaps::PANEL_RESERVE,
         ShellCaps::POPUP,
+        ShellCaps::POPUP_REPOSITION,
     ] {
         assert!(caps.contains(present), "{present:?} is implemented");
     }
@@ -2560,6 +2561,60 @@ fn a_menu_opens_below_its_button_and_goes_with_its_window() {
         [menu, parent],
         "the popup first, then its window"
     );
+}
+
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_repositioned_menu_follows_its_new_anchor_at_its_new_size() {
+    let mut shell = shell();
+    let parent = window(&mut shell);
+    shell.pump(&mut |_| {});
+    let parent_hwnd = hwnd_of(&shell, parent);
+    let scale = shell
+        .window_state(parent)
+        .expect("live")
+        .scale_factor()
+        .expect("configured");
+    let menu = shell
+        .create_window(&popup_desc(
+            "crcbl repositioned menu",
+            LogicalSize::new(200.0, 150.0),
+            menu_against(parent, crate::PopupInput::Pointer),
+        ))
+        .expect("a popup");
+    shell.pump(&mut |_| {});
+
+    let moved_to = crate::LogicalRect::new(
+        crate::LogicalPoint::new(60.0, 10.0),
+        LogicalSize::new(100.0, 20.0),
+    );
+    shell
+        .reposition_popup(menu, moved_to, LogicalSize::new(240.0, 90.0))
+        .expect("reposition");
+    shell.pump(&mut |_| {});
+    let mut origin = Point::default();
+    // SAFETY: the parent's client origin, converted in place.
+    unsafe { ffi::ClientToScreen(parent_hwnd, &raw mut origin) };
+    let px = |logical: f64| (logical * scale).round() as i32;
+    let (_, _, rect) = styles_and_rect(hwnd_of(&shell, menu));
+    assert_eq!(
+        (rect.left, rect.top),
+        (origin.x + px(60.0), origin.y + px(30.0)),
+        "below the new anchor, left edges aligned"
+    );
+    assert_eq!(
+        shell.window_state(menu).expect("live").size(),
+        Some(LogicalSize::new(240.0, 90.0).to_physical(scale)),
+        "the new size arrived as a resize"
+    );
+    assert!(
+        matches!(
+            shell.reposition_popup(parent, moved_to, LogicalSize::new(1.0, 1.0)),
+            Err(ShellError::InvalidDescriptor(_))
+        ),
+        "a toplevel is not a popup"
+    );
+    shell.destroy_window(parent).expect("destroy");
 }
 
 #[test]

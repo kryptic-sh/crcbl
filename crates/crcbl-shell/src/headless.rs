@@ -147,9 +147,10 @@ use crcbl_core::{EventTime, Pool, SurfaceTarget};
 use crate::waker::WakeSignal;
 use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
-    KeyCode, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PhysicalSize,
-    PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, ShellWaker,
-    SizeConstraints, WindowConfiguration, WindowDesc, WindowId, WindowState,
+    KeyCode, LogicalRect, LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint,
+    PhysicalRect, PhysicalSize, PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps,
+    ShellError, ShellEvent, ShellWaker, SizeConstraints, WindowConfiguration, WindowDesc, WindowId,
+    WindowState,
 };
 
 /// Resolution of the virtual monitor [`HeadlessShell::new`] creates.
@@ -1534,6 +1535,34 @@ impl Shell for HeadlessShell {
         Ok(())
     }
 
+    /// Takes the new size as a pending configure, like a window system that
+    /// answers a move with a resize. The anchor places nothing: there is no
+    /// screen to place against.
+    fn reposition_popup(
+        &mut self,
+        popup: WindowId,
+        anchor: LogicalRect,
+        size: LogicalSize,
+    ) -> Result<(), ShellError> {
+        let _ = anchor;
+        let countdown = self.configure_delay;
+        let state = self.window_mut(popup)?;
+        if state.parent.is_none() {
+            return Err(crate::role::not_a_popup(popup));
+        }
+        if let Some(pending) = state.pending.as_mut() {
+            pending.size = size.to_physical(pending.scale_factor);
+        } else if let Some(config) = state.configuration {
+            state.pending = Some(PendingConfigure {
+                size: size.to_physical(config.scale_factor),
+                scale_factor: config.scale_factor,
+                mode: config.mode,
+                countdown,
+            });
+        }
+        Ok(())
+    }
+
     fn monitors(&self) -> &[MonitorInfo] {
         &self.monitors
     }
@@ -1992,6 +2021,49 @@ mod tests {
         let state = shell.window_state(window).expect("state");
         assert_eq!(state.effective_mode(), Some(DisplayMode::Windowed));
         assert!(!state.mode_request_honoured());
+    }
+
+    /// A repositioned popup is configured at its new size, as a window system
+    /// answers a move; a window that is not a popup is refused.
+    #[test]
+    fn a_repositioned_popup_is_configured_at_its_new_size() {
+        let (mut shell, window) = shell_with_configured_window();
+        let anchor = crate::LogicalRect::new(
+            crate::LogicalPoint::new(10.0, 10.0),
+            LogicalSize::new(100.0, 20.0),
+        );
+        let popup = shell
+            .create_window(&WindowDesc {
+                size: LogicalSize::new(200.0, 150.0),
+                role: crate::WindowRole::Popup(crate::PopupDesc {
+                    parent: window,
+                    anchor,
+                    placement: crate::PopupPlacement::Below,
+                    input: crate::PopupInput::Pointer,
+                }),
+                ..WindowDesc::default()
+            })
+            .expect("a popup");
+        settle(&mut shell);
+        let scale = shell
+            .window_state(popup)
+            .expect("live")
+            .scale_factor()
+            .expect("configured");
+
+        let moved = LogicalSize::new(240.0, 90.0);
+        shell
+            .reposition_popup(popup, anchor, moved)
+            .expect("reposition");
+        settle(&mut shell);
+        assert_eq!(
+            shell.window_state(popup).expect("live").size(),
+            Some(moved.to_physical(scale))
+        );
+        assert!(matches!(
+            shell.reposition_popup(window, anchor, moved),
+            Err(ShellError::InvalidDescriptor(_))
+        ));
     }
 
     #[test]

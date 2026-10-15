@@ -132,12 +132,11 @@ pub(super) struct WinWindow {
     /// What a panel was created with, so it can be placed again; `None` for
     /// every other window. See [`panel`](super::panel).
     pub(super) panel: Option<Panel>,
-    /// A popup's input, which decides how it is shown and whether losing the
-    /// keyboard dismisses it; `None` for every other window. See
-    /// [`popup`](super::popup).
-    pub(super) popup: Option<crate::PopupInput>,
-    /// The window a popup belongs to, which destroys it when it goes.
-    pub(super) parent: Option<WindowId>,
+    /// What a popup was created with, or last repositioned to: its input,
+    /// which decides how it is shown and whether losing the keyboard
+    /// dismisses it, and its parent, which destroys it when it goes. `None`
+    /// for every other window. See [`popup`](super::popup).
+    pub(super) popup: Option<crate::PopupDesc>,
 }
 
 impl WinWindow {
@@ -355,7 +354,8 @@ impl Win32Shell {
             .union(ShellCaps::TOUCH)
             .union(ShellCaps::PANEL)
             .union(ShellCaps::PANEL_RESERVE)
-            .union(ShellCaps::POPUP);
+            .union(ShellCaps::POPUP)
+            .union(ShellCaps::POPUP_REPOSITION);
         if raw_motion {
             caps.union(ShellCaps::RAW_POINTER_MOTION)
         } else {
@@ -927,9 +927,11 @@ impl Win32Shell {
                     self.queue.push_back(ShellEvent::Focus { window, focused });
                     // A grabbing popup is dismissed by losing the keyboard:
                     // a click outside it activated what was clicked.
-                    let grabbing = self
-                        .window(window)
-                        .is_ok_and(|state| state.popup == Some(crate::PopupInput::Grab));
+                    let grabbing = self.window(window).is_ok_and(|state| {
+                        state
+                            .popup
+                            .is_some_and(|popup| popup.input == crate::PopupInput::Grab)
+                    });
                     if !focused && grabbing {
                         self.close_requested(window);
                     }
@@ -1176,6 +1178,8 @@ impl Shell for Win32Shell {
     ///   appbar, which is how the taskbar reserves its edge too.
     /// * [`POPUP`](ShellCaps::POPUP) — an owned `WS_POPUP` placed against its
     ///   parent and kept on its monitor; see [`popup`](super::popup).
+    /// * [`POPUP_REPOSITION`](ShellCaps::POPUP_REPOSITION) — the same placement
+    ///   worked out again, and the window moved with `SetWindowPos`.
     ///
     /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) is clear for a reason rather than
     /// for want of work — a plain `HWND` presents at its own size, and the
@@ -1299,8 +1303,7 @@ impl Shell for Win32Shell {
             close_pending: false,
             accept_drops: desc.accept_drops,
             panel,
-            popup: popup.map(|popup| popup.input),
-            parent: popup.map(|popup| popup.parent),
+            popup,
         };
         let window = self.windows.insert(window).cast();
         let state = self.window(window)?;
@@ -1319,7 +1322,7 @@ impl Shell for Win32Shell {
         // owned windows down with their owner anyway, but report nothing.
         let popups: Vec<WindowId> = self
             .windows_iter()
-            .filter(|(_, state)| state.parent == Some(window))
+            .filter(|(_, state)| state.popup.is_some_and(|popup| popup.parent == window))
             .map(|(id, _)| id)
             .collect();
         for popup in popups {
@@ -1395,7 +1398,8 @@ impl Shell for Win32Shell {
         let state = self.window(window)?;
         let hwnd = state.raw();
         if visible
-            && let Some(keyboard) = Self::furniture_keyboard(state.panel.as_ref(), state.popup)
+            && let Some(keyboard) =
+                Self::furniture_keyboard(state.panel.as_ref(), state.popup.map(|popup| popup.input))
         {
             return self.show_panel_window(window, keyboard);
         }
@@ -1483,6 +1487,15 @@ impl Shell for Win32Shell {
         let state = self.window(window)?;
         self.refresh_limits(state);
         Ok(())
+    }
+
+    fn reposition_popup(
+        &mut self,
+        popup: WindowId,
+        anchor: crate::LogicalRect,
+        size: crate::LogicalSize,
+    ) -> Result<(), ShellError> {
+        self.move_popup(popup, anchor, size)
     }
 
     fn monitors(&self) -> &[MonitorInfo] {
@@ -1969,7 +1982,10 @@ impl Drop for Win32Shell {
         // destroyed by this shell rather than taken down with its owner.
         fn depth<'a>(windows: &'a Pool<WinWindow>, mut window: &'a WinWindow) -> usize {
             let mut depth = 0;
-            while let Some(parent) = window.parent.and_then(|id| windows.get(id.cast())) {
+            while let Some(parent) = window
+                .popup
+                .and_then(|popup| windows.get(popup.parent.cast()))
+            {
                 depth += 1;
                 window = parent;
             }
