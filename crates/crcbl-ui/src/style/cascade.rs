@@ -38,7 +38,10 @@ use crcbl_core::input::CursorIcon;
 use super::selector::{Bucket, Element, PseudoClasses, Selector};
 use super::sheet::{Decl, Stylesheet, WideKeyword};
 use super::var::{CustomProperties, resolve_custom, substitute};
-use crate::tree::{FamilyName, FontFamily, LineHeight, NodeStyle, TextAlign, WhiteSpace};
+use crate::tree::{
+    FamilyName, FontFamily, FontStyle, FontWeight, LineHeight, NodeStyle, TextAlign,
+    TextDecoration, WhiteSpace,
+};
 
 /// Where a sheet's rules sit in the cascade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -186,10 +189,13 @@ struct Inherited {
     font_size: u32,
     font_family: FontFamily,
     family_name: Option<FamilyName>,
+    font_weight: FontWeight,
+    font_style: FontStyle,
     line_height: (u8, u32),
     text_align: TextAlign,
     white_space: WhiteSpace,
     cursor: Option<CursorIcon>,
+    text_decoration: TextDecoration,
     custom: Arc<CustomProperties>,
 }
 
@@ -200,10 +206,13 @@ impl Inherited {
             font_size: style.font_size.to_bits(),
             font_family: style.font_family,
             family_name: style.family_name,
+            font_weight: style.font_weight,
+            font_style: style.font_style,
             line_height: style.line_height.bits(),
             text_align: style.text_align,
             white_space: style.white_space,
             cursor: style.cursor,
+            text_decoration: style.text_decoration,
             custom,
         }
     }
@@ -328,10 +337,13 @@ fn compute(index: &RuleIndex, matched: &[u32], parent: &Inherited) -> Definition
         font_size: f32::from_bits(parent.font_size),
         font_family: parent.font_family,
         family_name: parent.family_name,
+        font_weight: parent.font_weight,
+        font_style: parent.font_style,
         line_height: LineHeight::from_bits(parent.line_height),
         text_align: parent.text_align,
         white_space: parent.white_space,
         cursor: parent.cursor,
+        text_decoration: parent.text_decoration,
         ..NodeStyle::DEFAULT
     };
 

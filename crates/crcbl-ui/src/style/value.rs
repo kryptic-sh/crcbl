@@ -9,8 +9,9 @@ use crcbl_core::input::CursorIcon;
 use crate::draw_list::CornerRadii;
 use crate::tree::{
     Align, BorderImageWidth, Direction, Display, Edges, FamilyName, FlexDirection, FlexWrap,
-    FontFamily, ImageName, Justify, Length, LengthAuto, LineHeight, NavTarget, NavWrap, NodeStyle,
-    Overflow, Position, TextAlign, TextOverflow, WhiteSpace,
+    FontFamily, FontStyle, FontWeight, ImageName, Justify, Length, LengthAuto, LineHeight,
+    NavTarget, NavWrap, NodeStyle, Overflow, Position, TextAlign, TextDecoration, TextOverflow,
+    WhiteSpace,
 };
 
 /// Which sides of a box a declaration sets.
@@ -112,6 +113,10 @@ pub enum Declaration {
     /// The family `font-family` names ahead of its first built-in one, which
     /// a registered font answers to; `None` when it names none. Inherited.
     FamilyName(Option<FamilyName>),
+    /// `font-weight`. Inherited.
+    FontWeight(FontWeight),
+    /// `font-style`. Inherited.
+    FontStyle(FontStyle),
     /// `line-height`. Inherited.
     LineHeight(LineHeight),
     /// `text-align`. Inherited.
@@ -122,6 +127,8 @@ pub enum Declaration {
     Cursor(Option<CursorIcon>),
     /// `text-overflow`.
     TextOverflow(TextOverflow),
+    /// `text-decoration`. Inherited, unlike CSS's; see [`TextDecoration`].
+    TextDecoration(TextDecoration),
     /// `outline-width`, in pixels.
     OutlineWidth(f32),
     /// `outline-color`, in linear light.
@@ -197,11 +204,14 @@ impl Declaration {
             Self::FontSize(value) => style.font_size = value,
             Self::FontFamily(value) => style.font_family = value,
             Self::FamilyName(value) => style.family_name = value,
+            Self::FontWeight(value) => style.font_weight = value,
+            Self::FontStyle(value) => style.font_style = value,
             Self::LineHeight(value) => style.line_height = value,
             Self::TextAlign(value) => style.text_align = value,
             Self::WhiteSpace(value) => style.white_space = value,
             Self::Cursor(value) => style.cursor = value,
             Self::TextOverflow(value) => style.text_overflow = value,
+            Self::TextDecoration(value) => style.text_decoration = value,
             Self::OutlineWidth(value) => style.outline_width = value,
             Self::OutlineColor(value) => style.outline_color = value,
             Self::OutlineOffset(value) => style.outline_offset = value,
@@ -257,11 +267,14 @@ impl NodeStyle {
             D::FontSize(self.font_size),
             D::FontFamily(self.font_family),
             D::FamilyName(self.family_name),
+            D::FontWeight(self.font_weight),
+            D::FontStyle(self.font_style),
             D::LineHeight(self.line_height),
             D::TextAlign(self.text_align),
             D::WhiteSpace(self.white_space),
             D::Cursor(self.cursor),
             D::TextOverflow(self.text_overflow),
+            D::TextDecoration(self.text_decoration),
             D::OutlineWidth(self.outline_width),
             D::OutlineColor(self.outline_color),
             D::OutlineOffset(self.outline_offset),
@@ -357,6 +370,9 @@ mod tests {
             color: [0.5; 4],
             font_size: 20.0,
             font_family: FontFamily::Sans,
+            font_weight: FontWeight::BOLD,
+            font_style: FontStyle::Italic,
+            text_decoration: TextDecoration::Underline,
             line_height: LineHeight::Multiple(1.5),
             text_align: TextAlign::Center,
             white_space: WhiteSpace::NoWrap,

@@ -7,6 +7,7 @@ use glam::Vec2;
 use super::tests::{frame, idle};
 use super::*;
 use crate::draw_list::{DrawCommand, DrawList};
+use crate::font::face::{SYNTHETIC_BOLD_EM, Synthesis};
 use crate::font::{Font, FontMetrics, GlyphId, ReservedFamilyName};
 use crate::style::Declaration;
 
@@ -291,4 +292,130 @@ fn a_tree_glyph_run_scales_its_origin_size_and_pen_offsets() {
         glyphs.iter().any(|glyph| glyph.offset.x > 0.0),
         "every pen at zero would pass a missing offset scale"
     );
+}
+
+/// A face of the [`fixed_pitch`] metrics, `advance` thousandths of an em wide.
+fn face(advance: f32, weight: f32, italic: bool) -> &'static Font {
+    Font::fixed_pitch_face(
+        FontMetrics {
+            units_per_em: 1000,
+            ascent: 800.0,
+            descent: -200.0,
+            line_gap: 0.0,
+        },
+        advance,
+        weight,
+        italic,
+    )
+}
+
+/// **A span draws in the face of its family that its weight and style
+/// select**: a bold face registered beside a regular one is a second face,
+/// not a replacement; a weight between them goes where CSS's rule sends it;
+/// and an italic the family has no face for is the chosen face sheared, not
+/// the regular one.
+#[test]
+fn a_span_draws_in_the_face_its_weight_and_style_select() {
+    let regular = face(400.0, 400.0, false);
+    let bold = face(600.0, 700.0, false);
+    let italic = Synthesis {
+        bold: false,
+        italic: true,
+    };
+    let css = r"
+        .a { font-family: family; }
+        .bold { font-weight: bold; }
+        .semibold { font-weight: 600; }
+        .light { font-weight: 300; }
+        .italic { font-style: italic; }
+    ";
+    let cases = [
+        (".a", regular.clone(), 0.4),
+        (".a.bold", bold.clone(), 0.6),
+        // Above 500, up first: 700 before 400.
+        (".a.semibold", bold.clone(), 0.6),
+        // Below 400, down first and then up: nothing below, so 400.
+        (".a.light", regular.clone(), 0.4),
+        (".a.italic", regular.synthesized(italic), 0.4),
+        (".a.bold.italic", bold.synthesized(italic), 0.6),
+    ];
+    for (class, want, em) in cases {
+        let mut ui = Ui::new();
+        ui.register_font("family", regular).expect("not reserved");
+        ui.register_font("FAMILY", bold).expect("not reserved");
+        let (size, list) = span_in(&mut ui, css, class);
+        assert_eq!(glyph_run(&list).0, want, "{class} drew in the wrong face");
+        assert_eq!(
+            size.x,
+            4.0 * em * SIZE,
+            "{class} measured in the wrong face"
+        );
+    }
+}
+
+/// **A built-in parsed family with no bold or italic face is synthesised**,
+/// inherited from a block, and measured wider by the bold's advance; **the
+/// bitmap font ignores both**, measuring and drawing as it always did.
+#[test]
+fn a_family_without_the_face_is_synthesised_and_the_bitmap_font_ignores_it() {
+    let mut ui = Ui::new();
+    ui.add_stylesheet(
+        "fonts.css",
+        ".column { font-weight: 700; font-style: italic; } .sans { font-family: sans-serif; } \
+         .bitmap { font-family: bitmap; }",
+    );
+    let mut keys = None;
+    frame(&mut ui, idle(), |ui| {
+        let plain = ui.span(".sans", TEXT, &[Declaration::FontSize(SIZE)]).key;
+        let (mut sans, mut bitmap) = (plain, plain);
+        ui.block(".column", &[], |ui| {
+            sans = ui.span(".sans", TEXT, &[Declaration::FontSize(SIZE)]).key;
+            bitmap = ui.span(".bitmap", TEXT, &[Declaration::FontSize(SIZE)]).key;
+        });
+        let flat = ui.span(".bitmap", TEXT, &[Declaration::FontSize(SIZE)]).key;
+        keys = Some((plain, sans, bitmap, flat));
+    });
+    let (plain, sans, bitmap, flat) = keys.expect("built");
+    let width = |key| {
+        let (min, max) = ui.rect(key).expect("laid out");
+        (max - min).x
+    };
+    let mut list = DrawList::new();
+    ui.emit(&mut list);
+    let fonts: Vec<Font> = list
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::Glyphs { font, .. } => Some(font.clone()),
+            _ => None,
+        })
+        .collect();
+    let both = Synthesis {
+        bold: true,
+        italic: true,
+    };
+    assert_eq!(
+        fonts,
+        [Font::sans().clone(), Font::sans().synthesized(both)],
+        "the inherited weight and style did not synthesise the committed face"
+    );
+    let units = f32::from(Font::sans().metrics().units_per_em);
+    let widened =
+        TEXT.len() as f32 * units * SYNTHETIC_BOLD_EM * Font::sans().metrics().scale(SIZE);
+    assert!(
+        (width(sans) - width(plain) - widened).abs() <= 1.0,
+        "the bold measured {} wider rather than {widened}",
+        width(sans) - width(plain)
+    );
+    assert_eq!(
+        width(bitmap),
+        width(flat),
+        "the bitmap font took the weight"
+    );
+    let texts = list
+        .commands()
+        .iter()
+        .filter(|command| matches!(command, DrawCommand::Text { .. }))
+        .count();
+    assert_eq!(texts, 2, "a bitmap span stopped drawing as bitmap text");
 }

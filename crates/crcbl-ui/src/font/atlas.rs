@@ -19,6 +19,10 @@
 //! pixel grid, so text laid out at fractional advances keeps its spacing
 //! without a mask per position. GPUI uses the same four.
 //!
+//! A synthesised face ([`crate::font::face`]) is a font of its own identity,
+//! so its sheared or thickened masks are keyed apart from the face's own: the
+//! distortion is applied to the outline before it is rasterised.
+//!
 //! # Pages, shelves and slots
 //!
 //! A page is [`GlyphAtlas::page_size`] texels square; pages open on demand up
@@ -78,6 +82,8 @@ use skrifa::outline::{
 #[cfg(feature = "parsed-font")]
 use skrifa::{FontRef, MetadataProvider};
 
+#[cfg(feature = "parsed-font")]
+use super::face::{SYNTHETIC_BOLD_EM, SYNTHETIC_ITALIC_SLANT};
 #[cfg(feature = "parsed-font")]
 use super::raster::Rasterizer;
 use super::{Font, FontId, GlyphId};
@@ -332,12 +338,14 @@ enum Segment {
     Cubic(Vec2, Vec2, Vec2, Vec2),
 }
 
-/// Collects a drawn outline as [`Segment`]s, flipped to y down and shifted
-/// right by a subpixel offset, closing every contour.
+/// Collects a drawn outline as [`Segment`]s, sheared right by `slant` per
+/// pixel above the baseline, flipped to y down and shifted right by a subpixel
+/// offset, closing every contour.
 #[cfg(feature = "parsed-font")]
 struct Collect<'a> {
     segments: &'a mut Vec<Segment>,
     offset: f32,
+    slant: f32,
     start: Vec2,
     current: Vec2,
 }
@@ -345,7 +353,7 @@ struct Collect<'a> {
 #[cfg(feature = "parsed-font")]
 impl Collect<'_> {
     fn point(&self, x: f32, y: f32) -> Vec2 {
-        Vec2::new(x + self.offset, -y)
+        Vec2::new(x + y * self.slant + self.offset, -y)
     }
 
     fn close_contour(&mut self) {
@@ -404,13 +412,54 @@ fn hinting_options() -> HintingOptions {
 }
 
 /// `glyph`'s outline at `size`, shifted `offset` pixels right, into
-/// `segments`: hinted by `hinting` when given. Returns whether it drew.
+/// `segments`: hinted by `hinting` when given, and distorted as the font's
+/// [`Synthesis`](super::face::Synthesis) says — sheared for italic, drawn a
+/// second time to the right for bold. Returns whether it drew.
 #[cfg(feature = "parsed-font")]
 fn draw_outline(
     font: &Font,
     glyph: GlyphId,
     size: f32,
     offset: f32,
+    hinting: Option<&HintingInstance>,
+    segments: &mut Vec<Segment>,
+) -> bool {
+    let synthesis = font.synthesis();
+    let slant = if synthesis.italic {
+        SYNTHETIC_ITALIC_SLANT
+    } else {
+        0.0
+    };
+    let drawn = draw_contours(font, glyph, size, (offset, slant), hinting, segments);
+    if drawn && synthesis.bold {
+        // The rasteriser's non-zero rule saturates where the two drawings
+        // overlap, so their union is the glyph thickened rightwards.
+        let strength = Vec2::new(size * SYNTHETIC_BOLD_EM, 0.0);
+        let first = segments.len();
+        for at in 0..first {
+            let shifted = match segments[at] {
+                Segment::Line(a, b) => Segment::Line(a + strength, b + strength),
+                Segment::Quadratic(a, b, c) => {
+                    Segment::Quadratic(a + strength, b + strength, c + strength)
+                }
+                Segment::Cubic(a, b, c, d) => {
+                    Segment::Cubic(a + strength, b + strength, c + strength, d + strength)
+                }
+            };
+            segments.push(shifted);
+        }
+    }
+    drawn
+}
+
+/// `glyph`'s outline into `segments` as it is drawn, with `(offset, slant)`
+/// [`Collect`]'s; see [`draw_outline`].
+#[cfg(feature = "parsed-font")]
+fn draw_contours(
+    font: &Font,
+    glyph: GlyphId,
+    size: f32,
+    (offset, slant): (f32, f32),
     hinting: Option<&HintingInstance>,
     segments: &mut Vec<Segment>,
 ) -> bool {
@@ -425,6 +474,7 @@ fn draw_outline(
     let mut pen = Collect {
         segments,
         offset,
+        slant,
         start: Vec2::ZERO,
         current: Vec2::ZERO,
     };
@@ -847,6 +897,7 @@ impl GlyphAtlas {
 #[cfg(all(test, feature = "parsed-font"))]
 mod tests {
     use super::*;
+    use crate::font::face::Synthesis;
     use crate::font::raster::coverage_byte;
 
     fn sans() -> &'static Font {
@@ -1226,5 +1277,89 @@ mod tests {
         assert_eq!(atlas.glyph(sans(), glyph('M'), 200.0, 0), None);
         assert_eq!(atlas.stats().rasterized, 1);
         assert_eq!(atlas.page_count(), 0);
+    }
+
+    /// A glyph's mask at 48px from a fresh atlas, as rows of coverage, with
+    /// its left edge's offset from the pen.
+    fn mask(font: &Font, c: char) -> (Vec<Vec<f32>>, i32) {
+        let mut atlas = GlyphAtlas::new(256, 1, 100);
+        atlas.begin_frame();
+        let at = atlas.glyph(font, glyph(c), 48.0, 0).expect("room");
+        let page = atlas.page_pixels(0);
+        let rows = (0..at.height)
+            .map(|y| {
+                (0..at.width)
+                    .map(|x| f32::from(page[((at.y + y) * 256 + at.x + x) as usize]) / 255.0)
+                    .collect()
+            })
+            .collect();
+        (rows, at.left)
+    }
+
+    /// The coverage-weighted x of `row`, in pixels from the pen.
+    fn row_centroid(row: &[f32], left: i32) -> f32 {
+        let (mut sum, mut weight) = (0.0, 0.0);
+        for (x, c) in row.iter().enumerate() {
+            sum += c * (left as f32 + x as f32 + 0.5);
+            weight += c;
+        }
+        sum / weight
+    }
+
+    /// **A synthesised italic leans by the slant**: the stem of `l`, upright
+    /// in the face, has its top row's ink right of its bottom row's by the
+    /// slant times the rows between them — and the face as parsed does not.
+    #[test]
+    fn a_synthesised_italic_shears_the_outline_by_the_slant() {
+        let lean = |font: &Font| {
+            let (rows, left) = mask(font, 'l');
+            // Clear of the rounded ends, where the stem's ink is not a stem.
+            let (top, bottom) = (rows.len() / 4, rows.len() * 3 / 4);
+            let rise = (bottom - top) as f32;
+            (row_centroid(&rows[top], left) - row_centroid(&rows[bottom], left)) / rise
+        };
+        let italic = sans().synthesized(Synthesis {
+            bold: false,
+            italic: true,
+        });
+        assert!(lean(sans()).abs() < 0.02, "upright leans {}", lean(sans()));
+        assert!(
+            (lean(&italic) - SYNTHETIC_ITALIC_SLANT).abs() < 0.02,
+            "synthesised italic leans {} rather than {SYNTHETIC_ITALIC_SLANT}",
+            lean(&italic)
+        );
+    }
+
+    /// **A synthesised bold thickens each stroke by its strength**: every
+    /// row of `l`'s stem carries that much more ink, and the glyph advances
+    /// that much further.
+    #[test]
+    fn a_synthesised_bold_thickens_each_stroke_by_its_strength() {
+        let ink = |font: &Font| {
+            let (rows, _) = mask(font, 'l');
+            let middle = &rows[rows.len() / 2];
+            middle.iter().sum::<f32>()
+        };
+        let bold = sans().synthesized(Synthesis {
+            bold: true,
+            italic: false,
+        });
+        let strength = 48.0 * SYNTHETIC_BOLD_EM;
+        let thicker = ink(&bold) - ink(sans());
+        assert!(
+            (thicker - strength).abs() < 0.1,
+            "the stem is {thicker}px thicker rather than {strength}px"
+        );
+        let units = f32::from(sans().metrics().units_per_em);
+        assert_eq!(
+            bold.advance(glyph('l')),
+            sans().advance(glyph('l')) + units * SYNTHETIC_BOLD_EM
+        );
+        assert_ne!(bold.id(), sans().id(), "the bold glyphs share a cache key");
+        assert_eq!(
+            bold,
+            sans().synthesized(bold.synthesis()),
+            "asking again is another identity"
+        );
     }
 }

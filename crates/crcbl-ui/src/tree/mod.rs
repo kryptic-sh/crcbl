@@ -220,6 +220,7 @@ use taffy::{NodeId, compute_root_layout, round_layout};
 use crate::draw_list::ClipRect;
 #[cfg(doc)]
 use crate::draw_list::DrawList;
+use crate::font::face::select_face;
 use crate::font::{Font, ReservedFamilyName, is_reserved_family};
 use crate::image::AtlasImage;
 use crate::style::{Declaration, InheritedId, NodeSelector, PseudoClasses, Styles};
@@ -231,6 +232,7 @@ use layout::{LayoutTree, MeasureCache};
 use store::{Interaction, NodeStore};
 use widgets::WidgetKind;
 
+pub use crate::font::face::{FontStyle, FontWeight};
 pub use crate::font::layout::TextAlign;
 pub use crate::font::{FamilyName, FontFamily};
 pub use focus::{
@@ -243,7 +245,7 @@ pub use store::NodeKey;
 pub use style::{
     Align, BorderImage, BorderImageWidth, Display, Edges, FlexDirection, FlexWrap, ImageName,
     Justify, Length, LengthAuto, LineHeight, NavId, NavTarget, NavWrap, NodeStyle, Overflow,
-    Position, TextOverflow, WhiteSpace,
+    Position, TextDecoration, TextOverflow, WhiteSpace,
 };
 pub use tooltip::{TOOLTIP_AUTOPOP_FACTOR, TOOLTIP_DELAY, TOOLTIP_RESHOW_DIVISOR};
 pub use widgets::{
@@ -492,8 +494,9 @@ pub struct Ui {
     clipboard_requests: Vec<ClipboardRequest>,
     /// The pictures a stylesheet's `url()` names, from [`Ui::set_image`].
     images: HashMap<ImageName, AtlasImage>,
-    /// The fonts a `font-family` list names, from [`Ui::register_font`].
-    fonts: HashMap<FamilyName, Font>,
+    /// The faces of each family a `font-family` list names, from
+    /// [`Ui::register_font`].
+    fonts: HashMap<FamilyName, Vec<Font>>,
     /// Family names a text span was built in with no font registered under
     /// them, already warned about, so each is reported once.
     unregistered: HashSet<FamilyName>,
@@ -1382,13 +1385,20 @@ impl Ui {
         self.images.insert(ImageName::new(name), image);
     }
 
-    /// Registers `font` under the family `name`, so a `font-family` list that
-    /// names it ahead of its first built-in family measures and draws in it.
+    /// Registers `font` as a face of the family `name`, so a `font-family`
+    /// list that names it ahead of its first built-in family measures and
+    /// draws in it.
     ///
     /// `name` is matched as [`FamilyName`] says: ASCII case ignored, and an
-    /// unquoted name's words joined by single spaces. **Registering a name
-    /// again replaces its font**, as [`Ui::set_image`] replaces a picture, and
-    /// every span in it is measured again. The registry is read when a span is
+    /// unquoted name's words joined by single spaces. **A family holds one
+    /// face per weight and style**, as the font's own tables give them
+    /// ([`Font::weight`], [`Font::is_italic`]): registering a bold font under
+    /// a name that has a regular one adds a face, and a span picks among them
+    /// by its `font-weight` and `font-style` — see [`crate::font::face`] for
+    /// the rule, and for the bold and italic drawn when the family has no such
+    /// face. **Registering a face of a weight and style the family already
+    /// has replaces it**, as [`Ui::set_image`] replaces a picture, and every
+    /// span in it is measured again. The registry is read when a span is
     /// built, so a span built this frame before the call keeps the font it was
     /// built in. See `crate::style`'s property notes for what a name nothing is
     /// registered under does.
@@ -1411,18 +1421,31 @@ impl Ui {
         if is_reserved_family(name) {
             return Err(ReservedFamilyName(name.to_owned()));
         }
-        self.fonts.insert(FamilyName::new(name), font.into());
+        let font = font.into();
+        let faces = self.fonts.entry(FamilyName::new(name)).or_default();
+        let same_face =
+            |face: &Font| face.weight() == font.weight() && face.is_italic() == font.is_italic();
+        match faces.iter_mut().find(|face| same_face(face)) {
+            Some(face) => *face = font,
+            None => faces.push(font),
+        }
         Ok(())
     }
 
-    /// The parsed font a text span in `style` draws in: the one registered
-    /// under its family name, else its built-in family's, `None` for the
-    /// bitmap font. Warns once per name when the span names a family nothing is
-    /// registered under; `selector` says which span.
+    /// The parsed font a text span in `style` draws in: the face of the family
+    /// registered under its family name that its weight and style select,
+    /// else its built-in family's — synthesised where the face falls short,
+    /// see [`crate::font::face`] — and `None` for the bitmap font. Warns once
+    /// per name when the span names a family nothing is registered under;
+    /// `selector` says which span.
     fn font_for(&mut self, style: &NodeStyle, selector: &str) -> Option<Font> {
         if let Some(name) = style.family_name {
-            if let Some(font) = self.fonts.get(&name) {
-                return Some(font.clone());
+            if let Some(font) = self
+                .fonts
+                .get(&name)
+                .and_then(|faces| select_face(faces, style.font_weight, style.font_style))
+            {
+                return Some(font);
             }
             if self.unregistered.insert(name) {
                 crcbl_core::warn!(
@@ -1432,7 +1455,12 @@ impl Ui {
                 );
             }
         }
-        style.font_family.font().cloned()
+        let built_in = style.font_family.font()?;
+        select_face(
+            core::slice::from_ref(built_in),
+            style.font_weight,
+            style.font_style,
+        )
     }
 
     /// The keys two nodes shared this frame, each once.

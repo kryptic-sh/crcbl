@@ -21,6 +21,8 @@
 //! * [`atlas`] — the glyph atlas: shelf-packed pages, LRU eviction and a
 //!   per-frame rasterisation budget.
 //! * [`layout`] — advancing, kerning and greedy line breaking.
+//! * [`face`] — choosing a family's face by weight and style, and the bold and
+//!   italic synthesised for a family without them.
 //!
 //! # Two fonts, two families
 //!
@@ -70,6 +72,7 @@
 //! right-to-left text.
 
 pub mod atlas;
+pub mod face;
 #[cfg(feature = "parsed-font")]
 mod kern;
 pub mod layout;
@@ -87,6 +90,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use skrifa::instance::{LocationRef, Size};
 #[cfg(feature = "parsed-font")]
 use skrifa::{FontRef, MetadataProvider};
+
+use face::Synthesis;
 
 /// The committed UI font's bytes: Atkinson Hyperlegible Regular. See the module
 /// docs for its licence.
@@ -237,6 +242,16 @@ impl fmt::Display for FontError {
 
 impl std::error::Error for FontError {}
 
+/// Where a font draws an underline, in font units, as its `post` table says.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Underline {
+    /// The baseline to the line's top edge, positive upwards: negative for
+    /// an underline below the baseline, as nearly every font's is.
+    pub offset: f32,
+    /// How thick it is.
+    pub thickness: f32,
+}
+
 /// A font's line metrics, in font units: the
 /// ascender, descender and line gap, as `skrifa` selects them from `hhea` or
 /// `OS/2`.
@@ -347,14 +362,16 @@ impl From<Box<[u8]>> for FontData {
 /// rasterises a glyph.
 ///
 /// A handle: cloning it is a reference count, and every clone is the same
-/// font. Two fonts are equal when they are one parse: equality is
-/// [`Font::id`].
+/// font. Two fonts are equal when they are one parse drawn with one
+/// [`Synthesis`]: equality is [`Font::id`].
 ///
 /// Without the `parsed-font` feature there is no value of this type: see the
 /// module docs.
 #[derive(Clone)]
 pub struct Font {
     parsed: Arc<Parsed>,
+    /// What this handle draws of the face that it lacks; see [`face`].
+    synthesis: Synthesis,
 }
 
 /// What one parse read, shared by every clone of its [`Font`].
@@ -363,9 +380,17 @@ struct Parsed {
     /// hold one: a body that reads the font's bytes matches on this instead.
     #[cfg(not(feature = "parsed-font"))]
     never: NoParsedFont,
-    id: FontId,
+    /// This parse's identity under each [`Synthesis`], by
+    /// [`Synthesis::index`]: a synthesised face's glyphs are not the face's.
+    ids: [FontId; SYNTHESES],
     data: FontData,
     metrics: FontMetrics,
+    /// Its `post` table's underline, if it has one.
+    underline: Option<Underline>,
+    /// Its weight class, 1 to 1000.
+    weight: f32,
+    /// Whether it is an italic or oblique face.
+    italic: bool,
     /// Glyph ids of the codepoints below [`LATIN1_END`]; zero where the font
     /// has none.
     latin1: [u32; LATIN1_END as usize],
@@ -380,8 +405,11 @@ impl fmt::Debug for Font {
     /// The id and the metrics; not the tables.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Font")
-            .field("id", &self.parsed.id)
+            .field("id", &self.id())
             .field("metrics", &self.parsed.metrics)
+            .field("weight", &self.parsed.weight)
+            .field("italic", &self.parsed.italic)
+            .field("synthesis", &self.synthesis)
             .field("glyphs", &self.parsed.advances.len())
             .field("kerning_pairs", &self.parsed.kerning.len())
             .finish_non_exhaustive()
@@ -390,7 +418,7 @@ impl fmt::Debug for Font {
 
 impl PartialEq for Font {
     fn eq(&self, other: &Self) -> bool {
-        self.parsed.id == other.parsed.id
+        self.id() == other.id()
     }
 }
 
@@ -410,11 +438,15 @@ impl From<&Font> for Font {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NoParsedFont {}
 
-/// The next parse's [`FontId`].
+/// How many [`Synthesis`] combinations there are, each an identity of its own.
+const SYNTHESES: usize = 4;
+
+/// The next parse's [`FontId`]s, one per [`Synthesis`].
 #[cfg(feature = "parsed-font")]
-fn next_id() -> FontId {
+fn next_ids() -> [FontId; SYNTHESES] {
     static NEXT_ID: AtomicU32 = AtomicU32::new(0);
-    FontId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    let first = NEXT_ID.fetch_add(SYNTHESES as u32, Ordering::Relaxed);
+    core::array::from_fn(|at| FontId(first + at as u32))
 }
 
 impl Font {
@@ -468,6 +500,11 @@ impl Font {
             descent: unscaled.descent,
             line_gap: unscaled.leading,
         };
+        let underline = unscaled.underline.map(|line| Underline {
+            offset: line.offset,
+            thickness: line.thickness,
+        });
+        let attributes = font.attributes();
 
         let charmap = font.charmap();
         let mut latin1 = [0; LATIN1_END as usize];
@@ -501,20 +538,62 @@ impl Font {
 
         Ok(Self {
             parsed: Arc::new(Parsed {
-                id: next_id(),
+                ids: next_ids(),
                 data,
                 metrics,
+                underline,
+                weight: attributes.weight.value(),
+                italic: attributes.style != skrifa::attribute::Style::Normal,
                 latin1,
                 advances,
                 kerning,
             }),
+            synthesis: Synthesis::NONE,
         })
     }
 
-    /// This font's identity.
+    /// This font's identity: one per parse and [`Synthesis`].
     #[must_use]
     pub fn id(&self) -> FontId {
-        self.parsed.id
+        self.parsed.ids[self.synthesis.index()]
+    }
+
+    /// This face drawn with `synthesis` — see [`face`] — sharing its parse:
+    /// a handle of its own identity, the same one every time it is asked
+    /// for, so a span in it is measured and its glyphs cached once.
+    #[must_use]
+    pub fn synthesized(&self, synthesis: Synthesis) -> Self {
+        Self {
+            parsed: Arc::clone(&self.parsed),
+            synthesis,
+        }
+    }
+
+    /// What this handle synthesises; [`Synthesis::NONE`] for a face as
+    /// parsed.
+    #[must_use]
+    pub const fn synthesis(&self) -> Synthesis {
+        self.synthesis
+    }
+
+    /// The face's weight class, 1 to 1000, as its `OS/2` table gives it — or
+    /// its `head` table's bold bit, for a font with none.
+    #[must_use]
+    pub fn weight(&self) -> f32 {
+        self.parsed.weight
+    }
+
+    /// Whether the face is italic or oblique, by its `OS/2` or `head` table.
+    #[must_use]
+    pub fn is_italic(&self) -> bool {
+        self.parsed.italic
+    }
+
+    /// Where the font says an underline goes, or `None` when it does not
+    /// say.
+    #[must_use]
+    pub fn underline(&self) -> Option<Underline> {
+        self.parsed.underline
     }
 
     /// The bytes it was parsed from.
@@ -552,15 +631,18 @@ impl Font {
             .map_or(GlyphId::NOTDEF, |glyph| GlyphId(glyph.to_u32()))
     }
 
-    /// `glyph`'s advance in font units; zero for a glyph the font does not
-    /// have.
+    /// `glyph`'s advance in font units, widened by a synthesised bold's
+    /// [`face::SYNTHETIC_BOLD_EM`]; zero for a glyph the font does not have.
     #[must_use]
     pub fn advance(&self, glyph: GlyphId) -> f32 {
-        self.parsed
-            .advances
-            .get(glyph.0 as usize)
-            .copied()
-            .unwrap_or(0.0)
+        let Some(&advance) = self.parsed.advances.get(glyph.0 as usize) else {
+            return 0.0;
+        };
+        if self.synthesis.bold {
+            advance + f32::from(self.parsed.metrics.units_per_em) * face::SYNTHETIC_BOLD_EM
+        } else {
+            advance
+        }
     }
 
     /// How far `right` moves when it follows `left`, in font units: the pair
@@ -587,15 +669,31 @@ impl Font {
     /// and without the `parsed-font` feature it cannot be made.
     #[cfg(all(test, feature = "parsed-font"))]
     pub(crate) fn fixed_pitch(metrics: FontMetrics, advance: f32) -> &'static Self {
+        Self::fixed_pitch_face(metrics, advance, 400.0, false)
+    }
+
+    /// [`Font::fixed_pitch`] as a face of `weight`, italic or not: what a
+    /// test builds a family of faces from.
+    #[cfg(all(test, feature = "parsed-font"))]
+    pub(crate) fn fixed_pitch_face(
+        metrics: FontMetrics,
+        advance: f32,
+        weight: f32,
+        italic: bool,
+    ) -> &'static Self {
         Box::leak(Box::new(Self {
             parsed: Arc::new(Parsed {
-                id: next_id(),
+                ids: next_ids(),
                 data: FontData::from(&[]),
                 metrics,
+                underline: None,
+                weight,
+                italic,
                 latin1: [1; LATIN1_END as usize],
                 advances: Box::new([0.0, advance]),
                 kerning: HashMap::new(),
             }),
+            synthesis: Synthesis::NONE,
         }))
     }
 }

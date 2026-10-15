@@ -60,9 +60,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   state and the focused node. `Ui::accessibility_action(&request)` acts on a
   screen reader's focus, blur and click; a click makes the node report `clicked`
   on the next frame, as a pointer's would.
+- **`font-weight` and `font-style` in `crcbl-ui` stylesheets**, inherited:
+  `normal`, `bold` or a weight from 1 to 1000, and `normal` or `italic`. A text
+  span draws in the face of its family they select, by CSS's font-matching rule,
+  and a family with no bold or italic face is synthesised — the outline drawn a
+  second time a twenty-fourth of an em to the right, or sheared one in four — in
+  the glyph atlas, so the committed `sans-serif` draws bold and italic. The
+  bitmap font ignores both. `Font::weight`, `Font::is_italic`,
+  `Font::underline`, `Font::synthesized` and `crcbl_ui::font::face` describe a
+  face.
 
 ### Changed
 
+- **`Ui::register_font` registers a face of a family** rather than the family's
+  one font. Its signature is unchanged, and a font of the weight and style the
+  family already has still replaces that face; a font of another weight or
+  style, as its own `OS/2` table gives them, is added beside the others for
+  `font-weight` and `font-style` to choose from. A caller that registered a
+  second, differently weighted font under a name to replace the first now gets
+  both, and selects between them with `font-weight` and `font-style`.
 - **On Win32 a window's input method is off until a text field asks for it.** A
   window is created with no input context and gets its default one back from
   `Shell::set_text_input_enabled(window, true)`, as on Wayland. Dead keys still

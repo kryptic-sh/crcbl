@@ -26,11 +26,14 @@
 //! | `border-radius` (1–4), `border-*-*-radius` | px |
 //! | `font-size` | px |
 //! | `font-family` | a comma-separated list; the first of `bitmap`, `sans-serif` and `"Atkinson Hyperlegible"` in it is used, after the first registered font named ahead of it |
+//! | `font-weight` | `normal` \| `bold` \| a whole number from 1 to 1000 |
+//! | `font-style` | `normal` \| `italic` |
 //! | `line-height` | `normal` \| number \| px |
 //! | `text-align` | `left` \| `start` \| `center` \| `right` \| `end` |
 //! | `white-space` | `normal` \| `nowrap` |
 //! | `cursor` | `auto` \| `none` \| a shape keyword, as [`CursorIcon::as_css_name`] spells it |
 //! | `text-overflow` | `clip` \| `ellipsis` |
+//! | `text-decoration` | `none` \| `underline` |
 //! | `outline-width` | px |
 //! | `outline-offset` | px, either sign |
 //! | `outline-color` | colour |
@@ -109,6 +112,15 @@
 //! `font-family: Roboto, Inter, sans-serif`, `Inter` is never looked up.
 //! `line-height` takes no percentage.
 //!
+//! # Weight, style and decoration
+//!
+//! `font-weight` and `font-style` choose a face of the family, or synthesise
+//! one — [`crate::font::face`] has the rule. `bolder`, `lighter`, `oblique`
+//! and a weight with a fraction are not in the subset. `text-decoration`
+//! takes only its line, and only `underline`: no colour, no style, no
+//! `overline` or `line-through`; the line is drawn in the text's colour. It
+//! is inherited — see [`TextDecoration`].
+//!
 //! Not in the subset: `opacity` — the draw list has no group opacity to give
 //! it, and multiplying each command's alpha is not what `opacity` means where
 //! children overlap — `inherit`, `!important`, `em` and every other unit.
@@ -118,11 +130,12 @@ use cssparser::color::{parse_hash_color, parse_named_color};
 use cssparser::{ParseError, Parser, Token, match_ignore_ascii_case};
 
 use super::value::{Corners, Declaration, Sides};
+use crate::font::face::{FontStyle, FontWeight};
 use crate::font::is_reserved_family;
 use crate::tree::{
     Align, BorderImage, BorderImageWidth, Direction, Display, Edges, FamilyName, FlexDirection,
     FlexWrap, FontFamily, ImageName, Justify, Length, LengthAuto, LineHeight, NavId, NavTarget,
-    NavWrap, NodeStyle, Overflow, Position, TextAlign, TextOverflow, WhiteSpace,
+    NavWrap, NodeStyle, Overflow, Position, TextAlign, TextDecoration, TextOverflow, WhiteSpace,
 };
 
 /// A property a stylesheet can name, longhand or shorthand.
@@ -165,11 +178,14 @@ pub(crate) enum Property {
     Color,
     FontSize,
     FontFamily,
+    FontWeight,
+    FontStyle,
     LineHeight,
     TextAlign,
     WhiteSpace,
     Cursor,
     TextOverflow,
+    TextDecoration,
     Outline,
     OutlineWidth,
     OutlineColor,
@@ -248,11 +264,14 @@ impl Property {
             "color" => Self::Color,
             "font-size" => Self::FontSize,
             "font-family" => Self::FontFamily,
+            "font-weight" => Self::FontWeight,
+            "font-style" => Self::FontStyle,
             "line-height" => Self::LineHeight,
             "text-align" => Self::TextAlign,
             "white-space" => Self::WhiteSpace,
             "cursor" => Self::Cursor,
             "text-overflow" => Self::TextOverflow,
+            "text-decoration" => Self::TextDecoration,
             "outline" => Self::Outline,
             "outline-width" => Self::OutlineWidth,
             "outline-color" => Self::OutlineColor,
@@ -424,6 +443,14 @@ impl Property {
                     out.extend(family.map(D::FontFamily));
                     out.push(D::FamilyName(name));
                 }
+                Self::FontWeight => out.push(D::FontWeight(font_weight(input)?)),
+                Self::FontStyle => out.push(D::FontStyle(keyword(input, |name| {
+                    Some(match_ignore_ascii_case! { name,
+                        "normal" => FontStyle::Normal,
+                        "italic" => FontStyle::Italic,
+                        _ => return None,
+                    })
+                })?)),
                 Self::LineHeight => out.push(D::LineHeight(line_height(input)?)),
                 Self::TextAlign => out.push(D::TextAlign(keyword(input, |name| {
                     Some(match_ignore_ascii_case! { name,
@@ -455,6 +482,13 @@ impl Property {
                     Some(match_ignore_ascii_case! { name,
                         "clip" => TextOverflow::Clip,
                         "ellipsis" => TextOverflow::Ellipsis,
+                        _ => return None,
+                    })
+                })?)),
+                Self::TextDecoration => out.push(D::TextDecoration(keyword(input, |name| {
+                    Some(match_ignore_ascii_case! { name,
+                        "none" => TextDecoration::None,
+                        "underline" => TextDecoration::Underline,
                         _ => return None,
                     })
                 })?)),
@@ -556,11 +590,14 @@ impl Property {
                 to.font_family = from.font_family;
                 to.family_name = from.family_name;
             }
+            Self::FontWeight => to.font_weight = from.font_weight,
+            Self::FontStyle => to.font_style = from.font_style,
             Self::LineHeight => to.line_height = from.line_height,
             Self::TextAlign => to.text_align = from.text_align,
             Self::WhiteSpace => to.white_space = from.white_space,
             Self::Cursor => to.cursor = from.cursor,
             Self::TextOverflow => to.text_overflow = from.text_overflow,
+            Self::TextDecoration => to.text_decoration = from.text_decoration,
             Self::Outline => {
                 to.outline_width = from.outline_width;
                 to.outline_color = from.outline_color;
@@ -946,6 +983,22 @@ fn nav_target(input: &mut Parser<'_>) -> Result<NavTarget, Invalid> {
 }
 
 /// `line-height`: `normal`, a number or a pixel length.
+/// `font-weight`: `normal`, `bold`, or a whole number in CSS's range.
+fn font_weight(input: &mut Parser<'_>) -> Result<FontWeight, Invalid> {
+    match *input.next()? {
+        Token::Ident(ref name) if name.eq_ignore_ascii_case("normal") => Ok(FontWeight::NORMAL),
+        Token::Ident(ref name) if name.eq_ignore_ascii_case("bold") => Ok(FontWeight::BOLD),
+        Token::Number {
+            int_value: Some(value),
+            ..
+        } => u16::try_from(value)
+            .ok()
+            .and_then(FontWeight::new)
+            .map_or_else(invalid, Ok),
+        _ => invalid(),
+    }
+}
+
 fn line_height(input: &mut Parser<'_>) -> Result<LineHeight, Invalid> {
     match *input.next()? {
         Token::Ident(ref name) if name.eq_ignore_ascii_case("normal") => Ok(LineHeight::Normal),
@@ -1524,6 +1577,57 @@ mod tests {
             ("nav-wrap", "wrap"),
         ];
         for (property, css) in refused {
+            assert!(
+                parse(property, css).is_err(),
+                "`{property}: {css}` was accepted"
+            );
+        }
+    }
+
+    /// **`font-weight`, `font-style` and `text-decoration` take their keywords
+    /// and CSS's weight range**, and nothing else.
+    #[test]
+    fn weight_style_and_decoration_parse_their_keywords_and_range() {
+        let weight = |css: &str| style_of(&[("font-weight", css)]).font_weight.value();
+        assert_eq!(weight("normal"), 400);
+        assert_eq!(weight("BOLD"), 700);
+        assert_eq!(weight("1"), 1);
+        assert_eq!(weight("650"), 650);
+        assert_eq!(weight("1000"), 1000);
+        assert_eq!(NodeStyle::DEFAULT.font_weight, FontWeight::NORMAL);
+        assert_eq!(
+            style_of(&[("font-style", "Italic")]).font_style,
+            FontStyle::Italic
+        );
+        assert_eq!(
+            style_of(&[("font-style", "italic"), ("font-style", "normal")]).font_style,
+            FontStyle::Normal
+        );
+        assert_eq!(
+            style_of(&[("text-decoration", "UNDERLINE")]).text_decoration,
+            TextDecoration::Underline
+        );
+        assert_eq!(
+            style_of(&[
+                ("text-decoration", "underline"),
+                ("text-decoration", "none")
+            ])
+            .text_decoration,
+            TextDecoration::None
+        );
+        for (property, css) in [
+            ("font-weight", "0"),
+            ("font-weight", "1001"),
+            ("font-weight", "-400"),
+            ("font-weight", "450.5"),
+            ("font-weight", "bolder"),
+            ("font-weight", "700px"),
+            ("font-style", "oblique"),
+            ("font-style", "italic bold"),
+            ("text-decoration", "overline"),
+            ("text-decoration", "underline red"),
+            ("text-decoration", "line-through"),
+        ] {
             assert!(
                 parse(property, css).is_err(),
                 "`{property}: {css}` was accepted"

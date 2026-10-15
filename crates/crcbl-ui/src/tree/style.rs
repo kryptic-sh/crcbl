@@ -14,8 +14,8 @@
 //! The two halves are hashed apart. [`NodeStyle::layout_hash`] folds in every
 //! field that can move a box and none that only colours one, which is what
 //! lets a paint-only change — a hover colour — leave every layout cache in the
-//! tree alone. `text-overflow` is a paint field: it changes what a span draws,
-//! never its box.
+//! tree alone. `text-overflow` and `text-decoration` are paint fields: they
+//! change what a span draws, never its box.
 
 use core::hash::Hasher;
 
@@ -28,6 +28,7 @@ use taffy::{
 
 use super::focus::Direction;
 use crate::draw_list::CornerRadii;
+use crate::font::face::{FontStyle, FontWeight};
 use crate::font::layout::TextAlign;
 use crate::font::{FamilyName, Font, FontFamily};
 use crate::widget::NATURAL_FONT_SIZE;
@@ -241,6 +242,22 @@ pub enum TextOverflow {
     Clip,
     /// The line is cut to fit and ends in `…`.
     Ellipsis,
+}
+
+/// `text-decoration`: a line drawn with a text span's or a run's text.
+///
+/// **Inherited here, where CSS propagates it**: CSS draws an ancestor's
+/// decoration through every descendant's text and lets no descendant take it
+/// off, while here a descendant inherits the value and may set `none`. What
+/// draws is the same until a descendant says `none`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TextDecoration {
+    /// No line — `none`.
+    #[default]
+    None,
+    /// A line under each line of text, where its font says an underline
+    /// goes — `underline`.
+    Underline,
 }
 
 /// `line-height`: the pitch between a text span's lines.
@@ -490,6 +507,13 @@ pub struct NodeStyle {
     /// [`Ui::register_font`](crate::tree::Ui::register_font) registered under
     /// it, and in `font_family` while none is. Inherited.
     pub family_name: Option<FamilyName>,
+    /// `font-weight`: which face of its family a text span draws in, and
+    /// whether it is synthesised bold — see [`crate::font::face`]. The bitmap
+    /// font ignores it. Inherited.
+    pub font_weight: FontWeight,
+    /// `font-style`: whether a text span draws in an italic face, or a
+    /// synthesised one. The bitmap font ignores it. Inherited.
+    pub font_style: FontStyle,
     /// The pitch of a text span's lines in the parsed font; the bitmap font's
     /// is fixed. Inherited.
     pub line_height: LineHeight,
@@ -503,6 +527,9 @@ pub struct NodeStyle {
     /// `text-overflow`: what a text span shows of a line too long for its
     /// box.
     pub text_overflow: TextOverflow,
+    /// `text-decoration`: the line drawn with a text span's text. Inherited;
+    /// see [`TextDecoration`].
+    pub text_decoration: TextDecoration,
     /// `outline-width`, in pixels: a ring drawn outside the border box that
     /// takes no space. Nothing is drawn while it is zero.
     pub outline_width: f32,
@@ -564,11 +591,14 @@ impl NodeStyle {
         font_size: NATURAL_FONT_SIZE,
         font_family: FontFamily::Bitmap,
         family_name: None,
+        font_weight: FontWeight::NORMAL,
+        font_style: FontStyle::Normal,
         line_height: LineHeight::Normal,
         text_align: TextAlign::Left,
         white_space: WhiteSpace::Normal,
         cursor: Some(CursorIcon::Default),
         text_overflow: TextOverflow::Clip,
+        text_decoration: TextDecoration::None,
         outline_width: 0.0,
         outline_color: [0.0; 4],
         outline_offset: 0.0,
