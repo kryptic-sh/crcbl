@@ -21,6 +21,9 @@ const VK_UP: usize = 0x26;
 mod desktop;
 use desktop::shell;
 
+#[cfg(feature = "accesskit")]
+mod accessibility;
+
 fn window(shell: &mut Win32Shell) -> WindowId {
     shell
         .create_window(&WindowDesc {

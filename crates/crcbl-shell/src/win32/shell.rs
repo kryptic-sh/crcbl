@@ -356,6 +356,8 @@ impl Win32Shell {
             .union(ShellCaps::PANEL_RESERVE)
             .union(ShellCaps::POPUP)
             .union(ShellCaps::POPUP_REPOSITION);
+        #[cfg(feature = "accesskit")]
+        let caps = caps.union(ShellCaps::ACCESSIBILITY);
         if raw_motion {
             caps.union(ShellCaps::RAW_POINTER_MOTION)
         } else {
@@ -1021,6 +1023,12 @@ impl Win32Shell {
                     self.queue.push_back(ShellEvent::MonitorsChanged);
                 }
                 RawEvent::DeviceRemoved { device } => self.devices.remove(device),
+                #[cfg(feature = "accesskit")]
+                RawEvent::AccessibilityActivated { .. } => {
+                    let Some(window) = window else { continue };
+                    self.queue
+                        .push_back(ShellEvent::AccessibilityActivated { window });
+                }
                 RawEvent::AppBar {
                     notification,
                     param,
@@ -1049,6 +1057,24 @@ impl Win32Shell {
                 | RawEvent::RawMotion { .. }
                 | RawEvent::RawKey { .. }) => self.translate_input(input_event, window),
             }
+        }
+    }
+
+    /// Turns the requests readers made into
+    /// [`AccessibilityAction`](ShellEvent::AccessibilityAction)s.
+    ///
+    /// Read off the adapters' own queue rather than the window procedure's,
+    /// because a request may be made on another thread; see
+    /// [`access`](super::access). One for a window that has gone since is
+    /// dropped, as every event naming a stale handle is.
+    #[cfg(feature = "accesskit")]
+    fn translate_actions(&mut self) {
+        for (hwnd, request) in self.shared.access().take_actions() {
+            let Some(window) = self.window_by_key(hwnd) else {
+                continue;
+            };
+            self.queue
+                .push_back(ShellEvent::AccessibilityAction { window, request });
         }
     }
 
@@ -1180,6 +1206,12 @@ impl Shell for Win32Shell {
     ///   parent and kept on its monitor; see [`popup`](super::popup).
     /// * [`POPUP_REPOSITION`](ShellCaps::POPUP_REPOSITION) — the same placement
     ///   worked out again, and the window moved with `SetWindowPos`.
+    /// * [`ACCESSIBILITY`](ShellCaps::ACCESSIBILITY), only when built with the
+    ///   `accesskit` feature — each window has a UI Automation adapter that
+    ///   answers `WM_GETOBJECT` with the tree `update_accessibility` sent, and
+    ///   turns a reader's requests into `AccessibilityAction`s. There is no
+    ///   deactivation to report; see the `access` module. (Plain names, not
+    ///   links: none of the three exists without the feature.)
     ///
     /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) is clear for a reason rather than
     /// for want of work — a plain `HWND` presents at its own size, and the
@@ -1306,6 +1338,20 @@ impl Shell for Win32Shell {
             popup,
         };
         let window = self.windows.insert(window).cast();
+        // Here rather than in the window procedure: the adapter must exist, and
+        // UI Automation be initialised, before the first `WM_GETOBJECT` is
+        // answered, and must not be created while one is. The waker is what
+        // gets a reader's request delivered while this thread is asleep. A
+        // window shown as it was created took the focus before its adapter
+        // existed, so the adapter starts from where the focus is now.
+        #[cfg(feature = "accesskit")]
+        {
+            let waker = self.waker();
+            // SAFETY: takes no arguments and only reads which window of this
+            // thread has the keyboard focus.
+            let focused = unsafe { ffi::GetFocus() } == hwnd.as_ptr();
+            self.shared.access().open(hwnd.as_ptr(), focused, waker);
+        }
         let state = self.window(window)?;
         self.refresh_limits(state);
         if desc.visible
@@ -1533,6 +1579,8 @@ impl Shell for Win32Shell {
     fn keep_alive(&mut self) {
         self.drain_messages();
         self.translate();
+        #[cfg(feature = "accesskit")]
+        self.translate_actions();
         self.publish_configurations();
     }
 
@@ -1933,6 +1981,26 @@ impl Shell for Win32Shell {
     /// # Errors
     ///
     /// [`ShellError::InvalidWindow`] for a stale handle.
+    /// Hands the tree to the window's UI Automation adapter, which keeps it
+    /// only once a reader has asked for the window — the
+    /// [`AccessibilityActivated`](ShellEvent::AccessibilityActivated) — and
+    /// raises what it changed for the reader.
+    ///
+    /// **Windows never says a reader stopped**, so
+    /// [`AccessibilityDeactivated`](ShellEvent::AccessibilityDeactivated) is
+    /// never raised here and trees keep being kept once a reader has asked.
+    /// See [`access`](super::access).
+    #[cfg(feature = "accesskit")]
+    fn update_accessibility(
+        &mut self,
+        window: WindowId,
+        update: crate::accesskit::TreeUpdate,
+    ) -> Result<(), ShellError> {
+        let key = self.window(window)?.key;
+        self.shared.access().update(key, update);
+        Ok(())
+    }
+
     fn set_text_input_area(
         &mut self,
         window: WindowId,

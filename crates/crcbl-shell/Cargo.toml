@@ -138,10 +138,29 @@ win32-ime-e2e = ["win32-e2e"]
 # Accessibility: `Shell::update_accessibility` and the events a screen reader
 # raises. Off by default, so a game that has no use for it keeps the shell's
 # small dependency set; a desktop program turns it on. See `accessibility`.
-accesskit = ["dep:accesskit"]
+#
+# On Windows it also brings `accesskit_windows`, the UI Automation adapter the
+# Win32 backend answers `WM_GETOBJECT` with. A target-specific optional
+# dependency, so on every other host the feature names it and builds nothing.
+accesskit = ["dep:accesskit", "dep:accesskit_windows"]
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 crcbl-spawn = { path = "../crcbl-spawn" }
+
+# The Win32 backend's accessibility adapter, behind the `accesskit` feature: it
+# turns the tree a program sends into UI Automation providers and a reader's
+# requests into `ActionRequest`s. It brings the `windows` crate, which the rest
+# of the backend still does not use — its own FFI stays in `src/win32/ffi.rs`,
+# and the adapter's types are converted at the one place they meet.
+[target.'cfg(target_os = "windows")'.dependencies]
+accesskit_windows = { version = "0.35.1", optional = true }
+
+# A UI Automation *client*, for the desktop test that reads a window's tree and
+# invokes a button the way a screen reader would. Test-only: the shell itself
+# is the provider side and never calls these. Already in the lock file through
+# `accesskit_windows`, so it adds no crate.
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Variant", "Win32_UI_Accessibility"] }

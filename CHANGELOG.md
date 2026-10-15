@@ -40,9 +40,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `ShellEvent::AccessibilityActivated`, `AccessibilityAction` and
   `AccessibilityDeactivated` say when a screen reader starts reading, what it
   asks for, and when it stops. `crcbl_shell::accesskit` re-exports the crate,
-  and `ShellCaps::ACCESSIBILITY` says whether a backend passes trees on. No
-  desktop backend does yet: the provided method drops the update, so the cap is
-  clear there. `HeadlessShell` plays the reader (`activate_accessibility`,
+  and `ShellCaps::ACCESSIBILITY` says whether a backend passes trees on. The
+  Win32 backend does: with the feature on, each window answers UI Automation
+  through `accesskit_windows`, a reader's requests arrive as
+  `AccessibilityAction`, and the cap is set. Windows never says a reader
+  stopped, so there `AccessibilityDeactivated` is never raised and trees keep
+  flowing once a reader has asked. Wayland, X11 and AppKit do not pass trees on
+  yet: the provided method drops the update, so the cap is clear there.
+  `HeadlessShell` plays the reader (`activate_accessibility`,
   `request_accessibility_action`, `accessibility_updates`,
   `deactivate_accessibility`).
 - **`crcbl-ui` builds an AccessKit tree, behind its new `accesskit` feature**

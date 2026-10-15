@@ -1014,6 +1014,11 @@ pub mod msg {
     pub const NC_HIT_TEST: u32 = 0x0084;
     /// `WM_GETMINMAXINFO`.
     pub const GET_MIN_MAX_INFO: u32 = 0x0024;
+    /// `WM_GETOBJECT` — an accessibility client asking for the window's
+    /// provider. `lParam` names which object; see `access`. Behind the
+    /// feature, because without an adapter nothing answers it.
+    #[cfg(feature = "accesskit")]
+    pub const GET_OBJECT: u32 = 0x003D;
     /// `WM_DISPLAYCHANGE`.
     pub const DISPLAY_CHANGE: u32 = 0x007E;
     /// `WM_SETTINGCHANGE` — a system parameter changed. With
@@ -1684,6 +1689,11 @@ unsafe extern "system" {
     // foreground it depends on is really its own.
     #[cfg(test)]
     pub fn GetForegroundWindow() -> Handle;
+    // The window of this thread holding the keyboard focus, or null. Read once,
+    // when a window's accessibility adapter is made: a window shown as it is
+    // created takes the focus before the adapter exists to hear it.
+    #[cfg(feature = "accesskit")]
+    pub fn GetFocus() -> Handle;
     pub fn ClientToScreen(hwnd: Handle, point: *mut Point) -> Bool32;
     pub fn ScreenToClient(hwnd: Handle, point: *mut Point) -> Bool32;
     // Which kind of device a `WM_POINTER*` message's pointer id belongs to.

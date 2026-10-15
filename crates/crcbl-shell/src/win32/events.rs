@@ -318,6 +318,13 @@ pub enum RawEvent {
         /// The notification's `lParam`, which some codes carry a value in.
         param: isize,
     },
+    /// The first `WM_GETOBJECT` a window's accessibility adapter answered: a
+    /// reader started reading it. See [`access`](super::access).
+    #[cfg(all(target_os = "windows", feature = "accesskit"))]
+    AccessibilityActivated {
+        /// `HWND` as an integer.
+        hwnd: isize,
+    },
 }
 
 impl RawEvent {
@@ -343,6 +350,8 @@ impl RawEvent {
             | Self::Preedit { hwnd, .. }
             | Self::AppBar { hwnd, .. }
             | Self::FilesDropped { hwnd, .. } => Some(hwnd),
+            #[cfg(all(target_os = "windows", feature = "accesskit"))]
+            Self::AccessibilityActivated { hwnd } => Some(hwnd),
             Self::MonitorsChanged | Self::DeviceRemoved { .. } => None,
         }
     }

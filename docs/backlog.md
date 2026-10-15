@@ -433,10 +433,27 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       (`SetTextSelection`, `SetValue`, `Increment`/`Decrement`, `Expand` and
       `ScrollIntoView` are not acted on). Every update is the whole tree, not a
       diff, and its cost on a large outliner has not been measured.
-    - Still to do, in this order: Win32 through `accesskit_windows::Adapter`
-      answering `WM_GETOBJECT` in the shell's window procedure; Wayland and X11
-      through `accesskit_unix` (AT-SPI over D-Bus); AppKit through
-      `accesskit_macos`.
+    - Win32 is in, behind the same feature: `win32::access` keeps one
+      `accesskit_windows::Adapter` per window in `Shared`, created after
+      `CreateWindowExW` and dropped by `Shared::forget`; the window procedure
+      answers `WM_GETOBJECT` (the first one raises `AccessibilityActivated`) and
+      passes `WM_SETFOCUS`/`WM_KILLFOCUS` on; requests cross from UI
+      Automation's thread on a mutex queue and ring the shell's waker; every
+      call that can re-enter the procedure runs after the table's borrow is
+      released. `ShellCaps::ACCESSIBILITY` is set. Verification is the desktop
+      test
+      `win32::shell::tests::accessibility::a_reader_finds_the_button_in_the_tree_and_presses_it`,
+      a UI Automation client on a second thread that finds a button by name and
+      invokes it; it runs only in CI's `win32 e2e (real desktop)` job
+      (`run-win32-e2e.ps1` now enables `accesskit`) and had not run when this
+      landed. Not covered by any test: the focus state passed to the adapter,
+      and an action arriving while the shell sleeps in `wait_events` (the waker
+      path).
+    - Behaviour, not a bug: Windows has no "the last reader went away" signal,
+      so `AccessibilityDeactivated` is never raised on Win32 and trees sent
+      after the first activation are always kept, for the window's lifetime.
+    - Still to do, in this order: Wayland and X11 through `accesskit_unix`
+      (AT-SPI over D-Bus); AppKit through `accesskit_macos`.
 
 14. **Image assets to RGBA (S28), asked by lyr for lyr and pikr on 2026-10-16**,
     relaying the owner: one crcbl crate that turns image files and raw buffers

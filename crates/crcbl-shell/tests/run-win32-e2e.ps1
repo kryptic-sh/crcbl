@@ -70,10 +70,12 @@ try {
         # e2e binary: the pointer-clip tests there are `#[ignore]`d out of the
         # ordinary sweep on the grounds that this script runs them, and a
         # `--test win32_e2e` selection left them running nowhere at all.
+        # `accesskit` as well, because the UI Automation test there is compiled
+        # only with it, and this is the one place it can run.
         cargo nextest run `
             --locked `
             --package crcbl-shell `
-            --features win32-e2e `
+            --features win32-e2e,accesskit `
             -E 'binary(win32_e2e) | test(/^win32::shell::tests::/)' `
             --run-ignored all `
             --test-threads 1 `

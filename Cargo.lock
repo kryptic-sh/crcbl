@@ -12,6 +12,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "accesskit_consumer"
+version = "0.39.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a45e2bb300bea6d5f33a82c3e051c3ddc6f41c209750f68a0acbe991a284344"
+dependencies = [
+ "accesskit",
+ "hashbrown",
+]
+
+[[package]]
+name = "accesskit_windows"
+version = "0.35.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce63f35d6bdcf59f26b76b3379063f738e6412cef46999cc772d46aa3de35adb"
+dependencies = [
+ "accesskit",
+ "accesskit_consumer",
+ "hashbrown",
+ "static_assertions",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -727,11 +751,13 @@ name = "crcbl-shell"
 version = "0.1.0"
 dependencies = [
  "accesskit",
+ "accesskit_windows",
  "bitflags",
  "crcbl-core",
  "crcbl-spawn",
  "crcbl-wl-scanner",
  "thiserror 2.0.21",
+ "windows",
 ]
 
 [[package]]
@@ -2078,6 +2104,12 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "subtle"

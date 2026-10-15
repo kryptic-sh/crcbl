@@ -16,7 +16,10 @@
 //! Win32 FFI (`extern "system"` decls for the surface we use)". Every
 //! declaration in [`ffi`] is ours; there is no `windows-rs`, no `winapi`, no
 //! framework, and — unlike the two Linux backends — no `dlopen`, for the reason
-//! that module states at length.
+//! that module states at length. The one exception is behind the `accesskit`
+//! feature: the UI Automation adapter, `accesskit_windows`, is built on the
+//! `windows` crate, and its types are converted to ours in the `access` module
+//! and go no further.
 //!
 //! # What is here, and what is not
 //!
@@ -44,6 +47,7 @@
 //! | File drops in: `DragAcceptFiles`, `WM_DROPFILES`, the `accept_drops` gate | complete — [`DRAG_DROP`](crate::ShellCaps::DRAG_DROP), see [`dnd`] |
 //! | Panels: frameless tool windows placed by their anchors on a monitor, and appbars for the ones that reserve an edge | complete — [`PANEL`](crate::ShellCaps::PANEL) and [`PANEL_RESERVE`](crate::ShellCaps::PANEL_RESERVE), see [`panel`]; popups — [`POPUP`](crate::ShellCaps::POPUP), see [`popup`]; per-pixel alpha is not yet |
 //! | Drag *feedback* — a drop cursor, hover highlighting, non-file formats | **not implemented**: it is `IDropTarget`, which is COM. [`dnd`] gives the argument |
+//! | Accessibility: each window's tree to UI Automation, `WM_GETOBJECT` answered, a reader's requests as events | complete behind the `accesskit` feature — [`ACCESSIBILITY`](crate::ShellCaps::ACCESSIBILITY), see the `access` module; never deactivates, because Windows never says a reader left, and verified only by the CI desktop test |
 //!
 //! Two things input needs that no other area of this backend does are worth
 //! finding here rather than in a call stack.
@@ -229,6 +233,8 @@ pub mod proc;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod ffi;
 
+#[cfg(all(target_os = "windows", feature = "accesskit"))]
+mod access;
 #[cfg(target_os = "windows")]
 mod input;
 #[cfg(target_os = "windows")]

@@ -239,6 +239,9 @@ pub(super) struct Shared {
     /// when focus comes back — so this records what the shell asked for rather
     /// than what the system currently has.
     clipped: Cell<isize>,
+    /// Each window's UI Automation adapter; see [`access`](super::access).
+    #[cfg(all(target_os = "windows", feature = "accesskit"))]
+    access: super::access::Adapters,
 }
 
 impl Shared {
@@ -310,6 +313,14 @@ impl Shared {
         if self.clipped.get() == hwnd {
             self.clipped.set(0);
         }
+        #[cfg(all(target_os = "windows", feature = "accesskit"))]
+        self.access.close(hwnd);
+    }
+
+    /// The windows' accessibility adapters.
+    #[cfg(all(target_os = "windows", feature = "accesskit"))]
+    pub(super) fn access(&self) -> &super::access::Adapters {
+        &self.access
     }
 
     /// Makes the pointer pass through `hwnd`; see [`passthrough`](Self).
@@ -601,7 +612,25 @@ pub(super) unsafe extern "system" fn window_proc(
                 hwnd: window,
                 focused,
             });
+            // UI Automation's focus follows the window's. The adapter raises
+            // what that changed after it has let go of its table, since the
+            // raising may itself ask for the provider.
+            #[cfg(feature = "accesskit")]
+            shared.access().focus(window, focused);
             0
+        }
+
+        // A UI Automation client asking for the window's provider. Answered
+        // here, because the answer is the return value; the first time it is
+        // asked is the reader arriving, which the program hears from the pump
+        // and answers by sending a tree. See [`access`](super::access).
+        #[cfg(feature = "accesskit")]
+        msg::GET_OBJECT => {
+            let answer = shared.access().get_object(window, w_param, l_param);
+            if answer.activated {
+                shared.push(RawEvent::AccessibilityActivated { hwnd: window });
+            }
+            answer.lresult.unwrap_or_else(default)
         }
 
         msg::KEY_DOWN | msg::KEY_UP | msg::SYS_KEY_DOWN | msg::SYS_KEY_UP => {

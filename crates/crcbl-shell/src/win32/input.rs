@@ -765,6 +765,8 @@ impl Win32Shell {
             | RawEvent::Preedit { .. }
             | RawEvent::AppBar { .. }
             | RawEvent::DeviceRemoved { .. } => {}
+            #[cfg(feature = "accesskit")]
+            RawEvent::AccessibilityActivated { .. } => {}
         }
     }
 

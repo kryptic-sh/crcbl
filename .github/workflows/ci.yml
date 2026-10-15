@@ -1247,10 +1247,10 @@ jobs:
       - uses: ./.github/actions/cargo-tool
         with:
           tool: cargo-nextest@0.9.146
-      # Runs the `#[ignore]`d suite with `--features win32-e2e`, serialised
-      # because the foreground window, the cursor and the clipboard are one of
-      # each per session, and fails when the reported test count is zero or
-      # unreadable.
+      # Runs the `#[ignore]`d suite with `--features win32-e2e,accesskit`,
+      # serialised because the foreground window, the cursor and the clipboard
+      # are one of each per session, and fails when the reported test count is
+      # zero or unreadable.
       - name: Run the suite against the runner's desktop
         shell: pwsh
         run: crates/crcbl-shell/tests/run-win32-e2e.ps1
