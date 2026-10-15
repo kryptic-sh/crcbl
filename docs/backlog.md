@@ -1458,7 +1458,9 @@ machine, or twice in CI, is real.
   `cfdeadd7` failed it with "no heartbeat reached the check tick in 9 line(s);
   the last was tick 540": the page fell short of the tick, and no hash was
   compared. A rerun of that job passed and deployed. That push changed only the
-  editor.
+  editor. Again on 2026-10-16, run 38795753186 at `da20fe58`, the same message
+  and the same last tick, 300 s in on the `swiftshader` adapter; that push
+  changed only the Wayland shell.
 - **The Pages job "probe the seam on Windows"** — on 2026-10-14, run 38479086250
   at `49f92895` failed with "the probe page never became ready in 90000 ms" and
   "ZERO CHECKS RAN", so no check failed. A rerun of that job passed and
