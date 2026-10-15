@@ -161,14 +161,20 @@ use crate::{
 use super::ffi::{self, Class, Id, Imp, NSRect, NSSize, ObjcBool, Sel, YES};
 use super::geometry;
 use super::monitors::Screen;
+use super::panel::Panel;
 use super::shell::{AppKitShell, AppWindow};
 use super::view;
+use crate::PanelKeyboard;
 
 /// The name of the `NSWindow` subclass this module builds at runtime.
 const WINDOW_CLASS: &CStr = c"CrcblWindow";
 
 /// The registration, once per process. `Err` carries what went wrong.
 static WINDOW: OnceLock<Result<usize, String>> = OnceLock::new();
+/// The same, for [`panel_class`]'s keyboard-taking panel.
+static PANEL: OnceLock<Result<usize, String>> = OnceLock::new();
+/// The same, for [`panel_class`]'s panel that never takes the keyboard.
+static PASSIVE_PANEL: OnceLock<Result<usize, String>> = OnceLock::new();
 
 /// `canBecomeKeyWindow` / `canBecomeMainWindow` — **always `YES`**.
 ///
@@ -181,6 +187,16 @@ static WINDOW: OnceLock<Result<usize, String>> = OnceLock::new();
 /// Called only by AppKit, on an instance of the class built below.
 unsafe extern "C" fn can_become(_window: Id, _cmd: Sel) -> ObjcBool {
     YES
+}
+
+/// `canBecomeKeyWindow` / `canBecomeMainWindow` — **always `NO`**: a panel
+/// that takes no keyboard, and the main-window question for every panel.
+///
+/// # Safety
+///
+/// Called only by AppKit, on an instance of a class built below.
+unsafe extern "C" fn cannot_become(_window: Id, _cmd: Sel) -> ObjcBool {
+    ffi::NO
 }
 
 /// `constrainFrameRect:toScreen:` — **the rectangle it was handed, unchanged**.
@@ -209,45 +225,97 @@ unsafe extern "C" fn constrain_frame(_window: Id, _cmd: Sel, frame: NSRect, _scr
 /// `objc_allocateClassPair` means the same code is loaded twice in one process,
 /// and the class that is already there is ours by name and by method table.
 fn window_class() -> Result<Class, ShellError> {
-    let outcome = WINDOW.get_or_init(|| {
-        let Some(superclass) = ffi::class(c"NSWindow") else {
-            return Err(
-                "the Objective-C runtime has no NSWindow, so this image has no AppKit \
-                        in it"
-                    .to_string(),
-            );
+    build_class(&ClassSpec {
+        superclass: c"NSWindow",
+        name: WINDOW_CLASS,
+        key: can_become,
+        main: can_become,
+        cell: &WINDOW,
+    })
+}
+
+/// The `NSPanel` subclass a [panel](crate::WindowRole::Panel) is made of:
+/// one that can take the keyboard, and one that never does, which is what
+/// keeps a click on a bar from taking the keyboard from the window the user
+/// is typing in. Neither becomes the main window, which a panel never is.
+pub(super) fn panel_class(takes_keyboard: bool) -> Result<Class, ShellError> {
+    if takes_keyboard {
+        build_class(&ClassSpec {
+            superclass: c"NSPanel",
+            name: c"CrcblPanel",
+            key: can_become,
+            main: cannot_become,
+            cell: &PANEL,
+        })
+    } else {
+        build_class(&ClassSpec {
+            superclass: c"NSPanel",
+            name: c"CrcblPassivePanel",
+            key: cannot_become,
+            main: cannot_become,
+            cell: &PASSIVE_PANEL,
+        })
+    }
+}
+
+/// What [`build_class`] registers: the superclass, the name, the answers to
+/// `canBecomeKeyWindow` and `canBecomeMainWindow`, and the once-per-process
+/// cell the registration is kept in.
+struct ClassSpec {
+    superclass: &'static CStr,
+    name: &'static CStr,
+    key: unsafe extern "C" fn(Id, Sel) -> ObjcBool,
+    main: unsafe extern "C" fn(Id, Sel) -> ObjcBool,
+    cell: &'static OnceLock<Result<usize, String>>,
+}
+
+/// Builds — or returns — one of this module's runtime subclasses; see
+/// [`window_class`].
+fn build_class(spec: &ClassSpec) -> Result<Class, ShellError> {
+    let outcome = spec.cell.get_or_init(|| {
+        let Some(superclass) = ffi::class(spec.superclass) else {
+            return Err(format!(
+                "the Objective-C runtime has no {:?}, so this image has no AppKit in it",
+                spec.superclass
+            ));
         };
         // SAFETY: `NSWindow` is a live class, the name is a NUL-terminated
         // literal, and no extra instance storage is asked for.
-        let class = unsafe { ffi::objc_allocateClassPair(superclass, WINDOW_CLASS.as_ptr(), 0) };
+        let class = unsafe { ffi::objc_allocateClassPair(superclass, spec.name.as_ptr(), 0) };
         if class.is_null() {
-            let Some(existing) = ffi::class(WINDOW_CLASS) else {
-                return Err(
-                    "objc_allocateClassPair refused CrcblWindow and no class of that \
-                            name exists"
-                        .to_string(),
-                );
+            let Some(existing) = ffi::class(spec.name) else {
+                return Err(format!(
+                    "objc_allocateClassPair refused {:?} and no class of that name exists",
+                    spec.name
+                ));
             };
             crcbl_core::log::debug!(
-                "the {WINDOW_CLASS:?} class was already registered in this process"
+                "the {:?} class was already registered in this process",
+                spec.name
             );
             return Ok(existing as usize);
         }
 
         let predicate = std::ffi::CString::new(format!("{}@:", ffi::ENC_BOOL))
             .expect("the encoding characters contain no NUL");
-        for name in [c"canBecomeKeyWindow", c"canBecomeMainWindow"] {
+        for (name, answer) in [
+            (c"canBecomeKeyWindow", spec.key),
+            (c"canBecomeMainWindow", spec.main),
+        ] {
             // SAFETY: casting a correctly-typed `extern "C"` function to the
             // runtime's opaque `IMP`; the encoding beside it describes the real
             // signature, and the class pair is not yet registered.
             let imp = unsafe {
-                core::mem::transmute::<unsafe extern "C" fn(Id, Sel) -> ObjcBool, Imp>(can_become)
+                core::mem::transmute::<unsafe extern "C" fn(Id, Sel) -> ObjcBool, Imp>(answer)
             };
             // SAFETY: as above.
             if unsafe { ffi::class_addMethod(class, ffi::sel(name), imp, predicate.as_ptr()) }
                 == ffi::NO
             {
-                return Err(format!("class_addMethod refused {name:?} on CrcblWindow"));
+                return Err(format!(
+                    "class_addMethod refused {name:?} on {:?}",
+                    spec.name
+                ));
             }
         }
 
@@ -275,9 +343,10 @@ fn window_class() -> Result<Class, ShellError> {
             )
         } == ffi::NO
         {
-            return Err(
-                "class_addMethod refused constrainFrameRect:toScreen: on CrcblWindow".to_string(),
-            );
+            return Err(format!(
+                "class_addMethod refused constrainFrameRect:toScreen: on {:?}",
+                spec.name
+            ));
         }
         // SAFETY: a complete class pair that has not been registered.
         unsafe { ffi::objc_registerClassPair(class) };
@@ -289,6 +358,29 @@ fn window_class() -> Result<Class, ShellError> {
             backend: ShellBackend::AppKit,
             detail: detail.clone(),
         }),
+    }
+}
+
+/// Lets the desktop show through a window where its frame's alpha is below
+/// one: no opaque fill behind the content, no shadow drawn from the opaque
+/// outline, and a layer AppKit composites by its alpha.
+///
+/// # Safety
+///
+/// `window` must be a live `NSWindow` and `layer` its live `CAMetalLayer`, on
+/// the main thread.
+unsafe fn make_transparent(window: Id, layer: Id) {
+    let Some(color) = ffi::class(c"NSColor") else {
+        return;
+    };
+    // SAFETY: the caller guarantees both objects; `clearColor` is a class
+    // accessor answering an autoreleased colour the window retains.
+    unsafe {
+        ffi::msg_set_bool(window, ffi::sel(c"setOpaque:"), false);
+        let clear = ffi::msg(color.cast(), ffi::sel(c"clearColor"));
+        ffi::msg1_void(window, ffi::sel(c"setBackgroundColor:"), clear);
+        ffi::msg_set_bool(window, ffi::sel(c"setHasShadow:"), false);
+        ffi::msg_set_bool(layer, ffi::sel(c"setOpaque:"), false);
     }
 }
 
@@ -432,8 +524,12 @@ impl AppKitShell {
         &self,
         desc: &WindowDesc<'_>,
         target: Option<&Screen>,
+        panel: Option<&Panel>,
     ) -> Result<Created, ShellError> {
-        let class = window_class()?;
+        let class = match panel {
+            Some(panel) => panel_class(panel.keyboard != PanelKeyboard::None)?,
+            None => window_class()?,
+        };
         // **`CrcblView`, not `NSView`.** A plain view answers `NO` to
         // `acceptsFirstResponder`, implements none of the responder methods
         // input arrives through, and conforms to no text-input protocol — so a
@@ -449,18 +545,22 @@ impl AppKitShell {
             });
         };
 
-        let mask = geometry::style_mask(desc.mode, desc.resizable);
+        let mask = match panel {
+            Some(_) => geometry::PANEL_STYLE_MASK,
+            None => geometry::style_mask(desc.mode, desc.resizable),
+        };
         // A borderless window is the screen's size, not the requested one:
         // `WindowDesc::size` is the *windowed* size and is remembered for the
         // trip back. In points, because that is the space `initWithContentRect:`
         // is in — and, on this platform, the seam's logical space too.
-        let content = match (desc.mode, target) {
-            (DisplayMode::Borderless { .. }, Some(screen)) => screen.frame,
-            (_, Some(screen)) => geometry::centred(screen.visible, geometry::points(desc.size)),
+        let content = match (panel, desc.mode, target) {
+            (Some(panel), _, Some(screen)) => panel.frame_on(screen),
+            (None, DisplayMode::Borderless { .. }, Some(screen)) => screen.frame,
+            (_, _, Some(screen)) => geometry::centred(screen.visible, geometry::points(desc.size)),
             // No screen to place against — a Mac with no display attached.
             // AppKit puts the window where it likes rather than this backend
             // inventing a desktop layout.
-            (_, None) => NSRect::new(0.0, 0.0, desc.size.width, desc.size.height),
+            (_, _, None) => NSRect::new(0.0, 0.0, desc.size.width, desc.size.height),
         };
 
         // SAFETY: `alloc` then the designated initialiser. `defer: NO` creates
@@ -658,15 +758,28 @@ impl AppKitShell {
         // SAFETY: a live window.
         unsafe { apply_constraints(window, desc.constraints) };
 
+        if let Some(panel) = panel {
+            // SAFETY: a live window of a panel class, on the main thread.
+            unsafe { Self::configure_panel(window, panel) };
+        }
+        if desc.transparent {
+            // SAFETY: a live window and its live layer; see `make_transparent`.
+            unsafe { make_transparent(window, layer) };
+        }
+
         // SAFETY: a live window; both read.
         let scale = unsafe { backing_scale(window) };
         // SAFETY: a live layer and its live host view.
         unsafe { size_layer(layer, view, scale) };
 
         if desc.visible {
-            // SAFETY: a live window; `nil` is the documented sender.
-            unsafe {
-                ffi::msg1_void(window, ffi::sel(c"makeKeyAndOrderFront:"), ptr::null_mut());
+            match panel {
+                // SAFETY: a live panel of this shell, on the main thread.
+                Some(panel) => unsafe { Self::show_panel(window, panel.keyboard) },
+                // SAFETY: a live window; `nil` is the documented sender.
+                None => unsafe {
+                    ffi::msg1_void(window, ffi::sel(c"makeKeyAndOrderFront:"), ptr::null_mut());
+                },
             }
         }
 

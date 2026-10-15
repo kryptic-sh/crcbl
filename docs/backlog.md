@@ -162,14 +162,34 @@ Each step lands in the crate the later steps build on, so the seam goes first.
    - Screen-positioned popups (S3), activating for `Grab` and closing on
      `WA_INACTIVE`.
 6. **AppKit**:
-   - Non-activating `NSPanel` (S5), with the per-layer window levels written
-     down. `Top` sits above the menu bar, at `NSStatusWindowLevel` (lyr item 8).
-   - `acceptsMouseMovedEvents` plus a tracking area, so hover arrives without
-     the panel becoming key (lyr item 9).
-   - `opaque = NO`, `hasShadow = NO` and a clear background for transparency
-     (pikr item 7).
-   - Child panels for popups (S3), with `ignoresMouseEvents` for `Passthrough`.
-   - `orderFront` after the first frame.
+   - Panels are built (`crates/crcbl-shell/src/appkit/panel.rs`, levels and
+     placement in `appkit/geometry.rs`): a `CrcblPanel` (can become key) or
+     `CrcblPassivePanel` (never key) `NSPanel` with
+     `NSWindowStyleMaskNonactivatingPanel` (S5), at the level
+     `CGWindowLevelForKey` gives for the layer's key: the desktop's for
+     `Background`, the desktop icons' plus one for `Bottom`, the status level
+     above the menu bar for `Top` (lyr item 8), the pop-up menu level for
+     `Overlay`. Every panel joins all spaces, stays put in Mission Control and
+     is out of window cycling; only `Overlay` may join a full-screen space.
+     `hidesOnDeactivate` is off. It is placed by `panel_frame` in the screen's
+     visible frame or its whole frame, on the screen asked for or the one under
+     the pointer, placed again when the screens change, and closed when its
+     screen is detached. `TRANSPARENT` is set for every window: `opaque = NO`, a
+     clear background, no shadow and a non-opaque `CAMetalLayer` (pikr item 7).
+   - Decided: the level numbers are asked of `CGWindowLevelForKey` at run time
+     rather than written down, because they are the window server's to define.
+     Hover without the keyboard (lyr item 9) is the never-key panel class plus
+     the existing `acceptsMouseMovedEvents` and tracking area every window
+     already had.
+   - **Verified so far:** the `panel_level`, `panel_collection` and
+     `panel_frame` unit tests on any host, and macOS clippy by cross-compiling.
+     The macOS session (`tests/appkit_session.rs`, `panels`) checks the class,
+     level, collection behaviour, `hidesOnDeactivate`, opacity and frame of a
+     hidden bar and launcher, and runs only on CI's macOS runner.
+   - Still to do: child panels for popups (S3), with `ignoresMouseEvents` for
+     `Passthrough`; `orderFront` after the first frame (no flash on map); and
+     whether `orderFrontRegardless` keeps a never-key bar visible over other
+     applications in every case, which the hidden-window session does not show.
 7. **Outputs.** Hotplug events with name, scale and work area on every backend
    (S7). The monitor-removed close requests in step 4 are part of this.
 8. **Text.**

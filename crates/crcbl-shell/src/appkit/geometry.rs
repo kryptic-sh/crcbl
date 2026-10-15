@@ -47,9 +47,14 @@
 //! `Xft.dpi`; this is the one platform whose own geometry is already in the
 //! seam's request space, and [`content_limits`] is where that shows.
 
-use crate::{AspectRatio, DisplayMode, LogicalSize, PhysicalRect, PhysicalSize, SizeConstraints};
+use crate::{
+    AspectRatio, DisplayMode, LogicalSize, Margins, PanelAnchor, PanelLayer, PhysicalRect,
+    PhysicalSize, SizeConstraints,
+};
 
-use super::ffi::{NSPoint, NSRect, NSSize, style, value};
+use super::ffi::{
+    NSInteger, NSPoint, NSRect, NSSize, NSUInteger, collection, level_key, style, value,
+};
 
 /// The conversion between AppKit's Y-up screen space and the seam's Y-down
 /// desktop space.
@@ -221,6 +226,90 @@ pub fn style_mask(mode: DisplayMode, resizable: bool) -> usize {
         // account for, and the whole point is that the content rectangle and the
         // frame rectangle become the same thing.
         DisplayMode::Borderless { .. } => style::BORDERLESS,
+    }
+}
+
+/// The style mask of a [panel](crate::WindowRole::Panel): no frame, and
+/// non-activating, so a panel that takes the keyboard does so without
+/// bringing the application forward — what a launcher does.
+pub const PANEL_STYLE_MASK: NSUInteger = style::BORDERLESS | style::NONACTIVATING_PANEL;
+
+/// The window level of a panel layer, as the `CGWindowLevelKey` to ask
+/// `CGWindowLevelForKey` for and how far above that level to sit.
+///
+/// `Top` is above the menu bar, as a status bar has to be, and `Overlay` is
+/// above every application window. `Background` is the desktop picture's own
+/// level and `Bottom` sits just above the desktop icons.
+#[must_use]
+pub const fn panel_level(layer: PanelLayer) -> (i32, NSInteger) {
+    match layer {
+        PanelLayer::Background => (level_key::DESKTOP, 0),
+        PanelLayer::Bottom => (level_key::DESKTOP_ICON, 1),
+        PanelLayer::Top => (level_key::STATUS, 0),
+        PanelLayer::Overlay => (level_key::POP_UP_MENU, 0),
+    }
+}
+
+/// How a panel takes part in spaces: on every space and left in place by
+/// Mission Control, out of window cycling, and — on the overlay layer, the
+/// only one above full-screen windows — allowed into a full-screen window's
+/// space.
+#[must_use]
+pub const fn panel_collection(layer: PanelLayer) -> NSUInteger {
+    let common =
+        collection::CAN_JOIN_ALL_SPACES | collection::STATIONARY | collection::IGNORES_CYCLE;
+    match layer {
+        PanelLayer::Overlay => common | collection::FULL_SCREEN_AUXILIARY,
+        PanelLayer::Background | PanelLayer::Bottom | PanelLayer::Top => common,
+    }
+}
+
+/// Where a panel of `size` goes in `area`, all in AppKit points with Y up:
+/// `margins` away from each edge it is anchored to, stretched between two
+/// opposite anchored edges, and centred on an axis anchored to neither.
+///
+/// `wlr-layer-shell`'s placement, which [`PanelDesc`](crate::PanelDesc) is
+/// written in, with the vertical axis turned over: `TOP` is the high end of Y.
+#[must_use]
+pub fn panel_frame(area: NSRect, anchor: PanelAnchor, size: NSSize, margins: Margins) -> NSRect {
+    let (x, width) = place_on_axis(
+        (area.origin.x, area.size.width),
+        (
+            anchor.contains(PanelAnchor::LEFT),
+            anchor.contains(PanelAnchor::RIGHT),
+        ),
+        (margins.left, margins.right),
+        size.width,
+    );
+    let (y, height) = place_on_axis(
+        (area.origin.y, area.size.height),
+        (
+            anchor.contains(PanelAnchor::BOTTOM),
+            anchor.contains(PanelAnchor::TOP),
+        ),
+        (margins.bottom, margins.top),
+        size.height,
+    );
+    NSRect::new(x, y, width, height)
+}
+
+/// One axis of [`panel_frame`]: where a panel of `length` starts along an
+/// area's `(start, length)`, and how long it is, given which ends it is
+/// anchored to and its margins from them.
+fn place_on_axis(
+    (area_start, area_length): (f64, f64),
+    (at_start, at_end): (bool, bool),
+    (margin_start, margin_end): (f64, f64),
+    length: f64,
+) -> (f64, f64) {
+    match (at_start, at_end) {
+        (true, true) => (
+            area_start + margin_start,
+            (area_length - margin_start - margin_end).max(1.0),
+        ),
+        (true, false) => (area_start + margin_start, length),
+        (false, true) => (area_start + area_length - margin_end - length, length),
+        (false, false) => (area_start + (area_length - length) / 2.0, length),
     }
 }
 
@@ -494,6 +583,72 @@ mod tests {
         assert_eq!(
             physical_size(NSSize::new(1680.0, 1050.0), 2.0),
             PhysicalSize::new(3360, 2100)
+        );
+    }
+
+    #[test]
+    fn a_panel_is_a_frameless_nonactivating_panel_at_its_layers_level() {
+        assert_eq!(PANEL_STYLE_MASK, 1 << 7, "borderless is zero");
+        assert_eq!(style::NONACTIVATING_PANEL, 1 << 7);
+        assert_eq!(
+            [
+                PanelLayer::Background,
+                PanelLayer::Bottom,
+                PanelLayer::Top,
+                PanelLayer::Overlay
+            ]
+            .map(panel_level),
+            [(2, 0), (18, 1), (9, 0), (11, 0)],
+            "CGWindowLevelKey's own numbers"
+        );
+        assert_eq!(panel_collection(PanelLayer::Top), 0b101_0001);
+        assert_eq!(panel_collection(PanelLayer::Overlay), 0b1_0101_0001);
+    }
+
+    #[test]
+    fn a_panel_frame_is_layer_shell_placement_with_y_up() {
+        // A visible frame below a 25-point menu bar on a 1440x900 screen.
+        let area = NSRect::new(0.0, 0.0, 1440.0, 875.0);
+        let margins = Margins {
+            top: 4.0,
+            right: 8.0,
+            bottom: 12.0,
+            left: 16.0,
+        };
+        let across_the_top = PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT;
+        assert_eq!(
+            panel_frame(
+                area,
+                across_the_top,
+                NSSize::new(0.0, 30.0),
+                Margins::default()
+            ),
+            NSRect::new(0.0, 845.0, 1440.0, 30.0),
+            "the top of a Y-up area is its high end"
+        );
+        assert_eq!(
+            panel_frame(area, across_the_top, NSSize::new(0.0, 30.0), margins),
+            NSRect::new(16.0, 841.0, 1416.0, 30.0),
+        );
+        assert_eq!(
+            panel_frame(
+                area,
+                PanelAnchor::BOTTOM | PanelAnchor::LEFT,
+                NSSize::new(64.0, 500.0),
+                margins
+            ),
+            NSRect::new(16.0, 12.0, 64.0, 500.0),
+            "the bottom is the low end"
+        );
+        assert_eq!(
+            panel_frame(
+                area,
+                PanelAnchor::empty(),
+                NSSize::new(600.0, 400.0),
+                margins
+            ),
+            NSRect::new(420.0, 237.5, 600.0, 400.0),
+            "centred, and an unanchored panel's margins do nothing"
         );
     }
 

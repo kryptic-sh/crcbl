@@ -208,9 +208,10 @@ mod macos {
     use crcbl_core::log::Filter;
     use crcbl_shell::{
         ButtonState, ClipboardContent, ClipboardOffer, CursorIcon, DisplayMode, KeyCode, Keysym,
-        LogicalSize, MimeType, MonitorId, PhysicalPoint, PhysicalSize, PointerButton, PointerMode,
-        ReceivedMime, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
-        SizeConstraints, WindowDesc, WindowId, WindowRole, open_backend, session_support,
+        LogicalSize, MimeType, MonitorId, PanelAnchor, PanelDesc, PanelKeyboard, PanelLayer,
+        PhysicalPoint, PhysicalSize, PointerButton, PointerMode, ReceivedMime, ScrollDelta, Shell,
+        ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints, WindowDesc, WindowId,
+        WindowRole, open_backend, session_support,
     };
 
     /// The window's title, which is **how this session finds its own window**.
@@ -553,6 +554,9 @@ mod macos {
         // And a fourth, which names the monitor it wants: the `Some(id)` arm of
         // the creation lookup, and the refusal that stands beside it.
         a_borderless_window_names_its_monitor(&mut shell);
+
+        // And the two panels lyr and pikr are: a bar and a launcher.
+        panels(&mut shell);
 
         shell.destroy_window(window).expect("destroy_window");
         assert!(
@@ -2086,6 +2090,122 @@ mod macos {
     }
 
     /// Pumps until `ready` answers, or fails naming the step that did not.
+    /// A bar across the top of the primary screen and an overlay launcher,
+    /// both hidden: what is asserted is the class, the level, the spaces they
+    /// join, the frame and the transparency, which AppKit reports for a hidden
+    /// window as readily as for a shown one.
+    fn panels(shell: &mut Box<dyn Shell>) {
+        const BAR: &str = "crcbl appkit session — bar";
+        const LAUNCHER: &str = "crcbl appkit session — launcher";
+        /// `NSWindowStyleMaskNonactivatingPanel`.
+        const NONACTIVATING: usize = 1 << 7;
+        /// `NSStatusWindowLevel` and `NSPopUpMenuWindowLevel`, as `NSWindow.h`
+        /// documents them.
+        const STATUS_LEVEL: isize = 25;
+        const POP_UP_MENU_LEVEL: isize = 101;
+        /// Every space, stationary in Mission Control, out of window cycling.
+        const EVERY_SPACE: usize = (1 << 0) | (1 << 4) | (1 << 6);
+        /// `NSWindowCollectionBehaviorFullScreenAuxiliary`.
+        const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+        const HEIGHT: f64 = 24.0;
+
+        let caps = shell.caps();
+        assert!(caps.contains(ShellCaps::PANEL | ShellCaps::TRANSPARENT));
+        assert!(
+            !caps.contains(ShellCaps::PANEL_RESERVE),
+            "macOS reserves space for nothing but the menu bar and the Dock"
+        );
+        let primary = shell
+            .monitors()
+            .iter()
+            .find(|monitor| monitor.is_primary)
+            .map(|monitor| monitor.id)
+            .expect("a primary monitor");
+        let bar = shell
+            .create_window(&WindowDesc {
+                title: BAR,
+                size: LogicalSize::new(0.0, HEIGHT),
+                visible: false,
+                transparent: true,
+                role: WindowRole::Panel(PanelDesc {
+                    monitor: Some(primary),
+                    anchor: PanelAnchor::TOP | PanelAnchor::LEFT | PanelAnchor::RIGHT,
+                    ..PanelDesc::default()
+                }),
+                ..WindowDesc::default()
+            })
+            .expect("a panel");
+        wait_for(shell, "the bar's first configure", |shell| {
+            shell.window_state(bar).ok()?.size()
+        });
+        let facts = session_support::window_facts(BAR).expect("the bar is readable");
+        let visible = session_support::menu_bar_screen_visible_frame().expect("a screen");
+        assert_eq!(facts.style_mask & NONACTIVATING, NONACTIVATING, "{facts:?}");
+        assert!(!facts.titled, "a panel has no title bar: {facts:?}");
+        assert_eq!(facts.level, STATUS_LEVEL, "above the menu bar: {facts:?}");
+        assert_eq!(
+            facts.collection_behavior & EVERY_SPACE,
+            EVERY_SPACE,
+            "{facts:?}"
+        );
+        assert_eq!(
+            facts.collection_behavior & FULL_SCREEN_AUXILIARY,
+            0,
+            "{facts:?}"
+        );
+        assert!(
+            !facts.hides_on_deactivate,
+            "a bar that hid whenever its application was not active: {facts:?}"
+        );
+        assert!(!facts.opaque, "a transparent window: {facts:?}");
+        assert!(!facts.can_become_key, "a bar takes no keyboard: {facts:?}");
+        assert_eq!(
+            [
+                facts.frame[0],
+                facts.frame[1] + facts.frame[3],
+                facts.frame[2],
+                facts.frame[3]
+            ],
+            [visible[0], visible[1] + visible[3], visible[2], HEIGHT],
+            "across the top of the visible frame, at its own height: {facts:?}"
+        );
+        shell.destroy_window(bar).expect("destroy the bar");
+
+        let launcher = shell
+            .create_window(&WindowDesc {
+                title: LAUNCHER,
+                size: LogicalSize::new(400.0, 300.0),
+                visible: false,
+                role: WindowRole::Panel(PanelDesc {
+                    layer: PanelLayer::Overlay,
+                    keyboard: PanelKeyboard::Exclusive,
+                    ..PanelDesc::default()
+                }),
+                ..WindowDesc::default()
+            })
+            .expect("a panel");
+        wait_for(shell, "the launcher's first configure", |shell| {
+            shell.window_state(launcher).ok()?.size()
+        });
+        let facts = session_support::window_facts(LAUNCHER).expect("the launcher is readable");
+        assert_eq!(facts.level, POP_UP_MENU_LEVEL, "{facts:?}");
+        assert_eq!(
+            facts.collection_behavior & FULL_SCREEN_AUXILIARY,
+            FULL_SCREEN_AUXILIARY,
+            "an overlay may join a full-screen window's space: {facts:?}"
+        );
+        assert!(
+            facts.can_become_key,
+            "a launcher takes the keyboard: {facts:?}"
+        );
+        assert!(facts.opaque, "not asked to be transparent: {facts:?}");
+        assert_eq!(facts.content_points, [400.0, 300.0], "{facts:?}");
+        shell
+            .destroy_window(launcher)
+            .expect("destroy the launcher");
+        println!("crcbl appkit session: a bar and a launcher are panels at their levels");
+    }
+
     fn wait_for<T>(
         shell: &mut Box<dyn Shell>,
         what: &str,

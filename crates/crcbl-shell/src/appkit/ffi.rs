@@ -296,6 +296,42 @@ pub mod style {
     pub const MINIATURIZABLE: NSUInteger = 1 << 2;
     /// `NSWindowStyleMaskResizable`.
     pub const RESIZABLE: NSUInteger = 1 << 3;
+    /// `NSWindowStyleMaskNonactivatingPanel` — an `NSPanel` that can take the
+    /// keyboard without bringing its application forward. Only meaningful on
+    /// an `NSPanel`.
+    pub const NONACTIVATING_PANEL: NSUInteger = 1 << 7;
+}
+
+/// `CGWindowLevelKey` values: what `CGWindowLevelForKey` turns into a window
+/// level. Asked for at run time rather than spelled as numbers, because the
+/// levels are the window server's to define.
+pub mod level_key {
+    /// `kCGDesktopWindowLevelKey`: the desktop picture's level.
+    pub const DESKTOP: i32 = 2;
+    /// `kCGStatusWindowLevelKey`: above the menu bar, which is the main menu
+    /// level, one below.
+    pub const STATUS: i32 = 9;
+    /// `kCGPopUpMenuWindowLevelKey`: above every application window, a
+    /// full-screen one included when the window may join its space.
+    pub const POP_UP_MENU: i32 = 11;
+    /// `kCGDesktopIconWindowLevelKey`: the desktop icons' level.
+    pub const DESKTOP_ICON: i32 = 18;
+}
+
+/// `NSWindowCollectionBehavior` values.
+pub mod collection {
+    use super::NSUInteger;
+
+    /// `NSWindowCollectionBehaviorCanJoinAllSpaces`: on every space.
+    pub const CAN_JOIN_ALL_SPACES: NSUInteger = 1 << 0;
+    /// `NSWindowCollectionBehaviorStationary`: left in place by Exposé and
+    /// Mission Control.
+    pub const STATIONARY: NSUInteger = 1 << 4;
+    /// `NSWindowCollectionBehaviorIgnoresCycle`: not in Cmd-` cycling.
+    pub const IGNORES_CYCLE: NSUInteger = 1 << 6;
+    /// `NSWindowCollectionBehaviorFullScreenAuxiliary`: may share a
+    /// full-screen window's space.
+    pub const FULL_SCREEN_AUXILIARY: NSUInteger = 1 << 8;
 }
 
 /// Everything else that is a bare number.
@@ -542,6 +578,9 @@ mod sys {
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
         pub fn CGMainDisplayID() -> u32;
+        /// The window level a `CGWindowLevelKey` names; see
+        /// [`level_key`](super::level_key).
+        pub fn CGWindowLevelForKey(key: i32) -> i32;
         pub fn CGDisplayCopyDisplayMode(display: u32) -> *mut c_void;
         pub fn CGDisplayModeGetRefreshRate(mode: *mut c_void) -> f64;
         pub fn CGDisplayModeRelease(mode: *mut c_void);
@@ -593,8 +632,9 @@ mod sys {
 pub use sys::{
     CACurrentMediaTime, CGAssociateMouseAndMouseCursorPosition, CGDisplayCopyDisplayMode,
     CGDisplayModeGetRefreshRate, CGDisplayModeRelease, CGMainDisplayID, CGWarpMouseCursorPosition,
-    NSApplicationDidChangeScreenParametersNotification, NSDefaultRunLoopMode, class_addMethod,
-    class_addProtocol, objc_allocateClassPair, objc_getProtocol, objc_registerClassPair,
+    CGWindowLevelForKey, NSApplicationDidChangeScreenParametersNotification, NSDefaultRunLoopMode,
+    class_addMethod, class_addProtocol, objc_allocateClassPair, objc_getProtocol,
+    objc_registerClassPair,
 };
 
 /// The three declarations that exist for the macOS test suite alone.
@@ -889,6 +929,19 @@ pub unsafe fn msg_set_bool(receiver: Id, selector: Sel, argument: bool) {
 pub unsafe fn msg_set_usize(receiver: Id, selector: Sel, argument: NSUInteger) {
     // SAFETY: the signature written here is the caller's obligation.
     let send: unsafe extern "C" fn(Id, Sel, NSUInteger) = unsafe { msg_send() };
+    unsafe { send(receiver, selector, argument) };
+}
+
+/// `[receiver sel:NSInteger]`.
+///
+/// # Safety
+///
+/// As [`msg`].
+#[cfg(target_os = "macos")]
+#[inline]
+pub unsafe fn msg_set_isize(receiver: Id, selector: Sel, argument: NSInteger) {
+    // SAFETY: the signature written here is the caller's obligation.
+    let send: unsafe extern "C" fn(Id, Sel, NSInteger) = unsafe { msg_send() };
     unsafe { send(receiver, selector, argument) };
 }
 

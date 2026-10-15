@@ -22,6 +22,7 @@ use super::ffi::{self, Id, NSRect, Pool as AutoreleasePool, Sel, value};
 use super::geometry;
 use super::input;
 use super::monitors::{self, Screen};
+use super::panel::Panel;
 use super::pasteboard;
 use super::pointer::Visibility;
 use super::window;
@@ -117,6 +118,9 @@ pub(super) struct AppWindow {
     pub(super) accept_drops: bool,
     pub(super) focused: bool,
     close_pending: bool,
+    /// What a panel was created with, so it can be placed again; `None` for
+    /// every other window. See [`panel`](super::panel).
+    pub(super) panel: Option<Panel>,
 }
 
 impl AppWindow {
@@ -374,6 +378,22 @@ impl AppKitShell {
     /// `nil` `screen` and is a real state for a window ordered out — or when the
     /// display it names is one this shell has not enumerated, which is a hotplug
     /// between the two.
+    /// AppKit or the shell asked for a window to go: `windowShouldClose:`, or
+    /// a panel's screen being detached.
+    ///
+    /// One request until it is answered, as on the other backends.
+    pub(super) fn close_requested(&mut self, handle: WindowId) {
+        let Ok(state) = self.window_mut(handle) else {
+            return;
+        };
+        if state.close_pending {
+            return;
+        }
+        state.close_pending = true;
+        self.queue
+            .push_back(ShellEvent::CloseRequested { window: handle });
+    }
+
     pub(super) fn screen_of(&self, window: Id) -> Option<MonitorId> {
         // SAFETY: a live window of this shell; `screen` is an accessor that may
         // answer nil.
@@ -524,11 +544,7 @@ impl AppKitShell {
                 }
                 RawEvent::CloseRequested { .. } => {
                     let Some(handle) = handle else { continue };
-                    if let Ok(state) = self.window_mut(handle) {
-                        state.close_pending = true;
-                    }
-                    self.queue
-                        .push_back(ShellEvent::CloseRequested { window: handle });
+                    self.close_requested(handle);
                 }
                 RawEvent::Closed { .. } => {
                     // Only reachable when the window went away without this
@@ -555,8 +571,10 @@ impl AppKitShell {
                         unsafe { monitors::enumerate(self) }
                     };
                     self.screens = screens;
-                    crate::monitor::queue_removed(&self.monitors, &monitors, &mut self.queue);
+                    let removed =
+                        crate::monitor::queue_removed(&self.monitors, &monitors, &mut self.queue);
                     self.monitors = monitors;
+                    self.place_panels(&removed);
                     self.queue.push_back(ShellEvent::MonitorsChanged);
                 }
                 RawEvent::Key { .. }
@@ -919,6 +937,11 @@ impl Shell for AppKitShell {
     ///   *starting* a drag is out of scope on any platform. Registration is
     ///   what the system gates on, so a window created without the flag cannot
     ///   receive a drop even in principle.
+    /// * [`PANEL`](ShellCaps::PANEL) — a non-activating `NSPanel` at its
+    ///   layer's level; see [`panel`](super::panel).
+    /// * [`TRANSPARENT`](ShellCaps::TRANSPARENT) — a window that is not opaque,
+    ///   with a clear background, no shadow and a layer composited by its
+    ///   alpha.
     ///
     /// # What is clear, and why each one is a decision
     ///
@@ -945,6 +968,9 @@ impl Shell for AppKitShell {
     ///   four where the two capture modes come apart, and
     ///   [`set_pointer_mode`](Shell::set_pointer_mode) refuses
     ///   [`Confined`](PointerMode::Confined) by name.
+    /// * [`PANEL_RESERVE`](ShellCaps::PANEL_RESERVE) — **macOS lets nothing
+    ///   but the menu bar and the Dock reserve space.** A reserving panel is
+    ///   built and overlaps what is behind it.
     fn caps(&self) -> ShellCaps {
         self.caps
     }
@@ -994,17 +1020,30 @@ impl Shell for AppKitShell {
                 "app_id contains a NUL byte".to_string(),
             ));
         }
-        let target = match desc.mode {
-            DisplayMode::Borderless {
-                monitor: Some(monitor),
-            } => self.screens.iter().find(|screen| screen.id == monitor),
+        let panel = match desc.role {
+            crate::WindowRole::Panel(panel) => Some(Panel::new(&panel, desc.size)),
+            _ => None,
+        };
+        let target = match (&panel, desc.mode) {
+            (Some(panel), _) => self.panel_screen(panel),
+            (
+                None,
+                DisplayMode::Borderless {
+                    monitor: Some(monitor),
+                },
+            ) => self
+                .screens
+                .iter()
+                .find(|screen| screen.id == monitor)
+                .copied(),
             // Index zero is the menu-bar screen — macOS's primary.
-            _ => self.screens.first(),
-        }
-        .copied();
+            _ => self.screens.first().copied(),
+        };
 
-        let created = self.create_native_window(desc, target.as_ref())?;
+        let created = self.create_native_window(desc, target.as_ref(), panel.as_ref())?;
         let effective_mode = match desc.mode {
+            // A panel has no full-screen state: see `set_mode`.
+            _ if panel.is_some() => DisplayMode::Windowed,
             DisplayMode::Windowed => DisplayMode::Windowed,
             DisplayMode::Borderless { .. } => DisplayMode::Borderless {
                 monitor: self.screen_of(created.window),
@@ -1037,6 +1076,7 @@ impl Shell for AppKitShell {
             accept_drops: desc.accept_drops,
             focused: false,
             close_pending: false,
+            panel,
         };
         let handle: WindowId = self.windows.insert(state).cast();
 
@@ -1138,7 +1178,13 @@ impl Shell for AppKitShell {
     /// [`ShellError::InvalidWindow`] if the handle is stale.
     fn set_visible(&mut self, handle: WindowId, visible: bool) -> Result<(), ShellError> {
         let _pool = AutoreleasePool::push();
-        let window = self.window(handle)?.window;
+        let state = self.window(handle)?;
+        let window = state.window;
+        if let (true, Some(panel)) = (visible, state.panel) {
+            // SAFETY: a live panel of this shell, on the main thread.
+            unsafe { Self::show_panel(window, panel.keyboard) };
+            return Ok(());
+        }
         // SAFETY: a live window; `nil` is the documented sender for both.
         unsafe {
             let selector = if visible {
@@ -1177,7 +1223,13 @@ impl Shell for AppKitShell {
         {
             return Err(ShellError::NoSuchMonitor(monitor.0));
         }
-        self.window_mut(handle)?.requested_mode = mode;
+        let state = self.window_mut(handle)?;
+        state.requested_mode = mode;
+        // A panel has no full-screen state, so the request stays one: its
+        // effective mode is always windowed, as on the other backends.
+        if state.panel.is_some() {
+            return Ok(());
+        }
         self.apply_mode(handle, mode)?;
 
         // The `windowDidResize:` the frame change produced is already in the raw

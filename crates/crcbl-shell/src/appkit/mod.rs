@@ -234,6 +234,8 @@ mod input;
 #[cfg(target_os = "macos")]
 mod monitors;
 #[cfg(target_os = "macos")]
+mod panel;
+#[cfg(target_os = "macos")]
 pub mod session_support;
 #[cfg(target_os = "macos")]
 mod shell;
@@ -381,6 +383,8 @@ pub(crate) const fn caps() -> ShellCaps {
         .union(ShellCaps::TEXT_IME)
         .union(ShellCaps::CLIPBOARD)
         .union(ShellCaps::DRAG_DROP)
+        .union(ShellCaps::PANEL)
+        .union(ShellCaps::TRANSPARENT)
 }
 
 #[cfg(test)]
@@ -403,6 +407,8 @@ mod tests {
             ShellCaps::TEXT_IME,
             ShellCaps::CLIPBOARD,
             ShellCaps::DRAG_DROP,
+            ShellCaps::PANEL,
+            ShellCaps::TRANSPARENT,
         ] {
             assert!(caps.contains(present), "{present:?} is implemented");
         }
@@ -412,10 +418,14 @@ mod tests {
         // way to ask, and `POINTER_CONFINE` because **macOS has no confine API**
         // and the alternatives are warp-based approximations. A capability that
         // overstates itself is worse than one that is missing.
+        // `PANEL_RESERVE` because macOS lets nothing but the menu bar and the
+        // Dock reserve space, and `POPUP` because child panels are not built yet.
         for absent in [
             ShellCaps::FRACTIONAL_SCALE,
             ShellCaps::HW_UPSCALE,
             ShellCaps::POINTER_CONFINE,
+            ShellCaps::PANEL_RESERVE,
+            ShellCaps::POPUP,
         ] {
             assert!(!caps.contains(absent), "{absent:?} is not implemented");
         }

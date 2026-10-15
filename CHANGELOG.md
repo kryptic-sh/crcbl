@@ -910,8 +910,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   under the pointer. A panel that takes the keyboard asks for the foreground
   when shown. A reserving panel is an appbar, so maximised windows stop at it
   and the space comes back when it is destroyed or the shell is dropped. AppKit
-  refuses panels until it implements them, and only the headless shell builds
-  popups so far. `LogicalRect` is new in `crcbl_shell`.
+  builds panels as non-activating `NSPanel`s at a level per layer, above the
+  menu bar for `Top`, on every space, placed in the screen's visible frame or
+  its whole frame, and honours `transparent`; it reserves no edge, which macOS
+  keeps for the menu bar and the Dock. Only the headless shell builds popups so
+  far. `LogicalRect` is new in `crcbl_shell`.
 
 - **Fonts from bytes read at run time.** `Font::parse` takes any `FontData`: an
   `include_bytes!` as before, or a `Vec<u8>`, `Box<[u8]>` or `Arc<[u8]>` an

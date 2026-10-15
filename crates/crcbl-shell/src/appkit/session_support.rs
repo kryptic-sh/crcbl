@@ -493,6 +493,45 @@ pub struct WindowFacts {
     pub backing_scale: f64,
     /// `-[[NSWindow screen] frame]`, or `None` for a window on no screen.
     pub screen_frame: Option<[f64; 4]>,
+    /// `-[NSWindow level]`.
+    pub level: isize,
+    /// `-[NSWindow collectionBehavior]`.
+    pub collection_behavior: usize,
+    /// `-[NSWindow hidesOnDeactivate]`, which an `NSPanel` turns on by default.
+    pub hides_on_deactivate: bool,
+    /// `-[NSWindow isOpaque]`.
+    pub opaque: bool,
+    /// `-[NSWindow canBecomeKeyWindow]`, which this backend's window classes
+    /// answer.
+    pub can_become_key: bool,
+}
+
+/// `-[[NSScreen screens][0] visibleFrame]` — the menu-bar screen's, which is
+/// the primary monitor — as `[x, y, width, height]` in AppKit points, Y up.
+///
+/// # Errors
+///
+/// A string when there is no screen at all.
+pub fn menu_bar_screen_visible_frame() -> Result<[f64; 4], String> {
+    let _pool = Pool::push();
+    let class = ffi::class(c"NSScreen").ok_or("the runtime has no NSScreen")?;
+    // SAFETY: class and instance accessors on the main thread with a pool in
+    // scope; `objectAtIndex:` is only sent to a non-empty array.
+    unsafe {
+        let screens = ffi::msg(class.cast(), ffi::sel(c"screens"));
+        if screens.is_null() || ffi::msg_usize(screens, ffi::sel(c"count")) == 0 {
+            return Err("+[NSScreen screens] is empty".to_owned());
+        }
+        let at: unsafe extern "C" fn(Id, Sel, usize) -> Id = ffi::msg_send();
+        let screen = at(screens, ffi::sel(c"objectAtIndex:"), 0);
+        let frame = ffi::msg_rect(screen, ffi::sel(c"visibleFrame"));
+        Ok([
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+        ])
+    }
 }
 
 /// This process's own window, found by `title`, described from AppKit's own
@@ -694,6 +733,18 @@ unsafe fn facts_of(window: Id, app_active: bool) -> WindowFacts {
     // SAFETY: a live `NSWindow`. Each is an accessor of the type its helper
     // dispatches, and the two object accessors answer objects owned by the
     // window rather than by this call.
+    // SAFETY: as above; `level` is an `NSInteger` read through the
+    // same-width unsigned getter, and the rest answer what their helpers
+    // dispatch.
+    let (level, collection_behavior, hides_on_deactivate, opaque, can_become_key) = unsafe {
+        (
+            ffi::msg_usize(window, ffi::sel(c"level")) as isize,
+            ffi::msg_usize(window, ffi::sel(c"collectionBehavior")),
+            ffi::msg_bool(window, ffi::sel(c"hidesOnDeactivate")),
+            ffi::msg_bool(window, ffi::sel(c"isOpaque")),
+            ffi::msg_bool(window, ffi::sel(c"canBecomeKeyWindow")),
+        )
+    };
     let (is_key, accepts_mouse_moved, responder, content, style_mask, frame, backing_scale, screen) = unsafe {
         (
             ffi::msg_bool(window, ffi::sel(c"isKeyWindow")),
@@ -745,6 +796,11 @@ unsafe fn facts_of(window: Id, app_active: bool) -> WindowFacts {
         content_points: [content_frame.size.width, content_frame.size.height],
         backing_scale,
         screen_frame,
+        level,
+        collection_behavior,
+        hides_on_deactivate,
+        opaque,
+        can_become_key,
     }
 }
 
