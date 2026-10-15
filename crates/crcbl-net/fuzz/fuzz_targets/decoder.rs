@@ -138,6 +138,8 @@ fuzz_target!(|data: &[u8]| {
     let limits = crcbl_image::Limits::DEFAULT;
     let _ = crcbl_image::png::decode(data, &limits);
     let _ = crcbl_image::jpeg::decode(data, &limits);
+    let _ = crcbl_image::bmp::decode(data, &limits);
+    let _ = crcbl_image::ico::decode(data, 32, &limits);
     if let [width, height, stride, flags, pixels @ ..] = data {
         use crcbl_image::raw::{AllZeroAlpha, Alpha, ChannelOrder, RawPixels, RowOrder, convert};
         let order = [

@@ -552,6 +552,23 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       (decoders disagree on its RGB, and icons and album art do not use it). Not
       matched exactly: 4:4:0, which libjpeg-turbo filters vertically and this
       replicates. EXIF orientation is not applied.
+    - **BMP and ICO are in**, `bmp::decode` and `ico::decode` behind the `bmp`
+      and `ico` features, written here: the core and INFO-through-V5 headers,
+      1/4/8-bit palettes, 16/24/32-bit direct colour with or without masks (a
+      narrow channel widened by repeating its bits), RLE8 and RLE4 (skipped
+      pixels transparent), top-down rows; an icon's frame nearest the asked size
+      by `resize::nearest_size`, as PNG or as a headerless bitmap whose AND mask
+      applies when its alpha is zero everywhere. Decided: a 32-bit bitmap with
+      no masks keeps its fourth byte as alpha unless every pixel's is zero, as
+      Chrome reads it (Pillow always drops it, Windows calls it unused), because
+      icon writers fill it with alpha. Verified against fixtures Pillow 12.3
+      wrote (1-bit, grey, palette, RGB, RGBA; icons with PNG and with bitmap
+      frames) — colour from Pillow's decode, alpha from the image written — and
+      hand-built bitmaps for what Pillow cannot write (4-bit, RLE8, RLE4, 5-6-5
+      and 5-5-5, the core header, top-down, an icon frame with an AND mask and
+      one with masks after its header), with hand mutants of every mechanism
+      each failing a test. Refused: JPEG- and PNG-compressed bitmaps and the
+      OS/2 2.x header.
     - Not done yet: decoding from a path (a caller reads the file
       `IconThemes::lookup` found, and keys its cache with `FileVersion`), and
       moving `crcbl-sprite`'s and `crcbl-golden`'s own PNG loaders onto this
@@ -636,8 +653,7 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `desktop-entry` hint name a theme icon), which the order below already
       puts before JPEG.
     - Order from here: SVG (theme icons are mostly SVG: lyr's M6 named icons,
-      pikr's port, lyr's tray), then ICO, BMP and WebP (pikr's parity), then
-      XPM.
+      pikr's port, lyr's tray), then WebP (pikr's parity), then XPM.
 
 ### Left behind by the seam split
 
