@@ -2138,6 +2138,10 @@ impl WaylandShell {
         let layer_shell = !self.conn.layer_shell.is_null();
         caps.set(ShellCaps::PANEL, layer_shell);
         caps.set(ShellCaps::PANEL_RESERVE, layer_shell);
+        // A compositor blends every surface by its buffer's alpha unless the
+        // client declares a region opaque, which this backend never does, so a
+        // swapchain with premultiplied alpha is all a transparent window needs.
+        caps.insert(ShellCaps::TRANSPARENT);
         caps
     }
 

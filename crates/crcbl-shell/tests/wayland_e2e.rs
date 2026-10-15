@@ -3132,15 +3132,22 @@ fn a_reserving_panel_takes_its_edge_from_tiled_windows_and_gives_it_back() {
 fn an_exclusive_panel_takes_the_keyboard_when_it_maps() {
     let mut session = Session::open();
     let size = LogicalSize::new(400.0, 300.0);
-    let launcher = session.create(&panel(
-        "crcbl e2e launcher",
-        size,
-        PanelDesc {
-            layer: PanelLayer::Overlay,
-            keyboard: PanelKeyboard::Exclusive,
-            ..PanelDesc::default()
-        },
-    ));
+    assert!(
+        session.shell.caps().contains(ShellCaps::TRANSPARENT),
+        "a Wayland compositor blends a surface by its alpha"
+    );
+    let launcher = session.create(&WindowDesc {
+        transparent: true,
+        ..panel(
+            "crcbl e2e launcher",
+            size,
+            PanelDesc {
+                layer: PanelLayer::Overlay,
+                keyboard: PanelKeyboard::Exclusive,
+                ..PanelDesc::default()
+            },
+        )
+    });
     session.pump_until("the panel's first configure", |session| {
         session.size(launcher).is_some()
     });

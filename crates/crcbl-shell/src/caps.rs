@@ -230,6 +230,11 @@ bitflags::bitflags! {
         /// [`WindowDesc::transparent`](crate::WindowDesc::transparent) is
         /// honoured: where the frame's alpha is below one, the desktop shows
         /// through.
+        ///
+        /// The window system's half. The frame's half is a swapchain that
+        /// carries alpha, premultiplied — which the HAL's surface caps say
+        /// whether the driver offers — and a renderer that clears to alpha
+        /// zero.
         const TRANSPARENT = 1 << 18;
     }
 }

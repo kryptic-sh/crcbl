@@ -69,6 +69,13 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      and `closed` is a `CloseRequested`. That is S1 and S2 (by output), and S21,
      because the fractional-scale and viewport objects are made for every
      surface; no e2e test runs a panel at a fractional scale yet.
+   - Transparency (S16) is on: `ShellCaps::TRANSPARENT` is set, because a
+     compositor blends a surface by its buffer's alpha unless the client
+     declares an opaque region, which this backend never does. The swapchain's
+     premultiplied alpha is the caller's. Not done: declaring an opaque region
+     for the windows that are not transparent, which is an optimisation
+     compositors use, and a test that reads pixels back through the compositor
+     (the e2e test checks the cap and that a transparent panel is built).
    - `MonitorInfo::name` was already `wl_output.name` on Wayland, so S7's name
      is Win32's (`MONITORINFOEX::szDevice`) and AppKit's
      (`NSScreen.localizedName`) to check.
@@ -87,8 +94,6 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      unmutated run is main's CI.
    - Still to do on Wayland:
      - no flash on map: the first commit carries the first frame;
-     - transparent surfaces (S16), which on Wayland is the swapchain's composite
-       alpha rather than anything the shell sends;
      - `xdg_popup` (S3), on layer surfaces through `get_popup`, with an empty
        input region for `Passthrough` and `xdg_popup.grab` for `Grab`;
      - repositioning a live popup through `xdg_popup.reposition` (needs

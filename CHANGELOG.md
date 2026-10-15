@@ -902,8 +902,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   wherever the compositor has `zwlr_layer_shell_v1`, version 4 for an on-demand
   keyboard: the compositor sizes a stretched axis and reports it as `Resized`,
   `Reserve::OwnExtent` is the exclusive zone, and a layer surface's `closed` is
-  a `CloseRequested`. The other window-system backends refuse them until each
-  implements them. `LogicalRect` is new in `crcbl_shell`.
+  a `CloseRequested`. Wayland also honours `transparent` on every window: a
+  swapchain with premultiplied alpha shows the desktop through. The other
+  window-system backends refuse panels and popups until each implements them.
+  `LogicalRect` is new in `crcbl_shell`.
 
 - **Fonts from bytes read at run time.** `Font::parse` takes any `FontData`: an
   `include_bytes!` as before, or a `Vec<u8>`, `Box<[u8]>` or `Arc<[u8]>` an
