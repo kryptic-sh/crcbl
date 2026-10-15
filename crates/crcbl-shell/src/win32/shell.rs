@@ -509,6 +509,24 @@ impl Win32Shell {
         self.queue.push_back(ShellEvent::CloseRequested { window });
     }
 
+    /// Shows a panel through [`show_panel`](Self::show_panel), records
+    /// whether it is now showing, and queues
+    /// [`FocusRefused`](ShellEvent::FocusRefused) if the foreground it asked
+    /// for was refused.
+    fn show_panel_window(
+        &mut self,
+        window: WindowId,
+        keyboard: crate::PanelKeyboard,
+    ) -> Result<(), ShellError> {
+        let hwnd = self.window(window)?.raw();
+        let granted = Self::show_panel(hwnd, keyboard);
+        self.window_mut(window)?.visible = Self::is_showing(hwnd);
+        if !granted {
+            self.queue.push_back(ShellEvent::FocusRefused { window });
+        }
+        Ok(())
+    }
+
     fn window_by_key(&self, key: isize) -> Option<WindowId> {
         self.windows
             .iter()
@@ -1239,6 +1257,9 @@ impl Shell for Win32Shell {
         let window = self.windows.insert(window).cast();
         let state = self.window(window)?;
         self.refresh_limits(state);
+        if let (true, Some(panel)) = (desc.visible, panel) {
+            self.show_panel_window(window, panel.keyboard)?;
+        }
         Ok(window)
     }
 
@@ -1313,10 +1334,7 @@ impl Shell for Win32Shell {
         let state = self.window(window)?;
         let hwnd = state.raw();
         if let (true, Some(panel)) = (visible, state.panel) {
-            Self::show_panel(hwnd, panel.keyboard);
-            let showing = Self::is_showing(hwnd);
-            self.window_mut(window)?.visible = showing;
-            return Ok(());
+            return self.show_panel_window(window, panel.keyboard);
         }
         let command = if visible {
             // `SW_SHOWNORMAL` rather than `SW_SHOW`: it also restores a window

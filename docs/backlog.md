@@ -139,9 +139,12 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      showing with `SW_SHOWNOACTIVATE`, not a `WM_MOUSEACTIVATE` answer. Mouse
      messages reach a window that is not active anyway, and the style also
      covers activation by means other than a click. An `Exclusive` panel calls
-     `SetForegroundWindow` when shown, and a refusal is logged and visible to
-     the program as a `Focus` that never arrives (pikr item 9). Whether a richer
-     report is wanted is pikr's call.
+     `SetForegroundWindow` when shown, and a refusal is
+     `ShellEvent::FocusRefused { window }` (pikr item 9). Decided 2026-10-15, at
+     pikr's request, over a `Focus { focused: false }` for a window that never
+     had focus, which a program could not tell from an ordinary focus loss.
+     Untested: no test can make the system refuse this process the foreground,
+     so the refusal path has run only in review.
    - **Verified so far:** `panel_styles`, `panel_rect`, `pixels` and
      `with_depth` unit tests on the Windows host. The real-desktop tests in
      `win32/shell/tests.rs` (`a_bar_is_a_topmost_tool_window_…`,

@@ -397,6 +397,20 @@ pub enum ShellEvent {
         monitor: MonitorId,
     },
 
+    /// The window asked for the keyboard and the window system refused it.
+    ///
+    /// A [panel](crate::WindowRole::Panel) that takes the keyboard outright
+    /// ([`PanelKeyboard::Exclusive`](crate::PanelKeyboard::Exclusive)) asks
+    /// when it is shown. Win32 refuses the foreground to a process the user is
+    /// not working in, and then no [`Focus`](ShellEvent::Focus) follows: keys
+    /// keep going to the window the user was in. This is how a program finds
+    /// out, without guessing a timeout — to retry, to say so, or to draw the
+    /// user's attention another way.
+    FocusRefused {
+        /// The window that asked.
+        window: WindowId,
+    },
+
     /// A file was dropped on the window.
     ///
     /// One event per file: a multi-file drop produces several. Only delivered
@@ -472,6 +486,7 @@ impl ShellEvent {
             | Self::TextCommit { window, .. }
             | Self::TextPreedit { window, .. }
             | Self::DroppedFile { window, .. }
+            | Self::FocusRefused { window }
             | Self::ClipboardData { window, .. } => Some(*window),
             Self::MonitorsChanged | Self::MonitorRemoved { .. } => None,
         }
@@ -500,6 +515,7 @@ impl ShellEvent {
             | Self::Focus { .. }
             | Self::MonitorsChanged
             | Self::MonitorRemoved { .. }
+            | Self::FocusRefused { .. }
             | Self::ClipboardData { .. } => None,
         }
     }
@@ -538,6 +554,7 @@ impl ShellEvent {
             Self::TextPreedit { .. } => "TextPreedit",
             Self::MonitorsChanged => "MonitorsChanged",
             Self::MonitorRemoved { .. } => "MonitorRemoved",
+            Self::FocusRefused { .. } => "FocusRefused",
             Self::DroppedFile { .. } => "DroppedFile",
             Self::ClipboardData { .. } => "ClipboardData",
         }
@@ -710,6 +727,7 @@ mod tests {
             ShellEvent::MonitorRemoved {
                 monitor: MonitorId(2),
             },
+            ShellEvent::FocusRefused { window },
         ];
 
         let mut names = Vec::new();

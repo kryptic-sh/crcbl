@@ -928,6 +928,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   not by pointer. `Font::id`, `Font::data` and `Font::metrics` are no longer
   `const`, and `Font::data` borrows from the font.
 
+- **`ShellEvent::FocusRefused`: the window system said no to the keyboard.** A
+  panel that takes the keyboard asks for the foreground when shown, and Win32
+  refuses it to a process the user is not working in. The refusal now arrives as
+  an event naming the window, so a launcher can retry or say so instead of
+  waiting for a `Focus` that never comes.
+
 - **`ShellEvent::MonitorRemoved`: which monitor was unplugged.** Every backend
   queues one for each monitor that leaves the list, before the `MonitorsChanged`
   that drops it, so a program can act on the id while it still knows what it

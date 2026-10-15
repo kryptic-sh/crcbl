@@ -183,7 +183,9 @@ impl Win32Shell {
         // outlive the call, this shell's registered class, a top-level window
         // with no menu, and the `Shared` this shell owns as the parameter. The
         // window is created hidden, whatever `visible` says, so that showing it
-        // is `show_panel`'s decision about activation and not the system's.
+        // is `show_panel`'s decision about activation and not the system's,
+        // made by `create_window` once the window has a handle to report a
+        // refused foreground against.
         let hwnd = unsafe {
             ffi::CreateWindowExW(
                 styles.ex_style,
@@ -228,9 +230,6 @@ impl Win32Shell {
                 );
             }
         }
-        if desc.visible {
-            Self::show_panel(hwnd, panel.keyboard);
-        }
         Ok(Created {
             hwnd,
             dpi: Self::dpi_of(hwnd),
@@ -241,11 +240,11 @@ impl Win32Shell {
     /// Shows a panel: without activating it, unless it takes the keyboard
     /// outright, in which case it is also brought to the foreground.
     ///
-    /// The system may refuse the foreground to a process the user is not
-    /// working in. That is logged, and the panel's
-    /// [`Focus`](crate::ShellEvent::Focus) never arrives, which is how a
-    /// program finds out.
-    pub(super) fn show_panel(hwnd: Handle, keyboard: PanelKeyboard) {
+    /// `false` when the system refused the foreground, which it does to a
+    /// process the user is not working in; the caller reports it as
+    /// [`FocusRefused`](crate::ShellEvent::FocusRefused).
+    #[must_use]
+    pub(super) fn show_panel(hwnd: Handle, keyboard: PanelKeyboard) -> bool {
         let command = match keyboard {
             PanelKeyboard::Exclusive => value::SW_SHOW_NORMAL,
             PanelKeyboard::None | PanelKeyboard::OnDemand => value::SW_SHOW_NO_ACTIVATE,
@@ -255,14 +254,9 @@ impl Win32Shell {
         unsafe { ffi::ShowWindow(hwnd, command) };
         if keyboard == PanelKeyboard::Exclusive {
             // SAFETY: a request about this shell's own window.
-            let granted = unsafe { ffi::SetForegroundWindow(hwnd) } != 0;
-            if !granted {
-                crcbl_core::log::warn!(
-                    "win32: the system refused a panel that takes the keyboard the foreground; \
-                     keys go to the window the user was in"
-                );
-            }
+            return unsafe { ffi::SetForegroundWindow(hwnd) } != 0;
         }
+        true
     }
 
     /// Places every panel again after the monitors changed, and asks each
