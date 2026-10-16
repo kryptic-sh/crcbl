@@ -556,6 +556,11 @@ pub struct Ui {
     /// The space the last [`Ui::layout`] was given, from its origin; `None`
     /// before the first.
     viewport: Option<ClipRect>,
+    /// Each virtualized block this frame built, and the rows it built.
+    built_rows: Vec<widgets::BuiltRows>,
+    /// Whether the last layout showed a row its build left out; see
+    /// [`Ui::needs_rebuild`].
+    rows_missed: bool,
     /// The tooltip's subject and clock; see `tooltip.rs`.
     tooltip: tooltip::TooltipState,
     /// The node whose context menu this frame's secondary press or `ui_menu`
@@ -611,6 +616,7 @@ impl Ui {
         self.tree_toggled = None;
         self.vertical_focus_move = None;
         self.popup_roots.clear();
+        self.built_rows.clear();
         self.paragraphs.clear();
         self.typeahead.built = None;
         let clicked = self.resolve_pointer(pointer);
@@ -1123,7 +1129,8 @@ impl Ui {
     }
 
     /// Lays out this frame's tree and prunes every stored node it did not
-    /// build.
+    /// build, then records whether a virtualized view showed a row the build
+    /// left out, for [`Ui::needs_rebuild`].
     ///
     /// Every top-level block is a root, laid out in `available` and placed at
     /// `origin`; a page with more than one panel puts them under one root and
@@ -1164,6 +1171,7 @@ impl Ui {
         if self.reveal_requested() {
             self.place(origin);
         }
+        self.check_built_rows();
     }
 
     /// The text `node` shows: `None` unless it is a text span.

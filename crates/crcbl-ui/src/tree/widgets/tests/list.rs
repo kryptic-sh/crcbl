@@ -178,3 +178,131 @@ fn the_focused_row_is_kept_and_the_view_shows_the_rows_its_offset_names() {
         );
     }
 }
+
+/// **One build after the row count or the offset changes builds exactly the
+/// rows the view then shows**, and layout finds nothing missing: a list that
+/// shrinks under a deep offset builds the rows it now ends with, not an empty
+/// window past its new end, and a jump of the offset builds the rows it names.
+#[test]
+fn one_build_windows_this_frames_rows_and_offset() {
+    let mut ui = Ui::new();
+    sheet(&mut ui);
+    let page = list_page(&mut ui, 100, idle(), NavInput::default());
+    let list = page.list.key;
+
+    // The rows the view shows at `offset` and the overscan on each side.
+    let window = |offset: f32, rows: usize| {
+        let top = (offset / ROW) as usize;
+        let end = ((offset + VIEW) / ROW).ceil() as usize;
+        top.saturating_sub(LIST_OVERSCAN)..(end + LIST_OVERSCAN).min(rows)
+    };
+    let check = |ui: &Ui, page: &ListPage, rows: usize, offset: f32| {
+        assert_eq!(
+            page.built,
+            window(offset, rows).collect::<Vec<_>>(),
+            "{rows} rows at {offset}"
+        );
+        assert_eq!(ui.scroll_offset_of(list).y, offset);
+        let top = (offset / ROW) as usize;
+        let (view_min, _) = rect(ui, list);
+        assert_eq!(rect(ui, row_key(ui, page, top)).0.y, view_min.y);
+        assert!(!ui.needs_rebuild(), "{rows} rows at {offset} missed a row");
+    };
+
+    // Jump to the end of a hundred rows, then shrink to four: the offset
+    // clamps to nothing and the four rows are built.
+    ui.set_scroll_offset_of(list, Vec2::new(0.0, 100.0 * ROW - VIEW));
+    let page = list_page(&mut ui, 100, idle(), NavInput::default());
+    check(&ui, &page, 100, 100.0 * ROW - VIEW);
+    let page = list_page(&mut ui, 4, idle(), NavInput::default());
+    assert_eq!(page.built, [0, 1, 2, 3]);
+    check(&ui, &page, 4, 0.0);
+
+    // Grow to fifty and jump to row thirty in the same build.
+    ui.set_scroll_offset_of(list, Vec2::new(0.0, 30.0 * ROW));
+    let page = list_page(&mut ui, 50, idle(), NavInput::default());
+    check(&ui, &page, 50, 30.0 * ROW);
+
+    // Shrink to ten under that offset: it clamps to the last five rows.
+    let page = list_page(&mut ui, 10, idle(), NavInput::default());
+    check(&ui, &page, 10, 10.0 * ROW - VIEW);
+}
+
+/// **A list that leaves the page and comes back builds its whole view in one
+/// build**, though nothing of it was laid out: a list sized by a percentage
+/// takes the viewport as its view, and layout finds nothing missing. Only the
+/// very first frame, with no viewport known yet, asks for a rebuild.
+#[test]
+fn a_list_coming_back_builds_its_view_in_one_build() {
+    let mut ui = Ui::new();
+    ui.add_stylesheet(
+        "list.css",
+        &format!(
+            ".holder {{ height: {VIEW}px; flex-shrink: 0; }}
+             #rows {{ height: 100%; border-width: 0; padding: 0; }}"
+        ),
+    );
+    let build = |ui: &mut Ui, rows: Option<usize>| {
+        frame(ui, idle(), NavInput::default(), |ui| {
+            let mut built = Vec::new();
+            ui.block(".holder", &[], |ui| match rows {
+                Some(rows) => {
+                    ui.list("#rows", rows, ROW, |_, index| built.push(index));
+                }
+                None => {
+                    ui.span(".empty", "no rows", &[]);
+                }
+            });
+            built
+        })
+    };
+
+    assert_eq!(build(&mut ui, Some(4)), [0, 1], "no viewport, no view");
+    assert!(ui.needs_rebuild(), "the first frame missed rows unreported");
+    assert_eq!(build(&mut ui, Some(4)), [0, 1, 2, 3]);
+    assert!(!ui.needs_rebuild());
+
+    for _ in 0..2 {
+        assert!(build(&mut ui, None).is_empty());
+        assert!(!ui.needs_rebuild());
+        assert_eq!(
+            build(&mut ui, Some(4)),
+            [0, 1, 2, 3],
+            "the list came back short"
+        );
+        assert!(!ui.needs_rebuild(), "the list came back short");
+    }
+}
+
+/// **A list sized by its content that grows past its overscan asks for a
+/// rebuild**, since the view layout gives it was not knowable when it was
+/// built — and the rebuild windows the view layout measured.
+#[test]
+fn a_list_that_grows_taller_asks_for_a_rebuild() {
+    let mut ui = Ui::new();
+    ui.add_stylesheet(
+        "list.css",
+        &format!("#rows {{ max-height: {VIEW}px; border-width: 0; padding: 0; }}"),
+    );
+    list_page(&mut ui, 1, idle(), NavInput::default());
+    let page = list_page(&mut ui, 1, idle(), NavInput::default());
+    assert_eq!(page.built, [0]);
+    assert!(!ui.needs_rebuild());
+    assert_eq!(
+        rect(&ui, page.list.key).1.y - rect(&ui, page.list.key).0.y,
+        ROW
+    );
+
+    let page = list_page(&mut ui, 40, idle(), NavInput::default());
+    assert_eq!(
+        page.built,
+        [0, 1, 2],
+        "the view it was built for was one row"
+    );
+    assert!(ui.needs_rebuild(), "the grown view's rows went unreported");
+
+    let page = list_page(&mut ui, 40, idle(), NavInput::default());
+    let rows = (VIEW / ROW) as usize + LIST_OVERSCAN;
+    assert_eq!(page.built, (0..rows).collect::<Vec<_>>());
+    assert!(!ui.needs_rebuild());
+}
