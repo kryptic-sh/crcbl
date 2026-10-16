@@ -4,8 +4,8 @@
 //!
 //! ```text
 //! cargo run --release -p crcbl-image --features svg,png --example svg_corpus -- \
-//!     [--size 48] [--resvg resvg] [--cache DIR] [--jobs N] [--show N] \
-//!     [--dump DIR] [--floor NAME=FRACTION]... NAME=DIR...
+//!     [--size 48] [--resvg resvg] [--resvg-arg ARG]... [--cache DIR] \
+//!     [--jobs N] [--show N] [--dump DIR] [--floor NAME=FRACTION]... NAME=DIR...
 //! ```
 //!
 //! Per theme it reports the files that render and match, those that render
@@ -13,7 +13,13 @@
 //! first), and those resvg itself cannot render, which are left out of the
 //! fractions. `--floor` makes it exit non-zero when a theme's matching
 //! fraction falls below the floor, which is how CI holds the line.
-//! `--cache` keeps resvg's renders between runs; `--show` lists that many of
+//! `--cache` keeps resvg's renders between runs, keyed by size, theme and
+//! file only, so a run with other `--resvg-arg`s wants a cache of its own;
+//! `--resvg-arg` passes an argument to every resvg run, such as the generic
+//! font families text falls back on (`--resvg-arg --serif-family
+//! --resvg-arg 'DejaVu Serif'`), so that with `svg-text` built the
+//! reference draws text in the faces this crate finds rather than in none;
+//! `--show` lists that many of
 //! the worst differing files and an example of each refusal; `--dump` writes
 //! both renders of every differing file there as PNGs, to look at.
 //!
@@ -51,6 +57,7 @@ const DIFFERING_FRACTION: f64 = 0.01;
 struct Options {
     size: u32,
     resvg: String,
+    resvg_args: Vec<String>,
     cache: Option<PathBuf>,
     jobs: usize,
     show: usize,
@@ -63,6 +70,7 @@ fn parse_options() -> Result<Options, String> {
     let mut options = Options {
         size: 48,
         resvg: "resvg".to_owned(),
+        resvg_args: Vec::new(),
         cache: None,
         jobs: std::thread::available_parallelism().map_or(1, usize::from),
         show: 0,
@@ -80,6 +88,7 @@ fn parse_options() -> Result<Options, String> {
                     .map_err(|_| "--size takes a number")?
             }
             "--resvg" => options.resvg = value("--resvg")?,
+            "--resvg-arg" => options.resvg_args.push(value("--resvg-arg")?),
             "--cache" => options.cache = Some(PathBuf::from(value("--cache")?)),
             "--dump" => options.dump = Some(PathBuf::from(value("--dump")?)),
             "--jobs" => {
@@ -189,6 +198,7 @@ fn run_resvg(
     out: &Path,
 ) -> Result<(), String> {
     let output = Command::new(&options.resvg)
+        .args(&options.resvg_args)
         .args(arguments)
         .arg(input)
         .arg(out)
