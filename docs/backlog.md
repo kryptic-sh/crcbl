@@ -631,6 +631,18 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       raw alpha, and the filter code is shared), eight partitions, and files
       from encoders other than libwebp's. The `ALPH` pre-processing field is
       informative and ignored, as libwebp's default decode ignores it.
+      `Limits::max_bytes` bounds the RGBA8 result, not a decode's working
+      memory: a lossy decode also holds its Y'CbCr planes padded to whole
+      macroblocks and, for lossless-coded alpha, that stream's four-byte pixels,
+      so its peak is a fixed multiple of `max_bytes`, larger for a frame a few
+      pixels wide (each macroblock row is padded to sixteen). Not unbounded, and
+      nothing is allocated per item a file names; a caller wanting a hard memory
+      cap would need `Limits` to grow a working-memory field. Reviewed
+      2026-10-16, with a scratch harness decoding 9.6 million corrupted copies
+      of the fixtures (overflow checks on): no panic, none slower than half a
+      second. Two overflows only a 32-bit `usize` reaches (the RIFF size in
+      `webp::decode`, the bit count in `BoolDecoder::read`) were fixed then and
+      run on no 32-bit target: none is installed here, and CI tests none.
     - **Step three is in: SVG icons**,
       `svg::decode(bytes, size, scale, &limits)` behind the `svg` feature,
       written here with no new dependency (`crates/crcbl-image/src/svg/`): its

@@ -59,7 +59,7 @@ pub fn decode(bytes: &[u8], limits: &Limits) -> Result<Rgba8Image, ImageError> {
     }
     let riff_size = u32_at(bytes, 4)? as usize;
     let body = bytes
-        .get(12..(8 + riff_size).min(bytes.len()))
+        .get(12..riff_size.saturating_add(8).min(bytes.len()))
         .ok_or_else(|| malformed("a RIFF size past the file"))?;
     // A still image is a `VP8L` or `VP8 ` chunk, alone or after a `VP8X`
     // chunk naming its canvas (and, if lossy, an `ALPH` chunk holding its
@@ -321,7 +321,7 @@ mod tests {
         for (_, webp, _) in [FIXTURES[0], LOSSY[0]] {
             for bytes in [
                 &b""[..],
-                b"RIFF    WEBP",
+                b"RIFF\0\0\0\0WEBP",
                 &webp[..webp.len() / 2],
                 &webp[..30],
             ] {
@@ -341,9 +341,22 @@ mod tests {
         }
     }
 
+    /// The largest RIFF size a header can hold reads to the file's end, as a
+    /// size past the end always does, rather than overflowing where `usize`
+    /// is 32 bits.
+    #[test]
+    fn the_largest_riff_size_reads_to_the_end_of_the_file() {
+        for (name, webp, rgba) in [FIXTURES[0], LOSSY[0]] {
+            let mut file = webp.to_vec();
+            file[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+            let image = decode(&file, &Limits::DEFAULT).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(image.pixels(), rgba, "{name}");
+        }
+    }
+
     /// A simple lossy file around `vp8`, its sizes made to fit.
     fn simple_lossy(vp8: &[u8]) -> Vec<u8> {
-        let mut file = b"RIFF    WEBPVP8 ".to_vec();
+        let mut file = b"RIFF\0\0\0\0WEBPVP8 ".to_vec();
         file.extend_from_slice(&(vp8.len() as u32).to_le_bytes());
         file.extend_from_slice(vp8);
         if vp8.len() % 2 == 1 {

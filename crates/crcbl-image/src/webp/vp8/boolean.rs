@@ -64,8 +64,10 @@ impl<'a> BoolDecoder<'a> {
         if self.at >= self.data.len() {
             // The window covers bits `8 * (at - 2) + bit_count` onwards, eight
             // of them; past the data, it is incomplete.
-            let window_end = 8 * self.at.saturating_sub(2) + self.bit_count as usize + 8;
-            self.past_end |= window_end > 8 * self.data.len();
+            // Counted in u64: a large partition's bit count overflows a 32-bit
+            // usize.
+            let window_end = 8 * self.at.saturating_sub(2) as u64 + u64::from(self.bit_count) + 8;
+            self.past_end |= window_end > 8 * self.data.len() as u64;
         }
         let split = 1 + (((self.range - 1) * u32::from(probability)) >> 8);
         let big_split = split << 8;
