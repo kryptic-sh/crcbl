@@ -1,7 +1,7 @@
 //! Named seeds from the fuzzer's corpus, replayed through the delta decoder,
 //! the replay file's reader and its spool's recovery, the save container's
-//! reader, the scene edit's messages, the scene fetch's, the session hello and
-//! the SVG renderer.
+//! reader, the scene edit's messages, the scene fetch's, the session hello,
+//! the SVG renderer and the lossy WebP decoder.
 //!
 //! `fuzz_targets/decoder.rs` runs the decoders against bytes libFuzzer invents.
 //! This target runs three of them against bytes somebody named, and the two are
@@ -629,4 +629,24 @@ fn the_svg_seed_renders() {
     )
     .expect("the SVG seed must render");
     assert!(image.pixels().chunks_exact(4).any(|pixel| pixel[3] > 0));
+}
+
+/// **The lossy WebP seed decodes**: an extended file with a losslessly coded
+/// alpha chunk and a segmented VP8 frame, so the fuzzer's mutations of it
+/// start inside the VP8 and alpha decoders rather than at the container's
+/// first refusal.
+#[test]
+fn the_lossy_webp_seed_decodes() {
+    let image = crcbl_image::webp::decode(
+        include_bytes!("../corpus/decoder/webp-lossy-alpha"),
+        &crcbl_image::Limits::DEFAULT,
+    )
+    .expect("the lossy WebP seed must decode");
+    assert_eq!((image.width(), image.height()), (45, 31));
+    assert!(
+        image
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[3] > 0 && pixel[3] < u8::MAX)
+    );
 }
