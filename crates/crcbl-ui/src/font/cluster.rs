@@ -32,8 +32,7 @@
 
 use core::ops::Range;
 
-/// U+200D ZERO WIDTH JOINER.
-const ZERO_WIDTH_JOINER: char = '\u{200D}';
+use super::fallback::ZERO_WIDTH_JOINER;
 
 /// Whether `c` continues the cluster before it whatever that cluster is: a
 /// combining mark, a variation selector, a zero-width joiner, a skin-tone
