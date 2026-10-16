@@ -122,6 +122,11 @@ rand_core = { version = "0.9", default-features = false }
 # rolled.
 ron = "0.12.2"
 thiserror = "2.0"
+# Font tables. `crcbl-ui` parses and hints faces with it and `crcbl-font` reads
+# their names and weights, through this one entry so the two always read a face
+# alike. Default features off: `autohint_shaping` feeds the automatic hinter,
+# which neither uses. `std` stays on, because the other float backend is `libm`.
+skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
 # Storage and persistence: serde for settings/save schemas, toml for settings
 # files, dirs for platform-standard config/data paths.
 serde = { version = "1", features = ["derive"] }
