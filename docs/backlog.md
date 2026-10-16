@@ -629,9 +629,23 @@ Each step lands in the crate the later steps build on, so the seam goes first.
     - lyr's M6 needs the theme lookup too (a notification's `app_icon` and
       `desktop-entry` hint name a theme icon), which the order below already
       puts before JPEG.
-    - Order from here: lossy WebP (VP8, pikr's parity), then XPM; SVG filters
-      and text when an app asks, since the corpus shows what they would buy
-      (filters are the larger share).
+    - **pikr's follow-ups on the corpus, 2026-10-16.** A `hicolor` set is
+      missing: hicolor is mostly what installed applications put there, not a
+      theme repository, so the set is to be taken from what CI's runner and WSL
+      actually have under `/usr/share/icons/hicolor`. And breeze apps at 88.3%
+      means about one app icon in eight falls back to pikr's generic icon, so
+      pikr keeps resvg until breeze apps is near the other sets. Counted on
+      2026-10-16 in WSL's corpus: of breeze apps' 428 SVGs, 9 use a filter and 6
+      text; their filters use only `feGaussianBlur` (173 uses), `feComposite`
+      (48), `feOffset` and `feFlood` (24 each) and `feColorMatrix` (8) — the
+      drop-shadow set — so those five primitives, with filter regions and units,
+      are the next SVG step, measured by breeze apps and the hicolor set.
+      "Matching" in the corpus means rendered and within tolerance of resvg: at
+      most 1% of the icon's pixels differing by more than 32 in a premultiplied
+      channel.
+    - Order from here: lossy WebP (VP8, pikr's parity, being written); the
+      hicolor corpus set; SVG's drop-shadow filters; then XPM. SVG text when an
+      app asks.
 
 ### Left behind by the seam split
 
@@ -1100,6 +1114,14 @@ bumped 0.1.1, since no 0.1.0 had ever shipped.
   The first publish creates every crate and can outlast the runner
   (`docs/notes/ci.md` has the numbers); a timed-out `publish-crates` job is
   re-run, and resumes.
+- **0.1.0's publish needed two re-runs of `publish-crates`**, both resumed
+  cleanly. The first stopped at crates.io's new-crate rate limit (429, which the
+  script waits out until it outlasted the job); the second at a crates.io server
+  error ("Application Error" page) uploading `crcbl-mtl`, which the script
+  reports as "not a rate limit" and fails on. All 40 crates and every package
+  channel were published on the third run (run 38778340864), and the GitHub
+  release carries its assets. A transient server error could be retried once in
+  `tools/publish-crates.sh` before failing; not done.
 
 Decided unasked, per the standing "pick the best long-term option" instruction:
 
