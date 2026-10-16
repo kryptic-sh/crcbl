@@ -1507,9 +1507,9 @@ impl Ui {
     /// default, turns fallback off.
     ///
     /// A colour glyph — an emoji font's CBDT, sbix or COLR picture — draws in
-    /// colour once the emitted list has been through
-    /// [`DrawList::resolve_color_glyphs`](crate::draw_list::DrawList::resolve_color_glyphs),
-    /// which puts it in the renderer's image atlas; see [`crate::font::color`].
+    /// colour when the emitted list is drawn by `crcbl-frame`'s UI pass, which
+    /// puts it in its image atlas as it tessellates; see
+    /// [`crate::font::color`] for a renderer of its own.
     pub fn set_fallback_fonts(&mut self, fonts: impl IntoIterator<Item = impl Into<Font>>) {
         self.fallback = fonts.into_iter().map(Into::into).collect();
         self.fallback_hash = hash_of(self.fallback.iter().map(Font::id).collect::<Vec<_>>());

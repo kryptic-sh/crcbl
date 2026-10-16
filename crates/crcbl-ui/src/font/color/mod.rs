@@ -2,7 +2,8 @@
 //! outlines, as RGBA pictures in the [`ImageAtlas`](crate::image::ImageAtlas).
 //!
 //! ```text
-//!   DrawList glyph run ──resolve_color_glyphs──▶ ColorGlyphCache::glyph
+//!   DrawList glyph run ──to_triangles_with_colors──▶ ColorGlyphCache::glyph
+//!                       (or resolve_color_glyphs)
 //!                                                 │ miss
 //!                                                 ▼
 //!        COLR layers or paint graph ──rasterise, composite──▶ RGBA
@@ -25,10 +26,15 @@
 //! The glyph atlas's pages are one coverage channel, multiplied into a text
 //! colour; a colour glyph has colours of its own, and the UI pass already
 //! draws RGBA pictures from the image atlas through its own binding. So a
-//! colour glyph is an image quad:
-//! [`DrawList::resolve_color_glyphs`](crate::draw_list::DrawList::resolve_color_glyphs)
-//! swaps each one in a glyph run for one before the list goes to the
-//! renderer, which needs nothing new.
+//! colour glyph is an image quad, and the renderer needs nothing new.
+//! `crcbl-frame`'s UI pass owns a [`ColorGlyphCache`] and tessellates with
+//! [`DrawList::to_triangles_with_colors`](crate::draw_list::DrawList::to_triangles_with_colors),
+//! which draws each colour glyph of a run as a quad in place of its outline,
+//! so every list it draws shows colour emoji with no call of the caller's. A
+//! renderer of its own does the same, or swaps the quads into the list first
+//! with
+//! [`DrawList::resolve_color_glyphs`](crate::draw_list::DrawList::resolve_color_glyphs);
+//! both draw a glyph through one function.
 //!
 //! # Trust
 //!

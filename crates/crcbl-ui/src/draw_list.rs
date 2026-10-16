@@ -1138,24 +1138,23 @@ impl DrawList {
 
     /// Swaps every colour glyph in the list's glyph runs for an image quad of
     /// it, rasterised into `images` through `cache` — see
-    /// [`crate::font::color`]. Call it once a frame, after
-    /// [`ColorGlyphCache::begin_frame`], before the list goes to the renderer
-    /// that draws from `images`; without it a colour glyph draws as its
-    /// outline, which for a bitmap-only font is nothing.
+    /// [`crate::font::color`]. **`crcbl-frame`'s UI pass does this itself**,
+    /// as it tessellates (see [`DrawList::to_triangles_with_colors`]); this is
+    /// for a renderer of its own that draws from `images`, which calls it once
+    /// a frame, after [`ColorGlyphCache::begin_frame`]. Without either a colour
+    /// glyph draws as its outline, which for a bitmap-only font is nothing.
     ///
     /// Each quad follows its run, under the run's clip and on the run's side
-    /// of the overlay cut, at the pen [`DrawList::to_triangles_split`] gives
-    /// the glyph for the same `scale`, on whole pixels. **The run's colour
-    /// does not tint it, but the run's opacity applies**, as a browser draws
-    /// an emoji. A glyph the cache cannot draw in colour this frame stays in
-    /// its run. The run itself stays even when every glyph left it, so the
-    /// text it carries can still be read back.
+    /// of the overlay cut, where [`DrawList::to_triangles_with_colors`] puts
+    /// it for the same `scale`; see [`ColorGlyphs`]. The run itself stays even
+    /// when every glyph left it, so the text it carries can still be read back.
     pub fn resolve_color_glyphs(
         &mut self,
         cache: &mut ColorGlyphCache,
         images: &mut ImageAtlas,
         scale: f32,
     ) {
+        let mut colors = ColorGlyphs { cache, images };
         let cut = self.overlay_start.map(|_| self.overlay_start());
         let mut commands = Vec::with_capacity(self.commands.len());
         let mut clips = Vec::with_capacity(self.clips.len());
@@ -1176,29 +1175,13 @@ impl DrawList {
                     color,
                     glyphs,
                     ..
-                } if font.has_color_tables() => {
-                    let mut quads = Vec::new();
-                    glyphs.retain(|glyph| {
-                        let pen = *origin + glyph.offset * scale;
-                        let colour = pen
-                            .is_finite()
-                            .then(|| cache.glyph(images, font, glyph.glyph, *size * scale))
-                            .flatten();
-                        let Some(colour) = colour else {
-                            return true;
-                        };
-                        let min = pen.round() + Vec2::new(colour.left as f32, colour.top as f32);
-                        quads.push(DrawCommand::Image {
-                            min,
-                            max: min + colour.image.size(),
-                            uv_min: colour.image.uv_min(),
-                            uv_max: colour.image.uv_max(),
-                            tint: [1.0, 1.0, 1.0, color[3]],
-                        });
-                        false
-                    });
-                    quads
-                }
+                } => match colors.split((*origin, font, *size, *color), glyphs, scale) {
+                    Some((outlines, quads)) => {
+                        *glyphs = outlines;
+                        quads
+                    }
+                    None => Vec::new(),
+                },
                 _ => Vec::new(),
             };
             commands.push(command);
@@ -1275,7 +1258,25 @@ impl DrawList {
     pub fn to_triangles_split(
         &self,
         atlas: Option<&FontAtlas>,
+        glyphs: Option<&mut GlyphAtlas>,
+        scale: f32,
+    ) -> Triangles {
+        self.to_triangles_with_colors(atlas, glyphs, None, scale)
+    }
+
+    /// [`DrawList::to_triangles_split`], drawing each colour glyph of a glyph
+    /// run as an image quad from `colors` in place of its outline, as
+    /// [`DrawList::resolve_color_glyphs`] would have swapped it: what
+    /// `crcbl-frame`'s UI pass tessellates with, so every list it draws shows
+    /// colour emoji with no call of the caller's. The quads go after the run's
+    /// outline glyphs, under its clip and on its side of the overlay cut.
+    /// `None` draws every glyph as its outline.
+    #[must_use]
+    pub fn to_triangles_with_colors(
+        &self,
+        atlas: Option<&FontAtlas>,
         mut glyphs: Option<&mut GlyphAtlas>,
+        mut colors: Option<ColorGlyphs<'_>>,
         scale: f32,
     ) -> Triangles {
         let mut vertices = Vec::new();
@@ -1292,8 +1293,7 @@ impl DrawList {
             let first_index = indices.len() as u32;
             expand(
                 cmd,
-                atlas,
-                glyphs.as_deref_mut(),
+                (atlas, glyphs.as_deref_mut(), colors.as_mut()),
                 scale,
                 &mut vertices,
                 &mut indices,
@@ -1333,14 +1333,78 @@ impl DrawList {
     }
 }
 
+/// Where colour glyphs are drawn from: the cache that rasterises and holds
+/// them, and the image atlas it holds them in — what
+/// [`DrawList::to_triangles_with_colors`] takes, and
+/// [`DrawList::resolve_color_glyphs`] makes of its arguments.
+///
+/// Both draw a colour glyph the same way, through one function: an image quad
+/// at the glyph's pen as the expansion places it for a `scale` — offset
+/// scaled, origin not — rounded to whole pixels and moved by the picture's
+/// bearing, the size scaled too. **The run's colour does not tint it, but the
+/// run's opacity applies**, as a browser draws an emoji. A glyph the cache
+/// cannot draw in colour this frame stays an outline glyph.
+#[derive(Debug)]
+pub struct ColorGlyphs<'a> {
+    /// The rasterised colour glyphs.
+    pub cache: &'a mut ColorGlyphCache,
+    /// The atlas the cache registers them in, which the quads sample.
+    pub images: &'a mut ImageAtlas,
+}
+
+impl ColorGlyphs<'_> {
+    /// `glyphs` of the run `(origin, font, size, color)` cut into the glyphs
+    /// that stay outlines and the image quads of the ones drawn in colour; see
+    /// the type's docs. `None` for a font with no colour tables, which keeps
+    /// every glyph.
+    fn split(
+        &mut self,
+        (origin, font, size, color): (Vec2, &Font, f32, [f32; 4]),
+        glyphs: &[PositionedGlyph],
+        scale: f32,
+    ) -> Option<(Vec<PositionedGlyph>, Vec<DrawCommand>)> {
+        if !font.has_color_tables() {
+            return None;
+        }
+        let mut outlines = Vec::with_capacity(glyphs.len());
+        let mut quads = Vec::new();
+        for glyph in glyphs {
+            let pen = origin + glyph.offset * scale;
+            let colour = pen
+                .is_finite()
+                .then(|| {
+                    self.cache
+                        .glyph(self.images, font, glyph.glyph, size * scale)
+                })
+                .flatten();
+            let Some(colour) = colour else {
+                outlines.push(*glyph);
+                continue;
+            };
+            let min = pen.round() + Vec2::new(colour.left as f32, colour.top as f32);
+            quads.push(DrawCommand::Image {
+                min,
+                max: min + colour.image.size(),
+                uv_min: colour.image.uv_min(),
+                uv_max: colour.image.uv_max(),
+                tint: [1.0, 1.0, 1.0, color[3]],
+            });
+        }
+        Some((outlines, quads))
+    }
+}
+
 /// Expand one draw command onto the end of `vertices` and `indices`.
 ///
 /// The clip is not this function's: [`DrawList::to_triangles_split`] stamps it
 /// onto whatever this pushed, so no primitive below can forget to carry it.
 fn expand(
     cmd: &DrawCommand,
-    atlas: Option<&FontAtlas>,
-    glyph_atlas: Option<&mut GlyphAtlas>,
+    (atlas, glyph_atlas, colors): (
+        Option<&FontAtlas>,
+        Option<&mut GlyphAtlas>,
+        Option<&mut ColorGlyphs<'_>>,
+    ),
     scale: f32,
     vertices: &mut Vec<Vertex2d>,
     indices: &mut Vec<u32>,
@@ -1454,15 +1518,24 @@ fn expand(
             glyphs,
             text: _,
         } => {
+            let split = colors
+                .and_then(|colors| colors.split((*origin, font, *size, *color), glyphs, scale));
+            let (outlines, quads) = match &split {
+                Some((outlines, quads)) => (outlines.as_slice(), quads.as_slice()),
+                None => (glyphs.as_slice(), &[][..]),
+            };
             if let Some(glyph_atlas) = glyph_atlas {
                 push_glyphs(
                     glyph_atlas,
                     (*origin, font, *size * scale, scale),
-                    glyphs,
+                    outlines,
                     *color,
                     vertices,
                     indices,
                 );
+            }
+            for quad in quads {
+                expand(quad, (None, None, None), scale, vertices, indices);
             }
         }
         DrawCommand::Image {

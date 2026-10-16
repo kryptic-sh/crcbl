@@ -46,6 +46,18 @@
 //! is the one rule `crate`'s docs forbid. A frame with nothing dirty stages
 //! nothing, imports nothing and adds no pass.
 //!
+//! # Colour glyphs are pictures in the image atlas
+//!
+//! A glyph run's colour glyphs — emoji from a CBDT, sbix or COLR font — are
+//! drawn as image quads, not coverage: the tessellation
+//! ([`DrawList::to_triangles_with_colors`]) rasterises each into the image
+//! atlas through a [`ColorGlyphCache`] this renderer owns, which evicts only
+//! its own glyphs, and the images it registered are staged after it, in the
+//! same frame. So every list drawn here shows colour emoji with no call of
+//! its caller's; [`DrawList::resolve_color_glyphs`] is for a renderer of its
+//! own. The glyphs share the page with the caller's pictures, so a picture
+//! registered once emoji have filled the page can be refused.
+//!
 //! # The menu is in the draw list
 //!
 //! A [`DrawList`] carries the game's HUD **and** the engine's overlays — the
@@ -144,8 +156,9 @@ use crcbl_hal::{
 };
 
 use crcbl_shaders::{Stage, UI};
-use crcbl_ui::draw_list::{DrawList, Vertex2d};
+use crcbl_ui::draw_list::{ColorGlyphs, DrawList, Vertex2d};
 use crcbl_ui::font::atlas::{GLYPH_MAX_PAGES, GLYPH_PAGE_SIZE, GLYPH_RASTER_BUDGET, GlyphAtlas};
+use crcbl_ui::font::color::ColorGlyphCache;
 use crcbl_ui::image::{ImageAtlas, PAGE_SIZE, TexelRect};
 use crcbl_ui::text::FontAtlas;
 
@@ -264,6 +277,9 @@ pub struct UiRenderer {
     glyph_uploads: Vec<GlyphUpload>,
     /// [`Self::image_recorded`]'s counterpart for the page copies.
     glyph_recorded: Arc<AtomicBool>,
+    /// The colour glyphs — emoji — a run draws, rasterised into
+    /// [`Self::images`] while the list is tessellated; see the module docs.
+    colors: ColorGlyphCache,
 
     /// Set 1's layout: one sampled texture — see the module docs.
     texture_layout: BindGroupLayoutHandle,
@@ -714,6 +730,7 @@ impl UiRenderer {
             glyph_staging: vec![Vec::new(); FRAMES_IN_FLIGHT],
             glyph_uploads: Vec::new(),
             glyph_recorded: Arc::new(AtomicBool::new(false)),
+            colors: ColorGlyphCache::new(),
             texture_layout,
             blank,
             blank_group,
@@ -779,6 +796,12 @@ impl UiRenderer {
     /// is staged after it; a glyph past the budget is left out of this frame
     /// and drawn by a later one.
     ///
+    /// **Colour glyphs come with it.** The tessellation draws each colour
+    /// glyph — an emoji — as an image quad, registering its picture in the
+    /// image atlas through this renderer's colour-glyph cache, and the image
+    /// atlas is staged after the tessellation, so the picture uploads in the
+    /// frame that draws it. See the module docs.
+    ///
     /// # Errors
     ///
     /// [`HalError`] if buffer upload failed.
@@ -792,15 +815,27 @@ impl UiRenderer {
         self.frame = (self.frame + 1) % FRAMES_IN_FLIGHT;
         let idx = self.frame;
         self.texture_groups.retire(device, idx);
-        self.stage_images(device, idx)?;
 
         self.glyphs.begin_frame();
+        self.colors.begin_frame();
+        let colors = ColorGlyphs {
+            cache: &mut self.colors,
+            images: &mut self.images,
+        };
         let crcbl_ui::draw_list::Triangles {
             vertices,
             indices,
             overlay,
             textures,
-        } = draw_list.to_triangles_split(Some(atlas), Some(&mut self.glyphs), scale);
+        } = draw_list.to_triangles_with_colors(
+            Some(atlas),
+            Some(&mut self.glyphs),
+            Some(colors),
+            scale,
+        );
+        // After the tessellation, so a colour glyph it registered uploads in
+        // the frame that draws it.
+        self.stage_images(device, idx)?;
         self.stage_glyphs(device, idx)?;
 
         // Grow the ring buffers only when this frame genuinely needs more room.

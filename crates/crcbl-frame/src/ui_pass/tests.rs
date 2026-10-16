@@ -1315,6 +1315,74 @@ fn rasterised_glyphs_are_copied_into_their_page_once_ahead_of_the_draw() {
     recorder.assert_valid();
 }
 
+/// **A colour glyph drawn through `begin_frame` alone is an image quad whose
+/// picture is staged in the same frame**: a CBDT emoji, whose outline is
+/// empty, draws one quad sampling the image atlas, the cache registered its
+/// picture there, and the `ui-images` copy ahead of the draw covers it — with
+/// no call of the caller's to resolve it.
+#[cfg(feature = "parsed-font")]
+#[test]
+fn a_colour_glyph_is_drawn_as_an_image_staged_in_its_own_frame() {
+    use crcbl_ui::font::Font;
+    use crcbl_ui::font::layout::TextLayout;
+
+    let (recorder, device, queue) = open_recorded();
+    let mut pool = crate::transient::TransientPool::new();
+    let mut ui = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+    recorder.clear();
+
+    let emoji = Font::parse(include_bytes!(
+        "../../../crcbl-ui/tests/fixtures/emoji/cbdt.ttf"
+    ))
+    .expect("the fixture parses");
+    let layout = TextLayout::new(&emoji, "\u{1F600}", 16.0, 20.0, None);
+    let mut list = DrawList::new();
+    list.glyphs(
+        glam::Vec2::splat(4.0),
+        &emoji,
+        16.0,
+        [1.0; 4],
+        layout.glyphs(),
+    );
+
+    let labels = record_frame(&mut ui, device.as_ref(), queue, &mut pool, &list);
+    assert_eq!(labels, ["ui-images", "ui-composite"]);
+    assert_eq!(ui.last_index_count[ui.frame], 6, "one quad");
+    let pictures = ui.images().images();
+    assert_eq!(pictures.len(), 1, "the emoji's picture");
+    let picture = pictures[0];
+    assert_eq!((picture.width, picture.height), (16, 16));
+    let copies: Vec<_> = image_copies(&recorder.commands())
+        .into_iter()
+        .filter(|copy| copy.image == ui.image_page.image)
+        .collect();
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    let (x, y) = (
+        copies[0].image_offset.x as u32,
+        copies[0].image_offset.y as u32,
+    );
+    let extent = copies[0].image_extent;
+    assert!(
+        x <= picture.x
+            && y <= picture.y
+            && picture.x + picture.width <= x + extent.width
+            && picture.y + picture.height <= y + extent.height,
+        "{:?} does not cover {picture:?}",
+        copies[0]
+    );
+
+    // The next frame draws it again from the cache, uploading nothing.
+    recorder.clear();
+    let labels = record_frame(&mut ui, device.as_ref(), queue, &mut pool, &list);
+    assert_eq!(labels, ["ui-composite"]);
+    assert_eq!(ui.last_index_count[ui.frame], 6);
+    assert_eq!(ui.images().images().len(), 1);
+
+    ui.destroy(device.as_ref());
+    pool.destroy(device.as_ref());
+    recorder.assert_valid();
+}
+
 /// A staged page copy whose frame never recorded it is staged again.
 #[cfg(feature = "parsed-font")]
 #[test]
