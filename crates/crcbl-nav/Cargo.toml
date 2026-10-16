@@ -1,29 +1,38 @@
 [package]
 name = "crcbl-nav"
-description = "Crucible navigation: deterministic ground-grid routing and bounded reach"
+description = "Crucible navigation: deterministic ground and span grid routing and bounded reach"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-# `glam` and `thiserror`, and nothing else. The grid is arithmetic over cell
+# `glam` and `thiserror`, and by default nothing else. The grids are arithmetic over cell
 # indices and one `DVec3` per waypoint, so there is no IO, no clock and no
 # `crcbl-core` here — which is what lets a server that draws nothing, a browser
 # build and a game's own tests all link the same router. `DVec3` is spelled in
 # `glam` because that is what `crcbl::math` is: a game passing its feet position
 # in hands this crate the type it already holds.
 #
-# **`crcbl-phys` is deliberately absent.** Building a grid *from* a physics
+# **`crcbl-phys` is absent by default.** Building a grid *from* a physics
 # world — a ground and clearance probe per cell — was declined on 2026-09-27
 # (`docs/backlog.md`, _EW's engine port requests_): the probe policy is a
 # scene's, and EW is its only user. A caller fills the cell map however it
-# likes and hands it over.
+# likes, or probes with its own closure, and hands it over.
 [dependencies]
 glam = { workspace = true }
-# The two error enums are returned across the crate boundary, so they need
+# The error enums are returned across the crate boundary, so they need
 # `Display` and `Error` without a macro of this crate's own.
 thiserror = { workspace = true }
+# Only for `NavAgent::from_character`, behind `phys`: a character
+# controller's configuration read as the body a span grid is built for. No
+# probe of a physics world comes with it.
+crcbl-phys = { workspace = true, optional = true }
+
+[features]
+# `spans::NavAgent::from_character`. Off by default, so the crate stays
+# glam-only for a caller that describes its agent itself.
+phys = ["dep:crcbl-phys"]
 
 [lints]
 workspace = true

@@ -2561,16 +2561,22 @@ migrates every caller and deletes its own copy in the same change.
   policy is scene-specific. Revisit when a second game needs it. **Possible
   next, not requested (EW, 2026-09-29):** a per-cell toggle on `GroundGrid` for
   dynamic obstacles. EW's game-side doors currently route as passable, and the
-  toggle waits on them proving out. **Height-aware grid, asked about 2026-10-17
-  (not requested yet):** `GroundGrid` samples every cell at `config.origin.y`,
-  which stops working on EW's rolling generated terrain and stairs, and
-  `MAX_GRID_CELL_COUNT` keeps a fine grid from covering a whole map. EW is
-  trying per-cell ground heights in its own route sampling first. It was pointed
-  at `24-navigation.md`'s voxel stage so the trial could later become a
-  `crcbl-nav` rung or that stage: spans per column (floor and headroom, so
-  routes can pass under landings and bridges), agent radius, height, climb and
-  slope as data, columns probed through the `PhysicsWorld`, fixed-size
-  deterministic tiles, and erosion by radius at build time.
+  toggle waits on them proving out. **Height-aware span grid: accepted
+  2026-10-17, shipped as `crcbl::nav::spans`.** EW built it in-game along the
+  voxel stage of `24-navigation.md` (spans per column, agent limits as data, a
+  probe of the collision world, erosion by radius at build time) and its AI
+  patrolled up generated stairs on it. The probe stays EW's (a closure handed to
+  `SpanGrid::build`), on the 2026-09-27 terms; `NavAgent::from_character`,
+  behind `crcbl-nav`'s `phys` feature, reads a `CharacterConfig`. Changed in the
+  move: configs, agents and non-finite floors are refused with `SpanGridError`,
+  columns are capped at `MAX_SPAN_COLUMN_COUNT` and the erosion reach at
+  `MAX_EROSION_REACH_CELLS`, queries return `GroundGrid`'s shapes and
+  `GroundRouteError`, and search state is in ordered maps. Left: tiles (one
+  build covers one region; EW measured about 1M spans, a 1,090 × 774 grid at
+  0.25 m, in 0.84 s release), headroom between columns on a link, and dynamic
+  obstacles. A probe that casts rays at cell centres over geometry on the same
+  lattice must nudge them, since a ray on an edge two boxes share can report the
+  side face; a voxelizer rasterizing triangles would not have that trap.
 - **Fixed-rate staggered sampling: accepted, into `crcbl-core`**, as
   `FixedRateSchedule`. EW's `PerceptionSchedule` is generic, so the name drops
   "perception". Shipped 2026-09-28 as

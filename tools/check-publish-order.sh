@@ -21,7 +21,6 @@ ORDER=(
 crcbl-rand
 crcbl-console
 crcbl-jobs
-crcbl-nav
 crcbl-vfx
 crcbl-water
 crcbl-sprite
@@ -45,6 +44,7 @@ crcbl-ui
 crcbl-frame
 crcbl-ecs
 crcbl-phys
+crcbl-nav
 crcbl-render
 crcbl-dx12
 crcbl-mtl

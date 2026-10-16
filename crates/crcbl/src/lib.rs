@@ -188,10 +188,11 @@ pub use crcbl_inventory as inventory;
 /// browser-versus-native question is answered — a sample writing that `cfg`
 /// itself is exactly what the seam exists to prevent.
 pub use crcbl_jobs as jobs;
-/// [`crcbl-nav`](crcbl_nav): routing across the ground — today the grid router
-/// and its bounded flood fill, the rung below the navmesh
-/// `docs/plan/24-navigation.md` plans. It depends on `glam` and `thiserror`
-/// alone, both already in every game's graph, so it is re-exported
+/// [`crcbl-nav`](crcbl_nav): routing across the ground — today a flat grid
+/// router and a height-aware span grid, each with a bounded flood fill, the
+/// rungs below the navmesh `docs/plan/24-navigation.md` plans. It depends on
+/// `glam` and `thiserror`, both already in every game's graph, and on
+/// `crcbl-phys` for `NavAgent::from_character`, so it is re-exported
 /// unconditionally.
 pub use crcbl_nav as nav;
 /// [`crcbl-net`](crcbl_net): the transport seam, the wire protocol and the

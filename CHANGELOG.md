@@ -93,6 +93,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **The `crcbl` umbrella's `system-fonts` feature** forwards `crcbl-ui`'s, so an
   app on the umbrella reaches `Ui::register_system_font` and `Font::from_system`
   without naming `crcbl-ui` itself.
+- **`crcbl::nav::spans`, a height-aware route grid**: `SpanGrid::build` takes a
+  `SpanGridConfig`, a `NavAgent` (radius, height, climb and slope limit) and the
+  caller's probe of each column's floors, keeps the floors flat enough, with
+  headroom and a body's radius from walls and drops, and answers `plan` and
+  `reachable_within` in `GroundGrid`'s shapes, so routes climb stairs and pass
+  under floors above. `NavAgent::from_character` (the `phys` feature of
+  `crcbl-nav`, on in the umbrella) reads a character controller's
+  `CharacterConfig`.
 
 ### Changed
 

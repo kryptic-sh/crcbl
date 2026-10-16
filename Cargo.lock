@@ -621,6 +621,7 @@ dependencies = [
 name = "crcbl-nav"
 version = "0.2.0"
 dependencies = [
+ "crcbl-phys",
  "glam",
  "thiserror 2.0.21",
 ]
