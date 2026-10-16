@@ -3103,6 +3103,71 @@ jobs:
             crates/crcbl-net/fuzz/coverage/decoder/
           if-no-files-found: ignore
 
+  # **pikr's condition on the SVG renderer** (`docs/backlog.md`, S28): it must
+  # draw real icon themes, judged icon by icon against resvg. The themes cannot
+  # be committed (Papirus is GPL-3.0, Adwaita's icons CC-BY-SA), so they are
+  # fetched here, and resvg is a tool on the runner, not a dependency of any
+  # crate. `crates/crcbl-image/examples/svg_corpus.rs` says how an icon is
+  # judged to match.
+  svg-corpus:
+    name: svg corpus (crcbl-image against resvg)
+    runs-on: ubuntu-latest
+    # Fetching the themes and rendering every icon twice takes minutes; this
+    # bounds a wedged fetch or render.
+    timeout-minutes: 30
+    env:
+      # Each theme at a pinned commit, so the floors below move only when the
+      # renderer does. Raising a pin is a measurement: rerun the tool on the
+      # new commit and record its fractions with it.
+      ADWAITA_COMMIT: 82d305723107d2ab619c0a4e4ec3136558bb4fe7
+      PAPIRUS_COMMIT: bf539287ef5dc18529424a02cccee76175920a6f
+      BREEZE_COMMIT: 3719ad1c69f5944dd37be415e0cd92d5d46f4037
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: svg-corpus
+      # The version the recorded floors were measured against: a different
+      # resvg antialiases differently and would move them.
+      - uses: ./.github/actions/cargo-tool
+        with:
+          tool: resvg@0.48.1
+      # One directory of each theme, shallow, sparse and without the blobs
+      # outside it: Papirus's whole tree is many times the 48-pixel set the
+      # measurement reads.
+      - name: Fetch the themes at their pinned commits
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          fetch() {
+            git init -q "$RUNNER_TEMP/$1"
+            git -C "$RUNNER_TEMP/$1" remote add origin "$2"
+            git -C "$RUNNER_TEMP/$1" sparse-checkout set --no-cone "/$4/"
+            git -C "$RUNNER_TEMP/$1" fetch -q --depth 1 --filter=blob:none origin "$3"
+            git -C "$RUNNER_TEMP/$1" checkout -q FETCH_HEAD
+          }
+          fetch adwaita https://gitlab.gnome.org/GNOME/adwaita-icon-theme.git "$ADWAITA_COMMIT" Adwaita
+          fetch papirus https://github.com/PapirusDevelopmentTeam/papirus-icon-theme.git "$PAPIRUS_COMMIT" Papirus/48x48
+          fetch breeze https://invent.kde.org/frameworks/breeze-icons.git "$BREEZE_COMMIT" icons
+      # Each floor is the matching fraction measured on 2026-10-16, less two
+      # icons' worth, rounded down: a change that loses icons fails here, and
+      # one that gains them should raise the floor in the same commit. The
+      # `apps-*` rows are the full-colour application icons within the themes,
+      # the kind a hicolor theme holds.
+      - name: Render every icon with both and compare
+        run: >-
+          cargo run --release --locked -p crcbl-image --features svg,png
+          --example svg_corpus -- --show 20 --floor adwaita=0.970 --floor
+          papirus=0.997 --floor breeze=0.985 --floor apps-papirus=0.996 --floor
+          apps-breeze=0.873 adwaita="$RUNNER_TEMP/adwaita/Adwaita"
+          papirus="$RUNNER_TEMP/papirus/Papirus/48x48"
+          breeze="$RUNNER_TEMP/breeze/icons"
+          apps-papirus="$RUNNER_TEMP/papirus/Papirus/48x48/apps"
+          apps-breeze="$RUNNER_TEMP/breeze/icons/apps/48"
+
   coverage:
     name: coverage (linux)
     runs-on: ubuntu-latest
