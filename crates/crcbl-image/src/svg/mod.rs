@@ -41,12 +41,16 @@
 //! `currentColor`, linear and radial gradients; `clipPath` and `mask`;
 //! group opacity; filters of the primitives drop shadows are made of
 //! (`feGaussianBlur`, `feOffset`, `feFlood`, `feComposite`, `feColorMatrix`
-//! and `feMerge`); and `image` elements embedding a PNG, JPEG, WebP or SVG
-//! in a `data:` URL, each raster format when its own feature is built. What
-//! is refused, among other things: text, an image anywhere but in the file
-//! itself, other filter primitives and filter functions, patterns, markers,
-//! `symbol`, nested `svg`, `switch`, blend modes, animation, and CSS beyond
-//! simple selectors.
+//! and `feMerge`); `image` elements embedding a PNG, JPEG, WebP or SVG
+//! in a `data:` URL, each raster format when its own feature is built; and
+//! `text` with `tspan`, in the system's fonts when the `svg-text` feature is
+//! built, one glyph a character with no shaping (the `text` module says
+//! what that leaves out). What is refused, among other things: text that
+//! would draw a character with no font to draw it in (every such text
+//! without `svg-text`), `textPath` and vertical text, an image anywhere but
+//! in the file itself, other filter primitives and filter functions,
+//! patterns, markers, `symbol`, nested `svg`, `switch`, blend modes,
+//! animation, and CSS beyond simple selectors.
 //!
 //! # Fitting the square
 //!
@@ -58,10 +62,10 @@
 //!
 //! The XML parser expands only a DTD's plain-text entities, which reference
 //! nothing, within caps, and fetches nothing; the tree is capped in depth and
-//! size; `use` instances, layers, dashes and filter
-//! primitives are capped where a small file could multiply them; a filter
-//! region is cut to the canvas; and the canvas passes the caller's
-//! [`Limits`] before it is allocated. An image is read only from a `data:`
+//! size; `use` instances, layers, dashes, filter primitives, characters
+//! of text, font lookups and font faces read are capped where a small file
+//! could multiply them; a filter region is cut to the canvas; and the
+//! canvas passes the caller's [`Limits`] before it is allocated. An image is read only from a `data:`
 //! URL in the file, never from a path or the network; each decodes under the
 //! caller's [`Limits`], all of a document's together within one budget of
 //! its `max_bytes`, and SVG images nest only so deep.
@@ -76,6 +80,7 @@ mod path;
 mod render;
 mod stroke;
 mod style;
+mod text;
 mod transform;
 mod xml;
 
@@ -94,6 +99,10 @@ fn malformed(what: impl core::fmt::Display) -> ImageError {
 
 /// Renders an SVG into a transparent square of `size × scale` pixels, its
 /// viewport scaled to fit and centred.
+///
+/// With the `svg-text` feature, text is drawn in the system's fonts through
+/// one `crcbl_font::SystemFonts` for the process, whose first lookup reads
+/// the system's font list; each decode reads the font files its text uses.
 ///
 /// # Errors
 ///

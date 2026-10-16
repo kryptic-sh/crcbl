@@ -25,7 +25,9 @@
 //! Each file format is a cargo feature: `png`, `jpeg`, `bmp`, `ico` (which
 //! brings `bmp` and `png`, the two forms an icon's frames take), `webp`
 //! (lossless), `xpm` and `svg` for icons (rendered by this crate, refusing
-//! what it does not draw rather than drawing part of it). The raw conversions, the
+//! what it does not draw rather than drawing part of it), with `svg-text`
+//! for an icon's text, drawn in the system's fonts found through
+//! `crcbl-font`. The raw conversions, the
 //! resize and the coverage rasteriser need none. The `theme` feature adds the
 //! freedesktop.org icon-theme lookup, which finds an icon's file by name;
 //! decoding it is the format's.

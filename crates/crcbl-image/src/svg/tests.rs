@@ -7,6 +7,8 @@ use super::*;
 
 mod filter;
 mod image;
+#[cfg(feature = "svg-text")]
+mod text;
 
 const SVG: &str =
     r#"xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink""#;
@@ -779,7 +781,6 @@ fn flowed_text_draws_nothing() {
 #[test]
 fn unsupported_features_refuse_the_file() {
     for body in [
-        r#"<text>hi</text>"#,
         r#"<image href="x.png" width="2" height="2"/>"#,
         r#"<filter id="f"><feTurbulence baseFrequency="0.1"/></filter><rect width="2" height="2" filter="url(#f)"/>"#,
         r#"<rect width="2" height="2" style="filter: blur(1px)"/>"#,
@@ -815,6 +816,21 @@ fn unsupported_features_refuse_the_file() {
         ),
         8,
     );
+}
+
+/// **Without the `svg-text` feature, text that would draw a character is
+/// refused**, naming the feature; text that draws none needs no font, so
+/// draws nothing and refuses nothing.
+#[cfg(not(feature = "svg-text"))]
+#[test]
+fn text_is_refused_without_the_feature() {
+    let error = refusal(&svg(8, "<text>hi</text>"));
+    assert!(
+        matches!(&error, ImageError::Unsupported(why) if why.contains("svg-text")),
+        "{error:?}"
+    );
+    let image = render(&svg(8, "<text> \n </text><text x=\"1\"><tspan/></text>"), 8);
+    assert!(image.pixels().iter().all(|&channel| channel == 0));
 }
 
 /// **What a browser ignores is ignored**: an attribute nothing defines (a

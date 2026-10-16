@@ -566,7 +566,9 @@ dependencies = [
 name = "crcbl-image"
 version = "0.2.0"
 dependencies = [
+ "crcbl-font",
  "png",
+ "skrifa",
  "thiserror 2.0.21",
 ]
 

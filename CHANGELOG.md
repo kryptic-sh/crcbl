@@ -15,6 +15,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_image::svg::decode` draws `<text>`** behind the new `svg-text`
+  feature, which brings in `crcbl-font` and `skrifa`: `text` and `tspan` (and
+  `a` as a span), their `x`, `y`, `dx` and `dy` lists, `xml:space` and SVG 2's
+  white-space collapsing, `font-family` lists, `font-size` (lengths, `em`,
+  percentages and keywords; 12 by default, as resvg), `font-weight` (setting a
+  variable face's `wght`), `font-style`, `text-anchor`, `letter-spacing` and
+  `word-spacing`, and fill, stroke, paint servers, transforms and group effects
+  as for shapes. Faces come from the system through `crcbl-font`, each family of
+  the list in turn and then `serif`, as browsers and resvg fall back; a
+  character none of them maps comes from the system's fallbacks for the first
+  face, else draws that face's `.notdef`. **There is no shaping**: one glyph a
+  character from the `cmap`, advanced by `hmtx`, so no kerning, ligatures,
+  contextual forms, mark positioning or bidirectional reordering. Refused by
+  name: `textPath`, `tref`, `rotate`, `textLength`, effects on a `tspan`, and
+  text under a value of a text property this renderer does not lay out (vertical
+  writing, baselines, decorations, small caps, the `font` shorthand). Text that
+  would draw a character with no face to draw it in is refused, as is every such
+  text in a build without `svg-text`; text that draws none needs no font and
+  draws nothing. Characters of text, font lookups and faces read are capped per
+  document. A text property's value in a unit the renderer does not evaluate,
+  such as `font-size: 2rem`, is now refused on any element, as other such
+  lengths are.
 - **`crcbl_image::svg::decode` draws `<image>`**, which it refused before, so
   icons that embed a picture (four of Adwaita's) no longer fall back to a
   generic one. The picture must be a `data:` URL in the file, base64 or

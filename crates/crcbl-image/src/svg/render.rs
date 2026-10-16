@@ -33,6 +33,7 @@
 
 mod filter;
 pub(super) mod image;
+pub(super) mod text;
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -42,6 +43,7 @@ use super::paint::{self, Gradient, Shape, Spread, Stop};
 use super::path::{self, Path, Rect, Segment};
 use super::stroke::{self, Stroke};
 use super::style::{self, Cascade, Length, Paint, Specified, Style, length};
+use super::text::{FaceCache, Fonts};
 use super::transform::{self, Transform};
 use super::xml::{Document, Element, Namespace};
 use super::{malformed, unsupported};
@@ -109,10 +111,10 @@ const NOT_SVG: &[&str] = &["flowRoot"];
 /// Children a shape may have that change nothing: descriptions.
 const DESCRIPTIVE: &[&str] = &["desc", "metadata", "title"];
 
-/// The elements drawn where they stand: groups, `use`, the basic shapes and
-/// images.
+/// The elements drawn where they stand: groups, `use`, the basic shapes,
+/// images and text.
 const DRAWN: &[&str] = &[
-    "circle", "ellipse", "g", "image", "line", "path", "polygon", "polyline", "rect", "use",
+    "circle", "ellipse", "g", "image", "line", "path", "polygon", "polyline", "rect", "text", "use",
 ];
 
 /// Attributes that change the picture in ways this renderer does not draw,
@@ -378,6 +380,16 @@ pub(super) fn render(
     side: u32,
     limits: &Limits,
 ) -> Result<Canvas, ImageError> {
+    render_with(document, side, limits, super::text::system_fonts())
+}
+
+/// [`render`], text drawn in faces from `fonts`.
+pub(super) fn render_with(
+    document: &Document,
+    side: u32,
+    limits: &Limits,
+    fonts: Fonts,
+) -> Result<Canvas, ImageError> {
     let viewport = Viewport::of(document)?;
     let (width, height) = (viewport.width, viewport.height);
     let side_f = f64::from(side);
@@ -385,7 +397,7 @@ pub(super) fn render(
     let placement =
         Transform::translate((side_f - width * fit) / 2.0, (side_f - height * fit) / 2.0)
             .then(Transform::scale(fit, fit));
-    let mut renderer = Renderer::new(document, &viewport, placement, side, *limits)?;
+    let mut renderer = Renderer::new(document, &viewport, placement, side, *limits, fonts)?;
     let mut canvas = Canvas::new(side);
     // A square viewport fills the square, whose edge clips a slice already.
     let square = (width - height).abs() < f64::EPSILON * width.max(height);
@@ -427,17 +439,27 @@ struct Renderer<'a> {
     /// Each `<image>` element's decoded image, decoded once however many
     /// times a `use` draws it.
     images: HashMap<usize, Rc<image::Embedded>>,
+    /// Where text finds its faces.
+    fonts: Fonts,
+    /// The faces text has looked up and read, shared with the documents
+    /// this one embeds.
+    faces: FaceCache,
+    /// Characters of text drawn so far, as [`text::MAX_CHARACTERS`] counts
+    /// them.
+    characters: usize,
 }
 
 impl<'a> Renderer<'a> {
     /// A renderer of `document`, whose viewport is `viewport` and whose
-    /// outermost viewport maps to pixels by `host`, into a `side`-square.
+    /// outermost viewport maps to pixels by `host`, into a `side`-square,
+    /// drawing text in faces from `fonts`.
     fn new(
         document: &'a Document,
         viewport: &Viewport,
         host: Transform,
         side: u32,
         limits: Limits,
+        fonts: Fonts,
     ) -> Result<Self, ImageError> {
         let mut ids = HashMap::new();
         let mut parents = vec![None; document.elements.len()];
@@ -467,6 +489,9 @@ impl<'a> Renderer<'a> {
             nesting: 0,
             image_bytes: 0,
             images: HashMap::new(),
+            fonts,
+            faces: FaceCache::default(),
+            characters: 0,
         })
     }
 
@@ -739,6 +764,7 @@ impl<'a> Renderer<'a> {
                 result
             }
             "image" => self.image(index, style, transform, canvas),
+            "text" => self.text(index, style, transform, canvas),
             _ => self.shape(index, style, transform, canvas),
         }
     }
@@ -899,6 +925,19 @@ impl<'a> Renderer<'a> {
             return Ok(());
         }
         let bbox = path::bounding_box(&geometry);
+        self.paint_geometry(&geometry, style, bbox, transform, canvas)
+    }
+
+    /// Fills and strokes `geometry` as `style` says, in its paint order, its
+    /// paint servers' bounding box being `bbox`.
+    fn paint_geometry(
+        &mut self,
+        geometry: &Path,
+        style: &Style,
+        bbox: Option<Rect>,
+        transform: Transform,
+        canvas: &mut Canvas,
+    ) -> Result<(), ImageError> {
         let order: [bool; 2] = if style.stroke_first {
             [true, false]
         } else {
@@ -906,11 +945,11 @@ impl<'a> Renderer<'a> {
         };
         for stroke in order {
             if stroke {
-                self.stroke(&geometry, style, bbox, transform, canvas)?;
+                self.stroke(geometry, style, bbox, transform, canvas)?;
             } else if let Some(paint) =
                 self.paint(&style.fill, style.fill_opacity, style, bbox, transform)?
             {
-                let coverage = self.fill_coverage(&geometry, transform, style.fill_rule);
+                let coverage = self.fill_coverage(geometry, transform, style.fill_rule);
                 self.apply_paint(&paint, &coverage, canvas);
             }
         }
@@ -1364,6 +1403,7 @@ impl<'a> Renderer<'a> {
                 .as_ref()
                 .and_then(path::bounding_box)),
             "image" => Ok(self.image_layout(index)?.map(|(_, layout)| layout.viewport)),
+            "text" => self.text_box(index),
             _ => Ok(None),
         }
     }

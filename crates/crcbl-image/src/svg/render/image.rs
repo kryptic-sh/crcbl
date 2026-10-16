@@ -346,13 +346,16 @@ impl Renderer<'_> {
             transform.then(layout.place),
             self.side,
             self.limits,
+            self.fonts,
         )?;
         nested.nesting = self.nesting + 1;
         nested.depth = self.depth;
         nested.instances = self.instances;
         nested.layers = self.layers;
         nested.image_bytes = self.image_bytes;
+        nested.characters = self.characters;
         nested.rasterizer = std::mem::take(&mut self.rasterizer);
+        std::mem::swap(&mut nested.faces, &mut self.faces);
         let result = match &clip {
             Some(clip) => {
                 let mut layer = Canvas::new(self.side);
@@ -363,6 +366,8 @@ impl Renderer<'_> {
             None => nested.draw_root(viewport, true, canvas),
         };
         self.rasterizer = std::mem::take(&mut nested.rasterizer);
+        std::mem::swap(&mut nested.faces, &mut self.faces);
+        self.characters = nested.characters;
         self.instances = nested.instances;
         self.image_bytes = nested.image_bytes;
         if clip.is_some() {
