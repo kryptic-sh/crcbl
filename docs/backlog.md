@@ -680,16 +680,21 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       (`Adwaita/`, 82d30572), Papirus (`Papirus/48x48`, bf539287) and breeze
       (`icons/`, 3719ad1c). A pixel differs when a premultiplied channel is more
       than 32 apart; an icon matches when at most 1% of its pixels differ.
-      Adwaita: 696 of 715 match (97.3%), 1 differs, 18 refused (15 filters, 3
-      `<image>`). Papirus: 6308 of 6319 (99.8%), 8 differ, 3 refused (a filter,
-      `vector-effect: non-scaling-stroke`, a malformed `fill`). breeze: 5560 of
-      5642 (98.5%), 45 differ, 37 refused (22 filters, 6 `<text>`, 5 Inkscape
-      `<flowRoot>`, 2 files whose namespace URIs are DTD entities, a malformed
-      `fill`, a misspelt `tyle` attribute). Application icons, the hicolor kind,
-      inside those: Papirus `48x48/apps` 3834 of 3845 (99.7%), breeze 48-pixel
-      `apps` 182 of 206 (88.3%, its refusals the same filters and text). CI's
-      `svg corpus` job reruns this at the same pins and fails below floors set
-      two icons under these.
+      Without filters, Adwaita matched 696 of 715 (97.3%), breeze 5560 of 5642
+      (98.5%) and breeze's apps 182 of 206 (88.3%). With them, measured the same
+      day: Adwaita 710 of 715 (99.3%), 1 differs, 4 refused (all `<image>`).
+      Papirus 6308 of 6319 (99.8%), 8 differ, 3 refused (an `feBlend` primitive,
+      `vector-effect: non-scaling-stroke`, a malformed `fill`). breeze 5582 of
+      5642 (98.9%), 45 differ, 15 refused (6 `<text>`, 5 Inkscape `<flowRoot>`,
+      2 files whose namespace URIs are DTD entities, a malformed `fill`, a
+      misspelt `tyle` attribute). Application icons, the hicolor kind, inside
+      those: Papirus `48x48/apps` 3834 of 3845 (99.7%), breeze 48-pixel `apps`
+      190 of 206 (92.2%, its refusals 5 `<text>`, 2 DTD entities and a
+      `<flowRoot>`). WSL's own `/usr/share/icons/hicolor` has 2 SVGs: 1 matches
+      and 1 is refused for an `href` on a `<path>`. Every icon the filters
+      unblocked matches; none joined the differing ones. CI's `svg corpus` job
+      reruns this at the same pins and fails below floors set two icons under
+      these.
     - Why the differing icons differ, checked icon by icon on the worst: (1)
       **resvg does not inherit `gradientTransform` through `href`** (usvg's
       `resolve_transform` reads only the element's own), where SVG 1.1 and 2,
@@ -715,13 +720,44 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       the margin, clipped only for a `slice`, as resvg does where it draws an
       SVG as an image. Malformed path data draws up to the error, as SVG
       specifies.
-    - Not done, in order of what the corpus refuses: **filters** (38 icons, all
-      themes: `feGaussianBlur` shadows in breeze, `feColorMatrix` in Adwaita;
-      matching resvg needs the Filter Effects specification's three-box-blur
-      approximation and the filter region and primitive-subregion rules);
-      **text** (`<text>`, and Inkscape's `<flowRoot>`, which browsers do not
-      draw either: 11 icons, needing fonts); `<image>` (3); DTD entities (2),
-      which would need a bounded expansion of plain-text entities only;
+    - **Filters, shipped 2026-10-16** (`svg/filter.rs` computes,
+      `svg/render/filter.rs` reads the `filter` element): the drop-shadow set
+      (`feGaussianBlur`, `feOffset`, `feFlood`, `feComposite` with every
+      operator, `feColorMatrix` of every type, `feMerge`), filter regions and
+      units, primitive subregions defaulting to the union of what they read, the
+      `in`/`result` graph, and linearRGB or sRGB converted on unpremultiplied
+      colour; images are `f32` premultiplied between primitives. Caps:
+      `filter::MAX_PRIMITIVES` primitives and merge nodes per filter, the region
+      cut to the canvas, and a blur's boxes summed from prefix sums so no
+      deviation is slow. Verified by unit tests worked from the specification
+      (box widths, the three-box kernels for odd and even widths, every
+      operator, every matrix type, the transfer functions), whole-file tests of
+      regions, units, the graph and refusals, and 55 hand mutants of the
+      primitives, units, regions and colour spaces, each failing a test. Where
+      it differs from resvg on purpose: a fractional `feOffset` is interpolated
+      (resvg truncates to whole pixels); a deviation under 2 pixels is the
+      Gaussian kernel itself (resvg runs an IIR approximation); the box
+      approximation is the specification's three boxes (resvg runs five);
+      `saturate` is not clamped to `0..=1` (Filter Effects allows over- and
+      undersaturation; resvg clamps). Agreed with resvg where the specifications
+      differ: an element whose filter reference names nothing is not rendered
+      (SVG 1.1 and resvg; Filter Effects ignores the filter). Surprises worth
+      knowing: each box blurs only what the one before left inside the region,
+      as resvg's do, so near the region's edge a blur loses what a box carries
+      past it; and under a rotation or skew a blur takes each pixel axis's
+      spread of the transformed Gaussian, exact for scales, flips and quarter
+      turns only.
+    - Not done, filters: every other primitive (`feBlend` in one Papirus icon;
+      no other in the corpus), filter functions (`blur()`, `drop-shadow()`), the
+      `BackgroundImage`, `BackgroundAlpha`, `FillPaint` and `StrokePaint`
+      inputs, `href` between `filter` elements, `edgeMode` on `feGaussianBlur`,
+      and drawing that lies outside the square, which a filter could move or
+      blur into view but this renderer never draws. Not measured: filters at
+      sizes other than 48, and against a reference other than resvg.
+    - Not done, in order of what the corpus refuses: **text** (`<text>`, and
+      Inkscape's `<flowRoot>`, which browsers do not draw either: 11 icons,
+      needing fonts); `<image>` (4); DTD entities (2), which would need a
+      bounded expansion of plain-text entities only;
       `vector-effect: non-scaling-stroke`; markers, patterns, `symbol` and
       nested `svg`, `switch`, blend modes and animation, which the corpus did
       not need. Not measured: GTK's own renderer (librsvg) as a second
@@ -818,14 +854,12 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       2026-10-16 in WSL's corpus: of breeze apps' 428 SVGs, 9 use a filter and 6
       text; their filters use only `feGaussianBlur` (173 uses), `feComposite`
       (48), `feOffset` and `feFlood` (24 each) and `feColorMatrix` (8) — the
-      drop-shadow set — so those five primitives, with filter regions and units,
-      are the next SVG step, measured by breeze apps and the hicolor set.
-      "Matching" in the corpus means rendered and within tolerance of resvg: at
-      most 1% of the icon's pixels differing by more than 32 in a premultiplied
-      channel.
-    - Order from here: SVG's drop-shadow filters, measured by breeze apps and
-      the hicolor set CI's `svg corpus` job now reports; then XPM. SVG text when
-      an app asks.
+      drop-shadow set. Those shipped the same day, which took breeze apps to 190
+      of 206 (92.2%); what it still refuses is text (6 icons, one of them
+      `<flowRoot>`) and DTD entities (2). "Matching" in the corpus means
+      rendered and within tolerance of resvg: at most 1% of the icon's pixels
+      differing by more than 32 in a premultiplied channel.
+    - Order from here: XPM. SVG text when an app asks.
 
 ### Left behind by the seam split
 
