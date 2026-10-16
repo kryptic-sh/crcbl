@@ -71,6 +71,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl_image::svg::decode` skips Inkscape's `<flowRoot>`** and everything
+  inside it, which it refused before, as browsers and resvg draw none of it:
+  flowed text is from an SVG 1.2 draft and no SVG element. Icons that carry an
+  empty or leftover text frame (five of breeze's) now render.
 - **A `crcbl-ui` text span paints its box**: its `background-color`, border and
   `border-radius` are drawn at its border box, behind its text, as a block's
   are, so a chip no longer needs a block around its label. A paragraph's inline
