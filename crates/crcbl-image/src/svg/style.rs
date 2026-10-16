@@ -1,23 +1,35 @@
-//! Properties: which ones this renderer reads, which it ignores by design,
-//! their values, and the cascade from presentation attributes, the
-//! `<style>` sheet and the `style` attribute to each element's computed
-//! style.
+//! Properties: which ones this renderer reads, which it refuses, their
+//! values, and the cascade from presentation attributes, the `<style>` sheet
+//! and the `style` attribute to each element's computed style.
 //!
-//! # Ignored, supported, refused
+//! # Supported, refused, ignored
 //!
-//! Every property name falls in one of three sets, and nothing falls through:
+//! Every property name falls in one of three sets:
 //!
-//! * **Supported** ([`Property`]): parsed, and a value that does not parse,
-//!   or that names a feature this renderer lacks, refuses the file.
-//! * **Ignored by design** ([`IGNORED_PROPERTIES`]): properties with no
-//!   effect on what this renderer can draw. Text properties (text itself is
-//!   refused, so they can never take effect), rendering-quality hints that
-//!   leave the geometry alone, properties of features that are refused where
-//!   they would apply (lighting, `solidColor`), and `isolation`, which only
-//!   changes a picture that uses blend modes, which are refused. An editor's
-//!   vendor-prefixed properties (`-inkscape-…`) are ignored the same way.
-//! * **Everything else is refused**, so a property this list has never heard
-//!   of fails loudly instead of being dropped.
+//! * **Supported** ([`Property`]): parsed, and a value naming a feature this
+//!   renderer lacks (a marker, a blend mode, a filter function, crisp-edged
+//!   rendering) refuses the file.
+//! * **Refused by name**: [`REFUSED_PROPERTIES`] wherever they are given, and
+//!   [`ATTRIBUTE_ONLY_PROPERTIES`] in a declaration. They change the picture
+//!   in ways this renderer does not draw, so a file using one fails loudly
+//!   rather than drawing without it.
+//! * **Everything else is ignored**, as browsers and resvg ignore it: a
+//!   property SVG does not define for these elements, one with no effect on
+//!   what this renderer draws (text properties, rendering hints, an editor's
+//!   own), or a misspelling.
+//!
+//! # Invalid values
+//!
+//! A value that is no value of its property at all — `fill="#fff;opacity:1"`,
+//! an opacity that is not a number, a negative width — is ignored, as CSS
+//! ignores an invalid declaration: the next declaration down the cascade
+//! applies, or failing one the property is inherited or takes its initial
+//! value, as SVG 2 says of an invalid presentation attribute. A value in a
+//! form this renderer does not evaluate is not known to be invalid, and is
+//! refused like an undrawn feature: a CSS function such as `var()` or
+//! `calc()`, a keyword where a colour or a paint server's reference belongs
+//! (a system colour, say), a colour function other than `rgb()`, or a length
+//! in a unit it does not resolve (`em`).
 
 use super::color::{self, Color, ColorValue};
 use super::css::{self, Declaration, Rule};
@@ -107,105 +119,69 @@ const PROPERTIES: &[(&str, Property)] = &[
     ("visibility", Property::Visibility),
 ];
 
-/// Properties with no effect on anything this renderer draws; the module
-/// docs say why each kind is here.
-pub(super) const IGNORED_PROPERTIES: &[&str] = &[
-    // Text, which is refused wherever it would render.
-    "alignment-baseline",
-    "baseline-shift",
-    "block-progression",
-    "direction",
-    "dominant-baseline",
-    "font",
-    "font-family",
-    "font-feature-settings",
-    "font-kerning",
-    "font-size",
-    "font-size-adjust",
-    "font-stretch",
-    "font-style",
-    "font-variant",
-    "font-variant-alternates",
-    "font-variant-caps",
-    "font-variant-east-asian",
-    "font-variant-east_asian",
-    "font-variant-ligatures",
-    "font-variant-numeric",
-    "font-variant-position",
-    "font-variation-settings",
-    "font-weight",
-    "glyph-orientation-horizontal",
-    "glyph-orientation-vertical",
-    "inline-size",
-    "kerning",
-    "letter-spacing",
-    "line-height",
-    "shape-inside",
-    "shape-margin",
-    "shape-padding",
-    "shape-subtract",
-    "text-align",
-    "text-align-last",
-    "text-anchor",
-    "text-decoration",
-    "text-decoration-color",
-    "text-decoration-line",
-    "text-decoration-style",
-    "text-indent",
-    "text-orientation",
-    "text-transform",
-    "unicode-bidi",
-    "white-space",
-    "word-spacing",
-    "writing-mode",
-    // Rendering hints that leave the geometry and colours alone.
-    "color-interpolation",
-    "color-profile",
-    "color-rendering",
-    "image-rendering",
-    "text-rendering",
-    // Properties of features refused where they would apply: lighting
-    // filters, a filter's background input, the `solidColor` paint server,
-    // and nested viewports.
-    "clip",
-    "enable-background",
-    "lighting-color",
-    "overflow",
-    "solid-color",
-    "solid-opacity",
-    // Only a picture with blend modes looks different isolated, and blend
-    // modes other than `normal` are refused.
-    "isolation",
-    // Interaction, which a still image has none of.
-    "cursor",
-    "pointer-events",
-    // Inkscape's own, written without a vendor prefix by its older
-    // versions and read by nothing else.
-    "filter-blend-mode",
-    "filter-gaussianblur-deviation",
+/// Properties that change the picture in ways this renderer does not draw,
+/// refused by name as presentation attributes and in declarations: a
+/// transform's box and origin, CSS Masking's longhands, and the
+/// `background-color` resvg paints behind an SVG's root.
+pub(super) const REFUSED_PROPERTIES: &[&str] = &[
+    "background-color",
+    "mask-border",
+    "mask-border-mode",
+    "mask-border-outset",
+    "mask-border-repeat",
+    "mask-border-slice",
+    "mask-border-source",
+    "mask-border-width",
+    "mask-clip",
+    "mask-composite",
+    "mask-image",
+    "mask-mode",
+    "mask-origin",
+    "mask-position",
+    "mask-repeat",
+    "mask-size",
+    "transform-box",
+    "transform-origin",
 ];
 
-/// What a property name means here.
-enum Known {
-    Supported(Property),
-    Ignored,
+/// Properties a declaration may set that move or reshape an element:
+/// geometry and `transform` given in CSS, which this renderer reads only as
+/// attributes, and CSS's individual transforms and motion path. Refused by
+/// name in a declaration; as attributes they are an element's own, or mean
+/// nothing on it.
+pub(super) const ATTRIBUTE_ONLY_PROPERTIES: &[&str] = &[
+    "cx",
+    "cy",
+    "d",
+    "height",
+    "offset",
+    "offset-anchor",
+    "offset-distance",
+    "offset-path",
+    "offset-position",
+    "offset-rotate",
+    "r",
+    "rotate",
+    "rx",
+    "ry",
+    "scale",
+    "transform",
+    "translate",
+    "width",
+    "x",
+    "y",
+];
+
+/// The supported property called `name`, if it is one.
+fn supported(name: &str) -> Option<Property> {
+    PROPERTIES
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|&(_, property)| property)
 }
 
-fn known(name: &str) -> Option<Known> {
-    if let Some(&(_, property)) = PROPERTIES.iter().find(|(known, _)| *known == name) {
-        return Some(Known::Supported(property));
-    }
-    (IGNORED_PROPERTIES.contains(&name) || name.starts_with('-')).then_some(Known::Ignored)
-}
-
-/// Whether `name`, as an attribute, is a presentation attribute this module
-/// handles (supported or ignored) rather than one the element must know.
-pub(super) fn is_presentation_attribute(name: &str) -> bool {
-    !name.starts_with('-') && known(name).is_some()
-}
-
-/// One element's declared values for the supported properties, cascaded:
-/// the winning declaration for each.
+/// One element's declarations of the supported properties, lowest-ranked
+/// first: the highest-ranked valid one of each applies.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Specified {
     values: Vec<(Property, String)>,
@@ -250,19 +226,18 @@ impl Cascade {
         Ok(Self { rules })
     }
 
-    /// `element`'s specified values: presentation attributes, then the
-    /// sheet's rules by specificity and order, then its `style` attribute,
-    /// then `!important` declarations in the same order.
+    /// `element`'s declarations: presentation attributes, then the sheet's
+    /// rules by specificity and order, then its `style` attribute, then
+    /// `!important` declarations in the same order.
     ///
     /// # Errors
     ///
-    /// A property neither supported nor ignored is unsupported.
+    /// A declaration of a property refused by name is unsupported.
     pub fn specified(&self, element: &Element) -> Result<Specified, ImageError> {
         // The highest-ranked declaration of each property wins.
         let mut ranked: Vec<(Rank, Declaration)> = Vec::new();
         for (order, attribute) in element.attributes.iter().enumerate() {
-            if attribute.namespace == Namespace::None && is_presentation_attribute(&attribute.name)
-            {
+            if attribute.namespace == Namespace::None && supported(&attribute.name).is_some() {
                 ranked.push((
                     (false, 0, (0, 0, 0), order),
                     Declaration {
@@ -291,18 +266,15 @@ impl Cascade {
         ranked.sort_by_key(|(rank, _)| *rank);
         let mut specified = Specified::default();
         for (_, declaration) in ranked {
-            match known(&declaration.name) {
-                Some(Known::Supported(property)) => {
-                    specified.values.retain(|(known, _)| *known != property);
-                    specified.values.push((property, declaration.value));
-                }
-                Some(Known::Ignored) => {}
-                None => {
-                    return Err(unsupported(format_args!(
-                        "property {} on <{}>",
-                        declaration.name, element.name
-                    )));
-                }
+            let name = declaration.name.as_str();
+            if REFUSED_PROPERTIES.contains(&name) || ATTRIBUTE_ONLY_PROPERTIES.contains(&name) {
+                return Err(unsupported(format_args!(
+                    "property {name} on <{}>",
+                    element.name
+                )));
+            }
+            if let Some(property) = supported(name) {
+                specified.values.push((property, declaration.value));
             }
         }
         Ok(specified)
@@ -463,6 +435,10 @@ pub(super) struct Style {
     pub stop_opacity: f32,
     /// `mask-type: alpha` rather than luminance.
     pub mask_alpha: bool,
+    /// `vector-effect: non-scaling-stroke`: the stroke's width and dashes are
+    /// measured in the coordinates the SVG is placed in, whatever transform
+    /// its element is under.
+    pub non_scaling_stroke: bool,
 }
 
 impl Style {
@@ -495,17 +471,20 @@ impl Style {
             stop_color: ColorValue::Color(Color::BLACK),
             stop_opacity: 1.0,
             mask_alpha: false,
+            non_scaling_stroke: false,
         }
     }
 
-    /// The style of an element with `specified` values whose parent's style
-    /// is `parent`.
+    /// The style of an element with `specified` declarations whose parent's
+    /// style is `parent`: each property's highest-ranked valid declaration
+    /// applies, and a property with none keeps its inherited or initial
+    /// value.
     ///
     /// # Errors
     ///
-    /// A value that does not parse, or that names an unsupported feature
-    /// (a filter function, a marker, a blend mode, a non-scaling stroke,
-    /// crisp-edged rendering), is unsupported.
+    /// A value naming a feature this renderer does not draw (a filter
+    /// function, a marker, a blend mode, crisp-edged rendering), or written
+    /// in a form it does not evaluate, is unsupported.
     pub fn compute(
         specified: &Specified,
         parent: &Self,
@@ -524,179 +503,278 @@ impl Style {
             stop_color: initial.stop_color,
             stop_opacity: initial.stop_opacity,
             mask_alpha: initial.mask_alpha,
+            non_scaling_stroke: initial.non_scaling_stroke,
             ..parent.clone()
         };
-        for (property, value) in &specified.values {
-            let value = value.trim();
-            let refuse = || {
-                unsupported(format_args!(
-                    "value {value:?} of {} on <{element}>",
-                    PROPERTIES
-                        .iter()
-                        .find(|(_, known)| known == property)
-                        .map_or("?", |(name, _)| name)
-                ))
-            };
-            if value == "inherit" {
-                style.inherit(*property, parent);
-                continue;
-            }
-            let opacity = || {
-                number_or_percent(value)
-                    .map(|v| v.clamp(0.0, 1.0))
-                    .ok_or_else(refuse)
-            };
-            let rule = || match value {
-                "nonzero" => Ok(FillRule::NonZero),
-                "evenodd" => Ok(FillRule::EvenOdd),
-                _ => Err(refuse()),
-            };
-            match property {
-                Property::Fill => style.fill = paint(value).ok_or_else(refuse)?,
-                Property::Stroke => style.stroke = paint(value).ok_or_else(refuse)?,
-                Property::FillOpacity => style.fill_opacity = opacity()?,
-                Property::StrokeOpacity => style.stroke_opacity = opacity()?,
-                Property::Opacity => style.opacity = opacity()?,
-                Property::StopOpacity => style.stop_opacity = opacity()?,
-                Property::FloodOpacity => style.flood_opacity = opacity()?,
-                Property::FillRule => style.fill_rule = rule()?,
-                Property::ClipRule => style.clip_rule = rule()?,
-                Property::StrokeWidth => {
-                    style.stroke_width = length(value)
-                        .filter(|length| !matches!(length, Length::Px(v) | Length::Percent(v) if *v < 0.0))
-                        .ok_or_else(refuse)?;
-                }
-                Property::StrokeLinecap => {
-                    style.stroke_linecap = match value {
-                        "butt" => LineCap::Butt,
-                        "round" => LineCap::Round,
-                        "square" => LineCap::Square,
-                        _ => return Err(refuse()),
-                    };
-                }
-                Property::StrokeLinejoin => {
-                    style.stroke_linejoin = match value {
-                        "miter" => LineJoin::Miter,
-                        "round" => LineJoin::Round,
-                        "bevel" => LineJoin::Bevel,
-                        _ => return Err(refuse()),
-                    };
-                }
-                Property::StrokeMiterlimit => {
-                    // A limit below one is out of range and is read as given:
-                    // no miter is shorter than the stroke is wide, so it
-                    // bevels every corner, as resvg's clamp to one does.
-                    style.stroke_miterlimit = number_prefix(value)
-                        .filter(|(_, rest)| rest.trim().is_empty())
-                        .map(|(v, _)| v)
-                        .ok_or_else(refuse)?;
-                }
-                Property::StrokeDasharray => {
-                    style.stroke_dasharray = if value == "none" {
-                        Vec::new()
-                    } else {
-                        value
-                            .split(|c: char| c == ',' || c.is_ascii_whitespace())
-                            .filter(|part| !part.is_empty())
-                            .map(length)
-                            .collect::<Option<Vec<_>>>()
-                            .ok_or_else(refuse)?
-                    };
-                }
-                Property::StrokeDashoffset => {
-                    style.stroke_dashoffset = length(value).ok_or_else(refuse)?
-                }
-                Property::Color => {
-                    style.color = match color::parse(value).ok_or_else(refuse)? {
-                        ColorValue::Color(color) => color,
-                        ColorValue::CurrentColor => parent.color,
-                    };
-                }
-                Property::StopColor => style.stop_color = color::parse(value).ok_or_else(refuse)?,
-                Property::FloodColor => {
-                    style.flood_color = color::parse(value).ok_or_else(refuse)?
-                }
-                Property::ColorInterpolationFilters => {
-                    // `auto` leaves the choice to the renderer, and this one
-                    // takes the initial value, as resvg does.
-                    style.filters_linear = match value {
-                        "auto" | "linearRGB" => true,
-                        "sRGB" => false,
-                        _ => return Err(refuse()),
-                    };
-                }
-                Property::Visibility => {
-                    style.visible = match value {
-                        "visible" => true,
-                        "hidden" | "collapse" => false,
-                        _ => return Err(refuse()),
-                    };
-                }
-                Property::Display => {
-                    style.display = match value {
-                        "none" => false,
-                        "inline" | "block" | "inline-block" => true,
-                        _ => return Err(refuse()),
-                    };
-                }
-                Property::ClipPath => style.clip_path = func_iri(value).ok_or_else(refuse)?,
-                Property::Mask => style.mask = func_iri(value).ok_or_else(refuse)?,
-                // A reference to one `filter` element; filter functions and
-                // lists of filters are not drawn.
-                Property::Filter => style.filter = func_iri(value).ok_or_else(refuse)?,
-                Property::MaskType => {
-                    style.mask_alpha = match value {
-                        "luminance" => false,
-                        "alpha" => true,
-                        _ => return Err(refuse()),
-                    };
-                }
-                Property::PaintOrder => {
-                    let words: Vec<&str> = value.split_ascii_whitespace().collect();
-                    if !words
-                        .iter()
-                        .all(|word| matches!(*word, "normal" | "fill" | "stroke" | "markers"))
-                    {
-                        return Err(refuse());
-                    }
-                    // Unlisted parts follow in their default order, so only
-                    // which of fill and stroke comes first matters.
-                    let fill = words.iter().position(|word| *word == "fill");
-                    let stroke = words.iter().position(|word| *word == "stroke");
-                    style.stroke_first = match (fill, stroke) {
-                        (Some(fill), Some(stroke)) => stroke < fill,
-                        (None, Some(_)) => true,
-                        _ => false,
-                    };
-                }
-                // Features this renderer does not have: their initial value
-                // is accepted, and nothing else.
-                Property::Marker
-                | Property::MarkerStart
-                | Property::MarkerMid
-                | Property::MarkerEnd => {
-                    if value != "none" {
-                        return Err(refuse());
-                    }
-                }
-                Property::MixBlendMode => {
-                    if value != "normal" {
-                        return Err(refuse());
-                    }
-                }
-                Property::VectorEffect => {
-                    if value != "none" {
-                        return Err(refuse());
-                    }
-                }
-                Property::ShapeRendering => {
-                    if !matches!(value, "auto" | "geometricPrecision") {
-                        return Err(refuse());
-                    }
-                }
+        let mut decided: Vec<Property> = Vec::new();
+        for (property, value) in specified.values.iter().rev() {
+            if !decided.contains(property)
+                && style.apply(*property, value.trim(), parent, element)?
+            {
+                decided.push(*property);
             }
         }
         Ok(style)
+    }
+
+    /// Sets `property` from `value`: `true` if it applied, `false` if it is no
+    /// value of the property, to be ignored.
+    fn apply(
+        &mut self,
+        property: Property,
+        value: &str,
+        parent: &Self,
+        element: &str,
+    ) -> Result<bool, ImageError> {
+        let refuse = || {
+            unsupported(format_args!(
+                "value {value:?} of {} on <{element}>",
+                PROPERTIES
+                    .iter()
+                    .find(|(_, known)| *known == property)
+                    .map_or("?", |(name, _)| name)
+            ))
+        };
+        match value {
+            "inherit" => {
+                self.inherit(property, parent);
+                return Ok(true);
+            }
+            "initial" => {
+                self.inherit(property, &Self::initial());
+                return Ok(true);
+            }
+            // Inherited or initial, as this style starts.
+            "unset" => return Ok(true),
+            _ => {}
+        }
+        let lower = value.to_ascii_lowercase();
+        if ["attr(", "calc(", "env(", "var("]
+            .iter()
+            .any(|function| lower.contains(function))
+        {
+            return Err(refuse());
+        }
+        // A value that did not parse: refused if it is in a form this
+        // renderer does not draw, ignored if it is no value at all.
+        let unparsed = |undrawn: bool| if undrawn { Err(refuse()) } else { Ok(false) };
+        let opacity = || number_or_percent(value).map(|v| v.clamp(0.0, 1.0));
+        let rule = || match value {
+            "nonzero" => Some(FillRule::NonZero),
+            "evenodd" => Some(FillRule::EvenOdd),
+            _ => None,
+        };
+        // A reference to one element, or `none`; a function or a keyword in
+        // its place is a feature this renderer does not draw.
+        let reference = || func_iri(value).ok_or(is_identifier(value) || value.contains('('));
+        match property {
+            Property::Fill => match paint(value) {
+                Some(paint) => self.fill = paint,
+                None => return unparsed(undrawn_paint(value)),
+            },
+            Property::Stroke => match paint(value) {
+                Some(paint) => self.stroke = paint,
+                None => return unparsed(undrawn_paint(value)),
+            },
+            Property::FillOpacity => match opacity() {
+                Some(opacity) => self.fill_opacity = opacity,
+                None => return Ok(false),
+            },
+            Property::StrokeOpacity => match opacity() {
+                Some(opacity) => self.stroke_opacity = opacity,
+                None => return Ok(false),
+            },
+            Property::Opacity => match opacity() {
+                Some(opacity) => self.opacity = opacity,
+                None => return Ok(false),
+            },
+            Property::StopOpacity => match opacity() {
+                Some(opacity) => self.stop_opacity = opacity,
+                None => return Ok(false),
+            },
+            Property::FloodOpacity => match opacity() {
+                Some(opacity) => self.flood_opacity = opacity,
+                None => return Ok(false),
+            },
+            Property::FillRule => match rule() {
+                Some(rule) => self.fill_rule = rule,
+                None => return Ok(false),
+            },
+            Property::ClipRule => match rule() {
+                Some(rule) => self.clip_rule = rule,
+                None => return Ok(false),
+            },
+            Property::StrokeWidth => match length(value) {
+                Some(Length::Px(width) | Length::Percent(width)) if width < 0.0 => {
+                    return Ok(false);
+                }
+                Some(width) => self.stroke_width = width,
+                None => return unparsed(undrawn_length(value)),
+            },
+            Property::StrokeLinecap => {
+                self.stroke_linecap = match value {
+                    "butt" => LineCap::Butt,
+                    "round" => LineCap::Round,
+                    "square" => LineCap::Square,
+                    _ => return Ok(false),
+                };
+            }
+            Property::StrokeLinejoin => {
+                self.stroke_linejoin = match value {
+                    "miter" => LineJoin::Miter,
+                    "round" => LineJoin::Round,
+                    "bevel" => LineJoin::Bevel,
+                    _ => return unparsed(matches!(value, "miter-clip" | "arcs")),
+                };
+            }
+            Property::StrokeMiterlimit => {
+                // A limit below one is out of range and is read as given:
+                // no miter is shorter than the stroke is wide, so it
+                // bevels every corner, as resvg's clamp to one does.
+                match number_prefix(value).filter(|(_, rest)| rest.trim().is_empty()) {
+                    Some((limit, _)) => self.stroke_miterlimit = limit,
+                    None => return Ok(false),
+                }
+            }
+            Property::StrokeDasharray => {
+                if value == "none" {
+                    self.stroke_dasharray = Vec::new();
+                } else {
+                    let parts: Vec<&str> = value
+                        .split(|c: char| c == ',' || c.is_ascii_whitespace())
+                        .filter(|part| !part.is_empty())
+                        .collect();
+                    match parts
+                        .iter()
+                        .map(|part| length(part))
+                        .collect::<Option<Vec<_>>>()
+                    {
+                        Some(dashes) => self.stroke_dasharray = dashes,
+                        None => {
+                            return unparsed(parts.iter().any(|part| undrawn_length(part)));
+                        }
+                    }
+                }
+            }
+            Property::StrokeDashoffset => match length(value) {
+                Some(offset) => self.stroke_dashoffset = offset,
+                None => return unparsed(undrawn_length(value)),
+            },
+            Property::Color => match color::parse(value) {
+                Some(ColorValue::Color(color)) => self.color = color,
+                Some(ColorValue::CurrentColor) => self.color = parent.color,
+                None => return unparsed(undrawn_color(value)),
+            },
+            Property::StopColor => match color::parse(value) {
+                Some(color) => self.stop_color = color,
+                None => return unparsed(undrawn_color(value)),
+            },
+            Property::FloodColor => match color::parse(value) {
+                Some(color) => self.flood_color = color,
+                None => return unparsed(undrawn_color(value)),
+            },
+            Property::ColorInterpolationFilters => {
+                // `auto` leaves the choice to the renderer, and this one
+                // takes the initial value, as resvg does.
+                self.filters_linear = match value {
+                    "auto" | "linearRGB" => true,
+                    "sRGB" => false,
+                    _ => return Ok(false),
+                };
+            }
+            Property::Visibility => {
+                self.visible = match value {
+                    "visible" => true,
+                    "hidden" | "collapse" => false,
+                    _ => return Ok(false),
+                };
+            }
+            Property::Display => {
+                // Every display type but `none` renders an SVG element.
+                self.display = match value {
+                    "none" => false,
+                    _ if !value.is_empty() && value.split_ascii_whitespace().all(is_identifier) => {
+                        true
+                    }
+                    _ => return Ok(false),
+                };
+            }
+            Property::ClipPath => match reference() {
+                Ok(id) => self.clip_path = id,
+                Err(undrawn) => return unparsed(undrawn),
+            },
+            // CSS's `mask` shorthand takes images, positions and modes, none
+            // of which this renderer draws.
+            Property::Mask => match func_iri(value) {
+                Some(id) => self.mask = id,
+                None => return Err(refuse()),
+            },
+            // A reference to one `filter` element; filter functions and
+            // lists of filters are not drawn.
+            Property::Filter => match reference() {
+                Ok(id) => self.filter = id,
+                Err(undrawn) => return unparsed(undrawn),
+            },
+            Property::MaskType => {
+                self.mask_alpha = match value {
+                    "luminance" => false,
+                    "alpha" => true,
+                    _ => return Ok(false),
+                };
+            }
+            Property::PaintOrder => {
+                let words: Vec<&str> = value.split_ascii_whitespace().collect();
+                if words.is_empty()
+                    || !words
+                        .iter()
+                        .all(|word| matches!(*word, "normal" | "fill" | "stroke" | "markers"))
+                {
+                    return Ok(false);
+                }
+                // Unlisted parts follow in their default order, so only
+                // which of fill and stroke comes first matters.
+                let fill = words.iter().position(|word| *word == "fill");
+                let stroke = words.iter().position(|word| *word == "stroke");
+                self.stroke_first = match (fill, stroke) {
+                    (Some(fill), Some(stroke)) => stroke < fill,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+            }
+            Property::VectorEffect => {
+                self.non_scaling_stroke = match value {
+                    "none" => false,
+                    "non-scaling-stroke" => true,
+                    _ => {
+                        return unparsed(matches!(
+                            value,
+                            "non-scaling-size" | "non-rotation" | "fixed-position"
+                        ));
+                    }
+                };
+            }
+            // Features this renderer does not have: their initial value is
+            // accepted, and nothing else that is a value of theirs.
+            Property::Marker
+            | Property::MarkerStart
+            | Property::MarkerMid
+            | Property::MarkerEnd => {
+                if value != "none" {
+                    return unparsed(func_iri(value).is_some() || value.starts_with("url("));
+                }
+            }
+            Property::MixBlendMode => {
+                if value != "normal" {
+                    return unparsed(BLEND_MODES.contains(&value));
+                }
+            }
+            Property::ShapeRendering => {
+                if !matches!(value, "auto" | "geometricPrecision") {
+                    return unparsed(matches!(value, "optimizeSpeed" | "crispEdges"));
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Takes `property`'s value from `parent`, for `inherit`.
@@ -728,12 +806,12 @@ impl Style {
             Property::StopColor => self.stop_color = parent.stop_color,
             Property::StopOpacity => self.stop_opacity = parent.stop_opacity,
             Property::MaskType => self.mask_alpha = parent.mask_alpha,
+            Property::VectorEffect => self.non_scaling_stroke = parent.non_scaling_stroke,
             Property::Marker
             | Property::MarkerStart
             | Property::MarkerMid
             | Property::MarkerEnd
             | Property::MixBlendMode
-            | Property::VectorEffect
             | Property::ShapeRendering => {}
         }
     }
@@ -745,6 +823,68 @@ impl Style {
             ColorValue::CurrentColor => self.color,
         }
     }
+}
+
+/// The blend modes other than `normal`, which this renderer does not draw.
+const BLEND_MODES: &[&str] = &[
+    "color",
+    "color-burn",
+    "color-dodge",
+    "darken",
+    "difference",
+    "exclusion",
+    "hard-light",
+    "hue",
+    "lighten",
+    "luminosity",
+    "multiply",
+    "overlay",
+    "plus-darker",
+    "plus-lighter",
+    "saturation",
+    "screen",
+    "soft-light",
+];
+
+/// Whether `text` is a CSS identifier, a keyword.
+fn is_identifier(text: &str) -> bool {
+    text.starts_with(|c: char| c.is_ascii_alphabetic() || c == '-')
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+/// Whether a colour that did not parse is in a form this renderer does not
+/// draw: a keyword (a system colour, `context-fill`) or a colour function
+/// other than `rgb()`, rather than no colour at all.
+fn undrawn_color(text: &str) -> bool {
+    if is_identifier(text) {
+        return true;
+    }
+    text.split_once('(').is_some_and(|(name, rest)| {
+        is_identifier(name)
+            && rest.ends_with(')')
+            && !name.eq_ignore_ascii_case("rgb")
+            && !name.eq_ignore_ascii_case("rgba")
+    })
+}
+
+/// Whether a paint that did not parse is one this renderer does not draw: a
+/// paint server in another file, or a colour as [`undrawn_color`] has it.
+fn undrawn_paint(text: &str) -> bool {
+    match text.strip_prefix("url(") {
+        Some(rest) => rest
+            .split(')')
+            .next()
+            .is_some_and(|inner| iri(inner).is_none()),
+        None => undrawn_color(text),
+    }
+}
+
+/// Whether a length that did not parse is a number in a unit this renderer
+/// does not resolve, such as `em`, rather than no length at all.
+fn undrawn_length(text: &str) -> bool {
+    number_prefix(text.trim()).is_some_and(|(_, unit)| is_identifier(unit.trim_end()))
 }
 
 #[cfg(test)]
@@ -921,25 +1061,37 @@ mod tests {
         assert_eq!(styles[1].fill_opacity, 1.0);
     }
 
-    /// **Unknown properties, unsupported values and unsupported features are
-    /// refused; ignored properties are not.**
+    /// **Values naming a feature this renderer does not draw, or written in
+    /// a form it does not evaluate, are refused, and so are the properties
+    /// refused by name.**
     #[test]
-    fn what_is_not_supported_is_refused() {
+    fn what_is_not_drawn_is_refused() {
         let svg = |body: &str| format!(r#"<svg xmlns="http://www.w3.org/2000/svg">{body}</svg>"#);
         for body in [
             r#"<rect style="fill: hsl(0, 50%, 50%)"/>"#,
+            r#"<rect fill="ButtonText"/>"#,
+            r#"<rect stroke="context-stroke"/>"#,
+            r#"<rect fill="url(other.svg#g)"/>"#,
+            r#"<rect fill="var(--c, red)"/>"#,
+            r#"<rect opacity="var(--o)"/>"#,
+            r#"<rect stroke-width="calc(1px + 1px)"/>"#,
+            r#"<rect stop-color="color-mix(in srgb, red, blue)"/>"#,
             r#"<rect filter="blur(2px)"/>"#,
             r#"<rect filter="url(#a) url(#b)"/>"#,
-            r#"<rect color-interpolation-filters="optimizeSpeed"/>"#,
+            r#"<rect clip-path="circle(5px)"/>"#,
+            r#"<rect clip-path="border-box"/>"#,
+            r#"<rect mask="url(#m) luminance"/>"#,
             r#"<rect marker-end="url(#m)"/>"#,
             r#"<rect style="mix-blend-mode: multiply"/>"#,
-            r#"<rect vector-effect="non-scaling-stroke"/>"#,
+            r#"<rect vector-effect="non-scaling-size"/>"#,
             r#"<rect shape-rendering="crispEdges"/>"#,
             r#"<rect stroke-linejoin="miter-clip"/>"#,
-            r#"<rect style="transform: rotate(3deg)"/>"#,
-            r#"<rect style="frobnicate: 1"/>"#,
             r#"<rect stroke-width="1em"/>"#,
-            r#"<rect stroke-width="-1"/>"#,
+            r#"<rect stroke-dasharray="1em, 2"/>"#,
+            r#"<rect style="transform: rotate(3deg)"/>"#,
+            r#"<rect style="transform-origin: 0 0"/>"#,
+            r#"<rect style="r: 2px"/>"#,
+            r#"<svg style="background-color: red"/>"#,
             r#"<style type="text/sass">a{}</style>"#,
             r#"<style media="print">a{}</style>"#,
         ] {
@@ -948,10 +1100,66 @@ mod tests {
                 "{body}"
             );
         }
-        let ignored = styles(&svg(
-            r#"<rect style="font-family: Sans; -inkscape-stroke: none; isolation: isolate; enable-background: accumulate" color-rendering="auto"/>"#,
-        ))
-        .expect("ignored properties are not refused");
-        assert_eq!(ignored[1], Style::initial());
+    }
+
+    /// **A value that is no value of its property is ignored**: the next
+    /// declaration down the cascade applies, else the inherited or initial
+    /// value; **a property this renderer does not know is ignored**; and
+    /// `initial` and `unset` mean what CSS says.
+    #[test]
+    fn invalid_values_and_unknown_properties_are_ignored() {
+        let styles = styles(
+            r##"<svg xmlns="http://www.w3.org/2000/svg">
+<style>.c { fill: #0000ff }</style>
+<g fill="#ff0000" stroke-width="3" opacity="0.5" stroke-linecap="round" paint-order="stroke">
+  <rect fill="#f5f5f5;opacity:0.26"/>
+  <rect class="c" style="fill: #nothex; fill"/>
+  <rect stroke-width="-1" opacity="half"/>
+  <rect fill="currentColor;fill-opacity:1;stroke:none" color="#00ff00"/>
+  <rect fill-rule="even-odd" stroke-linecap="flat" visibility="no" display="!" color-interpolation-filters="optimizeSpeed" paint-order="fill fill2" mask-type="lum" stroke-dasharray="1,x" stroke-miterlimit="4px" vector-effect="scaling" mix-blend-mode="mixed" shape-rendering="smooth" marker-end="#m" stroke-linejoin="mitre" clip-path="#c" filter="#f" stroke="#12345"/>
+  <rect fill="initial" stroke-width="unset" opacity="inherit"/>
+  <rect class="c" style="fill: unset" stop-color="rgb(1, 2)" color="1abc" paint-order=""/>
+  <rect display="none" style="display: !"/>
+  <rect style="frobnicate: 1; -inkscape-stroke: none; font-family: Sans; isolation: isolate" tyle="fill: #00ff00" adobe-blending-mode="normal"/>
+</g>
+</svg>"##,
+        )
+        .expect("styles");
+        let red = Paint::Color(ColorValue::Color(Color::rgb8(255, 0, 0)));
+        let group = &styles[2];
+        assert_eq!(styles[3].fill, red, "an invalid fill inherits");
+        assert_eq!(
+            styles[4].fill,
+            Paint::Color(ColorValue::Color(Color::rgb8(0, 0, 255))),
+            "the sheet's fill, under an invalid style attribute"
+        );
+        assert_eq!(styles[5].stroke_width, Length::Px(3.0), "inherited");
+        assert_eq!(styles[5].opacity, 1.0, "initial: opacity is not inherited");
+        assert_eq!(styles[6].fill, red);
+        let mut inherited = group.clone();
+        inherited.opacity = 1.0;
+        assert_eq!(styles[7], inherited, "every invalid value ignored");
+        assert_eq!(
+            styles[8].fill,
+            Paint::Color(ColorValue::Color(Color::BLACK))
+        );
+        assert_eq!(styles[8].stroke_width, Length::Px(3.0));
+        assert_eq!(styles[8].opacity, 0.5);
+        assert_eq!(styles[9].fill, red, "unset beats the sheet, and inherits");
+        assert_eq!(styles[9], inherited, "an invalid rgb(), colour and order");
+        assert!(!styles[10].display, "the attribute under an invalid style");
+        assert_eq!(styles[11], inherited, "unknown properties ignored");
+    }
+
+    /// **`vector-effect` is not inherited.**
+    #[test]
+    fn a_non_scaling_stroke_is_the_elements_own() {
+        let styles = styles(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><g vector-effect="non-scaling-stroke"><rect/><rect vector-effect="inherit"/></g></svg>"#,
+        )
+        .expect("styles");
+        assert!(styles[1].non_scaling_stroke);
+        assert!(!styles[2].non_scaling_stroke);
+        assert!(styles[3].non_scaling_stroke);
     }
 }

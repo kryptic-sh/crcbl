@@ -772,9 +772,10 @@ fn unsupported_features_refuse_the_file() {
         r#"<switch><rect width="2" height="2"/></switch>"#,
         r#"<rect width="2" height="2"><animate attributeName="x" to="4"/></rect>"#,
         r#"<foreignObject width="2" height="2"/>"#,
-        r#"<rect width="2" height="2" frobnicate="1"/>"#,
         r#"<path d="M0 0 H2" pathLength="10" stroke="red"/>"#,
         r#"<rect width="2" height="2" systemLanguage="en"/>"#,
+        r#"<rect width="2" height="2" transform-origin="1 1" transform="rotate(90)"/>"#,
+        r#"<rect width="2" height="2" style="x: 2px"/>"#,
         r#"<style>g rect { fill: red }</style>"#,
         r#"<rect width="2" height="2" style="mix-blend-mode: multiply"/>"#,
         r#"<use href="other.svg#icon"/>"#,
@@ -796,6 +797,62 @@ fn unsupported_features_refuse_the_file() {
         ),
         8,
     );
+}
+
+/// **What a browser ignores is ignored**: an attribute nothing defines (a
+/// misspelt `style` included), an `href` on a shape, a value that is no
+/// value of its property, a declaration with no colon and SVG 1.1's
+/// `filterRes`, so each of these files draws its square red.
+#[test]
+fn unknown_attributes_and_invalid_values_are_ignored() {
+    for body in [
+        r#"<rect width="2" height="2" fill="red" frobnicate="1" tyle="fill:#00ff00"/>"#,
+        r##"<path d="M0 0 H2 V2 H0 Z" fill="red" xlink:href="#x" href="#y"/>"##,
+        r##"<g fill="red"><rect width="2" height="2" fill="#00ff00;opacity:0.5"/></g>"##,
+        r#"<rect width="2" height="2" style="fill #00ff00; fill: red"/>"#,
+        r#"<filter id="f" filterRes="10"><feOffset/></filter><rect width="2" height="2" fill="red" filter="url(#f)"/>"#,
+    ] {
+        let image = render(&svg(4, body), 4);
+        assert_exact(&image, RED, |x, y| x < 2 && y < 2);
+    }
+}
+
+/// **A non-scaling stroke is measured where the SVG is placed**: its width
+/// and dashes ignore the element's transform and the `viewBox`, and scale
+/// with the image as a whole.
+#[test]
+fn non_scaling_strokes_keep_their_width() {
+    // Under scale(4) the line runs along y = 8; a two-unit stroke is two
+    // pixels, rows 7 and 8, where a scaling one would be eight.
+    let line = |effect: &str, dashes: &str| {
+        svg(
+            16,
+            &format!(
+                r#"<line x1="0" y1="2" x2="4" y2="2" transform="scale(4)" stroke="red" stroke-width="2" {effect} {dashes}/>"#
+            ),
+        )
+    };
+    let image = render(&line(r#"vector-effect="non-scaling-stroke""#, ""), 16);
+    assert_exact(&image, RED, |_, y| (7..9).contains(&y));
+    let image = render(&line("", ""), 16);
+    assert_exact(&image, RED, |_, y| (4..12).contains(&y));
+    // Two-pixel dashes and gaps, where scaling would make them eight.
+    let image = render(
+        &line(
+            r#"vector-effect="non-scaling-stroke""#,
+            r#"stroke-dasharray="2""#,
+        ),
+        16,
+    );
+    assert_exact(&image, RED, |x, y| (7..9).contains(&y) && x % 4 < 2);
+    // A viewBox half the viewport's size scales user units by two, which a
+    // non-scaling stroke ignores; drawn at twice the size, the whole image
+    // and the stroke with it scale.
+    let text = format!(
+        r#"<svg {SVG} viewBox="0 0 8 8" width="16" height="16"><line x1="0" y1="4" x2="8" y2="4" stroke="red" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>"#
+    );
+    assert_exact(&render(&text, 16), RED, |_, y| (7..9).contains(&y));
+    assert_exact(&render(&text, 32), RED, |_, y| (14..18).contains(&y));
 }
 
 /// **A file that multiplies itself through `use` is refused at the

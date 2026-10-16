@@ -113,12 +113,12 @@ fn split_top_level(text: &str, separator: char) -> Vec<&str> {
     parts
 }
 
-/// The declarations of a `style` attribute or a rule's block.
+/// The declarations of a `style` attribute or a rule's block. One with no
+/// colon or no name is dropped, as CSS drops an invalid declaration.
 ///
 /// # Errors
 ///
-/// [`ImageError::Malformed`] for a declaration with no colon or an unclosed
-/// comment.
+/// [`ImageError::Malformed`] for an unclosed comment.
 pub(super) fn declarations(text: &str) -> Result<Vec<Declaration>, ImageError> {
     let text = strip_comments(text)?;
     let mut out = Vec::new();
@@ -127,8 +127,11 @@ pub(super) fn declarations(text: &str) -> Result<Vec<Declaration>, ImageError> {
         if part.is_empty() {
             continue;
         }
-        let Some((name, value)) = part.split_once(':') else {
-            return Err(malformed(format_args!("the declaration {part:?}")));
+        let Some((name, value)) = part
+            .split_once(':')
+            .filter(|(name, _)| !name.trim().is_empty())
+        else {
+            continue;
         };
         let mut value = value.trim();
         let mut important = false;
@@ -240,7 +243,8 @@ mod tests {
     }
 
     /// **A `style` attribute splits into its declarations**, comments
-    /// dropped, `!important` noted, and a semicolon inside parentheses kept.
+    /// dropped, `!important` noted, a semicolon inside parentheses kept, and
+    /// a declaration with no colon or no name dropped.
     #[test]
     fn declarations_split_at_top_level_semicolons() {
         assert_eq!(
@@ -252,10 +256,10 @@ mod tests {
                 declaration("opacity", ".5", true),
             ]
         );
-        assert!(matches!(
-            declarations("fill red"),
-            Err(ImageError::Malformed(_))
-        ));
+        assert_eq!(
+            declarations("fill red; :blue; stroke: green").expect("parses"),
+            vec![declaration("stroke", "green", false)]
+        );
     }
 
     /// **A sheet's simple selectors match the elements they name**: by type,

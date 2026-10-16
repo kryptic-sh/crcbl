@@ -12,25 +12,30 @@
 //! draw is a decode error**, [`ImageError::Unsupported`] naming it, and
 //! never a partial image.
 //!
-//! What has no effect on the picture is not unsupported, and is ignored by
-//! design:
+//! What a browser would not draw either is not unsupported, and is ignored,
+//! as SVG and CSS say to and as browsers and resvg do:
 //!
-//! * elements and attributes outside the SVG namespace — Inkscape's,
-//!   Sodipodi's, RDF, Creative Commons and Dublin Core metadata, any
-//!   editor's — which no SVG renderer draws;
+//! * elements outside the SVG namespace — Inkscape's, Sodipodi's, RDF,
+//!   Creative Commons and Dublin Core metadata, any editor's;
 //! * `<title>`, `<desc>` and `<metadata>`, comments, processing instructions
-//!   and the DOCTYPE, `<script>` (a still image runs none), event-handler,
-//!   `data-` and `aria-` attributes;
+//!   and the DOCTYPE, and `<script>` (a still image runs none);
+//! * an attribute or property no SVG element it is on reads — an editor's,
+//!   a misspelling, an `href` on a shape — beside the few that change the
+//!   picture in ways this renderer does not draw, which are refused by name;
+//! * a value that is no value of its property, as CSS ignores an invalid
+//!   declaration: the next declaration down the cascade applies, else the
+//!   inherited or initial value (`style`'s module says which values count as
+//!   undrawn rather than invalid);
 //! * definitions nothing references: an unsupported element inside `<defs>`
-//!   refuses the file only when something uses it;
-//! * the properties `style`'s module lists as having no effect here.
+//!   refuses the file only when something uses it.
 //!
 //! What is drawn: `svg` with `viewBox`, `width`, `height` and
 //! `preserveAspectRatio`; `g`, `defs` and `use`; `path` (all of SVG 2's path
 //! grammar), `rect`, `circle`, `ellipse`, `line`, `polyline` and `polygon`;
 //! `transform`; presentation attributes, the `style` attribute and a
 //! `<style>` sheet of type, class and id selectors; fill and stroke with
-//! their opacities, rules, joins, caps, miter limits and dashes; colours,
+//! their opacities, rules, joins, caps, miter limits and dashes, and
+//! `vector-effect: non-scaling-stroke`; colours,
 //! `currentColor`, linear and radial gradients; `clipPath` and `mask`;
 //! group opacity; and filters of the primitives drop shadows are made of
 //! (`feGaussianBlur`, `feOffset`, `feFlood`, `feComposite`, `feColorMatrix`

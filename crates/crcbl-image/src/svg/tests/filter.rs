@@ -388,7 +388,6 @@ fn unsupported_filters_refuse_the_file() {
             r#"<feOffset><animate attributeName="dx" to="2"/></feOffset>"#,
         ),
         (r##"href="#g""##, r#"<feOffset/>"#),
-        (r#"filterRes="10""#, r#"<feOffset/>"#),
         (r#"filterUnits="strokeBox""#, r#"<feOffset/>"#),
     ] {
         let text = filtered(8, region, primitives, target);

@@ -70,25 +70,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   into a transparent `size × scale` square, the viewport fitted and centred. The
   subset icon themes use — paths and the basic shapes, transforms, `use`,
   presentation attributes, `style` and a `<style>` sheet of type, class and id
-  selectors, fills and strokes with joins, caps, miter limits and dashes, linear
-  and radial gradients, `clipPath`, `mask`, group opacity, and the `filter`
-  element with the primitives drop shadows are made of (`feGaussianBlur` by the
-  Filter Effects specification's three-box approximation, `feOffset`, `feFlood`,
-  `feComposite` with every operator including `arithmetic`, `feColorMatrix` of
-  every type, and `feMerge`), their regions, units, subregions and `in`/`result`
-  graph, in linearRGB or by `color-interpolation-filters` sRGB — and **anything
-  outside it is a decode error, never a partial icon**: text, images, other
-  filter primitives, filter functions, patterns, markers, `symbol`, blend modes
-  and animation are refused by name, while editors' metadata (Inkscape,
-  Sodipodi, RDF, `<title>`) is ignored by design. The XML parser expands a DTD's
-  entities only when they are plain text, the namespace URIs and styles Adobe
-  Illustrator writes as entities, within caps on their number, length and total
-  expansion, and fetches nothing; nesting, element count, `use` instances,
-  layers, dashes and filter primitives are capped, and a filter region is cut to
-  the canvas. Measured against resvg's renders of Adwaita, Papirus and breeze by
-  the `svg_corpus` example, which CI's `svg corpus` job runs. `raster`, the
-  coverage rasteriser from `crcbl-ui`, fills by `raster::FillRule::EvenOdd` as
-  well as non-zero (`Rasterizer::coverage_by`).
+  selectors, fills and strokes with joins, caps, miter limits and dashes,
+  `vector-effect: non-scaling-stroke`, linear and radial gradients, `clipPath`,
+  `mask`, group opacity, and the `filter` element with the primitives drop
+  shadows are made of (`feGaussianBlur` by the Filter Effects specification's
+  three-box approximation, `feOffset`, `feFlood`, `feComposite` with every
+  operator including `arithmetic`, `feColorMatrix` of every type, and
+  `feMerge`), their regions, units, subregions and `in`/`result` graph, in
+  linearRGB or by `color-interpolation-filters` sRGB — and **anything outside it
+  is a decode error, never a partial icon**: text, images, other filter
+  primitives, filter functions, patterns, markers, `symbol`, blend modes and
+  animation are refused by name, while editors' metadata (Inkscape, Sodipodi,
+  RDF, `<title>`) is ignored by design. As browsers and resvg do, an attribute
+  or property nothing on its element reads is ignored (a misspelling, an `href`
+  on a shape), and a value that is no value of its property, such as
+  `fill="#fff;opacity:1"`, gives way to the next declaration down the cascade or
+  the inherited or initial value; a value in a form the renderer does not
+  evaluate (`var()`, `calc()`, `em`, a colour function other than `rgb()`) and
+  the properties that change the picture in ways it does not draw
+  (`transform-origin`, CSS masks and transforms) are still refused by name. The
+  XML parser expands a DTD's entities only when they are plain text, the
+  namespace URIs and styles Adobe Illustrator writes as entities, within caps on
+  their number, length and total expansion, and fetches nothing; nesting,
+  element count, `use` instances, layers, dashes and filter primitives are
+  capped, and a filter region is cut to the canvas. Measured against resvg's
+  renders of Adwaita, Papirus and breeze by the `svg_corpus` example, which CI's
+  `svg corpus` job runs. `raster`, the coverage rasteriser from `crcbl-ui`,
+  fills by `raster::FillRule::EvenOdd` as well as non-zero
+  (`Rasterizer::coverage_by`).
 - **Dead keys and Compose sequences type on Wayland and X11.** A dead key
   commits nothing and the key after it commits what the two compose to (`´` then
   `e` is `é`), through libxkbcommon's compose module and the user's locale's

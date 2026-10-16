@@ -40,9 +40,6 @@ use crate::svg::transform::Transform;
 use crate::svg::xml::{Element, Namespace};
 use crate::svg::{malformed, unsupported};
 
-/// The attributes of every primitive: its subregion and its result's name.
-const PRIMITIVE_ATTRIBUTES: &[&str] = &["height", "result", "width", "x", "y"];
-
 impl Renderer<'_> {
     /// The filter `id` applied to an element whose user space maps to pixels
     /// by `transform` and whose object bounding box is `bbox`: the canvas
@@ -61,10 +58,14 @@ impl Renderer<'_> {
         if !element.is("filter") {
             return Err(unsupported(format_args!("a filter of <{}>", element.name)));
         }
-        check_attributes(
-            element,
-            &["filterUnits", "height", "primitiveUnits", "width", "x", "y"],
-        )?;
+        check_attributes(element)?;
+        if element
+            .attribute(Namespace::None, "href")
+            .or_else(|| element.attribute(Namespace::Xlink, "href"))
+            .is_some()
+        {
+            return Err(unsupported("an href between filters"));
+        }
         let object_units = units(element, "filterUnits", true)?;
         let primitive_units = if units(element, "primitiveUnits", false)? {
             match bounding_box_units(bbox) {
@@ -145,15 +146,21 @@ impl Renderer<'_> {
             {
                 continue;
             }
-            let own: &[&str] = match primitive.name.as_str() {
-                "feGaussianBlur" => &["in", "stdDeviation"],
-                "feOffset" => &["dx", "dy", "in"],
-                "feFlood" | "feMerge" => &[],
-                "feComposite" => &["in", "in2", "k1", "k2", "k3", "k4", "operator"],
-                "feColorMatrix" => &["in", "type", "values"],
-                other => return Err(unsupported(format_args!("filter primitive <{other}>"))),
-            };
-            check_attributes(primitive, &[PRIMITIVE_ATTRIBUTES, own].concat())?;
+            if !matches!(
+                primitive.name.as_str(),
+                "feGaussianBlur"
+                    | "feOffset"
+                    | "feFlood"
+                    | "feMerge"
+                    | "feComposite"
+                    | "feColorMatrix"
+            ) {
+                return Err(unsupported(format_args!(
+                    "filter primitive <{}>",
+                    primitive.name
+                )));
+            }
+            check_attributes(primitive)?;
             counted()?;
             let style = self.document_style(child)?;
             let input = |name: &str| resolve_input(primitive, name, &names);
@@ -212,7 +219,7 @@ impl Renderer<'_> {
                                 node.name
                             )));
                         }
-                        check_attributes(node, &["in"])?;
+                        check_attributes(node)?;
                         self.check_shape_children(node)?;
                         counted()?;
                         inputs.push(resolve_input(node, "in", &names)?);

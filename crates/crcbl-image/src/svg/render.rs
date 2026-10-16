@@ -100,42 +100,34 @@ const NOT_RENDERED: &[&str] = &[
 /// Children a shape may have that change nothing: descriptions.
 const DESCRIPTIVE: &[&str] = &["desc", "metadata", "title"];
 
-/// Attributes any SVG element may carry without effect on its pixels, beside
-/// the presentation attributes: identity, styling hooks, language, focus and
-/// accessibility, and SVG 1.1's `requiredFeatures`, which SVG 2 made always
-/// true.
-const CORE_ATTRIBUTES: &[&str] = &[
-    "class",
-    "externalResourcesRequired",
-    "focusable",
-    "id",
-    "lang",
-    "requiredFeatures",
-    "role",
-    "style",
-    "tabindex",
+/// The elements drawn where they stand: groups, `use` and the basic shapes.
+const DRAWN: &[&str] = &[
+    "circle", "ellipse", "g", "line", "path", "polygon", "polyline", "rect", "use",
 ];
 
-/// Refuses an attribute of `element` that is neither core, presentation,
-/// nor one of `own`. Attributes in another namespace (an editor's), the
-/// `xml:` ones, XLink's descriptive ones, event handlers (which a still image
-/// never runs), and `data-` and `aria-` attributes are ignored.
-fn check_attributes(element: &Element, own: &[&str]) -> Result<(), ImageError> {
+/// Attributes that change the picture in ways this renderer does not draw,
+/// refused by name beside the properties `style` refuses: conditional
+/// processing, which may leave an element out; a path length, which rescales
+/// dashes; and a blur's edge mode.
+const REFUSED_ATTRIBUTES: &[&str] = &[
+    "edgeMode",
+    "pathLength",
+    "requiredExtensions",
+    "systemLanguage",
+];
+
+/// Refuses an attribute of `element` whose effect this renderer does not
+/// draw: one of [`REFUSED_ATTRIBUTES`], or a property `style` refuses by
+/// name. Every other attribute is read by the code drawing its element, or
+/// means nothing on it and is ignored, as browsers and resvg ignore it: an
+/// editor's in its own namespace, a misspelling, an `href` on a shape, the
+/// geometry of another kind of shape an editor left behind.
+fn check_attributes(element: &Element) -> Result<(), ImageError> {
     for attribute in &element.attributes {
         let name = attribute.name.as_str();
-        let accepted = match attribute.namespace {
-            Namespace::Foreign | Namespace::Xml => true,
-            Namespace::Xlink => name != "href" || own.contains(&"href"),
-            Namespace::Svg | Namespace::None => {
-                CORE_ATTRIBUTES.contains(&name)
-                    || own.contains(&name)
-                    || style::is_presentation_attribute(name)
-                    || name.starts_with("on")
-                    || name.starts_with("data-")
-                    || name.starts_with("aria-")
-            }
-        };
-        if !accepted {
+        if matches!(attribute.namespace, Namespace::None | Namespace::Svg)
+            && (REFUSED_ATTRIBUTES.contains(&name) || style::REFUSED_PROPERTIES.contains(&name))
+        {
             return Err(unsupported(format_args!(
                 "attribute {name} on <{}>",
                 element.name
@@ -143,40 +135,6 @@ fn check_attributes(element: &Element, own: &[&str]) -> Result<(), ImageError> {
         }
     }
     Ok(())
-}
-
-/// The attributes of a group, a `use` or a basic shape beside the core and
-/// presentation ones, or `None` for an element that is none of those.
-///
-/// Every basic shape accepts the geometry attributes of all of them: an
-/// attribute that shapes another kind (a `width` left on a `path` by an
-/// editor that converted a rectangle) means nothing on this one in SVG or
-/// any renderer, which is not a feature left undrawn.
-fn own_attributes(element: &str) -> Option<&'static [&'static str]> {
-    const SHAPE: &[&str] = &[
-        "cx",
-        "cy",
-        "d",
-        "height",
-        "points",
-        "r",
-        "rx",
-        "ry",
-        "transform",
-        "width",
-        "x",
-        "x1",
-        "x2",
-        "y",
-        "y1",
-        "y2",
-    ];
-    match element {
-        "g" => Some(&["transform"]),
-        "use" => Some(&["height", "href", "transform", "width", "x", "y"]),
-        "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" => Some(SHAPE),
-        _ => None,
-    }
 }
 
 /// The transform that fits the `view_box` into a `width` by `height`
@@ -333,22 +291,7 @@ pub(super) fn render(document: &Document, side: u32) -> Result<Canvas, ImageErro
             root.name
         )));
     }
-    check_attributes(
-        root,
-        &[
-            "baseProfile",
-            "contentScriptType",
-            "contentStyleType",
-            "height",
-            "preserveAspectRatio",
-            "version",
-            "viewBox",
-            "width",
-            "x",
-            "y",
-            "zoomAndPan",
-        ],
-    )?;
+    check_attributes(root)?;
     let view_box = match root.attribute(Namespace::None, "viewBox") {
         None => None,
         Some(text) => match path::number_list(text).as_deref() {
@@ -407,6 +350,7 @@ pub(super) fn render(document: &Document, side: u32) -> Result<Canvas, ImageErro
     }
     let mut renderer = Renderer {
         document,
+        host: placement,
         cascade: Cascade::new(document)?,
         parents,
         ids,
@@ -444,6 +388,10 @@ pub(super) fn render(document: &Document, side: u32) -> Result<Canvas, ImageErro
 
 struct Renderer<'a> {
     document: &'a Document,
+    /// The map from the coordinates the SVG is placed in, its outermost
+    /// viewport's before any `viewBox`, to pixels: where a non-scaling
+    /// stroke is measured.
+    host: Transform,
     cascade: Cascade,
     parents: Vec<Option<usize>>,
     /// Each id's last element. Ids are meant to be unique; where a file
@@ -575,10 +523,10 @@ impl<'a> Renderer<'a> {
         if element.namespace != Namespace::Svg || NOT_RENDERED.contains(&element.name.as_str()) {
             return Ok(());
         }
-        let Some(own) = own_attributes(&element.name) else {
+        if !DRAWN.contains(&element.name.as_str()) {
             return Err(unsupported(format_args!("element <{}>", element.name)));
-        };
-        check_attributes(element, own)?;
+        }
+        check_attributes(element)?;
         self.instances += 1;
         if self.instances > MAX_INSTANCES {
             return Err(unsupported(format_args!(
@@ -920,12 +868,29 @@ impl<'a> Renderer<'a> {
             dash_offset: style.stroke_dashoffset.resolve(diagonal),
         };
         let tolerance = path::user_tolerance(transform.max_scale());
-        let contours = stroke::outline(&path::flatten(geometry, tolerance), &stroke, tolerance)?;
+        let mut polylines = path::flatten(geometry, tolerance);
+        // A non-scaling stroke is outlined in the host's coordinates, where
+        // its width and dashes are measured, and only the placement maps it
+        // to pixels.
+        let (outline_tolerance, to_pixels) = if style.non_scaling_stroke {
+            let Some(to_host) = self.host.invert().map(|inverse| inverse.then(transform)) else {
+                return Ok(());
+            };
+            for polyline in &mut polylines {
+                for (point, _) in &mut polyline.points {
+                    *point = to_host.apply(*point);
+                }
+            }
+            (path::user_tolerance(self.host.max_scale()), self.host)
+        } else {
+            (tolerance, transform)
+        };
+        let contours = stroke::outline(&polylines, &stroke, outline_tolerance)?;
         let mut edges = Vec::new();
         for contour in &contours {
             for (index, &from) in contour.iter().enumerate() {
                 let to = contour[(index + 1) % contour.len()];
-                edges.push(Edge::Line(device(transform, from), device(transform, to)));
+                edges.push(Edge::Line(device(to_pixels, from), device(to_pixels, to)));
             }
         }
         let coverage = self.coverage(&edges, FillRule::NonZero);
@@ -1079,32 +1044,7 @@ impl<'a> Renderer<'a> {
         let mut chain = vec![index];
         loop {
             let element = self.element(*chain.last().unwrap_or(&index));
-            let own: &[&str] = if element.name == "linearGradient" {
-                &[
-                    "gradientTransform",
-                    "gradientUnits",
-                    "href",
-                    "spreadMethod",
-                    "x1",
-                    "x2",
-                    "y1",
-                    "y2",
-                ]
-            } else {
-                &[
-                    "cx",
-                    "cy",
-                    "fr",
-                    "fx",
-                    "fy",
-                    "gradientTransform",
-                    "gradientUnits",
-                    "href",
-                    "r",
-                    "spreadMethod",
-                ]
-            };
-            check_attributes(element, own)?;
+            check_attributes(element)?;
             for &child in &element.children {
                 let child = self.element(child);
                 if child.namespace == Namespace::Svg
@@ -1194,7 +1134,7 @@ impl<'a> Renderer<'a> {
                 if !self.element(child).is("stop") {
                     continue;
                 }
-                check_attributes(self.element(child), &["offset"])?;
+                check_attributes(self.element(child))?;
                 let stop_style = self.document_style(child)?;
                 let text = self
                     .element(child)
@@ -1357,7 +1297,7 @@ impl<'a> Renderer<'a> {
                 element.name
             )));
         }
-        check_attributes(element, &["clipPathUnits", "transform"])?;
+        check_attributes(element)?;
         self.follow(index)?;
         self.enter()?;
         self.layers += 1;
@@ -1486,7 +1426,7 @@ impl<'a> Renderer<'a> {
     /// children.
     fn check_clip_child(&self, index: usize) -> Result<(), ImageError> {
         let element = self.element(index);
-        check_attributes(element, own_attributes(&element.name).unwrap_or(&[]))?;
+        check_attributes(element)?;
         if element.name != "use" {
             self.check_shape_children(element)?;
         }
@@ -1542,10 +1482,7 @@ impl<'a> Renderer<'a> {
         if !element.is("mask") {
             return Err(unsupported(format_args!("a mask of <{}>", element.name)));
         }
-        check_attributes(
-            element,
-            &["height", "maskContentUnits", "maskUnits", "width", "x", "y"],
-        )?;
+        check_attributes(element)?;
         self.follow(index)?;
         self.enter()?;
         self.layers += 1;
