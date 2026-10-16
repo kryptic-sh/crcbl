@@ -23,11 +23,11 @@ watcher and a grapheme crate stay declined until a caller needs them.
 each checked against the code here unless it says otherwise:
 
 - **System font lookup is `crcbl-font`** (pikr and lyr asked; SVG text in
-  `crcbl-image` will use it, which is why it is not in `crcbl-ui`), with
-  `crcbl-ui`'s `system-fonts` feature for `Ui::register_system_font` and
-  `Font::from_system`. Built 2026-10-16, loading `libfontconfig.so.1` at run
-  time (decided then, over reading fontconfig's configuration and cache files).
-  What it left:
+  `crcbl-image` uses it, since 2026-10-17, which is why it is not in
+  `crcbl-ui`), with `crcbl-ui`'s `system-fonts` feature for
+  `Ui::register_system_font` and `Font::from_system`. Built 2026-10-16, loading
+  `libfontconfig.so.1` at run time (decided then, over reading fontconfig's
+  configuration and cache files). What it left:
   - **Verified where:** Windows and Linux (WSL's Ubuntu 26.04, fontconfig
     2.17.1, DejaVu and Ubuntu fonts) locally, system tests included; macOS
     (`helvetica_is_found_in_its_collection`, Apple Color Emoji as `emoji` and a
@@ -112,8 +112,9 @@ each checked against the code here unless it says otherwise:
 **pikr drops resvg and the `image` crate, 2026-10-16** (the owner's call,
 relayed by pikr's session), so every `crcbl-image` gap now shows in pikr as a
 generic icon. pikr asked for its needs ahead of work it does not depend on, and
-that is the order from here: SVG text (`<text>` and Inkscape's `<flowRoot>`),
-the largest, since icons name system fonts. pikr pins each green main revision
+that is the order from here. SVG text (`<text>` and Inkscape's `<flowRoot>`),
+the largest, shipped 2026-10-17 behind `crcbl-image`'s `svg-text` feature (the
+`crcbl-image` entry below says what it left). pikr pins each green main revision
 as it lands.
 
 **lyr needs S9, S12, S17, S19 and S22 as well, from 2026-10-16** (the owner's
@@ -1110,12 +1111,118 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       apps 3836 of 3845, breeze apps 192 of 206, hicolor 1 of 2), and the
       differing list of every set unchanged, so no icon that matched stopped
       matching. The Adwaita floor rose to 0.995.
-    - Not done, in order of what the corpus refuses: **text** (`<text>`, and
-      Inkscape's `<flowRoot>`, which browsers do not draw either: 11 icons,
-      needing fonts); markers, patterns, `symbol` and nested `svg`, `switch`,
-      blend modes and animation, which the corpus did not need. Not measured:
-      GTK's own renderer (librsvg) as a second reference, and the corpus at
-      sizes other than 48.
+    - **`<flowRoot>` skipped, shipped 2026-10-17** (`svg/render.rs`'s
+      `NOT_SVG`): Inkscape's flowed text is from an SVG 1.2 draft, in SVG's
+      namespace but no SVG element, and resvg 0.48.1 draws nothing of it,
+      children included (checked in WSL on a `flowRoot` holding a `flowRegion`
+      rectangle, a `flowPara` and a filled `rect`: zero inked pixels), as
+      browsers draw nothing of an unknown element. So the walk skips it with its
+      subtree. Verified by `flowed_text_draws_nothing` and a mutant dropping the
+      skip, which it fails.
+    - **Text, shipped 2026-10-17** behind the new `svg-text` feature
+      (`svg/text.rs` lays a line out, `svg/text/faces.rs` finds faces through
+      `crcbl-font` and reads glyphs through `skrifa`, `svg/render/text.rs`
+      gathers and draws, `svg/style/text.rs` holds the text properties): `text`,
+      `tspan` and `a` as a span; `x`, `y`, `dx` and `dy` lists assigned as SVG 2
+      assigns them; `xml:space` and SVG 2's (CSS Text's) white-space collapsing
+      across elements; `font-family` lists, `font-size` (lengths, `em`, `ex` as
+      half an `em`, percentages, keywords), `font-weight` (numbers, keywords,
+      CSS Fonts 4's `bolder` and `lighter`; a variable face's `wght` axis set to
+      it), `font-style`, `text-anchor` per chunk, `letter-spacing` and
+      `word-spacing`; fill, stroke and paint servers per span, and transforms
+      and group effects on the text element. The XML tree now records where each
+      child stands in its parent's text (`Element::child_offsets`), which is
+      what puts a text's characters and spans back in order. **No shaping**: one
+      glyph a character from the first face whose `cmap` maps it, advanced by
+      `hmtx`; GSUB and GPOS (kerning, ligatures, contextual forms, marks,
+      complex scripts) and bidirectional reordering are a later slice of their
+      own. Caps: `render::text::MAX_CHARACTERS` characters drawn per document,
+      `use` instances counted; `text::faces::MAX_LOOKUPS` font lookups and
+      `text::faces::MAX_FACES` faces read per document, a fallback search
+      stopping at the face cap with `.notdef` rather than refusing. Verified by
+      unit tests of the white-space rule, the list assignment, the pen and the
+      chunk anchors worked by hand; whole-file tests through
+      `render::render_with` with Atkinson Hyperlegible and `crcbl-ui`'s heart
+      fixture as the fonts, each layout rule compared with the same glyphs drawn
+      as `<path>` elements whose data the test reads from the font and places by
+      the rule; the property parsers; the refusals; each cap at its edge; the
+      feature-off refusal; and 47 hand mutants of the white-space rule, the list
+      assignment, the pen, the anchors, the gathering of spans, the refusals,
+      glyph placement, the cells, the face chain, the caps, the property parsers
+      and the feature-off path, 46 of them failing a test and one surviving (the
+      `wght` one under Not tested below).
+    - Decided 2026-10-17, for text: **a text that would draw a character with no
+      face to draw it in is refused by name** (`ImageError::Unsupported`), and
+      so is every such text in a build without `svg-text`, as anything else this
+      renderer cannot draw is refused rather than drawn in part; resvg instead
+      draws the rest of the icon without the text (it does so in WSL, whose
+      fonts lack its default families). A text that draws no character (empty,
+      white space, empty spans, as breeze's `kile` and `xorg` have) needs no
+      font and draws nothing in either build. The feature is off by default, as
+      every codec of the crate is. A face comes from each family of the list in
+      turn, then `serif` (browsers' default font, and resvg's last resort), then
+      the system's fallbacks for the first face found, else that face's
+      `.notdef`. With resvg where CSS leaves it to the renderer or the two
+      differ: the default font size is 12 (resvg; CSS's `medium` is 16 in
+      browsers), size keywords step by 1.2 from it; a chunk is anchored by its
+      advances' sum (SVG 2 measures the glyphs placed, `dx` included); a text's
+      bounding box, for paint servers and clip, mask and filter units, is its
+      glyphs' cells (each advance wide, ascent to descent high); `fill-rule`
+      applies to glyphs; no synthetic bold or italic (browsers synthesize, resvg
+      does not). Text properties whose other values this renderer does not lay
+      out (vertical writing, baselines, decorations, small caps, case, widths,
+      font variations, the `font` shorthand, SVG 2's wrapping) are recorded
+      where given and refuse only text drawn under them, since editors write
+      them on shapes too; a text property's value in a unit not evaluated
+      (`rem`, `vw`) is refused on any element, as other lengths in such units
+      are. `transform` on a `tspan`, which SVG does not define there, is ignored
+      as any unknown attribute is, and so is `lengthAdjust` without
+      `textLength`. One `SystemFonts` serves the process; each decode reads the
+      faces it uses.
+    - Not done, text: shaping (above); `textPath`, `tref`, `textLength`,
+      `rotate`; vertical writing and `text-orientation`; `baseline-shift`,
+      `dominant-baseline` and `alignment-baseline`; `text-decoration`;
+      `font-variant`, small caps and `text-transform`; `font-stretch` and every
+      variation axis but `wght` (`wdth`, `ital`, `slnt`, `opsz`,
+      `font-variation-settings`); synthetic bold and italic; the `font`
+      shorthand; `white-space` beyond `normal` and `nowrap`; SVG 2's wrapped
+      text (`inline-size`, `shape-inside`); text inside a clip path; colour
+      glyphs (COLR, CBDT, sbix: a face's outline is drawn, or nothing); position
+      lists in `em`; a face cache across decodes. Not tested: a variable face's
+      `wght` (no variable font among the fixtures; a mutant fixing `wght` at 400
+      passes every test); the character count carried into an embedded SVG image
+      and back; decoding with the system's fonts on Windows and macOS (only
+      WSL's fontconfig, through the corpus).
+    - **Corpus after text, measured 2026-10-17** the same way (breeze 5642,
+      breeze apps 206; Adwaita 714 of 715, Papirus 6310 of 6319, Papirus apps
+      3836 of 3845 and hicolor 1 of 2 unchanged throughout): before, breeze 5586
+      matching, 45 differing, 11 refused, breeze apps 192, 8 and 6; with
+      `<flowRoot>` skipped, breeze 5591 and breeze apps 193 (every one of the
+      five `flowRoot` icons matching); with text and the feature off, breeze
+      5593 and breeze apps 195 (`kile` and `xorg`, whose texts draw nothing),
+      the other four text icons refused; with `svg-text` against resvg as CI
+      runs it, breeze 5594, 48 differing, 0 refused, breeze apps 196 and 10,
+      since resvg draws no text at all where its default families (Times New
+      Roman, Arial) are missing (`applets-template`, `kwave` and `kbruch`
+      differ, `khangman`'s two small letters match); with `svg-text` and resvg
+      given fontconfig's generic families (`svg_corpus`'s new `--resvg-arg`, as
+      `--serif-family 'DejaVu Serif' --sans-serif-family 'DejaVu Sans' --monospace-family 'DejaVu Sans Mono'`),
+      breeze 5597 of 5642 (99.2%) and breeze apps 198 of 206 (96.1%), 0 refused,
+      every text icon matching. In every run the differing list (and each icon's
+      count of differing pixels) was the earlier one plus only the text icons
+      named, so no icon that matched stopped matching. CI's `svg corpus` job
+      builds without `svg-text`, so its floors follow the feature-off numbers:
+      breeze 0.990 and breeze apps 0.936.
+    - Not done, CI: the `svg corpus` job could build `svg-text`, install the
+      fonts its references use and pass the generic families to resvg, which
+      would hold text to the floors too (breeze 0.991 and breeze apps 0.951 from
+      the measurement above, two icons under it); it needs the runner's fonts
+      installed in the job, as the `crcbl-font` job installs fontconfig and
+      DejaVu.
+    - Not done, in order of what the corpus refuses: markers, patterns, `symbol`
+      and nested `svg`, `switch`, blend modes and animation, which the corpus
+      did not need. Not measured: GTK's own renderer (librsvg) as a second
+      reference, and the corpus at sizes other than 48.
     - Not done yet: decoding from a path (a caller reads the file
       `IconThemes::lookup` found, and keys its cache with `FileVersion`), and
       moving `crcbl-sprite`'s and `crcbl-golden`'s own PNG loaders onto this
@@ -1210,10 +1317,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `feGaussianBlur` (173 uses), `feComposite` (48), `feOffset` and `feFlood`
       (24 each) and `feColorMatrix` (8) — the drop-shadow set. Those shipped the
       same day, which took breeze apps to 190 of 206 (92.2%), and the DTD
-      entities and the leniency to 192 (93.2%); what it still refuses is text (6
-      icons, one of them `<flowRoot>`). "Matching" in the corpus means rendered
-      and within tolerance of resvg: at most 1% of the icon's pixels differing
-      by more than 32 in a premultiplied channel.
+      entities and the leniency to 192 (93.2%); what it still refused then was
+      text (6 icons, one of them `<flowRoot>`), drawn since 2026-10-17 (198 with
+      `svg-text`). "Matching" in the corpus means rendered and within tolerance
+      of resvg: at most 1% of the icon's pixels differing by more than 32 in a
+      premultiplied channel.
     - **DTD entities and lenient values, shipped 2026-10-16** (`svg/xml.rs`,
       `svg/style.rs`, `svg/render.rs`): internal entities of plain text expanded
       under `MAX_ENTITIES`, `MAX_ENTITY_LENGTH` and `MAX_EXPANDED_BYTES`, the
