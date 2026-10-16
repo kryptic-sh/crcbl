@@ -19,6 +19,8 @@
 //!   Creative Commons and Dublin Core metadata, any editor's;
 //! * `<title>`, `<desc>` and `<metadata>`, comments, processing instructions
 //!   and the DOCTYPE, and `<script>` (a still image runs none);
+//! * Inkscape's flowed text, `<flowRoot>` and everything in it: it is in
+//!   SVG's namespace but from an SVG 1.2 draft, no SVG element;
 //! * an attribute or property no SVG element it is on reads — an editor's,
 //!   a misspelling, an `href` on a shape — beside the few that change the
 //!   picture in ways this renderer does not draw, which are refused by name;

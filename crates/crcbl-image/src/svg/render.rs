@@ -7,7 +7,9 @@
 //! `use` or a basic shape; skipped if it is one SVG never renders in place
 //! ([`NOT_RENDERED`]: definitions, paint servers, clip paths, masks and
 //! filters, descriptions, style sheets), since those only matter where
-//! something references them; and refused otherwise. A reference is where
+//! something references them; skipped too if it is no SVG element at all
+//! though in SVG's namespace ([`NOT_SVG`]: Inkscape's flowed text), as
+//! browsers and resvg skip it; and refused otherwise. A reference is where
 //! the target is checked: a `use` of a `symbol`, a fill of a `pattern`, a
 //! filter with a primitive outside the subset, all refuse the file there.
 //! An element outside the SVG namespace is an editor's private data and is
@@ -98,6 +100,11 @@ const NOT_RENDERED: &[&str] = &[
     "title",
     "view",
 ];
+
+/// Elements in SVG's namespace that are no SVG element, which browsers and
+/// resvg render nothing of, children included: Inkscape's flowed text,
+/// from an SVG 1.2 draft that never became a standard.
+const NOT_SVG: &[&str] = &["flowRoot"];
 
 /// Children a shape may have that change nothing: descriptions.
 const DESCRIPTIVE: &[&str] = &["desc", "metadata", "title"];
@@ -598,7 +605,10 @@ impl<'a> Renderer<'a> {
         canvas: &mut Canvas,
     ) -> Result<(), ImageError> {
         let element = self.element(index);
-        if element.namespace != Namespace::Svg || NOT_RENDERED.contains(&element.name.as_str()) {
+        if element.namespace != Namespace::Svg
+            || NOT_RENDERED.contains(&element.name.as_str())
+            || NOT_SVG.contains(&element.name.as_str())
+        {
             return Ok(());
         }
         if !DRAWN.contains(&element.name.as_str()) {

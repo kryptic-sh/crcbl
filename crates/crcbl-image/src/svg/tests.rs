@@ -757,6 +757,23 @@ fn metadata_is_ignored_by_design() {
     assert_eq!(decorated, plain);
 }
 
+/// **Inkscape's flowed text draws nothing, children included**, as resvg
+/// and browsers draw none of it: `flowRoot` is in SVG's namespace but no
+/// SVG element, so neither its region's rectangle nor a shape inside it
+/// shows, and the rest of the file still draws.
+#[test]
+fn flowed_text_draws_nothing() {
+    let plain = render(&svg(4, r#"<rect width="2" height="2" fill="red"/>"#), 4);
+    let flowed = render(
+        &svg(
+            4,
+            r#"<rect width="2" height="2" fill="red"/><flowRoot style="font-size:3px;fill:blue"><flowRegion><rect width="4" height="4"/></flowRegion><flowPara>Plasm</flowPara><rect width="4" height="4" fill="blue"/></flowRoot>"#,
+        ),
+        4,
+    );
+    assert_eq!(flowed, plain);
+}
+
 /// **Every unsupported element, attribute, property value and feature
 /// refuses the file**, naming it, rather than drawing the rest.
 #[test]
