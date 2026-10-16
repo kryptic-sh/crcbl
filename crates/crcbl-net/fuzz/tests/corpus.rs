@@ -1,6 +1,7 @@
 //! Named seeds from the fuzzer's corpus, replayed through the delta decoder,
 //! the replay file's reader and its spool's recovery, the save container's
-//! reader, the scene edit's messages, the scene fetch's and the session hello.
+//! reader, the scene edit's messages, the scene fetch's, the session hello and
+//! the SVG renderer.
 //!
 //! `fuzz_targets/decoder.rs` runs the decoders against bytes libFuzzer invents.
 //! This target runs three of them against bytes somebody named, and the two are
@@ -612,4 +613,20 @@ fn named_hello_seeds_reach_their_intended_paths() {
         )),
         Err(DecodeError::InvalidLength(2))
     ));
+}
+
+/// **The SVG seed renders**: it uses most of what `crcbl_image::svg` draws, so
+/// the fuzzer's mutations of it start inside the renderer rather than at the
+/// XML parser's first refusal, and a change that starts refusing it would
+/// leave the fuzzer exploring nothing.
+#[test]
+fn the_svg_seed_renders() {
+    let image = crcbl_image::svg::decode(
+        include_bytes!("../corpus/decoder/svg-icon"),
+        16,
+        1,
+        &crcbl_image::Limits::DEFAULT,
+    )
+    .expect("the SVG seed must render");
+    assert!(image.pixels().chunks_exact(4).any(|pixel| pixel[3] > 0));
 }

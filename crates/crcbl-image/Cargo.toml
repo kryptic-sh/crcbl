@@ -22,6 +22,9 @@ ico = ["bmp", "png"]
 # Baseline and progressive JPEG, decoded by this crate's own code.
 jpeg = []
 png = ["dep:png"]
+# SVG icons rendered to RGBA by this crate's own renderer and rasteriser:
+# the subset icon themes use, and a decode error for anything outside it.
+svg = []
 # Lossless WebP and its container, decoded by this crate's own code.
 webp = []
 # The freedesktop.org icon-theme lookup: a name, a size and a scale to a file.
