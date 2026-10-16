@@ -515,8 +515,8 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # FreeBSD (lyr and pikr's S18): the Wayland and X11 paths of `crcbl-shell` and
-  # the UI path compile for it. Compile-only — there is no FreeBSD runner and no
+  # FreeBSD (lyr and pikr's S18): the Wayland and X11 paths of `crcbl-shell`,
+  # `crcbl-font`'s fontconfig lookup and the UI path compile for it. Compile-only — there is no FreeBSD runner and no
   # compositor to run them against — so this says the hand-written libc
   # declarations and the `desktop_unix` gates hold there, and nothing about
   # behaviour. `cargo clippy` checks without linking, so no FreeBSD sysroot is
@@ -535,8 +535,8 @@ jobs:
         with:
           shared-key: freebsd
       - run: >-
-          cargo clippy --locked --all-features --all-targets -p crcbl-shell
-          --target x86_64-unknown-freebsd -- -D warnings
+          cargo clippy --locked --all-features --all-targets -p crcbl-shell -p
+          crcbl-font --target x86_64-unknown-freebsd -- -D warnings
       - run: >-
           cargo clippy --locked --all-features -p crcbl-ui -p crcbl-frame -p
           crcbl-vk --target x86_64-unknown-freebsd -- -D warnings
@@ -731,12 +731,15 @@ jobs:
       # ALSA headers for `cpal`; see the action for why it retries. And the
       # libxkbcommon runtime, which crcbl-shell's compose unit tests open with
       # `dlopen` and fail without: a test that skipped itself would pass
-      # whether compose works or not.
-      - name: Install the ALSA headers and libxkbcommon
+      # whether compose works or not. fontconfig and DejaVu for crcbl-font's
+      # system tests, on the same terms: they fail rather than skip without
+      # `libfontconfig.so.1`, and look up DejaVu Sans by name, so the image's
+      # incidental packages are not what they rest on.
+      - name: Install the ALSA headers, libxkbcommon, fontconfig and DejaVu
         timeout-minutes: 8
         uses: ./.github/actions/apt-packages
         with:
-          packages: libasound2-dev libxkbcommon0
+          packages: libasound2-dev libxkbcommon0 libfontconfig1 fonts-dejavu-core
       # THE VIEWER'S MODEL SHELF, and this is the only job that fetches it.
       #
       # `apps/viewer` ships a shelf of Khronos CC0 models — about 138 MB, of
@@ -3213,15 +3216,17 @@ jobs:
       # 78.12%, and the workspace total 72.06% against 77.57%.
       # A coverage number that says how much of the *backend* code a runner
       # happens to be able to reach is not measuring the test suite.
-      # libxkbcommon for crcbl-shell's compose unit tests, as `test-linux`
-      # installs it.
+      # libxkbcommon for crcbl-shell's compose unit tests, and fontconfig and
+      # DejaVu for crcbl-font's system tests, as `test-linux` installs them.
       - name:
-          Install the ALSA headers, the Vulkan loader, lavapipe and libxkbcommon
+          Install the ALSA headers, the Vulkan loader, lavapipe, libxkbcommon,
+          fontconfig and DejaVu
         timeout-minutes: 10
         uses: ./.github/actions/apt-packages
         with:
           packages: >-
             libasound2-dev libvulkan1 mesa-vulkan-drivers libxkbcommon0
+            libfontconfig1 fonts-dejavu-core
       # Pinned to the software ICD for the reason `vk-e2e` pins it: a runner
       # that grew a GPU tomorrow would otherwise change what this job measures
       # without a commit.
