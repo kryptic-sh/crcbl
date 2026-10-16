@@ -19,6 +19,47 @@ approved as a dependency of `crcbl-shell` and goes ahead after the release;
 breaking change, so a minor bump); `crcbl-cli` stays unpublished; the `notify`
 watcher and a grapheme crate stay declined until a caller needs them.
 
+**pikr's port findings, 2026-10-16** (pikr running on crcbl, Win32 + D3D12),
+each checked against the code here unless it says otherwise:
+
+- **System font lookup by family name** is asked for by pikr and lyr. This
+  reverses the earlier "stays with the caller (fontdb)" line under _What exists
+  already_: both apps need it, and SVG text in `crcbl-image` will too, which
+  cannot reach `crcbl-ui` (that crate depends on `crcbl-image`). Decided, per
+  the standing instruction: a small workspace crate for font discovery, used by
+  both, returning a family's file and face index for a weight and style and the
+  system's fallback order — fontconfig's configuration and cache on Linux and
+  FreeBSD (reading them, or loading `libfontconfig` the way `crcbl-shell` loads
+  system libraries, decided when built), the system and per-user font
+  directories matched by name table on Windows, the standard directories on
+  macOS. No new external crate. It goes after the XPM slice and before SVG
+  `<image>` and text.
+- **`FocusRefused` never arrives on Win32** when a panel taking the keyboard is
+  shown from a background process: `GetForegroundWindow` was another process,
+  and neither `FocusRefused` nor `Focus` came. Cause, read in `win32/panel.rs`'s
+  `show_panel`: it trusts `SetForegroundWindow`'s return value, which the
+  foreground lock can report as success while another process keeps the
+  foreground (the FFI comment on `SetForegroundWindow` already says so). Fix:
+  also require `GetForegroundWindow` to be the panel, which `ffi.rs` compiles
+  only for tests today. The hard part is a test: CI's process usually holds the
+  foreground lock, so a refusal has to be provoked, not waited for.
+- **A text span paints no box**: `emit_node`'s `Content::Text` arm draws no
+  `background-color`, border or radius, though its layout box has padding that
+  already insets the text, so pikr wrapped its chips in blocks. A text span is a
+  box like a block and should paint like one; inline runs inside a paragraph are
+  separate, needing a box per fragment.
+- **`Ui::list` builds the rows its previous layout showed**, so an event-driven
+  app whose row count changed sees last frame's window in a single build (2 of 4
+  rows), and pikr builds and lays out twice a drawn frame. Wanted: the window
+  computed from this frame's row count and offset, so one build is enough.
+- **crcbl-dx12 turns on the debug layer and DRED in a consumer's debug build**
+  unless `CRCBL_DX12_VALIDATION=0`, warning when Graphics Tools is missing. By
+  design (`debug.rs`'s `validation_policy`: on with `debug_assertions`), and
+  documented there, but not in the crate's front page or `crcbl-shell`'s docs
+  where a consumer would look.
+- **No `ShellCaps::TRANSPARENT` on Win32**: pikr's panel is opaque and square
+  there, the DirectComposition entry under the Win32 step.
+
 **pikr drops resvg and the `image` crate, 2026-10-16** (the owner's call,
 relayed by pikr's session), so every `crcbl-image` gap now shows in pikr as a
 generic icon. pikr asked for its needs ahead of work it does not depend on, and
@@ -571,7 +612,14 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       once the `border` shorthand was added. Checked by running it through
       `Stylesheet::parse`, not by rendering it.
 11. **Start-up and failure.**
-    - Measure cold start to the first presented frame against 500 ms (S13).
+    - Measure cold start to the first presented frame against 500 ms (S13). pikr
+      measured it on Win32 + D3D12, 2026-10-16, in a release build on an RX 7900
+      XTX with an iGPU and WARP beside it: about 1.1 s from launch to first
+      paint, almost all of it `Dx12Instance::open` with adapter enumeration
+      (about 0.7 s, some 0.3 s per hardware adapter) and device creation (0.23
+      s). Not reproduced here yet. What would cut it: probe adapters in
+      preference order and stop at the first that can present to the surface,
+      instead of creating a device per adapter to list its caps.
     - S26, checked 2026-10-15. With no usable GPU, `crcbl::backend::open`
       returns `GpuError::NoBackend` naming every backend it tried and the last
       error, not a panic, and never falls to the Null backend. Windows now falls
@@ -1037,8 +1085,9 @@ Each step lands in the crate the later steps build on, so the seam goes first.
 - crcbl-ui's virtualised fixed-height list (`widgets/list.rs`), caret and
   selection in `text_input`, an image module, a cssparser and taffy stylesheet,
   and `text_width`.
-- System font lookup by family name stays with the caller (fontdb), which hands
-  the bytes to crcbl-ui.
+- System font lookup by family name was left to the caller (fontdb), which hands
+  the bytes to crcbl-ui; reversed 2026-10-16, see _pikr's port findings_ at the
+  top.
 
 ## HIGH PRIORITY: EW engine requirements
 
