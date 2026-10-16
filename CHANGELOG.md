@@ -160,6 +160,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   lies on, in its colour, where its font's `post` table says — a fixed fraction
   of an em below the baseline for a font that does not say and for the bitmap
   font — and never thinner than a pixel.
+- **Per-glyph font fallback in `crcbl-ui`: `Ui::set_fallback_fonts`.** A
+  parsed-font span or paragraph run draws each char its own face has no glyph
+  for in the first fallback face that has one — an emoji in a notification body
+  from an emoji font — measured, wrapped, hit and caret-stopped at that face's
+  advance, and drawn as one `DrawCommand::Glyphs` run per face. U+FE0F after a
+  char prefers a face with a colour glyph for it and U+FE0E one without;
+  variation selectors and the zero-width joiner draw nothing. The list travels
+  on the font handle (`Font::with_fallback`, `Font::fallback`, `Font::face`), so
+  `TextLayout` falls back too, and `TextLayout::face_runs` cuts a layout into
+  its faces' runs; `Font::has_color_glyph` says whether a glyph has a COLR, CBDT
+  or sbix representation. There is no shaping, so a ZWJ sequence, a skin-tone
+  modifier or a flag draws as its component emoji.
 
 ### Changed
 

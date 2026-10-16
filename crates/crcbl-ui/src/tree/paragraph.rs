@@ -255,7 +255,8 @@ impl Ui {
             let Content::Run { start, end } = run.content else {
                 continue;
             };
-            let text = &self.text[start..end][fragment.text.clone()];
+            let run_text = &self.text[start..end];
+            let text = &run_text[fragment.text.clone()];
             let style = &run.style;
             let line = &laid.layout.lines()[fragment.line];
             if style.text_decoration == TextDecoration::Underline {
@@ -270,9 +271,15 @@ impl Ui {
             }
             match &run.font {
                 Some(font) => {
-                    let glyphs = laid.layout.positioned(fragment);
-                    if !glyphs.is_empty() {
-                        list.text_glyphs(origin, font, style.font_size, style.color, glyphs, text);
+                    for (face, glyphs, bytes) in laid.layout.face_runs(fragment) {
+                        list.text_glyphs(
+                            origin,
+                            font.face(face),
+                            style.font_size,
+                            style.color,
+                            glyphs,
+                            &run_text[bytes],
+                        );
                     }
                 }
                 None => {

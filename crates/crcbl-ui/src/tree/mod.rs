@@ -200,6 +200,8 @@ mod ellipsis;
 #[cfg(all(test, feature = "parsed-font"))]
 mod ellipsis_tests;
 mod emit;
+#[cfg(all(test, feature = "parsed-font"))]
+mod fallback_tests;
 pub mod focus;
 #[cfg(all(test, feature = "parsed-font"))]
 mod font_tests;
@@ -529,6 +531,12 @@ pub struct Ui {
     /// Family names a text span was built in with no font registered under
     /// them, already warned about, so each is reported once.
     unregistered: HashSet<FamilyName>,
+    /// The faces every parsed-font span falls back to, in order, from
+    /// [`Ui::set_fallback_fonts`].
+    fallback: Vec<Font>,
+    /// A hash of their identities, folded into each span's content hash so a
+    /// new list measures every span again.
+    fallback_hash: u64,
     /// The node this frame's pointer clicked, resolved when the frame began.
     clicked: Option<NodeKey>,
     /// The node whose `cursor` [`Ui::cursor`] reports: the one a press holds,
@@ -941,7 +949,7 @@ impl Ui {
                     &self.text[start..end],
                     style.font_size.to_bits(),
                     style.font_family,
-                    font.as_ref().map(Font::id),
+                    font.as_ref().map(|font| (font.id(), self.fallback_hash)),
                     style.line_height.bits(),
                     style.white_space,
                 ));
@@ -1482,13 +1490,50 @@ impl Ui {
         Ok(())
     }
 
+    /// Sets the faces every text span in a parsed font falls back to, in the
+    /// order they are asked, for a char its own face has no glyph for — an
+    /// emoji in a notification body, say, drawn from a colour emoji font. See
+    /// [`crate::font::fallback`] for the rule and the presentation selectors.
+    ///
+    /// **One list for the whole tree, asked after whatever face a span's
+    /// `font-family` selected**, so a stylesheet never has to name the emoji
+    /// font beside every family; `emoji`, CSS's generic family, stays a
+    /// reserved name rather than a second way to say the same thing. A span
+    /// in the bitmap font does not fall back. The faces draw as registered:
+    /// a bold span's fallback glyphs are not synthesised bold.
+    ///
+    /// Read when a span is built, like [`Ui::register_font`]'s registry, and
+    /// every span is measured again under a new list. An empty list, the
+    /// default, turns fallback off.
+    pub fn set_fallback_fonts(&mut self, fonts: impl IntoIterator<Item = impl Into<Font>>) {
+        self.fallback = fonts.into_iter().map(Into::into).collect();
+        self.fallback_hash = hash_of(self.fallback.iter().map(Font::id).collect::<Vec<_>>());
+    }
+
+    /// The faces [`Ui::set_fallback_fonts`] set, in order.
+    #[must_use]
+    pub fn fallback_fonts(&self) -> &[Font] {
+        &self.fallback
+    }
+
     /// The parsed font a text span in `style` draws in: the face of the family
     /// registered under its family name that its weight and style select,
     /// else its built-in family's — synthesised where the face falls short,
-    /// see [`crate::font::face`] — and `None` for the bitmap font. Warns once
-    /// per name when the span names a family nothing is registered under;
-    /// `selector` says which span.
+    /// see [`crate::font::face`] — carrying [`Ui::set_fallback_fonts`]'s
+    /// faces, and `None` for the bitmap font. Warns once per name when the
+    /// span names a family nothing is registered under; `selector` says which
+    /// span.
     fn font_for(&mut self, style: &NodeStyle, selector: &str) -> Option<Font> {
+        let face = self.face_for(style, selector)?;
+        Some(if self.fallback.is_empty() {
+            face
+        } else {
+            face.with_fallback(&self.fallback)
+        })
+    }
+
+    /// [`Ui::font_for`]'s face, before its fallback faces.
+    fn face_for(&mut self, style: &NodeStyle, selector: &str) -> Option<Font> {
         if let Some(name) = style.family_name {
             if let Some(font) = self
                 .fonts

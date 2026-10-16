@@ -25,6 +25,11 @@
 //! same size, spaces included, and never across a break or between two runs
 //! that differ in either.
 //!
+//! A char in a parsed font is drawn by the face [`map_char`] picks from the
+//! run's font and its fallback faces, at that face's advance, and two
+//! neighbours drawn by different faces do not kern; a presentation selector
+//! or a zero-width joiner takes no width and draws nothing.
+//!
 //! # Vertical metrics
 //!
 //! Each run's glyphs sit on the line's one baseline. A run takes its own line
@@ -40,7 +45,8 @@ use core::ops::Range;
 
 use glam::Vec2;
 
-use crate::font::layout::{PositionedGlyph, TextAlign, wrap_width};
+use crate::font::fallback::{Mapped, map_char};
+use crate::font::layout::{PositionedGlyph, TextAlign, advance_pen, wrap_width};
 use crate::font::{Font, FontId, GlyphId};
 use crate::text::{ASCENDER, FontAtlas, LINE_HEIGHT};
 
@@ -124,6 +130,12 @@ pub(crate) struct InlineGlyph {
     /// Its glyph in a parsed font; [`GlyphId::NOTDEF`] in the bitmap font,
     /// which draws from the character.
     pub glyph: GlyphId,
+    /// Which face of its run's font draws it, as [`Font::face`] numbers
+    /// them; zero in the bitmap font.
+    pub face: u8,
+    /// Whether it draws anything: not a space, and not a char that is
+    /// invisible in a parsed font.
+    pub drawn: bool,
     /// Its pen position from the paragraph's left.
     pub x: f32,
     pub advance: f32,
@@ -314,21 +326,32 @@ impl InlineLayout {
         c: char,
     ) {
         let input = &runs[run];
-        let (glyph, advance) = match input.font {
+        let (mapped, advance) = match input.font {
             RunFont::Parsed(font) => {
-                let glyph = font.glyph_id(c);
-                (
-                    glyph,
-                    font.advance(glyph) * font.metrics().scale(input.size),
-                )
+                let next = input.text[byte + c.len_utf8()..].chars().next();
+                match map_char(font, c, next) {
+                    Some(mapped) => (
+                        Some(mapped),
+                        advance_pen(font, input.size, 0.0, None, mapped).1,
+                    ),
+                    None => (None, 0.0),
+                }
             }
-            RunFont::Bitmap(scale) => (GlyphId::NOTDEF, atlas.glyph(c).advance * scale),
+            RunFont::Bitmap(scale) => (
+                Some(Mapped {
+                    face: 0,
+                    glyph: GlyphId::NOTDEF,
+                }),
+                atlas.glyph(c).advance * scale,
+            ),
         };
         self.glyphs.push(InlineGlyph {
             run,
             byte,
             c,
-            glyph,
+            glyph: mapped.map_or(GlyphId::NOTDEF, |mapped| mapped.glyph),
+            face: mapped.map_or(0, |mapped| mapped.face),
+            drawn: c != ' ' && mapped.is_some(),
             x: 0.0,
             advance,
         });
@@ -353,9 +376,11 @@ impl InlineLayout {
                 let (before, after) = (&runs[previous.run], &runs[glyph.run]);
                 if let (Some(key), RunFont::Parsed(font)) = (after.kerning_key(), after.font)
                     && before.kerning_key() == Some(key)
+                    && previous.face == glyph.face
                 {
-                    pen += font.kerning(previous.glyph, glyph.glyph)
-                        * font.metrics().scale(after.size);
+                    let face = font.face(glyph.face);
+                    pen += face.kerning(previous.glyph, glyph.glyph)
+                        * face.metrics().scale(after.size);
                 }
             }
             self.glyphs[at].x = pen;
@@ -444,18 +469,36 @@ impl InlineLayout {
         &self.lines
     }
 
-    /// `fragment`'s glyphs that draw — its spaces left out — pen at their
-    /// baseline, from the paragraph's top-left.
-    pub fn positioned(&self, fragment: &Fragment) -> Vec<PositionedGlyph> {
+    /// `fragment`'s glyphs that draw — its spaces and invisible chars left
+    /// out — pen at their baseline, from the paragraph's top-left, cut where
+    /// the face drawing them changes: each stretch's face, its glyphs, and
+    /// the bytes of its run's text it spells, from its first glyph to the
+    /// next stretch or the fragment's end.
+    pub fn face_runs(&self, fragment: &Fragment) -> Vec<(u8, Vec<PositionedGlyph>, Range<usize>)> {
         let baseline = self.lines[fragment.line].baseline;
-        self.glyphs[fragment.glyphs.clone()]
-            .iter()
-            .filter(|glyph| glyph.c != ' ')
-            .map(|glyph| PositionedGlyph {
+        let mut runs: Vec<(u8, Vec<PositionedGlyph>, Range<usize>)> = Vec::new();
+        for glyph in &self.glyphs[fragment.glyphs.clone()] {
+            if !glyph.drawn {
+                continue;
+            }
+            let positioned = PositionedGlyph {
                 glyph: glyph.glyph,
                 offset: Vec2::new(glyph.x, baseline),
-            })
-            .collect()
+            };
+            match runs.last_mut() {
+                Some((face, glyphs, _)) if *face == glyph.face => glyphs.push(positioned),
+                _ => {
+                    if let Some((_, _, text)) = runs.last_mut() {
+                        text.end = glyph.byte;
+                    }
+                    runs.push((glyph.face, vec![positioned], glyph.byte..fragment.text.end));
+                }
+            }
+        }
+        if let Some((_, _, text)) = runs.first_mut() {
+            text.start = fragment.text.start;
+        }
+        runs
     }
 
     /// The box the paragraph needs: its widest line rounded up to a whole

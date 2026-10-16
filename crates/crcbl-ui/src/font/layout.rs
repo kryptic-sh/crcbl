@@ -20,8 +20,17 @@
 //!   places, and a measured width, rounded up by [`TextLayout::measure`], always
 //!   fits the lines it was measured from.
 //!
-//! Kerning applies between every two consecutive glyphs on a line, spaces
-//! included, and never across a break.
+//! Kerning applies between every two consecutive glyphs on a line in the same
+//! face, spaces included, and never across a break.
+//!
+//! # Fallback faces
+//!
+//! Each char is drawn by the face [`fallback::map_char`] picks from the font
+//! and the fallback faces it carries, advanced by that face's own advance at
+//! its own scale; [`TextLayout::face_runs`] cuts the glyphs into the
+//! stretches each face draws. A presentation selector or a zero-width joiner
+//! draws nothing and takes no width. The lines' vertical metrics are the
+//! font's own: a taller fallback glyph does not make its line taller.
 //!
 //! # Vertical metrics
 //!
@@ -33,6 +42,7 @@ use core::ops::Range;
 
 use glam::Vec2;
 
+use super::fallback::{self, Mapped};
 use super::{Font, GlyphId};
 
 /// How close below a whole pixel a width may be and still count as that pixel.
@@ -88,16 +98,38 @@ pub struct TextLine {
 /// A string laid out in one font at one size. See the module docs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextLayout {
+    /// The font it was laid out in, fallback faces and all.
+    font: Font,
     glyphs: Vec<PositionedGlyph>,
+    /// Each glyph's face, as [`Font::face`] numbers it.
+    faces: Vec<u8>,
+    /// The byte offset in the text of each glyph's char.
+    bytes: Vec<usize>,
+    /// The text's length in bytes.
+    text_len: usize,
     lines: Vec<TextLine>,
     line_height: f32,
+}
+
+/// A stretch of a [`TextLayout`]'s glyphs that one face draws: what
+/// [`TextLayout::face_runs`] cuts it into.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FaceRun<'a> {
+    /// The face: the layout's font or one of its fallback faces.
+    pub font: &'a Font,
+    /// Its glyphs.
+    pub glyphs: &'a [PositionedGlyph],
+    /// The bytes of the text it spells: from its first glyph's char, or the
+    /// text's start for the first run, to the next run's start or the text's
+    /// end.
+    pub text: Range<usize>,
 }
 
 /// The line being filled.
 struct Line {
     first: usize,
     pen: f32,
-    previous: Option<GlyphId>,
+    previous: Option<Mapped>,
     /// The right edge of its last word.
     width: f32,
     has_word: bool,
@@ -115,75 +147,111 @@ impl Line {
     }
 }
 
-/// Positions `word` from `line`'s pen, writing each glyph's x beside it, and
-/// returns its right edge.
-fn place_word(font: &Font, scale: f32, word: &mut [PositionedGlyph], line: &Line) -> f32 {
-    let mut pen = line.pen;
-    let mut previous = line.previous;
-    for positioned in word {
-        let glyph = positioned.glyph;
-        if let Some(previous) = previous {
-            pen += font.kerning(previous, glyph) * scale;
-        }
-        positioned.offset.x = pen;
-        pen += font.advance(glyph) * scale;
-        previous = Some(glyph);
+/// Where `mapped`, drawn in `font` at `size` after `previous` on its line, is
+/// placed from a pen at `pen`, and the pen after it: kerned against
+/// `previous` when one face draws both, then advanced by its face's advance
+/// at its face's scale.
+pub(crate) fn advance_pen(
+    font: &Font,
+    size: f32,
+    pen: f32,
+    previous: Option<Mapped>,
+    mapped: Mapped,
+) -> (f32, f32) {
+    let face = font.face(mapped.face);
+    let scale = face.metrics().scale(size);
+    let mut at = pen;
+    if let Some(previous) = previous.filter(|previous| previous.face == mapped.face) {
+        at += face.kerning(previous.glyph, mapped.glyph) * scale;
     }
-    pen
+    (at, at + face.advance(mapped.glyph) * scale)
 }
 
 impl TextLayout {
-    /// Lays `text` out in `font` at `size` pixels per em, lines `line_height`
-    /// apart, broken to fit `wrap` pixels when given — see the module docs —
-    /// and every line against the left.
+    /// Positions the glyphs `word` at `size` from `line`'s pen, writing each
+    /// one's x, and returns the word's right edge.
+    fn place(&mut self, word: Range<usize>, size: f32, line: &Line) -> f32 {
+        let mut pen = line.pen;
+        let mut previous = line.previous;
+        let faces = &self.faces[word.clone()];
+        for (positioned, &face) in self.glyphs[word].iter_mut().zip(faces) {
+            let mapped = Mapped {
+                face,
+                glyph: positioned.glyph,
+            };
+            let (at, after) = advance_pen(&self.font, size, pen, previous, mapped);
+            positioned.offset.x = at;
+            pen = after;
+            previous = Some(mapped);
+        }
+        pen
+    }
+
+    /// Lays `text` out in `font` — and the fallback faces it carries — at
+    /// `size` pixels per em, lines `line_height` apart, broken to fit `wrap`
+    /// pixels when given — see the module docs — and every line against the
+    /// left.
     #[must_use]
     pub fn new(font: &Font, text: &str, size: f32, line_height: f32, wrap: Option<f32>) -> Self {
         let metrics = font.metrics();
         let scale = metrics.scale(size);
         let wrap = wrap.map(wrap_width);
         let mut layout = Self {
+            font: font.clone(),
             glyphs: Vec::with_capacity(text.len()),
+            faces: Vec::with_capacity(text.len()),
+            bytes: Vec::with_capacity(text.len()),
+            text_len: text.len(),
             lines: Vec::new(),
             line_height,
         };
+        let mut paragraph_start = 0;
         for paragraph in text.split('\n') {
             let mut line = Line::new(layout.glyphs.len());
-            let mut chars = paragraph.chars().peekable();
-            while let Some(&c) = chars.peek() {
+            let mut chars = fallback::map_text(font, paragraph).peekable();
+            while let Some(&(_, c, mapped)) = chars.peek() {
                 if c == ' ' {
                     chars.next();
-                    let glyph = font.glyph_id(c);
-                    if let Some(previous) = line.previous {
-                        line.pen += font.kerning(previous, glyph) * scale;
+                    if let Some(mapped) = mapped {
+                        line.pen = advance_pen(font, size, line.pen, line.previous, mapped).1;
+                        line.previous = Some(mapped);
                     }
-                    line.pen += font.advance(glyph) * scale;
-                    line.previous = Some(glyph);
                     continue;
                 }
                 let word_start = layout.glyphs.len();
-                while let Some(&c) = chars.peek() {
+                while let Some(&(byte, c, mapped)) = chars.peek() {
                     if c == ' ' {
                         break;
                     }
                     chars.next();
+                    let Some(mapped) = mapped else { continue };
                     layout.glyphs.push(PositionedGlyph {
-                        glyph: font.glyph_id(c),
+                        glyph: mapped.glyph,
                         offset: Vec2::ZERO,
                     });
+                    layout.faces.push(mapped.face);
+                    layout.bytes.push(paragraph_start + byte);
                 }
-                let mut right = place_word(font, scale, &mut layout.glyphs[word_start..], &line);
+                let word = word_start..layout.glyphs.len();
+                let mut right = layout.place(word.clone(), size, &line);
                 if line.has_word && wrap.is_some_and(|wrap| right > wrap) {
                     layout.finish_line(&line, word_start);
                     line = Line::new(word_start);
-                    right = place_word(font, scale, &mut layout.glyphs[word_start..], &line);
+                    right = layout.place(word.clone(), size, &line);
                 }
-                line.previous = layout.glyphs.last().map(|glyph| glyph.glyph);
+                if let Some(last) = word.clone().last() {
+                    line.previous = Some(Mapped {
+                        face: layout.faces[last],
+                        glyph: layout.glyphs[last].glyph,
+                    });
+                }
                 line.pen = right;
                 line.width = right;
                 line.has_word = true;
             }
             let end = layout.glyphs.len();
             layout.finish_line(&line, end);
+            paragraph_start += paragraph.len() + 1;
         }
 
         let ascent = metrics.ascent * scale;
@@ -229,6 +297,46 @@ impl TextLayout {
     #[must_use]
     pub fn glyphs(&self) -> &[PositionedGlyph] {
         &self.glyphs
+    }
+
+    /// Each of [`TextLayout::glyphs`]' faces, as [`Font::face`] numbers them
+    /// for the font it was laid out in.
+    #[must_use]
+    pub fn faces(&self) -> &[u8] {
+        &self.faces
+    }
+
+    /// The glyphs cut where the face drawing them changes, in order: what a
+    /// caller draws one
+    /// [`DrawList::text_glyphs`](crate::draw_list::DrawList::text_glyphs)
+    /// run per, since a run is in one font. Text with no glyphs at all is one
+    /// empty run in the font itself.
+    #[must_use]
+    pub fn face_runs(&self) -> Vec<FaceRun<'_>> {
+        let mut runs = Vec::new();
+        let mut start = 0;
+        while start < self.glyphs.len() {
+            let face = self.faces[start];
+            let end = (start..self.glyphs.len())
+                .find(|&at| self.faces[at] != face)
+                .unwrap_or(self.glyphs.len());
+            let text_start = if start == 0 { 0 } else { self.bytes[start] };
+            let text_end = self.bytes.get(end).copied().unwrap_or(self.text_len);
+            runs.push(FaceRun {
+                font: self.font.face(face),
+                glyphs: &self.glyphs[start..end],
+                text: text_start..text_end,
+            });
+            start = end;
+        }
+        if runs.is_empty() {
+            runs.push(FaceRun {
+                font: &self.font,
+                glyphs: &[],
+                text: 0..self.text_len,
+            });
+        }
+        runs
     }
 
     /// Every line, top to bottom.
