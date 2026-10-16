@@ -90,13 +90,9 @@ each checked against the code here unless it says otherwise:
 **pikr drops resvg and the `image` crate, 2026-10-16** (the owner's call,
 relayed by pikr's session), so every `crcbl-image` gap now shows in pikr as a
 generic icon. pikr asked for its needs ahead of work it does not depend on, and
-that is the order from here: S22 colour emoji (its emoji mode); XPM, SVG DTD
-entities and the malformed-value refusals; SVG `<image>`; then SVG text
-(`<text>` and Inkscape's `<flowRoot>`), the largest, since icons name system
-fonts. pikr pins each green main revision as it lands. **Next release: 0.2.0,
-once S22 is on main and green** (the owner's choice, 2026-10-16, over releasing
-at once or waiting); minor, not patch, because `crcbl_ui::font::raster` moved to
-`crcbl_image::raster` and takes `raster::Point`.
+that is the order from here: SVG text (`<text>` and Inkscape's `<flowRoot>`),
+the largest, since icons name system fonts. pikr pins each green main revision
+as it lands.
 
 **lyr needs S9, S12, S17, S19 and S22 as well, from 2026-10-16** (the owner's
 decision, lyr main 75d302a; before, only pikr needed them). lyr is becoming the
