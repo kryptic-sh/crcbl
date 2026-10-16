@@ -3139,6 +3139,15 @@ jobs:
       - uses: ./.github/actions/cargo-tool
         with:
           tool: resvg@0.48.1
+      # fontconfig and DejaVu for `svg-text`: icons name generic families, which
+      # `crcbl-font` resolves through fontconfig and resvg is told below, so
+      # both draw an icon's text in the same faces rather than in whatever the
+      # image happens to carry.
+      - name: Install fontconfig and DejaVu
+        timeout-minutes: 8
+        uses: ./.github/actions/apt-packages
+        with:
+          packages: libfontconfig1 fonts-dejavu-core
       # One directory of each theme, shallow, sparse and without the blobs
       # outside it: Papirus's whole tree is many times the 48-pixel set the
       # measurement reads.
@@ -3166,10 +3175,14 @@ jobs:
       # image, not this repository, decides what is in it.
       - name: Render every icon with both and compare
         run: >-
-          cargo run --release --locked -p crcbl-image --features svg,png
-          --example svg_corpus -- --show 20 --floor adwaita=0.995 --floor
-          papirus=0.998 --floor breeze=0.990 --floor apps-papirus=0.997 --floor
-          apps-breeze=0.936 adwaita="$RUNNER_TEMP/adwaita/Adwaita"
+          cargo run --release --locked -p crcbl-image --features
+          svg,svg-text,png --example svg_corpus -- --show 20 --resvg-arg
+          --serif-family --resvg-arg "DejaVu Serif" --resvg-arg
+          --sans-serif-family --resvg-arg "DejaVu Sans" --resvg-arg
+          --monospace-family --resvg-arg "DejaVu Sans Mono" --floor
+          adwaita=0.995 --floor papirus=0.998 --floor breeze=0.991 --floor
+          apps-papirus=0.997 --floor apps-breeze=0.951
+          adwaita="$RUNNER_TEMP/adwaita/Adwaita"
           papirus="$RUNNER_TEMP/papirus/Papirus/48x48"
           breeze="$RUNNER_TEMP/breeze/icons"
           apps-papirus="$RUNNER_TEMP/papirus/Papirus/48x48/apps"
