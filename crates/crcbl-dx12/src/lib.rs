@@ -8,6 +8,23 @@
 //! (PIX, DRED), robustness against a missing vendor ICD — and one thing this
 //! slice exists to *measure* rather than assume.
 //!
+//! # A debug build turns the D3D12 debug layer on
+//!
+//! **An application built without `--release` gets the D3D12 debug layer**,
+//! which checks every call at a CPU cost and reports a misuse at the call that
+//! made it. Where Windows' optional *Graphics Tools* feature, which provides
+//! the layer, is not installed, the first `Dx12Instance::open` logs a warning
+//! and everything else runs as before. A release build never turns it on.
+//!
+//! **`CRCBL_DX12_VALIDATION=0` turns it off** in a debug build (`false`, `no`
+//! and `off` work too), and any other non-empty value turns it on in a release
+//! build. It is read once a process, when the first instance opens.
+//!
+//! DRED is not the layer and the variable does not reach it: auto-breadcrumbs
+//! and page-fault reporting are on in every build, release included, because a
+//! device removal cannot be reproduced on demand. `crcbl_dx12::dred` gives the
+//! cost and the argument; the section on removed devices below says more.
+//!
 //! # What this backend does, and the question it was written to answer
 //!
 //! **Adapter enumeration, the resource half of the seam, a cleared pixel read

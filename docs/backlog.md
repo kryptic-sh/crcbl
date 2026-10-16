@@ -77,11 +77,13 @@ each checked against the code here unless it says otherwise:
   building for the whole viewport (several times the rows of a small list, every
   frame). pikr can drop its unconditional second build for
   `if ui.needs_rebuild()`.
-- **crcbl-dx12 turns on the debug layer and DRED in a consumer's debug build**
-  unless `CRCBL_DX12_VALIDATION=0`, warning when Graphics Tools is missing. By
-  design (`debug.rs`'s `validation_policy`: on with `debug_assertions`), and
-  documented there, but not in the crate's front page or `crcbl-shell`'s docs
-  where a consumer would look.
+- **DRED is on in every build, and `CRCBL_DX12_VALIDATION` does not reach it**,
+  unlike pikr's finding put it: only the debug layer follows the variable
+  (`dred.rs` argues why). crcbl-dx12's front page now says both, with how to
+  turn the layer off. No pointer went into `crcbl-shell`'s docs, which never
+  mention a GPU backend; the umbrella `crcbl` crate's docs were not changed and
+  could point there. Turning DRED off in a release build would need a switch of
+  its own; nobody has asked.
 - **No `ShellCaps::TRANSPARENT` on Win32**: pikr's panel is opaque and square
   there, the DirectComposition entry under the Win32 step.
 
