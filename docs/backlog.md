@@ -1867,7 +1867,11 @@ machine, or twice in CI, is real.
   — a proptest that takes about 25 s alone. During a local verify on 2026-10-06,
   with two other worktrees compiling, three of the editor's app tests took 148
   to 157 s and this one passed nextest's 240 s limit and was killed; alone it
-  passed in 25.6 s.
+  passed in 25.6 s. Again on 2026-10-16: killed at 240 s in a full gate and once
+  alone while a sub-agent compiled, then alone at 20.7, 107.6, 151.0 and 191.6 s
+  across commits with no pattern (main's tree took 19.8 and 86.8 s the same
+  afternoon). Each run draws a fresh proptest seed, and its saves copy files
+  into new directories, so the spread is the seed and the disk, not a commit.
 - **`crcbl-server host::udp_tests::a_session_changing_more_than_a_datagram_holds_updates_back_and_converges`**
   — real loopback sockets against wall time; see its note under the snapshot
   budget entry.
