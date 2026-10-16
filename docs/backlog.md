@@ -32705,6 +32705,12 @@ decision rather than a wiring job); RON scene files and the deterministic
 writer; hot reload; material templates; the glTF corpus; runtime `add_mesh`;
 texture slots beyond the page.
 
+Runtime `add_mesh` was asked about again on 2026-10-17, by EW, for generated
+terrain, and was not needed: EW builds its renderer per game phase, so the
+terrain goes into that phase's `SceneDesc` as `crcbl_greybox::heightfield_tiles`
+tiles. It stays deferred until something has to add a mesh to a renderer already
+running, such as streaming a world in.
+
 ### The materials-and-layers slice was almost entirely already done
 
 What that slice found, and the accessor it declined, are in

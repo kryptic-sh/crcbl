@@ -2,8 +2,10 @@
 //!
 //! A blockout kit for the 3D half of a game: cubes, walls, doorways, ramps,
 //! stairs, columns and the round primitives, plus a capsule the size of a person
-//! to check a space against. Every generator returns a
-//! [`Geometry::Flat`](crcbl_render::scene::Geometry::Flat) — procedural vertex
+//! to check a space against, and [`heightfield_tiles`] for generated terrain.
+//! Every generator returns a
+//! [`Geometry::Flat`](crcbl_render::scene::Geometry::Flat), one per tile for
+//! the terrain — procedural vertex
 //! bytes, indices and meshlet clusters — so the pack is host data with no device
 //! in sight and builds for every target the engine has, the browser included.
 //!
@@ -45,6 +47,7 @@
 //! `--no-default-features` drops the 2D half for a 3D-only pack.
 
 mod build;
+pub mod heightfield;
 pub mod material;
 pub mod primitives;
 pub mod scene;
@@ -52,6 +55,7 @@ pub mod scene;
 pub mod sprite;
 
 pub use build::GREYBOX_ALBEDO;
+pub use heightfield::{HeightfieldTile, heightfield_tiles};
 pub use material::{
     GREYBOX_TILE_CELL_M, GREYBOX_TILE_CELLS, GREYBOX_TILE_EXTENT, GREYBOX_TILE_M, GRID_CELL_M,
     GRID_CELLS, GRID_EXTENT, GRID_LAYER, GreyboxColor, greybox_color_material,

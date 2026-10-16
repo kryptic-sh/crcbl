@@ -229,6 +229,12 @@ impl MeshBuilder {
         }
     }
 
+    /// The triangles added so far, three indices each, in the order
+    /// [`finish`](Self::finish) writes them.
+    pub(crate) fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+
     /// Closes the builder into a flat geometry with its meshlet clusters.
     ///
     /// The UV range is computed here and nowhere earlier: it is the bounds of

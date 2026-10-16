@@ -7,9 +7,9 @@ use crcbl_greybox::{
     GREYBOX_CAPSULE, GREYBOX_COLUMN, GREYBOX_CUBE, GREYBOX_CYLINDER, GREYBOX_DOORWAY, GREYBOX_GREY,
     GREYBOX_GRID, GREYBOX_MESH_COUNT, GREYBOX_PLATFORM, GREYBOX_QUAD, GREYBOX_RAMP, GREYBOX_SPHERE,
     GREYBOX_STAIRS, GREYBOX_TILE_EXTENT, GREYBOX_TILE_M, GREYBOX_WALL, GRID_EXTENT, GRID_LAYER,
-    GreyboxColor, capsule, column, cube, cylinder, doorway, greybox_color_material,
-    greybox_color_texels, greybox_material, greybox_page, grid_material, platform, quad, ramp,
-    scene3d, sphere, stairs, unit_cube, wall,
+    GreyboxColor, HeightfieldTile, capsule, column, cube, cylinder, doorway,
+    greybox_color_material, greybox_color_texels, greybox_material, greybox_page, grid_material,
+    heightfield_tiles, platform, quad, ramp, scene3d, sphere, stairs, unit_cube, wall,
 };
 use crcbl_render::scene::{Geometry, PageDesc, PageKind};
 use crcbl_shaders::mesh::{GpuMaterial, MeshVertex, VERTEX_STRIDE};
@@ -83,7 +83,42 @@ fn every_primitive() -> Vec<(&'static str, Geometry<'static>)> {
         ("sphere", sphere(0.5, 16, 24)),
         ("capsule", capsule(0.25, 1.8, 8, 16)),
         ("platform", platform(1.0, 1.0, 0.2)),
+        (
+            "heightfield tile",
+            hills_tiles(TILE_CELLS).swap_remove(0).geometry,
+        ),
     ]
+}
+
+/// The point counts a side of [`hills`], and the cells a side of the tiles the
+/// checks cut it into: neither count a multiple of the tile, so the last tile
+/// of each row and column is narrower, and one tile is several clusters.
+const HILLS_COLUMNS: usize = 41;
+const HILLS_ROWS: usize = 27;
+const TILE_CELLS: usize = 16;
+const HILLS_CELL_M: f32 = 2.5;
+
+/// Rolling ground, steep enough that a wrong normal or a flipped triangle shows.
+fn hills() -> Vec<f32> {
+    (0..HILLS_ROWS)
+        .flat_map(|row| {
+            (0..HILLS_COLUMNS).map(move |column| {
+                let (x, z) = (column as f32 * 0.37, row as f32 * 0.23);
+                3.0 * x.sin() * z.cos() + 0.5 * (x + z)
+            })
+        })
+        .collect()
+}
+
+/// [`hills`] cut into tiles of `tile_cells` cells a side.
+fn hills_tiles(tile_cells: usize) -> Vec<HeightfieldTile> {
+    heightfield_tiles(
+        &hills(),
+        HILLS_COLUMNS,
+        HILLS_ROWS,
+        HILLS_CELL_M,
+        tile_cells,
+    )
 }
 
 #[test]
@@ -473,4 +508,151 @@ fn every_greybox_colour_tiles_by_physical_size_out_of_its_own_layer() {
         greybox_color_texels(GreyboxColor::Red),
         greybox_color_texels(GreyboxColor::Blue)
     );
+}
+
+/// The geometric normal of every triangle of `tile`, from its winding.
+fn face_normals(tile: &HeightfieldTile) -> Vec<Vec3> {
+    tile.triangles
+        .iter()
+        .map(|triangle| {
+            let [a, b, c] = triangle.map(|i| Vec3::from_array(tile.positions[i as usize]));
+            (b - a).cross(c - a)
+        })
+        .collect()
+}
+
+#[test]
+fn heightfield_tiles_cover_the_field_and_narrow_at_its_far_edges() {
+    let heights = hills();
+    let tiles = hills_tiles(TILE_CELLS);
+    // 40 cells across in tiles of 16 is 16, 16 and 8; 26 down is 16 and 10.
+    let widths = [17, 17, 9];
+    let depths = [17, 11];
+    assert_eq!(tiles.len(), widths.len() * depths.len());
+    let mut seen = vec![false; heights.len()];
+    for (t, tile) in tiles.iter().enumerate() {
+        let (width, depth) = (widths[t % widths.len()], depths[t / widths.len()]);
+        assert_eq!(tile.positions.len(), width * depth, "tile {t}'s points");
+        assert_eq!(
+            tile.triangles.len(),
+            (width - 1) * (depth - 1) * 2,
+            "tile {t}'s triangles"
+        );
+        for &[x, y, z] in &tile.positions {
+            let (column, row) = ((x / HILLS_CELL_M) as usize, (z / HILLS_CELL_M) as usize);
+            assert_eq!(column as f32 * HILLS_CELL_M, x, "a point off the grid");
+            assert_eq!(row as f32 * HILLS_CELL_M, z, "a point off the grid");
+            let index = row * HILLS_COLUMNS + column;
+            assert_eq!(
+                y, heights[index],
+                "point ({column}, {row}) at the wrong height"
+            );
+            seen[index] = true;
+        }
+    }
+    assert!(seen.iter().all(|&s| s), "a grid point no tile carries");
+}
+
+#[test]
+fn a_heightfield_tile_hands_back_the_triangles_it_draws() {
+    for (t, tile) in hills_tiles(TILE_CELLS).iter().enumerate() {
+        let drawn: Vec<[f32; 3]> = positions(&tile.geometry)
+            .into_iter()
+            .map(|position| position.to_array())
+            .collect();
+        assert_eq!(drawn, tile.positions, "tile {t}'s positions");
+        assert_eq!(
+            indices(&tile.geometry),
+            tile.triangles.concat(),
+            "tile {t}'s triangles"
+        );
+    }
+}
+
+#[test]
+fn heightfield_tiles_meet_with_the_same_points_and_normals() {
+    let tiles = hills_tiles(TILE_CELLS);
+    let mut first_seen: Vec<([f32; 3], Vec3, usize)> = Vec::new();
+    let mut shared = 0;
+    for (t, tile) in tiles.iter().enumerate() {
+        for (position, normal) in tile.positions.iter().zip(normals(&tile.geometry)) {
+            match first_seen.iter().find(|(seen, ..)| seen == position) {
+                Some(&(_, seen_normal, seen_tile)) => {
+                    assert_eq!(
+                        normal, seen_normal,
+                        "{position:?} lights differently in tiles {seen_tile} and {t}"
+                    );
+                    shared += 1;
+                }
+                None => first_seen.push((*position, normal, t)),
+            }
+        }
+    }
+    // Every edge between two tiles is repeated, corners in up to four tiles:
+    // two vertical seams of 27 points and one horizontal seam of 41, the two
+    // crossings counted once more each for the third and fourth tile there.
+    assert_eq!(shared, 2 * 27 + 41 + 2);
+}
+
+#[test]
+fn every_heightfield_triangle_faces_up() {
+    for (t, tile) in hills_tiles(TILE_CELLS).iter().enumerate() {
+        for (i, normal) in face_normals(tile).into_iter().enumerate() {
+            assert!(normal.y > 0.0, "tile {t} triangle {i} faces {normal}");
+        }
+    }
+}
+
+#[test]
+fn a_sloped_plane_has_its_slope_as_every_normal_edges_included() {
+    let (columns, rows, cell_m) = (6, 5, 2.0);
+    let (slope_x, slope_z) = (0.3, -0.2);
+    let heights: Vec<f32> = (0..rows)
+        .flat_map(|row| {
+            (0..columns)
+                .map(move |column| slope_x * column as f32 * cell_m + slope_z * row as f32 * cell_m)
+        })
+        .collect();
+    let expected = Vec3::new(-slope_x, 1.0, -slope_z).normalize();
+    for tile in heightfield_tiles(&heights, columns, rows, cell_m, 3) {
+        for normal in normals(&tile.geometry) {
+            assert!(
+                normal.distance(expected) < 2e-3,
+                "{normal} on a plane whose normal is {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_heightfield_edge_takes_the_one_sided_difference() {
+    // h = x²: a central difference is exact inside (2x), and the edge clamps to
+    // the cell beside it, (h(1) − h(0)) / 1 = 1, not half that.
+    let (columns, rows) = (5, 2);
+    let heights: Vec<f32> = (0..rows)
+        .flat_map(|_| (0..columns).map(|column| (column * column) as f32))
+        .collect();
+    let tile = heightfield_tiles(&heights, columns, rows, 1.0, columns).swap_remove(0);
+    let normals = normals(&tile.geometry);
+    for (column, slope) in [(0, 1.0), (2, 4.0), (4, 7.0)] {
+        let expected = Vec3::new(-slope, 1.0, 0.0).normalize();
+        assert!(
+            normals[column].distance(expected) < 2e-3,
+            "column {column}: {} where the slope {slope} gives {expected}",
+            normals[column]
+        );
+    }
+}
+
+#[test]
+fn a_tile_wider_than_the_field_is_the_whole_field() {
+    let tiles = hills_tiles(HILLS_COLUMNS * 2);
+    assert_eq!(tiles.len(), 1);
+    assert_eq!(tiles[0].positions.len(), HILLS_COLUMNS * HILLS_ROWS);
+}
+
+#[test]
+#[should_panic(expected = "one height per point")]
+fn a_heightfield_refuses_heights_that_do_not_fill_it() {
+    let _ = heightfield_tiles(&[0.0; 5], 3, 2, 1.0, 1);
 }
