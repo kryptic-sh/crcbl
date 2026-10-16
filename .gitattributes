@@ -65,6 +65,16 @@ crates/crcbl-ui/tests/fixtures/taffy/** text eol=lf
 # version-skew fixtures whose bytes, SHA-256 included, are read back by the
 # migration tests, so they are this block's case too.
 *.crb  binary
+# `crates/crcbl-image/fixtures`: image files and the pixels each decodes to,
+# compared byte for byte by that crate's tests. Git's heuristic calls an
+# expected-pixel file with no NUL in its head text, and a checkout converting
+# line endings would then change the pixels it holds.
+*.rgba binary
+*.rgb  binary
+*.webp binary
+*.jpg  binary
+*.bmp  binary
+*.ico  binary
 
 # Git LFS is deliberately NOT enabled yet. Everything binary through P8 is small
 # (golden images are a few KB and get re-blessed often, which LFS handles worse
