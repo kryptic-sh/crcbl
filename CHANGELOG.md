@@ -13,6 +13,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`crcbl_image::svg::decode` draws `<image>`**, which it refused before, so
+  icons that embed a picture (four of Adwaita's) no longer fall back to a
+  generic one. The picture must be a `data:` URL in the file, base64 or
+  percent-encoded, of a PNG, JPEG or WebP (each drawn when that format's feature
+  is built, and refused by name when not) or an SVG, which this renderer draws
+  as vectors with nothing of the outer document's style. `x`, `y`, `width` and
+  `height` (a missing side sized from the picture), `preserveAspectRatio` with
+  every alignment, `meet`, `slice` and `none`, and transforms, opacity, clip
+  paths, masks and filters apply as SVG 2 says. A raster picture is resampled as
+  resvg resamples it: nearest neighbour at its own size, otherwise the
+  Mitchell–Netravali cubic. A path, a `file:` or web address, or any other
+  reference outside the file is refused, never read. Every embedded picture
+  decodes under the caller's `Limits`, all of a document's within one budget of
+  its `max_bytes`, and SVG pictures nest only to a fixed depth.
+
 ## [0.2.0] - 2026-10-16
 
 ### Breaking

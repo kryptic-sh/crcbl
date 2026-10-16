@@ -1008,12 +1008,69 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       and drawing that lies outside the square, which a filter could move or
       blur into view but this renderer never draws. Not measured: filters at
       sizes other than 48, and against a reference other than resvg.
+    - **`<image>`, shipped 2026-10-16** (`svg/data_url.rs` reads the reference,
+      `svg/render/image.rs` places and draws it): `href` or `xlink:href` as a
+      `data:` URL, read as the Fetch standard's data URL processor reads one
+      (tabs and line breaks dropped, a `#` ending the payload, percent-decoding,
+      Infra's forgiving base64), of `image/png`, `image/jpeg` (and `image/jpg`,
+      as resvg reads it), `image/webp` and `image/svg+xml`. PNG, JPEG and WebP
+      go to this crate's decoders, each only when its feature is built and
+      refused by name otherwise; an SVG is parsed and drawn by this renderer as
+      vectors through its own viewport, sharing nothing with the outer document
+      but the caps, as resvg draws one. Placement is SVG 2's: `x`, `y`, `width`,
+      `height`, a missing or `auto` side from the picture's own size or aspect,
+      `preserveAspectRatio` with every alignment, `meet`, `slice` (cut at the
+      viewport) and `none`, and transforms, opacity, clip paths, masks and
+      filters through the usual group effects, the image's object bounding box
+      being its viewport. Caps: every picture decodes under the caller's
+      `Limits`; a document's pictures share one budget of `Limits::max_bytes`, a
+      raster picture's RGBA charged once when decoded (each `<image>` element
+      decodes once however often a `use` draws it) and an SVG picture's source
+      each time it is drawn, a decode refused before it allocates past what is
+      left; SVG pictures nest at most `render::image::MAX_NESTING` deep; and an
+      SVG picture's elements, depth and layers count against the outer
+      document's caps. Verified by unit tests worked by hand (RFC 4648's
+      vectors, white space, percent escapes, fragments, bad media types and
+      truncated payloads; every alignment, slice and none against hand-worked
+      rectangles; the cubic against Mitchell and Netravali's piecewise kernel;
+      each format against its own decoder's pixels; an embedded SVG
+      percent-encoded and base64; each cap at its edge) and 50 hand mutants of
+      parsing, placement, sampling, media-type dispatch, the external refusal
+      and the caps, each failing a test.
+    - Decided 2026-10-16, for `<image>`: **resampled as resvg does, not through
+      `resize::resize`.** resvg samples a raster picture at each pixel's centre
+      through the inverse transform, nearest neighbour when that transform only
+      translates and the Mitchell–Netravali cubic (`B = C = 1/3`, tiny-skia's)
+      otherwise, edge pixels repeated, with no prefilter when shrinking; this
+      does the same. Considered and declined: resizing a shrunk picture first
+      with `resize::resize` (Lanczos, widened with the shrink), which aliases
+      less but draws a different picture: measured on the four Adwaita icons at
+      16, 24 and 32 px, Adwaita's `application-x-addon` differed from resvg on
+      12, 57 and 19 pixels that way against 0, 0 and 0 sampled directly (at 24
+      px, 57 of 576 pixels, a failed match); at 48 px and above both match.
+      `image-rendering` is ignored (resvg's `optimizeSpeed`, `crispEdges` and
+      `pixelated` sample nearest, `smooth` bilinear). A reference outside the
+      file (a path, `file:`, `http:`, a fragment) is refused by design, as is a
+      `data:` URL with no media type or `text/plain`, which resvg sniffs for a
+      format; GIF is refused (no decoder here).
+    - Not done, `<image>`: GIF; the media-type sniffing above;
+      `image-rendering`. Behaviour worth knowing: an SVG picture is not cut at
+      its viewport under `meet`, as resvg does not cut it. Not tested: an
+      embedded JPEG or WebP in a real icon (the corpus embeds only PNG), and a
+      picture under rotation or skew against resvg (the unit tests sample only
+      scales and translations).
+    - **Corpus after `<image>`, measured 2026-10-16** the same way: Adwaita 714
+      of 715 (99.9%, none refused, its four `<image>` icons all matching); every
+      other set as before (Papirus 6310 of 6319, breeze 5586 of 5642, Papirus
+      apps 3836 of 3845, breeze apps 192 of 206, hicolor 1 of 2), and the
+      differing list of every set unchanged, so no icon that matched stopped
+      matching. The Adwaita floor rose to 0.995.
     - Not done, in order of what the corpus refuses: **text** (`<text>`, and
       Inkscape's `<flowRoot>`, which browsers do not draw either: 11 icons,
-      needing fonts); `<image>` (4); markers, patterns, `symbol` and nested
-      `svg`, `switch`, blend modes and animation, which the corpus did not need.
-      Not measured: GTK's own renderer (librsvg) as a second reference, and the
-      corpus at sizes other than 48.
+      needing fonts); markers, patterns, `symbol` and nested `svg`, `switch`,
+      blend modes and animation, which the corpus did not need. Not measured:
+      GTK's own renderer (librsvg) as a second reference, and the corpus at
+      sizes other than 48.
     - Not done yet: decoding from a path (a caller reads the file
       `IconThemes::lookup` found, and keys its cache with `FileVersion`), and
       moving `crcbl-sprite`'s and `crcbl-golden`'s own PNG loaders onto this
@@ -1145,8 +1202,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       the two agree on both corpus icons with an invalid value, whose parents
       set no fill. Not tested: `vector-effect` inside a mask or under a filter,
       whose host is still the placement.
-    - Order from here: pikr's, in the 2026-10-16 entry at the top: `<image>`,
-      then text once system font lookup is in.
+    - Order from here: pikr's, in the 2026-10-16 entry at the top: text once
+      system font lookup is in.
 
 ### Left behind by the seam split
 

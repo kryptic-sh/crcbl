@@ -37,12 +37,14 @@
 //! their opacities, rules, joins, caps, miter limits and dashes, and
 //! `vector-effect: non-scaling-stroke`; colours,
 //! `currentColor`, linear and radial gradients; `clipPath` and `mask`;
-//! group opacity; and filters of the primitives drop shadows are made of
+//! group opacity; filters of the primitives drop shadows are made of
 //! (`feGaussianBlur`, `feOffset`, `feFlood`, `feComposite`, `feColorMatrix`
-//! and `feMerge`). What is refused, among other things: text, images, other
-//! filter primitives and filter functions, patterns, markers, `symbol`,
-//! nested `svg`, `switch`, blend modes, animation, and CSS beyond simple
-//! selectors.
+//! and `feMerge`); and `image` elements embedding a PNG, JPEG, WebP or SVG
+//! in a `data:` URL, each raster format when its own feature is built. What
+//! is refused, among other things: text, an image anywhere but in the file
+//! itself, other filter primitives and filter functions, patterns, markers,
+//! `symbol`, nested `svg`, `switch`, blend modes, animation, and CSS beyond
+//! simple selectors.
 //!
 //! # Fitting the square
 //!
@@ -57,11 +59,15 @@
 //! size; `use` instances, layers, dashes and filter
 //! primitives are capped where a small file could multiply them; a filter
 //! region is cut to the canvas; and the canvas passes the caller's
-//! [`Limits`] before it is allocated.
+//! [`Limits`] before it is allocated. An image is read only from a `data:`
+//! URL in the file, never from a path or the network; each decodes under the
+//! caller's [`Limits`], all of a document's together within one budget of
+//! its `max_bytes`, and SVG images nest only so deep.
 
 mod canvas;
 mod color;
 mod css;
+mod data_url;
 mod filter;
 mod paint;
 mod path;
@@ -90,7 +96,8 @@ fn malformed(what: impl core::fmt::Display) -> ImageError {
 /// # Errors
 ///
 /// [`ImageError::Empty`] or [`ImageError::TooLarge`] if the square breaks
-/// `limits` (checked before anything is parsed or allocated);
+/// `limits` (checked before anything is parsed or allocated), or an
+/// embedded image does;
 /// [`ImageError::Malformed`] for bytes that are not a well-formed SVG,
 /// including a zero, negative or non-finite `viewBox`, `width` or `height`;
 /// and [`ImageError::Unsupported`] for anything the file uses that this
@@ -104,5 +111,5 @@ pub fn decode(
     let side = size.saturating_mul(scale);
     limits.rgba_bytes(side, side)?;
     let document = xml::parse(bytes)?;
-    Ok(render::render(&document, side)?.into_image())
+    Ok(render::render(&document, side, limits)?.into_image())
 }

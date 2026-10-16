@@ -30,8 +30,10 @@
 //! a whole, not to each of its children, filter first.
 
 mod filter;
+pub(super) mod image;
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use super::canvas::Canvas;
 use super::paint::{self, Gradient, Shape, Spread, Stop};
@@ -41,8 +43,8 @@ use super::style::{self, Cascade, Length, Paint, Specified, Style, length};
 use super::transform::{self, Transform};
 use super::xml::{Document, Element, Namespace};
 use super::{malformed, unsupported};
-use crate::ImageError;
 use crate::raster::{FillRule, Point, Rasterizer};
+use crate::{ImageError, Limits};
 
 /// The deepest the walk recurses, counting each element entered and each
 /// reference followed: past it, a chain of `use` elements is refused before
@@ -100,9 +102,10 @@ const NOT_RENDERED: &[&str] = &[
 /// Children a shape may have that change nothing: descriptions.
 const DESCRIPTIVE: &[&str] = &["desc", "metadata", "title"];
 
-/// The elements drawn where they stand: groups, `use` and the basic shapes.
+/// The elements drawn where they stand: groups, `use`, the basic shapes and
+/// images.
 const DRAWN: &[&str] = &[
-    "circle", "ellipse", "g", "line", "path", "polygon", "polyline", "rect", "use",
+    "circle", "ellipse", "g", "image", "line", "path", "polygon", "polyline", "rect", "use",
 ];
 
 /// Attributes that change the picture in ways this renderer does not draw,
@@ -276,113 +279,110 @@ fn bounding_box_units(bbox: Option<Rect>) -> Option<Transform> {
         .then(|| Transform::new(bbox.width, 0.0, 0.0, bbox.height, bbox.x, bbox.y))
 }
 
-/// Draws `document` into a `side`-pixel square.
+/// An SVG's outermost viewport: its size in the units it is placed in, the
+/// map from its user space into that size, and the user-space size
+/// percentages are of.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Viewport {
+    pub width: f64,
+    pub height: f64,
+    inner: Transform,
+    user: (f64, f64),
+    slice: bool,
+}
+
+impl Viewport {
+    /// The viewport of `document`, whose root must be an SVG `<svg>`.
+    ///
+    /// # Errors
+    ///
+    /// [`ImageError::Malformed`] for a root that is not `<svg>`, or a
+    /// `viewBox`, `width` or `height` that is unusable.
+    pub(super) fn of(document: &Document) -> Result<Self, ImageError> {
+        let root = document.root();
+        if !root.is("svg") {
+            return Err(malformed(format_args!(
+                "the root element is <{}>, not an SVG <svg>",
+                root.name
+            )));
+        }
+        check_attributes(root)?;
+        let view_box = match root.attribute(Namespace::None, "viewBox") {
+            None => None,
+            Some(text) => match path::number_list(text).as_deref() {
+                Some(&[x, y, width, height]) if width > 0.0 && height > 0.0 => Some(Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                }),
+                _ => return Err(malformed(format_args!("the viewBox {text:?}"))),
+            },
+        };
+        let side_length = |name: &str, from_box: Option<f64>| -> Result<f64, ImageError> {
+            let value = match root.attribute(Namespace::None, name) {
+                None => from_box,
+                Some(text) => match length(text) {
+                    Some(Length::Px(value)) => Some(value),
+                    Some(Length::Percent(percent)) => {
+                        from_box.map(|reference| percent / 100.0 * reference)
+                    }
+                    None => return Err(malformed(format_args!("the {name} {text:?}"))),
+                },
+            };
+            match value {
+                Some(value) if value > 0.0 && value.is_finite() => Ok(value),
+                _ => Err(malformed(format_args!("an SVG with no usable {name}"))),
+            }
+        };
+        let width = side_length("width", view_box.map(|b| b.width))?;
+        let height = side_length("height", view_box.map(|b| b.height))?;
+        let aspect = root
+            .attribute(Namespace::None, "preserveAspectRatio")
+            .unwrap_or("");
+        let (inner, user) = match view_box {
+            Some(view_box) => (
+                view_box_transform(view_box, width, height, aspect)?,
+                (view_box.width, view_box.height),
+            ),
+            None => (Transform::IDENTITY, (width, height)),
+        };
+        Ok(Self {
+            width,
+            height,
+            inner,
+            user,
+            slice: aspect.split_ascii_whitespace().any(|word| word == "slice"),
+        })
+    }
+}
+
+/// Draws `document` into a `side`-pixel square, decoding the images it
+/// embeds under `limits`.
 ///
 /// # Errors
 ///
 /// [`ImageError::Malformed`] for a document that is not an SVG or whose
-/// size is unusable, and [`ImageError::Unsupported`] for anything it uses
-/// that this renderer does not draw.
-pub(super) fn render(document: &Document, side: u32) -> Result<Canvas, ImageError> {
-    let root = document.root();
-    if !root.is("svg") {
-        return Err(malformed(format_args!(
-            "the root element is <{}>, not an SVG <svg>",
-            root.name
-        )));
-    }
-    check_attributes(root)?;
-    let view_box = match root.attribute(Namespace::None, "viewBox") {
-        None => None,
-        Some(text) => match path::number_list(text).as_deref() {
-            Some(&[x, y, width, height]) if width > 0.0 && height > 0.0 => Some(Rect {
-                x,
-                y,
-                width,
-                height,
-            }),
-            _ => return Err(malformed(format_args!("the viewBox {text:?}"))),
-        },
-    };
-    let side_length = |name: &str, from_box: Option<f64>| -> Result<f64, ImageError> {
-        let value = match root.attribute(Namespace::None, name) {
-            None => from_box,
-            Some(text) => match length(text) {
-                Some(Length::Px(value)) => Some(value),
-                Some(Length::Percent(percent)) => {
-                    from_box.map(|reference| percent / 100.0 * reference)
-                }
-                None => return Err(malformed(format_args!("the {name} {text:?}"))),
-            },
-        };
-        match value {
-            Some(value) if value > 0.0 && value.is_finite() => Ok(value),
-            _ => Err(malformed(format_args!("an SVG with no usable {name}"))),
-        }
-    };
-    let width = side_length("width", view_box.map(|b| b.width))?;
-    let height = side_length("height", view_box.map(|b| b.height))?;
-    let aspect = root
-        .attribute(Namespace::None, "preserveAspectRatio")
-        .unwrap_or("");
-    let (inner, viewport) = match view_box {
-        Some(view_box) => (
-            view_box_transform(view_box, width, height, aspect)?,
-            (view_box.width, view_box.height),
-        ),
-        None => (Transform::IDENTITY, (width, height)),
-    };
+/// size is unusable, [`ImageError::Unsupported`] for anything it uses
+/// that this renderer does not draw, and [`ImageError::TooLarge`] for
+/// embedded images past `limits`.
+pub(super) fn render(
+    document: &Document,
+    side: u32,
+    limits: &Limits,
+) -> Result<Canvas, ImageError> {
+    let viewport = Viewport::of(document)?;
+    let (width, height) = (viewport.width, viewport.height);
     let side_f = f64::from(side);
     let fit = side_f / width.max(height);
     let placement =
         Transform::translate((side_f - width * fit) / 2.0, (side_f - height * fit) / 2.0)
             .then(Transform::scale(fit, fit));
-
-    let mut ids = HashMap::new();
-    let mut parents = vec![None; document.elements.len()];
-    for (index, element) in document.elements.iter().enumerate() {
-        for &child in &element.children {
-            parents[child] = Some(index);
-        }
-        if let Some(id) = element.attribute(Namespace::None, "id") {
-            ids.insert(id, index);
-        }
-    }
-    let mut renderer = Renderer {
-        document,
-        host: placement,
-        cascade: Cascade::new(document)?,
-        parents,
-        ids,
-        styles: vec![None; document.elements.len()],
-        side,
-        viewport,
-        rasterizer: Rasterizer::default(),
-        following: Vec::new(),
-        depth: 0,
-        instances: 0,
-        layers: 0,
-    };
+    let mut renderer = Renderer::new(document, &viewport, placement, side, *limits)?;
     let mut canvas = Canvas::new(side);
-    let root_style = renderer.document_style(0)?;
-    let transform = placement.then(inner);
+    // A square viewport fills the square, whose edge clips a slice already.
     let square = (width - height).abs() < f64::EPSILON * width.max(height);
-    let slice = aspect.split_ascii_whitespace().any(|word| word == "slice");
-    if square || !slice {
-        // Drawing that strays outside a viewport narrower than the square
-        // shows in the margin, as it does where resvg draws an SVG as an
-        // image: clipping to the viewport would also square the coverage
-        // of every edge lying on it, and icons draw to their edges.
-        renderer.root(&root_style, transform, &mut canvas)?;
-    } else {
-        // A sliced viewBox overflows its viewport by design, and the
-        // overflow stays hidden.
-        let mut layer = Canvas::new(side);
-        renderer.root(&root_style, transform, &mut layer)?;
-        let frame = path::rect(0.0, 0.0, width, height, 0.0, 0.0);
-        let coverage = renderer.fill_coverage(&frame, placement, FillRule::NonZero);
-        canvas.composite(&layer, |index| coverage[index]);
-    }
+    renderer.draw_root(&viewport, !square, &mut canvas)?;
     Ok(canvas)
 }
 
@@ -410,11 +410,89 @@ struct Renderer<'a> {
     depth: usize,
     instances: usize,
     layers: usize,
+    /// The caller's limits, which every embedded image decodes under.
+    limits: Limits,
+    /// How many `<image>` documents this one is inside.
+    nesting: usize,
+    /// The image budget spent so far, in this document and the ones it
+    /// embeds, as `image`'s module docs describe.
+    image_bytes: usize,
+    /// Each `<image>` element's decoded image, decoded once however many
+    /// times a `use` draws it.
+    images: HashMap<usize, Rc<image::Embedded>>,
 }
 
 impl<'a> Renderer<'a> {
+    /// A renderer of `document`, whose viewport is `viewport` and whose
+    /// outermost viewport maps to pixels by `host`, into a `side`-square.
+    fn new(
+        document: &'a Document,
+        viewport: &Viewport,
+        host: Transform,
+        side: u32,
+        limits: Limits,
+    ) -> Result<Self, ImageError> {
+        let mut ids = HashMap::new();
+        let mut parents = vec![None; document.elements.len()];
+        for (index, element) in document.elements.iter().enumerate() {
+            for &child in &element.children {
+                parents[child] = Some(index);
+            }
+            if let Some(id) = element.attribute(Namespace::None, "id") {
+                ids.insert(id, index);
+            }
+        }
+        Ok(Renderer {
+            document,
+            host,
+            cascade: Cascade::new(document)?,
+            parents,
+            ids,
+            styles: vec![None; document.elements.len()],
+            side,
+            viewport: viewport.user,
+            rasterizer: Rasterizer::default(),
+            following: Vec::new(),
+            depth: 0,
+            instances: 0,
+            layers: 0,
+            limits,
+            nesting: 0,
+            image_bytes: 0,
+            images: HashMap::new(),
+        })
+    }
+
     fn element(&self, index: usize) -> &'a Element {
         &self.document.elements[index]
+    }
+
+    /// Draws the whole document into `canvas` through its `viewport`, whose
+    /// overflow a `slice` hides only where `clip_slice` says the canvas's
+    /// edge does not already.
+    fn draw_root(
+        &mut self,
+        viewport: &Viewport,
+        clip_slice: bool,
+        canvas: &mut Canvas,
+    ) -> Result<(), ImageError> {
+        let root_style = self.document_style(0)?;
+        let transform = self.host.then(viewport.inner);
+        if !(viewport.slice && clip_slice) {
+            // Drawing that strays outside a viewport narrower than the square
+            // shows in the margin, as it does where resvg draws an SVG as an
+            // image: clipping to the viewport would also square the coverage
+            // of every edge lying on it, and icons draw to their edges.
+            return self.root(&root_style, transform, canvas);
+        }
+        // A sliced viewBox overflows its viewport by design, and the
+        // overflow stays hidden.
+        let mut layer = Canvas::new(self.side);
+        self.root(&root_style, transform, &mut layer)?;
+        let frame = path::rect(0.0, 0.0, viewport.width, viewport.height, 0.0, 0.0);
+        let coverage = self.fill_coverage(&frame, self.host, FillRule::NonZero);
+        canvas.composite(&layer, |index| coverage[index]);
+        Ok(())
     }
 
     /// Draws the root `svg` element, which has a style and group effects of
@@ -650,6 +728,7 @@ impl<'a> Renderer<'a> {
                 self.following.pop();
                 result
             }
+            "image" => self.image(index, style, transform, canvas),
             _ => self.shape(index, style, transform, canvas),
         }
     }
@@ -1274,6 +1353,7 @@ impl<'a> Renderer<'a> {
                 .geometry(element)?
                 .as_ref()
                 .and_then(path::bounding_box)),
+            "image" => Ok(self.image_layout(index)?.map(|(_, layout)| layout.viewport)),
             _ => Ok(None),
         }
     }

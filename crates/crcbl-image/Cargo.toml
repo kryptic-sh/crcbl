@@ -23,7 +23,9 @@ ico = ["bmp", "png"]
 jpeg = []
 png = ["dep:png"]
 # SVG icons rendered to RGBA by this crate's own renderer and rasteriser:
-# the subset icon themes use, and a decode error for anything outside it.
+# the subset icon themes use, and a decode error for anything outside it. An
+# `<image>` embedding a PNG, JPEG or WebP draws when that format's feature is
+# on as well, and is refused by name when it is not.
 svg = []
 # Lossless WebP and its container, decoded by this crate's own code.
 webp = []
