@@ -41,3 +41,9 @@ thiserror = { workspace = true }
 
 [lints]
 workspace = true
+
+# The real-theme measurement of the SVG renderer against resvg's output; its
+# module docs say how to run it.
+[[example]]
+name = "svg_corpus"
+required-features = ["svg", "png"]

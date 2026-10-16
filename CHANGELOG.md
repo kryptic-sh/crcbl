@@ -66,9 +66,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   patterns, markers, `symbol`, blend modes and animation are refused by name,
   while editors' metadata (Inkscape, Sodipodi, RDF, `<title>`) is ignored by
   design. The XML parser expands no DTD entity and fetches nothing; nesting,
-  element count, `use` instances, layers and dashes are capped. `raster`, the
-  coverage rasteriser from `crcbl-ui`, fills by `raster::FillRule::EvenOdd` as
-  well as non-zero (`Rasterizer::coverage_by`).
+  element count, `use` instances, layers and dashes are capped. Measured against
+  resvg's renders of Adwaita, Papirus and breeze by the `svg_corpus` example.
+  `raster`, the coverage rasteriser from `crcbl-ui`, fills by
+  `raster::FillRule::EvenOdd` as well as non-zero (`Rasterizer::coverage_by`).
 - **Dead keys and Compose sequences type on Wayland and X11.** A dead key
   commits nothing and the key after it commits what the two compose to (`´` then
   `e` is `é`), through libxkbcommon's compose module and the user's locale's
