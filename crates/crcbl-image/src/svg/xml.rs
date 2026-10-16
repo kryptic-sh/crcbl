@@ -111,6 +111,10 @@ pub(super) struct Element {
     pub children: Vec<usize>,
     /// Its direct character data, text and CDATA joined.
     pub text: String,
+    /// Where in [`text`](Self::text) each child element stands, as a byte
+    /// offset, one per child: what puts a `<text>` element's characters and
+    /// its `<tspan>` children back in document order.
+    pub child_offsets: Vec<usize>,
 }
 
 impl Element {
@@ -529,9 +533,12 @@ impl Parser<'_> {
             attributes,
             children: Vec::new(),
             text: String::new(),
+            child_offsets: Vec::new(),
         });
         if let Some(&parent) = self.open.last() {
-            self.elements[parent].children.push(index);
+            let parent = &mut self.elements[parent];
+            parent.children.push(index);
+            parent.child_offsets.push(parent.text.len());
         }
         if self_closing {
             self.close(depth);
@@ -735,6 +742,20 @@ mod tests {
         assert_eq!(root.children, [1, 2]);
         assert_eq!(document.elements[1].text, " .a { fill: red } ");
         assert_eq!(document.elements[2].children, [3]);
+    }
+
+    /// **Each child records where it stands in its parent's text**, so text
+    /// and elements interleaved come back in document order.
+    #[test]
+    fn children_record_their_place_in_the_text() {
+        let document = parse(
+            b"<svg xmlns='http://www.w3.org/2000/svg'><text>a<tspan>b</tspan>c&amp;<![CDATA[d]]><tspan/>e</text></svg>",
+        )
+        .expect("parses");
+        let text = &document.elements[1];
+        assert_eq!(text.text, "ac&de");
+        assert_eq!(text.child_offsets, [1, 4]);
+        assert_eq!(document.root().child_offsets, [0]);
     }
 
     /// **The predefined entities and numeric references are replaced; a

@@ -15,8 +15,12 @@
 //!   rather than drawing without it.
 //! * **Everything else is ignored**, as browsers and resvg ignore it: a
 //!   property SVG does not define for these elements, one with no effect on
-//!   what this renderer draws (text properties, rendering hints, an editor's
-//!   own), or a misspelling.
+//!   what this renderer draws (`line-height` and other properties of wrapped
+//!   text, rendering hints, an editor's own), or a misspelling.
+//!
+//! Text has properties of its own, in [`text`]: those it lays out, and those
+//! whose other values it would not draw, which refuse only the text drawn
+//! under them.
 //!
 //! # Invalid values
 //!
@@ -33,6 +37,13 @@
 //! not resolve (`em`), or a reference to a paint it does not draw
 //! (`context-fill`, a paint server in another file).
 
+mod text;
+
+pub(super) use text::TextStyle;
+#[cfg(feature = "svg-text")]
+pub(super) use text::{Anchor, Family, Slant};
+
+use self::text::TextProperty;
 use super::color::{self, Color, ColorValue};
 use super::css::{self, Declaration, Rule};
 use super::path::number_prefix;
@@ -80,6 +91,8 @@ pub(super) enum Property {
     StrokeWidth,
     VectorEffect,
     Visibility,
+    /// One of the text properties, which [`text`] reads.
+    Text(TextProperty),
 }
 
 const PROPERTIES: &[(&str, Property)] = &[
@@ -180,6 +193,18 @@ fn supported(name: &str) -> Option<Property> {
         .iter()
         .find(|(known, _)| *known == name)
         .map(|&(_, property)| property)
+        .or_else(|| TextProperty::named(name).map(Property::Text))
+}
+
+/// The name of `property`.
+fn property_name(property: Property) -> &'static str {
+    match property {
+        Property::Text(text) => text.name(),
+        _ => PROPERTIES
+            .iter()
+            .find(|(_, known)| *known == property)
+            .map_or("?", |(name, _)| name),
+    }
 }
 
 /// One element's declarations of the supported properties, lowest-ranked
@@ -441,6 +466,8 @@ pub(super) struct Style {
     /// measured in the coordinates the SVG is placed in, whatever transform
     /// its element is under.
     pub non_scaling_stroke: bool,
+    /// The text properties, every one inherited.
+    pub text: TextStyle,
 }
 
 impl Style {
@@ -474,6 +501,7 @@ impl Style {
             stop_opacity: 1.0,
             mask_alpha: false,
             non_scaling_stroke: false,
+            text: TextStyle::initial(),
         }
     }
 
@@ -531,10 +559,7 @@ impl Style {
         let refuse = || {
             unsupported(format_args!(
                 "value {value:?} of {} on <{element}>",
-                PROPERTIES
-                    .iter()
-                    .find(|(_, known)| *known == property)
-                    .map_or("?", |(name, _)| name)
+                property_name(property)
             ))
         };
         match value {
@@ -775,6 +800,12 @@ impl Style {
                     return unparsed(matches!(value, "optimizeSpeed" | "crispEdges"));
                 }
             }
+            Property::Text(text) => {
+                return self
+                    .text
+                    .apply(text, value, &parent.text)
+                    .ok_or_else(refuse);
+            }
         }
         Ok(true)
     }
@@ -815,6 +846,7 @@ impl Style {
             | Property::MarkerEnd
             | Property::MixBlendMode
             | Property::ShapeRendering => {}
+            Property::Text(text) => self.text.inherit(text, &parent.text),
         }
     }
 
@@ -1120,7 +1152,7 @@ mod tests {
   <rect class="c" style="fill: unset" stop-color="rgb(1, 2)" color="1abc" paint-order=""/>
   <rect display="none" style="display: 9lives"/>
   <rect class="c" style="fill: bleu" stroke="ButtonText" color="notacolour"/>
-  <rect style="frobnicate: 1; -inkscape-stroke: none; font-family: Sans; isolation: isolate" tyle="fill: #00ff00" adobe-blending-mode="normal"/>
+  <rect style="frobnicate: 1; -inkscape-stroke: none; line-height: 1.25; isolation: isolate" tyle="fill: #00ff00" adobe-blending-mode="normal"/>
 </g>
 </svg>"##,
         )

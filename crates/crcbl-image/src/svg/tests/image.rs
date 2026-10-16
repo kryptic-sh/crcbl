@@ -33,6 +33,7 @@ fn data_url(media_type: &str, bytes: &[u8]) -> String {
 }
 
 /// A `width` × `height` image of one straight-alpha `color`.
+#[cfg(feature = "png")]
 fn solid(width: u32, height: u32, color: [u8; 4]) -> Rgba8Image {
     Rgba8Image::new(width, height, color.repeat((width * height) as usize))
         .unwrap_or_else(|error| panic!("{error}"))
@@ -210,6 +211,7 @@ fn missing_sides_size_themselves() {
 
 /// Mitchell and Netravali's cubic with `B = C = 1/3`, from their paper's
 /// piecewise definition.
+#[cfg(feature = "png")]
 fn mitchell(x: f64) -> f64 {
     let x = x.abs();
     if x < 1.0 {

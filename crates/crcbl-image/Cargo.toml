@@ -27,6 +27,11 @@ png = ["dep:png"]
 # `<image>` embedding a PNG, JPEG or WebP draws when that format's feature is
 # on as well, and is refused by name when it is not.
 svg = []
+# Text in SVG icons: `<text>` and `<tspan>` drawn in the system's fonts,
+# found through `crcbl-font` and outlined through `skrifa`, one glyph a
+# character (no shaping). Without it, text that would draw a character is
+# refused by name, as anything else the renderer does not draw is.
+svg-text = ["svg", "dep:crcbl-font", "dep:skrifa"]
 # Lossless WebP and its container, decoded by this crate's own code.
 webp = []
 # X PixMaps, XPM 3 and XPM 2, decoded by this crate's own code.
@@ -42,6 +47,11 @@ theme = []
 # `docs/backlog.md` under S28.
 png = { workspace = true, optional = true }
 thiserror = { workspace = true }
+# SVG text's fonts: the system's, through the workspace's lookup crate, and
+# their outlines and metrics through the font reader `crcbl-ui` and
+# `crcbl-font` already share.
+crcbl-font = { workspace = true, optional = true }
+skrifa = { workspace = true, optional = true }
 
 [lints]
 workspace = true
