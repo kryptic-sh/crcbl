@@ -27,6 +27,23 @@
 //! yet (`docs/backlog.md`, _What UI rung 1 shipped without_): an image that does
 //! not fit is [`AtlasError::Full`], never a panic.
 //!
+//! # Evictable images
+//!
+//! A picture the atlas may drop on its own is registered with
+//! [`register_evictable`](ImageAtlas::register_evictable): what the
+//! colour-glyph cache ([`crate::font::color::ColorGlyphCache`]) holds its emoji
+//! as, since it can draw one again from the font. Each is marked used by
+//! [`touch`](ImageAtlas::touch) in the frame that draws it, frames being
+//! counted by [`begin_frame`](ImageAtlas::begin_frame). **A registration of
+//! either kind that finds no room first unregisters evictable images not used
+//! this frame, least recently used first, until it fits**, and only then is
+//! [`AtlasError::Full`]. So emoji never crowd out a launcher's icons, an image
+//! a frame is drawing is never taken from under it, and **an image registered
+//! with [`register`](ImageAtlas::register) is never evicted**. Whoever holds an
+//! evictable image asks [`touch`](ImageAtlas::touch) before drawing it again,
+//! which answers `None` once it is gone; its id is never reused, so a stale
+//! handle can never name another picture.
+//!
 //! # Giving space back
 //!
 //! [`unregister`](ImageAtlas::unregister) frees an image's span of its shelf for
@@ -34,8 +51,9 @@
 //! keystroke registers the new ones in the space the old ones held instead of
 //! filling the page. Neighbouring free spans join, a free span at a shelf's end
 //! returns to the shelf, and an emptied last shelf is closed, so its rows can
-//! open a shelf of another height. The atlas does not decide what to evict: the
-//! caller knows which pictures it still draws, and nothing here does.
+//! open a shelf of another height. The atlas never evicts an image registered
+//! with [`register`](ImageAtlas::register): the caller knows which pictures it
+//! still draws. Only an evictable image, above, is dropped by the atlas.
 //!
 //! The page is [`PAGE_SIZE`] texels square, a power of two so every UV this
 //! module hands out is exact in `f32`, and inside the 4096 WebGPU's
@@ -57,6 +75,7 @@
 //! the alpha is straight rather than premultiplied.
 
 use core::fmt;
+use std::collections::HashMap;
 
 use glam::Vec2;
 
@@ -389,6 +408,10 @@ pub struct ImageAtlas {
     next_id: u32,
     shelves: Vec<Shelf>,
     dirty: Option<TexelRect>,
+    /// Each evictable image's last frame used; see the module docs.
+    evictable: HashMap<ImageId, u64>,
+    /// The frame [`ImageAtlas::begin_frame`] last started.
+    frame: u64,
 }
 
 impl fmt::Debug for ImageAtlas {
@@ -398,6 +421,7 @@ impl fmt::Debug for ImageAtlas {
             .field("images", &self.images)
             .field("shelves", &self.shelves.len())
             .field("dirty", &self.dirty)
+            .field("evictable", &self.evictable.len())
             .finish_non_exhaustive()
     }
 }
@@ -421,7 +445,44 @@ impl ImageAtlas {
             next_id: 0,
             shelves: Vec::new(),
             dirty: None,
+            evictable: HashMap::new(),
+            frame: 0,
         }
+    }
+
+    /// Starts a frame: evictable images used before now may be evicted. See
+    /// the module docs.
+    pub fn begin_frame(&mut self) {
+        self.frame += 1;
+    }
+
+    /// [`ImageAtlas::register`] for a picture the atlas may unregister on its
+    /// own once a frame passes without [`touch`](Self::touch) — see the module
+    /// docs — marked used this frame.
+    ///
+    /// # Errors
+    ///
+    /// As [`ImageAtlas::register`].
+    pub fn register_evictable(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Result<AtlasImage, AtlasError> {
+        let image = self.register(width, height, pixels)?;
+        self.evictable.insert(image.id, self.frame);
+        Ok(image)
+    }
+
+    /// The image registered as `id`, marked used this frame if it is
+    /// evictable, or `None` once it has been unregistered or evicted: what a
+    /// holder of an evictable image asks before drawing it again.
+    pub fn touch(&mut self, id: ImageId) -> Option<AtlasImage> {
+        let image = self.image(id)?;
+        if let Some(last_used) = self.evictable.get_mut(&id) {
+            *last_used = self.frame;
+        }
+        Some(image)
     }
 
     /// Places a `width` by `height` image of straight-alpha RGBA8 `pixels`,
@@ -430,11 +491,16 @@ impl ImageAtlas {
     /// The page texels it covers, gutter included, join the
     /// [`dirty`](Self::dirty) rectangle.
     ///
+    /// With no room for it, evictable images not used this frame are
+    /// unregistered, least recently used first, until it fits — see the
+    /// module docs. This image is never evicted itself.
+    ///
     /// # Errors
     ///
     /// [`AtlasError::Empty`] for a zero extent, [`AtlasError::PixelCount`] when
     /// `pixels` is not `width * height * 4` bytes, and [`AtlasError::Full`]
-    /// when there is no room for it. A refused image changes nothing.
+    /// when there is no room for it even after eviction. A refused image
+    /// changes nothing but the evictable images it evicted.
     pub fn register(
         &mut self,
         width: u32,
@@ -456,7 +522,9 @@ impl ImageAtlas {
         let padded_height = height.checked_add(2 * GUTTER).ok_or(full)?;
         let id = ImageId(self.next_id);
         let next_id = self.next_id.checked_add(1).ok_or(full)?;
-        let (shelf_x, shelf_y) = self.place(padded_width, padded_height).ok_or(full)?;
+        let (shelf_x, shelf_y) = self
+            .place_evicting(padded_width, padded_height)
+            .ok_or(full)?;
         self.next_id = next_id;
 
         let image = AtlasImage {
@@ -476,6 +544,26 @@ impl ImageAtlas {
         };
         self.dirty = Some(self.dirty.map_or(covered, |dirty| dirty.union(covered)));
         Ok(image)
+    }
+
+    /// [`ImageAtlas::place`], unregistering evictable images not used this
+    /// frame, least recently used first, until it finds room.
+    fn place_evicting(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
+        loop {
+            if let Some(placed) = self.place(width, height) {
+                return Some(placed);
+            }
+            if width > PAGE_SIZE || height > PAGE_SIZE {
+                return None;
+            }
+            let oldest = self
+                .evictable
+                .iter()
+                .filter(|&(_, &last_used)| last_used < self.frame)
+                .min_by_key(|&(id, &last_used)| (last_used, id.0))
+                .map(|(&id, _)| id)?;
+            self.unregister(oldest);
+        }
     }
 
     /// Finds the top-left of a free `width` by `height` block and claims it.
@@ -522,6 +610,7 @@ impl ImageAtlas {
             .binary_search_by_key(&id.0, |image| image.id.0)
             .ok()?;
         let image = self.images.remove(at);
+        self.evictable.remove(&id);
         let shelf = self
             .shelves
             .iter_mut()
@@ -919,5 +1008,60 @@ mod tests {
             Some(dirty),
             "an unrecorded upload comes back"
         );
+    }
+
+    /// **A registration that finds no room evicts evictable images not used
+    /// this frame, oldest first, and nothing else**: the older of two goes
+    /// first, one touched this frame stays, a registered image is never
+    /// evicted, and an evicted image answers `None` to `touch`.
+    #[test]
+    fn evictable_images_give_way_oldest_first_and_only_when_unused() {
+        let side = 62;
+        let padded = side + 2 * GUTTER;
+        assert_eq!(PAGE_SIZE % padded, 0, "the images tile the page");
+        let pixels = numbered(side, side);
+        let mut atlas = ImageAtlas::new();
+        // Registered images on all but two places, then an evictable image
+        // in each, a frame apart.
+        let places = (PAGE_SIZE / padded).pow(2) as usize;
+        let kept: Vec<AtlasImage> = (0..places - 2)
+            .map(|_| atlas.register(side, side, &pixels).expect("fits"))
+            .collect();
+        atlas.begin_frame();
+        let older = atlas.register_evictable(side, side, &pixels).expect("fits");
+        atlas.begin_frame();
+        let newer = atlas.register_evictable(side, side, &pixels).expect("fits");
+
+        atlas.begin_frame();
+        assert_eq!(atlas.touch(newer.id), Some(newer));
+        let first = atlas
+            .register(side, side, &pixels)
+            .expect("the older gives way");
+        assert_eq!((first.x, first.y), (older.x, older.y));
+        assert_eq!(atlas.touch(older.id), None, "evicted");
+        assert_eq!(
+            atlas.register(side, side, &pixels),
+            Err(AtlasError::Full {
+                width: side,
+                height: side
+            }),
+            "the newer was touched this frame"
+        );
+        assert_eq!(atlas.image(newer.id), Some(newer));
+
+        atlas.begin_frame();
+        let second = atlas
+            .register_evictable(side, side, &pixels)
+            .expect("the newer gives way, to an evictable image too");
+        assert_eq!((second.x, second.y), (newer.x, newer.y));
+        atlas.begin_frame();
+        let third = atlas.register(side, side, &pixels).expect("then that one");
+        assert!(matches!(
+            atlas.register(side, side, &pixels),
+            Err(AtlasError::Full { .. })
+        ));
+        for image in kept.iter().chain([&first, &third]) {
+            assert_eq!(atlas.image(image.id), Some(*image), "never evicted");
+        }
     }
 }

@@ -44,7 +44,7 @@ fn a_colour_glyph_becomes_an_image_quad_after_its_run() {
     assert_eq!(kinds(&list), ["glyphs 1", "glyphs 1", "glyphs 1"]);
     let mut images = ImageAtlas::new();
     let mut cache = ColorGlyphCache::new();
-    cache.begin_frame();
+    cache.begin_frame(&mut images);
     list.resolve_color_glyphs(&mut cache, &mut images, 1.0);
 
     assert_eq!(kinds(&list), ["glyphs 1", "glyphs 0", "image", "glyphs 1"]);
@@ -98,7 +98,7 @@ fn a_quad_keeps_its_runs_clip_and_side_of_the_cut() {
     emoji_runs(&mut list, Vec2::new(0.0, 60.0), "\u{1F600}");
     let mut images = ImageAtlas::new();
     let mut cache = ColorGlyphCache::new();
-    cache.begin_frame();
+    cache.begin_frame(&mut images);
     list.resolve_color_glyphs(&mut cache, &mut images, 1.0);
 
     assert_eq!(list.base_commands().len(), 2);
@@ -128,7 +128,7 @@ fn a_quad_is_placed_and_sized_at_the_expansions_scale() {
     let layout = emoji_runs(&mut list, origin, "a\u{1F600}");
     let mut images = ImageAtlas::new();
     let mut cache = ColorGlyphCache::new();
-    cache.begin_frame();
+    cache.begin_frame(&mut images);
     list.resolve_color_glyphs(&mut cache, &mut images, 2.0);
     let DrawCommand::Image { min, max, .. } = list.commands()[2] else {
         panic!("the emoji's quad");
@@ -159,7 +159,7 @@ fn plain_runs_and_glyphs_with_no_picture_stay_runs() {
     let before = kinds(&list);
     let mut images = ImageAtlas::new();
     let mut cache = ColorGlyphCache::new();
-    cache.begin_frame();
+    cache.begin_frame(&mut images);
     list.resolve_color_glyphs(&mut cache, &mut images, 1.0);
     assert_eq!(kinds(&list), before);
     assert!(images.images().is_empty());
@@ -179,7 +179,7 @@ fn tessellating_with_colours_matches_resolving_first() {
     emoji_runs(&mut list, Vec2::new(4.0, 70.0), "\u{1F600}c");
     let tessellate = |list: &DrawList, colors: bool| {
         let (mut cache, mut images) = (ColorGlyphCache::new(), ImageAtlas::new());
-        cache.begin_frame();
+        cache.begin_frame(&mut images);
         let mut glyphs = GlyphAtlas::new(256, 1, 100);
         let colors = colors.then_some(ColorGlyphs {
             cache: &mut cache,
@@ -190,7 +190,7 @@ fn tessellating_with_colours_matches_resolving_first() {
     };
     let mut resolved = list.clone();
     let (mut cache, mut images) = (ColorGlyphCache::new(), ImageAtlas::new());
-    cache.begin_frame();
+    cache.begin_frame(&mut images);
     resolved.resolve_color_glyphs(&mut cache, &mut images, 2.0);
 
     let (direct, placed) = tessellate(&list, true);

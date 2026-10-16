@@ -452,11 +452,48 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      `tessellating_with_colours_matches_resolving_first`; three more hand
      mutants were each killed: the pass tessellating without colours, staging
      the image atlas before the tessellation, and the expansion dropping the
-     quads. Left: the glyphs share the image atlas's page with the application's
-     pictures, and the cache evicts only for itself, so a picture registered
-     through `images_mut` after emoji filled the page is refused; evicting the
-     cache's glyphs for a registration would need `images_mut` to go through the
-     cache.
+     quads.
+   - Decided 2026-10-16 (the coordinator's call, the long-term option): **the
+     image atlas itself knows which images are evictable.** Colour glyphs are
+     registered with `ImageAtlas::register_evictable`, marked used by
+     `ImageAtlas::touch` in each frame that draws them, frames counted by
+     `ImageAtlas::begin_frame` (which `ColorGlyphCache::begin_frame` calls). Any
+     registration that finds no room, a plain `register` included, first
+     unregisters evictable images not used this frame, least recently used
+     first, and only then is `AtlasError::Full`; an image registered with
+     `register` is never evicted. The cache asks `touch` before drawing a cached
+     glyph and rasterises it again when the atlas has dropped it, and ids are
+     never reused, so a stale handle cannot name another picture. Before this,
+     lyr's and pikr's icon registrations came back `Full` once emoji filled the
+     page. Alternatives: (a) a cap on the cache's share of the page — declined
+     because any fixed share is either too small for an emoji-heavy notification
+     history or still large enough to starve icons, and it would evict emoji
+     while the page had room; (b) a separate page for emoji — declined because
+     it needs a new binding in the UI pass and its shader (a renderer change)
+     and a second page's worth of memory held whether or not anything draws
+     emoji. Verified by
+     `evictable_images_give_way_oldest_first_and_only_when_unused` in
+     `crates/crcbl-ui/src/image.rs` and
+     `a_callers_picture_evicts_unused_emoji_and_the_cache_draws_them_again`;
+     eight hand mutants, each compiling under `-D warnings`, were each killed:
+     the atlas never evicting, evicting images used this frame, evicting newest
+     first, evicting registered images, `register_evictable` not marking its
+     image, `touch` not marking it used, the cache drawing a stale glyph, and
+     the cache registering its glyphs as plain images.
+   - Smoke-checked 2026-10-16 against real fonts through the public API (a
+     scratch program, not committed): Segoe UI Emoji (`seguiemj.ttf`, COLR v0)
+     and Noto Color Emoji v2.051 (CBDT), each of 27 emoji — faces, hearts,
+     regional indicators U and S, white and chequered flags, hands, food and
+     symbols — at 16, 32 and 64 pixels. Noto drew all 81 in colour. Segoe drew
+     75; the 6 others were its regional indicators, which have no colour
+     representation in Segoe (it colours flags only through GSUB sequences,
+     which are not done here), so they fell back to the outline. No glyph hit a
+     cap: walked whole, Segoe's 3487 COLR glyphs nest at most 6 deep and fill at
+     most 857 times, well inside `MAX_PAINT_DEPTH` and `MAX_COLR_LAYERS`, so
+     neither cap was changed. Each glyph took at most a few milliseconds to
+     rasterise. Contact sheets were looked at by eye and look right. Not
+     checked: Noto's COLR v1 build, and the heaviest Segoe glyphs at large sizes
+     against `MAX_FILLED_PIXELS`.
    - Not done: **GSUB clusters** — there is no shaping, so a ZWJ sequence, a
      skin-tone modifier, a flag or a keycap draws as its component emoji. It
      would take reading GSUB ligature lookups (`ccmp`, `liga`) through
