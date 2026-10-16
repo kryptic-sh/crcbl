@@ -132,6 +132,10 @@ pub(super) struct WinWindow {
     /// What a panel was created with, so it can be placed again; `None` for
     /// every other window. See [`panel`](super::panel).
     pub(super) panel: Option<Panel>,
+    /// Whether [`WindowDesc::transparent`] was set: created with
+    /// `WS_EX_NOREDIRECTIONBITMAP`, and so what
+    /// [`SurfaceTarget::Win32`]'s `transparent` reports.
+    pub(super) transparent: bool,
     /// What a popup was created with, or last repositioned to: its input,
     /// which decides how it is shown and whether losing the keyboard
     /// dismisses it, and its parent, which destroys it when it goes. `None`
@@ -355,7 +359,8 @@ impl Win32Shell {
             .union(ShellCaps::PANEL)
             .union(ShellCaps::PANEL_RESERVE)
             .union(ShellCaps::POPUP)
-            .union(ShellCaps::POPUP_REPOSITION);
+            .union(ShellCaps::POPUP_REPOSITION)
+            .union(ShellCaps::TRANSPARENT);
         #[cfg(feature = "accesskit")]
         let caps = caps.union(ShellCaps::ACCESSIBILITY);
         if raw_motion {
@@ -1206,6 +1211,18 @@ impl Shell for Win32Shell {
     ///   parent and kept on its monitor; see [`popup`](super::popup).
     /// * [`POPUP_REPOSITION`](ShellCaps::POPUP_REPOSITION) — the same placement
     ///   worked out again, and the window moved with `SetWindowPos`.
+    /// * [`TRANSPARENT`](ShellCaps::TRANSPARENT) — the window system's half: a
+    ///   transparent window of any role is created with
+    ///   `WS_EX_NOREDIRECTIONBITMAP`, a frameless one is given square corners
+    ///   and no border, and its [`SurfaceTarget::Win32`] says `transparent`.
+    ///   The frame's half is the GPU backend's, and only D3D12 has it: it
+    ///   presents through a DirectComposition visual with premultiplied alpha.
+    ///   Vulkan refuses such a surface by name in `create_surface`, which is
+    ///   how a caller on that backend finds out; the shell cannot know which
+    ///   backend will draw. A pixel of alpha zero is still hit by the pointer
+    ///   (this is not a layered window); click-through is `WM_NCHITTEST`'s, as
+    ///   [`PopupInput::Passthrough`](crate::PopupInput::Passthrough) already
+    ///   answers it.
     /// * [`ACCESSIBILITY`](ShellCaps::ACCESSIBILITY), only when built with the
     ///   `accesskit` feature — each window has a UI Automation adapter that
     ///   answers `WM_GETOBJECT` with the tree `update_accessibility` sent, and
@@ -1334,9 +1351,13 @@ impl Shell for Win32Shell {
             visible: Self::is_showing(created.hwnd),
             close_pending: false,
             accept_drops: desc.accept_drops,
+            transparent: desc.transparent,
             panel,
             popup,
         };
+        if desc.transparent {
+            Self::apply_transparent_chrome(hwnd.as_ptr());
+        }
         let window = self.windows.insert(window).cast();
         // Here rather than in the window procedure: the adapter must exist, and
         // UI Automation be initialised, before the first `WM_GETOBJECT` is
@@ -1650,6 +1671,7 @@ impl Shell for Win32Shell {
         Ok(SurfaceTarget::Win32 {
             hinstance: self.instance,
             hwnd: state.hwnd,
+            transparent: state.transparent,
         })
     }
 

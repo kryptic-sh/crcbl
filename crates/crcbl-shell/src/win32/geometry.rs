@@ -35,7 +35,7 @@
 //! system computes rather than one to derive: the border width depends on the
 //! style, the DPI and the user's theme.
 
-use super::ffi::{Point, Rect, style, value};
+use super::ffi::{Point, Rect, dwm, style, value};
 use crate::{
     AspectRatio, DisplayMode, PanelAnchor, PanelKeyboard, PanelLayer, PhysicalRect, PhysicalSize,
     PopupInput, PopupPlacement, SizeConstraints,
@@ -151,6 +151,66 @@ pub fn popup_styles(input: PopupInput, topmost: bool) -> Styles {
     Styles {
         style: style::POPUP | COMMON,
         ex_style,
+    }
+}
+
+/// `styles` for a window that is, or is not,
+/// [transparent](crate::WindowDesc::transparent).
+///
+/// A transparent window adds `WS_EX_NOREDIRECTIONBITMAP`, whatever its role:
+/// DWM then keeps no redirection surface for it, and what it shows is the
+/// DirectComposition visual its D3D12 swapchain is bound to, blended by the
+/// frame's premultiplied alpha. Nothing else changes, because the frame is the
+/// role's: a panel and a popup are already frameless, and a windowed toplevel
+/// keeps the caption [`SERVER_DECORATIONS`](crate::ShellCaps::SERVER_DECORATIONS)
+/// promises.
+#[must_use]
+pub const fn with_transparency(styles: Styles, transparent: bool) -> Styles {
+    if transparent {
+        Styles {
+            style: styles.style,
+            ex_style: styles.ex_style | style::EX_NO_REDIRECTION_BITMAP,
+        }
+    } else {
+        styles
+    }
+}
+
+/// What DWM draws around a transparent window: its corners and its border.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Chrome {
+    /// A `DWMWCP_*` value for `DWMWA_WINDOW_CORNER_PREFERENCE`.
+    pub corners: u32,
+    /// A colour or `DWMWA_COLOR_*` value for `DWMWA_BORDER_COLOR`.
+    pub border: u32,
+}
+
+/// The chrome a transparent window of `styles` is given.
+///
+/// One with no caption — a panel, a popup, a borderless toplevel — draws its
+/// own shape, so DWM is asked for square corners and no border, which on
+/// Windows 11 would otherwise clip the shape and outline it. One with a caption
+/// keeps the system's corners and border, because the system frame is what the
+/// role asked for and the two belong together. Asked again after a mode
+/// change, so a toplevel that goes borderless and back ends where it started.
+///
+/// There is no shadow to take away: DWM shadows a window with a frame, or one
+/// whose class asks for `CS_DROPSHADOW`, and a frameless window of this
+/// backend is neither. `DWMWA_NCRENDERING_POLICY` is left alone for the same
+/// reason: a frameless window has no non-client area for DWM to render, and
+/// turning it off on a captioned one would take away the caption.
+#[must_use]
+pub const fn transparent_chrome(styles: Styles) -> Chrome {
+    if styles.style & style::CAPTION == 0 {
+        Chrome {
+            corners: dwm::CORNER_DO_NOT_ROUND,
+            border: dwm::COLOR_NONE,
+        }
+    } else {
+        Chrome {
+            corners: dwm::CORNER_DEFAULT,
+            border: dwm::COLOR_DEFAULT,
+        }
     }
 }
 
@@ -512,6 +572,65 @@ mod tests {
         for keyboard in [PanelKeyboard::OnDemand, PanelKeyboard::Exclusive] {
             let styles = panel_styles(PanelLayer::Top, keyboard);
             assert_eq!(styles.ex_style & style::EX_NO_ACTIVATE, 0, "{keyboard:?}");
+        }
+    }
+
+    #[test]
+    fn a_transparent_window_of_any_role_has_no_redirection_surface_and_nothing_else_changes() {
+        let every_role = [
+            styles(DisplayMode::Windowed, true),
+            styles(DisplayMode::Borderless { monitor: None }, true),
+            panel_styles(PanelLayer::Top, PanelKeyboard::None),
+            popup_styles(PopupInput::Passthrough, true),
+        ];
+        for opaque in every_role {
+            assert_eq!(opaque.ex_style & style::EX_NO_REDIRECTION_BITMAP, 0);
+            assert_eq!(with_transparency(opaque, false), opaque);
+            let transparent = with_transparency(opaque, true);
+            assert_ne!(
+                transparent.ex_style & style::EX_NO_REDIRECTION_BITMAP,
+                0,
+                "{opaque:?}"
+            );
+            assert_eq!(transparent.style, opaque.style, "the frame is the role's");
+            assert_eq!(
+                transparent.ex_style & !style::EX_NO_REDIRECTION_BITMAP,
+                opaque.ex_style,
+                "every other extended style is kept"
+            );
+        }
+    }
+
+    #[test]
+    fn a_frameless_transparent_window_is_square_and_unbordered_and_a_captioned_one_is_the_systems()
+    {
+        let bare = Chrome {
+            corners: dwm::CORNER_DO_NOT_ROUND,
+            border: dwm::COLOR_NONE,
+        };
+        for frameless in [
+            panel_styles(PanelLayer::Overlay, PanelKeyboard::Exclusive),
+            popup_styles(PopupInput::Grab, false),
+            styles(DisplayMode::Borderless { monitor: None }, true),
+        ] {
+            assert_eq!(
+                transparent_chrome(with_transparency(frameless, true)),
+                bare,
+                "{frameless:?}"
+            );
+        }
+        for captioned in [
+            styles(DisplayMode::Windowed, true),
+            styles(DisplayMode::Windowed, false),
+        ] {
+            assert_eq!(
+                transparent_chrome(with_transparency(captioned, true)),
+                Chrome {
+                    corners: dwm::CORNER_DEFAULT,
+                    border: dwm::COLOR_DEFAULT,
+                },
+                "{captioned:?}"
+            );
         }
     }
 

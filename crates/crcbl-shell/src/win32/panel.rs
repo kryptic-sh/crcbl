@@ -177,7 +177,10 @@ impl Win32Shell {
             ShellError::WindowCreation("there is no monitor to place a panel on".to_string())
         })?;
         let rect = panel.rect_on(&monitor);
-        let styles = geometry::panel_styles(panel.layer, panel.keyboard);
+        let styles = geometry::with_transparency(
+            geometry::panel_styles(panel.layer, panel.keyboard),
+            desc.transparent,
+        );
         let name = class_name();
         // SAFETY: as `create_native_window`: NUL-terminated strings that
         // outlive the call, this shell's registered class, a top-level window

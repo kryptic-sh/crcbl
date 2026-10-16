@@ -45,7 +45,7 @@
 //! | Cursor shapes and hiding | complete — stock `IDC_*` cursors through `WM_SETCURSOR`, hiding through a balanced `ShowCursor` |
 //! | Clipboard, both directions: `CF_UNICODETEXT` plus a registered format per mime | complete — [`CLIPBOARD`](crate::ShellCaps::CLIPBOARD), see [`clipboard`] |
 //! | File drops in: `DragAcceptFiles`, `WM_DROPFILES`, the `accept_drops` gate | complete — [`DRAG_DROP`](crate::ShellCaps::DRAG_DROP), see [`dnd`] |
-//! | Panels: frameless tool windows placed by their anchors on a monitor, and appbars for the ones that reserve an edge | complete — [`PANEL`](crate::ShellCaps::PANEL) and [`PANEL_RESERVE`](crate::ShellCaps::PANEL_RESERVE), see [`panel`]; popups — [`POPUP`](crate::ShellCaps::POPUP), see [`popup`]; per-pixel alpha is not yet |
+//! | Panels: frameless tool windows placed by their anchors on a monitor, and appbars for the ones that reserve an edge | complete — [`PANEL`](crate::ShellCaps::PANEL) and [`PANEL_RESERVE`](crate::ShellCaps::PANEL_RESERVE), see [`panel`]; popups — [`POPUP`](crate::ShellCaps::POPUP), see [`popup`]; per-pixel alpha — [`TRANSPARENT`](crate::ShellCaps::TRANSPARENT), the window system's half, with the D3D12 backend presenting through DirectComposition |
 //! | Drag *feedback* — a drop cursor, hover highlighting, non-file formats | **not implemented**: it is `IDropTarget`, which is COM. [`dnd`] gives the argument |
 //! | Accessibility: each window's tree to UI Automation, `WM_GETOBJECT` answered, a reader's requests as events | complete behind the `accesskit` feature — [`ACCESSIBILITY`](crate::ShellCaps::ACCESSIBILITY), see the `access` module; never deactivates, because Windows never says a reader left, and verified only by the CI desktop test |
 //!

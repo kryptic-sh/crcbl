@@ -283,16 +283,22 @@
 //! `crcbl-hal`'s rule — because the absence is expressed by the crate having no
 //! public items, not by a caller testing the platform.
 //!
-//! # No `unsafe` marker impls anywhere in this crate
+//! # One `unsafe` marker impl in this crate, for DirectComposition
 //!
 //! [`Instance`](crcbl_hal::Instance) and [`Device`](crcbl_hal::Device) both
 //! require [`HalThreadSafe`](crcbl_hal::threading::HalThreadSafe), which is
-//! `Send + Sync` on native, and neither is satisfied here by an assertion.
-//! `windows-rs` declares `unsafe impl Send` **and** `Sync` for every interface
-//! this crate holds — `IDXGIFactory4`, `IDXGIAdapter1`, `IDXGISwapChain3`,
-//! `ID3D12Device`, `ID3D12CommandQueue`, `ID3D12Resource`,
-//! `ID3D12DescriptorHeap` and `ID3D12Fence` — so the markers come from the
-//! compiler.
+//! `Send + Sync` on native, and almost none of that is satisfied here by an
+//! assertion. `windows-rs` declares `unsafe impl Send` **and** `Sync` for the
+//! DXGI and D3D12 interfaces this crate holds — `IDXGIFactory4`,
+//! `IDXGIAdapter1`, `IDXGISwapChain3`, `ID3D12Device`, `ID3D12CommandQueue`,
+//! `ID3D12Resource`, `ID3D12DescriptorHeap` and `ID3D12Fence` — so those
+//! markers come from the compiler.
+//!
+//! The exception is a transparent window's DirectComposition device, target
+//! and visual, which `windows-rs` leaves unmarked and which have to live in the
+//! surface and swapchain tables. `crate::composition` writes the impl for the
+//! one struct holding them, and quotes the documentation that makes it sound:
+//! DirectComposition objects are not bound to a thread.
 //!
 //! That is worth stating because `crcbl-mtl` could not do it: `MTLBuffer` and
 //! `MTLTexture` inherit from `MTLResource`, which objc2 leaves unmarked, so its
@@ -331,6 +337,8 @@ mod binding;
 mod buffer;
 #[cfg(target_os = "windows")]
 mod command;
+#[cfg(target_os = "windows")]
+mod composition;
 #[cfg(target_os = "windows")]
 mod conv;
 // The debug layer, the info queue behind it, and `GetDeviceRemovedReason`.

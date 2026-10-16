@@ -26,8 +26,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   so `e` with U+0301, an emoji ZWJ sequence or a flag is one stop rather than
   one per `char`.
 
+- **`SurfaceTarget::Win32` has a `transparent` field.** It is `true` for a
+  window the Win32 shell made with `WindowDesc::transparent`, which is created
+  with `WS_EX_NOREDIRECTIONBITMAP` and shows only what DirectComposition gives
+  it. A backend that builds the variant by hand (a test, a foreign window) sets
+  it to `false` for an ordinary window; a match with `..` is unaffected.
+
 ### Added
 
+- **Per-pixel transparency on Windows, with the D3D12 backend.** `Win32Shell`
+  now sets `ShellCaps::TRANSPARENT`: a transparent toplevel, panel or popup is
+  created with `WS_EX_NOREDIRECTIONBITMAP`, and a frameless one is given square
+  corners and no DWM border (`DWMWA_WINDOW_CORNER_PREFERENCE` and
+  `DWMWA_BORDER_COLOR`, which Windows 10 ignores). `crcbl-dx12` presents to such
+  a window through DirectComposition: its surface offers
+  `CompositeAlpha::PreMultiplied`, and the swapchain is a composition swapchain
+  (`CreateSwapChainForComposition`, `DXGI_ALPHA_MODE_PREMULTIPLIED`) bound to a
+  visual on the window. A fully transparent pixel still takes the pointer, as on
+  any DirectComposition window; click-through stays `WM_NCHITTEST`'s
+  (`PopupInput::Passthrough`). Non-transparent windows are unchanged.
 - **OpenType shaping for parsed fonts, through `harfrust` 0.14**, a new
   dependency of `crcbl-ui` under its `parsed-font` feature (HarfBuzz's Rust
   port; it reads fonts through the `read-fonts` that `skrifa` already brings, so
@@ -47,6 +64,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-vk` refuses a transparent Win32 window by name**: `create_surface`
+  answers `HalError::Unsupported` saying per-pixel transparency on Windows needs
+  the D3D12 backend, rather than presenting to a window that would show nothing.
+- **`crcbl-dx12`'s `reconfigure_swapchain` refuses a changed
+  `composite_alpha`**, as it already refused a changed format: `ResizeBuffers`
+  cannot change the alpha mode.
 - **Font fallback is per cluster**: a cluster goes to the first face that maps
   every char of it (variation selectors and joiners not counted), so a ZWJ
   sequence is shaped whole in one face rather than split across faces.

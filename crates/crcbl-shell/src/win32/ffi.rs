@@ -1,5 +1,6 @@
-//! Hand-written FFI to `user32`, `gdi32`, `shcore`, `shell32`, `imm32` and
-//! `kernel32`, and the wire structures the Win32 backend passes across it.
+//! Hand-written FFI to `user32`, `gdi32`, `shcore`, `shell32`, `imm32`,
+//! `dwmapi` and `kernel32`, and the wire structures the Win32 backend passes
+//! across it.
 //!
 //! # Decision: `#[link]`, not `dlopen` — the opposite of the two Linux backends
 //!
@@ -15,7 +16,8 @@
 //! and `kernel32.dll` are part of the operating system: a Windows that lacks
 //! them is not a Windows this engine failed to support, it is a Windows that
 //! cannot run any process at all. `shcore.dll` ships with every Windows since
-//! 8.1, which is below this backend's floor. There is nothing for a runtime
+//! 8.1 and `dwmapi.dll` with every one since Vista, both below this backend's
+//! floor. There is nothing for a runtime
 //! probe to discover, and `LoadLibraryW` + `GetProcAddress` for the system
 //! libraries would buy exactly one thing: a fallible code path with no failure.
 //!
@@ -951,6 +953,11 @@ pub mod style {
     /// `WS_EX_NOACTIVATE` — a click does not make the window the foreground
     /// one, so the keyboard stays where it was. Mouse messages still arrive.
     pub const EX_NO_ACTIVATE: u32 = 0x0800_0000;
+    /// `WS_EX_NOREDIRECTIONBITMAP` — DWM keeps no redirection surface for the
+    /// window, so it shows only what DirectComposition gives it: what a
+    /// transparent window is. Fixed at creation; a style rewrite carries it
+    /// across rather than trying to change it.
+    pub const EX_NO_REDIRECTION_BITMAP: u32 = 0x0020_0000;
     /// `WS_EX_ACCEPTFILES` — **what `DragAcceptFiles` sets**, and therefore
     /// state rather than style.
     ///
@@ -960,6 +967,26 @@ pub mod style {
     /// that does not carry this bit across silently stops a window receiving
     /// `WM_DROPFILES`. Exactly the hazard `WS_VISIBLE` has, one word over.
     pub const EX_ACCEPT_FILES: u32 = 0x0000_0010;
+}
+
+/// `DwmSetWindowAttribute`'s attributes and values, for the frame a
+/// transparent window is given.
+pub mod dwm {
+    /// `DWMWA_WINDOW_CORNER_PREFERENCE`: whether DWM rounds the window's
+    /// corners. Windows 11 and later; earlier versions refuse the attribute and
+    /// never round.
+    pub const WINDOW_CORNER_PREFERENCE: u32 = 33;
+    /// `DWMWCP_DEFAULT`: the system decides.
+    pub const CORNER_DEFAULT: u32 = 0;
+    /// `DWMWCP_DONOTROUND`: square corners.
+    pub const CORNER_DO_NOT_ROUND: u32 = 1;
+    /// `DWMWA_BORDER_COLOR`: the colour of the border DWM draws around the
+    /// window. Windows 11 and later, like the corner preference.
+    pub const BORDER_COLOR: u32 = 34;
+    /// `DWMWA_COLOR_DEFAULT`: the system's border.
+    pub const COLOR_DEFAULT: u32 = 0xFFFF_FFFF;
+    /// `DWMWA_COLOR_NONE`: no border at all.
+    pub const COLOR_NONE: u32 = 0xFFFF_FFFE;
 }
 
 /// `SHAppBarMessage`'s messages, edges and notifications.
@@ -1807,6 +1834,22 @@ unsafe extern "system" {
     pub fn ImmAssociateContextEx(hwnd: Handle, context: Handle, flags: u32) -> Bool32;
 }
 
+// The `dwmapi` surface: one call, for the frame of a transparent window. On
+// the same terms as `shcore`: the library is part of every Windows this backend
+// runs on. An attribute the running Windows does not know is refused with
+// `E_INVALIDARG`, which is a result, not a missing symbol.
+#[cfg(target_os = "windows")]
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    // An `HRESULT`; reads `size` bytes from `value`.
+    pub fn DwmSetWindowAttribute(
+        hwnd: Handle,
+        attribute: u32,
+        value: *const c_void,
+        size: u32,
+    ) -> i32;
+}
+
 // The `gdi32` surface: one call, for the class background brush.
 #[cfg(target_os = "windows")]
 #[link(name = "gdi32")]
@@ -2353,6 +2396,19 @@ mod tests {
         assert_eq!(style::OVERLAPPED_WINDOW, 0x00CF_0000);
         assert_eq!(style::CAPTION, 0x00C0_0000);
         assert_eq!(value::CS_REDRAW, 0x0003);
+    }
+
+    #[test]
+    fn the_transparency_values_are_the_sdks() {
+        // `winuser.h` and `dwmapi.h`. A wrong one is an extended style or an
+        // attribute the system ignores, and no call fails to say so.
+        assert_eq!(style::EX_NO_REDIRECTION_BITMAP, 0x0020_0000);
+        assert_eq!(dwm::WINDOW_CORNER_PREFERENCE, 33);
+        assert_eq!(dwm::CORNER_DEFAULT, 0);
+        assert_eq!(dwm::CORNER_DO_NOT_ROUND, 1);
+        assert_eq!(dwm::BORDER_COLOR, 34);
+        assert_eq!(dwm::COLOR_DEFAULT, 0xFFFF_FFFF);
+        assert_eq!(dwm::COLOR_NONE, 0xFFFF_FFFE);
     }
 
     /// The conversion from `QueryDisplayConfig`'s rational to millihertz, and

@@ -880,7 +880,17 @@ impl Instance for VkInstance {
             // swapchain built on it is a ring of plain images. See
             // `crate::swapchain`.
             SurfaceTarget::Offscreen => vk::SurfaceKHR::null(),
-            SurfaceTarget::Win32 { hinstance, hwnd } => {
+            SurfaceTarget::Win32 {
+                hinstance,
+                hwnd,
+                transparent,
+            } => {
+                // Before the extension check, so the answer is the same on a
+                // loader without `VK_KHR_win32_surface`: the refusal is about
+                // what the window needs, not about this machine.
+                if let Some(what) = win32_refusal(transparent) {
+                    return unsupported(what);
+                }
                 let Some(ext) = self.inner.win32_ext.as_ref() else {
                     return unsupported("VK_KHR_win32_surface is not available");
                 };
@@ -1146,9 +1156,36 @@ pub(crate) fn build_surface_caps(
     }
 }
 
+/// Why a [`SurfaceTarget::Win32`] cannot be a Vulkan surface, or `None` when it
+/// can.
+///
+/// A transparent window cannot. It is created with `WS_EX_NOREDIRECTIONBITMAP`,
+/// so it shows only what DirectComposition gives it, and Vulkan has no
+/// composition swapchain: `vkCreateWin32SurfaceKHR` presents to the `HWND`
+/// itself, and Windows drivers report `VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR` alone
+/// for it (which [`build_surface_caps`] would pass straight through). A surface
+/// made anyway would be a swapchain whose frames nothing shows. So it is
+/// refused by name, saying which backend can do it, and a caller that asked for
+/// transparency learns at `create_surface` rather than from an empty window.
+fn win32_refusal(transparent: bool) -> Option<&'static str> {
+    transparent.then_some(
+        "a transparent Win32 window: Vulkan presents to the HWND itself and has no \
+         DirectComposition swapchain, so per-pixel transparency on Windows needs the D3D12 \
+         backend",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_transparent_win32_window_is_refused_and_names_the_d3d12_backend() {
+        let refusal = win32_refusal(true).expect("a transparent window is refused");
+        assert!(refusal.contains("D3D12"), "{refusal}");
+        assert!(refusal.contains("transparent"), "{refusal}");
+        assert_eq!(win32_refusal(false), None, "an opaque window is a surface");
+    }
 
     // `from_raw`, for building a surface handle that stands in for a windowed
     // one. `ash` puts it on a trait rather than the type.

@@ -598,14 +598,10 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
         ShellCaps::PANEL_RESERVE,
         ShellCaps::POPUP,
         ShellCaps::POPUP_REPOSITION,
+        ShellCaps::TRANSPARENT,
     ] {
         assert!(caps.contains(present), "{present:?} is implemented");
     }
-    // Not yet: per-pixel alpha, which needs DirectComposition.
-    assert!(
-        !caps.contains(ShellCaps::TRANSPARENT),
-        "per-pixel alpha is not implemented yet"
-    );
     // Latched from the registration rather than assumed — the one bit on
     // this backend that is not a constant.
     assert!(
@@ -2145,11 +2141,17 @@ fn the_surface_target_exists_before_the_window_is_configured() {
     assert_eq!(shell.window_state(window).expect("live").size(), None);
 
     let target = shell.surface_target(window).expect("available already");
-    let SurfaceTarget::Win32 { hinstance, hwnd } = target else {
+    let SurfaceTarget::Win32 {
+        hinstance,
+        hwnd,
+        transparent,
+    } = target
+    else {
         panic!("the Win32 backend produces a Win32 target: {target:?}");
     };
     assert_eq!(hwnd.as_ptr(), hwnd_of(&shell, window));
     assert_eq!(hinstance, shell.instance);
+    assert!(!transparent, "an opaque window presents to its HWND");
 
     // And it does not change across a resize, which is what makes
     // "re-query after a mode change" a complete rule.
@@ -2171,6 +2173,96 @@ fn the_backend_reports_itself_and_is_reachable_by_name() {
     if std::env::var(crate::BACKEND_ENV_VAR).is_err() {
         let automatic = crate::open().expect("auto-selection has one candidate here");
         assert_eq!(automatic.backend(), ShellBackend::Win32);
+    }
+}
+
+/// Whether a window was created with no redirection surface, and whether its
+/// surface target says it is transparent: the two halves of a transparent
+/// window that the shell owns.
+fn transparency_of(shell: &Win32Shell, window: WindowId) -> (bool, bool) {
+    use super::super::ffi::style;
+    let (_, ex_style, _) = styles_and_rect(hwnd_of(shell, window));
+    let target = shell.surface_target(window).expect("a live window");
+    let SurfaceTarget::Win32 { transparent, .. } = target else {
+        panic!("the Win32 backend produces a Win32 target: {target:?}");
+    };
+    (ex_style & style::EX_NO_REDIRECTION_BITMAP != 0, transparent)
+}
+
+/// **A transparent window of every role has no redirection surface and says
+/// so in its surface target, and an opaque one has a surface and says not.**
+///
+/// The mirror of the Wayland e2e test that checks the cap and builds a
+/// transparent panel, plus what only Win32 has: the extended style a
+/// DirectComposition swapchain needs, and a trip through borderless that
+/// rewrites the style word and must not drop it.
+///
+/// Red if `with_transparency` is skipped at any creation site (that role's
+/// style lacks the bit), if `set_styles` stops carrying the bit (the toplevel
+/// loses it in borderless), or if `surface_target` stops reporting the flag.
+/// What DWM then draws is not read back: corners, border and the desktop
+/// showing through are verified by nothing automated.
+#[test]
+#[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
+fn a_transparent_window_of_every_role_has_no_redirection_surface() {
+    let mut shell = shell();
+    assert!(shell.caps().contains(ShellCaps::TRANSPARENT));
+
+    let opaque = window(&mut shell);
+    assert_eq!(transparency_of(&shell, opaque), (false, false));
+
+    let toplevel = shell
+        .create_window(&WindowDesc {
+            title: "crcbl transparent toplevel",
+            transparent: true,
+            ..WindowDesc::default()
+        })
+        .expect("a transparent toplevel");
+    let panel = shell
+        .create_window(&WindowDesc {
+            transparent: true,
+            ..panel_desc(
+                "crcbl transparent launcher",
+                LogicalSize::new(400.0, 300.0),
+                crate::PanelDesc {
+                    layer: crate::PanelLayer::Overlay,
+                    keyboard: crate::PanelKeyboard::Exclusive,
+                    ..crate::PanelDesc::default()
+                },
+            )
+        })
+        .expect("a transparent panel");
+    let popup = shell
+        .create_window(&WindowDesc {
+            title: "crcbl transparent popup",
+            size: LogicalSize::new(120.0, 40.0),
+            transparent: true,
+            role: crate::WindowRole::Popup(menu_against(panel, crate::PopupInput::Pointer)),
+            ..WindowDesc::default()
+        })
+        .expect("a transparent popup");
+    shell.pump(&mut |_| {});
+    for (what, window) in [("toplevel", toplevel), ("panel", panel), ("popup", popup)] {
+        assert_eq!(transparency_of(&shell, window), (true, true), "{what}");
+    }
+
+    shell
+        .set_mode(toplevel, DisplayMode::Borderless { monitor: None })
+        .expect("borderless");
+    shell.pump(&mut |_| {});
+    assert_eq!(
+        transparency_of(&shell, toplevel),
+        (true, true),
+        "a style rewrite must not drop the redirection bit"
+    );
+    shell
+        .set_mode(toplevel, DisplayMode::Windowed)
+        .expect("windowed");
+    shell.pump(&mut |_| {});
+    assert_eq!(transparency_of(&shell, toplevel), (true, true), "and back");
+
+    for window in [popup, panel, toplevel, opaque] {
+        shell.destroy_window(window).expect("destroy");
     }
 }
 

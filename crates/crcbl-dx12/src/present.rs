@@ -110,6 +110,27 @@ pub(crate) fn buffer_count(requested: u32) -> u32 {
     requested.clamp(MIN_BUFFERS, MAX_BUFFERS)
 }
 
+/// The composite-alpha modes a window's swapchain can be configured with.
+///
+/// An `HWND` swapchain composites opaquely: `CreateSwapChainForHwnd` takes
+/// `DXGI_ALPHA_MODE_IGNORE` or `UNSPECIFIED` and refuses
+/// `DXGI_ALPHA_MODE_PREMULTIPLIED`. A transparent window's swapchain is a
+/// composition one (see `crate::composition`), which takes `PREMULTIPLIED` as
+/// well, so its surface offers [`CompositeAlpha::PreMultiplied`] beside
+/// [`CompositeAlpha::Opaque`]. `PostMultiplied` is `DXGI_ALPHA_MODE_STRAIGHT`,
+/// which no flip-model swapchain accepts, and `Inherit` has no DXGI spelling.
+///
+/// [`CompositeAlpha::Opaque`] stays on a transparent window's list: it is a
+/// composition swapchain with `DXGI_ALPHA_MODE_IGNORE`, which DWM draws as
+/// opaque, and a caller that asks for it gets exactly that.
+pub(crate) fn window_composite_alpha(transparent: bool) -> Vec<CompositeAlpha> {
+    if transparent {
+        vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied]
+    } else {
+        vec![CompositeAlpha::Opaque]
+    }
+}
+
 /// Formats an **offscreen ring** can be created with, best first.
 ///
 /// Nothing here is a DXGI restriction: an offscreen ring is a set of plain
@@ -469,6 +490,20 @@ mod tests {
     /// Red when `offscreen_surface_caps` starts reporting
     /// `FLIP_MODEL_FORMATS`, when `MIN_RING_IMAGES` is raised to flip-discard's
     /// two, or when `Fifo` is dropped from `offscreen_present_modes`.
+    #[test]
+    fn only_a_transparent_window_offers_premultiplied_alpha() {
+        assert_eq!(window_composite_alpha(false), vec![CompositeAlpha::Opaque]);
+        let transparent = window_composite_alpha(true);
+        assert!(transparent.contains(&CompositeAlpha::PreMultiplied));
+        assert!(
+            transparent.contains(&CompositeAlpha::Opaque),
+            "a composition swapchain can still be opaque"
+        );
+        for never in [CompositeAlpha::PostMultiplied, CompositeAlpha::Inherit] {
+            assert!(!transparent.contains(&never), "{never:?} has no DXGI mode");
+        }
+    }
+
     #[test]
     fn an_offscreen_ring_reports_its_own_caps_and_not_the_flip_model_ones() {
         let caps = offscreen_surface_caps();

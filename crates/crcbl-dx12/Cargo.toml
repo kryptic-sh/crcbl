@@ -88,6 +88,12 @@ workspace = true
 #   nowhere. The same feature carries `CreateWindowExW`/`DestroyWindow`, which
 #   this crate's swapchain tests use to make a real `HWND` to present to; that
 #   is a second caller and not the reason the feature is here.
+# * `Win32_Graphics_DirectComposition` is how a transparent window shows a
+#   swapchain: `DCompositionCreateDevice`, `IDCompositionDevice`'s
+#   `CreateTargetForHwnd`, `CreateVisual` and `Commit`, and the visual's
+#   `SetContent`. A window created with `WS_EX_NOREDIRECTIONBITMAP` has no
+#   surface for `CreateSwapChainForHwnd` to present into, so its swapchain is a
+#   composition one bound to a visual; see `crcbl_dx12::composition`.
 #
 # A slice that needs more adds it here.
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -96,6 +102,7 @@ windows = { version = "0.62.2", default-features = false, features = [
   "Win32_Foundation",
   "Win32_Graphics_Direct3D",
   "Win32_Graphics_Direct3D12",
+  "Win32_Graphics_DirectComposition",
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
   "Win32_Security",
