@@ -1256,8 +1256,12 @@ bumped 0.1.1, since no 0.1.0 had ever shipped.
   error ("Application Error" page) uploading `crcbl-mtl`, which the script
   reports as "not a rate limit" and fails on. All 40 crates and every package
   channel were published on the third run (run 38778340864), and the GitHub
-  release carries its assets. A transient server error could be retried once in
-  `tools/publish-crates.sh` before failing; not done.
+  release carries its assets. `tools/publish-crates.sh` now retries a server
+  error (a 5xx, or the "Application Error" page) up to `SERVER_ERROR_RETRIES`
+  times, `SERVER_ERROR_WAIT_SECS` apart, and first asks crates.io whether the
+  upload landed anyway; checked against stub `cargo`, `curl` and `sleep` in four
+  scenarios (error then success, landed despite the error, another error failing
+  at once, retries running out), two of which the old script fails.
 
 Decided unasked, per the standing "pick the best long-term option" instruction:
 
