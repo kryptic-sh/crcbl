@@ -141,6 +141,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = crcbl_image::bmp::decode(data, &limits);
     let _ = crcbl_image::ico::decode(data, 32, &limits);
     let _ = crcbl_image::webp::decode(data, &limits);
+    let _ = crcbl_image::xpm::decode(data, &limits);
     // An SVG icon, drawn small so a run spends its time in the parser and
     // the walk rather than in pixels: the XML, the style sheet, the
     // references between elements and the caps on all of them.

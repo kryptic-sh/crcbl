@@ -51,37 +51,42 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   token partitions, every intra mode), its `ALPH` alpha raw or losslessly coded
   under any of its filters, in simple, extended and animated files, to exactly
   the pixels libwebp's default decode produces (its "fancy" chroma upsampling
-  and fixed-point colour conversion). Behind the `theme` feature,
-  `theme::IconThemes::lookup(name, size, scale)`: the freedesktop.org Icon Theme
-  Specification's lookup (the theme, what it `Inherits`, caller-chosen fallback
-  themes, `hicolor`, then bare files in `/usr/share/pixmaps`; PNG before SVG
-  before XPM; an exact size and scale before the nearest), generic fallback
-  names for a name that misses, absolute paths passed through,
-  `theme::SearchPath` from the XDG environment with extra roots first (a tray's
-  `IconThemePath`), hits kept and misses retried after a caller-set delay, and
-  `theme::FileVersion` (mtime and length) to key what a caller makes of a file.
-  Behind the `svg` feature, `svg::decode(bytes, size, scale, &limits)`: SVG
-  icons rendered by this crate into a transparent `size × scale` square, the
-  viewport fitted and centred. The subset icon themes use — paths and the basic
-  shapes, transforms, `use`, presentation attributes, `style` and a `<style>`
-  sheet of type, class and id selectors, fills and strokes with joins, caps,
-  miter limits and dashes, linear and radial gradients, `clipPath`, `mask`,
-  group opacity, and the `filter` element with the primitives drop shadows are
-  made of (`feGaussianBlur` by the Filter Effects specification's three-box
-  approximation, `feOffset`, `feFlood`, `feComposite` with every operator
-  including `arithmetic`, `feColorMatrix` of every type, and `feMerge`), their
-  regions, units, subregions and `in`/`result` graph, in linearRGB or by
-  `color-interpolation-filters` sRGB — and **anything outside it is a decode
-  error, never a partial icon**: text, images, other filter primitives, filter
-  functions, patterns, markers, `symbol`, blend modes and animation are refused
-  by name, while editors' metadata (Inkscape, Sodipodi, RDF, `<title>`) is
-  ignored by design. The XML parser expands no DTD entity and fetches nothing;
-  nesting, element count, `use` instances, layers, dashes and filter primitives
-  are capped, and a filter region is cut to the canvas. Measured against resvg's
-  renders of Adwaita, Papirus and breeze by the `svg_corpus` example, which CI's
-  `svg corpus` job runs. `raster`, the coverage rasteriser from `crcbl-ui`,
-  fills by `raster::FillRule::EvenOdd` as well as non-zero
-  (`Rasterizer::coverage_by`).
+  and fixed-point colour conversion). Behind the `xpm` feature, `xpm::decode`: X
+  PixMaps, XPM 3's C form and XPM 2's plain lines, any number of characters a
+  pixel, comments between strings, each colour's `c` value or else its `g`, `g4`
+  or `m` one, `None` for transparent, hex of any width scaled to eight bits, and
+  X11's colour names (`xpm::X11_COLOURS`, from X.Org's `rgb.txt`) matched
+  whatever their case or spacing; a pixel no colour defines is malformed. Behind
+  the `theme` feature, `theme::IconThemes::lookup(name, size, scale)`: the
+  freedesktop.org Icon Theme Specification's lookup (the theme, what it
+  `Inherits`, caller-chosen fallback themes, `hicolor`, then bare files in
+  `/usr/share/pixmaps`; PNG before SVG before XPM; an exact size and scale
+  before the nearest), generic fallback names for a name that misses, absolute
+  paths passed through, `theme::SearchPath` from the XDG environment with extra
+  roots first (a tray's `IconThemePath`), hits kept and misses retried after a
+  caller-set delay, and `theme::FileVersion` (mtime and length) to key what a
+  caller makes of a file. Behind the `svg` feature,
+  `svg::decode(bytes, size, scale, &limits)`: SVG icons rendered by this crate
+  into a transparent `size × scale` square, the viewport fitted and centred. The
+  subset icon themes use — paths and the basic shapes, transforms, `use`,
+  presentation attributes, `style` and a `<style>` sheet of type, class and id
+  selectors, fills and strokes with joins, caps, miter limits and dashes, linear
+  and radial gradients, `clipPath`, `mask`, group opacity, and the `filter`
+  element with the primitives drop shadows are made of (`feGaussianBlur` by the
+  Filter Effects specification's three-box approximation, `feOffset`, `feFlood`,
+  `feComposite` with every operator including `arithmetic`, `feColorMatrix` of
+  every type, and `feMerge`), their regions, units, subregions and `in`/`result`
+  graph, in linearRGB or by `color-interpolation-filters` sRGB — and **anything
+  outside it is a decode error, never a partial icon**: text, images, other
+  filter primitives, filter functions, patterns, markers, `symbol`, blend modes
+  and animation are refused by name, while editors' metadata (Inkscape,
+  Sodipodi, RDF, `<title>`) is ignored by design. The XML parser expands no DTD
+  entity and fetches nothing; nesting, element count, `use` instances, layers,
+  dashes and filter primitives are capped, and a filter region is cut to the
+  canvas. Measured against resvg's renders of Adwaita, Papirus and breeze by the
+  `svg_corpus` example, which CI's `svg corpus` job runs. `raster`, the coverage
+  rasteriser from `crcbl-ui`, fills by `raster::FillRule::EvenOdd` as well as
+  non-zero (`Rasterizer::coverage_by`).
 - **Dead keys and Compose sequences type on Wayland and X11.** A dead key
   commits nothing and the key after it commits what the two compose to (`´` then
   `e` is `é`), through libxkbcommon's compose module and the user's locale's

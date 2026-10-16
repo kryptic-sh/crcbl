@@ -1,0 +1,24 @@
+/* XPM */
+/* named colours, every hex width */
+static char *named[] = {
+/* width height ncolors chars_per_pixel x_hot y_hot */
+"12 10 10 1 5 4 XPMEXT",
+"  s none c None",
+". c light blue", /* beside */ "+ s background m white c DarkOliveGreen3",
+"@ c Grey 75",
+"# c #F80", /* beside */ "$ c #3A06E5FFF",
+"% c #00FF7FFF8000",
+"& m black g #4D4D4D", /* beside */ "* g4 navy m white",
+"= m Medium Sea Green",
+/* pixels */
+" $%%*.$$+ @$", "*% @@#%+@ *#",
+"%@$@..&%+.=%", "&.%$%.@@.&+#",
+"=@++#  =$$&&", "$$$+*.@$.#% ",
+"@$ * =#.@=+@", "%&@#@#$%=*%*",
+"@.%*++*@$*$ ", "#&@ #..$#.%+",
+
+"XPMEXT author someone",
+"XPMEXT notes",
+"two lines",
+"XPMENDEXT"
+};

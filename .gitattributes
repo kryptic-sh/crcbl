@@ -75,6 +75,10 @@ crates/crcbl-ui/tests/fixtures/taffy/** text eol=lf
 *.jpg  binary
 *.bmp  binary
 *.ico  binary
+# An XPM is C source, text through and through, but its fixtures' bytes are
+# what the tests decode: a checkout turning their line endings into CRLF
+# would hand the decoder a file no reference ever read.
+*.xpm  binary
 
 # Git LFS is deliberately NOT enabled yet. Everything binary through P8 is small
 # (golden images are a few KB and get re-blessed often, which LFS handles worse

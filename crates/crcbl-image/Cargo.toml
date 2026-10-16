@@ -27,6 +27,8 @@ png = ["dep:png"]
 svg = []
 # Lossless WebP and its container, decoded by this crate's own code.
 webp = []
+# X PixMaps, XPM 3 and XPM 2, decoded by this crate's own code.
+xpm = []
 # The freedesktop.org icon-theme lookup: a name, a size and a scale to a file.
 # Filesystem work only, no decoding, so it needs no codec.
 theme = []

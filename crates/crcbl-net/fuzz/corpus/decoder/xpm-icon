@@ -1,0 +1,16 @@
+/* XPM */
+static char *icon[] = {
+/* width height colours chars-per-pixel hotspot */
+"8 6 4 2 3 2 XPMEXT",
+"   c None",
+".. s fg c dark slate gray",
+"+o c #F80", /* short hex */ "@@ m white c #4A90D9C0FFFF",
+"    ........    ",
+"  ..+o+o+o+o..  ",
+"..+o@@@@@@@@+o..",
+"..+o@@@@@@@@+o..",
+"  ..+o+o+o+o..  ",
+"    ........    ",
+"XPMEXT note seed",
+"XPMENDEXT"
+};
