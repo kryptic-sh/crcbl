@@ -746,7 +746,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       as resvg's do, so near the region's edge a blur loses what a box carries
       past it; and under a rotation or skew a blur takes each pixel axis's
       spread of the transformed Gaussian, exact for scales, flips and quarter
-      turns only.
+      turns only. Memory: each primitive's result is an `f32` image of the
+      region, freed after its last reader, so a merge reading many named results
+      holds up to `filter::MAX_PRIMITIVES` of them at once, sixteen bytes a
+      pixel, plus a layer per nested filtered group: a fixed multiple of the
+      caller's `Limits`, never unbounded, and small at icon sizes.
     - Not done, filters: every other primitive (`feBlend` in one Papirus icon;
       no other in the corpus), filter functions (`blur()`, `drop-shadow()`), the
       `BackgroundImage`, `BackgroundAlpha`, `FillPaint` and `StrokePaint`
@@ -845,20 +849,21 @@ Each step lands in the crate the later steps build on, so the seam goes first.
     - lyr's M6 needs the theme lookup too (a notification's `app_icon` and
       `desktop-entry` hint name a theme icon), which the order below already
       puts before JPEG.
-    - **pikr's follow-ups on the corpus, 2026-10-16.** A `hicolor` set is
-      missing: hicolor is mostly what installed applications put there, not a
-      theme repository, so the set is to be taken from what CI's runner and WSL
-      actually have under `/usr/share/icons/hicolor`. And breeze apps at 88.3%
-      means about one app icon in eight falls back to pikr's generic icon, so
-      pikr keeps resvg until breeze apps is near the other sets. Counted on
-      2026-10-16 in WSL's corpus: of breeze apps' 428 SVGs, 9 use a filter and 6
-      text; their filters use only `feGaussianBlur` (173 uses), `feComposite`
-      (48), `feOffset` and `feFlood` (24 each) and `feColorMatrix` (8) — the
-      drop-shadow set. Those shipped the same day, which took breeze apps to 190
-      of 206 (92.2%); what it still refuses is text (6 icons, one of them
-      `<flowRoot>`) and DTD entities (2). "Matching" in the corpus means
-      rendered and within tolerance of resvg: at most 1% of the icon's pixels
-      differing by more than 32 in a premultiplied channel.
+    - **pikr's follow-ups on the corpus, 2026-10-16.** pikr asked for a
+      `hicolor` set: hicolor is mostly what installed applications put there,
+      not a theme repository, so CI's `svg corpus` job measures the runner's own
+      `/usr/share/icons/hicolor`, report-only, since the runner image decides
+      what is in it. And breeze apps at 88.3% means about one app icon in eight
+      falls back to pikr's generic icon, so pikr keeps resvg until breeze apps
+      is near the other sets. Counted on 2026-10-16 in WSL's corpus: of breeze
+      apps' 428 SVGs, 9 use a filter and 6 text; their filters use only
+      `feGaussianBlur` (173 uses), `feComposite` (48), `feOffset` and `feFlood`
+      (24 each) and `feColorMatrix` (8) — the drop-shadow set. Those shipped the
+      same day, which took breeze apps to 190 of 206 (92.2%); what it still
+      refuses is text (6 icons, one of them `<flowRoot>`) and DTD entities (2).
+      "Matching" in the corpus means rendered and within tolerance of resvg: at
+      most 1% of the icon's pixels differing by more than 32 in a premultiplied
+      channel.
     - Order from here: XPM. SVG text when an app asks.
 
 ### Left behind by the seam split
