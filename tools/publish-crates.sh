@@ -26,24 +26,50 @@ RATE_LIMIT_RETRIES=6
 FALLBACK_WAIT_SECS=660
 # The least a wait for a time already past is rounded up to.
 MIN_WAIT_SECS=15
+# How many times an upload crates.io answered with a server error (5xx, or
+# its "Application Error" page) is retried, and the wait before each: 0.1.0's
+# first publish stopped on one such error, which a re-run then got past.
+SERVER_ERROR_RETRIES=3
+SERVER_ERROR_WAIT_SECS=60
+
+# Whether `crate` is on crates.io at this version.
+published() {
+  # crates.io answers a request with no User-Agent with a 403.
+  curl -fsS -A "${1}-release-ci" -o /dev/null "https://crates.io/api/v1/crates/${1}/${VERSION}"
+}
 
 publish_if_missing() {
   local crate="$1"
-  local url="https://crates.io/api/v1/crates/${crate}/${VERSION}"
   local log="/tmp/publish_${crate}.log"
-  # crates.io answers a request with no User-Agent with a 403.
-  if curl -fsS -A "${crate}-release-ci" -o /dev/null "$url"; then
+  if published "$crate"; then
     echo "::notice::${crate}@${VERSION} already on crates.io, skipping"
     return 0
   fi
-  local attempt=0
+  local attempt=0 server_errors=0
   while [ "$attempt" -lt "$RATE_LIMIT_RETRIES" ]; do
     if cargo publish -p "$crate" --locked --no-verify 2>&1 | tee "$log"; then
       sleep "$PACING_SECS"
       return 0
     fi
+    if grep -qiE "status 5[0-9]{2}|Application Error" "$log"; then
+      # The upload may have landed before the error page did; a retry would
+      # then fail on a crate that already exists.
+      if published "$crate"; then
+        echo "::notice::${crate}@${VERSION} landed despite a server error"
+        sleep "$PACING_SECS"
+        return 0
+      fi
+      server_errors=$((server_errors + 1))
+      if [ "$server_errors" -gt "$SERVER_ERROR_RETRIES" ]; then
+        echo "::error::publish failed for ${crate} after ${SERVER_ERROR_RETRIES} server-error retries"
+        return 1
+      fi
+      echo "::warning::crates.io server error publishing ${crate}, retrying in ${SERVER_ERROR_WAIT_SECS}s"
+      sleep "$SERVER_ERROR_WAIT_SECS"
+      continue
+    fi
     if ! grep -qiE "429|Too Many Requests" "$log"; then
-      echo "::error::publish failed for ${crate} (not a rate limit)"
+      echo "::error::publish failed for ${crate} (not a rate limit or a server error)"
       return 1
     fi
     local wait_until wait_secs target
