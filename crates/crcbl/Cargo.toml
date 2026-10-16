@@ -376,6 +376,12 @@ windowed-e2e = ["crcbl-shell/x11-e2e"]
 # `crcbl-cli` and `apps/render-harness`, which draw every golden, turn it on.
 parsed-font = ["crcbl-ui/parsed-font", "crcbl-render/parsed-font"]
 
+# `crcbl-ui`'s system fonts — `Ui::register_system_font` and
+# `Font::from_system`, which look a family up through `crcbl-font` — forwarded
+# to it. **Off by default** for `parsed-font`'s reason, which it turns on: a
+# game draws the fonts it ships, and a browser has no system fonts to find.
+system-fonts = ["parsed-font", "crcbl-ui/system-fonts"]
+
 # `crcbl::scene` — `crcbl-scene`, the bake side: glTF import, `build_meshlets`
 # and `build_cluster_dag`. **Off by default**, and the reason is the same one
 # `crcbl-sprite` is linked as `load` and not `bake`: the crate depends on `gltf`,

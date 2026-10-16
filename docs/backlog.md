@@ -54,8 +54,6 @@ each checked against the code here unless it says otherwise:
     `fallbacks` reads `SystemLink` on every call (about 2 ms warm on this
     machine, against 0.07 ms for a warm `find`); cache it if an app calls it per
     frame.
-  - The `crcbl` umbrella forwards `parsed-font` but not `system-fonts`; an app
-    on the umbrella names `crcbl-ui` directly for it until one does.
 - **Win32 `FocusRefused` has no desktop test; decided 2026-10-16 not to write
   one.** `show_panel` now counts the foreground as granted only when
   `SetForegroundWindow` answered success and `GetForegroundWindow` then names

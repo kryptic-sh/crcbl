@@ -90,6 +90,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   colour per point (a kind of ground, say) as each vertex's albedo. Normals come
   from the whole grid, so tiles meet without a lighting seam, and splitting the
   ground into tiles lets the renderer cull it.
+- **The `crcbl` umbrella's `system-fonts` feature** forwards `crcbl-ui`'s, so an
+  app on the umbrella reaches `Ui::register_system_font` and `Font::from_system`
+  without naming `crcbl-ui` itself.
 
 ### Changed
 
