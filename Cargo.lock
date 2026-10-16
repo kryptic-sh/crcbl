@@ -829,6 +829,7 @@ dependencies = [
  "crcbl-reflect",
  "cssparser",
  "glam",
+ "harfrust",
  "skrifa",
  "taffy",
 ]
@@ -1205,6 +1206,18 @@ dependencies = [
  "crunchy",
  "num-traits",
  "zerocopy",
+]
+
+[[package]]
+name = "harfrust"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86aa776d6d32b072119e1f1650f4db843ff4382a4aaa6a2c9c4e35703cd377cb"
+dependencies = [
+ "bitflags",
+ "bytemuck",
+ "read-fonts",
+ "smallvec",
 ]
 
 [[package]]

@@ -16,6 +16,13 @@
 //! * `colrv1.ttf` — COLR v1 paint graphs from U+1F7E5: a solid fill, linear,
 //!   radial and sweep gradients, a translation, a composite, a nested clip,
 //!   and forty nested transforms.
+//! * `shaped.ttf` — a space, outlines for U+2764, U+1F525 and the regional
+//!   indicators U and S, a zero-width joiner, a `ccmp` GSUB feature joining
+//!   heart, joiner and fire, heart and fire, and U and S each into one COLR v0
+//!   glyph — a ZWJ sequence, a ligature of two clusters and a flag whose
+//!   components have no colour, as Segoe UI Emoji's flags have none — and a
+//!   GPOS `kern` feature kerning heart before heart by 3 units, heart before
+//!   space by 4 and space before heart by 2.
 //!
 //! They were built by this script, run as `python -I make_fixtures.py
 //! crates/crcbl-ui/tests/fixtures/emoji`:
@@ -31,6 +38,7 @@
 //! import sys
 //!
 //! from fontTools.colorLib.builder import buildCOLR, buildCPAL
+//! from fontTools.feaLib.builder import addOpenTypeFeaturesFromString
 //! from fontTools.fontBuilder import FontBuilder
 //! from fontTools.pens.ttGlyphPen import TTGlyphPen
 //! from fontTools.ttLib import newTable
@@ -235,8 +243,35 @@
 //!     return font
 //!
 //!
+//! def shaped_font():
+//!     glyphs = {"space": empty(), "heart": square(2, 0, 14, 12), "fire": square(4, 0, 12, 12),
+//!               "zwj": empty(), "riu": square(0, 0, 6, 12), "ris": square(10, 0, 16, 12),
+//!               "heartfire": square(0, 0, 16, 12), "flagus": square(0, 0, 16, 12),
+//!               "la": square(0, 0, 16, 6), "lb": square(0, 6, 16, 12)}
+//!     font = build("Shaped", glyphs, {0x20: "space", 0x2764: "heart", 0x1F525: "fire",
+//!                                     0x200D: "zwj", 0x1F1FA: "riu", 0x1F1F8: "ris"})
+//!     addOpenTypeFeaturesFromString(font, """
+//!         languagesystem DFLT dflt;
+//!         feature ccmp {
+//!             sub heart zwj fire by heartfire;
+//!             sub riu ris by flagus;
+//!             sub heart fire by heartfire;
+//!         } ccmp;
+//!         feature kern {
+//!             pos heart heart -3;
+//!             pos heart space -4;
+//!             pos space heart -2;
+//!         } kern;
+//!     """)
+//!     layers = {"heartfire": [("la", 0), ("lb", 1)], "flagus": [("la", 1), ("lb", 0)]}
+//!     font["COLR"] = buildCOLR(layers, version=0, glyphMap=font.getReverseGlyphMap())
+//!     font["CPAL"] = buildCPAL([[(1, 0, 0, 1), (0, 0, 1, 1)]])
+//!     return font
+//!
+//!
 //! for name, make in (("text", text_font), ("cbdt", cbdt_font), ("sbix", sbix_font),
-//!                    ("colrv0", colrv0_font), ("colrv1", colrv1_font)):
+//!                    ("colrv0", colrv0_font), ("colrv1", colrv1_font),
+//!                    ("shaped", shaped_font)):
 //!     make().save(f"{sys.argv[1]}/{name}.ttf")
 //! ```
 
@@ -283,5 +318,14 @@ pub(crate) fn colrv1() -> Font {
     parsed(
         &FONT,
         include_bytes!("../../tests/fixtures/emoji/colrv1.ttf"),
+    )
+}
+
+/// `shaped.ttf`.
+pub(crate) fn shaped() -> Font {
+    static FONT: OnceLock<Font> = OnceLock::new();
+    parsed(
+        &FONT,
+        include_bytes!("../../tests/fixtures/emoji/shaped.ttf"),
     )
 }

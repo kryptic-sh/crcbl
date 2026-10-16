@@ -469,9 +469,10 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      rasterise the committed regular face.
    - S22 is in (2026-10-16): per-glyph fallback and colour emoji. A tree's
      `Ui::set_fallback_fonts` list rides on each span's `Font` handle
-     (`Font::with_fallback`), and one function, `fallback::map_char` in
-     `crates/crcbl-ui/src/font/fallback.rs`, picks each char's face for layout
-     (`TextLayout`, the paragraph breaker), measurement, caret stops and
+     (`Font::with_fallback`), and one function — then `fallback::map_char`, per
+     char; since the shaping slice below `fallback::cluster_face` in
+     `crates/crcbl-ui/src/font/fallback.rs`, per cluster — picks the face for
+     layout (`TextLayout`, the paragraph breaker), measurement, caret stops and
      drawing, so they cannot disagree; emission draws one glyph run per face.
      U+FE0F prefers a face whose glyph is a colour glyph and U+FE0E one whose
      glyph is not; variation selectors and U+200D draw nothing and take no
@@ -574,29 +575,109 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      regional indicators U and S, white and chequered flags, hands, food and
      symbols — at 16, 32 and 64 pixels. Noto drew all 81 in colour. Segoe drew
      75; the 6 others were its regional indicators, which have no colour
-     representation in Segoe (it colours flags only through GSUB sequences,
-     which are not done here), so they fell back to the outline. No glyph hit a
-     cap: walked whole, Segoe's 3487 COLR glyphs nest at most 6 deep and fill at
-     most 857 times, well inside `MAX_PAINT_DEPTH` and `MAX_COLR_LAYERS`, so
-     neither cap was changed. Each glyph took at most a few milliseconds to
-     rasterise. Contact sheets were looked at by eye and look right. Not
-     checked: Noto's COLR v1 build, and the heaviest Segoe glyphs at large sizes
-     against `MAX_FILLED_PIXELS`.
-   - Not done: **GSUB clusters** — there is no shaping, so a ZWJ sequence, a
-     skin-tone modifier, a flag or a keycap draws as its component emoji. It
-     would take reading GSUB ligature lookups (`ccmp`, `liga`) through
-     `skrifa::raw` over each run's glyph sequence after the cmap, falling back
-     per cluster (the first face that maps every codepoint of it) rather than
-     per char, and caret stops per cluster. Also not done: uncompressed BGRA
-     CBDT bitmaps and sbix `jpg `/`tiff` graphics (drawn as outlines); the
-     foreground palette entry draws black, since the cache key has no text
-     colour; palette 0 only (no light/dark choice); COLR variations at the
-     default location only; no per-frame budget for colour glyphs, as the glyph
-     atlas has; the cache never prunes its "not colour" entries (bounded by the
-     glyphs and sizes of colour fonts drawn); fallback faces are not synthesised
-     bold or italic; a taller fallback glyph does not grow a span's line; a span
-     in the bitmap font does not fall back; and `text-overflow: ellipsis` picks
-     `…` or `...` by the primary face only.
+     representation in Segoe, so they fell back to the outline. (This said Segoe
+     coloured flags through GSUB; checked 2026-10-17 with shaping in, it does
+     not join a regional-indicator pair at all — Windows ships no country flags
+     — while its tag flags do join.) No glyph hit a cap: walked whole, Segoe's
+     3487 COLR glyphs nest at most 6 deep and fill at most 857 times, well
+     inside `MAX_PAINT_DEPTH` and `MAX_COLR_LAYERS`, so neither cap was changed.
+     Each glyph took at most a few milliseconds to rasterise. Contact sheets
+     were looked at by eye and look right. Not checked: Noto's COLR v1 build,
+     and the heaviest Segoe glyphs at large sizes against `MAX_FILLED_PIXELS`.
+   - **Shaping, shipped 2026-10-17.** Parsed text is shaped with `harfrust` 0.14
+     in `crates/crcbl-ui/src/font/shape.rs`: `shape` cuts text into clusters by
+     the rule in `font::cluster` (a base and its combining marks from the
+     combining-mark blocks, variation selectors, a ZWJ and the char it joins,
+     skin-tone modifiers, tags, regional-indicator pairs; a space or control
+     char always alone), gives each cluster the first face whose cmap maps all
+     of it (`fallback::cluster_face`; selectors and joiners not counted, VS15
+     and VS16 still steering by the base's glyph, then the face mapping the
+     base, then `.notdef`), and shapes each maximal run of one face, left to
+     right, with the surrounding text as context and default ignorables removed.
+     `TextLayout` (`font/layout.rs`) shapes each word and each run of spaces on
+     its own and places it whole, so nothing kerns across a space or a break;
+     the paragraph breaker (`tree/inline.rs`) shapes a word's parts in
+     consecutive runs of one font and size together, breaks an overlong word
+     only before a cluster's first glyph, and shapes the two sides of such a
+     break again apart. Caret stops (`layout::caret_stops`, used by
+     `text_input`'s `measure`) sit on cluster pens, a ligature of several
+     clusters split evenly; `edit::LineEdit` stops only between clusters (Left,
+     Right, Backspace, Delete, clicks, selections, word moves, inserts and
+     outside edits all land on a boundary); `text-overflow: ellipsis` cuts
+     between clusters. Shaped glyph ids take the same `ColorGlyphCache` path a
+     cmap glyph did, so a GSUB-only colour flag draws in colour. `font/kern.rs`
+     and `Font::kerning` are deleted: GPOS through the shaper is the one kerning
+     path for parsed faces. Verified by unit tests on the committed font
+     (advances, offsets and clusters equal to `harfrust`'s own output for known
+     strings, its `ccmp` dotless-i substitution, GPOS mark positioning on `h`
+     with U+0301, kerning within a word) and on a new fixture, `shaped.ttf`
+     (built by the script in `fixtures.rs`: a ZWJ sequence, a two-cluster
+     ligature and a flag ligated by `ccmp` into COLR glyphs whose components are
+     outlines, and `kern` pairs against a space). Hand mutants, each compiling
+     under `-D warnings`, were each killed: marks, regional-indicator pairing,
+     the joiner and a space's standing alone in the cluster rule; fallback
+     counting only the base, preferring the base's face, and ignoring VS16;
+     shaping every cluster in the own face, unscaled advances, a flipped or
+     dropped offset, default ignorables kept, synthetic bold not widened; layout
+     shaping a word with its trailing spaces, dropping either offset, caret
+     stops not splitting a ligature or counted per char; the paragraph breaker
+     not reshaping a broken word, shaping same-font runs apart, and dropping
+     offsets; the ellipsis cutting at any char; and `LineEdit` stepping,
+     deleting, placing, inserting, selecting, word-moving and syncing by char.
+     One more, the paragraph breaker allowing a break before any glyph, makes
+     `an_overlong_word_never_breaks_inside_a_cluster` never finish (a break
+     before a mark leaves an empty side), which counts as caught but not as a
+     clean failure.
+   - Decided 2026-10-17 (the long-term option): **shape with `harfrust`**,
+     HarfBuzz's own Rust port (harfbuzz org, MIT). It builds on the `read-fonts`
+     0.45 the workspace already resolves through `skrifa` 0.48, and with
+     `default-features = false, features = ["std"]` everything else it needs was
+     already in the lockfile, so it adds one crate. Declined: reading GSUB
+     ligature lookups by hand through `skrifa::raw` — it would cover ligatures
+     only, be wrong for marks, contextual forms and complex scripts, and be a
+     second shaping engine to keep right; `rustybuzz` is archived.
+   - Not done, shaping: **bidi** (UAX #9) — a right-to-left run is shaped
+     (Arabic joins) but laid out in logical order left to right, and caret and
+     breaking assume monotone clusters; **SVG text** in `crcbl-image`
+     (`crates/crcbl-image/src/svg/text*`) still draws one glyph a char from the
+     cmap — moving it onto `harfrust` is the follow-up; **script and language**
+     come only from `harfrust`'s `Buffer::guess_segment_properties` per run (no
+     language is ever set, so `locl` forms never apply, and a run mixing scripts
+     is shaped in its first strong script); **line breaking** is at spaces only,
+     not UAX #14; the cluster rule is not UAX #29 (a mark outside the
+     combining-mark blocks — Indic vowel signs, Hebrew points — is a caret stop
+     and a break opportunity of its own); **no shaping cache** (every
+     `TextLayout`, measurement and caret measurement shapes again, allocating a
+     `harfrust::Buffer` per run; not measured); a word whose parts are in runs
+     of different fonts or sizes is shaped in pieces with no context between
+     them beyond `harfrust`'s pre/post context; a font that kerns against a
+     space draws that pair unkerned, by the per-word rule; after an overlong
+     word's break, the side kept on the line was fitted by its width shaped
+     whole, so a lost kerning adjustment can leave it a fraction of a pixel past
+     the wrap width. Behaviour change worth knowing: a ZWJ between two letters
+     joins them into one cluster, so a caret cannot stop between them.
+   - Coverage gaps, shaping: no real complex-script font (Devanagari, Arabic,
+     Thai) is tested, so reordering and joining are trusted to `harfrust`'s own
+     conformance suite; no real emoji font is tested in the suite (too large to
+     commit) — a colour flag ligature rests on the fixture's GSUB flag. Smoke-
+     checked 2026-10-17 against this machine's Segoe UI Emoji with a scratch
+     test, not committed: woman-ZWJ-laptop, thumbs-up with a skin tone, keycap
+     one, heart on fire and England's tag flag each shaped into one colour
+     glyph; the US and UK regional-indicator pairs stayed two outline glyphs,
+     because Segoe has no country-flag ligatures (Noto Color Emoji not checked).
+     The legacy `kern` table, which `harfrust` may apply for a font with no
+     GPOS, is not tested; variable fonts are shaped at the default location only
+     (`Font` has no variation coordinates); a bitmap-font run's caret and
+     breaking follow the cluster rule but draw one glyph a char. Also not done:
+     uncompressed BGRA CBDT bitmaps and sbix `jpg `/`tiff` graphics (drawn as
+     outlines); the foreground palette entry draws black, since the cache key
+     has no text colour; palette 0 only (no light/dark choice); COLR variations
+     at the default location only; no per-frame budget for colour glyphs, as the
+     glyph atlas has; the cache never prunes its "not colour" entries (bounded
+     by the glyphs and sizes of colour fonts drawn); fallback faces are not
+     synthesised bold or italic; a taller fallback glyph does not grow a span's
+     line; a span in the bitmap font does not fall back; and
+     `text-overflow: ellipsis` picks `…` or `...` by the primary face only.
    - Not tested: a real Noto Color Emoji or Segoe UI Emoji (too large to
      commit), so Noto's flags, which `skrifa` notes take thousands of paint
      nodes, are not known to fit `MAX_COLR_LAYERS`; the quads on a GPU; COLR
@@ -1137,7 +1218,9 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       glyph a character from the first face whose `cmap` maps it, advanced by
       `hmtx`; GSUB and GPOS (kerning, ligatures, contextual forms, marks,
       complex scripts) and bidirectional reordering are a later slice of their
-      own. Caps: `render::text::MAX_CHARACTERS` characters drawn per document,
+      own. `crcbl-ui` shapes with `harfrust` since 2026-10-17 (see the colour
+      emoji item's shaping entry); SVG text taking the same shaper is that
+      slice. Caps: `render::text::MAX_CHARACTERS` characters drawn per document,
       `use` instances counted; `text::faces::MAX_LOOKUPS` font lookups and
       `text::faces::MAX_FACES` faces read per document, a fallback search
       stopping at the face cap with `.notdef` rather than refusing. Verified by
@@ -6272,9 +6355,10 @@ pending.
   (CSS would fold it into a space) — closer to `pre`. No `pre`, `pre-wrap`,
   `pre-line` or `break-spaces`. `text-overflow` takes no string value and no
   two-value form.
-- **The cut is at char boundaries, not graphemes**: the crate has no grapheme
-  segmenter and adding one is a new dependency. With one glyph per char no glyph
-  is halved, but a combining mark can be cut from its base.
+- **The cut is at cluster boundaries** (`font::cluster`'s rule, not UAX #29's
+  full grapheme segmentation), so a mark stays with its base and an emoji
+  sequence or flag is kept or dropped whole; a ligature the shaper makes of two
+  clusters can still be cut between them, and then draws as its parts.
 - **Fit is against the unrounded content width** — the width layout measured the
   text under — so the drawn, rounded box can be up to half a pixel narrower than
   the cut line. Integer-width boxes (every test) are exact.
@@ -6283,15 +6367,15 @@ pending.
 - **`Ui::text` is valid from `Ui::layout` to the next `Ui::begin_frame`**; a
   span built this frame but not laid out yet answers `None`.
 - **Not measured**: the cut's cost. Each overflowing line is binary-searched
-  over its char boundaries, one unbroken measurement (a fresh `TextLayout` for a
-  parsed font) per probe, at every layout, uncached. EW's card cuts a handful of
-  short lines; a long list of cut rows is where a `MeasureCache`-style cache
-  keyed by content hash and width would start to pay.
+  over its cluster boundaries, one unbroken measurement (a fresh `TextLayout`
+  for a parsed font) per probe, at every layout, uncached. EW's card cuts a
+  handful of short lines; a long list of cut rows is where a
+  `MeasureCache`-style cache keyed by content hash and width would start to pay.
 - **Untested**: the `…` glyph in a registered font (the synthetic fixed-pitch
   font maps nothing past Latin-1, so the registered path is covered with the
   `...` fallback and the `…` path only in the committed font); a real TTF
   registered; the pixels of a cut span (no golden); right-to-left text, which
-  the crate does not shape at all.
+  the crate shapes but lays out left to right.
 
 ## What the fitted, scrolled menu left open (2026-09-25)
 
@@ -6364,18 +6448,19 @@ scene menu with the gaps below.
 - **The GPU glyph pages are allocated up front** (two layers at start-up)
   because a WebGPU texture cannot grow in place; raising the page cap means
   growing and re-uploading the array across frames in flight.
-- **Kerning gaps**: the legacy `kern` table is not read; only the first glyph's
-  x-advance is applied; only Latin-1 pairs are cached, and a codepoint past
-  Latin-1 re-opens the font on every lookup; whether pair subtables sum or the
-  first decides is untested against a font where it matters.
+- **Kerning is the shaper's** since 2026-10-17 (`font/kern.rs` deleted; see the
+  colour emoji item's shaping entry). Left: a codepoint past Latin-1 still
+  re-opens the font for its cmap lookup on every `Font::glyph_id`, which
+  `fallback::cluster_face` calls per face per char; whether `harfrust` applies a
+  legacy `kern` table to a font with no GPOS is not tested here.
 - **`ReadoutPanel` cannot take an application stylesheet**, so only
   `default.css` can move it onto the parsed font.
 - **`line-height` is ignored for bitmap-font spans** and takes no percentages.
 - **A shelf emptied by eviction keeps its height**, so a fragmented page can
   refuse a glyph; it is counted as unplaced.
-- **Latin text only.** There is no shaping and no bidi. The design waits for
-  non-Latin text before adding `harfrust` shaping and UAX #9 bidi (`rustybuzz`
-  is archived), and the atlas is shaped so neither is precluded.
+- **Shaped, but left to right only.** Text is shaped with `harfrust` since
+  2026-10-17 (see the colour emoji item's shaping entry); UAX #9 bidi is not
+  done, so right-to-left text is laid out in logical order.
 - **What app-registered fonts (`Ui::register_font`) left open.** Only the
   _first_ non-built-in name ahead of a list's first built-in family is kept
   (`NodeStyle::family_name`), so in `font-family: Roboto, Inter, sans-serif`

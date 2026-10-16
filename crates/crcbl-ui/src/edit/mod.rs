@@ -8,17 +8,24 @@
 //! [`LineEdit`] takes [`Edit`]s, and [`Edit::for_key`] is the one place a key
 //! becomes one.
 //!
-//! # Positions are between characters, counted in `char`s
+//! # Positions are between clusters, counted in `char`s
 //!
-//! The caret and the anchor are **`char` boundaries**, never bytes and never
-//! extended grapheme clusters. UAX #29 segmentation needs the Unicode
-//! grapheme break tables, nothing in the dependency tree carries them, and a
-//! hand-rolled copy is a transcription of tables that change every Unicode
-//! release. So an `e` followed by U+0301 COMBINING ACUTE ACCENT is two caret
-//! stops, one Backspace after it takes the accent and leaves the `e`, and an
-//! emoji built with a zero-width joiner takes as many presses as it has
-//! scalars. Nothing is ever cut inside a scalar: every byte offset is derived
-//! from a `char` count at the moment the `String` is cut.
+//! The caret and the anchor are counted in **`char`s**, never bytes, and
+//! stand only **between clusters** — [`crate::font::cluster`]'s rule, which
+//! keeps a base and its combining marks, an emoji ZWJ sequence, a skin-tone
+//! modifier, a keycap and a flag's regional-indicator pair together. So an
+//! `e` followed by U+0301 COMBINING ACUTE ACCENT is one caret stop, one
+//! Backspace after it takes the `e` and its accent together, and an emoji
+//! built with a zero-width joiner takes one press. A position that lands
+//! inside a cluster — a click, a word move, an outside edit, text typed in
+//! front of a mark — moves to the cluster's edge: back to its start, except
+//! that a move or a selection reaching rightwards, and the caret after an
+//! insert, go on to its end. The rule is not UAX #29's full grapheme
+//! segmentation, which needs Unicode tables nothing in the dependency tree
+//! carries for this crate: a mark outside the combining-mark blocks the rule
+//! names is a stop of its own. Nothing is ever cut inside a scalar: every
+//! byte offset is derived from a `char` count at the moment the `String` is
+//! cut.
 //!
 //! # Selection
 //!
@@ -52,12 +59,14 @@ mod tests;
 
 use crcbl_core::input::{KeyCode, Modifiers};
 
+use crate::font::cluster;
+
 /// Where a move takes the caret.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Motion {
-    /// One character left.
+    /// One cluster left.
     Left,
-    /// One character right.
+    /// One cluster right.
     Right,
     /// To the start of the word before the caret.
     WordLeft,
@@ -82,9 +91,9 @@ pub enum Edit {
         /// Whether the move selects.
         select: bool,
     },
-    /// Deletes the selection, or else the character before the caret.
+    /// Deletes the selection, or else the cluster before the caret.
     Backspace,
-    /// Deletes the selection, or else the character after the caret.
+    /// Deletes the selection, or else the cluster after the caret.
     Delete,
     /// Selects the whole line, the caret at its end.
     SelectAll,
@@ -246,15 +255,16 @@ impl LineEdit {
 
     /// Takes `text` as the line when it is not already the line — an edit
     /// made from outside — keeping the caret and the anchor where they were,
-    /// held inside the new length. Returns whether the line changed.
+    /// held inside the new length and moved back to the start of a cluster
+    /// they would land inside. Returns whether the line changed.
     pub fn sync(&mut self, text: &str) -> bool {
         if self.text == text {
             return false;
         }
         text.clone_into(&mut self.text);
-        let len = self.len();
-        self.caret = self.caret.min(len);
-        self.anchor = self.anchor.min(len);
+        let stops = self.stops();
+        self.caret = snap_back(&stops, self.caret);
+        self.anchor = snap_back(&stops, self.anchor);
         true
     }
 
@@ -265,10 +275,11 @@ impl LineEdit {
         self.anchor = 0;
     }
 
-    /// Puts the caret at `at` — held inside the line — and the anchor with it
-    /// unless `select`. Returns whether either moved.
+    /// Puts the caret at `at` — held inside the line, and back at the start
+    /// of a cluster it would land inside — and the anchor with it unless
+    /// `select`. Returns whether either moved.
     pub fn place(&mut self, at: usize, select: bool) -> bool {
-        let at = at.min(self.len());
+        let at = snap_back(&self.stops(), at);
         let before = (self.caret, self.anchor);
         self.caret = at;
         if !select {
@@ -277,19 +288,21 @@ impl LineEdit {
         before != (self.caret, self.anchor)
     }
 
-    /// Selects `range` of `char` positions, held inside the line, with the
-    /// caret at its end. Returns whether the caret or the anchor moved.
+    /// Selects `range` of `char` positions, held inside the line and grown
+    /// to the clusters it reaches into, with the caret at its end. Returns
+    /// whether the caret or the anchor moved.
     pub fn select(&mut self, range: core::ops::Range<usize>) -> bool {
-        let len = self.len();
+        let stops = self.stops();
         let before = (self.caret, self.anchor);
-        self.anchor = range.start.min(len);
-        self.caret = range.end.min(len);
+        self.anchor = snap_back(&stops, range.start);
+        self.caret = snap_on(&stops, range.end);
         before != (self.caret, self.anchor)
     }
 
-    /// Inserts `text` over the selection and leaves the caret after it, with
-    /// control characters dropped. Returns whether the line changed — an
-    /// insert with nothing left to insert leaves a selection alone.
+    /// Inserts `text` over the selection and leaves the caret after it — and
+    /// after the rest of a cluster it joined — with control characters
+    /// dropped. Returns whether the line changed — an insert with nothing left
+    /// to insert leaves a selection alone.
     pub fn insert(&mut self, text: &str) -> bool {
         let mut kept = text.chars().filter(|c| !c.is_control()).peekable();
         if kept.peek().is_none() {
@@ -302,11 +315,12 @@ impl LineEdit {
             at += c.len_utf8();
             self.caret += 1;
         }
+        self.caret = snap_on(&self.stops(), self.caret);
         self.anchor = self.caret;
         true
     }
 
-    /// Deletes the selection, or else the character before the caret. Returns
+    /// Deletes the selection, or else the cluster before the caret. Returns
     /// whether anything was deleted.
     pub fn backspace(&mut self) -> bool {
         if self.delete_selection() {
@@ -315,24 +329,24 @@ impl LineEdit {
         if self.caret == 0 {
             return false;
         }
-        self.caret -= 1;
-        self.anchor = self.caret;
-        let at = byte_of(&self.text, self.caret);
-        self.text.remove(at);
+        let start = previous_stop(&self.stops(), self.caret);
+        self.remove(start..self.caret);
+        self.caret = start;
+        self.anchor = start;
         true
     }
 
-    /// Deletes the selection, or else the character after the caret. Returns
+    /// Deletes the selection, or else the cluster after the caret. Returns
     /// whether anything was deleted.
     pub fn delete(&mut self) -> bool {
         if self.delete_selection() {
             return true;
         }
-        let at = byte_of(&self.text, self.caret);
-        if at == self.text.len() {
+        if self.caret == self.len() {
             return false;
         }
-        self.text.remove(at);
+        let end = next_stop(&self.stops(), self.caret);
+        self.remove(self.caret..end);
         true
     }
 
@@ -348,13 +362,14 @@ impl LineEdit {
             _ => self.caret,
         };
         let chars: Vec<char> = self.text.chars().collect();
+        let stops = self.stops();
         let to = match motion {
             Motion::Left if collapsing => from,
             Motion::Right if collapsing => from,
-            Motion::Left => from.saturating_sub(1),
-            Motion::Right => (from + 1).min(chars.len()),
-            Motion::WordLeft => word_left(&chars, from),
-            Motion::WordRight => word_right(&chars, from),
+            Motion::Left => previous_stop(&stops, from),
+            Motion::Right => next_stop(&stops, from),
+            Motion::WordLeft => snap_back(&stops, word_left(&chars, from)),
+            Motion::WordRight => snap_on(&stops, word_right(&chars, from)),
             Motion::Home => 0,
             Motion::End => chars.len(),
         };
@@ -402,13 +417,47 @@ impl LineEdit {
         if range.is_empty() {
             return false;
         }
-        let start = byte_of(&self.text, range.start);
-        let end = byte_of(&self.text, range.end);
-        self.text.replace_range(start..end, "");
+        self.remove(range.clone());
         self.caret = range.start;
         self.anchor = range.start;
         true
     }
+
+    /// Removes the chars in `range`, leaving the caret and the anchor alone.
+    fn remove(&mut self, range: core::ops::Range<usize>) {
+        let start = byte_of(&self.text, range.start);
+        let end = byte_of(&self.text, range.end);
+        self.text.replace_range(start..end, "");
+    }
+
+    /// Where the caret may stand: [`cluster::caret_stops`] of the line.
+    fn stops(&self) -> Vec<usize> {
+        cluster::caret_stops(&self.text)
+    }
+}
+
+/// The last of `stops` at or before `at`: `at` held inside the line and moved
+/// back to the start of a cluster it lands inside.
+fn snap_back(stops: &[usize], at: usize) -> usize {
+    stops[stops.partition_point(|&stop| stop <= at) - 1]
+}
+
+/// The first of `stops` at or after `at`, or the line's end past it: `at`
+/// moved on to the end of a cluster it lands inside.
+fn snap_on(stops: &[usize], at: usize) -> usize {
+    let end = stops.len() - 1;
+    stops[stops.partition_point(|&stop| stop < at).min(end)]
+}
+
+/// The last of `stops` before `at`, or the line's start.
+fn previous_stop(stops: &[usize], at: usize) -> usize {
+    stops[stops.partition_point(|&stop| stop < at).saturating_sub(1)]
+}
+
+/// The first of `stops` after `at`, or the line's end.
+fn next_stop(stops: &[usize], at: usize) -> usize {
+    let end = stops.len() - 1;
+    stops[stops.partition_point(|&stop| stop <= at).min(end)]
 }
 
 /// The byte offset of character `count` in `text`, or its length past the end.

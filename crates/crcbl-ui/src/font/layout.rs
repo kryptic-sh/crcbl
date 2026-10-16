@@ -1,4 +1,4 @@
-//! Text layout: advancing, kerning, greedy line breaking and alignment.
+//! Text layout: shaped words, greedy line breaking and alignment.
 //!
 //! # The line breaker's rules
 //!
@@ -6,7 +6,8 @@
 //!   line between two newlines, is still one line tall.
 //! * **Soft breaks are at spaces** (U+0020) and nowhere else. Words are the
 //!   runs between spaces; a line takes words greedily while the word's right
-//!   edge stays within the wrap width.
+//!   edge stays within the wrap width. A space is always a
+//!   [`cluster`] of its own, so no break is ever inside one.
 //! * **The spaces a line breaks at belong to no line**: they are not drawn,
 //!   not measured, and the next line starts at the word after them. Spaces a
 //!   line ends with before a newline or the end of the text are not measured
@@ -20,17 +21,25 @@
 //!   places, and a measured width, rounded up by [`TextLayout::measure`], always
 //!   fits the lines it was measured from.
 //!
-//! Kerning applies between every two consecutive glyphs on a line in the same
-//! face, spaces included, and never across a break.
+//! # Shaping
+//!
+//! **Each word, and each run of spaces, is shaped on its own** by
+//! [`shape`](super::shape): kerning, marks, ligatures and every other GSUB and
+//! GPOS lookup apply within it and never across a space. A word is placed as
+//! one piece wherever the breaker puts it, so its width is the same on every
+//! line and nothing kerns across a break. A word's glyphs are advanced by the
+//! shaper's advances at their face's scale and drawn at the shaper's offsets
+//! from the pen.
 //!
 //! # Fallback faces
 //!
-//! Each char is drawn by the face [`fallback::map_char`] picks from the font
-//! and the fallback faces it carries, advanced by that face's own advance at
-//! its own scale; [`TextLayout::face_runs`] cuts the glyphs into the
-//! stretches each face draws. A presentation selector or a zero-width joiner
-//! draws nothing and takes no width. The lines' vertical metrics are the
-//! font's own: a taller fallback glyph does not make its line taller.
+//! Each cluster is drawn by the face
+//! [`fallback::cluster_face`](super::fallback::cluster_face) picks from the
+//! font and the fallback faces it carries, shaped in that face at its own
+//! scale; [`TextLayout::face_runs`] cuts the glyphs into the stretches each
+//! face draws. A presentation selector or a zero-width joiner draws nothing
+//! and takes no width. The lines' vertical metrics are the font's own: a
+//! taller fallback glyph does not make its line taller.
 //!
 //! # Vertical metrics
 //!
@@ -42,8 +51,8 @@ use core::ops::Range;
 
 use glam::Vec2;
 
-use super::fallback::{self, Mapped};
-use super::{Font, GlyphId};
+use super::shape::{ShapedGlyph, shape};
+use super::{Font, GlyphId, cluster};
 
 /// How close below a whole pixel a width may be and still count as that pixel.
 ///
@@ -76,8 +85,8 @@ pub enum TextAlign {
 pub struct PositionedGlyph {
     /// Which glyph.
     pub glyph: GlyphId,
-    /// Its pen position relative to the text's top-left: x along the line, y
-    /// the line's baseline.
+    /// Where it is drawn relative to the text's top-left: its pen on the
+    /// line's baseline, moved by the shaper's offset.
     pub offset: Vec2,
 }
 
@@ -103,7 +112,7 @@ pub struct TextLayout {
     glyphs: Vec<PositionedGlyph>,
     /// Each glyph's face, as [`Font::face`] numbers it.
     faces: Vec<u8>,
-    /// The byte offset in the text of each glyph's char.
+    /// The byte offset in the text of the first char of each glyph's cluster.
     bytes: Vec<usize>,
     /// The text's length in bytes.
     text_len: usize,
@@ -119,9 +128,9 @@ pub struct FaceRun<'a> {
     pub font: &'a Font,
     /// Its glyphs.
     pub glyphs: &'a [PositionedGlyph],
-    /// The bytes of the text it spells: from its first glyph's char, or the
-    /// text's start for the first run, to the next run's start or the text's
-    /// end.
+    /// The bytes of the text it spells: from its first glyph's cluster, or
+    /// the text's start for the first run, to the next run's start or the
+    /// text's end.
     pub text: Range<usize>,
 }
 
@@ -129,7 +138,6 @@ pub struct FaceRun<'a> {
 struct Line {
     first: usize,
     pen: f32,
-    previous: Option<Mapped>,
     /// The right edge of its last word.
     width: f32,
     has_word: bool,
@@ -140,53 +148,97 @@ impl Line {
         Self {
             first,
             pen: 0.0,
-            previous: None,
             width: 0.0,
             has_word: false,
         }
     }
 }
 
-/// Where `mapped`, drawn in `font` at `size` after `previous` on its line, is
-/// placed from a pen at `pen`, and the pen after it: kerned against
-/// `previous` when one face draws both, then advanced by its face's advance
-/// at its face's scale.
-pub(crate) fn advance_pen(
-    font: &Font,
-    size: f32,
-    pen: f32,
-    previous: Option<Mapped>,
-    mapped: Mapped,
-) -> (f32, f32) {
-    let face = font.face(mapped.face);
-    let scale = face.metrics().scale(size);
-    let mut at = pen;
-    if let Some(previous) = previous.filter(|previous| previous.face == mapped.face) {
-        at += face.kerning(previous.glyph, mapped.glyph) * scale;
+/// The pieces `paragraph` is shaped in, in order: each word and each run of
+/// spaces, as its bytes and whether it is spaces. See the module docs.
+fn pieces(paragraph: &str) -> impl Iterator<Item = (Range<usize>, bool)> + '_ {
+    let mut chars = paragraph.char_indices().peekable();
+    core::iter::from_fn(move || {
+        let (start, c) = chars.next()?;
+        let spaces = c == ' ';
+        let mut end = start + c.len_utf8();
+        while let Some(&(at, c)) = chars.peek() {
+            if (c == ' ') != spaces {
+                break;
+            }
+            end = at + c.len_utf8();
+            chars.next();
+        }
+        Some((start..end, spaces))
+    })
+}
+
+/// Places `glyphs` from a pen at `pen`, each at its pen plus its shaper's
+/// offset, and returns the pen after the last.
+fn place(glyphs: &mut [PositionedGlyph], shaped: &[ShapedGlyph], pen: f32) -> f32 {
+    let mut pen = pen;
+    for (positioned, shaped) in glyphs.iter_mut().zip(shaped) {
+        positioned.offset.x = pen + shaped.offset.x;
+        pen += shaped.advance;
     }
-    (at, at + face.advance(mapped.glyph) * scale)
+    pen
+}
+
+/// Each caret stop of `text` — one line, unbroken — in `font` at `size`,
+/// written to `out` from its left edge: one before each char and one at the
+/// end, placed as [`TextLayout`] places the glyphs.
+///
+/// A stop before the first char of a [`cluster`] is where the shaper put that
+/// cluster's pen. The shaper may join several clusters into one glyph — a
+/// ligature — and their stops then share its width evenly. A char inside a
+/// cluster, where no caret stands, takes its cluster's stop.
+pub(crate) fn caret_stops(font: &Font, text: &str, size: f32, out: &mut Vec<f32>) {
+    out.clear();
+    // Each shaped cluster: its first byte, its pen and its width.
+    let mut shaped_clusters: Vec<(usize, f32, f32)> = Vec::new();
+    let mut shaped = Vec::new();
+    let mut pen = 0.0;
+    for (piece, _) in pieces(text) {
+        shaped.clear();
+        shape(font, size, text, piece, &mut shaped);
+        for glyph in &shaped {
+            match shaped_clusters.last_mut() {
+                Some((start, _, width)) if *start == glyph.cluster => *width += glyph.advance,
+                _ => shaped_clusters.push((glyph.cluster, pen, glyph.advance)),
+            }
+            pen += glyph.advance;
+        }
+    }
+    let starts: Vec<usize> = cluster::clusters(text).map(|range| range.start).collect();
+    let mut stops = starts.iter().map(|&start| {
+        // The shaped cluster it lies in, and the cluster starts that share it.
+        let at = shaped_clusters.partition_point(|&(first, _, _)| first <= start);
+        let Some(&(first, left, width)) = at.checked_sub(1).map(|at| &shaped_clusters[at]) else {
+            return 0.0;
+        };
+        let end = shaped_clusters
+            .get(at)
+            .map_or(text.len(), |&(next, _, _)| next);
+        let sharing =
+            &starts[starts.partition_point(|&s| s < first)..starts.partition_point(|&s| s < end)];
+        // A shaped cluster that starts inside a rule cluster counts its own
+        // start as one more share before the first.
+        let lead = usize::from(sharing.first() != Some(&first));
+        let index = sharing.partition_point(|&s| s < start) + lead;
+        left + width * index as f32 / (sharing.len() + lead) as f32
+    });
+    let mut current = 0.0;
+    let mut next_start = starts.iter().peekable();
+    for (byte, _) in text.char_indices() {
+        if next_start.next_if(|&&start| start == byte).is_some() {
+            current = stops.next().unwrap_or(current);
+        }
+        out.push(current);
+    }
+    out.push(pen);
 }
 
 impl TextLayout {
-    /// Positions the glyphs `word` at `size` from `line`'s pen, writing each
-    /// one's x, and returns the word's right edge.
-    fn place(&mut self, word: Range<usize>, size: f32, line: &Line) -> f32 {
-        let mut pen = line.pen;
-        let mut previous = line.previous;
-        let faces = &self.faces[word.clone()];
-        for (positioned, &face) in self.glyphs[word].iter_mut().zip(faces) {
-            let mapped = Mapped {
-                face,
-                glyph: positioned.glyph,
-            };
-            let (at, after) = advance_pen(&self.font, size, pen, previous, mapped);
-            positioned.offset.x = at;
-            pen = after;
-            previous = Some(mapped);
-        }
-        pen
-    }
-
     /// Lays `text` out in `font` — and the fallback faces it carries — at
     /// `size` pixels per em, lines `line_height` apart, broken to fit `wrap`
     /// pixels when given — see the module docs — and every line against the
@@ -205,45 +257,40 @@ impl TextLayout {
             lines: Vec::new(),
             line_height,
         };
+        // Every glyph as shaped, beside `glyphs`: its advance and offset.
+        let mut shaped: Vec<ShapedGlyph> = Vec::with_capacity(text.len());
         let mut paragraph_start = 0;
         for paragraph in text.split('\n') {
             let mut line = Line::new(layout.glyphs.len());
-            let mut chars = fallback::map_text(font, paragraph).peekable();
-            while let Some(&(_, c, mapped)) = chars.peek() {
-                if c == ' ' {
-                    chars.next();
-                    if let Some(mapped) = mapped {
-                        line.pen = advance_pen(font, size, line.pen, line.previous, mapped).1;
-                        line.previous = Some(mapped);
-                    }
+            for (piece, spaces) in pieces(paragraph) {
+                let word_start = shaped.len();
+                shape(font, size, paragraph, piece, &mut shaped);
+                if spaces {
+                    line.pen += shaped[word_start..]
+                        .iter()
+                        .map(|glyph| glyph.advance)
+                        .sum::<f32>();
+                    shaped.truncate(word_start);
                     continue;
                 }
-                let word_start = layout.glyphs.len();
-                while let Some(&(byte, c, mapped)) = chars.peek() {
-                    if c == ' ' {
-                        break;
-                    }
-                    chars.next();
-                    let Some(mapped) = mapped else { continue };
+                for glyph in &shaped[word_start..] {
                     layout.glyphs.push(PositionedGlyph {
-                        glyph: mapped.glyph,
+                        glyph: glyph.glyph,
                         offset: Vec2::ZERO,
                     });
-                    layout.faces.push(mapped.face);
-                    layout.bytes.push(paragraph_start + byte);
+                    layout.faces.push(glyph.face);
+                    layout.bytes.push(paragraph_start + glyph.cluster);
                 }
-                let word = word_start..layout.glyphs.len();
-                let mut right = layout.place(word.clone(), size, &line);
+                let word = word_start..shaped.len();
+                let mut right = place(
+                    &mut layout.glyphs[word.clone()],
+                    &shaped[word.clone()],
+                    line.pen,
+                );
                 if line.has_word && wrap.is_some_and(|wrap| right > wrap) {
                     layout.finish_line(&line, word_start);
                     line = Line::new(word_start);
-                    right = layout.place(word.clone(), size, &line);
-                }
-                if let Some(last) = word.clone().last() {
-                    line.previous = Some(Mapped {
-                        face: layout.faces[last],
-                        glyph: layout.glyphs[last].glyph,
-                    });
+                    right = place(&mut layout.glyphs[word.clone()], &shaped[word], 0.0);
                 }
                 line.pen = right;
                 line.width = right;
@@ -259,8 +306,8 @@ impl TextLayout {
         let above = (line_height - (ascent - descent)) * 0.5 + ascent;
         for (index, line) in layout.lines.iter_mut().enumerate() {
             line.baseline = index as f32 * line_height + above;
-            for glyph in &mut layout.glyphs[line.glyphs.clone()] {
-                glyph.offset.y = line.baseline;
+            for at in line.glyphs.clone() {
+                layout.glyphs[at].offset.y = line.baseline + shaped[at].offset.y;
             }
         }
         layout
@@ -372,200 +419,6 @@ impl TextLayout {
         Vec2::new(self.width().ceil(), self.height())
     }
 }
+
 #[cfg(all(test, feature = "parsed-font"))]
-mod tests {
-    use super::*;
-
-    const SIZE: f32 = 16.0;
-    const LINE: f32 = 20.0;
-    const TEXT: &str = "The quick brown fox jumps";
-
-    /// `text`'s width at [`SIZE`], summed here glyph by glyph: every advance,
-    /// and the kerning between every two neighbours.
-    fn width(text: &str) -> f32 {
-        let font = Font::sans();
-        let scale = font.metrics().scale(SIZE);
-        let mut pen = 0.0;
-        let mut previous = None;
-        for c in text.chars() {
-            let glyph = font.glyph_id(c);
-            if let Some(previous) = previous {
-                pen += font.kerning(previous, glyph) * scale;
-            }
-            pen += font.advance(glyph) * scale;
-            previous = Some(glyph);
-        }
-        pen
-    }
-
-    /// Each line's glyphs, as the non-space glyphs of the string it should be.
-    fn assert_lines(layout: &TextLayout, want: &[&str], what: &str) {
-        let font = Font::sans();
-        let got: Vec<Vec<GlyphId>> = layout
-            .lines()
-            .iter()
-            .map(|line| {
-                layout.glyphs()[line.glyphs.clone()]
-                    .iter()
-                    .map(|g| g.glyph)
-                    .collect()
-            })
-            .collect();
-        let expected: Vec<Vec<GlyphId>> = want
-            .iter()
-            .map(|line| {
-                line.chars()
-                    .filter(|&c| c != ' ')
-                    .map(|c| font.glyph_id(c))
-                    .collect()
-            })
-            .collect();
-        assert_eq!(got, expected, "{what}: lines are not {want:?}");
-        for (line, text) in layout.lines().iter().zip(want) {
-            assert!(
-                (line.width - width(text.trim_end())).abs() < 1e-4,
-                "{what}: {text:?} measured {} rather than {}",
-                line.width,
-                width(text.trim_end())
-            );
-        }
-    }
-
-    /// **Greedy breaks at exact places for fixed widths**, the widths chosen
-    /// either side of where each line's last word ends.
-    #[test]
-    fn lines_break_at_the_exact_places_for_fixed_widths() {
-        let font = Font::sans();
-        // The table's premise, from the independent sum.
-        assert!(width("The quick brown fox jumps") > 188.0 && width(TEXT) < 189.0);
-        assert!(width("The quick brown fox") > 141.0 && width("The quick brown fox") < 142.0);
-        assert!(width("brown fox") < 68.0 && width("fox jumps") > 68.0);
-
-        let cases: [(Option<f32>, &[&str]); 11] = [
-            (None, &["The quick brown fox jumps"]),
-            (Some(189.0), &["The quick brown fox jumps"]),
-            (Some(188.0), &["The quick brown fox", "jumps"]),
-            (Some(142.0), &["The quick brown fox", "jumps"]),
-            (Some(141.9), &["The quick brown", "fox jumps"]),
-            (Some(116.0), &["The quick brown", "fox jumps"]),
-            (Some(69.0), &["The quick", "brown fox", "jumps"]),
-            (Some(68.0), &["The", "quick", "brown fox", "jumps"]),
-            (Some(67.0), &["The", "quick", "brown", "fox", "jumps"]),
-            (Some(0.0), &["The", "quick", "brown", "fox", "jumps"]),
-            // A word wider than the width overflows its own line unbroken.
-            (Some(20.0), &["The", "quick", "brown", "fox", "jumps"]),
-        ];
-        for (wrap, want) in cases {
-            let layout = TextLayout::new(font, TEXT, SIZE, LINE, wrap);
-            assert_lines(&layout, want, &format!("wrap {wrap:?}"));
-        }
-    }
-
-    /// **Newlines always break, spaces are measured only inside a line, and an
-    /// empty line is still a line.**
-    #[test]
-    fn newlines_and_spaces_follow_the_rules() {
-        let font = Font::sans();
-        let layout = TextLayout::new(font, "ab\n\ncd", SIZE, LINE, None);
-        assert_lines(&layout, &["ab", "", "cd"], "blank line");
-        assert_eq!(layout.height(), 3.0 * LINE);
-
-        let empty = TextLayout::new(font, "", SIZE, LINE, None);
-        assert_eq!(empty.lines().len(), 1);
-        assert_eq!(empty.measure(), Vec2::new(0.0, LINE));
-
-        let spaced = TextLayout::new(font, "  The  quick   \nfox ", SIZE, LINE, None);
-        assert_lines(&spaced, &["  The  quick", "fox"], "spaces");
-        assert!(spaced.lines()[0].width > width("The quick"));
-
-        // The spaces at a soft break vanish: the next line starts at zero.
-        let broken = TextLayout::new(font, "The     quick", SIZE, LINE, Some(40.0));
-        assert_lines(&broken, &["The", "quick"], "break in a run of spaces");
-        assert_eq!(
-            broken.glyphs()[broken.lines()[1].glyphs.start].offset.x,
-            0.0
-        );
-    }
-
-    /// **A kerned pair is advanced by the font's pair adjustment**: `AV`'s
-    /// second glyph sits at `A`'s advance plus the kerning the font gives.
-    #[test]
-    fn a_kerned_pair_is_advanced_by_the_fonts_adjustment() {
-        let font = Font::sans();
-        let (a, v) = (font.glyph_id('A'), font.glyph_id('V'));
-        let adjustment = font.kerning(a, v);
-        assert!(adjustment < 0.0, "the committed font does not kern AV");
-        let scale = font.metrics().scale(SIZE);
-        let layout = TextLayout::new(font, "AV", SIZE, LINE, None);
-        let step = layout.glyphs()[1].offset.x - layout.glyphs()[0].offset.x;
-        assert_eq!(step, font.advance(a) * scale + adjustment * scale);
-        assert!(step < font.advance(a) * scale);
-    }
-
-    /// **Baselines are one line height apart**, with the font's box centred in
-    /// each line.
-    #[test]
-    fn baselines_are_a_line_height_apart_with_the_box_centred() {
-        let font = Font::sans();
-        let metrics = font.metrics();
-        let scale = metrics.scale(SIZE);
-        let layout = TextLayout::new(font, TEXT, SIZE, LINE, Some(0.0));
-        let first =
-            (LINE - (metrics.ascent - metrics.descent) * scale) * 0.5 + metrics.ascent * scale;
-        for (index, line) in layout.lines().iter().enumerate() {
-            assert_eq!(line.baseline, index as f32 * LINE + first);
-            for glyph in &layout.glyphs()[line.glyphs.clone()] {
-                assert_eq!(glyph.offset.y, line.baseline);
-            }
-        }
-    }
-
-    /// **Alignment moves each line across its box**: left at zero, centred at
-    /// half the room, right at all of it, and an overflowing line at zero.
-    #[test]
-    fn alignment_places_each_line_in_its_box() {
-        let font = Font::sans();
-        let base = TextLayout::new(font, "The quick\nfox", SIZE, LINE, None);
-        for (align, share) in [
-            (TextAlign::Left, 0.0),
-            (TextAlign::Center, 0.5),
-            (TextAlign::Right, 1.0),
-        ] {
-            let mut layout = base.clone();
-            layout.align(100.0, align);
-            // Aligning twice is aligning once.
-            layout.align(100.0, align);
-            for (line, before) in layout.lines().iter().zip(base.lines()) {
-                let want = (100.0 - line.width) * share;
-                assert_eq!(line.offset, want, "{align:?}");
-                let first = line.glyphs.start;
-                assert_eq!(
-                    layout.glyphs()[first].offset.x,
-                    base.glyphs()[first].offset.x + want,
-                    "{align:?}"
-                );
-                assert_eq!(line.width, before.width);
-            }
-        }
-        let mut wide = TextLayout::new(font, TEXT, SIZE, LINE, None);
-        wide.align(50.0, TextAlign::Center);
-        assert_eq!(wide.lines()[0].offset, 0.0);
-    }
-
-    /// **The wrap width snaps to whole pixels with a sliver of slack**, so two
-    /// computations of one width an ulp apart agree.
-    #[test]
-    fn the_wrap_width_is_whole_pixels() {
-        assert_eq!(wrap_width(100.0), 100.0);
-        assert_eq!(wrap_width(99.999_99), 100.0);
-        assert_eq!(wrap_width(100.000_01), 100.0);
-        assert_eq!(wrap_width(100.9), 100.0);
-        let measured = TextLayout::new(Font::sans(), TEXT, SIZE, LINE, None).measure();
-        let again = TextLayout::new(Font::sans(), TEXT, SIZE, LINE, Some(measured.x));
-        assert_eq!(
-            again.lines().len(),
-            1,
-            "a measured width does not fit its own line"
-        );
-    }
-}
+mod tests;

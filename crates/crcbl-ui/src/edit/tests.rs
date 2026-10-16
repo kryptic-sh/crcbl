@@ -260,9 +260,9 @@ fn word_moves_stop_at_the_edges_of_runs_of_one_class() {
     assert_eq!(run_at(&[], 0), 0..0);
 }
 
-/// **Multi-byte text is edited by `char`, and combining text by `char` too.**
-/// A precomposed `é` is one caret stop; `e` with U+0301 is two, and one
-/// Backspace takes the accent only — the boundary rule the module docs
+/// **Multi-byte text is edited by `char`, and combining text by cluster.**
+/// A precomposed `é` is one caret stop, and so is `e` with U+0301: one Left
+/// passes both, and one Delete takes both — the cluster rule the module docs
 /// choose. CJK letters are alphanumeric, so they make a word; an emoji is
 /// punctuation-class and its own run. No edit cuts a scalar: a byte-indexed
 /// model panics on every one of these.
@@ -275,17 +275,9 @@ fn multi_byte_and_combining_text_is_edited_by_char() {
     let mut combining = line("cafe\u{301}|");
     assert_eq!(combining.len(), 5, "the accent is a char of its own");
     assert!(combining.apply(&mv(Motion::Left)).caret);
-    assert_eq!(
-        combining.caret(),
-        4,
-        "the caret stopped between e and its accent"
-    );
+    assert_eq!(combining.caret(), 3, "the caret stopped inside the cluster");
     assert!(combining.apply(&Edit::Delete).text);
-    assert_eq!(
-        combining.text(),
-        "cafe",
-        "Delete took the accent and nothing else"
-    );
+    assert_eq!(combining.text(), "caf", "Delete left the accent behind");
 
     let mut cjk = line("|\u{65e5}\u{672c}\u{8a9e} \u{1f600}x");
     cjk.apply(&sel(Motion::WordRight));
@@ -389,4 +381,59 @@ fn keys_become_edits() {
     ] {
         assert_eq!(Edit::for_key(key, none), None, "{key} is not an edit");
     }
+}
+
+/// **The caret never stops inside a cluster**: Left and Right pass a ZWJ
+/// sequence, a flag and a mark in one step; Backspace and Delete take each
+/// whole; a click, a selection and a word move inside one go to its edge;
+/// and text typed in front of a mark leaves the caret after the cluster it
+/// joined.
+#[test]
+fn the_caret_never_stops_inside_a_cluster() {
+    // a, woman-ZWJ-laptop (three chars), the US flag (two), q and its accent.
+    let text = "a\u{1F469}\u{200D}\u{1F4BB}\u{1F1FA}\u{1F1F8}q\u{301}";
+    let mut edit = line(&format!("|{text}"));
+    let mut stops = vec![edit.caret()];
+    while edit.apply(&mv(Motion::Right)).caret {
+        stops.push(edit.caret());
+    }
+    assert_eq!(stops, [0, 1, 4, 6, 8]);
+    let mut back = Vec::new();
+    while edit.apply(&mv(Motion::Left)).caret {
+        back.push(edit.caret());
+    }
+    assert_eq!(back, [6, 4, 1, 0]);
+
+    let mut edit = line(&format!("{text}|"));
+    assert!(edit.apply(&Edit::Backspace).text);
+    assert_eq!(edit.caret(), 6, "the accent went with its q");
+    assert!(edit.apply(&Edit::Backspace).text);
+    assert_eq!(
+        edit.text(),
+        "a\u{1F469}\u{200D}\u{1F4BB}",
+        "the flag went whole"
+    );
+    edit.place(1, false);
+    assert!(edit.apply(&Edit::Delete).text);
+    assert_eq!(edit.text(), "a", "the ZWJ sequence went whole");
+
+    let mut edit = line(&format!("{text}|"));
+    edit.place(2, false);
+    assert_eq!(edit.caret(), 1, "a click inside went back to the start");
+    edit.select(2..5);
+    assert_eq!(edit.selection(), 1..6, "a selection grew to whole clusters");
+    edit.select(0..7);
+    assert_eq!(edit.selection(), 0..8);
+    let mut words = line("|q\u{301}b c");
+    words.apply(&mv(Motion::WordRight));
+    assert_eq!(words.caret(), 2, "a word move stops after the accent");
+
+    let mut typed = line("|\u{301}x");
+    assert!(typed.insert("e"));
+    assert_eq!(typed.caret(), 2, "the caret went past the mark e took");
+
+    // An outside edit puts a mark after the caret's char: back to its start.
+    let mut synced = line("ab|c");
+    assert!(synced.sync("ab\u{301}c"));
+    assert_eq!((synced.caret(), synced.anchor()), (1, 1));
 }

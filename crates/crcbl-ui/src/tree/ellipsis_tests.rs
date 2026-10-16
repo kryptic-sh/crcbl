@@ -206,6 +206,31 @@ fn each_line_is_cut_on_its_own() {
     );
 }
 
+/// **A line is cut between clusters, never inside one**: a keycap — a digit,
+/// a presentation selector and U+20E3, which the committed font draws as
+/// `.notdef` beside the digit — is kept whole or dropped whole at every
+/// width, though its digit alone is narrower than it.
+#[test]
+fn a_line_is_cut_between_clusters() {
+    let keycap = "1\u{FE0F}\u{20E3}";
+    let text = keycap.repeat(12);
+    assert!(
+        Family::Sans.width("1") < Family::Sans.width(keycap),
+        "the digit alone is as wide as the keycap, so no width tells them apart"
+    );
+    for width in 30..140 {
+        let mut ui = tree();
+        let (key, _) = card(&mut ui, width as f32, ".line.sans", &text);
+        let shown = ui.text(key).expect("a text span");
+        let kept = shown.strip_suffix(ELLIPSIS).unwrap_or(shown);
+        assert_eq!(
+            kept.len() % keycap.len(),
+            0,
+            "{width}px kept {kept:?}, part of a keycap"
+        );
+    }
+}
+
 /// **Text that fits is left whole**, and emits the same text command as the
 /// span without the rule, independently of its overflow clip.
 #[test]

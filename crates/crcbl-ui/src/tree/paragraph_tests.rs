@@ -410,16 +410,20 @@ mod parsed {
 
     /// **Kerning reaches across a run boundary between two runs of one font
     /// and size, and not between runs that differ**: `AV` split into two runs
-    /// draws as `AV` does, and with the `V` larger it draws unkerned.
+    /// is shaped together and draws as `AV` does, and with the `V` larger the
+    /// two are shaped apart and draw unkerned.
     #[test]
     fn kerning_crosses_a_run_boundary_only_between_runs_of_one_font_and_size() {
         let sans = Font::sans();
-        let (a, v) = (sans.glyph_id('A'), sans.glyph_id('V'));
+        let a = sans.glyph_id('A');
+        let mut shaped = Vec::new();
+        crate::font::shape::shape(sans, SIZE, "AV", 0..2, &mut shaped);
+        let scale = sans.metrics().scale(SIZE);
+        let advance = sans.advance(a) * scale;
         assert!(
-            sans.kerning(a, v) < 0.0,
+            shaped[0].advance < advance,
             "the committed font does not kern AV"
         );
-        let scale = sans.metrics().scale(SIZE);
         let second_pen = |v_size: f32| {
             let mut ui = Ui::new();
             ui.add_stylesheet("kern.css", ".p { font-family: sans-serif; }");
@@ -431,8 +435,7 @@ mod parsed {
             ui.emit(&mut list);
             glyph_runs(&list)[1].1.x
         };
-        let advance = sans.advance(a) * scale;
-        assert_eq!(second_pen(SIZE), advance + sans.kerning(a, v) * scale);
+        assert_eq!(second_pen(SIZE), shaped[0].advance);
         assert_eq!(second_pen(BIG), advance);
     }
 

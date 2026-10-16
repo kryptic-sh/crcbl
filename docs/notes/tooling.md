@@ -303,7 +303,7 @@ section and by debug-tool item. Those resolve here:
 | Rung 1                | Draw-list primitives: textured quads, clip rects, the analytic rounded rectangle, the RGBA image atlas                 | Built (`DrawList`, `crcbl_ui::image`)                              |
 | Rungs 2 and 3         | Node tree, identity and pruning; layout on Taffy with scroll state and measure callbacks                               | Built (`Ui::block`, `Ui::span`)                                    |
 | Rung 4                | Selectors, typed values, cascade, `var()`, the rule index and definition cache, resolve counters, reload               | Built (`crcbl_ui::style`)                                          |
-| Rung 5                | Text: `skrifa` parsing, own rasteriser, shelf-packed LRU atlas, greedy wrap, pair kerning, the measure cache           | Built (`crcbl_ui::font`, `crcbl_ui::text`)                         |
+| Rung 5                | Text: `skrifa` parsing, own rasteriser, shelf-packed LRU atlas, greedy wrap, `harfrust` shaping, the measure cache     | Built (`crcbl_ui::font`, `crcbl_ui::text`)                         |
 | Rung 6                | Focus: scopes, beam-first scoring, `nav-*`, per-scope memory, the engaged state, the scoring overlay                   | Built (`crcbl_ui::tree`'s `focus`)                                 |
 | Rung 7 (7b–7d2)       | Widgets (7b), single-line text input (7c), `Menu` on the tree (7d1), `DebugPanel` and `ConsolePanel` on the tree (7d2) | Built                                                              |
 | Rung 8 (8a, 8b)       | Outliner, tabs and dock (8a); the reflection-driven property inspector (8b)                                            | Built (`Ui::outliner`, `Ui::tabs`, `Ui::dock`, `Ui::inspector`)    |
@@ -422,11 +422,12 @@ The rules, each with its _why_:
   with least-recently-used eviction per page and a per-frame re-raster budget**,
   a structure chosen so SDF and emoji are not precluded. **Grayscale
   antialiasing only**: LCD subpixel rendering needs dual-source blending, which
-  WebGPU offers only as an optional feature. Latin-1 with pair kerning first;
-  `harfrust` shaping and UAX #9 bidi only when non-Latin text is needed
-  (`rustybuzz` is archived). Greedy line breaking. SDF text is post-MVP and for
-  world-space text only, since SDF and MSDF look worse than hinted bitmaps at
-  small UI sizes.
+  WebGPU offers only as an optional feature. Text is shaped with `harfrust`
+  (decided 2026-10-17, ahead of non-Latin text, because emoji ZWJ sequences and
+  flags need GSUB; `rustybuzz` is archived); UAX #9 bidi only when right-to-left
+  text is needed. Greedy line breaking. SDF text is post-MVP and for world-space
+  text only, since SDF and MSDF look worse than hinted bitmaps at small UI
+  sizes.
 - **Widgets are block and span compositions with behaviour, added on demand.**
   Each ships default rules in `default.css` that a game overrides, and a widget
   is added when the editor or a debug tool needs it, never speculatively.

@@ -2,19 +2,18 @@
 //! held to its golden and to relations read off the frame itself.
 //!
 //! Every claim measures pixels against the stylesheet's colours and lengths
-//! and against the font's own kerning — never against the layout's output,
-//! which would only prove the layout agrees with itself. `ui_text_layout` is
-//! read to know *where to look*, and nowhere else.
+//! and against the font's own kerning, as the shaper reads it — never against
+//! the layout's output, which would only prove the layout agrees with itself.
+//! `ui_text_layout` is read to know *where to look*, and nowhere else.
 //!
 //! A pixel is **ink** when it differs from the fill behind it by more than
 //! [`FLAT`] in any channel: a glyph's faintest antialiased edge counts, so a
 //! claim that no ink is somewhere is a claim about every sliver of coverage.
 
 use crcbl::screenshot::{
-    Scene, UI_TEXT_CENTRED_FILL, UI_TEXT_LINE_HEIGHT, UI_TEXT_PAGE, UI_TEXT_PAIR,
-    UI_TEXT_PAIR_SIZE, UI_TEXT_PARAGRAPH_FILL, UiTextLayout, ui_text_layout,
+    Scene, UI_TEXT_CENTRED_FILL, UI_TEXT_LINE_HEIGHT, UI_TEXT_PAGE, UI_TEXT_PARAGRAPH_FILL,
+    UiTextLayout, ui_text_layout, ui_text_pair_kerning,
 };
-use crcbl::ui::font::Font;
 use crcbl_golden::Image;
 use glam::Vec2;
 
@@ -174,13 +173,7 @@ fn second_glyph_centre(image: &Image, rect: (Vec2, Vec2)) -> f64 {
 /// placed by advances alone, by the pair adjustment the font gives, to within
 /// [`KERNING_SLACK`].
 fn the_kerned_pair_is_closer_by_the_fonts_kerning(image: &Image, layout: &UiTextLayout) {
-    let font = Font::sans();
-    let mut chars = UI_TEXT_PAIR.chars();
-    let (left, right) = (
-        font.glyph_id(chars.next().expect("a pair")),
-        font.glyph_id(chars.next().expect("a pair")),
-    );
-    let expected = -f64::from(font.kerning(left, right) * font.metrics().scale(UI_TEXT_PAIR_SIZE));
+    let expected = f64::from(ui_text_pair_kerning());
     let kerned = second_glyph_centre(image, layout.kerned);
     let unkerned = second_glyph_centre(image, layout.unkerned);
     let closer = unkerned - kerned;

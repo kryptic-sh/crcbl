@@ -127,6 +127,10 @@ thiserror = "2.0"
 # alike. Default features off: `autohint_shaping` feeds the automatic hinter,
 # which neither uses. `std` stays on, because the other float backend is `libm`.
 skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
+# OpenType shaping, HarfBuzz's Rust port: `crcbl-ui` shapes its parsed text
+# with it. Default features are `std` alone, kept explicit beside `skrifa`'s so
+# the two agree on the float backend; `icu` and `libm` stay off.
+harfrust = { version = "0.14.0", default-features = false, features = ["std"] }
 # Storage and persistence: serde for settings/save schemas, toml for settings
 # files, dirs for platform-standard config/data paths.
 serde = { version = "1", features = ["derive"] }

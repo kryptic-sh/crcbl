@@ -1,5 +1,5 @@
 //! Fallback faces in a tree, from [`Ui::set_fallback_fonts`]: a span and a
-//! paragraph measured, drawn and hit in the face each char falls back to.
+//! paragraph measured, drawn and hit in the face each cluster falls back to.
 
 use std::sync::OnceLock;
 

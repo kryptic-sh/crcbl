@@ -39,6 +39,7 @@ use glam::Vec2;
 use crate::ui::draw_list::{DrawCommand, DrawList};
 use crate::ui::font::Font;
 use crate::ui::font::layout::{PositionedGlyph, TextLayout};
+use crate::ui::font::shape::shape;
 use crate::ui::text::FontAtlas;
 use crate::ui::tree::{AvailableSpace, NodeKey, Ui};
 use crate::ui::widget::PointerInput;
@@ -270,6 +271,24 @@ fn unkerned_pair(origin: Vec2) -> (Vec2, Vec<PositionedGlyph>) {
     (origin, glyphs)
 }
 
+/// How much nearer its first glyph the pair's second sits in the tree's span
+/// than advances alone put it, in pixels: the font's kerning of the pair, as
+/// shaping applies it.
+#[must_use]
+pub fn ui_text_pair_kerning() -> f32 {
+    let font = Font::sans();
+    let mut shaped = Vec::new();
+    shape(
+        font,
+        UI_TEXT_PAIR_SIZE,
+        UI_TEXT_PAIR,
+        0..UI_TEXT_PAIR.len(),
+        &mut shaped,
+    );
+    let first = shaped[0];
+    font.advance(first.glyph) * font.metrics().scale(UI_TEXT_PAIR_SIZE) - first.advance
+}
+
 /// The layout of [`Scene::UiText`](super::Scene::UiText) in an `extent`-sized
 /// frame.
 #[must_use]
@@ -340,8 +359,7 @@ mod tests {
             paragraph.lines().len() as f32 * UI_TEXT_LINE_HEIGHT
         );
 
-        let (t, o) = (font.glyph_id('T'), font.glyph_id('o'));
-        let kerning = -font.kerning(t, o) * font.metrics().scale(UI_TEXT_PAIR_SIZE);
+        let kerning = ui_text_pair_kerning();
         assert!(kerning >= 2.0, "the pair kerns by only {kerning}px");
 
         // The outer bearings as the atlas rasterises them: the first glyph's

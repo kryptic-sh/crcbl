@@ -209,3 +209,40 @@ fn tessellating_with_colours_matches_resolving_first() {
         "without colours, no quads"
     );
 }
+
+/// **A shaped ligature takes the colour path a cmap glyph does**: a flag
+/// whose two regional indicators have no colour, joined by the face's GSUB
+/// into one COLR glyph, leaves its run as an image quad at its pen, as
+/// Segoe UI Emoji's flags need.
+#[test]
+fn a_shaped_flag_ligature_draws_in_colour() {
+    let face = fixtures::shaped();
+    let font = Font::sans().with_fallback(core::slice::from_ref(&face));
+    let text = "a\u{1F1FA}\u{1F1F8}";
+    let layout = TextLayout::new(&font, text, SIZE, 20.0, None);
+    assert_eq!(layout.faces(), [0, 1], "the flag is not one glyph");
+    let flag = layout.glyphs()[1].glyph;
+    assert_ne!(
+        flag,
+        face.glyph_id('\u{1F1FA}'),
+        "the indicators were not joined"
+    );
+    assert!(face.has_color_glyph(flag));
+    let mut list = DrawList::new();
+    let origin = Vec2::new(3.0, 20.0);
+    for run in layout.face_runs() {
+        list.text_glyphs(origin, run.font, SIZE, INK, run.glyphs, &text[run.text]);
+    }
+    let mut images = ImageAtlas::new();
+    let mut cache = ColorGlyphCache::new();
+    cache.begin_frame(&mut images);
+    list.resolve_color_glyphs(&mut cache, &mut images, 1.0);
+    assert_eq!(kinds(&list), ["glyphs 1", "glyphs 0", "image"]);
+    let DrawCommand::Image { min, max, .. } = list.commands()[2] else {
+        panic!("the flag's quad");
+    };
+    let pen = origin + layout.glyphs()[1].offset;
+    assert_eq!(min.x, pen.round().x);
+    assert_eq!(max.x - min.x, SIZE);
+    assert_eq!(images.images().len(), 1);
+}

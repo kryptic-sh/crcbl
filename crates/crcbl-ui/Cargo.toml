@@ -62,6 +62,13 @@ cssparser = { version = "0.38.0", default-features = false }
 # font carries TrueType instructions the interpreter runs instead. Behind the
 # `parsed-font` feature below.
 skrifa = { workspace = true, optional = true }
+# OpenType shaping for `font`'s parsed text — GSUB and GPOS: kerning, marks,
+# ligatures, emoji ZWJ sequences and flags, contextual forms and complex
+# scripts — through HarfBuzz's own Rust port, decided 2026-10-17 over reading
+# GSUB by hand. It reads fonts through the same `read-fonts` `skrifa` does, so
+# it adds this one crate and no second table reader. Behind the `parsed-font`
+# feature below.
+harfrust = { workspace = true, optional = true }
 
 [features]
 # `crcbl_ui::font`'s parsed font: `skrifa`, the committed Atkinson Hyperlegible
@@ -83,7 +90,7 @@ skrifa = { workspace = true, optional = true }
 # It also turns on `crcbl-image`'s `png`, which decodes a CBDT or sbix
 # colour glyph's strike (`font::color`): only a build that parses fonts can
 # hold one.
-parsed-font = ["dep:skrifa", "crcbl-image/png"]
+parsed-font = ["dep:skrifa", "dep:harfrust", "crcbl-image/png"]
 
 # `font::system`: `Ui::register_system_font` and `Font::from_system`, which
 # look a family up on the system through `crcbl-font` and parse the face

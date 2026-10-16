@@ -2,9 +2,9 @@
 //! layout — UI rung 5.
 //!
 //! ```text
-//!  TTF bytes ──skrifa──▶ Font (cmap, advances, metrics, GPOS pair kerning)
+//!  TTF bytes ──skrifa──▶ Font (cmap, advances, metrics, harfrust's tables)
 //!                          │
-//!   text ──layout──▶ TextLayout (advanced, kerned, wrapped glyph positions)
+//!   text ──shape──▶ glyphs ──layout──▶ TextLayout (wrapped glyph positions)
 //!                          │
 //!                          ▼
 //!   DrawList::glyphs ──to_triangles_split──▶ GlyphAtlas::glyph
@@ -15,16 +15,20 @@
 //! ```
 //!
 //! * [`Font`] — one parsed font: glyph ids through the cmap, horizontal
-//!   advances, line metrics and pair kerning, read through `skrifa` and its
-//!   `read-fonts` (`skrifa::raw`).
+//!   advances and line metrics, read through `skrifa` and its `read-fonts`
+//!   (`skrifa::raw`).
 //! * [`raster`] — this engine's own coverage rasteriser.
 //! * [`atlas`] — the glyph atlas: shelf-packed pages, LRU eviction and a
 //!   per-frame rasterisation budget.
-//! * [`layout`] — advancing, kerning and greedy line breaking.
+//! * [`cluster`] — the runs of chars that fall back, break and take the
+//!   caret as one.
+//! * [`shape`] — clusters to positioned glyphs through `harfrust`: GSUB and
+//!   GPOS, kerning and marks, ligatures and emoji sequences.
+//! * [`layout`] — shaped words placed and greedily broken into lines.
 //! * [`face`] — choosing a family's face by weight and style, and the bold and
 //!   italic synthesised for a family without them.
-//! * [`fallback`] — which of a font's fallback faces draws each char, and the
-//!   emoji and text presentation selectors.
+//! * [`fallback`] — which of a font's fallback faces draws each cluster, and
+//!   the emoji and text presentation selectors.
 //! * [`color`] — colour glyphs, drawn as pictures in the image atlas.
 //! * `system` — faces looked up on the system by family name, through
 //!   `crcbl-font`, behind the `system-fonts` feature.
@@ -41,7 +45,7 @@
 //!
 //! # The `parsed-font` feature
 //!
-//! Everything here that reads a font's bytes — `skrifa`, `SANS_TTF`,
+//! Everything here that reads a font's bytes — `skrifa`, `harfrust`, `SANS_TTF`,
 //! `Font::sans`, [`Font::parse`]'s tables and the atlas's outlines — is behind
 //! the crate's `parsed-font` feature, off by default, because a browser build
 //! that links it pays for it whether or not it draws a parsed glyph. Off, the
@@ -69,29 +73,27 @@
 //! file a user picked — parse, register and draw like the committed font,
 //! and are freed with the last clone of the [`Font`] rather than leaked.
 //!
-//! # Latin-1 first
+//! # Shaped, left to right
 //!
-//! Every codepoint goes through the font's cmap, and one no face has a glyph
-//! for draws `.notdef` — after the handle's fallback faces have been asked,
-//! see [`fallback`]. Kerning is read for the pairs of glyphs Latin-1 maps to;
-//! there is no shaping, so no ligatures, no marks positioned and no
-//! right-to-left text.
+//! Text is shaped by [`shape`]: each cluster goes to the first face that maps
+//! all of it — see [`fallback`] — a cluster no face has a glyph for draws
+//! `.notdef`, and the font's GSUB and GPOS apply. There is no bidi, so
+//! right-to-left text is shaped but laid out left to right.
 
 pub mod atlas;
+pub mod cluster;
 pub mod color;
 pub mod face;
 pub mod fallback;
 #[cfg(all(test, feature = "parsed-font"))]
 pub(crate) mod fixtures;
-#[cfg(feature = "parsed-font")]
-mod kern;
 pub mod layout;
+pub mod shape;
 #[cfg(feature = "system-fonts")]
 pub mod system;
 pub use crcbl_image::raster;
 
 use core::fmt;
-use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(feature = "parsed-font")]
 use std::sync::OnceLock;
@@ -315,7 +317,9 @@ pub struct FontData(Bytes);
 #[derive(Clone)]
 enum Bytes {
     Static(&'static [u8]),
-    Shared(Arc<[u8]>),
+    /// Shared with `harfrust`'s copy of the font, which takes them in this
+    /// form, so the bytes a caller handed over are held once.
+    Shared(Arc<dyn AsRef<[u8]> + Send + Sync>),
 }
 
 impl FontData {
@@ -324,7 +328,7 @@ impl FontData {
     pub fn as_bytes(&self) -> &[u8] {
         match &self.0 {
             Bytes::Static(bytes) => bytes,
-            Bytes::Shared(bytes) => bytes,
+            Bytes::Shared(bytes) => (**bytes).as_ref(),
         }
     }
 }
@@ -352,28 +356,27 @@ impl<const N: usize> From<&'static [u8; N]> for FontData {
 
 impl From<Arc<[u8]>> for FontData {
     fn from(bytes: Arc<[u8]>) -> Self {
-        Self(Bytes::Shared(bytes))
+        Self(Bytes::Shared(Arc::new(bytes)))
     }
 }
 
 impl From<Vec<u8>> for FontData {
     fn from(bytes: Vec<u8>) -> Self {
-        Self(Bytes::Shared(bytes.into()))
+        Self(Bytes::Shared(Arc::new(bytes)))
     }
 }
 
 impl From<Box<[u8]>> for FontData {
     fn from(bytes: Box<[u8]>) -> Self {
-        Self(Bytes::Shared(bytes.into()))
+        Self(Bytes::Shared(Arc::new(bytes)))
     }
 }
 
 /// One parsed font. See the module docs.
 ///
-/// Parsing reads everything layout needs per glyph up front — the Latin-1
-/// cmap, every advance and the kerning of every Latin-1 pair — so measuring
-/// and laying out text touches no table. Outlines are read when the atlas
-/// rasterises a glyph.
+/// Parsing reads the Latin-1 cmap and every advance up front, and readies
+/// the font for `harfrust`, which reads the layout tables it shapes with
+/// once per parse. Outlines are read when the atlas rasterises a glyph.
 ///
 /// A handle: cloning it is a reference count, and every clone is the same
 /// font. Two fonts are equal when they are one parse drawn with one
@@ -418,9 +421,10 @@ struct Parsed {
     latin1: [u32; LATIN1_END as usize],
     /// Every glyph's advance, in font units.
     advances: Box<[f32]>,
-    /// `(left, right)` to the first glyph's advance adjustment, in font units.
-    /// Only non-zero pairs are held.
-    kerning: HashMap<(u32, u32), f32>,
+    /// The font as `harfrust` shapes with it, its layout tables read once;
+    /// `None` only for a test's fixed-pitch face, which has no bytes.
+    #[cfg(feature = "parsed-font")]
+    shaper: Option<harfrust::Font>,
 }
 
 impl fmt::Debug for Font {
@@ -434,7 +438,6 @@ impl fmt::Debug for Font {
             .field("synthesis", &self.synthesis)
             .field("fallback", &self.fallback.len())
             .field("glyphs", &self.parsed.advances.len())
-            .field("kerning_pairs", &self.parsed.kerning.len())
             .finish_non_exhaustive()
     }
 }
@@ -498,16 +501,12 @@ impl Font {
     }
 
     /// Parses `data` — see [`FontData`] for what it can be made from — and
-    /// keeps it for the outlines the atlas reads later.
-    ///
-    /// A font whose GPOS table cannot be read parses with no kerning, and says
-    /// so through `crcbl_core::warn!`: a font that draws unkerned is still a
-    /// font.
+    /// keeps it for the outlines the atlas reads later and for shaping.
     ///
     /// # Errors
     ///
-    /// [`FontError`] when the table directory cannot be read or the font has
-    /// no units per em.
+    /// [`FontError`] when the table directory cannot be read, by `skrifa` or
+    /// by `harfrust`, or the font has no units per em.
     #[cfg(feature = "parsed-font")]
     pub fn parse(data: impl Into<FontData>) -> Result<Self, FontError> {
         let data = data.into();
@@ -547,18 +546,11 @@ impl Font {
             })
             .collect();
 
-        let mut pair_glyphs: Vec<u32> = latin1.iter().copied().filter(|&g| g != 0).collect();
-        pair_glyphs.sort_unstable();
-        pair_glyphs.dedup();
-        let kerning = match kern::pair_kerning(&font, &pair_glyphs) {
-            Ok(kerning) => kerning,
-            Err(error) => {
-                crcbl_core::warn!(
-                    "font: the GPOS table cannot be read ({error}); the font draws unkerned"
-                );
-                HashMap::new()
-            }
-        };
+        let shaper = match &data.0 {
+            Bytes::Static(bytes) => harfrust::Font::new(*bytes, 0),
+            Bytes::Shared(bytes) => harfrust::Font::new(Arc::clone(bytes), 0),
+        }
+        .ok_or_else(|| FontError::Unreadable("harfrust cannot read it".to_owned()))?;
 
         Ok(Self {
             parsed: Arc::new(Parsed {
@@ -571,7 +563,7 @@ impl Font {
                 color,
                 latin1,
                 advances,
-                kerning,
+                shaper: Some(shaper),
             }),
             synthesis: Synthesis::NONE,
             fallback: no_fallback(),
@@ -596,8 +588,8 @@ impl Font {
         }
     }
 
-    /// This face with `fallback` asked, in order, for every char it has no
-    /// glyph for — see [`fallback`] — in place of whatever it carried. The
+    /// This face with `fallback` asked, in order, for every cluster it does
+    /// not map whole — see [`fallback`] — in place of whatever it carried. The
     /// faces' own fallback faces are left behind, and past
     /// [`fallback::MAX_FALLBACK_FACES`] they are left out.
     #[must_use]
@@ -625,7 +617,7 @@ impl Font {
     }
 
     /// Face `index` of this handle: itself for zero, its `index`th fallback
-    /// face from one — what [`fallback::Mapped::face`] numbers — and itself
+    /// face from one — what [`shape::ShapedGlyph::face`] numbers — and itself
     /// for an index past them.
     #[must_use]
     pub fn face(&self, index: u8) -> &Self {
@@ -741,28 +733,10 @@ impl Font {
         }
     }
 
-    /// How far `right` moves when it follows `left`, in font units: the pair
-    /// adjustment of the GPOS `kern` feature, zero for a pair it does not
-    /// kern. Only pairs of glyphs Latin-1 maps to are read.
-    #[must_use]
-    pub fn kerning(&self, left: GlyphId, right: GlyphId) -> f32 {
-        self.parsed
-            .kerning
-            .get(&(left.0, right.0))
-            .copied()
-            .unwrap_or(0.0)
-    }
-
-    /// How many glyph pairs the font kerns.
-    #[must_use]
-    pub fn kerning_pairs(&self) -> usize {
-        self.parsed.kerning.len()
-    }
-
     /// A font with `metrics` and no outlines, leaked for the process: every
     /// Latin-1 codepoint is glyph 1, `advance` font units wide, and nothing
-    /// kerns. What a test measures known widths in; it cannot be rasterised,
-    /// and without the `parsed-font` feature it cannot be made.
+    /// is shaped. What a test measures known widths in; it cannot be
+    /// rasterised, and without the `parsed-font` feature it cannot be made.
     #[cfg(all(test, feature = "parsed-font"))]
     pub(crate) fn fixed_pitch(metrics: FontMetrics, advance: f32) -> &'static Self {
         Self::fixed_pitch_face(metrics, advance, 400.0, false)
@@ -788,7 +762,7 @@ impl Font {
                 color: false,
                 latin1: [1; LATIN1_END as usize],
                 advances: Box::new([0.0, advance]),
-                kerning: HashMap::new(),
+                shaper: None,
             }),
             synthesis: Synthesis::NONE,
             fallback: no_fallback(),
@@ -824,9 +798,9 @@ mod tests {
 
     /// **The committed font parses into what layout reads**: its units per em
     /// and line metrics as `skrifa` reports them, a glyph for every printable
-    /// Latin-1 codepoint, and kerning.
+    /// Latin-1 codepoint, and its tables ready to shape with.
     #[test]
-    fn the_committed_font_parses_with_latin1_and_kerning() {
+    fn the_committed_font_parses_with_latin1_and_shaping() {
         let font = Font::sans();
         let reference = FontRef::new(SANS_TTF).expect("reads");
         let metrics = reference.metrics(Size::unscaled(), LocationRef::default());
@@ -845,8 +819,8 @@ mod tests {
             );
         }
         assert!(
-            font.kerning_pairs() > 0,
-            "the committed font's GPOS kerning was not read"
+            font.parsed.shaper.is_some(),
+            "the committed font is not ready to shape"
         );
     }
 

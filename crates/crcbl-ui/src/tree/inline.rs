@@ -9,26 +9,35 @@
 //!   whichever runs they are in, so `un` in one run and `known` in the next is
 //!   one word that never breaks between them.
 //! * **Explicit newlines end a line, always**, and **soft breaks are at spaces
-//!   and after a hyphen** (`-`, which stays at the end of its line). The spaces
-//!   a line breaks at belong to no line, and spaces a line ends with before a
-//!   newline or the end of the text are not measured; spaces anywhere else
-//!   take their advance.
-//! * **A word wider than the wrap width is broken between characters**, at
-//!   the last one that fits and never before the first — CSS's
+//!   and after a hyphen** (`-`, which stays at the end of its line, with
+//!   anything that continues its cluster). The spaces a line breaks at belong
+//!   to no line, and spaces a line ends with before a newline or the end of
+//!   the text are not measured; spaces anywhere else take their advance.
+//! * **A word wider than the wrap width is broken between clusters**, at the
+//!   last one that fits and never before the first — CSS's
 //!   `overflow-wrap: break-word`, so a long link in a notification wraps
-//!   rather than overflowing. It does not change the min-content width, which
-//!   is the widest word unbroken, as `break-word` specifies.
+//!   rather than overflowing — and **never inside a cluster**
+//!   ([`crate::font::cluster`]). It does not change the min-content width,
+//!   which is the widest word unbroken, as `break-word` specifies.
 //! * **The wrap width is whole pixels**, by [`wrap_width`], for the reason
 //!   the font module gives.
 //!
-//! Kerning applies between two neighbours on a line in the same font at the
-//! same size, spaces included, and never across a break or between two runs
-//! that differ in either.
+//! # Shaping
 //!
-//! A char in a parsed font is drawn by the face [`map_char`] picks from the
-//! run's font and its fallback faces, at that face's advance, and two
-//! neighbours drawn by different faces do not kern; a presentation selector
-//! or a zero-width joiner takes no width and draws nothing.
+//! Each word, and each space, is shaped on its own by
+//! [`shape`](crate::font::shape): a word's parts in consecutive runs of one
+//! parsed font at one size are shaped together, so kerning and ligatures
+//! reach across such a run boundary, and parts that differ in either are
+//! shaped apart. Nothing is shaped across a space, so nothing kerns across a
+//! break. A word broken between clusters has its two sides shaped again
+//! apart, so nothing kerns across that break either; the side left on the
+//! line was chosen by the width it had shaped whole, so losing a kerning
+//! adjustment can leave it a fraction of a pixel past the wrap width.
+//!
+//! A cluster in a parsed font is drawn by the face
+//! [`cluster_face`](crate::font::fallback::cluster_face) picks from the
+//! run's font and its fallback faces, shaped in that face; a presentation
+//! selector or a zero-width joiner takes no width and draws nothing.
 //!
 //! # Vertical metrics
 //!
@@ -45,9 +54,9 @@ use core::ops::Range;
 
 use glam::Vec2;
 
-use crate::font::fallback::{Mapped, map_char};
-use crate::font::layout::{PositionedGlyph, TextAlign, advance_pen, wrap_width};
-use crate::font::{Font, FontId, GlyphId};
+use crate::font::layout::{PositionedGlyph, TextAlign, wrap_width};
+use crate::font::shape::{ShapedGlyph, shape};
+use crate::font::{Font, FontId, GlyphId, cluster};
 use crate::text::{ASCENDER, FontAtlas, LINE_HEIGHT};
 
 /// What one run is drawn in.
@@ -98,9 +107,9 @@ impl<'a> InlineRun<'a> {
         }
     }
 
-    /// What two neighbouring glyphs must share to kern: a parsed font and a
-    /// size.
-    fn kerning_key(&self) -> Option<(FontId, u32)> {
+    /// What two neighbouring parts of a word must share to be shaped
+    /// together: a parsed font and a size.
+    fn shaping_key(&self) -> Option<(FontId, u32)> {
         match self.font {
             RunFont::Parsed(font) => Some((font.id(), self.size.to_bits())),
             RunFont::Bitmap(_) => None,
@@ -119,26 +128,31 @@ pub(crate) enum Wrap {
     Width(f32),
 }
 
-/// One character as laid out: spaces too, which draw nothing.
+/// One glyph as laid out — a space too, which draws nothing — or, in the
+/// bitmap font, one char.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct InlineGlyph {
     /// Which run it is from.
     pub run: usize,
-    /// Its byte offset in that run's text.
-    pub byte: usize,
-    pub c: char,
+    /// Where the bytes of its run's text its cluster spells start.
+    pub start: usize,
+    /// Where they end.
+    pub end: usize,
     /// Its glyph in a parsed font; [`GlyphId::NOTDEF`] in the bitmap font,
     /// which draws from the character.
     pub glyph: GlyphId,
     /// Which face of its run's font draws it, as [`Font::face`] numbers
     /// them; zero in the bitmap font.
     pub face: u8,
-    /// Whether it draws anything: not a space, and not a char that is
-    /// invisible in a parsed font.
+    /// Whether it draws anything: not a space.
     pub drawn: bool,
+    /// Whether a word may be broken before it: the first glyph of a cluster.
+    pub breakable: bool,
     /// Its pen position from the paragraph's left.
     pub x: f32,
     pub advance: f32,
+    /// Where it is drawn from its pen, y down: the shaper's offset.
+    pub shift: Vec2,
 }
 
 /// The part of one run that lies on one line.
@@ -146,7 +160,7 @@ pub(crate) struct InlineGlyph {
 pub(crate) struct Fragment {
     pub run: usize,
     pub line: usize,
-    /// Its characters in [`InlineLayout::glyphs`].
+    /// Its glyphs in [`InlineLayout::glyphs`].
     pub glyphs: Range<usize>,
     /// Its bytes in its run's text.
     pub text: Range<usize>,
@@ -179,35 +193,44 @@ pub(crate) struct InlineLayout {
     lines: Vec<InlineLine>,
 }
 
+/// A word's part in one run: the run and its bytes in that run's text.
+type Segment = (usize, Range<usize>);
+
 /// One piece of the stream between break opportunities.
 enum Token {
-    /// A word's characters, `(run, byte, char)`, ending at a space, a newline,
-    /// a hyphen or the end of the text.
-    Word(Vec<(usize, usize, char)>),
-    Space(usize, usize),
+    /// A word's parts, in order, ending at a space, a newline, a hyphen's
+    /// cluster or the end of the text.
+    Word(Vec<Segment>),
+    Space(Segment),
     Newline(usize),
 }
 
-/// The paragraph's runs as words, spaces and newlines, in order.
+/// The paragraph's runs as words, spaces and newlines, in order, cut at
+/// cluster boundaries.
 fn tokens(runs: &[InlineRun<'_>]) -> Vec<Token> {
     let mut tokens = Vec::new();
-    let mut word = Vec::new();
+    let mut word: Vec<Segment> = Vec::new();
     for (run, input) in runs.iter().enumerate() {
-        for (byte, c) in input.text.char_indices() {
-            match c {
-                ' ' | '\n' => {
+        for bytes in cluster::clusters(input.text) {
+            match input.text[bytes.start..].chars().next() {
+                Some(c @ (' ' | '\n')) => {
                     if !word.is_empty() {
                         tokens.push(Token::Word(core::mem::take(&mut word)));
                     }
                     tokens.push(if c == ' ' {
-                        Token::Space(run, byte)
+                        Token::Space((run, bytes))
                     } else {
                         Token::Newline(run)
                     });
                 }
-                _ => {
-                    word.push((run, byte, c));
-                    if c == '-' {
+                first => {
+                    match word.last_mut() {
+                        Some((last, range)) if *last == run && range.end == bytes.start => {
+                            range.end = bytes.end;
+                        }
+                        _ => word.push((run, bytes)),
+                    }
+                    if first == Some('-') {
                         tokens.push(Token::Word(core::mem::take(&mut word)));
                     }
                 }
@@ -218,6 +241,23 @@ fn tokens(runs: &[InlineRun<'_>]) -> Vec<Token> {
         tokens.push(Token::Word(word));
     }
     tokens
+}
+
+/// `segments` cut at byte `byte` of run `run`: what lies before it, and what
+/// lies from it on.
+fn split(segments: &[Segment], run: usize, byte: usize) -> (Vec<Segment>, Vec<Segment>) {
+    let (mut before, mut after) = (Vec::new(), Vec::new());
+    for (at, range) in segments {
+        if (*at, range.end) <= (run, byte) {
+            before.push((*at, range.clone()));
+        } else if (*at, range.start) >= (run, byte) {
+            after.push((*at, range.clone()));
+        } else {
+            before.push((*at, range.start..byte));
+            after.push((*at, byte..range.end));
+        }
+    }
+    (before, after)
 }
 
 /// The line being filled.
@@ -267,43 +307,46 @@ impl InlineLayout {
                     last_run = run;
                     line = Line::new(layout.glyphs.len());
                 }
-                Token::Space(run, byte) => {
-                    layout.push(runs, atlas, run, byte, ' ');
-                    line.pen =
-                        layout.place_from(runs, line.pen, layout.glyphs.len() - 1, line.first);
-                    last_run = run;
-                }
-                Token::Word(chars) => {
+                Token::Space(segment) => {
+                    last_run = segment.0;
                     let start = layout.glyphs.len();
-                    for &(run, byte, c) in &chars {
-                        layout.push(runs, atlas, run, byte, c);
+                    layout.push(runs, atlas, core::slice::from_ref(&segment), false);
+                    line.pen = layout.place_from(line.pen, start);
+                }
+                Token::Word(segments) => {
+                    if let Some(&(run, _)) = segments.last() {
                         last_run = run;
                     }
-                    let mut right = layout.place_from(runs, line.pen, start, line.first);
+                    let start = layout.glyphs.len();
+                    layout.push(runs, atlas, &segments, true);
+                    let mut right = layout.place_from(line.pen, start);
                     if line.has_word && limit.is_some_and(|limit| right > limit) {
                         finished.push((line.first..line.end, last_run));
                         line = Line::new(start);
-                        right = layout.place_from(runs, 0.0, start, start);
+                        right = layout.place_from(0.0, start);
                     }
                     // A word alone too wide for the line is broken between
-                    // characters, at the last that fits, until what is left
-                    // fits.
+                    // clusters, at the last that fits, until what is left
+                    // fits, each side shaped again on its own.
                     let mut word_start = start;
+                    let mut rest = segments;
                     while let Some(limit) = word_limit
                         && right > limit
-                        && layout.glyphs.len() - word_start > 1
+                        && let Some(fits) = layout.break_before(word_start, limit)
                     {
-                        let fits = (word_start + 1..layout.glyphs.len())
-                            .take_while(|&at| {
-                                let glyph = &layout.glyphs[at];
-                                glyph.x + glyph.advance <= limit
-                            })
-                            .last()
-                            .map_or(word_start + 1, |at| at + 1);
+                        let pen = layout.glyphs[word_start].x;
+                        let at = layout.glyphs[fits];
+                        let (before, after) = split(&rest, at.run, at.start);
+                        layout.glyphs.truncate(word_start);
+                        layout.push(runs, atlas, &before, true);
+                        let fits = layout.glyphs.len();
+                        layout.place_from(pen, word_start);
                         finished.push((line.first..fits, last_run));
+                        layout.push(runs, atlas, &after, true);
                         line = Line::new(fits);
                         word_start = fits;
-                        right = layout.place_from(runs, 0.0, fits, fits);
+                        rest = after;
+                        right = layout.place_from(0.0, fits);
                     }
                     line.pen = right;
                     line.end = layout.glyphs.len();
@@ -316,74 +359,150 @@ impl InlineLayout {
         layout
     }
 
-    /// Appends `c` of `run`, at `byte` in its text, unplaced.
+    /// Where a word whose glyphs start at `word_start` breaks to fit `limit`:
+    /// before the last cluster whose glyphs before it all fit, and never
+    /// before the first cluster; `None` when the word is one cluster.
+    fn break_before(&self, word_start: usize, limit: f32) -> Option<usize> {
+        let mut breaks =
+            (word_start + 1..self.glyphs.len()).filter(|&at| self.glyphs[at].breakable);
+        let first = breaks.next()?;
+        let fits = |at: usize| {
+            let before = &self.glyphs[at - 1];
+            before.x + before.advance <= limit
+        };
+        if !fits(first) {
+            return Some(first);
+        }
+        Some(breaks.take_while(|&at| fits(at)).last().unwrap_or(first))
+    }
+
+    /// Appends the glyphs `segments` shape into, unplaced, drawn or — for a
+    /// space — not. See the module docs for which parts are shaped together.
     fn push(
         &mut self,
         runs: &[InlineRun<'_>],
         atlas: &FontAtlas,
-        run: usize,
-        byte: usize,
-        c: char,
+        segments: &[Segment],
+        drawn: bool,
     ) {
-        let input = &runs[run];
-        let (mapped, advance) = match input.font {
-            RunFont::Parsed(font) => {
-                let next = input.text[byte + c.len_utf8()..].chars().next();
-                match map_char(font, c, next) {
-                    Some(mapped) => (
-                        Some(mapped),
-                        advance_pen(font, input.size, 0.0, None, mapped).1,
-                    ),
-                    None => (None, 0.0),
+        let mut at = 0;
+        while at < segments.len() {
+            let (run, bytes) = &segments[at];
+            let input = &runs[*run];
+            let RunFont::Parsed(font) = input.font else {
+                if let RunFont::Bitmap(scale) = input.font {
+                    self.push_bitmap(input, *run, bytes.clone(), scale, atlas, drawn);
                 }
+                at += 1;
+                continue;
+            };
+            let key = input.shaping_key();
+            let together = segments[at..]
+                .iter()
+                .take_while(|(run, _)| runs[*run].shaping_key() == key)
+                .count();
+            self.push_shaped(runs, font, input.size, &segments[at..at + together], drawn);
+            at += together;
+        }
+    }
+
+    /// Appends `segments`, each in a run of `font` at `size`, shaped
+    /// together.
+    fn push_shaped(
+        &mut self,
+        runs: &[InlineRun<'_>],
+        font: &Font,
+        size: f32,
+        segments: &[Segment],
+        drawn: bool,
+    ) {
+        let mut shaped: Vec<ShapedGlyph> = Vec::new();
+        // Where each segment starts in the text shaped, when that is the
+        // segments joined; one segment is shaped in its run's own text.
+        let mut starts = Vec::with_capacity(segments.len());
+        if let [(run, bytes)] = segments {
+            shape(font, size, runs[*run].text, bytes.clone(), &mut shaped);
+        } else {
+            let mut joined = String::new();
+            for (run, bytes) in segments {
+                starts.push(joined.len());
+                joined.push_str(&runs[*run].text[bytes.clone()]);
             }
-            RunFont::Bitmap(scale) => (
-                Some(Mapped {
-                    face: 0,
-                    glyph: GlyphId::NOTDEF,
-                }),
-                atlas.glyph(c).advance * scale,
-            ),
+            shape(font, size, &joined, 0..joined.len(), &mut shaped);
+        }
+        // A byte of the text shaped, as its run, its byte in that run's text,
+        // and the end of the segment it is in.
+        let locate = |byte: usize| {
+            if starts.is_empty() {
+                let (run, bytes) = &segments[0];
+                return (*run, byte, bytes.end);
+            }
+            let index = starts.partition_point(|&start| start <= byte) - 1;
+            let (run, bytes) = &segments[index];
+            (*run, bytes.start + byte - starts[index], bytes.end)
         };
-        self.glyphs.push(InlineGlyph {
-            run,
-            byte,
-            c,
-            glyph: mapped.map_or(GlyphId::NOTDEF, |mapped| mapped.glyph),
-            face: mapped.map_or(0, |mapped| mapped.face),
-            drawn: c != ' ' && mapped.is_some(),
-            x: 0.0,
-            advance,
-        });
+        for (index, glyph) in shaped.iter().enumerate() {
+            let (run, start, segment_end) = locate(glyph.cluster);
+            let next = shaped[index + 1..]
+                .iter()
+                .find(|next| next.cluster != glyph.cluster)
+                .map(|next| locate(next.cluster));
+            let end = match next {
+                Some((next_run, next_start, _)) if next_run == run => next_start,
+                _ => segment_end,
+            };
+            let breakable = index == 0 || shaped[index - 1].cluster != glyph.cluster;
+            self.glyphs.push(InlineGlyph {
+                run,
+                start,
+                end,
+                glyph: glyph.glyph,
+                face: glyph.face,
+                drawn,
+                breakable,
+                x: 0.0,
+                advance: glyph.advance,
+                shift: glyph.offset,
+            });
+        }
+    }
+
+    /// Appends `bytes` of the bitmap run `input`, one glyph a char.
+    fn push_bitmap(
+        &mut self,
+        input: &InlineRun<'_>,
+        run: usize,
+        bytes: Range<usize>,
+        scale: f32,
+        atlas: &FontAtlas,
+        drawn: bool,
+    ) {
+        for cluster in cluster::clusters(&input.text[bytes.clone()]) {
+            let cluster = bytes.start + cluster.start..bytes.start + cluster.end;
+            for (at, c) in input.text[cluster.clone()].char_indices() {
+                let start = cluster.start + at;
+                self.glyphs.push(InlineGlyph {
+                    run,
+                    start,
+                    end: start + c.len_utf8(),
+                    glyph: GlyphId::NOTDEF,
+                    face: 0,
+                    drawn: drawn && c != ' ',
+                    breakable: at == 0,
+                    x: 0.0,
+                    advance: atlas.glyph(c).advance * scale,
+                    shift: Vec2::ZERO,
+                });
+            }
+        }
     }
 
     /// Places every glyph from `start` on, the first with its pen at `pen`,
-    /// each kerned against the glyph before it unless that is not on its line
-    /// — the line starting at glyph `line_first` — and returns the pen after
-    /// the last.
-    fn place_from(
-        &mut self,
-        runs: &[InlineRun<'_>],
-        pen: f32,
-        start: usize,
-        line_first: usize,
-    ) -> f32 {
+    /// and returns the pen after the last.
+    fn place_from(&mut self, pen: f32, start: usize) -> f32 {
         let mut pen = pen;
-        for at in start..self.glyphs.len() {
-            let glyph = self.glyphs[at];
-            if at > line_first {
-                let previous = self.glyphs[at - 1];
-                let (before, after) = (&runs[previous.run], &runs[glyph.run]);
-                if let (Some(key), RunFont::Parsed(font)) = (after.kerning_key(), after.font)
-                    && before.kerning_key() == Some(key)
-                    && previous.face == glyph.face
-                {
-                    let face = font.face(glyph.face);
-                    pen += face.kerning(previous.glyph, glyph.glyph)
-                        * face.metrics().scale(after.size);
-                }
-            }
-            self.glyphs[at].x = pen;
+        for glyph in &mut self.glyphs[start..] {
+            glyph.x = pen;
             pen += glyph.advance;
         }
         pen
@@ -407,7 +526,7 @@ impl InlineLayout {
                     run,
                     line: index,
                     glyphs: start..at,
-                    text: head.byte..tail.byte + tail.c.len_utf8(),
+                    text: head.start..tail.end,
                     x: head.x,
                     width: tail.x + tail.advance - head.x,
                 });
@@ -469,11 +588,11 @@ impl InlineLayout {
         &self.lines
     }
 
-    /// `fragment`'s glyphs that draw — its spaces and invisible chars left
-    /// out — pen at their baseline, from the paragraph's top-left, cut where
-    /// the face drawing them changes: each stretch's face, its glyphs, and
-    /// the bytes of its run's text it spells, from its first glyph to the
-    /// next stretch or the fragment's end.
+    /// `fragment`'s glyphs that draw — its spaces left out — at their pens on
+    /// their baseline moved by the shaper's offsets, from the paragraph's
+    /// top-left, cut where the face drawing them changes: each stretch's
+    /// face, its glyphs, and the bytes of its run's text it spells, from its
+    /// first glyph's cluster to the next stretch or the fragment's end.
     pub fn face_runs(&self, fragment: &Fragment) -> Vec<(u8, Vec<PositionedGlyph>, Range<usize>)> {
         let baseline = self.lines[fragment.line].baseline;
         let mut runs: Vec<(u8, Vec<PositionedGlyph>, Range<usize>)> = Vec::new();
@@ -483,15 +602,15 @@ impl InlineLayout {
             }
             let positioned = PositionedGlyph {
                 glyph: glyph.glyph,
-                offset: Vec2::new(glyph.x, baseline),
+                offset: Vec2::new(glyph.x, baseline) + glyph.shift,
             };
             match runs.last_mut() {
                 Some((face, glyphs, _)) if *face == glyph.face => glyphs.push(positioned),
                 _ => {
                     if let Some((_, _, text)) = runs.last_mut() {
-                        text.end = glyph.byte;
+                        text.end = glyph.start;
                     }
-                    runs.push((glyph.face, vec![positioned], glyph.byte..fragment.text.end));
+                    runs.push((glyph.face, vec![positioned], glyph.start..fragment.text.end));
                 }
             }
         }
@@ -512,5 +631,105 @@ impl InlineLayout {
             widest.ceil(),
             self.lines.iter().map(|line| line.height).sum(),
         )
+    }
+}
+
+#[cfg(all(test, feature = "parsed-font"))]
+mod tests {
+    use super::*;
+    use crate::font::fixtures;
+
+    const SIZE: f32 = 16.0;
+
+    /// Each line's text, its fragments' texts joined, and its width.
+    fn lines(layout: &InlineLayout, runs: &[InlineRun<'_>]) -> Vec<(String, f32)> {
+        layout
+            .lines()
+            .iter()
+            .map(|line| {
+                let text = layout.fragments()[line.fragments.clone()]
+                    .iter()
+                    .map(|fragment| &runs[fragment.run].text[fragment.text.clone()])
+                    .collect();
+                (text, line.width)
+            })
+            .collect()
+    }
+
+    /// **A word too wide is broken between clusters and never inside one**:
+    /// at a width nothing fits, each `h` with its accent — two glyphs, one
+    /// cluster — keeps a line of its own.
+    #[test]
+    fn an_overlong_word_never_breaks_inside_a_cluster() {
+        let run = InlineRun::new(
+            "hh\u{301}h\u{301}",
+            RunFont::Parsed(Font::sans()),
+            SIZE,
+            20.0,
+        );
+        let runs = [run];
+        let layout = InlineLayout::new(&runs, Wrap::Width(1.0), &FontAtlas::built_in());
+        let texts: Vec<String> = lines(&layout, &runs)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect();
+        assert_eq!(texts, ["h", "h\u{301}", "h\u{301}"]);
+    }
+
+    /// **A paragraph draws a mark at the shaper's offset from its pen**, on
+    /// its line's baseline, and the mark takes no width.
+    #[test]
+    fn a_mark_is_drawn_at_the_shapers_offset() {
+        let font = Font::sans();
+        let runs = [InlineRun::new(
+            "xh\u{301}",
+            RunFont::Parsed(font),
+            SIZE,
+            20.0,
+        )];
+        let layout = InlineLayout::new(&runs, Wrap::None, &FontAtlas::built_in());
+        let mut shaped = Vec::new();
+        shape(font, SIZE, "xh\u{301}", 0..4, &mut shaped);
+        let fragment = &layout.fragments()[0];
+        let (_, glyphs, _) = &layout.face_runs(fragment)[0];
+        let baseline = layout.lines()[0].baseline;
+        let pen = shaped[0].advance + shaped[1].advance;
+        assert_ne!(
+            shaped[2].offset,
+            Vec2::ZERO,
+            "the font does not move the mark"
+        );
+        assert_eq!(
+            glyphs[2].offset,
+            Vec2::new(pen, baseline) + shaped[2].offset
+        );
+        assert_eq!(fragment.width, pen);
+    }
+
+    /// **A word broken between clusters has its sides shaped again apart**:
+    /// three hearts kerned together are each a heart's own width once each
+    /// takes a line, with nothing of the kerning towards the next.
+    #[test]
+    fn a_broken_word_is_shaped_again_on_each_side() {
+        let hearts = fixtures::shaped();
+        let run = InlineRun::new(
+            "\u{2764}\u{2764}\u{2764}",
+            RunFont::Parsed(&hearts),
+            SIZE,
+            20.0,
+        );
+        let runs = [run];
+        let whole = InlineLayout::new(&runs, Wrap::None, &FontAtlas::built_in());
+        assert_eq!(
+            lines(&whole, &runs)[0].1,
+            13.0 + 13.0 + 16.0,
+            "the hearts kern"
+        );
+        let broken = InlineLayout::new(&runs, Wrap::Width(20.0), &FontAtlas::built_in());
+        let widths: Vec<f32> = lines(&broken, &runs)
+            .into_iter()
+            .map(|(_, width)| width)
+            .collect();
+        assert_eq!(widths, [16.0, 16.0, 16.0]);
     }
 }

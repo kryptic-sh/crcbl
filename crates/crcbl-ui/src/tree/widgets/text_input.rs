@@ -63,7 +63,7 @@
 //! part is not worth adding them for.
 //!
 //! The selection and the caret are placed after layout, by `Ui::layout`,
-//! from the boundaries of every character in the span's own font — so the
+//! from the boundaries of every cluster in the span's own font — so the
 //! highlight spans exactly the glyphs selected and the caret sits on the
 //! boundary it names, in the bitmap font and a parsed one alike. Their
 //! `position: absolute` in `default.css` keeps them out of the span's flow.
@@ -86,8 +86,7 @@ use super::{Ui, WidgetKind, WidgetState, typed};
 use crate::console::caret_shown;
 use crate::edit::{ClipboardOp, Edit, LineEdit, run_at};
 use crate::font::Font;
-use crate::font::fallback;
-use crate::font::layout::advance_pen;
+use crate::font::layout::caret_stops;
 use crate::style::{Declaration, NodeSelector, PseudoClasses};
 use crate::text::FontAtlas;
 use crate::tree::emit::content_width;
@@ -269,10 +268,12 @@ pub(crate) struct TextFit {
 }
 
 /// Each caret stop of `text` at `style`'s size in `font` — the bitmap font
-/// when that is `None` — from its left edge: every advance, and — in a parsed
-/// font — the kerning between every two neighbours, spaces included, as
-/// [`crate::font::layout::TextLayout`] places glyphs. The stop before a glyph
-/// is where that glyph is drawn.
+/// when that is `None` — from its left edge, one before each char and one at
+/// the end: in the bitmap font every advance, and in a parsed font
+/// [`caret_stops`]'s, placed as [`crate::font::layout::TextLayout`] shapes
+/// and places the glyphs. The stop before a cluster is where it is drawn; a
+/// char inside one, where [`crate::edit::LineEdit`] never puts the caret,
+/// shares its cluster's stop.
 fn measure(
     atlas: &FontAtlas,
     font: Option<&Font>,
@@ -280,10 +281,10 @@ fn measure(
     style: &NodeStyle,
     out: &mut Vec<f32>,
 ) {
-    out.clear();
-    out.push(0.0);
     match font {
         None => {
+            out.clear();
+            out.push(0.0);
             let scale = style.font_size / NATURAL_FONT_SIZE;
             let mut buffer = [0; 4];
             let mut pen = 0.0;
@@ -292,21 +293,7 @@ fn measure(
                 out.push(pen);
             }
         }
-        Some(font) => {
-            // Each char in the face fallback picks for it; one that draws
-            // nothing is a stop at the pen it leaves where it was.
-            let mut pen = 0.0;
-            let mut previous = None;
-            for (_, _, mapped) in fallback::map_text(font, text) {
-                if let Some(mapped) = mapped {
-                    let (at, after) = advance_pen(font, style.font_size, pen, previous, mapped);
-                    *out.last_mut().expect("a stop per glyph so far") = at;
-                    pen = after;
-                    previous = Some(mapped);
-                }
-                out.push(pen);
-            }
-        }
+        Some(font) => caret_stops(font, text, style.font_size, out),
     }
 }
 
@@ -692,9 +679,9 @@ mod fallback_tests {
     use crate::font::layout::TextLayout;
 
     /// **Caret stops fall back as layout places glyphs**: the stop before
-    /// each char is where layout draws it, an emoji in the fallback face takes
-    /// that face's advance, and the presentation selector after it is a stop
-    /// at the pen the emoji left.
+    /// each cluster is where layout draws it, an emoji in the fallback face
+    /// takes that face's advance, and the presentation selector inside its
+    /// cluster shares the emoji's stop.
     #[test]
     fn caret_stops_fall_back_as_layout_places_glyphs() {
         let font = Font::sans().with_fallback(&[fixtures::cbdt()]);
@@ -715,6 +702,6 @@ mod fallback_tests {
         let x: Vec<f32> = layout.glyphs().iter().map(|glyph| glyph.offset.x).collect();
         assert_eq!(layout.faces(), [0, 1, 0]);
         assert_eq!(x[2] - x[1], style.font_size, "the emoji is an em wide");
-        assert_eq!(stops, [0.0, x[1], x[2], x[2], layout.width()]);
+        assert_eq!(stops, [0.0, x[1], x[1], x[2], layout.width()]);
     }
 }

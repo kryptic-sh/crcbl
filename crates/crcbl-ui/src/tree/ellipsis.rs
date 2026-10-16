@@ -15,11 +15,12 @@
 //! * Each line — the text between newlines — is judged on its own, against the
 //!   span's content-box width as layout measured it (the unrounded one, the
 //!   width a wrapped span is broken at). A line that fits is left whole.
-//! * A line that does not is cut at a **char** boundary: the longest prefix
-//!   that, with its trailing white space dropped and the ellipsis after it,
-//!   fits. The crate has no grapheme segmenter and draws one glyph per char, so
-//!   no glyph is ever cut in half, but a combining mark can be parted from its
-//!   base.
+//! * A line that does not is cut at a **cluster** boundary
+//!   ([`crate::font::cluster`]): the longest prefix that, with its trailing
+//!   white space dropped and the ellipsis after it, fits. So a mark is never
+//!   parted from its base, nor an emoji sequence or a flag cut in two. A
+//!   ligature the shaper makes of two clusters can still be cut between them,
+//!   and then draws as its two parts.
 //! * The ellipsis is `…` (U+2026) in a font that has the glyph, and `...` in
 //!   one that would draw `.notdef` for it — the bitmap font always.
 //! * **A line too narrow for even the ellipsis shows nothing**, rather than
@@ -33,7 +34,7 @@ use super::emit::content_width;
 use super::style::{NodeStyle, TextOverflow, WhiteSpace};
 use super::{Content, Shown, Ui};
 use crate::font::layout::{TextLayout, WRAP_EPSILON};
-use crate::font::{Font, GlyphId};
+use crate::font::{Font, GlyphId, cluster};
 use crate::text::{FontAtlas, NOTDEF_INDEX, glyph_index};
 use crate::widget::NATURAL_FONT_SIZE;
 
@@ -151,9 +152,9 @@ fn cut(measure: &Measure<'_>, text: &str, width: f32, out: &mut String) -> bool 
             scratch.push_str(ellipsis);
             measure.width(&scratch) <= fit
         };
-        // Every char boundary short of the whole line, which is known not to
-        // fit: the first is the empty prefix.
-        let ends: Vec<usize> = line.char_indices().map(|(at, _)| at).collect();
+        // Every cluster boundary short of the whole line, which is known not
+        // to fit: the first is the empty prefix.
+        let ends: Vec<usize> = cluster::clusters(line).map(|range| range.start).collect();
         if !fits(0) {
             continue;
         }

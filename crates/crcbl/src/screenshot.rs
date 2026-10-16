@@ -182,7 +182,7 @@ pub use ui_text::{
     UI_TEXT_INK, UI_TEXT_LINE_HEIGHT, UI_TEXT_PAGE, UI_TEXT_PAIR, UI_TEXT_PAIR_LINE_HEIGHT,
     UI_TEXT_PAIR_SIZE, UI_TEXT_PARAGRAPH, UI_TEXT_PARAGRAPH_FILL, UI_TEXT_PARAGRAPH_SIZE,
     UI_TEXT_PARAGRAPH_WIDTH, UI_TEXT_SIZES_WORD, UI_TEXT_SMALL, UiTextLayout, ui_text_css,
-    ui_text_draw_list, ui_text_layout,
+    ui_text_draw_list, ui_text_layout, ui_text_pair_kerning,
 };
 pub use ui_text_input::{
     UI_TEXT_INPUT_CARET, UI_TEXT_INPUT_CARET_WIDTH, UI_TEXT_INPUT_INSET_X, UI_TEXT_INPUT_INSET_Y,

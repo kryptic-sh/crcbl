@@ -13,6 +13,49 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`crcbl_ui::font` shapes parsed text, and the per-char API is gone.**
+  `Font::kerning` and `Font::kerning_pairs` are removed (GPOS now applies
+  through the shaper; read a pair's kerning from `font::shape::shape`'s
+  advances), as are `font::fallback::map_char`, `map_text` and `Mapped`
+  (`fallback::cluster_face` picks a face per cluster instead). A
+  `crcbl_ui::edit::LineEdit` caret now stops only between clusters: Left and
+  Right step over a whole cluster, Backspace and Delete remove one, and a placed
+  caret, a selection or a word move that lands inside one is moved to its edge —
+  so `e` with U+0301, an emoji ZWJ sequence or a flag is one stop rather than
+  one per `char`.
+
+### Added
+
+- **OpenType shaping for parsed fonts, through `harfrust` 0.14**, a new
+  dependency of `crcbl-ui` under its `parsed-font` feature (HarfBuzz's Rust
+  port; it reads fonts through the `read-fonts` that `skrifa` already brings, so
+  it adds one crate). `font::shape::shape` turns text into `ShapedGlyph`s —
+  face, glyph, cluster, advance and offset in pixels — and `TextLayout`, the
+  paragraph breaker and a text input's caret stops all use it: GPOS kerning and
+  mark positioning, GSUB ligatures and contextual forms, and emoji ZWJ
+  sequences, skin tones, keycaps and flags joined by the font. A colour glyph
+  only GSUB reaches draws in colour, since a shaped glyph goes through
+  `ColorGlyphCache` as a cmap glyph does: in Segoe UI Emoji a ZWJ sequence, a
+  skin tone, a keycap and a tag flag (England's) each draw as one colour glyph;
+  its regional-indicator pairs still draw as two outlines, since Segoe has no
+  country-flag ligatures. Text is shaped left to right; there is no bidi.
+- **`font::cluster`**: the cluster rule — a base and its combining marks,
+  variation selectors, a ZWJ and the char it joins, skin-tone modifiers, tags
+  and regional-indicator pairs — with `clusters` and `caret_stops`.
+
+### Changed
+
+- **Font fallback is per cluster**: a cluster goes to the first face that maps
+  every char of it (variation selectors and joiners not counted), so a ZWJ
+  sequence is shaped whole in one face rather than split across faces.
+- **Each word, and each run of spaces, is shaped on its own**, so nothing kerns
+  across a space: a font that kerns a glyph against a space draws that pair
+  unkerned. A word broken between clusters by a paragraph's
+  `overflow-wrap: break-word` is shaped again on each side.
+- **`text-overflow: ellipsis` cuts between clusters**, never inside one.
+
 ## [0.2.1] - 2026-10-17
 
 ### Added
