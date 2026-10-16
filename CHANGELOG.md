@@ -48,6 +48,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   shrank under a deep offset no longer builds an empty window, and a list built
   for the first time since it left the page takes the viewport as its view
   rather than building only its overscan rows (pikr saw 2 rows of 4).
+- **Win32 sends `ShellEvent::FocusRefused` when the foreground lock keeps
+  another process in front.** An `Exclusive` panel's foreground counts as
+  granted only when `GetForegroundWindow` names the panel after
+  `SetForegroundWindow`, which can answer success under the lock; a launcher
+  shown from the background used to hear neither `Focus` nor `FocusRefused`.
 
 ## [0.2.0] - 2026-10-16
 

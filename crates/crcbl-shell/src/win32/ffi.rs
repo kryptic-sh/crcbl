@@ -1683,11 +1683,12 @@ unsafe extern "system" {
     // process that owns the foreground window, and CI has nobody to click on
     // ours. This is the click.
     pub fn SetForegroundWindow(hwnd: Handle) -> Bool32;
-    // Test-only, as the other half of that click: `SetForegroundWindow` can be
-    // refused, or honoured and then overtaken by another process, and neither
-    // shows up in anything this backend keeps. This is how a test confirms the
-    // foreground it depends on is really its own.
-    #[cfg(test)]
+    // The other half of that request: `SetForegroundWindow` can be refused,
+    // answer success while the foreground lock leaves another process in
+    // front, or be honoured and then overtaken, and none of it shows up in
+    // anything this backend keeps. A panel asks this afterwards to know whether
+    // the foreground is really its own (see `panel::foreground_granted`), and
+    // the tests ask it to confirm the foreground they depend on.
     pub fn GetForegroundWindow() -> Handle;
     // The window of this thread holding the keyboard focus, or null. Read once,
     // when a window's accessibility adapter is made: a window shown as it is

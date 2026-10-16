@@ -242,7 +242,9 @@ impl Win32Shell {
     ///
     /// `false` when the system refused the foreground, which it does to a
     /// process the user is not working in; the caller reports it as
-    /// [`FocusRefused`](crate::ShellEvent::FocusRefused).
+    /// [`FocusRefused`](crate::ShellEvent::FocusRefused). Judged by
+    /// [`foreground_granted`], which asks the system who holds the foreground
+    /// afterwards rather than trusting the request's answer.
     #[must_use]
     pub(super) fn show_panel(hwnd: Handle, keyboard: PanelKeyboard) -> bool {
         let command = match keyboard {
@@ -254,7 +256,10 @@ impl Win32Shell {
         unsafe { ffi::ShowWindow(hwnd, command) };
         if keyboard == PanelKeyboard::Exclusive {
             // SAFETY: a request about this shell's own window.
-            return unsafe { ffi::SetForegroundWindow(hwnd) } != 0;
+            let answered = unsafe { ffi::SetForegroundWindow(hwnd) };
+            // SAFETY: no arguments; the handle is only compared.
+            let foreground = unsafe { ffi::GetForegroundWindow() };
+            return foreground_granted(hwnd, answered, foreground);
         }
         true
     }
@@ -400,6 +405,18 @@ pub(super) enum AppBarNotice {
     FullScreenApp(bool),
 }
 
+/// Whether `SetForegroundWindow(hwnd)`, which answered `answered`, gave `hwnd`
+/// the foreground, when `GetForegroundWindow` reported `foreground` after it.
+///
+/// Both have to say so. The answer alone is not enough: under the foreground
+/// lock the call can answer success while another process keeps the
+/// foreground, and the panel then never hears `Focus` or anything else. A zero
+/// answer is taken at its word, as the call's documentation states it: the
+/// window was not brought to the foreground.
+pub(super) fn foreground_granted(hwnd: Handle, answered: ffi::Bool32, foreground: Handle) -> bool {
+    answered != 0 && ptr::eq(foreground, hwnd)
+}
+
 /// Decodes the `ABN_*` code and `lParam` of an appbar's callback message, or
 /// `None` for one a panel does nothing with.
 pub(super) const fn appbar_notice(notification: u32, param: isize) -> Option<AppBarNotice> {
@@ -439,5 +456,38 @@ mod tests {
         );
         assert_eq!(appbar_notice(STATE_CHANGE, 1), None);
         assert_eq!(appbar_notice(WINDOW_ARRANGE, 1), None);
+    }
+
+    /// **The foreground counts as granted only when the request said so and
+    /// the system then names the panel as the foreground window**: a success
+    /// answer while another process keeps the foreground, which is what the
+    /// foreground lock does to a launcher shown from the background, is a
+    /// refusal.
+    #[test]
+    fn the_foreground_is_granted_only_when_the_panel_holds_it_afterwards() {
+        // Distinct non-null stand-ins: the decision only compares handles.
+        let mut cells = [0_u8; 2];
+        let panel: Handle = (&raw mut cells[0]).cast();
+        let other: Handle = (&raw mut cells[1]).cast();
+        let none: Handle = ptr::null_mut();
+
+        assert!(foreground_granted(panel, 1, panel));
+        assert!(
+            foreground_granted(panel, -1, panel),
+            "any nonzero BOOL is TRUE"
+        );
+        assert!(
+            !foreground_granted(panel, 1, other),
+            "success while another window kept the foreground"
+        );
+        assert!(
+            !foreground_granted(panel, 1, none),
+            "success with no foreground window at all"
+        );
+        assert!(!foreground_granted(panel, 0, other));
+        assert!(
+            !foreground_granted(panel, 0, panel),
+            "a refusal is taken at its word"
+        );
     }
 }

@@ -34,15 +34,30 @@ each checked against the code here unless it says otherwise:
   directories matched by name table on Windows, the standard directories on
   macOS. No new external crate. It goes after the XPM slice and before SVG
   `<image>` and text.
-- **`FocusRefused` never arrives on Win32** when a panel taking the keyboard is
-  shown from a background process: `GetForegroundWindow` was another process,
-  and neither `FocusRefused` nor `Focus` came. Cause, read in `win32/panel.rs`'s
-  `show_panel`: it trusts `SetForegroundWindow`'s return value, which the
-  foreground lock can report as success while another process keeps the
-  foreground (the FFI comment on `SetForegroundWindow` already says so). Fix:
-  also require `GetForegroundWindow` to be the panel, which `ffi.rs` compiles
-  only for tests today. The hard part is a test: CI's process usually holds the
-  foreground lock, so a refusal has to be provoked, not waited for.
+- **Win32 `FocusRefused` has no desktop test; decided 2026-10-16 not to write
+  one.** `show_panel` now counts the foreground as granted only when
+  `SetForegroundWindow` answered success and `GetForegroundWindow` then names
+  the panel (`panel::foreground_granted`, unit-tested and mutation-checked
+  headlessly). That `show_panel` calls it, and that pikr's background launch now
+  gets `FocusRefused`, is verified by review only: pikr should confirm. No
+  deterministic refusal was found to provoke from one test process:
+  - Making another window of the same process the foreground first refuses
+    nothing: the foreground process may always move its own foreground.
+  - `LockSetForegroundWindow(LSFW_LOCK)` is documented to disable
+    `SetForegroundWindow`, but not whether it binds the locking process itself;
+    and if it refuses with a zero answer, the old code reported that refusal
+    too, so the test could not tell the fix from the bug it fixes.
+  - Whether a background process is refused at all depends on state the test
+    does not control: which process had the last input (on a runner with none,
+    any process may take the foreground), the foreground lock time-out, and
+    whatever else holds the runner's desktop (see the focus flakes in
+    docs/notes/ci.md).
+  - The candidate: a child process (the test binary re-run as a helper) that
+    takes the foreground, which a child of the foreground process may, and locks
+    it; then the parent shows an `Exclusive` panel and expects `FocusRefused`
+    with the child's window still in front. It needs a branch run of the
+    real-desktop job to show it goes red on the old code before it can be
+    trusted.
 - **A paragraph's inline runs paint no box.** A text span paints its
   `background-color`, border and radius since 2026-10-16, but a run is drawn by
   `emit_paragraph` fragment by fragment, so its box would be one rectangle per
@@ -282,9 +297,9 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      `SetForegroundWindow` when shown, and a refusal is
      `ShellEvent::FocusRefused { window }` (pikr item 9). Decided 2026-10-15, at
      pikr's request, over a `Focus { focused: false }` for a window that never
-     had focus, which a program could not tell from an ordinary focus loss.
-     Untested: no test can make the system refuse this process the foreground,
-     so the refusal path has run only in review.
+     had focus, which a program could not tell from an ordinary focus loss. The
+     decision is `panel::foreground_granted`, unit-tested; no desktop test
+     provokes a refusal (see pikr's port findings at the top).
    - **Verified:** `panel_styles`, `panel_rect`, `pixels`, `with_depth`,
      `popup_styles` and `popup_rect` unit tests on the Windows host, each
      mutation-checked locally. The real-desktop tests in `win32/shell/tests.rs`
