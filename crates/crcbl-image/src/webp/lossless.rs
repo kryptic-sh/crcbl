@@ -380,8 +380,38 @@ pub(super) fn decode_vp8l(data: &[u8], limits: &Limits) -> Result<Rgba8Image, Im
         return Err(malformed("a lossless version other than 0"));
     }
     let bytes = limits.rgba_bytes(width, height)?;
-    let (full_width, height) = (width as usize, height as usize);
+    let pixels = decode_stream(&mut bits, width as usize, height as usize)?;
+    let mut rgba = Vec::with_capacity(bytes);
+    for pixel in pixels {
+        rgba.extend_from_slice(&[
+            (pixel >> 16) as u8,
+            (pixel >> 8) as u8,
+            pixel as u8,
+            (pixel >> 24) as u8,
+        ]);
+    }
+    Ok(Rgba8Image::from_sized(width, height, rgba))
+}
 
+/// Decodes a lossless image stream with no header, `width` × `height`
+/// pixels the caller already knows and has checked against its limits, as
+/// ARGB words: how an `ALPH` chunk codes its alpha (RFC 9649 section
+/// 2.7.1.2).
+pub(super) fn decode_headerless(
+    data: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<Vec<u32>, ImageError> {
+    decode_stream(&mut Bits::new(data), width, height)
+}
+
+/// Decodes an image stream past its header: the transforms, then the
+/// entropy-coded image they apply to, as ARGB words.
+fn decode_stream(
+    bits: &mut Bits<'_>,
+    full_width: usize,
+    height: usize,
+) -> Result<Vec<u32>, ImageError> {
     let mut transforms = Vec::new();
     let mut seen = [false; 4];
     let mut coded_width = full_width;
@@ -395,7 +425,7 @@ pub(super) fn decode_vp8l(data: &[u8], limits: &Limits) -> Result<Rgba8Image, Im
                 let block_bits = bits.read(3)? + 2;
                 let blocks_wide = coded_width.div_ceil(1 << block_bits);
                 let blocks_high = height.div_ceil(1 << block_bits);
-                let data = decode_image(&mut bits, blocks_wide, blocks_high, false)?;
+                let data = decode_image(bits, blocks_wide, blocks_high, false)?;
                 if kind == 0 {
                     Transform::Predictor {
                         bits: block_bits,
@@ -411,7 +441,7 @@ pub(super) fn decode_vp8l(data: &[u8], limits: &Limits) -> Result<Rgba8Image, Im
             2 => Transform::SubtractGreen,
             _ => {
                 let size = bits.read(8)? as usize + 1;
-                let mut palette = decode_image(&mut bits, size, 1, false)?;
+                let mut palette = decode_image(bits, size, 1, false)?;
                 // The palette is coded as differences from the entry before.
                 for i in 1..palette.len() {
                     palette[i] = add_pixels(palette[i], palette[i - 1]);
@@ -431,7 +461,7 @@ pub(super) fn decode_vp8l(data: &[u8], limits: &Limits) -> Result<Rgba8Image, Im
         });
     }
 
-    let mut pixels = decode_image(&mut bits, coded_width, height, true)?;
+    let mut pixels = decode_image(bits, coded_width, height, true)?;
     let mut width = coded_width;
     for transform in transforms.iter().rev() {
         match transform {
@@ -464,21 +494,7 @@ pub(super) fn decode_vp8l(data: &[u8], limits: &Limits) -> Result<Rgba8Image, Im
     if width != full_width {
         return Err(malformed("a lossless image narrower than its header"));
     }
-
-    let mut rgba = Vec::with_capacity(bytes);
-    for pixel in pixels {
-        rgba.extend_from_slice(&[
-            (pixel >> 16) as u8,
-            (pixel >> 8) as u8,
-            pixel as u8,
-            (pixel >> 24) as u8,
-        ]);
-    }
-    Ok(Rgba8Image::from_sized(
-        full_width as u32,
-        height as u32,
-        rgba,
-    ))
+    Ok(pixels)
 }
 
 /// Each channel of `a` plus `b`'s, modulo 256.

@@ -46,31 +46,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   bitmap with an AND mask. Behind the `webp` feature, `webp::decode`: lossless
   WebP (every transform, the colour cache, LZ77 and meta prefix codes) in a
   simple or extended file, and an animation's first frame on its canvas, to the
-  pixels libwebp produces; lossy WebP is refused for now. Behind the `theme`
-  feature, `theme::IconThemes::lookup(name, size, scale)`: the freedesktop.org
-  Icon Theme Specification's lookup (the theme, what it `Inherits`,
-  caller-chosen fallback themes, `hicolor`, then bare files in
-  `/usr/share/pixmaps`; PNG before SVG before XPM; an exact size and scale
-  before the nearest), generic fallback names for a name that misses, absolute
-  paths passed through, `theme::SearchPath` from the XDG environment with extra
-  roots first (a tray's `IconThemePath`), hits kept and misses retried after a
-  caller-set delay, and `theme::FileVersion` (mtime and length) to key what a
-  caller makes of a file. Behind the `svg` feature,
-  `svg::decode(bytes, size, scale, &limits)`: SVG icons rendered by this crate
-  into a transparent `size × scale` square, the viewport fitted and centred. The
-  subset icon themes use — paths and the basic shapes, transforms, `use`,
-  presentation attributes, `style` and a `<style>` sheet of type, class and id
-  selectors, fills and strokes with joins, caps, miter limits and dashes, linear
-  and radial gradients, `clipPath`, `mask` and group opacity — and **anything
-  outside it is a decode error, never a partial icon**: text, images, filters,
-  patterns, markers, `symbol`, blend modes and animation are refused by name,
-  while editors' metadata (Inkscape, Sodipodi, RDF, `<title>`) is ignored by
-  design. The XML parser expands no DTD entity and fetches nothing; nesting,
-  element count, `use` instances, layers and dashes are capped. Measured against
-  resvg's renders of Adwaita, Papirus and breeze by the `svg_corpus` example,
-  which CI's `svg corpus` job runs. `raster`, the coverage rasteriser from
-  `crcbl-ui`, fills by `raster::FillRule::EvenOdd` as well as non-zero
-  (`Rasterizer::coverage_by`).
+  pixels libwebp produces; and lossy WebP, written here from RFC 6386: the VP8
+  key frame (segmentation, both loop filters with their deltas, any number of
+  token partitions, every intra mode), its `ALPH` alpha raw or losslessly coded
+  under any of its filters, in simple, extended and animated files, to exactly
+  the pixels libwebp's default decode produces (its "fancy" chroma upsampling
+  and fixed-point colour conversion). Behind the `theme` feature,
+  `theme::IconThemes::lookup(name, size, scale)`: the freedesktop.org Icon Theme
+  Specification's lookup (the theme, what it `Inherits`, caller-chosen fallback
+  themes, `hicolor`, then bare files in `/usr/share/pixmaps`; PNG before SVG
+  before XPM; an exact size and scale before the nearest), generic fallback
+  names for a name that misses, absolute paths passed through,
+  `theme::SearchPath` from the XDG environment with extra roots first (a tray's
+  `IconThemePath`), hits kept and misses retried after a caller-set delay, and
+  `theme::FileVersion` (mtime and length) to key what a caller makes of a file.
+  Behind the `svg` feature, `svg::decode(bytes, size, scale, &limits)`: SVG
+  icons rendered by this crate into a transparent `size × scale` square, the
+  viewport fitted and centred. The subset icon themes use — paths and the basic
+  shapes, transforms, `use`, presentation attributes, `style` and a `<style>`
+  sheet of type, class and id selectors, fills and strokes with joins, caps,
+  miter limits and dashes, linear and radial gradients, `clipPath`, `mask` and
+  group opacity — and **anything outside it is a decode error, never a partial
+  icon**: text, images, filters, patterns, markers, `symbol`, blend modes and
+  animation are refused by name, while editors' metadata (Inkscape, Sodipodi,
+  RDF, `<title>`) is ignored by design. The XML parser expands no DTD entity and
+  fetches nothing; nesting, element count, `use` instances, layers and dashes
+  are capped. Measured against resvg's renders of Adwaita, Papirus and breeze by
+  the `svg_corpus` example, which CI's `svg corpus` job runs. `raster`, the
+  coverage rasteriser from `crcbl-ui`, fills by `raster::FillRule::EvenOdd` as
+  well as non-zero (`Rasterizer::coverage_by`).
 - **Dead keys and Compose sequences type on Wayland and X11.** A dead key
   commits nothing and the key after it commits what the two compose to (`´` then
   `e` is `é`), through libxkbcommon's compose module and the user's locale's
