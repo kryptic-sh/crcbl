@@ -739,7 +739,8 @@ jobs:
         timeout-minutes: 8
         uses: ./.github/actions/apt-packages
         with:
-          packages: libasound2-dev libxkbcommon0 libfontconfig1 fonts-dejavu-core
+          packages:
+            libasound2-dev libxkbcommon0 libfontconfig1 fonts-dejavu-core
       # THE VIEWER'S MODEL SHELF, and this is the only job that fetches it.
       #
       # `apps/viewer` ships a shelf of Khronos CC0 models — about 138 MB, of
