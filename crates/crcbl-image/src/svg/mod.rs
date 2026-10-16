@@ -31,10 +31,13 @@
 //! `transform`; presentation attributes, the `style` attribute and a
 //! `<style>` sheet of type, class and id selectors; fill and stroke with
 //! their opacities, rules, joins, caps, miter limits and dashes; colours,
-//! `currentColor`, linear and radial gradients; `clipPath` and `mask`; and
-//! group opacity. What is refused, among other things: text, images,
-//! filters, patterns, markers, `symbol`, nested `svg`, `switch`, blend
-//! modes, animation, and CSS beyond simple selectors.
+//! `currentColor`, linear and radial gradients; `clipPath` and `mask`;
+//! group opacity; and filters of the primitives drop shadows are made of
+//! (`feGaussianBlur`, `feOffset`, `feFlood`, `feComposite`, `feColorMatrix`
+//! and `feMerge`). What is refused, among other things: text, images, other
+//! filter primitives and filter functions, patterns, markers, `symbol`,
+//! nested `svg`, `switch`, blend modes, animation, and CSS beyond simple
+//! selectors.
 //!
 //! # Fitting the square
 //!
@@ -45,13 +48,15 @@
 //! # Hostile files
 //!
 //! The XML parser expands no DTD entities and fetches nothing; the tree is
-//! capped in depth and size; `use` instances, layers and dashes are capped
-//! where a small file could multiply them; and the canvas passes the
-//! caller's [`Limits`] before it is allocated.
+//! capped in depth and size; `use` instances, layers, dashes and filter
+//! primitives are capped where a small file could multiply them; a filter
+//! region is cut to the canvas; and the canvas passes the caller's
+//! [`Limits`] before it is allocated.
 
 mod canvas;
 mod color;
 mod css;
+mod filter;
 mod paint;
 mod path;
 mod render;

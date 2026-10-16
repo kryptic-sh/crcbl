@@ -5,13 +5,14 @@
 //!
 //! An element in a rendering position is drawn if it is a group (`g`), a
 //! `use` or a basic shape; skipped if it is one SVG never renders in place
-//! ([`NOT_RENDERED`]: definitions, paint servers, clip paths and masks,
-//! descriptions, style sheets), since those only matter where something
-//! references them; and refused otherwise. A reference is where the target
-//! is checked: a `use` of a `symbol`, a fill of a `pattern`, a `filter`, all
-//! refuse the file there. An element outside the SVG namespace is an
-//! editor's private data and is never rendered by any SVG renderer, so it is
-//! skipped with its whole subtree.
+//! ([`NOT_RENDERED`]: definitions, paint servers, clip paths, masks and
+//! filters, descriptions, style sheets), since those only matter where
+//! something references them; and refused otherwise. A reference is where
+//! the target is checked: a `use` of a `symbol`, a fill of a `pattern`, a
+//! filter with a primitive outside the subset, all refuse the file there.
+//! An element outside the SVG namespace is an editor's private data and is
+//! never rendered by any SVG renderer, so it is skipped with its whole
+//! subtree.
 //!
 //! A reference to an id nothing has is not refused: SVG defines what it
 //! means. A `use` of nothing draws nothing, a paint server that is missing
@@ -21,11 +22,14 @@
 //!
 //! # Group effects
 //!
-//! An element with `opacity` below one, a `clip-path` or a `mask` is drawn
-//! into a layer of its own, which is then composited scaled by its opacity,
-//! its clip path's coverage and its mask's value at each pixel: SVG's
-//! compositing model, in which a group's opacity applies to the group as a
-//! whole, not to each of its children.
+//! An element with `opacity` below one, a `clip-path`, a `mask` or a
+//! `filter` is drawn into a layer of its own. The filter, if any, replaces
+//! the layer with its result; then the layer is composited scaled by its
+//! opacity, its clip path's coverage and its mask's value at each pixel:
+//! SVG's compositing model, in which a group's effects apply to the group as
+//! a whole, not to each of its children, filter first.
+
+mod filter;
 
 use std::collections::HashMap;
 
@@ -219,6 +223,14 @@ fn view_box_transform(
     let tx = -view_box.x * sx + ax * (width - view_box.width * sx);
     let ty = -view_box.y * sy + ay * (height - view_box.height * sy);
     Ok(Transform::new(sx, 0.0, 0.0, sy, tx, ty))
+}
+
+/// Whether an element styled `style` is drawn through a layer of its own.
+fn has_effects(style: &Style) -> bool {
+    style.opacity < 1.0
+        || style.clip_path.is_some()
+        || style.mask.is_some()
+        || style.filter.is_some()
 }
 
 /// The box mapped by `transform`, as the box round its corners.
@@ -468,7 +480,7 @@ impl<'a> Renderer<'a> {
         if !style.display {
             return Ok(());
         }
-        if style.opacity >= 1.0 && style.clip_path.is_none() && style.mask.is_none() {
+        if !has_effects(style) {
             return self.content(0, style, transform, canvas);
         }
         let mut layer = Canvas::new(self.side);
@@ -595,7 +607,7 @@ impl<'a> Renderer<'a> {
         if transform.invert().is_none() {
             return Ok(());
         }
-        if style.opacity >= 1.0 && style.clip_path.is_none() && style.mask.is_none() {
+        if !has_effects(&style) {
             return self.content(index, &style, transform, canvas);
         }
         if style.opacity <= 0.0 {
@@ -622,12 +634,24 @@ impl<'a> Renderer<'a> {
         canvas: &mut Canvas,
         layer: &mut Canvas,
     ) -> Result<(), ImageError> {
-        self.content(index, style, transform, layer)?;
-        let bbox = if style.clip_path.is_some() || style.mask.is_some() {
+        let bbox = if style.clip_path.is_some() || style.mask.is_some() || style.filter.is_some() {
             self.object_box(index)?
         } else {
             None
         };
+        let filter = match &style.filter {
+            Some(id) => match self.filter_plan(id, transform, bbox)? {
+                Some(filter) => Some(filter),
+                // SVG 1.1: an element whose filter cannot apply is not
+                // rendered.
+                None => return Ok(()),
+            },
+            None => None,
+        };
+        self.content(index, style, transform, layer)?;
+        if let Some((region, plan)) = filter {
+            self.apply_filter(region, &plan, layer);
+        }
         let clip = match &style.clip_path {
             Some(id) => Some(self.clip(id, transform, bbox)?),
             None => None,

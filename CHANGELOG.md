@@ -65,16 +65,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   viewport fitted and centred. The subset icon themes use — paths and the basic
   shapes, transforms, `use`, presentation attributes, `style` and a `<style>`
   sheet of type, class and id selectors, fills and strokes with joins, caps,
-  miter limits and dashes, linear and radial gradients, `clipPath`, `mask` and
-  group opacity — and **anything outside it is a decode error, never a partial
-  icon**: text, images, filters, patterns, markers, `symbol`, blend modes and
-  animation are refused by name, while editors' metadata (Inkscape, Sodipodi,
-  RDF, `<title>`) is ignored by design. The XML parser expands no DTD entity and
-  fetches nothing; nesting, element count, `use` instances, layers and dashes
-  are capped. Measured against resvg's renders of Adwaita, Papirus and breeze by
-  the `svg_corpus` example, which CI's `svg corpus` job runs. `raster`, the
-  coverage rasteriser from `crcbl-ui`, fills by `raster::FillRule::EvenOdd` as
-  well as non-zero (`Rasterizer::coverage_by`).
+  miter limits and dashes, linear and radial gradients, `clipPath`, `mask`,
+  group opacity, and the `filter` element with the primitives drop shadows are
+  made of (`feGaussianBlur` by the Filter Effects specification's three-box
+  approximation, `feOffset`, `feFlood`, `feComposite` with every operator
+  including `arithmetic`, `feColorMatrix` of every type, and `feMerge`), their
+  regions, units, subregions and `in`/`result` graph, in linearRGB or by
+  `color-interpolation-filters` sRGB — and **anything outside it is a decode
+  error, never a partial icon**: text, images, other filter primitives, filter
+  functions, patterns, markers, `symbol`, blend modes and animation are refused
+  by name, while editors' metadata (Inkscape, Sodipodi, RDF, `<title>`) is
+  ignored by design. The XML parser expands no DTD entity and fetches nothing;
+  nesting, element count, `use` instances, layers, dashes and filter primitives
+  are capped, and a filter region is cut to the canvas. Measured against resvg's
+  renders of Adwaita, Papirus and breeze by the `svg_corpus` example, which CI's
+  `svg corpus` job runs. `raster`, the coverage rasteriser from `crcbl-ui`,
+  fills by `raster::FillRule::EvenOdd` as well as non-zero
+  (`Rasterizer::coverage_by`).
 - **Dead keys and Compose sequences type on Wayland and X11.** A dead key
   commits nothing and the key after it commits what the two compose to (`´` then
   `e` is `é`), through libxkbcommon's compose module and the user's locale's

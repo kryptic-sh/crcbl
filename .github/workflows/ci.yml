@@ -3163,9 +3163,9 @@ jobs:
       - name: Render every icon with both and compare
         run: >-
           cargo run --release --locked -p crcbl-image --features svg,png
-          --example svg_corpus -- --show 20 --floor adwaita=0.970 --floor
-          papirus=0.997 --floor breeze=0.985 --floor apps-papirus=0.996 --floor
-          apps-breeze=0.873 adwaita="$RUNNER_TEMP/adwaita/Adwaita"
+          --example svg_corpus -- --show 20 --floor adwaita=0.990 --floor
+          papirus=0.997 --floor breeze=0.989 --floor apps-papirus=0.996 --floor
+          apps-breeze=0.912 adwaita="$RUNNER_TEMP/adwaita/Adwaita"
           papirus="$RUNNER_TEMP/papirus/Papirus/48x48"
           breeze="$RUNNER_TEMP/breeze/icons"
           apps-papirus="$RUNNER_TEMP/papirus/Papirus/48x48/apps"

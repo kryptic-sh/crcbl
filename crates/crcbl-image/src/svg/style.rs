@@ -13,7 +13,7 @@
 //!   effect on what this renderer can draw. Text properties (text itself is
 //!   refused, so they can never take effect), rendering-quality hints that
 //!   leave the geometry alone, properties of features that are refused where
-//!   they would apply (filters, `solidColor`), and `isolation`, which only
+//!   they would apply (lighting, `solidColor`), and `isolation`, which only
 //!   changes a picture that uses blend modes, which are refused. An editor's
 //!   vendor-prefixed properties (`-inkscape-…`) are ignored the same way.
 //! * **Everything else is refused**, so a property this list has never heard
@@ -36,11 +36,14 @@ pub(super) enum Property {
     ClipPath,
     ClipRule,
     Color,
+    ColorInterpolationFilters,
     Display,
     Fill,
     FillOpacity,
     FillRule,
     Filter,
+    FloodColor,
+    FloodOpacity,
     Marker,
     MarkerEnd,
     MarkerMid,
@@ -69,11 +72,17 @@ const PROPERTIES: &[(&str, Property)] = &[
     ("clip-path", Property::ClipPath),
     ("clip-rule", Property::ClipRule),
     ("color", Property::Color),
+    (
+        "color-interpolation-filters",
+        Property::ColorInterpolationFilters,
+    ),
     ("display", Property::Display),
     ("fill", Property::Fill),
     ("fill-opacity", Property::FillOpacity),
     ("fill-rule", Property::FillRule),
     ("filter", Property::Filter),
+    ("flood-color", Property::FloodColor),
+    ("flood-opacity", Property::FloodOpacity),
     ("marker", Property::Marker),
     ("marker-end", Property::MarkerEnd),
     ("marker-mid", Property::MarkerMid),
@@ -155,13 +164,11 @@ pub(super) const IGNORED_PROPERTIES: &[&str] = &[
     "color-rendering",
     "image-rendering",
     "text-rendering",
-    // Properties of features refused where they would apply: filters,
-    // lighting, the `solidColor` paint server, and nested viewports.
+    // Properties of features refused where they would apply: lighting
+    // filters, a filter's background input, the `solidColor` paint server,
+    // and nested viewports.
     "clip",
-    "color-interpolation-filters",
     "enable-background",
-    "flood-color",
-    "flood-opacity",
     "lighting-color",
     "overflow",
     "solid-color",
@@ -401,6 +408,10 @@ fn func_iri(text: &str) -> Option<Option<String>> {
         return Some(None);
     }
     let inner = text.strip_prefix("url(")?.strip_suffix(')')?;
+    if inner.contains(')') {
+        // More than one reference, which none of these properties takes.
+        return None;
+    }
     iri(inner).map(Some)
 }
 
@@ -438,11 +449,16 @@ pub(super) struct Style {
     pub clip_rule: FillRule,
     /// Whether the stroke is painted before the fill.
     pub stroke_first: bool,
+    /// Whether filter primitives work in linearRGB rather than sRGB.
+    pub filters_linear: bool,
     // Not inherited.
     pub opacity: f32,
     pub display: bool,
     pub clip_path: Option<String>,
     pub mask: Option<String>,
+    pub filter: Option<String>,
+    pub flood_color: ColorValue,
+    pub flood_opacity: f32,
     pub stop_color: ColorValue,
     pub stop_opacity: f32,
     /// `mask-type: alpha` rather than luminance.
@@ -468,10 +484,14 @@ impl Style {
             visible: true,
             clip_rule: FillRule::NonZero,
             stroke_first: false,
+            filters_linear: true,
             opacity: 1.0,
             display: true,
             clip_path: None,
             mask: None,
+            filter: None,
+            flood_color: ColorValue::Color(Color::BLACK),
+            flood_opacity: 1.0,
             stop_color: ColorValue::Color(Color::BLACK),
             stop_opacity: 1.0,
             mask_alpha: false,
@@ -484,8 +504,8 @@ impl Style {
     /// # Errors
     ///
     /// A value that does not parse, or that names an unsupported feature
-    /// (a filter, a marker, a blend mode, a non-scaling stroke, crisp-edged
-    /// rendering), is unsupported.
+    /// (a filter function, a marker, a blend mode, a non-scaling stroke,
+    /// crisp-edged rendering), is unsupported.
     pub fn compute(
         specified: &Specified,
         parent: &Self,
@@ -498,6 +518,9 @@ impl Style {
             display: initial.display,
             clip_path: None,
             mask: None,
+            filter: None,
+            flood_color: initial.flood_color,
+            flood_opacity: initial.flood_opacity,
             stop_color: initial.stop_color,
             stop_opacity: initial.stop_opacity,
             mask_alpha: initial.mask_alpha,
@@ -535,6 +558,7 @@ impl Style {
                 Property::StrokeOpacity => style.stroke_opacity = opacity()?,
                 Property::Opacity => style.opacity = opacity()?,
                 Property::StopOpacity => style.stop_opacity = opacity()?,
+                Property::FloodOpacity => style.flood_opacity = opacity()?,
                 Property::FillRule => style.fill_rule = rule()?,
                 Property::ClipRule => style.clip_rule = rule()?,
                 Property::StrokeWidth => {
@@ -589,6 +613,18 @@ impl Style {
                     };
                 }
                 Property::StopColor => style.stop_color = color::parse(value).ok_or_else(refuse)?,
+                Property::FloodColor => {
+                    style.flood_color = color::parse(value).ok_or_else(refuse)?
+                }
+                Property::ColorInterpolationFilters => {
+                    // `auto` leaves the choice to the renderer, and this one
+                    // takes the initial value, as resvg does.
+                    style.filters_linear = match value {
+                        "auto" | "linearRGB" => true,
+                        "sRGB" => false,
+                        _ => return Err(refuse()),
+                    };
+                }
                 Property::Visibility => {
                     style.visible = match value {
                         "visible" => true,
@@ -605,6 +641,9 @@ impl Style {
                 }
                 Property::ClipPath => style.clip_path = func_iri(value).ok_or_else(refuse)?,
                 Property::Mask => style.mask = func_iri(value).ok_or_else(refuse)?,
+                // A reference to one `filter` element; filter functions and
+                // lists of filters are not drawn.
+                Property::Filter => style.filter = func_iri(value).ok_or_else(refuse)?,
                 Property::MaskType => {
                     style.mask_alpha = match value {
                         "luminance" => false,
@@ -632,8 +671,7 @@ impl Style {
                 }
                 // Features this renderer does not have: their initial value
                 // is accepted, and nothing else.
-                Property::Filter
-                | Property::Marker
+                Property::Marker
                 | Property::MarkerStart
                 | Property::MarkerMid
                 | Property::MarkerEnd => {
@@ -679,15 +717,18 @@ impl Style {
             Property::Visibility => self.visible = parent.visible,
             Property::ClipRule => self.clip_rule = parent.clip_rule,
             Property::PaintOrder => self.stroke_first = parent.stroke_first,
+            Property::ColorInterpolationFilters => self.filters_linear = parent.filters_linear,
             Property::Opacity => self.opacity = parent.opacity,
             Property::Display => self.display = parent.display,
             Property::ClipPath => self.clip_path = parent.clip_path.clone(),
             Property::Mask => self.mask = parent.mask.clone(),
+            Property::Filter => self.filter = parent.filter.clone(),
+            Property::FloodColor => self.flood_color = parent.flood_color,
+            Property::FloodOpacity => self.flood_opacity = parent.flood_opacity,
             Property::StopColor => self.stop_color = parent.stop_color,
             Property::StopOpacity => self.stop_opacity = parent.stop_opacity,
             Property::MaskType => self.mask_alpha = parent.mask_alpha,
-            Property::Filter
-            | Property::Marker
+            Property::Marker
             | Property::MarkerStart
             | Property::MarkerMid
             | Property::MarkerEnd
@@ -807,6 +848,43 @@ mod tests {
         );
     }
 
+    /// **The filter properties parse and inherit as Filter Effects defines
+    /// them**: `color-interpolation-filters` is inherited and starts as
+    /// linearRGB, `flood-color` and `flood-opacity` and `filter` are not.
+    #[test]
+    fn filter_properties_follow_their_definitions() {
+        let styles = styles(
+            r##"<svg xmlns="http://www.w3.org/2000/svg">
+<g style="color-interpolation-filters: sRGB; filter: url('#f')" flood-color="red" flood-opacity="0.5">
+  <rect/>
+  <rect color-interpolation-filters="auto" flood-color="currentColor" color="blue" flood-opacity="25%" filter="none"/>
+</g>
+</svg>"##,
+        )
+        .expect("styles");
+        assert!(styles[0].filters_linear, "linearRGB at first");
+        let (group, plain, own) = (&styles[1], &styles[2], &styles[3]);
+        assert!(!group.filters_linear);
+        assert_eq!(group.filter.as_deref(), Some("f"));
+        assert_eq!(group.flood_opacity, 0.5);
+        assert_eq!(group.flood_color, ColorValue::Color(Color::rgb8(255, 0, 0)));
+        assert!(
+            !plain.filters_linear,
+            "color-interpolation-filters is inherited"
+        );
+        assert_eq!(plain.filter, None, "filter is not");
+        assert_eq!(plain.flood_opacity, 1.0, "nor flood-opacity");
+        assert_eq!(
+            plain.flood_color,
+            ColorValue::Color(Color::BLACK),
+            "nor flood-color"
+        );
+        assert!(own.filters_linear, "auto is linearRGB");
+        assert_eq!(own.filter, None);
+        assert_eq!(own.flood_opacity, 0.25);
+        assert_eq!(own.resolve(own.flood_color), Color::rgb8(0, 0, 255));
+    }
+
     /// **Values parse to what they mean**: lengths in every unit, opacities
     /// as numbers or percentages, paint servers with fallbacks, dash arrays
     /// and paint order.
@@ -850,7 +928,9 @@ mod tests {
         let svg = |body: &str| format!(r#"<svg xmlns="http://www.w3.org/2000/svg">{body}</svg>"#);
         for body in [
             r#"<rect style="fill: hsl(0, 50%, 50%)"/>"#,
-            r#"<rect filter="url(#blur)"/>"#,
+            r#"<rect filter="blur(2px)"/>"#,
+            r#"<rect filter="url(#a) url(#b)"/>"#,
+            r#"<rect color-interpolation-filters="optimizeSpeed"/>"#,
             r#"<rect marker-end="url(#m)"/>"#,
             r#"<rect style="mix-blend-mode: multiply"/>"#,
             r#"<rect vector-effect="non-scaling-stroke"/>"#,

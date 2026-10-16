@@ -80,6 +80,20 @@ impl Canvas {
         }
     }
 
+    /// A pixel's premultiplied channels in `0..=1`.
+    pub fn premultiplied(&self, index: usize) -> [f32; 4] {
+        let pixel = &self.pixels[index * 4..index * 4 + 4];
+        [0, 1, 2, 3].map(|channel| f32::from(pixel[channel]) / 255.0)
+    }
+
+    /// Replaces every pixel by `pixel(index)`, premultiplied channels in
+    /// `0..=1`: a filter's result.
+    pub fn replace(&mut self, mut pixel: impl FnMut(usize) -> [f32; 4]) {
+        for (index, out) in self.pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            *out = pixel(index).map(byte);
+        }
+    }
+
     /// Each pixel's alpha in `0..=1`.
     pub fn alpha(&self, index: usize) -> f32 {
         f32::from(self.pixels[index * 4 + 3]) / 255.0

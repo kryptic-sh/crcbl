@@ -5,6 +5,8 @@
 
 use super::*;
 
+mod filter;
+
 const SVG: &str =
     r#"xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink""#;
 
@@ -761,7 +763,8 @@ fn unsupported_features_refuse_the_file() {
     for body in [
         r#"<text>hi</text>"#,
         r#"<image href="x.png" width="2" height="2"/>"#,
-        r#"<filter id="f"><feGaussianBlur stdDeviation="1"/></filter><rect width="2" height="2" filter="url(#f)"/>"#,
+        r#"<filter id="f"><feTurbulence baseFrequency="0.1"/></filter><rect width="2" height="2" filter="url(#f)"/>"#,
+        r#"<rect width="2" height="2" style="filter: blur(1px)"/>"#,
         r#"<pattern id="p" width="1" height="1"/><rect width="2" height="2" fill="url(#p)"/>"#,
         r#"<marker id="m"/><path d="M0 0 H2" stroke="red" marker-end="url(#m)"/>"#,
         r##"<symbol id="s"><rect width="2" height="2"/></symbol><use href="#s"/>"##,
