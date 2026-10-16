@@ -6,7 +6,7 @@ use crcbl_font::{FontQuery, SystemFonts};
 
 /// The file name of `found`'s path, lower-cased: what a test compares,
 /// since Windows does not keep one case for its font files.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
 fn file_name(found: &crcbl_font::FontMatch) -> String {
     found
         .path
@@ -18,7 +18,7 @@ fn file_name(found: &crcbl_font::FontMatch) -> String {
 
 /// `found`'s face, read as a font of its own, describes itself as `family`:
 /// the path and index point at the face that was reported.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
 fn reads_as(found: &crcbl_font::FontMatch, family: &str) {
     use skrifa::MetadataProvider;
     use skrifa::string::StringId;
@@ -118,5 +118,86 @@ mod windows {
         assert!(at("Tahoma") < at("Segoe UI Emoji"));
         at("Segoe UI Symbol");
         assert!(!families.contains(&"Segoe UI"), "{families:?}");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod fontconfig {
+    use crcbl_font::{BOLD_WEIGHT, FontStyle, Source};
+
+    use super::*;
+
+    /// A `SystemFonts` that reached fontconfig, or a failure saying why not:
+    /// the walk it falls back to would answer these lookups too, and say
+    /// nothing about fontconfig.
+    fn fontconfig() -> SystemFonts {
+        let fonts = SystemFonts::new();
+        assert_eq!(
+            fonts.source(),
+            Source::Fontconfig,
+            "libfontconfig.so.1 did not load: install fontconfig (CI's image has it)"
+        );
+        fonts
+    }
+
+    #[test]
+    fn dejavu_sans_is_found_in_its_regular_and_bold_faces() {
+        let fonts = fontconfig();
+        let regular = fonts
+            .find(&FontQuery::new("DejaVu Sans"))
+            .expect("DejaVu Sans is installed");
+        assert_eq!(
+            (
+                regular.family.as_str(),
+                regular.index,
+                regular.weight,
+                regular.style
+            ),
+            ("DejaVu Sans", 0, 400, FontStyle::Normal)
+        );
+        assert_eq!(file_name(&regular), "dejavusans.ttf");
+        reads_as(&regular, "DejaVu Sans");
+        let bold = fonts
+            .find(&FontQuery::new("dejavu sans").weight(BOLD_WEIGHT))
+            .expect("DejaVu Sans Bold is installed");
+        assert_eq!(file_name(&bold), "dejavusans-bold.ttf");
+        assert_eq!(bold.weight, BOLD_WEIGHT);
+    }
+
+    #[test]
+    fn monospace_resolves_to_fontconfigs_choice() {
+        let fonts = fontconfig();
+        let mono = fonts
+            .find(&FontQuery::new("monospace"))
+            .expect("a monospace face");
+        assert_eq!(mono.family, "DejaVu Sans Mono");
+        assert_eq!(file_name(&mono), "dejavusansmono.ttf");
+        let bold = fonts
+            .find(&FontQuery::new("monospace").weight(BOLD_WEIGHT))
+            .expect("a bold monospace face");
+        assert_eq!(file_name(&bold), "dejavusansmono-bold.ttf");
+    }
+
+    #[test]
+    fn emoji_is_an_emoji_family_or_nothing() {
+        // fontconfig answers its default text face for `emoji` on a system
+        // with no emoji font, as WSL's Ubuntu is; that is a miss.
+        let fonts = fontconfig();
+        if let Some(emoji) = fonts.find(&FontQuery::new("emoji")) {
+            assert!(emoji.family.contains("Emoji"), "{emoji:?}");
+        }
+    }
+
+    #[test]
+    fn fallbacks_are_fontconfigs_sort_without_the_family_itself() {
+        let fonts = fontconfig();
+        let list = fonts.fallbacks(&FontQuery::new("DejaVu Sans"));
+        assert!(!list.is_empty(), "fontconfig sorted no other face");
+        assert!(list.iter().all(|m| m.family != "DejaVu Sans"), "{list:?}");
+        assert!(list.iter().all(|m| m.path.is_file()), "{list:?}");
+        for (at, m) in list.iter().enumerate() {
+            let repeated = list[..at].iter().any(|known| known.family == m.family);
+            assert!(!repeated, "{} is listed twice: {list:?}", m.family);
+        }
     }
 }

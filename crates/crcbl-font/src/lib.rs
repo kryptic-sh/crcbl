@@ -39,6 +39,24 @@
 //! UI Symbol, Microsoft YaHei, Yu Gothic, Malgun Gothic and Arial Unicode MS,
 //! each where installed.
 //!
+//! ## Linux and FreeBSD
+//!
+//! [`Source::Fontconfig`]: `libfontconfig.so.1`, loaded at run time, answers
+//! as `fc-match` does, the system's and the user's configuration included,
+//! and generic families are fontconfig's. `find` keeps fontconfig's face only
+//! when it is of the family asked for or of one configuration put in that
+//! family's place with a strong binding (the metric-compatible aliases, Arial
+//! to Liberation Sans, are), since fontconfig matches its default face for a
+//! family nothing installs. Fallbacks are `FcFontSort`'s order, trimmed to
+//! the faces that add coverage, as `fc-match --sort` lists them.
+//!
+//! Without fontconfig, [`Source::Scan`]: `$XDG_DATA_HOME/fonts`, `~/.fonts`,
+//! `/usr/share/fonts` and `/usr/local/share/fonts` are walked by name table,
+//! **ignoring every fontconfig rule**; generic families are the first
+//! installed of DejaVu, Noto and Liberation's, `emoji` Noto Color Emoji, and
+//! fallbacks DejaVu Sans, Noto Sans, Noto Sans CJK SC, Noto Sans Symbols and
+//! Symbols 2, and Noto Color Emoji, each where installed.
+//!
 //! ## Every other target
 //!
 //! [`Source::None`], until its platform's source lands: every lookup misses.
@@ -75,7 +93,10 @@ mod sfnt;
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod platform;
-#[cfg(not(windows))]
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[path = "fontconfig.rs"]
+mod platform;
+#[cfg(not(any(windows, target_os = "linux", target_os = "freebsd")))]
 #[path = "none.rs"]
 mod platform;
 
@@ -226,8 +247,9 @@ impl SystemFonts {
 
     /// The faces to try, in order, for a char `query`'s face has no glyph for:
     /// what `crcbl-ui`'s `Ui::set_fallback_fonts` takes, for CJK, symbols and
-    /// emoji. The query's own family is left out, and so is a face listed
-    /// twice; empty when the system offers none.
+    /// emoji. The query's own family is left out, and every other family
+    /// appears once, where it first would; empty when the system offers
+    /// none.
     #[must_use]
     pub fn fallbacks(&self, query: &FontQuery) -> Vec<FontMatch> {
         self.platform.fallbacks(query)
@@ -316,8 +338,9 @@ impl Defaults {
     }
 }
 
-/// `candidates` in order, without the faces of `primary`'s family and
-/// without a face listed before.
+/// `candidates` in order, without the faces of `primary`'s family, and with
+/// only the first face of every other: a second face of a family listed
+/// already adds a weight or style, not a script.
 fn ordered(
     primary: Option<&FontMatch>,
     candidates: impl IntoIterator<Item = FontMatch>,
@@ -328,7 +351,7 @@ fn ordered(
             primary.is_some_and(|primary| same_family(&primary.family, &candidate.family));
         let listed = out
             .iter()
-            .any(|known| known.path == candidate.path && known.index == candidate.index);
+            .any(|known| same_family(&known.family, &candidate.family));
         if !primary_family && !listed {
             out.push(candidate);
         }
@@ -404,10 +427,22 @@ mod tests {
                 found("Tahoma", "tahoma.ttf", 0),
                 found("Meiryo", "meiryo.ttc", 0),
                 found("Meiryo UI", "meiryo.ttc", 1),
+                // Another face of a family already listed: its bold.
+                found("TAHOMA", "tahomabd.ttf", 0),
             ],
         );
-        let names: Vec<_> = list.iter().map(|m| (m.family.as_str(), m.index)).collect();
-        assert_eq!(names, [("Tahoma", 0), ("Meiryo UI", 1), ("Meiryo", 0)]);
+        let names: Vec<_> = list
+            .iter()
+            .map(|m| (m.family.as_str(), m.path.to_str().unwrap()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("Tahoma", "tahoma.ttf"),
+                ("Meiryo UI", "meiryo.ttc"),
+                ("Meiryo", "meiryo.ttc")
+            ]
+        );
         // With no primary, only repeats go.
         let list = ordered(None, [primary.clone(), primary.clone()]);
         assert_eq!(list, [primary]);

@@ -47,7 +47,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and per-user) narrow which files are opened and each file's name table
   decides, with no walk of the Fonts directory; fallbacks are the family's
   `FontLink\SystemLink` faces, then Segoe UI, Segoe UI Emoji, Segoe UI Symbol
-  and the CJK faces where installed.
+  and the CJK faces where installed. On Linux and FreeBSD, fontconfig, loaded
+  at run time, answers as `fc-match` does, user configuration included, with
+  `FcFontSort`'s order as the fallbacks; without `libfontconfig.so.1` the
+  standard font directories are walked by name table instead, ignoring
+  fontconfig's rules.
 
 ### Changed
 
