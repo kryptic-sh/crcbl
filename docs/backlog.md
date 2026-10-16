@@ -135,7 +135,12 @@ are ordinary S1 layer surfaces (overlay, exclusive zone 0, a chosen output)
 opened from its control socket with no input serial, so they cannot be grabbing
 popups. **Open, nothing asked yet:** closing a panel when the user clicks the
 empty desktop, which focus loss does not cover; lyr measures what Hyprland does
-in its M5 before asking.
+in its M5 before asking. **lyr takes `crcbl-font`, not fontdb (the owner's
+choice, 2026-10-17)**, pinning crcbl main by git revision from its M1 until
+crcbl's next release; lyr's own release needs `crcbl-font` on crates.io, which
+0.2.0 predates. Proposed, not yet confirmed by the owner: release once SVG text
+is on main and green, minor or patch decided then by whether a public signature
+changed since 0.2.0.
 
 **Done 2026-10-16 for lyr's M7: a password content type on the text-input
 seam.** `Shell::set_text_input(window, Option<TextPurpose>)` replaced
