@@ -642,8 +642,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       5642 (98.5%), 45 differ, 37 refused (22 filters, 6 `<text>`, 5 Inkscape
       `<flowRoot>`, 2 files whose namespace URIs are DTD entities, a malformed
       `fill`, a misspelt `tyle` attribute). Application icons, the hicolor kind,
-      inside those: Papirus `48x48/apps` 3834 of 3845 (99.7%), breeze `apps/48`
-      182 of 206 (88.3%, its refusals the same filters and text). CI's
+      inside those: Papirus `48x48/apps` 3834 of 3845 (99.7%), breeze 48-pixel
+      `apps` 182 of 206 (88.3%, its refusals the same filters and text). CI's
       `svg corpus` job reruns this at the same pins and fails below floors set
       two icons under these.
     - Why the differing icons differ, checked icon by icon on the worst: (1)
