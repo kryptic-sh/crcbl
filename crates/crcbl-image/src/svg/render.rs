@@ -259,6 +259,45 @@ fn union(a: Option<Rect>, b: Option<Rect>) -> Option<Rect> {
     }
 }
 
+/// Whether the units attribute `name` of `element` (`maskUnits`,
+/// `filterUnits` and their kind) is `objectBoundingBox`, `default_object` if
+/// it is absent.
+fn units(element: &Element, name: &str, default_object: bool) -> Result<bool, ImageError> {
+    match element.attribute(Namespace::None, name) {
+        None => Ok(default_object),
+        Some("objectBoundingBox") => Ok(true),
+        Some("userSpaceOnUse") => Ok(false),
+        Some(other) => Err(unsupported(format_args!("{name} {other:?}"))),
+    }
+}
+
+/// A coordinate attribute in bounding-box units: a number is a fraction of
+/// the box and a percentage a hundredth of one; `default` if absent.
+fn fraction(element: &Element, name: &str, default: f64) -> Result<f64, ImageError> {
+    match element.attribute(Namespace::None, name) {
+        None => Ok(default),
+        Some(text) => match length(text) {
+            Some(Length::Px(value)) => Ok(value),
+            Some(Length::Percent(percent)) => Ok(percent / 100.0),
+            None => Err(unsupported(format_args!(
+                "{name}={text:?} on <{}>",
+                element.name
+            ))),
+        },
+    }
+}
+
+/// `rect` mapped by `transform`, which only scales and translates.
+fn map_rect(rect: Rect, transform: Transform) -> Rect {
+    let (x, y) = transform.apply((rect.x, rect.y));
+    Rect {
+        x,
+        y,
+        width: rect.width * transform.a,
+        height: rect.height * transform.d,
+    }
+}
+
 /// The map from a bounding box's unit square to the box, for
 /// `objectBoundingBox` units; `None` for a box with no area.
 fn bounding_box_units(bbox: Option<Rect>) -> Option<Transform> {
@@ -1430,6 +1469,39 @@ impl<'a> Renderer<'a> {
         Ok(())
     }
 
+    /// The region of a `mask` or `filter` element applied to an element whose
+    /// object bounding box is `bbox`, in that element's user space: its `x`,
+    /// `y`, `width` and `height`, fractions of the box in bounding-box units
+    /// and lengths otherwise, by default the box (or the viewport) grown by a
+    /// tenth each way. `None` in bounding-box units for an element with no
+    /// box.
+    fn effect_region(
+        &self,
+        element: &Element,
+        object_units: bool,
+        bbox: Option<Rect>,
+    ) -> Result<Option<Rect>, ImageError> {
+        if object_units {
+            let Some(units) = bounding_box_units(bbox) else {
+                return Ok(None);
+            };
+            let rect = Rect {
+                x: fraction(element, "x", -0.1)?,
+                y: fraction(element, "y", -0.1)?,
+                width: fraction(element, "width", 1.2)?,
+                height: fraction(element, "height", 1.2)?,
+            };
+            return Ok(Some(map_rect(rect, units)));
+        }
+        let (w, h) = self.viewport;
+        Ok(Some(Rect {
+            x: self.length(element, "x", w, -0.1 * w)?,
+            y: self.length(element, "y", h, -0.1 * h)?,
+            width: self.length(element, "width", w, 1.2 * w)?,
+            height: self.length(element, "height", h, 1.2 * h)?,
+        }))
+    }
+
     /// Each pixel's value of the mask `id`, applied to an element whose user
     /// space maps to pixels by `transform`.
     fn mask(
@@ -1478,48 +1550,12 @@ impl<'a> Renderer<'a> {
         if style.clip_path.is_some() {
             return Err(unsupported("a clip-path on a mask"));
         }
-        let units =
-            |name: &str, default_object: bool| match element.attribute(Namespace::None, name) {
-                None => Ok(default_object),
-                Some("objectBoundingBox") => Ok(true),
-                Some("userSpaceOnUse") => Ok(false),
-                Some(other) => Err(unsupported(format_args!("{name} {other:?}"))),
-            };
-        let object_units = units("maskUnits", true)?;
-        let object_content = units("maskContentUnits", false)?;
+        let object_units = units(element, "maskUnits", true)?;
+        let object_content = units(element, "maskContentUnits", false)?;
         let bbox_units = bounding_box_units(bbox);
-        let (w, h) = self.viewport;
-        let region = if object_units {
-            let Some(bbox_units) = bbox_units else {
-                return Ok(vec![0.0; pixels]);
-            };
-            let fraction = |name: &str, default: f64| -> Result<f64, ImageError> {
-                match element.attribute(Namespace::None, name) {
-                    None => Ok(default),
-                    Some(text) => match length(text) {
-                        Some(Length::Px(value)) => Ok(value),
-                        Some(Length::Percent(percent)) => Ok(percent / 100.0),
-                        None => Err(unsupported(format_args!("{name}={text:?} on <mask>"))),
-                    },
-                }
-            };
-            let rect = Rect {
-                x: fraction("x", -0.1)?,
-                y: fraction("y", -0.1)?,
-                width: fraction("width", 1.2)?,
-                height: fraction("height", 1.2)?,
-            };
-            (rect, transform.then(bbox_units))
-        } else {
-            let rect = Rect {
-                x: self.length(element, "x", w, -0.1 * w)?,
-                y: self.length(element, "y", h, -0.1 * h)?,
-                width: self.length(element, "width", w, 1.2 * w)?,
-                height: self.length(element, "height", h, 1.2 * h)?,
-            };
-            (rect, transform)
+        let Some(rect) = self.effect_region(element, object_units, bbox)? else {
+            return Ok(vec![0.0; pixels]);
         };
-        let (rect, region_transform) = region;
         if rect.width <= 0.0 || rect.height <= 0.0 {
             return Ok(vec![0.0; pixels]);
         }
@@ -1532,7 +1568,7 @@ impl<'a> Renderer<'a> {
             transform
         };
         let frame = path::rect(rect.x, rect.y, rect.width, rect.height, 0.0, 0.0);
-        let region_coverage = self.fill_coverage(&frame, region_transform, FillRule::NonZero);
+        let region_coverage = self.fill_coverage(&frame, transform, FillRule::NonZero);
         let mut layer = Canvas::new(self.side);
         for child in self.element(index).children.clone() {
             self.node(child, &style, content_transform, &mut layer)?;
