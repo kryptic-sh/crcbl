@@ -33,7 +33,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   at run time, answers as `fc-match` does, user configuration included, with
   `FcFontSort`'s order as the fallbacks; without `libfontconfig.so.1` the
   standard font directories are walked by name table instead, ignoring
-  fontconfig's rules.
+  fontconfig's rules. On macOS the system, local and user font directories are
+  walked by name table, with Apple Color Emoji, PingFang SC, Hiragino Sans,
+  Apple SD Gothic Neo and Apple Symbols as fallbacks. `wasm32` and every other
+  target compile with `Source::None`, where every lookup misses.
 
 ## [0.2.0] - 2026-10-16
 

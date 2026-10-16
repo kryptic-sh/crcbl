@@ -57,9 +57,24 @@
 //! fallbacks DejaVu Sans, Noto Sans, Noto Sans CJK SC, Noto Sans Symbols and
 //! Symbols 2, and Noto Color Emoji, each where installed.
 //!
-//! ## Every other target
+//! ## macOS
 //!
-//! [`Source::None`], until its platform's source lands: every lookup misses.
+//! [`Source::Scan`]: `/System/Library/Fonts` and its `Supplemental`,
+//! `/Library/Fonts` and `~/Library/Fonts`, walked by name table. Fonts macOS
+//! downloads on demand into its asset store are not there to find; CoreText
+//! is the better source, and the future one. Generic families are the first
+//! installed of: `sans-serif` Helvetica then Helvetica Neue, `serif` Times
+//! then Times New Roman, `monospace` Menlo then Courier, `emoji` Apple Color
+//! Emoji. Fallbacks are the system interface font (as `System Font` or
+//! `.SF NS`, else Helvetica Neue), Apple Color Emoji, PingFang SC, Hiragino
+//! Sans, Apple SD Gothic Neo and Apple Symbols, each where installed.
+//!
+//! ## Every other target, `wasm32` included
+//!
+//! [`Source::None`]: no system fonts this crate can reach — a browser shows a
+//! page none of its fonts' files — so every lookup misses. Decided
+//! 2026-10-16 over leaving the crate out of those builds, so a program that
+//! looks fonts up where it can compiles everywhere unchanged.
 //!
 //! # Matching
 //!
@@ -96,7 +111,15 @@ mod platform;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[path = "fontconfig.rs"]
 mod platform;
-#[cfg(not(any(windows, target_os = "linux", target_os = "freebsd")))]
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod platform;
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+)))]
 #[path = "none.rs"]
 mod platform;
 

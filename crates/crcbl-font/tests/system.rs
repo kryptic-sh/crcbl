@@ -6,7 +6,12 @@ use crcbl_font::{FontQuery, SystemFonts};
 
 /// The file name of `found`'s path, lower-cased: what a test compares,
 /// since Windows does not keep one case for its font files.
-#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(
+    windows,
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+))]
 fn file_name(found: &crcbl_font::FontMatch) -> String {
     found
         .path
@@ -18,7 +23,12 @@ fn file_name(found: &crcbl_font::FontMatch) -> String {
 
 /// `found`'s face, read as a font of its own, describes itself as `family`:
 /// the path and index point at the face that was reported.
-#[cfg(any(windows, target_os = "linux", target_os = "freebsd"))]
+#[cfg(any(
+    windows,
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "macos"
+))]
 fn reads_as(found: &crcbl_font::FontMatch, family: &str) {
     use skrifa::MetadataProvider;
     use skrifa::string::StringId;
@@ -199,5 +209,43 @@ mod fontconfig {
             let repeated = list[..at].iter().any(|known| known.family == m.family);
             assert!(!repeated, "{} is listed twice: {list:?}", m.family);
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use crcbl_font::{BOLD_WEIGHT, Source};
+
+    use super::*;
+
+    #[test]
+    fn helvetica_is_found_in_its_collection() {
+        let fonts = SystemFonts::new();
+        assert_eq!(fonts.source(), Source::Scan);
+        let regular = fonts
+            .find(&FontQuery::new("Helvetica"))
+            .expect("Helvetica is installed");
+        assert_eq!(regular.family, "Helvetica");
+        assert_eq!(file_name(&regular), "helvetica.ttc");
+        reads_as(&regular, "Helvetica");
+        let bold = fonts
+            .find(&FontQuery::new("helvetica").weight(BOLD_WEIGHT))
+            .expect("Helvetica Bold is installed");
+        assert_eq!(bold.path, regular.path);
+        assert_ne!(bold.index, regular.index);
+        assert!(bold.weight >= 600, "{bold:?}");
+        reads_as(&bold, "Helvetica");
+        assert_eq!(fonts.find(&FontQuery::new("sans-serif")), Some(regular));
+    }
+
+    #[test]
+    fn apple_color_emoji_is_the_emoji_and_a_fallback() {
+        let fonts = SystemFonts::new();
+        let emoji = fonts.find(&FontQuery::new("emoji")).expect("an emoji face");
+        assert_eq!(emoji.family, "Apple Color Emoji");
+        let list = fonts.fallbacks(&FontQuery::new("Helvetica"));
+        let families: Vec<&str> = list.iter().map(|m| m.family.as_str()).collect();
+        assert!(families.contains(&"Apple Color Emoji"), "{families:?}");
+        assert!(!families.contains(&"Helvetica"), "{families:?}");
     }
 }
