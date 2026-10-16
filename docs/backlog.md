@@ -2454,7 +2454,16 @@ migrates every caller and deletes its own copy in the same change.
   policy is scene-specific. Revisit when a second game needs it. **Possible
   next, not requested (EW, 2026-09-29):** a per-cell toggle on `GroundGrid` for
   dynamic obstacles. EW's game-side doors currently route as passable, and the
-  toggle waits on them proving out.
+  toggle waits on them proving out. **Height-aware grid, asked about 2026-10-17
+  (not requested yet):** `GroundGrid` samples every cell at `config.origin.y`,
+  which stops working on EW's rolling generated terrain and stairs, and
+  `MAX_GRID_CELL_COUNT` keeps a fine grid from covering a whole map. EW is
+  trying per-cell ground heights in its own route sampling first. It was pointed
+  at `24-navigation.md`'s voxel stage so the trial could later become a
+  `crcbl-nav` rung or that stage: spans per column (floor and headroom, so
+  routes can pass under landings and bridges), agent radius, height, climb and
+  slope as data, columns probed through the `PhysicsWorld`, fixed-size
+  deterministic tiles, and erosion by radius at build time.
 - **Fixed-rate staggered sampling: accepted, into `crcbl-core`**, as
   `FixedRateSchedule`. EW's `PerceptionSchedule` is generic, so the name drops
   "perception". Shipped 2026-09-28 as
