@@ -4,16 +4,18 @@
 //! [`ForwardRenderer::with_scene`] would accept.
 
 use crcbl_greybox::{
-    GREYBOX_CAPSULE, GREYBOX_COLUMN, GREYBOX_CUBE, GREYBOX_CYLINDER, GREYBOX_DOORWAY, GREYBOX_GREY,
-    GREYBOX_GRID, GREYBOX_MESH_COUNT, GREYBOX_PLATFORM, GREYBOX_QUAD, GREYBOX_RAMP, GREYBOX_SPHERE,
-    GREYBOX_STAIRS, GREYBOX_TILE_EXTENT, GREYBOX_TILE_M, GREYBOX_WALL, GRID_EXTENT, GRID_LAYER,
-    GreyboxColor, HeightfieldTile, capsule, column, cube, cylinder, doorway,
-    greybox_color_material, greybox_color_texels, greybox_material, greybox_page, grid_material,
-    heightfield_tiles, platform, quad, ramp, scene3d, sphere, stairs, unit_cube, wall,
+    GREYBOX_ALBEDO, GREYBOX_CAPSULE, GREYBOX_COLUMN, GREYBOX_CUBE, GREYBOX_CYLINDER,
+    GREYBOX_DOORWAY, GREYBOX_GREY, GREYBOX_GRID, GREYBOX_MESH_COUNT, GREYBOX_PLATFORM,
+    GREYBOX_QUAD, GREYBOX_RAMP, GREYBOX_SPHERE, GREYBOX_STAIRS, GREYBOX_TILE_EXTENT,
+    GREYBOX_TILE_M, GREYBOX_WALL, GRID_EXTENT, GRID_LAYER, GreyboxColor, HeightfieldTile, capsule,
+    column, cube, cylinder, doorway, greybox_color_material, greybox_color_texels,
+    greybox_material, greybox_page, grid_material, heightfield_tiles, platform, quad, ramp,
+    scene3d, sphere, stairs, unit_cube, wall,
 };
 use crcbl_render::scene::{Geometry, PageDesc, PageKind};
 use crcbl_shaders::mesh::{GpuMaterial, MeshVertex, VERTEX_STRIDE};
 use crcbl_shaders::meshlet::{MAX_CLUSTER_TRIANGLES, MAX_CLUSTER_VERTICES};
+use crcbl_shaders::vertex::UvRange;
 use glam::Vec3;
 
 /// The position of every vertex, read out of a flat geometry's bytes.
@@ -114,6 +116,7 @@ fn hills() -> Vec<f32> {
 fn hills_tiles(tile_cells: usize) -> Vec<HeightfieldTile> {
     heightfield_tiles(
         &hills(),
+        None,
         HILLS_COLUMNS,
         HILLS_ROWS,
         HILLS_CELL_M,
@@ -614,7 +617,7 @@ fn a_sloped_plane_has_its_slope_as_every_normal_edges_included() {
         })
         .collect();
     let expected = Vec3::new(-slope_x, 1.0, -slope_z).normalize();
-    for tile in heightfield_tiles(&heights, columns, rows, cell_m, 3) {
+    for tile in heightfield_tiles(&heights, None, columns, rows, cell_m, 3) {
         for normal in normals(&tile.geometry) {
             assert!(
                 normal.distance(expected) < 2e-3,
@@ -632,7 +635,7 @@ fn a_heightfield_edge_takes_the_one_sided_difference() {
     let heights: Vec<f32> = (0..rows)
         .flat_map(|_| (0..columns).map(|column| (column * column) as f32))
         .collect();
-    let tile = heightfield_tiles(&heights, columns, rows, 1.0, columns).swap_remove(0);
+    let tile = heightfield_tiles(&heights, None, columns, rows, 1.0, columns).swap_remove(0);
     let normals = normals(&tile.geometry);
     for (column, slope) in [(0, 1.0), (2, 4.0), (4, 7.0)] {
         let expected = Vec3::new(-slope, 1.0, 0.0).normalize();
@@ -654,5 +657,60 @@ fn a_tile_wider_than_the_field_is_the_whole_field() {
 #[test]
 #[should_panic(expected = "one height per point")]
 fn a_heightfield_refuses_heights_that_do_not_fill_it() {
-    let _ = heightfield_tiles(&[0.0; 5], 3, 2, 1.0, 1);
+    let _ = heightfield_tiles(&[0.0; 5], None, 3, 2, 1.0, 1);
+}
+
+#[test]
+#[should_panic(expected = "one colour per point")]
+fn a_heightfield_refuses_colours_that_do_not_fill_it() {
+    let _ = heightfield_tiles(&[0.0; 6], Some(&[[1.0; 4]; 5]), 3, 2, 1.0, 1);
+}
+
+#[test]
+fn a_heightfield_point_wears_its_own_colour_or_the_greybox_grey() {
+    let heights = hills();
+    let colors: Vec<[f32; 4]> = (0..heights.len())
+        .map(|i| {
+            // A colour no other point has, in the eight bits a channel keeps.
+            [
+                (i % 256) as f32 / 255.0,
+                (i / 256) as f32 / 255.0,
+                0.25,
+                1.0,
+            ]
+        })
+        .collect();
+    let colored = heightfield_tiles(
+        &heights,
+        Some(&colors),
+        HILLS_COLUMNS,
+        HILLS_ROWS,
+        HILLS_CELL_M,
+        TILE_CELLS,
+    );
+    for (t, (tile, plain)) in colored.iter().zip(hills_tiles(TILE_CELLS)).enumerate() {
+        for ((vertex, plain), &[x, _, z]) in records(&tile.geometry)
+            .into_iter()
+            .zip(records(&plain.geometry))
+            .zip(&tile.positions)
+        {
+            let index = (z / HILLS_CELL_M) as usize * HILLS_COLUMNS + (x / HILLS_CELL_M) as usize;
+            let expected = MeshVertex::from_normal(
+                vertex.position,
+                [0.0, 1.0, 0.0],
+                colors[index],
+                [0.0, 0.0],
+                &UvRange::from_uvs(&[[0.0, 0.0]]),
+            );
+            assert_eq!(vertex.color, expected.color, "tile {t} at ({x}, {z})");
+            let grey = MeshVertex::from_normal(
+                plain.position,
+                [0.0, 1.0, 0.0],
+                GREYBOX_ALBEDO,
+                [0.0, 0.0],
+                &UvRange::from_uvs(&[[0.0, 0.0]]),
+            );
+            assert_eq!(plain.color, grey.color, "tile {t} at ({x}, {z}) uncoloured");
+        }
+    }
 }

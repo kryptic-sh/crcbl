@@ -76,6 +76,7 @@ struct RawVertex {
     position: Vec3,
     normal: Vec3,
     uv: [f32; 2],
+    albedo: [f32; 4],
 }
 
 impl MeshBuilder {
@@ -87,14 +88,27 @@ impl MeshBuilder {
         }
     }
 
-    /// Adds one vertex and returns its index, for the smooth-shaded path.
+    /// Adds one vertex in [`GREYBOX_ALBEDO`] and returns its index, for the
+    /// smooth-shaded path.
     pub(crate) fn vertex(&mut self, position: Vec3, normal: Vec3, uv: [f32; 2]) -> u32 {
+        self.colored_vertex(position, normal, uv, GREYBOX_ALBEDO)
+    }
+
+    /// [`vertex`](Self::vertex) in a colour of the caller's, linear RGBA.
+    pub(crate) fn colored_vertex(
+        &mut self,
+        position: Vec3,
+        normal: Vec3,
+        uv: [f32; 2],
+        albedo: [f32; 4],
+    ) -> u32 {
         let index = u32::try_from(self.vertices.len())
             .expect("a greybox primitive has fewer vertices than u32::MAX");
         self.vertices.push(RawVertex {
             position,
             normal,
             uv,
+            albedo,
         });
         index
     }
@@ -250,7 +264,7 @@ impl MeshBuilder {
                 MeshVertex::from_normal(
                     vertex.position.to_array(),
                     vertex.normal.to_array(),
-                    GREYBOX_ALBEDO,
+                    vertex.albedo,
                     vertex.uv,
                     &uv_range,
                 )

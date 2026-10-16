@@ -64,9 +64,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`crcbl_greybox::heightfield_tiles`** builds terrain from a row-major grid of
   heights: tiles of at most a given number of cells a side, each a
   `HeightfieldTile` holding its `Geometry::Flat` and the same positions and
-  triangles for a collider (`crcbl_phys::TriangleMesh`). Normals come from the
-  whole grid, so tiles meet without a lighting seam, and splitting the ground
-  into tiles lets the renderer cull it.
+  triangles for a collider (`crcbl_phys::TriangleMesh`), and optionally one
+  colour per point (a kind of ground, say) as each vertex's albedo. Normals come
+  from the whole grid, so tiles meet without a lighting seam, and splitting the
+  ground into tiles lets the renderer cull it.
 
 ### Changed
 

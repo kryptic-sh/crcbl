@@ -24,6 +24,7 @@
 use crcbl_render::scene::Geometry;
 use glam::Vec3;
 
+use crate::GREYBOX_ALBEDO;
 use crate::build::MeshBuilder;
 
 /// One tile of [`heightfield_tiles`]: its geometry, and the same triangles as
@@ -50,18 +51,25 @@ pub struct HeightfieldTile {
 /// Tiles come back row by row along `+Z`, each row along `+X`; the last tile of
 /// a row or column is narrower when `tile_cells` does not divide the cells.
 ///
+/// `colors`, when given, holds one linear RGBA albedo per point in the same
+/// order as `heights`, such as a colour per kind of ground; the material's
+/// texel is multiplied by it. Without it every point is
+/// [`GREYBOX_ALBEDO`], as the other primitives are.
+///
 /// Vertex texture coordinates are the point's `X` and `Z` in metres, so
 /// [`grid_material`](crate::grid_material)'s one-metre tile reads true to
 /// scale on the ground.
 ///
 /// # Panics
 ///
-/// If `heights` does not hold exactly `columns × rows` heights, if either
+/// If `heights`, or `colors` when given, does not hold exactly
+/// `columns × rows` entries, if either
 /// count is below two (a field of no cells), if `tile_cells` is zero, or if
 /// `cell_m` is not a positive finite length.
 #[must_use]
 pub fn heightfield_tiles(
     heights: &[f32],
+    colors: Option<&[[f32; 4]]>,
     columns: usize,
     rows: usize,
     cell_m: f32,
@@ -76,6 +84,13 @@ pub fn heightfield_tiles(
         columns * rows,
         "a {columns} × {rows} heightfield holds one height per point"
     );
+    if let Some(colors) = colors {
+        assert_eq!(
+            colors.len(),
+            columns * rows,
+            "a {columns} × {rows} heightfield holds one colour per point"
+        );
+    }
     assert!(tile_cells > 0, "a tile is at least one cell a side");
     assert!(
         cell_m.is_finite() && cell_m > 0.0,
@@ -108,7 +123,9 @@ pub fn heightfield_tiles(
                                 row as f32 * cell_m,
                             );
                             positions.push(at.to_array());
-                            builder.vertex(at, normal(column, row), [at.x, at.z])
+                            let albedo = colors
+                                .map_or(GREYBOX_ALBEDO, |colors| colors[row * columns + column]);
+                            builder.colored_vertex(at, normal(column, row), [at.x, at.z], albedo)
                         })
                         .collect()
                 })
