@@ -161,6 +161,8 @@ mod tests {
         assert_eq!(pick(&[100, 200, 400], 300), 200);
         assert_eq!(pick(&[400, 700], 300), 400);
         assert_eq!(pick(&[100, 700], 350), 100);
+        // The weight itself before anything lighter.
+        assert_eq!(pick(&[200, 300], 300), 300);
     }
 
     #[test]

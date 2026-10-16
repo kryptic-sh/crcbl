@@ -140,9 +140,13 @@ pub(crate) mod tests {
     use crate::matching::NORMAL_STRETCH;
     use crate::sfnt::tests::{EMOJI_TEXT, SANS, collection};
 
-    /// `font` with its `OS/2` weight class and italic bit replaced: a face
+    /// `font` with its `OS/2` weight class and style bits replaced: a face
     /// of another weight or style without a font file of its own.
-    pub(crate) fn restyled(font: &[u8], weight: u16, italic: bool) -> Vec<u8> {
+    pub(crate) fn restyled(font: &[u8], weight: u16, style: FontStyle) -> Vec<u8> {
+        /// `fsSelection`'s italic, regular and oblique bits.
+        const ITALIC: u16 = 1;
+        const REGULAR: u16 = 1 << 6;
+        const OBLIQUE: u16 = 1 << 9;
         let mut out = font.to_vec();
         let count = usize::from(u16::from_be_bytes([font[4], font[5]]));
         let record = (0..count)
@@ -150,17 +154,57 @@ pub(crate) mod tests {
             .find(|&at| &font[at..at + 4] == b"OS/2")
             .expect("an OS/2 table");
         let offset = u32::from_be_bytes(font[record + 8..record + 12].try_into().unwrap()) as usize;
-        // `usWeightClass` at 4, `fsSelection` at 62; its bit 0 is italic and
-        // bit 6 regular.
+        // `usWeightClass` is at 4 in the table, `fsSelection` at 62.
         out[offset + 4..offset + 6].copy_from_slice(&weight.to_be_bytes());
         let selection = u16::from_be_bytes([out[offset + 62], out[offset + 63]]);
-        let selection = if italic {
-            (selection | 1) & !(1 << 6)
-        } else {
-            selection & !1
-        };
+        let selection = selection & !(ITALIC | REGULAR | OBLIQUE)
+            | match style {
+                FontStyle::Normal => REGULAR,
+                FontStyle::Italic => ITALIC,
+                FontStyle::Oblique => OBLIQUE,
+            };
         out[offset + 62..offset + 64].copy_from_slice(&selection.to_be_bytes());
         out
+    }
+
+    /// `font` with its name table replaced by one holding `names`, each
+    /// `(name ID, Windows language ID, text)`, in that order.
+    pub(crate) fn renamed(font: &[u8], names: &[(u16, u16, &str)]) -> Vec<u8> {
+        /// The Windows platform, and its Unicode BMP encoding.
+        const WINDOWS: u16 = 3;
+        const UNICODE_BMP: u16 = 1;
+        let count = u16::try_from(names.len()).unwrap();
+        let mut table = Vec::new();
+        let mut strings = Vec::new();
+        for field in [0, count, 6 + 12 * count] {
+            table.extend_from_slice(&field.to_be_bytes());
+        }
+        for &(id, language, text) in names {
+            let bytes: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            let length = u16::try_from(bytes.len()).unwrap();
+            let offset = u16::try_from(strings.len()).unwrap();
+            for field in [WINDOWS, UNICODE_BMP, language, id, length, offset] {
+                table.extend_from_slice(&field.to_be_bytes());
+            }
+            strings.extend(bytes);
+        }
+        table.extend(strings);
+        let original = FontRef::new(font).unwrap();
+        let directory = original.table_directory();
+        let tables: Vec<_> = directory
+            .table_records()
+            .iter()
+            .map(|record| {
+                let tag = record.tag();
+                let bytes = if tag.to_be_bytes() == *b"name" {
+                    table.as_slice()
+                } else {
+                    original.table_data(tag).unwrap().as_bytes()
+                };
+                (tag.to_be_bytes(), record.checksum(), bytes)
+            })
+            .collect();
+        sfnt::build(directory.sfnt_version(), tables).unwrap()
     }
 
     #[test]
@@ -180,11 +224,65 @@ pub(crate) mod tests {
 
     #[test]
     fn a_restyled_face_reads_its_new_weight_and_style() {
-        let bold_italic = restyled(SANS, 700, true);
-        let (_, family, attributes) = describe(&FontRef::new(&bold_italic).unwrap()).unwrap();
-        assert_eq!(family, "Atkinson Hyperlegible");
-        assert_eq!(attributes.weight, 700);
-        assert_eq!(attributes.style, FontStyle::Italic);
+        for (weight, style) in [
+            (700, FontStyle::Italic),
+            (300, FontStyle::Oblique),
+            (900, FontStyle::Normal),
+        ] {
+            let face = restyled(SANS, weight, style);
+            let (_, family, attributes) = describe(&FontRef::new(&face).unwrap()).unwrap();
+            assert_eq!(family, "Atkinson Hyperlegible");
+            assert_eq!((attributes.weight, attributes.style), (weight, style));
+        }
+    }
+
+    #[test]
+    fn the_typographic_family_is_reported_and_every_name_answers() {
+        /// `name` IDs: the legacy family, the subfamily, the typographic
+        /// family.
+        const FAMILY: u16 = 1;
+        const SUBFAMILY: u16 = 2;
+        const TYPOGRAPHIC: u16 = 16;
+        /// Windows language IDs: German, US English, French.
+        const DE: u16 = 0x407;
+        const EN: u16 = 0x409;
+        const FR: u16 = 0x40C;
+        let font = renamed(
+            SANS,
+            &[
+                (FAMILY, DE, "Familie Alt"),
+                (FAMILY, EN, "Family Legacy"),
+                (TYPOGRAPHIC, DE, "Familie"),
+                (TYPOGRAPHIC, EN, "Family Typo"),
+                (TYPOGRAPHIC, FR, "family typo"),
+            ],
+        );
+        let (families, family, _) = describe(&FontRef::new(&font).unwrap()).unwrap();
+        assert_eq!(family, "Family Typo");
+        assert_eq!(
+            families,
+            ["Family Typo", "Familie", "Familie Alt", "Family Legacy"]
+        );
+
+        // No typographic family, or a blank one: the legacy family.
+        for names in [
+            &[(FAMILY, EN, "Only Legacy")][..],
+            &[(TYPOGRAPHIC, EN, "  "), (FAMILY, EN, "Only Legacy")][..],
+        ] {
+            let font = renamed(SANS, names);
+            let (families, family, _) = describe(&FontRef::new(&font).unwrap()).unwrap();
+            assert_eq!(family, "Only Legacy");
+            assert_eq!(families, ["Only Legacy"]);
+        }
+        // English before the first-listed language.
+        let font = renamed(SANS, &[(FAMILY, DE, "Zuerst"), (FAMILY, EN, "English")]);
+        assert_eq!(
+            describe(&FontRef::new(&font).unwrap()).unwrap().1,
+            "English"
+        );
+        // No family name at all: nothing to match it by.
+        let font = renamed(SANS, &[(SUBFAMILY, EN, "Regular")]);
+        assert_eq!(describe(&FontRef::new(&font).unwrap()), None);
     }
 
     #[test]
