@@ -596,9 +596,41 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       subtract-green transform, an offset animation) and unit tests of `Select`,
       the half predictor's truncation and the rightmost column's top-right,
       worked from the RFC; hand mutants of every stage each failed a test.
-      **Lossy WebP (`VP8 `, with `ALPH`) is refused**: it is RFC 6386's VP8
-      codec, a decoder as large as the rest of this crate, and the next format
-      to write for pikr's parity.
+    - **Lossy WebP is in**, in the same `webp::decode` and feature, written from
+      RFC 6386 (`webp/vp8/`) and RFC 9649's `ALPH` chunk (`webp/alpha.rs`): the
+      VP8 key frame — frame header, boolean decoder, segmentation (map, absolute
+      and relative quantiser and filter levels), coefficient probability
+      updates, skipped macroblocks, one to eight token partitions, every luma,
+      subblock and chroma mode, dequantisation, inverse WHT and DCT, the normal
+      and simple loop filters with sharpness and the intra and B_PRED deltas —
+      and its alpha, raw or as a headerless VP8L image (the lossless decoder's
+      stream decode, now callable without a header), under each of the four
+      filters; simple `VP8 ` files, `VP8X` with `ALPH`, and an animation's lossy
+      first frame. Interframes are malformed (WebP has none). The tables were
+      extracted from the RFC's prose by script and checked equal to its
+      reference decoder's copies. RGB is libwebp's: "fancy" upsampling (proved
+      equal to a single 9/3/3/1 interpolation with the edges repeated, in
+      `webp/yuv.rs`'s docs) and its fixed-point BT.601 conversion. Verified by
+      exact equality with libwebp's decode (Pillow 12.3) of twenty-one committed
+      fixtures — qualities 0 to 100, one pixel to 96x64, odd sizes, segmented
+      frames, alpha lossless, level-reduced and raw, an animation with alpha off
+      the canvas corner — and, for what libwebp's encoder never writes (simple
+      filter, sharpness, filter deltas, relative segment values, a frame level
+      of zero over segment levels, the skip flag (once on a B_PRED macroblock,
+      which still filters its subblock edges), four partitions, filtered raw
+      alpha), files the fixture script rewrites with the RFC's boolean encoder,
+      replaying every macroblock's decisions under a changed header, whose
+      reference is again libwebp's decode. Unit tests check the boolean decoder
+      against the RFC's encoder, the IDCT, WHT, every prediction mode, both
+      filters and the conversion against values worked from the RFC's
+      definitions, and 98 hand mutants across every stage each fail a test. Not
+      matched exactly by design: a relative segment filter level outside 0..=63
+      is clamped before the deltas (the RFC's reference decoder and libvpx),
+      where libwebp clamps only the sum; libwebp's encoder never writes one. Not
+      tested: a lossless-coded alpha under a filter (the fixtures filter only
+      raw alpha, and the filter code is shared), eight partitions, and files
+      from encoders other than libwebp's. The `ALPH` pre-processing field is
+      informative and ignored, as libwebp's default decode ignores it.
     - **Step three is in: SVG icons**,
       `svg::decode(bytes, size, scale, &limits)` behind the `svg` feature,
       written here with no new dependency (`crates/crcbl-image/src/svg/`): its
@@ -779,9 +811,9 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       "Matching" in the corpus means rendered and within tolerance of resvg: at
       most 1% of the icon's pixels differing by more than 32 in a premultiplied
       channel.
-    - Order from here: lossy WebP (VP8, pikr's parity, being written); the
-      hicolor corpus set; SVG's drop-shadow filters; then XPM. SVG text when an
-      app asks.
+    - Order from here: SVG's drop-shadow filters, measured by breeze apps and
+      the hicolor set CI's `svg corpus` job now reports; then XPM. SVG text when
+      an app asks.
 
 ### Left behind by the seam split
 
