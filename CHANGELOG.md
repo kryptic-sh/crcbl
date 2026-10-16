@@ -25,12 +25,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `monospace` and `emoji` resolve to the system's choice. `FontMatch::read`
   returns one face as a font file of its own, cut out of a `.ttc` collection
   when it is in one. `SystemFonts::new` reads nothing; `SystemFonts::source`
-  says where lookups go. On Windows the registry's font lists (machine-wide
-  and per-user) narrow which files are opened and each file's name table
-  decides, with no walk of the Fonts directory; fallbacks are the family's
+  says where lookups go. On Windows the registry's font lists (machine-wide and
+  per-user) narrow which files are opened and each file's name table decides,
+  with no walk of the Fonts directory; fallbacks are the family's
   `FontLink\SystemLink` faces, then Segoe UI, Segoe UI Emoji, Segoe UI Symbol
-  and the CJK faces where installed. On Linux and FreeBSD, fontconfig, loaded
-  at run time, answers as `fc-match` does, user configuration included, with
+  and the CJK faces where installed. On Linux and FreeBSD, fontconfig, loaded at
+  run time, answers as `fc-match` does, user configuration included, with
   `FcFontSort`'s order as the fallbacks; without `libfontconfig.so.1` the
   standard font directories are walked by name table instead, ignoring
   fontconfig's rules. On macOS the system, local and user font directories are
