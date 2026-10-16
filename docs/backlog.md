@@ -1213,15 +1213,11 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       breeze 5597 of 5642 (99.2%) and breeze apps 198 of 206 (96.1%), 0 refused,
       every text icon matching. In every run the differing list (and each icon's
       count of differing pixels) was the earlier one plus only the text icons
-      named, so no icon that matched stopped matching. CI's `svg corpus` job
-      builds without `svg-text`, so its floors follow the feature-off numbers:
-      breeze 0.990 and breeze apps 0.936.
-    - Not done, CI: the `svg corpus` job could build `svg-text`, install the
-      fonts its references use and pass the generic families to resvg, which
-      would hold text to the floors too (breeze 0.991 and breeze apps 0.951 from
-      the measurement above, two icons under it); it needs the runner's fonts
-      installed in the job, as the `crcbl-font` job installs fontconfig and
-      DejaVu.
+      named, so no icon that matched stopped matching. CI's `svg corpus` job now
+      builds `svg-text`, installs fontconfig and DejaVu and passes resvg those
+      generic families, and measured the same on its runner (breeze 5597, breeze
+      apps 198, 0 refused); its floors rose to breeze 0.991 and breeze apps
+      0.951.
     - Not done, in order of what the corpus refuses: markers, patterns, `symbol`
       and nested `svg`, `switch`, blend modes and animation, which the corpus
       did not need. Not measured: GTK's own renderer (librsvg) as a second
