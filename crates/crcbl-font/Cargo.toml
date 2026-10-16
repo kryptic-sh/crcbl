@@ -1,0 +1,27 @@
+[package]
+name = "crcbl-font"
+description = "Crucible system font lookup: a family, weight and style to a font file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# **Discovery only: no parsing beyond the tables that name a face, and no
+# rendering.** What lyr and pikr hand a family name to, and what `crcbl-image`'s
+# SVG text will, which is why it is a crate of its own rather than a module of
+# `crcbl-ui`: that crate depends on `crcbl-image`, so a lookup inside it could
+# not be reached from there. Decided 2026-10-16, recorded in `docs/backlog.md`.
+# Each platform's source is the system's own (fontconfig, the registry, the
+# font directories), reached through `std` and hand-written FFI; see the crate
+# docs.
+[dependencies]
+# The name, OS/2, head and post tables a face is matched by, read through the
+# crate `crcbl-ui` parses fonts with, at the version it names: one reader of
+# a family name and a weight class, so a face this crate finds registers in
+# `crcbl-ui` under the weight and style it was found by. Default features off
+# for `crcbl-ui`'s reason; `std` stays on.
+skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
