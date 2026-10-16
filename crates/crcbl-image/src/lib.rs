@@ -29,7 +29,6 @@
 //! resize and the coverage rasteriser need none. The `theme` feature adds the
 //! freedesktop.org icon-theme lookup, which finds an icon's file by name;
 //! decoding it is the format's.
-//! lookup, which finds an icon's file by name; decoding it is the format's.
 
 pub mod raster;
 pub mod raw;
@@ -46,6 +45,9 @@ pub mod jpeg;
 
 #[cfg(feature = "png")]
 pub mod png;
+
+#[cfg(feature = "svg")]
+pub mod svg;
 
 #[cfg(feature = "webp")]
 pub mod webp;
