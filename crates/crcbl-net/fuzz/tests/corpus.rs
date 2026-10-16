@@ -1,7 +1,7 @@
 //! Named seeds from the fuzzer's corpus, replayed through the delta decoder,
 //! the replay file's reader and its spool's recovery, the save container's
 //! reader, the scene edit's messages, the scene fetch's, the session hello,
-//! the SVG renderer and the lossy WebP decoder.
+//! the SVG renderer, the lossy WebP decoder and the XPM decoder.
 //!
 //! `fuzz_targets/decoder.rs` runs the decoders against bytes libFuzzer invents.
 //! This target runs three of them against bytes somebody named, and the two are
@@ -649,4 +649,24 @@ fn the_lossy_webp_seed_decodes() {
             .chunks_exact(4)
             .any(|pixel| pixel[3] > 0 && pixel[3] < u8::MAX)
     );
+}
+
+/// **The XPM seed decodes**: two characters a pixel, `None`, a named colour,
+/// short and long hex, a comment between strings and an extension after the
+/// rows, so the fuzzer's mutations of it start inside the colour and pixel
+/// readers rather than at the header's first refusal.
+#[test]
+fn the_xpm_seed_decodes() {
+    let image = crcbl_image::xpm::decode(
+        include_bytes!("../corpus/decoder/xpm-icon"),
+        &crcbl_image::Limits::DEFAULT,
+    )
+    .expect("the XPM seed must decode");
+    assert_eq!((image.width(), image.height()), (8, 6));
+    let pixels: Vec<&[u8]> = image.pixels().chunks_exact(4).collect();
+    // The corner is `None`; rgb.txt's dark slate gray is 47 79 79, and #F80
+    // scales to 255 136 0.
+    assert_eq!(pixels[0], [0, 0, 0, 0]);
+    assert_eq!(pixels[2], [47, 79, 79, 255]);
+    assert_eq!(pixels[10], [255, 136, 0, 255]);
 }

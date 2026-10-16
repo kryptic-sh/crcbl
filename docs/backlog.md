@@ -470,7 +470,7 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      it and measurement and drawing could be handed different lists. The cost of
      the handle: `Font` equality ignores the list (documented), so a span's
      content hash folds in a hash of the list to measure again when it changes.
-   - Decided 2026-10-16 (the coordinator's call, the long-term option):
+   - Decided 2026-10-16 (the long-term option, per the standing instruction):
      **`crcbl-frame`'s `UiRenderer` owns a `ColorGlyphCache` and draws colour
      glyphs inside `begin_frame`**, so every application drawing through the UI
      pass, the engine's own UI paths included, gets colour emoji with no call.
@@ -494,9 +494,9 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      mutants were each killed: the pass tessellating without colours, staging
      the image atlas before the tessellation, and the expansion dropping the
      quads.
-   - Decided 2026-10-16 (the coordinator's call, the long-term option): **the
-     image atlas itself knows which images are evictable.** Colour glyphs are
-     registered with `ImageAtlas::register_evictable`, marked used by
+   - Decided 2026-10-16 (the long-term option, per the standing instruction):
+     **the image atlas itself knows which images are evictable.** Colour glyphs
+     are registered with `ImageAtlas::register_evictable`, marked used by
      `ImageAtlas::touch` in each frame that draws them, frames counted by
      `ImageAtlas::begin_frame` (which `ColorGlyphCache::begin_frame` calls). Any
      registration that finds no room, a plain `register` included, first
@@ -849,32 +849,33 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       each colour's `c` value else its `g`, `g4` or `m` one, `None`, hex of 3,
       6, 9 or 12 digits scaled to eight bits and rounded, and X11's colour names
       (`xpm::X11_COLOURS`, generated from Ubuntu 26.04's `/etc/X11/rgb.txt`)
-      matched without regard to case or spaces. Decided: short hex is scaled
-      (`#fff` is white), as netpbm's `xpmtoppm` reads it, not taken as a value's
-      high bits as Xlib's `XParseColor` documents (`#fff` would be 240); a key
-      defined twice keeps its first; a colour or pixel key it cannot resolve is
-      malformed, never guessed. Verified by fixtures
-      (`crates/crcbl-image/fixtures/xpm/`) whose pixels are Pillow 12.3's
-      decode, or for what Pillow cannot read (it fails on `None` pixels with a
-      `ValueError`, misreads hex of other than six digits, and reads no names,
-      comments between strings or XPM 2) its decode of the same image rewritten
-      in the form it reads, and agree with netpbm 11.10's `xpmtoppm`; by unit
-      tests worked by hand; and by 32 hand mutants, 31 failing a test and one
-      equivalent (a colour string shorter than its key is malformed either way).
-      Measured on real files: 1152 XPMs from Ubuntu 26.04's packages (fvwm,
-      fvwm-icons, icewm, icewm-common, emacs-common, xpaint, xfig-libs, xterm,
-      xboard, wmaker-data, others, and `/usr/share/pixmaps`), fetched with
-      `apt-get download`: 1151 decode, 1101 of them pixel for pixel equal to
-      netpbm's or Pillow's decode, and the 50 others are files neither reads:
-      netpbm refuses them as "Color name appears multiple times in color map"
-      (which it also says of a colour with several keys), a declaration not
-      starting `static char`, a colour line not starting with a quote, or a row
-      past the image's width. The one refused is Emacs's `letter.xpm`, whose
-      colour `opaque` is Emacs's own and no X11 name. netpbm differs on one
-      file, icewm's `win95/close.xpm`, which has a blank line between its
-      colours and its rows, and whose pixels netpbm gets wrong from the first;
-      Pillow agrees with this decoder there. The fuzz target feeds every input
-      to it from an `xpm-icon` seed.
+      matched without regard to case or spaces. Decided 2026-10-16: short hex is
+      scaled (`#fff` is white), as netpbm's `xpmtoppm` and CSS read it, because
+      an icon's author writing `#fff` means white; the alternative, Xlib's
+      documented `XParseColor` rule of short digits as a value's high bits,
+      makes `#fff` (240, 240, 240); a key defined twice keeps its first; a
+      colour or pixel key it cannot resolve is malformed, never guessed.
+      Verified by fixtures (`crates/crcbl-image/fixtures/xpm/`) whose pixels are
+      Pillow 12.3's decode, or for what Pillow cannot read (it fails on `None`
+      pixels with a `ValueError`, misreads hex of other than six digits, and
+      reads no names, comments between strings or XPM 2) its decode of the same
+      image rewritten in the form it reads, and agree with netpbm 11.10's
+      `xpmtoppm`; by unit tests worked by hand; and by 32 hand mutants, 31
+      failing a test and one equivalent (a colour string shorter than its key is
+      malformed either way). Measured on real files: 1152 XPMs from Ubuntu
+      26.04's packages (fvwm, fvwm-icons, icewm, icewm-common, emacs-common,
+      xpaint, xfig-libs, xterm, xboard, wmaker-data, others, and
+      `/usr/share/pixmaps`), fetched with `apt-get download`: 1151 decode, 1101
+      of them pixel for pixel equal to netpbm's or Pillow's decode, and the 50
+      others are files neither reads: netpbm refuses them as "Color name appears
+      multiple times in color map" (which it also says of a colour with several
+      keys), a declaration not starting `static char`, a colour line not
+      starting with a quote, or a row past the image's width. The one refused is
+      Emacs's `letter.xpm`, whose colour `opaque` is Emacs's own and no X11
+      name. netpbm differs on one file, icewm's `win95/close.xpm`, which has a
+      blank line between its colours and its rows, and whose pixels netpbm gets
+      wrong from the first; Pillow agrees with this decoder there. The fuzz
+      target feeds every input to it from an `xpm-icon` seed.
     - **Step three is in: SVG icons**,
       `svg::decode(bytes, size, scale, &limits)` behind the `svg` feature,
       written here with no new dependency (`crates/crcbl-image/src/svg/`): its
@@ -1119,27 +1120,31 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       `vector-effect: non-scaling-stroke` drawn. Verified by unit tests worked
       by hand (a billion-laughs bomb and an external entity refused, each cap at
       its edge, the cascade's fallbacks, a non-scaling stroke's width and dashes
-      under a transform and a `viewBox`) and 55 hand mutants, 15 of the entities
-      and 40 of the leniency, every one failing a test. Only presentation values
+      under a transform and a `viewBox`) and 56 hand mutants, 15 of the entities
+      and 41 of the leniency, every one failing a test. Only presentation values
       became lenient: an invalid value of an element's own attribute still
       refuses the file (`gradientUnits`, `spreadMethod`, `clipPathUnits`,
       `preserveAspectRatio`, a shape's `x="1em"`, a filter primitive's numbers),
       where browsers would take the default; the corpus refuses none for it.
       Decided, so it is not re-argued: a value in a form the renderer does not
-      evaluate is refused rather than ignored, which includes any keyword where
-      a colour belongs that is not a colour it knows (a system colour, but also
-      a misspelling such as `bleu`, which a browser would ignore), any `mask`
-      value but `none` or one reference (the shorthand's images and modes), and
-      `var()`, `calc()`, `env()` and `attr()` anywhere; `pathLength`,
-      `systemLanguage` and `requiredExtensions` are refused even where they
-      would change nothing; `filterRes` is ignored (SVG 2 dropped it and resvg
-      reads none); `background-color` is refused on any element because resvg
-      paints it behind the root. An invalid value falls back as the
-      specifications say (the next declaration, else inherited, else initial),
-      where resvg takes the initial value, black for `fill`; the two agree on
-      both corpus icons with an invalid value, whose parents set no fill. Not
-      tested: `vector-effect` inside a mask or under a filter, whose host is
-      still the placement.
+      evaluate is refused rather than ignored (a colour function other than
+      `rgb()`, `context-fill` and `context-stroke`, a length in `em`), any
+      `mask` value but `none` or one reference (the shorthand's images and
+      modes), and `var()`, `calc()`, `env()` and `attr()` anywhere;
+      `pathLength`, `systemLanguage` and `requiredExtensions` are refused even
+      where they would change nothing; `filterRes` is ignored (SVG 2 dropped it
+      and resvg reads none); `background-color` is refused on any element
+      because resvg paints it behind the root. A word where a colour belongs
+      that names no colour (a misspelling such as `bleu`, a CSS system colour)
+      is an invalid value like any other and falls back down the cascade, as
+      browsers treat it; decided 2026-10-16 over refusing the icon, which the
+      first version did on the ground that the word might name a colour the
+      renderer lacks. An invalid value falls back as the specifications say (the
+      next declaration, else inherited, else initial), decided the same day; the
+      alternative was resvg's rule, the initial value (black for `fill`), and
+      the two agree on both corpus icons with an invalid value, whose parents
+      set no fill. Not tested: `vector-effect` inside a mask or under a filter,
+      whose host is still the placement.
     - Order from here: pikr's, in the 2026-10-16 entry at the top: `<image>`,
       then text once system font lookup is in.
 

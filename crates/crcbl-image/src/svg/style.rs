@@ -21,15 +21,17 @@
 //! # Invalid values
 //!
 //! A value that is no value of its property at all — `fill="#fff;opacity:1"`,
-//! an opacity that is not a number, a negative width — is ignored, as CSS
+//! an opacity that is not a number, a negative width, a word where a colour
+//! belongs that names no colour (a misspelling, a system colour) — is
+//! ignored, as CSS
 //! ignores an invalid declaration: the next declaration down the cascade
 //! applies, or failing one the property is inherited or takes its initial
 //! value, as SVG 2 says of an invalid presentation attribute. A value in a
 //! form this renderer does not evaluate is not known to be invalid, and is
 //! refused like an undrawn feature: a CSS function such as `var()` or
-//! `calc()`, a keyword where a colour or a paint server's reference belongs
-//! (a system colour, say), a colour function other than `rgb()`, or a length
-//! in a unit it does not resolve (`em`).
+//! `calc()`, a colour function other than `rgb()`, a length in a unit it does
+//! not resolve (`em`), or a reference to a paint it does not draw
+//! (`context-fill`, a paint server in another file).
 
 use super::color::{self, Color, ColorValue};
 use super::css::{self, Declaration, Rule};
@@ -855,12 +857,9 @@ fn is_identifier(text: &str) -> bool {
 }
 
 /// Whether a colour that did not parse is in a form this renderer does not
-/// draw: a keyword (a system colour, `context-fill`) or a colour function
-/// other than `rgb()`, rather than no colour at all.
+/// draw, a colour function other than `rgb()`, rather than no colour at all.
+/// A word that names no colour is no colour, as it is to a browser.
 fn undrawn_color(text: &str) -> bool {
-    if is_identifier(text) {
-        return true;
-    }
     text.split_once('(').is_some_and(|(name, rest)| {
         is_identifier(name)
             && rest.ends_with(')')
@@ -870,14 +869,15 @@ fn undrawn_color(text: &str) -> bool {
 }
 
 /// Whether a paint that did not parse is one this renderer does not draw: a
-/// paint server in another file, or a colour as [`undrawn_color`] has it.
+/// paint server in another file, a marker's or `use`'s context paint, or a
+/// colour as [`undrawn_color`] has it.
 fn undrawn_paint(text: &str) -> bool {
     match text.strip_prefix("url(") {
         Some(rest) => rest
             .split(')')
             .next()
             .is_some_and(|inner| iri(inner).is_none()),
-        None => undrawn_color(text),
+        None => matches!(text, "context-fill" | "context-stroke") || undrawn_color(text),
     }
 }
 
@@ -1069,7 +1069,6 @@ mod tests {
         let svg = |body: &str| format!(r#"<svg xmlns="http://www.w3.org/2000/svg">{body}</svg>"#);
         for body in [
             r#"<rect style="fill: hsl(0, 50%, 50%)"/>"#,
-            r#"<rect fill="ButtonText"/>"#,
             r#"<rect stroke="context-stroke"/>"#,
             r#"<rect fill="url(other.svg#g)"/>"#,
             r#"<rect fill="var(--c, red)"/>"#,
@@ -1119,7 +1118,8 @@ mod tests {
   <rect fill-rule="even-odd" stroke-linecap="flat" visibility="no" display="!" color-interpolation-filters="optimizeSpeed" paint-order="fill fill2" mask-type="lum" stroke-dasharray="1,x" stroke-miterlimit="4px" vector-effect="scaling" mix-blend-mode="mixed" shape-rendering="smooth" marker-end="#m" stroke-linejoin="mitre" clip-path="#c" filter="#f" stroke="#12345"/>
   <rect fill="initial" stroke-width="unset" opacity="inherit"/>
   <rect class="c" style="fill: unset" stop-color="rgb(1, 2)" color="1abc" paint-order=""/>
-  <rect display="none" style="display: !"/>
+  <rect display="none" style="display: 9lives"/>
+  <rect class="c" style="fill: bleu" stroke="ButtonText" color="notacolour"/>
   <rect style="frobnicate: 1; -inkscape-stroke: none; font-family: Sans; isolation: isolate" tyle="fill: #00ff00" adobe-blending-mode="normal"/>
 </g>
 </svg>"##,
@@ -1148,7 +1148,14 @@ mod tests {
         assert_eq!(styles[9].fill, red, "unset beats the sheet, and inherits");
         assert_eq!(styles[9], inherited, "an invalid rgb(), colour and order");
         assert!(!styles[10].display, "the attribute under an invalid style");
-        assert_eq!(styles[11], inherited, "unknown properties ignored");
+        assert_eq!(
+            styles[11].fill,
+            Paint::Color(ColorValue::Color(Color::rgb8(0, 0, 255))),
+            "a word that is no colour gives way to the sheet"
+        );
+        assert_eq!(styles[11].stroke, inherited.stroke, "a system colour");
+        assert_eq!(styles[11].color, inherited.color);
+        assert_eq!(styles[12], inherited, "unknown properties ignored");
     }
 
     /// **`vector-effect` is not inherited.**
