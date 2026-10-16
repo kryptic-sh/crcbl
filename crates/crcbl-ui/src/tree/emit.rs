@@ -139,11 +139,14 @@ impl Ui {
         }
         let (min, max) = self.store.get(node.slot).rect;
         match node.content {
-            Content::Block | Content::Paragraph => {
+            // A text span is a box like a block, painted behind its text.
+            Content::Block | Content::Paragraph | Content::Text { .. } => {
                 let padding = padding_box(min, &node.layout);
                 paint_box(list, &node.style, (min, max), padding, &self.images);
             }
-            Content::Text { .. } | Content::Run { .. } => {}
+            // A run is drawn by its paragraph, fragment by fragment, and paints
+            // no box: one would be a rectangle per fragment, not its own.
+            Content::Run { .. } => {}
             Content::Image(image) => {
                 let (content_min, content_max) = content_box(min, &node.layout);
                 list.image(content_min, content_max, &image, node.style.color);
@@ -261,7 +264,7 @@ fn paint_outline(list: &mut DrawList, style: &NodeStyle, min: Vec2, max: Vec2) {
     );
 }
 
-/// A block's background, its background image and its border — or its
+/// A block's or text span's background, its background image and its border — or its
 /// border image in the border's place — over its border box `min..max`, in
 /// that order. `padding` is its padding box, which the background image is
 /// stretched over; `images` is what [`Ui::set_image`] bound.
