@@ -104,8 +104,13 @@ each checked against the code here unless it says otherwise:
   mention a GPU backend; the umbrella `crcbl` crate's docs were not changed and
   could point there. Turning DRED off in a release build would need a switch of
   its own; nobody has asked.
-- **No `ShellCaps::TRANSPARENT` on Win32**: pikr's panel is opaque and square
-  there, the DirectComposition entry under the Win32 step.
+- **Transparency on Win32 shipped 2026-10-17, with the D3D12 backend only** (the
+  Win32 step below says how). pikr's panel is transparent and square on Windows
+  when it renders through D3D12 and asks its swapchain for
+  `CompositeAlpha::PreMultiplied`; through Vulkan, `create_surface` refuses the
+  window by name. Two things pikr and lyr should know, both open below:
+  `GpuContext` always asks for `CompositeAlpha::Opaque`, and on macOS
+  `crcbl-mtl` makes the layer opaque again when it configures it.
 
 **pikr drops resvg and the `image` crate, 2026-10-16** (the owner's call,
 relayed by pikr's session), so every `crcbl-image` gap now shows in pikr as a
@@ -368,9 +373,109 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      `PanelLayer::Overlay` and `Top` share the topmost band, and `Background`
      cannot go below the desktop icons; both are platform limits, written down
      in `win32/panel.rs`.
-   - Transparency: per-pixel alpha with a Vulkan or D3D12 swapchain likely means
-     DirectComposition (lyr item 11), with no DWM border, shadow or rounded
-     corner fighting the app's own (pikr item 7).
+   - Transparency (lyr item 11, pikr item 7) is on, 2026-10-17:
+     `ShellCaps::TRANSPARENT` is set. A transparent toplevel, panel or popup is
+     created with `WS_EX_NOREDIRECTIONBITMAP` (`geometry::with_transparency`),
+     its `SurfaceTarget::Win32` carries `transparent: true`, and a frameless one
+     is given `DWMWCP_DONOTROUND` and `DWMWA_COLOR_NONE` for its border
+     (`geometry::transparent_chrome`, applied by
+     `Win32Shell::apply_transparent_chrome` at creation and after every mode
+     change; `set_styles` carries the extended-style bit across a style
+     rewrite). `crcbl-dx12` presents to it through DirectComposition
+     (`crates/crcbl-dx12/src/composition.rs`): the surface builds a
+     DirectComposition device, a target on the window and a root visual, offers
+     `CompositeAlpha::PreMultiplied` beside `Opaque`
+     (`present::window_composite_alpha`), and the swapchain is a composition one
+     (`CreateSwapChainForComposition`, `DXGI_ALPHA_MODE_PREMULTIPLIED` for
+     premultiplied, `IGNORE` for opaque) bound as the visual's content. An
+     opaque window still gets `CreateSwapChainForHwnd`, unchanged.
+   - Decided 2026-10-17: the DirectComposition objects live in `crcbl-dx12`,
+     built with the surface and shared with each swapchain through a
+     `composition::Binding`, because DirectComposition binds one target per
+     window (so a swapchain rebuilt on one surface must reuse it rather than
+     race the old one's release), the swapchain and the visual's teardown order
+     has to be one crate's, and `windows` is named by `crcbl-dx12` alone.
+     Alternatives: the shell owning the device, target and visual and handing
+     the visual over, declined because the shell's FFI is hand-written (it would
+     need hand-rolled COM vtables) and the backend would still have to set the
+     content and commit on objects it does not own; a target per swapchain,
+     declined for the release race above.
+   - Decided 2026-10-17: the renderer learns a window is transparent from a
+     `transparent` field on `SurfaceTarget::Win32`, because the shell is the one
+     that knows, the field keeps `crcbl-core` free of Windows types (a `bool`),
+     and the type is not `#[non_exhaustive]` exactly so that a change like this
+     reaches every match. Alternatives: the backend reading the window's
+     `GWL_EXSTYLE`, declined because it is implicit (an `HWND` from any source
+     with the bit would silently change presentation) and Vulkan would need
+     `user32` to refuse; `SwapchainDesc::composite_alpha` being `PreMultiplied`
+     as the signal, declined because the window must be created without a
+     redirection surface before any swapchain exists, and `surface_caps` has to
+     offer premultiplied before a descriptor can ask.
+   - Decided 2026-10-17: Vulkan refuses a transparent Win32 target in
+     `create_surface` (`instance::win32_refusal`, `HalError::Unsupported` naming
+     the D3D12 backend), because `vkCreateWin32SurfaceKHR` presents to the
+     `HWND`, which shows nothing without a redirection surface, and Windows
+     drivers report only `VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR` there. Declined:
+     drawing it opaque (a window that silently is not what was asked), and
+     creating a transparent window with a redirection surface for Vulkan (DWM
+     would then blend nothing). The refusal is the only way a caller learns,
+     since the shell sets `TRANSPARENT` without knowing which backend will draw;
+     `ShellCaps::TRANSPARENT`'s docs already call the frame's half the HAL's.
+   - Decided 2026-10-17: the chrome is changed only for a transparent window,
+     and only where it has no caption. A frameless transparent window draws its
+     own shape, so it gets square corners and no border; a captioned toplevel
+     keeps the system's, because the system frame is what the role and
+     `SERVER_DECORATIONS` promise. `DWMWA_NCRENDERING_POLICY` is not set: a
+     frameless window has no non-client area, and disabling it on a captioned
+     one would remove the caption. No shadow is removed because none is drawn:
+     DWM shadows framed windows and `CS_DROPSHADOW` classes, and this backend's
+     frameless windows are neither.
+   - Decided 2026-10-17: one `unsafe impl Send` and `Sync`, on
+     `composition::Composition`, because `windows` leaves the DirectComposition
+     interfaces unmarked and the surface and swapchain tables must be both.
+     Microsoft's "Basic concepts (DirectComposition)" says the objects are not
+     thread bound and may be called from several threads; the `bound` flag
+     orders the calls that could race. Declined: keeping raw interface pointers
+     as integers with hand-counted references, which would trade one argued
+     marker for unchecked lifetimes.
+   - Behaviour, not a bug: a pixel of alpha zero is still the window's for the
+     pointer (DirectComposition is not a layered window), so click-through is
+     `WM_NCHITTEST`'s, as `PopupInput::Passthrough` answers it. Nothing does
+     pixel-alpha hit testing, on purpose. A resize does not stretch stale
+     content: the visual shows the swapchain at its own size, so until
+     `reconfigure_swapchain` a grown window has a transparent band and a shrunk
+     one clips its last frame. `reconfigure_swapchain` refuses a changed
+     `composite_alpha` (`ResizeBuffers` keeps the alpha mode). A second live
+     transparent surface on one window, or a second swapchain on one, is refused
+     by name.
+   - **Verified:** `with_transparency`, `transparent_chrome`, the FFI values,
+     `window_composite_alpha`, `alpha_mode`, `swap_chain_desc` and
+     `win32_refusal` unit tests, mutation-checked locally. The D3D12 device test
+     `a_transparent_window_presents_premultiplied_through_directcomposition`
+     passed locally on WARP and on an RX 7900 XTX with the debug layer off (this
+     machine has no Graphics Tools): every offered format takes premultiplied
+     alpha, a half-transparent premultiplied clear reads back as its exact
+     bytes, `ResizeBuffers` works, a rebuilt swapchain binds, and a surface made
+     after the first is released composes. Its mutants (no composition, no
+     binding, no second-swapchain refusal, the visual never given back, no
+     alpha-change refusal) were all killed. The Vulkan refusal's e2e test passed
+     on this machine's loader, and its mutants were killed.
+   - **Only CI verified:** the desktop test
+     `a_transparent_window_of_every_role_has_no_redirection_surface` (the style
+     bit on every role and across borderless, the surface target's flag, the
+     cap), in `win32 e2e (real desktop)`; the D3D12 device test with the debug
+     layer on, in the DX12 jobs. Neither desktop wiring mutant was run.
+   - **Verified by nothing:** what DWM shows. No test reads the desktop back, so
+     the desktop showing through, the square corners and the missing border are
+     unobserved, as is the `DwmSetWindowAttribute` result (logged at debug, not
+     asserted, because Windows 10 refuses both attributes).
+   - Not done: `GpuContext` (`crates/crcbl/src/engine.rs`,
+     `SwapchainConfig::desc`) always asks for `CompositeAlpha::Opaque`, so a
+     transparent window opened through it is drawn opaque on every backend (here
+     as `DXGI_ALPHA_MODE_IGNORE`; on Wayland, Mesa picks an opaque format for an
+     opaque swapchain). Needs a decision: a `GpuContextDesc` field, or
+     `GpuContext` asking for `PreMultiplied` when the surface offers it and the
+     window is transparent, which it cannot tell today off Win32.
    - Popups (S3) are built (`crates/crcbl-shell/src/win32/popup.rs`, placement
      in `geometry::popup_rect`): an owned `WS_POPUP` tool window, topmost when
      its parent is, placed against the anchor at the parent's scale, flipped to
@@ -400,6 +505,15 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      the pointer, placed again when the screens change, and closed when its
      screen is detached. `TRANSPARENT` is set for every window: `opaque = NO`, a
      clear background, no shadow and a non-opaque `CAMetalLayer` (pikr item 7).
+   - **Found 2026-10-17, unverified on a Mac:** `crcbl-mtl`'s swapchain
+     configure calls `layer.setOpaque(true)` unconditionally
+     (`crates/crcbl-mtl/src/swapchain.rs`, beside `setFramebufferOnly`), after
+     the AppKit shell made the window's `CAMetalLayer` non-opaque in
+     `appkit/window.rs`. Read from the code only: a transparent window drawn
+     through Metal is likely opaque. Fixing it means offering
+     `CompositeAlpha::PreMultiplied` on Metal surfaces and setting `opaque` from
+     the descriptor, which `layer_surface_caps` declines today for want of a
+     verified non-opaque path.
    - Decided: the level numbers are asked of `CGWindowLevelForKey` at run time
      rather than written down, because they are the window server's to define.
      Hover without the keyboard (lyr item 9) is the never-key panel class plus

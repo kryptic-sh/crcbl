@@ -28,12 +28,19 @@
 //! and 2b's zombie list never engages here; that bookkeeping is asserted in
 //! `instance.rs` instead, because the only surfaces this suite can create are
 //! the ones it cannot exercise.
+//!
+//! One refusal is here too, because it is Vulkan's alone: a transparent Win32
+//! target is not a surface this backend can make, and the error has to say
+//! which backend can.
+
+use core::ptr::NonNull;
 
 use crate::harness::{CLEAR, Headless, instance};
+use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
-    Barriers, BufferDesc, BufferUsage, ClearValue, ColorAttachment, CommandEncoderDesc, DeviceDesc,
-    Features, ImageSubresourceRange, Instance, LoadOp, MemoryLocation, PresentInfo, Rect2d,
-    RenderPassDesc, ResourceState, StoreOp, SubmitInfo,
+    BackendKind, Barriers, BufferDesc, BufferUsage, ClearValue, ColorAttachment,
+    CommandEncoderDesc, DeviceDesc, Features, HalError, ImageSubresourceRange, Instance, LoadOp,
+    MemoryLocation, PresentInfo, Rect2d, RenderPassDesc, ResourceState, StoreOp, SubmitInfo,
 };
 
 /// Obligation 1: a `Device` may outlive its `Instance`. Getting this wrong is a
@@ -161,4 +168,36 @@ fn a_vulkan_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
     device.destroy_swapchain(headless.swapchain);
     headless.device.destroy();
     headless.instance.validation_report().assert_clean();
+}
+
+/// A transparent Win32 window is refused by name, on every host and loader.
+///
+/// Such a window shows only what DirectComposition gives it, and Vulkan has no
+/// composition swapchain, so a surface made anyway would present frames nothing
+/// shows. The refusal comes before the `VK_KHR_win32_surface` check, which is
+/// why this runs on a Linux loader too, and before either pointer is read,
+/// which is why dangling ones are safe here.
+///
+/// Red if the refusal is dropped (the call then reaches the extension check or
+/// `vkCreateWin32SurfaceKHR` with dangling handles and answers something else),
+/// or if its text stops naming the D3D12 backend.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_transparent_win32_window_is_refused_and_names_the_d3d12_backend() {
+    let instance = instance();
+    let target = SurfaceTarget::Win32 {
+        hinstance: NonNull::dangling(),
+        hwnd: NonNull::dangling(),
+        transparent: true,
+    };
+    // SAFETY: the transparent arm returns before either handle is read, so the
+    // dangling pointers reach nothing. That is what this test asserts.
+    let error = unsafe { instance.create_surface(&target) }
+        .expect_err("Vulkan cannot present to a transparent Win32 window");
+    let HalError::Unsupported { backend, what } = &error else {
+        panic!("expected a named refusal, got {error:?}");
+    };
+    assert_eq!(*backend, BackendKind::Vulkan);
+    assert!(what.contains("D3D12"), "{what}");
+    instance.validation_report().assert_clean();
 }

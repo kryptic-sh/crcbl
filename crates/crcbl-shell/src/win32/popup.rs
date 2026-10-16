@@ -153,7 +153,10 @@ impl Win32Shell {
         // SAFETY: reading this shell's own window's extended style.
         let parent_ex_style =
             unsafe { ffi::GetWindowLongPtrW(parent_hwnd, value::GWL_EX_STYLE) } as u32;
-        let styles = geometry::popup_styles(popup.input, parent_ex_style & style::EX_TOPMOST != 0);
+        let styles = geometry::with_transparency(
+            geometry::popup_styles(popup.input, parent_ex_style & style::EX_TOPMOST != 0),
+            desc.transparent,
+        );
         let name = class_name();
         // SAFETY: as `create_native_window`, with the parent as the owner: a
         // live window of this shell on this thread. Created hidden; showing is

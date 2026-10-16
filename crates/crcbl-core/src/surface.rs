@@ -105,12 +105,27 @@ pub enum SurfaceTarget {
         /// compatible format.
         visual_id: u32,
     },
-    /// Windows: module instance + window handle.
+    /// Windows: module instance + window handle, and whether the window was
+    /// made for per-pixel transparency.
     Win32 {
         /// `HINSTANCE` of the module that registered the window class.
         hinstance: NonNull<c_void>,
         /// `HWND`.
         hwnd: NonNull<c_void>,
+        /// The window was created transparent (`WS_EX_NOREDIRECTIONBITMAP`):
+        /// it has no redirection surface, so nothing presented to the `HWND`
+        /// itself is shown, and a backend must present through
+        /// DirectComposition with premultiplied alpha.
+        ///
+        /// The one target that carries this, because Windows is the one
+        /// window system where transparency changes how a *backend* presents.
+        /// On Wayland, X11 and macOS it is the window's own business (its
+        /// visual, its opaque region, its layer), and a backend makes the
+        /// surface the same way either way. A backend that cannot present this
+        /// way refuses
+        /// the surface by name rather than drawing into a window that shows
+        /// nothing.
+        transparent: bool,
     },
     /// macOS/iOS: a `CAMetalLayer*`.
     ///
@@ -208,6 +223,7 @@ mod tests {
             SurfaceTarget::Win32 {
                 hinstance: dangling(),
                 hwnd: dangling(),
+                transparent: false,
             },
             SurfaceTarget::AppKit { layer: dangling() },
             SurfaceTarget::Web { canvas_id: 7 },

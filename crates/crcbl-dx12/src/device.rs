@@ -2063,6 +2063,7 @@ impl Dx12Device {
         let (images, views) = self.register_ring_images(extent, count, desc)?;
         let entry = SwapchainEntry {
             owner: self.inner.owner.id,
+            composition: None,
             // The field that decides everything else about this entry.
             raw: None,
             // Zero is "there is nothing to wait on", which `swapchain::wait`
@@ -2071,6 +2072,7 @@ impl Dx12Device {
             hwnd: OFFSCREEN_HWND,
             extent,
             format: desc.format,
+            composite_alpha: desc.composite_alpha,
             buffers: count,
             next_offscreen: 0,
             acquired: None,
@@ -4345,25 +4347,27 @@ impl Device for Dx12Device {
     /// refuses — legal here because a swapchain buffer is the case D3D12
     /// permits it on.
     fn create_swapchain(&self, desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
-        let Some(hwnd) = self.inner.instance.surface_hwnd(desc.surface)? else {
+        let Some(window) = self.inner.instance.surface_window(desc.surface)? else {
             return self.create_offscreen_ring(desc);
         };
-        let created = swapchain::create(
+        let (created, composition) = swapchain::create(
             &self.inner.instance.factory,
             &self.inner.raw,
             &self.inner.queue,
-            hwnd,
+            &window,
             desc,
             self.inner.instance.allow_tearing,
         )?;
         let (images, views) = self.register_backbuffers(&created, desc)?;
         let entry = SwapchainEntry {
             owner: self.inner.owner.id,
+            composition,
             raw: Some(created.raw),
             waitable: created.waitable,
-            hwnd: hwnd.0 as usize,
+            hwnd: window.hwnd.0 as usize,
             extent: created.extent,
             format: desc.format,
+            composite_alpha: desc.composite_alpha,
             buffers: created.buffers,
             next_offscreen: 0,
             acquired: None,
@@ -4414,17 +4418,17 @@ impl Device for Dx12Device {
         swapchain: SwapchainHandle,
         desc: &SwapchainDesc<'_>,
     ) -> Result<(), SurfaceError> {
-        let hwnd = self.inner.instance.surface_hwnd(desc.surface)?;
+        let window = self.inner.instance.surface_window(desc.surface)?;
+        let hwnd = window.as_ref().map(|window| window.hwnd);
         // Which surface this descriptor names decides which rules apply, and
         // the comparison below is what refuses a descriptor that named the
         // other kind: a window is a non-zero address and a ring is zero, so
         // "move this swapchain onto an offscreen surface" fails here rather
         // than half-way through a `ResizeBuffers` on nothing.
         let offscreen = hwnd.is_none();
-        let (extent, buffers) = if offscreen {
-            swapchain::check_offscreen(desc)?
-        } else {
-            swapchain::check(desc)?
+        let (extent, buffers) = match &window {
+            None => swapchain::check_offscreen(desc)?,
+            Some(window) => swapchain::check(desc, window.composition.is_some())?,
         };
         let (old_images, old_views) = {
             let state = self.state();
@@ -4447,6 +4451,16 @@ impl Device for Dx12Device {
                     "reconfigure_swapchain cannot change a swapchain's format from {:?} to {:?} \
                      on this backend; destroy it and create another",
                     entry.format, desc.format
+                ))));
+            }
+            if entry.composite_alpha != desc.composite_alpha {
+                // `ResizeBuffers` takes no alpha mode at all, so a changed one
+                // would be accepted and silently not applied.
+                return Err(SurfaceError::Hal(HalError::InvalidDescriptor(format!(
+                    "reconfigure_swapchain cannot change a swapchain's composite alpha from \
+                     {:?} to {:?}: ResizeBuffers keeps the alpha mode it was created with; \
+                     destroy it and create another",
+                    entry.composite_alpha, desc.composite_alpha
                 ))));
             }
             (entry.images.clone(), entry.views.clone())

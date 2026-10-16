@@ -725,6 +725,7 @@ pub(crate) mod tests {
             SurfaceTarget::Win32 {
                 hinstance: dangling,
                 hwnd: dangling,
+                transparent: false,
             },
             SurfaceTarget::Web { canvas_id: 0 },
         ];

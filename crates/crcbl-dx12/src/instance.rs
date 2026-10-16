@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crcbl_core::Pool;
 use crcbl_hal::{
-    AdapterId, AdapterInfo, BackendKind, CompositeAlpha, DeviceDesc, DeviceRequestState, HalError,
-    Instance, PendingDevice, SurfaceCaps, SurfaceHandle, SurfaceTarget,
+    AdapterId, AdapterInfo, BackendKind, DeviceDesc, DeviceRequestState, HalError, Instance,
+    PendingDevice, SurfaceCaps, SurfaceHandle, SurfaceTarget,
 };
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Dxgi::{
@@ -18,6 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::core::{BOOL, Interface};
 
 use crate::adapter::{self, RawCaps};
+use crate::composition::Composition;
 use crate::debug;
 use crate::device::Dx12Device;
 use crate::dred;
@@ -108,8 +109,8 @@ impl AdapterRecord {
     }
 }
 
-/// One live surface: the window it presents to, and the instance that issued
-/// it.
+/// One live surface: the window it presents to, the instance that issued it,
+/// and a transparent window's DirectComposition tree.
 ///
 /// **There is no DXGI object here, and that is the whole shape of obligation 2
 /// on this backend.** A `VkSurfaceKHR` is a driver object whose destruction has
@@ -128,9 +129,14 @@ impl AdapterRecord {
 /// [`HWND`] because that type is a raw
 /// pointer, which `windows-rs` declares neither `Send` nor `Sync` — and this
 /// table lives behind a [`Mutex`] inside a struct the seam requires to be both.
-/// Storing the integer is what keeps this crate's "no `unsafe` marker impls
-/// anywhere" claim true; the pointer is rebuilt at each call site that needs
-/// one.
+/// Storing the integer is what keeps this struct free of an `unsafe` marker
+/// impl; the pointer is rebuilt at each call site that needs one.
+///
+/// A transparent window's [`Composition`] **is** an object, and it is shared
+/// with every swapchain made on the surface rather than owned here alone, so
+/// destroying the handle still strands nothing: a swapchain keeps the tree it
+/// is shown through. `crate::composition` says why the tree is made with the
+/// surface rather than with the swapchain.
 #[derive(Debug)]
 pub(crate) struct SurfaceEntry {
     /// Instance that created it. Surfaces are checked against the *instance*
@@ -148,12 +154,24 @@ pub(crate) struct SurfaceEntry {
     hwnd: usize,
     /// Which [`SurfaceTarget`] variant it came from, for logs.
     platform: &'static str,
+    /// The window's DirectComposition tree, for a transparent window; `None`
+    /// for an opaque one, whose swapchain presents to the `HWND`, and for
+    /// [`SurfaceTarget::Offscreen`].
+    composition: Option<Arc<Composition>>,
 }
 
 impl Owned for SurfaceEntry {
     fn owner(&self) -> u64 {
         self.owner
     }
+}
+
+/// A windowed surface as a swapchain needs it: the window, and the
+/// composition a transparent one is shown through.
+#[derive(Clone, Debug)]
+pub(crate) struct SurfaceWindow {
+    pub(crate) hwnd: HWND,
+    pub(crate) composition: Option<Arc<Composition>>,
 }
 
 /// What a surface or swapchain entry's window address holds when there is no
@@ -229,12 +247,28 @@ impl InstanceInner {
     ///
     /// As [`handle::lookup`].
     pub(crate) fn surface_hwnd(&self, surface: SurfaceHandle) -> Result<Option<HWND>, HalError> {
+        Ok(self.surface_window(surface)?.map(|window| window.hwnd))
+    }
+
+    /// [`surface_hwnd`](Self::surface_hwnd), with the composition a
+    /// transparent window is shown through.
+    ///
+    /// # Errors
+    ///
+    /// As [`handle::lookup`].
+    pub(crate) fn surface_window(
+        &self,
+        surface: SurfaceHandle,
+    ) -> Result<Option<SurfaceWindow>, HalError> {
         let surfaces = self.surfaces();
         let entry = handle::lookup(&surfaces, "surface", surface, self.owner)?;
         if entry.hwnd == OFFSCREEN_HWND {
             return Ok(None);
         }
-        Ok(Some(HWND(core::ptr::without_provenance_mut(entry.hwnd))))
+        Ok(Some(SurfaceWindow {
+            hwnd: HWND(core::ptr::without_provenance_mut(entry.hwnd)),
+            composition: entry.composition.clone(),
+        }))
     }
 }
 
@@ -638,6 +672,15 @@ impl Instance for Dx12Instance {
     ///    thread-affine and `CreateSwapChainForHwnd` installs a message hook on
     ///    it.
     ///
+    /// # A transparent window is composed here
+    ///
+    /// `transparent` names a window made with `WS_EX_NOREDIRECTIONBITMAP`,
+    /// which shows only a DirectComposition tree, so for it this call **does**
+    /// touch the window: it builds that tree (`crate::composition`), and the
+    /// swapchain later made on the surface is a composition swapchain shown
+    /// through it. A second live transparent surface on one window is refused
+    /// here, because a window takes one target.
+    ///
     /// # Offscreen names no window, and touches nothing
     ///
     /// [`SurfaceTarget::Offscreen`] carries no pointer and no handle, so all
@@ -653,9 +696,10 @@ impl Instance for Dx12Instance {
     ///
     /// The four are [`HalError::Unsupported`] naming the absence rather than a
     /// slice to wait for: D3D12's
-    /// only presentation target is an `HWND` (a `CoreWindow` and a composition
-    /// surface are the other two DXGI accepts, and neither is a variant of this
-    /// enum), so no slice will ever make them work.
+    /// only window-system target is an `HWND` (a `CoreWindow` and a composition
+    /// surface handle are the other two DXGI accepts, and neither is a variant
+    /// of this enum; a transparent window's composition swapchain is still
+    /// shown on an `HWND`), so no slice will ever make them work.
     unsafe fn create_surface(&self, target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {
         let never = |what| {
             Err(HalError::Unsupported {
@@ -663,12 +707,21 @@ impl Instance for Dx12Instance {
                 what,
             })
         };
-        let hwnd = match *target {
+        let (hwnd, composition) = match *target {
             // The one variant this backend presents to. `hinstance` is
             // deliberately unread: `CreateSwapChainForHwnd` takes the window
             // alone.
-            SurfaceTarget::Win32 { hwnd, .. } => hwnd.as_ptr() as usize,
-            SurfaceTarget::Offscreen => OFFSCREEN_HWND,
+            SurfaceTarget::Win32 {
+                hwnd, transparent, ..
+            } => {
+                let composition = if transparent {
+                    Some(Arc::new(Composition::for_window(HWND(hwnd.as_ptr()))?))
+                } else {
+                    None
+                };
+                (hwnd.as_ptr() as usize, composition)
+            }
+            SurfaceTarget::Offscreen => (OFFSCREEN_HWND, None),
             SurfaceTarget::Wayland { .. } | SurfaceTarget::Xcb { .. } => {
                 return never("a Linux window system is crcbl-vk's target, not D3D12's");
             }
@@ -680,17 +733,19 @@ impl Instance for Dx12Instance {
             }
         };
 
+        let composed = composition.is_some();
         let handle: SurfaceHandle = {
             let mut surfaces = self.inner.surfaces();
             let slot = surfaces.insert(SurfaceEntry {
                 owner: self.inner.owner.id,
                 hwnd,
                 platform: target.platform_name(),
+                composition,
             });
             handle::stamp(self.inner.owner, slot)
         };
         crcbl_core::log::debug!(
-            "crcbl-dx12: created a {} surface {handle:?} on HWND {hwnd:#x}",
+            "crcbl-dx12: created a {} surface {handle:?} on HWND {hwnd:#x}, composed={composed}",
             target.platform_name()
         );
         Ok(handle)
@@ -754,18 +809,19 @@ impl Instance for Dx12Instance {
         {
             return Err(HalError::NoSuchAdapter(adapter.0));
         }
-        let Some(hwnd) = self.inner.surface_hwnd(surface)? else {
+        let Some(window) = self.inner.surface_window(surface)? else {
             return Ok(present::offscreen_surface_caps());
         };
+        let hwnd = window.hwnd;
         Ok(SurfaceCaps {
             formats: present::FLIP_MODEL_FORMATS.to_vec(),
             present_modes: present::present_modes(self.inner.allow_tearing),
-            // Flip-model on an `HWND` composites as opaque:
-            // `DXGI_ALPHA_MODE_PREMULTIPLIED` is a composition-swapchain mode
-            // and `CreateSwapChainForHwnd` rejects anything but `IGNORE` and
-            // `UNSPECIFIED`. Offering one this backend cannot configure would
-            // be the same mistake as offering a format it cannot create.
-            composite_alpha: vec![CompositeAlpha::Opaque],
+            // Opaque alone on an `HWND` swapchain, and premultiplied as well on
+            // a transparent window's composition swapchain; see
+            // `present::window_composite_alpha`. Offering a mode this backend
+            // cannot configure would be the same mistake as offering a format
+            // it cannot create.
+            composite_alpha: present::window_composite_alpha(window.composition.is_some()),
             min_image_count: present::MIN_BUFFERS,
             max_image_count: present::MAX_BUFFERS,
             current_extent: client_extent(hwnd),

@@ -41,7 +41,7 @@ use crate::{
     WindowConfiguration,
 };
 
-use super::ffi::{self, Handle, Rect, WindowPlacement, WndClassExW, style, value};
+use super::ffi::{self, Handle, Rect, WindowPlacement, WndClassExW, dwm, style, value};
 use super::geometry::{self, Frame, Styles};
 use super::proc::{self, Limits};
 use super::shell::{Saved, Win32Shell, WinWindow};
@@ -224,7 +224,10 @@ impl Win32Shell {
         let title = ffi::wide(desc.title).ok_or_else(|| {
             ShellError::InvalidDescriptor("title contains a NUL byte".to_string())
         })?;
-        let styles = geometry::styles(desc.mode, desc.resizable);
+        let styles = geometry::with_transparency(
+            geometry::styles(desc.mode, desc.resizable),
+            desc.transparent,
+        );
         let dpi = target.map_or(value::DEFAULT_DPI, |monitor| {
             // The monitor's scale is its DPI divided by 96, so this recovers
             // the DPI the shell already asked the system for.
@@ -531,10 +534,54 @@ impl Win32Shell {
         state.dpi = dpi;
         state.scale_factor = geometry::scale_from_dpi(dpi);
         // The frame changed with the style, so the constraints the window
-        // procedure enforces have to be recomputed against the new one.
+        // procedure enforces have to be recomputed against the new one, and a
+        // transparent window's chrome follows whether it now has a caption.
         let state = self.window(window)?;
         self.refresh_limits(state);
+        if state.transparent {
+            Self::apply_transparent_chrome(hwnd);
+        }
         Ok(())
+    }
+
+    /// Asks DWM for the corners and border
+    /// [`geometry::transparent_chrome`] gives a transparent window of the
+    /// styles it has now.
+    ///
+    /// Windows 10 does not know either attribute and refuses both, which is
+    /// logged and is no loss: it never rounds a window's corners, and draws no
+    /// border around a frameless one.
+    pub(super) fn apply_transparent_chrome(hwnd: Handle) {
+        // SAFETY: reading this shell's own window's two style words.
+        let styles = unsafe {
+            Styles {
+                style: ffi::GetWindowLongPtrW(hwnd, value::GWL_STYLE) as u32,
+                ex_style: ffi::GetWindowLongPtrW(hwnd, value::GWL_EX_STYLE) as u32,
+            }
+        };
+        let chrome = geometry::transparent_chrome(styles);
+        for (attribute, wanted) in [
+            (dwm::WINDOW_CORNER_PREFERENCE, chrome.corners),
+            (dwm::BORDER_COLOR, chrome.border),
+        ] {
+            // SAFETY: `hwnd` is this shell's own window, and both attributes
+            // are documented as a four-byte value: `wanted` is a live `u32`
+            // read for exactly its own size.
+            let result = unsafe {
+                ffi::DwmSetWindowAttribute(
+                    hwnd,
+                    attribute,
+                    (&raw const wanted).cast(),
+                    size_of::<u32>() as u32,
+                )
+            };
+            if result < 0 {
+                crcbl_core::log::debug!(
+                    "DwmSetWindowAttribute({attribute}, {wanted:#x}) answered {result:#x}; this \
+                     Windows draws that part of a transparent window's frame its own way"
+                );
+            }
+        }
     }
 
     /// The rectangle a borderless window should cover.
@@ -610,20 +657,18 @@ impl Win32Shell {
     /// drops stopped working.
     fn set_styles(hwnd: Handle, window_style: u32, ex_style: u32) {
         // SAFETY: reading this shell's own window's extended style, only to
-        // carry the drop registration across the write below.
-        let accepts_drops = unsafe { ffi::GetWindowLongPtrW(hwnd, value::GWL_EX_STYLE) } as u32
-            & style::EX_ACCEPT_FILES;
+        // carry across the write below the two bits that are state fixed
+        // elsewhere rather than style: the drop registration, and the missing
+        // redirection surface a transparent window was created with.
+        let carried = unsafe { ffi::GetWindowLongPtrW(hwnd, value::GWL_EX_STYLE) } as u32
+            & (style::EX_ACCEPT_FILES | style::EX_NO_REDIRECTION_BITMAP);
         // SAFETY: setting this shell's own window's styles. The values are
         // widened through `u32` on purpose — the style words are 32 bits even
         // on 64-bit Windows, and sign-extending them through `isize` would set
         // every high bit for a style with `WS_POPUP` in it.
         unsafe {
             ffi::SetWindowLongPtrW(hwnd, value::GWL_STYLE, window_style as isize);
-            ffi::SetWindowLongPtrW(
-                hwnd,
-                value::GWL_EX_STYLE,
-                (ex_style | accepts_drops) as isize,
-            );
+            ffi::SetWindowLongPtrW(hwnd, value::GWL_EX_STYLE, (ex_style | carried) as isize);
         }
     }
 

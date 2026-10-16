@@ -54,6 +54,19 @@
 //! | Reconfigure | `ResizeBuffers` | recreate the images |
 //! | Pacing wait | the waitable object | nothing to wait for |
 //!
+//! # A transparent window's swapchain is a composition swapchain
+//!
+//! A window the shell made transparent has no redirection surface, so an
+//! `HWND` swapchain on it would present frames nothing shows. Its surface
+//! carries a DirectComposition tree instead (`crate::composition`), and
+//! [`create`] makes the swapchain with `CreateSwapChainForComposition` and
+//! binds it as the tree's visual content. Everything else is the same object:
+//! the same descriptor apart from the alpha mode ([`swap_chain_desc`]), the
+//! same waitable object, the same `ResizeBuffers` and `Present`. The alpha mode
+//! is the caller's [`CompositeAlpha`]:
+//! `PreMultiplied` is `DXGI_ALPHA_MODE_PREMULTIPLIED`, which DWM blends by, and
+//! `Opaque` is `DXGI_ALPHA_MODE_IGNORE` on either kind ([`alpha_mode`]).
+//!
 //! # DXGI has no `OUT_OF_DATE`, so neither does this backend
 //!
 //! `vkAcquireNextImageKHR` reports a swapchain that no longer matches its
@@ -68,13 +81,17 @@
 use core::time::Duration;
 
 use crcbl_hal::{
-    Format, HalError, ImageHandle, ImageViewHandle, PresentMode, SurfaceError, SwapchainDesc,
+    CompositeAlpha, Format, HalError, ImageHandle, ImageViewHandle, PresentMode, SurfaceError,
+    SwapchainDesc,
 };
-use windows::Win32::Foundation::{HANDLE, HWND, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, ID3D12CommandQueue, ID3D12Device,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_ALPHA_MODE, DXGI_ALPHA_MODE_IGNORE, DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT,
+    DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_MWA_NO_ALT_ENTER, DXGI_PRESENT,
     DXGI_PRESENT_ALLOW_TEARING, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
@@ -84,9 +101,11 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::Threading::WaitForSingleObjectEx;
 use windows::core::{BOOL, Interface};
 
+use crate::composition::Binding;
 use crate::conv;
 use crate::debug;
 use crate::handle::Owned;
+use crate::instance::SurfaceWindow;
 use crate::present::{self, PresentLedger};
 
 /// What a swapchain handle resolves to.
@@ -94,6 +113,18 @@ use crate::present::{self, PresentLedger};
 pub(crate) struct SwapchainEntry {
     /// Device that created it, per obligation 3.
     pub(crate) owner: u64,
+    /// A transparent window's claim on its DirectComposition visual; `None`
+    /// for an `HWND` swapchain and an offscreen ring.
+    ///
+    /// **Declared before [`raw`](Self::raw), because fields drop in
+    /// declaration order** and this one has to go first: dropping it takes the
+    /// swapchain off the visual, which is DirectComposition's reference to it.
+    /// See `crate::composition` for the whole teardown order.
+    #[expect(
+        dead_code,
+        reason = "held for its `Drop`, which is the whole of what it does"
+    )]
+    pub(crate) composition: Option<Binding>,
     /// The DXGI object, or `None` for an offscreen ring — which has no window
     /// to present to and therefore no swapchain to present through. See the
     /// module docs for the table of what each call does instead.
@@ -135,6 +166,10 @@ pub(crate) struct SwapchainEntry {
     /// rule to strip the sRGB encoding for, so the resource and the view are
     /// the one format the caller asked for.
     pub(crate) format: Format,
+    /// The composite alpha it was created with, kept because `ResizeBuffers`
+    /// cannot change the alpha mode, so `reconfigure_swapchain` refuses a
+    /// descriptor that asks it to rather than ignoring the field.
+    pub(crate) composite_alpha: CompositeAlpha,
     /// Back buffers, or ring images.
     ///
     /// Equal to `images.len()` except inside `reconfigure_swapchain`, which
@@ -235,12 +270,17 @@ pub(crate) fn flags(tearing: bool) -> DXGI_SWAP_CHAIN_FLAG {
 ///
 /// Split out of [`create`] because it is also what `reconfigure_swapchain`
 /// needs, and because every rule here is one D3D12 would otherwise report as a
-/// bare `E_INVALIDARG` with no field named.
+/// bare `E_INVALIDARG` with no field named. `transparent` is whether the
+/// surface is a transparent window's, whose composition swapchain takes one
+/// more alpha mode.
 ///
 /// # Errors
 ///
 /// [`HalError::InvalidDescriptor`], naming the field and why.
-pub(crate) fn check(desc: &SwapchainDesc<'_>) -> Result<((u32, u32), u32), HalError> {
+pub(crate) fn check(
+    desc: &SwapchainDesc<'_>,
+    transparent: bool,
+) -> Result<((u32, u32), u32), HalError> {
     let extent = check_extent(desc)?;
     if !present::is_flip_model_format(desc.format) {
         return Err(HalError::InvalidDescriptor(format!(
@@ -250,15 +290,79 @@ pub(crate) fn check(desc: &SwapchainDesc<'_>) -> Result<((u32, u32), u32), HalEr
             present::FLIP_MODEL_FORMATS
         )));
     }
-    if desc.composite_alpha != crcbl_hal::CompositeAlpha::Opaque {
-        return Err(HalError::InvalidDescriptor(format!(
-            "CreateSwapChainForHwnd composites an HWND swapchain opaquely, so {:?} is not \
-             configurable; Instance::surface_caps offers CompositeAlpha::Opaque alone",
-            desc.composite_alpha
-        )));
+    if alpha_mode(desc.composite_alpha, transparent).is_none() {
+        return Err(HalError::InvalidDescriptor(if transparent {
+            format!(
+                "a transparent window's composition swapchain takes DXGI_ALPHA_MODE_IGNORE or \
+                 PREMULTIPLIED, so {:?} is not configurable; Instance::surface_caps offers {:?}",
+                desc.composite_alpha,
+                present::window_composite_alpha(true)
+            )
+        } else {
+            format!(
+                "CreateSwapChainForHwnd composites an HWND swapchain opaquely, so {:?} is not \
+                 configurable; Instance::surface_caps offers CompositeAlpha::Opaque alone, and \
+                 PreMultiplied too on a window the shell made transparent",
+                desc.composite_alpha
+            )
+        }));
     }
 
     Ok((extent, present::buffer_count(desc.image_count)))
+}
+
+/// The DXGI alpha mode a swapchain is created with, or `None` for a mode the
+/// window's [`SurfaceCaps`](crcbl_hal::SurfaceCaps) did not offer.
+///
+/// The offer is `present::window_composite_alpha`, so a caller that picked
+/// from it is never refused here.
+pub(crate) fn alpha_mode(alpha: CompositeAlpha, transparent: bool) -> Option<DXGI_ALPHA_MODE> {
+    if !present::window_composite_alpha(transparent).contains(&alpha) {
+        return None;
+    }
+    match alpha {
+        CompositeAlpha::PreMultiplied => Some(DXGI_ALPHA_MODE_PREMULTIPLIED),
+        _ => Some(DXGI_ALPHA_MODE_IGNORE),
+    }
+}
+
+/// The descriptor both kinds of window swapchain are created with.
+///
+/// One function for both, because the two differ only in `alpha`, and two
+/// copies of the rest would be where they drift: a composition swapchain must
+/// be flip-model and `DXGI_SCALING_STRETCH` too, which is what an `HWND` one
+/// already is here.
+pub(crate) fn swap_chain_desc(
+    extent: (u32, u32),
+    format: DXGI_FORMAT,
+    buffers: u32,
+    flags: DXGI_SWAP_CHAIN_FLAG,
+    alpha: DXGI_ALPHA_MODE,
+) -> DXGI_SWAP_CHAIN_DESC1 {
+    DXGI_SWAP_CHAIN_DESC1 {
+        Width: extent.0,
+        Height: extent.1,
+        Format: format,
+        Stereo: BOOL::from(false),
+        // Flip-model swapchains are single-sampled by definition: multisampling
+        // is done on an offscreen target and resolved into the back buffer,
+        // which is what the engine's tonemap pass already does.
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+        BufferCount: buffers,
+        // Stretch rather than `DXGI_SCALING_NONE`, so the frames rendered
+        // between a window resize and the swapchain catching up still cover an
+        // `HWND` window instead of leaving an unpainted border. A composition
+        // swapchain accepts nothing else; its visual shows it unscaled anyway
+        // (see `crate::composition`).
+        Scaling: DXGI_SCALING_STRETCH,
+        SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+        AlphaMode: alpha,
+        Flags: flags.0.cast_unsigned(),
+    }
 }
 
 /// The extent half of [`check`] and [`check_offscreen`], which is the half they
@@ -322,7 +426,7 @@ pub(crate) fn check_offscreen(desc: &SwapchainDesc<'_>) -> Result<((u32, u32), u
             present::OFFSCREEN_FORMATS
         )));
     }
-    if desc.composite_alpha != crcbl_hal::CompositeAlpha::Opaque {
+    if desc.composite_alpha != CompositeAlpha::Opaque {
         return Err(HalError::InvalidDescriptor(format!(
             "nothing composites an offscreen ring, so {:?} is not configurable; \
              Instance::surface_caps offers CompositeAlpha::Opaque alone",
@@ -340,53 +444,58 @@ pub(crate) fn check_offscreen(desc: &SwapchainDesc<'_>) -> Result<((u32, u32), u
 /// the **queue** presents are ordered against, which is also why a swapchain is
 /// device-scoped while the surface it names is not.
 ///
+/// A transparent window (one whose surface has a composition) gets a
+/// composition swapchain bound to its visual, and the [`Binding`] that keeps it
+/// there comes back beside the swapchain; see the module docs.
+///
 /// # Errors
 ///
-/// [`HalError::InvalidDescriptor`] as [`check`], or the DXGI failure through
-/// [`surface_error`].
+/// [`HalError::InvalidDescriptor`] as [`check`], or while another swapchain is
+/// bound to the same transparent window; or the DXGI or DirectComposition
+/// failure.
 pub(crate) fn create(
     factory: &IDXGIFactory4,
     device: &ID3D12Device,
     queue: &ID3D12CommandQueue,
-    hwnd: HWND,
+    window: &SurfaceWindow,
     desc: &SwapchainDesc<'_>,
     tearing: bool,
-) -> Result<Created, SurfaceError> {
-    let (extent, buffers) = check(desc)?;
+) -> Result<(Created, Option<Binding>), SurfaceError> {
+    let hwnd = window.hwnd;
+    let transparent = window.composition.is_some();
+    let (extent, buffers) = check(desc, transparent)?;
+    let alpha = alpha_mode(desc.composite_alpha, transparent)
+        .unwrap_or_else(|| unreachable!("`check` refused every mode with no alpha mode"));
     let present_mode = present::resolve_present_mode(desc.present_mode, tearing);
     let flags = flags(tearing);
-    let desc1 = DXGI_SWAP_CHAIN_DESC1 {
-        Width: extent.0,
-        Height: extent.1,
-        // Linear here, sRGB on the view. See the module docs.
-        Format: conv::dxgi_format(present::buffer_format(desc.format)),
-        Stereo: BOOL::from(false),
-        // Flip-model swapchains are single-sampled by definition: multisampling
-        // is done on an offscreen target and resolved into the back buffer,
-        // which is what the engine's tonemap pass already does.
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        BufferCount: buffers,
-        // Stretch rather than `DXGI_SCALING_NONE`, so the frames rendered
-        // between a window resize and the swapchain catching up still cover the
-        // window instead of leaving an unpainted border.
-        Scaling: DXGI_SCALING_STRETCH,
-        SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-        AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-        Flags: flags.0.cast_unsigned(),
-    };
+    // Linear here, sRGB on the view. See the module docs.
+    let format = conv::dxgi_format(present::buffer_format(desc.format));
+    let desc1 = swap_chain_desc(extent, format, buffers, flags, alpha);
 
-    // SAFETY: `factory` and `queue` are live COM interfaces this crate owns
-    // references to; `hwnd` is the address the caller promised names a live
-    // window in `Instance::create_surface`'s safety contract. `desc1` is a
-    // fully initialised local borrowed for the call. `None` for the fullscreen
-    // descriptor means windowed, and `None` for the output restriction means
-    // "any" — both are documented as optional.
-    let chain = unsafe { factory.CreateSwapChainForHwnd(queue, hwnd, &desc1, None, None) }
-        .map_err(|error| surface_error(device, "CreateSwapChainForHwnd", &error))?;
+    let (chain, binding) = match &window.composition {
+        None => {
+            // SAFETY: `factory` and `queue` are live COM interfaces this crate
+            // owns references to; `hwnd` is the address the caller promised
+            // names a live window in `Instance::create_surface`'s safety
+            // contract. `desc1` is a fully initialised local borrowed for the
+            // call. `None` for the fullscreen descriptor means windowed, and
+            // `None` for the output restriction means "any" — both are
+            // documented as optional.
+            let chain = unsafe { factory.CreateSwapChainForHwnd(queue, hwnd, &desc1, None, None) }
+                .map_err(|error| surface_error(device, "CreateSwapChainForHwnd", &error))?;
+            (chain, None)
+        }
+        Some(composition) => {
+            // SAFETY: as above for `factory`, `queue` and `desc1`, which
+            // `swap_chain_desc` makes flip-model and stretched, as a
+            // composition swapchain requires. `None` for the output
+            // restriction means "any".
+            let chain = unsafe { factory.CreateSwapChainForComposition(queue, &desc1, None) }
+                .map_err(|error| surface_error(device, "CreateSwapChainForComposition", &error))?;
+            let binding = composition.bind(&chain)?;
+            (chain, Some(binding))
+        }
+    };
     let raw: IDXGISwapChain3 = chain
         .cast()
         .map_err(|error| surface_error(device, "QueryInterface for IDXGISwapChain3", &error))?;
@@ -417,17 +526,21 @@ pub(crate) fn create(
 
     crcbl_core::log::debug!(
         "crcbl-dx12: created a {buffers}-buffer {extent:?} {:?} swapchain, {present_mode:?}, \
-         latency {latency}, tearing={tearing}",
-        desc.format
+         latency {latency}, tearing={tearing}, composed={transparent}, alpha={:?}",
+        desc.format,
+        desc.composite_alpha
     );
-    Ok(Created {
-        raw,
-        waitable,
-        extent,
-        buffers,
-        present_mode,
-        flags,
-    })
+    Ok((
+        Created {
+            raw,
+            waitable,
+            extent,
+            buffers,
+            present_mode,
+            flags,
+        },
+        binding,
+    ))
 }
 
 /// `ResizeBuffers` for a reconfigure, with the same flags the swapchain was
@@ -583,14 +696,17 @@ mod tests {
 
     use crcbl_core::SurfaceTarget;
     use crcbl_hal::{
-        Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
-        CommandEncoderDesc, CompositeAlpha, Device as _, Extent3d, ImageAspect, ImageBarrier,
-        ImageSubresourceLayers, ImageSubresourceRange, Instance as _, LoadOp, MemoryLocation,
-        Offset3d, PresentInfo, QueueKind, ReadbackDesc, Rect2d, RenderPassDesc, ResourceState,
-        StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle, SwapchainDesc, SwapchainHandle,
+        Barriers, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage, ClearValue,
+        ColorAttachment, CommandEncoderDesc, CompositeAlpha, Device as _, Extent3d, ImageAspect,
+        ImageBarrier, ImageSubresourceLayers, ImageSubresourceRange, Instance as _, LoadOp,
+        MemoryLocation, Offset3d, PresentInfo, QueueKind, ReadbackDesc, Rect2d, RenderPassDesc,
+        ResourceState, StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle, SwapchainDesc,
+        SwapchainHandle,
     };
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, SW_SHOWNOACTIVATE, ShowWindow, WS_EX_TOOLWINDOW, WS_POPUP,
+        CreateWindowExW, DestroyWindow, SW_SHOWNOACTIVATE, ShowWindow, WINDOW_EX_STYLE,
+        WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
     };
     use windows::core::PCWSTR;
 
@@ -627,12 +743,25 @@ mod tests {
     /// focus** — visible because a fully occluded window's presents complete
     /// differently, and without focus because the foreground window is one per
     /// session and `crcbl-shell`'s own e2e suite is entitled to it.
+    ///
+    /// [`open_transparent`](Self::open_transparent) adds
+    /// `WS_EX_NOREDIRECTIONBITMAP`, which is what the Win32 shell gives a
+    /// transparent window, and names the target transparent to match.
     struct TestWindow {
         hwnd: HWND,
+        transparent: bool,
     }
 
     impl TestWindow {
         fn open(size: (u32, u32)) -> Self {
+            Self::create(size, WS_EX_TOOLWINDOW, false)
+        }
+
+        fn open_transparent(size: (u32, u32)) -> Self {
+            Self::create(size, WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP, true)
+        }
+
+        fn create(size: (u32, u32), ex_style: WINDOW_EX_STYLE, transparent: bool) -> Self {
             let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
             let title: Vec<u16> = "crcbl-dx12 swapchain\0".encode_utf16().collect();
             let width = i32::try_from(size.0).expect("a test window fits in an i32");
@@ -644,7 +773,7 @@ mod tests {
             // other argument is a scalar or an omitted optional.
             let hwnd = unsafe {
                 CreateWindowExW(
-                    WS_EX_TOOLWINDOW,
+                    ex_style,
                     PCWSTR::from_raw(class.as_ptr()),
                     PCWSTR::from_raw(title.as_ptr()),
                     WS_POPUP,
@@ -665,7 +794,7 @@ mod tests {
             // SAFETY: `hwnd` is the window just created. The return value says
             // whether it was previously visible, which is not a failure.
             let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
-            Self { hwnd }
+            Self { hwnd, transparent }
         }
 
         /// The target a shell would hand the HAL for this window.
@@ -679,6 +808,7 @@ mod tests {
             SurfaceTarget::Win32 {
                 hinstance: NonNull::dangling(),
                 hwnd: NonNull::new(self.hwnd.0).expect("a created window is never null"),
+                transparent: self.transparent,
             }
         }
     }
@@ -1058,6 +1188,351 @@ mod tests {
         }
 
         instance.destroy_surface(surface);
+    }
+
+    /// **A transparent window's swapchain takes premultiplied alpha, and an
+    /// `HWND` one is refused it before DXGI sees it.**
+    ///
+    /// Red if `alpha_mode` stops following the surface's offer: premultiplied
+    /// reaching `CreateSwapChainForHwnd` is a bare `E_INVALIDARG`, and
+    /// premultiplied dropped to `IGNORE` on a transparent window is a window
+    /// drawn opaque with no error at all.
+    #[test]
+    fn the_alpha_mode_follows_what_the_window_offers() {
+        assert_eq!(
+            alpha_mode(CompositeAlpha::Opaque, false),
+            Some(DXGI_ALPHA_MODE_IGNORE)
+        );
+        assert_eq!(alpha_mode(CompositeAlpha::PreMultiplied, false), None);
+        assert_eq!(
+            alpha_mode(CompositeAlpha::PreMultiplied, true),
+            Some(DXGI_ALPHA_MODE_PREMULTIPLIED)
+        );
+        assert_eq!(
+            alpha_mode(CompositeAlpha::Opaque, true),
+            Some(DXGI_ALPHA_MODE_IGNORE)
+        );
+        for transparent in [false, true] {
+            for never in [CompositeAlpha::PostMultiplied, CompositeAlpha::Inherit] {
+                assert_eq!(alpha_mode(never, transparent), None, "{never:?}");
+            }
+        }
+    }
+
+    /// **Both kinds of window swapchain are the same flip-model, stretched
+    /// descriptor, apart from the alpha mode.**
+    ///
+    /// `CreateSwapChainForComposition` refuses anything but a flip effect and
+    /// `DXGI_SCALING_STRETCH`, so a change to the shared descriptor that an
+    /// `HWND` swapchain tolerated would break only transparent windows, which
+    /// only the device suite would then find.
+    #[test]
+    fn a_composition_swapchain_descriptor_differs_from_an_hwnd_one_only_in_alpha() {
+        let flags = flags(true);
+        let format = conv::dxgi_format(Format::Bgra8Unorm);
+        let hwnd = swap_chain_desc(EXTENT, format, BUFFERS, flags, DXGI_ALPHA_MODE_IGNORE);
+        let composed = swap_chain_desc(
+            EXTENT,
+            format,
+            BUFFERS,
+            flags,
+            DXGI_ALPHA_MODE_PREMULTIPLIED,
+        );
+        assert_eq!(composed.AlphaMode, DXGI_ALPHA_MODE_PREMULTIPLIED);
+        assert_eq!(hwnd.AlphaMode, DXGI_ALPHA_MODE_IGNORE);
+        for desc in [hwnd, composed] {
+            assert_eq!(desc.SwapEffect, DXGI_SWAP_EFFECT_FLIP_DISCARD);
+            assert_eq!(desc.Scaling, DXGI_SCALING_STRETCH);
+            assert_eq!((desc.Width, desc.Height), EXTENT);
+            assert_eq!(desc.BufferCount, BUFFERS);
+            assert_eq!(desc.Format, format);
+            assert_eq!(desc.Flags, flags.0.cast_unsigned());
+            assert_eq!(desc.SampleDesc.Count, 1);
+        }
+        assert_eq!(
+            DXGI_SWAP_CHAIN_DESC1 {
+                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                ..composed
+            },
+            hwnd
+        );
+    }
+
+    /// The colour a transparent window is cleared to, premultiplied, and the
+    /// bytes it lands as in an `Rgba8Unorm` back buffer.
+    ///
+    /// Alpha about a half, and each colour channel below it, which is what
+    /// premultiplied means. Each value is a multiple of `17`, so the
+    /// `f32`-to-`unorm8` round trip is exact, as [`RING_FRAMES`] explains.
+    const HALF_CLEAR: ([f32; 4], [u8; 4]) = (
+        [34.0 / 255.0, 17.0 / 255.0, 51.0 / 255.0, 136.0 / 255.0],
+        [0x22, 0x11, 0x33, 0x88],
+    );
+
+    /// Clears the acquired back buffer to `colour`, copies it into `readback`,
+    /// and presents it numbered `present_id`.
+    ///
+    /// [`draw_and_present`] with a copy in the middle, so the bytes a
+    /// composition swapchain's buffer holds can be asserted rather than
+    /// assumed. `readback` must hold the whole frame at four bytes a texel.
+    fn clear_copy_and_present(
+        device: &Dx12Device,
+        swapchain: SwapchainHandle,
+        format: Format,
+        present_id: u64,
+        colour: [f32; 4],
+        readback: BufferHandle,
+    ) -> Result<(), SurfaceError> {
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let frame = device.acquire_next_frame(swapchain)?;
+        let range = ImageSubresourceRange::all(format);
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-dx12 e2e transparent frame"),
+            queue,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                frame.image,
+                range,
+                ResourceState::Undefined,
+                ResourceState::ColorAttachment,
+            )],
+            ..Barriers::default()
+        });
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("crcbl-dx12 e2e transparent clear"),
+            color_attachments: &[ColorAttachment {
+                view: frame.view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(colour),
+            }],
+            depth_stencil_attachment: None,
+            render_area: Rect2d::from_size(frame.extent.0, frame.extent.1),
+            timestamp_writes: None,
+        });
+        encoder.end_render_pass();
+        encoder.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                frame.image,
+                range,
+                ResourceState::ColorAttachment,
+                ResourceState::TransferSrc,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_image_to_buffer(&BufferImageCopy {
+            buffer: readback,
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image: frame.image,
+            image_subresource: ImageSubresourceLayers {
+                aspect: ImageAspect::COLOR,
+                mip: 0,
+                base_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: Offset3d::default(),
+            image_extent: Extent3d::d2(frame.extent.0, frame.extent.1),
+        });
+        encoder.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                frame.image,
+                range,
+                ResourceState::TransferSrc,
+                ResourceState::Present,
+            )],
+            ..Barriers::default()
+        });
+        let commands = encoder
+            .finish()
+            .unwrap_or_else(|error| panic!("stage=finish id={present_id}: {error:?}"));
+        device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .unwrap_or_else(|error| panic!("stage=submit id={present_id}: {error:?}"));
+        let presented = device.present(
+            queue,
+            &PresentInfo {
+                swapchain,
+                waits: &[],
+                present_id: Some(present_id),
+            },
+        );
+        device.destroy_command_buffer(commands);
+        presented
+    }
+
+    /// Reads `bytes` of `readback` back once the queue is idle, and asserts
+    /// every texel is `texel`.
+    fn assert_every_texel(
+        device: &Dx12Device,
+        readback: BufferHandle,
+        bytes: usize,
+        texel: [u8; 4],
+    ) {
+        device.wait_idle().expect("the queue drains");
+        let request = device
+            .request_readback(&ReadbackDesc {
+                label: Some("crcbl-dx12 e2e transparent readback"),
+                buffer: readback,
+                offset: 0,
+                size: bytes as u64,
+                after: None,
+            })
+            .expect("a readback of a finished copy");
+        let read = drain(device, request, bytes);
+        assert_eq!(&read[..4], &texel, "the first texel is not the clear");
+        assert!(
+            read.as_chunks::<4>().0.iter().all(|got| *got == texel),
+            "the clear did not reach every texel of the back buffer"
+        );
+        device.destroy_readback(request);
+    }
+
+    /// **A transparent window presents through DirectComposition: a
+    /// composition swapchain with premultiplied alpha, bound to the window's
+    /// visual, that resizes, is rebuilt on the same surface, and comes down in
+    /// order.**
+    ///
+    /// What a green run proves, none of which a host-side test can:
+    ///
+    /// * `DCompositionCreateDevice2`, `CreateTargetForHwnd` on a
+    ///   `WS_EX_NOREDIRECTIONBITMAP` window, `SetRoot` and `Commit` succeed,
+    ///   and the surface offers premultiplied alpha.
+    /// * `CreateSwapChainForComposition` accepts this backend's descriptor with
+    ///   `DXGI_ALPHA_MODE_PREMULTIPLIED`, the visual takes it as content, and a
+    ///   half-transparent premultiplied clear lands in the back buffer as the
+    ///   exact bytes asked for.
+    /// * `ResizeBuffers` works on it after the views are released, and a
+    ///   reconfigure asking for another alpha mode is refused by name.
+    /// * A second swapchain on the bound window is refused, and one made after
+    ///   the first is destroyed binds: the `Binding` gave the visual back.
+    /// * A second transparent surface on the window is refused while the first
+    ///   lives, and one made after the first and its swapchain are gone
+    ///   succeeds: the target was released.
+    ///
+    /// What it cannot prove is what DWM shows: nothing here reads the desktop
+    /// back, so "the desktop shows through the half-transparent pixels" is
+    /// verified by no test.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_transparent_window_presents_premultiplied_through_directcomposition() {
+        const FRAME_BYTES: usize = (EXTENT.0 * EXTENT.1 * 4) as usize;
+        let (instance, device) = open_device();
+        let adapter = pinned_adapter(&instance);
+        let window = TestWindow::open_transparent(EXTENT);
+
+        // SAFETY: `window` owns a live `HWND` created on this thread and
+        // outlives every surface and swapchain made from it below.
+        let surface = unsafe { instance.create_surface(&window.target()) }
+            .expect("a transparent Win32 target is composed, not refused");
+        let caps = instance
+            .surface_caps(surface, adapter)
+            .expect("a live surface on a real adapter");
+        assert_eq!(
+            caps.composite_alpha,
+            present::window_composite_alpha(true),
+            "a transparent window offers premultiplied alpha"
+        );
+        assert!(caps.formats.contains(&Format::Rgba8Unorm), "{caps:?}");
+        println!("crcbl-dx12 transparent surface caps: {caps:?}");
+
+        // SAFETY: as above.
+        let second = unsafe { instance.create_surface(&window.target()) };
+        match second {
+            Err(HalError::Backend(message)) => {
+                assert!(
+                    message.contains("already has a DirectComposition target"),
+                    "{message}"
+                );
+            }
+            other => panic!("a second transparent surface on one window: {other:?}"),
+        }
+
+        // Every format the surface offers is one a premultiplied composition
+        // swapchain accepts, so a caller picking from the caps is never
+        // refused one call later.
+        for &offered in &caps.formats {
+            let desc = SwapchainDesc {
+                format: offered,
+                composite_alpha: CompositeAlpha::PreMultiplied,
+                ..configure(surface, &caps, EXTENT)
+            };
+            let swapchain = device
+                .create_swapchain(&desc)
+                .unwrap_or_else(|error| panic!("{offered:?} premultiplied: {error:?}"));
+            draw_and_present(&device, swapchain, offered, 1)
+                .unwrap_or_else(|error| panic!("{offered:?} present: {error:?}"));
+            device.destroy_swapchain(swapchain);
+        }
+
+        let desc = SwapchainDesc {
+            format: Format::Rgba8Unorm,
+            composite_alpha: CompositeAlpha::PreMultiplied,
+            ..configure(surface, &caps, EXTENT)
+        };
+        let format = desc.format;
+        let swapchain = device
+            .create_swapchain(&desc)
+            .expect("a premultiplied composition swapchain");
+        let refused = device
+            .create_swapchain(&desc)
+            .expect_err("the visual already shows a swapchain");
+        assert!(
+            matches!(refused, SurfaceError::Hal(HalError::InvalidDescriptor(_))),
+            "{refused:?}"
+        );
+
+        let readback = readback_buffer(&device, FRAME_BYTES);
+        let (colour, texel) = HALF_CLEAR;
+        for id in 1..=3u64 {
+            clear_copy_and_present(&device, swapchain, format, id, colour, readback)
+                .unwrap_or_else(|error| panic!("stage=present id={id}: {error:?}"));
+            assert_every_texel(&device, readback, FRAME_BYTES, texel);
+        }
+
+        let opaque = SwapchainDesc {
+            composite_alpha: CompositeAlpha::Opaque,
+            ..desc
+        };
+        let error = device
+            .reconfigure_swapchain(swapchain, &opaque)
+            .expect_err("ResizeBuffers cannot change the alpha mode");
+        assert!(
+            matches!(&error, SurfaceError::Hal(HalError::InvalidDescriptor(message)) if message.contains("composite alpha")),
+            "{error:?}"
+        );
+        let resized = SwapchainDesc {
+            extent: RESIZED,
+            ..desc
+        };
+        device
+            .reconfigure_swapchain(swapchain, &resized)
+            .expect("ResizeBuffers on a composition swapchain");
+        // Presented without a readback: `RESIZED` is narrower than a placed
+        // footprint's row alignment, so a copy of it is refused by name.
+        draw_and_present(&device, swapchain, format, 1).expect("a frame at the new size");
+        device.destroy_swapchain(swapchain);
+
+        let again = device
+            .create_swapchain(&desc)
+            .expect("the visual was given back when the first swapchain went");
+        clear_copy_and_present(&device, again, format, 1, colour, readback)
+            .expect("a frame from the rebuilt swapchain");
+        assert_every_texel(&device, readback, FRAME_BYTES, texel);
+        device.destroy_swapchain(again);
+        instance.destroy_surface(surface);
+
+        // SAFETY: as above.
+        let fresh = unsafe { instance.create_surface(&window.target()) }
+            .expect("the first surface's target was released with it");
+        instance.destroy_surface(fresh);
+        device.destroy_buffer(readback);
+        device.wait_idle().expect("the queue drains");
     }
 
     /// The offscreen ring's extent.
