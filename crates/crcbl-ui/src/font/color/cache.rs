@@ -297,6 +297,35 @@ mod tests {
         }
     }
 
+    /// **Of the glyphs not used this frame, the least recently used goes
+    /// first**: with two to choose from, the older is evicted and the newer
+    /// stays.
+    #[test]
+    fn eviction_takes_the_least_recently_used_first() {
+        let (mut images, _) = nearly_full();
+        let (cbdt, sbix) = (fixtures::cbdt(), fixtures::sbix());
+        let smile = cbdt.glyph_id('\u{1F600}');
+        let heart = cbdt.glyph_id('\u{2764}');
+        let yellow = sbix.glyph_id('\u{1F600}');
+        let mut cache = ColorGlyphCache::new();
+        cache.begin_frame();
+        let older = cache.glyph(&mut images, &cbdt, smile, SIZE).expect("room");
+        cache.begin_frame();
+        let newer = cache.glyph(&mut images, &cbdt, heart, SIZE).expect("room");
+        cache.begin_frame();
+        let third = cache.glyph(&mut images, &sbix, yellow, SIZE).expect("room");
+        assert_eq!(cache.stats().evicted, 1);
+        assert_eq!(
+            (third.image.x, third.image.y),
+            (older.image.x, older.image.y)
+        );
+        assert_eq!(cache.cached(ColorGlyphCache::key(&cbdt, smile, SIZE)), None);
+        assert_eq!(
+            cache.cached(ColorGlyphCache::key(&cbdt, heart, SIZE)),
+            Some(newer)
+        );
+    }
+
     /// **A glyph is rasterised once per size**, and one with no colour
     /// representation is remembered as such rather than asked again.
     #[test]
