@@ -5,12 +5,15 @@
 //!   DrawList glyph run ──resolve_color_glyphs──▶ ColorGlyphCache::glyph
 //!                                                 │ miss
 //!                                                 ▼
-//!                      CBDT / sbix strike PNG ──decode, resize──▶ RGBA
+//!        COLR layers or paint graph ──rasterise, composite──▶ RGBA
+//!        else a CBDT or sbix strike's PNG ──decode, resize──▶ RGBA
 //!                                                 │
 //!                                                 ▼
 //!                          ImageAtlas::register ──▶ DrawCommand::Image quad
 //! ```
 //!
+//! * `colr` — COLR v0 layer lists and v1 paint graphs, painted with the
+//!   coverage rasteriser, asked first since an outline scales.
 //! * `bitmap` — CBDT/CBLC and sbix strikes: the strike nearest the size, its
 //!   PNG decoded by `crcbl_image::png`, scaled by [`crcbl_image::resize`]
 //!   and placed by the strike's metrics.
@@ -37,6 +40,8 @@
 #[cfg(feature = "parsed-font")]
 mod bitmap;
 mod cache;
+#[cfg(feature = "parsed-font")]
+pub mod colr;
 
 pub use cache::{ColorGlyph, ColorGlyphCache, ColorGlyphKey, ColorGlyphStats};
 #[cfg(feature = "parsed-font")]
@@ -93,7 +98,15 @@ pub(crate) fn rasterize(font: &Font, glyph: GlyphId, size: f32) -> Option<ColorB
     }
     let font_ref = FontRef::new(font.data()).ok()?;
     let glyph = skrifa::GlyphId::new(glyph.0);
-    bitmap::rasterize(&font_ref, glyph, size, font.metrics().units_per_em)
+    let units_per_em = font.metrics().units_per_em;
+    colr::rasterize(
+        &font_ref,
+        glyph,
+        size,
+        units_per_em,
+        colr::PaintLimits::DEFAULT,
+    )
+    .or_else(|| bitmap::rasterize(&font_ref, glyph, size, units_per_em))
 }
 
 #[cfg(all(test, feature = "parsed-font"))]

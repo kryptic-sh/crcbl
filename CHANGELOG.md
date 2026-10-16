@@ -183,6 +183,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   own glyphs not used this frame, least recently used first. A PNG that does not
   decode, or a glyph larger than `MAX_COLOR_GLYPH_SIDE`, draws its outline
   instead. `parsed-font` now turns on `crcbl-image`'s `png` feature.
+- **COLR v0 and v1 colour glyphs in `crcbl-ui`**, through the same
+  `resolve_color_glyphs` step: v0 layers each filled in their `CPAL` colour, and
+  v1 paint graphs with solid fills, linear, radial and sweep gradients,
+  transforms, glyph and box clips and every composite mode, rasterised with
+  `crcbl_image::raster` and composited premultiplied in sRGB values. A COLR
+  representation is preferred over a bitmap strike. A paint graph nesting past
+  `MAX_PAINT_DEPTH`, filling past `MAX_COLR_LAYERS` times, or past its pixel
+  budgets draws its outline instead. The foreground palette entry draws black
+  rather than the text colour.
 
 ### Changed
 
