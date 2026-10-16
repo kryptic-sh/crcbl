@@ -545,8 +545,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       Verified by its unit tests on Windows and on Linux (WSL), over themes
       built in a temporary directory, and fourteen hand mutants, each failing
       its own test. Not tested against an installed theme: CI's Linux runner has
-      `hicolor` at most, and the real-theme corpus job (below) is where Adwaita,
-      Papirus and breeze get looked up.
+      `hicolor` at most, and the `svg corpus` job walks the themes' files for
+      the SVG renderer without looking anything up by name.
     - **JPEG is in**, `jpeg::decode` behind the `jpeg` feature, written here:
       sequential and progressive Huffman frames with successive approximation,
       restart intervals, grey, YCbCr and RGB (by libjpeg's JFIF, Adobe and
@@ -599,6 +599,89 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       **Lossy WebP (`VP8 `, with `ALPH`) is refused**: it is RFC 6386's VP8
       codec, a decoder as large as the rest of this crate, and the next format
       to write for pikr's parity.
+    - **Step three is in: SVG icons**,
+      `svg::decode(bytes, size, scale, &limits)` behind the `svg` feature,
+      written here with no new dependency (`crates/crcbl-image/src/svg/`): its
+      own XML parser (no DTD expansion, so no entity bomb and no external fetch;
+      depth and element caps), the `style` attribute and a `<style>` sheet of
+      type, class and id selectors, the cascade with inheritance and
+      `currentColor`, SVG 2's path grammar with arcs, the basic shapes,
+      transforms, `use` (cycles refused; depth, instances and layers capped),
+      linear and two-point conical radial gradients with `href` inheritance,
+      `clipPath`, `mask`, group opacity as a layer, and strokes outlined in user
+      space (joins, caps, miter limit, dashes) then filled. Coverage comes from
+      `crcbl_image::raster`, moved from `crcbl-ui` (which re-exports it at
+      `font::raster`) and given even-odd, accumulated a strip at a time on a
+      grid four times finer each way: the area integral alone cancelled two
+      oppositely wound halves meeting inside one pixel (a transparent seam down
+      Papirus's `pop-shop`) and over-counted the slivers inside stroke corners.
+      Anything unsupported is a decode error naming it; ignored by design are
+      elements and attributes in other namespaces, `<title>`, `<desc>`,
+      `<metadata>`, `<script>`, event-handler, `data-` and `aria-` attributes,
+      the properties in `svg/style.rs`'s `IGNORED_PROPERTIES` (text, rendering
+      hints, properties of refused features, Inkscape's unprefixed
+      `filter-blend-mode` and `filter-gaussianBlur-deviation`), other shapes'
+      geometry attributes left on a shape, and unsupported content nothing
+      references. Verified by the module's unit tests (pixels against exact grid
+      coverage, sampled curve coverage and the compositing and gradient formulas
+      worked by hand) and 57 hand mutants, every one failing a test (the
+      instance-cap mutant by the bomb test's timeout). `crcbl-net/fuzz`'s
+      decoder target now feeds every input to `svg::decode` too, from an
+      `svg-icon` seed whose rendering its corpus test asserts; the fuzz run
+      itself is CI's.
+    - **Corpus, measured 2026-10-16** with the `svg_corpus` example
+      (`cargo run --release -p crcbl-image --features svg,png --example svg_corpus -- NAME=DIR...`)
+      in WSL's Ubuntu 26.04 against the `resvg` 0.48.1 command line, at 48 px,
+      over every regular `.svg` file (symbolic links skipped) of Adwaita
+      (`Adwaita/`, 82d30572), Papirus (`Papirus/48x48`, bf539287) and breeze
+      (`icons/`, 3719ad1c). A pixel differs when a premultiplied channel is more
+      than 32 apart; an icon matches when at most 1% of its pixels differ.
+      Adwaita: 696 of 715 match (97.3%), 1 differs, 18 refused (15 filters, 3
+      `<image>`). Papirus: 6308 of 6319 (99.8%), 8 differ, 3 refused (a filter,
+      `vector-effect: non-scaling-stroke`, a malformed `fill`). breeze: 5560 of
+      5642 (98.5%), 45 differ, 37 refused (22 filters, 6 `<text>`, 5 Inkscape
+      `<flowRoot>`, 2 files whose namespace URIs are DTD entities, a malformed
+      `fill`, a misspelt `tyle` attribute). Application icons, the hicolor kind,
+      inside those: Papirus `48x48/apps` 3834 of 3845 (99.7%), breeze `apps/48`
+      182 of 206 (88.3%, its refusals the same filters and text). CI's
+      `svg corpus` job reruns this at the same pins and fails below floors set
+      two icons under these.
+    - Why the differing icons differ, checked icon by icon on the worst: (1)
+      **resvg does not inherit `gradientTransform` through `href`** (usvg's
+      `resolve_transform` reads only the element's own), where SVG 1.1 and 2,
+      Chromium and Firefox inherit it; this renderer follows the specification,
+      which is most of breeze's large differences (`text-x-qml`, `kfourinline`,
+      `accessories-character-map`, `latte-dock`, `rekonq`, `dragonplayer`,
+      `system-software-*`, `kwrite`). (2) **resvg's strokes are less exact**:
+      its stroke of a circle is off the exact annulus by up to 0.16 of a pixel's
+      coverage and 3% of the area, this one's by 0.056, so thin curved strokes
+      differ at their edges (breeze's weather and osd icons); and its dash
+      lengths on curves come from a coarser measure (`edit-select-lasso`,
+      `tool_elliptical_selection`). (3) Hairlines a third of a pixel wide after
+      scaling antialias differently (Papirus's `headset`, breeze's osd icons).
+      None of them is a missing or misplaced shape.
+    - Decided 2026-10-16, so the renders agree with resvg where SVG leaves it
+      open: a repeated `id` names its **last** element (resvg's id table;
+      browsers take the first; in the corpus the last is the one the drawing
+      means, as in breeze's `audio-headphones`); a paint reference to something
+      that is not a paint server paints its fallback or nothing (SVG 2); a
+      missing clip path or mask is as if none were given (CSS Masking for clip
+      paths, usvg for both); a `stroke-miterlimit` below one bevels every
+      corner; and drawing outside a viewport narrower than the square shows in
+      the margin, clipped only for a `slice`, as resvg does where it draws an
+      SVG as an image. Malformed path data draws up to the error, as SVG
+      specifies.
+    - Not done, in order of what the corpus refuses: **filters** (38 icons, all
+      themes: `feGaussianBlur` shadows in breeze, `feColorMatrix` in Adwaita;
+      matching resvg needs the Filter Effects specification's three-box-blur
+      approximation and the filter region and primitive-subregion rules);
+      **text** (`<text>`, and Inkscape's `<flowRoot>`, which browsers do not
+      draw either: 11 icons, needing fonts); `<image>` (3); DTD entities (2),
+      which would need a bounded expansion of plain-text entities only;
+      `vector-effect: non-scaling-stroke`; markers, patterns, `symbol` and
+      nested `svg`, `switch`, blend modes and animation, which the corpus did
+      not need. Not measured: GTK's own renderer (librsvg) as a second
+      reference, and the corpus at sizes other than 48.
     - Not done yet: decoding from a path (a caller reads the file
       `IconThemes::lookup` found, and keys its cache with `FileVersion`), and
       moving `crcbl-sprite`'s and `crcbl-golden`'s own PNG loaders onto this
@@ -682,8 +765,9 @@ Each step lands in the crate the later steps build on, so the seam goes first.
     - lyr's M6 needs the theme lookup too (a notification's `app_icon` and
       `desktop-entry` hint name a theme icon), which the order below already
       puts before JPEG.
-    - Order from here: SVG (theme icons are mostly SVG: lyr's M6 named icons,
-      pikr's port, lyr's tray), then lossy WebP (VP8, pikr's parity), then XPM.
+    - Order from here: lossy WebP (VP8, pikr's parity), then XPM; SVG filters
+      and text when an app asks, since the corpus shows what they would buy
+      (filters are the larger share).
 
 ### Left behind by the seam split
 
