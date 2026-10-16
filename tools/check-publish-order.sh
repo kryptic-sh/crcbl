@@ -25,8 +25,8 @@ crcbl-nav
 crcbl-vfx
 crcbl-water
 crcbl-sprite
-crcbl-image
 crcbl-font
+crcbl-image
 crcbl-golden
 crcbl-reflect-derive
 crcbl-wl-scanner
