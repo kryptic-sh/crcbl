@@ -475,9 +475,11 @@ mod tests {
     fn catalog_find_resolves_generics_in_order_and_misses_as_none() {
         let dir = temp_dir("defaults-find");
         std::fs::write(dir.join("sans.ttf"), SANS).unwrap();
+        let second = face::tests::renamed(SANS, &[(1, 0x409, "Second Family")]);
+        std::fs::write(dir.join("second.ttf"), second).unwrap();
         let catalog = scan::Catalog::new(vec![dir.to_path_buf()]);
         let defaults = Defaults {
-            sans_serif: &["Not Installed", "Atkinson Hyperlegible"],
+            sans_serif: &["Not Installed", "Atkinson Hyperlegible", "Second Family"],
             serif: &["Not Installed"],
             monospace: &[],
             emoji: &[],

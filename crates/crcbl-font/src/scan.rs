@@ -127,8 +127,16 @@ mod tests {
     fn a_walked_family_is_matched_by_weight_and_style() {
         let root = crate::tests::temp_dir("scan-match");
         fs::write(root.join("regular.ttf"), SANS).unwrap();
-        fs::write(root.join("bold.ttf"), restyled(SANS, 700, false)).unwrap();
-        fs::write(root.join("light-italic.ttf"), restyled(SANS, 300, true)).unwrap();
+        fs::write(
+            root.join("bold.ttf"),
+            restyled(SANS, 700, FontStyle::Normal),
+        )
+        .unwrap();
+        fs::write(
+            root.join("light-italic.ttf"),
+            restyled(SANS, 300, FontStyle::Italic),
+        )
+        .unwrap();
         let faces = Catalog::new(vec![root.to_path_buf()]).faces_of("Atkinson Hyperlegible");
         let attributes: Vec<_> = faces.iter().map(|face| face.attributes).collect();
         let pick = |weight, style| {

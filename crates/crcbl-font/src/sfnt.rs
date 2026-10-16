@@ -157,7 +157,7 @@ pub(crate) fn standalone(data: Vec<u8>, index: u32) -> io::Result<Vec<u8>> {
 ///
 /// [`io::ErrorKind::InvalidData`] when the tables do not fit the format's
 /// 16-bit table count and search fields or its 32-bit offsets.
-fn build<'a>(
+pub(crate) fn build<'a>(
     version: u32,
     tables: impl IntoIterator<Item = ([u8; 4], u32, &'a [u8])>,
 ) -> io::Result<Vec<u8>> {
