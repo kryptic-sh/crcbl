@@ -172,6 +172,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   its faces' runs; `Font::has_color_glyph` says whether a glyph has a COLR, CBDT
   or sbix representation. There is no shaping, so a ZWJ sequence, a skin-tone
   modifier or a flag draws as its component emoji.
+- **Colour emoji from CBDT/CBLC and sbix bitmap strikes in `crcbl-ui`.**
+  `DrawList::resolve_color_glyphs(cache, images, scale)` swaps each colour glyph
+  in the list's glyph runs for a `DrawCommand::Image` quad from the caller's
+  `ImageAtlas`, so the UI pass draws it with no renderer change: the strike
+  nearest the size, its PNG decoded by `crcbl_image::png` and scaled by
+  `crcbl_image::resize`, placed by the strike's metrics on whole pixels, tinted
+  by the run's opacity and not its colour. `font::color::ColorGlyphCache` holds
+  them by font, glyph and size and, when the atlas fills, unregisters only its
+  own glyphs not used this frame, least recently used first. A PNG that does not
+  decode, or a glyph larger than `MAX_COLOR_GLYPH_SIDE`, draws its outline
+  instead. `parsed-font` now turns on `crcbl-image`'s `png` feature.
 
 ### Changed
 

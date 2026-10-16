@@ -262,6 +262,12 @@ pub(crate) fn cbdt() -> Font {
     parsed(&FONT, include_bytes!("../../tests/fixtures/emoji/cbdt.ttf"))
 }
 
+/// `sbix.ttf`.
+pub(crate) fn sbix() -> Font {
+    static FONT: OnceLock<Font> = OnceLock::new();
+    parsed(&FONT, include_bytes!("../../tests/fixtures/emoji/sbix.ttf"))
+}
+
 /// `colrv0.ttf`.
 pub(crate) fn colrv0() -> Font {
     static FONT: OnceLock<Font> = OnceLock::new();
