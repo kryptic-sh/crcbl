@@ -86,6 +86,8 @@ use super::{Ui, WidgetKind, WidgetState, typed};
 use crate::console::caret_shown;
 use crate::edit::{ClipboardOp, Edit, LineEdit, run_at};
 use crate::font::Font;
+use crate::font::fallback;
+use crate::font::layout::advance_pen;
 use crate::style::{Declaration, NodeSelector, PseudoClasses};
 use crate::text::FontAtlas;
 use crate::tree::emit::content_width;
@@ -291,18 +293,18 @@ fn measure(
             }
         }
         Some(font) => {
-            let scale = font.metrics().scale(style.font_size);
+            // Each char in the face fallback picks for it; one that draws
+            // nothing is a stop at the pen it leaves where it was.
             let mut pen = 0.0;
             let mut previous = None;
-            for c in text.chars() {
-                let glyph = font.glyph_id(c);
-                if let Some(previous) = previous {
-                    pen += font.kerning(previous, glyph) * scale;
-                    *out.last_mut().expect("a stop per glyph so far") = pen;
+            for (_, _, mapped) in fallback::map_text(font, text) {
+                if let Some(mapped) = mapped {
+                    let (at, after) = advance_pen(font, style.font_size, pen, previous, mapped);
+                    *out.last_mut().expect("a stop per glyph so far") = at;
+                    pen = after;
+                    previous = Some(mapped);
                 }
-                pen += font.advance(glyph) * scale;
                 out.push(pen);
-                previous = Some(glyph);
             }
         }
     }
@@ -614,7 +616,9 @@ impl Ui {
                 shown,
                 style.font_size.to_bits(),
                 style.font_family,
-                span.font.as_ref().map(Font::id),
+                span.font
+                    .as_ref()
+                    .map(|font| (font.id(), self.fallback_hash)),
             ));
             if state.boundaries.is_empty() || state.measured != hash {
                 measure(
@@ -678,5 +682,39 @@ impl Ui {
         }
         self.fits = fits;
         self.fits.clear();
+    }
+}
+
+#[cfg(all(test, feature = "parsed-font"))]
+mod fallback_tests {
+    use super::*;
+    use crate::font::fixtures;
+    use crate::font::layout::TextLayout;
+
+    /// **Caret stops fall back as layout places glyphs**: the stop before
+    /// each char is where layout draws it, an emoji in the fallback face takes
+    /// that face's advance, and the presentation selector after it is a stop
+    /// at the pen the emoji left.
+    #[test]
+    fn caret_stops_fall_back_as_layout_places_glyphs() {
+        let font = Font::sans().with_fallback(&[fixtures::cbdt()]);
+        let text = "A\u{1F600}\u{FE0F}V";
+        let style = NodeStyle {
+            font_size: 20.0,
+            ..NodeStyle::default()
+        };
+        let mut stops = Vec::new();
+        measure(
+            &FontAtlas::built_in(),
+            Some(&font),
+            text,
+            &style,
+            &mut stops,
+        );
+        let layout = TextLayout::new(&font, text, style.font_size, 24.0, None);
+        let x: Vec<f32> = layout.glyphs().iter().map(|glyph| glyph.offset.x).collect();
+        assert_eq!(layout.faces(), [0, 1, 0]);
+        assert_eq!(x[2] - x[1], style.font_size, "the emoji is an em wide");
+        assert_eq!(stops, [0.0, x[1], x[2], x[2], layout.width()]);
     }
 }

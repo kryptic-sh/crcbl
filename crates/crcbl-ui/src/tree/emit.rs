@@ -193,14 +193,18 @@ impl Ui {
                         .iter()
                         .map(|line| (line.offset, line.baseline, line.width));
                     underline_lines(list, style, Some(font), content_min, lines);
-                    list.text_glyphs(
-                        content_min,
-                        font,
-                        style.font_size,
-                        style.color,
-                        layout.glyphs(),
-                        text,
-                    );
+                    // One run per face, since a run is in one font: a span
+                    // whose every char its own font has is one run.
+                    for run in layout.face_runs() {
+                        list.text_glyphs(
+                            content_min,
+                            run.font,
+                            style.font_size,
+                            style.color,
+                            run.glyphs,
+                            &text[run.text],
+                        );
+                    }
                 }
             }
         }

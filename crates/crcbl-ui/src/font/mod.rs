@@ -23,6 +23,8 @@
 //! * [`layout`] — advancing, kerning and greedy line breaking.
 //! * [`face`] — choosing a family's face by weight and style, and the bold and
 //!   italic synthesised for a family without them.
+//! * [`fallback`] — which of a font's fallback faces draws each char, and the
+//!   emoji and text presentation selectors.
 //!
 //! # Two fonts, two families
 //!
@@ -66,13 +68,19 @@
 //!
 //! # Latin-1 first
 //!
-//! Every codepoint goes through the font's cmap, and one the font has no glyph
-//! for draws `.notdef`. Kerning is read for the pairs of glyphs Latin-1 maps
-//! to; there is no shaping, so no ligatures, no marks positioned and no
+//! Every codepoint goes through the font's cmap, and one no face has a glyph
+//! for draws `.notdef` — after the handle's fallback faces have been asked,
+//! see [`fallback`]. Kerning is read for the pairs of glyphs Latin-1 maps to;
+//! there is no shaping, so no ligatures, no marks positioned and no
 //! right-to-left text.
 
 pub mod atlas;
+#[cfg(feature = "parsed-font")]
+mod color;
 pub mod face;
+pub mod fallback;
+#[cfg(all(test, feature = "parsed-font"))]
+pub(crate) mod fixtures;
 #[cfg(feature = "parsed-font")]
 mod kern;
 pub mod layout;
@@ -88,6 +96,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(feature = "parsed-font")]
 use skrifa::instance::{LocationRef, Size};
+#[cfg(feature = "parsed-font")]
+use skrifa::raw::TableProvider;
 #[cfg(feature = "parsed-font")]
 use skrifa::{FontRef, MetadataProvider};
 
@@ -363,7 +373,8 @@ impl From<Box<[u8]>> for FontData {
 ///
 /// A handle: cloning it is a reference count, and every clone is the same
 /// font. Two fonts are equal when they are one parse drawn with one
-/// [`Synthesis`]: equality is [`Font::id`].
+/// [`Synthesis`]: equality is [`Font::id`], and **the fallback faces a handle
+/// carries ([`Font::with_fallback`]) are not part of it**.
 ///
 /// Without the `parsed-font` feature there is no value of this type: see the
 /// module docs.
@@ -372,6 +383,9 @@ pub struct Font {
     parsed: Arc<Parsed>,
     /// What this handle draws of the face that it lacks; see [`face`].
     synthesis: Synthesis,
+    /// The faces asked, in order, for a char this one has no glyph for; see
+    /// [`fallback`]. None of them carries fallback faces of its own.
+    fallback: Arc<[Font]>,
 }
 
 /// What one parse read, shared by every clone of its [`Font`].
@@ -391,6 +405,10 @@ struct Parsed {
     weight: f32,
     /// Whether it is an italic or oblique face.
     italic: bool,
+    /// Whether it has a `COLR`, `CBDT` or `sbix` table: whether any of its
+    /// glyphs can be a colour glyph.
+    #[cfg(feature = "parsed-font")]
+    color: bool,
     /// Glyph ids of the codepoints below [`LATIN1_END`]; zero where the font
     /// has none.
     latin1: [u32; LATIN1_END as usize],
@@ -410,6 +428,7 @@ impl fmt::Debug for Font {
             .field("weight", &self.parsed.weight)
             .field("italic", &self.parsed.italic)
             .field("synthesis", &self.synthesis)
+            .field("fallback", &self.fallback.len())
             .field("glyphs", &self.parsed.advances.len())
             .field("kerning_pairs", &self.parsed.kerning.len())
             .finish_non_exhaustive()
@@ -505,6 +524,7 @@ impl Font {
             thickness: line.thickness,
         });
         let attributes = font.attributes();
+        let color = font.colr().is_ok() || font.cbdt().is_ok() || font.sbix().is_ok();
 
         let charmap = font.charmap();
         let mut latin1 = [0; LATIN1_END as usize];
@@ -544,11 +564,13 @@ impl Font {
                 underline,
                 weight: attributes.weight.value(),
                 italic: attributes.style != skrifa::attribute::Style::Normal,
+                color,
                 latin1,
                 advances,
                 kerning,
             }),
             synthesis: Synthesis::NONE,
+            fallback: no_fallback(),
         })
     }
 
@@ -566,7 +588,64 @@ impl Font {
         Self {
             parsed: Arc::clone(&self.parsed),
             synthesis,
+            fallback: Arc::clone(&self.fallback),
         }
+    }
+
+    /// This face with `fallback` asked, in order, for every char it has no
+    /// glyph for — see [`fallback`] — in place of whatever it carried. The
+    /// faces' own fallback faces are left behind, and past
+    /// [`fallback::MAX_FALLBACK_FACES`] they are left out.
+    #[must_use]
+    pub fn with_fallback(&self, fallback: &[Self]) -> Self {
+        let faces = fallback
+            .iter()
+            .take(fallback::MAX_FALLBACK_FACES)
+            .map(|face| Self {
+                parsed: Arc::clone(&face.parsed),
+                synthesis: face.synthesis,
+                fallback: no_fallback(),
+            })
+            .collect();
+        Self {
+            parsed: Arc::clone(&self.parsed),
+            synthesis: self.synthesis,
+            fallback: faces,
+        }
+    }
+
+    /// The fallback faces this handle carries, in the order they are asked.
+    #[must_use]
+    pub fn fallback(&self) -> &[Self] {
+        &self.fallback
+    }
+
+    /// Face `index` of this handle: itself for zero, its `index`th fallback
+    /// face from one — what [`fallback::Mapped::face`] numbers — and itself
+    /// for an index past them.
+    #[must_use]
+    pub fn face(&self, index: u8) -> &Self {
+        match index.checked_sub(1) {
+            Some(at) => self.fallback.get(usize::from(at)).unwrap_or(self),
+            None => self,
+        }
+    }
+
+    /// Without the `parsed-font` feature there is no font to ask.
+    #[cfg(not(feature = "parsed-font"))]
+    #[must_use]
+    pub fn has_color_glyph(&self, _glyph: GlyphId) -> bool {
+        match self.parsed.never {}
+    }
+
+    /// Whether `glyph` has a colour representation: a `COLR` layer list or
+    /// paint graph, or a bitmap in one of its `CBDT` or `sbix` strikes.
+    #[cfg(feature = "parsed-font")]
+    #[must_use]
+    pub fn has_color_glyph(&self, glyph: GlyphId) -> bool {
+        self.parsed.color
+            && FontRef::new(self.data())
+                .is_ok_and(|font| color::has_color_glyph(&font, skrifa::GlyphId::new(glyph.0)))
     }
 
     /// What this handle synthesises; [`Synthesis::NONE`] for a face as
@@ -689,13 +768,20 @@ impl Font {
                 underline: None,
                 weight,
                 italic,
+                color: false,
                 latin1: [1; LATIN1_END as usize],
                 advances: Box::new([0.0, advance]),
                 kerning: HashMap::new(),
             }),
             synthesis: Synthesis::NONE,
+            fallback: no_fallback(),
         }))
     }
+}
+
+/// An empty fallback list.
+fn no_fallback() -> Arc<[Font]> {
+    Arc::from(Vec::new())
 }
 
 #[cfg(all(test, not(feature = "parsed-font")))]
