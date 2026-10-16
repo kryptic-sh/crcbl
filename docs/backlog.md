@@ -30,13 +30,16 @@ notification images and album art; S17 is closing a panel when it loses the
 keyboard (in: an on-demand panel's `WindowState::focused` goes false when the
 user focuses another window, under sway; the test reads the state, not the
 `Focus` event that sets it); S19 is the password caret's blink (in); S22 is
-emoji in notification text. So the S12 gaps (runs that wrap together, weight,
-italic, underline, a link's hit area) and S22 are now what both callers wait on.
-lyr's new panels are ordinary S1 layer surfaces (overlay, exclusive zone 0, a
-chosen output) opened from its control socket with no input serial, so they
-cannot be grabbing popups. **Open, nothing asked yet:** closing a panel when the
-user clicks the empty desktop, which focus loss does not cover; lyr measures
-what Hyprland does in its M5 before asking.
+emoji in notification text (in, 2026-10-16: per-glyph fallback and CBDT, sbix
+and COLR colour glyphs, with ZWJ sequences, skin tones and flags still drawn as
+their components — item 8 under Text). The S12 gaps (runs that wrap together,
+weight, italic, underline, a link's hit area) and S22 were what both callers
+waited on; both are in, and S22's clusters are what is left. lyr's new panels
+are ordinary S1 layer surfaces (overlay, exclusive zone 0, a chosen output)
+opened from its control socket with no input serial, so they cannot be grabbing
+popups. **Open, nothing asked yet:** closing a panel when the user clicks the
+empty desktop, which focus loss does not cover; lyr measures what Hyprland does
+in its M5 before asking.
 
 **Done 2026-10-16 for lyr's M7: a password content type on the text-input
 seam.** `Shell::set_text_input(window, Option<TextPurpose>)` replaced
@@ -365,7 +368,88 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      real bold or italic TTF registered beside a regular one — the face tests
      use fixed-pitch fixtures labelled with a weight, and the synthesis tests
      rasterise the committed regular face.
-   - Colour emoji (COLR, CBDT, sbix) with per-glyph fallback (S22).
+   - S22 is in (2026-10-16): per-glyph fallback and colour emoji. A tree's
+     `Ui::set_fallback_fonts` list rides on each span's `Font` handle
+     (`Font::with_fallback`), and one function, `fallback::map_char` in
+     `crates/crcbl-ui/src/font/fallback.rs`, picks each char's face for layout
+     (`TextLayout`, the paragraph breaker), measurement, caret stops and
+     drawing, so they cannot disagree; emission draws one glyph run per face.
+     U+FE0F prefers a face whose glyph is a colour glyph and U+FE0E one whose
+     glyph is not; variation selectors and U+200D draw nothing and take no
+     width. Colour glyphs (`crates/crcbl-ui/src/font/color/`) are CBDT/CBLC and
+     sbix strikes (the smallest strike at least the size, else the largest,
+     decoded by `crcbl_image::png`, scaled by `crcbl_image::resize`) and COLR v0
+     and v1 (solid fills, linear, radial and sweep gradients, transforms, glyph
+     and box clips, every composite mode, rasterised with `crcbl_image::raster`
+     into RGBA). `DrawList::resolve_color_glyphs` swaps each colour glyph in a
+     run for a `DrawCommand::Image` quad from the caller's `ImageAtlas`, held by
+     `ColorGlyphCache` and evicted least recently used among glyphs unused this
+     frame, never touching the caller's images; text colour does not tint it,
+     the run's opacity does. A corrupt PNG, a glyph past `MAX_COLOR_GLYPH_SIDE`,
+     or a paint graph past `MAX_PAINT_DEPTH`, `MAX_COLR_LAYERS` or the pixel
+     budgets draws its outline instead.
+   - **Verified** by unit tests on fixture fonts built with fontTools
+     (`crates/crcbl-ui/tests/fixtures/emoji/`, the script in the docs of
+     `crates/crcbl-ui/src/font/fixtures.rs`): fallback order and presentation
+     selectors, a span's and a paragraph's measured width equal to the drawn
+     pens, caret stops, strike choice, CBDT and sbix pixels and placement
+     (exact, and against `crcbl_image::resize` when scaled), COLR v0 layer order
+     and palette colours and v1 solids, translation, composite and clip pixel
+     for pixel, gradients within one level, the composite formulas, the depth
+     and fill limits, cache eviction and the draw list's quads, clips and
+     overlay cut. Fifteen hand mutants, each compiling under `-D warnings`, were
+     each killed (2026-10-16): fallback ignoring `.notdef`, fallback order
+     reversed, VS16 inverted, a fallback glyph advanced at the primary face's
+     scale, strike choice taking the first or the largest strike, layer
+     compositing as destination-over, the palette read one entry on or as BGR,
+     eviction of glyphs used this frame, eviction newest first, the depth and
+     fill limits loosened, a colour glyph left in its run, and the quad tinted
+     by the text colour.
+   - Decided 2026-10-16, per the standing instruction: **one ordered fallback
+     list per `Ui`, carried on the font handle.** Alternatives: (a) CSS's own
+     model, fallback through the `font-family` list
+     (`Roboto, "Noto Color Emoji"`), declined for now because every rule would
+     have to name the emoji font and the registry would need a chain per family
+     — it can come later on top, since `Font::with_fallback` takes any list; (b)
+     registering the emoji font under CSS's reserved `emoji` family, declined
+     because it makes `emoji` silently mean "the fallback list" and leaves other
+     scripts' fallback (CJK) unanswered — the list already holds any face; (c)
+     passing the list beside the font to `TextLayout`, the paragraph breaker and
+     `DrawList`, declined because every call site and application would thread
+     it and measurement and drawing could be handed different lists. The cost of
+     the handle: `Font` equality ignores the list (documented), so a span's
+     content hash folds in a hash of the list to measure again when it changes.
+   - Decided 2026-10-16: **colour glyphs are resolved by the caller, before the
+     renderer**, into its `ImageAtlas`, rather than in `to_triangles_split`,
+     which has no image atlas; giving it one is a renderer change the brief
+     ruled out. So an application calls `ColorGlyphCache::begin_frame` and
+     `DrawList::resolve_color_glyphs(cache, renderer.images_mut(), scale)` each
+     frame after `Ui::emit`; without it a colour glyph draws its outline, which
+     for a bitmap-only font is nothing. The engine's own UI paths do not call it
+     yet, so a sample that wants emoji needs that wiring.
+   - Not done: **GSUB clusters** — there is no shaping, so a ZWJ sequence, a
+     skin-tone modifier, a flag or a keycap draws as its component emoji. It
+     would take reading GSUB ligature lookups (`ccmp`, `liga`) through
+     `skrifa::raw` over each run's glyph sequence after the cmap, falling back
+     per cluster (the first face that maps every codepoint of it) rather than
+     per char, and caret stops per cluster. Also not done: uncompressed BGRA
+     CBDT bitmaps and sbix `jpg `/`tiff` graphics (drawn as outlines); the
+     foreground palette entry draws black, since the cache key has no text
+     colour; palette 0 only (no light/dark choice); COLR variations at the
+     default location only; no per-frame budget for colour glyphs, as the glyph
+     atlas has; the cache never prunes its "not colour" entries (bounded by the
+     glyphs and sizes of colour fonts drawn); fallback faces are not synthesised
+     bold or italic; a taller fallback glyph does not grow a span's line; a span
+     in the bitmap font does not fall back; and `text-overflow: ellipsis` picks
+     `…` or `...` by the primary face only.
+   - Not tested: a real Noto Color Emoji or Segoe UI Emoji (too large to
+     commit), so Noto's flags, which `skrifa` notes take thousands of paint
+     nodes, are not known to fit `MAX_COLR_LAYERS`; the quads on a GPU; COLR
+     `Repeat` and `Reflect` extends, `PaintColrGlyph`, clip boxes, rotation and
+     skew; most blend modes on non-trivial colours; an sbix glyph with `glyf`
+     bearings. The sweep gradient's direction follows `skrifa`'s documented
+     clockwise angles and the fixture's expected pixels, not a reference
+     renderer.
    - Text measurement exists as `text_width`.
 9. **Input.**
    - S9 is in. XKB compose (`crates/crcbl-shell/src/linux/xkb/compose.rs`, fed
