@@ -22,18 +22,43 @@ watcher and a grapheme crate stay declined until a caller needs them.
 **pikr's port findings, 2026-10-16** (pikr running on crcbl, Win32 + D3D12),
 each checked against the code here unless it says otherwise:
 
-- **System font lookup by family name** is asked for by pikr and lyr. This
-  reverses the earlier "stays with the caller (fontdb)" line under _What exists
-  already_: both apps need it, and SVG text in `crcbl-image` will too, which
-  cannot reach `crcbl-ui` (that crate depends on `crcbl-image`). Decided, per
-  the standing instruction: a small workspace crate for font discovery, used by
-  both, returning a family's file and face index for a weight and style and the
-  system's fallback order — fontconfig's configuration and cache on Linux and
-  FreeBSD (reading them, or loading `libfontconfig` the way `crcbl-shell` loads
-  system libraries, decided when built), the system and per-user font
-  directories matched by name table on Windows, the standard directories on
-  macOS. No new external crate. It goes after the XPM slice and before SVG
-  `<image>` and text.
+- **System font lookup is `crcbl-font`** (pikr and lyr asked; SVG text in
+  `crcbl-image` will use it, which is why it is not in `crcbl-ui`), with
+  `crcbl-ui`'s `system-fonts` feature for `Ui::register_system_font` and
+  `Font::from_system`. Built 2026-10-16, loading `libfontconfig.so.1` at run
+  time (decided then, over reading fontconfig's configuration and cache files).
+  What it left:
+  - **Verified where:** Windows and Linux (WSL's Ubuntu 26.04, fontconfig
+    2.17.1, DejaVu and Ubuntu fonts) locally, system tests included; macOS
+    (`helvetica_is_found_in_its_collection`, Apple Color Emoji as `emoji` and a
+    fallback) and the CI images' fonts only in CI. FreeBSD is compiled, never
+    run.
+  - **Not exercised end to end:** Linux without fontconfig (the walk of the
+    standard directories). `Catalog` and the defaults it answers with are unit
+    tested; the branch choosing it needs a machine with no `libfontconfig.so.1`,
+    which no test here can arrange.
+  - **macOS through CoreText** is the better source: `CTFontDescriptor` matching
+    finds the fonts macOS downloads on demand into its asset store (not in any
+    directory the walk reads), and `CTFontCopyDefaultCascadeListForLanguages` is
+    the system's own fallback order where `macos.rs`'s `DEFAULTS` is fixed. Its
+    cascade names the interface font as `System Font` and `.SF NS`, neither
+    checked against a real `SFNS.ttf`; Helvetica Neue stands in when both miss.
+  - **Variable fonts:** fontconfig reports a named instance; `FontMatch` gives
+    its face (`index` without the instance bits) with the instance's weight and
+    style, but `FontMatch::read` and `crcbl-ui` give the default instance, since
+    `crcbl-ui` applies no variations. The instance-bit mask is the one
+    fontconfig mutant not proven: CI's image has no variable font to look up.
+  - **Windows:** a font whose registry display name shares nothing with its
+    family (after dropping case and punctuation) is not found, since the name
+    narrows which files are opened; `REG_EXPAND_SZ` font values are skipped.
+    `fallbacks` reads `SystemLink` on every call (about 2 ms warm on this
+    machine, against 0.07 ms for a warm `find`); cache it if an app calls it per
+    frame.
+  - **`skrifa` is named in two manifests** (`crcbl-ui` and `crcbl-font`, both
+    0.48.0) rather than once in `[workspace.dependencies]`; hoisting it was
+    outside the slice that added the second.
+  - The `crcbl` umbrella forwards `parsed-font` but not `system-fonts`; an app
+    on the umbrella names `crcbl-ui` directly for it until one does.
 - **Win32 `FocusRefused` has no desktop test; decided 2026-10-16 not to write
   one.** `show_panel` now counts the foreground as granted only when
   `SetForegroundWindow` answered success and `GetForegroundWindow` then names
@@ -1225,8 +1250,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       the two agree on both corpus icons with an invalid value, whose parents
       set no fill. Not tested: `vector-effect` inside a mask or under a filter,
       whose host is still the placement.
-    - Order from here: pikr's, in the 2026-10-16 entry at the top: text once
-      system font lookup is in.
+    - Order from here: pikr's, in the 2026-10-16 entry at the top: text, whose
+      font lookup is `crcbl-font`.
 
 ### Left behind by the seam split
 
@@ -1247,9 +1272,8 @@ Each step lands in the crate the later steps build on, so the seam goes first.
 - crcbl-ui's virtualised fixed-height list (`widgets/list.rs`), caret and
   selection in `text_input`, an image module, a cssparser and taffy stylesheet,
   and `text_width`.
-- System font lookup by family name was left to the caller (fontdb), which hands
-  the bytes to crcbl-ui; reversed 2026-10-16, see _pikr's port findings_ at the
-  top.
+- System font lookup by family name: `crcbl-font`, decided 2026-10-16 over
+  leaving it to the caller (fontdb); see _pikr's port findings_ at the top.
 
 ## HIGH PRIORITY: EW engine requirements
 
