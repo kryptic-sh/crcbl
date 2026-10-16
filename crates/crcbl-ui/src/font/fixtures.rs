@@ -276,3 +276,12 @@ pub(crate) fn colrv0() -> Font {
         include_bytes!("../../tests/fixtures/emoji/colrv0.ttf"),
     )
 }
+
+/// `colrv1.ttf`.
+pub(crate) fn colrv1() -> Font {
+    static FONT: OnceLock<Font> = OnceLock::new();
+    parsed(
+        &FONT,
+        include_bytes!("../../tests/fixtures/emoji/colrv1.ttf"),
+    )
+}
