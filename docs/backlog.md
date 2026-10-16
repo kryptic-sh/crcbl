@@ -392,13 +392,12 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      decoded by `crcbl_image::png`, scaled by `crcbl_image::resize`) and COLR v0
      and v1 (solid fills, linear, radial and sweep gradients, transforms, glyph
      and box clips, every composite mode, rasterised with `crcbl_image::raster`
-     into RGBA). `DrawList::resolve_color_glyphs` swaps each colour glyph in a
-     run for a `DrawCommand::Image` quad from the caller's `ImageAtlas`, held by
-     `ColorGlyphCache` and evicted least recently used among glyphs unused this
-     frame, never touching the caller's images; text colour does not tint it,
-     the run's opacity does. A corrupt PNG, a glyph past `MAX_COLOR_GLYPH_SIDE`,
-     or a paint graph past `MAX_PAINT_DEPTH`, `MAX_COLR_LAYERS` or the pixel
-     budgets draws its outline instead.
+     into RGBA). Each colour glyph in a run draws as an image quad from an
+     `ImageAtlas`, held by `ColorGlyphCache` and evicted least recently used
+     among glyphs unused this frame, never touching the caller's images; text
+     colour does not tint it, the run's opacity does. A corrupt PNG, a glyph
+     past `MAX_COLOR_GLYPH_SIDE`, or a paint graph past `MAX_PAINT_DEPTH`,
+     `MAX_COLR_LAYERS` or the pixel budgets draws its outline instead.
    - **Verified** by unit tests on fixture fonts built with fontTools
      (`crates/crcbl-ui/tests/fixtures/emoji/`, the script in the docs of
      `crates/crcbl-ui/src/font/fixtures.rs`): fallback order and presentation
@@ -430,14 +429,34 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      it and measurement and drawing could be handed different lists. The cost of
      the handle: `Font` equality ignores the list (documented), so a span's
      content hash folds in a hash of the list to measure again when it changes.
-   - Decided 2026-10-16: **colour glyphs are resolved by the caller, before the
-     renderer**, into its `ImageAtlas`, rather than in `to_triangles_split`,
-     which has no image atlas; giving it one is a renderer change the brief
-     ruled out. So an application calls `ColorGlyphCache::begin_frame` and
-     `DrawList::resolve_color_glyphs(cache, renderer.images_mut(), scale)` each
-     frame after `Ui::emit`; without it a colour glyph draws its outline, which
-     for a bitmap-only font is nothing. The engine's own UI paths do not call it
-     yet, so a sample that wants emoji needs that wiring.
+   - Decided 2026-10-16 (the coordinator's call, the long-term option):
+     **`crcbl-frame`'s `UiRenderer` owns a `ColorGlyphCache` and draws colour
+     glyphs inside `begin_frame`**, so every application drawing through the UI
+     pass, the engine's own UI paths included, gets colour emoji with no call.
+     The tessellation does it, through `DrawList::to_triangles_with_colors`
+     (taking a `ColorGlyphs` of the cache and the image atlas), which draws each
+     colour glyph as an image quad in place of its outline under the run's clip
+     and on its side of the overlay cut; `begin_frame` keeps its signature and
+     now stages the image atlas after the tessellation, so a new glyph's picture
+     uploads in the frame that draws it. `DrawList::resolve_color_glyphs` stays
+     public for a renderer of its own, and both go through one function,
+     `ColorGlyphs::split`. Alternatives: (a) the first cut, every application
+     calling `resolve_color_glyphs` each frame — declined as a trap: forgotten,
+     Noto's CBDT emoji draw nothing, and the engine's own paths
+     (`crates/crcbl/src/text_input.rs`, `crates/crcbl/src/engine/page.rs`, the
+     screenshot scenes) never called it; (b) `begin_frame` taking
+     `&mut DrawList` and resolving it in place — declined because it breaks
+     every caller for what the tessellation can do from a shared borrow.
+     Verified by `a_colour_glyph_is_drawn_as_an_image_staged_in_its_own_frame`
+     in `crates/crcbl-frame/src/ui_pass/tests.rs` and
+     `tessellating_with_colours_matches_resolving_first`; three more hand
+     mutants were each killed: the pass tessellating without colours, staging
+     the image atlas before the tessellation, and the expansion dropping the
+     quads. Left: the glyphs share the image atlas's page with the application's
+     pictures, and the cache evicts only for itself, so a picture registered
+     through `images_mut` after emoji filled the page is refused; evicting the
+     cache's glyphs for a registration would need `images_mut` to go through the
+     cache.
    - Not done: **GSUB clusters** — there is no shaping, so a ZWJ sequence, a
      skin-tone modifier, a flag or a keycap draws as its component emoji. It
      would take reading GSUB ligature lookups (`ccmp`, `liga`) through

@@ -164,3 +164,48 @@ fn plain_runs_and_glyphs_with_no_picture_stay_runs() {
     assert_eq!(kinds(&list), before);
     assert!(images.images().is_empty());
 }
+
+/// **Tessellating with colours draws what resolving and then tessellating
+/// draws**: one implementation, so a renderer of its own and the UI pass put
+/// a colour glyph in the same place, and a list resolved first has nothing
+/// left for the tessellation to swap.
+#[test]
+fn tessellating_with_colours_matches_resolving_first() {
+    let mut list = DrawList::new();
+    list.push_clip(Vec2::new(2.0, 3.0), Vec2::new(200.0, 100.0));
+    emoji_runs(&mut list, Vec2::new(10.25, 30.0), "a\u{1F600}b");
+    list.pop_clip().expect("pushed above");
+    list.begin_overlay();
+    emoji_runs(&mut list, Vec2::new(4.0, 70.0), "\u{1F600}c");
+    let tessellate = |list: &DrawList, colors: bool| {
+        let (mut cache, mut images) = (ColorGlyphCache::new(), ImageAtlas::new());
+        cache.begin_frame();
+        let mut glyphs = GlyphAtlas::new(256, 1, 100);
+        let colors = colors.then_some(ColorGlyphs {
+            cache: &mut cache,
+            images: &mut images,
+        });
+        let triangles = list.to_triangles_with_colors(None, Some(&mut glyphs), colors, 2.0);
+        (triangles, images.images().len())
+    };
+    let mut resolved = list.clone();
+    let (mut cache, mut images) = (ColorGlyphCache::new(), ImageAtlas::new());
+    cache.begin_frame();
+    resolved.resolve_color_glyphs(&mut cache, &mut images, 2.0);
+
+    let (direct, placed) = tessellate(&list, true);
+    assert_eq!(placed, 1);
+    assert_eq!(direct, tessellate(&resolved, false).0);
+    assert_eq!(direct, tessellate(&resolved, true).0);
+    let images_drawn = direct
+        .vertices
+        .iter()
+        .filter(|vertex| vertex.primitive() == Some(Primitive::Image))
+        .count();
+    assert_eq!(images_drawn, 2 * 4, "a quad per emoji");
+    assert_ne!(
+        direct,
+        tessellate(&list, false).0,
+        "without colours, no quads"
+    );
+}
