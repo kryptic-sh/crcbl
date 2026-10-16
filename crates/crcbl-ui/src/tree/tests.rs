@@ -840,6 +840,107 @@ fn a_block_paints_with_the_primitive_its_style_needs() {
 
 use crate::draw_list::CornerRadii;
 
+/// **A text span paints its box like a block, behind its text**: its
+/// background, border and radius at its border box, before the glyphs drawn
+/// from its content box — while a paragraph's run with the same style paints
+/// no box, only its text.
+#[test]
+fn a_text_span_paints_its_box_behind_its_text() {
+    let fill = [0.2, 0.3, 0.4, 1.0];
+    let edge = [1.0, 1.0, 0.0, 1.0];
+    let chip = |radius: f32| NodeStyle {
+        background: fill,
+        border: Edges::all(2.0),
+        border_color: edge,
+        radii: CornerRadii::uniform(radius),
+        padding: Edges::all(Length::Px(3.0)),
+        ..NodeStyle::DEFAULT
+    };
+    let holder = NodeStyle {
+        padding: Edges::all(Length::Px(7.0)),
+        ..NodeStyle::DEFAULT
+    };
+    for (radius, want) in [
+        (4.0, &["RoundedRect", "Text"][..]),
+        (0.0, &["Rect", "RectOutline", "Text"][..]),
+    ] {
+        let mut ui = Ui::new();
+        let mut key = None;
+        frame(&mut ui, idle(), |ui| {
+            ui.block("", &holder.declarations(), |ui| {
+                key = Some(ui.span("", "chip", &chip(radius).declarations()).key);
+            });
+        });
+        let (min, max) = ui.rect(key.expect("built")).expect("laid out");
+        assert_eq!(min, Vec2::splat(7.0), "the span's border box moved");
+        let list = emitted(&ui);
+        let got: Vec<&str> = list
+            .commands()
+            .iter()
+            .map(|command| match command {
+                DrawCommand::Rect { .. } => "Rect",
+                DrawCommand::RectOutline { .. } => "RectOutline",
+                DrawCommand::RoundedRect { .. } => "RoundedRect",
+                DrawCommand::Text { .. } => "Text",
+                other => panic!("a span drew {other:?}"),
+            })
+            .collect();
+        assert_eq!(got, want, "radius {radius}");
+        let commands = list.commands();
+        match &commands[0] {
+            DrawCommand::RoundedRect {
+                min: at,
+                max: to,
+                radii,
+                color,
+                border,
+            } => {
+                assert_eq!((*at, *to), (min, max));
+                assert_eq!(*radii, CornerRadii::uniform(radius));
+                assert_eq!(*color, fill);
+                assert_eq!((border.width, border.color), (2.0, edge));
+            }
+            DrawCommand::Rect {
+                min: at,
+                max: to,
+                color,
+            } => {
+                assert_eq!((*at, *to, *color), (min, max, fill));
+                assert!(matches!(
+                    commands[1],
+                    DrawCommand::RectOutline { min: at, max: to, thickness: 2.0, color }
+                    if (at, to, color) == (min, max, edge)
+                ));
+            }
+            other => panic!("the span's box is {other:?}"),
+        }
+        let DrawCommand::Text { pos, .. } = commands.last().expect("drawn") else {
+            panic!("the text is not last");
+        };
+        assert_eq!(
+            *pos,
+            min + Vec2::splat(5.0),
+            "the text left its content box"
+        );
+    }
+
+    let mut ui = Ui::new();
+    frame(&mut ui, idle(), |ui| {
+        ui.paragraph("", &[], |paragraph| {
+            paragraph.run("", "run", &chip(4.0).declarations());
+        });
+    });
+    let list = emitted(&ui);
+    assert!(
+        list.commands()
+            .iter()
+            .all(|command| matches!(command, DrawCommand::Text { .. })),
+        "a run painted a box: {:?}",
+        list.commands()
+    );
+    assert!(!list.commands().is_empty(), "the run drew nothing");
+}
+
 /// **`display: none` draws nothing, takes no space and is never hit**, and
 /// neither is anything under it.
 #[test]

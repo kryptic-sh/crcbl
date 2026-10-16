@@ -30,6 +30,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   decodes under the caller's `Limits`, all of a document's within one budget of
   its `max_bytes`, and SVG pictures nest only to a fixed depth.
 
+### Changed
+
+- **A `crcbl-ui` text span paints its box**: its `background-color`, border and
+  `border-radius` are drawn at its border box, behind its text, as a block's
+  are, so a chip no longer needs a block around its label. A paragraph's inline
+  runs still paint no box.
+
 ## [0.2.0] - 2026-10-16
 
 ### Breaking

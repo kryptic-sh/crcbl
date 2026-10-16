@@ -146,7 +146,8 @@
 //!
 //! # Emission
 //!
-//! A block paints its border box: with square corners a filled rect, then the
+//! A block paints its border box, and so does a text span, behind its text; a
+//! paragraph's run paints none. With square corners it is a filled rect, then the
 //! border — one [`DrawList::rect_outline`] when every side is one width, a rect
 //! per side otherwise. With any corner radius it is one
 //! [`DrawList::rounded_rect`], whose border is uniform, **drawn at the top

@@ -43,11 +43,12 @@ each checked against the code here unless it says otherwise:
   also require `GetForegroundWindow` to be the panel, which `ffi.rs` compiles
   only for tests today. The hard part is a test: CI's process usually holds the
   foreground lock, so a refusal has to be provoked, not waited for.
-- **A text span paints no box**: `emit_node`'s `Content::Text` arm draws no
-  `background-color`, border or radius, though its layout box has padding that
-  already insets the text, so pikr wrapped its chips in blocks. A text span is a
-  box like a block and should paint like one; inline runs inside a paragraph are
-  separate, needing a box per fragment.
+- **A paragraph's inline runs paint no box.** A text span paints its
+  `background-color`, border and radius since 2026-10-16, but a run is drawn by
+  `emit_paragraph` fragment by fragment, so its box would be one rectangle per
+  fragment (CSS's `box-decoration-break: slice` by default: no side border or
+  radius where a line breaks it), as the underline already is. Not asked for
+  yet; a run's highlight is the likely first caller.
 - **`Ui::list` builds the rows its previous layout showed**, so an event-driven
   app whose row count changed sees last frame's window in a single build (2 of 4
   rows), and pikr builds and lays out twice a drawn frame. Wanted: the window
