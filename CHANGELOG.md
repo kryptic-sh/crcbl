@@ -177,11 +177,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   function. The picture is the strike nearest the size, its PNG decoded by
   `crcbl_image::png` and scaled by `crcbl_image::resize`, placed by the strike's
   metrics on whole pixels, tinted by the run's opacity and not its colour.
-  `font::color::ColorGlyphCache` holds them by font, glyph and size and, when
-  the atlas fills, unregisters only its own glyphs not used this frame, least
-  recently used first. A PNG that does not decode, or a glyph larger than
-  `MAX_COLOR_GLYPH_SIDE`, draws its outline instead. `parsed-font` now turns on
-  `crcbl-image`'s `png` feature.
+  `font::color::ColorGlyphCache` holds them by font, glyph and size as the image
+  atlas's new evictable images: `ImageAtlas::register_evictable`, `touch` to
+  mark one used and `begin_frame` to count frames. Any registration that finds
+  the page full, `register` included, first unregisters evictable images not
+  used this frame, least recently used first, so emoji never crowd out an
+  application's icons; an image registered with `register` is never evicted, and
+  the cache rasterises a glyph again once the atlas has dropped it. A PNG that
+  does not decode, or a glyph larger than `MAX_COLOR_GLYPH_SIDE`, draws its
+  outline instead. `parsed-font` now turns on `crcbl-image`'s `png` feature.
 - **COLR v0 and v1 colour glyphs in `crcbl-ui`**, drawn the same way: v0 layers
   each filled in their `CPAL` colour, and v1 paint graphs with solid fills,
   linear, radial and sweep gradients, transforms, glyph and box clips and every

@@ -179,7 +179,7 @@ fn an_emoji_in_a_span_resolves_to_a_colour_quad() {
     let mut list = DrawList::new();
     ui.emit(&mut list);
     let (mut cache, mut images) = (ColorGlyphCache::new(), ImageAtlas::new());
-    cache.begin_frame();
+    cache.begin_frame(&mut images);
     list.resolve_color_glyphs(&mut cache, &mut images, 1.0);
     let quads: Vec<(Vec2, Vec2)> = list
         .commands()

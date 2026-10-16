@@ -51,12 +51,15 @@
 //! A glyph run's colour glyphs — emoji from a CBDT, sbix or COLR font — are
 //! drawn as image quads, not coverage: the tessellation
 //! ([`DrawList::to_triangles_with_colors`]) rasterises each into the image
-//! atlas through a [`ColorGlyphCache`] this renderer owns, which evicts only
-//! its own glyphs, and the images it registered are staged after it, in the
-//! same frame. So every list drawn here shows colour emoji with no call of
-//! its caller's; [`DrawList::resolve_color_glyphs`] is for a renderer of its
-//! own. The glyphs share the page with the caller's pictures, so a picture
-//! registered once emoji have filled the page can be refused.
+//! atlas through a [`ColorGlyphCache`] this renderer owns, and the images it
+//! registered are staged after it, in the same frame. So every list drawn here
+//! shows colour emoji with no call of its caller's;
+//! [`DrawList::resolve_color_glyphs`] is for a renderer of its own. The glyphs
+//! are the atlas's evictable images ([`ImageAtlas::register_evictable`]): a
+//! picture registered through [`images_mut`](UiRenderer::images_mut) that
+//! finds the page full of emoji takes the room of those the last frame did
+//! not draw, so emoji never crowd out an application's icons, and the
+//! application's pictures are never evicted.
 //!
 //! # The menu is in the draw list
 //!
@@ -817,7 +820,7 @@ impl UiRenderer {
         self.texture_groups.retire(device, idx);
 
         self.glyphs.begin_frame();
-        self.colors.begin_frame();
+        self.colors.begin_frame(&mut self.images);
         let colors = ColorGlyphs {
             cache: &mut self.colors,
             images: &mut self.images,
