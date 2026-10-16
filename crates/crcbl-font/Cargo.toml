@@ -17,11 +17,10 @@ rust-version.workspace = true
 # docs.
 [dependencies]
 # The name, OS/2, head and post tables a face is matched by, read through the
-# crate `crcbl-ui` parses fonts with, at the version it names: one reader of
-# a family name and a weight class, so a face this crate finds registers in
-# `crcbl-ui` under the weight and style it was found by. Default features off
-# for `crcbl-ui`'s reason; `std` stays on.
-skrifa = { version = "0.48.0", default-features = false, features = ["std"] }
+# crate `crcbl-ui` parses fonts with, through the same workspace entry: one
+# reader of a family name and a weight class, so a face this crate finds
+# registers in `crcbl-ui` under the weight and style it was found by.
+skrifa.workspace = true
 
 [lints]
 workspace = true

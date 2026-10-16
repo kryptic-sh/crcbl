@@ -58,11 +58,10 @@ cssparser = { version = "0.38.0", default-features = false }
 # `docs/notes/tooling.md`, the user's decision of 2026-09-15. Rasterisation and the
 # glyph atlas are this crate's. `read-fonts` comes with it and is reached as
 # `skrifa::raw`, so the GPOS reader is always the version skrifa was built
-# against. Default features off: `autohint_shaping` feeds the automatic hinter,
-# and the committed font carries TrueType instructions the interpreter runs
-# instead. `std` stays on, because the other float backend is `libm`. Behind
-# the `parsed-font` feature below.
-skrifa ={ version = "0.48.0", default-features = false, features = ["std"], optional = true }
+# against. The workspace entry turns off the automatic hinter: the committed
+# font carries TrueType instructions the interpreter runs instead. Behind the
+# `parsed-font` feature below.
+skrifa = { workspace = true, optional = true }
 
 [features]
 # `crcbl_ui::font`'s parsed font: `skrifa`, the committed Atkinson Hyperlegible
