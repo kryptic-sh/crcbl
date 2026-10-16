@@ -1,19 +1,31 @@
 //! The XML an SVG file is written in, parsed into a tree of elements.
 //!
 //! Only what a standalone SVG file needs: elements, attributes, character data
-//! (text and CDATA sections), the five predefined entities and numeric
-//! character references, and namespaces resolved through their `xmlns`
-//! declarations. Comments, processing instructions and the document type
-//! declaration are skipped.
+//! (text and CDATA sections), the five predefined entities, numeric character
+//! references and the plain-text entities a DOCTYPE declares, and namespaces
+//! resolved through their `xmlns` declarations. Comments, processing
+//! instructions and the rest of the document type declaration are skipped.
 //!
-//! # No DTD
+//! # Plain-text entities only
 //!
-//! A DOCTYPE's internal subset is stepped over, never interpreted: no entity
-//! it declares is expanded and no external entity is fetched. That one rule
-//! is the whole defence against the "billion laughs" entity bomb and against
-//! a file reaching out to the filesystem or the network. A reference to an
-//! entity the subset declares is refused as unsupported, so a file that
-//! depends on one fails loudly rather than rendering with text missing.
+//! Adobe Illustrator writes its namespace URIs and its styles as entities in
+//! the DOCTYPE's internal subset (`<!ENTITY ns_svg "http://...">`, then
+//! `xmlns="&ns_svg;"`), so those are expanded, in attribute values and in
+//! text: an internal general entity whose value is plain text, holding no
+//! markup and no reference of any kind. Its replacement can then never
+//! contain another reference, so expansion is a single substitution and the
+//! "billion laughs" bomb, built of entities that reference entities, has
+//! nothing to multiply. An entity whose value does reference another, holds
+//! markup, or is external (`SYSTEM` or `PUBLIC`, which would read the
+//! filesystem or the network) is refused as unsupported where the document
+//! references it, naming it, so a file that depends on one fails loudly
+//! rather than rendering with text missing; and nothing external is ever
+//! read. Parameter entities are never expanded, and nothing else in the
+//! subset (element and attribute-list declarations) is interpreted.
+//!
+//! The expansion is capped too: [`MAX_ENTITIES`] declarations,
+//! [`MAX_ENTITY_LENGTH`] bytes of value each (a longer one is refused where
+//! referenced), and [`MAX_EXPANDED_BYTES`] substituted in all.
 //!
 //! # Caps
 //!
@@ -30,6 +42,28 @@ pub(super) const MAX_DEPTH: usize = 128;
 
 /// The most elements a file may hold.
 pub(super) const MAX_ELEMENTS: usize = 200_000;
+
+/// The most general entities a DOCTYPE may declare: Illustrator's files
+/// declare a few dozen.
+pub(super) const MAX_ENTITIES: usize = 256;
+
+/// The longest entity value expanded, in bytes: room for any namespace URI
+/// or style an editor writes as one.
+pub(super) const MAX_ENTITY_LENGTH: usize = 1024;
+
+/// The most bytes entity references may substitute in a whole file, which
+/// bounds what references a few bytes long can grow the file to.
+pub(super) const MAX_EXPANDED_BYTES: usize = 1 << 20;
+
+/// The predefined entities, which a DOCTYPE may redeclare but not change:
+/// a reference to one is replaced before the DOCTYPE's are looked at.
+const PREDEFINED: [(&str, char); 5] = [
+    ("lt", '<'),
+    ("gt", '>'),
+    ("amp", '&'),
+    ("quot", '"'),
+    ("apos", '\''),
+];
 
 /// The SVG namespace.
 pub(super) const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
@@ -117,8 +151,9 @@ fn malformed(what: impl core::fmt::Display) -> ImageError {
 ///
 /// [`ImageError::Malformed`] for anything that is not well-formed XML in
 /// UTF-8, and [`ImageError::Unsupported`] for a compressed (`.svgz`) file, an
-/// encoding other than UTF-8, a reference to an entity a DTD declares, or a
-/// tree past [`MAX_DEPTH`] or [`MAX_ELEMENTS`].
+/// encoding other than UTF-8, a reference to an entity a DTD declares that is
+/// not plain text, a DTD or expansion past the entity caps, or a tree past
+/// [`MAX_DEPTH`] or [`MAX_ELEMENTS`].
 pub(super) fn parse(bytes: &[u8]) -> Result<Document, ImageError> {
     if bytes.starts_with(&[0x1f, 0x8b]) {
         return Err(ImageError::Unsupported(
@@ -134,9 +169,18 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Document, ImageError> {
         elements: Vec::new(),
         open: Vec::new(),
         scopes: Vec::new(),
-        dtd_entities: Vec::new(),
+        entities: Vec::new(),
+        expanded: 0,
     }
     .document()
+}
+
+/// What a general entity a DOCTYPE declares expands to.
+enum Entity {
+    /// Plain text, substituted as it stands.
+    Text(String),
+    /// Nothing: a reference is refused, for this reason.
+    Refused(&'static str),
 }
 
 /// One namespace binding in scope: the prefix (empty for the default) and
@@ -154,8 +198,10 @@ struct Parser<'a> {
     /// The elements open from the root down.
     open: Vec<usize>,
     scopes: Vec<Binding>,
-    /// Entity names a DOCTYPE declared, refused when referenced.
-    dtd_entities: Vec<String>,
+    /// The general entities a DOCTYPE declared, in order.
+    entities: Vec<(String, Entity)>,
+    /// The bytes entity references have substituted so far.
+    expanded: usize,
 }
 
 impl Parser<'_> {
@@ -257,7 +303,7 @@ impl Parser<'_> {
                 let length = self.rest().find('<').unwrap_or(self.rest().len());
                 let raw = &self.text[self.at..self.at + length];
                 self.at += length;
-                let decoded = self.unescape(raw)?;
+                let decoded = self.unescape(raw, false)?;
                 self.character_data(&decoded)?;
             }
         }
@@ -286,8 +332,8 @@ impl Parser<'_> {
         }
     }
 
-    /// Steps over a DOCTYPE, recording the names its internal subset declares
-    /// as entities and expanding none of them.
+    /// Steps over a DOCTYPE, recording the general entities its internal
+    /// subset declares.
     fn doctype(&mut self) -> Result<(), ImageError> {
         let start = self.at;
         self.at += "<!DOCTYPE".len();
@@ -306,15 +352,7 @@ impl Parser<'_> {
                 continue;
             }
             if subset && self.starts_with("<!ENTITY") {
-                self.at += "<!ENTITY".len();
-                self.skip_whitespace();
-                if self.starts_with("%") {
-                    // A parameter entity: only the DTD itself can name it.
-                    self.at += 1;
-                    self.skip_whitespace();
-                }
-                let name = self.name()?.to_owned();
-                self.dtd_entities.push(name);
+                self.entity_declaration()?;
                 continue;
             }
             self.at += c.len_utf8();
@@ -329,6 +367,48 @@ impl Parser<'_> {
         Err(malformed(format_args!(
             "the DOCTYPE at byte {start} never ends"
         )))
+    }
+
+    /// Reads an entity declaration up to its value, or up to its external
+    /// identifier, which the DOCTYPE's walk then steps over.
+    fn entity_declaration(&mut self) -> Result<(), ImageError> {
+        self.at += "<!ENTITY".len();
+        self.skip_whitespace();
+        // A parameter entity: only the DTD itself can name it, and the DTD
+        // is not interpreted.
+        let parameter = self.starts_with("%");
+        if parameter {
+            self.at += 1;
+            self.skip_whitespace();
+        }
+        let name = self.name()?.to_owned();
+        self.skip_whitespace();
+        let entity = match self.rest().chars().next() {
+            Some(quote @ ('"' | '\'')) => {
+                self.at += 1;
+                let value = self.until(if quote == '"' { "\"" } else { "'" }, "an entity value")?;
+                if value.len() > MAX_ENTITY_LENGTH {
+                    Entity::Refused("whose value is too long to expand")
+                } else if value.contains(['<', '&', '%']) {
+                    Entity::Refused("whose value holds markup or a reference")
+                } else {
+                    Entity::Text(value.to_owned())
+                }
+            }
+            _ => Entity::Refused("that is external"),
+        };
+        // A name's first declaration is the one a reference finds, and a
+        // reference to a predefined entity never looks here.
+        if parameter {
+            return Ok(());
+        }
+        if self.entities.len() == MAX_ENTITIES {
+            return Err(ImageError::Unsupported(format!(
+                "SVG XML: a DTD of more than {MAX_ENTITIES} entities"
+            )));
+        }
+        self.entities.push((name, entity));
+        Ok(())
     }
 
     fn start_tag(&mut self) -> Result<(), ImageError> {
@@ -383,7 +463,7 @@ impl Parser<'_> {
                     }
                 })
                 .collect();
-            let value = self.unescape(&normalised)?;
+            let value = self.unescape(&normalised, true)?;
             if raw_attributes.iter().any(|(seen, _)| *seen == name) {
                 return Err(malformed(format_args!(
                     "{name} appears twice on <{qualified}>"
@@ -511,8 +591,10 @@ impl Parser<'_> {
             )
     }
 
-    /// `raw` with its entity and character references replaced.
-    fn unescape(&self, raw: &str) -> Result<String, ImageError> {
+    /// `raw` with its entity and character references replaced; in an
+    /// `attribute` value, each whitespace character an entity brings becomes a
+    /// space, as attribute-value normalisation makes it.
+    fn unescape(&mut self, raw: &str, attribute: bool) -> Result<String, ImageError> {
         if !raw.contains('&') {
             return Ok(raw.to_owned());
         }
@@ -526,29 +608,53 @@ impl Parser<'_> {
             };
             let name = &rest[..semicolon];
             rest = &rest[semicolon + 1..];
-            let c = match name {
-                "lt" => '<',
-                "gt" => '>',
-                "amp" => '&',
-                "quot" => '"',
-                "apos" => '\'',
-                _ => {
-                    let code = if let Some(hex) = name.strip_prefix("#x") {
-                        u32::from_str_radix(hex, 16).ok()
-                    } else if let Some(decimal) = name.strip_prefix('#') {
-                        decimal.parse::<u32>().ok()
-                    } else if self.dtd_entities.iter().any(|entity| entity == name) {
+            if let Some(&(_, c)) = PREDEFINED
+                .iter()
+                .find(|(predefined, _)| *predefined == name)
+            {
+                out.push(c);
+                continue;
+            }
+            let code = if let Some(hex) = name.strip_prefix("#x") {
+                u32::from_str_radix(hex, 16).ok()
+            } else if let Some(decimal) = name.strip_prefix('#') {
+                decimal.parse::<u32>().ok()
+            } else {
+                match self.entities.iter().find(|(declared, _)| declared == name) {
+                    Some((_, Entity::Text(value))) => {
+                        self.expanded += value.len();
+                        if self.expanded > MAX_EXPANDED_BYTES {
+                            return Err(ImageError::Unsupported(format!(
+                                "SVG XML: entities expanding past {MAX_EXPANDED_BYTES} bytes"
+                            )));
+                        }
+                        if attribute {
+                            out.extend(value.chars().map(|c| {
+                                if matches!(c, '\t' | '\r' | '\n') {
+                                    ' '
+                                } else {
+                                    c
+                                }
+                            }));
+                        } else {
+                            out.push_str(value);
+                        }
+                        continue;
+                    }
+                    Some((_, Entity::Refused(why))) => {
                         return Err(ImageError::Unsupported(format!(
-                            "SVG XML: the entity &{name}; a DTD declares"
+                            "SVG XML: the entity &{name}; a DTD declares, {why}"
                         )));
-                    } else {
+                    }
+                    None => {
                         return Err(malformed(format_args!("the undeclared entity &{name};")));
-                    };
-                    code.and_then(char::from_u32)
-                        .filter(|&c| c != '\0')
-                        .ok_or_else(|| malformed(format_args!("the reference &{name};")))?
+                    }
                 }
             };
+            let c = code
+                .and_then(char::from_u32)
+                .filter(|&c| c != '\0')
+                .ok_or_else(|| malformed(format_args!("the reference &{name};")))?;
             out.push(c);
         }
         out.push_str(rest);
@@ -670,32 +776,129 @@ mod tests {
         assert_eq!(undeclared.namespace, Namespace::Foreign);
     }
 
-    /// **A DTD's entities are never expanded**: the billion-laughs bomb is
-    /// refused at its first reference, without growing anything.
+    /// **A plain-text entity a DTD declares is expanded** in attribute
+    /// values (namespace declarations included) and in text, its whitespace
+    /// a space in an attribute; the first declaration of a name stands, and
+    /// the predefined entities cannot be redeclared.
     #[test]
-    fn dtd_entities_are_refused_not_expanded() {
-        let bomb = br#"<?xml version="1.0"?>
-<!DOCTYPE svg [
+    fn plain_text_entities_expand() {
+        let document = parse(
+            b"<?xml version='1.0'?>
+<!DOCTYPE svg PUBLIC '-//W3C//DTD SVG 1.0//EN' 'http://www.w3.org/TR/2001/PR-SVG-20010719/DTD/svg10.dtd' [
+  <!ENTITY ns_svg 'http://www.w3.org/2000/svg'>
+  <!ENTITY ns_xlink \"http://www.w3.org/1999/xlink\">
+  <!ENTITY st0 \"fill:url(#a);stroke:none;\">
+  <!ENTITY lines 'a\tb\nc'>
+  <!ENTITY st0 'fill:red'>
+  <!ENTITY lt 'not a less-than'>
+  <!ENTITY brackets ']>'>
+]>
+<svg xmlns='&ns_svg;' xmlns:xlink='&ns_xlink;'><use xlink:href='#x' style='&st0;' class='&lines;'/>&lines;&lt;&st0;</svg>",
+        );
+        let document = document.expect("parses");
+        let [svg, use_] = &document.elements[..] else {
+            panic!("{:?}", names(&document));
+        };
+        assert!(svg.is("svg") && use_.is("use"));
+        assert_eq!(use_.attribute(Namespace::Xlink, "href"), Some("#x"));
+        assert_eq!(
+            use_.attribute(Namespace::None, "style"),
+            Some("fill:url(#a);stroke:none;")
+        );
+        assert_eq!(use_.attribute(Namespace::None, "class"), Some("a b c"));
+        assert_eq!(svg.text, "a\tb\nc<fill:url(#a);stroke:none;");
+    }
+
+    /// **Nothing that could multiply or reach outside is expanded**: an
+    /// entity referencing another — the "billion laughs" bomb — is refused
+    /// at its reference without growing anything, and so are an external
+    /// entity, one holding markup, and one too long; a parameter entity
+    /// declares no general one.
+    #[test]
+    fn entities_that_are_not_plain_text_are_refused() {
+        let refused = |dtd: &str, body: &str, name: &str| {
+            let text = format!(
+                "<!DOCTYPE svg [{dtd}]><svg xmlns='http://www.w3.org/2000/svg'>{body}</svg>"
+            );
+            let error = parse(text.as_bytes()).expect_err(name);
+            assert!(
+                matches!(&error, ImageError::Unsupported(why) if why.contains(name)),
+                "{name}: {error:?}"
+            );
+        };
+        let bomb = r#"
   <!ENTITY lol "lol">
   <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
   <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
   <!-- ]> a comment that looks like the end -->
-]>
-<svg xmlns="http://www.w3.org/2000/svg"><title>&lol3;</title></svg>"#;
-        let error = parse(bomb).expect_err("refused");
-        assert!(
-            matches!(&error, ImageError::Unsupported(why) if why.contains("&lol3;")),
-            "{error:?}"
+"#;
+        refused(bomb, "<title>&lol3;</title>", "&lol3;");
+        refused(bomb, "<g id='&lol2;'/>", "&lol2;");
+        assert_eq!(
+            parse(format!("<!DOCTYPE svg [{bomb}]><svg>&lol;</svg>").as_bytes())
+                .expect("the plain one expands")
+                .root()
+                .text,
+            "lol"
         );
-        // An external entity is no different: declared, so refused, and never
-        // read.
-        let external = br#"<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]>
-<svg xmlns="http://www.w3.org/2000/svg">&x;</svg>"#;
-        assert!(matches!(parse(external), Err(ImageError::Unsupported(_))));
-        // And one nothing declared is simply malformed.
+        refused(r#"<!ENTITY x SYSTEM "file:///etc/passwd">"#, "&x;", "&x;");
+        refused(
+            r#"<!ENTITY x PUBLIC "-//x//y" "http://example.com/x">"#,
+            "<g id='&x;'/>",
+            "&x;",
+        );
+        refused(r#"<!ENTITY m "<g/>">"#, "&m;", "&m;");
+        refused(r#"<!ENTITY c "&#65;">"#, "&c;", "&c;");
+        refused(r#"<!ENTITY p "%q;">"#, "&p;", "&p;");
+        let longest = "x".repeat(MAX_ENTITY_LENGTH);
+        let fits = format!("<!DOCTYPE svg [<!ENTITY l '{longest}'>]><svg>&l;</svg>");
+        assert_eq!(parse(fits.as_bytes()).expect("fits").root().text, longest);
+        refused(&format!("<!ENTITY l '{longest}x'>"), "&l;", "&l;");
+        // A parameter entity is the DTD's own; a reference to its name in the
+        // document names nothing.
+        assert!(matches!(
+            parse(b"<!DOCTYPE svg [<!ENTITY % p 'x'>]><svg>&p;</svg>"),
+            Err(ImageError::Malformed(_))
+        ));
         assert!(matches!(
             parse(b"<svg xmlns='http://www.w3.org/2000/svg'>&nbsp;</svg>"),
             Err(ImageError::Malformed(_))
+        ));
+    }
+
+    /// **The entity caps hold**: [`MAX_ENTITIES`] declarations parse and
+    /// one more does not, and expansion stops at [`MAX_EXPANDED_BYTES`].
+    #[test]
+    fn entity_declarations_and_expansion_are_capped() {
+        let declarations = |count: usize| {
+            let dtd: String = (0..count).map(|n| format!("<!ENTITY e{n} 'x'>")).collect();
+            format!("<!DOCTYPE svg [{dtd}]><svg/>")
+        };
+        assert!(parse(declarations(MAX_ENTITIES).as_bytes()).is_ok());
+        assert!(matches!(
+            parse(declarations(MAX_ENTITIES + 1).as_bytes()),
+            Err(ImageError::Unsupported(why)) if why.contains("entities")
+        ));
+        let value = "x".repeat(MAX_ENTITY_LENGTH);
+        let references = |count: usize| {
+            format!(
+                "<!DOCTYPE svg [<!ENTITY l '{value}'>]><svg a='{}'>{}</svg>",
+                "&l;".repeat(count / 2),
+                "&l;".repeat(count - count / 2)
+            )
+        };
+        let whole = MAX_EXPANDED_BYTES / MAX_ENTITY_LENGTH;
+        assert_eq!(
+            parse(references(whole).as_bytes())
+                .expect("just inside")
+                .root()
+                .text
+                .len(),
+            (whole - whole / 2) * MAX_ENTITY_LENGTH
+        );
+        assert!(matches!(
+            parse(references(whole + 1).as_bytes()),
+            Err(ImageError::Unsupported(why)) if why.contains("expanding")
         ));
     }
 

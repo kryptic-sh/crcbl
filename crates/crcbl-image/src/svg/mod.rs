@@ -47,8 +47,9 @@
 //!
 //! # Hostile files
 //!
-//! The XML parser expands no DTD entities and fetches nothing; the tree is
-//! capped in depth and size; `use` instances, layers, dashes and filter
+//! The XML parser expands only a DTD's plain-text entities, which reference
+//! nothing, within caps, and fetches nothing; the tree is capped in depth and
+//! size; `use` instances, layers, dashes and filter
 //! primitives are capped where a small file could multiply them; a filter
 //! region is cut to the canvas; and the canvas passes the caller's
 //! [`Limits`] before it is allocated.

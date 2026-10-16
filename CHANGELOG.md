@@ -80,13 +80,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   outside it is a decode error, never a partial icon**: text, images, other
   filter primitives, filter functions, patterns, markers, `symbol`, blend modes
   and animation are refused by name, while editors' metadata (Inkscape,
-  Sodipodi, RDF, `<title>`) is ignored by design. The XML parser expands no DTD
-  entity and fetches nothing; nesting, element count, `use` instances, layers,
-  dashes and filter primitives are capped, and a filter region is cut to the
-  canvas. Measured against resvg's renders of Adwaita, Papirus and breeze by the
-  `svg_corpus` example, which CI's `svg corpus` job runs. `raster`, the coverage
-  rasteriser from `crcbl-ui`, fills by `raster::FillRule::EvenOdd` as well as
-  non-zero (`Rasterizer::coverage_by`).
+  Sodipodi, RDF, `<title>`) is ignored by design. The XML parser expands a DTD's
+  entities only when they are plain text, the namespace URIs and styles Adobe
+  Illustrator writes as entities, within caps on their number, length and total
+  expansion, and fetches nothing; nesting, element count, `use` instances,
+  layers, dashes and filter primitives are capped, and a filter region is cut to
+  the canvas. Measured against resvg's renders of Adwaita, Papirus and breeze by
+  the `svg_corpus` example, which CI's `svg corpus` job runs. `raster`, the
+  coverage rasteriser from `crcbl-ui`, fills by `raster::FillRule::EvenOdd` as
+  well as non-zero (`Rasterizer::coverage_by`).
 - **Dead keys and Compose sequences type on Wayland and X11.** A dead key
   commits nothing and the key after it commits what the two compose to (`´` then
   `e` is `é`), through libxkbcommon's compose module and the user's locale's
