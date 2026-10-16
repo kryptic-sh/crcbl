@@ -8,15 +8,10 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::face::{self, Face};
-
-/// The extensions of the font files a walk reads: TrueType and OpenType,
-/// single and collected. Bitmap formats and WOFF are left out, since no
-/// font parser this crate serves reads them.
-const FONT_EXTENSIONS: [&str; 4] = ["ttf", "otf", "ttc", "otc"];
 
 /// The faces under a set of directories, indexed on first use.
 #[derive(Debug)]
@@ -69,7 +64,7 @@ fn scan(dirs: &[PathBuf]) -> Vec<Face> {
             // a linked font read.
             match fs::metadata(&path) {
                 Ok(meta) if meta.is_dir() => pending.push(path),
-                Ok(meta) if meta.is_file() && is_font_file(&path) => files.push(path),
+                Ok(meta) if meta.is_file() && face::is_font_file(&path) => files.push(path),
                 _ => {}
             }
         }
@@ -83,18 +78,10 @@ fn scan(dirs: &[PathBuf]) -> Vec<Face> {
         .collect()
 }
 
-fn is_font_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            FONT_EXTENSIONS
-                .iter()
-                .any(|known| known.eq_ignore_ascii_case(extension))
-        })
-}
-
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::face::tests::restyled;
     use crate::sfnt::tests::{EMOJI_TEXT, SANS, collection};

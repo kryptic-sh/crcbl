@@ -23,9 +23,25 @@
 //!
 //! # Where each platform looks
 //!
-//! | Platform | [`Source`] | How |
-//! | --- | --- | --- |
-//! | every target, until its platform's source lands | [`Source::None`] | nothing: every lookup misses |
+//! [`SystemFonts::source`] says which of these a lookup goes to.
+//!
+//! ## Windows
+//!
+//! [`Source::Registry`]. The registry's `Fonts` lists, machine-wide and per
+//! user, narrow which files a lookup opens, and each file's name table
+//! decides, so a lookup reads a few small tables rather than walking the
+//! Fonts directory. Windows has no setting for the generic families, so each
+//! is the first installed of a list: `sans-serif` Segoe UI then Arial,
+//! `serif` Times New Roman then Cambria, `monospace` Consolas then Courier
+//! New, `emoji` Segoe UI Emoji — the platform's own look rather than a
+//! browser's, decided 2026-10-16. Fallbacks are the faces Windows links to
+//! the family (`FontLink\SystemLink`), then Segoe UI, Segoe UI Emoji, Segoe
+//! UI Symbol, Microsoft YaHei, Yu Gothic, Malgun Gothic and Arial Unicode MS,
+//! each where installed.
+//!
+//! ## Every other target
+//!
+//! [`Source::None`], until its platform's source lands: every lookup misses.
 //!
 //! # Matching
 //!
@@ -36,13 +52,8 @@
 //! oblique then italic; then weight, by CSS's rule for the weight asked for.
 //! A family is every face whose name table gives it as its typographic family
 //! (name ID 16) or its family (name ID 1), in any language, compared without
-//! case.
-//!
-//! # Generic families
-//!
-//! `sans-serif`, `serif`, `monospace` and `emoji` resolve to the system's
-//! choice, as each platform's section above says, and [`FontMatch::family`]
-//! names the family they resolved to.
+//! case. A generic family's [`FontMatch::family`] names the family it
+//! resolved to.
 //!
 //! # Cost
 //!
@@ -55,9 +66,16 @@ use std::path::PathBuf;
 
 mod face;
 mod matching;
+#[cfg(any(windows, test))]
+mod registry;
+#[cfg(any(not(windows), test))]
 mod scan;
 mod sfnt;
 
+#[cfg(windows)]
+#[path = "windows.rs"]
+mod platform;
+#[cfg(not(windows))]
 #[path = "none.rs"]
 mod platform;
 
@@ -439,6 +457,12 @@ mod tests {
         let names: Vec<_> = list.iter().map(|m| m.family.as_str()).collect();
         assert_eq!(names, ["Linked", "Cascade One", "Cascade Two"]);
         assert!(list[1..].iter().all(|m| m.weight == BOLD_WEIGHT));
+    }
+
+    #[test]
+    fn system_fonts_can_be_shared_between_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<SystemFonts>();
     }
 
     #[test]
