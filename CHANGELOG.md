@@ -55,6 +55,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   walked by name table, with Apple Color Emoji, PingFang SC, Hiragino Sans,
   Apple SD Gothic Neo and Apple Symbols as fallbacks. `wasm32` and every other
   target compile with `Source::None`, where every lookup misses.
+- **`crcbl-ui`'s `system-fonts` feature**, off by default and turning
+  `parsed-font` on: `Ui::register_system_font(name, &SystemFonts, &FontQuery)`
+  looks a family up and registers the face found under `name`, and
+  `Font::from_system(&FontMatch)` parses one found face, such as each of
+  `SystemFonts::fallbacks` for `Ui::set_fallback_fonts`. `crcbl-font` is
+  re-exported as `crcbl_ui::font::system::crcbl_font`.
 
 ### Changed
 

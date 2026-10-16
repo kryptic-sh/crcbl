@@ -26,6 +26,8 @@
 //! * [`fallback`] — which of a font's fallback faces draws each char, and the
 //!   emoji and text presentation selectors.
 //! * [`color`] — colour glyphs, drawn as pictures in the image atlas.
+//! * `system` — faces looked up on the system by family name, through
+//!   `crcbl-font`, behind the `system-fonts` feature.
 //!
 //! # Two fonts, two families
 //!
@@ -84,6 +86,8 @@ pub(crate) mod fixtures;
 #[cfg(feature = "parsed-font")]
 mod kern;
 pub mod layout;
+#[cfg(feature = "system-fonts")]
+pub mod system;
 pub use crcbl_image::raster;
 
 use core::fmt;

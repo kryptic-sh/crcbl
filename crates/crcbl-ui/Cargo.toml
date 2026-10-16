@@ -24,6 +24,10 @@ crcbl-core = { workspace = true }
 # shapes without a UI dependency. No codec by default: `parsed-font` below
 # turns on its `png` feature, for the PNGs in a colour font's bitmap strikes.
 crcbl-image = { workspace = true }
+# System font lookup by family name, for `font::system`: a family, weight and
+# style to the face's file, and the system's fallback order. Behind the
+# `system-fonts` feature below.
+crcbl-font = { workspace = true, optional = true }
 # `Reflect`, `Value` and `get_path`/`set_path` for `tree::widgets::inspector` —
 # UI rung 8's property panel. The arrow points this way
 # because the panel is a widget and a widget needs `Ui`; the reverse would put
@@ -81,6 +85,12 @@ skrifa ={ version = "0.48.0", default-features = false, features = ["std"], opti
 # colour glyph's strike (`font::color`): only a build that parses fonts can
 # hold one.
 parsed-font = ["dep:skrifa", "crcbl-image/png"]
+
+# `font::system`: `Ui::register_system_font` and `Font::from_system`, which
+# look a family up on the system through `crcbl-font` and parse the face
+# found. **Off by default**, as `parsed-font` is, which it turns on: a game
+# draws the fonts it ships, and a browser build has no system fonts to find.
+system-fonts = ["dep:crcbl-font", "parsed-font"]
 
 # `Ui::accessibility_update` and `Ui::accessibility_action`: the tree as an
 # AccessKit `TreeUpdate`, and a screen reader's focus and click acted on.
