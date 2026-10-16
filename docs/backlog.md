@@ -842,36 +842,68 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       second. Two overflows only a 32-bit `usize` reaches (the RIFF size in
       `webp::decode`, the bit count in `BoolDecoder::read`) were fixed then and
       run on no 32-bit target: none is installed here, and CI tests none.
+    - **XPM is in**, `xpm::decode` behind the `xpm` feature, written here: XPM
+      3's C form and XPM 2's lines, any characters per pixel (capped at
+      `xpm::MAX_CHARS_PER_PIXEL`, colours at `xpm::MAX_COLOURS`), comments
+      anywhere between strings, everything after the last row (`XPMEXT`) unread,
+      each colour's `c` value else its `g`, `g4` or `m` one, `None`, hex of 3,
+      6, 9 or 12 digits scaled to eight bits and rounded, and X11's colour names
+      (`xpm::X11_COLOURS`, generated from Ubuntu 26.04's `/etc/X11/rgb.txt`)
+      matched without regard to case or spaces. Decided: short hex is scaled
+      (`#fff` is white), as netpbm's `xpmtoppm` reads it, not taken as a value's
+      high bits as Xlib's `XParseColor` documents (`#fff` would be 240); a key
+      defined twice keeps its first; a colour or pixel key it cannot resolve is
+      malformed, never guessed. Verified by fixtures
+      (`crates/crcbl-image/fixtures/xpm/`) whose pixels are Pillow 12.3's
+      decode, or for what Pillow cannot read (it fails on `None` pixels with a
+      `ValueError`, misreads hex of other than six digits, and reads no names,
+      comments between strings or XPM 2) its decode of the same image rewritten
+      in the form it reads, and agree with netpbm 11.10's `xpmtoppm`; by unit
+      tests worked by hand; and by 32 hand mutants, 31 failing a test and one
+      equivalent (a colour string shorter than its key is malformed either way).
+      Measured on real files: 1152 XPMs from Ubuntu 26.04's packages (fvwm,
+      fvwm-icons, icewm, icewm-common, emacs-common, xpaint, xfig-libs, xterm,
+      xboard, wmaker-data, others, and `/usr/share/pixmaps`), fetched with
+      `apt-get download`: 1151 decode, 1101 of them pixel for pixel equal to
+      netpbm's or Pillow's decode, and the 50 others are files neither reads:
+      netpbm refuses them as "Color name appears multiple times in color map"
+      (which it also says of a colour with several keys), a declaration not
+      starting `static char`, a colour line not starting with a quote, or a row
+      past the image's width. The one refused is Emacs's `letter.xpm`, whose
+      colour `opaque` is Emacs's own and no X11 name. netpbm differs on one
+      file, icewm's `win95/close.xpm`, which has a blank line between its
+      colours and its rows, and whose pixels netpbm gets wrong from the first;
+      Pillow agrees with this decoder there. The fuzz target feeds every input
+      to it from an `xpm-icon` seed.
     - **Step three is in: SVG icons**,
       `svg::decode(bytes, size, scale, &limits)` behind the `svg` feature,
       written here with no new dependency (`crates/crcbl-image/src/svg/`): its
-      own XML parser (no DTD expansion, so no entity bomb and no external fetch;
-      depth and element caps), the `style` attribute and a `<style>` sheet of
-      type, class and id selectors, the cascade with inheritance and
-      `currentColor`, SVG 2's path grammar with arcs, the basic shapes,
-      transforms, `use` (cycles refused; depth, instances and layers capped),
-      linear and two-point conical radial gradients with `href` inheritance,
-      `clipPath`, `mask`, group opacity as a layer, and strokes outlined in user
-      space (joins, caps, miter limit, dashes) then filled. Coverage comes from
-      `crcbl_image::raster`, moved from `crcbl-ui` (which re-exports it at
-      `font::raster`) and given even-odd, accumulated a strip at a time on a
-      grid four times finer each way: the area integral alone cancelled two
-      oppositely wound halves meeting inside one pixel (a transparent seam down
-      Papirus's `pop-shop`) and over-counted the slivers inside stroke corners.
-      Anything unsupported is a decode error naming it; ignored by design are
-      elements and attributes in other namespaces, `<title>`, `<desc>`,
-      `<metadata>`, `<script>`, event-handler, `data-` and `aria-` attributes,
-      the properties in `svg/style.rs`'s `IGNORED_PROPERTIES` (text, rendering
-      hints, properties of refused features, Inkscape's unprefixed
-      `filter-blend-mode` and `filter-gaussianBlur-deviation`), other shapes'
-      geometry attributes left on a shape, and unsupported content nothing
-      references. Verified by the module's unit tests (pixels against exact grid
-      coverage, sampled curve coverage and the compositing and gradient formulas
-      worked by hand) and 57 hand mutants, every one failing a test (the
-      instance-cap mutant by the bomb test's timeout). `crcbl-net/fuzz`'s
-      decoder target now feeds every input to `svg::decode` too, from an
-      `svg-icon` seed whose rendering its corpus test asserts; the fuzz run
-      itself is CI's.
+      own XML parser (a DTD's plain-text entities only, so no entity bomb and no
+      external fetch; depth, element and entity caps), the `style` attribute and
+      a `<style>` sheet of type, class and id selectors, the cascade with
+      inheritance and `currentColor`, SVG 2's path grammar with arcs, the basic
+      shapes, transforms, `use` (cycles refused; depth, instances and layers
+      capped), linear and two-point conical radial gradients with `href`
+      inheritance, `clipPath`, `mask`, group opacity as a layer, and strokes
+      outlined in user space (joins, caps, miter limit, dashes) then filled.
+      Coverage comes from `crcbl_image::raster`, moved from `crcbl-ui` (which
+      re-exports it at `font::raster`) and given even-odd, accumulated a strip
+      at a time on a grid four times finer each way: the area integral alone
+      cancelled two oppositely wound halves meeting inside one pixel (a
+      transparent seam down Papirus's `pop-shop`) and over-counted the slivers
+      inside stroke corners. Anything it does not draw is a decode error naming
+      it; ignored, as browsers and resvg ignore them, are elements in other
+      namespaces, `<title>`, `<desc>`, `<metadata>`, `<script>`, any attribute
+      or property nothing on its element reads (since 2026-10-16; before, an
+      unknown one refused the file), a value that is no value of its property
+      (it gives way down the cascade to the inherited or initial value), and
+      unsupported content nothing references. Verified by the module's unit
+      tests (pixels against exact grid coverage, sampled curve coverage and the
+      compositing and gradient formulas worked by hand) and 57 hand mutants,
+      every one failing a test (the instance-cap mutant by the bomb test's
+      timeout). `crcbl-net/fuzz`'s decoder target now feeds every input to
+      `svg::decode` too, from an `svg-icon` seed whose rendering its corpus test
+      asserts; the fuzz run itself is CI's.
     - **Corpus, measured 2026-10-16** with the `svg_corpus` example
       (`cargo run --release -p crcbl-image --features svg,png --example svg_corpus -- NAME=DIR...`)
       in WSL's Ubuntu 26.04 against the `resvg` 0.48.1 command line, at 48 px,
@@ -894,6 +926,24 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       unblocked matches; none joined the differing ones. CI's `svg corpus` job
       reruns this at the same pins and fails below floors set two icons under
       these.
+    - **Corpus after the DTD entities and the leniency, measured 2026-10-16**
+      the same way: Adwaita 710 of 715 (99.3%, 4 `<image>` refused), Papirus
+      6310 of 6319 (99.9%, 1 `feBlend` refused), breeze 5586 of 5642 (99.0%, 6
+      `<text>` and 5 `<flowRoot>` refused), Papirus apps 3834 to 3836 of 3845
+      (99.8%), breeze apps 190 to 192 of 206 (93.2%, 5 `<text>` and 1
+      `<flowRoot>` refused). Every refusal the entities and the leniency removed
+      now matches resvg (kig and ktouch, Illustrator files; Geopard's and
+      `im-invisible-user`'s malformed `fill`; pushy's `vector-effect`;
+      `kr_syncbrowse_off`'s `tyle`), and the differing lists are unchanged, so
+      no icon that matched stopped matching. The CI floors rose with them
+      (Papirus 0.998, Papirus apps 0.997, breeze apps 0.922). The one exception
+      is hicolor's `apport.svg`, no longer refused for the `href` on a path but
+      differing from resvg on 89 pixels: three of its gradients inherit
+      `gradientTransform` through `href`, which resvg does not do (see the next
+      item); with those transforms written onto the gradients themselves resvg's
+      render differs on 45 pixels, all at the antialiased edges of its strokes
+      about a pixel wide, the thin-stroke difference below. hicolor has no
+      floor.
     - Why the differing icons differ, checked icon by icon on the worst: (1)
       **resvg does not inherit `gradientTransform` through `href`** (usvg's
       `resolve_transform` reads only the element's own), where SVG 1.1 and 2,
@@ -959,12 +1009,10 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       sizes other than 48, and against a reference other than resvg.
     - Not done, in order of what the corpus refuses: **text** (`<text>`, and
       Inkscape's `<flowRoot>`, which browsers do not draw either: 11 icons,
-      needing fonts); `<image>` (4); DTD entities (2), which would need a
-      bounded expansion of plain-text entities only;
-      `vector-effect: non-scaling-stroke`; markers, patterns, `symbol` and
-      nested `svg`, `switch`, blend modes and animation, which the corpus did
-      not need. Not measured: GTK's own renderer (librsvg) as a second
-      reference, and the corpus at sizes other than 48.
+      needing fonts); `<image>` (4); markers, patterns, `symbol` and nested
+      `svg`, `switch`, blend modes and animation, which the corpus did not need.
+      Not measured: GTK's own renderer (librsvg) as a second reference, and the
+      corpus at sizes other than 48.
     - Not done yet: decoding from a path (a caller reads the file
       `IconThemes::lookup` found, and keys its cache with `FileVersion`), and
       moving `crcbl-sprite`'s and `crcbl-golden`'s own PNG loaders onto this
@@ -1058,13 +1106,42 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       apps' 428 SVGs, 9 use a filter and 6 text; their filters use only
       `feGaussianBlur` (173 uses), `feComposite` (48), `feOffset` and `feFlood`
       (24 each) and `feColorMatrix` (8) — the drop-shadow set. Those shipped the
-      same day, which took breeze apps to 190 of 206 (92.2%); what it still
-      refuses is text (6 icons, one of them `<flowRoot>`) and DTD entities (2).
-      "Matching" in the corpus means rendered and within tolerance of resvg: at
-      most 1% of the icon's pixels differing by more than 32 in a premultiplied
-      channel.
-    - Order from here: pikr's, in the 2026-10-16 entry at the top: XPM, DTD
-      entities and malformed values; `<image>`; then text.
+      same day, which took breeze apps to 190 of 206 (92.2%), and the DTD
+      entities and the leniency to 192 (93.2%); what it still refuses is text (6
+      icons, one of them `<flowRoot>`). "Matching" in the corpus means rendered
+      and within tolerance of resvg: at most 1% of the icon's pixels differing
+      by more than 32 in a premultiplied channel.
+    - **DTD entities and lenient values, shipped 2026-10-16** (`svg/xml.rs`,
+      `svg/style.rs`, `svg/render.rs`): internal entities of plain text expanded
+      under `MAX_ENTITIES`, `MAX_ENTITY_LENGTH` and `MAX_EXPANDED_BYTES`, the
+      rest refused by name where referenced; unknown attributes and properties
+      ignored, invalid values falling back down the cascade, and
+      `vector-effect: non-scaling-stroke` drawn. Verified by unit tests worked
+      by hand (a billion-laughs bomb and an external entity refused, each cap at
+      its edge, the cascade's fallbacks, a non-scaling stroke's width and dashes
+      under a transform and a `viewBox`) and 55 hand mutants, 15 of the entities
+      and 40 of the leniency, every one failing a test. Only presentation values
+      became lenient: an invalid value of an element's own attribute still
+      refuses the file (`gradientUnits`, `spreadMethod`, `clipPathUnits`,
+      `preserveAspectRatio`, a shape's `x="1em"`, a filter primitive's numbers),
+      where browsers would take the default; the corpus refuses none for it.
+      Decided, so it is not re-argued: a value in a form the renderer does not
+      evaluate is refused rather than ignored, which includes any keyword where
+      a colour belongs that is not a colour it knows (a system colour, but also
+      a misspelling such as `bleu`, which a browser would ignore), any `mask`
+      value but `none` or one reference (the shorthand's images and modes), and
+      `var()`, `calc()`, `env()` and `attr()` anywhere; `pathLength`,
+      `systemLanguage` and `requiredExtensions` are refused even where they
+      would change nothing; `filterRes` is ignored (SVG 2 dropped it and resvg
+      reads none); `background-color` is refused on any element because resvg
+      paints it behind the root. An invalid value falls back as the
+      specifications say (the next declaration, else inherited, else initial),
+      where resvg takes the initial value, black for `fill`; the two agree on
+      both corpus icons with an invalid value, whose parents set no fill. Not
+      tested: `vector-effect` inside a mask or under a filter, whose host is
+      still the placement.
+    - Order from here: pikr's, in the 2026-10-16 entry at the top: `<image>`,
+      then text once system font lookup is in.
 
 ### Left behind by the seam split
 

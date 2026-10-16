@@ -3164,8 +3164,8 @@ jobs:
         run: >-
           cargo run --release --locked -p crcbl-image --features svg,png
           --example svg_corpus -- --show 20 --floor adwaita=0.990 --floor
-          papirus=0.997 --floor breeze=0.989 --floor apps-papirus=0.996 --floor
-          apps-breeze=0.912 adwaita="$RUNNER_TEMP/adwaita/Adwaita"
+          papirus=0.998 --floor breeze=0.989 --floor apps-papirus=0.997 --floor
+          apps-breeze=0.922 adwaita="$RUNNER_TEMP/adwaita/Adwaita"
           papirus="$RUNNER_TEMP/papirus/Papirus/48x48"
           breeze="$RUNNER_TEMP/breeze/icons"
           apps-papirus="$RUNNER_TEMP/papirus/Papirus/48x48/apps"
