@@ -12382,6 +12382,12 @@ pass.
 whole premise; and `33-decals.md`'s impact VFX, which assume a VFX system
 exists.
 
+**A consumer waiting (2026-10-16).** EW's smoke grenades draw their clouds as
+opaque grey puff instances, a game-side placeholder. Alpha-blended billboards
+with soft-particle depth fade are the engine feature that would replace it. EW
+has not asked for it yet: under the game-first rule it proves the effect in the
+game first, and asks once the placeholder is the limit.
+
 ### Particles: the spawn-shape and modifier menus are two entries each (2026-09-24)
 
 `crcbl_vfx::Shape` is `Point` and `Cone`. Its doc comment says the plan's
