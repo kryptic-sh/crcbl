@@ -25,6 +25,7 @@
 //!   italic synthesised for a family without them.
 //! * [`fallback`] — which of a font's fallback faces draws each char, and the
 //!   emoji and text presentation selectors.
+//! * [`color`] — colour glyphs, drawn as pictures in the image atlas.
 //!
 //! # Two fonts, two families
 //!
@@ -75,8 +76,7 @@
 //! right-to-left text.
 
 pub mod atlas;
-#[cfg(feature = "parsed-font")]
-mod color;
+pub mod color;
 pub mod face;
 pub mod fallback;
 #[cfg(all(test, feature = "parsed-font"))]
@@ -636,6 +636,19 @@ impl Font {
     #[must_use]
     pub fn has_color_glyph(&self, _glyph: GlyphId) -> bool {
         match self.parsed.never {}
+    }
+
+    /// Without the `parsed-font` feature there is no font to ask.
+    #[cfg(not(feature = "parsed-font"))]
+    pub(crate) fn has_color_tables(&self) -> bool {
+        match self.parsed.never {}
+    }
+
+    /// Whether any of its glyphs can be a colour glyph: whether it has a
+    /// `COLR`, `CBDT` or `sbix` table. Read once, when it was parsed.
+    #[cfg(feature = "parsed-font")]
+    pub(crate) fn has_color_tables(&self) -> bool {
+        self.parsed.color
     }
 
     /// Whether `glyph` has a colour representation: a `COLR` layer list or

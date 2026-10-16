@@ -53,8 +53,9 @@
 
 use crate::font::Font;
 use crate::font::atlas::{GlyphAtlas, SUBPIXEL_BINS};
+use crate::font::color::ColorGlyphCache;
 use crate::font::layout::PositionedGlyph;
-use crate::image::{AtlasImage, NineSliceImage, TextureId, slice_bands, slice_cuts};
+use crate::image::{AtlasImage, ImageAtlas, NineSliceImage, TextureId, slice_bands, slice_cuts};
 use crate::text::FontAtlas;
 use crate::text::GLYPH_HEIGHT;
 use crate::widget::SkinInsets;
@@ -1135,6 +1136,85 @@ impl DrawList {
         self.overlay_start = None;
     }
 
+    /// Swaps every colour glyph in the list's glyph runs for an image quad of
+    /// it, rasterised into `images` through `cache` — see
+    /// [`crate::font::color`]. Call it once a frame, after
+    /// [`ColorGlyphCache::begin_frame`], before the list goes to the renderer
+    /// that draws from `images`; without it a colour glyph draws as its
+    /// outline, which for a bitmap-only font is nothing.
+    ///
+    /// Each quad follows its run, under the run's clip and on the run's side
+    /// of the overlay cut, at the pen [`DrawList::to_triangles_split`] gives
+    /// the glyph for the same `scale`, on whole pixels. **The run's colour
+    /// does not tint it, but the run's opacity applies**, as a browser draws
+    /// an emoji. A glyph the cache cannot draw in colour this frame stays in
+    /// its run. The run itself stays even when every glyph left it, so the
+    /// text it carries can still be read back.
+    pub fn resolve_color_glyphs(
+        &mut self,
+        cache: &mut ColorGlyphCache,
+        images: &mut ImageAtlas,
+        scale: f32,
+    ) {
+        let cut = self.overlay_start.map(|_| self.overlay_start());
+        let mut commands = Vec::with_capacity(self.commands.len());
+        let mut clips = Vec::with_capacity(self.clips.len());
+        let mut overlay = None;
+        for (index, (mut command, clip)) in core::mem::take(&mut self.commands)
+            .into_iter()
+            .zip(core::mem::take(&mut self.clips))
+            .enumerate()
+        {
+            if Some(index) == cut {
+                overlay = Some(commands.len());
+            }
+            let quads = match &mut command {
+                DrawCommand::Glyphs {
+                    origin,
+                    font,
+                    size,
+                    color,
+                    glyphs,
+                    ..
+                } if font.has_color_tables() => {
+                    let mut quads = Vec::new();
+                    glyphs.retain(|glyph| {
+                        let pen = *origin + glyph.offset * scale;
+                        let colour = pen
+                            .is_finite()
+                            .then(|| cache.glyph(images, font, glyph.glyph, *size * scale))
+                            .flatten();
+                        let Some(colour) = colour else {
+                            return true;
+                        };
+                        let min = pen.round() + Vec2::new(colour.left as f32, colour.top as f32);
+                        quads.push(DrawCommand::Image {
+                            min,
+                            max: min + colour.image.size(),
+                            uv_min: colour.image.uv_min(),
+                            uv_max: colour.image.uv_max(),
+                            tint: [1.0, 1.0, 1.0, color[3]],
+                        });
+                        false
+                    });
+                    quads
+                }
+                _ => Vec::new(),
+            };
+            commands.push(command);
+            clips.push(clip);
+            for quad in quads {
+                commands.push(quad);
+                clips.push(clip);
+            }
+        }
+        self.commands = commands;
+        self.clips = clips;
+        self.overlay_start = self
+            .overlay_start
+            .map(|_| overlay.unwrap_or(self.commands.len()));
+    }
+
     /// Expand every draw command into screen-space triangles.
     ///
     /// [`to_triangles_split`](Self::to_triangles_split) without the overlay cut,
@@ -1729,6 +1809,8 @@ unsafe impl bytemuck::Zeroable for Vertex2d {}
 // Tests
 // ---------------------------------------------------------------------------
 
+#[cfg(all(test, feature = "parsed-font"))]
+mod color_tests;
 #[cfg(test)]
 mod scale_tests;
 #[cfg(test)]

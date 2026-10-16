@@ -161,3 +161,40 @@ fn changing_the_fallback_list_measures_again() {
     ui.set_fallback_fonts([cbdt()]);
     assert_eq!(width(&mut ui), NARROW + WIDE);
 }
+
+/// **A notification body's emoji draws in colour**: emitted in the fallback
+/// face, then resolved into the image atlas as a quad on the span's
+/// baseline, an em wide, after the run it left.
+#[test]
+fn an_emoji_in_a_span_resolves_to_a_colour_quad() {
+    use crate::font::color::ColorGlyphCache;
+    use crate::image::ImageAtlas;
+
+    let mut ui = tree();
+    let mut key = None;
+    frame(&mut ui, idle(), |ui| {
+        key = Some(ui.span(".t", "ok \u{1F600}", &[]).key);
+    });
+    let (min, _) = ui.rect(key.expect("built")).expect("laid out");
+    let mut list = DrawList::new();
+    ui.emit(&mut list);
+    let (mut cache, mut images) = (ColorGlyphCache::new(), ImageAtlas::new());
+    cache.begin_frame();
+    list.resolve_color_glyphs(&mut cache, &mut images, 1.0);
+    let quads: Vec<(Vec2, Vec2)> = list
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::Image { min, max, .. } => Some((*min, *max)),
+            _ => None,
+        })
+        .collect();
+    let baseline = runs(&list)[0].2[0].y;
+    assert_eq!(quads.len(), 1);
+    let (quad_min, quad_max) = quads[0];
+    // The fixture's 16-pixel strike scaled to the span's size, its bearing
+    // three quarters of an em above the baseline.
+    assert_eq!(quad_min.x, (min.x + 3.0 * NARROW).round());
+    assert_eq!(quad_min.y, baseline.round() - (WIDE * 0.75).round());
+    assert_eq!(quad_max - quad_min, Vec2::splat(WIDE));
+}

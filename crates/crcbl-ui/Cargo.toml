@@ -21,7 +21,8 @@ bytemuck = { workspace = true }
 crcbl-core = { workspace = true }
 # The coverage rasteriser the glyph atlas draws with, `crcbl_image::raster`,
 # re-exported as `font::raster`. It moved there so the SVG renderer can fill
-# shapes without a UI dependency; no feature, so no codec comes with it.
+# shapes without a UI dependency. No codec by default: `parsed-font` below
+# turns on its `png` feature, for the PNGs in a colour font's bitmap strikes.
 crcbl-image = { workspace = true }
 # `Reflect`, `Value` and `get_path`/`set_path` for `tree::widgets::inspector` —
 # UI rung 8's property panel. The arrow points this way
@@ -75,7 +76,11 @@ skrifa ={ version = "0.48.0", default-features = false, features = ["std"], opti
 # called; `Font::parse` returns `FontError::ParsedFontOff`; and a stylesheet
 # naming `sans-serif` or `"Atkinson Hyperlegible"` is refused with a warning
 # rather than drawn in the bitmap font.
-parsed-font = ["dep:skrifa"]
+#
+# It also turns on `crcbl-image`'s `png`, which decodes a CBDT or sbix
+# colour glyph's strike (`font::color`): only a build that parses fonts can
+# hold one.
+parsed-font = ["dep:skrifa", "crcbl-image/png"]
 
 # `Ui::accessibility_update` and `Ui::accessibility_action`: the tree as an
 # AccessKit `TreeUpdate`, and a screen reader's focus and click acted on.
