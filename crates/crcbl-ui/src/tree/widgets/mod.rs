@@ -370,30 +370,73 @@ impl Ui {
     /// [`Ui::outliner`] window their rows with it, so the two agree by
     /// construction on what "in the window" means.
     ///
+    /// The window is this frame's: `rows` is this frame's count, and the
+    /// offset is clamped to it as layout will clamp it, so a list that shrank
+    /// under a deep offset still builds the rows it now ends with. The view is
+    /// the height the block was last laid out with, which only layout can
+    /// know; a block never laid out takes its stylesheet's height when that
+    /// is a length, else the last layout's viewport, past which no row can
+    /// show. The window is recorded for [`Ui::needs_rebuild`], which reports a
+    /// view that layout then found showing rows the window left out.
+    ///
     /// Panics outside every block.
-    fn row_window(&self, rows: usize, height: f32) -> RowWindow {
-        let block = &self.nodes[*self.open.last().expect("called inside the block")];
+    fn row_window(&mut self, rows: usize, height: f32) -> RowWindow {
+        let index = *self.open.last().expect("called inside the block");
+        let block = &self.nodes[index];
         let stored = self.store.get(block.slot);
         let view = if block.fresh {
-            // Nothing laid out yet: the stylesheet's height, when it is one.
             match block.style.height {
                 LengthAuto::Px(px) => px,
-                LengthAuto::Percent(_) | LengthAuto::Auto => 0.0,
+                LengthAuto::Percent(_) | LengthAuto::Auto => self
+                    .viewport
+                    .map(|viewport| viewport.max.y - viewport.min.y)
+                    .filter(|height| height.is_finite())
+                    .unwrap_or(0.0),
             }
         } else {
             let (start, end) = stored.content_box();
             end.y - start.y
         };
-        let offset = stored.scroll_offset.y.max(0.0);
+        let reach = (rows as f32 * height - view).max(0.0);
+        let offset = stored.scroll_offset.y.max(0.0).min(reach);
+        let window = window_of(rows, height, offset, view, LIST_OVERSCAN);
+        self.built_rows.push(BuiltRows {
+            node: index,
+            rows,
+            height,
+            window,
+        });
+        window
+    }
 
-        // Float-to-integer casts saturate, so a huge offset is the last row.
-        let first = ((offset / height).floor() as usize).saturating_sub(LIST_OVERSCAN);
-        let last = ((offset + view.max(0.0)) / height).ceil() as usize;
-        let end = last.saturating_add(LIST_OVERSCAN).min(rows);
-        RowWindow {
-            first: first.min(end),
-            end,
-        }
+    /// Records, once layout has placed this frame's tree, whether a
+    /// virtualized block's view shows a row its build left out; see
+    /// [`Ui::needs_rebuild`].
+    pub(in crate::tree) fn check_built_rows(&mut self) {
+        self.rows_missed = self.built_rows.iter().any(|built| {
+            let stored = self.store.get(self.nodes[built.node].slot);
+            let (start, end) = stored.content_box();
+            let offset = stored.scroll_offset.y.max(0.0);
+            let shown = window_of(built.rows, built.height, offset, end.y - start.y, 0);
+            shown.first < shown.end
+                && (shown.first < built.window.first || shown.end > built.window.end)
+        });
+    }
+
+    /// **Whether the last [`Ui::layout`] showed a row this frame's build did
+    /// not build**, so that drawing now would leave a gap in a [`Ui::list`] or
+    /// an [`Ui::outliner`]: build and lay out once more, and the next build
+    /// windows the view layout just measured.
+    ///
+    /// A list windows its rows from this frame's row count and offset, so a
+    /// change to either needs no second build. What a build cannot know is a
+    /// view taller than the one last laid out: a list's very first layout
+    /// when nothing was laid out before it, or a list whose box grew by more
+    /// than its [`LIST_OVERSCAN`] rows — one sized by its content, or a
+    /// sibling that gave up its space. False before the first layout.
+    #[must_use]
+    pub const fn needs_rebuild(&self) -> bool {
+        self.rows_missed
     }
 
     /// The row a virtualized block kept focus on, when it is still a row and
@@ -421,4 +464,31 @@ pub(super) struct RowWindow {
     pub first: usize,
     /// One past the last row in the window.
     pub end: usize,
+}
+
+/// The rows of `rows` rows `height` pixels tall that a view `view` pixels
+/// tall shows at `offset`, and `overscan` more on each side.
+fn window_of(rows: usize, height: f32, offset: f32, view: f32, overscan: usize) -> RowWindow {
+    // Float-to-integer casts saturate, so a huge offset is the last row.
+    let first = ((offset / height).floor() as usize).saturating_sub(overscan);
+    let last = ((offset + view.max(0.0)) / height).ceil() as usize;
+    let end = last.saturating_add(overscan).min(rows);
+    RowWindow {
+        first: first.min(end),
+        end,
+    }
+}
+
+/// A virtualized block this frame built, and the window it built: what
+/// [`Ui::check_built_rows`] holds the laid-out view to.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::tree) struct BuiltRows {
+    /// The block's index in this frame's nodes.
+    node: usize,
+    /// Its row count this frame.
+    rows: usize,
+    /// Its row height, as [`row_span`](list::row_span) made it usable.
+    height: f32,
+    /// The rows it built, the kept focused row aside.
+    window: RowWindow,
 }

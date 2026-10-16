@@ -49,10 +49,19 @@ each checked against the code here unless it says otherwise:
   fragment (CSS's `box-decoration-break: slice` by default: no side border or
   radius where a line breaks it), as the underline already is. Not asked for
   yet; a run's highlight is the likely first caller.
-- **`Ui::list` builds the rows its previous layout showed**, so an event-driven
-  app whose row count changed sees last frame's window in a single build (2 of 4
-  rows), and pikr builds and lays out twice a drawn frame. Wanted: the window
-  computed from this frame's row count and offset, so one build is enough.
+- **`Ui::list`'s view height is last layout's; decided 2026-10-16.** The window
+  now uses this frame's row count and an offset clamped to it, and a list never
+  laid out takes its stylesheet's length or the last layout's viewport, so a
+  changed count, a jumped offset or a list coming back needs one build. Only the
+  view's height cannot be known before layout: a Ui's very first frame, or a
+  list whose box grew past its overscan (content-sized, or a sibling giving up
+  space). For those, `Ui::needs_rebuild` reports after layout that a shown row
+  was not built, and the app builds again. Declined: the caller passing a
+  viewport height to `Ui::list` (it does not know its list's laid-out height
+  either, and it would be one more argument for a case the flag covers); always
+  building for the whole viewport (several times the rows of a small list, every
+  frame). pikr can drop its unconditional second build for
+  `if ui.needs_rebuild()`.
 - **crcbl-dx12 turns on the debug layer and DRED in a consumer's debug build**
   unless `CRCBL_DX12_VALIDATION=0`, warning when Graphics Tools is missing. By
   design (`debug.rs`'s `validation_policy`: on with `debug_assertions`), and

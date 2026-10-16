@@ -29,6 +29,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   reference outside the file is refused, never read. Every embedded picture
   decodes under the caller's `Limits`, all of a document's within one budget of
   its `max_bytes`, and SVG pictures nest only to a fixed depth.
+- **`Ui::needs_rebuild`** reports that the last layout showed a `Ui::list` or
+  `Ui::outliner` row the build left out — a first frame with no viewport known,
+  or a list whose box grew taller than its overscan — so an event-driven app
+  builds a second time only when that happened.
 
 ### Changed
 
@@ -36,6 +40,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `border-radius` are drawn at its border box, behind its text, as a block's
   are, so a chip no longer needs a block around its label. A paragraph's inline
   runs still paint no box.
+
+### Fixed
+
+- **`Ui::list` and `Ui::outliner` build this frame's rows in one build.** The
+  window clamps the scroll offset to this frame's row count, so a list that
+  shrank under a deep offset no longer builds an empty window, and a list built
+  for the first time since it left the page takes the viewport as its view
+  rather than building only its overscan rows (pikr saw 2 rows of 4).
 
 ## [0.2.0] - 2026-10-16
 

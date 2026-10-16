@@ -2,13 +2,20 @@
 //!
 //! The list is an `overflow: scroll` block holding one `.list-content` block
 //! as tall as every row together, so the scroll offset clamps to the whole
-//! list; only the rows that last frame's view showed at this frame's offset,
-//! and [`LIST_OVERSCAN`] more on each side, are built, each absolutely
-//! positioned at its index times the row height. The row height being fixed
-//! is what makes that window arithmetic rather than a measurement: Unity's
-//! `ListView` virtualizes only at a fixed height for the same reason.
+//! list; only the rows its view shows at this frame's offset, clamped to this
+//! frame's row count, and [`LIST_OVERSCAN`] more on each side, are built, each
+//! absolutely positioned at its index times the row height. The row height
+//! being fixed is what makes that window arithmetic rather than a measurement:
+//! Unity's `ListView` virtualizes only at a fixed height for the same reason.
 //! [`Ui::row_window`](super::Ui::row_window) is the arithmetic, shared with
 //! [`Ui::outliner`].
+//!
+//! **One build is enough after the rows or the offset change**, since both are
+//! this frame's. The view's height is the one thing a build cannot know before
+//! layout: it is the height last laid out, or for a list never laid out its
+//! stylesheet's length or the viewport. When layout then shows a row the build
+//! left out — a first frame, or a list that grew taller — the
+//! [`Ui::needs_rebuild`] it reports asks for one more build.
 //!
 //! **Focus moves through rows that are not built.** The overscan rows are in
 //! the tree, clipped out of sight, so a step past the last row shown lands on
