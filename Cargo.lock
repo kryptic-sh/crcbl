@@ -516,6 +516,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-font"
+version = "0.2.0"
+dependencies = [
+ "skrifa",
+]
+
+[[package]]
 name = "crcbl-frame"
 version = "0.2.0"
 dependencies = [

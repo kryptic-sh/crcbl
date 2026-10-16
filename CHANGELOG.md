@@ -33,6 +33,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Ui::outliner` row the build left out — a first frame with no viewport known,
   or a list whose box grew taller than its overscan — so an event-driven app
   builds a second time only when that happened.
+- **`crcbl-font`, a new crate: system font lookup by family name**, for apps
+  that today shell out to `fc-match` or read the Windows registry themselves.
+  `SystemFonts::find(&FontQuery)` returns a `FontMatch` (the file, the face's
+  index in a collection, its family, weight and style) for a family and a CSS
+  weight and style, picking the face by CSS Fonts 4's matching rules, or `None`
+  when the system has no such family; `SystemFonts::fallbacks` returns the faces
+  to try after it, in order. The generic families `sans-serif`, `serif`,
+  `monospace` and `emoji` resolve to the system's choice. `FontMatch::read`
+  returns one face as a font file of its own, cut out of a `.ttc` collection
+  when it is in one. `SystemFonts::new` reads nothing; `SystemFonts::source`
+  says where lookups go.
 
 ### Changed
 
