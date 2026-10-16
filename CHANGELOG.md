@@ -25,7 +25,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `monospace` and `emoji` resolve to the system's choice. `FontMatch::read`
   returns one face as a font file of its own, cut out of a `.ttc` collection
   when it is in one. `SystemFonts::new` reads nothing; `SystemFonts::source`
-  says where lookups go.
+  says where lookups go. On Windows the registry's font lists (machine-wide
+  and per-user) narrow which files are opened and each file's name table
+  decides, with no walk of the Fonts directory; fallbacks are the family's
+  `FontLink\SystemLink` faces, then Segoe UI, Segoe UI Emoji, Segoe UI Symbol
+  and the CJK faces where installed.
 
 ## [0.2.0] - 2026-10-16
 

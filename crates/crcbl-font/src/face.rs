@@ -45,6 +45,22 @@ impl Face {
     }
 }
 
+/// The extensions of the font files this crate reads: TrueType and
+/// OpenType, single and collected. Bitmap formats and WOFF are left out,
+/// since no font parser this crate serves reads them.
+const FONT_EXTENSIONS: [&str; 4] = ["ttf", "otf", "ttc", "otc"];
+
+/// Whether `path` names a font file this crate reads, by its extension.
+pub(crate) fn is_font_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            FONT_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
+}
+
 /// Whether two family names name one family: equal but for case and the
 /// space around them, as CSS compares the names a `font-family` list gives.
 pub(crate) fn same_family(a: &str, b: &str) -> bool {
