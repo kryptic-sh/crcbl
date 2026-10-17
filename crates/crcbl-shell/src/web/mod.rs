@@ -36,10 +36,11 @@
 //! | [`RAW_POINTER_MOTION`](ShellCaps::RAW_POINTER_MOTION) | under that lock `movementX`/`movementY` are the whole event, asked for with `unadjustedMovement: true` |
 //!
 //! Everything else is clear, and each one is a *behaviour* that is missing
-//! rather than a platform that lacks it. [`TEXT_IME`](ShellCaps::TEXT_IME) is
-//! clear because there is no input method behind the commits this backend
-//! makes — see [`text_of`], which reads the composed `KeyboardEvent.key` and
-//! nothing else, so a dead key or a candidate window composes nothing;
+//! rather than a platform that lacks it. [`TEXT_IME`](ShellCaps::TEXT_IME) and
+//! [`TEXT_COMPOSE`](ShellCaps::TEXT_COMPOSE) are clear because there is no
+//! input method or compose state behind the commits this backend makes — see
+//! [`text_of`], which reads the composed `KeyboardEvent.key` and nothing else,
+//! so a dead key or a candidate window composes nothing;
 //! [`POINTER_CONFINE`](ShellCaps::POINTER_CONFINE) because the Pointer Lock API
 //! is the only pointer constraint a browser has and it pins rather than
 //! confines; [`WINDOW_POSITION`](ShellCaps::WINDOW_POSITION) and
@@ -2048,6 +2049,7 @@ mod tests {
         );
         // The three that used to be advertised with nothing behind them.
         assert!(!caps.contains(ShellCaps::TEXT_IME));
+        assert!(!caps.contains(ShellCaps::TEXT_COMPOSE));
         assert!(!caps.contains(ShellCaps::WINDOW_POSITION));
         assert!(!caps.contains(ShellCaps::SERVER_DECORATIONS));
 

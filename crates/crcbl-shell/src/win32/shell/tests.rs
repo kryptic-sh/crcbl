@@ -574,6 +574,21 @@ fn a_window_created_borderless_can_still_be_made_windowed() {
     );
 }
 
+/// The text and keyboard bits split or added 2026-10-17, which need no
+/// window to read: the set is a constant apart from raw motion.
+#[test]
+fn dead_keys_and_the_input_method_are_set_and_a_held_keyboard_is_not() {
+    for raw_motion in [false, true] {
+        let caps = Win32Shell::latch_caps(raw_motion);
+        assert!(caps.contains(ShellCaps::TEXT_COMPOSE), "TranslateMessage");
+        assert!(caps.contains(ShellCaps::TEXT_IME), "imm32");
+        assert!(
+            !caps.contains(ShellCaps::PANEL_EXCLUSIVE_KEYBOARD),
+            "nothing takes the foreground back once the user clicks away"
+        );
+    }
+}
+
 #[test]
 #[ignore = "opens windows on the real desktop: run-win32-e2e.ps1 runs it"]
 fn the_capabilities_are_exactly_what_this_backend_implements() {
@@ -593,6 +608,7 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
         ShellCaps::CLIPBOARD,
         ShellCaps::DRAG_DROP,
         ShellCaps::TEXT_IME,
+        ShellCaps::TEXT_COMPOSE,
         ShellCaps::TOUCH,
         ShellCaps::PANEL,
         ShellCaps::PANEL_RESERVE,
@@ -613,6 +629,7 @@ fn the_capabilities_are_exactly_what_this_backend_implements() {
     // Clear, for a stated reason: a plain `HWND` presents at its own size.
     // A capability that overstates itself is worse than one that is missing.
     assert!(!caps.contains(ShellCaps::HW_UPSCALE));
+    assert!(!caps.contains(ShellCaps::PANEL_EXCLUSIVE_KEYBOARD));
     assert_eq!(caps, shell.caps(), "latched for the shell's lifetime");
 
     // And the methods agree with the bits, which is what makes them

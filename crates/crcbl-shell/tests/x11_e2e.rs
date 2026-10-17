@@ -654,6 +654,10 @@ fn the_capability_set_is_x11_shaped() {
         !caps.contains(ShellCaps::HW_UPSCALE),
         "X11 has no viewporter; the renderer blits"
     );
+    assert!(
+        !caps.contains(ShellCaps::TEXT_IME),
+        "no XIM, IBus or Fcitx client, so no input method reaches this backend"
+    );
     // And one that depends on nothing at all: XDND is client-to-client client
     // messages plus a selection, with no extension and no window manager under
     // it. The bit is a claim, and the claim is cashed by
@@ -1310,7 +1314,7 @@ fn a_keystroke_carries_the_keycode_the_keysym_and_the_text() {
     assert_eq!(key_code, Some(KeyCode::KeyA), "the physical position");
     assert_eq!(state, ButtonState::Pressed);
     assert!(!repeat, "the first press is not a repeat");
-    if session.shell.caps().contains(ShellCaps::TEXT_IME) {
+    if session.shell.caps().contains(ShellCaps::TEXT_COMPOSE) {
         assert_eq!(
             keysym,
             crcbl_shell::Keysym::from_char('a'),
@@ -1401,7 +1405,7 @@ fn a_held_key_repeats_and_the_repeats_are_flagged() {
 #[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
 fn a_control_key_is_a_key_and_not_committed_text() {
     let mut session = Session::open();
-    if !session.shell.caps().contains(ShellCaps::TEXT_IME) {
+    if !session.shell.caps().contains(ShellCaps::TEXT_COMPOSE) {
         return;
     }
     let window = session.window(&desc("escape"));
@@ -1481,7 +1485,7 @@ fn modifiers_are_stamped_on_the_event_they_modify() {
     session.peer.key(keycode::LEFT_SHIFT, false);
     session.pump();
 
-    if session.shell.caps().contains(ShellCaps::TEXT_IME) {
+    if session.shell.caps().contains(ShellCaps::TEXT_COMPOSE) {
         assert!(
             shifted.0.contains(Modifiers::SHIFT),
             "Shift was held when A went down: {:?}",

@@ -7,7 +7,7 @@
 //! | `layer` | `WS_EX_TOPMOST` for `Top` and `Overlay`, which share the one topmost band; the bottom of the z-order for `Bottom` and `Background`, which is above the desktop and no lower |
 //! | `anchor`, `margins`, the size | a rectangle on the monitor, from [`geometry::panel_rect`] |
 //! | `reserve` | `None` places the panel inside the monitor's work area, clear of the taskbar and every appbar; `IgnoreOthers` places it on the whole monitor; `OwnExtent` makes it an appbar — see below |
-//! | `keyboard` | `None` is `WS_EX_NOACTIVATE`, and the panel is shown without activating, so clicking and hovering it leave the keyboard where it was. `OnDemand` activates on a click. `Exclusive` takes the foreground when shown |
+//! | `keyboard` | `None` is `WS_EX_NOACTIVATE`, and the panel is shown without activating, so clicking and hovering it leave the keyboard where it was. `OnDemand` activates on a click. `Exclusive` takes the foreground when shown, with [`FocusRefused`](crate::ShellEvent::FocusRefused) when the system refuses it; the user can click it away, so [`PANEL_EXCLUSIVE_KEYBOARD`](crate::ShellCaps::PANEL_EXCLUSIVE_KEYBOARD) is clear |
 //! | `monitor` | the one asked for, else the one under the pointer |
 //! | `namespace` | nothing: Win32 has no rules keyed by one |
 //!

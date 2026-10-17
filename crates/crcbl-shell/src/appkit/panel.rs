@@ -7,7 +7,7 @@
 //! | `layer` | a window level from [`geometry::panel_level`]: the desktop picture's for `Background`, just above the desktop icons for `Bottom`, above the menu bar for `Top`, the pop-up menu level for `Overlay`. Every panel is on every space and stays put in Mission Control; only `Overlay` may join a full-screen window's space |
 //! | `anchor`, `margins`, the size | a frame on the screen, from [`geometry::panel_frame`], in points |
 //! | `reserve` | `None` places the panel in the screen's visible frame, clear of the menu bar and the Dock; `IgnoreOthers` places it on the whole screen. `OwnExtent` is placed as `None` is and reserves nothing: macOS lets nothing but the menu bar and the Dock reserve space, which [`ShellCaps::PANEL_RESERVE`](crate::ShellCaps::PANEL_RESERVE) being clear says |
-//! | `keyboard` | `None` is a panel class that can never become the key window, so clicks and hover leave the keyboard alone. `OnDemand` becomes key on a click. `Exclusive` is made key when shown. All are `NSWindowStyleMaskNonactivatingPanel`, so taking the keyboard does not bring the application forward |
+//! | `keyboard` | `None` is a panel class that can never become the key window, so clicks and hover leave the keyboard alone. `OnDemand` becomes key on a click. `Exclusive` is made key when shown, and [`FocusRefused`](crate::ShellEvent::FocusRefused) follows if it did not become key; nothing takes the keyboard back if the user clicks away, so [`PANEL_EXCLUSIVE_KEYBOARD`](crate::ShellCaps::PANEL_EXCLUSIVE_KEYBOARD) is clear. All are `NSWindowStyleMaskNonactivatingPanel`, so taking the keyboard does not bring the application forward |
 //! | `monitor` | the one asked for, else the screen under the pointer |
 //! | `namespace` | nothing: macOS has no rules keyed by one |
 //!
@@ -141,19 +141,30 @@ impl AppKitShell {
     /// Shows a panel: made key if it takes the keyboard outright, otherwise
     /// brought to the front without becoming key.
     ///
+    /// `false` when an exclusive panel asked to become key and AppKit did not
+    /// make it so; the caller reports it as
+    /// [`FocusRefused`](crate::ShellEvent::FocusRefused). Judged by reading
+    /// `isKeyWindow` back after `makeKeyAndOrderFront:`, as Win32 asks who
+    /// holds the foreground after `SetForegroundWindow` rather than trusting
+    /// the request.
+    ///
     /// # Safety
     ///
     /// `window` must be a live panel of this shell, on the main thread.
-    pub(super) unsafe fn show_panel(window: Id, keyboard: PanelKeyboard) {
+    #[must_use]
+    pub(super) unsafe fn show_panel(window: Id, keyboard: PanelKeyboard) -> bool {
         // SAFETY: the caller guarantees a live window; `nil` is the
-        // documented sender, and `orderFrontRegardless` takes nothing.
+        // documented sender, `orderFrontRegardless` takes nothing, and
+        // `isKeyWindow` returns a `BOOL`.
         unsafe {
             match keyboard {
                 PanelKeyboard::Exclusive => {
                     ffi::msg1_void(window, ffi::sel(c"makeKeyAndOrderFront:"), ptr::null_mut());
+                    ffi::msg_bool(window, ffi::sel(c"isKeyWindow"))
                 }
                 PanelKeyboard::None | PanelKeyboard::OnDemand => {
                     ffi::msg_void(window, ffi::sel(c"orderFrontRegardless"));
+                    true
                 }
             }
         }

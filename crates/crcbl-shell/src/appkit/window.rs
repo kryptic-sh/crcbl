@@ -407,6 +407,9 @@ pub(super) struct Created {
     pub scale: f64,
     /// The content area in backing pixels, which AppKit already knows.
     pub size: PhysicalSize,
+    /// `false` when an exclusive panel shown at creation did not become key;
+    /// see [`show_panel`](super::AppKitShell::show_panel).
+    pub focus_granted: bool,
 }
 
 /// A window's content area, in backing pixels.
@@ -793,10 +796,11 @@ impl AppKitShell {
 
         // A popup is shown by the shell, which makes it its parent's child
         // window as it does.
+        let mut focus_granted = true;
         if desc.visible && !matches!(kind, Kind::Popup { .. }) {
             match panel {
                 // SAFETY: a live panel of this shell, on the main thread.
-                Some(panel) => unsafe { Self::show_panel(window, panel.keyboard) },
+                Some(panel) => focus_granted = unsafe { Self::show_panel(window, panel.keyboard) },
                 // SAFETY: a live window; `nil` is the documented sender.
                 None => unsafe {
                     ffi::msg1_void(window, ffi::sel(c"makeKeyAndOrderFront:"), ptr::null_mut());
@@ -811,6 +815,7 @@ impl AppKitShell {
             scale,
             // SAFETY: a live view whose window device exists — `defer: NO`.
             size: unsafe { backing_size(view) },
+            focus_granted,
         })
     }
 

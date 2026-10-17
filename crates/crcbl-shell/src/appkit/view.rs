@@ -69,7 +69,9 @@
 //! tracked because an input method cannot compose without the answers and is
 //! never surfaced. `firstRectForCharacterRange:` answers with the window's own
 //! origin rather than a caret the seam does not model, so a candidate window
-//! appears at the bottom-left of the window rather than under the text.
+//! appears at the bottom-left of the window rather than under the text. That is
+//! why this backend sets [`TEXT_COMPOSE`](crate::ShellCaps::TEXT_COMPOSE) and
+//! not [`TEXT_IME`](crate::ShellCaps::TEXT_IME).
 //!
 //! `doCommandBySelector:` is overridden to do **nothing**, which is not laziness:
 //! the default implementation beeps at every command it does not recognize, so a

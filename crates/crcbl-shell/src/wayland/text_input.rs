@@ -26,7 +26,12 @@
 //!   `set_surrounding_text` as "not supported". So no
 //!   `delete_surrounding_text` should arrive, and one that does is ignored:
 //!   there is nothing in the seam to carry it.
-//! * **The content type is always `normal`, with no hints.**
+//! * **The content type says only what [`TextPurpose`] does**: `normal`,
+//!   `password` or `pin` as the purpose, with `hidden_text` and
+//!   `sensitive_data` as the hints for a password or PIN and none otherwise
+//!   (see `content_type`). Nothing richer — an e-mail address, a number, a
+//!   URL, capitalisation or completion hints — is sent, because the seam has
+//!   no way for a field to say so.
 //! * **`done`'s serial is not compared.** It matters to a client that re-sends
 //!   state after the input method acts, which this backend never does; the
 //!   protocol applies the events whatever the serial.

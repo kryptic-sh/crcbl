@@ -37,12 +37,10 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
      the trait's no-op defaults, so fields do not switch the input method, no
      secure input (`EnableSecureEventInput`) guards a `Password` or `Pin` field,
      `setMarkedText:` sends no `TextPreedit`, and `firstRectForCharacterRange:`
-     places no candidate window. S each.
-   - S9 `ShellCaps::TEXT_IME` claims a real input method where none exists: X11
-     sets it from `xkb::x11_available()` with no XIM, IBus or Fcitx client, and
-     Wayland from `xkb::available()` whatever `zwp_text_input_manager_v3` is
-     offered. Clear or split the cap (compose versus input method), S; an X11
-     input-method client is L.
+     places no candidate window. S each. AppKit reports `ShellCaps::TEXT_IME`
+     clear until this lands, so it is no longer silent; set the bit in
+     `appkit::caps` (and flip the `appkit_session` and unit-test assertions) in
+     the same change.
    - S16 the null backend's `build_ring` (`crcbl-hal`'s `null` module) checks
      `SwapchainDesc::format` but not `composite_alpha` against the `Opaque`-only
      list its `surface_caps` reports, so it accepts what `crcbl-vk`,
@@ -51,12 +49,44 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
      move into `crates/crcbl/tests/hal_seam_e2e.rs` beside
      `a_swapchain_format_the_surface_does_not_offer_is_refused` and out of
      `crcbl-vk`'s own suite. `crcbl-webgpu` not checked. S.
-   - S17 `PanelKeyboard::Exclusive` is documented as holding the keyboard while
-     mapped; Win32 and AppKit take it once, and AppKit never raises
-     `FocusRefused`. Make the code keep it or the docs say what it does, S.
-   - Documented degradations no cap reports: Win32 `PanelLayer::Overlay` shares
-     `Top`'s band, Wayland's `work_area` is the output's bounds, X11's wheel
-     arrives in lines only.
+   - S9 an X11 input-method client (XIM, or IBus and Fcitx over D-Bus), L, so
+     X11 can set `ShellCaps::TEXT_IME`. Until then it is clear there.
+   - S17 a `PopupInput::Grab` popup on AppKit is made key the way an exclusive
+     panel is (`show_popup`) and reports no `FocusRefused` when it is not, where
+     Win32 reports one for both. Same `isKeyWindow` read-back as `show_panel`,
+     S; left out because no session test shows a grabbing popup and the runner
+     never activates, so nothing would tell a refusal from a regression.
+   - **Decided 2026-10-17: `ShellCaps::TEXT_IME` is split**, keeping the name
+     for a real input method end to end (pre-edit as `TextPreedit`, commits,
+     `set_text_input` and `set_text_input_area` acted on) and adding
+     `TEXT_COMPOSE` for dead keys and Compose sequences, because X11 composing
+     through libxkbcommon is real and a caller may want it while no input method
+     exists there, and one bit would have to under-report one of the two. Now:
+     Wayland sets `TEXT_COMPOSE` from libxkbcommon and `TEXT_IME` only when
+     `zwp_text_input_manager_v3` bound (the latch runs after the registry round
+     trip in `open`); X11 `TEXT_COMPOSE` only; Win32 both (`imm32` pre-edit is
+     written but unverified, see "Implemented, untested"); AppKit `TEXT_COMPOSE`
+     only; web neither; headless both (`ShellCaps::DESKTOP` is every bit).
+     Alternative declined: one bit cleared on X11 and AppKit, which hides
+     compose there.
+   - **Decided 2026-10-17: `PanelKeyboard::Exclusive` holds the keyboard only
+     where `ShellCaps::PANEL_EXCLUSIVE_KEYBOARD` says so**, which is Wayland's
+     layer-shell (the compositor enforces it on the `Top` and `Overlay` layers).
+     Win32 and AppKit take the keyboard when the panel is shown, report
+     `FocusRefused` when the system declines (AppKit now reads `isKeyWindow`
+     back after `makeKeyAndOrderFront:`, `panel::show_panel`), and let the user
+     click away, which arrives as `Focus` with `focused: false`. Alternative
+     declined: taking focus back whenever it is lost while mapped, which on
+     Win32 fights the foreground lock and on both fights the user. AppKit's
+     refusal is verified by review only.
+   - **Decided 2026-10-17, degradations that get no cap**, because no caller has
+     a different path to take: Win32 `PanelLayer::Overlay` sharing `Top`'s
+     topmost band (now said on `PanelLayer::Overlay`; there is no higher band to
+     ask for); Wayland's `MonitorInfo::work_area` equal to the output's bounds
+     (documented on the field, and Wayland places no windowed window by position
+     anyway, `WINDOW_POSITION` being clear); X11's wheel in lines only
+     (`ScrollDelta` says its unit on every event, so a caller already handles
+     both).
 2. **Decided 2026-10-17, transparency on Windows, built the same day:** a
    transparent Win32 window opened through `GpuContext` with no backend named
    goes to D3D12. When a backend's `create_surface` refuses the target with
@@ -28517,9 +28547,10 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   infers. Wiring it means a third system library (`shell32` is already linked
   for the drop calls) and a decision about _where_ a process-wide property is
   set when a host application embedded the engine.
-- **No verified IME pre-edit, and a CJK commit has not been watched.**
-  `ShellCaps::TEXT_IME` is set since 2026-09-21, on the bar X11 and Wayland use:
-  composed text reaches the engine. `win32_e2e`'s
+- **No verified IME pre-edit, and a CJK commit has not been watched.** Win32
+  sets `ShellCaps::TEXT_COMPOSE` for dead keys and `ShellCaps::TEXT_IME` for the
+  input method, pre-edit included, because the path is written (the bit was
+  split in two 2026-10-17). `win32_e2e`'s
   `a_dead_key_typed_by_another_process_composes_with_the_next_key` proves the
   dead-key half on a real desktop. The IME half rests on `DefWindowProc` turning
   `WM_IME_CHAR` into `WM_CHAR`, which is documented behaviour but has not been

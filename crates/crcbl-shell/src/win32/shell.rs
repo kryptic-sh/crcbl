@@ -355,6 +355,7 @@ impl Win32Shell {
             .union(ShellCaps::CLIPBOARD)
             .union(ShellCaps::DRAG_DROP)
             .union(ShellCaps::TEXT_IME)
+            .union(ShellCaps::TEXT_COMPOSE)
             .union(ShellCaps::TOUCH)
             .union(ShellCaps::PANEL)
             .union(ShellCaps::PANEL_RESERVE)
@@ -1179,21 +1180,23 @@ impl Shell for Win32Shell {
     ///   feedback while a drag is in the air, because that is `IDropTarget` and
     ///   `IDropTarget` is COM. [`dnd`](super::dnd) gives the argument, and it is
     ///   a gap in *feedback* rather than in the capability the seam names.
-    /// * [`TEXT_IME`](ShellCaps::TEXT_IME) — the bit claims only that composed
-    ///   text reaches the engine through the platform's input method, which is
-    ///   the bar X11 and Wayland set it on. Here the system composes:
+    /// * [`TEXT_COMPOSE`](ShellCaps::TEXT_COMPOSE) — the system composes:
     ///   `TranslateMessage` turns a dead key and the next key into one
-    ///   `WM_CHAR`, and the `WM_IME_*` family falls through to `DefWindowProc`,
-    ///   which delivers an IME's committed string as `WM_CHAR` too. Both arrive
-    ///   as [`TextCommit`](ShellEvent::TextCommit), surrogate pairs joined.
-    ///   `win32_e2e`'s dead-key test proves the composition on a real desktop.
-    ///   The composition in progress is read from `WM_IME_COMPOSITION` and
-    ///   reported as [`TextPreedit`](ShellEvent::TextPreedit), and
+    ///   `WM_CHAR`, which arrives as [`TextCommit`](ShellEvent::TextCommit),
+    ///   surrogate pairs joined. `win32_e2e`'s dead-key test proves the
+    ///   composition on a real desktop.
+    /// * [`TEXT_IME`](ShellCaps::TEXT_IME) — `imm32`. The `WM_IME_*` family
+    ///   falls through to `DefWindowProc`, which delivers an IME's committed
+    ///   string as `WM_CHAR` and so as a commit. The composition in progress is
+    ///   read from `WM_IME_COMPOSITION` and reported as
+    ///   [`TextPreedit`](ShellEvent::TextPreedit), and
     ///   [`set_text_input_area`](Shell::set_text_input_area) places the input
-    ///   method's composition window and candidate list at the caret. **That
-    ///   half is unverified against a real input method**: its desktop test,
-    ///   behind the `win32-ime-e2e` feature, has never passed, and only the
-    ///   decoding and bookkeeping around the `imm32` calls are unit-tested.
+    ///   method's composition window and candidate list at the caret. **The
+    ///   pre-edit and placement are unverified against a real input method**:
+    ///   their desktop test, behind the `win32-ime-e2e` feature, has never
+    ///   passed, and only the decoding and bookkeeping around the `imm32` calls
+    ///   are unit-tested. The bit is set because the path is written, not
+    ///   because it is proven.
     /// * [`TOUCH`](ShellCaps::TOUCH) — `WM_POINTERDOWN`/`UPDATE`/`UP` for
     ///   `PT_TOUCH` pointers, with a capture change or a cancelled release as
     ///   [`Cancelled`](crcbl_core::input::TouchPhase::Cancelled). The primary
@@ -1233,6 +1236,10 @@ impl Shell for Win32Shell {
     /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) is clear for a reason rather than
     /// for want of work — a plain `HWND` presents at its own size, and the
     /// renderer does the upscale blit.
+    /// [`PANEL_EXCLUSIVE_KEYBOARD`](ShellCaps::PANEL_EXCLUSIVE_KEYBOARD) is
+    /// clear by decision: an exclusive panel takes the foreground when shown,
+    /// and taking it back whenever the user clicks away would fight both the
+    /// user and the system's foreground lock.
     fn caps(&self) -> ShellCaps {
         self.caps
     }
