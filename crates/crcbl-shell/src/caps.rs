@@ -125,14 +125,26 @@ bitflags::bitflags! {
         /// the `web` backend's module docs name which browsers do.
         const RAW_POINTER_MOTION = 1 << 5;
 
-        /// Composed text arrives as
-        /// [`ShellEvent::TextCommit`](crate::ShellEvent::TextCommit) through a
-        /// real input method, so CJK and dead-key input work.
+        /// The backend is wired to the platform's input method, the framework
+        /// CJK and other complex-script input runs through, end to end.
         ///
-        /// Without it a backend still emits `TextCommit` for plain typing —
-        /// the event is not IME-only — but complex scripts will not compose.
-        /// Full IME (pre-edit strings, candidate windows) is post-MVP; this bit
-        /// says only that the commit path is wired to an input method.
+        /// For a window that named a field with
+        /// [`Shell::set_text_input`](crate::Shell::set_text_input), the
+        /// composition in progress arrives as
+        /// [`ShellEvent::TextPreedit`](crate::ShellEvent::TextPreedit), the
+        /// conversion the user picks as
+        /// [`ShellEvent::TextCommit`](crate::ShellEvent::TextCommit), and
+        /// [`Shell::set_text_input_area`](crate::Shell::set_text_input_area)
+        /// is passed on so the input method can place its candidate window.
+        /// Whether the user runs an input method is not the shell's to know;
+        /// the bit says one would reach the engine.
+        ///
+        /// Wayland sets it when the compositor offers `text-input-v3`, and
+        /// Win32 through `imm32`. Clear on X11, which has no XIM, IBus or
+        /// Fcitx client; on AppKit, which does not send the pre-edit yet; and
+        /// on the web. Dead keys and Compose sequences are
+        /// [`TEXT_COMPOSE`](Self::TEXT_COMPOSE), which a backend can have
+        /// without this.
         const TEXT_IME = 1 << 6;
 
         /// Clipboard get/set works. See
@@ -255,6 +267,37 @@ bitflags::bitflags! {
         /// where that method and those events are, and an adapter for its
         /// platform.
         const ACCESSIBILITY = 1 << 20;
+
+        /// Dead keys and Compose sequences compose: a dead accent and the next
+        /// key, or a Compose-key sequence, arrive as one
+        /// [`ShellEvent::TextCommit`](crate::ShellEvent::TextCommit) carrying
+        /// the composed text.
+        ///
+        /// libxkbcommon's compose module on Wayland and X11, with the user's
+        /// locale's table; `TranslateMessage` on Win32; `interpretKeyEvents:`
+        /// on AppKit. Without it a backend may still commit plain typing, but
+        /// an accent typed through a dead key never lands on its letter. It
+        /// says nothing about an input method, which is
+        /// [`TEXT_IME`](Self::TEXT_IME): X11 composes and has none.
+        const TEXT_COMPOSE = 1 << 21;
+
+        /// A panel with
+        /// [`PanelKeyboard::Exclusive`](crate::PanelKeyboard::Exclusive)
+        /// keeps the keyboard while it is mapped: the window system will not
+        /// give it to another window, whatever the user clicks.
+        ///
+        /// Wayland's layer-shell enforces it in the compositor, on the
+        /// [`Top`](crate::PanelLayer::Top) and
+        /// [`Overlay`](crate::PanelLayer::Overlay) layers; the protocol lets a
+        /// compositor use ordinary focus on the lower two. Clear on Win32 and
+        /// AppKit, where an exclusive panel takes the keyboard when it is
+        /// shown (or hears
+        /// [`FocusRefused`](crate::ShellEvent::FocusRefused)) and the user
+        /// can click it away, which arrives as
+        /// [`Focus`](crate::ShellEvent::Focus) with `focused: false`. A
+        /// launcher that should close when it loses the keyboard closes on
+        /// that event; a lock screen cannot be built without this bit.
+        const PANEL_EXCLUSIVE_KEYBOARD = 1 << 22;
     }
 }
 
@@ -318,6 +361,7 @@ mod tests {
             | ShellCaps::POINTER_CONFINE
             | ShellCaps::RAW_POINTER_MOTION
             | ShellCaps::TEXT_IME
+            | ShellCaps::TEXT_COMPOSE
             | ShellCaps::CLIPBOARD
             | ShellCaps::DRAG_DROP
             | ShellCaps::MULTI_WINDOW

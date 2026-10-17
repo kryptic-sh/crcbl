@@ -350,10 +350,10 @@ pub enum ShellEvent {
     /// caret and draws the latest pre-edit after it — so their relative order
     /// within one pump carries no meaning.
     ///
-    /// A backend with no input-method integration never sends this, and
-    /// composed text still arrives as commits where
-    /// [`ShellCaps::TEXT_IME`](crate::ShellCaps::TEXT_IME) is set; the platform's
-    /// own composition window shows the pre-edit instead.
+    /// Sent where [`ShellCaps::TEXT_IME`](crate::ShellCaps::TEXT_IME) is set.
+    /// A backend without it never sends this; where an input method's commits
+    /// still reach it (AppKit today), the platform's own composition window
+    /// shows the pre-edit instead.
     /// [`Shell::set_text_input_area`](crate::Shell::set_text_input_area) is how a
     /// field tells the input method where to put that window and its
     /// candidate list.
@@ -402,8 +402,9 @@ pub enum ShellEvent {
     /// A [panel](crate::WindowRole::Panel) that takes the keyboard outright
     /// ([`PanelKeyboard::Exclusive`](crate::PanelKeyboard::Exclusive)) asks
     /// when it is shown. Win32 refuses the foreground to a process the user is
-    /// not working in, and then no [`Focus`](ShellEvent::Focus) follows: keys
-    /// keep going to the window the user was in. This is how a program finds
+    /// not working in, and AppKit can decline to make the panel the key
+    /// window; then no [`Focus`](ShellEvent::Focus) follows: keys keep going
+    /// to the window the user was in. This is how a program finds
     /// out, without guessing a timeout — to retry, to say so, or to draw the
     /// user's attention another way.
     FocusRefused {

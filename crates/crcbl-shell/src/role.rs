@@ -92,6 +92,10 @@ pub enum PanelLayer {
     Top,
     /// Above everything, full-screen windows included: a launcher, a lock
     /// screen, a notification.
+    ///
+    /// Win32 has one topmost band, which `Top` uses too, so there an overlay
+    /// is above application windows and shares the band with full-screen
+    /// ones that are topmost themselves.
     Overlay,
 }
 
@@ -182,8 +186,17 @@ pub enum PanelKeyboard {
     None,
     /// When clicked, like an application window.
     OnDemand,
-    /// Takes it on mapping and holds it while mapped: a launcher, a lock
-    /// screen. Keys typed the moment it appears are its.
+    /// Takes it on mapping: a launcher, a lock screen. Keys typed the moment
+    /// it appears are its, or
+    /// [`FocusRefused`](crate::ShellEvent::FocusRefused) says the window
+    /// system would not hand it over.
+    ///
+    /// Held while mapped only where
+    /// [`ShellCaps::PANEL_EXCLUSIVE_KEYBOARD`](crate::ShellCaps::PANEL_EXCLUSIVE_KEYBOARD)
+    /// is set. Elsewhere the user can click another window and the panel
+    /// hears [`Focus`](crate::ShellEvent::Focus) with `focused: false`;
+    /// nothing takes the keyboard back, since that would fight the user and
+    /// the system's foreground rules.
     Exclusive,
 }
 

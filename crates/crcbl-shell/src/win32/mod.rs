@@ -37,7 +37,7 @@
 //! | Message pump, and a blocking [`wait_events`](crate::Shell::wait_events) | complete |
 //! | [`SurfaceTarget::Win32`](crcbl_core::SurfaceTarget::Win32) for the HAL | complete |
 //! | Keyboard: scan codes, [`KeyCode`](crcbl_core::KeyCode), keysyms, modifiers, auto-repeat | complete — [`keys`] |
-//! | Text: `WM_CHAR` with surrogate pairs, dead keys and IME commits, as [`TextCommit`](crate::ShellEvent::TextCommit); the IME composition as [`TextPreedit`](crate::ShellEvent::TextPreedit), and its windows placed at the caret; the IME only in a window that asked with [`set_text_input`](crate::Shell::set_text_input) | commits complete — [`TEXT_IME`](crate::ShellCaps::TEXT_IME), see [`caps`](Win32Shell::caps); the pre-edit and placement are **unverified against a real input method** |
+//! | Text: `WM_CHAR` with surrogate pairs, dead keys and IME commits, as [`TextCommit`](crate::ShellEvent::TextCommit); the IME composition as [`TextPreedit`](crate::ShellEvent::TextPreedit), and its windows placed at the caret; the IME only in a window that asked with [`set_text_input`](crate::Shell::set_text_input) | commits complete — [`TEXT_COMPOSE`](crate::ShellCaps::TEXT_COMPOSE) and [`TEXT_IME`](crate::ShellCaps::TEXT_IME), see [`caps`](Win32Shell::caps); the pre-edit and placement are **unverified against a real input method** |
 //! | Pointer: motion, five buttons, enter/leave, capture, both wheel axes | complete — [`mod@pointer`] |
 //! | Raw relative motion, absolute devices included | complete — [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION), latched on the registration |
 //! | Touch: `WM_POINTER*` contacts, with the primary one also a mouse | complete — [`TOUCH`](crate::ShellCaps::TOUCH); secondary contacts are kept from `DefWindowProc`'s gesture promotion, see [`caps`](Win32Shell::caps) |
@@ -51,8 +51,9 @@
 //!
 //! Two things input needs that no other area of this backend does are worth
 //! finding here rather than in a call stack.
-//! [`ShellCaps::TEXT_IME`](crate::ShellCaps::TEXT_IME) is set for composed
-//! commits, and the composition in progress is reported as a pre-edit —
+//! [`ShellCaps::TEXT_COMPOSE`](crate::ShellCaps::TEXT_COMPOSE) is set for dead
+//! keys and [`ShellCaps::TEXT_IME`](crate::ShellCaps::TEXT_IME) for the input
+//! method's commits and its composition in progress, reported as a pre-edit —
 //! [`caps`](Win32Shell::caps) gives the argument. And a
 //! [`DeviceId`](crcbl_core::input::DeviceId) names the physical keyboard or
 //! mouse, taken from the raw report behind each message — see [`devices`].

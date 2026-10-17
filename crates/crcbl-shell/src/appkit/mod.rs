@@ -39,7 +39,7 @@
 //! | Event pump, and a blocking [`wait_events`](crate::Shell::wait_events) | complete — [`EVENT_WAIT`](crate::ShellCaps::EVENT_WAIT) |
 //! | `CAMetalLayer` on a layer-hosting `NSView`, as [`SurfaceTarget::AppKit`](crcbl_core::SurfaceTarget::AppKit) | complete — [`window`] |
 //! | Keyboard: `kVK_*` codes, [`KeyCode`](crcbl_core::KeyCode), keysyms, modifiers through `flagsChanged:`, auto-repeat | complete — [`keys`] |
-//! | Text: `interpretKeyEvents:` through a real `NSTextInputClient`, as [`TextCommit`](crate::ShellEvent::TextCommit) | complete — [`TEXT_IME`](crate::ShellCaps::TEXT_IME), see [`view`] and [`caps`](AppKitShell::caps) |
+//! | Text: `interpretKeyEvents:` through a real `NSTextInputClient`, as [`TextCommit`](crate::ShellEvent::TextCommit) | commits and dead keys complete — [`TEXT_COMPOSE`](crate::ShellCaps::TEXT_COMPOSE); the pre-edit is not sent and the candidate window sits at the window's origin, so [`TEXT_IME`](crate::ShellCaps::TEXT_IME) is clear — see [`view`] and [`caps`](AppKitShell::caps) |
 //! | Pointer: motion, buttons past the fifth, enter and leave through an `NSTrackingArea`, both scroll units | complete — [`mod@pointer`] |
 //! | Relative motion from `NSEvent`'s `deltaX`/`deltaY` | complete — [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION), **accelerated**; [`caps`](AppKitShell::caps) says exactly what the bit means here |
 //! | [`PointerMode::Locked`](crate::PointerMode) and [`warp_pointer`](crate::Shell::warp_pointer) | complete — [`POINTER_LOCK`](crate::ShellCaps::POINTER_LOCK), [`POINTER_WARP`](crate::ShellCaps::POINTER_WARP) |
@@ -382,7 +382,7 @@ pub(crate) const fn caps() -> ShellCaps {
         .union(ShellCaps::POINTER_LOCK)
         .union(ShellCaps::POINTER_WARP)
         .union(ShellCaps::RAW_POINTER_MOTION)
-        .union(ShellCaps::TEXT_IME)
+        .union(ShellCaps::TEXT_COMPOSE)
         .union(ShellCaps::CLIPBOARD)
         .union(ShellCaps::DRAG_DROP)
         .union(ShellCaps::PANEL)
@@ -408,7 +408,7 @@ mod tests {
             ShellCaps::POINTER_LOCK,
             ShellCaps::POINTER_WARP,
             ShellCaps::RAW_POINTER_MOTION,
-            ShellCaps::TEXT_IME,
+            ShellCaps::TEXT_COMPOSE,
             ShellCaps::CLIPBOARD,
             ShellCaps::DRAG_DROP,
             ShellCaps::PANEL,
@@ -425,12 +425,17 @@ mod tests {
         // and the alternatives are warp-based approximations. A capability that
         // overstates itself is worse than one that is missing.
         // `PANEL_RESERVE` because macOS lets nothing but the menu bar and the
-        // Dock reserve space.
+        // Dock reserve space. `TEXT_IME` because the input method's pre-edit
+        // is tracked and never sent, and nothing places its candidate window.
+        // `PANEL_EXCLUSIVE_KEYBOARD` because an exclusive panel is made key
+        // once, and the user can click another window.
         for absent in [
             ShellCaps::FRACTIONAL_SCALE,
             ShellCaps::HW_UPSCALE,
             ShellCaps::POINTER_CONFINE,
             ShellCaps::PANEL_RESERVE,
+            ShellCaps::TEXT_IME,
+            ShellCaps::PANEL_EXCLUSIVE_KEYBOARD,
         ] {
             assert!(!caps.contains(absent), "{absent:?} is not implemented");
         }

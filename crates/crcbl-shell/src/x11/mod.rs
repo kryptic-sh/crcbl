@@ -970,11 +970,12 @@ impl X11Shell {
         // `RAW_POINTER_MOTION` exists to distinguish.
         caps.set(ShellCaps::RAW_POINTER_MOTION, self.conn.xi_opcode.is_some());
 
-        // As on Wayland, this asserts that composed text can reach the engine
-        // at all, which here means libxkbcommon **and** its X11 companion
-        // resolved and the server had a keymap to give.
+        // Dead keys and Compose sequences, which need libxkbcommon **and** its
+        // X11 companion resolved and the server to have had a keymap to give.
+        // `TEXT_IME` stays clear: there is no XIM, IBus or Fcitx client here,
+        // so no input method's pre-edit or commits ever reach this backend.
         caps.set(
-            ShellCaps::TEXT_IME,
+            ShellCaps::TEXT_COMPOSE,
             xkb::x11_available() && self.keymap.is_some(),
         );
 

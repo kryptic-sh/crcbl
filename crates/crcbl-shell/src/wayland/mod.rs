@@ -2206,19 +2206,20 @@ impl WaylandShell {
         let data_device = !self.conn.data_device_manager.is_null();
         caps.set(ShellCaps::CLIPBOARD, data_device);
         caps.set(ShellCaps::DRAG_DROP, data_device);
-        // Not "there is an input method": the seam's own wording is that this
-        // bit "says only that the commit path is wired to an input method".
-        // What it is really asserting here is that composed text can reach the
-        // engine at all, which on Wayland means libxkbcommon resolved: an input
-        // method's commits also come through `text-input-v3` where the
-        // compositor relays one (see `text_input`), and keys it lets through
-        // type through XKB.
-        caps.set(ShellCaps::TEXT_IME, xkb::available());
+        // Dead keys and Compose sequences are libxkbcommon's compose module,
+        // so they need the library and nothing from the compositor. An input
+        // method's pre-edit and commits come only through `text-input-v3`
+        // (see `text_input`), which the registry listing has bound by now or
+        // will not bind this run.
+        caps.set(ShellCaps::TEXT_COMPOSE, xkb::available());
+        caps.set(ShellCaps::TEXT_IME, !self.conn.text_input_manager.is_null());
         // A layer surface's exclusive zone is how it reserves an edge, so the
         // one global gives both.
         let layer_shell = !self.conn.layer_shell.is_null();
         caps.set(ShellCaps::PANEL, layer_shell);
         caps.set(ShellCaps::PANEL_RESERVE, layer_shell);
+        // `keyboard_interactivity = exclusive`, which the compositor holds.
+        caps.set(ShellCaps::PANEL_EXCLUSIVE_KEYBOARD, layer_shell);
         // A compositor blends every surface by its buffer's alpha unless the
         // client declares a region opaque, which this backend never does, so a
         // swapchain with premultiplied alpha is all a transparent window needs.

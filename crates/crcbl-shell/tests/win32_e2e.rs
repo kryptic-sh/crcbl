@@ -1474,7 +1474,9 @@ fn the_backend_is_reachable_by_name_and_is_win32_shaped() {
         ShellCaps::POINTER_WARP,
         ShellCaps::CLIPBOARD,
         ShellCaps::DRAG_DROP,
-        // Composed commits, which the dead-key test below proves.
+        // Dead keys, which the dead-key test below proves.
+        ShellCaps::TEXT_COMPOSE,
+        // The input method's path, written and not yet proven here.
         ShellCaps::TEXT_IME,
     ] {
         assert!(caps.contains(present), "{present:?} is implemented");
@@ -2213,9 +2215,8 @@ fn an_input_method_composition_is_a_pre_edit_and_its_result_a_commit() {
 
 /// A dead key composes with the next key into one committed character.
 ///
-/// This is what [`ShellCaps::TEXT_IME`] claims on every backend that sets it:
-/// composed text reaches the engine through the platform's input method, not
-/// that a pre-edit exists. On US-International `'` is a dead acute accent, so
+/// This is what [`ShellCaps::TEXT_COMPOSE`] claims on every backend that sets
+/// it. On US-International `'` is a dead acute accent, so
 /// `'` then `e` must commit exactly `é` — never the bare accent, never `'e`. The
 /// system does the composing (`TranslateMessage` posts `WM_DEADCHAR` and then a
 /// `WM_CHAR` carrying the result); what this proves is that the backend lets it,

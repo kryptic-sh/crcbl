@@ -63,8 +63,8 @@
 //!
 //! So WASD, Escape and every gameplay binding keep working with no
 //! libxkbcommon at all; only text and rebind-menu labels are lost.
-//! [`ShellCaps::TEXT_IME`](crate::ShellCaps) is cleared in that case, which is
-//! how a consumer finds out without guessing.
+//! [`ShellCaps::TEXT_COMPOSE`](crate::ShellCaps::TEXT_COMPOSE) is cleared in
+//! that case, which is how a consumer finds out without guessing.
 //!
 //! # Compose
 //!
@@ -302,7 +302,8 @@ pub fn x11_available() -> bool {
 
 /// Whether libxkbcommon is available in this process.
 ///
-/// What [`ShellCaps::TEXT_IME`](crate::ShellCaps) is latched from.
+/// What the Wayland backend latches
+/// [`ShellCaps::TEXT_COMPOSE`](crate::ShellCaps::TEXT_COMPOSE) from.
 #[must_use]
 pub fn available() -> bool {
     load().is_some()

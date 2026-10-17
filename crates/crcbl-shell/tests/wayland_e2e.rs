@@ -873,7 +873,18 @@ fn capabilities_are_honest_about_what_the_compositor_advertises() {
         caps.contains(ShellCaps::SERVER_DECORATIONS),
         "xdg-decoration"
     );
-    assert!(caps.contains(ShellCaps::TEXT_IME), "libxkbcommon resolved");
+    assert!(
+        caps.contains(ShellCaps::TEXT_COMPOSE),
+        "libxkbcommon resolved"
+    );
+    assert!(
+        caps.contains(ShellCaps::TEXT_IME),
+        "sway offers zwp_text_input_manager_v3, which the input-method tests use"
+    );
+    assert!(
+        caps.contains(ShellCaps::PANEL | ShellCaps::PANEL_EXCLUSIVE_KEYBOARD),
+        "sway offers layer-shell, which holds an exclusive panel's keyboard"
+    );
     // P0.5c: both come from `wl_data_device_manager`, which sway advertises.
     assert!(caps.contains(ShellCaps::CLIPBOARD));
     assert!(caps.contains(ShellCaps::DRAG_DROP));

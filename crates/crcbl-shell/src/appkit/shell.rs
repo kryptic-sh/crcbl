@@ -928,19 +928,10 @@ impl Shell for AppKitShell {
     ///   would oblige `raw_delta: None`, which — with `abs` also `None` under
     ///   [`Locked`](PointerMode::Locked) — makes mouselook *impossible* on macOS
     ///   rather than merely accelerated. `docs/backlog.md` carries the gap.
-    /// * [`TEXT_IME`](ShellCaps::TEXT_IME) — the view conforms to
+    /// * [`TEXT_COMPOSE`](ShellCaps::TEXT_COMPOSE) — the view conforms to
     ///   `NSTextInputClient` and every key event goes through
-    ///   `interpretKeyEvents:`, so commits arrive **from the input method**
-    ///   rather than from a translation this backend performs. That is the same
-    ///   structural standard the Wayland backend is held to, where the bit
-    ///   follows having *bound* `text-input-v3`, and it is a stronger claim than
-    ///   the Win32 backend can make — there, `WM_CHAR` arrives whether or not
-    ///   anything was wired to an IME, which is why that backend leaves the bit
-    ///   clear. What is **not** implemented is displaying a pre-edit: the seam
-    ///   has no event for one, so marked text is tracked (an input method cannot
-    ///   compose without the answers) and never surfaced, and the candidate
-    ///   window is placed at the window's origin rather than at a caret the seam
-    ///   does not model. See [`view`](super::view).
+    ///   `interpretKeyEvents:`, so a dead key composes in the input context
+    ///   and its result arrives as a commit, as does an input method's.
     /// * [`CLIPBOARD`](ShellCaps::CLIPBOARD) — `NSPasteboard`, both directions,
     ///   with `public.utf8-plain-text` beside the engine's own format so a copy
     ///   reaches TextEdit and an engine-to-engine copy is lossless. The bytes
@@ -994,6 +985,15 @@ impl Shell for AppKitShell {
     /// * [`PANEL_RESERVE`](ShellCaps::PANEL_RESERVE) — **macOS lets nothing
     ///   but the menu bar and the Dock reserve space.** A reserving panel is
     ///   built and overlaps what is behind it.
+    /// * [`TEXT_IME`](ShellCaps::TEXT_IME) — the input method's commits do
+    ///   arrive, but the rest of what the bit promises does not: marked text
+    ///   is tracked (an input method cannot compose without the answers) and
+    ///   never sent as [`TextPreedit`](crate::ShellEvent::TextPreedit),
+    ///   [`set_text_input`](Shell::set_text_input) and
+    ///   [`set_text_input_area`](Shell::set_text_input_area) are the trait's
+    ///   no-op defaults, and the candidate window is placed at the window's
+    ///   origin. A gap in this backend, not in the platform. See
+    ///   [`view`](super::view).
     fn caps(&self) -> ShellCaps {
         self.caps
     }
@@ -1117,6 +1117,10 @@ impl Shell for AppKitShell {
             popup,
         };
         let handle: WindowId = self.windows.insert(state).cast();
+        if !created.focus_granted {
+            self.queue
+                .push_back(ShellEvent::FocusRefused { window: handle });
+        }
         if desc.visible
             && let Some(popup) = popup
         {
@@ -1238,7 +1242,10 @@ impl Shell for AppKitShell {
         let window = state.window;
         if let (true, Some(panel)) = (visible, state.panel) {
             // SAFETY: a live panel of this shell, on the main thread.
-            unsafe { Self::show_panel(window, panel.keyboard) };
+            if !unsafe { Self::show_panel(window, panel.keyboard) } {
+                self.queue
+                    .push_back(ShellEvent::FocusRefused { window: handle });
+            }
             return Ok(());
         }
         if let (true, Some(popup)) = (visible, state.popup) {

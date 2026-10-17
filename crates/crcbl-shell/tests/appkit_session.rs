@@ -585,7 +585,11 @@ mod macos {
             "a locked pointer and a delta beside it are both implemented: {caps:?}"
         );
         assert!(caps.contains(ShellCaps::POINTER_WARP), "{caps:?}");
-        assert!(caps.contains(ShellCaps::TEXT_IME), "{caps:?}");
+        assert!(caps.contains(ShellCaps::TEXT_COMPOSE), "{caps:?}");
+        assert!(
+            !caps.contains(ShellCaps::TEXT_IME),
+            "the pre-edit is not sent, so the input method is not wired end to end: {caps:?}"
+        );
         assert!(
             !caps.contains(ShellCaps::POINTER_CONFINE),
             "macOS has no confine API and this backend must not claim one: {caps:?}"

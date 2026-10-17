@@ -13,8 +13,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- **`ShellCaps::TEXT_COMPOSE`**: dead keys and Compose sequences arrive as one
+  `TextCommit` carrying the composed text. Set on Wayland and X11 (through
+  libxkbcommon's compose tables), Win32 and AppKit; clear on the web.
+- **`ShellCaps::PANEL_EXCLUSIVE_KEYBOARD`**: a `PanelKeyboard::Exclusive` panel
+  keeps the keyboard while it is mapped. Set on Wayland when the compositor
+  offers layer-shell, which enforces it on the `Top` and `Overlay` layers; clear
+  on Win32 and AppKit.
+
 ### Changed
 
+- **`ShellCaps::TEXT_IME` means an input method wired end to end**: its
+  composition as `TextPreedit`, its conversions as `TextCommit`, and
+  `set_text_input` and `set_text_input_area` passed on to it. It used to mean
+  only that composed text reached the engine. X11 no longer sets it (it has no
+  XIM, IBus or Fcitx client), Wayland sets it only when the compositor offers
+  `zwp_text_input_manager_v3`, and AppKit no longer sets it until it sends the
+  pre-edit. Code that read `TEXT_IME` to learn whether dead keys work reads
+  `TEXT_COMPOSE`.
+- **`PanelKeyboard::Exclusive` holds the keyboard only where
+  `ShellCaps::PANEL_EXCLUSIVE_KEYBOARD` is set.** On Win32 and AppKit the panel
+  takes the keyboard when it is shown and the user can click it away, which
+  arrives as `Focus` with `focused: false`. AppKit now sends `FocusRefused` when
+  an exclusive panel it showed did not become the key window, as Win32 already
+  did when refused the foreground.
 - **An unpinned `GpuContext` open moves on to the next backend when one refuses
   the window's surface as `HalError::Unsupported`**, and logs which refused and
   why. A transparent Win32 window now opens on D3D12 instead of failing with

@@ -915,6 +915,7 @@ pub trait Shell: core::fmt::Debug {
     /// [`Normal`](TextPurpose::Normal) field, keeping it off for a password or
     /// a PIN as a Windows password box does. AppKit takes the default, and its
     /// input methods compose in every window whatever this says.
+    /// [`ShellCaps::TEXT_IME`] is set only where this is acted on.
     ///
     /// # Errors
     ///
