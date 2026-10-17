@@ -15,8 +15,9 @@
 //!   a `Box<dyn Instance>`.
 //! * Something has to depend on the backends, or "try Vulkan, fall back" cannot
 //!   be written at all. `crcbl-shell` puts that dependency in the crate that
-//!   owns [`open`](crate::shell::open); the umbrella is the equivalent here,
-//!   because it is already the one dependency a game names.
+//!   owns [`open`](crcbl_shell::open); this crate is the equivalent here — the
+//!   one a game reaches through the `crcbl` umbrella, which re-exports this
+//!   module as `crcbl::backend`, and the one a UI-only program names itself.
 //!
 //! The alternative — putting it in `crcbl-render` — is better and is where this
 //! should move once that crate exists (P1.3). It is not a reason to make
@@ -241,9 +242,8 @@ impl GpuBackend {
     /// written out in two places and one of them named four backends of six.
     /// The aliases [`from_name`](Self::from_name) also accepts are deliberately
     /// absent: a rejection offering `vulkan` beside `vk` reads as more backends
-    /// rather than as one more spelling, and
-    /// [`COMMON_OPTIONS_HELP`](crate::args::COMMON_OPTIONS_HELP) is where every
-    /// spelling is listed.
+    /// rather than as one more spelling, and the umbrella's
+    /// `crcbl::args::COMMON_OPTIONS_HELP` is where every spelling is listed.
     #[must_use]
     pub fn name_list() -> String {
         let names: Vec<String> = Self::ALL
@@ -303,31 +303,39 @@ pub enum GpuError {
 /// of function pointers over three unrelated backends. Not `Send`: an instance
 /// is opened once, on the thread that will drive the frame loop, and on the web
 /// there is only one thread anyway.
-pub(crate) type InstanceFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Instance>, HalError>>>>;
+///
+/// Public, and hidden, only so the umbrella's `GpuContext` tests can build a
+/// table of their own; not part of this crate's API.
+#[doc(hidden)]
+pub type InstanceFuture = Pin<Box<dyn Future<Output = Result<Box<dyn Instance>, HalError>>>>;
 
 /// Wraps an already-decided result as a future that completes on its first poll.
 ///
 /// What a backend whose open really is synchronous returns; the seam's
 /// `crcbl-vk` half says the same thing about `vkCreateDevice`.
-pub(crate) fn ready(result: Result<Box<dyn Instance>, HalError>) -> InstanceFuture {
+#[doc(hidden)]
+pub fn ready(result: Result<Box<dyn Instance>, HalError>) -> InstanceFuture {
     Box::pin(core::future::ready(result))
 }
 
 /// One entry in the backend table.
 ///
-/// Crate-visible so the engine's tests can walk a table of their own through
-/// [`request_open_auto`] and [`request_open_named`].
-pub(crate) struct Registration {
-    pub(crate) backend: GpuBackend,
+/// Public, and hidden, only so the umbrella's `GpuContext` tests can walk a
+/// table of their own through [`request_open_auto`] and
+/// [`request_open_named`]; not part of this crate's API.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct Registration {
+    pub backend: GpuBackend,
     /// Whether [`request_open`] may select this entry without being asked for
     /// it by name — and so whether `open`, which blocks on it and does not
     /// exist on `wasm32`, may. `false` for [`GpuBackend::Null`] — see the
     /// module docs.
-    pub(crate) auto: bool,
+    pub auto: bool,
     /// Starts opening this backend. Returning a future rather than an instance
     /// is what makes the web path expressible; two of the three complete on
     /// their first poll.
-    pub(crate) open: fn() -> InstanceFuture,
+    pub open: fn() -> InstanceFuture,
 }
 
 /// Why [`GpuBackend::WebGpu`] refuses when it is not the active backend, worded
@@ -568,7 +576,11 @@ impl PendingInstance {
     /// D3D12, the next entry there, presents through DirectComposition. Only
     /// once the instance was handed over: a backend still being opened falls
     /// through in [`poll`](Self::poll) already.
-    pub(crate) fn fall_through(&mut self, error: &HalError) -> bool {
+    ///
+    /// Public, and hidden, only because `GpuContext` is still in the `crcbl`
+    /// umbrella; not part of this crate's API.
+    #[doc(hidden)]
+    pub fn fall_through(&mut self, error: &HalError) -> bool {
         if !self.fallback || self.current.is_some() {
             return false;
         }
@@ -644,7 +656,8 @@ pub fn request_open_backend(backend: GpuBackend) -> Result<PendingInstance, GpuE
 
 /// The by-name pending object over an arbitrary registry, so a test can hold
 /// a named backend's refusal to being final.
-pub(crate) fn request_open_named(
+#[doc(hidden)]
+pub fn request_open_named(
     registry: &'static [Registration],
     backend: GpuBackend,
 ) -> Result<PendingInstance, GpuError> {
@@ -660,7 +673,8 @@ pub(crate) fn request_open_named(
 
 /// The auto-selection pending object over an arbitrary registry, so the
 /// "nothing auto-selectable worked" arm is reachable from a test.
-pub(crate) fn request_open_auto(registry: &'static [Registration]) -> PendingInstance {
+#[doc(hidden)]
+pub fn request_open_auto(registry: &'static [Registration]) -> PendingInstance {
     let mut pending = PendingInstance {
         current: None,
         remaining: registry,

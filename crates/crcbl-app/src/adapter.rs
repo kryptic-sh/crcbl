@@ -7,16 +7,15 @@
 //!
 //! # Why this exists, in one measurement
 //!
-//! `crate::screenshot`'s `OffscreenSetup` took `adapters().first()` and never
-//! said which adapter that was. (Not a doc link: `screenshot` is not compiled
-//! for wasm, where this module still is, and a link that resolves on three
-//! targets and breaks the fourth is a red CI job for a hyperlink.) On
+//! `crcbl::screenshot`'s `OffscreenSetup` took `adapters().first()` and never
+//! said which adapter that was. (Not a doc link: it is in the `crcbl` umbrella,
+//! which depends on this crate, and is not compiled for wasm either.) On
 //! `windows-latest` the first adapter is not a device that works: the D3D12 HAL
 //! suite passed 155/155 on WARP in the same CI job, and the frame that followed
 //! failed on its first buffer with `DXGI_ERROR_DEVICE_REMOVED`, before anything
 //! was drawn. `crcbl-dx12` has a pin of its own that would have avoided it, and
 //! it could not be reached: it is `#[cfg(test)]` inside that crate, and the
-//! harness that needed it lives in this one.
+//! harness that needed it lives in `crcbl`.
 //!
 //! So the pin is here, above the seam, where every backend's enumeration
 //! arrives in the same [`AdapterInfo`] shape and one variable can mean the same
@@ -46,7 +45,7 @@
 //!
 //! `crcbl_dx12::pin` and `CRCBL_DX12_ADAPTER` are unchanged and still serve that
 //! crate's own suite, which opens instances directly and never reaches
-//! [`crate::backend`]. It cannot defer to this module: `crcbl` depends on
+//! [`crate::backend`]. It cannot defer to this module: this crate depends on
 //! `crcbl-dx12`, so sharing would mean putting adapter *policy* into
 //! `crcbl-hal`, whose crate docs scope it to "traits plus POD descriptors" and
 //! whose seam is frozen at P5 exit. The two are read by different processes —
@@ -110,7 +109,7 @@ pub fn pin() -> Option<String> {
 /// instead — because there is nothing a caller can do about it but report it:
 /// the variable is wrong, or the machine is not the one it describes.
 ///
-/// The second half is `crate::engine`'s: a windowed open that pinned an adapter
+/// The second half is `crcbl::engine`'s: a windowed open that pinned an adapter
 /// which then cannot present to the window refuses with one of these rather
 /// than walking on to an adapter nobody named.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -118,9 +117,14 @@ pub fn pin() -> Option<String> {
 pub struct PinMiss(String);
 
 impl PinMiss {
-    /// A refusal whose message is `message`, for a caller in this crate that
-    /// found the pinned adapter unusable after [`select`] had chosen it.
-    pub(crate) const fn new(message: String) -> Self {
+    /// A refusal whose message is `message`, for a caller that found the
+    /// pinned adapter unusable after [`select`] had chosen it.
+    ///
+    /// Public, and hidden, only because that caller — `GpuContext` — is still
+    /// in the `crcbl` umbrella; not part of this crate's API.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn new(message: String) -> Self {
         Self(message)
     }
 }

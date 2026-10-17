@@ -383,12 +383,12 @@ name = "crcbl"
 version = "0.3.0"
 dependencies = [
  "crcbl-anim",
+ "crcbl-app",
  "crcbl-assets",
  "crcbl-audio",
  "crcbl-client",
  "crcbl-console",
  "crcbl-core",
- "crcbl-dx12",
  "crcbl-ecs",
  "crcbl-golden",
  "crcbl-greybox",
@@ -396,7 +396,6 @@ dependencies = [
  "crcbl-input",
  "crcbl-inventory",
  "crcbl-jobs",
- "crcbl-mtl",
  "crcbl-nav",
  "crcbl-net",
  "crcbl-phys",
@@ -433,6 +432,22 @@ dependencies = [
  "glam",
  "ron",
  "serde",
+]
+
+[[package]]
+name = "crcbl-app"
+version = "0.3.0"
+dependencies = [
+ "crcbl-core",
+ "crcbl-dx12",
+ "crcbl-hal",
+ "crcbl-mtl",
+ "crcbl-shell",
+ "crcbl-ui",
+ "crcbl-vk",
+ "crcbl-webgpu",
+ "log",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

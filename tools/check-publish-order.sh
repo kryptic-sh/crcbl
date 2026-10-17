@@ -50,6 +50,7 @@ crcbl-dx12
 crcbl-mtl
 crcbl-vk
 crcbl-webgpu
+crcbl-app
 crcbl-server
 crcbl-steam
 crcbl-assets

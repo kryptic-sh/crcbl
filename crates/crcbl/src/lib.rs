@@ -382,11 +382,13 @@ pub use crcbl_vfx as vfx;
 
 pub mod acoustic_path;
 
-pub mod adapter;
+/// [`crcbl_app::adapter`], at the path it has always had.
+pub use crcbl_app::adapter;
 
 pub mod args;
 
-pub mod backend;
+/// [`crcbl_app::backend`], at the path it has always had.
+pub use crcbl_app::backend;
 
 pub mod console_config;
 

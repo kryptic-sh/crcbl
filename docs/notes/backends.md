@@ -1993,7 +1993,7 @@ not, because deleting the crate deleted the only WebGL2 path there was to build.
 | file                                 | references                                                  |
 | ------------------------------------ | ----------------------------------------------------------- |
 | `crates/crcbl-hal/src/capability.rs` | 18 `BackendKind::Wgpu`, 1 `crcbl_wgpu`                      |
-| `crates/crcbl/src/backend.rs`        | 9 `GpuBackend::Wgpu`, 4 `BackendKind::Wgpu`, 1 `crcbl_wgpu` |
+| `crates/crcbl-app/src/backend.rs`    | 9 `GpuBackend::Wgpu`, 4 `BackendKind::Wgpu`, 1 `crcbl_wgpu` |
 | `crates/crcbl-hal/src/caps.rs`       | 2 `BackendKind::Wgpu`                                       |
 | `crates/crcbl/src/args.rs`           | 1 `GpuBackend::Wgpu`                                        |
 | `crates/crcbl-hal/src/error.rs`      | 1 `BackendKind::Wgpu`                                       |

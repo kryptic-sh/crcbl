@@ -1,0 +1,56 @@
+[package]
+name = "crcbl-app"
+description = "Crucible app core: the GPU backend walk, the adapter pin, window bring-up and text input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# What a windowed program that draws only a UI — a status bar, a launcher —
+# needs from the engine and used to find only in the `crcbl` umbrella, which
+# links audio, physics, networking and the ECS beside it. `crcbl` depends on
+# this crate and re-exports every module at its old path, so a game sees no
+# move.
+[dependencies]
+# `crcbl_core::warn!` and the monotonic clock `wait_for_configure` times out on.
+crcbl-core = { workspace = true }
+crcbl-hal = { workspace = true }
+crcbl-shell = { workspace = true }
+# The tree's `TextInput`, edits and clipboard requests `TextPump` carries.
+crcbl-ui = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+
+# The browser's GPU backend, and only where a browser is. Per-target for the
+# reason `crcbl-vk` below is: the target already says whether a browser is the
+# host. `src/backend.rs` gates the matching registry entry with the same `cfg`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+crcbl-webgpu = { workspace = true }
+
+# There is no Vulkan in a browser. `crcbl-vk` reaches `libvulkan.so.1` through
+# `ash`, which reaches it through `libloading` — a crate that does not compile
+# for `wasm32-unknown-unknown` at all. Per-target dependency rather than a
+# feature: the target is already known at build time, and a feature that must
+# be remembered is a feature that will be forgotten. `src/backend.rs` gates the
+# matching registry entry with the same `cfg`, so the browser's table contains
+# only backends that exist.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+crcbl-vk = { workspace = true }
+
+# Metal, and only where Metal exists. `crcbl-mtl` is `#[cfg(target_os =
+# "macos")]` from its crate root down and its `objc2-*` dependencies are pinned
+# to the same target, so naming it unconditionally would compile to nothing
+# everywhere else while still resolving the framework bindings. `src/backend.rs`
+# gates the matching registry entry with the same `cfg`.
+[target.'cfg(target_os = "macos")'.dependencies]
+crcbl-mtl = { workspace = true }
+
+# Direct3D 12, and only where D3D12 exists: the same shape and the same reason
+# as `crcbl-mtl` above. Registered *beside* Vulkan rather than instead of it;
+# see `src/backend.rs` for the order.
+[target.'cfg(target_os = "windows")'.dependencies]
+crcbl-dx12 = { workspace = true }
+
+[lints]
+workspace = true

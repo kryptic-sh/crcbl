@@ -28,6 +28,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and records a shape where the bit is clear, so a UI that sets the cursor on
   every hover needs no error handling; read the bit to know whether the shape is
   seen.
+- **`crcbl-app`**, a crate for a windowed program that draws only a UI: the GPU
+  backend walk with its fall-through (`crcbl_app::backend`), the `CRCBL_ADAPTER`
+  pin (`crcbl_app::adapter`), `window::open_window` and
+  `window::wait_for_configure`, and `text_input::TextPump`. Depending on it
+  instead of `crcbl` links no audio, physics, networking or ECS. `crcbl`
+  re-exports each item at its old path (`crcbl::backend`, `crcbl::adapter`,
+  `crcbl::engine::wait_for_configure`, `crcbl::text_input::TextPump`), and
+  `crcbl::engine::open_window` keeps its signature, so games change nothing.
+  `GpuContext` is still in `crcbl` for now.
 
 ### Changed
 

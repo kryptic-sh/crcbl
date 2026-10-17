@@ -165,6 +165,7 @@ crcbl-image = { path = "crates/crcbl-image", version = "0.3.0" }
 # entry left on.
 crcbl-greybox = { path = "crates/crcbl-greybox", version = "0.3.0", default-features = false }
 crcbl-hal = { path = "crates/crcbl-hal", version = "0.3.0" }
+crcbl-app = { path = "crates/crcbl-app", version = "0.3.0" }
 crcbl-frame = { path = "crates/crcbl-frame", version = "0.3.0" }
 crcbl-render = { path = "crates/crcbl-render", version = "0.3.0" }
 crcbl-shaders = { path = "crates/crcbl-shaders", version = "0.3.0" }

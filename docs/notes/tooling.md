@@ -240,10 +240,10 @@ The rules, each with its _why_:
   headless by construction and editor edits are `Command` values: a CLI client
   sends the same commands the GUI sends, with the same validation, undo log and
   result, and console commands route over the same transport. The `crcbl-vk`
-  half protects **consumers**: nothing above the seam names a backend. The
-  `crcbl` umbrella depends on `crcbl-vk` without re-exporting it, so a sample
-  asks `crcbl::backend` for one by value (`crates/crcbl/src/backend.rs` has the
-  argument).
+  half protects **consumers**: nothing above the seam names a backend.
+  `crcbl-app`, which the `crcbl` umbrella re-exports, depends on `crcbl-vk`
+  without re-exporting it, so a sample asks `crcbl::backend` for one by value
+  (`crates/crcbl-app/src/backend.rs` has the argument).
 - **Every verb lives in one binary.** A capability that needs a second binary
   built to reach it is the same regression as one that needs the GUI, which is
   why the `crcbl-sim` binary became `crcbl sim` on 2026-08-23.

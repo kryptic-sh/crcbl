@@ -302,27 +302,63 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      are small for a window plus a UI: `crcbl-hal`, `crcbl-shell`, `crcbl-ui`
      and each backend reach only `crcbl-core`, `crcbl-console` and (for the
      shell) `crcbl-wl-scanner` inside the workspace.
-   - **Decided 2026-10-18 (asked by lyr): a leaf crate `crcbl-app`** for what a
-     windowed UI-only program needs and today finds only in the `crcbl`
-     umbrella, which links audio (cpal, ALSA on Linux), physics, networking and
-     the ECS: `GpuContext`, `GpuContextDesc`, `PendingGpuContext` and `GpuError`
-     (in `crates/crcbl/src/engine.rs`), the backend walk with its fall-through
-     (`crcbl::backend`) and the adapter pin (`crcbl::adapter`), `open_window`
-     and `wait_for_configure`, and `text_input::TextPump`. It depends on
-     `crcbl-core`, `crcbl-hal`, `crcbl-shell`, `crcbl-ui` and the GPU backends
-     only; the umbrella re-exports everything at its current path so the games
-     do not change. Declined: putting it in `crcbl-frame`, which is the render
+   - **`crcbl-app` (decided 2026-10-18, asked by lyr): the backend walk, the
+     adapter pin, window bring-up and `TextPump` are in; `GpuContext` is not.**
+     `crates/crcbl-app` holds `backend` (with its fall-through), `adapter`,
+     `window::{open_window, wait_for_configure, ConfigureError, CONFIGURE_TIMEOUT}`
+     and `text_input::TextPump`, and depends on `crcbl-core`, `crcbl-hal`,
+     `crcbl-shell`, `crcbl-ui` and the GPU backends only. The umbrella
+     re-exports each at its old path, and
+     `crcbl::engine::open_window(&Clock, ..)` is a wrapper passing the clock's
+     elapsed time. Declined: putting it in `crcbl-frame`, which is the render
      graph and the UI pass and stays usable offscreen without a window or a
-     backend. Without it lyr and pikr each re-implement the device, swapchain
-     and composite-alpha choice the engine already gets right. It also takes a
-     seam out of `engine.rs`, which is far past the size anyone can hold. L.
-     Planned for the next release (0.4.0, since the `ShellCaps::TEXT_IME`
-     meaning change on main is breaking); tell lyr and pikr when it lands, with
-     what their code changes to use it.
+     backend.
+     - **Left: `GpuContext`, `GpuContextDesc`, `PendingGpuContext` and
+       `GpuError`**, still in `crates/crcbl/src/engine.rs`. Without them lyr and
+       pikr each re-implement the device, swapchain and composite-alpha choice
+       the engine already gets right. Decided 2026-10-18: `GpuContext` splits
+       into a core presenter in `crcbl-app` (backend walk, adapter pin,
+       composite alpha, surface, swapchain, pacing, `acquire`,
+       `submit_and_present`, `resize`, `drain`, `destroy`) and the umbrella's
+       engine `GpuContext` wrapping it with the video settings,
+       `effect_request`, screenshots and the settings stack. Why it could not
+       move as it is, by what each piece reaches outside the allowed crates
+       (read in `engine.rs`):
+       - `GpuError::Graph` holds `crcbl_render::GraphError`.
+       - `FRAMES_IN_FLIGHT` is `crcbl_render::forward::FRAMES_IN_FLIGHT`.
+       - `effect_request`, `video_effects` and `antialiasing` return
+         `crcbl-render` types (`EffectRequest`, `RenderEffects`,
+         `Antialiasing`).
+       - `GpuContextDesc::settings` is a `SettingsSource`: it reads
+         `crcbl_store::settings` (and `crcbl-store` depends on `crcbl-net`),
+         calls `crate::settings`' readers, and its `audio_gains` speak
+         `crcbl-audio`'s mixer.
+       - The context keeps a `VideoSettings` (`crate::settings`), which holds
+         `crcbl-render` types and the engine's `FrameLimit`; `video` and
+         `frame_limit` read it, and `switch_pacing` returns
+         `crate::settings::Landed`.
+       - `--screenshot` rides inside `submit_and_present`, through
+         `crate::screenshot`'s readback helpers and `crcbl-golden`'s PNG
+         encoder.
+       - `crate::perf::PRESENT_WAIT_SPAN`, a string constant: it moves with the
+         presenter, and stays in `perf` until then.
+     - Open questions for that slice: what `GpuError::Graph` becomes (an API
+       change either way, fine in 0.4.0); whether the core desc takes resolved
+       pacing and present values instead of `SettingsSource`; keeping a
+       `FRAMES_IN_FLIGHT` in `crcbl-app` in step with `crcbl-render`'s (a
+       compile-time assertion in the umbrella); how a screenshot attaches to a
+       frame (an extra command buffer plus an after-present hook).
+     - Declined: allowing `crcbl-render` into `crcbl-app`. It would still leave
+       `crcbl-store` (and through it `crcbl-net`), `crcbl-audio`,
+       `crate::settings` and `crcbl-golden`.
+     - Planned for 0.4.0 (the `ShellCaps::TEXT_IME` meaning change on main is
+       breaking). Tell lyr and pikr when `GpuContext` lands, with what their
+       code changes to use it. L.
    - An example drawing `crcbl-ui` on a shell window through `GpuContext`, with
      no `PageBundle` (asked by lyr, 2026-10-18): `apps/bare` draws no UI, and
-     the UI frame lives in `PageBundle::frame`. Belongs in `crcbl-app` once it
-     exists, as its `examples/`. S.
+     the UI frame lives in `PageBundle::frame`. Belongs in `crcbl-app`'s
+     `examples/` directory once `GpuContext` is there (not cited as a path: it
+     does not exist yet). S.
 2. **The loop: done.** S6 (`Shell::waker`, `ShellWaker`), S19 and S25 are on
    main. CI on 5e669fc4 ran each backend's wake check: Wayland under sway, X11
    under Xvfb, the Win32 real-desktop job, the AppKit session and the Linux

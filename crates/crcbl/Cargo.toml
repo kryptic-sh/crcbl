@@ -12,16 +12,19 @@ rust-version.workspace = true
 # it must never grow logic of its own beyond engine-setup helpers (the rule is
 # recorded in `docs/notes/backends.md`).
 #
-# `crcbl-vk` IS a dependency, and is deliberately **not** re-exported. P1.1
-# added `src/backend.rs`, the GPU equivalent of `crcbl_shell::backend::open`:
-# something has to depend on the backends or "try Vulkan, fall back" cannot be
-# written at all, and topic 11's rule (`docs/notes/tooling.md`) is about
-# *samples* naming a backend, which `apps/sandbox` still does not. See that
-# module's docs for the full argument, including why this should move to
-# `crcbl-render` at P1.2. `log` and `thiserror` are the registry's own, and
-# nothing else here uses them.
+# The GPU backend registry — `crcbl::backend`, the equivalent of
+# `crcbl_shell::backend::open` — is `crcbl-app`'s, and that crate is the one
+# that depends on the backends: something has to, or "try Vulkan, fall back"
+# cannot be written at all, and topic 11's rule (`docs/notes/tooling.md`) is
+# about *samples* naming a backend, which `apps/sandbox` still does not. See
+# `crates/crcbl-app/src/backend.rs` for the full argument.
 [dependencies]
 crcbl-core = { workspace = true }
+# The backend walk, the adapter pin, window bring-up and `TextPump`, which a
+# UI-only program takes without the rest of this crate. Re-exported at the
+# paths they had here: `crcbl::backend`, `crcbl::adapter`,
+# `crcbl::text_input::TextPump` and `crcbl::engine::wait_for_configure`.
+crcbl-app = { workspace = true }
 # The console's vocabulary — `Kind`, `Value`, `Fault`, `Binding`, `Flags`. It is
 # `crcbl::settings`' dependency rather than the other way round: the catalogue's
 # domain **is** a `Kind`, and every catalogue key is a `Binding` the console
@@ -159,11 +162,9 @@ crcbl-webgpu = { workspace = true }
 # There is no Vulkan in a browser. `crcbl-vk` reaches `libvulkan.so.1` through
 # `ash`, which reaches it through `libloading` — a crate that does not compile
 # for `wasm32-unknown-unknown` at all, so an unconditional dependency here broke
-# the wasm build of everything that names the umbrella (P5.6). Per-target
-# dependency rather than a feature: the target is already known at build time,
-# and a feature that must be remembered is a feature that will be forgotten.
-# `src/backend.rs` gates the matching registry entry with the same `cfg`, so the
-# browser's table contains only backends that exist.
+# the wasm build of everything that names the umbrella (P5.6). The registry
+# entry is `crcbl-app`'s; `tests/windowed_e2e.rs` names `VkInstance` itself,
+# which is what this line is still here for. Deliberately **not** re-exported.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 crcbl-vk = { workspace = true }
 # The PNG encoder behind `crcbl::args::Common::screenshot` — `--screenshot
@@ -177,34 +178,6 @@ crcbl-vk = { workspace = true }
 # what the manifest note below used to be protecting — `crcbl-golden` reaching a
 # *shipped* binary — and a browser demo is the shipped binary here.
 crcbl-golden = { workspace = true }
-
-# Metal, and only where Metal exists. `crcbl-mtl` is `#[cfg(target_os =
-# "macos")]` from its crate root down and its `objc2-*` dependencies are pinned
-# to the same target, so naming it unconditionally would compile to nothing
-# everywhere else while still resolving the framework bindings; the per-target
-# line says what is true instead. Same shape and same reason as `crcbl-vk`
-# above, and `src/backend.rs` gates the matching registry entry with the same
-# `cfg`.
-#
-# This is the wire-up `docs/backlog.md`'s "What MTL1 left open" entry deferred:
-# it asked for the slice that gives the backend a device to hand back, and MTL2
-# through MTL6 landed the device, the swapchain, pipelines, bind groups and
-# draws. Registering it before that would have been a path that exists only to
-# fail; not registering it now is macOS with no GPU at all.
-[target.'cfg(target_os = "macos")'.dependencies]
-crcbl-mtl = { workspace = true }
-
-# Direct3D 12, and only where D3D12 exists. `crcbl-dx12` is `#[cfg(target_os =
-# "windows")]` from its crate root down and pins `windows` to the same target,
-# so the per-target line is the same shape and the same reason as `crcbl-mtl`
-# above, with `src/backend.rs` gating the matching registry entry identically.
-#
-# Unlike Metal, this one is registered *beside* an existing backend rather than
-# instead of nothing: Windows already reaches a GPU through `crcbl-vk`, so the
-# entry is deliberately not auto-selectable and `CRCBL_GPU=dx12` is what asks
-# for it. See `src/backend.rs`.
-[target.'cfg(target_os = "windows")'.dependencies]
-crcbl-dx12 = { workspace = true }
 
 # `crcbl-golden` is **also** a dev-dependency, and the duplicate is load-bearing
 # rather than sloppy: the normal dependency above is `cfg(not(wasm32))`, and the
@@ -463,7 +436,7 @@ steam = ["dep:crcbl-steam"]
 
 # THERE IS NO `webgpu` FEATURE ANY MORE, AND ITS ABSENCE IS THE POINT.
 #
-# It existed to pick which of two browser backends `src/backend.rs`
+# It existed to pick which of two browser backends `crcbl::backend`
 # auto-selected on `wasm32`, while `crcbl-webgpu` was taking over from
 # `crcbl-wgpu`. That crate was deleted on 2026-08-21, so a browser build has
 # exactly one GPU backend and there is nothing left to pick:

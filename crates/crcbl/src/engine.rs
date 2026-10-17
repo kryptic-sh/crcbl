@@ -154,9 +154,6 @@ pub use steam::SteamSource;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// How long to wait for the window to configure before giving up.
-pub const CONFIGURE_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// A fixed advisory idle for [`Shell::wait_events`], kept for games that
 /// already pass it.
 ///
@@ -4911,49 +4908,11 @@ pub enum Flow {
 // Window bring-up
 // ---------------------------------------------------------------------------
 
-/// Why [`wait_for_configure`] gave up.
-#[derive(Debug)]
-pub enum ConfigureError {
-    /// The shell refused a call.
-    Shell(ShellError),
-    /// No configure arrived within [`CONFIGURE_TIMEOUT`].
-    TimedOut,
-}
-
-impl std::fmt::Display for ConfigureError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Shell(error) => write!(f, "shell error: {error}"),
-            Self::TimedOut => write!(
-                f,
-                "the window system never configured the window within {}s, \
-                 so it never had a size",
-                CONFIGURE_TIMEOUT.as_secs()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ConfigureError {}
-
-impl From<ShellError> for ConfigureError {
-    fn from(error: ShellError) -> Self {
-        Self::Shell(error)
-    }
-}
+pub use crcbl_app::window::{CONFIGURE_TIMEOUT, ConfigureError, wait_for_configure};
 
 /// Logs the backend, puts the shell's event clock on the engine's, and creates
-/// the window.
-///
-/// The three lines every sample runs before the native and browser paths
-/// diverge over *how they wait* for the first configure. `desc` stays the
-/// caller's, because a title, an app id and a preferred size are the game's to
-/// choose and nothing here could guess them.
-///
-/// **The clock alignment is the load-bearing line**, and it is the one a game
-/// writing this by hand would omit: shell events carry their own timestamps, and
-/// a shell whose clock never met the engine's reports every event at an origin
-/// the loop cannot compare against its own.
+/// the window: [`crcbl_app::window::open_window`] with `clock_source`'s elapsed
+/// time, which is the whole of what it needs from the engine's clock.
 ///
 /// # Errors
 ///
@@ -4963,26 +4922,7 @@ pub fn open_window<S: Shell + ?Sized>(
     clock_source: &Clock,
     desc: &crcbl_shell::WindowDesc<'_>,
 ) -> Result<WindowId, ShellError> {
-    log::info!(
-        "shell: {} backend, caps {:?}",
-        shell.backend(),
-        shell.caps()
-    );
-    shell.align_event_clock(clock_source.elapsed());
-    shell.create_window(desc)
-}
-
-/// Reports the size a window first configured at.
-///
-/// **One place, because two paths report it and only one of them is checked.**
-/// The browser gate asserts this line by its exact text — `web/tools/
-/// browser-e2e.mjs` matches "the shell reported the canvas size" against it —
-/// and the browser reaches it through [`PolledBoot`], never through
-/// [`wait_for_configure`]. Every native sample used to carry its own copy of
-/// the `info!`, so the six that the gate does not run could have drifted from
-/// the one it does and nothing would have said so.
-fn log_first_configure(extent: (u32, u32)) {
-    log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+    crcbl_app::window::open_window(shell, clock_source.elapsed(), desc)
 }
 
 /// Opens the shell a run wants: the headless backend, or whatever this
@@ -5040,39 +4980,6 @@ pub const DEFAULT_WINDOW_SIZE: crcbl_shell::LogicalSize =
 #[must_use]
 pub fn requested_window_size(size: Option<crcbl_shell::PhysicalSize>) -> crcbl_shell::LogicalSize {
     size.map_or(DEFAULT_WINDOW_SIZE, |size| size.to_logical(1.0))
-}
-
-/// Pumps until `window` reports a size, and returns it.
-///
-/// A swapchain needs a size and an unconfigured window does not have one, so
-/// this is the gate between [`Shell::create_window`] and [`GpuContext::open`].
-/// Events observed while waiting are added to `events`.
-///
-/// # Errors
-///
-/// [`ConfigureError`] if the shell failed, or if no configure arrived within
-/// [`CONFIGURE_TIMEOUT`].
-pub fn wait_for_configure<S: Shell + ?Sized>(
-    shell: &mut S,
-    window: WindowId,
-    events: &mut u64,
-) -> Result<(u32, u32), ConfigureError> {
-    let started = MonotonicTime::new();
-    loop {
-        shell.pump(&mut |event| {
-            *events += 1;
-            log::debug!("shell event: {event:?}");
-        });
-        if let Some(size) = shell.window_state(window)?.size() {
-            let extent = (size.width, size.height);
-            log_first_configure(extent);
-            return Ok(extent);
-        }
-        if started.elapsed() >= CONFIGURE_TIMEOUT {
-            return Err(ConfigureError::TimedOut);
-        }
-        shell.wait_events(Some(Duration::from_millis(8)));
-    }
 }
 
 /// Answers a close request with "yes", and closes the window whether or not a
@@ -5334,7 +5241,7 @@ impl<S: Shell + ?Sized, G: PolledGpu> PolledBoot<S, G> {
                     self.stage = BootStage::Configure;
                     return Ok(None);
                 };
-                log_first_configure(extent);
+                crcbl_app::window::log_first_configure(extent);
                 // Left `Done` if this fails, so a failed start-up stays failed
                 // rather than requesting a second device next frame.
                 // Taken after the extent check, not before: the arm above

@@ -539,7 +539,7 @@ jobs:
           crcbl-font --target x86_64-unknown-freebsd -- -D warnings
       - run: >-
           cargo clippy --locked --all-features -p crcbl-ui -p crcbl-frame -p
-          crcbl-vk --target x86_64-unknown-freebsd -- -D warnings
+          crcbl-vk -p crcbl-app --target x86_64-unknown-freebsd -- -D warnings
 
   # The one job in this file that builds a *worker-capable* wasm artifact, and
   # the reason it did not exist until now is a rustup component: `web/build.sh
