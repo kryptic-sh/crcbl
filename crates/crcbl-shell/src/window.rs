@@ -302,8 +302,10 @@ pub struct WindowDesc<'a> {
     ///    asks for `CompositeAlpha::PreMultiplied`, and refuses the open
     ///    (`GpuError::Unusable`) when no adapter's surface offers it rather
     ///    than drawing the window opaque. On Windows only the D3D12 backend
-    ///    can present it; Vulkan refuses the surface. A swapchain built by
-    ///    hand asks for premultiplied itself.
+    ///    can present it: Vulkan refuses the surface, and an open that named
+    ///    no backend moves on to D3D12, while one that named Vulkan fails
+    ///    with that refusal. A swapchain built by hand asks for premultiplied
+    ///    itself.
     /// 3. **The frame.** Premultiplied colour, with alpha below one where the
     ///    desktop should show. A forward renderer view with
     ///    `ViewBackground::Transparent` clears to transparent black and writes

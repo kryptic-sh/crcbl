@@ -324,6 +324,58 @@ impl From<crcbl_render::GraphError> for GpuError {
     }
 }
 
+/// Why [`GpuContext::start_device`] started no device.
+///
+/// A [`GpuError`] with one refusal told apart: the backend's `create_surface`
+/// answering [`HalError::Unsupported`], which says this backend cannot present
+/// to the window at all (Vulkan and a transparent Win32 window). An unpinned
+/// open answers that one by trying the next backend, through
+/// [`PendingInstance::fall_through`](crate::backend::PendingInstance::fall_through);
+/// everything else ends the open.
+#[derive(Debug)]
+enum StartRefusal {
+    /// `create_surface` refused the target as unsupported.
+    Surface(HalError),
+    /// Anything else.
+    Failed(GpuError),
+}
+
+impl core::fmt::Display for StartRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Surface(error) => write!(f, "{error}"),
+            Self::Failed(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl From<StartRefusal> for GpuError {
+    fn from(refusal: StartRefusal) -> Self {
+        match refusal {
+            StartRefusal::Surface(error) => Self::Hal(error),
+            StartRefusal::Failed(error) => error,
+        }
+    }
+}
+
+impl From<GpuError> for StartRefusal {
+    fn from(error: GpuError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<HalError> for StartRefusal {
+    fn from(error: HalError) -> Self {
+        Self::Failed(error.into())
+    }
+}
+
+impl From<crate::adapter::PinMiss> for StartRefusal {
+    fn from(error: crate::adapter::PinMiss) -> Self {
+        Self::Failed(error.into())
+    }
+}
+
 /// Anything that can stop a loop, plus whatever the game itself refuses.
 ///
 /// Every sample had its own copy of this enum with the same five loop variants
@@ -1339,7 +1391,21 @@ impl PendingGpuContext {
                     // The stage is left `Done` if this fails, which is what
                     // makes a failed open stay failed rather than retrying a
                     // half-built context on the next frame.
-                    self.stage = GpuContext::start_device(instance, self)?;
+                    let backend = instance.backend();
+                    match GpuContext::start_device(instance, self) {
+                        Ok(stage) => self.stage = stage,
+                        Err(StartRefusal::Surface(error)) if pending.fall_through(&error) => {
+                            // Never silent: which backend a window ended up
+                            // on, and why not the first, is the question a
+                            // bug report starts with.
+                            log::info!(
+                                "hal: the {backend} backend cannot present to this {} window                                  ({error}); trying the next backend",
+                                self.target.platform_name()
+                            );
+                            self.stage = OpenStage::Instance(pending);
+                        }
+                        Err(refusal) => return Err(refusal.into()),
+                    }
                 }
                 OpenStage::Device {
                     instance,
@@ -1573,11 +1639,11 @@ impl GpuContext {
     fn start_device(
         instance: Box<dyn Instance>,
         open: &PendingGpuContext,
-    ) -> Result<OpenStage, GpuError> {
+    ) -> Result<OpenStage, StartRefusal> {
         let (target, extent, label, pacing) = (&open.target, open.extent, &open.label, open.pacing);
         let adapters = instance.adapters();
         if adapters.is_empty() {
-            return Err(GpuError::Unusable("no adapter"));
+            return Err(GpuError::Unusable("no adapter").into());
         }
         // Resolved before the surface exists, so a pin that names nothing here
         // leaves nothing to tear down.
@@ -1591,7 +1657,11 @@ impl GpuContext {
         // therefore the window, alive until after `destroy`, which tears the
         // swapchain and surface down first. This is the whole
         // `Instance::create_surface` contract.
-        let surface = unsafe { instance.create_surface(target) }?;
+        let surface = match unsafe { instance.create_surface(target) } {
+            Ok(surface) => surface,
+            Err(error @ HalError::Unsupported { .. }) => return Err(StartRefusal::Surface(error)),
+            Err(error) => return Err(error.into()),
+        };
 
         // **Adapter selection is surface-aware, and has to be.** P1.1 found a
         // discrete radv GPU that enumerates first, is Tier A, and *cannot
@@ -1639,7 +1709,7 @@ impl GpuContext {
         }
         let Some((adapter, caps, composite_alpha)) = chosen else {
             instance.destroy_surface(surface);
-            return Err(match (pin, candidates, last_error) {
+            return Err(StartRefusal::Failed(match (pin, candidates, last_error) {
                 (Some(pin), [pinned], error) => {
                     let reason = match error {
                         Some(error) => error.to_string(),
@@ -1662,7 +1732,7 @@ impl GpuContext {
                 _ if alpha_refused => GpuError::Unusable(NO_PREMULTIPLIED_ALPHA),
                 (_, _, Some(error)) => error.into(),
                 (_, _, None) => GpuError::Unusable("no adapter can present to this window"),
-            });
+            }));
         };
         let why = match pin {
             Some(pin) => format!("pinned by {ADAPTER_ENV_VAR}={}", pin.trim()),
@@ -8905,6 +8975,9 @@ mod tests {
 
     mod ui_scale;
 
+    // The backend walk past a backend that refuses the window.
+    mod backend_walk;
+
     // The Steam limb's checks, which run on this module's fixture.
 
     #[cfg(all(
@@ -12254,7 +12327,7 @@ mod tests {
         let (_shell, pending) = adapter_walk_request(adapter_pin);
         match GpuContext::start_device(Box::new(instance), &pending) {
             Ok(_) => panic!("nothing could serve this surface, so start-up must not have"),
-            Err(error) => error,
+            Err(error) => error.into(),
         }
     }
 

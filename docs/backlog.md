@@ -57,16 +57,23 @@ backend's caps, the e2e tests and which CI jobs run them (main 4d48eaf4, run
    - Documented degradations no cap reports: Win32 `PanelLayer::Overlay` shares
      `Top`'s band, Wayland's `work_area` is the output's bounds, X11's wheel
      arrives in lines only.
-2. **Decided 2026-10-17, transparency on Windows:** a transparent Win32 window
-   opened through `GpuContext` should go to D3D12 rather than fail with Vulkan's
-   refusal, since Windows tries Vulkan first and `start_device` passes the
-   `create_surface` error up instead of trying the next backend (today it needs
-   `CRCBL_GPU=dx12`). S. Declined: presenting Vulkan through DirectComposition
-   by exporting its image (`VK_KHR_external_memory_win32`) into a D3D12
-   composition swapchain with shared fences — L, a second device API to keep
-   right, and nothing gained while D3D12 is there on every Windows machine.
-   Vulkan's own swapchain has no composition mode and Windows drivers offer only
-   opaque alpha for an `HWND` surface, so its refusal stays.
+2. **Decided 2026-10-17, transparency on Windows, built the same day:** a
+   transparent Win32 window opened through `GpuContext` with no backend named
+   goes to D3D12. When a backend's `create_surface` refuses the target with
+   `HalError::Unsupported`, `PendingGpuContext::poll` asks
+   `PendingInstance::fall_through` for the next automatic backend and logs which
+   refused and why; a backend named by `CRCBL_GPU` or `GpuContextDesc::backend`
+   stops there with its refusal, and a refusal of any other kind ends the open.
+   Decided over ordering the table by target, because it also covers any later
+   per-target refusal (a missing surface extension falls through the same way).
+   Verified with the null backend (`engine::tests::backend_walk`); a real
+   transparent window through Vulkan-then-D3D12 is not run here. Declined:
+   presenting Vulkan through DirectComposition by exporting its image
+   (`VK_KHR_external_memory_win32`) into a D3D12 composition swapchain with
+   shared fences — L, a second device API to keep right, and nothing gained
+   while D3D12 is there on every Windows machine. Vulkan's own swapchain has no
+   composition mode and Windows drivers offer only opaque alpha for an `HWND`
+   surface, so its refusal stays.
 3. **Refused today, to build:** S14 accessibility through AT-SPI on Wayland and
    X11 (`accesskit_unix`, which brings `zbus`; AccessKit itself was approved
    2026-10-16, so whether the approval covers `zbus` is the owner's to confirm)
