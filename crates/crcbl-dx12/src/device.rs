@@ -1674,6 +1674,16 @@ impl Dx12Device {
                 record.info.name
             ))
         })?;
+        // This device holds its adapter's D3D12 device now, so enumeration's
+        // probes can go, the chosen adapter's included; see
+        // `AdapterRecord::probe`.
+        for record in &instance.adapters {
+            record
+                .probe
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
         // Says whether this device's validation messages can be read back at
         // all, and drops whatever the info queue already held so a later
         // failure reports its own messages rather than the process's.

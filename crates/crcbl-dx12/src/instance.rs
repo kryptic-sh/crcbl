@@ -10,6 +10,7 @@ use crcbl_hal::{
     PendingDevice, SurfaceCaps, SurfaceHandle, SurfaceTarget,
 };
 use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_ADAPTER_DESC1, DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_NOT_FOUND,
     DXGI_FEATURE_PRESENT_ALLOW_TEARING, IDXGIAdapter1, IDXGIFactory4, IDXGIFactory5,
@@ -60,6 +61,19 @@ pub(crate) struct AdapterRecord {
     pub(crate) info: AdapterInfo,
     pub(crate) raw: RawCaps,
     pub(crate) adapter: IDXGIAdapter1,
+    /// The device enumeration opened to describe this adapter, held until any
+    /// device is opened on this instance and then released, every adapter's
+    /// at once.
+    ///
+    /// Held because D3D12 keeps one device per adapter and feature level while
+    /// one is alive, and hands that same device to the next
+    /// `D3D12CreateDevice`: dropping the probe made [`Dx12Device::open`] pay for
+    /// the driver's whole device creation a second time (measured at a
+    /// quarter of a second on a discrete GPU). Released at the first open
+    /// rather than kept, because a live device on an adapter the program did
+    /// not choose holds that GPU awake, which on a laptop with two is the
+    /// discrete one's power draw for nothing.
+    pub(crate) probe: Mutex<Option<ID3D12Device>>,
 }
 
 impl AdapterRecord {
@@ -374,7 +388,8 @@ impl Dx12Instance {
         // would name the wrong adapter.
         let mut next_id = 0u32;
         for (raw_adapter, desc) in candidates(&factory) {
-            let Some((info, raw)) = adapter::describe(AdapterId(next_id), &raw_adapter, &desc)
+            let Some((info, raw, probe)) =
+                adapter::describe(AdapterId(next_id), &raw_adapter, &desc)
             else {
                 continue;
             };
@@ -382,6 +397,7 @@ impl Dx12Instance {
                 info,
                 raw,
                 adapter: raw_adapter,
+                probe: Mutex::new(Some(probe)),
             };
             // The measurement, emitted by the backend itself rather than only by
             // its tests: an application with a logger installed gets the line
@@ -954,6 +970,40 @@ pub(crate) mod tests {
             .map(AdapterRecord::report)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Every adapter's probe device is held from enumeration until a device
+    /// is opened, and every adapter's is released then, the chosen one's
+    /// included. Red when the probe is dropped during enumeration again (the
+    /// open pays for a second driver device creation) or kept after the open
+    /// (an adapter nobody chose is held awake).
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn enumeration_holds_each_probe_device_until_the_first_open() {
+        let instance = open();
+        let held = |instance: &Dx12Instance| -> Vec<bool> {
+            instance
+                .records()
+                .iter()
+                .map(|record| {
+                    record
+                        .probe
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_some()
+                })
+                .collect()
+        };
+        let before = held(&instance);
+        assert!(!before.is_empty(), "no adapter to hold a probe for");
+        assert!(before.iter().all(|&held| held), "{before:?}");
+
+        let device = instance
+            .open_device(&desc(pinned_adapter(&instance)))
+            .unwrap_or_else(|error| panic!("{error}\n{}", report_all(&instance)));
+        let after = held(&instance);
+        assert!(after.iter().all(|&held| !held), "{after:?}");
+        drop(device);
     }
 
     #[test]

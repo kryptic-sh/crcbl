@@ -31,6 +31,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-dx12` opens its first device without creating it twice.** The device
+  `Dx12Instance::open` creates on each adapter to read its caps is now held
+  until a device is opened, so `create_device` gets the one D3D12 already holds
+  for that adapter, and every adapter's is released then. Measured on an RX 7900
+  XTX with an iGPU beside it, warm: `create_device` went from about 190–225 ms
+  to about 11–14 ms, and the open as a whole from about 0.6–0.7 s to about 0.4
+  s.
 - **Wayland applies cursor shapes through `cursor-shape-v1`** where the
   compositor offers it, and the compositor draws the user's own themed cursor.
   `set_cursor(window, Some(shape))` used to be recorded and never applied there;

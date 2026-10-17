@@ -1,9 +1,10 @@
 //! One D3D12 adapter, described in the seam's vocabulary.
 //!
 //! Everything here is a **read**: each function asks DXGI or D3D12 a question
-//! and turns the answer into [`AdapterInfo`] / [`DeviceCaps`]. Nothing is kept —
-//! the `ID3D12Device` opened to ask the questions is dropped before this module
-//! returns.
+//! and turns the answer into [`AdapterInfo`] / [`DeviceCaps`]. The
+//! `ID3D12Device` opened to ask the questions is handed back with the answers,
+//! for the instance to hold until a device is opened; see
+//! `AdapterRecord::probe` for why.
 //!
 //! # D3D12 has no adapter-level capability query, and that shapes this module
 //!
@@ -857,11 +858,11 @@ fn limits_of(features: Features) -> Limits {
     }
 }
 
-/// Everything one D3D12 adapter says about itself, or `None` if D3D12 will not
-/// open it.
+/// Everything one D3D12 adapter says about itself, and the device it was asked
+/// through, or `None` if D3D12 will not open it.
 ///
-/// The `ID3D12Device` created here exists only for the duration of the call. It
-/// is created at [`D3D_FEATURE_LEVEL_11_0`] — D3D12's floor — on purpose:
+/// The `ID3D12Device` is created at [`D3D_FEATURE_LEVEL_11_0`] — D3D12's floor —
+/// on purpose:
 /// asking for a higher level would silently drop adapters from the enumeration,
 /// and which tier a device can run is decided by [`Features`], never by the
 /// feature level it was opened at.
@@ -869,7 +870,7 @@ pub(crate) fn describe(
     id: AdapterId,
     adapter: &IDXGIAdapter1,
     desc: &DXGI_ADAPTER_DESC1,
-) -> Option<(AdapterInfo, RawCaps)> {
+) -> Option<(AdapterInfo, RawCaps, ID3D12Device)> {
     let mut device: Option<ID3D12Device> = None;
     // SAFETY: `adapter` is a live `IDXGIAdapter1` this crate owns a reference
     // to, and `device` is a live `Option<ID3D12Device>` the call writes through.
@@ -944,7 +945,7 @@ pub(crate) fn describe(
             limits: limits_of(features),
         },
     };
-    Some((info, raw))
+    Some((info, raw, device))
 }
 
 #[cfg(test)]

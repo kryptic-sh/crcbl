@@ -1071,13 +1071,19 @@ Each step lands in the crate the later steps build on, so the seam goes first.
       0.79 to 0.99 s. `Dx12Instance::open` spends about 306 ms on the RX 7900
       XTX, 272 ms on the iGPU and 15 ms on WARP, each a `D3D12CreateDevice`
       inside `adapter::describe` that is dropped again, and `create_device` then
-      spends about 257 ms creating the same adapter's device a second time.
-      Planned, keeping the seam's promise that caps are known before a device
-      exists: describe the adapters on parallel threads, and keep each probe's
-      `ID3D12Device` in its `AdapterRecord` so `Dx12Device::open`'s
-      `D3D12CreateDevice` finds the device D3D12 already holds for that adapter
-      (a device is a singleton per adapter and feature level while one is
-      alive). Measure before and after on this machine (also an RX 7900 XTX).
+      spends about 257 ms creating the same adapter's device a second time. Done
+      2026-10-18 for the second creation: each probe's `ID3D12Device` is held in
+      its `AdapterRecord` until the first device is opened, so `create_device`
+      dropped to about 12 ms here (an RX 7900 XTX, an iGPU and WARP), and the
+      whole open to about 0.4 s. What is left is one driver device creation per
+      hardware adapter inside `Dx12Instance::open`, about 0.2 s each here. Tried
+      and dropped: describing the adapters on parallel threads, which saved
+      nothing measurable (the open took the same 0.36 to 0.42 s either way, so
+      D3D12 serialises device creation), and DRED, which is not the cost (the
+      open measured the same without `dred::enable`). The remaining option is a
+      seam change: describe adapters lazily, in preference order, and stop at
+      the first that serves, which breaks `Instance::adapters`' promise that
+      every adapter's caps are known before a device exists. Not decided.
     - S26, checked 2026-10-15. With no usable GPU, `crcbl::backend::open`
       returns `GpuError::NoBackend` naming every backend it tried and the last
       error, not a panic, and never falls to the Null backend. Windows now falls
