@@ -41,6 +41,9 @@
 //! * [`trig`] — [`sin`](trig::sin) and [`cos`](trig::cos) in `f64`, built
 //!   from operations IEEE-754 pins down so a simulation that calls them reaches
 //!   the same bits on every target. No platform `libm`; see the module docs.
+//! * [`hash`] — FNV-1a ([`fnv1a_32`](hash::fnv1a_32),
+//!   [`fnv1a_64`](hash::fnv1a_64) and the [`Fnv1a64`](hash::Fnv1a64) hasher),
+//!   for ids and digests that must be the same on every target and run.
 //! * [`surface`] — [`SurfaceTarget`], the native window handles the shell
 //!   produces and a HAL backend consumes. It lives here, and not in either of
 //!   those crates, because neither may depend on the other; see the module docs
@@ -49,6 +52,7 @@
 pub mod alloc;
 pub mod bounds;
 pub mod handle;
+pub mod hash;
 pub mod input;
 pub mod log;
 pub mod logarithm;

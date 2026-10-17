@@ -613,19 +613,8 @@ fn a_hard_landing_raises_a_kinetic_contact_with_its_impulse_and_energy() {
 
 /// A pile of balls poured into a box, hashed.
 fn pour(ticks: u32) -> u64 {
-    use std::hash::Hasher;
-    struct Fnv(u64);
-    impl Hasher for Fnv {
-        fn finish(&self) -> u64 {
-            self.0
-        }
-        fn write(&mut self, bytes: &[u8]) {
-            for byte in bytes {
-                self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        }
-    }
     use crcbl_ecs::SystemTrait as _;
+    use std::hash::Hasher;
 
     let mut phys = system(true);
     let material = SurfaceMaterial::new(0.4, 0.3);
@@ -654,7 +643,7 @@ fn pour(ticks: u32) -> u64 {
         }
         phys.step(DT);
     }
-    let mut hasher = Fnv(0xcbf2_9ce4_8422_2325);
+    let mut hasher = crcbl_core::hash::Fnv1a64::new();
     phys.hash_state(&mut hasher);
     hasher.finish()
 }

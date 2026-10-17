@@ -412,26 +412,11 @@ fn a_scene_with_sweeps_hashes_the_same_twice() {
             phys.step(DT);
             hits += phys.contact_counters().sweep_hits;
         }
-        let mut hasher = Fnv(0xcbf2_9ce4_8422_2325);
+        let mut hasher = crcbl_core::hash::Fnv1a64::new();
         phys.hash_state(&mut hasher);
-        (hasher.0, hits)
+        (std::hash::Hasher::finish(&hasher), hits)
     };
     let (first, hits) = run();
     assert!(hits >= 3, "the sweeps stopped {hits} bodies");
     assert_eq!(run(), (first, hits), "two runs disagreed");
-}
-
-/// FNV-1a, for a digest that means the same in every build.
-struct Fnv(u64);
-
-impl std::hash::Hasher for Fnv {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
 }

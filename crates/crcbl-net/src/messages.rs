@@ -111,18 +111,11 @@ pub struct SystemSnapshot {
 /// Derived from the name rather than the schedule position, because the
 /// position changes whenever a system is registered or removed and the client
 /// would then apply one system's blobs into another's baseline without any
-/// error. FNV-1a: short, stable across builds and platforms, and adequate for
+/// error. FNV-1a ([`crcbl_core::hash::fnv1a_32`]): short, stable across builds and platforms, and adequate for
 /// an identifier space the server also checks for collisions.
 #[must_use]
 pub fn replicated_system_id(name: &str) -> u32 {
-    const OFFSET_BASIS: u32 = 0x811c_9dc5;
-    const PRIME: u32 = 0x0100_0193;
-    let mut hash = OFFSET_BASIS;
-    for byte in name.as_bytes() {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(PRIME);
-    }
-    hash
+    crcbl_core::hash::fnv1a_32(name.as_bytes())
 }
 
 // ── Session end ───────────────────────────────────────────────────────────────

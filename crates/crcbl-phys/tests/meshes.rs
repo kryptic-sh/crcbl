@@ -699,9 +699,9 @@ fn a_mesh_scene_hashes_the_same_twice() {
             phys.step(DT);
             points += phys.contact_counters().points;
         }
-        let mut hasher = Fnv(0xcbf2_9ce4_8422_2325);
+        let mut hasher = crcbl_core::hash::Fnv1a64::new();
         phys.hash_state(&mut hasher);
-        (hasher.0, points)
+        (std::hash::Hasher::finish(&hasher), points)
     };
     let (first, points) = run();
     assert!(points > 0);
@@ -823,19 +823,4 @@ fn the_cost_of_a_sizable_mesh() {
         "10000 rays down at it: {:.2} µs a ray",
         rays / 10_000.0 * 1e6
     );
-}
-
-/// FNV-1a, for a digest that means the same in every build.
-struct Fnv(u64);
-
-impl std::hash::Hasher for Fnv {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 = (self.0 ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
 }

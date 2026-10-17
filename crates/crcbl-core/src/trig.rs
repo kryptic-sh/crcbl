@@ -775,18 +775,14 @@ mod tests {
 
     /// FNV-1a over the bits of both functions at every sampled argument.
     fn digest() -> u64 {
-        /// FNV-1a's 64-bit offset basis and prime.
-        const BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-        const PRIME: u64 = 0x0000_0100_0000_01b3;
-        let mut hash = BASIS;
+        use core::hash::Hasher;
+        let mut hash = crate::hash::Fnv1a64::new();
         for_each_sampled_argument(|x| {
             for value in [sin(x), cos(x)] {
-                for byte in value.to_bits().to_le_bytes() {
-                    hash = (hash ^ u64::from(byte)).wrapping_mul(PRIME);
-                }
+                hash.write(&value.to_bits().to_le_bytes());
             }
         });
-        hash
+        hash.finish()
     }
 
     /// **The same bits on every run and every target.**

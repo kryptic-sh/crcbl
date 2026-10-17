@@ -185,12 +185,13 @@ impl Catalog {
     ///
     /// [`ItemId`] is a position and moves when the file is edited, so a save
     /// writes this instead and reads it back through [`by_key`](Self::by_key).
-    /// FNV-1a because it is four lines, because it is defined over bytes rather
+    /// FNV-1a ([`crcbl_core::hash`]) because it is defined over bytes rather
     /// than over a `Hasher` whose output Rust does not promise across releases,
     /// and because a collision costs an item, not a security property.
     #[must_use]
     pub fn key(&self, id: ItemId) -> Option<u32> {
-        self.get(id).map(|item| fnv1a(&item.name))
+        self.get(id)
+            .map(|item| crcbl_core::hash::fnv1a_32(item.name.as_bytes()))
     }
 
     /// The item whose [`key`](Self::key) is `key`.
@@ -198,7 +199,7 @@ impl Catalog {
     pub fn by_key(&self, key: u32) -> Option<ItemId> {
         self.items
             .iter()
-            .position(|item| fnv1a(&item.name) == key)
+            .position(|item| crcbl_core::hash::fnv1a_32(item.name.as_bytes()) == key)
             .and_then(|index| u16::try_from(index).ok())
             .map(ItemId)
     }
@@ -222,17 +223,6 @@ impl Catalog {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
-}
-
-/// The FNV-1a 32-bit hash of `text`, as the reference implementation defines
-/// it: offset basis `0x811c9dc5`, prime `0x01000193`, one byte at a time.
-fn fnv1a(text: &str) -> u32 {
-    let mut hash: u32 = 0x811c_9dc5;
-    for byte in text.as_bytes() {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    hash
 }
 
 /// What a catalogue looks like on disk, which is deliberately not what it looks
@@ -477,13 +467,7 @@ mod tests {
         assert_eq!(edited.by_key(key), Some(moved));
         assert_eq!(edited.by_key(key.wrapping_add(1)), None);
 
-        assert_eq!(fnv1a(""), 0x811c_9dc5, "the FNV-1a offset basis");
-        assert_eq!(fnv1a("a"), 0xe40c_292c, "the reference vector for \"a\"");
-        assert_eq!(
-            fnv1a("foobar"),
-            0xbf9c_f968,
-            "the reference vector for \"foobar\""
-        );
+        assert_eq!(key, 0x8d7a_7c20, "saves hold FNV-1a of the name");
     }
 
     /// **A file this build cannot stand behind is refused with a position.** A

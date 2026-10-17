@@ -61,6 +61,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`font::cluster`**: the cluster rule — a base and its combining marks,
   variation selectors, a ZWJ and the char it joins, skin-tone modifiers, tags
   and regional-indicator pairs — with `clusters` and `caret_stops`.
+- **`crcbl::core::hash`**: FNV-1a over bytes as `fnv1a_32` and `fnv1a_64`
+  (`const fn`s), and `Fnv1a64`, the 64-bit hash as a `Hasher`, for ids and
+  digests that must be the same on every target, toolchain and run, which a
+  `std` hasher does not promise. `crcbl-net`'s `replicated_system_id` and
+  `crcbl-inventory`'s `Catalog::key` now hash through it; their values are
+  unchanged.
 
 ### Changed
 

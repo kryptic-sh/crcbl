@@ -322,19 +322,16 @@ bfe052da205cf5e7 bfe6d5aa2708e569";
     /// scaling, which IEEE-754 makes exact, so the arguments are the same on
     /// every target as well as the outputs.
     fn digest() -> u64 {
-        const BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-        const PRIME: u64 = 0x0000_0100_0000_01b3;
-        let mut hash = BASIS;
+        use core::hash::Hasher;
+        let mut hash = crate::hash::Fnv1a64::new();
         let mut magnitude = 1e30_f64;
         while magnitude > 1e-30 {
             for x in [magnitude, -magnitude.min(0.999_999), magnitude * 0.7] {
-                for byte in ln_1p(x).to_bits().to_le_bytes() {
-                    hash = (hash ^ u64::from(byte)).wrapping_mul(PRIME);
-                }
+                hash.write(&ln_1p(x).to_bits().to_le_bytes());
             }
             magnitude *= 0.999;
         }
-        hash
+        hash.finish()
     }
 
     /// **The same bits on every target.** CI runs this on x86-64 Linux and
