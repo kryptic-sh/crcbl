@@ -164,7 +164,7 @@ pub(crate) enum SurfaceKind {
         layer: Retained<CAMetalLayer>,
         /// [`SurfaceTarget::AppKit`]'s `transparent`: the shell made this
         /// layer non-opaque, so the surface offers premultiplied alpha. See
-        /// [`alpha`](crate::alpha).
+        /// [`alpha`].
         transparent: bool,
     },
     /// No window system at all.
