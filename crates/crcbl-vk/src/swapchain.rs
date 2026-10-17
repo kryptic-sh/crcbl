@@ -153,12 +153,39 @@ pub(crate) fn check_swapchain_format(
     format: Format,
     offered: &[Format],
 ) -> Result<(), SurfaceError> {
-    if offered.contains(&format) {
+    check_offered("format", format, offered)
+}
+
+/// Holds [`SwapchainDesc::composite_alpha`] to the modes the surface offers.
+///
+/// The same rule as [`check_swapchain_format`], for the same reason: a mode
+/// outside `supportedCompositeAlpha` is
+/// `VUID-VkSwapchainCreateInfoKHR-compositeAlpha-01280`, which a release driver
+/// need not report, so a caller asking a Windows `HWND` surface (opaque only)
+/// for `PreMultiplied` got a swapchain that silently composited opaquely.
+/// `crcbl-dx12` and `crcbl-mtl` refuse the same descriptor. `offered` is what
+/// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) reports for
+/// the surface, so a caller picking from that list is never refused.
+pub(crate) fn check_swapchain_composite_alpha(
+    alpha: CompositeAlpha,
+    offered: &[CompositeAlpha],
+) -> Result<(), SurfaceError> {
+    check_offered("composite_alpha", alpha, offered)
+}
+
+/// The refusal both descriptor checks above share: `field` of
+/// [`SwapchainDesc`] named a value its [`SurfaceCaps`] list does not hold.
+fn check_offered<T: PartialEq + core::fmt::Debug>(
+    field: &str,
+    value: T,
+    offered: &[T],
+) -> Result<(), SurfaceError> {
+    if offered.contains(&value) {
         return Ok(());
     }
     Err(SurfaceError::Hal(HalError::InvalidDescriptor(format!(
-        "SwapchainDesc::format is {format:?}, which this surface does not offer; \
-         SurfaceCaps::formats has {offered:?}"
+        "SwapchainDesc::{field} is {value:?}, which this surface does not offer; \
+         SurfaceCaps::{field} has {offered:?}"
     ))))
 }
 
@@ -454,6 +481,45 @@ mod tests {
         // message with only the first leaves the caller guessing.
         assert!(message.contains("D32Float"), "{message}");
         assert!(message.contains("Rgba8UnormSrgb"), "{message}");
+    }
+
+    /// [`check_swapchain_composite_alpha`], which the WSI path holds to the
+    /// surface's `supportedCompositeAlpha` and the offscreen ring to its own
+    /// opaque-only list. The WSI call site needs a window no headless test
+    /// has, so the refusal's wording is held here.
+    #[test]
+    fn a_composite_alpha_the_surface_does_not_offer_is_refused_by_name() {
+        let offered = crate::instance::surface_composite_alpha(
+            vk::CompositeAlphaFlagsKHR::OPAQUE | vk::CompositeAlphaFlagsKHR::INHERIT,
+        );
+
+        check_swapchain_composite_alpha(CompositeAlpha::Inherit, &offered)
+            .expect("a mode on the list is what the list is for");
+
+        let error = check_swapchain_composite_alpha(CompositeAlpha::PreMultiplied, &offered)
+            .expect_err("this surface composites opaquely or as the platform says");
+        let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = error else {
+            panic!("the wrong kind of error: {error}");
+        };
+        assert!(message.contains("composite_alpha"), "{message}");
+        assert!(message.contains("PreMultiplied"), "{message}");
+        assert!(message.contains("Inherit"), "{message}");
+
+        // The offscreen ring offers exactly what its caps say, and nothing
+        // composites a ring.
+        let ring = offscreen_surface_caps().composite_alpha;
+        check_swapchain_composite_alpha(CompositeAlpha::Opaque, &ring)
+            .expect("the ring's own offer");
+        for refused in [
+            CompositeAlpha::PreMultiplied,
+            CompositeAlpha::PostMultiplied,
+            CompositeAlpha::Inherit,
+        ] {
+            assert!(
+                check_swapchain_composite_alpha(refused, &ring).is_err(),
+                "{refused:?} on the offscreen ring"
+            );
+        }
     }
 
     /// A `SwapchainEntry` with nothing in it but the fields the present-id

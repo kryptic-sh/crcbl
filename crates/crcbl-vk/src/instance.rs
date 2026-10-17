@@ -1071,6 +1071,24 @@ impl crcbl_hal::PendingDevice for VkPendingDevice {
     }
 }
 
+/// The seam's composite-alpha list for a surface, from its
+/// `supportedCompositeAlpha`.
+///
+/// Split out of [`build_surface_caps`] for the reason [`surface_formats`] is:
+/// `build_swapchain` holds `SwapchainDesc::composite_alpha` to this same list.
+/// A driver offering no mode at all still gets `Opaque`, which every surface
+/// composites with in practice and the seam's callers default to.
+#[must_use]
+pub(crate) fn surface_composite_alpha(
+    supported: vk::CompositeAlphaFlagsKHR,
+) -> Vec<CompositeAlpha> {
+    let mut alpha = conv::composite_alpha_from_vk(supported);
+    if alpha.is_empty() {
+        alpha.push(CompositeAlpha::Opaque);
+    }
+    alpha
+}
+
 /// The seam's format list for a surface, from what `vkGetPhysicalDeviceSurface\
 /// FormatsKHR` reported.
 ///
@@ -1143,15 +1161,10 @@ pub(crate) fn build_surface_caps(
         modes.insert(0, PresentMode::Fifo);
     }
 
-    let mut alpha = conv::composite_alpha_from_vk(capabilities.supported_composite_alpha);
-    if alpha.is_empty() {
-        alpha.push(CompositeAlpha::Opaque);
-    }
-
     SurfaceCaps {
         formats: mapped,
         present_modes: modes,
-        composite_alpha: alpha,
+        composite_alpha: surface_composite_alpha(capabilities.supported_composite_alpha),
         min_image_count: capabilities.min_image_count,
         max_image_count: if capabilities.max_image_count == 0 {
             // Vulkan's "unlimited". The seam wants a number; anything a caller

@@ -13,6 +13,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Changed
+
+- **`crcbl-vk` refuses a `SwapchainDesc::composite_alpha` the surface does not
+  offer** with `HalError::InvalidDescriptor` naming the mode and the surface's
+  list, on `create_swapchain` and `reconfigure_swapchain`, as `crcbl-dx12` and
+  `crcbl-mtl` already did. It used to pass the mode to `vkCreateSwapchainKHR`
+  unchecked, so asking an opaque-only surface (an `HWND` on Windows drivers, the
+  offscreen ring) for `PreMultiplied` succeeded and composited opaquely. Pick
+  the mode from `Instance::surface_caps`' `composite_alpha`.
+
 ## [0.3.0] - 2026-10-17
 
 ### Breaking
