@@ -705,40 +705,43 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      skin-tone modifiers, tags, regional-indicator pairs; a space or control
      char always alone), gives each cluster the first face whose cmap maps all
      of it (`fallback::cluster_face`; selectors and joiners not counted, VS15
-     and VS16 still steering by the base's glyph, then the face mapping the
-     base, then `.notdef`), and shapes each maximal run of one face, left to
-     right, with the surrounding text as context and default ignorables removed.
-     `TextLayout` (`font/layout.rs`) shapes each word and each run of spaces on
-     its own and places it whole, so nothing kerns across a space or a break;
-     the paragraph breaker (`tree/inline.rs`) shapes a word's parts in
-     consecutive runs of one font and size together, breaks an overlong word
-     only before a cluster's first glyph, and shapes the two sides of such a
-     break again apart. Caret stops (`layout::caret_stops`, used by
-     `text_input`'s `measure`) sit on cluster pens, a ligature of several
-     clusters split evenly; `edit::LineEdit` stops only between clusters (Left,
-     Right, Backspace, Delete, clicks, selections, word moves, inserts and
-     outside edits all land on a boundary); `text-overflow: ellipsis` cuts
-     between clusters. Shaped glyph ids take the same `ColorGlyphCache` path a
-     cmap glyph did, so a GSUB-only colour flag draws in colour. `font/kern.rs`
-     and `Font::kerning` are deleted: GPOS through the shaper is the one kerning
-     path for parsed faces. Verified by unit tests on the committed font
-     (advances, offsets and clusters equal to `harfrust`'s own output for known
-     strings, its `ccmp` dotless-i substitution, GPOS mark positioning on `h`
-     with U+0301, kerning within a word) and on a new fixture, `shaped.ttf`
-     (built by the script in `fixtures.rs`: a ZWJ sequence, a two-cluster
-     ligature and a flag ligated by `ccmp` into COLR glyphs whose components are
-     outlines, and `kern` pairs against a space). Hand mutants, each compiling
-     under `-D warnings`, were each killed: marks, regional-indicator pairing,
-     the joiner and a space's standing alone in the cluster rule; fallback
-     counting only the base, preferring the base's face, and ignoring VS16;
-     shaping every cluster in the own face, unscaled advances, a flipped or
-     dropped offset, default ignorables kept, synthetic bold not widened; layout
-     shaping a word with its trailing spaces, dropping either offset, caret
-     stops not splitting a ligature or counted per char; the paragraph breaker
-     not reshaping a broken word, shaping same-font runs apart, and dropping
-     offsets; the ellipsis cutting at any char; and `LineEdit` stepping,
-     deleting, placing, inserting, selecting, word-moving and syncing by char.
-     One more, the paragraph breaker allowing a break before any glyph, makes
+     and VS16 steering by whether the cluster shaped in a face alone draws a
+     colour glyph, so a ligature-only colour keycap counts (pikr found a theme
+     font that maps the digit and the keycap taking `1️⃣` before Segoe,
+     2026-10-17), then the face mapping the base, then `.notdef`), and shapes
+     each maximal run of one face, left to right, with the surrounding text as
+     context and default ignorables removed. `TextLayout` (`font/layout.rs`)
+     shapes each word and each run of spaces on its own and places it whole, so
+     nothing kerns across a space or a break; the paragraph breaker
+     (`tree/inline.rs`) shapes a word's parts in consecutive runs of one font
+     and size together, breaks an overlong word only before a cluster's first
+     glyph, and shapes the two sides of such a break again apart. Caret stops
+     (`layout::caret_stops`, used by `text_input`'s `measure`) sit on cluster
+     pens, a ligature of several clusters split evenly; `edit::LineEdit` stops
+     only between clusters (Left, Right, Backspace, Delete, clicks, selections,
+     word moves, inserts and outside edits all land on a boundary);
+     `text-overflow: ellipsis` cuts between clusters. Shaped glyph ids take the
+     same `ColorGlyphCache` path a cmap glyph did, so a GSUB-only colour flag
+     draws in colour. `font/kern.rs` and `Font::kerning` are deleted: GPOS
+     through the shaper is the one kerning path for parsed faces. Verified by
+     unit tests on the committed font (advances, offsets and clusters equal to
+     `harfrust`'s own output for known strings, its `ccmp` dotless-i
+     substitution, GPOS mark positioning on `h` with U+0301, kerning within a
+     word) and on a new fixture, `shaped.ttf` (built by the script in
+     `fixtures.rs`: a ZWJ sequence, a two-cluster ligature and a flag ligated by
+     `ccmp` into COLR glyphs whose components are outlines, and `kern` pairs
+     against a space). Hand mutants, each compiling under `-D warnings`, were
+     each killed: marks, regional-indicator pairing, the joiner and a space's
+     standing alone in the cluster rule; fallback counting only the base,
+     preferring the base's face, and ignoring VS16; shaping every cluster in the
+     own face, unscaled advances, a flipped or dropped offset, default
+     ignorables kept, synthetic bold not widened; layout shaping a word with its
+     trailing spaces, dropping either offset, caret stops not splitting a
+     ligature or counted per char; the paragraph breaker not reshaping a broken
+     word, shaping same-font runs apart, and dropping offsets; the ellipsis
+     cutting at any char; and `LineEdit` stepping, deleting, placing, inserting,
+     selecting, word-moving and syncing by char. One more, the paragraph breaker
+     allowing a break before any glyph, makes
      `an_overlong_word_never_breaks_inside_a_cluster` never finish (a break
      before a mark leaves an empty side), which counts as caught but not as a
      clean failure.
@@ -775,23 +778,24 @@ Each step lands in the crate the later steps build on, so the seam goes first.
      conformance suite; no real emoji font is tested in the suite (too large to
      commit) — a colour flag ligature rests on the fixture's GSUB flag. Smoke-
      checked 2026-10-17 against this machine's Segoe UI Emoji with a scratch
-     test, not committed: woman-ZWJ-laptop, thumbs-up with a skin tone, keycap
-     one, heart on fire and England's tag flag each shaped into one colour
-     glyph; the US and UK regional-indicator pairs stayed two outline glyphs,
-     because Segoe has no country-flag ligatures (Noto Color Emoji not checked).
-     The legacy `kern` table, which `harfrust` may apply for a font with no
-     GPOS, is not tested; variable fonts are shaped at the default location only
-     (`Font` has no variation coordinates); a bitmap-font run's caret and
-     breaking follow the cluster rule but draw one glyph a char. Also not done:
-     uncompressed BGRA CBDT bitmaps and sbix `jpg `/`tiff` graphics (drawn as
-     outlines); the foreground palette entry draws black, since the cache key
-     has no text colour; palette 0 only (no light/dark choice); COLR variations
-     at the default location only; no per-frame budget for colour glyphs, as the
-     glyph atlas has; the cache never prunes its "not colour" entries (bounded
-     by the glyphs and sizes of colour fonts drawn); fallback faces are not
-     synthesised bold or italic; a taller fallback glyph does not grow a span's
-     line; a span in the bitmap font does not fall back; and
-     `text-overflow: ellipsis` picks `…` or `...` by the primary face only.
+     test, not committed, with Segoe as the only face: woman-ZWJ-laptop,
+     thumbs-up with a skin tone, keycap one, heart on fire and England's tag
+     flag each shaped into one colour glyph; the US and UK regional-indicator
+     pairs stayed two outline glyphs, because Segoe has no country-flag
+     ligatures (Noto Color Emoji not checked). The legacy `kern` table, which
+     `harfrust` may apply for a font with no GPOS, is not tested; variable fonts
+     are shaped at the default location only (`Font` has no variation
+     coordinates); a bitmap-font run's caret and breaking follow the cluster
+     rule but draw one glyph a char. Also not done: uncompressed BGRA CBDT
+     bitmaps and sbix `jpg `/`tiff` graphics (drawn as outlines); the foreground
+     palette entry draws black, since the cache key has no text colour; palette
+     0 only (no light/dark choice); COLR variations at the default location
+     only; no per-frame budget for colour glyphs, as the glyph atlas has; the
+     cache never prunes its "not colour" entries (bounded by the glyphs and
+     sizes of colour fonts drawn); fallback faces are not synthesised bold or
+     italic; a taller fallback glyph does not grow a span's line; a span in the
+     bitmap font does not fall back; and `text-overflow: ellipsis` picks `…` or
+     `...` by the primary face only.
    - Not tested: a real Noto Color Emoji or Segoe UI Emoji (too large to
      commit), so Noto's flags, which `skrifa` notes take thousands of paint
      nodes, are not known to fit `MAX_COLR_LAYERS`; the quads on a GPU; COLR

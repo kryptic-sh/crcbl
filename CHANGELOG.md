@@ -78,7 +78,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   cannot change the alpha mode.
 - **Font fallback is per cluster**: a cluster goes to the first face that maps
   every char of it (variation selectors and joiners not counted), so a ZWJ
-  sequence is shaped whole in one face rather than split across faces.
+  sequence is shaped whole in one face rather than split across faces. VS16 and
+  VS15 choose by whether a face draws the cluster, shaped, in colour, so a
+  keycap that only a GSUB ligature colours (Segoe UI Emoji's) is drawn in colour
+  past a text face that maps the digit and the keycap.
 - **Each word, and each run of spaces, is shaped on its own**, so nothing kerns
   across a space: a font that kerns a glyph against a space draws that pair
   unkerned. A word broken between clusters by a paragraph's

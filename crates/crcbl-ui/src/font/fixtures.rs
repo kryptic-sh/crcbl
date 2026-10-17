@@ -5,7 +5,8 @@
 //! 16 units wide, so at 16 pixels per em a unit is a pixel and a test can
 //! work out every pixel by hand:
 //!
-//! * `text.ttf` — an outline heart at U+2764 and nothing in colour.
+//! * `text.ttf` — an outline heart at U+2764, and an outline digit one and
+//!   combining keycap (U+20E3), and nothing in colour.
 //! * `cbdt.ttf` — CBDT/CBLC strikes at 16 and 8 pixels per em: U+1F600 in
 //!   both (red and blue halves at 16, green at 8), U+2764 only at 16
 //!   (magenta), and U+1F4A5 at 16 with a PNG that does not decode.
@@ -22,7 +23,10 @@
 //!   glyph — a ZWJ sequence, a ligature of two clusters and a flag whose
 //!   components have no colour, as Segoe UI Emoji's flags have none — and a
 //!   GPOS `kern` feature kerning heart before heart by 3 units, heart before
-//!   space by 4 and space before heart by 2.
+//!   space by 4 and space before heart by 2; and outlines for the digit one,
+//!   VS16 and the combining keycap, which `ccmp` joins (with or without the
+//!   selector) into a COLR v0 keycap, as Segoe UI Emoji's keycaps are: the
+//!   digit alone has no colour.
 //!
 //! They were built by this script, run as `python -I make_fixtures.py
 //! crates/crcbl-ui/tests/fixtures/emoji`:
@@ -113,8 +117,9 @@
 //!
 //!
 //! def text_font():
-//!     return build("Text", {"space": empty(), "heart": square(2, 0, 14, 12)},
-//!                  {0x20: "space", 0x2764: "heart"})
+//!     return build("Text", {"space": empty(), "heart": square(2, 0, 14, 12),
+//!                           "one": square(6, 0, 10, 12), "keycap": empty()},
+//!                  {0x20: "space", 0x2764: "heart", 0x31: "one", 0x20E3: "keycap"})
 //!
 //!
 //! def cbdt_strike(font, ppem, images):
@@ -247,15 +252,20 @@
 //!     glyphs = {"space": empty(), "heart": square(2, 0, 14, 12), "fire": square(4, 0, 12, 12),
 //!               "zwj": empty(), "riu": square(0, 0, 6, 12), "ris": square(10, 0, 16, 12),
 //!               "heartfire": square(0, 0, 16, 12), "flagus": square(0, 0, 16, 12),
-//!               "la": square(0, 0, 16, 6), "lb": square(0, 6, 16, 12)}
+//!               "la": square(0, 0, 16, 6), "lb": square(0, 6, 16, 12),
+//!               "one": square(6, 0, 10, 12), "vs16": empty(), "keycap": empty(),
+//!               "keycapone": square(0, 0, 16, 12)}
 //!     font = build("Shaped", glyphs, {0x20: "space", 0x2764: "heart", 0x1F525: "fire",
-//!                                     0x200D: "zwj", 0x1F1FA: "riu", 0x1F1F8: "ris"})
+//!                                     0x200D: "zwj", 0x1F1FA: "riu", 0x1F1F8: "ris",
+//!                                     0x31: "one", 0xFE0F: "vs16", 0x20E3: "keycap"})
 //!     addOpenTypeFeaturesFromString(font, """
 //!         languagesystem DFLT dflt;
 //!         feature ccmp {
 //!             sub heart zwj fire by heartfire;
 //!             sub riu ris by flagus;
 //!             sub heart fire by heartfire;
+//!             sub one vs16 keycap by keycapone;
+//!             sub one keycap by keycapone;
 //!         } ccmp;
 //!         feature kern {
 //!             pos heart heart -3;
@@ -263,7 +273,8 @@
 //!             pos space heart -2;
 //!         } kern;
 //!     """)
-//!     layers = {"heartfire": [("la", 0), ("lb", 1)], "flagus": [("la", 1), ("lb", 0)]}
+//!     layers = {"heartfire": [("la", 0), ("lb", 1)], "flagus": [("la", 1), ("lb", 0)],
+//!               "keycapone": [("la", 0), ("lb", 0)]}
 //!     font["COLR"] = buildCOLR(layers, version=0, glyphMap=font.getReverseGlyphMap())
 //!     font["CPAL"] = buildCPAL([[(1, 0, 0, 1), (0, 0, 1, 1)]])
 //!     return font

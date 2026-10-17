@@ -14,21 +14,24 @@
 //! that, the handle's own face draws it, as `.notdef`. A whole cluster goes to
 //! one face so that face's GSUB can join it: a ZWJ sequence, a flag's two
 //! regional indicators, a keycap. Layout, measurement, caret stops and
-//! drawing all ask [`cluster_face`], through [`shape`](super::shape), so they
+//! drawing all ask [`cluster_face`], through [`shape`], so they
 //! cannot disagree about which face a glyph came from or how wide it is.
 //!
 //! # Presentation selectors
 //!
 //! A cluster whose second char is U+FE0F (VARIATION SELECTOR-16) asks for
-//! **emoji presentation**: of the faces that map it, the first whose glyph
-//! for its base char is a colour glyph ([`Font::has_color_glyph`]) draws it,
-//! and only when none has one the first that maps it at all. U+FE0E
-//! (VARIATION SELECTOR-15) asks for **text presentation** the same way round:
-//! the first face whose glyph is not a colour glyph. Neither selector draws
+//! **emoji presentation**: of the faces that map it, the first that draws a
+//! colour glyph ([`Font::has_color_glyph`]) for the cluster shaped in it
+//! alone draws it, and only when none does the first that maps it at all.
+//! Shaped, not the base char's own glyph: Segoe UI Emoji's digit one is a
+//! plain outline, and only its GSUB ligature of `1`, VS16 and the keycap is
+//! in colour. U+FE0E (VARIATION SELECTOR-15) asks for **text presentation**
+//! the same way round: the first face that draws no colour glyph for it.
+//! Only a cluster with a selector is shaped to choose. Neither selector draws
 //! anything or takes any width, and neither does any other variation selector
 //! or a zero-width joiner: the shaper removes them.
 
-use super::{Font, GlyphId};
+use super::{Font, GlyphId, shape};
 
 /// U+FE0E VARIATION SELECTOR-15: text presentation.
 pub const TEXT_PRESENTATION: char = '\u{FE0E}';
@@ -68,8 +71,7 @@ pub fn cluster_face(font: &Font, cluster: &str) -> u8 {
     for (index, face) in faces.enumerate() {
         // At most `MAX_FALLBACK_FACES` fallback faces, so the index fits.
         let index = index as u8;
-        let base_glyph = face.glyph_id(base);
-        if base_face.is_none() && base_glyph != GlyphId::NOTDEF {
+        if base_face.is_none() && face.glyph_id(base) != GlyphId::NOTDEF {
             base_face = Some(index);
         }
         let maps_all = cluster
@@ -80,8 +82,8 @@ pub fn cluster_face(font: &Font, cluster: &str) -> u8 {
             continue;
         }
         let wanted = match presentation {
-            Some(EMOJI_PRESENTATION) => face.has_color_glyph(base_glyph),
-            Some(_) => !face.has_color_glyph(base_glyph),
+            Some(EMOJI_PRESENTATION) => shape::shapes_to_colour(face, cluster),
+            Some(_) => !shape::shapes_to_colour(face, cluster),
             None => return index,
         };
         if wanted {
@@ -177,5 +179,29 @@ mod tests {
             assert!(is_invisible(invisible), "{invisible:?}");
         }
         assert!(!is_invisible('a'));
+    }
+
+    /// **VS16 counts a colour glyph the cluster shapes into, not only the
+    /// base's own**: the text face maps the digit and the keycap as plain
+    /// outlines, and the shaped face's digit is plain too, but its GSUB
+    /// ligature of the three is in colour, so VS16 goes past the text face.
+    /// Without a selector the first face that maps it all keeps it, and VS15
+    /// goes past the ligature's face.
+    #[test]
+    fn presentation_counts_a_colour_ligature() {
+        let (text, shaped) = (fixtures::text(), fixtures::shaped());
+        assert!(!shaped.has_color_glyph(shaped.glyph_id('1')));
+        let keycap = "1\u{FE0F}\u{20E3}";
+        let font = text.clone().with_fallback(core::slice::from_ref(&shaped));
+        assert_eq!(cluster_face(&font, keycap), 1);
+        assert_eq!(cluster_face(&font, "1\u{20E3}"), 0);
+        let mut glyphs = Vec::new();
+        shape::shape(&font, 16.0, keycap, 0..keycap.len(), &mut glyphs);
+        assert_eq!(glyphs.len(), 1, "one ligature: {glyphs:?}");
+        assert_eq!(glyphs[0].face, 1);
+        assert!(shaped.has_color_glyph(glyphs[0].glyph));
+        let font = shaped.with_fallback(&[text]);
+        assert_eq!(cluster_face(&font, keycap), 0);
+        assert_eq!(cluster_face(&font, "1\u{FE0E}\u{20E3}"), 1);
     }
 }

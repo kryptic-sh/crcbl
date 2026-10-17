@@ -114,6 +114,28 @@ fn shape_run(
         nominal(drawn, face, scale, text, range, out);
         return;
     };
+    let buffer = run_shaper(shaper, text, range);
+    for (info, position) in buffer.glyph_infos().iter().zip(buffer.glyph_positions()) {
+        let mut advance = position.x_advance as f32;
+        if position.x_advance != 0 {
+            advance += bold;
+        }
+        out.push(ShapedGlyph {
+            face,
+            glyph: GlyphId(info.glyph_id),
+            cluster: info.cluster as usize,
+            advance: advance * scale,
+            offset: Vec2::new(
+                position.x_offset as f32 * scale,
+                -(position.y_offset as f32) * scale,
+            ),
+        });
+    }
+}
+
+/// `range` of `text` shaped by `shaper`, as the module docs say a run is.
+#[cfg(feature = "parsed-font")]
+fn run_shaper(shaper: &harfrust::Font, text: &str, range: Range<usize>) -> harfrust::Buffer {
     let mut buffer = harfrust::Buffer::new();
     for (at, c) in text[range.clone()].char_indices() {
         let cluster = u32::try_from(range.start + at)
@@ -131,22 +153,29 @@ fn shape_run(
         harfrust::ShapeOptions::new(),
     )
     .expect("a fresh buffer with its direction set is everything shaping asks for");
-    for (info, position) in buffer.glyph_infos().iter().zip(buffer.glyph_positions()) {
-        let mut advance = position.x_advance as f32;
-        if position.x_advance != 0 {
-            advance += bold;
-        }
-        out.push(ShapedGlyph {
-            face,
-            glyph: GlyphId(info.glyph_id),
-            cluster: info.cluster as usize,
-            advance: advance * scale,
-            offset: Vec2::new(
-                position.x_offset as f32 * scale,
-                -(position.y_offset as f32) * scale,
-            ),
-        });
+    buffer
+}
+
+/// Whether `face` draws any of `cluster` as a colour glyph once the cluster
+/// is shaped in it alone — so a keycap or a flag whose parts are plain
+/// outlines, and which only a GSUB ligature colours, counts as colour.
+#[cfg(feature = "parsed-font")]
+pub(super) fn shapes_to_colour(face: &Font, cluster: &str) -> bool {
+    match &face.parsed.shaper {
+        Some(shaper) => run_shaper(shaper, cluster, 0..cluster.len())
+            .glyph_infos()
+            .iter()
+            .any(|info| face.has_color_glyph(GlyphId(info.glyph_id))),
+        None => cluster
+            .chars()
+            .any(|c| face.has_color_glyph(face.glyph_id(c))),
     }
+}
+
+/// Without the `parsed-font` feature there is no face to shape in.
+#[cfg(not(feature = "parsed-font"))]
+pub(super) fn shapes_to_colour(face: &Font, _cluster: &str) -> bool {
+    match face.parsed.never {}
 }
 
 /// `range` of `text` in `face` with no tables to shape with: each char that
